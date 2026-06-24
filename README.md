@@ -1,11 +1,13 @@
 # Flint — Foundry Local Interface (FLInt)
 
-**Flint** (also styled FLInt) is a lightweight, privacy-first desktop GUI for [Microsoft Foundry Local](https://github.com/microsoft/Foundry-Local).
+**Flint** (also styled FLInt) is a lightweight, desktop GUI for [Microsoft Foundry Local](https://github.com/microsoft/Foundry-Local).
 
 It provides an intuitive interface for:
-- Model catalog browsing/search/filter (STT-only for audio via metadata), hardware-aware recs, download/load/unload + progress, WinML/accelerators support
-- Chat (streaming) with switcher, localStorage persisted history, system prompt, stop, basic vision image support (emerging in SDK)
-- Audio transcription (mic + file) using only STT models (Whisper, Nemotron Speech Streaming, future via task/capabilities - no hardcodes)
+
+- Model catalog browsing/search/filter (STT-only for audio via metadata), hardware-aware recommendations, download/load/unload + progress, and WinML/accelerator preference support
+- Chat (streaming) with conversation sidebar, persona selector, localStorage persisted history, system prompt controls, stop/cancel, and basic vision image support (emerging in SDK)
+- Audio transcription (mic + file) using STT models with copy/download transcript actions
+- Diagnostics with service controls, endpoint visibility/copy snippets, and active execution provider inventory
 - Learn section + local endpoint
 - Bundled runtime (sidecar eval for clean prod builds), first-run guidance
 
@@ -13,7 +15,77 @@ Everything runs locally on your device by default.
 
 ## Status
 
-MVP features largely implemented (models w/ STT filter, chat streaming+persist+stop+basic vision, audio STT-only). JS build clean (externalize). Sidecar prototype ready. Gaps: full diagnostics, snippets, polished first-run, sidecar runtime wiring. See IMPLEMENTATION_PLAN.md. Ready for 0.1.0-alpha check-in; full 0.1 after sidecar.
+Flint is now at an **MVP 0.1-ready baseline** for dogfood/public-preview use:
+
+- Models: catalog/search/filter + download/load/unload + model metadata details
+- Chat: streaming + conversation UX + thinking-trace rendering + cancellation path + persona presets
+- Audio: STT model selection + mic/file transcription + transcript copy/download
+- Diagnostics: service controls + endpoint/snippet visibility + execution provider inventory
+- Test baseline: unit + sidecar protocol tests + coverage gating
+
+See release evaluation + roadmap: [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md)
+
+## MVP 0.1 Interface
+
+### Main window
+
+![Flint main window](./images/flint-main-window.png)
+
+### Model selection
+
+![Flint model selection](./images/flint-model-selection.png)
+
+### Chat window
+
+![Flint chat window](./images/flint-chat-window.png)
+
+### Known Limitations (0.1)
+
+- Multi-endpoint orchestration is not implemented; most flows assume one active endpoint/model lane.
+- Diagnostics export and cache operations are functional but not yet fully hardened/polished.
+- Security posture is improved but not yet least-privilege complete (shell capability scope will be tightened in 0.2).
+- Test coverage is foundational (good baseline), not full UI/E2E depth yet.
+- Some audio features may not work as desired.
+
+## Working Features (MVP 0.1)
+
+### Models
+
+- Browse and search local model catalog
+- Metadata-driven model filtering (including STT-focused audio lane)
+- Download/load/unload models with progress feedback
+- Model details panel (task/context/capabilities)
+
+### Chat
+
+- Streaming assistant responses
+- Conversation sidebar with persisted history
+- Persona selector and editable system prompt
+- "Thinking" trace rendering in chat responses
+- Stop/cancel active generation
+- Basic image attach flow for vision-capable models
+
+### Audio
+
+- Microphone transcription
+- File transcription
+- STT model selection
+- Copy transcription text
+- Download transcription text
+
+### Diagnostics
+
+- Sidecar/service status and controls
+- Local endpoint display
+- Copy-ready endpoint snippets
+- Execution provider list and active provider visibility
+
+### Testing & quality baseline
+
+- `npm run check` static/type validation
+- Vitest unit tests for core utilities
+- Sidecar protocol smoke test
+- Coverage thresholds in CI/dev test runs
 
 ## Tech
 
@@ -29,6 +101,7 @@ npm run tauri dev
 ```
 
 **Prerequisites**
+
 - Node.js + npm
 - Rust + Cargo (for Tauri)
 - The runtime is bundled in builds (no separate install needed for end users)
@@ -54,8 +127,20 @@ node scripts/verify-bundle.js
 
 See `.github/workflows/` for CI (PR checks + builds) and Release (tagged builds create GitHub releases with artifacts for Windows/macOS).
 
+## Icon asset generation
+
+To refresh app icon assets from a source image:
+
+```powershell
+pwsh .\scripts\flint-icon-generator.ps1 -SourceImage .\static\flint-master-1024.png -RepositoryRoot .
+```
+
+This updates icon assets in `static\` and `src-tauri\icons\` (including `.ico`).
+SVG generation is intentionally excluded because it was producing raster-wrapped output rather than true vector artwork.
+
 **Sidecar evaluation (for native SDK issues):**
 Direct use of `foundry-local-sdk` (JS + native) from the Svelte frontend has bundling challenges:
+
 - Vite externalizes Node core modules (`fs`, `url`, `module`, etc.) during `tauri build`.
 - Native prebuilts + core DLLs are copied via resources, but resolution can fail in the final bundle.
 - See `sidecar/foundry-sidecar.js` for a prototype stdio-based sidecar wrapper (JSON protocol). Use `@tauri-apps/plugin-shell` to spawn and communicate from frontend.
@@ -69,6 +154,7 @@ Direct use of `foundry-local-sdk` (JS + native) from the Svelte frontend has bun
 Run `npm run tauri:build` (may require full MSVC/Rust env) and `node scripts/verify-bundle.js`.
 
 ## Vision / Multimodal
+
 - Added basic support in Chat: image attach (base64) when model alias suggests vision/multimodal.
 - Messages use OpenAI-style content array for images.
 - Helper `getVisionModels()` in SDK (based on task/capabilities).
@@ -79,11 +165,12 @@ Run `npm run tauri:build` (may require full MSVC/Rust env) and `node scripts/ver
 - PRs: Lint, checks, cross-platform debug builds
 - Releases: Push `vX.Y.Z` tag → automated release with installers
 
-
 ## Design
 
 - [FLINT_DESIGN_SPEC.md](./FLINT_DESIGN_SPEC.md)
 - [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md)
+- [MVP_FEATURE_COMPLETION_PLAN.md](./MVP_FEATURE_COMPLETION_PLAN.md)
+- [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md)
 
 ## License
 
@@ -96,4 +183,3 @@ See the design spec for scope and roadmap.
 ---
 
 Built to make Foundry Local approachable while staying true to its local-first roots.
-

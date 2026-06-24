@@ -144,6 +144,9 @@ This approach allows fast initial progress while keeping the codebase understand
 
 ## 9. High-Level Roadmap
 
+> Current release readiness decision and versioned limitations/plans are tracked in
+> [`RELEASE_ROADMAP.md`](./RELEASE_ROADMAP.md). This spec remains the architectural baseline.
+
 **MVP (v0.1)**
 - Model catalog browsing + search/filter (via SDK)
 - Download / load / unload with progress

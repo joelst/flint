@@ -8,15 +8,13 @@
 </script>
 
 <script lang="ts">
+  import { truncateConversationTitle } from "./conversation-sidebar";
+
   export let conversations: Conversation[] = [];
   export let currentConversationId: string | null = null;
   export let onNewChat: () => void = () => {};
   export let onSelectConversation: (id: string) => void = () => {};
   export let onDeleteConversation: (id: string) => void = () => {};
-
-  function truncateTitle(title: string, maxLen: number = 40): string {
-    return title.length > maxLen ? title.substring(0, maxLen) + "…" : title;
-  }
 
   function formatTime(timestamp: number): string {
     const now = Date.now();
@@ -61,7 +59,7 @@
           title="Select conversation"
         >
           <div class="conv-title" title={conv.title}>
-            {truncateTitle(conv.title)}
+            {truncateConversationTitle(conv.title)}
           </div>
           <div class="conv-meta">
             {conv.messageCount} messages • {formatTime(conv.createdAt)}

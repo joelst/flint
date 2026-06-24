@@ -1,4 +1,4 @@
-y
+# MVP Feature Completion Plan (Original 0.1 Execution Plan)
 
 **Date:** 2026-06-24
 **Target:** Reach 70-80% MVP readiness (4 critical features)
@@ -6,9 +6,26 @@ y
 
 ---
 
+## Current Verdict Update (2026-06-24)
+
+This document remains the **original execution plan** for MVP completion.
+
+Current implementation status has advanced enough to declare **MVP 0.1 ready (preview baseline)** with known limitations:
+
+- Multi-endpoint orchestration is not yet complete.
+- Some diagnostics/cache/security hardening items remain.
+- Testing is now in a solid baseline state and will expand in 0.2.
+
+For the full readiness review, known limitations, MVP 0.2 planning (security/testing/multi-endpoint), and 1.0 definition, see:
+
+- [`RELEASE_ROADMAP.md`](./RELEASE_ROADMAP.md)
+
+---
+
 ## Overview
 
 This plan details the completion of 4 critical MVP features:
+
 1. **Complete Models Page** (Phase 1)
 2. **Polish Chat UI** (Phase 2)
 3. **Complete Audio UI** (Phase 3)
@@ -29,6 +46,7 @@ This plan details the completion of 4 critical MVP features:
 **Component:** `src/routes/+page.svelte` → new `<section>` for models view
 
 **Tasks:**
+
 - [ ] Create responsive grid layout (4-6 columns on desktop, 1-2 on mobile)
 - [ ] Render model cards with:
   - Model alias (bold, prominent)
@@ -55,6 +73,7 @@ This plan details the completion of 4 critical MVP features:
 **Component:** New component `src/lib/ModelDetailPanel.svelte`
 
 **Tasks:**
+
 - [ ] Create modal/side panel that shows (on card click or dedicated button):
   - Model alias & full name
   - Description (from SDK model.info)
@@ -81,17 +100,23 @@ This plan details the completion of 4 critical MVP features:
 **Tasks:**
 
 **Sidecar Side (foundry-sidecar.js):**
+
 - [ ] Enhance `download` command to emit progress messages:
+
   ```json
   { "type": "progress", "alias": "...", "percent": 45, "bytesDownloaded": 123456, "totalBytes": 1000000 }
   ```
+
 - [ ] Emit error messages on download failure:
+
   ```json
   { "type": "error", "alias": "...", "message": "Network timeout", "code": "TIMEOUT" }
   ```
+
 - [ ] Support cancel via abort signal passed from UI
 
 **Frontend Side:**
+
 - [ ] Modify `downloadAndTrack()` in `+page.svelte` to listen for progress events from sidecar
 - [ ] Display overlay progress bar on model card during download:
   - Percent complete
@@ -113,6 +138,7 @@ This plan details the completion of 4 critical MVP features:
 **Component:** New `src/lib/CachePanel.svelte` or dedicated tab in models view
 
 **Tasks:**
+
 - [ ] Display list of cached models with:
   - Model alias
   - Size on disk (MB / GB)
@@ -124,10 +150,12 @@ This plan details the completion of 4 critical MVP features:
 - [ ] Cache size estimation tooltip ("Removing will free ~2.1 GB")
 
 **Sidecar Integration:**
+
 - [ ] Add sidecar command `clearCache` / `removeFromCache(alias)`
 - [ ] Implement in sidecar (use foundry-local-sdk or CLI)
 
 **Frontend:**
+
 - [ ] Hook remove/clear actions to sidecar
 - [ ] Refresh model list after removal
 - [ ] Show success toast
@@ -149,6 +177,7 @@ This plan details the completion of 4 critical MVP features:
 | **Total**            | **~10-12 hours** |                        |          |
 
 **Recommended Order:**
+
 1. Grid layout (foundation)
 2. Detail modal
 3. Cache management (independent)
@@ -167,6 +196,7 @@ This plan details the completion of 4 critical MVP features:
 **Component:** `src/lib/MessageRenderer.svelte` (new) + chat view integration
 
 **Tasks:**
+
 - [ ] Install markdown renderer:
   - **Option A:** `marked` library (lightweight, ~30KB)
   - **Option B:** `remark` + `remark-html` (more flexible, ~50KB total)
@@ -197,6 +227,7 @@ This plan details the completion of 4 critical MVP features:
 **Component:** New `src/lib/ConversationSidebar.svelte`
 
 **Tasks:**
+
 - [ ] Left sidebar (collapsible on mobile) showing:
   - "New Chat" button at top
   - List of recent conversations (in-memory for MVP)
@@ -222,6 +253,7 @@ This plan details the completion of 4 critical MVP features:
 **Component:** Refine message rendering in chat view
 
 **Tasks:**
+
 - [ ] User messages:
   - Right-aligned, light background
   - Show timestamp (optional, on hover)
@@ -250,6 +282,7 @@ This plan details the completion of 4 critical MVP features:
 **Component:** Refine existing controls; move to persistent header/panel
 
 **Tasks:**
+
 - [ ] System prompt:
   - Move to collapsible "Settings" panel (top-right or side panel)
   - Show current system prompt + edit button
@@ -278,6 +311,7 @@ This plan details the completion of 4 critical MVP features:
 | **Total**                | **~8-11 hours** |                    |          |
 
 **Recommended Order:**
+
 1. Markdown rendering (foundation for nice output)
 2. Message formatting (use markdown result)
 3. Conversation sidebar (independent)
@@ -296,6 +330,7 @@ This plan details the completion of 4 critical MVP features:
 **Component:** Enhance audio view in `+page.svelte`
 
 **Tasks:**
+
 - [ ] Large "🎤 Record" button (primary focus)
 - [ ] Request microphone permissions on first click:
   - Use `navigator.mediaDevices.getUserMedia({ audio: true })`
@@ -318,6 +353,7 @@ This plan details the completion of 4 critical MVP features:
 **Component:** New `src/lib/WaveformCanvas.svelte`
 
 **Tasks:**
+
 - [ ] Create live waveform display during recording:
   - Use `AnalyserNode` from Web Audio API
   - Draw bars or line graph on HTML canvas
@@ -326,6 +362,7 @@ This plan details the completion of 4 critical MVP features:
 - [ ] Alternative (simpler): animated dots or bars that pulse to audio level
 
 **Libraries:**
+
 - Option A: Canvas only (lightweight, custom)
 - Option B: `wavesurfer.js` (full-featured, ~60KB)
 - Recommendation: Canvas for MVP (smaller footprint)
@@ -341,6 +378,7 @@ This plan details the completion of 4 critical MVP features:
 **Component:** Enhance audio view
 
 **Tasks:**
+
 - [ ] "Upload Audio File" button
 - [ ] File picker (via Tauri `@tauri-apps/plugin-dialog` or browser File API)
 - [ ] Accept formats: .mp3, .wav, .m4a, .flac, .ogg
@@ -361,6 +399,7 @@ This plan details the completion of 4 critical MVP features:
 **Component:** Refine existing audio view
 
 **Tasks:**
+
 - [ ] Model selector dropdown:
   - Filter to only show STT models (Whisper family)
   - Show model size + language support
@@ -385,6 +424,7 @@ This plan details the completion of 4 critical MVP features:
 **Component:** Audio view result section
 
 **Tasks:**
+
 - [ ] Display transcription result in large, readable text area
 - [ ] Action buttons:
   - **Copy** (copy to clipboard)
@@ -418,6 +458,7 @@ This plan details the completion of 4 critical MVP features:
 | **Total**                    | **~10-14 hours** |                   |          |
 
 **Recommended Order:**
+
 1. Record button (foundation)
 2. Waveform viz (visual feedback)
 3. Model selection + transcribe (core functionality)
@@ -437,6 +478,7 @@ This plan details the completion of 4 critical MVP features:
 **Component:** New dedicated "Diagnostics" view in `+page.svelte`
 
 **Tasks:**
+
 - [ ] Status card showing:
   - Service running? (🟢 Running / 🔴 Stopped)
   - Local endpoint URL (e.g., `http://localhost:5272/v1`)
@@ -464,6 +506,7 @@ This plan details the completion of 4 critical MVP features:
 **Component:** New `src/lib/LogViewer.svelte`
 
 **Tasks:**
+
 - [ ] Tabs: "App Logs" vs "Foundry Service Logs"
 - [ ] **App Logs:**
   - Display messages from frontend (console errors, SDK events)
@@ -495,6 +538,7 @@ This plan details the completion of 4 critical MVP features:
 **Component:** "Export" button in diagnostics view
 
 **Tasks:**
+
 - [ ] Button: "Export Diagnostic Bundle"
 - [ ] On click:
   - Collect:
@@ -521,6 +565,7 @@ This plan details the completion of 4 critical MVP features:
 **Component:** Card or section in diagnostics view (could also be in Learn / header)
 
 **Tasks:**
+
 - [ ] Display:
   - **Endpoint URL:** `http://localhost:5272/v1` (large, monospace)
   - Status: "Ready" or "Starting..."
@@ -551,6 +596,7 @@ This plan details the completion of 4 critical MVP features:
 | **Total**                | **~11-14 hours** |                          |          |
 
 **Recommended Order:**
+
 1. Service status (foundation)
 2. Endpoint display (quick win, independent)
 3. Log viewer (most complex UI)
@@ -563,6 +609,7 @@ This plan details the completion of 4 critical MVP features:
 ### Error Handling & User Feedback
 
 **Apply to all phases:**
+
 - Toast notifications for success/error (use Svelte store + component)
 - Spinners/loaders during async operations
 - Graceful fallbacks ("Model not cached? Try downloading first.")
@@ -592,7 +639,7 @@ This plan details the completion of 4 critical MVP features:
 
 ## Dependency Graph & Blockers
 
-```
+``` plaintext
 Phase 1 (Models)
   ├─ 1.1 Grid layout [foundation]
   ├─ 1.2 Detail modal [depends on 1.1]
@@ -625,6 +672,7 @@ Cross-Cutting
 ```
 
 **Critical Blockers:**
+
 1. **Sidecar progress events** (Phase 1.3) — check if `foundry-local-sdk` emits progress in download
 2. **Sidecar transcribe command** (Phase 3.4) — ensure audio client wired to sidecar
 3. **Sidecar service control** (Phase 4.1) — implement start/stop/restart
@@ -647,6 +695,7 @@ Cross-Cutting
 | **TOTAL**      |                       | **~45-59 hours** | **~40% of MVP** |
 
 **Realistic Timeline:**
+
 - **Full-time (8h/day):** 6-8 days
 - **Part-time (4h/day):** 12-15 days
 - **With sidecar unblocking:** Subtract 1-2 days
@@ -695,6 +744,7 @@ Cross-Cutting
 ## Success Criteria
 
 MVP is "done" when:
+
 - ✅ All 4 phases have visible, functional UI
 - ✅ Models can be downloaded/loaded without terminal
 - ✅ Chat streams responses with markdown formatting

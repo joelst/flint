@@ -7,6 +7,7 @@
   import {
     initializeSDK,
     getSDKState,
+    getEps,
     refreshModels,
     ensureAccelerators,
     getRecommendedStarterModels,
@@ -16,6 +17,7 @@
     downloadModel,
     loadModel as sdkLoadModel,
     unloadModel as sdkUnloadModel,
+    deleteModel as sdkDeleteModel,
     chatCompletion,
     chatCompletionStream,
     cancelChatRequest,
@@ -38,6 +40,220 @@
   type View = "models" | "chat" | "audio" | "diagnostics" | "learn";
   let currentView = $state<View>("models");
 
+  // Model capability helpers (based on catalog task/capabilities/family/alias)
+  function modelSupportsChat(m: any): boolean {
+    if (!m) return false;
+    const alias = String(m.alias || '').toLowerCase();
+    let task = '';
+    let caps = '';
+    const info = m.info || m;
+    if (info) {
+      task = String(info.task || '').toLowerCase();
+      caps = String(info.capabilities || '').toLowerCase();
+    }
+    if (task.includes('automatic-speech-recognition') || task.includes('stt') || caps.includes('automatic-speech-recognition')) return false;
+    if (alias.includes('whisper') || alias.includes('-stt') || alias.includes('stt-')) return false;
+    if (task.includes('embedding') || alias.includes('embed')) return false;
+    return true;
+  }
+
+  function detectHostPlatform(): "windows" | "macos" | "linux" | "unknown" {
+    const platformRaw =
+      String((navigator as any)?.userAgentData?.platform || navigator.platform || navigator.userAgent || "").toLowerCase();
+    if (platformRaw.includes("mac")) return "macos";
+    if (platformRaw.includes("win")) return "windows";
+    if (platformRaw.includes("linux")) return "linux";
+    return "unknown";
+  }
+
+  function classifyExecutionProvider(epName: string): "cpu" | "gpu" | "npu" | "other" {
+    const n = String(epName || "").toLowerCase();
+    if (n.includes("cpu")) return "cpu";
+    if (n.includes("qnn") || n.includes("npu")) return "npu";
+    if (
+      n.includes("cuda") ||
+      n.includes("directml") ||
+      n.includes("dml") ||
+      n.includes("coreml") ||
+      n.includes("metal") ||
+      n.includes("gpu")
+    ) {
+      return "gpu";
+    }
+    return "other";
+  }
+
+  function parseModelSizeMb(model: any): number | null {
+    const direct = Number(
+      model?.info?.fileSizeMb ??
+      model?.info?.size ??
+      model?.size ??
+      model?.info?.info?.fileSizeMb ??
+      0,
+    );
+    if (Number.isFinite(direct) && direct > 0) return direct;
+    const raw = String(model?.size || model?.info?.size || "").trim().toLowerCase();
+    if (!raw) return null;
+    const match = raw.match(/([\d.]+)\s*(kb|mb|gb|tb)/);
+    if (!match) return null;
+    const value = Number(match[1]);
+    const unit = match[2];
+    if (!Number.isFinite(value) || value <= 0) return null;
+    if (unit === "kb") return value / 1024;
+    if (unit === "mb") return value;
+    if (unit === "gb") return value * 1024;
+    if (unit === "tb") return value * 1024 * 1024;
+    return null;
+  }
+
+  function formatSizeLabel(model: any): string {
+    const sizeMb = parseModelSizeMb(model);
+    if (!sizeMb) return "Unknown";
+    if (sizeMb >= 1024) return `${(sizeMb / 1024).toFixed(1)} GB`;
+    return `${Math.round(sizeMb)} MB`;
+  }
+
+  function estimateMemoryRequirement(model: any): string {
+    const sizeMb = parseModelSizeMb(model);
+    if (!sizeMb) return "Unknown";
+    // Approximate runtime footprint for local inference (weights + kv/cache/overhead).
+    const lowGb = (sizeMb * 1.25) / 1024;
+    const highGb = (sizeMb * 2.0) / 1024;
+    if (highGb < 1) return `${Math.max(256, Math.round(lowGb * 1024))}-${Math.round(highGb * 1024)} MB`;
+    return `${lowGb.toFixed(1)}-${highGb.toFixed(1)} GB`;
+  }
+
+  function formatContextLength(model: any): string {
+    const info = model?.info || {};
+    const value = info.contextLength ?? info.maxContext ?? null;
+    return typeof value === "number" && value > 0 ? `${value} tokens (~${Math.round(value / 1024)}k)` : "Unknown";
+  }
+
+  function normalizeCapabilities(model: any): string[] {
+    const raw = String(model?.info?.capabilities || model?.capabilities || "").trim();
+    if (!raw) return [];
+    return raw
+      .split(/[,\n|]/)
+      .map((v) => v.trim())
+      .filter(Boolean)
+      .slice(0, 8);
+  }
+
+  function getShortModelDescription(model: any): string {
+    const info = model?.info || {};
+    const explicit = String(info.description || info.summary || "").trim();
+    if (explicit) {
+      return explicit.length > 140 ? `${explicit.slice(0, 137)}...` : explicit;
+    }
+    const task = String(info.task || "general-purpose");
+    const caps = normalizeCapabilities(model);
+    if (caps.length) return `${task} model with ${caps.slice(0, 2).join(" + ")} support.`;
+    return `${task} model for local inference.`;
+  }
+
+  function getFamilyLabel(model: any): string | null {
+    const family = String(model?.info?.family || model?.family || "").trim();
+    return family || null;
+  }
+
+  function formatMetaTimestamp(value?: string): string {
+    if (!value) return "Unknown";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "Unknown";
+    return date.toLocaleString();
+  }
+
+  function getApplicableAccelerationLabels(
+    model: any,
+    eps: EpInfo[],
+    platform: "windows" | "macos" | "linux" | "unknown",
+  ): string[] {
+    const labels: string[] = [];
+    const has = { cpu: false, gpu: false, npu: false };
+    for (const ep of eps || []) {
+      if (!ep.isRegistered) continue;
+      const kind = classifyExecutionProvider(ep.name);
+      if (kind === "cpu" && !has.cpu) {
+        labels.push("CPU");
+        has.cpu = true;
+      }
+      if (kind === "gpu" && !has.gpu) {
+        labels.push(platform === "macos" ? "Apple GPU (CoreML/Metal)" : "GPU");
+        has.gpu = true;
+      }
+      if (kind === "npu" && !has.npu) {
+        labels.push("NPU");
+        has.npu = true;
+      }
+    }
+
+    if (!has.cpu) labels.push("CPU");
+    if (platform === "macos" && !has.gpu) labels.push("Apple GPU (CoreML/Metal)");
+    if (platform === "windows" && !has.gpu) labels.push("GPU (DirectML if installed)");
+    if (platform === "windows" && !has.npu) labels.push("NPU (QNN if installed)");
+    if (platform === "linux" && !has.gpu) labels.push("GPU (CUDA/ROCm if installed)");
+
+    const sizeMb = parseModelSizeMb(model);
+    if (sizeMb && sizeMb > 10_000 && !labels.some((l) => l.includes("GPU"))) {
+      labels.push("GPU recommended for this size");
+    }
+    return [...new Set(labels)];
+  }
+
+  function describeAccelerationFit(model: any, preference: string): string {
+    if (preference === "auto") {
+      return "Auto mode: runtime will choose the best available execution provider.";
+    }
+    const kind = classifyExecutionProvider(preference);
+    const sizeMb = Number(model?.size || model?.info?.fileSizeMb || 0);
+    if (kind === "npu") {
+      return sizeMb > 7000
+        ? "Large model for NPU-only workflows; expect slower startup or fallback."
+        : "Good candidate for NPU acceleration if the runtime supports this model/provider pair.";
+    }
+    if (kind === "gpu") {
+      return "Good candidate for GPU acceleration when compatible kernels are available.";
+    }
+    if (kind === "cpu") {
+      return "Will run on CPU; lower memory pressure but generally slower generation throughput.";
+    }
+    return "Provider selected. Runtime compatibility depends on model format and installed kernels.";
+  }
+
+  async function refreshExecutionProviders() {
+    if (!state.ready) return;
+    try {
+      await getEps();
+      statusMessage = `${state.eps.length} execution providers detected`;
+      await loadRecommendations();
+    } catch (e: any) {
+      statusMessage = `Provider check failed: ${e?.message || e}`;
+    }
+  }
+
+  async function setAccelerationPreference(nextPreference: string) {
+    selectedAccelerationPreference = nextPreference || "auto";
+    persistChat();
+    statusMessage =
+      selectedAccelerationPreference === "auto"
+        ? "Acceleration preference set to Auto (runtime chooses)."
+        : `Acceleration preference set to ${selectedAccelerationPreference}.`;
+    await loadRecommendations();
+  }
+
+  function modelSupportsAudio(m: any): boolean {
+    if (!m) return false;
+    const alias = String(m.alias || '').toLowerCase();
+    let task = '';
+    let caps = '';
+    const info = m.info || m;
+    if (info) {
+      task = String(info.task || '').toLowerCase();
+      caps = String(info.capabilities || '').toLowerCase();
+    }
+    return task.includes('automatic-speech-recognition') || task.includes('stt') || caps.includes('automatic-speech-recognition') || alias.includes('whisper');
+  }
+
   const sdkStateStore = getSDKState();
 
   // Local UI state (runes)
@@ -59,6 +275,10 @@
   // Recommended starters
   let recommendedStarters = $state([] as ModelInfo[]);
   let isLoadingRecommendations = $state(false);
+  let selectedAccelerationPreference = $state<string>("auto");
+  let hostPlatform = $state<"windows" | "macos" | "linux" | "unknown">("unknown");
+  let modelDetailsAlias = $state<string | null>(null);
+  let modelRuntimeMeta = $state<Record<string, { downloadedAt?: string; lastUsedAcceleration?: string }>>({});
 
   // Chat state
   let selectedModelAlias = $state("");
@@ -248,9 +468,43 @@
   let audioBlob = $state<Blob | null>(null);
   let transcription = $state("");
   let isTranscribing = $state(false);
+  let transcriptionProgress = $state<{ current: number; total: number } | null>(null);
+  let transcriptionLanguage = $state("auto");
   let mediaRecorder: MediaRecorder | null = null;
   let audioChunks: Blob[] = [];
   let sttModels = $state<ModelInfo[]>([]);
+  let selectedSTTModelAlias = $state("");
+
+  const selectedChatModel = $derived(state.models.find((m: any) => m.alias === selectedModelAlias));
+  const selectedModelSupportsChat = $derived(
+    !selectedModelAlias || (selectedChatModel ? modelSupportsChat(selectedChatModel) : true)
+  );
+
+  // If an STT model was loaded via the main UI / top bar / Models list,
+  // the Audio page should inherit it automatically as the current STT model.
+  const loadedAudioModel = $derived(
+    state.models.find((m: any) => m.isLoaded && modelSupportsAudio(m))
+  );
+
+  // Prioritize the actually loaded STT model (so loading from top bar / Models
+  // list / main UI immediately makes the Audio page inherit it).
+  // Fall back to the last explicitly chosen STT (for when a chat model is
+  // currently active, user can still "Ensure service" to bring their audio model back).
+  const effectiveSTTModelAlias = $derived(
+    loadedAudioModel?.alias || selectedSTTModelAlias || ""
+  );
+  const chatBlockedByLoadedSTT = $derived(
+    !!loadedAudioModel && (!selectedModelAlias || loadedAudioModel.alias !== selectedModelAlias)
+  );
+
+  // Keep selectedSTTModelAlias in sync with the loaded audio model so that
+  // "Current STT model" in the Audio page reflects loads done elsewhere
+  // (top bar, Models tab "Load", etc.) and so it gets persisted.
+  $effect(() => {
+    if (loadedAudioModel?.alias && selectedSTTModelAlias !== loadedAudioModel.alias) {
+      selectedSTTModelAlias = loadedAudioModel.alias;
+    }
+  });
 
   // Sidecar logs (basic for now)
   let sidecarLogs = $state<string[]>([]);
@@ -490,12 +744,15 @@
         PERSIST_KEY,
         JSON.stringify({
           selectedModelAlias,
+          selectedSTTModelAlias,
+          selectedAccelerationPreference,
           chatMessages,
           systemPrompt,
           contextTurns,
           showFullHistory,
           sidebarCollapsed,
           theme,
+          modelRuntimeMeta,
         }),
       );
     } catch {}
@@ -507,6 +764,11 @@
         const data = JSON.parse(raw);
         if (data.selectedModelAlias)
           selectedModelAlias = data.selectedModelAlias;
+        if (data.selectedSTTModelAlias)
+          selectedSTTModelAlias = data.selectedSTTModelAlias;
+        if (typeof data.selectedAccelerationPreference === "string") {
+          selectedAccelerationPreference = data.selectedAccelerationPreference;
+        }
         if (data.chatMessages?.length) chatMessages = data.chatMessages;
         if (data.systemPrompt) systemPrompt = data.systemPrompt;
         if (typeof data.contextTurns === 'number' && data.contextTurns > 0) {
@@ -521,16 +783,34 @@
         if (data.theme === 'light' || data.theme === 'dark') {
           theme = data.theme;
         }
+        if (data.modelRuntimeMeta && typeof data.modelRuntimeMeta === "object") {
+          modelRuntimeMeta = data.modelRuntimeMeta;
+        }
       }
     } catch {}
   }
 
   $effect(() => {
-    // Persist on changes to chat related state
-    if (selectedModelAlias || chatMessages.length > 0 || systemPrompt) {
+    // Persist on changes to chat + audio model state
+    if (selectedModelAlias || selectedSTTModelAlias || chatMessages.length > 0 || systemPrompt) {
       persistChat();
     }
   });
+
+  function setModelRuntimeMeta(
+    alias: string,
+    patch: Partial<{ downloadedAt?: string; lastUsedAcceleration?: string }>,
+  ) {
+    if (!alias) return;
+    modelRuntimeMeta = {
+      ...modelRuntimeMeta,
+      [alias]: {
+        ...(modelRuntimeMeta[alias] || {}),
+        ...patch,
+      },
+    };
+    persistChat();
+  }
 
   // Apply theme
   $effect(() => {
@@ -586,7 +866,11 @@
               statusMessage = `Restoring ${selectedModelAlias} from previous session...`;
               await loadModelAndMaybeStart(existing);
             } else if (!state.serviceRunning) {
-              await startService(5272, selectedModelAlias);
+              await startService(
+                5272,
+                selectedModelAlias,
+                selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+              );
             }
 
             selectedModel = { alias: selectedModelAlias };
@@ -608,6 +892,8 @@
     try {
       await refreshModels();
       statusMessage = `${state.models.length} models available`;
+      // Keep STT list fresh too (metadata driven)
+      loadSTTModels().catch(() => {});
     } catch (e: any) {
       statusMessage = `Failed to load catalog: ${e?.message || e}`;
     } finally {
@@ -641,7 +927,11 @@
   async function startLocalService() {
     try {
       statusMessage = "Starting local service...";
-      const ep = await startService(5272, selectedModelAlias || undefined);
+      const ep = await startService(
+        5272,
+        selectedModelAlias || undefined,
+        selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+      );
       updateStateFromSdk();
       statusMessage = `Service running at ${ep}`;
     } catch (e: any) {
@@ -670,6 +960,7 @@
       app: {
         view: currentView,
         selectedModelAlias: selectedModelAlias || null,
+        selectedAccelerationPreference,
         statusMessage,
       },
       sdkState: {
@@ -725,6 +1016,7 @@
         state.acceleratorsReady ?
           "Hardware acceleration ready"
         : "Accelerators configured";
+      await refreshExecutionProviders();
       await refreshModels();
       await loadRecommendations();
     } catch (e: any) {
@@ -733,6 +1025,10 @@
   }
 
   async function useStarterModel(model: ModelInfo) {
+    if (!modelSupportsChat(model)) {
+      statusMessage = `${model.alias} is not a chat model.`;
+      return;
+    }
     try {
       const alias = model.alias;
 
@@ -755,7 +1051,11 @@
       // Auto start service and switch to chat
       if (!state.serviceRunning) {
         try {
-          await startService(5272, alias);
+          await startService(
+            5272,
+            alias,
+            selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+          );
         } catch {}
       }
 
@@ -767,6 +1067,12 @@
   }
 
   async function selectAndChat(model: any) {
+    if (!modelSupportsChat(model)) {
+      statusMessage = `${model.alias} is an STT/audio model and cannot be used for chat.`;
+      currentView = 'audio';
+      await useSTTModelForAudio(model).catch(() => {});
+      return;
+    }
     try {
       selectedModelAlias = model.alias;
       selectedModel = { alias: model.alias };
@@ -784,7 +1090,11 @@
 
       if (!state.serviceRunning) {
         try {
-          await startService(5272, model.alias);
+          await startService(
+            5272,
+            model.alias,
+            selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+          );
         } catch {}
       }
     } catch (e: any) {
@@ -793,6 +1103,12 @@
   }
 
   async function loadAndSelect(model: any) {
+    if (!modelSupportsChat(model)) {
+      statusMessage = `${model.alias} is an STT/audio model. Switching to Audio tab.`;
+      await useSTTModelForAudio(model);
+      currentView = 'audio';
+      return;
+    }
     try {
       await loadModelAndMaybeStart(model);
       await selectAndChat(model);
@@ -801,7 +1117,42 @@
     }
   }
 
+  // Dedicated path for audio/STT: load the model + (re)start service with it,
+  // but do NOT affect the chat selectedModelAlias or switch views.
+  // This answers "separate model for audio": we switch the active service model
+  // when the user wants to transcribe. Chat and audio share the single local
+  // OpenAI endpoint, so only one primary model is active at a time.
+  async function useSTTModelForAudio(model: any) {
+    try {
+      const alias = model.alias;
+
+      if (!model.isCached) {
+        statusMessage = `Downloading STT model ${alias}...`;
+        await downloadAndTrack(model);
+      }
+
+      statusMessage = `Loading ${alias} for audio transcription...`;
+      await sendLoadToSidecar(model);
+
+      // This will switch currentModel in sidecar if different and (re)start the web service
+      // which is required for /audio/transcriptions to be available.
+      const ep = await startService(
+        5272,
+        alias,
+        selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+      );
+      selectedSTTModelAlias = alias;
+
+      statusMessage = `Audio ready: ${alias} at ${ep}`;
+      await refreshModels();
+      await loadSTTModels();
+    } catch (e: any) {
+      statusMessage = `Failed to prepare STT model: ${e?.message || e}`;
+    }
+  }
+
   onMount(() => {
+    hostPlatform = detectHostPlatform();
     // Subscribe to the SDK store
     unsubscribe = sdkStateStore.subscribe(syncFromStore);
     // Load conversation history
@@ -827,22 +1178,32 @@
       await downloadModel(model, (p: number) => {
         statusMessage = `Downloading ${model.alias}: ${p.toFixed(1)}%`;
       });
+      setModelRuntimeMeta(model.alias, { downloadedAt: new Date().toISOString() });
       statusMessage = `${model.alias} downloaded`;
       await refreshModels();
     } catch (e: any) {
       statusMessage = `Download failed: ${e?.message || e}`;
+      throw e;
     }
   }
 
   async function loadModelAndMaybeStart(model: any) {
     try {
       statusMessage = `Loading ${model.alias}...`;
-      await sendLoadToSidecar(model); // use sidecar
+      const loadResult = await sendLoadToSidecar(model); // use sidecar
+      const loadAccel = String(loadResult?.acceleration?.active || "").trim();
+      if (loadAccel) {
+        setModelRuntimeMeta(model.alias, { lastUsedAcceleration: loadAccel });
+      }
       statusMessage = `${model.alias} loaded`;
 
       if (!state.serviceRunning) {
         try {
-          await startService(5272, model.alias);
+          await startService(
+            5272,
+            model.alias,
+            selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+          );
           statusMessage = `${model.alias} loaded + service started`;
         } catch (e) {
           console.warn("Auto-start service failed", e);
@@ -850,6 +1211,12 @@
       }
 
       await refreshModels();
+
+      // If this was an STT model loaded from the main UI (e.g. Models tab "Load" button),
+      // make the Audio page inherit it automatically.
+      if (modelSupportsAudio(model)) {
+        selectedSTTModelAlias = model.alias;
+      }
     } catch (e: any) {
       statusMessage = `Load failed: ${e?.message || e}`;
     }
@@ -857,7 +1224,7 @@
 
   // Placeholder for sidecar load - actual impl in sdk
   async function sendLoadToSidecar(model: any) {
-    await sdkLoadModel(model);
+    return await sdkLoadModel(model);
   }
 
   async function unloadModel(model: any) {
@@ -871,8 +1238,46 @@
     }
   }
 
+  async function deleteCachedModel(model: any) {
+    try {
+      const confirmed = globalThis.confirm(
+        `Delete cached model "${model.alias}" from disk? This cannot be undone.`,
+      );
+      if (!confirmed) {
+        statusMessage = `Delete cancelled for ${model.alias}`;
+        return;
+      }
+      statusMessage = `Deleting ${model.alias}...`;
+      if (model.isLoaded) {
+        await sdkUnloadModel(model);
+      }
+      await sdkDeleteModel(model);
+      if (selectedModelAlias === model.alias) {
+        selectedModelAlias = "";
+      }
+      if (modelRuntimeMeta[model.alias]) {
+        const nextMeta = { ...modelRuntimeMeta };
+        delete nextMeta[model.alias];
+        modelRuntimeMeta = nextMeta;
+        persistChat();
+      }
+      statusMessage = `${model.alias} deleted`;
+      await refreshModels();
+    } catch (e: any) {
+      statusMessage = `Delete failed: ${e?.message || e}`;
+    }
+  }
+
   async function sendMessage(e: Event) {
     e.preventDefault();
+    if (chatBlockedByLoadedSTT) {
+      statusMessage = "Text chat is disabled while an STT model is active. Load a chat model to continue.";
+      return;
+    }
+    if (!selectedModelSupportsChat) {
+      statusMessage = "Current model does not support chat completions.";
+      return;
+    }
     if (!chatInput.trim() || (!state.endpoint && !chatClient) || isStreaming) return;
 
     const userContent = chatInput.trim();
@@ -910,13 +1315,19 @@
             };
             chatMessages = [...chatMessages];
           },
-          undefined,
+          {
+            preferredEp: selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+          },
           (requestId: number) => {
             activeStreamRequestId = requestId;
           },
         );
         if (requestController.signal.aborted) {
           return;
+        }
+        const endpointAcceleration = String(data?.acceleration?.active || "").trim();
+        if (endpointAcceleration && selectedModelAlias) {
+          setModelRuntimeMeta(selectedModelAlias, { lastUsedAcceleration: endpointAcceleration });
         }
         assistantContent = data?.choices?.[0]?.message?.content || assistantContent;
         const lastIndex = chatMessages.length - 1;
@@ -985,12 +1396,70 @@
   }
 
   /**
+   * Normalizes messages for strict chat templates (e.g., Mistral Instruct)
+   * that require only user/assistant roles and strict alternation.
+   */
+  function normalizeForAlternatingChat(
+    messages: Array<{ role: string; content: any }>,
+    systemInstruction?: string,
+  ): Array<{ role: "user" | "assistant"; content: string }> {
+    const instructionParts: string[] = [];
+    if (systemInstruction?.trim()) instructionParts.push(systemInstruction.trim());
+
+    const normalized: Array<{ role: "user" | "assistant"; content: string }> = [];
+    for (const message of messages || []) {
+      const role = String(message?.role || "").toLowerCase();
+      const content = String(message?.content ?? "").trim();
+      if (!content) continue;
+      if (role === "system") {
+        instructionParts.push(content);
+        continue;
+      }
+      if (role === "user" || role === "assistant") {
+        normalized.push({ role, content });
+      }
+    }
+
+    const instructionText = instructionParts.length
+      ? `Follow these instructions:\n${instructionParts.join("\n\n")}`
+      : "";
+
+    if (instructionText) {
+      if (normalized.length > 0 && normalized[0].role === "user") {
+        normalized[0] = {
+          role: "user",
+          content: `${instructionText}\n\n${normalized[0].content}`,
+        };
+      } else {
+        normalized.unshift({ role: "user", content: instructionText });
+      }
+    }
+
+    const alternating: Array<{ role: "user" | "assistant"; content: string }> = [];
+    for (const message of normalized) {
+      if (alternating.length === 0) {
+        if (message.role !== "user") continue;
+        alternating.push(message);
+        continue;
+      }
+      const previous = alternating[alternating.length - 1];
+      if (previous.role === message.role) {
+        previous.content = `${previous.content}\n\n${message.content}`;
+        continue;
+      }
+      alternating.push(message);
+    }
+
+    return alternating;
+  }
+
+  /**
    * Builds the messages array to send to the model.
-   * 
+   *
    * Key design decisions for local inference:
    * - We NEVER mutate the full `chatMessages` (user can always see full history).
    * - We apply a sliding window based on `contextTurns` to keep token usage reasonable.
-   * - System prompt is always included (or you can move it into the window).
+   * - We normalize to strict user/assistant alternation for model compatibility.
    * - This directly affects latency + energy use, even on powerful local hardware.
    */
   function getMessagesForInference(): any[] {
@@ -1025,16 +1494,15 @@
       if (!combined.includes(m)) combined.push(m);
     }
 
-    return [
-      { role: "system", content: systemPrompt },
+    return normalizeForAlternatingChat([
       ...combined.map((m: any) => ({
         role: m.role,
         content: m.content,
       })),
-    ];
+    ], systemPrompt);
   }
 
-  /** 
+  /**
    * === Step 3: Better token counting ===
    * Improved heuristic + can be upgraded with sidecar tokenizer in future.
    * We use a blended heuristic that works reasonably for English + code.
@@ -1081,15 +1549,14 @@
     const oldMessages = chatMessages.slice(0, splitIndex);
     const keepMessages = chatMessages.slice(splitIndex);
 
-    const summaryPrompt = `You are a precise conversation summarizer. 
-Summarize the following conversation history concisely in 4-8 sentences. 
+    const summaryPrompt = `You are a precise conversation summarizer.
+Summarize the following conversation history concisely in 4-8 sentences.
 Focus on: key facts the user shared, important decisions, open questions, user goals/preferences, and any code or specific details worth remembering.
 Output only the summary text, no preamble.`;
 
-    const summaryMessages = [
-      { role: "system", content: summaryPrompt },
+    const summaryMessages = normalizeForAlternatingChat([
       ...oldMessages.map((m: any) => ({ role: m.role, content: m.content }))
-    ];
+    ], summaryPrompt);
 
     statusMessage = "Summarizing older context...";
     let summary = "";
@@ -1100,6 +1567,7 @@ Output only the summary text, no preamble.`;
         const data = await chatCompletion(selectedModelAlias, summaryMessages, {
           maxTokens: 600,
           temperature: 0.3,
+          preferredEp: selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
         });
         summary = data.choices?.[0]?.message?.content || "";
       } else if (chatClient) {
@@ -1125,7 +1593,7 @@ Output only the summary text, no preamble.`;
     }
 
     const summaryMessage = {
-      role: "system",
+      role: "assistant",
       content: `[Previous conversation summary — ${oldMessages.length} earlier messages]:\n${summary.trim()}`,
       isSummary: true,
     };
@@ -1189,7 +1657,9 @@ Output only the summary text, no preamble.`;
           statusMessage = "Recording saved. Ready to transcribe.";
         };
 
-        mediaRecorder.start();
+        // Use timeslice so we get regular chunks even for long recordings.
+        // The final Blob from all chunks will contain the full audio.
+        mediaRecorder.start(1000);
         isRecording = true;
         audioBlob = null;
         statusMessage = "Recording...";
@@ -1213,40 +1683,322 @@ Output only the summary text, no preamble.`;
     input.click();
   }
 
+  // Convert any audio Blob the browser can decode into 16 kHz mono 16-bit WAV.
+  // The ONNX Runtime GenAI decoder used by many Foundry Local Whisper models
+  // is strict and commonly fails with "Cannot detect audio stream format"
+  // on WebM/Opus, MP3, etc.
+  async function getMono16kBuffer(blob: Blob): Promise<AudioBuffer> {
+    const AudioContextClass = (window.AudioContext || (window as any).webkitAudioContext);
+    const audioCtx = new AudioContextClass();
+    const arrayBuffer = await blob.arrayBuffer();
+    const decoded = await audioCtx.decodeAudioData(arrayBuffer);
+
+    const targetRate = 16000;
+    const targetLength = Math.max(1, Math.ceil(decoded.duration * targetRate));
+    const offlineCtx = new OfflineAudioContext(1, targetLength, targetRate);
+
+    const source = offlineCtx.createBufferSource();
+    source.buffer = decoded;
+    source.connect(offlineCtx.destination);
+    source.start(0);
+
+    return await offlineCtx.startRendering();
+  }
+
+  async function convertAudioBlobToWav(blob: Blob): Promise<Blob> {
+    const rendered = await getMono16kBuffer(blob);
+    const wavBuffer = audioBufferToWav(rendered);
+    return new Blob([wavBuffer], { type: "audio/wav" });
+  }
+
+  function audioBufferToWav(buffer: AudioBuffer): ArrayBuffer {
+    const numChannels = buffer.numberOfChannels;
+    const sampleRate = buffer.sampleRate;
+    const bitDepth = 16;
+    const bytesPerSample = bitDepth / 8;
+    const blockAlign = numChannels * bytesPerSample;
+    const dataLength = buffer.length * blockAlign;
+    const bufferLength = 44 + dataLength;
+    const arrayBuffer = new ArrayBuffer(bufferLength);
+    const view = new DataView(arrayBuffer);
+
+    writeString(view, 0, "RIFF");
+    view.setUint32(4, 36 + dataLength, true);
+    writeString(view, 8, "WAVE");
+    writeString(view, 12, "fmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true); // PCM
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * blockAlign, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitDepth, true);
+    writeString(view, 36, "data");
+    view.setUint32(40, dataLength, true);
+
+    let offset = 44;
+    for (let i = 0; i < buffer.length; i++) {
+      for (let ch = 0; ch < numChannels; ch++) {
+        const sample = Math.max(-1, Math.min(1, buffer.getChannelData(ch)[i]));
+        view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+        offset += 2;
+      }
+    }
+    return arrayBuffer;
+  }
+
+  function writeString(view: DataView, offset: number, str: string) {
+    for (let i = 0; i < str.length; i++) {
+      view.setUint8(offset + i, str.charCodeAt(i));
+    }
+  }
+
+  /**
+   * Chunk long audio into ~28s segments (with overlap) and transcribe each.
+   * This is required because many local Whisper implementations (including the
+   * ONNX/GenAI backend used here) only reliably process a limited prefix
+   * when given very long single files.
+   */
+  function normalizeTranscriptText(value: string): string {
+    return value.replace(/\s+/g, " ").trim();
+  }
+
+  function getTranscriptTextFromResult(result: any): string {
+    if (typeof result?.text === "string" && result.text.trim()) {
+      return normalizeTranscriptText(result.text);
+    }
+    if (Array.isArray(result?.segments)) {
+      return normalizeTranscriptText(
+        result.segments.map((s: any) => s?.text || s?.transcript || "").join(" ")
+      );
+    }
+    return "";
+  }
+
+  function findWordOverlapTailPrefix(previousText: string, nextText: string, maxWords = 24): number {
+    const prevWords = normalizeTranscriptText(previousText).split(" ").filter(Boolean);
+    const nextWords = normalizeTranscriptText(nextText).split(" ").filter(Boolean);
+    const max = Math.min(maxWords, prevWords.length, nextWords.length);
+    for (let overlap = max; overlap > 0; overlap--) {
+      const prevTail = prevWords.slice(prevWords.length - overlap).join(" ").toLowerCase();
+      const nextHead = nextWords.slice(0, overlap).join(" ").toLowerCase();
+      if (prevTail === nextHead) return overlap;
+    }
+    return 0;
+  }
+
+  function mergeTranscriptChunks(chunks: string[]): string {
+    const cleaned = chunks.map((c) => normalizeTranscriptText(c)).filter(Boolean);
+    if (cleaned.length === 0) return "";
+    let merged = cleaned[0];
+    for (let i = 1; i < cleaned.length; i++) {
+      const next = cleaned[i];
+      const overlapWords = findWordOverlapTailPrefix(merged, next);
+      if (overlapWords > 0) {
+        const nextWords = next.split(" ");
+        merged = `${merged} ${nextWords.slice(overlapWords).join(" ")}`.trim();
+      } else if (!merged.toLowerCase().includes(next.toLowerCase())) {
+        merged = `${merged} ${next}`.trim();
+      }
+    }
+    return normalizeTranscriptText(merged);
+  }
+
+  async function transcribeLongAudio(
+    audioBlob: Blob,
+    model: string,
+    language = 'auto',
+    fileNameBase = 'audio',
+    onProgress?: (current: number, total: number) => void,
+    options?: { temperature?: number; preferredEp?: string }
+  ): Promise<any> {
+    const mono = await getMono16kBuffer(audioBlob);
+    const sr = 16000;
+    const chunkSec = 28;
+    const overlapSec = 4;
+    const chunkSamples = Math.floor(chunkSec * sr);
+    const step = chunkSamples - Math.floor(overlapSec * sr);
+    const total = mono.length;
+
+    const texts: string[] = [];
+    let pos = 0;
+    let idx = 0;
+    const totalChunks = Math.max(1, Math.ceil(total / step));
+
+    while (pos < total) {
+      const end = Math.min(pos + chunkSamples, total);
+      const len = end - pos;
+      if (len < 1000) break; // too short
+
+      const data = new Float32Array(len);
+      mono.copyFromChannel(data, 0, pos);
+
+      // Small temp context just to build AudioBuffer for the chunk WAV
+      const tmpCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const chunkBuf = tmpCtx.createBuffer(1, len, sr);
+      chunkBuf.copyToChannel(data, 0);
+      try { tmpCtx.close?.(); } catch {}
+
+      const wavBlob = new Blob([audioBufferToWav(chunkBuf)], { type: 'audio/wav' });
+
+      if (onProgress) onProgress(idx + 1, totalChunks);
+      statusMessage = `Transcribing segment ${idx + 1} of ${totalChunks}...`;
+
+      try {
+        const res = await transcribeAudio(wavBlob, model, language, `${fileNameBase}_part${idx}.wav`, options);
+        const t = getTranscriptTextFromResult(res);
+        if (t) texts.push(t);
+      } catch (e) {
+        console.warn('Chunk transcription failed', e);
+      }
+
+      pos += step;
+      idx++;
+    }
+
+    if (onProgress) onProgress(totalChunks, totalChunks);
+    return { text: mergeTranscriptChunks(texts) };
+  }
+
+  async function getAudioDuration(blob: Blob): Promise<number> {
+    try {
+      const AudioContextClass = (window.AudioContext || (window as any).webkitAudioContext);
+      const ctx = new AudioContextClass();
+      const buf = await blob.arrayBuffer();
+      const decoded = await ctx.decodeAudioData(buf);
+      return decoded.duration;
+    } catch {
+      return 0;
+    }
+  }
+
   async function doTranscribe() {
-    if (!audioBlob || !state.serviceRunning || !state.endpoint) {
-      statusMessage =
-        "Service must be running (start via Diagnostics or load a model)";
+    const sttAlias = effectiveSTTModelAlias || "whisper-tiny";
+
+    if (!audioBlob) {
+      statusMessage = "Record or upload audio first.";
       return;
     }
 
     isTranscribing = true;
     transcription = "";
-    statusMessage = "Transcribing via sidecar service...";
+    statusMessage = `Transcribing with ${sttAlias} via sidecar...`;
 
     try {
-      const result = await transcribeAudio(
-        audioBlob,
-        selectedModelAlias || "whisper-tiny",
-        "en",
-        "audio.webm",
-      );
-      transcription = result.text || JSON.stringify(result, null, 2);
-      statusMessage = "Transcription complete (via sidecar)";
+      // Ensure the local service is running with an STT-capable model.
+      if (!state.serviceRunning || !state.endpoint) {
+        await startService(
+          5272,
+          sttAlias,
+          selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+        );
+      } else {
+        await startService(
+          5272,
+          sttAlias,
+          selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+        );
+      }
+
+      const dur = await getAudioDuration(audioBlob);
+      statusMessage = dur > 90
+        ? "Normalizing long audio (chunking for full transcription)..."
+        : "Normalizing audio to WAV...";
+
+      // The ONNX Runtime GenAI audio decoder used by Foundry Local Whisper models
+      // is extremely strict ("Cannot detect audio stream format"). We always
+      // decode + re-encode to 16 kHz mono WAV before sending.
+      //
+      // For long audio we split into overlapping chunks because the model
+      // backend often only returns the beginning when given one huge file.
+      let result: any;
+      if (dur > 90) {
+        const estChunks = Math.max(1, Math.ceil(dur / 24));
+        transcriptionProgress = { current: 0, total: estChunks };
+        statusMessage = "Transcribing long audio in overlapping chunks...";
+        result = await transcribeLongAudio(audioBlob, sttAlias, transcriptionLanguage, 'audio', (cur, tot) => {
+          transcriptionProgress = { current: cur, total: tot };
+          statusMessage = `Transcribing segment ${cur}/${tot}...`;
+        }, {
+          temperature: 0,
+          preferredEp: selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference
+        });
+      } else {
+        let sendBlob = audioBlob;
+        let sendName = "audio.webm";
+        try {
+          sendBlob = await convertAudioBlobToWav(audioBlob);
+          sendName = "audio.wav";
+        } catch (convErr) {
+          console.warn("WAV normalization failed, trying original", convErr);
+        }
+
+        result = await transcribeAudio(
+          sendBlob,
+          sttAlias,
+          transcriptionLanguage,
+          sendName,
+          {
+            temperature: 0,
+            preferredEp: selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference
+          }
+        );
+      }
+
+      // Extract the most complete text possible.
+      // Some results put full transcript in .text, others have segments for long audio.
+      const transcribed = getTranscriptTextFromResult(result);
+      transcription = transcribed || JSON.stringify(result, null, 2);
+
+      // Helpful for debugging long audio: the backend may return duration or segments
+      // even if .text is partial.
+      if (result && typeof result.duration === 'number') {
+        console.log(`[transcription] model reported audio duration: ${result.duration}s`);
+      }
+      transcriptionProgress = null;
+      const path = result?.transcriptionPath ? ` via ${result.transcriptionPath}` : "";
+      statusMessage = dur > 90
+        ? `Transcription complete (full long audio via chunks${path})`
+        : `Transcription complete (via sidecar${path})`;
     } catch (err: any) {
       transcription = `Error: ${err.message || err}`;
       statusMessage = "Transcription failed";
+      transcriptionProgress = null;
     } finally {
       isTranscribing = false;
     }
+  }
+
+  async function copyTranscriptionToClipboard() {
+    if (!transcription) return;
+    try {
+      await navigator.clipboard.writeText(transcription);
+      statusMessage = "Transcription copied to clipboard";
+    } catch (e: any) {
+      statusMessage = `Failed to copy transcription: ${e?.message || e}`;
+    }
+  }
+
+  function downloadTranscription() {
+    if (!transcription) return;
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const fileName = `flint-transcription-${stamp}.txt`;
+    const blob = new Blob([transcription], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = fileName;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    statusMessage = `Transcription downloaded: ${fileName}`;
   }
 </script>
 
 <main class="app">
   <header class="header">
-    <div class="brand">
-      <strong>Flint</strong>
-      <span class="tag">Foundry Local Interface</span>
+    <div class="brand" data-tooltip="Foundry Local Interface">
+      <img class="brand-logo" src="/favicon.png" alt="Flint logo" />
+      <strong>FLInt</strong>
     </div>
 
     <div class="status-bar">
@@ -1287,8 +2039,8 @@ Output only the summary text, no preamble.`;
       </button>
 
       <!-- Theme toggle -->
-      <button 
-        class="theme-toggle" 
+      <button
+        class="theme-toggle"
         onclick={() => theme = theme === 'dark' ? 'light' : 'dark'}
         title="Toggle light/dark mode"
       >
@@ -1302,9 +2054,23 @@ Output only the summary text, no preamble.`;
       <button
         class="nav-item collapse-toggle"
         onclick={() => (sidebarCollapsed = !sidebarCollapsed)}
+        aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
         title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
       >
-        {sidebarCollapsed ? "▶" : "◀"}
+        <svg
+          class="collapse-icon"
+          class:collapsed={sidebarCollapsed}
+          viewBox="0 0 24 24"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+          aria-hidden="true"
+        >
+          <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" stroke="currentColor" stroke-width="1.8" />
+          <path d="M9.5 5.5V18.5" stroke="currentColor" stroke-width="1.8" />
+          <path d="M13 8.5H17.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+          <path d="M13 12H17.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+          <path d="M13 15.5H17.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+        </svg>
       </button>
 
       <button
@@ -1313,7 +2079,13 @@ Output only the summary text, no preamble.`;
         onclick={() => (currentView = "models")}
         title="Models"
       >
-        <span class="nav-icon">📦</span>
+        <span class="nav-icon" aria-hidden="true">
+          <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 3.5L19 7.5L12 11.5L5 7.5L12 3.5Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
+            <path d="M5 7.5V16.5L12 20.5L19 16.5V7.5" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
+            <path d="M12 11.5V20.5" stroke="currentColor" stroke-width="1.8" />
+          </svg>
+        </span>
         <span class="nav-label">Models</span>
       </button>
       <button
@@ -1322,7 +2094,13 @@ Output only the summary text, no preamble.`;
         onclick={() => (currentView = "chat")}
         title="Chat"
       >
-        <span class="nav-icon">💬</span>
+        <span class="nav-icon" aria-hidden="true">
+          <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="4" y="5" width="16" height="11" rx="3" stroke="currentColor" stroke-width="1.8" />
+            <path d="M9 16L7.5 19.5L12.5 16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M8 10.5H16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+          </svg>
+        </span>
         <span class="nav-label">Chat</span>
       </button>
       <button
@@ -1331,7 +2109,14 @@ Output only the summary text, no preamble.`;
         onclick={() => (currentView = "audio")}
         title="Audio"
       >
-        <span class="nav-icon">🎙️</span>
+        <span class="nav-icon" aria-hidden="true">
+          <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="9" y="4" width="6" height="10" rx="3" stroke="currentColor" stroke-width="1.8" />
+            <path d="M6.5 11.5C6.5 14.5 8.8 17 12 17C15.2 17 17.5 14.5 17.5 11.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+            <path d="M12 17V20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+            <path d="M9.5 20H14.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+          </svg>
+        </span>
         <span class="nav-label">Audio</span>
       </button>
       <button
@@ -1340,7 +2125,15 @@ Output only the summary text, no preamble.`;
         onclick={() => (currentView = "diagnostics")}
         title="Diagnostics"
       >
-        <span class="nav-icon">🔍</span>
+        <span class="nav-icon" aria-hidden="true">
+          <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M5 17L9 13L12 15L16.5 9.5L19 12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M4.5 19.5H19.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+            <circle cx="7.5" cy="8" r="1" fill="currentColor" />
+            <circle cx="12" cy="10.5" r="1" fill="currentColor" />
+            <circle cx="16.5" cy="6.5" r="1" fill="currentColor" />
+          </svg>
+        </span>
         <span class="nav-label">Diagnostics</span>
       </button>
       <button
@@ -1349,7 +2142,12 @@ Output only the summary text, no preamble.`;
         onclick={() => (currentView = "learn")}
         title="Learn"
       >
-        <span class="nav-icon">📖</span>
+        <span class="nav-icon" aria-hidden="true">
+          <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M4.5 6.5C4.5 5.4 5.4 4.5 6.5 4.5H11V19.5H6.5C5.4 19.5 4.5 18.6 4.5 17.5V6.5Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
+            <path d="M19.5 6.5C19.5 5.4 18.6 4.5 17.5 4.5H13V19.5H17.5C18.6 19.5 19.5 18.6 19.5 17.5V6.5Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
+          </svg>
+        </span>
         <span class="nav-label">Learn</span>
       </button>
 
@@ -1384,11 +2182,42 @@ Output only the summary text, no preamble.`;
                 bind:value={searchTerm}
               />
               <span class="count">{filteredModels.length} models</span>
-              <button
-                onclick={ensureHardwareAccel}
-                disabled={!state.ready || state.acceleratorsReady}
-                >Setup/Refresh Accelerators</button
-              >
+            </div>
+
+            <div class="accel-panel">
+              <div class="accel-panel-row">
+                <label for="accel-pref">Preferred acceleration</label>
+                <select
+                  id="accel-pref"
+                  bind:value={selectedAccelerationPreference}
+                  onchange={(e) =>
+                    setAccelerationPreference(
+                      (e.currentTarget as HTMLSelectElement).value,
+                    )}
+                >
+                  <option value="auto">Auto (runtime decides)</option>
+                  {#each state.eps as ep (ep.name)}
+                    <option value={ep.name}>
+                      {ep.name} {ep.isRegistered ? "• ready" : "• detected"}
+                    </option>
+                  {/each}
+                </select>
+                <button onclick={ensureHardwareAccel} disabled={!state.ready}>
+                  Install / Update Accelerators
+                </button>
+                <button class="secondary" onclick={refreshExecutionProviders} disabled={!state.ready}>
+                  Recheck Providers
+                </button>
+              </div>
+              {#if state.eps.length}
+                <div class="ep-status-list">
+                  {#each state.eps as ep (ep.name)}
+                    <span class="ep-pill" class:ready={ep.isRegistered}>
+                      {ep.name} • {ep.isRegistered ? "ready" : "not ready"}
+                    </span>
+                  {/each}
+                </div>
+              {/if}
             </div>
 
             {#if recommendedStarters.length > 0}
@@ -1400,6 +2229,10 @@ Output only the summary text, no preamble.`;
                   ).length} ready
                   {#if state.acceleratorsReady}
                     (accelerated){/if}
+                  • preference:
+                  {selectedAccelerationPreference === "auto"
+                    ? "auto"
+                    : selectedAccelerationPreference}
                 </div>
                 <div class="starter-options">
                   {#each recommendedStarters as model (model.alias)}
@@ -1452,10 +2285,12 @@ Output only the summary text, no preamble.`;
                 {#each filteredModels as model (model.alias)}
                   <div class="model-card">
                     <div class="model-header">
-                      <strong>{model.alias}</strong>
+                      <strong title={getShortModelDescription(model)}>
+                        {model.alias}
+                      </strong>
                       <span class="badges">
                         {#if model.isCached}<span class="badge cached"
-                            >Cached</span
+                            >Downloaded</span
                           >{/if}
                         {#if model.isLoaded}<span class="badge loaded"
                             >Loaded</span
@@ -1464,12 +2299,49 @@ Output only the summary text, no preamble.`;
                     </div>
 
                     <div class="model-meta">
-                      {#if (model as any).size}
-                        <span>Size: {(model as any).size}</span>
+                      <span title="Model file size (reported by catalog)">Size: {formatSizeLabel(model)}</span>
+                      <span title="Estimated in-memory runtime footprint for local inference">
+                        Memory: {estimateMemoryRequirement(model)}
+                      </span>
+                      {#if getFamilyLabel(model)}
+                        <span>
+                          Family:
+                          <span class="meta-badges">
+                            <span class="meta-badge">{getFamilyLabel(model)}</span>
+                          </span>
+                        </span>
                       {/if}
-                      {#if (model as any).family}
-                        <span>Family: {(model as any).family}</span>
+                      <span title="Execution providers currently applicable on this machine">
+                        Acceleration:
+                        <span class="meta-badges">
+                          {#each getApplicableAccelerationLabels(model, state.eps, hostPlatform) as accel}
+                            <span class="meta-badge">{accel}</span>
+                          {/each}
+                        </span>
+                      </span>
+                      {#if model.isCached}
+                        <span title="What is currently downloaded for this model">
+                          Downloaded artifact:
+                          <span class="meta-badges">
+                            <span class="meta-badge">Model weights</span>
+                          </span>
+                        </span>
+                        <span>Downloaded at: {formatMetaTimestamp(modelRuntimeMeta[model.alias]?.downloadedAt)}</span>
+                        <span>Last used acceleration: {modelRuntimeMeta[model.alias]?.lastUsedAcceleration || "Unknown"}</span>
                       {/if}
+                      {#if normalizeCapabilities(model).length}
+                        <span>
+                          Capabilities:
+                          <span class="meta-badges">
+                            {#each normalizeCapabilities(model) as cap}
+                              <span class="meta-badge">{cap}</span>
+                            {/each}
+                          </span>
+                        </span>
+                      {/if}
+                      <span class="model-short-desc" title={getShortModelDescription(model)}>
+                        {getShortModelDescription(model)}
+                      </span>
                     </div>
 
                     <div class="model-actions">
@@ -1487,16 +2359,20 @@ Output only the summary text, no preamble.`;
                         <button onclick={() => loadModelAndMaybeStart(model)}
                           >Load</button
                         >
-                        <button onclick={() => loadAndSelect(model)}
-                          >Load & Chat</button
-                        >
+                        {#if modelSupportsChat(model)}
+                          <button onclick={() => loadAndSelect(model)}
+                            >Load & Chat</button
+                          >
+                        {/if}
                       {/if}
 
                       {#if model.isLoaded}
                         {#if selectedModelAlias !== model.alias}
-                          <button onclick={() => selectAndChat(model)}
-                            >Chat with this</button
-                          >
+                          {#if modelSupportsChat(model)}
+                            <button onclick={() => selectAndChat(model)}
+                              >Chat with this</button
+                            >
+                          {/if}
                         {/if}
                         <button onclick={() => unloadModel(model)}
                           >Unload</button
@@ -1504,17 +2380,104 @@ Output only the summary text, no preamble.`;
                       {/if}
 
                       {#if model.isCached && model.isLoaded && selectedModelAlias !== model.alias}
-                        <button
-                          onclick={() => selectAndChat(model)}
-                          class="primary-chat">Set as Current Chat</button
-                        >
+                        {#if modelSupportsChat(model)}
+                          <button
+                            onclick={() => selectAndChat(model)}
+                            class="primary-chat">Set as Current Chat</button
+                          >
+                        {/if}
                       {/if}
 
-                      <button class="secondary" disabled>Details</button>
+                      {#if modelSupportsAudio(model)}
+                        <button onclick={() => useSTTModelForAudio(model)} class="stt-btn">Use for Audio</button>
+                      {/if}
+
+                      {#if model.isCached}
+                        <button class="danger-btn" onclick={() => deleteCachedModel(model)}>Delete</button>
+                      {/if}
+
+                      <button
+                        class="secondary"
+                        onclick={() => (modelDetailsAlias = model.alias)}
+                      >
+                        Details
+                      </button>
                     </div>
                   </div>
                 {/each}
               </div>
+
+              {#if modelDetailsAlias}
+                {@const detailModel = state.models.find((m: any) => m.alias === modelDetailsAlias)}
+                {#if detailModel}
+                  <div
+                    class="model-modal-overlay"
+                    role="presentation"
+                    onclick={() => (modelDetailsAlias = null)}
+                    onkeydown={(e) => { if (e.key === 'Escape') modelDetailsAlias = null; }}
+                  >
+                    <div
+                      class="model-modal"
+                      role="dialog"
+                      aria-modal="true"
+                      aria-label={`${detailModel.alias} details`}
+                      tabindex="-1"
+                      onclick={(e) => e.stopPropagation()}
+                      onkeydown={(e) => { if (e.key === 'Escape') modelDetailsAlias = null; }}
+                    >
+                      <div class="modal-header">
+                        <h3>{detailModel.alias}</h3>
+                        <button type="button" onclick={() => (modelDetailsAlias = null)}>✕</button>
+                      </div>
+                      <div class="modal-body model-detail-grid">
+                        <div><strong>Task:</strong> {(detailModel as any).task || (detailModel as any).info?.task || "Unknown"}</div>
+                        <div><strong>Family:</strong> {(detailModel as any).family || (detailModel as any).info?.family || "Unknown"}</div>
+                        <div><strong>Size:</strong> {formatSizeLabel(detailModel)}</div>
+                        <div><strong>Estimated memory:</strong> {estimateMemoryRequirement(detailModel)}</div>
+                        <div><strong>Context:</strong> {formatContextLength(detailModel)}</div>
+                        <div><strong>Downloaded artifact:</strong> {detailModel.isCached ? "Model weights" : "Not downloaded"}</div>
+                        <div><strong>Downloaded at:</strong> {formatMetaTimestamp(modelRuntimeMeta[detailModel.alias]?.downloadedAt)}</div>
+                        <div><strong>Last used acceleration:</strong> {modelRuntimeMeta[detailModel.alias]?.lastUsedAcceleration || "Unknown"}</div>
+                        <div>
+                          <strong>Applicable accelerations:</strong>
+                          <span class="meta-badges">
+                            {#each getApplicableAccelerationLabels(detailModel, state.eps, hostPlatform) as accel}
+                              <span class="meta-badge">{accel}</span>
+                            {/each}
+                          </span>
+                        </div>
+                        <div>
+                          <strong>Capabilities:</strong>
+                          {#if normalizeCapabilities(detailModel).length}
+                            <span class="meta-badges">
+                              {#each normalizeCapabilities(detailModel) as cap}
+                                <span class="meta-badge">{cap}</span>
+                              {/each}
+                            </span>
+                          {:else}
+                            Unknown
+                          {/if}
+                        </div>
+                        <div><strong>Acceleration fit:</strong> {describeAccelerationFit(detailModel, selectedAccelerationPreference)}</div>
+                        <div>
+                          <strong>Description:</strong>
+                          {getShortModelDescription(detailModel)}
+                        </div>
+                        {#if hostPlatform === "macos"}
+                          <div class="small">
+                            macOS note: Apple GPU acceleration depends on CoreML/Metal provider availability in your local runtime.
+                          </div>
+                        {/if}
+                      </div>
+                      <div class="modal-footer">
+                        <span class="small">
+                          Memory and acceleration values are guidance estimates for local planning.
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                {/if}
+              {/if}
             {/if}
           {/if}
         </div>
@@ -1530,10 +2493,21 @@ Output only the summary text, no preamble.`;
             />
 
             <div class="chat-main">
+              {#if chatBlockedByLoadedSTT}
+                <div class="notice" style="margin: 12px; padding: 12px;">
+                  <strong>{loadedAudioModel?.alias}</strong> is currently active for audio transcription.
+                  Text chat is temporarily disabled. Load a chat model from the Models view to continue.
+                </div>
+              {:else if !selectedModelSupportsChat}
+                <div class="notice" style="margin: 12px; padding: 12px;">
+                  <strong>{selectedModelAlias}</strong> is an STT/audio-only model and does not support chat completions.
+                  Use the Audio tab or select a chat model from the Models view.
+                </div>
+              {/if}
               <div class="chat-header">
                 <h2>Chat with {selectedModelAlias || "model"}</h2>
-                <button 
-                  type="button" 
+                <button
+                  type="button"
                   class="compact-btn full-thread-btn"
                   onclick={() => (showFullHistory = !showFullHistory)}
                   title="Toggle between compact (recommended for inference) and full uncondensed thread"
@@ -1542,8 +2516,8 @@ Output only the summary text, no preamble.`;
                 </button>
 
                 {#if chatMessages.length > contextTurns * 2 + 4}
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     class="compact-btn"
                     title="Mark older messages as condensed (they stay in full thread view)"
                     onclick={() => {
@@ -1557,8 +2531,8 @@ Output only the summary text, no preamble.`;
                   >
                     Condense old
                   </button>
-                  <button 
-                    type="button" 
+                  <button
+                    type="button"
                     class="compact-btn summarize-btn"
                     title="Use the model to summarize older turns into a compact memory note. Allows continuing long chats efficiently."
                     disabled={isStreaming}
@@ -1587,7 +2561,7 @@ Output only the summary text, no preamble.`;
                         <div class="role">
                           {msg.isSummary ? "📝" : (msg.role === "user" ? "🧑" : "🤖")}
                           {#if msg.role !== 'system'}
-                            <button 
+                            <button
                               type="button"
                               class="pin-btn"
                               class:pinned={!!msg.pinned}
@@ -1655,7 +2629,6 @@ Output only the summary text, no preamble.`;
                       role="menu"
                       tabindex="-1"
                       style="position: fixed; top: {personaMenuPos.top}px; left: {personaMenuPos.left}px;"
-                      onmouseleave={() => (showPersonaMenu = false)}
                     >
                       <div class="persona-menu-header">
                         Choose persona
@@ -1707,8 +2680,8 @@ Output only the summary text, no preamble.`;
                     <option value={20}>20 turns</option>
                     <option value={30}>30 turns</option>
                   </select>
-                  <span 
-                    class="context-estimate" 
+                  <span
+                    class="context-estimate"
                     title="Estimated tokens being sent this turn (rough). Smaller = less time & energy."
                   >
                     ~{estimatedContextTokens}t
@@ -1721,9 +2694,9 @@ Output only the summary text, no preamble.`;
                       / ~{Math.round(currentModelContextLength / 1024)}k
                     </span>
                     {#if recommendedMaxTurns && Math.abs(contextTurns - recommendedMaxTurns) > 1}
-                      <button 
-                        type="button" 
-                        class="recommend-btn" 
+                      <button
+                        type="button"
+                        class="recommend-btn"
                         onclick={applyRecommendedContext}
                         title={`Use recommended ${recommendedMaxTurns} turns for this model`}
                       >rec</button>
@@ -1734,8 +2707,8 @@ Output only the summary text, no preamble.`;
                   {#if contextUsagePercent !== null}
                     <div class="context-meter" title="Approximate % of model context used by current trimmed history">
                       <div class="meter-bar">
-                        <div 
-                          class="meter-fill" 
+                        <div
+                          class="meter-fill"
                           style="width: {contextUsagePercent}%"
                           class:warn={contextUsagePercent > 70}
                           class:danger={contextUsagePercent > 85}
@@ -1771,16 +2744,23 @@ Output only the summary text, no preamble.`;
               </div>
 
               <form class="chat-input" onsubmit={sendMessage}>
+                {#if chatBlockedByLoadedSTT}
+                  <div style="width:100%; padding: 8px; font-size:0.8rem; color:var(--muted);">
+                    Text chat is disabled while STT model <strong>{loadedAudioModel?.alias}</strong> is active.
+                  </div>
+                {:else if !selectedModelSupportsChat}
+                  <div style="width:100%; padding: 8px; font-size:0.8rem; color:var(--muted);">Chat disabled for current model.</div>
+                {/if}
                 <input
                   bind:value={chatInput}
                   placeholder="Type your message... (model is running locally)"
-                  disabled={(!state.endpoint && !chatClient) || isStreaming}
+                  disabled={chatBlockedByLoadedSTT || !selectedModelSupportsChat || (!state.endpoint && !chatClient) || isStreaming}
                 />
                 <button
                   type="submit"
-                  disabled={!chatInput.trim() || (!state.endpoint && !chatClient) || isStreaming}
+                  disabled={chatBlockedByLoadedSTT || !selectedModelSupportsChat || !chatInput.trim() || (!state.endpoint && !chatClient) || isStreaming}
                 >
-                  {isStreaming ? "⏳" : "📤"}
+                  {isStreaming ? "⏳" : "➜"}
                 </button>
                 {#if isStreaming}
                   <button type="button" onclick={stopGeneration} class="stop"
@@ -1791,16 +2771,16 @@ Output only the summary text, no preamble.`;
 
               <!-- Persona Manager Modal -->
               {#if showPersonaManager}
-                <div 
-                  class="persona-modal-overlay" 
-                  role="presentation" 
+                <div
+                  class="persona-modal-overlay"
+                  role="presentation"
                   onclick={closePersonaManager}
                   onkeydown={(e) => { if (e.key === 'Escape') closePersonaManager(); }}
                 >
-                  <div 
-                    class="persona-modal" 
-                    role="dialog" 
-                    aria-modal="true" 
+                  <div
+                    class="persona-modal"
+                    role="dialog"
+                    aria-modal="true"
                     tabindex="-1"
                     onclick={(e) => e.stopPropagation()}
                     onkeydown={(e) => { if (e.key === 'Escape') closePersonaManager(); }}
@@ -1870,54 +2850,108 @@ Output only the summary text, no preamble.`;
         <div class="view audio-view">
           <h2>Audio Transcription</h2>
 
-          {#if !selectedModelAlias}
-            <p class="notice">
-              Only STT models (via sidecar). New families appear automatically
-              from catalog metadata.
-            </p>
-            {#if sttModels.length > 0}
-              <div class="stt-models">
-                <strong>Available STT models:</strong>
-                {#each sttModels.slice(0, 5) as m}
-                  <button onclick={() => loadAndSelect(m)} class="stt-btn"
-                    >{m.alias}</button
-                  >
-                {/each}
-              </div>
-            {/if}
-          {:else}
-            <div class="audio-controls">
-              <button onclick={toggleRecording} disabled={isTranscribing}>
-                {isRecording ? "⏹ Stop Recording" : "🎤 Start Recording"}
-              </button>
-              <button onclick={uploadAudioFile} disabled={isTranscribing}>
-                📁 Upload Audio File
-              </button>
+          <p class="notice">
+            Audio uses STT models (Whisper etc.) via the sidecar + local service.
+            Selecting one here will (re)start the service with that model.
+            Chat and audio share one endpoint, so only one model is active at a time.
+            New STT families appear automatically from catalog metadata (task/capabilities).
+            <br><small>For best results on long/complex audio (e.g. Text readings with names), use the largest STT model your hardware supports. Tiny models often hallucinate or repeat words.</small>
+          </p>
+
+          <!-- STT model selector (independent of chat selectedModelAlias) -->
+          <div class="stt-picker">
+            <strong>Current STT model:</strong>
+            <span class="current-stt">{effectiveSTTModelAlias || "(none)"}</span>
+            {#if effectiveSTTModelAlias}
               <button
-                onclick={doTranscribe}
-                disabled={!audioBlob || isTranscribing}
+                class="tiny"
+                onclick={async () => {
+                  await startService(
+                    5272,
+                    effectiveSTTModelAlias,
+                    selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+                  );
+                  statusMessage = `Service ensured with ${effectiveSTTModelAlias}`;
+                }}
               >
-                {isTranscribing ? "Transcribing..." : "Transcribe"}
+                Ensure service
               </button>
-            </div>
-
-            {#if audioBlob}
-              <div class="audio-info">
-                Recorded audio ready ({(audioBlob.size / 1024).toFixed(1)} KB)
-              </div>
             {/if}
 
-            {#if transcription}
-              <div class="transcription-result">
-                <h3>Transcription:</h3>
-                <pre>{transcription}</pre>
+          </div>
+
+          {#if sttModels.length > 0}
+            <div class="stt-models">
+              <strong>Available STT models:</strong>
+              {#each sttModels as m}
+                <button
+                  onclick={() => useSTTModelForAudio(m)}
+                  class="stt-btn"
+                  title={m.alias}
+                >
+                  {m.alias}
+                  {#if !m.isCached}(get){/if}
+                </button>
+              {/each}
+            </div>
+          {:else}
+            <p class="small">No STT models found yet. Make sure the sidecar is initialized and refresh the catalog.</p>
+          {/if}
+
+          <div class="audio-controls">
+            <label class="audio-language">
+              Language
+              <select bind:value={transcriptionLanguage} disabled={isTranscribing}>
+                <option value="auto">Auto</option>
+                <option value="en">English</option>
+                <option value="es">Spanish</option>
+                <option value="fr">French</option>
+                <option value="de">German</option>
+                <option value="ja">Japanese</option>
+                <option value="zh">Chinese</option>
+              </select>
+            </label>
+            <button onclick={toggleRecording} disabled={isTranscribing}>
+              {isRecording ? "⏹ Stop Recording" : "🎤 Start Recording"}
+            </button>
+            <button onclick={uploadAudioFile} disabled={isTranscribing}>
+              📁 Upload Audio File
+            </button>
+            <button
+              onclick={doTranscribe}
+              disabled={!audioBlob || isTranscribing || !effectiveSTTModelAlias}
+            >
+              {isTranscribing
+                ? (transcriptionProgress
+                    ? `Transcribing ${transcriptionProgress.current}/${transcriptionProgress.total}...`
+                    : "Transcribing...")
+                : "Transcribe"}
+            </button>
+          </div>
+
+          {#if audioBlob}
+            <div class="audio-info">
+              Audio ready ({(audioBlob.size / 1024).toFixed(1)} KB)
+              {#await getAudioDuration(audioBlob) then secs}
+                — approx {secs.toFixed(1)} seconds
+              {/await}
+            </div>
+          {/if}
+
+          {#if transcription}
+            <div class="transcription-result">
+              <h3>Transcription:</h3>
+              <pre>{transcription}</pre>
+              <div class="transcription-actions">
+                <button onclick={copyTranscriptionToClipboard}>Copy</button>
+                <button onclick={downloadTranscription}>Download .txt</button>
                 <button
                   onclick={() => {
                     transcription = "";
                   }}>Clear</button
                 >
               </div>
-            {/if}
+            </div>
           {/if}
         </div>
       {:else if currentView === "diagnostics"}
@@ -2132,13 +3166,15 @@ Output only the summary text, no preamble.`;
     font-size: 1.25rem;
     display: flex;
     gap: 8px;
-    align-items: baseline;
+    align-items: center;
   }
 
-  .brand .tag {
-    font-size: 0.75rem;
-    color: var(--muted);
-    font-weight: 400;
+  .brand-logo {
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+    display: block;
+    object-fit: contain;
   }
 
   .status-bar {
@@ -2284,6 +3320,21 @@ Output only the summary text, no preamble.`;
     padding: 6px 8px !important;
     margin-bottom: 8px;
     opacity: 0.7;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+  }
+
+  .collapse-icon {
+    width: 18px;
+    height: 18px;
+    display: block;
+    transition: transform 0.2s ease;
+  }
+
+  .collapse-icon.collapsed {
+    transform: scaleX(-1);
   }
 
   .sidebar.collapsed .collapse-toggle {
@@ -2291,9 +3342,19 @@ Output only the summary text, no preamble.`;
   }
 
   .nav-icon {
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     margin-right: 8px;
     width: 1.2em;
+  }
+
+  .nav-icon-svg {
+    width: 1.05em;
+    height: 1.05em;
+    stroke: currentColor;
+    fill: none;
+    flex: 0 0 auto;
   }
 
   .nav-label {
@@ -2324,6 +3385,56 @@ Output only the summary text, no preamble.`;
     display: flex;
     gap: 12px;
     margin-bottom: 16px;
+  }
+
+  .accel-panel {
+    margin: 0 0 14px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--subtle-bg);
+  }
+
+  .accel-panel-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .accel-panel-row label {
+    font-size: 0.85rem;
+    color: var(--muted);
+  }
+
+  .accel-panel-row select {
+    min-width: 260px;
+    padding: 6px 8px;
+    background: var(--input-bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+
+  .ep-status-list {
+    margin-top: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .ep-pill {
+    font-size: 0.75rem;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--danger) 18%, var(--panel-bg));
+    color: var(--fg);
+    border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
+  }
+
+  .ep-pill.ready {
+    background: color-mix(in srgb, #16a34a 20%, var(--panel-bg));
+    border-color: color-mix(in srgb, #16a34a 40%, var(--border));
   }
 
   input {
@@ -2378,15 +3489,88 @@ Output only the summary text, no preamble.`;
   }
 
   .model-meta {
+    display: grid;
+    gap: 4px;
     font-size: 0.8rem;
     color: var(--muted);
     margin-bottom: 12px;
+  }
+
+  .meta-badges {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-left: 4px;
+    vertical-align: middle;
+  }
+
+  .meta-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 6px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--subtle-bg);
+    color: var(--fg);
+    font-size: 0.72rem;
+    line-height: 1.2;
+  }
+
+  .model-short-desc {
+    line-height: 1.25;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
   }
 
   .model-actions {
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
+  }
+
+  .danger-btn {
+    border-color: #ef4444;
+    color: #fecaca;
+  }
+
+  .model-details {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px dashed var(--border);
+    display: grid;
+    gap: 6px;
+    font-size: 0.78rem;
+    color: var(--muted);
+  }
+
+  .model-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.65);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 210;
+  }
+
+  .model-modal {
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    width: min(700px, 94vw);
+    max-height: 85vh;
+    overflow: auto;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+  }
+
+  .model-detail-grid {
+    display: grid;
+    gap: 8px;
+    font-size: 0.85rem;
+    color: var(--muted);
   }
 
   button {
@@ -2756,9 +3940,33 @@ Output only the summary text, no preamble.`;
     flex-wrap: wrap;
   }
 
+  .audio-language {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 0.78rem;
+    color: var(--muted);
+  }
+
+  .audio-language select {
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    border-radius: 6px;
+    padding: 6px 8px;
+    min-width: 120px;
+  }
+
   .audio-info {
     margin: 8px 0;
     color: var(--muted);
+  }
+
+  .transcription-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 10px;
   }
 
   .stt-models {
@@ -2770,6 +3978,18 @@ Output only the summary text, no preamble.`;
     margin: 2px;
     background: var(--subtle-bg);
     color: var(--fg);
+  }
+
+  .stt-picker {
+    margin: 8px 0 12px;
+    font-size: 0.85rem;
+  }
+  .current-stt {
+    font-family: ui-monospace, monospace;
+    background: var(--subtle-bg);
+    padding: 1px 6px;
+    border-radius: 3px;
+    margin: 0 6px;
   }
 
   .vision-attach {
