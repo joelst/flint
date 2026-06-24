@@ -1,6 +1,6 @@
 import { writable, type Writable } from 'svelte/store';
 import { Command } from '@tauri-apps/plugin-shell';
-import { resolveResource } from '@tauri-apps/api/path';
+import { resolveResource, resourceDir } from '@tauri-apps/api/path';
 
 // Sidecar-based implementation for clean production builds.
 // We never import 'foundry-local-sdk' in the web bundle.
@@ -18,6 +18,7 @@ export interface EpDownloadResult { success: boolean; status: string; registered
 let sidecarProcess: any = null;
 let sidecarReady = false;
 let pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
+let streamHandlers = new Map<number, (delta: string) => void>();
 let msgId = 0;
 let currentStatus: any = { initialized: false, modelLoaded: false, serviceRunning: false };
 export type ModelInfo = IModel & {
@@ -27,6 +28,55 @@ export type ModelInfo = IModel & {
 
 let managerInstance: any = null;
 let currentEndpoint: string | undefined = undefined;
+const sidecarResourcePath = 'sidecar/foundry-sidecar.js';
+
+function decodeShellOutput(data: string | Uint8Array): string {
+  return typeof data === 'string' ? data : new TextDecoder().decode(data);
+}
+
+function formatStartupFailure(
+  stdoutEventFired: boolean,
+  stderrLines: string[],
+  closeData: any,
+  commandError: string | null
+): string {
+  const details: string[] = [`stdout listener fired: ${stdoutEventFired}`];
+
+  if (commandError) {
+    details.push(`shell error: ${commandError}`);
+  }
+
+  if (closeData) {
+    details.push(`exit code: ${closeData.code ?? 'unknown'}`);
+    if (closeData.signal) {
+      details.push(`signal: ${closeData.signal}`);
+    }
+  }
+
+  const lastStderr = stderrLines.at(-1);
+  if (lastStderr) {
+    details.push(`last stderr: ${lastStderr}`);
+  }
+
+  return `Sidecar did not emit ready signal (${details.join(', ')})`;
+}
+
+function getTauriDevRepoRoot(resolvedResourcePath: string): string | null {
+  const normalized = resolvedResourcePath.replace(/\\/g, '/');
+  const marker = '/src-tauri/target/';
+  const markerIndex = normalized.toLowerCase().indexOf(marker);
+  if (markerIndex < 0) {
+    return null;
+  }
+
+  const repoRoot = normalized.slice(0, markerIndex);
+  return resolvedResourcePath.includes('\\') ? repoRoot.replace(/\//g, '\\') : repoRoot;
+}
+
+function joinResourcePath(basePath: string, relativePath: string): string {
+  const separator = basePath.includes('\\') ? '\\' : '/';
+  return `${basePath.replace(/[\\/]+$/, '')}${separator}${relativePath.replace(/\//g, separator)}`;
+}
 
 export interface FlintSDKState {
   ready: boolean;
@@ -70,24 +120,43 @@ async function startSidecar() {
   // Resolve sidecar script path using resolveResource (handles dev + prod bundles correctly)
   let script: string;
   let isDev = false;
+  let baseDir: string | undefined;
   try {
-    script = await resolveResource('sidecar/foundry-sidecar.js');
-    console.log(`[sdk] Resolved sidecar resource path: ${script}`);
+    const resolvedScript = await resolveResource(sidecarResourcePath);
+    const devRepoRoot = getTauriDevRepoRoot(resolvedScript);
+    if (devRepoRoot) {
+      script = joinResourcePath(devRepoRoot, sidecarResourcePath);
+      baseDir = devRepoRoot;
+      isDev = true;
+      console.log(`[sdk] Dev mode: resolved sidecar resource points at target dir, using repo path: ${script}`);
+    } else {
+      script = resolvedScript;
+      console.log(`[sdk] Resolved sidecar resource path: ${script}`);
+    }
   } catch {
     // In dev mode, resolveResource fails; use relative path from cwd
-    script = 'sidecar/foundry-sidecar.js';
+    script = sidecarResourcePath;
     isDev = true;
     console.log(`[sdk] Dev mode: using relative sidecar path`);
   }
 
   // Determine base dir for cwd (helps node resolve sibling 'foundry-local-sdk' in prod bundle)
-  let baseDir: string | undefined;
-  try {
-    const { resourceDir } = await import('@tauri-apps/api/path');
-    baseDir = await resourceDir();
-    console.log(`[sdk] Resource dir: ${baseDir}`);
-  } catch (e) {
-    console.log(`[sdk] resourceDir unavailable`);
+  if (!baseDir) {
+    try {
+      baseDir = await resourceDir();
+      console.log(`[sdk] Resource dir: ${baseDir}`);
+    } catch (e) {
+      console.log(`[sdk] resourceDir unavailable`);
+    }
+  }
+
+  if (isDev && baseDir && script === sidecarResourcePath) {
+    const devRepoRoot = getTauriDevRepoRoot(joinResourcePath(baseDir, sidecarResourcePath));
+    if (devRepoRoot) {
+      script = joinResourcePath(devRepoRoot, sidecarResourcePath);
+      baseDir = devRepoRoot;
+      console.log(`[sdk] Dev mode: using repo sidecar path from resource dir: ${script}`);
+    }
   }
 
   const opts: any = baseDir
@@ -101,48 +170,84 @@ async function startSidecar() {
   // Attach stdout listener to the command (works before/after spawn in plugin-shell)
   let stdoutBuffer = '';
   let stdoutEventFired = false;
-  command.stdout.on('data', (data: Uint8Array) => {
-    stdoutEventFired = true;
-    const text = new TextDecoder().decode(data);
-    console.log(`[sdk] stdout.on('data') fired: ${text.length} bytes`);
+  const stderrLines: string[] = [];
+  let closeData: any = null;
+  let commandError: string | null = null;
+
+  const processStdoutLine = (line: string) => {
+    if (!line.trim()) return;
+    console.log(`[sidecar stdout] ${line}`);
+    try {
+      const msg = JSON.parse(line);
+      if (msg.id && msg.stream) {
+        const onStream = streamHandlers.get(msg.id);
+        if (onStream) {
+          const delta = String(
+            msg.delta ??
+            msg.chunk?.choices?.[0]?.delta?.content ??
+            msg.chunk?.choices?.[0]?.message?.content ??
+            ''
+          );
+          if (delta) onStream(delta);
+        }
+        return;
+      }
+      if (msg.id && pending.has(msg.id)) {
+        const p = pending.get(msg.id)!;
+        pending.delete(msg.id);
+        streamHandlers.delete(msg.id);
+        msg.error ? p.reject(new Error(msg.error)) : p.resolve(msg);
+      } else if (msg.type === 'log') {
+        console.log(`[sidecar] ${msg.level}: ${msg.message}`);
+        sdkState.update(s => ({ ...s, logs: [...s.logs.slice(-50), `[${msg.level}] ${msg.message}`] }));
+      } else if (msg.ready) {
+        console.log(`[sdk] Sidecar ready signal received!`);
+        sidecarReady = true;
+      }
+    } catch (e) {
+      // Ignore parse errors for non-json lines
+    }
+  };
+
+  const processStdoutText = (text: string) => {
     stdoutBuffer += text;
 
-    // Process complete lines
-    const lines = stdoutBuffer.split('\n');
+    // The Tauri shell plugin usually emits strings, and depending on platform
+    // those strings may be line-oriented with the newline already stripped.
+    const lines = stdoutBuffer.split(/\r?\n/);
     stdoutBuffer = lines[lines.length - 1]; // Keep incomplete line
 
-    lines.slice(0, -1).forEach((line: string) => {
-      if (!line.trim()) return;
-      console.log(`[sidecar stdout] ${line}`);
-      try {
-        const msg = JSON.parse(line);
-        if (msg.id && pending.has(msg.id)) {
-          const p = pending.get(msg.id)!;
-          pending.delete(msg.id);
-          msg.error ? p.reject(new Error(msg.error)) : p.resolve(msg);
-        } else if (msg.type === 'log') {
-          console.log(`[sidecar] ${msg.level}: ${msg.message}`);
-          sdkState.update(s => ({ ...s, logs: [...s.logs.slice(-50), `[${msg.level}] ${msg.message}`] }));
-        } else if (msg.ready) {
-          console.log(`[sdk] Sidecar ready signal received!`);
-          sidecarReady = true;
-        }
-      } catch (e) {
-        // Ignore parse errors for non-json lines
-      }
-    });
+    lines.slice(0, -1).forEach(processStdoutLine);
+
+    const buffered = stdoutBuffer.trim();
+    if (buffered.startsWith('{') && buffered.endsWith('}')) {
+      processStdoutLine(stdoutBuffer);
+      stdoutBuffer = '';
+    }
+  };
+
+  command.stdout.on('data', (data: string | Uint8Array) => {
+    stdoutEventFired = true;
+    const text = decodeShellOutput(data);
+    console.log(`[sdk] stdout.on('data') fired: ${text.length} bytes`);
+    processStdoutText(text);
   });
 
   // Add listener event to detect if listener is even attached
   console.log(`[sdk] stdout listeners count: ${command.stdout.listenerCount('data')}`);
-  command.stderr.on('data', (data: Uint8Array) => {
-    const text = new TextDecoder().decode(data).trim();
+  command.stderr.on('data', (data: string | Uint8Array) => {
+    const text = decodeShellOutput(data).trim();
     if (!text) return;
+    stderrLines.push(text);
+    if (stderrLines.length > 10) {
+      stderrLines.shift();
+    }
     console.error(`[sidecar stderr] ${text}`);
     sdkState.update(s => ({ ...s, logs: [...s.logs.slice(-50), `[stderr] ${text}`] }));
   });
 
   command.on('close', (data: any) => {
+    closeData = data;
     console.log(`[sdk] Sidecar process closed (exit code: ${data?.code})`);
     sidecarReady = false;
     sidecarProcess = null;
@@ -150,6 +255,7 @@ async function startSidecar() {
   });
 
   command.on('error', (error: any) => {
+    commandError = String(error);
     console.error(`[sdk] Sidecar error event:`, error);
     updateState({ error: `Sidecar error: ${error}` });
   });
@@ -167,7 +273,7 @@ async function startSidecar() {
       readyTimeout = setTimeout(() => {
         const msg = sidecarReady
           ? 'Sidecar ready signal received but not processed'
-          : `Sidecar did not emit ready signal (stdout listener fired: ${stdoutEventFired}, check browser console for stderr logs)`;
+          : formatStartupFailure(stdoutEventFired, stderrLines, closeData, commandError);
         reject(new Error(msg));
       }, 20000); // 20s timeout to be extra patient on first startup
 
@@ -176,6 +282,9 @@ async function startSidecar() {
           console.log(`[sdk] Init complete: sidecar is ready!`);
           if (readyTimeout) clearTimeout(readyTimeout);
           resolve();
+        } else if (closeData || commandError) {
+          if (readyTimeout) clearTimeout(readyTimeout);
+          reject(new Error(formatStartupFailure(stdoutEventFired, stderrLines, closeData, commandError)));
         } else {
           // poll briefly
           setTimeout(checkReady, 100);
@@ -193,22 +302,49 @@ async function startSidecar() {
   }
 }
 
-async function send(cmd: string, payload: any = {}): Promise<any> {
+async function sendInternal(
+  cmd: string,
+  payload: any = {},
+  onStream?: (delta: string) => void,
+  onAssignedId?: (id: number) => void
+): Promise<any> {
   if (!sidecarProcess || !sidecarReady) {
     await startSidecar();
   }
   const id = ++msgId;
+  if (onAssignedId) {
+    onAssignedId(id);
+  }
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });
+    if (onStream) {
+      streamHandlers.set(id, onStream);
+    }
     // write is async in recent plugin-shell
     // write returns Promise<void>
     sidecarProcess.write(JSON.stringify({ id, cmd, ...payload }) + '\n')
       .then(() => { /* written */ })
       .catch((e: any) => {
         pending.delete(id);
+        streamHandlers.delete(id);
         reject(e);
       });
   });
+}
+
+async function send(cmd: string, payload: any = {}): Promise<any> {
+  return sendInternal(cmd, payload);
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
 }
 
 let isInitializing = false;
@@ -226,6 +362,7 @@ export async function initializeSDK(config: Partial<any> = {}): Promise<boolean>
     await send('init', { appName: config.appName || 'flint', logLevel: config.logLevel || 'info' });
     await send('setLogLevel', { level: 'info' }); // at least enabling logging
 
+    managerInstance = true;
     updateState({ ready: true, error: null });
     await refreshModels();
     // Auto start service for endpoint exposure (MVP requirement)
@@ -252,24 +389,32 @@ export async function refreshModels(): Promise<void> {
   try {
     const res = await send('listModels');
     const list = res.result || [];
-    const models = list.map((m: any) => ({ alias: m.alias, isCached: m.cached, info: m } as ModelInfo));
+    let currentLoadedAlias: string | undefined;
 
-    updateState({
-      models,
-      cachedModels: models.filter((m: ModelInfo) => m.isCached),
-      loadedModels: [], // sidecar tracks current model
-    });
-
-    // Also refresh status
+    // Also refresh status first so loaded-model state is accurate for UI + actions
     const status = await send('getStatus');
     if (status.result) {
       currentEndpoint = status.result.endpoint;
+      currentLoadedAlias = status.result.currentModel || undefined;
       updateState({
         endpoint: currentEndpoint || undefined,
         serviceRunning: !!status.result.serviceRunning,
         acceleratorsReady: true, // simplified
       });
     }
+
+    const models = list.map((m: any) => ({
+      alias: m.alias,
+      isCached: m.cached,
+      isLoaded: m.alias === currentLoadedAlias,
+      info: m
+    } as ModelInfo));
+
+    updateState({
+      models,
+      cachedModels: models.filter((m: ModelInfo) => m.isCached),
+      loadedModels: models.filter((m: ModelInfo) => m.isLoaded),
+    });
   } catch (e) {
     console.error('refreshModels via sidecar failed', e);
   }
@@ -308,8 +453,12 @@ export async function getLocalEndpoint(): Promise<string | undefined> {
   return res.endpoint;
 }
 
-export async function startService(port = 5272): Promise<string> {
-  const res = await send('startService', { port });
+export async function startService(port = 5272, alias?: string): Promise<string> {
+  const payload: any = { port };
+  if (alias) {
+    payload.alias = alias;
+  }
+  const res = await send('startService', payload);
   currentEndpoint = res.endpoint;
   updateState({ endpoint: currentEndpoint, serviceRunning: true });
   return currentEndpoint!;
@@ -319,6 +468,64 @@ export async function stopService(): Promise<void> {
   await send('stopService');
   currentEndpoint = undefined;
   updateState({ endpoint: undefined, serviceRunning: false });
+}
+
+export async function chatCompletion(
+  model: string,
+  messages: Array<{ role: string; content: any }>,
+  options?: { maxTokens?: number; temperature?: number }
+): Promise<any> {
+  const res = await send('chatCompletion', {
+    model,
+    messages,
+    maxTokens: options?.maxTokens,
+    temperature: options?.temperature
+  });
+  return res.result;
+}
+
+export async function chatCompletionStream(
+  model: string,
+  messages: Array<{ role: string; content: any }>,
+  onDelta: (delta: string) => void,
+  options?: { maxTokens?: number; temperature?: number },
+  onAssignedId?: (id: number) => void
+): Promise<any> {
+  const res = await sendInternal(
+    'chatCompletion',
+    {
+      model,
+      messages,
+      maxTokens: options?.maxTokens,
+      temperature: options?.temperature,
+      stream: true
+    },
+    onDelta,
+    onAssignedId
+  );
+  return res.result;
+}
+
+export async function cancelChatRequest(requestId: number): Promise<void> {
+  await send('cancelChatRequest', { requestId });
+}
+
+export async function transcribeAudio(
+  audioBlob: Blob,
+  model: string,
+  language = 'en',
+  fileName = 'audio.webm'
+): Promise<any> {
+  const arrayBuffer = await audioBlob.arrayBuffer();
+  const audioBase64 = arrayBufferToBase64(arrayBuffer);
+  const res = await send('transcribeAudio', {
+    audioBase64,
+    mimeType: audioBlob.type || 'application/octet-stream',
+    fileName,
+    model,
+    language
+  });
+  return res.result;
 }
 
 export function getManager(): any {

@@ -19,7 +19,7 @@
       ]
     },
     {
-      "identifier": "shell:allow-execute",
+      "identifier": "shell:allow-stdin-write",
       "allow": [
         {
           "name": "node",

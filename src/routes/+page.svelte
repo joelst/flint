@@ -10,11 +10,16 @@
     refreshModels,
     ensureAccelerators,
     getRecommendedStarterModels,
-    getModel,
     getSTTModels,
     startService,
     stopService,
     downloadModel,
+    loadModel as sdkLoadModel,
+    unloadModel as sdkUnloadModel,
+    chatCompletion,
+    chatCompletionStream,
+    cancelChatRequest,
+    transcribeAudio,
     type ModelInfo,
     type EpInfo,
   } from "$lib/sdk";
@@ -78,6 +83,7 @@
   let theme = $state<'light' | 'dark'>('dark');
 
   let abortController: AbortController | null = $state(null);
+  let activeStreamRequestId: number | null = $state(null);
   let attachedImage: string | null = $state(null); // base64 data url
   let isVisionModel = $derived(
     selectedModelAlias.includes("vision") ||
@@ -92,6 +98,11 @@
   let managerNewName = $state("");
   let managerNewPrompt = $state("");
   let editingPersona: Persona | null = $state(null);
+
+  // For positioning the persona dropdown (fixed to escape scrollers)
+  let personaBtnEl: HTMLButtonElement | null = $state(null);
+  let personaMenuPos = $state({ top: 0, left: 0 });
+  let personaMenuDirection = $state<'up' | 'down'>('down');
 
   // Derived list + current model context for recommendations
   const allPersonas = $derived(getAllPersonas(customPersonas));
@@ -205,6 +216,29 @@
     };
     document.addEventListener("click", handler, { capture: true });
     return () => document.removeEventListener("click", handler, { capture: true });
+  });
+
+  // Position persona menu (fixed) when opened, and close on scrolls to avoid stale positions vs scrollbars
+  $effect(() => {
+    if (!showPersonaMenu) return;
+
+    queueMicrotask(positionPersonaMenu);
+
+    const closeOnScroll = () => {
+      showPersonaMenu = false;
+    };
+    const repositionOnResize = () => {
+      positionPersonaMenu();
+    };
+
+    // Capture phase to catch scrolling inside any child scroll containers (messages, content, etc.)
+    document.addEventListener("scroll", closeOnScroll, true);
+    window.addEventListener("resize", repositionOnResize);
+
+    return () => {
+      document.removeEventListener("scroll", closeOnScroll, true);
+      window.removeEventListener("resize", repositionOnResize);
+    };
   });
 
   let messagesContainer = $state<HTMLDivElement | null>(null);
@@ -323,6 +357,33 @@
     editingPersona = null;
     managerNewName = "";
     managerNewPrompt = "";
+  }
+
+  function positionPersonaMenu() {
+    if (!personaBtnEl) return;
+    const rect = personaBtnEl.getBoundingClientRect();
+    const gap = 4;
+    const maxH = 340;
+    const menuMinW = 260;
+
+    const spaceBelow = window.innerHeight - rect.bottom - gap;
+    const openUp = spaceBelow < maxH && rect.top > 160;
+    personaMenuDirection = openUp ? 'up' : 'down';
+
+    let left = rect.left;
+
+    // Avoid going off the right edge of the window
+    const rightEdge = window.innerWidth - 12;
+    if (left + menuMinW > rightEdge) {
+      left = Math.max(8, rightEdge - menuMinW);
+    }
+
+    if (openUp) {
+      // Position so that after translateY(-100%) the menu bottom sits above button
+      personaMenuPos = { top: rect.top - gap, left };
+    } else {
+      personaMenuPos = { top: rect.bottom + gap, left };
+    }
   }
 
   function startEditPersona(p: Persona) {
@@ -520,15 +581,20 @@
           (m: ModelInfo) => m.alias === selectedModelAlias,
         );
         if (existing?.isCached) {
-          getModel(selectedModelAlias)
-            .then((fresh) => {
-              selectedModel = fresh;
-              chatClient = fresh.createChatClient();
-              if (chatMessages.length === 0) {
-                // could add welcome if wanted
-              }
-            })
-            .catch(() => {});
+          try {
+            if (!existing.isLoaded) {
+              statusMessage = `Restoring ${selectedModelAlias} from previous session...`;
+              await loadModelAndMaybeStart(existing);
+            } else if (!state.serviceRunning) {
+              await startService(5272, selectedModelAlias);
+            }
+
+            selectedModel = { alias: selectedModelAlias };
+            chatClient = null; // Sidecar endpoint is the primary chat path
+            statusMessage = `${selectedModelAlias} restored from previous session`;
+          } catch (e: any) {
+            statusMessage = `Failed to restore ${selectedModelAlias}: ${e?.message || e}`;
+          }
         }
       }
     } else {
@@ -575,7 +641,7 @@
   async function startLocalService() {
     try {
       statusMessage = "Starting local service...";
-      const ep = await startService(5272);
+      const ep = await startService(5272, selectedModelAlias || undefined);
       updateStateFromSdk();
       statusMessage = `Service running at ${ep}`;
     } catch (e: any) {
@@ -596,6 +662,52 @@
   async function refreshServiceStatus() {
     await refreshModels();
     updateStateFromSdk();
+  }
+
+  async function copyDiagnosticsToClipboard() {
+    const diagnosticsSnapshot = {
+      generatedAt: new Date().toISOString(),
+      app: {
+        view: currentView,
+        selectedModelAlias: selectedModelAlias || null,
+        statusMessage,
+      },
+      sdkState: {
+        ready: state.ready,
+        error: state.error,
+        endpoint: state.endpoint || null,
+        serviceRunning: state.serviceRunning,
+        acceleratorsReady: state.acceleratorsReady,
+        executionProviders: state.eps,
+        modelCount: state.models.length,
+        cachedModelCount: state.models.filter((m) => m.isCached).length,
+        loadedModelCount: state.models.filter((m) => m.isLoaded).length,
+        models: state.models.map((m) => ({
+          alias: m.alias,
+          isCached: !!m.isCached,
+          isLoaded: !!m.isLoaded,
+          info: (m as any).info || null,
+        })),
+      },
+      logs: sidecarLogs,
+      runtime: {
+        userAgent: navigator.userAgent,
+        platform: navigator.platform || "unknown",
+        language: navigator.language,
+      },
+    };
+
+    const payload =
+      `Flint Diagnostic Snapshot\n` +
+      `Generated: ${diagnosticsSnapshot.generatedAt}\n\n` +
+      JSON.stringify(diagnosticsSnapshot, null, 2);
+
+    try {
+      await navigator.clipboard.writeText(payload);
+      statusMessage = `Copied diagnostics to clipboard (${sidecarLogs.length} logs)`;
+    } catch (e: any) {
+      statusMessage = `Failed to copy diagnostics: ${e?.message || e}`;
+    }
   }
 
   function updateStateFromSdk() {
@@ -643,7 +755,7 @@
       // Auto start service and switch to chat
       if (!state.serviceRunning) {
         try {
-          await startService(5272);
+          await startService(5272, alias);
         } catch {}
       }
 
@@ -672,7 +784,7 @@
 
       if (!state.serviceRunning) {
         try {
-          await startService(5272);
+          await startService(5272, model.alias);
         } catch {}
       }
     } catch (e: any) {
@@ -730,7 +842,7 @@
 
       if (!state.serviceRunning) {
         try {
-          await startService(5272);
+          await startService(5272, model.alias);
           statusMessage = `${model.alias} loaded + service started`;
         } catch (e) {
           console.warn("Auto-start service failed", e);
@@ -745,13 +857,13 @@
 
   // Placeholder for sidecar load - actual impl in sdk
   async function sendLoadToSidecar(model: any) {
-    await loadModel(model);
+    await sdkLoadModel(model);
   }
 
   async function unloadModel(model: any) {
     try {
       statusMessage = `Unloading ${model.alias}...`;
-      await model.unload();
+      await sdkUnloadModel(model);
       statusMessage = `${model.alias} unloaded`;
       await refreshModels();
     } catch (e: any) {
@@ -761,14 +873,15 @@
 
   async function sendMessage(e: Event) {
     e.preventDefault();
-    if (!chatInput.trim() || !chatClient || isStreaming) return;
+    if (!chatInput.trim() || (!state.endpoint && !chatClient) || isStreaming) return;
 
     const userContent = chatInput.trim();
     chatMessages = [...chatMessages, { role: "user", content: userContent }];
-    const currentPrompt = userContent;
     chatInput = "";
     isStreaming = true;
-    abortController = new AbortController();
+    const requestController = new AbortController();
+    abortController = requestController;
+    activeStreamRequestId = null;
 
     // Scroll to bottom
     setTimeout(() => {
@@ -784,55 +897,43 @@
       const endpoint = state.endpoint;
       if (endpoint) {
         const inferenceMessages = getMessagesForInference();
-
-        const resp = await fetch(`${endpoint}/v1/chat/completions`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model: selectedModelAlias,
-            messages: inferenceMessages,
-            stream: true,
-          }),
-        });
-
-        const reader = resp.body?.getReader();
-        const decoder = new TextDecoder();
-        if (reader) {
-          while (true) {
-            if (abortController?.signal.aborted) break;
-            const { done, value } = await reader.read();
-            if (done) break;
-            const chunk = decoder.decode(value);
-            // Very naive SSE parsing for demo
-            chunk.split("\n").forEach((line) => {
-              if (line.startsWith("data: ")) {
-                try {
-                  const data = JSON.parse(line.slice(6));
-                  const delta = data.choices?.[0]?.delta?.content || "";
-                  if (delta) {
-                    assistantContent += delta;
-                    const lastIndex = chatMessages.length - 1;
-                    chatMessages[lastIndex] = {
-                      ...chatMessages[lastIndex],
-                      content: assistantContent,
-                    };
-                    chatMessages = [...chatMessages];
-                    setTimeout(() => {
-                      if (messagesContainer)
-                        messagesContainer.scrollTop =
-                          messagesContainer.scrollHeight;
-                    }, 5);
-                  }
-                } catch {}
-              }
-            });
-          }
+        const data = await chatCompletionStream(
+          selectedModelAlias,
+          inferenceMessages,
+          (delta: string) => {
+            if (requestController.signal.aborted) return;
+            assistantContent += delta;
+            const lastIndex = chatMessages.length - 1;
+            chatMessages[lastIndex] = {
+              ...chatMessages[lastIndex],
+              content: assistantContent,
+            };
+            chatMessages = [...chatMessages];
+          },
+          undefined,
+          (requestId: number) => {
+            activeStreamRequestId = requestId;
+          },
+        );
+        if (requestController.signal.aborted) {
+          return;
         }
+        assistantContent = data?.choices?.[0]?.message?.content || assistantContent;
+        const lastIndex = chatMessages.length - 1;
+        chatMessages[lastIndex] = {
+          ...chatMessages[lastIndex],
+          content: assistantContent,
+        };
+        chatMessages = [...chatMessages];
+        setTimeout(() => {
+          if (messagesContainer)
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }, 5);
       } else if (chatClient) {
         // Fallback to direct client (dev only)
         const inferenceMessages = getMessagesForInference();
         for await (const chunk of chatClient.completeStreamingChat(inferenceMessages)) {
-          if (abortController?.signal.aborted) break;
+          if (requestController.signal.aborted) break;
           const delta = chunk.choices?.[0]?.delta?.content || "";
           if (delta) {
             assistantContent += delta;
@@ -846,10 +947,11 @@
         }
       }
     } catch (err: any) {
-      if (!abortController?.signal.aborted) {
+      if (!requestController.signal.aborted) {
         const lastIndex = chatMessages.length - 1;
         chatMessages[lastIndex] = {
           ...chatMessages[lastIndex],
+          isError: true,
           content:
             (chatMessages[lastIndex].content || "") +
             "\n\n[Error: " +
@@ -860,13 +962,23 @@
       }
     } finally {
       isStreaming = false;
-      abortController = null;
+      activeStreamRequestId = null;
+      if (abortController === requestController) {
+        abortController = null;
+      }
     }
   }
 
-  function stopGeneration() {
+  async function stopGeneration() {
     if (abortController) {
       abortController.abort();
+      if (activeStreamRequestId != null) {
+        try {
+          await cancelChatRequest(activeStreamRequestId);
+        } catch (e: any) {
+          statusMessage = `Stop warning: ${e?.message || e}`;
+        }
+      }
       isStreaming = false;
       statusMessage = "Generation stopped by user";
     }
@@ -895,6 +1007,7 @@
     // This keeps the inference payload small while full thread stays readable.
     const effectiveHistory = history.filter((m: any) => {
       if (m.condensed && !m.isSummary && !m.pinned) return false;
+      if (m.isError) return false;
       return true;
     });
 
@@ -913,8 +1026,11 @@
     }
 
     return [
-      { role: 'system', content: systemPrompt },
-      ...combined,
+      { role: "system", content: systemPrompt },
+      ...combined.map((m: any) => ({
+        role: m.role,
+        content: m.content,
+      })),
     ];
   }
 
@@ -981,18 +1097,10 @@ Output only the summary text, no preamble.`;
     try {
       const endpoint = state.endpoint;
       if (endpoint) {
-        const resp = await fetch(`${endpoint}/v1/chat/completions`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model: selectedModelAlias,
-            messages: summaryMessages,
-            stream: false,
-            max_tokens: 600,
-            temperature: 0.3,
-          }),
+        const data = await chatCompletion(selectedModelAlias, summaryMessages, {
+          maxTokens: 600,
+          temperature: 0.3,
         });
-        const data = await resp.json();
         summary = data.choices?.[0]?.message?.content || "";
       } else if (chatClient) {
         // Fallback non-stream (best effort)
@@ -1117,22 +1225,12 @@ Output only the summary text, no preamble.`;
     statusMessage = "Transcribing via sidecar service...";
 
     try {
-      const endpoint = state.endpoint;
-      const formData = new FormData();
-      formData.append("file", audioBlob, "audio.webm");
-      formData.append("model", selectedModelAlias || "whisper-tiny");
-      formData.append("language", "en");
-
-      const resp = await fetch(`${endpoint}/v1/audio/transcriptions`, {
-        method: "POST",
-        body: formData,
-      });
-
-      if (!resp.ok) {
-        throw new Error(`HTTP ${resp.status}`);
-      }
-
-      const result = await resp.json();
+      const result = await transcribeAudio(
+        audioBlob,
+        selectedModelAlias || "whisper-tiny",
+        "en",
+        "audio.webm",
+      );
       transcription = result.text || JSON.stringify(result, null, 2);
       statusMessage = "Transcription complete (via sidecar)";
     } catch (err: any) {
@@ -1540,37 +1638,51 @@ Output only the summary text, no preamble.`;
                     class="persona-btn"
                     title="Choose persona (system prompt preset)"
                     disabled={isStreaming}
-                    onclick={() => (showPersonaMenu = !showPersonaMenu)}
+                    bind:this={personaBtnEl}
+                    onclick={() => {
+                      const next = !showPersonaMenu;
+                      showPersonaMenu = next;
+                      if (next) queueMicrotask(positionPersonaMenu);
+                    }}
                   >
                     🎭
                   </button>
 
                   {#if showPersonaMenu}
-                    <div class="persona-menu" role="menu" tabindex="-1" onmouseleave={() => (showPersonaMenu = false)}>
+                    <div
+                      class="persona-menu"
+                      class:up={personaMenuDirection === 'up'}
+                      role="menu"
+                      tabindex="-1"
+                      style="position: fixed; top: {personaMenuPos.top}px; left: {personaMenuPos.left}px;"
+                      onmouseleave={() => (showPersonaMenu = false)}
+                    >
                       <div class="persona-menu-header">
                         Choose persona
                         <span class="hint">({currentModelTags.join(", ")} model)</span>
                       </div>
-                      {#each sortedPersonasForUI as p (p.id)}
-                        <button
-                          type="button"
-                          class="persona-item"
-                          class:matches={scorePersonaForModel(p, currentModelTags) > 1.5}
-                          onclick={() => {
-                            systemPrompt = p.prompt;
-                            showPersonaMenu = false;
-                            statusMessage = `Persona: ${p.name}`;
-                          }}
-                        >
-                          <span class="p-name">{p.name}</span>
-                          {#if p.description}
-                            <span class="p-desc">{p.description}</span>
-                          {/if}
-                          {#if p.tags?.length}
-                            <span class="p-tags">{p.tags.join(" ")}</span>
-                          {/if}
-                        </button>
-                      {/each}
+                      <div class="persona-menu-items">
+                        {#each sortedPersonasForUI as p (p.id)}
+                          <button
+                            type="button"
+                            class="persona-item"
+                            class:matches={scorePersonaForModel(p, currentModelTags) > 1.5}
+                            onclick={() => {
+                              systemPrompt = p.prompt;
+                              showPersonaMenu = false;
+                              statusMessage = `Persona: ${p.name}`;
+                            }}
+                          >
+                            <span class="p-name">{p.name}</span>
+                            {#if p.description}
+                              <span class="p-desc">{p.description}</span>
+                            {/if}
+                            {#if p.tags?.length}
+                              <span class="p-tags">{p.tags.join(" ")}</span>
+                            {/if}
+                          </button>
+                        {/each}
+                      </div>
                       <div class="persona-menu-footer">
                         <button type="button" class="manage-link" onclick={() => { showPersonaMenu = false; showPersonaManager = true; }}>
                           Manage personas…
@@ -1662,11 +1774,11 @@ Output only the summary text, no preamble.`;
                 <input
                   bind:value={chatInput}
                   placeholder="Type your message... (model is running locally)"
-                  disabled={!chatClient || isStreaming}
+                  disabled={(!state.endpoint && !chatClient) || isStreaming}
                 />
                 <button
                   type="submit"
-                  disabled={!chatInput.trim() || !chatClient || isStreaming}
+                  disabled={!chatInput.trim() || (!state.endpoint && !chatClient) || isStreaming}
                 >
                   {isStreaming ? "⏳" : "📤"}
                 </button>
@@ -1851,6 +1963,9 @@ Output only the summary text, no preamble.`;
               <button onclick={refreshServiceStatus} disabled={!state.ready}>
                 Refresh Status
               </button>
+              <button onclick={copyDiagnosticsToClipboard}>
+                Copy All Diagnostics
+              </button>
             </div>
           </div>
 
@@ -1956,6 +2071,8 @@ Output only the summary text, no preamble.`;
     --danger: #f87171;
     --input-bg: #222226;
     --button-bg: #3b82f6;
+    --subtle-bg: #2a2a30;
+    --messages-bg: #16161a;
   }
 
   :global([data-theme="light"]) {
@@ -1972,12 +2089,31 @@ Output only the summary text, no preamble.`;
     --danger: #dc3545;
     --input-bg: #ffffff;
     --button-bg: #0d6efd;
+    --subtle-bg: #e9ecef;
+    --messages-bg: #f8f9fa;
+  }
+
+  /* Ensure body and html follow the theme background and have no default margins */
+  :global(html),
+  :global(body) {
+    margin: 0;
+    padding: 0;
+    background-color: var(--bg);
+    color: var(--fg);
+  }
+
+  :global(html) {
+    height: 100%;
+  }
+
+  :global(body) {
+    height: 100%;
   }
 
   .app {
     display: flex;
     flex-direction: column;
-    height: 100vh;
+    height: 100%;
     overflow: hidden;
     background: var(--bg);
     color: var(--fg);
@@ -2001,7 +2137,7 @@ Output only the summary text, no preamble.`;
 
   .brand .tag {
     font-size: 0.75rem;
-    color: #888;
+    color: var(--muted);
     font-weight: 400;
   }
 
@@ -2027,7 +2163,7 @@ Output only the summary text, no preamble.`;
   .endpoint {
     font-family: ui-monospace, monospace;
     font-size: 0.8rem;
-    background: #222;
+    background: var(--subtle-bg);
     padding: 2px 6px;
     border-radius: 3px;
   }
@@ -2079,7 +2215,7 @@ Output only the summary text, no preamble.`;
   }
 
   .status-msg {
-    color: #666;
+    color: var(--muted);
     font-size: 0.8rem;
   }
 
@@ -2125,7 +2261,7 @@ Output only the summary text, no preamble.`;
     margin-top: auto;
     padding: 16px 20px;
     font-size: 0.75rem;
-    color: #555;
+    color: var(--muted);
   }
 
   .sidebar.collapsed {
@@ -2176,7 +2312,7 @@ Output only the summary text, no preamble.`;
     flex: 1;
     padding: 24px;
     overflow: auto;
-    background: #1a1a1e;
+    background: var(--bg);
   }
 
   h2 {
@@ -2193,9 +2329,9 @@ Output only the summary text, no preamble.`;
   input {
     flex: 1;
     padding: 8px 12px;
-    background: #222226;
-    border: 1px solid #333;
-    color: #eee;
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    color: var(--fg);
     border-radius: 6px;
   }
 
@@ -2206,8 +2342,8 @@ Output only the summary text, no preamble.`;
   }
 
   .model-card {
-    background: #222226;
-    border: 1px solid #2f2f36;
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
     border-radius: 8px;
     padding: 14px;
   }
@@ -2228,7 +2364,8 @@ Output only the summary text, no preamble.`;
     font-size: 0.7rem;
     padding: 1px 6px;
     border-radius: 3px;
-    background: #333;
+    background: var(--subtle-bg);
+    color: var(--fg);
   }
 
   .badge.cached {
@@ -2242,7 +2379,7 @@ Output only the summary text, no preamble.`;
 
   .model-meta {
     font-size: 0.8rem;
-    color: #888;
+    color: var(--muted);
     margin-bottom: 12px;
   }
 
@@ -2254,7 +2391,7 @@ Output only the summary text, no preamble.`;
 
   button {
     padding: 6px 12px;
-    background: #3b82f6;
+    background: var(--button-bg);
     color: white;
     border: none;
     border-radius: 5px;
@@ -2268,20 +2405,20 @@ Output only the summary text, no preamble.`;
   }
 
   button.secondary {
-    background: #333;
-    color: #ddd;
+    background: var(--subtle-bg);
+    color: var(--fg);
   }
 
   .notice {
-    background: #2a1f1f;
-    border: 1px solid #553;
+    background: color-mix(in srgb, var(--danger) 10%, var(--panel-bg));
+    border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--border));
     padding: 16px;
     border-radius: 8px;
     max-width: 520px;
   }
 
   .placeholder {
-    color: #666;
+    color: var(--muted);
     font-style: italic;
   }
 
@@ -2292,7 +2429,7 @@ Output only the summary text, no preamble.`;
   .recommendations {
     margin: 16px 0;
     padding: 12px;
-    background: #1f1f24;
+    background: var(--subtle-bg);
     border-radius: 8px;
   }
 
@@ -2308,7 +2445,7 @@ Output only the summary text, no preamble.`;
   }
 
   .starter-card {
-    background: #2a2a32;
+    background: var(--panel-bg);
     padding: 8px 12px;
     border-radius: 6px;
     min-width: 160px;
@@ -2320,13 +2457,13 @@ Output only the summary text, no preamble.`;
 
   .hardware-info {
     font-size: 0.8rem;
-    color: #888;
+    color: var(--muted);
     margin-bottom: 8px;
   }
 
   .size {
     font-size: 0.7rem;
-    color: #666;
+    color: var(--muted);
     margin-left: 6px;
   }
 
@@ -2370,7 +2507,7 @@ Output only the summary text, no preamble.`;
     align-items: center;
     justify-content: space-between;
     padding: 12px 16px;
-    border-bottom: 1px solid #2a2a30;
+    border-bottom: 1px solid var(--border);
   }
 
   .chat-header h2 {
@@ -2381,11 +2518,11 @@ Output only the summary text, no preamble.`;
   .messages {
     flex: 1;
     overflow-y: auto;
-    background: #16161a;
+    background: var(--messages-bg);
     padding: 12px 16px;
     margin: 12px 12px 8px 12px;
     border-radius: 8px;
-    border: 1px solid #2a2a30;
+    border: 1px solid var(--border);
   }
 
   .empty-chat {
@@ -2428,12 +2565,12 @@ Output only the summary text, no preamble.`;
     opacity: 0.92;
   }
   .message.summary .content {
-    border-left: 3px solid #64748b;
-    background: #1f2937;
+    border-left: 3px solid var(--muted);
+    background: var(--subtle-bg);
   }
   .summary-label {
     font-size: 0.65rem;
-    color: #64748b;
+    color: var(--muted);
     font-weight: 600;
     margin-bottom: 3px;
     text-transform: uppercase;
@@ -2441,7 +2578,7 @@ Output only the summary text, no preamble.`;
   }
 
   .message.pinned {
-    border-left: 3px solid #eab308;
+    border-left: 3px solid var(--warning);
   }
 
   .pin-btn {
@@ -2452,21 +2589,21 @@ Output only the summary text, no preamble.`;
     margin-left: 2px;
     cursor: pointer;
     opacity: 0.5;
-    color: #888;
+    color: var(--muted);
     line-height: 1;
   }
   .pin-btn:hover {
     opacity: 1;
   }
   .pin-btn.pinned {
-    color: #eab308;
+    color: var(--warning);
     opacity: 1;
   }
 
   .condensed-hint {
     font-size: 0.65rem;
     font-style: italic;
-    color: #64748b;
+    color: var(--muted);
     margin-bottom: 4px;
   }
 
@@ -2481,6 +2618,9 @@ Output only the summary text, no preamble.`;
     gap: 8px;
     flex-wrap: wrap;
     align-items: center;
+    position: relative;
+    z-index: 20;
+    overflow: visible;
   }
 
   .persona-control {
@@ -2489,6 +2629,7 @@ Output only the summary text, no preamble.`;
     gap: 6px;
     font-size: 0.8rem;
     position: relative;
+    z-index: 30;
   }
 
   .vision-attach {
@@ -2504,19 +2645,19 @@ Output only the summary text, no preamble.`;
   }
 
   .attached {
-    color: #4ade80;
+    color: var(--success);
     font-size: 0.8rem;
   }
 
   .mini {
     padding: 0 2px !important;
     background: none !important;
-    color: #999 !important;
+    color: var(--muted) !important;
     font-size: 0.9rem;
   }
 
   .mini:hover {
-    color: #f87171 !important;
+    color: var(--danger) !important;
   }
 
   .chat-input {
@@ -2526,6 +2667,8 @@ Output only the summary text, no preamble.`;
     background: var(--panel-bg);
     border-top: 1px solid var(--border);
     border-radius: 0;
+    position: relative;
+    z-index: 1;
   }
 
   .chat-input input {
@@ -2550,7 +2693,7 @@ Output only the summary text, no preamble.`;
   }
 
   .chat-input button:hover {
-    background: #2563eb;
+    background: color-mix(in srgb, var(--accent) 80%, #000);
   }
 
   .chat-input button:disabled {
@@ -2559,11 +2702,11 @@ Output only the summary text, no preamble.`;
   }
 
   .chat-input .stop {
-    background: #dc2626 !important;
+    background: var(--danger) !important;
   }
 
   .chat-input .stop:hover {
-    background: #b91c1c !important;
+    background: color-mix(in srgb, var(--danger) 70%, #000) !important;
   }
 
   .streaming {
@@ -2603,7 +2746,7 @@ Output only the summary text, no preamble.`;
   }
 
   .stop {
-    background: #dc2626 !important;
+    background: var(--danger) !important;
   }
 
   .audio-view .audio-controls {
@@ -2615,7 +2758,7 @@ Output only the summary text, no preamble.`;
 
   .audio-info {
     margin: 8px 0;
-    color: #888;
+    color: var(--muted);
   }
 
   .stt-models {
@@ -2625,7 +2768,8 @@ Output only the summary text, no preamble.`;
     font-size: 0.8rem;
     padding: 4px 8px;
     margin: 2px;
-    background: #333;
+    background: var(--subtle-bg);
+    color: var(--fg);
   }
 
   .vision-attach {
@@ -2647,16 +2791,16 @@ Output only the summary text, no preamble.`;
   }
 
   .status.running {
-    color: #4ade80;
+    color: var(--success);
     font-weight: bold;
   }
   .status.stopped {
-    color: #f87171;
+    color: var(--danger);
   }
 
   .endpoint-display {
     font-family: monospace;
-    background: #1a1a1e;
+    background: var(--subtle-bg);
     padding: 8px;
     border-radius: 4px;
     margin: 8px 0;
@@ -2712,16 +2856,17 @@ Output only the summary text, no preamble.`;
     padding: 2px 8px;
     font-size: 1rem;
     line-height: 1;
-    background: #2a2a32;
-    border: 1px solid #444;
+    background: var(--subtle-bg);
+    border: 1px solid var(--border);
     border-radius: 4px;
     cursor: pointer;
+    color: var(--fg);
   }
 
   .persona-chip {
     font-size: 0.65rem;
-    background: #334155;
-    color: #94a3b8;
+    background: var(--subtle-bg);
+    color: var(--muted);
     padding: 1px 5px;
     border-radius: 3px;
     max-width: 110px;
@@ -2735,38 +2880,38 @@ Output only the summary text, no preamble.`;
     align-items: center;
     gap: 4px;
     font-size: 0.7rem;
-    color: #888;
+    color: var(--muted);
   }
   .context-control select {
     font-size: 0.7rem;
-    background: #222226;
-    border: 1px solid #444;
-    color: #ccc;
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    color: var(--fg);
     border-radius: 3px;
     padding: 1px 4px;
   }
   .context-estimate {
     font-family: ui-monospace, monospace;
     font-size: 0.65rem;
-    background: #1f2a1f;
-    color: #4ade80;
+    background: color-mix(in srgb, var(--success) 15%, var(--panel-bg));
+    color: var(--success);
     padding: 1px 5px;
     border-radius: 3px;
   }
 
   .context-model-info {
     font-size: 0.6rem;
-    color: #666;
+    color: var(--muted);
     font-family: ui-monospace, monospace;
   }
 
   .usage-pct {
     font-size: 0.6rem;
-    color: #86efac;
+    color: var(--success);
     margin-left: 2px;
   }
   .usage-pct.high {
-    color: #facc15;
+    color: var(--warning);
     font-weight: 600;
   }
 
@@ -2838,21 +2983,30 @@ Output only the summary text, no preamble.`;
     color: var(--fg);
     border-color: var(--border);
   }
-  .persona-btn:hover { background: #3a3a42; }
+  .persona-btn:hover { background: color-mix(in srgb, var(--accent) 15%, var(--panel-bg)); }
 
   .persona-menu {
-    position: absolute;
-    top: 100%;
-    left: 0;
-    z-index: 100;
-    margin-top: 4px;
+    /* Uses position:fixed + inline styles from JS so it can escape .content scroller + chat layers */
+    z-index: 9999;
     background: var(--panel-bg);
     border: 1px solid var(--border);
     border-radius: 8px;
     min-width: 260px;
     max-width: 340px;
+    max-height: min(420px, 70vh);
     box-shadow: 0 8px 24px rgba(0,0,0,0.3);
     font-size: 0.8rem;
+  }
+
+  /* When we decide to open upward (near bottom of window) */
+  .persona-menu.up {
+    transform: translateY(-100%);
+  }
+
+  .persona-menu-items {
+    max-height: 260px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
   }
 
   .persona-menu-header {
@@ -2887,12 +3041,12 @@ Output only the summary text, no preamble.`;
 
   .persona-menu-footer {
     padding: 6px 10px;
-    border-top: 1px solid #333;
+    border-top: 1px solid var(--border);
   }
   .manage-link {
     background: none;
     border: none;
-    color: #60a5fa;
+    color: var(--accent);
     font-size: 0.75rem;
     padding: 2px 4px;
     cursor: pointer;
@@ -2948,7 +3102,7 @@ Output only the summary text, no preamble.`;
     max-height: 180px;
     overflow: auto;
     margin-bottom: 12px;
-    border: 1px solid #333;
+    border: 1px solid var(--border);
     border-radius: 6px;
   }
   .persona-row {
@@ -2956,7 +3110,7 @@ Output only the summary text, no preamble.`;
     justify-content: space-between;
     align-items: center;
     padding: 6px 10px;
-    border-bottom: 1px solid #2a2a30;
+    border-bottom: 1px solid var(--border);
     gap: 8px;
   }
   .persona-row:last-child { border-bottom: none; }
@@ -2965,7 +3119,7 @@ Output only the summary text, no preamble.`;
     font-size: 0.7rem;
     padding: 2px 6px;
   }
-  .persona-row-actions button.danger { color: #f87171; }
+  .persona-row-actions button.danger { color: var(--danger); }
   .add-form input, .add-form textarea {
     width: 100%;
     margin-bottom: 6px;

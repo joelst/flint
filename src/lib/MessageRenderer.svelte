@@ -1,32 +1,16 @@
 <script lang="ts">
-  import { onMount } from "svelte";
-
   export let content: string = "";
   export let role: "user" | "assistant" = "assistant";
 
   let renderedHtml = "";
+  let thinkingBlocks: string[] = [];
+  let showThinking = false;
+  let markedParser: ((src: string, options?: any) => string | Promise<string>) | null =
+    null;
+  let renderVersion = 0;
+  let pendingRenderTimer: ReturnType<typeof setTimeout> | null = null;
 
-  onMount(async () => {
-    // Lazy-load marked only when needed
-    const { marked } = await import("marked");
-
-    if (role === "assistant" && content) {
-      try {
-        const html = await Promise.resolve(
-          marked(content, {
-            breaks: true,
-            gfm: true,
-          }),
-        );
-        renderedHtml = html;
-      } catch (e) {
-        console.warn("Markdown parse error:", e);
-        renderedHtml = `<p>${escapeHtml(content)}</p>`;
-      }
-    } else {
-      renderedHtml = `<p>${escapeHtml(content)}</p>`;
-    }
-  });
+  $: void queueRender(role, content);
 
   function escapeHtml(text: string): string {
     const map: Record<string, string> = {
@@ -39,13 +23,201 @@
     return text.replace(/[&<>"']/g, (m) => map[m]);
   }
 
+  function extractThinkingTrace(text: string): {
+    visibleContent: string;
+    thinkingContent: string[];
+  } {
+    const sections: string[] = [];
+    let visible = text;
+    const tagPairs: Array<[RegExp, RegExp]> = [
+      [/<think>([\s\S]*?)<\/think>/gi, /<think>([\s\S]*)$/i],
+      [/<thinking>([\s\S]*?)<\/thinking>/gi, /<thinking>([\s\S]*)$/i],
+    ];
+
+    for (const [closedPattern, openPattern] of tagPairs) {
+      const closedMatches = Array.from(visible.matchAll(closedPattern));
+      for (const match of closedMatches) {
+        const body = String(match[1] ?? "").trim();
+        if (body) sections.push(body);
+      }
+      visible = visible.replace(closedPattern, "");
+
+      const openMatch = visible.match(openPattern);
+      if (openMatch) {
+        const body = String(openMatch[1] ?? "").trim();
+        if (body) sections.push(body);
+        visible = visible.replace(openPattern, "");
+      }
+    }
+
+    return {
+      visibleContent: visible.trim(),
+      thinkingContent: sections,
+    };
+  }
+
+  async function renderContent(
+    currentVersion: number,
+    currentRole: "user" | "assistant",
+    safeContent: string,
+  ): Promise<void> {
+    if (currentRole !== "assistant") {
+      if (currentVersion === renderVersion) {
+        renderedHtml = `<p>${escapeHtml(safeContent)}</p>`;
+        thinkingBlocks = [];
+        showThinking = false;
+      }
+      return;
+    }
+
+    const { visibleContent, thinkingContent } = extractThinkingTrace(safeContent);
+    thinkingBlocks = thinkingContent;
+    if (!visibleContent) {
+      if (currentVersion === renderVersion) {
+        renderedHtml = "";
+      }
+      return;
+    }
+
+    try {
+      if (!markedParser) {
+        const { marked } = await import("marked");
+        markedParser = marked;
+      }
+      const html = await Promise.resolve(
+        markedParser(visibleContent, {
+          breaks: true,
+          gfm: true,
+        }),
+      );
+      if (currentVersion === renderVersion) {
+        renderedHtml = sanitizeHtml(html);
+      }
+    } catch (e) {
+      console.warn("Markdown parse error:", e);
+      if (currentVersion === renderVersion) {
+        renderedHtml = `<p>${escapeHtml(visibleContent)}</p>`;
+      }
+    }
+  }
+
   function copyToClipboard() {
     navigator.clipboard.writeText(content);
+  }
+
+  function queueRender(currentRole: "user" | "assistant", currentContent: string): void {
+    const currentVersion = ++renderVersion;
+    if (pendingRenderTimer) {
+      clearTimeout(pendingRenderTimer);
+      pendingRenderTimer = null;
+    }
+
+    const scheduleDelayMs = currentRole === "assistant" ? 40 : 0;
+    pendingRenderTimer = setTimeout(() => {
+      pendingRenderTimer = null;
+      void renderContent(currentVersion, currentRole, String(currentContent || ""));
+    }, scheduleDelayMs);
+  }
+
+  function sanitizeHtml(html: string): string {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, "text/html");
+    const allowedTags = new Set([
+      "A",
+      "P",
+      "BR",
+      "STRONG",
+      "EM",
+      "UL",
+      "OL",
+      "LI",
+      "PRE",
+      "CODE",
+      "BLOCKQUOTE",
+      "H1",
+      "H2",
+      "H3",
+      "H4",
+      "H5",
+      "H6",
+      "TABLE",
+      "THEAD",
+      "TBODY",
+      "TR",
+      "TH",
+      "TD",
+      "HR",
+    ]);
+    const allowedAttrs = new Set(["href", "title", "target", "rel"]);
+
+    const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_ELEMENT);
+    const toRemove: Element[] = [];
+    let node = walker.nextNode() as Element | null;
+    while (node) {
+      const tag = node.tagName.toUpperCase();
+      if (!allowedTags.has(tag)) {
+        toRemove.push(node);
+      } else {
+        const attrs = Array.from(node.attributes);
+        for (const attr of attrs) {
+          const name = attr.name.toLowerCase();
+          if (name.startsWith("on") || !allowedAttrs.has(name)) {
+            node.removeAttribute(attr.name);
+            continue;
+          }
+          if (name === "href") {
+            const value = attr.value.trim().toLowerCase();
+            const safe =
+              value.startsWith("http://") ||
+              value.startsWith("https://") ||
+              value.startsWith("mailto:") ||
+              value.startsWith("tel:") ||
+              value.startsWith("/") ||
+              value.startsWith("#");
+            if (!safe) {
+              node.removeAttribute(attr.name);
+            }
+          }
+        }
+        if (tag === "A") {
+          node.setAttribute("target", "_blank");
+          node.setAttribute("rel", "noopener noreferrer");
+        }
+      }
+      node = walker.nextNode() as Element | null;
+    }
+
+    for (const el of toRemove) {
+      el.replaceWith(doc.createTextNode(el.textContent || ""));
+    }
+
+    return doc.body.innerHTML;
   }
 </script>
 
 <div class="message-renderer {role}">
   {#if role === "assistant"}
+    {#if thinkingBlocks.length > 0}
+      <div class="thinking-block">
+        <button
+          class="thinking-toggle"
+          type="button"
+          onclick={() => {
+            showThinking = !showThinking;
+          }}
+          title={showThinking ? "Hide model reasoning" : "Show model reasoning"}
+        >
+          {showThinking ? "▼" : "▶"} Thinking ({thinkingBlocks.length})
+        </button>
+        {#if showThinking}
+          <div class="thinking-content">
+            {#each thinkingBlocks as block, i}
+              <pre>{block}</pre>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
     <div class="rendered-markdown">
       {@html renderedHtml}
     </div>
@@ -68,11 +240,12 @@
 
   .message-renderer.assistant :global(p) {
     margin: 0.5em 0;
+    color: var(--fg);
   }
 
   .message-renderer.assistant :global(pre) {
-    background: #1a1a1e;
-    border-left: 3px solid #3b82f6;
+    background: var(--subtle-bg);
+    border-left: 3px solid var(--accent);
     padding: 12px;
     border-radius: 4px;
     overflow-x: auto;
@@ -82,7 +255,7 @@
   }
 
   .message-renderer.assistant :global(code) {
-    background: #222226;
+    background: var(--input-bg);
     padding: 2px 6px;
     border-radius: 3px;
     font-family: ui-monospace, monospace;
@@ -96,19 +269,19 @@
   }
 
   .message-renderer.assistant :global(strong) {
-    color: #fff;
+    color: var(--fg);
     font-weight: 600;
   }
 
   .message-renderer.assistant :global(em) {
-    color: #ddd;
+    color: var(--muted);
   }
 
   .message-renderer.assistant :global(h1),
   .message-renderer.assistant :global(h2),
   .message-renderer.assistant :global(h3) {
     margin: 1em 0 0.5em 0;
-    color: #fff;
+    color: var(--fg);
     font-weight: 600;
   }
 
@@ -135,20 +308,20 @@
   }
 
   .message-renderer.assistant :global(a) {
-    color: #3b82f6;
+    color: var(--accent);
     text-decoration: underline;
     cursor: pointer;
   }
 
   .message-renderer.assistant :global(a:hover) {
-    color: #60a5fa;
+    color: color-mix(in srgb, var(--accent) 70%, #fff);
   }
 
   .message-renderer.assistant :global(blockquote) {
-    border-left: 3px solid #555;
+    border-left: 3px solid var(--border);
     padding-left: 12px;
     margin: 0.75em 0;
-    color: #aaa;
+    color: var(--muted);
   }
 
   .message-renderer.assistant :global(table) {
@@ -159,22 +332,62 @@
 
   .message-renderer.assistant :global(th),
   .message-renderer.assistant :global(td) {
-    border: 1px solid #333;
+    border: 1px solid var(--border);
     padding: 6px 8px;
     text-align: left;
   }
 
   .message-renderer.assistant :global(th) {
-    background: #222226;
+    background: var(--subtle-bg);
     font-weight: 600;
   }
 
   .message-renderer p {
     margin: 0;
+    color: var(--fg);
   }
 
   .rendered-markdown {
     line-height: 1.6;
+  }
+
+  .thinking-block {
+    margin-bottom: 0.6rem;
+  }
+
+  .thinking-toggle {
+    width: 100%;
+    text-align: left;
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--subtle-bg);
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 0.85rem;
+  }
+
+  .thinking-toggle:hover {
+    color: var(--fg);
+    background: color-mix(in srgb, var(--subtle-bg) 80%, var(--panel-bg));
+  }
+
+  .thinking-content {
+    margin-top: 0.35rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--input-bg);
+    padding: 0.45rem 0.5rem;
+  }
+
+  .thinking-content pre {
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 0.8rem;
+    line-height: 1.4;
   }
 
   .copy-btn {
@@ -183,9 +396,9 @@
     right: 4px;
     padding: 2px 6px;
     font-size: 0.7rem;
-    background: #333;
-    color: #999;
-    border: 1px solid #444;
+    background: var(--subtle-bg);
+    color: var(--muted);
+    border: 1px solid var(--border);
     border-radius: 3px;
     cursor: pointer;
     opacity: 0;
@@ -197,7 +410,7 @@
   }
 
   .copy-btn:hover {
-    background: #444;
-    color: #ccc;
+    background: var(--panel-bg);
+    color: var(--fg);
   }
 </style>

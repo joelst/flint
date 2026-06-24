@@ -86,8 +86,8 @@
 <style>
   .conversation-sidebar {
     width: 280px;
-    background: #111114;
-    border-right: 1px solid #2a2a30;
+    background: var(--sidebar-bg);
+    border-right: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -95,7 +95,7 @@
 
   .sidebar-header {
     padding: 12px;
-    border-bottom: 1px solid #2a2a30;
+    border-bottom: 1px solid var(--border);
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -104,11 +104,12 @@
   .sidebar-header h3 {
     margin: 0;
     font-size: 0.95rem;
+    color: var(--fg);
   }
 
   .new-chat-btn {
     padding: 4px 8px;
-    background: #3b82f6;
+    background: var(--button-bg);
     color: white;
     border: none;
     border-radius: 3px;
@@ -118,55 +119,61 @@
   }
 
   .new-chat-btn:hover {
-    background: #2563eb;
+    background: color-mix(in srgb, var(--accent) 80%, #000);
   }
 
   .conversations-list {
     flex: 1;
     overflow-y: auto;
+    overflow-x: hidden;
+    min-width: 0;
   }
 
   .empty-state {
     padding: 20px 12px;
     text-align: center;
-    color: #666;
+    color: var(--muted);
     font-size: 0.85rem;
   }
 
   .conversation-item {
     width: 100%;
+    box-sizing: border-box;
     text-align: left;
-    padding: 12px;
-    border-bottom: 1px solid #2a2a30;
+    padding: 12px 44px 12px 12px;
+    border-bottom: 1px solid var(--border);
     cursor: pointer;
     transition: background 0.15s;
     position: relative;
     background: none;
     border: none;
     color: inherit;
+    min-width: 0;
   }
 
   .conversation-item:hover {
-    background: #1f1f24;
+    background: var(--subtle-bg);
   }
 
   .conversation-item.active {
-    background: #2a2a32;
-    border-left: 3px solid #3b82f6;
+    background: var(--panel-bg);
+    border-left: 3px solid var(--accent);
     padding-left: 9px;
   }
 
   .conv-title {
     font-size: 0.9rem;
-    color: #eee;
+    color: var(--fg);
     margin-bottom: 4px;
-    word-break: break-word;
-    white-space: normal;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .conv-meta {
     font-size: 0.7rem;
-    color: #666;
+    color: var(--muted);
   }
 
   .delete-btn {
@@ -175,7 +182,7 @@
     right: 8px;
     background: none;
     border: none;
-    color: #666;
+    color: var(--muted);
     cursor: pointer;
     font-size: 1rem;
     padding: 0;
@@ -195,6 +202,6 @@
   }
 
   .delete-btn:hover {
-    color: #f87171;
+    color: var(--danger);
   }
 </style>
