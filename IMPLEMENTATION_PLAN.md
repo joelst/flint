@@ -3,7 +3,7 @@
 **Project:** FLInt (Foundry Local Interface)  
 **Based on:** FLINT_DESIGN_SPEC.md (v0.4 after review adjustments)  
 **Date:** 2026-06-24  
-**Status:** Draft – ready for review/iteration
+**Status:** Active – MVP 0.1 baseline reached; 0.2 planning in progress
 
 ## Objectives
 Deliver a working MVP desktop app (FLInt) that makes Foundry Local delightful to use:
@@ -11,6 +11,17 @@ Deliver a working MVP desktop app (FLInt) that makes Foundry Local delightful to
 - Beautiful, fast, privacy-first experience
 - SDK-first integration for reliability
 - Ready for Azure cloud extension
+
+## 0.1 Readiness Decision (2026-06-24)
+
+- Compared current implementation against the original MVP scope in `FLINT_DESIGN_SPEC.md` and `MVP_FEATURE_COMPLETION_PLAN.md`.
+- **Decision:** MVP **0.1 is ready** as a practical preview baseline.
+- Remaining limitations and 0.2 priorities are documented in `RELEASE_ROADMAP.md`.
+
+### 0.1 limitations (summary)
+- Multi-endpoint routing/concurrency is not yet implemented.
+- Diagnostics export + cache operations need additional hardening/polish.
+- Security and tests are at strong baseline, with planned hardening/expansion in 0.2.
 
 ## Guiding Principles (from spec)
 - Local-first always

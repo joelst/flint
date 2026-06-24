@@ -49,4 +49,25 @@ export default defineConfig(() => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+  test: {
+    include: ['src/**/*.{test,spec}.{js,ts}', 'sidecar/**/*.{test,spec}.{js,ts}'],
+    environment: 'jsdom',
+    css: false,
+    setupFiles: ['./src/test/setup.ts'],
+    coverage: {
+      provider: /** @type {'v8'} */ ('v8'),
+      reporter: ['text', 'html'],
+      include: [
+        'src/lib/personas.ts',
+        'src/lib/message-rendering.ts',
+        'src/lib/conversation-sidebar.ts'
+      ],
+      thresholds: {
+        lines: 50,
+        functions: 50,
+        branches: 35,
+        statements: 50
+      }
+    }
+  }
 }));

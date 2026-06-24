@@ -3,6 +3,10 @@
 **Date:** 2026-06-24
 **Status:** ✅ Complete - Phase 2 (Chat UI) significantly advanced
 
+> **Note (latest):** This file is a point-in-time implementation snapshot.
+> Current release readiness, known limitations, and forward planning are tracked in:
+> - `RELEASE_ROADMAP.md`
+
 ---
 
 ## 🔧 Sidecar Evaluation

@@ -19,6 +19,7 @@ let sidecarProcess: any = null;
 let sidecarReady = false;
 let pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
 let streamHandlers = new Map<number, (delta: string) => void>();
+let progressHandlers = new Map<number, (p: number) => void>();
 let msgId = 0;
 let currentStatus: any = { initialized: false, modelLoaded: false, serviceRunning: false };
 export type ModelInfo = IModel & {
@@ -192,10 +193,23 @@ async function startSidecar() {
         }
         return;
       }
+      if (msg.id && msg.progress !== undefined) {
+        // Progress messages (e.g. from download) should not resolve the pending promise.
+        // The final reply (with ok or error) will do that.
+        const handler = progressHandlers.get(msg.id);
+        if (handler) {
+          try { handler(Number(msg.progress)); } catch {}
+        }
+        if (msg.alias) {
+          console.log(`[sdk] download progress ${msg.alias}: ${msg.progress}%`);
+        }
+        return;
+      }
       if (msg.id && pending.has(msg.id)) {
         const p = pending.get(msg.id)!;
         pending.delete(msg.id);
         streamHandlers.delete(msg.id);
+        progressHandlers.delete(msg.id);
         msg.error ? p.reject(new Error(msg.error)) : p.resolve(msg);
       } else if (msg.type === 'log') {
         console.log(`[sidecar] ${msg.level}: ${msg.message}`);
@@ -327,6 +341,7 @@ async function sendInternal(
       .catch((e: any) => {
         pending.delete(id);
         streamHandlers.delete(id);
+        progressHandlers.delete(id);
         reject(e);
       });
   });
@@ -404,6 +419,7 @@ export async function refreshModels(): Promise<void> {
     }
 
     const models = list.map((m: any) => ({
+      ...m,
       alias: m.alias,
       isCached: m.cached,
       isLoaded: m.alias === currentLoadedAlias,
@@ -426,19 +442,30 @@ export async function getModel(alias: string) {
   return { alias } as any;
 }
 
-export async function downloadModel(model: any, onProgress?: (p: number) => void, signal?: AbortSignal) {
-  await send('download', { alias: model.alias });
-  // Sidecar sends progress messages (we can listen in real impl)
+export async function downloadModel(model: any, onProgress?: (p: number) => void) {
+  await sendInternal('download', { alias: model.alias }, undefined, (id: number) => {
+    if (onProgress) {
+      progressHandlers.set(id, onProgress);
+    }
+  });
+  // Sidecar sends progress messages via stdout; onAssignedId registers the handler above.
+  // The pending promise resolves only on the final reply (see stdout processing).
   await refreshModels();
 }
 
 export async function loadModel(model: any) {
-  await send('load', { alias: model.alias });
+  const res = await send('load', { alias: model.alias });
   await refreshModels();
+  return res.result;
 }
 
 export async function unloadModel(model: any) {
   await send('unload', { alias: model.alias });
+  await refreshModels();
+}
+
+export async function deleteModel(model: any) {
+  await send('deleteModel', { alias: model.alias });
   await refreshModels();
 }
 
@@ -453,10 +480,17 @@ export async function getLocalEndpoint(): Promise<string | undefined> {
   return res.endpoint;
 }
 
-export async function startService(port = 5272, alias?: string): Promise<string> {
+export async function startService(
+  port = 5272,
+  alias?: string,
+  preferredEp?: string
+): Promise<string> {
   const payload: any = { port };
   if (alias) {
     payload.alias = alias;
+  }
+  if (preferredEp) {
+    payload.preferredEp = preferredEp;
   }
   const res = await send('startService', payload);
   currentEndpoint = res.endpoint;
@@ -473,13 +507,14 @@ export async function stopService(): Promise<void> {
 export async function chatCompletion(
   model: string,
   messages: Array<{ role: string; content: any }>,
-  options?: { maxTokens?: number; temperature?: number }
+  options?: { maxTokens?: number; temperature?: number; preferredEp?: string }
 ): Promise<any> {
   const res = await send('chatCompletion', {
     model,
     messages,
     maxTokens: options?.maxTokens,
-    temperature: options?.temperature
+    temperature: options?.temperature,
+    preferredEp: options?.preferredEp
   });
   return res.result;
 }
@@ -488,7 +523,7 @@ export async function chatCompletionStream(
   model: string,
   messages: Array<{ role: string; content: any }>,
   onDelta: (delta: string) => void,
-  options?: { maxTokens?: number; temperature?: number },
+  options?: { maxTokens?: number; temperature?: number; preferredEp?: string },
   onAssignedId?: (id: number) => void
 ): Promise<any> {
   const res = await sendInternal(
@@ -498,6 +533,7 @@ export async function chatCompletionStream(
       messages,
       maxTokens: options?.maxTokens,
       temperature: options?.temperature,
+      preferredEp: options?.preferredEp,
       stream: true
     },
     onDelta,
@@ -513,8 +549,9 @@ export async function cancelChatRequest(requestId: number): Promise<void> {
 export async function transcribeAudio(
   audioBlob: Blob,
   model: string,
-  language = 'en',
-  fileName = 'audio.webm'
+  language = 'auto',
+  fileName = 'audio.webm',
+  options?: { temperature?: number; preferredEp?: string }
 ): Promise<any> {
   const arrayBuffer = await audioBlob.arrayBuffer();
   const audioBase64 = arrayBufferToBase64(arrayBuffer);
@@ -523,7 +560,9 @@ export async function transcribeAudio(
     mimeType: audioBlob.type || 'application/octet-stream',
     fileName,
     model,
-    language
+    language,
+    temperature: options?.temperature,
+    preferredEp: options?.preferredEp
   });
   return res.result;
 }
