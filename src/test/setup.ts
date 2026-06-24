@@ -1,6 +1,12 @@
 import { afterEach } from 'vitest';
-import { cleanup } from '@testing-library/svelte';
 
-afterEach(() => {
-  cleanup();
-});
+const hasDom =
+  typeof window !== 'undefined' &&
+  typeof document !== 'undefined';
+
+if (hasDom) {
+  afterEach(async () => {
+    const { cleanup } = await import('@testing-library/svelte');
+    cleanup();
+  });
+}

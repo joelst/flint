@@ -32,6 +32,15 @@ export function extractThinkingTrace(text: string): {
 }
 
 export function sanitizeAssistantHtml(html: string): string {
+  if (typeof DOMParser === 'undefined' || typeof NodeFilter === 'undefined') {
+    return html
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#39;');
+  }
+
   const parser = new DOMParser();
   const doc = parser.parseFromString(html, 'text/html');
   const allowedTags = new Set([

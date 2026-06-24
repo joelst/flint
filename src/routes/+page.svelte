@@ -205,7 +205,7 @@
       return "Auto mode: runtime will choose the best available execution provider.";
     }
     const kind = classifyExecutionProvider(preference);
-    const sizeMb = Number(model?.size || model?.info?.fileSizeMb || 0);
+    const sizeMb = parseModelSizeMb(model) ?? 0;
     if (kind === "npu") {
       return sizeMb > 7000
         ? "Large model for NPU-only workflows; expect slower startup or fallback."
@@ -1690,19 +1690,27 @@ Output only the summary text, no preamble.`;
   async function getMono16kBuffer(blob: Blob): Promise<AudioBuffer> {
     const AudioContextClass = (window.AudioContext || (window as any).webkitAudioContext);
     const audioCtx = new AudioContextClass();
-    const arrayBuffer = await blob.arrayBuffer();
-    const decoded = await audioCtx.decodeAudioData(arrayBuffer);
+    try {
+      const arrayBuffer = await blob.arrayBuffer();
+      const decoded = await audioCtx.decodeAudioData(arrayBuffer);
 
-    const targetRate = 16000;
-    const targetLength = Math.max(1, Math.ceil(decoded.duration * targetRate));
-    const offlineCtx = new OfflineAudioContext(1, targetLength, targetRate);
+      const targetRate = 16000;
+      const targetLength = Math.max(1, Math.ceil(decoded.duration * targetRate));
+      const offlineCtx = new OfflineAudioContext(1, targetLength, targetRate);
 
-    const source = offlineCtx.createBufferSource();
-    source.buffer = decoded;
-    source.connect(offlineCtx.destination);
-    source.start(0);
+      const source = offlineCtx.createBufferSource();
+      source.buffer = decoded;
+      source.connect(offlineCtx.destination);
+      source.start(0);
 
-    return await offlineCtx.startRendering();
+      return await offlineCtx.startRendering();
+    } finally {
+      try {
+        await audioCtx.close();
+      } catch (closeError) {
+        console.warn("Failed to close AudioContext after audio normalization decode", closeError);
+      }
+    }
   }
 
   async function convertAudioBlobToWav(blob: Blob): Promise<Blob> {
@@ -1861,14 +1869,25 @@ Output only the summary text, no preamble.`;
   }
 
   async function getAudioDuration(blob: Blob): Promise<number> {
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioContextClass) {
+      return 0;
+    }
+
+    const ctx = new AudioContextClass();
     try {
-      const AudioContextClass = (window.AudioContext || (window as any).webkitAudioContext);
-      const ctx = new AudioContextClass();
       const buf = await blob.arrayBuffer();
       const decoded = await ctx.decodeAudioData(buf);
       return decoded.duration;
-    } catch {
+    } catch (error) {
+      console.warn("Failed to determine audio duration", error);
       return 0;
+    } finally {
+      try {
+        await ctx.close();
+      } catch (closeError) {
+        console.warn("Failed to close AudioContext after duration decode", closeError);
+      }
     }
   }
 
@@ -1886,19 +1905,11 @@ Output only the summary text, no preamble.`;
 
     try {
       // Ensure the local service is running with an STT-capable model.
-      if (!state.serviceRunning || !state.endpoint) {
-        await startService(
-          5272,
-          sttAlias,
-          selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
-        );
-      } else {
-        await startService(
-          5272,
-          sttAlias,
-          selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
-        );
-      }
+      await startService(
+        5272,
+        sttAlias,
+        selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+      );
 
       const dur = await getAudioDuration(audioBlob);
       statusMessage = dur > 90

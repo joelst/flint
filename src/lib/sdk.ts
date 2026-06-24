@@ -341,6 +341,7 @@ async function sendInternal(
       .catch((e: any) => {
         pending.delete(id);
         streamHandlers.delete(id);
+        progressHandlers.delete(id);
         reject(e);
       });
   });

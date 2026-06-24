@@ -41,4 +41,20 @@ describe("sanitizeAssistantHtml", () => {
     const output = sanitizeAssistantHtml('<a href="//evil.example">nope</a>');
     expect(output).not.toContain('href="//evil.example"');
   });
+
+  it("falls back to escaped text when DOM globals are unavailable", () => {
+    const originalDomParser = (globalThis as any).DOMParser;
+    const originalNodeFilter = (globalThis as any).NodeFilter;
+
+    Object.defineProperty(globalThis, 'DOMParser', { configurable: true, value: undefined });
+    Object.defineProperty(globalThis, 'NodeFilter', { configurable: true, value: undefined });
+
+    try {
+      const output = sanitizeAssistantHtml('<script>alert("x")</script><b>ok</b>');
+      expect(output).toBe('&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;&lt;b&gt;ok&lt;/b&gt;');
+    } finally {
+      Object.defineProperty(globalThis, 'DOMParser', { configurable: true, value: originalDomParser });
+      Object.defineProperty(globalThis, 'NodeFilter', { configurable: true, value: originalNodeFilter });
+    }
+  });
 });
