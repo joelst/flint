@@ -3104,7 +3104,7 @@ Output only the summary text, no preamble.`;
     --warning: #facc15;
     --danger: #f87171;
     --input-bg: #222226;
-    --button-bg: #3b82f6;
+    --button-bg: #001639;
     --subtle-bg: #2a2a30;
     --messages-bg: #16161a;
   }
@@ -3122,7 +3122,7 @@ Output only the summary text, no preamble.`;
     --warning: #ffc107;
     --danger: #dc3545;
     --input-bg: #ffffff;
-    --button-bg: #0d6efd;
+    --button-bg: #001639;
     --subtle-bg: #e9ecef;
     --messages-bg: #f8f9fa;
   }
