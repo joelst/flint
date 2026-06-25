@@ -487,6 +487,9 @@
   let isRollingTranscribe = false;
   let sttModels = $state<ModelInfo[]>([]);
   let selectedSTTModelAlias = $state("");
+  // Tracks the alias of a model explicitly loaded into the audio lane via
+  // useSTTModelForAudio(). Used to prevent audio-lane loads from blocking chat.
+  let audioLaneModelAlias = $state("");
 
   const selectedChatModel = $derived(state.models.find((m: any) => m.alias === selectedModelAlias));
   const selectedModelSupportsChat = $derived(
@@ -506,16 +509,24 @@
   const effectiveSTTModelAlias = $derived(
     loadedAudioModel?.alias || selectedSTTModelAlias || ""
   );
+  // Chat is blocked only when an audio-capable model is loaded in the chat lane
+  // (i.e. it was not deliberately loaded via useSTTModelForAudio into the audio lane).
   const chatBlockedByLoadedSTT = $derived(
-    !!loadedAudioModel && (!selectedModelAlias || loadedAudioModel.alias !== selectedModelAlias)
+    !!loadedAudioModel &&
+    (!selectedModelAlias || loadedAudioModel.alias !== selectedModelAlias) &&
+    loadedAudioModel.alias !== audioLaneModelAlias
   );
 
   // Keep selectedSTTModelAlias in sync with the loaded audio model so that
   // "Current STT model" in the Audio page reflects loads done elsewhere
   // (top bar, Models tab "Load", etc.) and so it gets persisted.
+  // Also clear audioLaneModelAlias when the audio-lane model is no longer loaded.
   $effect(() => {
     if (loadedAudioModel?.alias && selectedSTTModelAlias !== loadedAudioModel.alias) {
       selectedSTTModelAlias = loadedAudioModel.alias;
+    }
+    if (audioLaneModelAlias && loadedAudioModel?.alias !== audioLaneModelAlias) {
+      audioLaneModelAlias = '';
     }
   });
 
@@ -1161,6 +1172,7 @@
       statusMessage = `Loading ${alias} for audio transcription...`;
       await sendLoadToSidecar(model, 'audio');
       selectedSTTModelAlias = alias;
+      audioLaneModelAlias = alias;
 
       statusMessage = `Audio ready: ${alias}`;
       await refreshModels();
