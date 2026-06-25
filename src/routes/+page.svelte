@@ -1764,7 +1764,7 @@ Output only the summary text, no preamble.`;
       const wavBlob = await convertAudioBlobToWav(blob).catch(() => blob);
       const res = await transcribeAudio(wavBlob, sttAlias, transcriptionLanguage, 'dictation-interim.wav', { temperature: 0 });
       const text = getTranscriptTextFromResult(res);
-      if (text) dictationInterim = text;
+      if (text && isDictating) dictationInterim = text;
     } catch {
       // rolling transcription is best-effort; failures are silent
     } finally {
@@ -2896,6 +2896,7 @@ Output only the summary text, no preamble.`;
                 />
                 <button
                   type="submit"
+                  aria-label="Send message"
                   disabled={chatBlockedByLoadedSTT || !selectedModelSupportsChat || !chatInput.trim() || (!state.endpoint && !chatClient) || isStreaming}
                 >
                   {#if isStreaming}<Icon name="loader" size={15} class="spin" />{:else}<Icon name="send" size={15} />{/if}
