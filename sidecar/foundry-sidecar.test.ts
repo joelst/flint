@@ -163,8 +163,8 @@ describe('foundry-sidecar command schema validation', () => {
   it('accepts well-formed commands without errors from schema', async () => {
     proc.stdin.write(`${JSON.stringify({ id: 15, cmd: 'getStatus' })}\n`);
     const res = await waitForLine(proc, (msg) => msg.id === 15);
-    // getStatus fails without init but schema validation passes (error is from manager being null)
-    // The error message should not say 'Unknown command' or 'missing required field'
+    // getStatus succeeds even before init; this test only asserts schema validation doesn't reject the command.
+    // If there is an error, it should not be from the schema layer (unknown command/field/missing required field).
     if (res.error) {
       expect(String(res.error)).not.toContain('Unknown command');
       expect(String(res.error)).not.toContain('missing required field');
