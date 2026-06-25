@@ -2526,7 +2526,7 @@ Output only the summary text, no preamble.`;
                     >
                       <div class="modal-header">
                         <h3>{detailModel.alias}</h3>
-                        <button type="button" onclick={() => (modelDetailsAlias = null)}><Icon name="x" size={14} /></button>
+                        <button type="button" aria-label="Close model details" onclick={() => (modelDetailsAlias = null)}><Icon name="x" size={14} /></button>
                       </div>
                       <div class="modal-body model-detail-grid">
                         <div><strong>Task:</strong> {(detailModel as any).task || (detailModel as any).info?.task || "Unknown"}</div>
