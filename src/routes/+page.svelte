@@ -2880,7 +2880,7 @@ Output only the summary text, no preamble.`;
                   type="submit"
                   disabled={chatBlockedByLoadedSTT || !selectedModelSupportsChat || !chatInput.trim() || (!state.endpoint && !chatClient) || isStreaming}
                 >
-                  {#if isStreaming}<Icon name="loader" size={15} />{:else}<Icon name="send" size={15} />{/if}
+                  {#if isStreaming}<Icon name="loader" size={15} class="spin" />{:else}<Icon name="send" size={15} />{/if}
                 </button>
                 {#if isStreaming}
                   <button type="button" onclick={stopGeneration} class="stop"
