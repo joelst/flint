@@ -251,6 +251,18 @@ describe('foundry-sidecar error propagation and resilience', () => {
     expect(res.id).toBeNull();
   });
 
+  it('rejects non-object JSON messages without crashing', async () => {
+    for (const input of ['null\n', '123\n', '[]\n']) {
+      proc.stdin.write(input);
+      const res = await waitForLine(proc, (msg) => msg.error === 'Invalid message: expected JSON object');
+      expect(res.id).toBeNull();
+    }
+
+    proc.stdin.write(`${JSON.stringify({ id: 39, cmd: 'getStatus' })}\n`);
+    const status = await waitForLine(proc, (msg) => msg.id === 39);
+    expect(status.ok).toBe(true);
+  });
+
   it('getStatus reports both lane models as null before any load', async () => {
     proc.stdin.write(`${JSON.stringify({ id: 38, cmd: 'getStatus' })}\n`);
     const res = await waitForLine(proc, (msg) => msg.id === 38);

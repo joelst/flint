@@ -370,6 +370,11 @@ rl.on('line', async (line) => {
     return;
   }
 
+  if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {
+    send({ id: null, error: 'Invalid message: expected JSON object' });
+    return;
+  }
+
   const { id, cmd, ...payload } = msg;
 
   const reply = (result) => {
