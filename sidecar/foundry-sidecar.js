@@ -77,8 +77,8 @@ const COMMAND_SCHEMA = {
   getSTTModels:       { required: [], optional: [] },
 };
 
-// Base64 character limit for transcribeAudio. Base64 inflates by ~33%, so 50 M chars ≈ 37.5 MB decoded audio.
-const AUDIO_BASE64_MAX_CHARS = 50 * 1024 * 1024;
+// Base64 character limit for transcribeAudio. 50 MB decoded audio is ~67 MB of base64.
+const AUDIO_BASE64_MAX_CHARS = Math.ceil(50 * 1024 * 1024 * 4 / 3);
 
 /**
  * Validates a command name and its payload fields.
