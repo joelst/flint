@@ -3139,7 +3139,7 @@ Output only the summary text, no preamble.`;
               </div>
             </div>
             <div class="log-list" bind:this={logListEl} use:autoScrollLog>
-              {#each sidecarLogs as entry (entry.ts + entry.message)}
+              {#each sidecarLogs as entry, i (entry.ts + ':' + i)}
                 {@const d = new Date(entry.ts)}
                 {@const hms = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`}
                 <div class="log-entry log-{entry.level}">
