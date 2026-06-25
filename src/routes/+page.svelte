@@ -2661,7 +2661,7 @@ Output only the summary text, no preamble.`;
                           {#if msg.isSummary}<Icon name="note" size={15} />{:else if msg.role === "user"}<Icon name="user" size={15} />{:else}<Icon name="bot" size={15} />{/if}
                           {#if msg.role !== 'system'}
                             <button
-                              type="button"
+                              type="button" aria-label={msg.pinned ? "Unpin message" : "Pin message"}
                               class="pin-btn"
                               class:pinned={!!msg.pinned}
                               title={msg.pinned ? "Unpin (this message will be subject to normal trimming)" : "Pin this message — it will always be included in context"}
