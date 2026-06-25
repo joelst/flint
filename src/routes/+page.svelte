@@ -4120,7 +4120,7 @@ Output only the summary text, no preamble.`;
     vertical-align: -0.175em;
   }
 
-  .chat-input button[type="submit"]:disabled svg {
+  .chat-input button[type="submit"] svg.spin {
     animation: spin 1s linear infinite;
   }
 
