@@ -153,7 +153,7 @@ describe('foundry-sidecar command schema validation', () => {
   });
 
   it('rejects transcribeAudio with oversized audioBase64', async () => {
-    const oversized = 'A'.repeat(50 * 1024 * 1024 + 1);
+    const oversized = 'A'.repeat(Math.ceil(50 * 1024 * 1024 * 4 / 3) + 1);
     proc.stdin.write(`${JSON.stringify({ id: 16, cmd: 'transcribeAudio', audioBase64: oversized, mimeType: 'audio/wav', fileName: 'x.wav', model: 'm', language: 'en' })}\n`);
     const res = await waitForLine(proc, (msg) => msg.id === 16, 10000);
     expect(res.error).toBeTruthy();
