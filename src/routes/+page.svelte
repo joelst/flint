@@ -2866,7 +2866,7 @@ Output only the summary text, no preamble.`;
                   class="dictation-btn"
                   class:active={isDictating}
                   onclick={toggleDictation}
-                  title={isDictating ? "Stop dictation (finalizes transcript)" : "Dictate into chat (requires STT model)"}
+                  title={isDictating ? "Stop dictation (finalizes transcript)" : "Dictate into chat (requires STT model)"} aria-label={isDictating ? "Stop dictation" : "Start dictation"}
                   disabled={isStreaming}
                 >
                   {#if isDictating}<Icon name="stop" size={14} />{:else}<Icon name="mic" size={14} />{/if}
