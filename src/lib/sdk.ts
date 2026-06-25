@@ -1,9 +1,8 @@
 import { writable, type Writable } from 'svelte/store';
 import { Command } from '@tauri-apps/plugin-shell';
 import { resolveResource, resourceDir } from '@tauri-apps/api/path';
-export type { LaneName, EndpointProfile } from './ipc-contracts';
-// LogEntry is defined in this file and exported below with the interface declaration
 import type { LaneName, EndpointProfile } from './ipc-contracts';
+export type { LaneName, EndpointProfile };
 
 // Sidecar-based implementation for clean production builds.
 // We never import 'foundry-local-sdk' in the web bundle.
@@ -120,6 +119,15 @@ const initialState: FlintSDKState = {
 };
 
 export const sdkState: Writable<FlintSDKState> = writable(initialState);
+
+function drainPending(reason: Error) {
+  for (const { reject } of pending.values()) {
+    reject(reason);
+  }
+  pending.clear();
+  streamHandlers.clear();
+  progressHandlers.clear();
+}
 
 function updateState(partial: Partial<FlintSDKState>) {
   sdkState.update((s) => ({ ...s, ...partial }));
@@ -280,12 +288,14 @@ async function startSidecar() {
     sidecarReady = false;
     sidecarProcess = null;
     updateState({ ready: false, error: 'Sidecar closed' });
+    drainPending(new Error('Sidecar closed'));
   });
 
   command.on('error', (error: any) => {
     commandError = String(error);
     console.error(`[sdk] Sidecar error event:`, error);
     updateState({ error: `Sidecar error: ${error}` });
+    drainPending(new Error(`Sidecar error: ${error}`));
   });
 
   // spawn() returns the Child process which has .write()
@@ -717,14 +727,26 @@ export function loadEndpointProfiles(): EndpointProfile[] {
 }
 
 export function saveEndpointProfiles(profiles: EndpointProfile[]): void {
-  localStorage.setItem(ENDPOINT_PROFILES_KEY, JSON.stringify(profiles));
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.setItem(ENDPOINT_PROFILES_KEY, JSON.stringify(profiles));
+  } catch {
+    // Silently no-op in SSR or sandboxed environments
+  }
+}
+
+function generateProfileId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `ep_${crypto.randomUUID()}`;
+  }
+  return `ep_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
 }
 
 export function addEndpointProfile(profile: Omit<EndpointProfile, 'id'>): EndpointProfile {
   const existing = loadEndpointProfiles();
   const created: EndpointProfile = {
     ...profile,
-    id: `ep_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    id: generateProfileId(),
   };
   saveEndpointProfiles([...existing, created]);
   return created;

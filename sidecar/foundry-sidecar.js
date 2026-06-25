@@ -35,6 +35,25 @@ const KNOWN_COMMANDS = new Set([
   'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',
 ]);
 
+// Per-command type requirements. Keys are required or optional field names; values are:
+// 'number', 'string' (any string), 'non-empty-string', 'array'.
+const FIELD_TYPES = {
+  init:              { appName: 'non-empty-string', logLevel: 'non-empty-string' },
+  setLogLevel:       { level: 'non-empty-string' },
+  startService:      { port: 'number' },
+  download:          { alias: 'non-empty-string' },
+  load:              { alias: 'non-empty-string' },
+  unload:            { alias: 'non-empty-string' },
+  deleteModel:       { alias: 'non-empty-string' },
+  chatCompletion:    { model: 'non-empty-string', messages: 'array' },
+  cancelChatRequest: { requestId: 'number' },
+  transcribeAudio:   { audioBase64: 'string', mimeType: 'non-empty-string', fileName: 'non-empty-string', model: 'non-empty-string', language: 'non-empty-string' },
+};
+
+// Commands that accept a lane field; validated to 'chat' | 'audio'.
+const LANE_CMDS = new Set(['load', 'unload']);
+const VALID_LANES = new Set(['chat', 'audio']);
+
 // Each entry lists required fields and all allowed optional fields.
 // Payloads with unknown fields are rejected to prevent injection attacks.
 const COMMAND_SCHEMA = {
@@ -58,8 +77,8 @@ const COMMAND_SCHEMA = {
   getSTTModels:       { required: [], optional: [] },
 };
 
-// ~50 MB base64 limit (≈37.5 MB decoded audio); prevents memory blowup on malformed payloads
-const AUDIO_BASE64_MAX_BYTES = 50 * 1024 * 1024;
+// Base64 character limit for transcribeAudio. Base64 inflates by ~33%, so 50 M chars ≈ 37.5 MB decoded audio.
+const AUDIO_BASE64_MAX_CHARS = 50 * 1024 * 1024;
 
 /**
  * Validates a command name and its payload fields.
@@ -81,11 +100,32 @@ function validateCommand(cmd, payload) {
       return `Command "${cmd}" has unknown field: ${field}`;
     }
   }
-  if (cmd === 'transcribeAudio') {
-    const audioLen = typeof payload.audioBase64 === 'string' ? payload.audioBase64.length : 0;
-    if (audioLen > AUDIO_BASE64_MAX_BYTES) {
-      return `Command "transcribeAudio" audioBase64 exceeds maximum allowed size`;
+  // Type/value validation
+  const typeRules = FIELD_TYPES[cmd];
+  if (typeRules) {
+    for (const [field, expected] of Object.entries(typeRules)) {
+      const value = payload[field];
+      if (value === undefined) continue; // already caught by required check above
+      if (expected === 'number' && typeof value !== 'number') {
+        return `Command "${cmd}" field "${field}" must be a number`;
+      }
+      if (expected === 'non-empty-string' && (typeof value !== 'string' || !value.trim())) {
+        return `Command "${cmd}" field "${field}" must be a non-empty string`;
+      }
+      if (expected === 'string' && typeof value !== 'string') {
+        return `Command "${cmd}" field "${field}" must be a string`;
+      }
+      if (expected === 'array' && !Array.isArray(value)) {
+        return `Command "${cmd}" field "${field}" must be an array`;
+      }
     }
+  }
+  // Lane validation for commands that accept a lane field
+  if (LANE_CMDS.has(cmd) && payload.lane !== undefined && !VALID_LANES.has(payload.lane)) {
+    return `Command "${cmd}" invalid lane "${payload.lane}": must be "chat" or "audio"`;
+  }
+  if (cmd === 'transcribeAudio' && payload.audioBase64.length > AUDIO_BASE64_MAX_CHARS) {
+    return `Command "transcribeAudio" audioBase64 exceeds maximum allowed size`;
   }
   return null;
 }
@@ -322,6 +362,7 @@ async function getFoundryManager () {
 }
 
 rl.on('line', async (line) => {
+  if (!line.trim()) return;
   let msg;
   try {
     msg = JSON.parse(line);
@@ -387,7 +428,6 @@ rl.on('line', async (line) => {
       reply({ ok: true });
     } else if (cmd === 'load') {
       const which = payload.lane || 'chat';
-      if (!['chat', 'audio'].includes(which)) throw new Error(`Invalid lane: ${which}`);
       log('info', `Loading model ${payload.alias} into ${which} lane`);
       const loaded = await ensureLaneModel(which, payload.alias);
       const acceleration = {

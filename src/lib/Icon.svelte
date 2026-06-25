@@ -3,8 +3,10 @@
     name: string;
     size?: number | string;
     class?: string;
+    /** Accessible label. When set, the icon is announced by screen readers (role="img"). Omit for purely decorative use. */
+    label?: string;
   };
-  const { name, size = 16, class: cls = '' }: Props = $props();
+  const { name, size = 16, class: cls = '', label }: Props = $props();
 </script>
 
 <!--
@@ -22,7 +24,9 @@
   stroke-linecap="round"
   stroke-linejoin="round"
   class={cls}
-  aria-hidden="true"
+  aria-hidden={label ? undefined : true}
+  role={label ? 'img' : undefined}
+  aria-label={label}
 >
   {#if name === 'mic'}
     <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>

@@ -217,10 +217,23 @@ describe('foundry-sidecar error propagation and resilience', () => {
   });
 
   it('silently ignores whitespace-only lines and processes next command', async () => {
+    const invalidJsonErrors: any[] = [];
+    const collector = (chunk: Buffer | string) => {
+      for (const line of chunk.toString().split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        try {
+          const msg = JSON.parse(line);
+          if (msg.error === 'Invalid JSON') invalidJsonErrors.push(msg);
+        } catch { /* ignore unparseable */ }
+      }
+    };
+    proc.stdout.on('data', collector);
     proc.stdin.write('   \n');
     proc.stdin.write('\n');
     proc.stdin.write(`${JSON.stringify({ id: 34, cmd: 'getStatus' })}\n`);
     const res = await waitForLine(proc, (msg) => msg.id === 34);
+    proc.stdout.off('data', collector);
+    expect(invalidJsonErrors).toHaveLength(0);
     expect(res.ok).toBe(true);
   });
 
