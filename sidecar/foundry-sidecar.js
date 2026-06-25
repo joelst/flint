@@ -100,25 +100,24 @@ function validateCommand(cmd, payload) {
       return `Command "${cmd}" has unknown field: ${field}`;
     }
   }
-  // Type/value validation
+  // Type/value validation (required + selected optional fields)
   const typeRules = FIELD_TYPES[cmd];
   if (typeRules) {
     for (const [field, expected] of Object.entries(typeRules)) {
       const value = payload[field];
       if (value === undefined) continue; // already caught by required check above
-      if (expected === 'number' && typeof value !== 'number') {
-        return `Command "${cmd}" field "${field}" must be a number`;
-      }
-      if (expected === 'non-empty-string' && (typeof value !== 'string' || !value.trim())) {
-        return `Command "${cmd}" field "${field}" must be a non-empty string`;
-      }
-      if (expected === 'string' && typeof value !== 'string') {
-        return `Command "${cmd}" field "${field}" must be a string`;
-      }
-      if (expected === 'array' && !Array.isArray(value)) {
-        return `Command "${cmd}" field "${field}" must be an array`;
-      }
+      if (expected === 'number' && typeof value !== 'number') return `Command "${cmd}" field "${field}" must be a number`;
+      if (expected === 'non-empty-string' && (typeof value !== 'string' || !value.trim())) return `Command "${cmd}" field "${field}" must be a non-empty string`;
+      if (expected === 'string' && typeof value !== 'string') return `Command "${cmd}" field "${field}" must be a string`;
+      if (expected === 'array' && !Array.isArray(value)) return `Command "${cmd}" field "${field}" must be an array`;
     }
+  }
+  if (payload.preferredEp !== undefined && typeof payload.preferredEp !== 'string') return `Command "${cmd}" field "preferredEp" must be a string`;
+  if (cmd === 'startService' && payload.alias !== undefined && (typeof payload.alias !== 'string' || !payload.alias.trim())) return `Command "startService" field "alias" must be a non-empty string`;
+  if ((cmd === 'chatCompletion' || cmd === 'transcribeAudio') && payload.temperature !== undefined && typeof payload.temperature !== 'number') return `Command "${cmd}" field "temperature" must be a number`;
+  if (cmd === 'chatCompletion') {
+    if (payload.stream !== undefined && typeof payload.stream !== 'boolean') return `Command "chatCompletion" field "stream" must be a boolean`;
+    if (payload.maxTokens !== undefined && typeof payload.maxTokens !== 'number') return `Command "chatCompletion" field "maxTokens" must be a number`;
   }
   // Lane validation for commands that accept a lane field
   if (LANE_CMDS.has(cmd) && payload.lane !== undefined && !VALID_LANES.has(payload.lane)) {
