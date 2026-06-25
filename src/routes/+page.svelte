@@ -2718,7 +2718,7 @@ Output only the summary text, no preamble.`;
                       if (next) queueMicrotask(positionPersonaMenu);
                     }}
                   >
-                    <Icon name="masks" size={16} />
+                    <Icon name="masks" size={16} label="Choose persona" />
                   </button>
 
                   {#if showPersonaMenu}
