@@ -62,138 +62,256 @@ This is not "feature complete forever"; it is a valid 0.1 checkpoint with clear 
 
 ---
 
-## 3) MVP 0.2 Plan
+## 3) MVP 0.2 Plan (rubber-ducked and scope-locked)
 
-## Theme A — Security hardening
+### MVP 0.2 objectives
 
-1. **Shell capability reduction**
-   - Replace broad `node + args:true` permission with narrowly scoped invocation.
-   - Prefer a dedicated Rust command wrapper for sidecar lifecycle where feasible.
+- Harden trust boundaries (renderer + sidecar + shell permissions).
+- Support practical multi-endpoint use without full scheduler complexity.
+- Raise confidence with deterministic tests and CI quality gates.
+- Investigate tool calling as a Foundry Local capability surfaced through Flint, not as a separate Flint-native tool runtime.
+- Add realtime voice dictation into the chatbox so speech can become text input without a record-then-transcribe detour.
 
-2. **Command boundary hardening**
-   - Introduce strict sidecar command schema validation (input shape, types, limits).
-   - Enforce explicit allowlist per command and reject unknown fields.
+### What is explicitly in 0.2 (must-have)
 
-3. **Output safety**
-   - Add security regression tests for markdown/html sanitization.
-   - Verify CSP and WebView settings for script injection resistance.
+1. **Security boundary hardening**
+   - Replace broad shell invocation surface with least-privilege settings.
+   - Introduce strict sidecar command schema validation (type/shape/limits).
+   - Enforce explicit command allowlist and reject unknown fields.
+   - Add renderer sanitization regression tests and validate CSP/WebView posture.
 
-4. **Operational safety**
-   - Add structured audit events for model load/unload, service start/stop, and endpoint profile changes.
+2. **Minimal multi-endpoint architecture (no scheduler yet)**
+   - Add endpoint profiles (name/type/base URL/auth/routing role).
+   - Add explicit lane routing:
+     - chat lane -> selected chat endpoint
+     - audio lane -> selected audio endpoint
+   - Keep model-to-endpoint strategy simple: one active model per endpoint lane.
 
-## Theme B — Testing expansion
+3. **Testing and quality gates**
+   - Expand sidecar contract tests (error paths, malformed payloads, cancellation timing).
+   - Add deterministic Tauri smoke flow in CI: launch -> init -> model list -> chat -> audio happy path.
+   - Increment coverage thresholds and widen include scope per milestone.
 
-1. **Component testing**
-   - Stabilize Svelte component test harness and restore direct component interaction tests.
+4. **Tool-calling security + UX investigation**
+   - Map which tool-capable scenarios are actually provided by Foundry Local / OpenAI-compatible endpoints.
+   - Define what Flint owns: endpoint setup, profile management, snippets, visibility, and auditability.
+   - Decide how user confirmation, allowlisting, and prompt-injection protections should behave before any agent-like execution is exposed.
 
-2. **Sidecar contract testing**
-   - Expand protocol tests to include error-path, cancellation timing, malformed payload, and large-response behavior.
+5. **Realtime voice input**
+   - Add push-to-talk / live dictation support that inserts partial speech-to-text into the chatbox.
+   - Reuse the existing transcription pipeline where possible, but optimize for low-latency incremental text updates.
+   - Keep the existing record-and-transcribe flow as the fallback path.
 
-3. **E2E smoke tests**
-   - Add a minimal Tauri smoke flow: launch -> initialize -> model list -> chat send -> audio transcribe happy path.
+### Deferred from 0.2 (post-0.2/1.0+)
 
-4. **Acceleration validation matrix**
-   - Add repeatable tests for execution provider detection, accelerator install/update flow, and preference propagation behavior.
-   - Validate expected behavior for CPU-only, GPU-ready, and NPU-ready environments.
+- Endpoint scheduler (sticky routing + fallback orchestration).
+- Role-like controls for shared environments.
+- LRU unload/admission control engine.
+- Full telemetry dashboard (latency percentiles, memory trends, error analytics).
+- Hardware matrix automation in CI (CPU/GPU/NPU) beyond manual/nightly validation.
 
-5. **Quality gates**
-   - Raise coverage thresholds in increments and widen include scope each milestone.
+### Milestones and sequencing
 
-## Theme C — Multi-endpoint architecture
+1. **M1 — Contract freeze + scope lock**
+   - Version sidecar protocol contract and define validation rules.
+   - Publish explicit 0.2 non-goals.
 
-### Goal
+2. **M2 — Security hardening**
+   - Implement shell capability reduction.
+   - Implement sidecar schema + allowlist enforcement.
+   - Add sanitization/CSP regression tests.
 
-Support multiple local/remote endpoints concurrently (local Foundry endpoint(s), Azure/OpenAI-compatible endpoints, and tool-specific endpoints such as OpenClaw integrations).
+3. **M3 — Multi-endpoint foundation**
+   - Implement endpoint profiles and secure local storage for credentials.
+   - Implement explicit chat/audio lane routing.
+   - Verify no chat/audio model thrash in normal workflows.
 
-### Proposed model
+4. **M4 — Reliability + CI confidence**
+   - Expand sidecar contract tests (cancel/error/malformed/large payload).
+   - Add/solidify deterministic Tauri smoke test in CI.
+   - Raise coverage gate and widen target modules.
 
-1. **Endpoint Profiles**
-   - Each profile stores: name, type, base URL, auth mode, active model policy, max concurrency, memory budget hint.
-   - Examples:
-     - `Local Chat (Foundry @5272)`
-     - `Local Audio (Foundry @5273)`
-     - `OpenClaw Tool Endpoint`
-     - `Azure AI Foundry Endpoint`
+5. **M5 — Optional stretch (only if ahead)**
+   - Basic endpoint health snapshot in diagnostics export.
+   - Initial observability counters (queue depth, active lane/endpoint).
 
-2. **Endpoint Manager**
-   - Central scheduler routes requests by task type (chat/audio/tooling) and endpoint health.
-   - Supports sticky routing (conversation pinned to endpoint) and fallback routing.
+### MVP 0.2 exit criteria (verifiable)
 
-3. **Model-to-endpoint strategy**
-   - Option A: one model per endpoint (simpler, clearer memory accounting).
-   - Option B: shared endpoint pool with dynamic model switching (higher churn risk).
-   - 0.2 recommendation: start with **Option A**.
-
-### User management impact
-
-- Introduce **workspace profiles** (single-user desktop first) to isolate:
-  - endpoint credentials
-  - model defaults
-  - conversation routing preferences
-- Add role-like controls for shared environments (future):
-  - admin (manage endpoints/secrets)
-  - user (consume endpoints only)
-
-### Memory requirements & management
-
-1. **Per-endpoint memory budget**
-   - Track configured and observed memory per endpoint.
-2. **Admission control**
-   - Refuse or queue model loads that exceed configured budget.
-3. **LRU unload policy**
-   - Auto-unload inactive models to free memory.
-4. **Telemetry**
-   - Report RSS/VRAM/NPU usage, load times, queue depth, and OOM events.
-5. **UX**
-   - Live "capacity meter" with warnings before model switch/load.
-
-### Monitoring plan
-
-- Endpoint dashboard with:
-  - health status
-  - latency percentiles
-  - active sessions
-  - memory trend
-  - error rate
-- Diagnostics export includes endpoint profile inventory + health snapshots.
-
-### Why this helps OpenClaw and other tools
-
-- Tooling endpoints can be isolated from chat/audio workloads.
-- Enables stable integrations with dedicated credentials and throughput limits.
-- Reduces model thrash by separating "interactive chat" and "tool-runner" lanes.
+- **Security:** least-privilege shell capability model in place; sidecar rejects invalid/unknown payloads.
+- **Architecture:** chat and audio can run on different configured endpoints in same session without forced lane contention.
+- **Reliability:** cancellation and invalid payload behavior are deterministic and tested.
+- **Quality:** CI runs unit + contract + smoke tests; coverage threshold increased from 0.1 baseline.
+- **Tooling:** tool-calling boundaries are documented, and the Flint/Foundry Local split is explicit in docs and UI copy.
+- **Voice:** dictation can feed the chatbox in real time, with a clear fallback to the current transcription flow.
 
 ---
 
-## 4) Additional Future Milestones (post-0.2 ideas)
+## 4) MVP 0.3 Plan
+
+### 0.3 objectives
+
+- Generalize the two-lane model into a flexible model pool so any number of models (chat, audio, or otherwise) can be resident simultaneously based on hardware availability.
+- Add a real-time monitoring view that surfaces who is using the local endpoint, what resources are consumed, and what the runtime is doing.
+- Begin network security management: access controls and per-client logging for the local OpenAI-compatible service.
+- Research and define the routing architecture before committing to a scheduler design.
+- Easy setup options to configure Foundry Local as backend for OpenClaw, Claude Code, etc.
+
+### Open research item: routing architecture
+
+Routing in Flint touches several layers and needs deliberate design before any scheduler is built:
+
+- **Request routing**: when multiple models are loaded, which one handles an incoming request? Options include explicit user selection (current), capability-based auto-routing (vision requests → vision model, audio → STT model), and queue-depth-based routing (route to the least-busy loaded model).
+- **Endpoint routing**: when the user has both a local Foundry model and a remote Azure endpoint configured, which endpoint gets a given conversation? Sticky-by-conversation, explicit per-chat selection, or rule-based (e.g. "use local unless prompt exceeds context length")?
+- **Fallback routing**: if the primary model is evicted or the endpoint is unreachable, automatically retry on a configured secondary. Requires health-check awareness.
+- **Load balancing**: if multiple instances of Foundry Local are running (or multiple endpoints are healthy), distribute load across them. Likely only relevant for team/shared deployments; probably post-1.0.
+
+**Recommended approach for 0.3**: do the spike on model pool behavior first (section 1 below), then design the capability-based auto-routing rules as the only new routing in 0.3. Defer the full scheduler (sticky, fallback, load balancing) to 0.4 or later once the pool behavior is understood empirically.
+
+### What is in 0.3 (proposed)
+
+1. **Model pool (replaces named lanes)**
+   - Replace `lane.chat` / `lane.audio` with a `Map<alias, LoadedModel>` pool in the sidecar.
+   - `ensureModel(alias)` loads into the pool if absent; all callers (chat, audio, dictation) request by alias.
+   - Keep the current lane routing hints (`lane?: 'chat' | 'audio'`) as soft labels for routing preference, not hard ownership.
+   - Hardware-aware admission: before loading, estimate model VRAM footprint from catalog metadata and compare against available headroom. Fail gracefully with a clear "not enough memory" message rather than silent eviction.
+   - Hot-switch: when the user switches chat models, the old model stays resident until explicitly unloaded or memory pressure forces eviction. No forced unload on switch.
+   - **Prerequisite spike**: confirm whether Foundry Local will keep two chat-class models resident simultaneously without silently evicting one. If it evicts, design budget-aware proactive eviction instead of optimistic pooling. Run this spike before designing the pool API.
+
+2. **Monitoring view** (new nav section)
+   - Live snapshot of the model pool: each loaded model with alias, lane hint, estimated VRAM, and last-used timestamp.
+   - Token counters: cumulative input/output tokens per model per session (tracked in sidecar, surfaced via `getStatus`).
+   - Memory gauge: reported or estimated resident memory per loaded model; aggregate vs. available.
+   - Active request indicator: whether a stream is in progress, which model, elapsed time.
+   - Client access log: for each request to the local service, log the source IP / process hint, timestamp, model, and request type (chat/audio/other). Display as a rolling table in the monitoring view.
+   - Depends on network security work below to make client identity trustworthy.
+
+3. **Network security and access logging** (prerequisite for meaningful monitoring)
+   - Bind the local service to `127.0.0.1` only by default (reject connections from other hosts unless explicitly configured).
+   - Add a per-request access log in the sidecar: `{ ts, sourceIp, method, path, modelAlias, durationMs, tokensIn, tokensOut }`.
+   - Expose the access log via a sidecar command (`getAccessLog`) and surface it in the monitoring view.
+   - Optional allowlist: let the user configure which IPs or local process names may connect. Block others with a 403.
+   - Note: process identification from an HTTP request is not reliably available cross-platform; surface IP + user-agent as a best-effort proxy. Document the limitation clearly in the UI.
+
+4. **Keyboard shortcuts**
+   - Global shortcuts for send, new chat, model switch, push-to-talk dictation, view navigation.
+   - Configurable bindings stored in settings; displayed in a shortcuts reference panel.
+
+5. **Auto-start and default model configuration**
+   - Set one or more models to load automatically when Flint launches.
+   - Optional OS-level startup: register Flint as a login item (Windows startup / macOS Login Items) so the endpoint is available before the user opens the window.
+   - Per-model startup role: mark a model as "default chat" or "default audio" so the UI pre-selects it without manual intervention.
+
+6. **CI/CD and installer improvements**
+   - Build signed installers (Windows MSIX/EXE, macOS DMG with notarization) in CI.
+   - Automated version bump and changelog generation on tag.
+   - Delta/auto-update channel so users get patch releases without manual reinstall.
+
+### Deferred from 0.3 to later
+
+- Full endpoint scheduler (sticky routing, fallback, health-check-based failover).
+- Persistent telemetry storage across sessions (token trend graphs, memory history).
+- Role-based access controls for shared-machine or shared-network scenarios.
+- Azure AI Foundry cloud connections (still high-priority but blocked on 0.3 security foundation).
+
+---
+
+## 5) MVP 0.4 Plan (outline)
+
+### 0.4 objectives
+
+Expand Flint's inference capabilities beyond single-turn chat into multi-modal, retrieval-augmented, and comparative workflows. Add the enterprise control layer that makes shared and managed deployments viable.
+
+### What is in 0.4 (proposed)
+
+1. **Tool calling — execution layer**
+   - 0.2 documented the boundary (Foundry Local emits `tool_calls`; Flint does not execute). 0.4 adds opt-in execution inside Flint for a limited, user-confirmed tool set.
+   - User defines an allowlist of tools (shell commands, file reads, HTTP calls). Each tool invocation requires explicit one-time or session-scoped confirmation.
+   - Visible audit trail: every tool execution logged with inputs, outputs, and which model requested it.
+   - Prompt-injection guard: heuristic scan of model output before executing any tool call.
+   - Non-goal: autonomous multi-step agent loops without confirmation. Every tool execution is a manual gate.
+
+### Open architectural decision: agent loops — Flint-native vs. upstream delegation
+
+**The question**: should Flint ever run autonomous multi-step agent loops (model calls a tool, sees the result, calls another tool, repeats without user confirmation per step), or should that always be delegated to purpose-built tools like OpenClaw and Scout?
+
+**Recommendation: delegate to upstream tools, with one narrow exception.**
+
+Reasons to delegate:
+
+- OpenClaw, Scout, and similar tools are purpose-built for agentic workflows: they have loop management, tool registries, sandboxing, permission models, and observability that would take significant effort to replicate well.
+- Flint's architecture (Tauri desktop app, sidecar process) is optimized for interactive use, not long-running headless agent processes. A multi-minute autonomous loop running inside Flint while the user does something else is a poor fit.
+- Duplicating agent loop logic creates a fragmented ecosystem where users have to choose between Flint-agents and OpenClaw-agents for the same models. Better to make Flint the best possible backend for OpenClaw and Scout to connect to.
+- Security surface: every tool execution step that doesn't require confirmation is an attack surface. Flint's local-first posture makes this risk higher, not lower.
+
+The narrow exception — **user-initiated linear chains**:
+A linear chain (run prompt A → pipe output into prompt B → show final result, with user triggering each step) is meaningfully different from an autonomous loop. It is closer to the model bake-off feature (0.4) than to agentic execution. If demand exists, Flint could support 2–3 step user-confirmed pipelines as a UI feature without building a general agent runtime. This would look like a "chain" tab, not an "agent" mode.
+
+**Decision to make before 0.4 tool calling work begins**: confirm with OpenClaw and Scout maintainers whether there are integration gaps that only a Flint-native execution layer could fill. If the answer is no, keep the manual-gate model and improve the endpoint/tool-call visibility surface instead.
+
+2. **RAG (retrieval-augmented generation)**
+   - Index local folders or files into an embedded vector store (e.g. sqlite-vec or a lightweight HNSW store).
+   - At query time, retrieve relevant chunks and inject into the system/context window before sending to the model.
+   - UI: attach a knowledge base to a conversation; show which chunks were retrieved and their sources.
+   - Scope: local files only for 0.4. Remote/URL indexing deferred.
+
+3. **Vision — multi-image and previews**
+   - Extend the existing single-image attach to support multiple images per message.
+   - Inline image preview thumbnails in the chat thread before and after submission.
+   - Drag-and-drop image attachment directly into the chat input area.
+   - Scope-gated by catalog: only surfaces for models whose capability flags include vision.
+
+1. **Model comparison / bake-off**
+   - Run a single prompt simultaneously against two or more loaded models and display responses side-by-side.
+   - Optional scoring: rate each response (thumbs up/down or 1–5) to build a local preference log.
+   - Export comparison results as markdown or JSON for external analysis.
+   - Depends on the 0.3 model pool — multiple models must be resident simultaneously for this to be low-latency.
+
+2. **Workspace export / import**
+   - Export a workspace bundle: selected models list, endpoint profiles, personas, conversation history, settings.
+   - Import a bundle to restore or migrate to another machine.
+   - Credentials (auth tokens) excluded from export bundles; user must re-enter on import.
+
+3. **Enterprise controls and policy engine**
+   - Network configuration: choose bind address, port, and allowed CIDR ranges for the local service.
+   - Access policies: per-model or per-endpoint allow/deny rules; optional API key requirement for the local service.
+   - Audit log export: structured JSON/CSV export of the access log (from 0.3 monitoring) with retention settings.
+   - Policy file: machine-level JSON config that can be pre-deployed by IT to enforce defaults before user launch.
+
+### Deferred from 0.4 to later
+
+- Azure AI Foundry cloud connections.
+- Multi-user or shared-server deployment mode.
+- Persistent token trend graphs and memory history across sessions.
+
+---
+
+## 6) Additional Future Milestones (post-0.4 ideas)
 
 1. **Plugin-style connector framework**
    - Add provider adapters (Azure/OpenAI-compatible, additional local runtimes) behind one interface.
 2. **Conversation intelligence**
    - Per-conversation endpoint pinning, retry policy, and export/import.
-3. **Enterprise ops pack**
-   - Policy enforcement, signed diagnostics, audit retention settings.
-4. **Performance toolkit**
+3. **Performance toolkit**
    - Benchmark mode for model + endpoint comparisons (latency, throughput, memory).
-5. **User onboarding**
+4. **User onboarding**
    - Guided setup for endpoint profiles and tool integration recipes.
-6. **Model catalog details v2 (backlog)**
+5. **Model catalog details v2 (backlog)**
    - Expand model details modal with full upstream metadata, benchmark notes, and platform-specific acceleration compatibility matrix (Windows/macOS/Linux).
    - Replace heuristic memory guidance with measured baseline telemetry per model/provider where available.
    - Add an inventory view that can list all models with per-model disk usage and supported acceleration providers.
-
-7. **Deferred hardening items (queued)**
+6. **Deferred hardening items (queued)**
    - Add defensive environment guards for `DOMParser` / `NodeFilter` in message sanitization so utility calls remain safe if reused in non-browser execution contexts.
    - Improve sidecar audio input reliability by validating actual WAV bytes (or adding explicit transcoding) instead of relying on filename extension conventions.
    - Broaden coverage gating beyond the current narrow include list so new SDK/sidecar logic changes affect quality gates by default.
 
 ---
 
-## 5) What Release 1.0 Should Look Like
+## 7) What Release 1.0 Should Look Like
 
 Release 1.0 should represent **production-grade local AI operations**, not just "working features."
 
 ### 1.0 release criteria
+
 1. **Security**
    - Principle-of-least-privilege shell/capability model in place.
    - Security test suite for renderer/sidecar boundaries.
@@ -213,4 +331,5 @@ Release 1.0 should represent **production-grade local AI operations**, not just 
    - Deployment/admin guide, troubleshooting runbook, versioned release notes.
 
 ### 1.0 statement
+
 If 0.1 is "usable MVP" and 0.2 is "hardened + scalable architecture", then **1.0 is "operationally trustworthy."**

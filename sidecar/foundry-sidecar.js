@@ -27,19 +27,146 @@ const __dirname = path.dirname(__filename);
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
+// --- Command allowlist and schema (mirrors src/lib/ipc-contracts.ts) ---
+const KNOWN_COMMANDS = new Set([
+  'init', 'setLogLevel', 'startService', 'stopService', 'getStatus',
+  'listModels', 'download', 'load', 'unload', 'deleteModel', 'getEndpoint',
+  'chatCompletion', 'cancelChatRequest', 'transcribeAudio',
+  'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',
+]);
+
+// Per-command type requirements. Keys are required or optional field names; values are:
+// 'number', 'string' (any string), 'non-empty-string', 'array'.
+const FIELD_TYPES = {
+  init:              { appName: 'non-empty-string', logLevel: 'non-empty-string' },
+  setLogLevel:       { level: 'non-empty-string' },
+  startService:      { port: 'number' },
+  download:          { alias: 'non-empty-string' },
+  load:              { alias: 'non-empty-string' },
+  unload:            { alias: 'non-empty-string' },
+  deleteModel:       { alias: 'non-empty-string' },
+  chatCompletion:    { model: 'non-empty-string', messages: 'array' },
+  cancelChatRequest: { requestId: 'number' },
+  transcribeAudio:   { audioBase64: 'string', mimeType: 'non-empty-string', fileName: 'non-empty-string', model: 'non-empty-string', language: 'non-empty-string' },
+};
+
+// Commands that accept a lane field; validated to 'chat' | 'audio'.
+const LANE_CMDS = new Set(['load', 'unload']);
+const VALID_LANES = new Set(['chat', 'audio']);
+
+// Each entry lists required fields and all allowed optional fields.
+// Payloads with unknown fields are rejected to prevent injection attacks.
+const COMMAND_SCHEMA = {
+  init:               { required: ['appName', 'logLevel'], optional: [] },
+  setLogLevel:        { required: ['level'], optional: [] },
+  startService:       { required: ['port'], optional: ['alias', 'preferredEp'] },
+  stopService:        { required: [], optional: [] },
+  getStatus:          { required: [], optional: [] },
+  listModels:         { required: [], optional: [] },
+  download:           { required: ['alias'], optional: [] },
+  load:               { required: ['alias'], optional: ['lane'] },
+  unload:             { required: ['alias'], optional: ['lane'] },
+  deleteModel:        { required: ['alias'], optional: [] },
+  getEndpoint:        { required: [], optional: [] },
+  chatCompletion:     { required: ['model', 'messages'], optional: ['maxTokens', 'temperature', 'preferredEp', 'stream'] },
+  cancelChatRequest:  { required: ['requestId'], optional: [] },
+  transcribeAudio:    { required: ['audioBase64', 'mimeType', 'fileName', 'model', 'language'], optional: ['temperature', 'preferredEp'] },
+  getEps:             { required: [], optional: [] },
+  ensureAccelerators: { required: [], optional: [] },
+  getVisionModels:    { required: [], optional: [] },
+  getSTTModels:       { required: [], optional: [] },
+};
+
+// Base64 character limit for transcribeAudio. 50 MB decoded audio is ~67 MB of base64.
+const AUDIO_BASE64_MAX_CHARS = Math.ceil(50 * 1024 * 1024 * 4 / 3);
+
+/**
+ * Validates a command name and its payload fields.
+ * Returns an error string if invalid, or null if the command is well-formed.
+ */
+function validateCommand(cmd, payload) {
+  if (!KNOWN_COMMANDS.has(cmd)) {
+    return `Unknown command: ${cmd}`;
+  }
+  const schema = COMMAND_SCHEMA[cmd];
+  for (const field of schema.required) {
+    if (payload[field] === undefined) {
+      return `Command "${cmd}" missing required field: ${field}`;
+    }
+  }
+  const knownFields = new Set([...schema.required, ...schema.optional]);
+  for (const field of Object.keys(payload)) {
+    if (!knownFields.has(field)) {
+      return `Command "${cmd}" has unknown field: ${field}`;
+    }
+  }
+  // Type/value validation (required + selected optional fields)
+  const typeRules = FIELD_TYPES[cmd];
+  if (typeRules) {
+    for (const [field, expected] of Object.entries(typeRules)) {
+      const value = payload[field];
+      if (value === undefined) continue; // already caught by required check above
+      if (expected === 'number' && typeof value !== 'number') return `Command "${cmd}" field "${field}" must be a number`;
+      if (expected === 'non-empty-string' && (typeof value !== 'string' || !value.trim())) return `Command "${cmd}" field "${field}" must be a non-empty string`;
+      if (expected === 'string' && typeof value !== 'string') return `Command "${cmd}" field "${field}" must be a string`;
+      if (expected === 'array' && !Array.isArray(value)) return `Command "${cmd}" field "${field}" must be an array`;
+    }
+  }
+  if (payload.preferredEp !== undefined && typeof payload.preferredEp !== 'string') return `Command "${cmd}" field "preferredEp" must be a string`;
+  if (cmd === 'startService' && payload.alias !== undefined && (typeof payload.alias !== 'string' || !payload.alias.trim())) return `Command "startService" field "alias" must be a non-empty string`;
+  if ((cmd === 'chatCompletion' || cmd === 'transcribeAudio') && payload.temperature !== undefined && typeof payload.temperature !== 'number') return `Command "${cmd}" field "temperature" must be a number`;
+  if (cmd === 'chatCompletion') {
+    if (payload.stream !== undefined && typeof payload.stream !== 'boolean') return `Command "chatCompletion" field "stream" must be a boolean`;
+    if (payload.maxTokens !== undefined && typeof payload.maxTokens !== 'number') return `Command "chatCompletion" field "maxTokens" must be a number`;
+  }
+  // Lane validation for commands that accept a lane field
+  if (LANE_CMDS.has(cmd) && payload.lane !== undefined && !VALID_LANES.has(payload.lane)) {
+    return `Command "${cmd}" invalid lane "${payload.lane}": must be "chat" or "audio"`;
+  }
+  if (cmd === 'transcribeAudio' && payload.audioBase64.length > AUDIO_BASE64_MAX_CHARS) {
+    return `Command "transcribeAudio" audioBase64 exceeds maximum allowed size`;
+  }
+  return null;
+}
+// --- end allowlist ---
+
 let manager = null;
-let currentEndpoint = null;
-let currentModel = null;
 let FoundryLocalManager = null;
 const canceledRequests = new Set();
 
-async function applyPreferredExecutionProvider (preferredEp) {
+// Per-lane model and endpoint state.
+// Each lane tracks its own loaded model independently, preventing chat/audio thrash.
+// sharedEndpoint is set by startService and used by both lanes as the default HTTP endpoint.
+const lane = {
+  chat:  { model: null, endpoint: null },
+  audio: { model: null, endpoint: null },
+};
+let sharedEndpoint = null;
+
+function resolveLaneEndpoint(which) {
+  return lane[which].endpoint || sharedEndpoint;
+}
+
+async function ensureLaneModel(which, alias) {
+  const existing = lane[which].model;
+  if (!existing || existing.alias !== alias) {
+    lane[which].model = await manager.catalog.getModel(alias);
+    await lane[which].model.load();
+    log('info', `Model ${alias} loaded in ${which} lane`);
+  } else if (typeof existing.isLoaded === 'boolean' && !existing.isLoaded) {
+    await existing.load();
+    log('info', `Model ${alias} reloaded (runtime eviction) in ${which} lane`);
+  }
+  return lane[which].model;
+}
+
+async function applyPreferredExecutionProvider (preferredEp, model) {
   const value = String(preferredEp || '').trim();
   if (!value || !manager) {
     return { requested: value || null, applied: null, method: null };
   }
 
-  const candidateTargets = [manager, currentModel].filter(Boolean);
+  const candidateTargets = [manager, model].filter(Boolean);
   const candidateMethods = [
     'setPreferredExecutionProvider',
     'setPreferredEp',
@@ -234,6 +361,7 @@ async function getFoundryManager () {
 }
 
 rl.on('line', async (line) => {
+  if (!line.trim()) return;
   let msg;
   try {
     msg = JSON.parse(line);
@@ -242,11 +370,22 @@ rl.on('line', async (line) => {
     return;
   }
 
+  if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {
+    send({ id: null, error: 'Invalid message: expected JSON object' });
+    return;
+  }
+
   const { id, cmd, ...payload } = msg;
 
   const reply = (result) => {
     send({ id, ...result });
   };
+
+  const validationError = validateCommand(cmd, payload);
+  if (validationError) {
+    reply({ error: validationError });
+    return;
+  }
 
   try {
     if (cmd === 'init') {
@@ -292,20 +431,25 @@ rl.on('line', async (line) => {
       await model.download((p) => send({ id, progress: p, alias: payload.alias }));
       reply({ ok: true });
     } else if (cmd === 'load') {
-      currentModel = await manager.catalog.getModel(payload.alias);
-      await currentModel.load();
+      const which = payload.lane || 'chat';
+      log('info', `Loading model ${payload.alias} into ${which} lane`);
+      const loaded = await ensureLaneModel(which, payload.alias);
       const acceleration = {
-        requested: payload.preferredEp ? String(payload.preferredEp).trim() : null,
-        active: await detectActiveExecutionProvider(currentModel)
+        requested: null,
+        active: await detectActiveExecutionProvider(loaded)
       };
-      log('info', `Model ${payload.alias} loaded`);
-      reply({ ok: true, result: { acceleration } });
+      log('info', `Model ${payload.alias} ready in ${which} lane (accel: ${acceleration.active || 'cpu'})`);
+      reply({ ok: true, result: { acceleration, lane: which } });
     } else if (cmd === 'unload') {
-      if (currentModel) {
-        await currentModel.unload();
-        log('info', `Model unloaded`);
+      const alias = payload.alias;
+      const which = payload.lane ||
+        (lane.chat.model?.alias === alias ? 'chat' :
+         lane.audio.model?.alias === alias ? 'audio' : null);
+      if (which && lane[which].model) {
+        await lane[which].model.unload();
+        lane[which].model = null;
+        log('info', `Model ${alias} unloaded from ${which} lane`);
       }
-      currentModel = null;
       reply({ ok: true });
     } else if (cmd === 'deleteModel') {
       if (!payload.alias) {
@@ -315,9 +459,11 @@ rl.on('line', async (line) => {
       if (!model) {
         throw new Error(`Model not found: ${payload.alias}`);
       }
-      if (currentModel && currentModel.alias === payload.alias && typeof currentModel.unload === 'function') {
-        await currentModel.unload();
-        currentModel = null;
+      for (const which of ['chat', 'audio']) {
+        if (lane[which].model?.alias === payload.alias && typeof lane[which].model.unload === 'function') {
+          await lane[which].model.unload();
+          lane[which].model = null;
+        }
       }
       const deleteMethods = ['delete', 'remove', 'removeFromDisk', 'purgeCache', 'uninstall'];
       let deleted = false;
@@ -337,69 +483,70 @@ rl.on('line', async (line) => {
     } else if (cmd === 'startService') {
       const desired = payload.alias;
       if (desired) {
-        if (!currentModel || currentModel.alias !== desired) {
-          currentModel = await manager.catalog.getModel(desired);
-          await currentModel.load();
-          log('info', `Model ${desired} loaded during service start`);
-        }
+        await ensureLaneModel('chat', desired);
       }
-      const preferred = await applyPreferredExecutionProvider(payload.preferredEp);
-      if (!currentModel) {
-        throw new Error('No model loaded (pass alias or load first)');
+      const preferred = await applyPreferredExecutionProvider(payload.preferredEp, lane.chat.model);
+      if (!lane.chat.model) {
+        throw new Error('No model loaded in chat lane (pass alias or load first)');
       }
       // Use the SDK's web service if available
       if (typeof manager.startWebService === 'function') {
         const info = await manager.startWebService({ port: payload.port || 5272 });
-        currentEndpoint = info?.endpoint || info?.url || `http://localhost:${payload.port || 5272}/v1`;
+        sharedEndpoint = info?.endpoint || info?.url || `http://localhost:${payload.port || 5272}/v1`;
       } else {
-        // Fallback - the sidecar itself can't easily serve, but we can report default
-        // In practice the main app or another mechanism would use the endpoint
-        currentEndpoint = `http://localhost:${payload.port || 5272}/v1`;
+        sharedEndpoint = `http://localhost:${payload.port || 5272}/v1`;
       }
-      log('info', `Service started at ${currentEndpoint}`);
+      log('info', `Service started at ${sharedEndpoint}`);
       reply({
         ok: true,
-        endpoint: currentEndpoint,
+        endpoint: sharedEndpoint,
         result: {
           acceleration: {
             requested: preferred?.requested ?? null,
             preferredApplied: preferred?.applied ?? null,
-            active: await detectActiveExecutionProvider(currentModel)
+            active: await detectActiveExecutionProvider(lane.chat.model)
           }
         }
       });
     } else if (cmd === 'stopService') {
-      // Best effort
-      currentEndpoint = null;
-      log('info', 'Service stop requested');
+      if (manager && typeof manager.stopWebService === 'function') {
+        try {
+          await manager.stopWebService();
+        } catch (e) {
+          log('warn', `stopWebService error (ignored): ${e?.message ?? e}`);
+        }
+      }
+      sharedEndpoint = null;
+      lane.chat.endpoint = null;
+      lane.audio.endpoint = null;
+      log('info', 'Service stopped');
       reply({ ok: true });
     } else if (cmd === 'getEndpoint') {
-      reply({ ok: true, endpoint: currentEndpoint });
+      reply({ ok: true, endpoint: sharedEndpoint });
     } else if (cmd === 'getStatus') {
       reply({
         ok: true,
         result: {
           initialized: !!manager,
-          modelLoaded: !!currentModel,
-          currentModel: currentModel?.alias,
-          endpoint: currentEndpoint,
-          serviceRunning: !!currentEndpoint
+          modelLoaded: !!(lane.chat.model || lane.audio.model),
+          currentModel: lane.chat.model?.alias,
+          endpoint: sharedEndpoint,
+          serviceRunning: !!sharedEndpoint,
+          chatLane: { model: lane.chat.model?.alias || null, endpoint: lane.chat.endpoint || sharedEndpoint || null },
+          audioLane: { model: lane.audio.model?.alias || null, endpoint: lane.audio.endpoint || sharedEndpoint || null },
         }
       });
     } else if (cmd === 'chatCompletion') {
-      const apiBase = getOpenAiApiBase(currentEndpoint);
-      const modelAlias = payload.model || currentModel?.alias;
+      const modelAlias = payload.model || lane.chat.model?.alias;
       const shouldStream = !!payload.stream;
       canceledRequests.delete(id);
       if (!modelAlias) {
         throw new Error('No model selected for chat completion.');
       }
-      if (!currentModel || currentModel.alias !== modelAlias) {
-        currentModel = await manager.catalog.getModel(modelAlias);
-        await currentModel.load();
-        log('info', `Model ${modelAlias} loaded during chat completion`);
-      }
-      const preferred = await applyPreferredExecutionProvider(payload.preferredEp);
+      log('debug', `Chat completion: model=${modelAlias} msgs=${payload.messages?.length ?? 0} stream=${shouldStream}`);
+      const chatModel = await ensureLaneModel('chat', modelAlias);
+      const apiBase = getOpenAiApiBase(resolveLaneEndpoint('chat'));
+      const preferred = await applyPreferredExecutionProvider(payload.preferredEp, chatModel);
 
       const sdkMessages = toSdkMessages(payload.messages);
       if (!sdkMessages.length) {
@@ -407,8 +554,8 @@ rl.on('line', async (line) => {
       }
 
       // Prefer direct SDK inference to avoid web-service schema/version mismatch issues.
-      if (typeof currentModel?.createChatClient === 'function') {
-        const client = currentModel.createChatClient();
+      if (typeof chatModel?.createChatClient === 'function') {
+        const client = chatModel.createChatClient();
         if (shouldStream && typeof client?.completeStreamingChat === 'function') {
           let content = '';
           for await (const chunk of client.completeStreamingChat(sdkMessages)) {
@@ -446,7 +593,7 @@ rl.on('line', async (line) => {
               acceleration: {
                 requested: preferred?.requested ?? null,
                 preferredApplied: preferred?.applied ?? null,
-                active: await detectActiveExecutionProvider(currentModel)
+                active: await detectActiveExecutionProvider(chatModel)
               }
             }
           });
@@ -472,7 +619,7 @@ rl.on('line', async (line) => {
               acceleration: {
                 requested: preferred?.requested ?? null,
                 preferredApplied: preferred?.applied ?? null,
-                active: await detectActiveExecutionProvider(currentModel)
+                active: await detectActiveExecutionProvider(chatModel)
               }
             }
           });
@@ -493,7 +640,7 @@ rl.on('line', async (line) => {
               acceleration: {
                 requested: preferred?.requested ?? null,
                 preferredApplied: preferred?.applied ?? null,
-                active: await detectActiveExecutionProvider(currentModel)
+                active: await detectActiveExecutionProvider(chatModel)
               }
             }
           });
@@ -501,7 +648,7 @@ rl.on('line', async (line) => {
           throw new Error('Model chat client does not expose completion methods');
         }
       } else {
-        if (!currentEndpoint) {
+        if (!resolveLaneEndpoint('chat')) {
           throw new Error('Service endpoint unavailable and direct chat client is unsupported.');
         }
         const resp = await fetch(`${apiBase}/chat/completions`, {
@@ -527,7 +674,7 @@ rl.on('line', async (line) => {
             acceleration: {
               requested: preferred?.requested ?? null,
               preferredApplied: preferred?.applied ?? null,
-              active: await detectActiveExecutionProvider(currentModel)
+              active: await detectActiveExecutionProvider(chatModel)
             }
           }
         });
@@ -545,17 +692,17 @@ rl.on('line', async (line) => {
       if (!payload.audioBase64) {
         throw new Error('audioBase64 is required');
       }
+      log('debug', `Transcription: model=${payload.model} file=${payload.fileName} lang=${payload.language || 'auto'}`);
 
       const requestedAlias = payload.model;
-      if (requestedAlias && (!currentModel || currentModel.alias !== requestedAlias)) {
-        currentModel = await manager.catalog.getModel(requestedAlias);
-        await currentModel.load();
-        log('info', `Model ${requestedAlias} loaded for transcription`);
+      if (requestedAlias) {
+        await ensureLaneModel('audio', requestedAlias);
       }
-      const preferred = await applyPreferredExecutionProvider(payload.preferredEp);
+      const audioModel = lane.audio.model;
+      const preferred = await applyPreferredExecutionProvider(payload.preferredEp, audioModel);
 
-      if (!currentModel) {
-        throw new Error('No model loaded. Select an STT model on the Audio page first.');
+      if (!audioModel) {
+        throw new Error('No model loaded in audio lane. Select an STT model on the Audio page first.');
       }
 
       const bytes = Buffer.from(payload.audioBase64, 'base64');
@@ -570,8 +717,8 @@ rl.on('line', async (line) => {
       try {
         // Prefer direct AudioClient (like we do for chat) — this avoids relying on the web service HTTP route
         // which may return 404 for /audio/transcriptions even for Whisper models.
-        if (typeof currentModel.createAudioClient === 'function') {
-          const audioClient = currentModel.createAudioClient();
+        if (typeof audioModel.createAudioClient === 'function') {
+          const audioClient = audioModel.createAudioClient();
           if (payload.language && payload.language !== 'auto') {
             audioClient.settings.language = payload.language;
           }
@@ -647,7 +794,7 @@ rl.on('line', async (line) => {
               acceleration: {
                 requested: preferred?.requested ?? null,
                 preferredApplied: preferred?.applied ?? null,
-                active: await detectActiveExecutionProvider(currentModel)
+                active: await detectActiveExecutionProvider(audioModel)
               }
             }
           });
@@ -655,14 +802,15 @@ rl.on('line', async (line) => {
         }
 
         // Fallback to OpenAI-compatible HTTP if direct client not available for this model
-        if (!currentEndpoint) {
+        const audioEndpoint = resolveLaneEndpoint('audio');
+        if (!audioEndpoint) {
           throw new Error('Service endpoint unavailable and model has no direct audio client.');
         }
-        const apiBase = getOpenAiApiBase(currentEndpoint);
+        const apiBase = getOpenAiApiBase(audioEndpoint);
         const blob = new Blob([bytes], { type: payload.mimeType || 'application/octet-stream' });
         const form = new FormData();
         form.append('file', blob, payload.fileName || 'audio.webm');
-        form.append('model', payload.model || currentModel.alias);
+        form.append('model', payload.model || audioModel.alias);
         if (payload.language && payload.language !== 'auto') {
           form.append('language', payload.language);
         }
@@ -682,7 +830,7 @@ rl.on('line', async (line) => {
             acceleration: {
               requested: preferred?.requested ?? null,
               preferredApplied: preferred?.applied ?? null,
-              active: await detectActiveExecutionProvider(currentModel)
+              active: await detectActiveExecutionProvider(audioModel)
             }
           }
         });

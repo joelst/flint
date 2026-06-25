@@ -14,7 +14,7 @@
         {
           "name": "node",
           "cmd": "node",
-          "args": true
+          "args": [{ "validator": "^[^-].*[/\\\\]foundry-sidecar\\.js$" }]
         }
       ]
     },
@@ -24,7 +24,7 @@
         {
           "name": "node",
           "cmd": "node",
-          "args": true
+          "args": [{ "validator": "^[^-].*[/\\\\]foundry-sidecar\\.js$" }]
         }
       ]
     }

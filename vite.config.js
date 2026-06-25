@@ -60,13 +60,14 @@ export default defineConfig(() => ({
       include: [
         'src/lib/personas.ts',
         'src/lib/message-rendering.ts',
-        'src/lib/conversation-sidebar.ts'
+        'src/lib/conversation-sidebar.ts',
+        'src/lib/ipc-contracts.ts',
       ],
       thresholds: {
-        lines: 50,
-        functions: 50,
-        branches: 35,
-        statements: 50
+        lines: 65,
+        functions: 65,
+        branches: 45,
+        statements: 65
       }
     }
   }
