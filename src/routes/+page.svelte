@@ -1741,7 +1741,8 @@ Output only the summary text, no preamble.`;
     isRollingTranscribe = true;
     const snapshotLen = dictationChunks.length;
     try {
-      const blob = new Blob(dictationChunks.slice(), { type: 'audio/webm' });
+      const windowChunks = dictationChunks.slice(-2); // ~last 4s (timeslice=2000ms)
+      const blob = new Blob(windowChunks, { type: 'audio/webm' });
       const wavBlob = await convertAudioBlobToWav(blob).catch(() => blob);
       const res = await transcribeAudio(wavBlob, sttAlias, transcriptionLanguage, 'dictation-interim.wav', { temperature: 0 });
       const text = getTranscriptTextFromResult(res);
