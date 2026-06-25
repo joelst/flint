@@ -2872,7 +2872,7 @@ Output only the summary text, no preamble.`;
                 </button>
                 <input
                   bind:value={chatInput}
-                  placeholder={isDictating ? "Dictating… (click ⏹ to finish)" : "Type your message... (model is running locally)"}
+                  placeholder={isDictating ? "Dictating… (click Stop to finish)" : "Type your message... (model is running locally)"}
                   disabled={chatBlockedByLoadedSTT || !selectedModelSupportsChat || (!state.endpoint && !chatClient) || isStreaming}
                 />
                 <button
