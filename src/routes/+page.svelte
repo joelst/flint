@@ -3133,15 +3133,19 @@ Output only the summary text, no preamble.`;
             <div class="log-viewer-header">
               <h4>Diagnostic Log <span class="log-count">({sidecarLogs.length})</span></h4>
               <div class="log-actions">
-                <button class="secondary" onclick={() => {
-                  const text = sidecarLogs.map(e => {
-                    const d = new Date(e.ts);
-                    const t = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
-                    return `[${t}][${e.source}][${e.level}] ${e.message}`;
-                  }).join('\n');
-                  navigator.clipboard.writeText(text);
-                  statusMessage = 'Logs copied to clipboard';
-                }}>Copy Logs</button>
+<button class="secondary" onclick={async () => {
+  const text = sidecarLogs.map(e => {
+    const d = new Date(e.ts);
+    const t = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
+    return `[${t}][${e.source}][${e.level}] ${e.message}`;
+  }).join('\n');
+  try {
+    await navigator.clipboard.writeText(text);
+    statusMessage = 'Logs copied to clipboard';
+  } catch (e) {
+    statusMessage = `Failed to copy logs: ${e}`;
+  }
+}}>Copy Logs</button>
                 <button class="secondary" onclick={() => (sidecarLogs = [])}>Clear</button>
               </div>
             </div>
