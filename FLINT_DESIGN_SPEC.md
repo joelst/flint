@@ -135,6 +135,7 @@ This would allow Flint to act as a unified hub for both local and cloud models w
 - Implement model management, chat, audio, vision/multimodal (if supported), diagnostics, and Learn sections
 
 **Phase 2 – Incremental Rust + Polish**
+
 - Move selected CLI interactions or heavy parsing to Rust Tauri commands when reliability or performance benefits are clear
 - Add direct use of the Foundry Rust SDK where beneficial
 - Implement Azure AI Foundry (cloud) connection support
@@ -188,6 +189,12 @@ This approach allows fast initial progress while keeping the codebase understand
 - **Azure before other providers**: Matches Foundry Local's value prop (local ↔ cloud seamless) and user demand.
 - **Local endpoint exposure**: Critical for ecosystem (tools expect OpenAI compat). The GUI must surface the URL + ready-to-paste config snippets.
 - **In-process vs server**: Prefer SDK in-process clients inside Flint for chat/audio. Start optional server only when user wants to share the endpoint with external tools.
+- **Tool-calling boundary (explicit split)**:
+  - **Foundry Local's responsibility**: The model runtime and OpenAI-compatible inference endpoint. When a loaded model supports tool calling, Foundry Local emits `tool_calls` JSON in responses.
+  - **Flint's responsibility**: Model loading, service lifecycle, endpoint display, and configuration management. Flint exposes the endpoint so that external clients (Continue.dev, Cline, Claude Code, GitHub Copilot custom provider, user-authored code) can connect and use tool-capable models.
+  - **What Flint explicitly does NOT do**: Parse tool-call JSON, execute tools, run shell commands, access files, or make network requests on behalf of a model response. Flint's chat UI is display-only — no auto-execution, no allowlisting/blocklisting of tools, no execution confirmation dialogs.
+  - **Future scope**: Dedicated tool-execution confirmation, allowlisting UI, and execution audit log are intentionally deferred. If Flint ever gains tool-execution capability, it requires explicit user opt-in per tool and per session, a visible audit trail, and prominent "tool running" indicators.
+  - **UI copy requirement (met in v0.2)**: The Learn tab documents this split explicitly so users understand that Flint is the management surface, not the execution surface.
 - **Vision scope**: Included in spec but contingent on catalog support and SDK image input in chat clients. If no strong vision models in early catalog, defer polished vision UI.
 
 ## 12. Security & Privacy (expanded)
@@ -206,12 +213,15 @@ Detailed phased implementation plan is in [IMPLEMENTATION_PLAN.md](./IMPLEMENTAT
 High level PR grouping (summary):
 
 **PR 1: Project bootstrap**
+
 - Init Tauri 2 + Svelte + TS project
 - Add foundry-local-sdk dependency (with platform notes)
 - Basic window, routing (home, models, chat, audio, diagnostics, learn)
 - Hello world SDK integration (list catalog or show not-installed state)
 
 **PR 2: Model Catalog & Management**
+
+
 - List / search / filter models from SDK
 - Model detail pane (size, capabilities, variants)
 - Download with progress (SDK callback + UI)
@@ -219,35 +229,41 @@ High level PR grouping (summary):
 - Cache list/remove
 
 **PR 3: Chat MVP**
+
 - Model selector (global or per-chat)
 - Streaming chat using SDK createChatClient
 - System prompt, basic history (multiple convos later)
 - Copy / clear
 
 **PR 4: Audio Transcription**
+
 - Record from mic (Web Audio + MediaRecorder or Tauri)
 - File drop / select
 - Use SDK audio client + transcription
 - Result display + copy
 
 **PR 5: Diagnostics + Logging + Endpoint**
+
 - Show service status
 - View / export logs (service + app)
 - Prominently display current endpoint + copy + "How to use with X" snippets
 
 **PR 6: Learn / Education + Polish**
+
 - Static + dynamic content explaining Foundry Local vs Azure
 - Privacy messaging
 - First-run wizard / install detector polish
 - Theming, accessibility, basic settings
 
 **PR 7: Packaging & Release prep**
+
 - Tauri bundle config for Windows (msi/exe) + macOS (dmg)
 - Code signing notes
 - Update / auto-update strategy (optional for v1)
 - README, contributing, screenshots
 
 **Post-MVP PRs**
+
 - Azure provider integration
 - Conversation persistence
 - Vision/multimodal UI enhancements

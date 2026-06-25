@@ -1,10 +1,20 @@
 import { writable, type Writable } from 'svelte/store';
 import { Command } from '@tauri-apps/plugin-shell';
 import { resolveResource, resourceDir } from '@tauri-apps/api/path';
+export type { LaneName, EndpointProfile } from './ipc-contracts';
+// LogEntry is defined in this file and exported below with the interface declaration
+import type { LaneName, EndpointProfile } from './ipc-contracts';
 
 // Sidecar-based implementation for clean production builds.
 // We never import 'foundry-local-sdk' in the web bundle.
 // All heavy work (including Node natives) happens in the sidecar process.
+
+export interface LogEntry {
+  ts: number;
+  level: 'info' | 'warn' | 'error' | 'debug';
+  message: string;
+  source: 'sidecar' | 'sdk' | 'app';
+}
 
 export interface IModel { alias: string; isCached?: boolean; isLoaded?: boolean; info?: any; }
 export interface ModelContextInfo {
@@ -89,7 +99,9 @@ export interface FlintSDKState {
   eps: EpInfo[];
   acceleratorsReady: boolean;
   serviceRunning: boolean;
-  logs: string[];
+  logs: LogEntry[];
+  chatLaneModel?: string;
+  audioLaneModel?: string;
 }
 
 const initialState: FlintSDKState = {
@@ -103,6 +115,8 @@ const initialState: FlintSDKState = {
   acceleratorsReady: false,
   serviceRunning: false,
   logs: [],
+  chatLaneModel: undefined,
+  audioLaneModel: undefined,
 };
 
 export const sdkState: Writable<FlintSDKState> = writable(initialState);
@@ -213,7 +227,7 @@ async function startSidecar() {
         msg.error ? p.reject(new Error(msg.error)) : p.resolve(msg);
       } else if (msg.type === 'log') {
         console.log(`[sidecar] ${msg.level}: ${msg.message}`);
-        sdkState.update(s => ({ ...s, logs: [...s.logs.slice(-50), `[${msg.level}] ${msg.message}`] }));
+        sdkState.update(s => ({ ...s, logs: [...s.logs.slice(-199), { ts: msg.timestamp ?? Date.now(), level: msg.level ?? 'info', message: msg.message, source: 'sidecar' as const }] }));
       } else if (msg.ready) {
         console.log(`[sdk] Sidecar ready signal received!`);
         sidecarReady = true;
@@ -257,7 +271,7 @@ async function startSidecar() {
       stderrLines.shift();
     }
     console.error(`[sidecar stderr] ${text}`);
-    sdkState.update(s => ({ ...s, logs: [...s.logs.slice(-50), `[stderr] ${text}`] }));
+    sdkState.update(s => ({ ...s, logs: [...s.logs.slice(-199), { ts: Date.now(), level: 'error' as const, message: text, source: 'sdk' as const }] }));
   });
 
   command.on('close', (data: any) => {
@@ -410,19 +424,29 @@ export async function refreshModels(): Promise<void> {
     const status = await send('getStatus');
     if (status.result) {
       currentEndpoint = status.result.endpoint;
-      currentLoadedAlias = status.result.currentModel || undefined;
+      const chatLaneModel: string | undefined = status.result.chatLane?.model || status.result.currentModel || undefined;
+      const audioLaneModel: string | undefined = status.result.audioLane?.model || undefined;
+      currentLoadedAlias = chatLaneModel;
       updateState({
         endpoint: currentEndpoint || undefined,
         serviceRunning: !!status.result.serviceRunning,
         acceleratorsReady: true, // simplified
+        chatLaneModel,
+        audioLaneModel,
       });
     }
+
+    const loadedAliases = new Set([
+      status?.result?.chatLane?.model,
+      status?.result?.audioLane?.model,
+      status?.result?.currentModel,
+    ].filter(Boolean));
 
     const models = list.map((m: any) => ({
       ...m,
       alias: m.alias,
       isCached: m.cached,
-      isLoaded: m.alias === currentLoadedAlias,
+      isLoaded: loadedAliases.has(m.alias),
       info: m
     } as ModelInfo));
 
@@ -453,14 +477,18 @@ export async function downloadModel(model: any, onProgress?: (p: number) => void
   await refreshModels();
 }
 
-export async function loadModel(model: any) {
-  const res = await send('load', { alias: model.alias });
+export async function loadModel(model: any, lane?: LaneName) {
+  const payload: any = { alias: model.alias };
+  if (lane) payload.lane = lane;
+  const res = await send('load', payload);
   await refreshModels();
   return res.result;
 }
 
-export async function unloadModel(model: any) {
-  await send('unload', { alias: model.alias });
+export async function unloadModel(model: any, lane?: LaneName) {
+  const payload: any = { alias: model.alias };
+  if (lane) payload.lane = lane;
+  await send('unload', payload);
   await refreshModels();
 }
 
@@ -567,6 +595,10 @@ export async function transcribeAudio(
   return res.result;
 }
 
+export function appendAppLog(message: string, level: LogEntry['level'] = 'info') {
+  sdkState.update(s => ({ ...s, logs: [...s.logs.slice(-199), { ts: Date.now(), level, message, source: 'app' as const }] }));
+}
+
 export function getManager(): any {
   return null; // No direct manager when using sidecar
 }
@@ -663,4 +695,47 @@ export async function getRecommendedStarterModels(count: number = 3): Promise<Mo
     console.warn('Could not compute recommended starters', e);
     return [];
   }
+}
+
+// ---------------------------------------------------------------------------
+// Endpoint profile management
+// Auth credentials are intentionally excluded from profiles and must be stored
+// separately in secure OS keychain storage — never in localStorage.
+// ---------------------------------------------------------------------------
+
+const ENDPOINT_PROFILES_KEY = 'flint_endpoint_profiles_v1';
+
+export function loadEndpointProfiles(): EndpointProfile[] {
+  try {
+    const raw = localStorage.getItem(ENDPOINT_PROFILES_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveEndpointProfiles(profiles: EndpointProfile[]): void {
+  localStorage.setItem(ENDPOINT_PROFILES_KEY, JSON.stringify(profiles));
+}
+
+export function addEndpointProfile(profile: Omit<EndpointProfile, 'id'>): EndpointProfile {
+  const existing = loadEndpointProfiles();
+  const created: EndpointProfile = {
+    ...profile,
+    id: `ep_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+  };
+  saveEndpointProfiles([...existing, created]);
+  return created;
+}
+
+export function removeEndpointProfile(id: string): void {
+  const existing = loadEndpointProfiles();
+  saveEndpointProfiles(existing.filter((p) => p.id !== id));
+}
+
+export function updateEndpointProfile(id: string, patch: Partial<Omit<EndpointProfile, 'id'>>): void {
+  const existing = loadEndpointProfiles();
+  saveEndpointProfiles(existing.map((p) => (p.id === id ? { ...p, ...patch } : p)));
 }

@@ -3,6 +3,7 @@
   import { onMount } from "svelte";
   import MessageRenderer from "$lib/MessageRenderer.svelte";
   import ConversationSidebar from "$lib/ConversationSidebar.svelte";
+  import Icon from "$lib/Icon.svelte";
   import type { Conversation } from "$lib/ConversationSidebar.svelte";
   import {
     initializeSDK,
@@ -22,8 +23,10 @@
     chatCompletionStream,
     cancelChatRequest,
     transcribeAudio,
+    appendAppLog,
     type ModelInfo,
     type EpInfo,
+    type LogEntry,
   } from "$lib/sdk";
 
   import {
@@ -444,7 +447,9 @@
 
     queueMicrotask(positionPersonaMenu);
 
-    const closeOnScroll = () => {
+    const closeOnScroll = (e: Event) => {
+      // Don't close when scrolling inside the menu's own item list
+      if ((e.target as HTMLElement)?.closest?.('.persona-menu')) return;
       showPersonaMenu = false;
     };
     const repositionOnResize = () => {
@@ -472,6 +477,14 @@
   let transcriptionLanguage = $state("auto");
   let mediaRecorder: MediaRecorder | null = null;
   let audioChunks: Blob[] = [];
+
+  // Dictation state (push-to-talk into chat input)
+  let isDictating = $state(false);
+  let dictationInterim = $state('');
+  let dictationChunks: Blob[] = [];
+  let dictationMediaRecorder: MediaRecorder | null = null;
+  let dictationStream: MediaStream | null = null;
+  let isRollingTranscribe = false;
   let sttModels = $state<ModelInfo[]>([]);
   let selectedSTTModelAlias = $state("");
 
@@ -506,8 +519,16 @@
     }
   });
 
-  // Sidecar logs (basic for now)
-  let sidecarLogs = $state<string[]>([]);
+  let sidecarLogs = $state<LogEntry[]>([]);
+  let logListEl: HTMLDivElement | null = null;
+
+  function autoScrollLog(node: HTMLElement) {
+    const observer = new MutationObserver(() => {
+      node.scrollTop = node.scrollHeight;
+    });
+    observer.observe(node, { childList: true });
+    return { destroy() { observer.disconnect(); } };
+  }
 
   // Conversation management
   let conversations = $state<Conversation[]>([]);
@@ -927,6 +948,7 @@
   async function startLocalService() {
     try {
       statusMessage = "Starting local service...";
+      appendAppLog('Starting local OpenAI-compatible service');
       const ep = await startService(
         5272,
         selectedModelAlias || undefined,
@@ -934,8 +956,10 @@
       );
       updateStateFromSdk();
       statusMessage = `Service running at ${ep}`;
+      appendAppLog(`Service started at ${ep}`);
     } catch (e: any) {
       statusMessage = `Failed to start service: ${e?.message || e}`;
+      appendAppLog(`Service start failed: ${e?.message || e}`, 'error');
     }
   }
 
@@ -944,8 +968,10 @@
       await stopService();
       updateStateFromSdk();
       statusMessage = "Service stopped";
+      appendAppLog('Service stopped');
     } catch (e: any) {
       statusMessage = `Failed to stop service: ${e?.message || e}`;
+      appendAppLog(`Service stop failed: ${e?.message || e}`, 'error');
     }
   }
 
@@ -980,7 +1006,11 @@
           info: (m as any).info || null,
         })),
       },
-      logs: sidecarLogs,
+      logs: sidecarLogs.map(e => {
+        const d = new Date(e.ts);
+        const t = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
+        return `[${t}][${e.source}][${e.level}] ${e.message}`;
+      }),
       runtime: {
         userAgent: navigator.userAgent,
         platform: navigator.platform || "unknown",
@@ -1117,11 +1147,8 @@
     }
   }
 
-  // Dedicated path for audio/STT: load the model + (re)start service with it,
-  // but do NOT affect the chat selectedModelAlias or switch views.
-  // This answers "separate model for audio": we switch the active service model
-  // when the user wants to transcribe. Chat and audio share the single local
-  // OpenAI endpoint, so only one primary model is active at a time.
+  // Dedicated path for audio/STT: loads the model in the audio lane without
+  // affecting the chat lane or the running chat service endpoint.
   async function useSTTModelForAudio(model: any) {
     try {
       const alias = model.alias;
@@ -1132,18 +1159,10 @@
       }
 
       statusMessage = `Loading ${alias} for audio transcription...`;
-      await sendLoadToSidecar(model);
-
-      // This will switch currentModel in sidecar if different and (re)start the web service
-      // which is required for /audio/transcriptions to be available.
-      const ep = await startService(
-        5272,
-        alias,
-        selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
-      );
+      await sendLoadToSidecar(model, 'audio');
       selectedSTTModelAlias = alias;
 
-      statusMessage = `Audio ready: ${alias} at ${ep}`;
+      statusMessage = `Audio ready: ${alias}`;
       await refreshModels();
       await loadSTTModels();
     } catch (e: any) {
@@ -1190,7 +1209,8 @@
   async function loadModelAndMaybeStart(model: any) {
     try {
       statusMessage = `Loading ${model.alias}...`;
-      const loadResult = await sendLoadToSidecar(model); // use sidecar
+      appendAppLog(`Loading model ${model.alias} (chat lane)`);
+      const loadResult = await sendLoadToSidecar(model, 'chat');
       const loadAccel = String(loadResult?.acceleration?.active || "").trim();
       if (loadAccel) {
         setModelRuntimeMeta(model.alias, { lastUsedAcceleration: loadAccel });
@@ -1222,9 +1242,8 @@
     }
   }
 
-  // Placeholder for sidecar load - actual impl in sdk
-  async function sendLoadToSidecar(model: any) {
-    return await sdkLoadModel(model);
+  async function sendLoadToSidecar(model: any, lane?: 'chat' | 'audio') {
+    return await sdkLoadModel(model, lane);
   }
 
   async function unloadModel(model: any) {
@@ -1669,6 +1688,74 @@ Output only the summary text, no preamble.`;
     }
   }
 
+  async function toggleDictation() {
+    if (isDictating) {
+      if (dictationMediaRecorder && dictationMediaRecorder.state !== 'inactive') {
+        dictationMediaRecorder.stop();
+      }
+    } else {
+      const sttAlias = effectiveSTTModelAlias || 'whisper-tiny';
+      try {
+        dictationStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        dictationMediaRecorder = new MediaRecorder(dictationStream);
+        dictationChunks = [];
+        dictationInterim = '';
+        isRollingTranscribe = false;
+
+        dictationMediaRecorder.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            dictationChunks = [...dictationChunks, event.data];
+            if (!isRollingTranscribe) triggerRollingTranscription(sttAlias);
+          }
+        };
+
+        dictationMediaRecorder.onstop = async () => {
+          dictationStream?.getTracks().forEach((t) => t.stop());
+          isDictating = false;
+          const chunks = dictationChunks;
+          dictationChunks = [];
+          if (chunks.length === 0) { dictationInterim = ''; return; }
+          try {
+            const fullBlob = new Blob(chunks, { type: 'audio/webm' });
+            const wavBlob = await convertAudioBlobToWav(fullBlob).catch(() => fullBlob);
+            const res = await transcribeAudio(wavBlob, sttAlias, transcriptionLanguage, 'dictation.wav', { temperature: 0 });
+            const text = getTranscriptTextFromResult(res);
+            if (text) chatInput = chatInput ? `${chatInput} ${text}` : text;
+          } catch (err) {
+            statusMessage = `Dictation failed: ${err}`;
+          } finally {
+            dictationInterim = '';
+          }
+        };
+
+        dictationMediaRecorder.start(2000);
+        isDictating = true;
+      } catch (err) {
+        statusMessage = `Dictation mic error: ${err}`;
+      }
+    }
+  }
+
+  async function triggerRollingTranscription(sttAlias: string) {
+    if (isRollingTranscribe || dictationChunks.length === 0) return;
+    isRollingTranscribe = true;
+    const snapshotLen = dictationChunks.length;
+    try {
+      const blob = new Blob(dictationChunks.slice(), { type: 'audio/webm' });
+      const wavBlob = await convertAudioBlobToWav(blob).catch(() => blob);
+      const res = await transcribeAudio(wavBlob, sttAlias, transcriptionLanguage, 'dictation-interim.wav', { temperature: 0 });
+      const text = getTranscriptTextFromResult(res);
+      if (text) dictationInterim = text;
+    } catch {
+      // rolling transcription is best-effort; failures are silent
+    } finally {
+      isRollingTranscribe = false;
+      if (isDictating && dictationChunks.length > snapshotLen) {
+        triggerRollingTranscription(sttAlias);
+      }
+    }
+  }
+
   async function uploadAudioFile() {
     const input = document.createElement("input");
     input.type = "file";
@@ -2022,7 +2109,7 @@ Output only the summary text, no preamble.`;
         {/if}
         {#if selectedModelAlias}
           <span class="current-model" title="Running locally via Foundry Local">
-            🖥️ {selectedModelAlias}
+            <Icon name="monitor" size={14} /> {selectedModelAlias}
             <span class="local-badge">local</span>
           </span>
         {/if}
@@ -2055,7 +2142,7 @@ Output only the summary text, no preamble.`;
         onclick={() => theme = theme === 'dark' ? 'light' : 'dark'}
         title="Toggle light/dark mode"
       >
-        {theme === 'dark' ? '☀️' : '🌙'}
+        {#if theme === 'dark'}<Icon name="sun" size={16} />{:else}<Icon name="moon" size={16} />{/if}
       </button>
     </div>
   </header>
@@ -2233,7 +2320,7 @@ Output only the summary text, no preamble.`;
 
             {#if recommendedStarters.length > 0}
               <div class="recommendations">
-                <h3>🚀 Recommended for your hardware</h3>
+                <h3>Recommended for your hardware</h3>
                 <div class="hardware-info">
                   {state.eps.length} execution providers detected • {state.eps.filter(
                     (e) => e.isRegistered,
@@ -2438,7 +2525,7 @@ Output only the summary text, no preamble.`;
                     >
                       <div class="modal-header">
                         <h3>{detailModel.alias}</h3>
-                        <button type="button" onclick={() => (modelDetailsAlias = null)}>✕</button>
+                        <button type="button" onclick={() => (modelDetailsAlias = null)}><Icon name="x" size={14} /></button>
                       </div>
                       <div class="modal-body model-detail-grid">
                         <div><strong>Task:</strong> {(detailModel as any).task || (detailModel as any).info?.task || "Unknown"}</div>
@@ -2523,7 +2610,7 @@ Output only the summary text, no preamble.`;
                   onclick={() => (showFullHistory = !showFullHistory)}
                   title="Toggle between compact (recommended for inference) and full uncondensed thread"
                 >
-                  {showFullHistory ? '📜 Compact' : '📖 Full thread'}
+                  {#if showFullHistory}<Icon name="scroll" size={13} /> Compact{:else}<Icon name="book" size={13} /> Full thread{/if}
                 </button>
 
                 {#if chatMessages.length > contextTurns * 2 + 4}
@@ -2570,7 +2657,7 @@ Output only the summary text, no preamble.`;
                     {#if showFullHistory || !msg.condensed || msg.isSummary}
                       <div class="message {msg.role}" class:summary={!!msg.isSummary} class:pinned={!!msg.pinned} class:condensed={msg.condensed && !showFullHistory}>
                         <div class="role">
-                          {msg.isSummary ? "📝" : (msg.role === "user" ? "🧑" : "🤖")}
+                          {#if msg.isSummary}<Icon name="note" size={15} />{:else if msg.role === "user"}<Icon name="user" size={15} />{:else}<Icon name="bot" size={15} />{/if}
                           {#if msg.role !== 'system'}
                             <button
                               type="button"
@@ -2582,7 +2669,7 @@ Output only the summary text, no preamble.`;
                                 chatMessages = [...chatMessages]; // force update
                               }}
                             >
-                              {msg.pinned ? "★" : "☆"}
+                              <Icon name={msg.pinned ? "pin" : "pin-off"} size={13} />
                             </button>
                           {/if}
                         </div>
@@ -2604,7 +2691,7 @@ Output only the summary text, no preamble.`;
                 {/if}
                 {#if isStreaming}
                   <div class="message assistant streaming">
-                    <div class="role">🤖</div>
+                    <div class="role"><Icon name="bot" size={15} /></div>
                     <div class="content">
                       <span class="typing-indicator"></span>
                     </div>
@@ -2630,7 +2717,7 @@ Output only the summary text, no preamble.`;
                       if (next) queueMicrotask(positionPersonaMenu);
                     }}
                   >
-                    🎭
+                    <Icon name="masks" size={16} />
                   </button>
 
                   {#if showPersonaMenu}
@@ -2728,7 +2815,7 @@ Output only the summary text, no preamble.`;
                     </div>
                     {#if contextUsagePercent > 70}
                       <span class="context-warn" title="High context usage may slow responses and use more power. Consider trimming, summarizing, or lowering turns.">
-                        ⚠️ High
+                        <Icon name="warning" size={13} /> High
                       </span>
                     {/if}
                   {/if}
@@ -2739,20 +2826,31 @@ Output only the summary text, no preamble.`;
                     <button
                       type="button"
                       onclick={attachImage}
-                      disabled={isStreaming || !!attachedImage}>📷 Image</button
+                      disabled={isStreaming || !!attachedImage}><Icon name="camera" size={14} /> Image</button
                     >
                     {#if attachedImage}
                       <span class="attached"
-                        >✓ <button
+                        ><Icon name="check" size={13} /> <button
                           type="button"
                           onclick={clearImage}
-                          class="mini">✕</button
+                          class="mini"><Icon name="x" size={12} /></button
                         ></span
                       >
                     {/if}
                   </div>
                 {/if}
               </div>
+
+              {#if isDictating || dictationInterim}
+                <div class="dictation-preview">
+                  <span class="dictation-indicator" class:pulsing={isDictating}><Icon name="mic" size={14} /></span>
+                  {#if dictationInterim}
+                    <span class="dictation-interim">{dictationInterim}</span>
+                  {:else}
+                    <span class="dictation-hint">Listening…</span>
+                  {/if}
+                </div>
+              {/if}
 
               <form class="chat-input" onsubmit={sendMessage}>
                 {#if chatBlockedByLoadedSTT}
@@ -2762,20 +2860,30 @@ Output only the summary text, no preamble.`;
                 {:else if !selectedModelSupportsChat}
                   <div style="width:100%; padding: 8px; font-size:0.8rem; color:var(--muted);">Chat disabled for current model.</div>
                 {/if}
+                <button
+                  type="button"
+                  class="dictation-btn"
+                  class:active={isDictating}
+                  onclick={toggleDictation}
+                  title={isDictating ? "Stop dictation (finalizes transcript)" : "Dictate into chat (requires STT model)"}
+                  disabled={isStreaming}
+                >
+                  {#if isDictating}<Icon name="stop" size={14} />{:else}<Icon name="mic" size={14} />{/if}
+                </button>
                 <input
                   bind:value={chatInput}
-                  placeholder="Type your message... (model is running locally)"
+                  placeholder={isDictating ? "Dictating… (click ⏹ to finish)" : "Type your message... (model is running locally)"}
                   disabled={chatBlockedByLoadedSTT || !selectedModelSupportsChat || (!state.endpoint && !chatClient) || isStreaming}
                 />
                 <button
                   type="submit"
                   disabled={chatBlockedByLoadedSTT || !selectedModelSupportsChat || !chatInput.trim() || (!state.endpoint && !chatClient) || isStreaming}
                 >
-                  {isStreaming ? "⏳" : "➜"}
+                  {#if isStreaming}<Icon name="loader" size={15} />{:else}<Icon name="send" size={15} />{/if}
                 </button>
                 {#if isStreaming}
                   <button type="button" onclick={stopGeneration} class="stop"
-                    >🛑 Stop</button
+                    ><Icon name="stop" size={14} /> Stop</button
                   >
                 {/if}
               </form>
@@ -2798,7 +2906,7 @@ Output only the summary text, no preamble.`;
                   >
                     <div class="modal-header">
                       <h3>Manage Personas</h3>
-                      <button type="button" onclick={closePersonaManager}>✕</button>
+                      <button type="button" onclick={closePersonaManager}><Icon name="x" size={14} /></button>
                     </div>
 
                     <div class="modal-body">
@@ -2923,10 +3031,10 @@ Output only the summary text, no preamble.`;
               </select>
             </label>
             <button onclick={toggleRecording} disabled={isTranscribing}>
-              {isRecording ? "⏹ Stop Recording" : "🎤 Start Recording"}
+              {#if isRecording}<Icon name="stop" size={14} /> Stop Recording{:else}<Icon name="mic" size={14} /> Start Recording{/if}
             </button>
             <button onclick={uploadAudioFile} disabled={isTranscribing}>
-              📁 Upload Audio File
+              <Icon name="folder" size={14} /> Upload Audio File
             </button>
             <button
               onclick={doTranscribe}
@@ -3014,26 +3122,37 @@ Output only the summary text, no preamble.`;
             </div>
           </div>
 
-          <div class="logs-hint">
-            <p>
-              Logging is enabled in the sidecar (console + stdout). Full log
-              viewer UI coming later.
-            </p>
-          </div>
-
           <div class="log-viewer">
-            <h4>Recent Sidecar Logs</h4>
-            <div class="log-list">
-              {#each sidecarLogs as log, i}
-                <div>{log}</div>
+            <div class="log-viewer-header">
+              <h4>Diagnostic Log <span class="log-count">({sidecarLogs.length})</span></h4>
+              <div class="log-actions">
+                <button class="secondary" onclick={() => {
+                  const text = sidecarLogs.map(e => {
+                    const d = new Date(e.ts);
+                    const t = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
+                    return `[${t}][${e.source}][${e.level}] ${e.message}`;
+                  }).join('\n');
+                  navigator.clipboard.writeText(text);
+                  statusMessage = 'Logs copied to clipboard';
+                }}>Copy Logs</button>
+                <button class="secondary" onclick={() => (sidecarLogs = [])}>Clear</button>
+              </div>
+            </div>
+            <div class="log-list" bind:this={logListEl} use:autoScrollLog>
+              {#each sidecarLogs as entry (entry.ts + entry.message)}
+                {@const d = new Date(entry.ts)}
+                {@const hms = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`}
+                <div class="log-entry log-{entry.level}">
+                  <span class="log-ts">{hms}</span>
+                  <span class="log-src">{entry.source}</span>
+                  <span class="log-level">{entry.level}</span>
+                  <span class="log-msg">{entry.message}</span>
+                </div>
+              {:else}
+                <div class="log-empty">No log entries yet. Start the service or load a model.</div>
               {/each}
             </div>
-            <button onclick={() => (sidecarLogs = [])}>Clear Logs</button>
           </div>
-
-          <p class="placeholder">
-            More diagnostics (logs export, cache info, etc.) coming in v0.2.
-          </p>
         </div>
       {:else if currentView === "learn"}
         <div class="view">
@@ -3085,6 +3204,35 @@ Output only the summary text, no preamble.`;
             <p>Start the service in Diagnostics to see live snippets.</p>
           {/if}
 
+          <h3>Tool Calling</h3>
+          <p>
+            Foundry Local exposes an OpenAI-compatible API, and many models on
+            this endpoint support tool calling (also called function calling) —
+            the model can emit a <code>tool_calls</code> object in its response
+            that describes what function to invoke. A <em>client application</em>
+            is then responsible for executing that call and returning the result.
+          </p>
+          <p><strong>What Foundry Local provides:</strong></p>
+          <ul>
+            <li>The model runtime and the OpenAI-compatible inference endpoint</li>
+            <li>Tool-call JSON in responses (<code>tool_calls</code> / <code>function_call</code>) when a model supports it</li>
+            <li>The surface that AI coding tools — Continue.dev, Cline, Claude Code, GitHub Copilot — connect to</li>
+          </ul>
+          <p><strong>What Flint does (and does not do):</strong></p>
+          <ul>
+            <li>Flint manages model loading, service configuration, and endpoint setup</li>
+            <li>Flint's chat window displays model responses — it does <strong>not</strong> parse, execute, or forward tool calls on your behalf</li>
+            <li>No shell commands, file operations, or network requests are run automatically based on model output</li>
+            <li>Tool execution belongs to the AI client you connect to the endpoint (Cline, Continue, your own code, etc.)</li>
+          </ul>
+          <p>
+            To use tool-capable models in a full agentic workflow, point one of
+            the clients above at the local endpoint shown in this tab. Flint's
+            role is to keep the model running — the calling client controls
+            which tools are allowed, when they run, and what confirmation the
+            user sees.
+          </p>
+
           <p>
             <a href="https://github.com/microsoft/Foundry-Local" target="_blank"
               >Official Foundry Local repo →</a
@@ -3097,6 +3245,13 @@ Output only the summary text, no preamble.`;
 </main>
 
 <style>
+  /* Inline SVG icons sit on the text baseline */
+  :global(svg[aria-hidden="true"]) {
+    display: inline-block;
+    vertical-align: -0.175em;
+    flex-shrink: 0;
+  }
+
   :root {
     font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
     font-size: 15px;
@@ -3291,6 +3446,7 @@ Output only the summary text, no preamble.`;
     color: var(--fg);
     font-size: 0.95rem;
     cursor: pointer;
+    position: relative;
   }
 
   .nav-item:hover {
@@ -3300,8 +3456,17 @@ Output only the summary text, no preamble.`;
   .nav-item.active {
     background: var(--panel-bg);
     color: var(--fg);
-    border-left: 3px solid var(--accent);
-    padding-left: 17px;
+  }
+
+  .nav-item.active::before {
+    content: '';
+    position: absolute;
+    left: 5px;
+    top: 6px;
+    bottom: 6px;
+    width: 3px;
+    background: var(--accent);
+    border-radius: 2px;
   }
 
   .sidebar-footer {
@@ -3321,20 +3486,20 @@ Output only the summary text, no preamble.`;
     font-size: 1.1rem;
   }
 
-  .sidebar.collapsed .nav-item.active {
-    border-left: none;
-    padding-left: 8px;
+  .sidebar.collapsed .nav-item.active::before {
+    left: 3px;
+    top: 4px;
+    bottom: 4px;
   }
 
   .collapse-toggle {
     font-size: 0.9rem;
-    padding: 6px 8px !important;
+    padding: 6px 20px !important;
     margin-bottom: 8px;
     opacity: 0.7;
     display: flex;
-    justify-content: center;
+    justify-content: flex-start;
     align-items: center;
-    text-align: center;
   }
 
   .collapse-icon {
@@ -3349,7 +3514,8 @@ Output only the summary text, no preamble.`;
   }
 
   .sidebar.collapsed .collapse-toggle {
-    padding: 6px 4px !important;
+    padding: 6px 8px !important;
+    justify-content: center;
   }
 
   .nav-icon {
@@ -3904,6 +4070,75 @@ Output only the summary text, no preamble.`;
     background: color-mix(in srgb, var(--danger) 70%, #000) !important;
   }
 
+  .chat-input .dictation-btn {
+    min-width: 36px;
+    padding: 8px 10px;
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    font-size: 1rem;
+  }
+
+  .chat-input .dictation-btn.active {
+    background: color-mix(in srgb, var(--danger) 30%, var(--panel-bg));
+    border-color: var(--danger);
+  }
+
+  .chat-input .dictation-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 20%, var(--panel-bg));
+  }
+
+  .dictation-preview {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    background: color-mix(in srgb, var(--accent) 10%, var(--panel-bg));
+    border-top: 1px solid var(--border);
+    font-size: 0.85rem;
+    color: var(--fg);
+    min-height: 32px;
+  }
+
+  .dictation-indicator {
+    flex-shrink: 0;
+  }
+
+  .dictation-indicator.pulsing {
+    animation: dictation-pulse 1.2s ease-in-out infinite;
+  }
+
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+
+  /* Spin the loader icon in the send button while streaming */
+  .chat-input button[type="submit"] svg {
+    display: inline-block;
+    vertical-align: -0.175em;
+  }
+
+  .chat-input button[type="submit"]:disabled svg {
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes dictation-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .dictation-interim {
+    font-style: italic;
+    color: var(--fg);
+    opacity: 0.8;
+  }
+
+  .dictation-hint {
+    color: var(--muted);
+    font-style: italic;
+  }
+
   .streaming {
     animation: pulse-animation 1.5s infinite;
   }
@@ -4056,16 +4291,73 @@ Output only the summary text, no preamble.`;
 
   .log-viewer {
     margin-top: 16px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+
+  .log-viewer-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 12px;
+    background: var(--panel-bg);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .log-viewer-header h4 {
+    margin: 0;
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+
+  .log-count {
+    font-weight: 400;
+    color: var(--muted);
+    font-size: 0.8em;
+  }
+
+  .log-actions {
+    display: flex;
+    gap: 6px;
   }
 
   .log-list {
-    height: 120px;
-    overflow: auto;
-    background: var(--panel-bg);
-    padding: 4px;
+    height: 260px;
+    overflow-y: auto;
+    background: color-mix(in srgb, var(--bg) 60%, var(--panel-bg));
+    padding: 4px 0;
     font-family: monospace;
-    font-size: 0.75em;
-    border: 1px solid var(--border);
+    font-size: 0.75rem;
+  }
+
+  .log-entry {
+    display: grid;
+    grid-template-columns: 54px 46px 40px 1fr;
+    gap: 0 6px;
+    padding: 2px 10px;
+    line-height: 1.5;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 40%, transparent);
+  }
+
+  .log-entry:last-child { border-bottom: none; }
+
+  .log-ts   { color: var(--muted); white-space: nowrap; }
+  .log-src  { color: var(--muted); }
+  .log-level { text-transform: uppercase; font-size: 0.7rem; font-weight: 600; opacity: 0.85; }
+  .log-msg  { word-break: break-all; }
+
+  .log-info  .log-level { color: var(--accent); }
+  .log-debug .log-level { color: var(--muted); }
+  .log-warn  .log-level { color: var(--warning); }
+  .log-error .log-level { color: var(--danger); }
+  .log-error .log-msg   { color: var(--danger); }
+
+  .log-empty {
+    padding: 16px;
+    color: var(--muted);
+    font-size: 0.8rem;
+    text-align: center;
   }
 
   .transcription-result {

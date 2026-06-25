@@ -42,6 +42,45 @@ describe("sanitizeAssistantHtml", () => {
     expect(output).not.toContain('href="//evil.example"');
   });
 
+  it("removes img onerror XSS", () => {
+    const output = sanitizeAssistantHtml('<img src="x" onerror="alert(1)">');
+    expect(output).not.toContain('onerror');
+    expect(output).not.toContain('<img');
+  });
+
+  it("strips iframe injection", () => {
+    const output = sanitizeAssistantHtml('<iframe src="https://evil.example"></iframe>');
+    expect(output).not.toContain('<iframe');
+  });
+
+  it("strips svg with onload handler", () => {
+    const output = sanitizeAssistantHtml('<svg onload="alert(1)"><rect/></svg>');
+    expect(output).not.toContain('<svg');
+    expect(output).not.toContain('onload');
+  });
+
+  it("strips data: href injection", () => {
+    const output = sanitizeAssistantHtml('<a href="data:text/html,<script>alert(1)</script>">click</a>');
+    expect(output).not.toContain('data:');
+  });
+
+  it("strips meta refresh", () => {
+    const output = sanitizeAssistantHtml('<meta http-equiv="refresh" content="0;url=javascript:alert(1)">');
+    expect(output).not.toContain('<meta');
+  });
+
+  it("strips style tag", () => {
+    const output = sanitizeAssistantHtml('<style>body{background:url(javascript:alert(1))}</style>');
+    expect(output).not.toContain('<style');
+  });
+
+  it("keeps safe anchor attributes and body text", () => {
+    const output = sanitizeAssistantHtml('<a href="https://example.com" title="t">go</a>');
+    expect(output).toContain('href="https://example.com"');
+    expect(output).toContain('title="t"');
+    expect(output).toContain('go');
+  });
+
   it("falls back to escaped text when DOM globals are unavailable", () => {
     const originalDomParser = (globalThis as any).DOMParser;
     const originalNodeFilter = (globalThis as any).NodeFilter;
