@@ -1731,6 +1731,12 @@ Output only the summary text, no preamble.`;
         dictationMediaRecorder.start(2000);
         isDictating = true;
       } catch (err) {
+        dictationStream?.getTracks().forEach((t) => t.stop());
+        dictationStream = null;
+        dictationMediaRecorder = null;
+        dictationChunks = [];
+        dictationInterim = '';
+        isDictating = false;
         statusMessage = `Dictation mic error: ${err}`;
       }
     }
