@@ -2907,7 +2907,7 @@ Output only the summary text, no preamble.`;
                   >
                     <div class="modal-header">
                       <h3>Manage Personas</h3>
-                      <button type="button" onclick={closePersonaManager}><Icon name="x" size={14} /></button>
+                      <button type="button" aria-label="Close persona manager" onclick={closePersonaManager}><Icon name="x" size={14} /></button>
                     </div>
 
                     <div class="modal-body">
