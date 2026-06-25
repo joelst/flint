@@ -504,10 +504,17 @@ rl.on('line', async (line) => {
         }
       });
     } else if (cmd === 'stopService') {
+      if (manager && typeof manager.stopWebService === 'function') {
+        try {
+          await manager.stopWebService();
+        } catch (e) {
+          log('warn', `stopWebService error (ignored): ${e?.message ?? e}`);
+        }
+      }
       sharedEndpoint = null;
       lane.chat.endpoint = null;
       lane.audio.endpoint = null;
-      log('info', 'Service stop requested');
+      log('info', 'Service stopped');
       reply({ ok: true });
     } else if (cmd === 'getEndpoint') {
       reply({ ok: true, endpoint: sharedEndpoint });
