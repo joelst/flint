@@ -559,7 +559,7 @@
   });
 
   let sidecarLogs = $state<LogEntry[]>([]);
-  let logListEl: HTMLDivElement | null = null;
+  let logListEl = $state<HTMLDivElement | null>(null);
 
   function autoScrollLog(node: HTMLElement) {
     const observer = new MutationObserver(() => {
@@ -4269,12 +4269,13 @@ Output only the summary text, no preamble.`;
   }
 
   /* Spin the loader icon in the send button while streaming */
-  .chat-input button[type="submit"] svg {
+  /* :global needed because Icon component renders the SVG in its own scope */
+  .chat-input button[type="submit"] :global(svg) {
     display: inline-block;
     vertical-align: -0.175em;
   }
 
-  .chat-input button[type="submit"] svg.spin {
+  .chat-input button[type="submit"] :global(svg.spin) {
     animation: spin 1s linear infinite;
   }
 

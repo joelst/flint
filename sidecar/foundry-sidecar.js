@@ -33,7 +33,7 @@ const KNOWN_COMMANDS = new Set([
   'listModels', 'download', 'load', 'unload', 'deleteModel', 'getEndpoint',
   'chatCompletion', 'cancelChatRequest', 'transcribeAudio',
   'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',
-  'poolStatus',
+  'poolStatus', 'getAccessLog',
 ]);
 
 // Per-command type requirements. Keys are required or optional field names; values are:
@@ -78,6 +78,7 @@ const COMMAND_SCHEMA = {
   getVisionModels:    { required: [], optional: [] },
   getSTTModels:       { required: [], optional: [] },
   poolStatus:         { required: [], optional: [] },
+  getAccessLog:       { required: [], optional: [] },
 };
 
 // Base64 character limit for transcribeAudio. 50 MB decoded audio is ~67 MB of base64.
@@ -143,6 +144,16 @@ const canceledRequests = new Set();
 // Multiple models coexist; no LRU eviction policy for MVP (spike confirmed co-residency).
 const pool = new Map();
 let sharedEndpoint = null;
+
+// Per-request access log (IPC-originated requests only; direct HTTP to the Foundry Local
+// service is not intercepted — that requires a proxy layer, deferred to 0.3 item 0b).
+const ACCESS_LOG_MAX = 500;
+const accessLog = [];
+
+function appendAccessLog(entry) {
+  accessLog.push(entry);
+  if (accessLog.length > ACCESS_LOG_MAX) accessLog.shift();
+}
 
 // Returns true/false/null. Handles isLoaded as boolean, function, or unknown.
 function resolveIsLoaded(model) {
@@ -559,143 +570,166 @@ rl.on('line', async (line) => {
       const shouldStream = !!payload.stream;
       canceledRequests.delete(id);
       log('debug', `Chat completion: model=${modelAlias} msgs=${payload.messages?.length ?? 0} stream=${shouldStream}`);
-      const poolEntry = await ensureModel(modelAlias);
-      const chatModel = poolEntry.catModel;
-      const apiBase = getOpenAiApiBase(sharedEndpoint);
-      const preferred = await applyPreferredExecutionProvider(payload.preferredEp, chatModel);
+      const chatAccessTs = Date.now();
+      let chatTokensIn = null, chatTokensOut = null, chatOk = false;
+      try {
+        const poolEntry = await ensureModel(modelAlias);
+        const chatModel = poolEntry.catModel;
+        const apiBase = getOpenAiApiBase(sharedEndpoint);
+        const preferred = await applyPreferredExecutionProvider(payload.preferredEp, chatModel);
 
-      const sdkMessages = toSdkMessages(payload.messages);
-      if (!sdkMessages.length) {
-        throw new Error('No valid messages supplied');
-      }
+        const sdkMessages = toSdkMessages(payload.messages);
+        if (!sdkMessages.length) {
+          throw new Error('No valid messages supplied');
+        }
 
-      // Prefer direct SDK inference to avoid web-service schema/version mismatch issues.
-      if (typeof chatModel?.createChatClient === 'function') {
-        const client = chatModel.createChatClient();
-        if (shouldStream && typeof client?.completeStreamingChat === 'function') {
-          let content = '';
-          for await (const chunk of client.completeStreamingChat(sdkMessages)) {
-            if (canceledRequests.has(id)) {
-              log('info', `Chat stream canceled for request ${id}`);
-              break;
+        // Prefer direct SDK inference to avoid web-service schema/version mismatch issues.
+        if (typeof chatModel?.createChatClient === 'function') {
+          const client = chatModel.createChatClient();
+          if (shouldStream && typeof client?.completeStreamingChat === 'function') {
+            let content = '';
+            for await (const chunk of client.completeStreamingChat(sdkMessages)) {
+              if (canceledRequests.has(id)) {
+                log('info', `Chat stream canceled for request ${id}`);
+                break;
+              }
+              const deltaText = chunk?.choices?.[0]?.delta?.content;
+              const messageText = chunk?.choices?.[0]?.message?.content ?? chunk?.message?.content;
+              let delta = '';
+              if (typeof deltaText === 'string' && deltaText) {
+                delta = deltaText;
+              } else if (typeof messageText === 'string' && messageText) {
+                // Some runtimes emit cumulative message text instead of token deltas.
+                delta = messageText.startsWith(content)
+                  ? messageText.slice(content.length)
+                  : messageText;
+              }
+              if (delta) {
+                content += delta;
+                send({
+                  id,
+                  stream: true,
+                  delta,
+                  chunk: {
+                    choices: [{ delta: { role: 'assistant', content: delta } }]
+                  }
+                });
+              }
             }
-            const deltaText = chunk?.choices?.[0]?.delta?.content;
-            const messageText = chunk?.choices?.[0]?.message?.content ?? chunk?.message?.content;
-            let delta = '';
-            if (typeof deltaText === 'string' && deltaText) {
-              delta = deltaText;
-            } else if (typeof messageText === 'string' && messageText) {
-              // Some runtimes emit cumulative message text instead of token deltas.
-              delta = messageText.startsWith(content)
-                ? messageText.slice(content.length)
-                : messageText;
-            }
-            if (delta) {
-              content += delta;
-              send({
-                id,
-                stream: true,
-                delta,
-                chunk: {
-                  choices: [{ delta: { role: 'assistant', content: delta } }]
+            chatOk = true;
+            reply({
+              ok: true,
+              result: {
+                choices: [{ message: { role: 'assistant', content } }],
+                acceleration: {
+                  requested: preferred?.requested ?? null,
+                  preferredApplied: preferred?.applied ?? null,
+                  active: await detectActiveExecutionProvider(chatModel)
                 }
-              });
-            }
-          }
-          reply({
-            ok: true,
-            result: {
-              choices: [{ message: { role: 'assistant', content } }],
-              acceleration: {
-                requested: preferred?.requested ?? null,
-                preferredApplied: preferred?.applied ?? null,
-                active: await detectActiveExecutionProvider(chatModel)
+              }
+            });
+          } else if (typeof client?.completeChat === 'function') {
+            const result = await client.completeChat(sdkMessages);
+            chatTokensIn = result?.usage?.prompt_tokens ?? null;
+            chatTokensOut = result?.usage?.completion_tokens ?? null;
+            if (shouldStream) {
+              const content = result?.choices?.[0]?.message?.content || '';
+              if (content) {
+                send({
+                  id,
+                  stream: true,
+                  delta: content,
+                  chunk: {
+                    choices: [{ delta: { role: 'assistant', content } }]
+                  }
+                });
               }
             }
-          });
-        } else if (typeof client?.completeChat === 'function') {
-          const result = await client.completeChat(sdkMessages);
-          if (shouldStream) {
-            const content = result?.choices?.[0]?.message?.content || '';
-            if (content) {
-              send({
-                id,
-                stream: true,
-                delta: content,
-                chunk: {
-                  choices: [{ delta: { role: 'assistant', content } }]
+            chatOk = true;
+            reply({
+              ok: true,
+              result: {
+                ...result,
+                acceleration: {
+                  requested: preferred?.requested ?? null,
+                  preferredApplied: preferred?.applied ?? null,
+                  active: await detectActiveExecutionProvider(chatModel)
                 }
-              });
-            }
-          }
-          reply({
-            ok: true,
-            result: {
-              ...result,
-              acceleration: {
-                requested: preferred?.requested ?? null,
-                preferredApplied: preferred?.applied ?? null,
-                active: await detectActiveExecutionProvider(chatModel)
               }
-            }
-          });
-        } else if (typeof client?.completeStreamingChat === 'function') {
-          let content = '';
-          for await (const chunk of client.completeStreamingChat(sdkMessages)) {
-            if (canceledRequests.has(id)) {
-              log('info', `Chat stream canceled for request ${id}`);
-              break;
-            }
-            const delta = chunk?.choices?.[0]?.delta?.content || '';
-            if (delta) content += delta;
-          }
-          reply({
-            ok: true,
-            result: {
-              choices: [{ message: { role: 'assistant', content } }],
-              acceleration: {
-                requested: preferred?.requested ?? null,
-                preferredApplied: preferred?.applied ?? null,
-                active: await detectActiveExecutionProvider(chatModel)
+            });
+          } else if (typeof client?.completeStreamingChat === 'function') {
+            let content = '';
+            for await (const chunk of client.completeStreamingChat(sdkMessages)) {
+              if (canceledRequests.has(id)) {
+                log('info', `Chat stream canceled for request ${id}`);
+                break;
               }
+              const delta = chunk?.choices?.[0]?.delta?.content || '';
+              if (delta) content += delta;
             }
-          });
+            chatOk = true;
+            reply({
+              ok: true,
+              result: {
+                choices: [{ message: { role: 'assistant', content } }],
+                acceleration: {
+                  requested: preferred?.requested ?? null,
+                  preferredApplied: preferred?.applied ?? null,
+                  active: await detectActiveExecutionProvider(chatModel)
+                }
+              }
+            });
+          } else {
+            throw new Error('Model chat client does not expose completion methods');
+          }
         } else {
-          throw new Error('Model chat client does not expose completion methods');
-        }
-      } else {
-        if (!sharedEndpoint) {
-          throw new Error('Service endpoint unavailable and direct chat client is unsupported.');
-        }
-        const resp = await fetch(`${apiBase}/chat/completions`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: poolEntry.variantId,
-            messages: sdkMessages,
-            stream: false,
-            max_tokens: payload.maxTokens,
-            temperature: payload.temperature
-          })
-        });
-        if (!resp.ok) {
-          const details = await readErrorBody(resp);
-          throw new Error(`Chat completion failed (${resp.status} ${resp.statusText}): ${details}`);
-        }
-        const httpResult = await resp.json();
-        reply({
-          ok: true,
-          result: {
-            ...httpResult,
-            acceleration: {
-              requested: preferred?.requested ?? null,
-              preferredApplied: preferred?.applied ?? null,
-              active: await detectActiveExecutionProvider(chatModel)
-            }
+          if (!sharedEndpoint) {
+            throw new Error('Service endpoint unavailable and direct chat client is unsupported.');
           }
+          const resp = await fetch(`${apiBase}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              model: poolEntry.variantId,
+              messages: sdkMessages,
+              stream: false,
+              max_tokens: payload.maxTokens,
+              temperature: payload.temperature
+            })
+          });
+          if (!resp.ok) {
+            const details = await readErrorBody(resp);
+            throw new Error(`Chat completion failed (${resp.status} ${resp.statusText}): ${details}`);
+          }
+          const httpResult = await resp.json();
+          chatTokensIn = httpResult?.usage?.prompt_tokens ?? null;
+          chatTokensOut = httpResult?.usage?.completion_tokens ?? null;
+          chatOk = true;
+          reply({
+            ok: true,
+            result: {
+              ...httpResult,
+              acceleration: {
+                requested: preferred?.requested ?? null,
+                preferredApplied: preferred?.applied ?? null,
+                active: await detectActiveExecutionProvider(chatModel)
+              }
+            }
+          });
+        }
+      } finally {
+        canceledRequests.delete(id);
+        appendAccessLog({
+          ts: chatAccessTs,
+          type: 'chat',
+          modelAlias,
+          durationMs: Date.now() - chatAccessTs,
+          tokensIn: chatTokensIn,
+          tokensOut: chatTokensOut,
+          source: 'ipc',
+          ok: chatOk,
         });
       }
-      canceledRequests.delete(id);
     } else if (cmd === 'cancelChatRequest') {
       const requestId = Number(payload.requestId);
       if (Number.isFinite(requestId)) {
@@ -731,6 +765,8 @@ rl.on('line', async (line) => {
       const tempPath = path.join(os.tmpdir(), tempFileName);
       await fs.promises.writeFile(tempPath, bytes);
 
+      const audioAccessTs = Date.now();
+      let audioOk = false;
       try {
         // Prefer direct AudioClient (like we do for chat) — this avoids relying on the web service HTTP route
         // which may return 404 for /audio/transcriptions even for Whisper models.
@@ -804,6 +840,7 @@ rl.on('line', async (line) => {
             }
           });
 
+          audioOk = true;
           reply({
             ok: true,
             result: {
@@ -839,6 +876,7 @@ rl.on('line', async (line) => {
           throw new Error(`Transcription failed (${resp.status} ${resp.statusText}): ${details}`);
         }
         const transcriptionResult = await resp.json();
+        audioOk = true;
         reply({
           ok: true,
           result: {
@@ -852,6 +890,16 @@ rl.on('line', async (line) => {
         });
       } finally {
         try { fs.unlinkSync(tempPath); } catch {}
+        appendAccessLog({
+          ts: audioAccessTs,
+          type: 'audio',
+          modelAlias: requestedAlias,
+          durationMs: Date.now() - audioAccessTs,
+          tokensIn: null,
+          tokensOut: null,
+          source: 'ipc',
+          ok: audioOk,
+        });
       }
     } else if (cmd === 'poolStatus') {
       const entries = [...pool.entries()].map(([alias, { catModel, variantId }]) => ({
@@ -860,6 +908,8 @@ rl.on('line', async (line) => {
         isLoaded: resolveIsLoaded(catModel), // true | false | null (null = unknown/unsupported SDK)
       }));
       reply({ ok: true, result: { models: entries, endpoint: sharedEndpoint } });
+    } else if (cmd === 'getAccessLog') {
+      reply({ ok: true, result: accessLog });
     } else if (cmd === 'getEps') {
       const eps = typeof manager.discoverEps === 'function' ? manager.discoverEps() : [];
       reply({ ok: true, result: eps });
