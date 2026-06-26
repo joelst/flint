@@ -33,6 +33,7 @@ const KNOWN_COMMANDS = new Set([
   'listModels', 'download', 'load', 'unload', 'deleteModel', 'getEndpoint',
   'chatCompletion', 'cancelChatRequest', 'transcribeAudio',
   'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',
+  'poolStatus',
 ]);
 
 // Per-command type requirements. Keys are required or optional field names; values are:
@@ -51,6 +52,7 @@ const FIELD_TYPES = {
 };
 
 // Commands that accept a lane field; validated to 'chat' | 'audio'.
+// Lane is accepted for backwards compatibility but the pool is alias-keyed, not lane-keyed.
 const LANE_CMDS = new Set(['load', 'unload']);
 const VALID_LANES = new Set(['chat', 'audio']);
 
@@ -75,6 +77,7 @@ const COMMAND_SCHEMA = {
   ensureAccelerators: { required: [], optional: [] },
   getVisionModels:    { required: [], optional: [] },
   getSTTModels:       { required: [], optional: [] },
+  poolStatus:         { required: [], optional: [] },
 };
 
 // Base64 character limit for transcribeAudio. 50 MB decoded audio is ~67 MB of base64.
@@ -132,32 +135,40 @@ function validateCommand(cmd, payload) {
 
 let manager = null;
 let FoundryLocalManager = null;
+let initConfig = null; // { appName, logLevel } — kept so startService can re-create manager with webServiceUrls
 const canceledRequests = new Set();
 
-// Per-lane model and endpoint state.
-// Each lane tracks its own loaded model independently, preventing chat/audio thrash.
-// sharedEndpoint is set by startService and used by both lanes as the default HTTP endpoint.
-const lane = {
-  chat:  { model: null, endpoint: null },
-  audio: { model: null, endpoint: null },
-};
+// Model pool: Map<alias, { catModel, variantId }>
+// variantId is catModel.id (e.g. "Phi-4-mini-instruct-generic-cpu:5") — required for HTTP routing.
+// Multiple models coexist; no LRU eviction policy for MVP (spike confirmed co-residency).
+const pool = new Map();
 let sharedEndpoint = null;
 
-function resolveLaneEndpoint(which) {
-  return lane[which].endpoint || sharedEndpoint;
+// Returns true/false/null. Handles isLoaded as boolean, function, or unknown.
+function resolveIsLoaded(model) {
+  if (!model) return null;
+  if (typeof model.isLoaded === 'boolean') return model.isLoaded;
+  if (typeof model.isLoaded === 'function') {
+    try { return !!model.isLoaded(); } catch { return null; }
+  }
+  return null;
 }
 
-async function ensureLaneModel(which, alias) {
-  const existing = lane[which].model;
-  if (!existing || existing.alias !== alias) {
-    lane[which].model = await manager.catalog.getModel(alias);
-    await lane[which].model.load();
-    log('info', `Model ${alias} loaded in ${which} lane`);
-  } else if (typeof existing.isLoaded === 'boolean' && !existing.isLoaded) {
-    await existing.load();
-    log('info', `Model ${alias} reloaded (runtime eviction) in ${which} lane`);
+async function ensureModel(alias) {
+  const existing = pool.get(alias);
+  if (existing) {
+    if (resolveIsLoaded(existing.catModel) === false) {
+      await existing.catModel.load();
+      log('info', `Model ${alias} reloaded after runtime eviction`);
+    }
+    return existing;
   }
-  return lane[which].model;
+  const catModel = await manager.catalog.getModel(alias);
+  await catModel.load();
+  const variantId = catModel.id;
+  pool.set(alias, { catModel, variantId });
+  log('info', `Model ${alias} loaded (variantId: ${variantId})`);
+  return pool.get(alias);
 }
 
 async function applyPreferredExecutionProvider (preferredEp, model) {
@@ -391,7 +402,8 @@ rl.on('line', async (line) => {
     if (cmd === 'init') {
       const FManager = await getFoundryManager();
       const appName = payload.appName || 'flint';
-      manager = FManager.create({ appName, logLevel: payload.logLevel || 'info' });
+      initConfig = { appName, logLevel: payload.logLevel || 'info' };
+      manager = FManager.create(initConfig);
       log('info', `SDK initialized for ${appName}`);
       reply({ ok: true, result: 'initialized' });
     } else if (cmd === 'listModels') {
@@ -431,24 +443,20 @@ rl.on('line', async (line) => {
       await model.download((p) => send({ id, progress: p, alias: payload.alias }));
       reply({ ok: true });
     } else if (cmd === 'load') {
-      const which = payload.lane || 'chat';
-      log('info', `Loading model ${payload.alias} into ${which} lane`);
-      const loaded = await ensureLaneModel(which, payload.alias);
+      const entry = await ensureModel(payload.alias);
       const acceleration = {
         requested: null,
-        active: await detectActiveExecutionProvider(loaded)
+        active: await detectActiveExecutionProvider(entry.catModel)
       };
-      log('info', `Model ${payload.alias} ready in ${which} lane (accel: ${acceleration.active || 'cpu'})`);
-      reply({ ok: true, result: { acceleration, lane: which } });
+      log('info', `Model ${payload.alias} ready (variantId: ${entry.variantId}, accel: ${acceleration.active || 'cpu'})`);
+      reply({ ok: true, result: { acceleration, lane: payload.lane || 'chat', variantId: entry.variantId } });
     } else if (cmd === 'unload') {
       const alias = payload.alias;
-      const which = payload.lane ||
-        (lane.chat.model?.alias === alias ? 'chat' :
-         lane.audio.model?.alias === alias ? 'audio' : null);
-      if (which && lane[which].model) {
-        await lane[which].model.unload();
-        lane[which].model = null;
-        log('info', `Model ${alias} unloaded from ${which} lane`);
+      const entry = pool.get(alias);
+      if (entry) {
+        await entry.catModel.unload();
+        pool.delete(alias);
+        log('info', `Model ${alias} unloaded from pool`);
       }
       reply({ ok: true });
     } else if (cmd === 'deleteModel') {
@@ -459,11 +467,10 @@ rl.on('line', async (line) => {
       if (!model) {
         throw new Error(`Model not found: ${payload.alias}`);
       }
-      for (const which of ['chat', 'audio']) {
-        if (lane[which].model?.alias === payload.alias && typeof lane[which].model.unload === 'function') {
-          await lane[which].model.unload();
-          lane[which].model = null;
-        }
+      const poolEntry = pool.get(payload.alias);
+      if (poolEntry && typeof poolEntry.catModel.unload === 'function') {
+        await poolEntry.catModel.unload();
+        pool.delete(payload.alias);
       }
       const deleteMethods = ['delete', 'remove', 'removeFromDisk', 'purgeCache', 'uninstall'];
       let deleted = false;
@@ -481,22 +488,32 @@ rl.on('line', async (line) => {
       }
       reply({ ok: true });
     } else if (cmd === 'startService') {
-      const desired = payload.alias;
-      if (desired) {
-        await ensureLaneModel('chat', desired);
+      // Re-create the manager with webServiceUrls so startWebService() binds to the requested port.
+      // The manager from init() lacks webServiceUrls and would bind to whatever the SDK default is.
+      // Pool is cleared because catModel references from the old manager instance become stale.
+      if (FoundryLocalManager && initConfig) {
+        pool.clear();
+        manager = FoundryLocalManager.create({
+          ...initConfig,
+          webServiceUrls: `http://127.0.0.1:${payload.port}`,
+        });
       }
-      const preferred = await applyPreferredExecutionProvider(payload.preferredEp, lane.chat.model);
-      if (!lane.chat.model) {
-        throw new Error('No model loaded in chat lane (pass alias or load first)');
-      }
-      // Use the SDK's web service if available
+      // Start service BEFORE loading models so HTTP routing layer initializes with the registry.
       if (typeof manager.startWebService === 'function') {
-        const info = await manager.startWebService({ port: payload.port || 5272 });
-        sharedEndpoint = info?.endpoint || info?.url || `http://localhost:${payload.port || 5272}/v1`;
+        manager.startWebService(); // synchronous, no args; port comes from webServiceUrls above
+        const urls = manager.urls || [];
+        const base = (urls[0] || `http://127.0.0.1:${payload.port}`).replace(/\/+$/, '');
+        sharedEndpoint = `${base}/v1`;
       } else {
-        sharedEndpoint = `http://localhost:${payload.port || 5272}/v1`;
+        sharedEndpoint = `http://127.0.0.1:${payload.port}/v1`;
       }
       log('info', `Service started at ${sharedEndpoint}`);
+      const desired = payload.alias;
+      if (desired) {
+        await ensureModel(desired);
+      }
+      const firstModel = desired ? pool.get(desired)?.catModel : [...pool.values()][0]?.catModel;
+      const preferred = await applyPreferredExecutionProvider(payload.preferredEp, firstModel);
       reply({
         ok: true,
         endpoint: sharedEndpoint,
@@ -504,48 +521,47 @@ rl.on('line', async (line) => {
           acceleration: {
             requested: preferred?.requested ?? null,
             preferredApplied: preferred?.applied ?? null,
-            active: await detectActiveExecutionProvider(lane.chat.model)
+            active: await detectActiveExecutionProvider(firstModel)
           }
         }
       });
     } else if (cmd === 'stopService') {
       if (manager && typeof manager.stopWebService === 'function') {
         try {
-          await manager.stopWebService();
+          manager.stopWebService(); // synchronous
         } catch (e) {
           log('warn', `stopWebService error (ignored): ${e?.message ?? e}`);
         }
       }
       sharedEndpoint = null;
-      lane.chat.endpoint = null;
-      lane.audio.endpoint = null;
       log('info', 'Service stopped');
       reply({ ok: true });
     } else if (cmd === 'getEndpoint') {
       reply({ ok: true, endpoint: sharedEndpoint });
     } else if (cmd === 'getStatus') {
+      const poolSnapshot = [...pool.entries()].map(([alias, { variantId }]) => ({ alias, variantId }));
       reply({
         ok: true,
         result: {
           initialized: !!manager,
-          modelLoaded: !!(lane.chat.model || lane.audio.model),
-          currentModel: lane.chat.model?.alias,
+          modelLoaded: pool.size > 0,
+          currentModel: poolSnapshot[0]?.alias ?? null,
           endpoint: sharedEndpoint,
           serviceRunning: !!sharedEndpoint,
-          chatLane: { model: lane.chat.model?.alias || null, endpoint: lane.chat.endpoint || sharedEndpoint || null },
-          audioLane: { model: lane.audio.model?.alias || null, endpoint: lane.audio.endpoint || sharedEndpoint || null },
+          pool: poolSnapshot,
+          // Legacy lane fields for frontend compatibility
+          chatLane: { model: poolSnapshot[0]?.alias ?? null, endpoint: sharedEndpoint || null },
+          audioLane: { model: poolSnapshot[1]?.alias ?? null, endpoint: sharedEndpoint || null },
         }
       });
     } else if (cmd === 'chatCompletion') {
-      const modelAlias = payload.model || lane.chat.model?.alias;
+      const modelAlias = payload.model;
       const shouldStream = !!payload.stream;
       canceledRequests.delete(id);
-      if (!modelAlias) {
-        throw new Error('No model selected for chat completion.');
-      }
       log('debug', `Chat completion: model=${modelAlias} msgs=${payload.messages?.length ?? 0} stream=${shouldStream}`);
-      const chatModel = await ensureLaneModel('chat', modelAlias);
-      const apiBase = getOpenAiApiBase(resolveLaneEndpoint('chat'));
+      const poolEntry = await ensureModel(modelAlias);
+      const chatModel = poolEntry.catModel;
+      const apiBase = getOpenAiApiBase(sharedEndpoint);
       const preferred = await applyPreferredExecutionProvider(payload.preferredEp, chatModel);
 
       const sdkMessages = toSdkMessages(payload.messages);
@@ -648,14 +664,14 @@ rl.on('line', async (line) => {
           throw new Error('Model chat client does not expose completion methods');
         }
       } else {
-        if (!resolveLaneEndpoint('chat')) {
+        if (!sharedEndpoint) {
           throw new Error('Service endpoint unavailable and direct chat client is unsupported.');
         }
         const resp = await fetch(`${apiBase}/chat/completions`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            model: modelAlias,
+            model: poolEntry.variantId,
             messages: sdkMessages,
             stream: false,
             max_tokens: payload.maxTokens,
@@ -696,13 +712,14 @@ rl.on('line', async (line) => {
 
       const requestedAlias = payload.model;
       if (requestedAlias) {
-        await ensureLaneModel('audio', requestedAlias);
+        await ensureModel(requestedAlias);
       }
-      const audioModel = lane.audio.model;
+      const audioPoolEntry = pool.get(requestedAlias);
+      const audioModel = audioPoolEntry?.catModel;
       const preferred = await applyPreferredExecutionProvider(payload.preferredEp, audioModel);
 
       if (!audioModel) {
-        throw new Error('No model loaded in audio lane. Select an STT model on the Audio page first.');
+        throw new Error('No STT model loaded. Select an STT model on the Audio page first.');
       }
 
       const bytes = Buffer.from(payload.audioBase64, 'base64');
@@ -802,15 +819,14 @@ rl.on('line', async (line) => {
         }
 
         // Fallback to OpenAI-compatible HTTP if direct client not available for this model
-        const audioEndpoint = resolveLaneEndpoint('audio');
-        if (!audioEndpoint) {
+        if (!sharedEndpoint) {
           throw new Error('Service endpoint unavailable and model has no direct audio client.');
         }
-        const apiBase = getOpenAiApiBase(audioEndpoint);
+        const apiBase = getOpenAiApiBase(sharedEndpoint);
         const blob = new Blob([bytes], { type: payload.mimeType || 'application/octet-stream' });
         const form = new FormData();
         form.append('file', blob, payload.fileName || 'audio.webm');
-        form.append('model', payload.model || audioModel.alias);
+        form.append('model', audioPoolEntry?.variantId || payload.model);
         if (payload.language && payload.language !== 'auto') {
           form.append('language', payload.language);
         }
@@ -837,6 +853,13 @@ rl.on('line', async (line) => {
       } finally {
         try { fs.unlinkSync(tempPath); } catch {}
       }
+    } else if (cmd === 'poolStatus') {
+      const entries = [...pool.entries()].map(([alias, { catModel, variantId }]) => ({
+        alias,
+        variantId,
+        isLoaded: resolveIsLoaded(catModel), // true | false | null (null = unknown/unsupported SDK)
+      }));
+      reply({ ok: true, result: { models: entries, endpoint: sharedEndpoint } });
     } else if (cmd === 'getEps') {
       const eps = typeof manager.discoverEps === 'function' ? manager.discoverEps() : [];
       reply({ ok: true, result: eps });

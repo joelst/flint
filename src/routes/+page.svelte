@@ -39,8 +39,36 @@
     type Persona,
   } from "$lib/personas";
 
+  import {
+    integrations,
+    renderSnippet,
+    detectPlatform,
+    type Integration,
+    type IntegrationStatus,
+  } from "$lib/integrations";
+
+  // Integrations tab state
+  let integrationsOS = $state<'windows' | 'unix'>(detectPlatform());
+  let expandedIntegrationId = $state<string | null>(null);
+  let copiedSnippetKey = $state<string | null>(null);
+
+  function copyIntegrationSnippet(key: string, body: string) {
+    navigator.clipboard?.writeText(body);
+    copiedSnippetKey = key;
+    setTimeout(() => {
+      if (copiedSnippetKey === key) copiedSnippetKey = null;
+    }, 1500);
+  }
+
+  function statusBadgeLabel(status: IntegrationStatus): string {
+    if (status === 'verified') return 'Verified';
+    if (status === 'community') return 'Community-reported';
+    if (status === 'research-needed') return 'Unverified';
+    return 'Not supported';
+  }
+
   // Simple client-side navigation
-  type View = "models" | "chat" | "audio" | "diagnostics" | "learn";
+  type View = "models" | "chat" | "audio" | "diagnostics" | "integrations" | "learn";
   let currentView = $state<View>("models");
 
   // Model capability helpers (based on catalog task/capabilities/family/alias)
@@ -2255,6 +2283,17 @@ Output only the summary text, no preamble.`;
       </button>
       <button
         class="nav-item"
+        class:active={currentView === "integrations"}
+        onclick={() => (currentView = "integrations")}
+        title="Integrations"
+      >
+        <span class="nav-icon" aria-hidden="true">
+          <Icon name="zap" size={20} />
+        </span>
+        <span class="nav-label">Integrations</span>
+      </button>
+      <button
+        class="nav-item"
         class:active={currentView === "learn"}
         onclick={() => (currentView = "learn")}
         title="Learn"
@@ -3178,6 +3217,105 @@ Output only the summary text, no preamble.`;
             </div>
           </div>
         </div>
+      {:else if currentView === "integrations"}
+        <div class="view integrations-view">
+          <h2>Integrations</h2>
+          <p class="integrations-lede">
+            Point AI coding tools at your local Flint endpoint. Pick your OS, copy the snippet, drop it into the tool's config.
+          </p>
+
+          {#if !state.endpoint}
+            <div class="notice">
+              <p><strong>The local endpoint is not running.</strong></p>
+              <p>Start the service in <button class="link-like" onclick={() => (currentView = "diagnostics")}>Diagnostics</button> to populate live URLs in the snippets below.</p>
+            </div>
+          {/if}
+
+          <div class="integrations-toolbar">
+            <span class="os-toggle-label">OS:</span>
+            <button
+              class="os-toggle"
+              class:active={integrationsOS === 'windows'}
+              onclick={() => (integrationsOS = 'windows')}
+              type="button"
+            >Windows</button>
+            <button
+              class="os-toggle"
+              class:active={integrationsOS === 'unix'}
+              onclick={() => (integrationsOS = 'unix')}
+              type="button"
+            >macOS / Linux</button>
+            <span class="endpoint-hint">
+              Endpoint:
+              <code>{state.endpoint || 'not started'}</code>
+            </span>
+          </div>
+
+          <div class="integration-cards">
+            {#each integrations as integration (integration.id)}
+              {@const osSnippets = integration.snippets[integrationsOS]}
+              {@const isExpanded = expandedIntegrationId === integration.id}
+              <article class="integration-card" class:status-unsupported={integration.status === 'unsupported'}>
+                <header class="integration-card-head">
+                  <div class="integration-title">
+                    <h3>{integration.name}</h3>
+                    <span class="integration-vendor">{integration.vendor}</span>
+                  </div>
+                  <span class="status-badge status-{integration.status}">
+                    {statusBadgeLabel(integration.status)}
+                  </span>
+                </header>
+                <p class="integration-desc">{integration.description}</p>
+
+                {#if osSnippets.length === 0}
+                  <p class="integration-empty">No snippet — see limitations below.</p>
+                {:else}
+                  {#each osSnippets as snippet, snippetIdx}
+                    {@const snippetKey = `${integration.id}-${integrationsOS}-${snippetIdx}`}
+                    {@const rendered = renderSnippet(snippet.body, state.endpoint || '')}
+                    <div class="snippet-block">
+                      <div class="snippet-head">
+                        <span class="snippet-label">{snippet.label}</span>
+                        <button
+                          class="snippet-copy"
+                          type="button"
+                          onclick={() => copyIntegrationSnippet(snippetKey, rendered)}
+                        >
+                          {copiedSnippetKey === snippetKey ? 'Copied' : 'Copy'}
+                        </button>
+                      </div>
+                      <pre class="snippet-body">{rendered}</pre>
+                    </div>
+                  {/each}
+                {/if}
+
+                {#if (integration.limitations && integration.limitations.length) || integration.docsUrl}
+                  <button
+                    class="integration-toggle"
+                    type="button"
+                    onclick={() => (expandedIntegrationId = isExpanded ? null : integration.id)}
+                  >
+                    {isExpanded ? 'Hide details' : 'Show limitations & docs'}
+                  </button>
+                  {#if isExpanded}
+                    <div class="integration-details">
+                      {#if integration.limitations?.length}
+                        <ul class="integration-limitations">
+                          {#each integration.limitations as note}
+                            <li>{note}</li>
+                          {/each}
+                        </ul>
+                      {/if}
+                      {#if integration.docsUrl}
+                        <a class="integration-docs-link" href={integration.docsUrl} target="_blank" rel="noopener noreferrer">Upstream docs ↗</a>
+                      {/if}
+                    </div>
+                  {/if}
+                {/if}
+              </article>
+            {/each}
+          </div>
+        </div>
       {:else if currentView === "learn"}
         <div class="view">
           <h2>Learn about Foundry Local</h2>
@@ -3205,27 +3343,20 @@ Output only the summary text, no preamble.`;
                 >Copy</button
               >
             </div>
-
-            <h4>Continue.dev</h4>
-            <pre>{`{
-  "apiBase": "${state.endpoint}",
-  "model": "your-loaded-model-alias"
-}`}</pre>
-
-            <h4>GitHub Copilot (Custom Provider)</h4>
-            <pre>{`{
-  "http": {
-    "proxy": "${state.endpoint}"
-  }
-}`}</pre>
-
-            <h4>Generic OpenAI-compatible client</h4>
-            <pre>{`const openai = new OpenAI({
-  baseURL: "${state.endpoint}",
-  apiKey: "not-needed-for-local"
-});`}</pre>
+            <p>
+              Full setup snippets for AI coding tools (Continue.dev, OpenCode,
+              Codex CLI, generic OpenAI SDKs, and more) live in the
+              <button class="link-like" onclick={() => (currentView = "integrations")}
+                >Integrations</button
+              > tab — with per-OS commands and copy buttons.
+            </p>
           {:else}
-            <p>Start the service in Diagnostics to see live snippets.</p>
+            <p>
+              Start the service in Diagnostics, then open the
+              <button class="link-like" onclick={() => (currentView = "integrations")}
+                >Integrations</button
+              > tab for copy-paste setup snippets.
+            </p>
           {/if}
 
           <h3>Tool Calling</h3>
@@ -4311,6 +4442,229 @@ Output only the summary text, no preamble.`;
 
   .endpoint-snippet code {
     word-break: break-all;
+  }
+
+  /* Integrations view */
+  .integrations-view .integrations-lede {
+    color: var(--muted);
+    margin-bottom: 14px;
+  }
+
+  .integrations-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 12px 0 18px 0;
+    flex-wrap: wrap;
+  }
+
+  .os-toggle-label {
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  .os-toggle {
+    padding: 4px 12px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--muted);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+
+  .os-toggle:hover {
+    border-color: var(--accent);
+    color: var(--fg);
+  }
+
+  .os-toggle.active {
+    background: var(--accent);
+    color: var(--accent-fg, #fff);
+    border-color: var(--accent);
+  }
+
+  .endpoint-hint {
+    margin-left: auto;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .endpoint-hint code {
+    color: var(--fg);
+    word-break: break-all;
+  }
+
+  .integration-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+    gap: 12px;
+  }
+
+  .integration-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px;
+    background: var(--panel-bg);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .integration-card.status-unsupported {
+    opacity: 0.85;
+  }
+
+  .integration-card-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .integration-title h3 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+  }
+
+  .integration-vendor {
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .status-badge {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .status-badge.status-verified {
+    background: rgba(40, 180, 99, 0.12);
+    color: #28b463;
+    border-color: rgba(40, 180, 99, 0.4);
+  }
+
+  .status-badge.status-community {
+    background: rgba(52, 152, 219, 0.12);
+    color: #3498db;
+    border-color: rgba(52, 152, 219, 0.4);
+  }
+
+  .status-badge.status-research-needed {
+    background: rgba(241, 196, 15, 0.12);
+    color: #d4a017;
+    border-color: rgba(241, 196, 15, 0.4);
+  }
+
+  .status-badge.status-unsupported {
+    background: rgba(231, 76, 60, 0.1);
+    color: #e74c3c;
+    border-color: rgba(231, 76, 60, 0.4);
+  }
+
+  .integration-desc {
+    margin: 0;
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  .integration-empty {
+    margin: 0;
+    color: var(--muted);
+    font-style: italic;
+    font-size: 13px;
+  }
+
+  .snippet-block {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    background: var(--bg);
+  }
+
+  .snippet-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel-bg);
+  }
+
+  .snippet-label {
+    font-size: 12px;
+    color: var(--muted);
+    font-weight: 500;
+  }
+
+  .snippet-copy {
+    padding: 2px 10px;
+    font-size: 12px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--fg);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  .snippet-copy:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  .snippet-body {
+    margin: 0;
+    padding: 10px 12px;
+    font-family: ui-monospace, "Cascadia Code", "Source Code Pro", monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    overflow-x: auto;
+    white-space: pre;
+    color: var(--fg);
+  }
+
+  .integration-toggle {
+    align-self: flex-start;
+    background: none;
+    border: none;
+    color: var(--accent);
+    cursor: pointer;
+    padding: 0;
+    font-size: 12px;
+    text-decoration: underline;
+  }
+
+  .integration-details {
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+    font-size: 13px;
+  }
+
+  .integration-limitations {
+    margin: 0 0 8px 0;
+    padding-left: 18px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+
+  .integration-docs-link {
+    color: var(--accent);
+    font-size: 12px;
+  }
+
+  .link-like {
+    background: none;
+    border: none;
+    color: var(--accent);
+    padding: 0;
+    cursor: pointer;
+    text-decoration: underline;
+    font: inherit;
   }
 
   .log-viewer {

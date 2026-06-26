@@ -18,7 +18,8 @@ export type SidecarCommand =
   | { cmd: 'getEps' }
   | { cmd: 'ensureAccelerators' }
   | { cmd: 'getVisionModels' }
-  | { cmd: 'getSTTModels' };
+  | { cmd: 'getSTTModels' }
+  | { cmd: 'poolStatus' };
 
 export type SidecarCommandName = SidecarCommand['cmd'];
 
@@ -27,6 +28,7 @@ export const KNOWN_COMMANDS = new Set<SidecarCommandName>([
   'listModels', 'download', 'load', 'unload', 'deleteModel', 'getEndpoint',
   'chatCompletion', 'cancelChatRequest', 'transcribeAudio',
   'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',
+  'poolStatus',
 ]);
 
 /**

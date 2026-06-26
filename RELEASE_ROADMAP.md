@@ -169,13 +169,56 @@ Routing in Flint touches several layers and needs deliberate design before any s
 
 ### What is in 0.3 (proposed)
 
+0. **Integration snippets / tool onboarding** (first milestone — easiest user-visible win)
+   - Dedicated **Integrations** nav section listing AI coding tools that can use Flint's local OpenAI-compatible endpoint.
+   - **Reference model**: Ollama's [integrations page](https://docs.ollama.com/integrations) — same shape (categorized tool cards with copy-paste setup), but Flint does **not** ship CLI installers / one-line install scripts. Snippets only; the user runs the tool install themselves.
+   - Data-driven catalog (`src/lib/integrations.ts`) with per-tool:
+     - Name, description, category, status (`verified` / `community` / `research-needed` / `unsupported`).
+     - OS-specific setup snippets (Windows PowerShell + macOS/Linux bash).
+     - Required env vars / config-file paths / CLI flags.
+     - Known limitations (e.g. requires translation proxy for non-OpenAI-protocol tools).
+     - Upstream docs link for verification.
+   - Card UI with OS toggle, copy buttons, expandable "limitations" panel, status badge.
+   - **Initial verified entries (target for first cut)**: Continue.dev, generic OpenAI SDK.
+   - **Community-reported entries**: GitHub Copilot for VS Code (native Foundry Local support), OpenClaw via LiteLLM proxy.
+   - **Research-needed scaffolds (banner says "unverified")**: OpenCode, Codex CLI, Cline, Hermes Agent, Droid, Pi.
+   - **Documented as unsupported / proxy-required**: Claude Code (Anthropic protocol — needs LiteLLM translation proxy), GitHub Copilot **CLI** (GH-proprietary backend, distinct from the VS Code extension), OpenAI Codex App (hosted, not redirectable).
+   - **Out of scope for 0.3**: auto-run "install for me" buttons that would write to user shell configs / VS Code settings. Snippets only — preserves the least-privilege shell capability work from 0.2.
+
+0b. **Local API-key proxy and multi-model routing** (research)
+
+   - Many OpenAI-compat clients enforce non-empty / well-formed API keys; "dummy" strings work in some clients and fail in others (header validation, key prefix checks, etc.). Some agentic tools also expect bearer tokens for sub-features (telemetry endpoints, billing checks) that fail noisily against a local endpoint that has no auth surface.
+   - **Investigate**: bundling a tiny optional auth-proxy in front of Flint's local endpoint that (a) accepts any key matching a user-issued local token, (b) optionally translates OpenAI → Anthropic protocol for Claude Code, (c) issues per-tool tokens visible in a "local API keys" UI for audit/revoke.
+   - **Two-for-one opportunity**: the same proxy layer could also provide the **request-routing fabric** called for in item 1 (model pool) and the routing-research block — LiteLLM-style proxies natively support cross-backend routing rules (capability-based, fallback, sticky). If Flint already runs a local proxy, the routing layer is "free."
+   - **Candidate stack**: LiteLLM (mature, already widely referenced for OpenClaw + Azure Foundry recipes).
+   - **Trade-offs to weigh explicitly before adopting**:
+     - **Pro**: solves dummy-keys, protocol translation, multi-backend routing, audit-able local tokens — all in one component already battle-tested across the ecosystem.
+     - **Pro**: removes the need for Flint to write a routing layer from scratch (less Flint code = less Flint security surface).
+     - **Con**: pulls in a Python runtime and its full transitive dependency tree (FastAPI, uvicorn, Pydantic, provider SDKs). Each is its own CVE surface to track.
+     - **Con**: LiteLLM ships frequent releases with breaking changes; bundling pins us to coordinating updates or shipping a wide version range.
+     - **Con**: violates the current "bundle is ~20 MB, runtime is just Foundry Local + Node sidecar" footprint promise. Embedding Python is a category change for Flint's install size and threat model.
+   - **Decision needed before implementation**: is this Flint-owned (bundled sub-process, integrated UI) or a documented external dependency (linked recipe, opt-in install)? Strong lean toward **documented external dependency** for 0.3 — keeps Flint small and lets the security-conscious user opt into the proxy explicitly. Bundling is a 0.4-or-later conversation, contingent on the routing layer becoming a must-have rather than a nice-to-have.
+   - **Direct-integration first; no compatibility hacks**: where a client supports a standard OpenAI base-URL override (e.g. OpenClaw per its [local-models docs](https://open-claw.bot/docs/gateway/local-models/#other-openai-compatible-local-proxies)), Flint documents the direct path. Where a client is wire-bound to a different protocol (e.g. Claude Code → Anthropic Messages API), we mark it **unsupported** and point users at OpenAI-compatible alternatives. We do not ship translation-proxy workarounds that "kinda work" — a lossy bridge to Claude Code (no prompt caching, broken extended thinking, fragile tool-use) is worse than a clear "use a different client" message.
+
+0c. **Governance & telemetry research — Microsoft Purview SDK**
+
+   - Investigate the Microsoft Purview SDK / APIs for capturing useful governance data about Flint usage in managed environments (model-load events, endpoint access patterns, prompt/response audit hooks where the user opts in).
+   - **Goals**: surface enterprise-relevant signals (which models were loaded, by which user, what data crossed the local endpoint, retention) without breaking Flint's local-first / no-telemetry-by-default posture.
+   - **Constraints**:
+     - All Purview reporting must be off by default and gated by explicit per-machine policy (consistent with 0.4 enterprise controls).
+     - Must respect the security organization instruction not to ship customer PII or employee pay/HR data through generated reports.
+     - Prompt/response content is the most sensitive surface — default to metadata-only (event types, counts, model aliases, timestamps) unless the operator opts content in.
+   - **Deliverable in 0.3**: a short design memo answering: which Purview ingestion path (Activity Log API, Audit log, Information Protection labels), what metadata schema to emit, and what the opt-in UX looks like. Implementation lands no earlier than 0.4 enterprise controls.
+
 1. **Model pool (replaces named lanes)**
    - Replace `lane.chat` / `lane.audio` with a `Map<alias, LoadedModel>` pool in the sidecar.
    - `ensureModel(alias)` loads into the pool if absent; all callers (chat, audio, dictation) request by alias.
    - Keep the current lane routing hints (`lane?: 'chat' | 'audio'`) as soft labels for routing preference, not hard ownership.
    - Hardware-aware admission: before loading, estimate model VRAM footprint from catalog metadata and compare against available headroom. Fail gracefully with a clear "not enough memory" message rather than silent eviction.
    - Hot-switch: when the user switches chat models, the old model stays resident until explicitly unloaded or memory pressure forces eviction. No forced unload on switch.
-   - **Prerequisite spike**: confirm whether Foundry Local will keep two chat-class models resident simultaneously without silently evicting one. If it evicts, design budget-aware proactive eviction instead of optimistic pooling. Run this spike before designing the pool API.
+   - **Prerequisite spike — COMPLETE. Verdict: `optimistic-pool-works`.** Both models (phi-4-mini 4.9 GB + mistral-7b 4.2 GB) loaded simultaneously at 10.37 GB RSS with no eviction. HTTP routing works; chat-A-2 (185 ms) was faster than chat-A-1 (231 ms) confirming A stayed resident. Full results: [docs/pool-spike-results/pool-spike-2026-06-26T05-38-18-941Z.md](./docs/pool-spike-results/pool-spike-2026-06-26T05-38-18-941Z.md). Protocol: [docs/POOL_SPIKE.md](./docs/POOL_SPIKE.md); script: [sidecar/scripts/pool-spike.mjs](./sidecar/scripts/pool-spike.mjs).
+   - **Design finding — HTTP endpoint routes by variant ID, not alias.** `model: "phi-4-mini"` returns HTTP 400; `model: "Phi-4-mini-instruct-generic-cpu:5"` returns HTTP 200. The `ModelPool` must store `Map<alias, { model, variantId }>` and use the variant ID in all HTTP requests to the local service. External tools connecting to Flint's endpoint also need the variant ID — the Integrations tab snippets must document how to discover it.
+   - **Sidecar bug — `startWebService` call signature**: `foundry-sidecar.js` currently calls `manager.startWebService({ port })` but in the installed SDK version `startWebService()` takes no arguments and returns void; the actual endpoint URLs are read from `manager.urls` after the call. The `{ port }` argument is silently ignored, and the port/fallback-URL chain in the sidecar accidentally works only because it falls back to the hardcoded `http://localhost:${port}/v1` string. Fix this as part of the pool redesign: remove the argument, read `manager.urls` afterward, and surface the real bound URL in `getStatus`.
 
 2. **Monitoring view** (new nav section)
    - Live snapshot of the model pool: each loaded model with alias, lane hint, estimated VRAM, and last-used timestamp.
