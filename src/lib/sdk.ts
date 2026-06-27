@@ -94,11 +94,20 @@ export interface PoolEntry {
   isLoaded: boolean | null;
 }
 
+export interface StreamingStatus {
+  active: boolean;
+  type: 'chat' | 'audio' | null;
+  modelAlias: string | null;
+  elapsedMs: number | null;
+  count: number;
+}
+
 export interface PoolStats {
-  memoryMb: number;
+  usedMemMb: number;
   totalMemMb: number;
   freeMemMb: number;
   tokenTotals: Array<{ alias: string; tokensIn: number; tokensOut: number }>;
+  streaming: StreamingStatus | null;
 }
 
 export interface FlintSDKState {
@@ -488,10 +497,11 @@ export async function refreshModels(): Promise<void> {
         updateState({
           pool: ps.result.models ?? [],
           poolStats: {
-            memoryMb: ps.result.memoryMb ?? 0,
+            usedMemMb: ps.result.usedMemMb ?? (ps.result.totalMemMb ?? 0) - (ps.result.freeMemMb ?? 0),
             totalMemMb: ps.result.totalMemMb ?? 0,
             freeMemMb: ps.result.freeMemMb ?? 0,
             tokenTotals: ps.result.tokenTotals ?? [],
+            streaming: ps.result.streaming ?? null,
           },
         });
       }
@@ -545,6 +555,27 @@ export async function removeFromCache(alias: string) {
   // Not implemented in current sidecar for safety; can be added
   console.warn('removeFromCache not wired to sidecar yet');
   await refreshModels();
+}
+
+export async function getAccessLog(): Promise<any[]> {
+  const res = await send('getAccessLog');
+  return res?.result ?? [];
+}
+
+export async function pollPoolStatus(): Promise<void> {
+  const ps = await send('poolStatus');
+  if (ps?.result) {
+    updateState({
+      pool: ps.result.models ?? [],
+      poolStats: {
+        usedMemMb: ps.result.usedMemMb ?? (ps.result.totalMemMb ?? 0) - (ps.result.freeMemMb ?? 0),
+        totalMemMb: ps.result.totalMemMb ?? 0,
+        freeMemMb: ps.result.freeMemMb ?? 0,
+        tokenTotals: ps.result.tokenTotals ?? [],
+        streaming: ps.result.streaming ?? null,
+      },
+    });
+  }
 }
 
 export async function getLocalEndpoint(): Promise<string | undefined> {

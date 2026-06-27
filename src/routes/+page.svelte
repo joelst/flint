@@ -24,6 +24,8 @@
     cancelChatRequest,
     transcribeAudio,
     appendAppLog,
+    getAccessLog,
+    pollPoolStatus,
     type ModelInfo,
     type EpInfo,
     type LogEntry,
@@ -68,7 +70,7 @@
   }
 
   // Simple client-side navigation
-  type View = "models" | "chat" | "audio" | "diagnostics" | "integrations" | "learn";
+  type View = "models" | "chat" | "audio" | "monitor" | "diagnostics" | "integrations" | "learn";
   let currentView = $state<View>("models");
 
   // Model capability helpers (based on catalog task/capabilities/family/alias)
@@ -314,6 +316,10 @@
   let modelRuntimeMeta = $state<Record<string, { downloadedAt?: string; lastUsedAcceleration?: string }>>({});
   let variantPanelOpen = $state<Record<string, boolean>>({});
   let startupModels = $state<Record<string, string | null>>({});
+  let downloadingModelAliases = $state<Record<string, boolean>>({});
+  let downloadingVariantIds = $state<Record<string, boolean>>({});
+  let monitorLog = $state<any[]>([]);
+  let monitorLogPaused = $state(false);
 
   // Chat state
   let selectedModelAlias = $state("");
@@ -542,11 +548,13 @@
     loadedAudioModel?.alias || selectedSTTModelAlias || ""
   );
   // Chat is blocked only when an audio-capable model is loaded in the chat lane
-  // (i.e. it was not deliberately loaded via useSTTModelForAudio into the audio lane).
+  // (i.e. it was not deliberately loaded via useSTTModelForAudio into the audio lane)
+  // AND no chat-capable model is also loaded and selected.
   const chatBlockedByLoadedSTT = $derived(
     !!loadedAudioModel &&
     (!selectedModelAlias || loadedAudioModel.alias !== selectedModelAlias) &&
-    loadedAudioModel.alias !== audioLaneModelAlias
+    loadedAudioModel.alias !== audioLaneModelAlias &&
+    !state.models.some((m: any) => m.isLoaded && modelSupportsChat(m) && m.alias === selectedModelAlias)
   );
 
   // Keep selectedSTTModelAlias in sync with the loaded audio model so that
@@ -892,6 +900,62 @@
       localStorage.setItem(PERSIST_KEY, JSON.stringify(existing));
     } catch {}
   });
+
+  // Monitor tab polling — 5s while active, pauses when tab hidden, clears on view change
+  $effect(() => {
+    if (currentView !== 'monitor') return;
+
+    async function pollMonitor() {
+      if (document.hidden) return;
+      try {
+        const [log] = await Promise.all([
+          getAccessLog(),
+          pollPoolStatus(),
+        ]);
+        if (!monitorLogPaused) {
+          monitorLog = (log ?? []).slice(-100).reverse();
+        }
+      } catch {}
+    }
+
+    pollMonitor();
+    const interval = setInterval(pollMonitor, 5000);
+    return () => clearInterval(interval);
+  });
+
+  async function refreshMonitorNow() {
+    const log = await getAccessLog().catch(() => []);
+    monitorLog = (log ?? []).slice(-100).reverse();
+    await pollPoolStatus().catch(() => {});
+  }
+
+  function exportAccessLog(format: 'json' | 'csv') {
+    const entries = [...monitorLog].reverse(); // restore chronological order
+    let content: string;
+    let mime: string;
+    let ext: string;
+    if (format === 'json') {
+      content = JSON.stringify(entries, null, 2);
+      mime = 'application/json';
+      ext = 'json';
+    } else {
+      const headers = 'time,type,model,durationMs,tokensIn,tokensOut,ok';
+      const rows = entries.map(e =>
+        [new Date(e.ts).toISOString(), e.type, e.modelAlias ?? '', e.durationMs ?? '', e.tokensIn ?? '', e.tokensOut ?? '', e.ok].join(',')
+      );
+      content = [headers, ...rows].join('\n');
+      mime = 'text/csv';
+      ext = 'csv';
+    }
+    const stamp = new Date().toISOString().slice(0, 10);
+    const blob = new Blob([content], { type: `${mime};charset=utf-8` });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `flint-access-log-${stamp}.${ext}`;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }
 
   async function init() {
     statusMessage = "Initializing Foundry Local SDK...";
@@ -1265,6 +1329,7 @@
   });
 
   async function downloadAndTrack(model: any) {
+    downloadingModelAliases = { ...downloadingModelAliases, [model.alias]: true };
     try {
       statusMessage = `Downloading ${model.alias}...`;
       await downloadModel(model, (p: number) => {
@@ -1276,6 +1341,10 @@
     } catch (e: any) {
       statusMessage = `Download failed: ${e?.message || e}`;
       throw e;
+    } finally {
+      const next = { ...downloadingModelAliases };
+      delete next[model.alias];
+      downloadingModelAliases = next;
     }
   }
 
@@ -1348,6 +1417,7 @@
   }
 
   async function downloadVariant(model: any, variantId: string) {
+    downloadingVariantIds = { ...downloadingVariantIds, [variantId]: true };
     try {
       statusMessage = `Downloading ${model.alias} variant...`;
       await downloadModel(model, (p: number) => {
@@ -1358,7 +1428,27 @@
       await refreshModels();
     } catch (e: any) {
       statusMessage = `Download failed: ${e?.message || e}`;
+    } finally {
+      const next = { ...downloadingVariantIds };
+      delete next[variantId];
+      downloadingVariantIds = next;
     }
+  }
+
+  function accelBadgeInfo(deviceType: string | null, ep: string | null): { label: string; cls: string } {
+    const device = deviceType ?? 'CPU';
+    const epNorm = (ep ?? 'generic').toLowerCase().replace(/executionprovider$/i, '').trim();
+    let epLabel: string;
+    let cls: string;
+    if (epNorm === 'cuda')                        { epLabel = 'CUDA';      cls = 'ep-cuda';      }
+    else if (epNorm === 'qnn')                    { epLabel = 'QNN';       cls = 'ep-qnn';       }
+    else if (epNorm === 'dml')                    { epLabel = 'DirectML';  cls = 'ep-dml';       }
+    else if (epNorm.includes('openvino'))         { epLabel = 'OpenVINO';  cls = 'ep-openvino';  }
+    else if (epNorm === 'webgpu')                 { epLabel = 'WebGPU';    cls = 'ep-webgpu';    }
+    else if (epNorm.includes('tensorrt'))         { epLabel = 'TensorRT';  cls = 'ep-tensorrt';  }
+    else if (epNorm.includes('vitis'))            { epLabel = 'Vitis';     cls = 'ep-vitis';     }
+    else                                          { epLabel = 'Generic';   cls = 'ep-generic';   }
+    return { label: `${device} (${epLabel})`, cls };
   }
 
   function toggleStartup(alias: string, variantId: string | null) {
@@ -2360,6 +2450,22 @@ Output only the summary text, no preamble.`;
       </button>
       <button
         class="nav-item"
+        class:active={currentView === "monitor"}
+        onclick={() => { currentView = "monitor"; refreshMonitorNow(); }}
+        title="Monitor"
+      >
+        <span class="nav-icon" aria-hidden="true">
+          <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="3" y="4" width="18" height="13" rx="2" stroke="currentColor" stroke-width="1.8" />
+            <path d="M8 20H16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+            <path d="M12 17V20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+            <path d="M7 12.5L9.5 10L12 12L15 8.5L17 10.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </span>
+        <span class="nav-label">Monitor</span>
+      </button>
+      <button
+        class="nav-item"
         class:active={currentView === "integrations"}
         onclick={() => (currentView = "integrations")}
         title="Integrations"
@@ -2517,7 +2623,7 @@ Output only the summary text, no preamble.`;
                   <h3>Running ({state.pool.length} model{state.pool.length !== 1 ? 's' : ''})</h3>
                   {#if state.poolStats}
                     <span class="pool-mem">
-                      {state.poolStats.memoryMb} MB RSS &nbsp;·&nbsp; {state.poolStats.freeMemMb} MB free of {state.poolStats.totalMemMb} MB
+                      {state.poolStats.usedMemMb} MB used &nbsp;·&nbsp; {state.poolStats.freeMemMb} MB free of {state.poolStats.totalMemMb} MB
                     </span>
                   {/if}
                 </div>
@@ -2624,18 +2730,9 @@ Output only the summary text, no preamble.`;
                           <div class="variant-list">
                             {#each (model as any).variants as variant (variant.id)}
                               {@const isCurrentlyLoaded = state.pool.some((e) => e.variantId === variant.id)}
+                              {@const badge = accelBadgeInfo(variant.deviceType, variant.executionProvider)}
                               <div class="variant-row" class:variant-active={isCurrentlyLoaded}>
-                                <span
-                                  class="device-badge"
-                                  class:device-cpu={variant.deviceType === 'CPU'}
-                                  class:device-gpu={variant.deviceType === 'GPU'}
-                                  class:device-npu={variant.deviceType === 'NPU'}
-                                >
-                                  {variant.deviceType ?? '?'}
-                                </span>
-                                {#if variant.executionProvider && variant.executionProvider !== 'generic'}
-                                  <span class="ep-tag">{variant.executionProvider}</span>
-                                {/if}
+                                <span class="accel-badge {badge.cls}">{badge.label}</span>
                                 {#if variant.fileSizeMb}
                                   <span class="variant-size">{Math.round(variant.fileSizeMb)} MB</span>
                                 {/if}
@@ -2647,7 +2744,9 @@ Output only the summary text, no preamble.`;
                                 {:else if variant.cached}
                                   <button class="small" onclick={() => loadVariant(model, variant.id)}>Load</button>
                                 {:else}
-                                  <button class="small" onclick={() => downloadVariant(model, variant.id)}>Download</button>
+                                  <button class="small" onclick={() => downloadVariant(model, variant.id)} disabled={downloadingVariantIds[variant.id]}>
+                                    {downloadingVariantIds[variant.id] ? 'Downloading…' : 'Download'}
+                                  </button>
                                 {/if}
                               </div>
                             {/each}
@@ -2662,8 +2761,8 @@ Output only the summary text, no preamble.`;
                       {/if}
 
                       {#if !model.isCached}
-                        <button onclick={() => downloadAndTrack(model)}>
-                          Download
+                        <button onclick={() => downloadAndTrack(model)} disabled={downloadingModelAliases[model.alias]}>
+                          {downloadingModelAliases[model.alias] ? 'Downloading…' : 'Download'}
                         </button>
                       {/if}
 
@@ -3380,6 +3479,136 @@ Output only the summary text, no preamble.`;
                 <div class="log-empty">No log entries yet. Start the service or load a model.</div>
               {/each}
             </div>
+          </div>
+        </div>
+      {:else if currentView === "monitor"}
+        <div class="view monitor-view">
+          <div class="monitor-header">
+            <h2>Monitor</h2>
+            <button class="small" onclick={refreshMonitorNow} title="Refresh now">↺ Refresh</button>
+          </div>
+
+          <!-- Streaming indicator -->
+          {#if state.poolStats?.streaming?.active}
+            {@const s = state.poolStats.streaming}
+            <div class="stream-indicator">
+              <span class="stream-pulse"></span>
+              {s.count > 1 ? `${s.count} streams active` : `Streaming${s.modelAlias ? ` · ${s.modelAlias}` : ''}${s.type ? ` · ${s.type}` : ''}`}
+              {#if s.elapsedMs != null}
+                <span class="stream-elapsed">{(s.elapsedMs / 1000).toFixed(1)}s</span>
+              {/if}
+            </div>
+          {/if}
+
+          <!-- System RAM gauge -->
+          {#if state.poolStats}
+            {@const used = state.poolStats.usedMemMb}
+            {@const total = state.poolStats.totalMemMb}
+            {@const pct = total > 0 ? Math.min(100, Math.round(used / total * 100)) : 0}
+            <div class="resource-panel">
+              <div class="resource-label">
+                <span>System RAM</span>
+                <span class="resource-nums">{used.toLocaleString()} / {total.toLocaleString()} MB ({pct}%)</span>
+              </div>
+              <div class="ram-bar-track">
+                <div class="ram-bar-fill" class:ram-warn={pct >= 80} style="width: {pct}%"></div>
+              </div>
+              <p class="resource-note">Includes all processes. GPU models consume VRAM (not shown).</p>
+            </div>
+          {/if}
+
+          <!-- Pool table -->
+          <div class="monitor-section">
+            <h3>Model Pool</h3>
+            {#if state.pool.length === 0}
+              <p class="monitor-empty">No models loaded.</p>
+            {:else}
+              <table class="pool-table-full">
+                <thead>
+                  <tr>
+                    <th>Alias</th>
+                    <th>Variant</th>
+                    <th>Status</th>
+                    <th>Device</th>
+                    <th title="Tokens in this session">↑ In</th>
+                    <th title="Tokens out this session">↓ Out</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each state.pool as entry (entry.alias)}
+                    {@const shortVariant = entry.variantId?.split(':')[0]?.split('-').slice(-3).join('-') ?? '—'}
+                    {@const poolBadge = accelBadgeInfo(
+                      entry.variantId?.toLowerCase().includes('gpu') ? 'GPU' : entry.variantId?.toLowerCase().includes('npu') ? 'NPU' : 'CPU',
+                      entry.variantId?.toLowerCase().includes('cuda') ? 'CUDA' : entry.variantId?.toLowerCase().includes('qnn') ? 'QNN' : entry.variantId?.toLowerCase().includes('dml') ? 'DML' : 'generic'
+                    )}
+                    {@const tokens = state.poolStats?.tokenTotals?.find((t: any) => t.alias === entry.alias)}
+                    <tr>
+                      <td class="pool-alias-cell">{entry.alias}</td>
+                      <td class="pool-variant-cell" title={entry.variantId}>{shortVariant}</td>
+                      <td>
+                        <span class="badge" class:loaded={entry.isLoaded === true} class:warn={entry.isLoaded === false}>
+                          {entry.isLoaded === true ? 'Loaded' : entry.isLoaded === false ? 'Evicted' : 'Active'}
+                        </span>
+                      </td>
+                      <td>
+                        <span class="accel-badge {poolBadge.cls}">{poolBadge.label}</span>
+                      </td>
+                      <td class="pool-tokens-cell">{tokens?.tokensIn ?? '—'}</td>
+                      <td class="pool-tokens-cell">{tokens?.tokensOut ?? '—'}</td>
+                      <td><button class="small danger-btn" onclick={() => sdkUnloadModel({ alias: entry.alias }).then(refreshMonitorNow)}>Unload</button></td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            {/if}
+          </div>
+
+          <!-- Access log -->
+          <div class="monitor-section">
+            <div class="log-toolbar">
+              <h3>Access Log <span class="log-count">({monitorLog.length} entries)</span></h3>
+              <label class="pause-label">
+                <input type="checkbox" bind:checked={monitorLogPaused} />
+                Pause
+              </label>
+              <button class="small" onclick={() => { monitorLog = []; }}>Clear display</button>
+              <button class="small" onclick={() => exportAccessLog('json')}>Export JSON</button>
+              <button class="small" onclick={() => exportAccessLog('csv')}>Export CSV</button>
+            </div>
+            <p class="log-note">In-memory: last 500 requests · Disk: <code>~/.flint/logs/</code> retained 7 days</p>
+            {#if monitorLog.length === 0}
+              <p class="monitor-empty">No log entries yet. Send a message or transcribe audio to populate.</p>
+            {:else}
+              <div class="access-log-wrap" onmouseenter={() => { monitorLogPaused = true; }} onmouseleave={() => { monitorLogPaused = false; }}>
+                <table class="access-log-table">
+                  <thead>
+                    <tr>
+                      <th>Time</th>
+                      <th>Type</th>
+                      <th>Model</th>
+                      <th>Duration</th>
+                      <th>↑ In</th>
+                      <th>↓ Out</th>
+                      <th>OK</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {#each monitorLog as entry, i (i)}
+                      <tr class:log-row-err={!entry.ok}>
+                        <td class="log-time">{new Date(entry.ts).toLocaleTimeString()}</td>
+                        <td><span class="log-type-badge log-type-{entry.type}">{entry.type}</span></td>
+                        <td class="log-model">{entry.modelAlias ?? '—'}</td>
+                        <td class="log-dur">{entry.durationMs != null ? `${entry.durationMs}ms` : '—'}</td>
+                        <td class="log-tok">{entry.tokensIn ?? '—'}</td>
+                        <td class="log-tok">{entry.tokensOut ?? '—'}</td>
+                        <td class="log-ok">{entry.ok ? '✓' : '✗'}</td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
+            {/if}
           </div>
         </div>
       {:else if currentView === "integrations"}
@@ -4150,25 +4379,55 @@ Output only the summary text, no preamble.`;
     padding: 3px 6px;
   }
 
-  .device-badge {
-    font-size: 0.7rem;
+  .accel-badge {
+    display: inline-block;
+    font-size: 0.68rem;
     font-weight: 700;
-    padding: 2px 6px;
-    border-radius: 3px;
-    min-width: 34px;
-    text-align: center;
-    background: var(--border);
-    color: var(--fg);
+    padding: 2px 8px;
+    border-radius: 4px;
+    white-space: nowrap;
+    letter-spacing: 0.01em;
+    border: 1px solid transparent;
+    /* default (Generic/CPU) */
+    background: #1e293b;
+    color: #94a3b8;
+    border-color: #334155;
   }
-
-  .device-cpu { background: #374151; color: #d1fae5; }
-  .device-gpu { background: #1e3a5f; color: #bfdbfe; }
-  .device-npu { background: #3b1a5a; color: #e9d5ff; }
-
-  .ep-tag {
-    font-size: 0.7rem;
-    color: var(--muted);
-    font-family: monospace;
+  /* NVIDIA: CUDA / TensorRT */
+  .ep-cuda, .ep-tensorrt {
+    background: #0e2a12;
+    color: #76b900;
+    border-color: #2a5a0a;
+  }
+  /* AMD: Vitis */
+  .ep-vitis {
+    background: #2a0a0a;
+    color: #ff3e00;
+    border-color: #5a1010;
+  }
+  /* Intel: OpenVINO */
+  .ep-openvino {
+    background: #0a1a2e;
+    color: #54aaff;
+    border-color: #0057ae;
+  }
+  /* Qualcomm: QNN */
+  .ep-qnn {
+    background: #0a1a2a;
+    color: #3399ff;
+    border-color: #0048a8;
+  }
+  /* Microsoft: DirectML */
+  .ep-dml {
+    background: #0a1428;
+    color: #50b0f0;
+    border-color: #005eb8;
+  }
+  /* WebGPU */
+  .ep-webgpu {
+    background: #1a0e2a;
+    color: #c084fc;
+    border-color: #6b21a8;
   }
 
   .variant-size {
@@ -5374,4 +5633,68 @@ Output only the summary text, no preamble.`;
   .form-actions { display: flex; gap: 6px; }
   .small { font-size: 0.75rem; color: var(--muted); }
   .mono { font-family: ui-monospace, monospace; }
+
+  /* Monitor tab */
+  .monitor-view { display: flex; flex-direction: column; gap: 20px; padding: 20px; }
+  .monitor-header { display: flex; align-items: center; gap: 12px; }
+  .monitor-header h2 { margin: 0; }
+
+  .stream-indicator {
+    display: flex; align-items: center; gap: 8px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    border-radius: 6px; padding: 8px 12px;
+    font-size: 0.85rem; color: var(--accent);
+  }
+  .stream-pulse {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--accent);
+    animation: pulse 1.2s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.4; transform: scale(0.75); }
+  }
+  .stream-elapsed { margin-left: auto; font-family: monospace; font-size: 0.8rem; opacity: 0.8; }
+
+  .resource-panel { background: var(--surface); border-radius: 8px; padding: 14px 16px; }
+  .resource-label { display: flex; justify-content: space-between; font-size: 0.82rem; margin-bottom: 8px; color: var(--muted); }
+  .resource-nums { font-family: monospace; }
+  .ram-bar-track { height: 10px; background: var(--border); border-radius: 5px; overflow: hidden; }
+  .ram-bar-fill { height: 100%; background: var(--accent); border-radius: 5px; transition: width 0.4s ease; }
+  .ram-bar-fill.ram-warn { background: #ef4444; }
+  .resource-note { font-size: 0.72rem; color: var(--muted); margin: 6px 0 0; }
+
+  .monitor-section { background: var(--surface); border-radius: 8px; padding: 14px 16px; }
+  .monitor-section h3 { margin: 0 0 12px; font-size: 0.95rem; }
+  .monitor-empty { color: var(--muted); font-size: 0.85rem; margin: 0; }
+
+  .pool-table-full { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+  .pool-table-full th { text-align: left; color: var(--muted); font-weight: 500; padding: 4px 8px 8px; border-bottom: 1px solid var(--border); }
+  .pool-table-full td { padding: 7px 8px; border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent); }
+  .pool-alias-cell { font-weight: 500; }
+  .pool-variant-cell { font-family: monospace; font-size: 0.78rem; color: var(--muted); max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pool-tokens-cell { font-family: monospace; font-size: 0.78rem; text-align: right; }
+
+  .log-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+  .log-toolbar h3 { margin: 0; font-size: 0.95rem; flex: 1; }
+  .log-count { font-size: 0.75rem; color: var(--muted); font-weight: 400; }
+  .pause-label { display: flex; align-items: center; gap: 4px; font-size: 0.78rem; color: var(--muted); cursor: pointer; user-select: none; }
+  .log-note { font-size: 0.72rem; color: var(--muted); margin: 0 0 10px; }
+
+  .access-log-wrap { max-height: 380px; overflow-y: auto; border-radius: 4px; border: 1px solid var(--border); }
+  .access-log-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+  .access-log-table th { position: sticky; top: 0; background: var(--surface); text-align: left; color: var(--muted); font-weight: 500; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  .access-log-table td { padding: 5px 8px; border-bottom: 1px solid color-mix(in srgb, var(--border) 40%, transparent); }
+  .log-row-err td { background: color-mix(in srgb, #ef4444 8%, transparent); }
+  .log-time { font-family: monospace; white-space: nowrap; color: var(--muted); font-size: 0.75rem; }
+  .log-model { font-weight: 500; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .log-dur { font-family: monospace; color: var(--muted); }
+  .log-tok { font-family: monospace; text-align: right; color: var(--muted); }
+  .log-ok { text-align: center; font-weight: 600; }
+  .log-type-badge { font-size: 0.7rem; padding: 1px 5px; border-radius: 3px; font-weight: 600; }
+  .log-type-chat { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+  .log-type-audio { background: color-mix(in srgb, #a855f7 18%, transparent); color: #a855f7; }
+  .log-type-audit { background: color-mix(in srgb, #f59e0b 18%, transparent); color: #f59e0b; }
 </style>
