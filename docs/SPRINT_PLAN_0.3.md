@@ -16,25 +16,28 @@
 | 0b | Local API-key proxy research | Decision documented in roadmap: external dependency for 0.3, bundling deferred to 0.4+ |
 | 1 | Model pool (replaces named lanes) | `Map<alias,{catModel,variantId}>`, `ensureModel`, `resolveIsLoaded`, `poolStatus`, `getAccessLog`, `startWebService` port-binding fix, variant-ID HTTP routing |
 | 3 | Network security + access logging | 127.0.0.1 bind (via `webServiceUrls`); access log ring buffer (500 entries); disk log (`appendFileSync`, 7-day rotation, `~/.flint/logs/`); audit trail for 8 destructive/config commands; IPC rejection logging (malformed JSON, schema failures); PII fix (filename → extension only in transcription log) |
+| 2a | Monitoring sidecar backend | Memory usage, streaming flag, token accumulator exposed via `getStatus` / `monitorStream` |
+| 2b | Monitoring view UI | Monitor tab with live resource usage, model pool table, access log panel, audit log export |
+| A | Audit log export | JSON/CSV export button inside monitor tab |
+| 5 | Auto-start and default model | `tauri-plugin-autostart` integrated; Settings view with OS login-item toggle, startup service toggle, default model selects |
+| 4 | Keyboard shortcuts | Global `keydown` listener; Ctrl/Cmd+1–5, B, N (shift), comma, Space, Enter; `?` opens shortcut reference modal |
+| B | Network config UI | Configurable port + bind-address in Settings; `bindAddress` param wired through sidecar→sdk→`startSvc` wrapper; bind/connect URL separation preserves loopback connect |
 
 ### Remaining — 0.3 items
 
 | Item | Description | Blocking deps | Priority |
 |---|---|---|---|
-| 2 | Monitoring view | Needs backend additions (memory, streaming flag, token accumulator) | P0 — unblocked now |
-| 4 | Keyboard shortcuts | None | P1 |
-| 5 | Auto-start and default model | Needs Tauri plugin assessment | P2 |
 | 6 | CI/CD improvements | None | P3 |
 | 0c | Purview SDK governance memo | None | P3 (design memo only) |
 
 ### Pulled from 0.4 — fits current sprint
 
-| Item | Source | Rationale |
+| Item | Source | Status |
 |---|---|---|
-| A | Enterprise controls: audit log export | Access log is built; adding export (JSON/CSV) is a single UI surface |
-| B | Enterprise controls: network config UI | 127.0.0.1 is currently hardcoded; configurable bind/port/CIDR is a direct extension of item 3 |
-| C | Vision: multi-image + drag-and-drop | Single-image attach already exists; extending to multiple + drop target is bounded UI work |
-| D | Model comparison / bake-off | Pool now supports multiple resident models; side-by-side display builds naturally on the monitoring view |
+| A | Enterprise controls: audit log export | ✅ Done |
+| B | Enterprise controls: network config UI | ✅ Done |
+| C | Vision: multi-image + drag-and-drop | Remaining |
+| D | Model comparison / bake-off | Remaining |
 
 ### Not pulling from 0.4 this sprint
 

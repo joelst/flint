@@ -49,6 +49,8 @@
     type IntegrationStatus,
   } from "$lib/integrations";
 
+  import { enable as autostartEnable, disable as autostartDisable, isEnabled as autostartIsEnabled } from '@tauri-apps/plugin-autostart';
+
   // Integrations tab state
   let integrationsOS = $state<'windows' | 'unix'>(detectPlatform());
   let expandedIntegrationId = $state<string | null>(null);
@@ -70,7 +72,7 @@
   }
 
   // Simple client-side navigation
-  type View = "models" | "chat" | "audio" | "monitor" | "diagnostics" | "integrations" | "learn";
+  type View = "models" | "chat" | "audio" | "monitor" | "diagnostics" | "integrations" | "learn" | "settings";
   let currentView = $state<View>("models");
 
   // Model capability helpers (based on catalog task/capabilities/family/alias)
@@ -312,6 +314,7 @@
   let isLoadingRecommendations = $state(false);
   let selectedAccelerationPreference = $state<string>("auto");
   let hostPlatform = $state<"windows" | "macos" | "linux" | "unknown">("unknown");
+  let isMac = $derived(hostPlatform === 'macos');
   let modelDetailsAlias = $state<string | null>(null);
   let modelRuntimeMeta = $state<Record<string, { downloadedAt?: string; lastUsedAcceleration?: string }>>({});
   let variantPanelOpen = $state<Record<string, boolean>>({});
@@ -320,6 +323,19 @@
   let downloadingVariantIds = $state<Record<string, boolean>>({});
   let monitorLog = $state<any[]>([]);
   let monitorLogPaused = $state(false);
+
+  // Settings: startup behaviour
+  let autoStartService = $state(true);
+  let defaultChatAlias = $state('');
+  let defaultAudioAlias = $state('');
+  let osAutoStartEnabled = $state<boolean | null>(null);
+
+  // Settings: network
+  let networkPort = $state(5272);
+  let networkBindAddress = $state('127.0.0.1');
+
+  // UI: keyboard shortcut help modal
+  let showShortcutsHelp = $state(false);
 
   // Chat state
   let selectedModelAlias = $state("");
@@ -828,6 +844,11 @@
           theme,
           modelRuntimeMeta,
           startupModels,
+          autoStartService,
+          defaultChatAlias,
+          defaultAudioAlias,
+          networkPort,
+          networkBindAddress,
         }),
       );
     } catch {}
@@ -864,8 +885,17 @@
         if (data.startupModels && typeof data.startupModels === "object") {
           startupModels = data.startupModels;
         }
+        if (typeof data.autoStartService === 'boolean') autoStartService = data.autoStartService;
+        if (typeof data.defaultChatAlias === 'string') defaultChatAlias = data.defaultChatAlias;
+        if (typeof data.defaultAudioAlias === 'string') defaultAudioAlias = data.defaultAudioAlias;
+        if (typeof data.networkPort === 'number' && data.networkPort >= 1024 && data.networkPort <= 65535) networkPort = data.networkPort;
+        if (typeof data.networkBindAddress === 'string' && data.networkBindAddress) networkBindAddress = data.networkBindAddress;
       }
     } catch {}
+  }
+
+  function startSvc(alias?: string, preferredEp?: string) {
+    return startService(networkPort, alias, preferredEp, networkBindAddress || undefined);
   }
 
   $effect(() => {
@@ -929,6 +959,67 @@
     await pollPoolStatus().catch(() => {});
   }
 
+  $effect(() => {
+    if (currentView !== 'settings') return;
+    autostartIsEnabled()
+      .then((v: boolean) => { osAutoStartEnabled = v; })
+      .catch(() => { osAutoStartEnabled = false; });
+  });
+
+  async function handleOsAutoStartToggle(e: Event) {
+    const checked = (e.target as HTMLInputElement).checked;
+    try {
+      if (checked) {
+        await autostartEnable();
+      } else {
+        await autostartDisable();
+      }
+      osAutoStartEnabled = checked;
+    } catch (err: any) {
+      console.error('[settings] OS autostart toggle failed:', err);
+      osAutoStartEnabled = !checked;
+    }
+  }
+
+  function handleGlobalKeydown(e: KeyboardEvent) {
+    const mod = isMac ? e.metaKey : e.ctrlKey;
+    const tag = (document.activeElement as HTMLElement)?.tagName?.toLowerCase() ?? '';
+    const inTypable = tag === 'input' || tag === 'textarea' || tag === 'select';
+
+    if (e.key === '?' && !inTypable) {
+      showShortcutsHelp = !showShortcutsHelp;
+      e.preventDefault();
+      return;
+    }
+    if (e.key === 'Escape' && showShortcutsHelp) {
+      showShortcutsHelp = false;
+      return;
+    }
+
+    if (!mod) return;
+
+    switch (e.key) {
+      case 'b':
+      case 'B':
+        if (!e.shiftKey) { e.preventDefault(); sidebarCollapsed = !sidebarCollapsed; persistChat(); }
+        break;
+      case 'N':
+        if (e.shiftKey) { e.preventDefault(); createNewConversation(); }
+        break;
+      case '1': e.preventDefault(); currentView = 'chat'; break;
+      case '2': e.preventDefault(); currentView = 'models'; break;
+      case '3': e.preventDefault(); currentView = 'audio'; break;
+      case '4': e.preventDefault(); currentView = 'monitor'; refreshMonitorNow(); break;
+      case '5': e.preventDefault(); currentView = 'integrations'; break;
+      case ',':
+        if (!e.shiftKey) { e.preventDefault(); currentView = 'settings'; }
+        break;
+      case ' ':
+        if (!e.shiftKey && currentView === 'chat' && !inTypable) { e.preventDefault(); toggleDictation(); }
+        break;
+    }
+  }
+
   function exportAccessLog(format: 'json' | 'csv') {
     const entries = [...monitorLog].reverse(); // restore chronological order
     let content: string;
@@ -989,31 +1080,38 @@
             useStarterModel(recommendedStarters[0]);
           }
         }, 600);
-      } else if (selectedModelAlias && !selectedModel) {
-        // Try to restore previous model for chat
-        const existing = state.models.find(
-          (m: ModelInfo) => m.alias === selectedModelAlias,
-        );
-        if (existing?.isCached) {
-          try {
-            if (!existing.isLoaded) {
-              statusMessage = `Restoring ${selectedModelAlias} from previous session...`;
-              await loadModelAndMaybeStart(existing);
-            } else if (!state.serviceRunning) {
-              await startService(
-                5272,
-                selectedModelAlias,
-                selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
-              );
+      } else if (autoStartService) {
+        const targetAlias = defaultChatAlias || selectedModelAlias;
+        if (targetAlias && !selectedModel) {
+          const existing = state.models.find(
+            (m: ModelInfo) => m.alias === targetAlias,
+          );
+          if (existing?.isCached) {
+            const usingDefault = !!defaultChatAlias;
+            try {
+              if (!existing.isLoaded) {
+                statusMessage = usingDefault
+                  ? `Auto-loading ${targetAlias}...`
+                  : `Restoring ${targetAlias} from previous session...`;
+                await loadModelAndMaybeStart(existing);
+              } else if (!state.serviceRunning) {
+                await startSvc(
+                  targetAlias,
+                  selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+                );
+              }
+              selectedModelAlias = targetAlias;
+              selectedModel = { alias: targetAlias };
+              chatClient = null;
+              statusMessage = usingDefault
+                ? `${targetAlias} ready`
+                : `${targetAlias} restored from previous session`;
+            } catch (e: any) {
+              statusMessage = `Failed to restore ${targetAlias}: ${e?.message || e}`;
             }
-
-            selectedModel = { alias: selectedModelAlias };
-            chatClient = null; // Sidecar endpoint is the primary chat path
-            statusMessage = `${selectedModelAlias} restored from previous session`;
-          } catch (e: any) {
-            statusMessage = `Failed to restore ${selectedModelAlias}: ${e?.message || e}`;
           }
         }
+        if (defaultAudioAlias) selectedSTTModelAlias = defaultAudioAlias;
       }
 
       // Load any additional startup models (multi-model pool pre-warm)
@@ -1085,8 +1183,7 @@
     try {
       statusMessage = "Starting local service...";
       appendAppLog('Starting local OpenAI-compatible service');
-      const ep = await startService(
-        5272,
+      const ep = await startSvc(
         selectedModelAlias || undefined,
         selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
       );
@@ -1217,8 +1314,7 @@
       // Auto start service and switch to chat
       if (!state.serviceRunning) {
         try {
-          await startService(
-            5272,
+          await startSvc(
             alias,
             selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
           );
@@ -1256,8 +1352,7 @@
 
       if (!state.serviceRunning) {
         try {
-          await startService(
-            5272,
+          await startSvc(
             model.alias,
             selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
           );
@@ -1314,10 +1409,12 @@
     // Load conversation history
     loadConversations();
     init();
+    document.addEventListener('keydown', handleGlobalKeydown);
 
     return () => {
       if (unsubscribe) unsubscribe();
       saveConversations();
+      document.removeEventListener('keydown', handleGlobalKeydown);
     };
   });
 
@@ -1361,8 +1458,7 @@
 
       if (!state.serviceRunning) {
         try {
-          await startService(
-            5272,
+          await startSvc(
             model.alias,
             selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
           );
@@ -1407,7 +1503,7 @@
       statusMessage = `${model.alias} loaded`;
       if (!state.serviceRunning) {
         try {
-          await startService(5272, model.alias, undefined);
+          await startSvc(model.alias, undefined);
         } catch {}
       }
       await refreshModels();
@@ -2206,8 +2302,7 @@ Output only the summary text, no preamble.`;
 
     try {
       // Ensure the local service is running with an STT-capable model.
-      await startService(
-        5272,
+      await startSvc(
         sttAlias,
         selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
       );
@@ -2488,6 +2583,21 @@ Output only the summary text, no preamble.`;
           </svg>
         </span>
         <span class="nav-label">Learn</span>
+      </button>
+
+      <button
+        class="nav-btn"
+        class:active={currentView === "settings"}
+        onclick={() => (currentView = "settings")}
+        title="Settings"
+      >
+        <span class="nav-icon" aria-hidden="true">
+          <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="12" cy="12" r="2.8" stroke="currentColor" stroke-width="1.8"/>
+            <path d="M10.29 3.86 8.64 4.86l.26 1.5A6.8 6.8 0 0 0 7.4 7.4L5.9 7.14l-1 1.72 1.07 1.08A6.7 6.7 0 0 0 5.86 12a6.7 6.7 0 0 0 .11 1.06L4.9 14.14l1 1.72 1.5-.26c.36.37.77.7 1.22.98l-.26 1.5 1.72 1L10.86 18c.37.09.75.14 1.14.14.39 0 .77-.05 1.14-.14l.68.98 1.72-1-.26-1.5c.45-.28.86-.61 1.22-.98l1.5.26 1-1.72-1.07-1.08c.07-.35.11-.7.11-1.06 0-.36-.04-.71-.11-1.06l1.07-1.08-1-1.72-1.5.26A6.8 6.8 0 0 0 16.1 7.4l.26-1.5-1.72-1-.68.98A6.8 6.8 0 0 0 12 5.86c-.39 0-.77.05-1.14.14l-.57-.14Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+          </svg>
+        </span>
+        <span class="nav-label">Settings</span>
       </button>
 
       <div class="sidebar-footer">
@@ -3196,6 +3306,7 @@ Output only the summary text, no preamble.`;
                   bind:value={chatInput}
                   placeholder={isDictating ? "Dictating… (click Stop to finish)" : "Type your message... (model is running locally)"}
                   disabled={chatBlockedByLoadedSTT || !selectedModelSupportsChat || (!state.endpoint && !chatClient) || isStreaming}
+                  onkeydown={(e) => { if ((isMac ? e.metaKey : e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); sendMessage(e); } }}
                 />
                 <button
                   type="submit"
@@ -3308,8 +3419,7 @@ Output only the summary text, no preamble.`;
               <button
                 class="tiny"
                 onclick={async () => {
-                  await startService(
-                    5272,
+                  await startSvc(
                     effectiveSTTModelAlias,
                     selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
                   );
@@ -3580,7 +3690,7 @@ Output only the summary text, no preamble.`;
             {#if monitorLog.length === 0}
               <p class="monitor-empty">No log entries yet. Send a message or transcribe audio to populate.</p>
             {:else}
-              <div class="access-log-wrap" onmouseenter={() => { monitorLogPaused = true; }} onmouseleave={() => { monitorLogPaused = false; }}>
+              <div class="access-log-wrap" role="region" aria-label="Access log" onmouseenter={() => { monitorLogPaused = true; }} onmouseleave={() => { monitorLogPaused = false; }}>
                 <table class="access-log-table">
                   <thead>
                     <tr>
@@ -3788,9 +3898,177 @@ Output only the summary text, no preamble.`;
             >
           </p>
         </div>
+      {:else if currentView === "settings"}
+        <div class="view settings-view">
+          <h2>Settings</h2>
+
+          <div class="settings-section">
+            <h3>System</h3>
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-name">Launch Flint when the OS starts</span>
+                <span class="setting-desc">Registers Flint as a login item (Windows) or LaunchAgent (macOS). In dev mode, the dev-server path is registered — test with a built app.</span>
+              </div>
+              {#if osAutoStartEnabled === null}
+                <span class="setting-loading">…</span>
+              {:else}
+                <label class="toggle-switch">
+                  <input
+                    type="checkbox"
+                    checked={osAutoStartEnabled === true}
+                    onchange={handleOsAutoStartToggle}
+                  />
+                  <span class="toggle-track"></span>
+                </label>
+              {/if}
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <h3>Startup</h3>
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-name">Start local service automatically</span>
+                <span class="setting-desc">Load the default model and start the inference service when Flint opens</span>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" bind:checked={autoStartService} onchange={persistChat} />
+                <span class="toggle-track"></span>
+              </label>
+            </div>
+
+            {#if autoStartService}
+              <div class="setting-row setting-row-indent">
+                <label class="setting-info" for="default-chat-model">
+                  <span class="setting-name">Default chat model</span>
+                  <span class="setting-desc">Model to load on startup — "Last used" restores your previous session</span>
+                </label>
+                <select id="default-chat-model" bind:value={defaultChatAlias} onchange={persistChat}>
+                  <option value="">Last used</option>
+                  {#each state.models.filter((m: ModelInfo) => m.isCached) as m (m.alias)}
+                    <option value={m.alias}>{m.alias}</option>
+                  {/each}
+                </select>
+              </div>
+              <div class="setting-row setting-row-indent">
+                <label class="setting-info" for="default-audio-model">
+                  <span class="setting-name">Default audio model</span>
+                  <span class="setting-desc">STT model to pre-select on startup</span>
+                </label>
+                <select id="default-audio-model" bind:value={defaultAudioAlias} onchange={persistChat}>
+                  <option value="">Last used</option>
+                  {#each sttModels.filter((m: any) => m.isCached) as m (m.alias)}
+                    <option value={m.alias}>{m.alias}</option>
+                  {/each}
+                </select>
+              </div>
+            {/if}
+          </div>
+
+          <div class="settings-section">
+            <h3>Network</h3>
+            <p class="setting-note">Changes take effect after the next service restart.</p>
+
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-name">Port</span>
+                <span class="setting-desc">Port the local inference service listens on (default: 5272)</span>
+              </div>
+              <input
+                type="number"
+                class="port-input"
+                min="1024"
+                max="65535"
+                bind:value={networkPort}
+                onchange={persistChat}
+              />
+            </div>
+
+            <div class="setting-col">
+              <div class="setting-info">
+                <span class="setting-name">Bind address</span>
+                <span class="setting-desc">Network interface the service listens on</span>
+              </div>
+              <label class="radio-option">
+                <input type="radio" name="bind-addr" checked={networkBindAddress === '127.0.0.1'}
+                  onchange={() => { networkBindAddress = '127.0.0.1'; persistChat(); }} />
+                <span>127.0.0.1 — loopback only <span class="badge-recommend">Recommended</span></span>
+              </label>
+              <label class="radio-option">
+                <input type="radio" name="bind-addr" checked={networkBindAddress === '0.0.0.0'}
+                  onchange={() => { networkBindAddress = '0.0.0.0'; persistChat(); }} />
+                <span>0.0.0.0 — all interfaces</span>
+              </label>
+              <label class="radio-option">
+                <input type="radio" name="bind-addr" checked={networkBindAddress !== '127.0.0.1' && networkBindAddress !== '0.0.0.0'}
+                  onchange={() => { if (networkBindAddress === '127.0.0.1' || networkBindAddress === '0.0.0.0') { networkBindAddress = ''; } }} />
+                <span>Custom</span>
+              </label>
+              {#if networkBindAddress !== '127.0.0.1' && networkBindAddress !== '0.0.0.0'}
+                <input type="text" class="custom-bind-input" bind:value={networkBindAddress} onchange={persistChat} placeholder="e.g. 192.168.1.100" />
+              {/if}
+              {#if networkBindAddress !== '127.0.0.1'}
+                <div class="warning-banner">
+                  Binding to {networkBindAddress || 'all interfaces'} exposes the local inference service to other machines on the same network. Ensure your OS firewall is configured appropriately.
+                </div>
+              {/if}
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <h3>Appearance</h3>
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-name">Theme</span>
+              </div>
+              <div class="theme-toggle-group">
+                <button
+                  class="theme-option"
+                  class:active={theme === 'light'}
+                  onclick={() => { theme = 'light'; }}
+                  aria-pressed={theme === 'light'}
+                >Light</button>
+                <button
+                  class="theme-option"
+                  class:active={theme === 'dark'}
+                  onclick={() => { theme = 'dark'; }}
+                  aria-pressed={theme === 'dark'}
+                >Dark</button>
+              </div>
+            </div>
+          </div>
+        </div>
       {/if}
     </section>
   </div>
+
+  {#if showShortcutsHelp}
+    <div class="shortcuts-overlay" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+      <button class="shortcuts-backdrop" onclick={() => { showShortcutsHelp = false; }} aria-label="Close keyboard shortcuts dialog"></button>
+      <div class="shortcuts-dialog">
+        <div class="shortcuts-header">
+          <h3>Keyboard Shortcuts</h3>
+          <button onclick={() => { showShortcutsHelp = false; }} aria-label="Close">×</button>
+        </div>
+        <table class="shortcuts-table">
+          <tbody>
+            <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+Enter</td><td>Send message</td></tr>
+            <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+Shift+N</td><td>New conversation</td></tr>
+            <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+1</td><td>Chat</td></tr>
+            <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+2</td><td>Models</td></tr>
+            <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+3</td><td>Audio</td></tr>
+            <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+4</td><td>Monitor</td></tr>
+            <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+5</td><td>Integrations</td></tr>
+            <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+,</td><td>Settings</td></tr>
+            <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+B</td><td>Toggle sidebar</td></tr>
+            <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+Space</td><td>Toggle dictation</td></tr>
+            <tr><td class="sk">?</td><td>Show this help</td></tr>
+            <tr><td class="sk">Escape</td><td>Close this dialog</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  {/if}
 </main>
 
 <style>
@@ -5697,4 +5975,52 @@ Output only the summary text, no preamble.`;
   .log-type-chat { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
   .log-type-audio { background: color-mix(in srgb, #a855f7 18%, transparent); color: #a855f7; }
   .log-type-audit { background: color-mix(in srgb, #f59e0b 18%, transparent); color: #f59e0b; }
+
+  /* Settings view */
+  .settings-view { display: flex; flex-direction: column; gap: 16px; padding: 20px; max-width: 640px; }
+  .settings-view h2 { margin: 0 0 4px; }
+  .settings-section { background: var(--surface); border-radius: 8px; padding: 16px 20px; display: flex; flex-direction: column; gap: 14px; }
+  .settings-section h3 { margin: 0; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
+  .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+  .setting-row-indent { padding-left: 16px; }
+  .setting-info { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
+  .setting-name { font-size: 0.9rem; font-weight: 500; }
+  .setting-desc { font-size: 0.77rem; color: var(--muted); line-height: 1.4; }
+  .setting-loading { color: var(--muted); font-size: 0.85rem; flex-shrink: 0; }
+  .settings-view select { padding: 5px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 0.85rem; cursor: pointer; min-width: 140px; flex-shrink: 0; }
+
+  /* Toggle switch */
+  .toggle-switch { position: relative; display: inline-flex; align-items: center; cursor: pointer; flex-shrink: 0; }
+  .toggle-switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .toggle-track { display: inline-block; width: 40px; height: 22px; background: var(--border); border-radius: 11px; transition: background 0.2s; position: relative; flex-shrink: 0; }
+  .toggle-track::after { content: ''; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; background: white; border-radius: 50%; transition: transform 0.2s; box-shadow: 0 1px 3px rgba(0,0,0,0.25); }
+  .toggle-switch input:checked ~ .toggle-track { background: var(--accent); }
+  .toggle-switch input:checked ~ .toggle-track::after { transform: translateX(18px); }
+
+  /* Theme toggle */
+  .theme-toggle-group { display: flex; border-radius: 6px; overflow: hidden; border: 1px solid var(--border); flex-shrink: 0; }
+  .theme-option { padding: 5px 16px; border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 0.85rem; transition: background 0.15s, color 0.15s; }
+  .theme-option.active { background: var(--accent); color: white; }
+
+  /* Network config */
+  .setting-note { font-size: 0.77rem; color: var(--muted); margin: 0; }
+  .setting-col { display: flex; flex-direction: column; gap: 8px; }
+  .port-input { width: 80px; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); font-size: 0.85rem; text-align: right; }
+  .radio-option { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; cursor: pointer; }
+  .custom-bind-input { padding: 5px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); font-size: 0.85rem; }
+  .badge-recommend { font-size: 0.7rem; padding: 1px 5px; border-radius: 3px; background: color-mix(in srgb, var(--success) 15%, transparent); color: var(--success); font-weight: 600; }
+  .warning-banner { padding: 8px 12px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent); background: color-mix(in srgb, var(--warning) 10%, transparent); color: var(--warning); font-size: 0.8rem; }
+
+  /* Keyboard shortcuts modal */
+  .shortcuts-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55); display: grid; place-items: center; z-index: 1000; }
+  .shortcuts-backdrop { position: absolute; inset: 0; background: transparent; border: none; cursor: default; }
+  .shortcuts-dialog { position: relative; z-index: 1; background: var(--panel-bg); border: 1px solid var(--border); border-radius: 10px; width: 380px; max-height: 80vh; overflow-y: auto; }
+  .shortcuts-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--border); }
+  .shortcuts-header h3 { margin: 0; font-size: 0.95rem; }
+  .shortcuts-header button { background: none; border: none; cursor: pointer; color: var(--muted); font-size: 1.2rem; line-height: 1; padding: 2px 6px; border-radius: 4px; }
+  .shortcuts-header button:hover { background: var(--subtle-bg); color: var(--fg); }
+  .shortcuts-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  .shortcuts-table tr:hover { background: var(--subtle-bg); }
+  .shortcuts-table td { padding: 7px 18px; }
+  .shortcuts-table td.sk { font-family: monospace; white-space: nowrap; color: var(--accent); font-weight: 600; width: 1%; padding-right: 12px; }
 </style>

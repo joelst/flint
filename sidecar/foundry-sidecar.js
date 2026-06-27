@@ -41,7 +41,7 @@ const KNOWN_COMMANDS = new Set([
 const FIELD_TYPES = {
   init:              { appName: 'non-empty-string', logLevel: 'non-empty-string' },
   setLogLevel:       { level: 'non-empty-string' },
-  startService:      { port: 'number' },
+  startService:      { port: 'number', bindAddress: 'string' },
   download:          { alias: 'non-empty-string', variantId: 'non-empty-string' },
   load:              { alias: 'non-empty-string', variantId: 'non-empty-string' },
   unload:            { alias: 'non-empty-string' },
@@ -61,7 +61,7 @@ const VALID_LANES = new Set(['chat', 'audio']);
 const COMMAND_SCHEMA = {
   init:               { required: ['appName', 'logLevel'], optional: [] },
   setLogLevel:        { required: ['level'], optional: [] },
-  startService:       { required: ['port'], optional: ['alias', 'preferredEp'] },
+  startService:       { required: ['port'], optional: ['alias', 'preferredEp', 'bindAddress'] },
   stopService:        { required: [], optional: [] },
   getStatus:          { required: [], optional: [] },
   listModels:         { required: [], optional: [] },
@@ -623,24 +623,25 @@ rl.on('line', async (line) => {
       // Re-create the manager with webServiceUrls so startWebService() binds to the requested port.
       // The manager from init() lacks webServiceUrls and would bind to whatever the SDK default is.
       // Pool is cleared because catModel references from the old manager instance become stale.
+      // bindAddress controls the bind interface; sharedEndpoint always uses 127.0.0.1 for connecting.
+      const bindAddr = payload.bindAddress || '127.0.0.1';
+      if (bindAddr !== '127.0.0.1') {
+        log('warn', `Service binding to ${bindAddr} — accessible from other network interfaces`);
+      }
       if (FoundryLocalManager && initConfig) {
         pool.clear();
         manager = FoundryLocalManager.create({
           ...initConfig,
-          webServiceUrls: `http://127.0.0.1:${payload.port}`,
+          webServiceUrls: `http://${bindAddr}:${payload.port}`,
         });
       }
       // Start service BEFORE loading models so HTTP routing layer initializes with the registry.
       if (typeof manager.startWebService === 'function') {
         manager.startWebService(); // synchronous, no args; port comes from webServiceUrls above
-        const urls = manager.urls || [];
-        const base = (urls[0] || `http://127.0.0.1:${payload.port}`).replace(/\/+$/, '');
-        sharedEndpoint = `${base}/v1`;
-      } else {
-        sharedEndpoint = `http://127.0.0.1:${payload.port}/v1`;
       }
-      log('info', `Service started at ${sharedEndpoint}`);
-      audit('startService', { port: payload.port, endpoint: sharedEndpoint });
+      sharedEndpoint = `http://127.0.0.1:${payload.port}/v1`;
+      log('info', `Service started; bind=${bindAddr}:${payload.port} connect=${sharedEndpoint}`);
+      audit('startService', { port: payload.port, bindAddress: bindAddr, endpoint: sharedEndpoint });
       const desired = payload.alias;
       if (desired) {
         await ensureModel(desired);

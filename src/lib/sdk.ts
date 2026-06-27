@@ -586,7 +586,8 @@ export async function getLocalEndpoint(): Promise<string | undefined> {
 export async function startService(
   port = 5272,
   alias?: string,
-  preferredEp?: string
+  preferredEp?: string,
+  bindAddress?: string
 ): Promise<string> {
   const payload: any = { port };
   if (alias) {
@@ -594,6 +595,9 @@ export async function startService(
   }
   if (preferredEp) {
     payload.preferredEp = preferredEp;
+  }
+  if (bindAddress) {
+    payload.bindAddress = bindAddress;
   }
   const res = await send('startService', payload);
   currentEndpoint = res.endpoint;
