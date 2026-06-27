@@ -7,8 +7,8 @@ export type SidecarCommand =
   | { cmd: 'stopService' }
   | { cmd: 'getStatus' }
   | { cmd: 'listModels' }
-  | { cmd: 'download'; alias: string }
-  | { cmd: 'load'; alias: string; lane?: LaneName }
+  | { cmd: 'download'; alias: string; variantId?: string }
+  | { cmd: 'load'; alias: string; lane?: LaneName; variantId?: string }
   | { cmd: 'unload'; alias: string; lane?: LaneName }
   | { cmd: 'deleteModel'; alias: string }
   | { cmd: 'getEndpoint' }
@@ -19,7 +19,8 @@ export type SidecarCommand =
   | { cmd: 'ensureAccelerators' }
   | { cmd: 'getVisionModels' }
   | { cmd: 'getSTTModels' }
-  | { cmd: 'poolStatus' };
+  | { cmd: 'poolStatus' }
+  | { cmd: 'getAccessLog' };
 
 export type SidecarCommandName = SidecarCommand['cmd'];
 
@@ -28,7 +29,7 @@ export const KNOWN_COMMANDS = new Set<SidecarCommandName>([
   'listModels', 'download', 'load', 'unload', 'deleteModel', 'getEndpoint',
   'chatCompletion', 'cancelChatRequest', 'transcribeAudio',
   'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',
-  'poolStatus',
+  'poolStatus', 'getAccessLog',
 ]);
 
 /**

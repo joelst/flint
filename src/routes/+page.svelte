@@ -301,6 +301,8 @@
     eps: [] as EpInfo[],
     acceleratorsReady: false,
     serviceRunning: false,
+    pool: [] as any[],
+    poolStats: null as any,
   });
 
   // Recommended starters
@@ -310,6 +312,8 @@
   let hostPlatform = $state<"windows" | "macos" | "linux" | "unknown">("unknown");
   let modelDetailsAlias = $state<string | null>(null);
   let modelRuntimeMeta = $state<Record<string, { downloadedAt?: string; lastUsedAcceleration?: string }>>({});
+  let variantPanelOpen = $state<Record<string, boolean>>({});
+  let startupModels = $state<Record<string, string | null>>({});
 
   // Chat state
   let selectedModelAlias = $state("");
@@ -774,6 +778,8 @@
     state.eps = s.eps ?? [];
     state.acceleratorsReady = s.acceleratorsReady ?? false;
     state.serviceRunning = s.serviceRunning ?? false;
+    state.pool = s.pool ?? [];
+    state.poolStats = s.poolStats ?? null;
     sidecarLogs = s.logs ?? [];
   }
 
@@ -813,6 +819,7 @@
           sidebarCollapsed,
           theme,
           modelRuntimeMeta,
+          startupModels,
         }),
       );
     } catch {}
@@ -845,6 +852,9 @@
         }
         if (data.modelRuntimeMeta && typeof data.modelRuntimeMeta === "object") {
           modelRuntimeMeta = data.modelRuntimeMeta;
+        }
+        if (data.startupModels && typeof data.startupModels === "object") {
+          startupModels = data.startupModels;
         }
       }
     } catch {}
@@ -939,6 +949,29 @@
           } catch (e: any) {
             statusMessage = `Failed to restore ${selectedModelAlias}: ${e?.message || e}`;
           }
+        }
+      }
+
+      // Load any additional startup models (multi-model pool pre-warm)
+      const startupEntries = Object.entries(startupModels);
+      if (startupEntries.length > 0) {
+        let startupLoaded = 0;
+        for (const [alias, variantId] of startupEntries) {
+          if (alias === selectedModelAlias) continue; // already loading above
+          const model = state.models.find((m: ModelInfo) => m.alias === alias);
+          if (model?.isCached) {
+            try {
+              statusMessage = `Auto-loading ${alias}...`;
+              await sdkLoadModel({ alias }, undefined, variantId ?? undefined);
+              startupLoaded++;
+            } catch (e: any) {
+              console.warn(`Startup auto-load failed for ${alias}:`, e);
+            }
+          }
+        }
+        if (startupLoaded > 0) {
+          await refreshModels();
+          statusMessage = `${startupLoaded} startup model${startupLoaded !== 1 ? 's' : ''} loaded`;
         }
       }
     } else {
@@ -1295,6 +1328,50 @@
     } catch (e: any) {
       statusMessage = `Unload failed: ${e?.message || e}`;
     }
+  }
+
+  async function loadVariant(model: any, variantId: string) {
+    try {
+      statusMessage = `Loading ${model.alias} (${variantId.split(':')[0].split('-').slice(-2).join('-')})...`;
+      appendAppLog(`Loading model ${model.alias} variant ${variantId}`);
+      await sdkLoadModel(model, undefined, variantId);
+      statusMessage = `${model.alias} loaded`;
+      if (!state.serviceRunning) {
+        try {
+          await startService(5272, model.alias, undefined);
+        } catch {}
+      }
+      await refreshModels();
+    } catch (e: any) {
+      statusMessage = `Load failed: ${e?.message || e}`;
+    }
+  }
+
+  async function downloadVariant(model: any, variantId: string) {
+    try {
+      statusMessage = `Downloading ${model.alias} variant...`;
+      await downloadModel(model, (p: number) => {
+        statusMessage = `Downloading ${model.alias}: ${p.toFixed(1)}%`;
+      }, variantId);
+      setModelRuntimeMeta(model.alias, { downloadedAt: new Date().toISOString() });
+      statusMessage = `${model.alias} variant downloaded`;
+      await refreshModels();
+    } catch (e: any) {
+      statusMessage = `Download failed: ${e?.message || e}`;
+    }
+  }
+
+  function toggleStartup(alias: string, variantId: string | null) {
+    if (startupModels[alias] !== undefined) {
+      const updated = { ...startupModels };
+      delete updated[alias];
+      startupModels = updated;
+    } else {
+      // Capture the currently loaded variant so the right device type reloads on startup
+      const activeVariantId = state.pool.find((e: any) => e.alias === alias)?.variantId ?? variantId;
+      startupModels = { ...startupModels, [alias]: activeVariantId };
+    }
+    persistChat();
   }
 
   async function deleteCachedModel(model: any) {
@@ -2434,6 +2511,36 @@ Output only the summary text, no preamble.`;
               </div>
             {/if}
 
+            {#if state.pool?.length}
+              <div class="pool-panel">
+                <div class="pool-panel-header">
+                  <h3>Running ({state.pool.length} model{state.pool.length !== 1 ? 's' : ''})</h3>
+                  {#if state.poolStats}
+                    <span class="pool-mem">
+                      {state.poolStats.memoryMb} MB RSS &nbsp;·&nbsp; {state.poolStats.freeMemMb} MB free of {state.poolStats.totalMemMb} MB
+                    </span>
+                  {/if}
+                </div>
+                <div class="pool-table">
+                  {#each state.pool as entry (entry.alias)}
+                    {@const shortVariant = entry.variantId?.split(':')[0]?.split('-').slice(-3).join('-') ?? '—'}
+                    {@const tokens = state.poolStats?.tokenTotals?.find((t) => t.alias === entry.alias)}
+                    <div class="pool-row">
+                      <span class="pool-alias">{entry.alias}</span>
+                      <span class="pool-variant" title={entry.variantId}>{shortVariant}</span>
+                      <span class="badge" class:loaded={entry.isLoaded === true} class:warn={entry.isLoaded === false}>
+                        {entry.isLoaded === true ? 'Loaded' : entry.isLoaded === false ? 'Evicted' : 'Active'}
+                      </span>
+                      {#if tokens}
+                        <span class="pool-tokens" title="Session tokens in / out">↑{tokens.tokensIn} ↓{tokens.tokensOut}</span>
+                      {/if}
+                      <button class="small danger-btn" onclick={() => unloadModel({ alias: entry.alias })}>Unload</button>
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+
             {#if isLoadingModels && state.models.length === 0}
               <p>Loading catalog...</p>
             {:else}
@@ -2500,6 +2607,55 @@ Output only the summary text, no preamble.`;
                       </span>
                     </div>
 
+                    {#if (model as any).variants?.length > 0}
+                      <div class="variant-section">
+                        <button
+                          class="variant-toggle"
+                          onclick={() => { variantPanelOpen[model.alias] = !variantPanelOpen[model.alias]; }}
+                        >
+                          {#if (model as any).variants.length === 1}
+                            1 variant
+                          {:else}
+                            {(model as any).variants.length} variants
+                          {/if}
+                          &nbsp;{variantPanelOpen[model.alias] ? '▲' : '▼'}
+                        </button>
+                        {#if variantPanelOpen[model.alias]}
+                          <div class="variant-list">
+                            {#each (model as any).variants as variant (variant.id)}
+                              {@const isCurrentlyLoaded = state.pool.some((e) => e.variantId === variant.id)}
+                              <div class="variant-row" class:variant-active={isCurrentlyLoaded}>
+                                <span
+                                  class="device-badge"
+                                  class:device-cpu={variant.deviceType === 'CPU'}
+                                  class:device-gpu={variant.deviceType === 'GPU'}
+                                  class:device-npu={variant.deviceType === 'NPU'}
+                                >
+                                  {variant.deviceType ?? '?'}
+                                </span>
+                                {#if variant.executionProvider && variant.executionProvider !== 'generic'}
+                                  <span class="ep-tag">{variant.executionProvider}</span>
+                                {/if}
+                                {#if variant.fileSizeMb}
+                                  <span class="variant-size">{Math.round(variant.fileSizeMb)} MB</span>
+                                {/if}
+                                {#if variant.cached}
+                                  <span class="badge small cached">Downloaded</span>
+                                {/if}
+                                {#if isCurrentlyLoaded}
+                                  <span class="badge small loaded">Running</span>
+                                {:else if variant.cached}
+                                  <button class="small" onclick={() => loadVariant(model, variant.id)}>Load</button>
+                                {:else}
+                                  <button class="small" onclick={() => downloadVariant(model, variant.id)}>Download</button>
+                                {/if}
+                              </div>
+                            {/each}
+                          </div>
+                        {/if}
+                      </div>
+                    {/if}
+
                     <div class="model-actions">
                       {#if selectedModelAlias === model.alias}
                         <span class="current-badge">CURRENT</span>
@@ -2551,6 +2707,15 @@ Output only the summary text, no preamble.`;
                       {#if model.isCached}
                         <button class="danger-btn" onclick={() => deleteCachedModel(model)}>Delete</button>
                       {/if}
+
+                      <label class="startup-toggle" title="Load this model automatically when Flint starts">
+                        <input
+                          type="checkbox"
+                          checked={startupModels[model.alias] !== undefined}
+                          onchange={() => toggleStartup(model.alias, null)}
+                        />
+                        Load on startup{#if startupModels[model.alias]}&nbsp;<span class="startup-variant-hint">({startupModels[model.alias]?.split(':')[0]?.split('-').slice(-2).join('-')})</span>{/if}
+                      </label>
 
                       <button
                         class="secondary"
@@ -3820,6 +3985,16 @@ Output only the summary text, no preamble.`;
     color: #93c5fd;
   }
 
+  .badge.warn {
+    background: #7c2d12;
+    color: #fed7aa;
+  }
+
+  .badge.small {
+    font-size: 0.68rem;
+    padding: 1px 5px;
+  }
+
   .model-meta {
     display: grid;
     gap: 4px;
@@ -3861,6 +4036,170 @@ Output only the summary text, no preamble.`;
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
+    align-items: center;
+  }
+
+  /* Pool panel */
+  .pool-panel {
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 16px;
+  }
+
+  .pool-panel-header {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    margin-bottom: 10px;
+  }
+
+  .pool-panel-header h3 {
+    margin: 0;
+    font-size: 0.9rem;
+    font-weight: 600;
+  }
+
+  .pool-mem {
+    font-size: 0.78rem;
+    color: var(--muted);
+  }
+
+  .pool-table {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .pool-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.82rem;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .pool-row:last-child {
+    border-bottom: none;
+  }
+
+  .pool-alias {
+    font-weight: 500;
+    min-width: 120px;
+  }
+
+  .pool-variant {
+    color: var(--muted);
+    font-family: monospace;
+    font-size: 0.75rem;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .pool-tokens {
+    font-size: 0.75rem;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+
+  /* Variant section */
+  .variant-section {
+    margin: 8px 0;
+    padding: 0;
+  }
+
+  .variant-toggle {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 0.75rem;
+    padding: 3px 8px;
+  }
+
+  .variant-toggle:hover {
+    color: var(--fg);
+    border-color: var(--accent);
+  }
+
+  .variant-list {
+    margin-top: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    border-left: 2px solid var(--border);
+    padding-left: 10px;
+  }
+
+  .variant-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.8rem;
+    padding: 3px 0;
+  }
+
+  .variant-row.variant-active {
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    border-radius: 4px;
+    padding: 3px 6px;
+  }
+
+  .device-badge {
+    font-size: 0.7rem;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 3px;
+    min-width: 34px;
+    text-align: center;
+    background: var(--border);
+    color: var(--fg);
+  }
+
+  .device-cpu { background: #374151; color: #d1fae5; }
+  .device-gpu { background: #1e3a5f; color: #bfdbfe; }
+  .device-npu { background: #3b1a5a; color: #e9d5ff; }
+
+  .ep-tag {
+    font-size: 0.7rem;
+    color: var(--muted);
+    font-family: monospace;
+  }
+
+  .variant-size {
+    font-size: 0.75rem;
+    color: var(--muted);
+  }
+
+  button.small {
+    font-size: 0.75rem;
+    padding: 2px 8px;
+  }
+
+  /* Startup toggle */
+  .startup-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 0.78rem;
+    color: var(--muted);
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .startup-toggle input[type="checkbox"] {
+    cursor: pointer;
+  }
+
+  .startup-variant-hint {
+    font-size: 0.72rem;
+    opacity: 0.65;
+    font-family: monospace;
   }
 
   .danger-btn {

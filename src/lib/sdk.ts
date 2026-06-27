@@ -88,6 +88,19 @@ function joinResourcePath(basePath: string, relativePath: string): string {
   return `${basePath.replace(/[\\/]+$/, '')}${separator}${relativePath.replace(/\//g, separator)}`;
 }
 
+export interface PoolEntry {
+  alias: string;
+  variantId: string;
+  isLoaded: boolean | null;
+}
+
+export interface PoolStats {
+  memoryMb: number;
+  totalMemMb: number;
+  freeMemMb: number;
+  tokenTotals: Array<{ alias: string; tokensIn: number; tokensOut: number }>;
+}
+
 export interface FlintSDKState {
   ready: boolean;
   error: string | null;
@@ -101,6 +114,8 @@ export interface FlintSDKState {
   logs: LogEntry[];
   chatLaneModel?: string;
   audioLaneModel?: string;
+  pool: PoolEntry[];
+  poolStats: PoolStats | null;
 }
 
 const initialState: FlintSDKState = {
@@ -116,6 +131,8 @@ const initialState: FlintSDKState = {
   logs: [],
   chatLaneModel: undefined,
   audioLaneModel: undefined,
+  pool: [],
+  poolStats: null,
 };
 
 export const sdkState: Writable<FlintSDKState> = writable(initialState);
@@ -446,11 +463,9 @@ export async function refreshModels(): Promise<void> {
       });
     }
 
-    const loadedAliases = new Set([
-      status?.result?.chatLane?.model,
-      status?.result?.audioLane?.model,
-      status?.result?.currentModel,
-    ].filter(Boolean));
+    const loadedAliases = new Set(
+      (status?.result?.pool ?? []).map((e: any) => e.alias).filter(Boolean)
+    );
 
     const models = list.map((m: any) => ({
       ...m,
@@ -465,6 +480,22 @@ export async function refreshModels(): Promise<void> {
       cachedModels: models.filter((m: ModelInfo) => m.isCached),
       loadedModels: models.filter((m: ModelInfo) => m.isLoaded),
     });
+
+    // Refresh pool detail + memory stats
+    try {
+      const ps = await send('poolStatus');
+      if (ps.result) {
+        updateState({
+          pool: ps.result.models ?? [],
+          poolStats: {
+            memoryMb: ps.result.memoryMb ?? 0,
+            totalMemMb: ps.result.totalMemMb ?? 0,
+            freeMemMb: ps.result.freeMemMb ?? 0,
+            tokenTotals: ps.result.tokenTotals ?? [],
+          },
+        });
+      }
+    } catch {}
   } catch (e) {
     console.error('refreshModels via sidecar failed', e);
   }
@@ -476,8 +507,10 @@ export async function getModel(alias: string) {
   return { alias } as any;
 }
 
-export async function downloadModel(model: any, onProgress?: (p: number) => void) {
-  await sendInternal('download', { alias: model.alias }, undefined, (id: number) => {
+export async function downloadModel(model: any, onProgress?: (p: number) => void, variantId?: string) {
+  const payload: any = { alias: model.alias };
+  if (variantId) payload.variantId = variantId;
+  await sendInternal('download', payload, undefined, (id: number) => {
     if (onProgress) {
       progressHandlers.set(id, onProgress);
     }
@@ -487,9 +520,10 @@ export async function downloadModel(model: any, onProgress?: (p: number) => void
   await refreshModels();
 }
 
-export async function loadModel(model: any, lane?: LaneName) {
+export async function loadModel(model: any, lane?: LaneName, variantId?: string) {
   const payload: any = { alias: model.alias };
   if (lane) payload.lane = lane;
+  if (variantId) payload.variantId = variantId;
   const res = await send('load', payload);
   await refreshModels();
   return res.result;

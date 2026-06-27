@@ -42,8 +42,8 @@ const FIELD_TYPES = {
   init:              { appName: 'non-empty-string', logLevel: 'non-empty-string' },
   setLogLevel:       { level: 'non-empty-string' },
   startService:      { port: 'number' },
-  download:          { alias: 'non-empty-string' },
-  load:              { alias: 'non-empty-string' },
+  download:          { alias: 'non-empty-string', variantId: 'non-empty-string' },
+  load:              { alias: 'non-empty-string', variantId: 'non-empty-string' },
   unload:            { alias: 'non-empty-string' },
   deleteModel:       { alias: 'non-empty-string' },
   chatCompletion:    { model: 'non-empty-string', messages: 'array' },
@@ -65,8 +65,8 @@ const COMMAND_SCHEMA = {
   stopService:        { required: [], optional: [] },
   getStatus:          { required: [], optional: [] },
   listModels:         { required: [], optional: [] },
-  download:           { required: ['alias'], optional: [] },
-  load:               { required: ['alias'], optional: ['lane'] },
+  download:           { required: ['alias'], optional: ['variantId'] },
+  load:               { required: ['alias'], optional: ['lane', 'variantId'] },
   unload:             { required: ['alias'], optional: ['lane'] },
   deleteModel:        { required: ['alias'], optional: [] },
   getEndpoint:        { required: [], optional: [] },
@@ -149,10 +149,43 @@ let sharedEndpoint = null;
 // service is not intercepted — that requires a proxy layer, deferred to 0.3 item 0b).
 const ACCESS_LOG_MAX = 500;
 const accessLog = [];
+const tokenAccumulator = new Map(); // alias → { tokensIn: number, tokensOut: number }; reset on stopService
+let activeStreamCount = 0;           // incremented on stream start, decremented in finally; handles concurrent streams
+let activeStreamOldest = null;       // { type, modelAlias, startedAt } — the longest-running stream for badge display
 
 function appendAccessLog(entry) {
   accessLog.push(entry);
   if (accessLog.length > ACCESS_LOG_MAX) accessLog.shift();
+  writeToDisk({ type: 'access', ...entry });
+  if (entry.modelAlias && (entry.tokensIn != null || entry.tokensOut != null)) {
+    const t = tokenAccumulator.get(entry.modelAlias) ?? { tokensIn: 0, tokensOut: 0 };
+    tokenAccumulator.set(entry.modelAlias, {
+      tokensIn: t.tokensIn + (entry.tokensIn ?? 0),
+      tokensOut: t.tokensOut + (entry.tokensOut ?? 0),
+    });
+  }
+}
+
+// Fallback: parse device type / EP from variant ID when runtime metadata is null.
+// Variant IDs follow the pattern: <model>-<ep>-<device>:<version>
+// e.g. Phi-4-mini-instruct-generic-cpu:5, Phi-4-mini-instruct-cuda-gpu:5, ...-qnn-npu:1
+function parseDeviceFromVariantId(id) {
+  if (!id) return null;
+  const s = id.toLowerCase();
+  if (s.includes('cuda-gpu') || s.includes('-gpu:')) return 'GPU';
+  if (s.includes('qnn-npu') || s.includes('-npu:')) return 'NPU';
+  if (s.includes('generic-cpu') || s.includes('cpu-int') || s.includes('-cpu:')) return 'CPU';
+  return null;
+}
+
+function parseEpFromVariantId(id) {
+  if (!id) return null;
+  const s = id.toLowerCase();
+  if (s.includes('cuda')) return 'CUDA';
+  if (s.includes('qnn')) return 'QNN';
+  if (s.includes('dml')) return 'DML';
+  if (s.includes('generic')) return 'generic';
+  return null;
 }
 
 // Returns true/false/null. Handles isLoaded as boolean, function, or unknown.
@@ -165,20 +198,48 @@ function resolveIsLoaded(model) {
   return null;
 }
 
-async function ensureModel(alias) {
+async function ensureModel(alias, variantId) {
   const existing = pool.get(alias);
   if (existing) {
-    if (resolveIsLoaded(existing.catModel) === false) {
-      await existing.catModel.load();
-      log('info', `Model ${alias} reloaded after runtime eviction`);
+    if (variantId && existing.variantId !== variantId) {
+      log('info', `Variant switch for ${alias}: ${existing.variantId} → ${variantId}`);
+      await existing.catModel.unload();
+      pool.delete(alias);
+    } else {
+      let loaded = null;
+      if (typeof existing.catModel.isLoaded === 'function') {
+        try { loaded = await existing.catModel.isLoaded(); } catch {}
+      } else if (typeof existing.catModel.isLoaded === 'boolean') {
+        loaded = existing.catModel.isLoaded;
+      }
+      if (loaded === false) {
+        await existing.catModel.load();
+        log('info', `Model ${alias} reloaded after runtime eviction`);
+      }
+      return existing;
     }
-    return existing;
   }
   const catModel = await manager.catalog.getModel(alias);
-  await catModel.load();
-  const variantId = catModel.id;
-  pool.set(alias, { catModel, variantId });
-  log('info', `Model ${alias} loaded (variantId: ${variantId})`);
+  if (variantId) {
+    const variant = await manager.catalog.getModelVariant(variantId);
+    const fileSizeMb = variant.info?.fileSizeMb;
+    if (fileSizeMb && os.freemem() < fileSizeMb * 1024 * 1024 * 1.15) {
+      log('warn', `Low memory: loading ${alias} (${fileSizeMb} MB) but only ${Math.round(os.freemem() / 1024 / 1024)} MB free`);
+    }
+    catModel.selectVariant(variant);
+    await catModel.load();
+    pool.set(alias, { catModel, variantId });
+    log('info', `Model ${alias} loaded (variantId: ${variantId})`);
+  } else {
+    const fileSizeMb = catModel.info?.fileSizeMb;
+    if (fileSizeMb && os.freemem() < fileSizeMb * 1024 * 1024 * 1.15) {
+      log('warn', `Low memory: loading ${alias} (${fileSizeMb} MB) but only ${Math.round(os.freemem() / 1024 / 1024)} MB free`);
+    }
+    await catModel.load();
+    const resolvedVariantId = catModel.id;
+    pool.set(alias, { catModel, variantId: resolvedVariantId });
+    log('info', `Model ${alias} loaded (variantId: ${resolvedVariantId})`);
+  }
   return pool.get(alias);
 }
 
@@ -353,13 +414,55 @@ function buildTranscriptResult (candidate, extras = {}) {
   return { ...base, ...extras };
 }
 
+// --- Disk log ---
+// appendFileSync for crash durability — a buffered stream loses its tail on OOM/kill/segfault,
+// which is exactly when the log matters most. Date is computed once at startup; a sidecar
+// running past midnight continues to the same file. Fine for MVP.
+const LOG_DIR = path.join(os.homedir(), '.flint', 'logs');
+let diskLogPath = null;
+
+function initDiskLog() {
+  try {
+    fs.mkdirSync(LOG_DIR, { recursive: true });
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    for (const f of fs.readdirSync(LOG_DIR)) {
+      if (!/\.(log|jsonl)$/.test(f)) continue;
+      try {
+        const fp = path.join(LOG_DIR, f);
+        if (fs.statSync(fp).mtimeMs < cutoff) fs.unlinkSync(fp);
+      } catch {}
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    diskLogPath = path.join(LOG_DIR, `sidecar-${today}.log`);
+  } catch (err) {
+    console.error('[sidecar] Failed to initialize disk log:', err?.message || err);
+  }
+}
+
+function writeToDisk(entry) {
+  if (!diskLogPath) return;
+  try {
+    fs.appendFileSync(diskLogPath, JSON.stringify(entry) + '\n');
+  } catch (err) {
+    // Use console.error here — calling log() would recurse.
+    console.error('[sidecar] Disk write failed:', err?.message || err);
+  }
+}
+
+function audit(cmd, detail) {
+  const entry = { type: 'audit', ts: Date.now(), pid: process.pid, cmd, detail };
+  send(entry);
+  writeToDisk(entry);
+}
+
 function send (msg) {
   process.stdout.write(JSON.stringify(msg) + '\n');
 }
 
 function log (level, message) {
-  // At least enabling logging (sent to stdout for now; UI can consume later)
-  send({ type: 'log', level, message, timestamp: Date.now() });
+  const entry = { type: 'log', level, message, timestamp: Date.now() };
+  send(entry);
+  writeToDisk(entry);
 }
 
 async function getFoundryManager () {
@@ -388,11 +491,13 @@ rl.on('line', async (line) => {
   try {
     msg = JSON.parse(line);
   } catch (e) {
+    log('warn', `IPC rejected: invalid JSON (${line.length} bytes)`);
     send({ id: null, error: 'Invalid JSON' });
     return;
   }
 
   if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {
+    log('warn', `IPC rejected: expected JSON object (${line.length} bytes)`);
     send({ id: null, error: 'Invalid message: expected JSON object' });
     return;
   }
@@ -405,6 +510,7 @@ rl.on('line', async (line) => {
 
   const validationError = validateCommand(cmd, payload);
   if (validationError) {
+    log('warn', `IPC validation rejected: cmd=${String(cmd).slice(0, 40)} error=${validationError}`);
     reply({ error: validationError });
     return;
   }
@@ -416,6 +522,7 @@ rl.on('line', async (line) => {
       initConfig = { appName, logLevel: payload.logLevel || 'info' };
       manager = FManager.create(initConfig);
       log('info', `SDK initialized for ${appName}`);
+      audit('init', { appName });
       reply({ ok: true, result: 'initialized' });
     } else if (cmd === 'listModels') {
       const models = await manager.catalog.getModels();
@@ -426,10 +533,17 @@ rl.on('line', async (line) => {
           size: m.info?.fileSizeMb,
           task: m.info?.task,
           capabilities: m.info?.capabilities,
-          // Context length is very useful for trimming decisions
           contextLength: m.info?.contextLength ?? m.info?.maxContext ?? null,
           family: m.info?.family || null,
-          info: m.info || {}
+          info: m.info || {},
+          variants: (m.variants || []).map(v => ({
+            id: v.id,
+            deviceType: v.info?.runtime?.deviceType ?? parseDeviceFromVariantId(v.id),
+            executionProvider: v.info?.runtime?.executionProvider ?? parseEpFromVariantId(v.id),
+            fileSizeMb: v.info?.fileSizeMb ?? null,
+            cached: v.info?.cached ?? (typeof v.isCached === 'boolean' ? v.isCached : null),
+            name: v.info?.name ?? null,
+          })),
         }))
       });
     } else if (cmd === 'getSTTModels') {
@@ -450,16 +564,21 @@ rl.on('line', async (line) => {
       });
       reply({ ok: true, result: vision.map(m => ({ alias: m.alias, cached: m.isCached })) });
     } else if (cmd === 'download') {
-      const model = await manager.catalog.getModel(payload.alias);
+      const model = payload.variantId
+        ? await manager.catalog.getModelVariant(payload.variantId)
+        : await manager.catalog.getModel(payload.alias);
+      audit('download.start', { alias: payload.alias, variantId: payload.variantId ?? null });
       await model.download((p) => send({ id, progress: p, alias: payload.alias }));
+      audit('download.complete', { alias: payload.alias, variantId: payload.variantId ?? null });
       reply({ ok: true });
     } else if (cmd === 'load') {
-      const entry = await ensureModel(payload.alias);
+      const entry = await ensureModel(payload.alias, payload.variantId);
       const acceleration = {
         requested: null,
         active: await detectActiveExecutionProvider(entry.catModel)
       };
       log('info', `Model ${payload.alias} ready (variantId: ${entry.variantId}, accel: ${acceleration.active || 'cpu'})`);
+      audit('load', { alias: payload.alias, variantId: entry.variantId, accel: acceleration.active || 'cpu' });
       reply({ ok: true, result: { acceleration, lane: payload.lane || 'chat', variantId: entry.variantId } });
     } else if (cmd === 'unload') {
       const alias = payload.alias;
@@ -468,6 +587,7 @@ rl.on('line', async (line) => {
         await entry.catModel.unload();
         pool.delete(alias);
         log('info', `Model ${alias} unloaded from pool`);
+        audit('unload', { alias });
       }
       reply({ ok: true });
     } else if (cmd === 'deleteModel') {
@@ -491,6 +611,7 @@ rl.on('line', async (line) => {
           await method.call(model);
           deleted = true;
           log('info', `Model ${payload.alias} deleted via ${methodName}`);
+          audit('deleteModel', { alias: payload.alias, method: methodName });
           break;
         }
       }
@@ -519,6 +640,7 @@ rl.on('line', async (line) => {
         sharedEndpoint = `http://127.0.0.1:${payload.port}/v1`;
       }
       log('info', `Service started at ${sharedEndpoint}`);
+      audit('startService', { port: payload.port, endpoint: sharedEndpoint });
       const desired = payload.alias;
       if (desired) {
         await ensureModel(desired);
@@ -545,7 +667,9 @@ rl.on('line', async (line) => {
         }
       }
       sharedEndpoint = null;
+      tokenAccumulator.clear();
       log('info', 'Service stopped');
+      audit('stopService', {});
       reply({ ok: true });
     } else if (cmd === 'getEndpoint') {
       reply({ ok: true, endpoint: sharedEndpoint });
@@ -572,6 +696,8 @@ rl.on('line', async (line) => {
       log('debug', `Chat completion: model=${modelAlias} msgs=${payload.messages?.length ?? 0} stream=${shouldStream}`);
       const chatAccessTs = Date.now();
       let chatTokensIn = null, chatTokensOut = null, chatOk = false;
+      activeStreamCount++;
+      if (!activeStreamOldest) activeStreamOldest = { type: 'chat', modelAlias, startedAt: chatAccessTs };
       try {
         const poolEntry = await ensureModel(modelAlias);
         const chatModel = poolEntry.catModel;
@@ -718,6 +844,8 @@ rl.on('line', async (line) => {
           });
         }
       } finally {
+        activeStreamCount = Math.max(0, activeStreamCount - 1);
+        if (activeStreamCount === 0) activeStreamOldest = null;
         canceledRequests.delete(id);
         appendAccessLog({
           ts: chatAccessTs,
@@ -742,7 +870,8 @@ rl.on('line', async (line) => {
       if (!payload.audioBase64) {
         throw new Error('audioBase64 is required');
       }
-      log('debug', `Transcription: model=${payload.model} file=${payload.fileName} lang=${payload.language || 'auto'}`);
+      const fileExt = (payload.fileName?.split('.').pop() ?? 'unknown').toLowerCase();
+      log('debug', `Transcription: model=${payload.model} ext=.${fileExt} lang=${payload.language || 'auto'}`);
 
       const requestedAlias = payload.model;
       if (requestedAlias) {
@@ -767,6 +896,8 @@ rl.on('line', async (line) => {
 
       const audioAccessTs = Date.now();
       let audioOk = false;
+      activeStreamCount++;
+      if (!activeStreamOldest) activeStreamOldest = { type: 'audio', modelAlias: requestedAlias, startedAt: audioAccessTs };
       try {
         // Prefer direct AudioClient (like we do for chat) — this avoids relying on the web service HTTP route
         // which may return 404 for /audio/transcriptions even for Whisper models.
@@ -889,6 +1020,8 @@ rl.on('line', async (line) => {
           }
         });
       } finally {
+        activeStreamCount = Math.max(0, activeStreamCount - 1);
+        if (activeStreamCount === 0) activeStreamOldest = null;
         try { fs.unlinkSync(tempPath); } catch {}
         appendAccessLog({
           ts: audioAccessTs,
@@ -902,12 +1035,37 @@ rl.on('line', async (line) => {
         });
       }
     } else if (cmd === 'poolStatus') {
+      let loadedIds = new Set();
+      try {
+        const loaded = await manager.catalog.getLoadedModels();
+        for (const m of loaded) loadedIds.add(m.id);
+      } catch {}
       const entries = [...pool.entries()].map(([alias, { catModel, variantId }]) => ({
         alias,
         variantId,
-        isLoaded: resolveIsLoaded(catModel), // true | false | null (null = unknown/unsupported SDK)
+        isLoaded: loadedIds.size > 0 ? loadedIds.has(variantId) : null,
       }));
-      reply({ ok: true, result: { models: entries, endpoint: sharedEndpoint } });
+      const totalMemMb = Math.round(os.totalmem() / 1024 / 1024);
+      const freeMemMb = Math.round(os.freemem() / 1024 / 1024);
+      reply({
+        ok: true,
+        result: {
+          models: entries,
+          endpoint: sharedEndpoint,
+          // usedMemMb = system-wide used RAM; models load in Foundry's process, not sidecar's RSS
+          usedMemMb: totalMemMb - freeMemMb,
+          totalMemMb,
+          freeMemMb,
+          tokenTotals: [...tokenAccumulator.entries()].map(([alias, t]) => ({ alias, ...t })),
+          streaming: activeStreamCount > 0 && activeStreamOldest ? {
+            active: true,
+            type: activeStreamOldest.type,
+            modelAlias: activeStreamOldest.modelAlias,
+            elapsedMs: Date.now() - activeStreamOldest.startedAt,
+            count: activeStreamCount,
+          } : { active: false, type: null, modelAlias: null, elapsedMs: null, count: 0 },
+        }
+      });
     } else if (cmd === 'getAccessLog') {
       reply({ ok: true, result: accessLog });
     } else if (cmd === 'getEps') {
@@ -923,6 +1081,7 @@ rl.on('line', async (line) => {
     } else if (cmd === 'setLogLevel') {
       // Enable logging at requested level (SDK supports via config or we just log here)
       log('info', `Log level set to ${payload.level}`);
+      audit('setLogLevel', { level: payload.level });
       reply({ ok: true });
     } else {
       reply({ error: `Unknown command: ${cmd}` });
@@ -932,11 +1091,14 @@ rl.on('line', async (line) => {
   }
 });
 
+// initDiskLog opens today's log file and prunes files older than 7 days.
+initDiskLog();
+
 // Send ready as early as possible (after readline setup) so the host does not time out.
 // We lazy-load the heavy Foundry SDK only on first 'init' command.
 const readyMsg = { ready: true, pid: process.pid, version: '0.1.0' };
 send(readyMsg);
-send({ type: 'log', level: 'info', message: `Sidecar process started (pid ${process.pid}) and listening` });
+log('info', `Sidecar process started (pid ${process.pid}) and listening`);
 
 // Also write to stderr for better visibility in dev mode
 console.error(`[foundry-sidecar] Ready: ${JSON.stringify(readyMsg)}`);
