@@ -49,7 +49,7 @@
     type IntegrationStatus,
   } from "$lib/integrations";
 
-  import { enable as autostartEnable, disable as autostartDisable, isEnabled as autostartIsEnabled } from '@tauri-apps/plugin-autostart';
+  import { enable as autostartEnable, disable as autostartDisable, isEnabled as autostartIsEnabled } from '$lib/autostart';
 
   // Integrations tab state
   let integrationsOS = $state<'windows' | 'unix'>(detectPlatform());
@@ -315,6 +315,7 @@
   let selectedAccelerationPreference = $state<string>("auto");
   let hostPlatform = $state<"windows" | "macos" | "linux" | "unknown">("unknown");
   let isMac = $derived(hostPlatform === 'macos');
+  const isDev = import.meta.env.DEV;
   let modelDetailsAlias = $state<string | null>(null);
   let modelRuntimeMeta = $state<Record<string, { downloadedAt?: string; lastUsedAcceleration?: string }>>({});
   let variantPanelOpen = $state<Record<string, boolean>>({});
@@ -960,13 +961,14 @@
   }
 
   $effect(() => {
-    if (currentView !== 'settings') return;
+    if (currentView !== 'settings' || isDev) return;
     autostartIsEnabled()
       .then((v: boolean) => { osAutoStartEnabled = v; })
       .catch(() => { osAutoStartEnabled = false; });
   });
 
   async function handleOsAutoStartToggle(e: Event) {
+    if (isDev) return;
     const checked = (e.target as HTMLInputElement).checked;
     try {
       if (checked) {
@@ -3904,24 +3906,26 @@ Output only the summary text, no preamble.`;
 
           <div class="settings-section">
             <h3>System</h3>
-            <div class="setting-row">
-              <div class="setting-info">
-                <span class="setting-name">Launch Flint when the OS starts</span>
-                <span class="setting-desc">Registers Flint as a login item (Windows) or LaunchAgent (macOS). In dev mode, the dev-server path is registered — test with a built app.</span>
+            {#if !isDev}
+              <div class="setting-row">
+                <div class="setting-info">
+                  <span class="setting-name">Launch Flint when the OS starts</span>
+                  <span class="setting-desc">Registers Flint as a login item (Windows) or LaunchAgent (macOS).</span>
+                </div>
+                {#if osAutoStartEnabled === null}
+                  <span class="setting-loading">…</span>
+                {:else}
+                  <label class="toggle-switch">
+                    <input
+                      type="checkbox"
+                      checked={osAutoStartEnabled === true}
+                      onchange={handleOsAutoStartToggle}
+                    />
+                    <span class="toggle-track"></span>
+                  </label>
+                {/if}
               </div>
-              {#if osAutoStartEnabled === null}
-                <span class="setting-loading">…</span>
-              {:else}
-                <label class="toggle-switch">
-                  <input
-                    type="checkbox"
-                    checked={osAutoStartEnabled === true}
-                    onchange={handleOsAutoStartToggle}
-                  />
-                  <span class="toggle-track"></span>
-                </label>
-              {/if}
-            </div>
+            {/if}
           </div>
 
           <div class="settings-section">

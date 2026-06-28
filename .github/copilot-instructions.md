@@ -14,7 +14,7 @@
 - Frontend watch check: `npm run check:watch`
 - Web build: `npm run build`
 - Tauri package build: `npm run tauri:build`
-- Post-build bundle verification: `node scripts/verify-bundle.js`
+- Post-build bundle verification: `node scripts/verify-bundle.cjs`
 - Windows accelerator setup: `npm run setup:winml`
 - Rust check for Tauri code: `cd src-tauri && cargo check`
 - Targeted validation while editing one frontend file: `npm run check -- --watch`
@@ -37,3 +37,17 @@
 - `src-tauri/src/lib.rs` currently only initializes the opener plugin and does not expose custom invoke handlers.
 - If you add Rust commands, update the Tauri permissions/capabilities and keep the frontend call sites in sync.
 - Tauri config already bundles Foundry SDK assets and the sidecar; adjust both when adding/removing runtime files.
+
+## Versioning & Changesets (PR-driven)
+- App version lives in **three** places and must stay in sync:
+  `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`
+- Use **changesets** so that PRs drive the next version:
+  1. Make your code changes.
+  2. Run: `npm run changeset`
+  3. Answer the prompts (choose `patch` / `minor` / `major` and write a short summary).
+  4. Commit the generated `.changeset/xxxx.md` file as part of the PR.
+- CI will fail PRs that modify code without a changeset (this is how "PRs set the version").
+- `npm run version` runs `changeset version` + syncs the version to all three files.
+- A GitHub Action watches pushes to main and will automatically open a "Version Packages" PR when changesets are present.
+- Releases are still triggered by pushing a `v*` tag (the tag workflow sets the version from the tag as a fallback and builds with tauri-action).
+- For pure docs / internal / CI-only changes you can still create a changeset with "none" or skip if CI allows it.

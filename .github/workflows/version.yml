@@ -1,0 +1,44 @@
+name: Version
+
+on:
+  push:
+    branches: [main, master, mvp-0.3]
+  workflow_dispatch:
+
+# Allow the changesets action to create PRs
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history is needed for changeset detection
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Create or update Version Packages PR
+        uses: changesets/action@v1
+        with:
+          # This runs on merge of the version PR and on pushes that need a new version bump PR.
+          # It will:
+          #   1. Run `npm run version` which calls `changeset version && sync script`
+          #   2. The action then commits the version bumps or opens a PR titled "Version Packages"
+          version: npm run version
+          commit: 'chore: bump versions for release'
+          title: 'chore: version packages'
+          # Optional: create a tag when the version PR is merged (uncomment if desired)
+          # createGithubReleases: false   # we keep tag-driven releases for now
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

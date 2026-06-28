@@ -116,7 +116,7 @@ npm run setup:winml
 
 ```bash
 npm run tauri:build
-node scripts/verify-bundle.js
+node scripts/verify-bundle.cjs
 ```
 
 ### Running the built app
@@ -151,7 +151,7 @@ Direct use of `foundry-local-sdk` (JS + native) from the Svelte frontend has bun
 
 **Note on distribution**: Because the sidecar runs `node <script>`, end users of built installers still need Node.js installed and on PATH. (A self-contained .exe sidecar via `pkg` or a Rust port would remove this.)
 
-Run `npm run tauri:build` (may require full MSVC/Rust env) and `node scripts/verify-bundle.js`.
+Run `npm run tauri:build` (may require full MSVC/Rust env) and `node scripts/verify-bundle.cjs`.
 
 ## Vision / Multimodal
 
