@@ -11,6 +11,10 @@ on:
         required: false
         default: ''
 
+# Required for tauri-action to create releases and upload assets
+permissions:
+  contents: write
+
 jobs:
   release:
     strategy:

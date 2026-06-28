@@ -163,7 +163,7 @@ Enhance `.github/workflows/release.yml` with the goal of producing signed releas
 - macOS notarization: Can be skipped or run optionally in the first iteration when using self-signed. Use `xcrun notarytool` when real certs are available.
 - Updater endpoint security: Use GitHub releases (the artifacts themselves are signed with the Tauri key).
 - Breaking changes to release process: Use `workflow_dispatch: true` on the release workflow for safe testing of tag-less runs.
-- Secrets & contributor experience: See the newly created `docs/RELEASE_SIGNING.md` for generating self-signed certs and secret setup. Start with self-signed to unblock 0.3 releases.
+- Secrets & contributor experience: See `docs/RELEASE_SIGNING.md` (local cert generation) and the new `docs/GITHUB_RELEASE_BUILDS_SETUP.md` (exact GitHub repo settings, secrets, permissions, and testing steps). Start with self-signed to unblock 0.3 releases.
 
 ### Verification (CI/CD focus)
 - Create a test tag (e.g. `v0.3.0-test`) or use `workflow_dispatch` → the release workflow produces:

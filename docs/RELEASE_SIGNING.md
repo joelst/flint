@@ -78,7 +78,21 @@ npx tauri signer generate -w ~/.tauri/flint.key
    - Signed installers appear in the GitHub release.
    - `latest.json` and `*.sig` files are present.
 
-## 5. Future Migration
+## 5. GitHub Repository Configuration
+
+All secrets must be added in the GitHub repo (Settings → Secrets and variables → Actions).
+
+See the dedicated guide for the full GitHub-side checklist:
+- [docs/GITHUB_RELEASE_BUILDS_SETUP.md](./GITHUB_RELEASE_BUILDS_SETUP.md)
+
+It covers:
+- Repository Actions permissions
+- Exact secret names and how to set them
+- Workflow permissions required for release creation
+- How to test with `workflow_dispatch`
+- Updater key placement in `tauri.conf.json`
+
+## 6. Future Migration
 
 When you obtain real certificates:
 - Replace the self-signed secrets.
