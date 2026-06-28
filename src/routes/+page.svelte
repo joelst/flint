@@ -72,7 +72,7 @@
   }
 
   // Simple client-side navigation
-  type View = "models" | "chat" | "audio" | "monitor" | "diagnostics" | "integrations" | "learn" | "settings";
+  type View = "models" | "chat" | "audio" | "monitor" | "diagnostics" | "integrations" | "learn" | "settings" | "compare";
   let currentView = $state<View>("models");
 
   // Model capability helpers (based on catalog task/capabilities/family/alias)
@@ -325,6 +325,12 @@
   let monitorLog = $state<any[]>([]);
   let monitorLogPaused = $state(false);
 
+  // Compare (bake-off) state - simple side-by-side for 0.3
+  let compareSelected: string[] = $state([]);
+  let comparePrompt = $state("");
+  let compareResults: Record<string, { content: string; latencyMs?: number; tokensIn?: number; tokensOut?: number; rating?: 'up'|'down' | null }> = $state({});
+  let isComparing = $state(false);
+
   // Settings: startup behaviour
   let autoStartService = $state(true);
   let defaultChatAlias = $state('');
@@ -362,12 +368,27 @@
 
   let abortController: AbortController | null = $state(null);
   let activeStreamRequestId: number | null = $state(null);
-  let attachedImage: string | null = $state(null); // base64 data url
-  let isVisionModel = $derived(
-    selectedModelAlias.includes("vision") ||
-      selectedModelAlias.includes("multimodal") ||
-      selectedModelAlias.includes("phi"),
-  );
+  let attachedImages: string[] = $state([]); // array of base64 data urls for vision
+
+  // Proper vision capability detection based on model metadata (not just alias name).
+  // We gate multi-image UI on the *selected* model being vision-capable.
+  // This follows the sprint plan: "only show attach controls when the selected model has vision capability".
+  // We do NOT require the model to already be "loaded" in the pool — attaching images
+  // is allowed for vision models; the send path will ensure it's loaded via the pool.
+  let isVisionModel = $derived.by(() => {
+    if (!selectedModelAlias) return false;
+    const model = state.models.find((m: any) => m.alias === selectedModelAlias);
+    if (!model) return false;
+    const tags = getModelTags(selectedModelAlias, model.info);
+    return tags.includes('vision');
+  });
+
+  // Auto-clear images if user switches away from a vision model
+  $effect(() => {
+    if (!isVisionModel && attachedImages.length > 0) {
+      attachedImages = [];
+    }
+  });
 
   // Personas (system prompt presets)
   let customPersonas = $state<Persona[]>([]);
@@ -619,6 +640,7 @@
     chatMessages = [];
     chatInput = "";
     lastAutoSummaryCount = 0;
+    clearImages(); // clear any pending vision attachments for new chat
     conversations = [
       ...conversations,
       { id, title: "New chat", createdAt: Date.now(), messageCount: 0 },
@@ -960,6 +982,79 @@
     await pollPoolStatus().catch(() => {});
   }
 
+  async function runComparison() {
+    if (compareSelected.length < 2 || !comparePrompt.trim() || isComparing) return;
+    isComparing = true;
+    compareResults = {};
+    const prompt = comparePrompt.trim();
+    const modelsToRun = [...compareSelected];
+
+    await Promise.allSettled(modelsToRun.map(async (alias) => {
+      const start = Date.now();
+      try {
+        // Ensure service/model if needed (pool supports concurrent)
+        const res = await chatCompletion(alias, [{ role: 'user', content: prompt }], {
+          maxTokens: 512,
+          temperature: 0.7,
+          preferredEp: selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+        });
+        const latency = Date.now() - start;
+        const content = res?.choices?.[0]?.message?.content || "";
+        // Rough token counts if provided by response
+        const usage = res?.usage || {};
+        compareResults[alias] = {
+          content,
+          latencyMs: latency,
+          tokensIn: usage.prompt_tokens,
+          tokensOut: usage.completion_tokens,
+          rating: compareResults[alias]?.rating ?? null,
+        };
+      } catch (e: any) {
+        compareResults[alias] = {
+          content: `[Error] ${e?.message || e}`,
+          latencyMs: Date.now() - start,
+          rating: null,
+        };
+      }
+    }));
+
+    compareResults = { ...compareResults };
+    isComparing = false;
+  }
+
+  function setCompareRating(alias: string, rating: 'up'|'down') {
+    if (!compareResults[alias]) return;
+    compareResults[alias].rating = compareResults[alias].rating === rating ? null : rating;
+    compareResults = { ...compareResults };
+  }
+
+  function exportComparison() {
+    let md = `# Model Comparison\n\n**Prompt:** ${comparePrompt}\n\n`;
+    Object.entries(compareResults).forEach(([alias, r]) => {
+      md += `## ${alias}\n`;
+      md += `- Latency: ${r.latencyMs} ms\n`;
+      md += `- Tokens: in ${r.tokensIn ?? '?'} / out ${r.tokensOut ?? '?'}\n`;
+      md += `- Rating: ${r.rating || 'none'}\n\n`;
+      md += `${r.content}\n\n---\n\n`;
+    });
+    const blob = new Blob([md], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `comparison-${Date.now()}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function loadModelForCompare(alias: string) {
+    try {
+      await sdkLoadModel(alias, selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference);
+      statusMessage = `Loaded ${alias} for comparison`;
+    } catch (e: any) {
+      statusMessage = `Failed to load ${alias}: ${e?.message || e}`;
+    }
+  }
+
   $effect(() => {
     if (currentView !== 'settings' || isDev) return;
     autostartIsEnabled()
@@ -1013,6 +1108,7 @@
       case '3': e.preventDefault(); currentView = 'audio'; break;
       case '4': e.preventDefault(); currentView = 'monitor'; refreshMonitorNow(); break;
       case '5': e.preventDefault(); currentView = 'integrations'; break;
+      case '6': e.preventDefault(); currentView = 'compare'; break;
       case ',':
         if (!e.shiftKey) { e.preventDefault(); currentView = 'settings'; }
         break;
@@ -1604,9 +1700,17 @@
     }
     if (!chatInput.trim() || (!state.endpoint && !chatClient) || isStreaming) return;
 
-    const userContent = chatInput.trim();
+    const text = chatInput.trim();
+    let userContent: any = text;
+    if (attachedImages.length > 0 && isVisionModel) {
+      userContent = [
+        { type: "text", text },
+        ...attachedImages.map((url) => ({ type: "image_url", image_url: { url } }))
+      ];
+    }
     chatMessages = [...chatMessages, { role: "user", content: userContent }];
     chatInput = "";
+    clearImages(); // clear after queuing for send
     isStreaming = true;
     const requestController = new AbortController();
     abortController = requestController;
@@ -1730,12 +1834,14 @@
     const instructionParts: string[] = [];
     if (systemInstruction?.trim()) instructionParts.push(systemInstruction.trim());
 
-    const normalized: Array<{ role: "user" | "assistant"; content: string }> = [];
+    const normalized: Array<{ role: "user" | "assistant"; content: any }> = [];
     for (const message of messages || []) {
       const role = String(message?.role || "").toLowerCase();
-      const content = String(message?.content ?? "").trim();
-      if (!content) continue;
-      if (role === "system") {
+      const rawContent = message?.content;
+      // For vision: keep array form; for text keep string
+      const content = Array.isArray(rawContent) ? rawContent : String(rawContent ?? "").trim();
+      if (!content || (typeof content === 'string' && !content)) continue;
+      if (role === "system" && typeof content === 'string') {
         instructionParts.push(content);
         continue;
       }
@@ -1821,7 +1927,7 @@
     return normalizeForAlternatingChat([
       ...combined.map((m: any) => ({
         role: m.role,
-        content: m.content,
+        content: m.content, // can be string or vision array [{type,text}, {type:'image_url',...}]
       })),
     ], systemPrompt);
   }
@@ -1846,8 +1952,19 @@
   function estimateTokensForMessages(msgs: any[]): number {
     let total = 0;
     for (const m of msgs) {
-      const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
-      total += estimateTokens(text);
+      if (Array.isArray(m.content)) {
+        // Vision content: sum text parts + rough overhead per image (approx for 0.3)
+        for (const part of m.content) {
+          if (part.type === 'text' && typeof part.text === 'string') {
+            total += estimateTokens(part.text);
+          } else if (part.type === 'image_url') {
+            total += 500; // rough overhead per image (base64 + encoding)
+          }
+        }
+      } else {
+        const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
+        total += estimateTokens(text);
+      }
     }
     // Add a bit for roles / formatting overhead
     return total + Math.ceil(msgs.length * 1.5);
@@ -1936,12 +2053,29 @@ Output only the summary text, no preamble.`;
     const input = document.createElement("input");
     input.type = "file";
     input.accept = "image/*";
+    input.multiple = true; // support multi-image
     input.onchange = (e: any) => {
-      const file = e.target.files?.[0];
-      if (file) {
+      const files: FileList = e.target.files;
+      if (!files) return;
+      const max = 4;
+      const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB decoded approx (base64 will be ~33% larger)
+      for (const file of Array.from(files)) {
+        if (attachedImages.length >= max) break;
+        if (file.size > MAX_IMAGE_SIZE) {
+          statusMessage = `Image ${file.name} is too large (max ~5MB)`;
+          continue;
+        }
         const reader = new FileReader();
         reader.onload = () => {
-          attachedImage = reader.result as string;
+          const dataUrl = reader.result as string;
+          // Rough check on base64 size too
+          if (dataUrl.length > MAX_IMAGE_SIZE * 1.4) {
+            statusMessage = `Image ${file.name} is too large after encoding`;
+            return;
+          }
+          if (attachedImages.length < max) {
+            attachedImages = [...attachedImages, dataUrl];
+          }
         };
         reader.readAsDataURL(file);
       }
@@ -1949,8 +2083,52 @@ Output only the summary text, no preamble.`;
     input.click();
   }
 
-  function clearImage() {
-    attachedImage = null;
+  function removeImage(index: number) {
+    attachedImages = attachedImages.filter((_, i) => i !== index);
+  }
+
+  function clearImages() {
+    attachedImages = [];
+  }
+
+  // Drag & drop support for images (only when vision model)
+  function handleDragOver(e: DragEvent) {
+    if (!isVisionModel) return;
+    e.preventDefault();
+    e.dataTransfer!.dropEffect = 'copy';
+  }
+  function handleDrop(e: DragEvent) {
+    if (!isVisionModel) return;
+    e.preventDefault();
+    const files = Array.from(e.dataTransfer?.files || []);
+    const imageFiles = files.filter(f => f.type.startsWith('image/'));
+    const max = 4 - attachedImages.length;
+    for (const file of imageFiles.slice(0, max)) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (attachedImages.length < 4) attachedImages = [...attachedImages, reader.result as string];
+      };
+      reader.readAsDataURL(file);
+    }
+  }
+
+  // Enhanced paste for multiple images
+  function handlePaste(e: ClipboardEvent) {
+    if (!isVisionModel) return;
+    const items = Array.from(e.clipboardData?.items || []);
+    const imageItems = items.filter(item => item.type.startsWith('image/'));
+    if (imageItems.length === 0) return;
+    e.preventDefault();
+    const max = 4 - attachedImages.length;
+    for (const item of imageItems.slice(0, max)) {
+      const file = item.getAsFile();
+      if (!file) continue;
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (attachedImages.length < 4) attachedImages = [...attachedImages, reader.result as string];
+      };
+      reader.readAsDataURL(file);
+    }
   }
 
   // Audio functions
@@ -2560,6 +2738,20 @@ Output only the summary text, no preamble.`;
           </svg>
         </span>
         <span class="nav-label">Monitor</span>
+      </button>
+      <button
+        class="nav-item"
+        class:active={currentView === "compare"}
+        onclick={() => (currentView = "compare")}
+        title="Compare models side-by-side"
+      >
+        <span class="nav-icon" aria-hidden="true">
+          <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="3" y="4" width="7" height="16" rx="1" stroke="currentColor" stroke-width="1.6"/>
+            <rect x="14" y="4" width="7" height="16" rx="1" stroke="currentColor" stroke-width="1.6"/>
+          </svg>
+        </span>
+        <span class="nav-label">Compare</span>
       </button>
       <button
         class="nav-item"
@@ -3260,16 +3452,23 @@ Output only the summary text, no preamble.`;
                     <button
                       type="button"
                       onclick={attachImage}
-                      disabled={isStreaming || !!attachedImage}><Icon name="camera" size={14} /> Image</button
+                      disabled={isStreaming || attachedImages.length >= 4}
+                      title="Attach up to 4 images (vision models only)"
                     >
-                    {#if attachedImage}
-                      <span class="attached"
-                        ><Icon name="check" size={13} /> <button
-                          type="button"
-                          onclick={clearImage}
-                          class="mini"><Icon name="x" size={12} /></button
-                        ></span
-                      >
+                      <Icon name="camera" size={14} /> Image ({attachedImages.length}/4)
+                    </button>
+                    {#if attachedImages.length > 0}
+                      <div class="image-strip">
+                        {#each attachedImages as img, i (i)}
+                          <span class="thumb">
+                            <img src={img} alt="attached" />
+                            <button type="button" onclick={() => removeImage(i)} class="mini" title="Remove image">
+                              <Icon name="x" size={10} />
+                            </button>
+                          </span>
+                        {/each}
+                      </div>
+                      <button type="button" onclick={clearImages} class="mini">Clear all</button>
                     {/if}
                   </div>
                 {/if}
@@ -3286,7 +3485,7 @@ Output only the summary text, no preamble.`;
                 </div>
               {/if}
 
-              <form class="chat-input" onsubmit={sendMessage}>
+              <form class="chat-input" onsubmit={sendMessage} ondrop={handleDrop} ondragover={handleDragOver} ondragenter={handleDragOver}>
                 {#if chatBlockedByLoadedSTT}
                   <div style="width:100%; padding: 8px; font-size:0.8rem; color:var(--muted);">
                     Text chat is disabled while STT model <strong>{loadedAudioModel?.alias}</strong> is active.
@@ -3309,6 +3508,7 @@ Output only the summary text, no preamble.`;
                   placeholder={isDictating ? "Dictating… (click Stop to finish)" : "Type your message... (model is running locally)"}
                   disabled={chatBlockedByLoadedSTT || !selectedModelSupportsChat || (!state.endpoint && !chatClient) || isStreaming}
                   onkeydown={(e) => { if ((isMac ? e.metaKey : e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); sendMessage(e); } }}
+                  onpaste={handlePaste}
                 />
                 <button
                   type="submit"
@@ -3900,6 +4100,80 @@ Output only the summary text, no preamble.`;
             >
           </p>
         </div>
+      {:else if currentView === "compare"}
+        <div class="view compare-view">
+          <h2>Model Comparison</h2>
+          <p class="muted">Send the same prompt to 2–3 models and compare side-by-side (non-streaming for 0.3).</p>
+
+          <div class="compare-controls">
+            <div>
+              <label>Select models (max 3, prefer loaded):</label>
+              <div class="model-pills">
+                {#each state.models.filter(m => m.isCached) as m (m.alias)}
+                  <div class="pill-wrapper">
+                    <button
+                      class="pill"
+                      class:selected={compareSelected.includes(m.alias)}
+                      onclick={() => {
+                        if (compareSelected.includes(m.alias)) {
+                          compareSelected = compareSelected.filter(a => a !== m.alias);
+                        } else if (compareSelected.length < 3) {
+                          compareSelected = [...compareSelected, m.alias];
+                        }
+                      }}
+                    >
+                      {m.alias} {m.isLoaded ? '●' : ''}
+                    </button>
+                    {#if !m.isLoaded}
+                      <button class="tiny" onclick={() => loadModelForCompare(m.alias)} title="Load this model">Load</button>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            </div>
+
+            <textarea bind:value={comparePrompt} placeholder="Enter the same prompt for all selected models..." rows={3}></textarea>
+
+            <div class="actions">
+              <button onclick={runComparison} disabled={compareSelected.length < 2 || !comparePrompt.trim() || isComparing}>
+                {isComparing ? 'Comparing...' : 'Run Comparison'}
+              </button>
+              {#if Object.keys(compareResults).length}
+                <button class="secondary" onclick={exportComparison}>Export Markdown</button>
+                <button class="secondary" onclick={() => { compareResults = {}; }}>Clear Results</button>
+              {/if}
+            </div>
+          </div>
+
+          {#if Object.keys(compareResults).length}
+            <div class="compare-results" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-top: 16px;">
+              {#each compareSelected as alias (alias)}
+                {@const r = compareResults[alias] || {}}
+                <div class="compare-card">
+                  <div class="card-header">
+                    <strong>{alias}</strong>
+                    {#if r.latencyMs}<span class="badge">{r.latencyMs}ms</span>{/if}
+                    {#if r.tokensOut}<span class="badge">{r.tokensOut} tokens</span>{/if}
+                  </div>
+                  <div class="result-body">
+                    {#if r.content}
+                      <div class="result-content">
+                        <MessageRenderer content={r.content || ''} />
+                      </div>
+                    {:else}
+                      <em>No result yet.</em>
+                    {/if}
+                  </div>
+                  <div class="rating">
+                    <button class:selected={r.rating==='up'} onclick={() => setCompareRating(alias, 'up')}>👍</button>
+                    <button class:selected={r.rating==='down'} onclick={() => setCompareRating(alias, 'down')}>👎</button>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
+
       {:else if currentView === "settings"}
         <div class="view settings-view">
           <h2>Settings</h2>
@@ -5033,6 +5307,7 @@ Output only the summary text, no preamble.`;
     gap: 6px;
     align-items: center;
     font-size: 0.85rem;
+    flex-wrap: wrap;
   }
 
   .vision-attach button {
@@ -5040,8 +5315,67 @@ Output only the summary text, no preamble.`;
     font-size: 0.75rem;
   }
 
+  .image-strip {
+    display: flex;
+    gap: 4px;
+  }
+  .thumb {
+    position: relative;
+    width: 44px;
+    height: 44px;
+  }
+  .thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+  }
+  .thumb .mini {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    width: 14px;
+    height: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    padding: 0;
+  }
+
   .attached {
-    color: var(--success);
+    color: var(--success); 
+
+  .compare-card {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px;
+    background: var(--panel-bg, #111);
+  }
+  .compare-card .card-header {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 8px;
+  }
+  .compare-card .badge {
+    font-size: 0.7em;
+    background: var(--accent, #333);
+    padding: 1px 6px;
+    border-radius: 3px;
+  }
+  .compare-card .rating button {
+    margin-right: 4px;
+    opacity: 0.7;
+  }
+  .compare-card .rating button.selected {
+    opacity: 1;
+    font-weight: bold;
+  }
     font-size: 0.8rem;
   }
 

@@ -1,8 +1,14 @@
 # MVP 0.3 Remaining Implementation Plan
 
-**Branch:** `mvp-0.3`  
-**Date:** 2026-06-28  
-**Status:** Draft for review  
+**Branch:** `mvp-0.3`
+**Date:** 2026-06-28
+**Status:** Draft for review — Significant progress:
+
+- Vision multi-image: implemented + gating improved
+- Model comparison: basic functional tab implemented + strengthened
+- CI/CD: updater foundation + self-signed workflow + signing guide
+- Purview: memo created
+- Docs: sprint plan updated with status
 **Goal:** Complete the three incomplete areas for MVP 0.3 exit so the release meets the success criteria in `docs/SPRINT_PLAN_0.3.md`.
 
 ## Overview of Incomplete Items
@@ -19,11 +25,19 @@ Many other 0.3 items (model pool, monitoring, autostart, network config, shortcu
 
 This plan provides **detailed, actionable steps**, current state analysis, file changes, sequencing, risks, testing, and verification for each.
 
+## Assumptions (applies across all sections)
+
+- The model pool and concurrent model support (recently implemented) remain stable.
+- Existing patterns (Svelte 5 runes, localStorage persistence via PERSIST_KEY, sidecar command style, changesets for versioning) will be followed.
+- We are targeting a 0.3 release that is "feature complete per the sprint plan" but may use self-signed certs for distribution. Proper code signing certs are a post-0.3 polish item.
+- No new external services or heavy dependencies unless explicitly called out.
+
 ---
 
 ## 1. CI/CD Improvements (Item 6)
 
 ### Current State
+
 - `.github/workflows/ci.yml`: Runs `npm run check`, tests, and debug Tauri builds (`tauri-action@v0 --debug`) on PRs/pushes for Windows + macOS.
 - `.github/workflows/release.yml`: Triggered on `v*` tags. Sets version from tag (now via `scripts/sync-versions.cjs`), builds release bundles (msi/nsis + dmg/app) using `tauri-action@v0`, creates draft GitHub release.
 - `src-tauri/tauri.conf.json`: No `plugins.updater` section. Version managed via sync script + changesets (recently added).
@@ -32,11 +46,14 @@ This plan provides **detailed, actionable steps**, current state analysis, file 
 - No changelog generation automation (though `CHANGELOG.md` exists and changesets can populate it).
 - Versioning partially addressed by new `.github/workflows/version.yml` (changesets) + sync script.
 
-**Success criterion (from plan):** "Signed build artifact produced on tag push; updater endpoint configured."
+**Adjusted 0.3 goal:** Get the release pipeline producing **signed installers** (self-signed certs to bootstrap) and **updater metadata** in GitHub releases. Runtime update checking UI is explicitly deferred until pre-1.0.
+
+**Success criterion (from plan, adjusted for scope):** "Signed build artifact produced on tag push; updater endpoint configured." (Infrastructure + build artifacts; full end-user auto-update flow later.)
 
 ### Detailed Implementation Steps
 
 #### 1.1 Add Tauri Updater Plugin (Foundation)
+
 - Frontend: `npm install @tauri-apps/plugin-updater`
 - Rust side:
   - Add to `src-tauri/Cargo.toml`:
@@ -44,22 +61,25 @@ This plan provides **detailed, actionable steps**, current state analysis, file 
     tauri-plugin-updater = "2"
     ```
   - In `src-tauri/src/lib.rs`: `.plugin(tauri_plugin_updater::Builder::new().build())`
-- Capabilities: Update `src-tauri/capabilities/default.json`:
+- Capabilities: Update `src-tauri/capabilities/default.json` (add these even though runtime calls are deferred — they are harmless and prepare for 1.0):
+
   ```json
   "updater:allow-check",
   "updater:allow-download-and-install"
   ```
+
 - Add `updater` to `tauri.conf.json` (see 1.3).
 
 #### 1.2 Generate and Configure Updater Keys + Endpoints
+
 - Run: `npx tauri signer generate -w ~/.tauri/flint.key` (or via `tauri signer generate`).
 - Store private key securely (never commit).
 - Public key goes into `tauri.conf.json`.
 - Endpoints: GitHub Releases (Tauri provides a standard `latest.json` format).
   Example endpoint: `https://github.com/<org>/flint/releases/download/latest/latest.json` or use the release JSON.
 
-#### 1.3 Update tauri.conf.json for Updater
-Add under root (or `plugins`):
+#### 1.3 Update tauri.conf.json for Updater (build-time config)
+Add the updater plugin configuration. This is required so that released bundles are "updater-aware" even if we do not yet call the updater APIs at runtime:
 ```json
 "plugins": {
   "updater": {
@@ -73,52 +93,56 @@ Add under root (or `plugins`):
   }
 }
 ```
-- Also add `bundle > updater` if needed for old format (Tauri 2 prefers plugins).
+- Also add under `bundle` if needed for compatibility.
 - Ensure `bundle.active: true` and correct targets.
+- **Note:** Runtime usage of the updater plugin (check/download) is deferred. We only need the config so the release artifacts are ready.
 
-#### 1.4 Update Release Workflow for Updater Artifacts + Signing
-Enhance `.github/workflows/release.yml`:
+#### 1.4 Update Release Workflow for Updater Artifacts + Signing (self-signed bootstrap)
+Enhance `.github/workflows/release.yml` with the goal of producing signed release artifacts + updater metadata on every `v*` tag.
 
-- After version set:
-  - For updater: The tauri-action can produce the `latest.json` and signature when configured.
-  - Add step to generate `latest.json` if action doesn't (use `tauri build --bundles updater` logic).
-- Add signing:
+- After the version-set step:
+  - Configure the tauri-action call to produce updater artifacts. Common pattern:
+    ```yaml
+    with:
+      args: --target ${{ matrix.target }} --bundles appimage,deb,app,dmg,msi,nsis,updater
+    ```
+    (or run a separate `tauri build` step for the updater bundle if the action needs help).
+  - Add a post-build step (or rely on tauri-action outputs) that uploads `latest.json` and the `.sig` files as release assets.
+- Add signing steps using **self-signed certificates to get started**:
+  **Self-signed certificate generation (do this once locally):**
+  - Windows: Use PowerShell or `New-SelfSignedCertificate` + `Export-PfxCertificate` to create a code-signing PFX. Base64-encode it for the secret.
+  - macOS: `security create-keypair`, `codesign` with a self-signed cert, or use a Developer ID Application cert from Apple (self-signed will still show warnings).
+  **In the workflow:**
   **macOS:**
-  - Use `apple-actions/import-codesign-certs` + `xcrun notarytool`.
-  - Secrets needed: `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`.
+  - Use `apple-actions/import-codesign-certs` (or manual `security` + `codesign`).
+  - `xcrun notarytool` can be skipped or made optional for the initial self-signed phase.
   **Windows:**
-  - Use `tauri-action` signing or explicit `signtool`.
-  - Secrets: `WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD` (or Azure Trusted Signing for EV).
-- In matrix jobs, conditionally sign based on OS.
-- Upload release assets including signatures.
-- Ensure tag push produces signed bundles + updater metadata.
+  - Import the PFX from secret.
+  - Use `signtool sign /f cert.pfx ...` on the output executables/installers (or tauri-action's built-in signing if configured via env).
+- Secrets (self-signed bootstrap):
+  - `WINDOWS_CERTIFICATE` (base64 of .pfx) + `WINDOWS_CERTIFICATE_PASSWORD`
+  - `APPLE_CERTIFICATE` etc. when moving beyond pure self-signed.
+- Upload all signed bundles + updater files.
+- Ensure a tag push always produces a draft release containing the signed installers and the files needed for future delta updates.
 
-Example addition (pseudocode):
-```yaml
-- name: Import Apple Certificate (macOS)
-  if: matrix.os == 'macos-latest'
-  uses: apple-actions/import-codesign-certs@v3
-  with:
-    p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
-    p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-```
-
-- Update `tauri-action` call to include signing env vars and `releaseBody` improvements.
+- Update the `tauri-action` call to pass signing-related environment variables when available.
+- Improve `releaseBody` to reference the changelog or the new release artifacts.
 
 #### 1.5 Changelog Automation
-- Option A (preferred, since we have changesets): Configure changesets to update `CHANGELOG.md` on version PR.
-- Option B: Add `git-cliff` (as mentioned in plan).
-  - Add `cliff.toml` config.
-  - In release workflow (or version.yml): `git cliff --tag $VERSION > CHANGELOG.md`
-- Commit changelog as part of release or version bump.
-- Reference in release notes.
+- Primary: Use the existing changesets setup (already configured with `@changesets/cli/changelog`).
+  - When the "Version Packages" PR is merged, it should update `CHANGELOG.md`.
+  - In the release workflow, ensure the changelog is committed/updated before building.
+- Fallback / enhancement: Add `git-cliff` later if more control over conventional commits is desired.
+  - Add `cliff.toml` only if we decide to go beyond changesets.
+- In release notes: Reference the generated CHANGELOG or include a summary.
+- The `releaseBody: "See CHANGELOG for details."` can stay or be made more dynamic.
 
-#### 1.6 Wiring + Polish
-- Add a "Check for updates" button in Settings (using the updater plugin JS API: `check()`, `downloadAndInstall()`).
-- Handle update UI (simple modal or toast) — keep lightweight per plan ("functional update check is enough").
-- Update `README.md` and copilot-instructions with release process.
-- Test locally with `tauri build` + manual `latest.json`.
-- Add GitHub release template mentioning "Auto-updates via Tauri updater".
+#### 1.6 Release Pipeline Polish & Documentation (UI deferred)
+- Update `README.md`, `docs/SPRINT_PLAN_0.3.md`, and `.github/copilot-instructions.md` with the new release process (tag-driven signed builds + self-signed bootstrap).
+- Test the full pipeline locally where possible (`tauri build`) and via `workflow_dispatch` on the release workflow.
+- Add a GitHub release template or `RELEASE.md` notes mentioning signed installers and planned future auto-updates.
+- Reference the new `docs/RELEASE_SIGNING.md` guide.
+- **Explicitly deferred to pre-1.0:** Any "Check for updates" button, in-app update UI, or calls to the updater JS API (`check()`, `downloadAndInstall()`).
 
 #### 1.7 CI Polish
 - Keep debug builds unsigned/fast in `ci.yml`.
@@ -131,20 +155,23 @@ Example addition (pseudocode):
 - `.github/workflows/release.yml` (primary)
 - `.github/workflows/version.yml` (minor, for changelog)
 - New: `cliff.toml` (if using git-cliff) or changesets config tweak
-- `README.md`, `docs/SPRINT_PLAN_0.3.md` (mark complete)
-- `src/routes/+page.svelte` (optional update UI in Settings)
+- `README.md`, `docs/SPRINT_PLAN_0.3.md` (mark complete), and a short `docs/RELEASE_PROCESS.md` if desired
+- (No changes to `src/routes/+page.svelte` for this milestone — update UI deferred)
 
 ### Risks & Mitigations
-- Signing secrets: Use repository secrets + docs for contributors. Start with self-signed / test certs for Windows.
-- macOS notarization delays: Use `notarytool` (faster than altool).
-- Updater endpoint security: Use GitHub releases (signed with tauri key).
-- Breaking changes to release process: Use `workflow_dispatch` for testing.
-- Cost: Self-sign first; EV cert later.
+- Signing with self-signed certs: Use repository secrets for the PFX/certificate. Self-signed will trigger Windows SmartScreen and macOS "unidentified developer" warnings initially. This is acceptable to bootstrap the pipeline. Document the limitation and plan for proper EV/Developer ID certs later.
+- macOS notarization: Can be skipped or run optionally in the first iteration when using self-signed. Use `xcrun notarytool` when real certs are available.
+- Updater endpoint security: Use GitHub releases (the artifacts themselves are signed with the Tauri key).
+- Breaking changes to release process: Use `workflow_dispatch: true` on the release workflow for safe testing of tag-less runs.
+- Secrets & contributor experience: See the newly created `docs/RELEASE_SIGNING.md` for generating self-signed certs and secret setup. Start with self-signed to unblock 0.3 releases.
 
-### Verification
-- Tag `v0.3.0` (or test tag) → signed artifacts appear + `latest.json` + signature.
-- App can check + download update.
-- Changelog populated in release.
+### Verification (CI/CD focus)
+- Create a test tag (e.g. `v0.3.0-test`) or use `workflow_dispatch` → the release workflow produces:
+  - Signed installer bundles using self-signed certificates (Windows .exe/.msi and macOS .app/.dmg).
+  - Updater metadata files (`latest.json` + `.sig`) attached to the GitHub release.
+- Bundles contain the `plugins.updater` configuration (pubkey + GitHub endpoints).
+- Changelog is populated.
+- No "Check for updates" UI or runtime calls are added in this milestone.
 
 ---
 
@@ -234,13 +261,13 @@ These were pulled from 0.4 because model pool enables them. They are the last ma
 ### 3A. Vision: Multi-Image + Drag-and-Drop (Item C)
 
 #### Current State (Important)
-- `let attachedImage: string | null = $state(null);`
-- UI button + checkmark only for `isVisionModel` (name heuristics: vision/multimodal/phi).
-- `attachImage()` uses hidden `<input type=file>`, reads single Data URL.
+- `let attachedImage: string | null = $state(null);` (single image only).
+- UI button + checkmark only for `isVisionModel` (currently a crude name heuristic).
+- `attachImage()` uses hidden file input and reads a single Data URL.
 - `clearImage()`.
-- **Critical gap:** `attachedImage` is **never** added to `chatMessages` or `inferenceMessages`. `getMessagesForInference()` and `normalizeForAlternatingChat()` produce only string `content`. Sidecar `toSdkMessages()` does `String(m.content)`.
-- Sidecar has `getVisionModels` filter and audio base64 handling precedent, but vision chat content is text-only.
-- Single image "support" is a UI stub only.
+- **Critical gap:** The image is never sent. `getMessagesForInference()` / `normalizeForAlternatingChat()` always produce string `content`. Sidecar `toSdkMessages()` does `String(m.content ?? '')`.
+- The SDK already exposes `getVisionModels()` (and the sidecar has filtering logic), but it is not used in the UI for gating.
+- Single-image "support" is currently a non-functional UI stub.
 
 #### Requirements (from plan)
 - Up to **4 images** per message.
@@ -251,25 +278,22 @@ These were pulled from 0.4 because model pool enables them. They are the last ma
 - Leave inline rendering in bubbles for later (just send the data).
 
 #### Detailed Steps
-1. **State change:** `let attachedImages: string[] = $state([]);` (array of data URLs). Update `isVisionModel` usage.
+1. **State change:** `let attachedImages: string[] = $state([]);` (array of data URLs).
+   - Prefer the proper `getVisionModels()` API from the SDK (instead of the current name heuristic `isVisionModel`) for gating the attach UI.
 2. **Update attach:**
-   - Allow multiple files (remove `disabled=!!` or allow append).
-   - `for` loop over `files`, read each as DataURL, push to array (enforce <=4).
+   - Allow multiple files (remove the `disabled=!!attachedImage` guard or change it to support append).
+   - Loop over selected files, read each as Data URL, push to the array (hard limit of 4).
 3. **Thumbnail strip UI (in chat input area):**
-   - Below/above input: flex row of small `<img>` (max-height 60px) + red X button.
-   - Each image has remove handler: filter array.
-   - Show count "3/4 images".
+   - Below/above the input: a flex row of small `<img>` previews (max-height ~60px) with a remove "X" button per image.
+   - Show "X/4 images attached".
 4. **Drag & drop:**
-   - Add handlers to chat input container (`.chat-input` or equivalent):
-     - `ondragover`, `ondragenter` (add highlight class).
-     - `ondrop`: `e.dataTransfer.files`, filter images, read as dataurl, append (respect limit).
-     - `ondragleave` remove highlight.
-   - Visual drop zone hint when dragging (CSS).
+   - Attach `ondragover`, `ondragenter`, `ondrop`, `ondragleave` to the main chat input container.
+   - On drop: filter for image files, read as Data URLs, append (respect limit).
+   - Add visual feedback (e.g. dashed border highlight class).
 5. **Clipboard paste enhancement:**
-   - Existing paste probably works for first. Hook `paste` event or in existing handler:
-     - If `items` contain image files, read them as dataurl and append to array (don't replace).
+   - Hook into paste (or improve the existing handler): if clipboard items contain images, read them as Data URLs and append (do not replace existing ones).
 6. **Message payload changes (critical):**
-   - In `sendMessage`, before pushing user message:
+   - In `sendMessage`, construct user content as OpenAI vision format when images exist:
      ```ts
      let userContent: any = userContentText;
      if (attachedImages.length > 0) {
@@ -280,27 +304,26 @@ These were pulled from 0.4 because model pool enables them. They are the last ma
      }
      chatMessages.push({ role: "user", content: userContent });
      ```
-   - Clear `attachedImages = []` after push (before API call).
+   - Immediately clear `attachedImages = []`.
 7. **Inference & normalization updates:**
-   - `getMessagesForInference()`: Return content as-is (support array or string).
-   - `estimateTokensForMessages()`: If content array, sum text parts + rough overhead per image (e.g. +500 tokens/image or use metadata).
-   - `normalizeForAlternatingChat()`: Keep content as provided for vision messages (don't force string).
+   - `getMessagesForInference()` and `normalizeForAlternatingChat()`: pass `content` through as-is (support string or array).
+   - `estimateTokensForMessages()`: handle array content by summing text + a rough per-image overhead (document as approximate for 0.3).
 8. **Sidecar update (`foundry-sidecar.js`):**
-   - Update `toSdkMessages`:
+   - Change `toSdkMessages` to preserve the original content shape:
      ```js
-     .map((m) => ({
-       role: m.role,
-       content: m.content  // pass array or string through
-     }))
+     .map((m) => ({ role: m.role, content: m.content }))
      ```
-   - The Foundry SDK / OpenAI client should accept the standard vision content array when model supports it.
-   - Add validation/size limit (reuse audio base64 idea; e.g. warn > few MB total).
+   - The local SDK clients should handle the standard `[{type, text}, {type: 'image_url', ...}]` format for vision models.
+   - Add a size guard (e.g. total decoded size) similar to audio handling.
 9. **Clearing & UX:**
-   - Clear images on send, on model change (if not vision), on new chat.
-   - Disable attach when 4 images or streaming or non-vision.
-10. **CSS:** Extend `.vision-attach` for strip (flex, small previews with border, hover X).
-11. **Error handling:** File too large, too many, non-image.
-12. **Testing:** Manual with vision model (e.g. qwen2-vl or phi-3-vision). Verify multi-image sent in correct format.
+   - Clear attached images on send, on switching away from a vision model, on new chat / conversation change.
+   - Disable the attach button when at limit or not a vision model.
+10. **CSS & polish:** Extend `.vision-attach` styles for the thumbnail strip.
+11. **Error handling:** Clear user-friendly messages for oversized files, too many images, or non-image drops.
+12. **Testing:**
+    - Manual with real vision models.
+    - Verify both single and multi-image messages reach the model in correct format.
+    - Regression test that plain-text chat is unaffected.
 
 **Leave out (per plan):** Inline image previews in assistant/user bubbles (data URL already in history if we store the structured content).
 
@@ -396,24 +419,28 @@ Parallel: Memo + Vision can start together. Comparison depends lightly on pool s
 - Add entries to CHANGELOG.md via the mechanism.
 
 ### Risks & Mitigations
-- **Vision format change:** Update toSdkMessages carefully; test with non-vision + vision models. Keep backward (string content still works).
-- **Concurrency in comparison:** Pool already supports; add small delay or queue if GPU pressure.
-- **Large base64 images:** Enforce limits early (e.g. 4MB total decoded per message). Mirror audio limits.
-- **CI signing:** Requires org secrets + cert procurement. Plan for "unsigned release first, signed in follow-up".
-- **Updater:** Requires GitHub release artifacts + public key rotation strategy.
-- **No real vision models:** Use catalog filtering + note in docs.
-- **Testing surface:** Focus on happy path + error cases manually + add 1-2 vitest cases for message normalization.
+- **Vision format change:** This touches the hot chat path. Update `toSdkMessages` carefully and add a regression test that plain-text messages continue to work unchanged.
+- **Concurrency in comparison:** The pool supports it, but we should add basic safeguards (small stagger or respect pool limits) if GPU memory pressure appears.
+- **Large base64 images:** Enforce limits early (total decoded size). Mirror the existing audio base64 guard.
+- **CI signing:** Self-signed will trigger warnings. Document this clearly and plan migration to proper certs post-0.3.
+- **Updater:** Needs GitHub release artifacts + a public key. The key must be kept safe.
+- **Vision model detection:** Prefer `getVisionModels()` over heuristics.
+- **No real vision models in test env:** Rely on catalog filtering + manual testing notes.
+- **Testing surface:** Prioritize happy paths + one regression test for message shape.
 
 ### Testing & Verification Strategy
-- **Unit:** Message normalization + token estimation for arrays.
-- **Integration (sidecar test):** Add vision message shape test.
-- **Manual:** 
-  - Vision: Attach 1→4 images with vision model → verify response references image content.
-  - Drag/drop/paste.
-  - Comparison: 2-3 models, same prompt, side-by-side, ratings, export.
-- **E2E/CI:** Extend release validation to produce signed artifacts (once secrets ready).
-- **Success criteria check:** Tick off in sprint plan once verified.
-- Run full `npm run check`, tests, `npm run tauri:build` (debug) after each major piece.
+- **Unit / Contract:**
+  - Message normalization and token estimation for both string and array content.
+  - Add/update a sidecar test that exercises vision-shaped messages.
+- **Use existing helpers:** Wire and test `getVisionModels()` for UI gating.
+- **Manual verification checklist:**
+  - Vision: 1–4 images via button / drag-and-drop / paste with a real vision model.
+  - Plain text chat is unaffected after the content format change.
+  - Comparison: 2–3 models respond side-by-side, metrics are shown, export works, ratings persist in session.
+- **CI / Release:**
+  - After changesets version bump + features, create a test tag and verify signed bundles + `latest.json` appear.
+- **General:** Run `npm run check`, full test suite, and `npm run tauri:build` (debug) after each major chunk.
+- Success criteria from `SPRINT_PLAN_0.3.md` should be ticked off as each area is verified.
 
 ### Documentation Updates
 - `docs/SPRINT_PLAN_0.3.md` (mark done)
@@ -427,5 +454,10 @@ Parallel: Memo + Vision can start together. Comparison depends lightly on pool s
 ## Exit Criteria Summary
 
 When complete:
-- Tag-driven signed releases + functional updater.
-- Purview memo publi
+- Tag-driven **signed releases** (self-signed bootstrap) + updater metadata (`latest.json` etc.) in GitHub releases. Runtime "check for updates" UI deferred to pre-1.0.
+- Purview memo published.
+- Multiple images (≤4) attachable via button/drag/paste on vision models; sent correctly.
+- Compare tab functional with 2-3 models, parallel results, export, ratings.
+- All success criteria from SPRINT_PLAN_0.3.md satisfied or explicitly deferred.
+
+This plan is actionable and can be broken into PRs (e.g. one per major section).

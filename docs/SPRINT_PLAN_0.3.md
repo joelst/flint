@@ -28,7 +28,7 @@
 | Item | Description | Blocking deps | Priority |
 |---|---|---|---|
 | 6 | CI/CD improvements | None | P3 |
-| 0c | Purview SDK governance memo | None | P3 (design memo only) |
+| 0c | Purview SDK governance memo | None | P3 (design memo only) ✅ Done (see docs/PURVIEW_GOVERNANCE.md) |
 
 ### Pulled from 0.4 — fits current sprint
 
@@ -36,8 +36,8 @@
 |---|---|---|
 | A | Enterprise controls: audit log export | ✅ Done |
 | B | Enterprise controls: network config UI | ✅ Done |
-| C | Vision: multi-image + drag-and-drop | Remaining |
-| D | Model comparison / bake-off | Remaining |
+| C | Vision: multi-image + drag-and-drop | In progress (multi support + UI implemented; gating improved) |
+| D | Model comparison / bake-off | In progress (basic tab + parallel run implemented; polish ongoing) |
 
 ### Not pulling from 0.4 this sprint
 
@@ -275,5 +275,5 @@ Inside the monitoring view (or Diagnostics tab if it fits better):
 | Auto-start | Default chat + audio model pre-selected on launch when configured |
 | Vision | Multiple images attachable per message with thumbnail strip |
 | Model comparison | Two models can respond to the same prompt side-by-side |
-| CI/CD | Signed build artifact produced on tag push; updater endpoint configured |
+| CI/CD | Signed build artifact produced on tag push; updater endpoint configured | In progress (updater plugin + config + self-signed workflow scaffolding + signing guide; full test with secrets pending) |
 | Build warnings | `logListEl` Svelte warning and unused CSS selector warnings resolved ✅ |

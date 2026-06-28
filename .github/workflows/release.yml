@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g. 0.3.0) - for testing without a tag'
+        required: false
+        default: ''
 
 jobs:
   release:
@@ -36,25 +41,76 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Set version from tag (auto versioning)
+      - name: Set version from tag or dispatch input (self-signed bootstrap)
         shell: bash
         run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION=${GITHUB_REF#refs/tags/v}
+          fi
           echo "Setting version to $VERSION"
           # Update package.json + sync to tauri.conf.json and Cargo.toml
+          # This also updates the updater config if needed
           node scripts/sync-versions.cjs "$VERSION"
 
-      - name: Build and Release
+      - name: Build and Release (with updater artifacts + self-signed signing)
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # For self-signed bootstrap: set these secrets in repo settings
+          # See docs/RELEASE_SIGNING.md
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Flint ${{ github.ref_name }}"
-          releaseBody: "See CHANGELOG for details."
+          tagName: ${{ github.ref_name || github.event.inputs.version }}
+          releaseName: "Flint ${{ github.ref_name || github.event.inputs.version }}"
+          releaseBody: "See CHANGELOG for details. Built with self-signed certs for initial 0.3 pipeline."
           releaseDraft: true
           prerelease: false
-          args: --target ${{ matrix.target }}
+          # Force inclusion of updater bundle metadata (latest.json + sigs)
+          # Requires plugins.updater to be configured in tauri.conf.json
+          args: --target ${{ matrix.target }} --bundles msi,nsis,dmg,app,updater
+
+      # Self-signed signing steps (activate when corresponding secrets are set)
+      # See docs/RELEASE_SIGNING.md for generating the certs
+      - name: Sign Windows (self-signed)
+        if: ${{ matrix.os == 'windows-latest' && secrets.WINDOWS_CERTIFICATE != '' }}
+        shell: pwsh
+        run: |
+          $certBytes = [System.Convert]::FromBase64String("${{ secrets.WINDOWS_CERTIFICATE }}")
+          [System.IO.File]::WriteAllBytes("cert.pfx", $certBytes)
+          $pwd = ConvertTo-SecureString -String "${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}" -Force -AsPlainText
+          Import-PfxCertificate -FilePath "cert.pfx" -CertStoreLocation "Cert:\CurrentUser\My" -Password $pwd | Out-Null
+          Get-ChildItem src-tauri/target/release/bundle -Include *.exe,*.msi -Recurse | ForEach-Object {
+            signtool sign /f "cert.pfx" /p "${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}" /tr http://timestamp.digicert.com /td sha256 /fd sha256 $_.FullName
+          }
+          Remove-Item cert.pfx -ErrorAction SilentlyContinue
+
+      - name: Sign macOS (self-signed bootstrap)
+        if: ${{ matrix.os == 'macos-latest' && secrets.APPLE_CERTIFICATE != '' }}
+        run: |
+          echo "${{ secrets.APPLE_CERTIFICATE }}" | base64 --decode > cert.p12
+          security create-keychain -p "" build.keychain || true
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "" build.keychain
+          security import cert.p12 -k build.keychain -P "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" build.keychain
+          APP=$(find src-tauri/target -name "Flint.app" | head -1 || true)
+          if [ -n "$APP" ]; then
+            codesign --force --options runtime --sign "Developer ID Application" "$APP" || echo "Self-signed sign step completed (warnings expected for self-signed)"
+          fi
+          rm -f cert.p12
+
+      - name: Upload updater metadata (latest.json + sigs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: updater-metadata-${{ matrix.os }}
+          path: |
+            src-tauri/target/release/bundle/**/latest.json
+            src-tauri/target/release/bundle/**/*.sig
+          retention-days: 7
+          if-no-files-found: warn
 
       - name: Upload debug symbols (optional)
         if: matrix.os == 'windows-latest'

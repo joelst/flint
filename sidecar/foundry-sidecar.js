@@ -324,9 +324,11 @@ async function readErrorBody (resp) {
 }
 
 function toSdkMessages (messages) {
+  // Pass content through as-is to support vision arrays:
+  // { role, content: "text" } or { role, content: [ {type:"text", text:...}, {type:"image_url", image_url:{url:...}} ] }
   return (messages || [])
     .filter((m) => m && (m.role === 'system' || m.role === 'user' || m.role === 'assistant'))
-    .map((m) => ({ role: m.role, content: String(m.content ?? '') }));
+    .map((m) => ({ role: m.role, content: m.content }));
 }
 
 function normalizeText (value) {
