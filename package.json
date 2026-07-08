@@ -1,6 +1,6 @@
 {
   "name": "flint",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Flint — Foundry Local Interface (desktop GUI for Microsoft Foundry Local)",
   "type": "module",
   "scripts": {
@@ -22,11 +22,12 @@
   },
   "license": "MIT",
   "dependencies": {
+    "@mozilla/readability": "^0.6.0",
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-autostart": "^2",
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-fs": "^2.5.1",
     "@tauri-apps/plugin-opener": "^2",
-    "@tauri-apps/plugin-autostart": "^2",
     "@tauri-apps/plugin-shell": "^2.3.5",
     "@tauri-apps/plugin-updater": "^2",
     "foundry-local-sdk": "^1.2.3",

@@ -1,8 +1,8 @@
 # Flint Release Roadmap (0.1 → 1.0)
 
-**Last updated:** 2026-07-08  
+**Last updated:** 2026-07-08 (rev. 3 — docs consolidated; historical plans under `docs/archive/`; process: one living planner)  
 **Original date:** 2026-06-24  
-**Scope:** Living release roadmap — tracks readiness decisions, known limitations, and per-release objectives from MVP 0.1 through 1.0.
+**Scope:** Living release roadmap — tracks readiness decisions, known limitations, and per-release objectives from MVP 0.1 through 1.0. This is the **only** living release planner; do not maintain parallel sprint + remaining-implementation docs for the same milestone (see [docs/README.md](./docs/README.md)).
 
 ---
 
@@ -12,15 +12,15 @@
 |---|---|---|---|
 | **0.1** | `mvp-0.1-alpha` | 0.1.0 | ✅ Released (dogfood baseline) |
 | **0.2** | merged → `main` | 0.2.0 | ✅ Released (security hardening + lane routing) |
-| **0.3** | `mvp-0.3` | 0.2.0 → **0.3.0 pending** | 🟡 Feature-complete; awaiting version bump + release pipeline finalization |
+| **0.3** | `mvp-0.3` | **0.3.0 (bumped, unreleased)** | 🟡 Feature-complete + over-delivered; version bumped; awaiting updater key + signing secrets + release tag |
 | **0.4** | Not started | — | 📋 Planned |
 | **1.0** | Not started | — | 📋 Planned |
 
 ---
 
-## 0.3 Progress Scorecard (as of 2026-07-08)
+## 0.3 Progress Scorecard (as of 2026-07-08, rev. 2)
 
-All feature work is complete. The only remaining gate to shipping 0.3 is generating the updater signing key, configuring release secrets, bumping the version, and cutting the release tag.
+All planned 0.3 feature work is complete, and two unplanned features were delivered on top of scope (host-aware chat context and a guarded web-fetch → chat-context pipeline). The version is already bumped to `0.3.0` across all three files. The remaining gate to shipping is purely release mechanics: generate the updater signing key, configure Windows signing secrets, fix placeholder URLs, and cut the tag. **Process gap:** the version was bumped without a Changesets entry, so `CHANGELOG.md` has no 0.3 section — this must be reconciled before the tag.
 
 | Success Criterion | Status | Notes |
 |---|---|---|
@@ -36,23 +36,30 @@ All feature work is complete. The only remaining gate to shipping 0.3 is generat
 | Purview SDK governance memo | ✅ Complete | `docs/PURVIEW_GOVERNANCE.md` |
 | Integration snippets / tool onboarding | ✅ Complete | Integrations tab, data-driven catalog, OS toggle, copy buttons |
 | CI/CD: release pipeline scaffolding + updater plugin infrastructure | ⚠️ Partial | Workflow, updater plugin, signing steps in place; updater pubkey = PLACEHOLDER; certs not yet in repo secrets |
-| Version bump to 0.3.0 | ❌ Not started | Requires changeset → `npm run version` → sync all three files |
+| Version bump to 0.3.0 | 🟡 Done, no changeset | All three files at `0.3.0`; bumped directly, **skipping `npm run changeset`** → `CHANGELOG.md` has no 0.3 section yet |
+
+### Bonus — delivered beyond original 0.3 scope
+
+| Feature | Status | Notes |
+|---|---|---|
+| Host-aware chat context (`flint-context.ts`) | ✅ Complete | Compact identity line every turn + expanded Foundry/Flint fact sheet gated on app-intent regex; de-dupes against persona; unit-tested (`flint-context.test.ts`) |
+| Guarded web-fetch → chat context (`fetchUrl`) | ✅ Complete | Sidecar command: http/https-only, private/loopback SSRF block, size cap, `@mozilla/readability` + `jsdom` article extraction, access-log audit entry. SDK method + chat URL-detection chips + context injection. Type-checks clean; release build produced `Flint_0.3.0_x64_en-US.msi`. **This is a down-payment on 0.4 RAG** (the "inject external content as context" pipeline). |
 
 ### Remaining 0.3 release blockers (in dependency order)
 
-1. **Generate updater signing key** — `npx tauri signer generate -w ~/.tauri/flint.key`; replace `PLACEHOLDER` pubkey in `src-tauri/tauri.conf.json`
-2. **Configure GitHub repo secrets** — `WINDOWS_CERTIFICATE` + `WINDOWS_CERTIFICATE_PASSWORD` (self-signed PFX); see `docs/RELEASE_SIGNING.md`
-3. **Create changeset** — `npm run changeset` (minor bump); document all 0.3 feature work
-4. **Bump version to 0.3.0** — `npm run version` syncs `package.json`, `tauri.conf.json`, `Cargo.toml`
-5. **Pre-test release workflow** — `workflow_dispatch` with version `0.3.0-rc1` before tagging
-6. **PR `mvp-0.3` → `main`** — wait for CI green, merge
+1. **Generate updater signing key** — `npx tauri signer generate -w ~/.tauri/flint.key`; replace `PLACEHOLDER` pubkey in `src-tauri/tauri.conf.json` → `plugins.updater.pubkey`
+2. **Fix placeholder release URL** — `src-tauri/tauri.conf.json` updater endpoint still reads `github.com/YOUR_ORG/flint/...`; set to the real `owner/repo`
+3. **Configure GitHub repo secrets** — `WINDOWS_CERTIFICATE` + `WINDOWS_CERTIFICATE_PASSWORD` (self-signed PFX); see [docs/RELEASE.md](./docs/RELEASE.md)
+4. **Reconcile CHANGELOG / changeset** — version is already at `0.3.0` but no changeset was recorded. Either author a retroactive changeset or hand-write the `0.3.0` `CHANGELOG.md` section covering all scorecard items **plus** the two bonus features (host-aware context, web-fetch)
+5. **Pre-test release workflow** — `workflow_dispatch` on `.github/workflows/release.yml` with version `0.3.0-rc1` before tagging
+6. **PR `mvp-0.3` → `main`** — wait for CI green, merge (untracked files `flint-context.ts` / `.test.ts` / `flint-context` wiring must be committed first)
 7. **Tag `v0.3.0`** — triggers release workflow → signed installers + updater metadata artifacts
 
 ---
 
 ## 1) MVP 0.1 Readiness Review (against original MVP plan)
 
-Original MVP expectation (from `FLINT_DESIGN_SPEC.md` and `MVP_FEATURE_COMPLETION_PLAN.md`) was:
+Original MVP expectation (from `FLINT_DESIGN_SPEC.md` and the archived `docs/archive/MVP_FEATURE_COMPLETION_PLAN.md`) was:
 
 - Model management (catalog/search/download/load/unload)
 - Streaming chat UX
@@ -321,6 +328,7 @@ Routing in Flint touches several layers and needs deliberate design before any s
 > - ✅ Model comparison / bake-off (shipped in 0.3)
 > - ✅ Enterprise controls: audit log export (shipped in 0.3)
 > - ✅ Enterprise controls: network config UI / bind address (shipped in 0.3)
+> - 🟡 **RAG "external content → context" pipeline partially started** — the 0.3 web-fetch feature (`fetchUrl` + chat URL-context injection) already builds the fetch → sanitize → inject-as-context path. 0.4 RAG extends this from single-URL to indexed local files. See RAG item below.
 >
 > The 0.4 scope below reflects the updated plan after these pull-ins.
 
@@ -356,10 +364,11 @@ A linear chain (run prompt A → pipe output into prompt B → show final result
 **Decision to make before 0.4 tool calling work begins**: confirm with OpenClaw and Scout maintainers whether there are integration gaps that only a Flint-native execution layer could fill. If the answer is no, keep the manual-gate model and improve the endpoint/tool-call visibility surface instead.
 
 2. **RAG (retrieval-augmented generation)**
+   - **Already started in 0.3**: the `fetchUrl` web-fetch pipeline (guarded fetch → Readability extraction → inject as chat context) is the single-source version of this. 0.4 generalizes it to a persistent, indexed knowledge base.
    - Index local folders or files into an embedded vector store (e.g. sqlite-vec or a lightweight HNSW store).
-   - At query time, retrieve relevant chunks and inject into the system/context window before sending to the model.
-   - UI: attach a knowledge base to a conversation; show which chunks were retrieved and their sources.
-   - Scope: local files only for 0.4. Remote/URL indexing deferred.
+   - At query time, retrieve relevant chunks and inject into the system/context window before sending to the model — reuse the 0.3 context-injection path rather than building a new one.
+   - UI: attach a knowledge base to a conversation; show which chunks were retrieved and their sources (the web-fetch chips are the UI precedent).
+   - Scope: local files only for 0.4. Remote/URL indexing deferred — but single-URL fetch already ships in 0.3.
 
 3. **Workspace export / import**
    - Export a workspace bundle: selected models list, endpoint profiles, personas, conversation history, settings.
@@ -453,22 +462,25 @@ If 0.1 is "usable MVP" and 0.2 is "hardened + scalable architecture", then **1.0
 
 ### Ship 0.3 (this week)
 
+> Version is already `0.3.0` in all three files, so the old "bump" steps are replaced by "commit the outstanding work + reconcile the changelog." The signing/secrets steps are unchanged and remain the true blockers.
+
 | Step | Action | Owner |
 |---|---|---|
-| 1 | Generate Tauri updater signing key: `npx tauri signer generate -w ~/.tauri/flint.key` | Dev |
-| 2 | Replace `PLACEHOLDER` pubkey in `src-tauri/tauri.conf.json` → `plugins.updater.pubkey` | Dev |
-| 3 | Generate self-signed Windows PFX cert; set `WINDOWS_CERTIFICATE` + `WINDOWS_CERTIFICATE_PASSWORD` in GitHub repo secrets | Dev |
-| 4 | Run `npm run changeset` (minor) — document all 0.3 feature work | Dev |
-| 5 | Run `npm run version` — bumps all three version files to 0.3.0 | Dev |
-| 6 | Test release workflow: `workflow_dispatch` on `.github/workflows/release.yml` with version `0.3.0-rc1` | Dev |
-| 7 | Fix any pipeline issues found in step 6 | Dev |
-| 8 | PR `mvp-0.3` → `main`; wait for CI green; merge | Dev |
-| 9 | `git tag v0.3.0 && git push origin v0.3.0` → triggers signed release build | Dev |
-| 10 | Review draft release on GitHub; publish when artifacts look correct | Dev |
+| 1 | **Commit outstanding 0.3 work** — the branch has uncommitted changes (sidecar `fetchUrl`, `sdk.ts`, `+page.svelte`) and untracked `src/lib/flint-context.ts` + `flint-context.test.ts` + `sidecar/scripts/accelerator-memory.ps1`. Stage, run `npm run check` + tests, commit. | Dev |
+| 2 | **Reconcile CHANGELOG** — author a retroactive changeset (or hand-write the `0.3.0` section) covering every scorecard row **plus** host-aware context and web-fetch. | Dev |
+| 3 | Generate Tauri updater signing key: `npx tauri signer generate -w ~/.tauri/flint.key` | Dev |
+| 4 | Replace `PLACEHOLDER` pubkey in `src-tauri/tauri.conf.json` → `plugins.updater.pubkey` | Dev |
+| 5 | Fix `YOUR_ORG` placeholder in the updater endpoint URL (`src-tauri/tauri.conf.json`) → real `owner/repo` | Dev |
+| 6 | Generate self-signed Windows PFX cert; set `WINDOWS_CERTIFICATE` + `WINDOWS_CERTIFICATE_PASSWORD` in GitHub repo secrets | Dev |
+| 7 | Test release workflow: `workflow_dispatch` on `.github/workflows/release.yml` with version `0.3.0-rc1` | Dev |
+| 8 | Fix any pipeline issues found in step 7 | Dev |
+| 9 | PR `mvp-0.3` → `main`; wait for CI green; merge | Dev |
+| 10 | `git tag v0.3.0 && git push origin v0.3.0` → triggers signed release build | Dev |
+| 11 | Review draft release on GitHub; publish when artifacts look correct | Dev |
 
 ### Start 0.4 planning (after 0.3 ships)
 
-1. **Sprint plan doc**: create `docs/SPRINT_PLAN_0.4.md` following the same structure as `docs/SPRINT_PLAN_0.3.md`.
+1. **Plan in this file** — add a **0.4 Progress Scorecard** (same shape as the 0.3 scorecard above) with objectives, status, and ordered work. Prefer **not** creating a separate `SPRINT_PLAN_0.4.md` unless execution detail would bloat this roadmap past readability; if a sprint file is spun out, keep a single file and still use this roadmap as SSoT for status. Historical 0.3 sprint docs live under `docs/archive/`.
 2. **Prioritize 0.4 items** — recommended ordering based on dependency and impact:
    - **P1**: Azure AI Foundry cloud connections (highest user demand; now unblocked)
    - **P1**: Auto-update UX (infrastructure is ready; just the UI layer)
@@ -478,4 +490,5 @@ If 0.1 is "usable MVP" and 0.2 is "hardened + scalable architecture", then **1.0
    - **P3**: Tool calling (requires architecture decision first — see agent loops section)
 3. **Branch**: create `mvp-0.4` from `main` after 0.3 merges.
 4. **Architecture decision**: before tool calling work begins, resolve the agent loop delegation question (Flint-native vs. OpenClaw) — this gates item ordering in 0.4.
+5. **Deferred product-copy items** (Learn tab, flint-context fact sheet): [docs/BACKLOG.md](./docs/BACKLOG.md).
 

@@ -21,6 +21,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import os from 'os';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+
+const execFileAsync = promisify(execFile);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -33,7 +37,7 @@ const KNOWN_COMMANDS = new Set([
   'listModels', 'download', 'load', 'unload', 'deleteModel', 'getEndpoint',
   'chatCompletion', 'cancelChatRequest', 'transcribeAudio',
   'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',
-  'poolStatus', 'getAccessLog',
+  'poolStatus', 'getAccessLog', 'fetchUrl',
 ]);
 
 // Per-command type requirements. Keys are required or optional field names; values are:
@@ -45,10 +49,11 @@ const FIELD_TYPES = {
   download:          { alias: 'non-empty-string', variantId: 'non-empty-string' },
   load:              { alias: 'non-empty-string', variantId: 'non-empty-string' },
   unload:            { alias: 'non-empty-string' },
-  deleteModel:       { alias: 'non-empty-string' },
+  deleteModel:       { alias: 'non-empty-string', variantId: 'non-empty-string' },
   chatCompletion:    { model: 'non-empty-string', messages: 'array' },
   cancelChatRequest: { requestId: 'number' },
   transcribeAudio:   { audioBase64: 'string', mimeType: 'non-empty-string', fileName: 'non-empty-string', model: 'non-empty-string', language: 'non-empty-string' },
+  fetchUrl:          { url: 'non-empty-string' },
 };
 
 // Commands that accept a lane field; validated to 'chat' | 'audio'.
@@ -68,7 +73,7 @@ const COMMAND_SCHEMA = {
   download:           { required: ['alias'], optional: ['variantId'] },
   load:               { required: ['alias'], optional: ['lane', 'variantId'] },
   unload:             { required: ['alias'], optional: ['lane'] },
-  deleteModel:        { required: ['alias'], optional: [] },
+  deleteModel:        { required: ['alias'], optional: ['variantId'] },
   getEndpoint:        { required: [], optional: [] },
   chatCompletion:     { required: ['model', 'messages'], optional: ['maxTokens', 'temperature', 'preferredEp', 'stream'] },
   cancelChatRequest:  { required: ['requestId'], optional: [] },
@@ -79,6 +84,7 @@ const COMMAND_SCHEMA = {
   getSTTModels:       { required: [], optional: [] },
   poolStatus:         { required: [], optional: [] },
   getAccessLog:       { required: [], optional: [] },
+  fetchUrl:           { required: ['url'], optional: ['maxChars'] },
 };
 
 // Base64 character limit for transcribeAudio. 50 MB decoded audio is ~67 MB of base64.
@@ -129,6 +135,12 @@ function validateCommand(cmd, payload) {
   }
   if (cmd === 'transcribeAudio' && payload.audioBase64.length > AUDIO_BASE64_MAX_CHARS) {
     return `Command "transcribeAudio" audioBase64 exceeds maximum allowed size`;
+  }
+  if (cmd === 'fetchUrl') {
+    try { new URL(payload.url); } catch { return `Command "fetchUrl" field "url" must be a valid URL`; }
+    if (payload.maxChars !== undefined && typeof payload.maxChars !== 'number') {
+      return `Command "fetchUrl" field "maxChars" must be a number`;
+    }
   }
   return null;
 }
@@ -186,6 +198,287 @@ function parseEpFromVariantId(id) {
   if (s.includes('dml')) return 'DML';
   if (s.includes('generic')) return 'generic';
   return null;
+}
+
+/**
+ * Accelerator memory snapshots for Monitor (GPU VRAM / NPU when available).
+ * @typedef {{ kind: 'gpu'|'npu', name: string, vendor?: string|null, totalMb: number|null, usedMb: number|null, freeMb: number|null, source: string }} AccelMem
+ */
+
+/** @type {{ ts: number, devices: AccelMem[] } | null} */
+let accelMemCache = null;
+const ACCEL_MEM_TTL_MS = 4000;
+
+function normalizeAccelDevice(d) {
+  if (!d || typeof d !== 'object') return null;
+  const kind = d.kind === 'npu' ? 'npu' : 'gpu';
+  const name = String(d.name || '').trim();
+  if (!name) return null;
+  const toNum = (v) => {
+    if (v == null || v === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 ? Math.round(n) : null;
+  };
+  let totalMb = toNum(d.totalMb);
+  let usedMb = toNum(d.usedMb);
+  let freeMb = toNum(d.freeMb);
+  if (freeMb == null && totalMb != null && usedMb != null) {
+    freeMb = Math.max(0, totalMb - usedMb);
+  }
+  return {
+    kind,
+    name,
+    vendor: d.vendor ? String(d.vendor) : null,
+    totalMb,
+    usedMb,
+    freeMb,
+    source: String(d.source || 'unknown'),
+  };
+}
+
+async function queryNvidiaSmi() {
+  try {
+    const { stdout } = await execFileAsync(
+      'nvidia-smi',
+      ['--query-gpu=name,memory.total,memory.used,memory.free', '--format=csv,noheader,nounits'],
+      { timeout: 5000, windowsHide: true, maxBuffer: 1024 * 1024 },
+    );
+    return stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const parts = line.split(',').map((s) => s.trim());
+        if (parts.length < 4) return null;
+        const [name, total, used, free] = parts;
+        return normalizeAccelDevice({
+          kind: 'gpu',
+          name,
+          vendor: 'nvidia',
+          totalMb: total,
+          usedMb: used,
+          freeMb: free,
+          source: 'nvidia-smi',
+        });
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/** Resolve path to accelerator-memory.ps1 (dev layout or bundled next to sidecar). */
+function resolveAcceleratorMemoryScript() {
+  const candidates = [
+    path.join(__dirname, 'scripts', 'accelerator-memory.ps1'),
+    path.join(__dirname, 'accelerator-memory.ps1'),
+  ];
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p)) return p;
+    } catch {}
+  }
+  return null;
+}
+
+/** Windows: DXGI dedicated totals + perf-counter usage + PnP NPU presence. */
+async function queryWindowsAccelerators() {
+  if (process.platform !== 'win32') return [];
+  const scriptPath = resolveAcceleratorMemoryScript();
+  if (!scriptPath) return [];
+
+  try {
+    const { stdout } = await execFileAsync(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
+      { timeout: 10000, windowsHide: true, maxBuffer: 2 * 1024 * 1024 },
+    );
+    const raw = stdout.trim();
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    const arr = Array.isArray(parsed) ? parsed : [parsed];
+    return arr.map(normalizeAccelDevice).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/** Linux: AMD ROCm VRAM + DRM sysfs (Intel/AMD). NVIDIA covered by nvidia-smi. */
+async function queryLinuxAccelerators() {
+  if (process.platform !== 'linux') return [];
+  const devices = [];
+
+  // ROCm (AMD discrete / APUs with ROCm tools installed)
+  try {
+    const { stdout } = await execFileAsync(
+      'rocm-smi',
+      ['--showmeminfo', 'vram', '--csv'],
+      { timeout: 5000, maxBuffer: 1024 * 1024 },
+    );
+    // Typical CSV rows vary by version; also try non-CSV line parse as fallback below.
+    const lines = stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    for (const line of lines) {
+      if (/device|gpu|card/i.test(line) && /total|used/i.test(line) && line.includes(',')) {
+        // header-ish
+        continue;
+      }
+      const nums = line.match(/(\d+)/g);
+      if (!nums || nums.length < 2) continue;
+      // Heuristic: last large numbers often total/used in bytes or MB
+      const vals = nums.map(Number).filter((n) => Number.isFinite(n));
+      if (vals.length < 2) continue;
+      // Prefer values that look like bytes (> 1e6) → MB
+      let totalMb = null;
+      let usedMb = null;
+      const asMb = vals.map((n) => (n > 1e6 ? Math.round(n / 1024 / 1024) : n));
+      // pick two largest plausible VRAM numbers
+      const big = asMb.filter((n) => n >= 256 && n <= 256000).sort((a, b) => b - a);
+      if (big.length >= 2) {
+        totalMb = Math.max(big[0], big[1]);
+        usedMb = Math.min(big[0], big[1]);
+        if (usedMb > totalMb) [usedMb, totalMb] = [totalMb, usedMb];
+      } else if (big.length === 1) {
+        totalMb = big[0];
+      }
+      if (totalMb != null) {
+        devices.push(normalizeAccelDevice({
+          kind: 'gpu',
+          name: `AMD GPU (ROCm)`,
+          vendor: 'amd',
+          totalMb,
+          usedMb,
+          freeMb: usedMb != null ? Math.max(0, totalMb - usedMb) : null,
+          source: 'rocm-smi',
+        }));
+      }
+    }
+  } catch {
+    // try human-readable rocm-smi
+    try {
+      const { stdout } = await execFileAsync('rocm-smi', ['--showmeminfo', 'vram'], {
+        timeout: 5000,
+        maxBuffer: 1024 * 1024,
+      });
+      const totalMatch = stdout.match(/VRAM\s*Total\s*Memory[^0-9]*(\d+)/i)
+        || stdout.match(/Total\s*Memory\s*\(B\)\s*:\s*(\d+)/i);
+      const usedMatch = stdout.match(/VRAM\s*Total\s*Used\s*Memory[^0-9]*(\d+)/i)
+        || stdout.match(/Total\s*Used\s*Memory\s*\(B\)\s*:\s*(\d+)/i);
+      if (totalMatch) {
+        let totalMb = Number(totalMatch[1]);
+        let usedMb = usedMatch ? Number(usedMatch[1]) : null;
+        if (totalMb > 1e6) totalMb = Math.round(totalMb / 1024 / 1024);
+        if (usedMb != null && usedMb > 1e6) usedMb = Math.round(usedMb / 1024 / 1024);
+        devices.push(normalizeAccelDevice({
+          kind: 'gpu',
+          name: 'AMD GPU (ROCm)',
+          vendor: 'amd',
+          totalMb,
+          usedMb,
+          freeMb: usedMb != null ? Math.max(0, totalMb - usedMb) : null,
+          source: 'rocm-smi',
+        }));
+      }
+    } catch { /* no ROCm */ }
+  }
+
+  // DRM sysfs (works for many AMD/Intel nodes without ROCm)
+  try {
+    const drmRoot = '/sys/class/drm';
+    if (fs.existsSync(drmRoot)) {
+      const cards = fs.readdirSync(drmRoot).filter((n) => /^card\d+$/.test(n));
+      for (const card of cards) {
+        const devDir = path.join(drmRoot, card, 'device');
+        const totalPath = path.join(devDir, 'mem_info_vram_total');
+        const usedPath = path.join(devDir, 'mem_info_vram_used');
+        if (!fs.existsSync(totalPath)) continue;
+        const totalB = Number(fs.readFileSync(totalPath, 'utf8').trim());
+        if (!Number.isFinite(totalB) || totalB <= 0) continue;
+        const totalMb = Math.round(totalB / 1024 / 1024);
+        if (totalMb < 64) continue; // skip tiny/shared stubs
+        let usedMb = null;
+        if (fs.existsSync(usedPath)) {
+          const usedB = Number(fs.readFileSync(usedPath, 'utf8').trim());
+          if (Number.isFinite(usedB) && usedB >= 0) usedMb = Math.round(usedB / 1024 / 1024);
+        }
+        let name = card;
+        try {
+          const uevent = fs.readFileSync(path.join(devDir, 'uevent'), 'utf8');
+          const driver = (uevent.match(/DRIVER=(\S+)/) || [])[1];
+          if (driver) name = `${card} (${driver})`;
+        } catch {}
+        devices.push(normalizeAccelDevice({
+          kind: 'gpu',
+          name,
+          vendor: vendorFromName(name),
+          totalMb,
+          usedMb,
+          freeMb: usedMb != null ? Math.max(0, totalMb - usedMb) : null,
+          source: 'sysfs-drm',
+        }));
+      }
+    }
+  } catch { /* ignore */ }
+
+  return devices.filter(Boolean);
+}
+
+function vendorFromName(name) {
+  const s = String(name || '').toLowerCase();
+  if (s.includes('nvidia') || s.includes('geforce') || s.includes('rtx') || s.includes('quadro')) return 'nvidia';
+  if (s.includes('amd') || s.includes('radeon')) return 'amd';
+  if (s.includes('intel') || s.includes('arc ')) return 'intel';
+  if (s.includes('qualcomm') || s.includes('hexagon') || s.includes('npu')) return 'npu-vendor';
+  return null;
+}
+
+/** Prefer nvidia-smi rows for NVIDIA devices; keep DXGI/other for non-NVIDIA + NPUs. */
+function mergeAcceleratorDevices(nvidia, others) {
+  const byKey = new Map();
+  const keyOf = (d) => `${d.kind}:${d.name.toLowerCase()}`;
+
+  for (const d of others || []) {
+    byKey.set(keyOf(d), d);
+  }
+  for (const d of nvidia || []) {
+    // nvidia-smi is authoritative for NVIDIA used/total
+    byKey.set(keyOf(d), d);
+    // Drop DXGI duplicate if names differ slightly: match by vendor nvidia + similar name
+  }
+
+  // If nvidia-smi found devices, remove DXGI nvidia entries that look like duplicates under different keys
+  if ((nvidia || []).length > 0) {
+    for (const [k, d] of [...byKey.entries()]) {
+      if (d.source === 'dxgi' && (d.vendor === 'nvidia' || vendorFromName(d.name) === 'nvidia')) {
+        const covered = (nvidia || []).some((n) => {
+          const a = n.name.toLowerCase();
+          const b = d.name.toLowerCase();
+          return a === b || a.includes(b) || b.includes(a);
+        });
+        if (covered) byKey.delete(k);
+      }
+    }
+  }
+
+  return [...byKey.values()].sort((a, b) => {
+    if (a.kind !== b.kind) return a.kind === 'gpu' ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+async function collectAcceleratorMemory(force = false) {
+  const now = Date.now();
+  if (!force && accelMemCache && now - accelMemCache.ts < ACCEL_MEM_TTL_MS) {
+    return accelMemCache.devices;
+  }
+  const [nvidia, win, linux] = await Promise.all([
+    queryNvidiaSmi(),
+    queryWindowsAccelerators(),
+    queryLinuxAccelerators(),
+  ]);
+  // nvidia-smi is authoritative for NVIDIA; Windows DXGI / Linux ROCm+sysfs fill the rest.
+  const devices = mergeAcceleratorDevices(nvidia, [...win, ...linux]);
+  accelMemCache = { ts: now, devices };
+  return devices;
 }
 
 // Returns true/false/null. Handles isLoaded as boolean, function, or unknown.
@@ -529,24 +822,48 @@ rl.on('line', async (line) => {
     } else if (cmd === 'listModels') {
       const models = await manager.catalog.getModels();
       reply({
-        ok: true, result: models.map(m => ({
-          alias: m.alias,
-          cached: m.isCached,
-          size: m.info?.fileSizeMb,
-          task: m.info?.task,
-          capabilities: m.info?.capabilities,
-          contextLength: m.info?.contextLength ?? m.info?.maxContext ?? null,
-          family: m.info?.family || null,
-          info: m.info || {},
-          variants: (m.variants || []).map(v => ({
-            id: v.id,
-            deviceType: v.info?.runtime?.deviceType ?? parseDeviceFromVariantId(v.id),
-            executionProvider: v.info?.runtime?.executionProvider ?? parseEpFromVariantId(v.id),
-            fileSizeMb: v.info?.fileSizeMb ?? null,
-            cached: v.info?.cached ?? (typeof v.isCached === 'boolean' ? v.isCached : null),
-            name: v.info?.name ?? null,
-          })),
-        }))
+        ok: true, result: models.map(m => {
+          // Prefer live isCached getters (query native cache). Catalog snapshot
+          // info.cached is often stale after download until a full catalog refresh.
+          const variantRows = (m.variants || []).map(v => {
+            let cached = false;
+            try {
+              cached = !!v.isCached;
+            } catch {
+              cached = !!v.info?.cached;
+            }
+            return {
+              id: v.id,
+              deviceType: v.info?.runtime?.deviceType ?? parseDeviceFromVariantId(v.id),
+              executionProvider: v.info?.runtime?.executionProvider ?? parseEpFromVariantId(v.id),
+              fileSizeMb: v.info?.fileSizeMb ?? null,
+              cached,
+              name: v.info?.name ?? null,
+            };
+          });
+          let modelCached = false;
+          try {
+            modelCached = !!m.isCached;
+          } catch {
+            modelCached = !!m.info?.cached;
+          }
+          // Alias is "downloaded" if any variant is on disk (not only the selected one).
+          if (!modelCached) modelCached = variantRows.some(v => v.cached);
+
+          return {
+            alias: m.alias,
+            cached: modelCached,
+            size: m.info?.fileSizeMb,
+            task: m.info?.task,
+            capabilities: m.info?.capabilities,
+            contextLength: m.info?.contextLength ?? m.info?.maxContext ?? null,
+            family: m.info?.family || null,
+            // Live catalog uses createdAt (unix seconds); older SDK typings said createdAtUnix.
+            createdAt: m.info?.createdAt ?? m.info?.createdAtUnix ?? null,
+            info: m.info || {},
+            variants: variantRows,
+          };
+        })
       });
     } else if (cmd === 'getSTTModels') {
       const all = await manager.catalog.getModels();
@@ -571,6 +888,8 @@ rl.on('line', async (line) => {
         : await manager.catalog.getModel(payload.alias);
       audit('download.start', { alias: payload.alias, variantId: payload.variantId ?? null });
       await model.download((p) => send({ id, progress: p, alias: payload.alias }));
+      // Force next catalog access to re-read model list metadata (info.cached, etc.).
+      try { manager.catalog.invalidateCache?.(); } catch {}
       audit('download.complete', { alias: payload.alias, variantId: payload.variantId ?? null });
       reply({ ok: true });
     } else if (cmd === 'load') {
@@ -596,31 +915,78 @@ rl.on('line', async (line) => {
       if (!payload.alias) {
         throw new Error('deleteModel requires alias');
       }
-      const model = await manager.catalog.getModel(payload.alias);
-      if (!model) {
-        throw new Error(`Model not found: ${payload.alias}`);
-      }
-      const poolEntry = pool.get(payload.alias);
-      if (poolEntry && typeof poolEntry.catModel.unload === 'function') {
-        await poolEntry.catModel.unload();
-        pool.delete(payload.alias);
-      }
-      const deleteMethods = ['delete', 'remove', 'removeFromDisk', 'purgeCache', 'uninstall'];
-      let deleted = false;
-      for (const methodName of deleteMethods) {
-        const method = model?.[methodName];
-        if (typeof method === 'function') {
-          await method.call(model);
-          deleted = true;
-          log('info', `Model ${payload.alias} deleted via ${methodName}`);
-          audit('deleteModel', { alias: payload.alias, method: methodName });
-          break;
+      const variantId = payload.variantId || null;
+
+      const tryRemoveFromCache = (target, label) => {
+        if (!target) return false;
+        if (typeof target.removeFromCache === 'function') {
+          target.removeFromCache();
+          log('info', `Removed from cache: ${label}`);
+          return true;
         }
+        for (const methodName of ['delete', 'remove', 'removeFromDisk', 'purgeCache', 'uninstall']) {
+          const method = target?.[methodName];
+          if (typeof method === 'function') {
+            method.call(target);
+            log('info', `Deleted ${label} via ${methodName}`);
+            return true;
+          }
+        }
+        return false;
+      };
+
+      if (variantId) {
+        // Delete a single variant from the local cache.
+        const variant = await manager.catalog.getModelVariant(variantId);
+        if (!variant) {
+          throw new Error(`Variant not found: ${variantId}`);
+        }
+        const poolEntry = pool.get(payload.alias);
+        if (poolEntry?.variantId === variantId) {
+          if (typeof poolEntry.catModel.unload === 'function') {
+            await poolEntry.catModel.unload();
+          }
+          pool.delete(payload.alias);
+          log('info', `Unloaded pool entry for deleted variant ${variantId}`);
+        }
+        const ok = tryRemoveFromCache(variant, variantId);
+        if (!ok) {
+          throw new Error('Runtime does not expose a variant deletion API (removeFromCache)');
+        }
+        try { manager.catalog.invalidateCache?.(); } catch {}
+        audit('deleteModel', { alias: payload.alias, variantId });
+        reply({ ok: true, result: { alias: payload.alias, variantId } });
+      } else {
+        // Delete all cached variants for this alias.
+        const model = await manager.catalog.getModel(payload.alias);
+        if (!model) {
+          throw new Error(`Model not found: ${payload.alias}`);
+        }
+        const poolEntry = pool.get(payload.alias);
+        if (poolEntry && typeof poolEntry.catModel.unload === 'function') {
+          await poolEntry.catModel.unload();
+          pool.delete(payload.alias);
+        }
+        let deleted = 0;
+        const variants = model.variants || [];
+        for (const v of variants) {
+          let cached = false;
+          try { cached = !!v.isCached; } catch { cached = !!v.info?.cached; }
+          if (!cached) continue;
+          if (tryRemoveFromCache(v, v.id || payload.alias)) deleted++;
+        }
+        // Fallback: selected variant / model-level remove
+        if (deleted === 0) {
+          if (tryRemoveFromCache(model, payload.alias)) deleted++;
+        }
+        if (deleted === 0) {
+          throw new Error('No cached variants found to delete (or runtime lacks removeFromCache)');
+        }
+        try { manager.catalog.invalidateCache?.(); } catch {}
+        log('info', `Deleted ${deleted} cached variant(s) for ${payload.alias}`);
+        audit('deleteModel', { alias: payload.alias, variantId: null, count: deleted });
+        reply({ ok: true, result: { alias: payload.alias, count: deleted } });
       }
-      if (!deleted) {
-        throw new Error('Runtime does not expose a model deletion API');
-      }
-      reply({ ok: true });
     } else if (cmd === 'startService') {
       // Re-create the manager with webServiceUrls so startWebService() binds to the requested port.
       // The manager from init() lacks webServiceUrls and would bind to whatever the SDK default is.
@@ -1050,6 +1416,13 @@ rl.on('line', async (line) => {
       }));
       const totalMemMb = Math.round(os.totalmem() / 1024 / 1024);
       const freeMemMb = Math.round(os.freemem() / 1024 / 1024);
+      let accelerators = [];
+      try {
+        accelerators = await collectAcceleratorMemory();
+      } catch (e) {
+        log('warn', `Accelerator memory probe failed: ${e?.message || e}`);
+        accelerators = accelMemCache?.devices ?? [];
+      }
       reply({
         ok: true,
         result: {
@@ -1059,6 +1432,12 @@ rl.on('line', async (line) => {
           usedMemMb: totalMemMb - freeMemMb,
           totalMemMb,
           freeMemMb,
+          // Native host facts (more reliable than browser UA for Apple Silicon vs Intel Mac)
+          host: {
+            platform: process.platform, // darwin | win32 | linux
+            arch: process.arch,         // arm64 | x64 | ...
+          },
+          accelerators,
           tokenTotals: [...tokenAccumulator.entries()].map(([alias, t]) => ({ alias, ...t })),
           streaming: activeStreamCount > 0 && activeStreamOldest ? {
             active: true,
@@ -1071,6 +1450,132 @@ rl.on('line', async (line) => {
       });
     } else if (cmd === 'getAccessLog') {
       reply({ ok: true, result: accessLog });
+    } else if (cmd === 'fetchUrl') {
+      const fetchTs = Date.now();
+      let fetchOk = false;
+      const rawUrl = String(payload.url).trim();
+      const maxChars = typeof payload.maxChars === 'number' ? payload.maxChars : 50000;
+
+      // SSRF / protocol guard — reject anything that isn't https/http, and block
+      // private/loopback ranges so the sidecar can't be used as a proxy to reach
+      // local services (LAN hosts, the Foundry endpoint itself, etc.).
+      let parsedUrl;
+      try {
+        parsedUrl = new URL(rawUrl);
+      } catch {
+        reply({ error: `fetchUrl: invalid URL` });
+        return;
+      }
+      if (parsedUrl.protocol !== 'https:' && parsedUrl.protocol !== 'http:') {
+        reply({ error: `fetchUrl: only http/https URLs are supported` });
+        return;
+      }
+      const hostname = parsedUrl.hostname.toLowerCase();
+      const privateRanges = [
+        /^localhost$/,
+        /^127\./,
+        /^10\./,
+        /^172\.(1[6-9]|2[0-9]|3[01])\./,
+        /^192\.168\./,
+        /^169\.254\./,     // link-local
+        /^::1$/,           // IPv6 loopback
+        /^fc00:/,          // IPv6 ULA
+        /^fe80:/,          // IPv6 link-local
+        /^0\.0\.0\.0$/,
+      ];
+      if (privateRanges.some((re) => re.test(hostname))) {
+        reply({ error: `fetchUrl: private/loopback addresses are not allowed` });
+        return;
+      }
+
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000);
+        let resp;
+        try {
+          resp = await fetch(rawUrl, {
+            signal: controller.signal,
+            headers: { 'User-Agent': 'Flint/0.3 (local-AI-client; +https://github.com/joelst/flint)' },
+            redirect: 'follow',
+          });
+        } finally {
+          clearTimeout(timeoutId);
+        }
+
+        if (!resp.ok) {
+          throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+        }
+
+        const contentType = resp.headers.get('content-type') || '';
+        // Cap raw download at 2 MB to avoid OOM on large pages
+        const RAW_LIMIT = 2 * 1024 * 1024;
+        const rawText = await resp.text();
+        const capped = rawText.length > RAW_LIMIT ? rawText.slice(0, RAW_LIMIT) : rawText;
+
+        let title = '';
+        let extractedText = '';
+
+        if (contentType.includes('text/html')) {
+          // Dynamically import jsdom + readability (both ship in node_modules)
+          const { JSDOM } = await import('jsdom');
+          const { Readability } = await import('@mozilla/readability');
+          const dom = new JSDOM(capped, { url: rawUrl });
+          // Extract <title> as fallback
+          title = dom.window.document.title?.trim() || '';
+          const reader = new Readability(dom.window.document, { charThreshold: 50 });
+          const article = reader.parse();
+          if (article) {
+            title = article.title?.trim() || title;
+            extractedText = article.textContent?.replace(/\s+/g, ' ').trim() || '';
+          } else {
+            // Readability couldn't parse it; strip tags as a rough fallback
+            extractedText = dom.window.document.body?.textContent?.replace(/\s+/g, ' ').trim() || '';
+          }
+        } else {
+          // Plain text, JSON, markdown, etc. — use as-is (already text/utf-8 from resp.text())
+          extractedText = capped.replace(/\s+/g, ' ').trim();
+        }
+
+        const truncated = extractedText.length > maxChars;
+        const finalText = truncated ? extractedText.slice(0, maxChars) : extractedText;
+
+        fetchOk = true;
+        appendAccessLog({
+          ts: fetchTs,
+          type: 'fetchUrl',
+          modelAlias: null,
+          durationMs: Date.now() - fetchTs,
+          tokensIn: null,
+          tokensOut: null,
+          source: 'ipc',
+          ok: true,
+          url: parsedUrl.hostname, // host only, not full URL (privacy)
+        });
+        log('info', `fetchUrl: fetched ${parsedUrl.hostname} (${finalText.length} chars, truncated=${truncated})`);
+        reply({
+          ok: true,
+          result: {
+            url: rawUrl,
+            title,
+            text: finalText,
+            truncated,
+            charCount: finalText.length,
+          }
+        });
+      } catch (err) {
+        appendAccessLog({
+          ts: fetchTs,
+          type: 'fetchUrl',
+          modelAlias: null,
+          durationMs: Date.now() - fetchTs,
+          tokensIn: null,
+          tokensOut: null,
+          source: 'ipc',
+          ok: false,
+          url: parsedUrl?.hostname || rawUrl,
+        });
+        throw err;
+      }
     } else if (cmd === 'getEps') {
       const eps = typeof manager.discoverEps === 'function' ? manager.discoverEps() : [];
       reply({ ok: true, result: eps });

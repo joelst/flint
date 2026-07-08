@@ -63,7 +63,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # For self-signed bootstrap: set these secrets in repo settings
-          # See docs/RELEASE_SIGNING.md
+          # See docs/RELEASE.md
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         with:
@@ -77,7 +77,7 @@ jobs:
           args: --target ${{ matrix.target }} --bundles msi,nsis,dmg,app,updater
 
       # Self-signed signing steps (activate when corresponding secrets are set)
-      # See docs/RELEASE_SIGNING.md for generating the certs
+      # See docs/RELEASE.md for generating the certs
       - name: Sign Windows (self-signed)
         if: ${{ matrix.os == 'windows-latest' && secrets.WINDOWS_CERTIFICATE != '' }}
         shell: pwsh

@@ -23,6 +23,7 @@
     chatCompletionStream,
     cancelChatRequest,
     transcribeAudio,
+    fetchUrl,
     appendAppLog,
     getAccessLog,
     pollPoolStatus,
@@ -50,6 +51,10 @@
   } from "$lib/integrations";
 
   import { enable as autostartEnable, disable as autostartDisable, isEnabled as autostartIsEnabled } from '$lib/autostart';
+  import {
+    buildFlintAwareSystemPrompt,
+    contentToPlainText,
+  } from "$lib/flint-context";
 
   // Integrations tab state
   let integrationsOS = $state<'windows' | 'unix'>(detectPlatform());
@@ -99,6 +104,24 @@
     if (platformRaw.includes("win")) return "windows";
     if (platformRaw.includes("linux")) return "linux";
     return "unknown";
+  }
+
+  /** Apple Silicon = unified memory (CPU/GPU/ANE share one pool). */
+  function isAppleSiliconHost(host?: { platform?: string; arch?: string } | null): boolean {
+    const platform = String(host?.platform || "").toLowerCase();
+    const arch = String(host?.arch || "").toLowerCase();
+    return platform === "darwin" && (arch === "arm64" || arch === "aarch64");
+  }
+
+  function systemMemoryLabel(host?: { platform?: string; arch?: string } | null): string {
+    return isAppleSiliconHost(host) ? "Unified Memory" : "System RAM";
+  }
+
+  function systemMemoryNote(host?: { platform?: string; arch?: string } | null): string {
+    if (isAppleSiliconHost(host)) {
+      return "Apple Silicon unified memory shared by CPU, GPU, and Neural Engine.";
+    }
+    return "Host memory across all processes.";
   }
 
   function classifyExecutionProvider(epName: string): "cpu" | "gpu" | "npu" | "other" {
@@ -196,6 +219,29 @@
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return "Unknown";
     return date.toLocaleString();
+  }
+
+  /** Catalog publish/update time from Foundry model info (createdAt unix seconds). */
+  function formatModelUpdated(model: any): string {
+    const raw =
+      model?.createdAt ??
+      model?.createdAtUnix ??
+      model?.info?.createdAt ??
+      model?.info?.createdAtUnix ??
+      model?.info?.info?.createdAt ??
+      model?.info?.info?.createdAtUnix ??
+      null;
+    const unix = Number(raw);
+    if (!Number.isFinite(unix) || unix <= 0) return "Unknown";
+    // Foundry reports seconds; tolerate ms values just in case.
+    const ms = unix > 1e12 ? unix : unix * 1000;
+    const date = new Date(ms);
+    if (Number.isNaN(date.getTime())) return "Unknown";
+    return date.toLocaleDateString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
   }
 
   function getApplicableAccelerationLabels(
@@ -305,6 +351,8 @@
     eps: [] as EpInfo[],
     acceleratorsReady: false,
     serviceRunning: false,
+    chatLaneModel: undefined as string | undefined,
+    audioLaneModel: undefined as string | undefined,
     pool: [] as any[],
     poolStats: null as any,
   });
@@ -325,11 +373,48 @@
   let monitorLog = $state<any[]>([]);
   let monitorLogPaused = $state(false);
 
-  // Compare (bake-off) state - simple side-by-side for 0.3
-  let compareSelected: string[] = $state([]);
+  // Compare (bake-off): pick models/variants, prepare (download+load), run, save
+  type CompareSlot = {
+    key: string;
+    alias: string;
+    variantId: string | null;
+    label: string;
+    deviceType?: string | null;
+    executionProvider?: string | null;
+  };
+  type CompareResult = {
+    content: string;
+    latencyMs?: number;
+    tokensIn?: number;
+    tokensOut?: number;
+    rating?: "up" | "down" | null;
+    error?: string;
+  };
+  type SavedComparison = {
+    id: string;
+    createdAt: number;
+    prompt: string;
+    slots: CompareSlot[];
+    results: Record<string, CompareResult>;
+  };
+  const COMPARE_HISTORY_KEY = "flint-comparisons-v1";
+  const COMPARE_MAX_SLOTS = 3;
+  const COMPARE_HISTORY_MAX = 30;
+
+  let compareSlots: CompareSlot[] = $state([]);
   let comparePrompt = $state("");
-  let compareResults: Record<string, { content: string; latencyMs?: number; tokensIn?: number; tokensOut?: number; rating?: 'up'|'down' | null }> = $state({});
+  let compareResults: Record<string, CompareResult> = $state({});
   let isComparing = $state(false);
+  let comparePreparing = $state(false);
+  let comparePrepStatus = $state("");
+  let comparePickerOpen = $state(false);
+  let comparePickerSearch = $state("");
+  let compareExpandedAliases: Record<string, boolean> = $state({});
+  let compareHistory: SavedComparison[] = $state([]);
+  let compareHistoryOpen = $state(false);
+  let compareReviewId: string | null = $state(null);
+  /** true = load → run → unload each slot (peak RAM ≈ largest model). false = try to keep all loaded. */
+  let compareOneAtATime = $state(true);
 
   // Settings: startup behaviour
   let autoStartService = $state(true);
@@ -369,6 +454,17 @@
   let abortController: AbortController | null = $state(null);
   let activeStreamRequestId: number | null = $state(null);
   let attachedImages: string[] = $state([]); // array of base64 data urls for vision
+
+  // URL-fetch (Option A web fetch): pending URL chips and their fetched content
+  let pendingUrlFetches: { url: string; status: 'pending' | 'fetching' | 'done' | 'error'; title?: string; text?: string; error?: string }[] = $state([]);
+  let isFetchingUrl = $state(false);
+
+  // Detects URLs typed/pasted into the chat input that haven't been fetched yet
+  let detectedUrls = $derived.by(() => {
+    const matches = chatInput.match(/https?:\/\/[^\s"'<>)]+/g) ?? [];
+    const alreadyQueued = new Set(pendingUrlFetches.map(f => f.url));
+    return [...new Set(matches)].filter(u => !alreadyQueued.has(u));
+  });
 
   // Proper vision capability detection based on model metadata (not just alias name).
   // We gate multi-image UI on the *selected* model being vision-capable.
@@ -572,6 +668,59 @@
     !selectedModelAlias || (selectedChatModel ? modelSupportsChat(selectedChatModel) : true)
   );
 
+  /** Loaded chat-capable models (pool), preferred for auto-select and picker. */
+  const loadedChatModels = $derived(
+    state.models.filter((m: any) => m.isLoaded && modelSupportsChat(m)),
+  );
+
+  /** All models currently in the runtime pool (alias + exact variant). */
+  const loadedPoolEntries = $derived(
+    (state.pool || []).filter((e: any) => e?.alias),
+  );
+
+  function shortPoolVariantLabel(variantId: string | null | undefined): string {
+    if (!variantId) return "default";
+    const base = String(variantId).split(":")[0] || String(variantId);
+    const parts = base.split("-");
+    // e.g. ...-cuda-gpu or ...-generic-cpu
+    return parts.slice(-2).join("-") || base;
+  }
+
+  function poolEntryTooltip(entry: { alias: string; variantId?: string; isLoaded?: boolean | null }): string {
+    const lines = [
+      `Alias: ${entry.alias}`,
+      `Variant: ${entry.variantId || "(default / unknown)"}`,
+      `Status: ${entry.isLoaded === true ? "Loaded" : entry.isLoaded === false ? "Evicted" : "Active"}`,
+      "Running locally via Foundry Local",
+    ];
+    const model = state.models.find((m: ModelInfo) => m.alias === entry.alias);
+    if (model) {
+      const v = entry.variantId
+        ? ((model as any).variants || []).find((x: any) => x.id === entry.variantId)
+        : null;
+      const device = v?.deviceType || model.info?.runtime?.deviceType || model.info?.info?.runtime?.deviceType;
+      const ep = v?.executionProvider || model.info?.runtime?.executionProvider || model.info?.info?.runtime?.executionProvider;
+      const size = v?.fileSizeMb ?? parseModelSizeMb(model);
+      if (device) lines.push(`Device: ${device}`);
+      if (ep) lines.push(`EP: ${ep}`);
+      if (size) lines.push(`Size: ~${Math.round(Number(size))} MB`);
+    }
+    if (selectedModelAlias === entry.alias) {
+      lines.push("Selected for chat");
+    }
+    return lines.join("\n");
+  }
+  /** Cached or loaded chat models shown in the chat header picker. */
+  const chatPickerModels = $derived(
+    state.models
+      .filter((m: any) => modelSupportsChat(m) && (m.isLoaded || m.isCached))
+      .slice()
+      .sort((a: any, b: any) => {
+        if (!!a.isLoaded !== !!b.isLoaded) return a.isLoaded ? -1 : 1;
+        return String(a.alias).localeCompare(String(b.alias));
+      }),
+  );
+
   // If an STT model was loaded via the main UI / top bar / Models list,
   // the Audio page should inherit it automatically as the current STT model.
   const loadedAudioModel = $derived(
@@ -608,6 +757,23 @@
     }
   });
 
+  // When chat has no selected model, assume the chat-lane / first loaded chat model.
+  // User can still change it via the chat header picker.
+  $effect(() => {
+    if (selectedModelAlias) return;
+    const lane = state.chatLaneModel;
+    if (lane && state.models.some((m: any) => m.alias === lane && modelSupportsChat(m))) {
+      selectedModelAlias = lane;
+      selectedModel = { alias: lane };
+      return;
+    }
+    const first = loadedChatModels[0];
+    if (first?.alias) {
+      selectedModelAlias = first.alias;
+      selectedModel = { alias: first.alias };
+    }
+  });
+
   let sidecarLogs = $state<LogEntry[]>([]);
   let logListEl = $state<HTMLDivElement | null>(null);
 
@@ -641,6 +807,7 @@
     chatInput = "";
     lastAutoSummaryCount = 0;
     clearImages(); // clear any pending vision attachments for new chat
+    clearUrlFetches();
     conversations = [
       ...conversations,
       { id, title: "New chat", createdAt: Date.now(), messageCount: 0 },
@@ -825,6 +992,8 @@
     state.eps = s.eps ?? [];
     state.acceleratorsReady = s.acceleratorsReady ?? false;
     state.serviceRunning = s.serviceRunning ?? false;
+    state.chatLaneModel = s.chatLaneModel;
+    state.audioLaneModel = s.audioLaneModel;
     state.pool = s.pool ?? [];
     state.poolStats = s.poolStats ?? null;
     sidecarLogs = s.logs ?? [];
@@ -982,78 +1151,827 @@
     await pollPoolStatus().catch(() => {});
   }
 
-  async function runComparison() {
-    if (compareSelected.length < 2 || !comparePrompt.trim() || isComparing) return;
-    isComparing = true;
-    compareResults = {};
-    const prompt = comparePrompt.trim();
-    const modelsToRun = [...compareSelected];
-
-    await Promise.allSettled(modelsToRun.map(async (alias) => {
-      const start = Date.now();
-      try {
-        // Ensure service/model if needed (pool supports concurrent)
-        const res = await chatCompletion(alias, [{ role: 'user', content: prompt }], {
-          maxTokens: 512,
-          temperature: 0.7,
-          preferredEp: selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
-        });
-        const latency = Date.now() - start;
-        const content = res?.choices?.[0]?.message?.content || "";
-        // Rough token counts if provided by response
-        const usage = res?.usage || {};
-        compareResults[alias] = {
-          content,
-          latencyMs: latency,
-          tokensIn: usage.prompt_tokens,
-          tokensOut: usage.completion_tokens,
-          rating: compareResults[alias]?.rating ?? null,
-        };
-      } catch (e: any) {
-        compareResults[alias] = {
-          content: `[Error] ${e?.message || e}`,
-          latencyMs: Date.now() - start,
-          rating: null,
-        };
-      }
-    }));
-
-    compareResults = { ...compareResults };
-    isComparing = false;
+  function compareSlotKey(alias: string, variantId: string | null): string {
+    return variantId ? `${alias}::${variantId}` : `${alias}::default`;
   }
 
-  function setCompareRating(alias: string, rating: 'up'|'down') {
-    if (!compareResults[alias]) return;
-    compareResults[alias].rating = compareResults[alias].rating === rating ? null : rating;
+  function makeCompareSlot(
+    model: any,
+    variant?: { id: string; deviceType?: string | null; executionProvider?: string | null } | null,
+  ): CompareSlot {
+    const alias = model.alias;
+    const variantId = variant?.id ?? null;
+    // Prefer explicit variant metadata; else catalog selected-variant runtime.
+    const rt = model?.info?.runtime || model?.info?.info?.runtime || {};
+    const deviceType = variant?.deviceType ?? rt.deviceType ?? null;
+    const executionProvider = variant?.executionProvider ?? rt.executionProvider ?? null;
+    let label = alias;
+    if (variant || deviceType || executionProvider) {
+      const badge = accelBadgeInfo(deviceType ?? null, executionProvider ?? null);
+      label = variant ? `${alias} · ${badge.label}` : `${alias} · ${badge.label}`;
+    }
+    return {
+      key: compareSlotKey(alias, variantId),
+      alias,
+      variantId,
+      label,
+      deviceType,
+      executionProvider,
+    };
+  }
+
+  function isSlotInPool(slot: CompareSlot): boolean {
+    return state.pool.some(
+      (e: any) =>
+        e.alias === slot.alias &&
+        (slot.variantId ? e.variantId === slot.variantId : true),
+    );
+  }
+
+  function isVariantCached(model: any, variantId: string | null): boolean {
+    if (!model) return false;
+    if (!variantId) return !!model.isCached;
+    const v = (model.variants || []).find((x: any) => x.id === variantId);
+    return !!(v?.cached ?? model.isCached);
+  }
+
+  /** Infer where a compare slot will load: CPU system RAM vs GPU VRAM vs NPU. */
+  function resolveSlotTarget(slot: CompareSlot): "cpu" | "gpu" | "npu" | "unknown" {
+    const model = state.models.find((m: ModelInfo) => m.alias === slot.alias);
+    let device = String(slot.deviceType || "").toLowerCase();
+    let ep = String(slot.executionProvider || "").toLowerCase();
+    let variantId = String(slot.variantId || "").toLowerCase();
+
+    if (slot.variantId && model) {
+      const v = ((model as any).variants || []).find((x: any) => x.id === slot.variantId);
+      if (v) {
+        if (!device) device = String(v.deviceType || "").toLowerCase();
+        if (!ep) ep = String(v.executionProvider || "").toLowerCase();
+      }
+    }
+    // Default (no explicit variant): use catalog selected-variant runtime if present
+    if (!slot.variantId && model) {
+      const rt = model.info?.runtime || model.info?.info?.runtime || {};
+      if (!device) device = String(rt.deviceType || "").toLowerCase();
+      if (!ep) ep = String(rt.executionProvider || "").toLowerCase();
+      if (!variantId) variantId = String(model.info?.id || model.info?.info?.id || "").toLowerCase();
+    }
+
+    const blob = `${device} ${ep} ${variantId}`;
+    if (blob.includes("npu") || blob.includes("qnn") || blob.includes("hexagon")) return "npu";
+    if (
+      blob.includes("gpu") ||
+      blob.includes("cuda") ||
+      blob.includes("tensorrt") ||
+      blob.includes("trtrtx") ||
+      blob.includes("directml") ||
+      blob.includes("dml") ||
+      blob.includes("webgpu") ||
+      blob.includes("openvino") ||
+      blob.includes("rocm") ||
+      blob.includes("metal") ||
+      blob.includes("coreml")
+    ) {
+      return "gpu";
+    }
+    if (blob.includes("cpu") || blob.includes("generic")) return "cpu";
+    return "unknown";
+  }
+
+  function slotTargetLabel(target: "cpu" | "gpu" | "npu" | "unknown"): string {
+    if (target === "gpu") return "GPU VRAM";
+    if (target === "npu") return "NPU";
+    if (target === "cpu") return "System RAM";
+    return "Unknown device";
+  }
+
+  /** Weight size in MB for a slot (variant file size preferred). */
+  function estimateSlotWeightMb(slot: CompareSlot): number {
+    const model = state.models.find((m: ModelInfo) => m.alias === slot.alias);
+    if (!model) return 512;
+    if (slot.variantId) {
+      const v = ((model as any).variants || []).find((x: any) => x.id === slot.variantId);
+      if (v?.fileSizeMb != null && Number(v.fileSizeMb) > 0) return Number(v.fileSizeMb);
+    }
+    return parseModelSizeMb(model) || 512;
+  }
+
+  /**
+   * Estimated memory on the *target* device for a slot.
+   * GPU: weights × 1.15 (VRAM) + small host RAM overhead tracked separately.
+   * CPU: weights × 1.5 (host RAM including KV).
+   * NPU: weights often still stage via host; count primarily as host + note NPU unknown.
+   */
+  function estimateSlotDeviceMb(slot: CompareSlot): { target: "cpu" | "gpu" | "npu" | "unknown"; deviceMb: number; hostRamMb: number } {
+    const target = resolveSlotTarget(slot);
+    const weight = estimateSlotWeightMb(slot);
+    if (target === "gpu") {
+      return {
+        target,
+        deviceMb: Math.round(weight * 1.15),
+        // Host still holds some activations/runtime
+        hostRamMb: Math.round(Math.min(2048, Math.max(256, weight * 0.15))),
+      };
+    }
+    if (target === "npu") {
+      return {
+        target,
+        deviceMb: Math.round(weight * 1.1), // often opaque; treat like dedicated if unknown
+        hostRamMb: Math.round(Math.min(3072, Math.max(512, weight * 0.35))),
+      };
+    }
+    // CPU / unknown → host RAM
+    return {
+      target: target === "unknown" ? "unknown" : "cpu",
+      deviceMb: Math.round(weight * 1.5),
+      hostRamMb: Math.round(weight * 1.5),
+    };
+  }
+
+  /** @deprecated use estimateSlotDeviceMb — kept for chip shorthand */
+  function estimateSlotRuntimeMb(slot: CompareSlot): number {
+    const e = estimateSlotDeviceMb(slot);
+    return e.target === "gpu" || e.target === "npu" ? e.deviceMb : e.hostRamMb;
+  }
+
+  function formatMbShort(mb: number): string {
+    if (!Number.isFinite(mb) || mb < 0) return "?";
+    if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
+    return `${Math.round(mb)} MB`;
+  }
+
+  function getGpuVramSummary(): {
+    totalMb: number;
+    freeMb: number;
+    usedMb: number;
+    count: number;
+    maxFreeMb: number;
+    names: string[];
+  } {
+    const gpus = (state.poolStats?.accelerators || []).filter((a) => a.kind === "gpu");
+    let totalMb = 0;
+    let freeMb = 0;
+    let usedMb = 0;
+    let maxFreeMb = 0;
+    const names: string[] = [];
+    for (const g of gpus) {
+      names.push(g.name);
+      if (g.totalMb != null) totalMb += g.totalMb;
+      if (g.freeMb != null) {
+        freeMb += g.freeMb;
+        maxFreeMb = Math.max(maxFreeMb, g.freeMb);
+      } else if (g.totalMb != null && g.usedMb != null) {
+        const f = Math.max(0, g.totalMb - g.usedMb);
+        freeMb += f;
+        maxFreeMb = Math.max(maxFreeMb, f);
+      }
+      if (g.usedMb != null) usedMb += g.usedMb;
+    }
+    return { totalMb, freeMb, usedMb, count: gpus.length, maxFreeMb, names };
+  }
+
+  type CompareMemPlan = {
+    freeRamMb: number;
+    totalRamMb: number;
+    headroomRamMb: number;
+    freeVramMb: number;
+    maxFreeVramMb: number;
+    totalVramMb: number;
+    vramAvailable: boolean;
+    perSlot: Array<{
+      key: string;
+      label: string;
+      target: "cpu" | "gpu" | "npu" | "unknown";
+      deviceMb: number;
+      hostRamMb: number;
+      alreadyLoaded: boolean;
+    }>;
+    needAllRamMb: number;
+    needOneRamMb: number;
+    needAllVramMb: number;
+    needOneVramMb: number;
+    fitsAll: boolean;
+    fitsOneAtATime: boolean;
+    ramOkAll: boolean;
+    ramOkOne: boolean;
+    vramOkAll: boolean;
+    vramOkOne: boolean;
+    vramUnknown: boolean;
+  };
+
+  function buildCompareMemoryPlan(slots: CompareSlot[]): CompareMemPlan {
+    const freeRamMb = Number(state.poolStats?.freeMemMb ?? 0);
+    const totalRamMb = Number(state.poolStats?.totalMemMb ?? 0);
+    const headroomRamMb = Math.min(
+      Math.max(1536, Math.round(totalRamMb * 0.12) || 1536),
+      Math.max(2048, Math.round(totalRamMb * 0.25) || 2048),
+    );
+    const vram = getGpuVramSummary();
+    // Prefer max free on a single GPU (models typically bind one device).
+    // Fall back to summed free if max is 0 but sum > 0.
+    const freeVramMb = vram.maxFreeMb > 0 ? vram.maxFreeMb : vram.freeMb;
+    const headroomVramMb = Math.min(512, Math.round((vram.totalMb || freeVramMb) * 0.08) || 256);
+
+    const perSlot = slots.map((slot) => {
+      const est = estimateSlotDeviceMb(slot);
+      return {
+        key: slot.key,
+        label: slot.label,
+        target: est.target,
+        deviceMb: est.deviceMb,
+        hostRamMb: est.hostRamMb,
+        alreadyLoaded: isSlotInPool(slot),
+      };
+    });
+
+    const pending = perSlot.filter((s) => !s.alreadyLoaded);
+    const needAllRamMb = pending.reduce((sum, s) => sum + s.hostRamMb, 0);
+    const needOneRamMb = pending.reduce((max, s) => Math.max(max, s.hostRamMb), 0);
+    const gpuPending = pending.filter((s) => s.target === "gpu");
+    const needAllVramMb = gpuPending.reduce((sum, s) => sum + s.deviceMb, 0);
+    const needOneVramMb = gpuPending.reduce((max, s) => Math.max(max, s.deviceMb), 0);
+
+    const ramBudget = Math.max(0, freeRamMb - headroomRamMb);
+    const vramBudget = Math.max(0, freeVramMb - headroomVramMb);
+    const hasGpuSlots = perSlot.some((s) => s.target === "gpu");
+    const vramAvailable = vram.count > 0 && freeVramMb > 0;
+    // If we have GPU slots but no VRAM telemetry, don't hard-fail — warn via vramUnknown.
+    const vramUnknown = hasGpuSlots && !vramAvailable;
+
+    const ramOkAll = needAllRamMb <= ramBudget;
+    const ramOkOne = needOneRamMb <= ramBudget;
+    const vramOkAll = !hasGpuSlots || vramUnknown || needAllVramMb <= vramBudget;
+    const vramOkOne = !hasGpuSlots || vramUnknown || needOneVramMb <= vramBudget;
+
+    return {
+      freeRamMb,
+      totalRamMb,
+      headroomRamMb,
+      freeVramMb,
+      maxFreeVramMb: vram.maxFreeMb,
+      totalVramMb: vram.totalMb,
+      vramAvailable,
+      perSlot,
+      needAllRamMb,
+      needOneRamMb,
+      needAllVramMb,
+      needOneVramMb,
+      fitsAll: ramOkAll && vramOkAll,
+      fitsOneAtATime: ramOkOne && vramOkOne,
+      ramOkAll,
+      ramOkOne,
+      vramOkAll,
+      vramOkOne,
+      vramUnknown,
+    };
+  }
+
+  const compareMemoryPlan = $derived(buildCompareMemoryPlan(compareSlots));
+
+  function addCompareSlot(slot: CompareSlot) {
+    if (compareSlots.some((s) => s.key === slot.key)) {
+      statusMessage = `Already in comparison: ${slot.label}`;
+      return;
+    }
+    if (compareSlots.length >= COMPARE_MAX_SLOTS) {
+      statusMessage = `Comparison supports at most ${COMPARE_MAX_SLOTS} models`;
+      return;
+    }
+    compareSlots = [...compareSlots, slot];
+    compareResults = {};
+  }
+
+  function removeCompareSlot(key: string) {
+    compareSlots = compareSlots.filter((s) => s.key !== key);
+    const next = { ...compareResults };
+    delete next[key];
+    compareResults = next;
+  }
+
+  function loadCompareHistory() {
+    try {
+      const raw = localStorage.getItem(COMPARE_HISTORY_KEY);
+      if (!raw) {
+        compareHistory = [];
+        return;
+      }
+      const parsed = JSON.parse(raw);
+      compareHistory = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      compareHistory = [];
+    }
+  }
+
+  function persistCompareHistory() {
+    try {
+      localStorage.setItem(COMPARE_HISTORY_KEY, JSON.stringify(compareHistory.slice(0, COMPARE_HISTORY_MAX)));
+    } catch {}
+  }
+
+  function saveCurrentComparison() {
+    if (!comparePrompt.trim() || Object.keys(compareResults).length === 0 || compareSlots.length < 2) {
+      statusMessage = "Run a comparison first, then save.";
+      return;
+    }
+    const entry: SavedComparison = {
+      id: `cmp-${Date.now()}`,
+      createdAt: Date.now(),
+      prompt: comparePrompt.trim(),
+      slots: compareSlots.map((s) => ({ ...s })),
+      results: { ...compareResults },
+    };
+    compareHistory = [entry, ...compareHistory].slice(0, COMPARE_HISTORY_MAX);
+    persistCompareHistory();
+    statusMessage = "Comparison saved for review";
+  }
+
+  function openSavedComparison(entry: SavedComparison) {
+    compareReviewId = entry.id;
+    compareSlots = entry.slots.map((s) => ({ ...s }));
+    comparePrompt = entry.prompt;
+    compareResults = { ...entry.results };
+    compareHistoryOpen = false;
+    statusMessage = `Reviewing comparison from ${new Date(entry.createdAt).toLocaleString()}`;
+  }
+
+  function deleteSavedComparison(id: string) {
+    compareHistory = compareHistory.filter((h) => h.id !== id);
+    if (compareReviewId === id) compareReviewId = null;
+    persistCompareHistory();
+  }
+
+  /** Download slot weights if missing. Does not load into memory. */
+  async function ensureCompareSlotDownloaded(slot: CompareSlot): Promise<void> {
+    const model = state.models.find((m: ModelInfo) => m.alias === slot.alias);
+    if (!model) throw new Error("Not found in catalog");
+    if (!modelSupportsChat(model)) throw new Error("Not a chat model");
+    if (isVariantCached(model, slot.variantId)) return;
+    comparePrepStatus = `Downloading ${slot.label}…`;
+    statusMessage = comparePrepStatus;
+    await downloadModel(
+      model,
+      (p: number) => {
+        comparePrepStatus = `Downloading ${slot.label}: ${p.toFixed(0)}%`;
+        statusMessage = comparePrepStatus;
+      },
+      slot.variantId ?? undefined,
+    );
+    await refreshModels();
+  }
+
+  async function ensureServiceForCompare(alias: string) {
+    if (state.serviceRunning) return;
+    comparePrepStatus = "Starting local service…";
+    try {
+      await startSvc(
+        alias,
+        selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+      );
+    } catch {}
+  }
+
+  async function loadCompareSlot(slot: CompareSlot): Promise<void> {
+    const model = state.models.find((m: ModelInfo) => m.alias === slot.alias);
+    if (!model) throw new Error("Not found in catalog");
+    if (isSlotInPool(slot)) {
+      // Already correct variant in pool
+      return;
+    }
+    comparePrepStatus = `Loading ${slot.label}…`;
+    statusMessage = comparePrepStatus;
+    await sdkLoadModel(model, "chat", slot.variantId ?? undefined);
+    await refreshModels();
+  }
+
+  async function unloadCompareSlot(slot: CompareSlot): Promise<void> {
+    if (!state.pool.some((e: any) => e.alias === slot.alias)) return;
+    try {
+      comparePrepStatus = `Unloading ${slot.label}…`;
+      await sdkUnloadModel({ alias: slot.alias });
+      await refreshModels();
+    } catch (e: any) {
+      console.warn("Compare unload failed", e);
+    }
+  }
+
+  /**
+   * Unload only when safe:
+   * - models we loaded for this comparison run, or
+   * - pre-existing pool models the user explicitly allowed unloading.
+   * Never touches pool aliases that are not in the compare set.
+   */
+  async function safeUnloadCompareSlot(
+    slot: CompareSlot,
+    ctx: { preloadedAliases: Set<string>; loadedByCompare: Set<string>; allowUnloadPreloaded: boolean },
+  ): Promise<boolean> {
+    if (!state.pool.some((e: any) => e.alias === slot.alias)) return false;
+    const wasPreloaded = ctx.preloadedAliases.has(slot.alias);
+    const weLoaded = ctx.loadedByCompare.has(slot.alias);
+    if (wasPreloaded && !ctx.allowUnloadPreloaded && !weLoaded) {
+      return false;
+    }
+    await unloadCompareSlot(slot);
+    ctx.loadedByCompare.delete(slot.alias);
+    return true;
+  }
+
+  /**
+   * Pre-flight memory check for the full set. Refreshes pool stats first.
+   * Returns null if OK to proceed, or an error string to abort.
+   * May flip compareOneAtATime to true when "load all" does not fit.
+   */
+  async function verifyCompareMemory(slots: CompareSlot[]): Promise<string | null> {
+    try {
+      await pollPoolStatus();
+    } catch {}
+    const plan = buildCompareMemoryPlan(slots);
+
+    if (!plan.fitsOneAtATime) {
+      const parts: string[] = [];
+      if (!plan.ramOkOne) {
+        parts.push(
+          `System RAM: free ${formatMbShort(plan.freeRamMb)} (need ~${formatMbShort(plan.needOneRamMb)} + ${formatMbShort(plan.headroomRamMb)} headroom)`,
+        );
+      }
+      if (!plan.vramOkOne) {
+        parts.push(
+          `GPU VRAM: free ~${formatMbShort(plan.freeVramMb)} on best GPU (need ~${formatMbShort(plan.needOneVramMb)} for largest GPU model)`,
+        );
+      }
+      return (
+        `Not enough free memory for comparison. ${parts.join(" · ")}. ` +
+        `Free memory or remove a larger model/variant.`
+      );
+    }
+
+    if (!compareOneAtATime && !plan.fitsAll) {
+      compareOneAtATime = true;
+      const why: string[] = [];
+      if (!plan.ramOkAll) {
+        why.push(`RAM need ~${formatMbShort(plan.needAllRamMb)} vs free ${formatMbShort(plan.freeRamMb)}`);
+      }
+      if (!plan.vramOkAll) {
+        why.push(`VRAM need ~${formatMbShort(plan.needAllVramMb)} vs free ${formatMbShort(plan.freeVramMb)}`);
+      }
+      statusMessage =
+        `Not enough memory to keep all models loaded (${why.join("; ")}). ` +
+        `Switching to one-at-a-time.`;
+    } else if (plan.vramUnknown && plan.perSlot.some((s) => s.target === "gpu")) {
+      statusMessage =
+        "GPU models selected but VRAM telemetry unavailable — cannot verify VRAM headroom. Proceeding with system RAM checks only.";
+    }
+
+    return null;
+  }
+
+  /**
+   * Fresh RAM/VRAM check for a single slot immediately before load.
+   * Skips if the exact variant is already in the pool (no extra footprint).
+   */
+  async function verifySlotMemoryBeforeLoad(slot: CompareSlot): Promise<string | null> {
+    if (isSlotInPool(slot)) return null;
+
+    try {
+      await pollPoolStatus();
+    } catch {}
+
+    const est = estimateSlotDeviceMb(slot);
+    const freeRamMb = Number(state.poolStats?.freeMemMb ?? 0);
+    const totalRamMb = Number(state.poolStats?.totalMemMb ?? 0);
+    const headroomRamMb = Math.min(
+      Math.max(1536, Math.round(totalRamMb * 0.12) || 1536),
+      Math.max(2048, Math.round(totalRamMb * 0.25) || 2048),
+    );
+    const ramBudget = Math.max(0, freeRamMb - headroomRamMb);
+    const vram = getGpuVramSummary();
+    const freeVramMb = vram.maxFreeMb > 0 ? vram.maxFreeMb : vram.freeMb;
+    const headroomVramMb = Math.min(512, Math.round((vram.totalMb || freeVramMb) * 0.08) || 256);
+    const vramBudget = Math.max(0, freeVramMb - headroomVramMb);
+    const vramKnown = vram.count > 0 && freeVramMb > 0;
+
+    const parts: string[] = [];
+
+    // Host RAM always needed (full for CPU; overhead for GPU/NPU)
+    if (est.hostRamMb > ramBudget) {
+      parts.push(
+        `System RAM: need ~${formatMbShort(est.hostRamMb)}, free ${formatMbShort(freeRamMb)} ` +
+          `(~${formatMbShort(headroomRamMb)} headroom)`,
+      );
+    }
+
+    if (est.target === "gpu") {
+      if (vramKnown && est.deviceMb > vramBudget) {
+        parts.push(
+          `GPU VRAM: need ~${formatMbShort(est.deviceMb)}, free ~${formatMbShort(freeVramMb)} on best GPU`,
+        );
+      }
+      // If VRAM unknown, only RAM check applies (already done)
+    }
+
+    if (est.target === "npu" && est.deviceMb > ramBudget && parts.length === 0) {
+      // NPU dedicated pool rarely reported; host check is primary
+    }
+
+    if (parts.length === 0) return null;
+
+    return (
+      `Insufficient memory to load ${slot.label} (${slotTargetLabel(est.target)}). ` +
+      parts.join(" · ") +
+      `. Skipped this model.`
+    );
+  }
+
+  /**
+   * If one-at-a-time (or a variant switch) would unload models already in the pool,
+   * ask the user first. Returns false if the user cancels the whole comparison.
+   */
+  function confirmUnloadPreloadedIfNeeded(
+    slots: CompareSlot[],
+    oneAtATime: boolean,
+  ): { proceed: boolean; allowUnloadPreloaded: boolean } {
+    const preloadedAliases = new Set(
+      (state.pool || []).map((e: any) => e.alias).filter(Boolean) as string[],
+    );
+    if (preloadedAliases.size === 0) {
+      return { proceed: true, allowUnloadPreloaded: false };
+    }
+
+    const preloadedCompare = [
+      ...new Set(slots.filter((s) => preloadedAliases.has(s.alias)).map((s) => s.alias)),
+    ];
+    const variantSwaps = slots
+      .map((s) => {
+        const entry = (state.pool || []).find((e: any) => e.alias === s.alias);
+        if (!entry?.variantId || !s.variantId || entry.variantId === s.variantId) return null;
+        return `${s.alias}: ${shortPoolVariantLabel(entry.variantId)} → ${shortPoolVariantLabel(s.variantId)}`;
+      })
+      .filter(Boolean) as string[];
+
+    // Keep-all mode only forces unload when replacing a variant of the same alias.
+    const needsUnloadConsent =
+      (oneAtATime && preloadedCompare.length > 0) || variantSwaps.length > 0;
+
+    if (!needsUnloadConsent) {
+      return { proceed: true, allowUnloadPreloaded: false };
+    }
+
+    const lines: string[] = [
+      "Comparison may unload models that are already in memory.",
+      "",
+    ];
+    if (oneAtATime && preloadedCompare.length > 0) {
+      lines.push("Already loaded (in this comparison set):");
+      for (const a of preloadedCompare) lines.push(`  • ${a}`);
+      lines.push("");
+      lines.push(
+        "One-at-a-time mode loads → tests → unloads each model so the next one can fit.",
+      );
+      lines.push("");
+    }
+    if (variantSwaps.length > 0) {
+      lines.push("Different variant than currently loaded (will replace in place):");
+      for (const v of variantSwaps) lines.push(`  • ${v}`);
+      lines.push("");
+    }
+    lines.push("Models not in this comparison will not be touched.");
+    lines.push("");
+    lines.push("OK = allow unloading those models during the run");
+    lines.push("Cancel = abort comparison (nothing unloaded)");
+
+    const ok = globalThis.confirm(lines.join("\n"));
+    if (!ok) {
+      statusMessage = "Comparison cancelled — existing loaded models left as-is.";
+      return { proceed: false, allowUnloadPreloaded: false };
+    }
+    return { proceed: true, allowUnloadPreloaded: true };
+  }
+
+  async function runComparison(e?: Event) {
+    e?.preventDefault?.();
+    if (compareSlots.length < 2 || !comparePrompt.trim() || isComparing || comparePreparing) return;
+
+    compareReviewId = null;
+    const prompt = comparePrompt.trim();
+    comparePickerOpen = false;
+    isComparing = true;
+    comparePreparing = true;
+    compareResults = {};
+
+    try {
+      const memErr = await verifyCompareMemory(compareSlots);
+      if (memErr) {
+        statusMessage = memErr;
+        for (const slot of compareSlots) {
+          compareResults[slot.key] = {
+            content: `[Memory check] ${memErr}`,
+            error: memErr,
+            rating: null,
+          };
+        }
+        compareResults = { ...compareResults };
+        return;
+      }
+
+      // Re-read mode after verify (may auto-switch to one-at-a-time)
+      const oneAtATime = compareOneAtATime;
+      const consent = confirmUnloadPreloadedIfNeeded(compareSlots, oneAtATime);
+      if (!consent.proceed) {
+        return;
+      }
+
+      const preloadedAliases = new Set(
+        (state.pool || []).map((e: any) => e.alias).filter(Boolean) as string[],
+      );
+      const unloadCtx = {
+        preloadedAliases,
+        loadedByCompare: new Set<string>(),
+        allowUnloadPreloaded: consent.allowUnloadPreloaded,
+      };
+
+      let failCount = 0;
+
+      for (const slot of compareSlots) {
+        // latencyMs = chatCompletion only (after download/load/service prep)
+        let inferenceStarted: number | null = null;
+        try {
+          await ensureCompareSlotDownloaded(slot);
+
+          // One-at-a-time: free other compare slots before loading this one (with consent rules).
+          if (oneAtATime) {
+            for (const other of compareSlots) {
+              if (other.key === slot.key) continue;
+              await safeUnloadCompareSlot(other, unloadCtx);
+            }
+          }
+
+          // Re-check free RAM/VRAM right before this load (stats change after prior loads/unloads).
+          comparePrepStatus = `Checking memory for ${slot.label}…`;
+          const slotMemErr = await verifySlotMemoryBeforeLoad(slot);
+          if (slotMemErr) {
+            failCount++;
+            compareResults[slot.key] = {
+              content: `[Memory check] ${slotMemErr}`,
+              latencyMs: undefined,
+              error: slotMemErr,
+              rating: null,
+            };
+            compareResults = { ...compareResults };
+            statusMessage = slotMemErr;
+            continue;
+          }
+
+          const alreadyInPool = isSlotInPool(slot);
+          const hadAlias = state.pool.some((e: any) => e.alias === slot.alias);
+          await loadCompareSlot(slot);
+          if (!alreadyInPool) {
+            // We caused a load (new alias or variant replace)
+            unloadCtx.loadedByCompare.add(slot.alias);
+            // Variant replace of a preloaded alias still counts as "we changed pool"
+            if (hadAlias && unloadCtx.preloadedAliases.has(slot.alias)) {
+              unloadCtx.loadedByCompare.add(slot.alias);
+            }
+          }
+
+          await ensureServiceForCompare(slot.alias);
+
+          // Re-select variant in case pool had another variant for same alias
+          if (!isSlotInPool(slot)) {
+            await sdkLoadModel({ alias: slot.alias }, "chat", slot.variantId ?? undefined);
+            unloadCtx.loadedByCompare.add(slot.alias);
+          }
+
+          const completionOpts = {
+            temperature: 0.7,
+            preferredEp:
+              selectedAccelerationPreference === "auto"
+                ? undefined
+                : selectedAccelerationPreference,
+          };
+
+          // Discarded warm-up so timed run is not cold-start / first-token init.
+          comparePrepStatus = `Warming up ${slot.label}…`;
+          statusMessage = comparePrepStatus;
+          try {
+            await chatCompletion(
+              slot.alias,
+              [{ role: "user", content: "Reply with exactly: ok" }],
+              { ...completionOpts, maxTokens: 8 },
+            );
+          } catch (warmErr: any) {
+            // Warm-up failure is non-fatal; still attempt the timed prompt.
+            console.warn(`Compare warm-up failed for ${slot.alias}:`, warmErr?.message || warmErr);
+          }
+
+          comparePrepStatus = `Running ${slot.label}…`;
+          statusMessage = comparePrepStatus;
+          // Latency = measured prompt only (after load + discarded warm-up).
+          inferenceStarted = Date.now();
+          const res = await chatCompletion(
+            slot.alias,
+            [{ role: "user", content: prompt }],
+            { ...completionOpts, maxTokens: 512 },
+          );
+          const latency = Date.now() - inferenceStarted;
+          const content = res?.choices?.[0]?.message?.content || "";
+          const usage = res?.usage || {};
+          compareResults[slot.key] = {
+            content,
+            latencyMs: latency,
+            tokensIn: usage.prompt_tokens ?? usage.input_tokens,
+            tokensOut: usage.completion_tokens ?? usage.output_tokens,
+            rating: null,
+          };
+
+          if (oneAtATime) {
+            await safeUnloadCompareSlot(slot, unloadCtx);
+          }
+        } catch (err: any) {
+          failCount++;
+          compareResults[slot.key] = {
+            content: `[Error] ${err?.message || err}`,
+            // Only report inference latency if we reached chatCompletion
+            latencyMs: inferenceStarted != null ? Date.now() - inferenceStarted : undefined,
+            error: err?.message || String(err),
+            rating: null,
+          };
+          // Only unload what we are allowed to (never silent-evict preloaded without consent)
+          if (oneAtATime) {
+            try {
+              await safeUnloadCompareSlot(slot, unloadCtx);
+            } catch {}
+          }
+        }
+        compareResults = { ...compareResults };
+      }
+
+      comparePrepStatus = "";
+      statusMessage =
+        failCount > 0
+          ? `Comparison finished with ${failCount} failure(s)` +
+            (oneAtATime ? " (one-at-a-time)" : "")
+          : `Comparison complete` + (oneAtATime ? " (one-at-a-time)" : "");
+    } finally {
+      comparePreparing = false;
+      comparePrepStatus = "";
+      isComparing = false;
+    }
+  }
+
+  function setCompareRating(key: string, rating: "up" | "down") {
+    if (!compareResults[key]) return;
+    compareResults[key].rating = compareResults[key].rating === rating ? null : rating;
     compareResults = { ...compareResults };
+    // Update open saved review if applicable
+    if (compareReviewId) {
+      compareHistory = compareHistory.map((h) =>
+        h.id === compareReviewId ? { ...h, results: { ...compareResults } } : h,
+      );
+      persistCompareHistory();
+    }
   }
 
   function exportComparison() {
-    let md = `# Model Comparison\n\n**Prompt:** ${comparePrompt}\n\n`;
-    Object.entries(compareResults).forEach(([alias, r]) => {
-      md += `## ${alias}\n`;
-      md += `- Latency: ${r.latencyMs} ms\n`;
-      md += `- Tokens: in ${r.tokensIn ?? '?'} / out ${r.tokensOut ?? '?'}\n`;
-      md += `- Rating: ${r.rating || 'none'}\n\n`;
+    if (!comparePrompt.trim() || Object.keys(compareResults).length === 0) return;
+    let md = `# Model Comparison\n\n**Date:** ${new Date().toISOString()}\n\n**Prompt:** ${comparePrompt}\n\n`;
+    for (const slot of compareSlots) {
+      const r = compareResults[slot.key];
+      if (!r) continue;
+      md += `## ${slot.label}\n`;
+      md += `- Alias: \`${slot.alias}\`\n`;
+      if (slot.variantId) md += `- Variant: \`${slot.variantId}\`\n`;
+      md += `- Latency: ${r.latencyMs ?? "?"} ms\n`;
+      md += `- Tokens: in ${r.tokensIn ?? "?"} / out ${r.tokensOut ?? "?"}\n`;
+      md += `- Rating: ${r.rating || "none"}\n\n`;
       md += `${r.content}\n\n---\n\n`;
-    });
-    const blob = new Blob([md], { type: 'text/markdown' });
+    }
+    const blob = new Blob([md], { type: "text/markdown" });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
+    const a = document.createElement("a");
     a.href = url;
     a.download = `comparison-${Date.now()}.md`;
     a.click();
     URL.revokeObjectURL(url);
   }
 
-  async function loadModelForCompare(alias: string) {
-    try {
-      await sdkLoadModel(alias, selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference);
-      statusMessage = `Loaded ${alias} for comparison`;
-    } catch (e: any) {
-      statusMessage = `Failed to load ${alias}: ${e?.message || e}`;
-    }
-  }
+  const comparePickerModels = $derived(
+    state.models
+      .filter((m: ModelInfo) => modelSupportsChat(m))
+      .filter((m: ModelInfo) => {
+        const q = comparePickerSearch.trim().toLowerCase();
+        if (!q) return true;
+        const alias = String(m.alias || "").toLowerCase();
+        const family = String((m as any).family || m.info?.family || "").toLowerCase();
+        return alias.includes(q) || family.includes(q);
+      })
+      .slice()
+      .sort((a: any, b: any) => {
+        // Loaded first, then cached, then name
+        const score = (m: any) => (m.isLoaded ? 2 : 0) + (m.isCached ? 1 : 0);
+        const d = score(b) - score(a);
+        if (d !== 0) return d;
+        return String(a.alias).localeCompare(String(b.alias));
+      }),
+  );
 
   $effect(() => {
     if (currentView !== 'settings' || isDev) return;
@@ -1506,6 +2424,7 @@
     unsubscribe = sdkStateStore.subscribe(syncFromStore);
     // Load conversation history
     loadConversations();
+    loadCompareHistory();
     init();
     document.addEventListener('keydown', handleGlobalKeydown);
 
@@ -1568,6 +2487,13 @@
 
       await refreshModels();
 
+      // Chat: plain "Load" should become the current chat model when none is set.
+      if (modelSupportsChat(model) && !selectedModelAlias) {
+        selectedModelAlias = model.alias;
+        selectedModel = { alias: model.alias };
+        chatClient = null;
+      }
+
       // If this was an STT model loaded from the main UI (e.g. Models tab "Load" button),
       // make the Audio page inherit it automatically.
       if (modelSupportsAudio(model)) {
@@ -1575,6 +2501,36 @@
       }
     } catch (e: any) {
       statusMessage = `Load failed: ${e?.message || e}`;
+    }
+  }
+
+  /** Switch the active chat model (does not clear conversation history). */
+  async function setChatModel(alias: string) {
+    const next = String(alias || "").trim();
+    if (!next) return;
+    const model = state.models.find((m: any) => m.alias === next);
+    if (!model || !modelSupportsChat(model)) {
+      statusMessage = `${next} is not a chat model.`;
+      return;
+    }
+    try {
+      selectedModelAlias = next;
+      selectedModel = { alias: next };
+      chatClient = null;
+      if (!model.isLoaded) {
+        await loadModelAndMaybeStart(model);
+      } else if (!state.serviceRunning) {
+        try {
+          await startSvc(
+            next,
+            selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+          );
+        } catch {}
+      }
+      statusMessage = `Chatting with ${next}`;
+      persistChat();
+    } catch (e: any) {
+      statusMessage = `Failed to select ${next}: ${e?.message || e}`;
     }
   }
 
@@ -1593,20 +2549,69 @@
     }
   }
 
+  function shortVariantLabel(variantId: string): string {
+    const base = String(variantId || "").split(":")[0] || variantId;
+    const parts = base.split("-");
+    return parts.slice(-3).join("-") || base;
+  }
+
   async function loadVariant(model: any, variantId: string) {
     try {
-      statusMessage = `Loading ${model.alias} (${variantId.split(':')[0].split('-').slice(-2).join('-')})...`;
+      statusMessage = `Loading ${model.alias} (${shortVariantLabel(variantId)})...`;
       appendAppLog(`Loading model ${model.alias} variant ${variantId}`);
-      await sdkLoadModel(model, undefined, variantId);
-      statusMessage = `${model.alias} loaded`;
+      await sdkLoadModel(model, "chat", variantId);
+      statusMessage = `${model.alias} loaded (${shortVariantLabel(variantId)})`;
       if (!state.serviceRunning) {
         try {
-          await startSvc(model.alias, undefined);
+          await startSvc(
+            model.alias,
+            selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+          );
         } catch {}
       }
       await refreshModels();
     } catch (e: any) {
       statusMessage = `Load failed: ${e?.message || e}`;
+    }
+  }
+
+  /** Load a specific variant (if needed) and open chat with that model. */
+  async function loadAndChatVariant(model: any, variantId: string) {
+    if (!modelSupportsChat(model)) {
+      statusMessage = `${model.alias} is not a chat model.`;
+      return;
+    }
+    try {
+      const alreadyThis =
+        state.pool.some((e: any) => e.alias === model.alias && e.variantId === variantId);
+      if (!alreadyThis) {
+        statusMessage = `Loading ${model.alias} (${shortVariantLabel(variantId)})...`;
+        appendAppLog(`Load & Chat: ${model.alias} variant ${variantId}`);
+        await sdkLoadModel(model, "chat", variantId);
+      }
+      selectedModelAlias = model.alias;
+      selectedModel = { alias: model.alias };
+      chatClient = null;
+      chatMessages = [];
+      chatInput = "";
+      lastAutoSummaryCount = 0;
+      if (recommendedMaxTurns && recommendedMaxTurns !== contextTurns) {
+        contextTurns = recommendedMaxTurns;
+      }
+      if (!state.serviceRunning) {
+        try {
+          await startSvc(
+            model.alias,
+            selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+          );
+        } catch {}
+      }
+      await refreshModels();
+      statusMessage = `Chatting with ${model.alias} (${shortVariantLabel(variantId)})`;
+      currentView = "chat";
+      persistChat();
+    } catch (e: any) {
+      statusMessage = `Load & Chat failed: ${e?.message || e}`;
     }
   }
 
@@ -1626,6 +2631,45 @@
       const next = { ...downloadingVariantIds };
       delete next[variantId];
       downloadingVariantIds = next;
+    }
+  }
+
+  async function deleteVariant(model: any, variantId: string) {
+    try {
+      const label = shortVariantLabel(variantId);
+      const confirmed = globalThis.confirm(
+        `Delete variant "${label}" of "${model.alias}" from disk?\n\n${variantId}\n\nThis cannot be undone.`,
+      );
+      if (!confirmed) {
+        statusMessage = `Delete cancelled for ${label}`;
+        return;
+      }
+      statusMessage = `Deleting ${model.alias} (${label})...`;
+      const isLoadedVariant = state.pool.some(
+        (e: any) => e.alias === model.alias && e.variantId === variantId,
+      );
+      if (isLoadedVariant) {
+        await sdkUnloadModel(model);
+      }
+      await sdkDeleteModel(model, variantId);
+      // If no other variants remain cached, clear selection/meta like full delete
+      await refreshModels();
+      const refreshed = state.models.find((m: ModelInfo) => m.alias === model.alias);
+      const anyCached =
+        refreshed?.isCached ||
+        ((refreshed as any)?.variants || []).some((v: any) => v.cached);
+      if (!anyCached) {
+        if (selectedModelAlias === model.alias) selectedModelAlias = "";
+        if (modelRuntimeMeta[model.alias]) {
+          const nextMeta = { ...modelRuntimeMeta };
+          delete nextMeta[model.alias];
+          modelRuntimeMeta = nextMeta;
+          persistChat();
+        }
+      }
+      statusMessage = `${model.alias} variant deleted (${label})`;
+    } catch (e: any) {
+      statusMessage = `Delete variant failed: ${e?.message || e}`;
     }
   }
 
@@ -1660,8 +2704,11 @@
 
   async function deleteCachedModel(model: any) {
     try {
+      const variantCount = ((model as any).variants || []).filter((v: any) => v.cached).length;
       const confirmed = globalThis.confirm(
-        `Delete cached model "${model.alias}" from disk? This cannot be undone.`,
+        variantCount > 1
+          ? `Delete ALL ${variantCount} cached variants of "${model.alias}" from disk? This cannot be undone.`
+          : `Delete cached model "${model.alias}" from disk? This cannot be undone.`,
       );
       if (!confirmed) {
         statusMessage = `Delete cancelled for ${model.alias}`;
@@ -1694,6 +2741,10 @@
       statusMessage = "Text chat is disabled while an STT model is active. Load a chat model to continue.";
       return;
     }
+    if (!selectedModelAlias?.trim()) {
+      statusMessage = "Select a chat model first (header picker or Models → Load & Chat).";
+      return;
+    }
     if (!selectedModelSupportsChat) {
       statusMessage = "Current model does not support chat completions.";
       return;
@@ -1701,6 +2752,21 @@
     if (!chatInput.trim() || (!state.endpoint && !chatClient) || isStreaming) return;
 
     const text = chatInput.trim();
+
+    // Inject fetched URL content as context ahead of user message
+    const doneFetches = pendingUrlFetches.filter(f => f.status === 'done' && f.text);
+    if (doneFetches.length > 0) {
+      const contextBlock = doneFetches.map(f => {
+        const titleLine = f.title ? `Title: ${f.title}\n` : '';
+        return `--- Page context from ${f.url} ---\n${titleLine}${f.text}\n--- end context ---`;
+      }).join('\n\n');
+      chatMessages = [...chatMessages, {
+        role: "user",
+        content: `The following web page content has been fetched for context:\n\n${contextBlock}\n\nPlease use this context to answer my question.`
+      }, { role: "assistant", content: "Understood. I have read the page content and will use it to answer your question." }];
+      clearUrlFetches();
+    }
+
     let userContent: any = text;
     if (attachedImages.length > 0 && isVisionModel) {
       userContent = [
@@ -1924,12 +2990,22 @@
       if (!combined.includes(m)) combined.push(m);
     }
 
+    // Latest user turn drives optional FLInt fact-sheet expansion (token-efficient).
+    let latestUserText = "";
+    for (let i = combined.length - 1; i >= 0; i--) {
+      if (combined[i]?.role === "user") {
+        latestUserText = contentToPlainText(combined[i].content);
+        break;
+      }
+    }
+    const effectiveSystem = buildFlintAwareSystemPrompt(systemPrompt, latestUserText);
+
     return normalizeForAlternatingChat([
       ...combined.map((m: any) => ({
         role: m.role,
         content: m.content, // can be string or vision array [{type,text}, {type:'image_url',...}]
       })),
-    ], systemPrompt);
+    ], effectiveSystem);
   }
 
   /**
@@ -2089,6 +3165,38 @@ Output only the summary text, no preamble.`;
 
   function clearImages() {
     attachedImages = [];
+  }
+
+  // URL fetch helpers
+  async function queueUrlFetch(url: string) {
+    if (pendingUrlFetches.some(f => f.url === url)) return;
+    pendingUrlFetches = [...pendingUrlFetches, { url, status: 'pending' }];
+  }
+
+  async function executeFetch(url: string) {
+    const idx = pendingUrlFetches.findIndex(f => f.url === url);
+    if (idx < 0) return;
+    pendingUrlFetches[idx] = { ...pendingUrlFetches[idx], status: 'fetching' };
+    pendingUrlFetches = [...pendingUrlFetches];
+    isFetchingUrl = true;
+    try {
+      const result = await fetchUrl(url);
+      pendingUrlFetches[idx] = { url, status: 'done', title: result.title, text: result.text };
+      pendingUrlFetches = [...pendingUrlFetches];
+    } catch (e: any) {
+      pendingUrlFetches[idx] = { url, status: 'error', error: e?.message || String(e) };
+      pendingUrlFetches = [...pendingUrlFetches];
+    } finally {
+      isFetchingUrl = false;
+    }
+  }
+
+  function removeUrlFetch(url: string) {
+    pendingUrlFetches = pendingUrlFetches.filter(f => f.url !== url);
+  }
+
+  function clearUrlFetches() {
+    pendingUrlFetches = [];
   }
 
   // Drag & drop support for images (only when vision model)
@@ -2596,10 +3704,31 @@ Output only the summary text, no preamble.`;
             {state.eps.filter((e) => e.isRegistered).length}/{state.eps.length} accel
           </span>
         {/if}
-        {#if selectedModelAlias}
-          <span class="current-model" title="Running locally via Foundry Local">
+        {#if loadedPoolEntries.length > 0}
+          <span class="loaded-models" aria-label="Loaded models">
+            <Icon name="monitor" size={14} />
+            {#each loadedPoolEntries as entry, i (entry.variantId || entry.alias + i)}
+              <span
+                class="current-model"
+                class:is-chat={selectedModelAlias === entry.alias}
+                title={poolEntryTooltip(entry)}
+              >
+                <span class="cm-alias">{entry.alias}</span>
+                {#if entry.variantId}
+                  <span class="cm-variant">{shortPoolVariantLabel(entry.variantId)}</span>
+                {/if}
+                {#if selectedModelAlias === entry.alias}
+                  <span class="local-badge">chat</span>
+                {:else}
+                  <span class="local-badge muted-badge">local</span>
+                {/if}
+              </span>
+            {/each}
+          </span>
+        {:else if selectedModelAlias}
+          <span class="current-model" title="Selected for chat (not currently loaded in the pool)">
             <Icon name="monitor" size={14} /> {selectedModelAlias}
-            <span class="local-badge">local</span>
+            <span class="local-badge muted-badge">selected</span>
           </span>
         {/if}
         {#if state.endpoint}
@@ -2780,7 +3909,7 @@ Output only the summary text, no preamble.`;
       </button>
 
       <button
-        class="nav-btn"
+        class="nav-item"
         class:active={currentView === "settings"}
         onclick={() => (currentView = "settings")}
         title="Settings"
@@ -2976,6 +4105,9 @@ Output only the summary text, no preamble.`;
                       <span title="Estimated in-memory runtime footprint for local inference">
                         Memory: {estimateMemoryRequirement(model)}
                       </span>
+                      <span title="When this model was last updated in the catalog">
+                        Updated: {formatModelUpdated(model)}
+                      </span>
                       {#if getFamilyLabel(model)}
                         <span>
                           Family:
@@ -3035,8 +4167,10 @@ Output only the summary text, no preamble.`;
                             {#each (model as any).variants as variant (variant.id)}
                               {@const isCurrentlyLoaded = state.pool.some((e) => e.variantId === variant.id)}
                               {@const badge = accelBadgeInfo(variant.deviceType, variant.executionProvider)}
+                              {@const isCurrentChat =
+                                selectedModelAlias === model.alias && isCurrentlyLoaded}
                               <div class="variant-row" class:variant-active={isCurrentlyLoaded}>
-                                <span class="accel-badge {badge.cls}">{badge.label}</span>
+                                <span class="accel-badge {badge.cls}" title={variant.id}>{badge.label}</span>
                                 {#if variant.fileSizeMb}
                                   <span class="variant-size">{Math.round(variant.fileSizeMb)} MB</span>
                                 {/if}
@@ -3045,13 +4179,39 @@ Output only the summary text, no preamble.`;
                                 {/if}
                                 {#if isCurrentlyLoaded}
                                   <span class="badge small loaded">Running</span>
-                                {:else if variant.cached}
-                                  <button class="small" onclick={() => loadVariant(model, variant.id)}>Load</button>
-                                {:else}
-                                  <button class="small" onclick={() => downloadVariant(model, variant.id)} disabled={downloadingVariantIds[variant.id]}>
-                                    {downloadingVariantIds[variant.id] ? 'Downloading…' : 'Download'}
-                                  </button>
                                 {/if}
+                                {#if isCurrentChat}
+                                  <span class="badge small current-chat-badge">Chat</span>
+                                {/if}
+                                <span class="variant-actions">
+                                  {#if !variant.cached}
+                                    <button
+                                      class="small"
+                                      onclick={() => downloadVariant(model, variant.id)}
+                                      disabled={downloadingVariantIds[variant.id]}
+                                    >
+                                      {downloadingVariantIds[variant.id] ? 'Downloading…' : 'Download'}
+                                    </button>
+                                  {:else}
+                                    {#if !isCurrentlyLoaded}
+                                      <button class="small" onclick={() => loadVariant(model, variant.id)}>Load</button>
+                                    {/if}
+                                    {#if modelSupportsChat(model)}
+                                      {#if isCurrentlyLoaded && isCurrentChat}
+                                        <button class="small" onclick={() => (currentView = 'chat')}>Open chat</button>
+                                      {:else if isCurrentlyLoaded}
+                                        <button class="small primary-chat" onclick={() => loadAndChatVariant(model, variant.id)}>Chat</button>
+                                      {:else}
+                                        <button class="small primary-chat" onclick={() => loadAndChatVariant(model, variant.id)}>Load &amp; Chat</button>
+                                      {/if}
+                                    {/if}
+                                    <button
+                                      class="small danger-btn"
+                                      title={`Delete ${variant.id} from disk`}
+                                      onclick={() => deleteVariant(model, variant.id)}
+                                    >Delete</button>
+                                  {/if}
+                                </span>
                               </div>
                             {/each}
                           </div>
@@ -3158,6 +4318,7 @@ Output only the summary text, no preamble.`;
                         <div><strong>Family:</strong> {(detailModel as any).family || (detailModel as any).info?.family || "Unknown"}</div>
                         <div><strong>Size:</strong> {formatSizeLabel(detailModel)}</div>
                         <div><strong>Estimated memory:</strong> {estimateMemoryRequirement(detailModel)}</div>
+                        <div><strong>Updated:</strong> {formatModelUpdated(detailModel)}</div>
                         <div><strong>Context:</strong> {formatContextLength(detailModel)}</div>
                         <div><strong>Downloaded artifact:</strong> {detailModel.isCached ? "Model weights" : "Not downloaded"}</div>
                         <div><strong>Downloaded at:</strong> {formatMetaTimestamp(modelRuntimeMeta[detailModel.alias]?.downloadedAt)}</div>
@@ -3229,54 +4390,81 @@ Output only the summary text, no preamble.`;
                 </div>
               {/if}
               <div class="chat-header">
-                <h2>Chat with {selectedModelAlias || "model"}</h2>
-                <button
-                  type="button"
-                  class="compact-btn full-thread-btn"
-                  onclick={() => (showFullHistory = !showFullHistory)}
-                  title="Toggle between compact (recommended for inference) and full uncondensed thread"
-                >
-                  {#if showFullHistory}<Icon name="scroll" size={13} /> Compact{:else}<Icon name="book" size={13} /> Full thread{/if}
-                </button>
+                <div class="chat-header-left">
+                  <h2>Chat</h2>
+                  <label class="chat-model-picker">
+                    <span class="chat-model-label">Model</span>
+                    <select
+                      value={selectedModelAlias}
+                      disabled={isStreaming || chatPickerModels.length === 0}
+                      title="Model used for this chat. Loaded models are preferred; choosing an unloaded model will load it."
+                      onchange={(e) => setChatModel((e.currentTarget as HTMLSelectElement).value)}
+                    >
+                      {#if chatPickerModels.length === 0}
+                        <option value="">No chat models available</option>
+                      {:else if !selectedModelAlias}
+                        <option value="">Select model…</option>
+                      {/if}
+                      {#each chatPickerModels as m (m.alias)}
+                        <option value={m.alias}>
+                          {m.alias}{m.isLoaded ? "" : " (not loaded)"}
+                        </option>
+                      {/each}
+                    </select>
+                  </label>
+                </div>
+                <div class="chat-header-actions">
+                  <button
+                    type="button"
+                    class="compact-btn full-thread-btn"
+                    onclick={() => (showFullHistory = !showFullHistory)}
+                    title="Toggle between compact (recommended for inference) and full uncondensed thread"
+                  >
+                    {#if showFullHistory}<Icon name="scroll" size={13} /> Compact{:else}<Icon name="book" size={13} /> Full thread{/if}
+                  </button>
 
-                {#if chatMessages.length > contextTurns * 2 + 4}
-                  <button
-                    type="button"
-                    class="compact-btn"
-                    title="Mark older messages as condensed (they stay in full thread view)"
-                    onclick={() => {
-                      // Non-destructive: mark old non-pinned as condensed instead of deleting
-                      const keep = contextTurns * 2;
-                      const toCondense = chatMessages.slice(0, -keep).filter((m: any) => !m.pinned && !m.isSummary);
-                      toCondense.forEach((m: any) => { m.condensed = true; });
-                      chatMessages = [...chatMessages];
-                      statusMessage = `Older messages condensed (view full thread to read them)`;
-                    }}
-                  >
-                    Condense old
-                  </button>
-                  <button
-                    type="button"
-                    class="compact-btn summarize-btn"
-                    title="Use the model to summarize older turns into a compact memory note. Allows continuing long chats efficiently."
-                    disabled={isStreaming}
-                    onclick={() => compactConversationWithSummary(Math.max(4, Math.floor(contextTurns / 2)))}
-                  >
-                    Summarize &amp; Compact
-                  </button>
-                {/if}
-                {#if selectedModelAlias}
+                  {#if chatMessages.length > contextTurns * 2 + 4}
+                    <button
+                      type="button"
+                      class="compact-btn"
+                      title="Mark older messages as condensed (they stay in full thread view)"
+                      onclick={() => {
+                        // Non-destructive: mark old non-pinned as condensed instead of deleting
+                        const keep = contextTurns * 2;
+                        const toCondense = chatMessages.slice(0, -keep).filter((m: any) => !m.pinned && !m.isSummary);
+                        toCondense.forEach((m: any) => { m.condensed = true; });
+                        chatMessages = [...chatMessages];
+                        statusMessage = `Older messages condensed (view full thread to read them)`;
+                      }}
+                    >
+                      Condense old
+                    </button>
+                    <button
+                      type="button"
+                      class="compact-btn summarize-btn"
+                      title="Use the model to summarize older turns into a compact memory note. Allows continuing long chats efficiently."
+                      disabled={isStreaming}
+                      onclick={() => compactConversationWithSummary(Math.max(4, Math.floor(contextTurns / 2)))}
+                    >
+                      Summarize &amp; Compact
+                    </button>
+                  {/if}
                   <button
                     onclick={() => (currentView = "models")}
-                    class="secondary small">Change Model</button
-                  >
-                {/if}
+                    class="secondary small"
+                    title="Open the model catalog"
+                  >Catalog</button>
+                </div>
               </div>
 
               <div class="messages" bind:this={messagesContainer}>
                 {#if chatMessages.length === 0}
                   <div class="empty-chat">
-                    Start a conversation. Your model is ready locally.
+                    {#if !selectedModelAlias}
+                      Select a chat model above, or load one from the Models catalog.
+                    {:else}
+                      Start a conversation. Your model is ready locally.
+                    {/if}
                   </div>
                 {:else}
                   {#each chatMessages as msg, i}
@@ -3446,6 +4634,55 @@ Output only the summary text, no preamble.`;
                     {/if}
                   {/if}
                 </div>
+
+                <!-- URL fetch chips: appear when the user types/pastes a URL -->
+                {#if detectedUrls.length > 0 || pendingUrlFetches.length > 0}
+                  <div class="url-fetch-bar">
+                    {#each detectedUrls as url (url)}
+                      <span class="url-chip detected">
+                        <span class="chip-label" title={url}>{new URL(url).hostname}</span>
+                        <button type="button" onclick={() => queueUrlFetch(url)} title="Fetch this page as context">
+                          <Icon name="download" size={11} /> Fetch
+                        </button>
+                        <button type="button" class="chip-dismiss" onclick={() => pendingUrlFetches = [...pendingUrlFetches, { url, status: 'error', error: 'dismissed' }]} title="Dismiss">
+                          <Icon name="x" size={10} />
+                        </button>
+                      </span>
+                    {/each}
+                    {#each pendingUrlFetches.filter(f => f.status !== 'error' || !f.error?.includes('dismissed')) as fetch (fetch.url)}
+                      <span
+                        class="url-chip"
+                        class:fetching={fetch.status === 'fetching'}
+                        class:done={fetch.status === 'done'}
+                        class:error={fetch.status === 'error'}
+                        title={fetch.url}
+                      >
+                        {#if fetch.status === 'pending'}
+                          <span class="chip-label">{new URL(fetch.url).hostname}</span>
+                          <button type="button" onclick={() => executeFetch(fetch.url)} disabled={isFetchingUrl} title="Fetch now">
+                            <Icon name="download" size={11} /> Fetch
+                          </button>
+                        {:else if fetch.status === 'fetching'}
+                          <Icon name="loader" size={11} class="spin" />
+                          <span class="chip-label">Fetching {new URL(fetch.url).hostname}…</span>
+                        {:else if fetch.status === 'done'}
+                          <Icon name="check" size={11} />
+                          <span class="chip-label" title={fetch.title || fetch.url}>{fetch.title || new URL(fetch.url).hostname}</span>
+                          <span class="chip-meta">{Math.round((fetch.text?.length ?? 0) / 1000)}k chars</span>
+                        {:else}
+                          <Icon name="warning" size={11} />
+                          <span class="chip-label chip-error" title={fetch.error}>{new URL(fetch.url).hostname} failed</span>
+                        {/if}
+                        <button type="button" class="chip-dismiss" onclick={() => removeUrlFetch(fetch.url)} title="Remove">
+                          <Icon name="x" size={10} />
+                        </button>
+                      </span>
+                    {/each}
+                    {#if pendingUrlFetches.some(f => f.status === 'done')}
+                      <span class="url-fetch-hint">Context will be injected on send</span>
+                    {/if}
+                  </div>
+                {/if}
 
                 {#if isVisionModel}
                   <div class="vision-attach">
@@ -3812,20 +5049,98 @@ Output only the summary text, no preamble.`;
             </div>
           {/if}
 
-          <!-- System RAM gauge -->
+          <!-- System RAM / Unified Memory + GPU / NPU memory -->
           {#if state.poolStats}
             {@const used = state.poolStats.usedMemMb}
             {@const total = state.poolStats.totalMemMb}
             {@const pct = total > 0 ? Math.min(100, Math.round(used / total * 100)) : 0}
-            <div class="resource-panel">
-              <div class="resource-label">
-                <span>System RAM</span>
-                <span class="resource-nums">{used.toLocaleString()} / {total.toLocaleString()} MB ({pct}%)</span>
+            {@const accels = state.poolStats.accelerators ?? []}
+            {@const host = state.poolStats.host}
+            {@const memLabel = systemMemoryLabel(host)}
+            {@const appleSilicon = isAppleSiliconHost(host)}
+            <div class="resource-stack">
+              <div class="resource-panel">
+                <div class="resource-label">
+                  <span>{memLabel}</span>
+                  <span class="resource-nums">{used.toLocaleString()} / {total.toLocaleString()} MB ({pct}%)</span>
+                </div>
+                <div class="ram-bar-track">
+                  <div class="ram-bar-fill" class:ram-warn={pct >= 80} style="width: {pct}%"></div>
+                </div>
+                <p class="resource-note">{systemMemoryNote(host)}</p>
               </div>
-              <div class="ram-bar-track">
-                <div class="ram-bar-fill" class:ram-warn={pct >= 80} style="width: {pct}%"></div>
-              </div>
-              <p class="resource-note">Includes all processes. GPU models consume VRAM (not shown).</p>
+
+              {#if accels.length === 0}
+                <div class="resource-panel">
+                  <div class="resource-label">
+                    <span>{appleSilicon ? "GPU / Neural Engine" : "GPU / NPU memory"}</span>
+                    <span class="resource-nums">{appleSilicon ? "Shared" : "Not detected"}</span>
+                  </div>
+                  <p class="resource-note">
+                    {#if appleSilicon}
+                      On Apple Silicon, GPU and Neural Engine use unified memory (shown above) rather than a separate VRAM pool.
+                    {:else}
+                      No accelerator memory reported. NVIDIA uses nvidia-smi; other GPUs use Windows DXGI where available. Many NPUs share system RAM and do not expose a separate pool.
+                    {/if}
+                  </p>
+                </div>
+              {:else}
+                {#each accels as accel, i (`${accel.kind}-${accel.name}-${i}`)}
+                  {@const aUsed = accel.usedMb}
+                  {@const aTotal = accel.totalMb}
+                  {@const aPct =
+                    aTotal != null && aTotal > 0 && aUsed != null
+                      ? Math.min(100, Math.round((aUsed / aTotal) * 100))
+                      : null}
+                  <div class="resource-panel" class:resource-npu={accel.kind === 'npu'}>
+                    <div class="resource-label">
+                      <span class="resource-title">
+                        <span class="resource-kind-badge" class:kind-gpu={accel.kind === 'gpu'} class:kind-npu={accel.kind === 'npu'}>
+                          {accel.kind === 'npu' ? 'NPU' : 'GPU'}
+                        </span>
+                        <span class="resource-device-name" title={accel.name}>{accel.name}</span>
+                      </span>
+                      <span class="resource-nums">
+                        {#if aTotal != null && aUsed != null}
+                          {aUsed.toLocaleString()} / {aTotal.toLocaleString()} MB
+                          {#if aPct != null}({aPct}%){/if}
+                        {:else if aTotal != null}
+                          {aTotal.toLocaleString()} MB total
+                          {#if aUsed == null} · usage n/a{/if}
+                        {:else}
+                          Memory not reported
+                        {/if}
+                      </span>
+                    </div>
+                    {#if aPct != null}
+                      <div class="ram-bar-track">
+                        <div
+                          class="ram-bar-fill"
+                          class:ram-warn={aPct >= 80}
+                          class:ram-npu={accel.kind === 'npu'}
+                          style="width: {aPct}%"
+                        ></div>
+                      </div>
+                    {:else if aTotal != null}
+                      <div class="ram-bar-track ram-bar-unknown">
+                        <div class="ram-bar-fill ram-muted" style="width: 100%"></div>
+                      </div>
+                    {/if}
+                    {#if accel.freeMb != null && aTotal != null}
+                      <p class="resource-note">{accel.freeMb.toLocaleString()} MB free · source: {accel.source}</p>
+                    {:else}
+                      <p class="resource-note">
+                        {#if accel.kind === 'npu'}
+                          NPU memory is often shared with system RAM and may not be exposed separately.
+                        {:else}
+                          Dedicated VRAM total known; live usage unavailable for this device.
+                        {/if}
+                        · source: {accel.source}
+                      </p>
+                    {/if}
+                  </div>
+                {/each}
+              {/if}
             </div>
           {/if}
 
@@ -4102,71 +5417,367 @@ Output only the summary text, no preamble.`;
         </div>
       {:else if currentView === "compare"}
         <div class="view compare-view">
-          <h2>Model Comparison</h2>
-          <p class="muted">Send the same prompt to 2–3 models and compare side-by-side (non-streaming for 0.3).</p>
-
-          <div class="compare-controls">
+          <div class="compare-header">
             <div>
-              <label>Select models (max 3, prefer loaded):</label>
-              <div class="model-pills">
-                {#each state.models.filter(m => m.isCached) as m (m.alias)}
-                  <div class="pill-wrapper">
-                    <button
-                      class="pill"
-                      class:selected={compareSelected.includes(m.alias)}
-                      onclick={() => {
-                        if (compareSelected.includes(m.alias)) {
-                          compareSelected = compareSelected.filter(a => a !== m.alias);
-                        } else if (compareSelected.length < 3) {
-                          compareSelected = [...compareSelected, m.alias];
-                        }
-                      }}
-                    >
-                      {m.alias} {m.isLoaded ? '●' : ''}
-                    </button>
-                    {#if !m.isLoaded}
-                      <button class="tiny" onclick={() => loadModelForCompare(m.alias)} title="Load this model">Load</button>
-                    {/if}
-                  </div>
-                {/each}
-              </div>
+              <h2>Model Comparison</h2>
+              <p class="muted">
+                Pick 2–{COMPARE_MAX_SLOTS} models or variants, then send one prompt. Missing models are downloaded and loaded automatically.
+              </p>
             </div>
-
-            <textarea bind:value={comparePrompt} placeholder="Enter the same prompt for all selected models..." rows={3}></textarea>
-
-            <div class="actions">
-              <button onclick={runComparison} disabled={compareSelected.length < 2 || !comparePrompt.trim() || isComparing}>
-                {isComparing ? 'Comparing...' : 'Run Comparison'}
+            <div class="compare-header-actions">
+              <button
+                type="button"
+                class="secondary small"
+                onclick={() => {
+                  compareHistoryOpen = !compareHistoryOpen;
+                  if (compareHistoryOpen) loadCompareHistory();
+                }}
+              >
+                Saved ({compareHistory.length})
               </button>
-              {#if Object.keys(compareResults).length}
-                <button class="secondary" onclick={exportComparison}>Export Markdown</button>
-                <button class="secondary" onclick={() => { compareResults = {}; }}>Clear Results</button>
-              {/if}
             </div>
           </div>
 
+          {#if compareHistoryOpen}
+            <div class="compare-history-panel">
+              <div class="compare-history-header">
+                <strong>Saved comparisons</strong>
+                <button type="button" class="tiny" onclick={() => (compareHistoryOpen = false)}>Close</button>
+              </div>
+              {#if compareHistory.length === 0}
+                <p class="muted small">No saved comparisons yet. Run one and click Save.</p>
+              {:else}
+                <ul class="compare-history-list">
+                  {#each compareHistory as entry (entry.id)}
+                    <li class:active={compareReviewId === entry.id}>
+                      <button type="button" class="compare-history-item" onclick={() => openSavedComparison(entry)}>
+                        <span class="cmp-hist-date">{new Date(entry.createdAt).toLocaleString()}</span>
+                        <span class="cmp-hist-prompt" title={entry.prompt}>{entry.prompt}</span>
+                        <span class="cmp-hist-meta">{entry.slots.length} models</span>
+                      </button>
+                      <button
+                        type="button"
+                        class="tiny danger-btn"
+                        title="Delete saved comparison"
+                        onclick={() => deleteSavedComparison(entry.id)}
+                      >×</button>
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            </div>
+          {/if}
+
+          <div class="compare-controls">
+            <div class="compare-slot-section">
+              <div class="compare-slot-toolbar">
+                <label>Models in this run ({compareSlots.length}/{COMPARE_MAX_SLOTS})</label>
+                <button
+                  type="button"
+                  class="small"
+                  disabled={compareSlots.length >= COMPARE_MAX_SLOTS || isComparing || comparePreparing}
+                  onclick={() => {
+                    comparePickerOpen = !comparePickerOpen;
+                    if (comparePickerOpen) comparePickerSearch = "";
+                  }}
+                >
+                  {comparePickerOpen ? "Close picker" : "Add model…"}
+                </button>
+              </div>
+
+              {#if compareSlots.length === 0}
+                <p class="muted small">Add at least two chat models (or specific variants) to compare.</p>
+              {:else}
+                <div class="compare-mode-row" role="group" aria-label="Comparison load mode">
+                  <label class="compare-mode-option" class:active={compareOneAtATime}>
+                    <input type="radio" name="compare-mode" checked={compareOneAtATime}
+                      onchange={() => { compareOneAtATime = true; }}
+                      disabled={isComparing || comparePreparing} />
+                    <span>
+                      <strong>One at a time</strong>
+                      <span class="muted small">
+                        Load → test → unload each. Peak ≈
+                        RAM {formatMbShort(compareMemoryPlan.needOneRamMb)}
+                        {#if compareMemoryPlan.needOneVramMb > 0}
+                          · VRAM {formatMbShort(compareMemoryPlan.needOneVramMb)}
+                        {/if}
+                        . Already-loaded models are not unloaded without your OK.
+                      </span>
+                    </span>
+                  </label>
+                  <label class="compare-mode-option" class:active={!compareOneAtATime} class:warn={!compareMemoryPlan.fitsAll}>
+                    <input type="radio" name="compare-mode" checked={!compareOneAtATime}
+                      onchange={() => { compareOneAtATime = false; }}
+                      disabled={isComparing || comparePreparing} />
+                    <span>
+                      <strong>Keep all loaded</strong>
+                      <span class="muted small">
+                        Needs ≈ RAM {formatMbShort(compareMemoryPlan.needAllRamMb)}
+                        {#if compareMemoryPlan.needAllVramMb > 0}
+                          · VRAM {formatMbShort(compareMemoryPlan.needAllVramMb)}
+                        {/if}
+                        (plus headroom)
+                      </span>
+                    </span>
+                  </label>
+                </div>
+
+                <div
+                  class="compare-mem-banner"
+                  class:ok={(compareOneAtATime ? compareMemoryPlan.fitsOneAtATime : compareMemoryPlan.fitsAll)}
+                  class:warn={!(compareOneAtATime ? compareMemoryPlan.fitsOneAtATime : compareMemoryPlan.fitsAll) || compareMemoryPlan.vramUnknown}
+                  title="Target device is inferred from variant deviceType / execution provider / id. GPU VRAM from nvidia-smi (Win/Linux), DXGI (Win), ROCm/sysfs (Linux)."
+                >
+                  <span class="mem-lines">
+                    <span>
+                      System RAM free: <strong>{formatMbShort(compareMemoryPlan.freeRamMb)}</strong>
+                      · need {formatMbShort(compareOneAtATime ? compareMemoryPlan.needOneRamMb : compareMemoryPlan.needAllRamMb)}
+                    </span>
+                    {#if compareMemoryPlan.vramAvailable || compareMemoryPlan.needOneVramMb > 0 || compareMemoryPlan.needAllVramMb > 0}
+                      <span>
+                        GPU VRAM free: <strong>{compareMemoryPlan.vramAvailable ? formatMbShort(compareMemoryPlan.freeVramMb) : "n/a"}</strong>
+                        · need {formatMbShort(compareOneAtATime ? compareMemoryPlan.needOneVramMb : compareMemoryPlan.needAllVramMb)}
+                        {#if compareMemoryPlan.vramUnknown}
+                          <em>(no telemetry)</em>
+                        {/if}
+                      </span>
+                    {/if}
+                  </span>
+                  {#if compareOneAtATime}
+                    {#if compareMemoryPlan.fitsOneAtATime}
+                      <span class="mem-ok">OK for one-at-a-time</span>
+                    {:else}
+                      <span class="mem-bad">Not enough free memory for the largest model</span>
+                    {/if}
+                  {:else if compareMemoryPlan.fitsAll}
+                    <span class="mem-ok">OK to keep all loaded</span>
+                  {:else}
+                    <span class="mem-bad">Insufficient for all — Send will switch to one-at-a-time</span>
+                  {/if}
+                </div>
+
+                <div class="compare-slots">
+                  {#each compareSlots as slot (slot.key)}
+                    {@const model = state.models.find((m: ModelInfo) => m.alias === slot.alias)}
+                    {@const cached = isVariantCached(model, slot.variantId)}
+                    {@const loaded = isSlotInPool(slot)}
+                    {@const est = estimateSlotDeviceMb(slot)}
+                    <div class="compare-slot-chip" class:ready={loaded} class:need-dl={!cached}>
+                      <div class="slot-main">
+                        <strong title={slot.variantId || slot.alias}>{slot.label}</strong>
+                        <span class="slot-badges">
+                          {#if loaded}
+                            <span class="badge small loaded">Loaded</span>
+                          {:else if cached}
+                            <span class="badge small cached">Downloaded</span>
+                          {:else}
+                            <span class="badge small">Not downloaded</span>
+                          {/if}
+                          <span
+                            class="badge small target-{est.target}"
+                            title="Where this variant is expected to load"
+                          >{slotTargetLabel(est.target)}</span>
+                          <span
+                            class="badge small"
+                            title={est.target === 'gpu'
+                              ? `Est. VRAM ~${formatMbShort(est.deviceMb)} (+ ~${formatMbShort(est.hostRamMb)} host RAM)`
+                              : `Est. system RAM ~${formatMbShort(est.hostRamMb)}`}
+                          >
+                            ~{formatMbShort(est.target === 'gpu' || est.target === 'npu' ? est.deviceMb : est.hostRamMb)}
+                          </span>
+                        </span>
+                      </div>
+                      <div class="slot-actions">
+                        {#if !loaded && cached}
+                          <button
+                            type="button"
+                            class="tiny"
+                            disabled={isComparing || comparePreparing}
+                            onclick={async () => {
+                              try {
+                                statusMessage = `Loading ${slot.label}…`;
+                                await sdkLoadModel(
+                                  { alias: slot.alias },
+                                  "chat",
+                                  slot.variantId ?? undefined,
+                                );
+                                await refreshModels();
+                                statusMessage = `Loaded ${slot.label}`;
+                              } catch (err: any) {
+                                statusMessage = `Load failed: ${err?.message || err}`;
+                              }
+                            }}
+                          >Load</button>
+                        {/if}
+                        <button
+                          type="button"
+                          class="tiny"
+                          title="Remove from comparison"
+                          disabled={isComparing || comparePreparing}
+                          onclick={() => removeCompareSlot(slot.key)}
+                        >×</button>
+                      </div>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+
+              {#if comparePickerOpen && !isComparing && !comparePreparing}
+                <div class="compare-picker">
+                  <input
+                    type="search"
+                    class="compare-picker-search"
+                    placeholder="Search models…"
+                    bind:value={comparePickerSearch}
+                  />
+                  <div class="compare-picker-list">
+                    {#each comparePickerModels as m (m.alias)}
+                      {@const variants = (m as any).variants || []}
+                      {@const expanded = !!compareExpandedAliases[m.alias]}
+                      <div class="compare-picker-model">
+                        <div class="picker-model-row">
+                          <button
+                            type="button"
+                            class="picker-add"
+                            disabled={compareSlots.length >= COMPARE_MAX_SLOTS ||
+                              compareSlots.some((s) => s.key === compareSlotKey(m.alias, null))}
+                            title="Add default variant for this model"
+                            onclick={() => addCompareSlot(makeCompareSlot(m))}
+                          >+</button>
+                          <button
+                            type="button"
+                            class="picker-name"
+                            onclick={() => {
+                              compareExpandedAliases = {
+                                ...compareExpandedAliases,
+                                [m.alias]: !expanded,
+                              };
+                            }}
+                          >
+                            <span>{m.alias}</span>
+                            <span class="picker-flags">
+                              {#if m.isLoaded}<span class="badge small loaded">Loaded</span>{/if}
+                              {#if m.isCached}<span class="badge small cached">Downloaded</span>
+                              {:else}<span class="badge small">Remote</span>{/if}
+                              {#if variants.length}
+                                <span class="muted small">{variants.length} var</span>
+                              {/if}
+                            </span>
+                          </button>
+                        </div>
+                        {#if expanded && variants.length}
+                          <div class="picker-variants">
+                            {#each variants as v (v.id)}
+                              {@const badge = accelBadgeInfo(v.deviceType, v.executionProvider)}
+                              {@const key = compareSlotKey(m.alias, v.id)}
+                              <div class="picker-variant-row">
+                                <button
+                                  type="button"
+                                  class="picker-add"
+                                  disabled={compareSlots.length >= COMPARE_MAX_SLOTS ||
+                                    compareSlots.some((s) => s.key === key)}
+                                  onclick={() => addCompareSlot(makeCompareSlot(m, v))}
+                                >+</button>
+                                <span class="accel-badge {badge.cls}">{badge.label}</span>
+                                {#if v.fileSizeMb}
+                                  <span class="muted small">{Math.round(v.fileSizeMb)} MB</span>
+                                {/if}
+                                {#if v.cached}
+                                  <span class="badge small cached">Downloaded</span>
+                                {:else}
+                                  <span class="badge small">Not downloaded</span>
+                                {/if}
+                                {#if state.pool.some((e) => e.variantId === v.id)}
+                                  <span class="badge small loaded">Loaded</span>
+                                {/if}
+                              </div>
+                            {/each}
+                          </div>
+                        {/if}
+                      </div>
+                    {:else}
+                      <p class="muted small">No matching chat models.</p>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+            </div>
+
+            <form class="compare-composer" onsubmit={runComparison}>
+              <textarea
+                bind:value={comparePrompt}
+                placeholder="Enter the same prompt for all selected models… (Ctrl/⌘+Enter to send)"
+                rows={3}
+                disabled={isComparing || comparePreparing}
+                onkeydown={(e) => {
+                  if ((isMac ? e.metaKey : e.ctrlKey) && e.key === "Enter") {
+                    e.preventDefault();
+                    runComparison(e);
+                  }
+                }}
+              ></textarea>
+              <div class="compare-composer-actions">
+                <button
+                  type="submit"
+                  class="compare-send"
+                  aria-label="Run comparison"
+                  disabled={compareSlots.length < 2 || !comparePrompt.trim() || isComparing || comparePreparing}
+                  title={compareSlots.length < 2 ? "Add at least 2 models" : "Send prompt to all selected models"}
+                >
+                  {#if isComparing || comparePreparing}
+                    <Icon name="loader" size={15} class="spin" />
+                    <span>{comparePreparing ? "Preparing…" : "Comparing…"}</span>
+                  {:else}
+                    <Icon name="send" size={15} />
+                    <span>Send</span>
+                  {/if}
+                </button>
+                {#if comparePrepStatus}
+                  <span class="compare-prep-status">{comparePrepStatus}</span>
+                {/if}
+                {#if Object.keys(compareResults).length}
+                  <button type="button" class="secondary small" onclick={saveCurrentComparison}>Save</button>
+                  <button type="button" class="secondary small" onclick={exportComparison}>Export MD</button>
+                  <button
+                    type="button"
+                    class="secondary small"
+                    onclick={() => {
+                      compareResults = {};
+                      compareReviewId = null;
+                    }}
+                  >Clear results</button>
+                {/if}
+              </div>
+            </form>
+          </div>
+
           {#if Object.keys(compareResults).length}
-            <div class="compare-results" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-top: 16px;">
-              {#each compareSelected as alias (alias)}
-                {@const r = compareResults[alias] || {}}
-                <div class="compare-card">
+            {#if compareReviewId}
+              <p class="muted small">Reviewing a saved comparison — ratings auto-save.</p>
+            {/if}
+            <div class="compare-results">
+              {#each compareSlots as slot (slot.key)}
+                {@const r = compareResults[slot.key] || {}}
+                <div class="compare-card" class:has-error={!!r.error}>
                   <div class="card-header">
-                    <strong>{alias}</strong>
-                    {#if r.latencyMs}<span class="badge">{r.latencyMs}ms</span>{/if}
-                    {#if r.tokensOut}<span class="badge">{r.tokensOut} tokens</span>{/if}
+                    <strong title={slot.variantId || slot.alias}>{slot.label}</strong>
+                    {#if r.latencyMs != null}<span class="badge">{r.latencyMs}ms</span>{/if}
+                    {#if r.tokensOut != null}<span class="badge">{r.tokensOut} tok out</span>{/if}
                   </div>
                   <div class="result-body">
                     {#if r.content}
                       <div class="result-content">
-                        <MessageRenderer content={r.content || ''} />
+                        <MessageRenderer content={r.content || ""} />
                       </div>
+                    {:else if isComparing}
+                      <em>Waiting…</em>
                     {:else}
                       <em>No result yet.</em>
                     {/if}
                   </div>
                   <div class="rating">
-                    <button class:selected={r.rating==='up'} onclick={() => setCompareRating(alias, 'up')}>👍</button>
-                    <button class:selected={r.rating==='down'} onclick={() => setCompareRating(alias, 'down')}>👎</button>
+                    <button type="button" class:selected={r.rating === "up"} onclick={() => setCompareRating(slot.key, "up")}>👍</button>
+                    <button type="button" class:selected={r.rating === "down"} onclick={() => setCompareRating(slot.key, "down")}>👎</button>
                   </div>
                 </div>
               {/each}
@@ -4267,24 +5878,26 @@ Output only the summary text, no preamble.`;
                 <span class="setting-name">Bind address</span>
                 <span class="setting-desc">Network interface the service listens on</span>
               </div>
-              <label class="radio-option">
-                <input type="radio" name="bind-addr" checked={networkBindAddress === '127.0.0.1'}
-                  onchange={() => { networkBindAddress = '127.0.0.1'; persistChat(); }} />
-                <span>127.0.0.1 — loopback only <span class="badge-recommend">Recommended</span></span>
-              </label>
-              <label class="radio-option">
-                <input type="radio" name="bind-addr" checked={networkBindAddress === '0.0.0.0'}
-                  onchange={() => { networkBindAddress = '0.0.0.0'; persistChat(); }} />
-                <span>0.0.0.0 — all interfaces</span>
-              </label>
-              <label class="radio-option">
-                <input type="radio" name="bind-addr" checked={networkBindAddress !== '127.0.0.1' && networkBindAddress !== '0.0.0.0'}
-                  onchange={() => { if (networkBindAddress === '127.0.0.1' || networkBindAddress === '0.0.0.0') { networkBindAddress = ''; } }} />
-                <span>Custom</span>
-              </label>
-              {#if networkBindAddress !== '127.0.0.1' && networkBindAddress !== '0.0.0.0'}
-                <input type="text" class="custom-bind-input" bind:value={networkBindAddress} onchange={persistChat} placeholder="e.g. 192.168.1.100" />
-              {/if}
+              <div class="radio-group" role="radiogroup" aria-label="Bind address">
+                <label class="radio-option">
+                  <input type="radio" name="bind-addr" checked={networkBindAddress === '127.0.0.1'}
+                    onchange={() => { networkBindAddress = '127.0.0.1'; persistChat(); }} />
+                  <span class="radio-option-text">127.0.0.1 — loopback only <span class="badge-recommend">Recommended</span></span>
+                </label>
+                <label class="radio-option">
+                  <input type="radio" name="bind-addr" checked={networkBindAddress === '0.0.0.0'}
+                    onchange={() => { networkBindAddress = '0.0.0.0'; persistChat(); }} />
+                  <span class="radio-option-text">0.0.0.0 — all interfaces</span>
+                </label>
+                <label class="radio-option">
+                  <input type="radio" name="bind-addr" checked={networkBindAddress !== '127.0.0.1' && networkBindAddress !== '0.0.0.0'}
+                    onchange={() => { if (networkBindAddress === '127.0.0.1' || networkBindAddress === '0.0.0.0') { networkBindAddress = ''; } }} />
+                  <span class="radio-option-text">Custom</span>
+                </label>
+                {#if networkBindAddress !== '127.0.0.1' && networkBindAddress !== '0.0.0.0'}
+                  <input type="text" class="custom-bind-input" bind:value={networkBindAddress} onchange={persistChat} placeholder="e.g. 192.168.1.100" />
+                {/if}
+              </div>
               {#if networkBindAddress !== '127.0.0.1'}
                 <div class="warning-banner">
                   Binding to {networkBindAddress || 'all interfaces'} exposes the local inference service to other machines on the same network. Ensure your OS firewall is configured appropriately.
@@ -4483,6 +6096,14 @@ Output only the summary text, no preamble.`;
     color: var(--success);
   }
 
+  .loaded-models {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px 6px;
+    max-width: min(520px, 42vw);
+  }
+
   .current-model {
     font-size: 0.75rem;
     background: color-mix(in srgb, var(--warning) 20%, var(--panel-bg));
@@ -4491,7 +6112,31 @@ Output only the summary text, no preamble.`;
     color: var(--fg);
     display: inline-flex;
     align-items: center;
-    gap: 2px;
+    gap: 3px;
+    max-width: 220px;
+    cursor: default;
+  }
+
+  .current-model.is-chat {
+    background: color-mix(in srgb, var(--accent) 22%, var(--panel-bg));
+    outline: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+
+  .cm-alias {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 120px;
+  }
+
+  .cm-variant {
+    font-size: 0.65rem;
+    font-family: monospace;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 72px;
   }
 
   .service-badge {
@@ -4924,15 +6569,29 @@ Output only the summary text, no preamble.`;
   .variant-row {
     display: flex;
     align-items: center;
-    gap: 8px;
+    flex-wrap: wrap;
+    gap: 6px 8px;
     font-size: 0.8rem;
-    padding: 3px 0;
+    padding: 4px 0;
   }
 
   .variant-row.variant-active {
     background: color-mix(in srgb, var(--accent) 10%, transparent);
     border-radius: 4px;
-    padding: 3px 6px;
+    padding: 4px 6px;
+  }
+
+  .variant-actions {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-left: auto;
+  }
+
+  .current-chat-badge {
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    color: var(--accent);
   }
 
   .accel-badge {
@@ -5176,13 +6835,53 @@ Output only the summary text, no preamble.`;
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 12px;
     padding: 12px 16px;
     border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+
+  .chat-header-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .chat-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
   }
 
   .chat-header h2 {
     margin: 0;
     font-size: 1.1rem;
+    white-space: nowrap;
+  }
+
+  .chat-model-picker {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .chat-model-label {
+    font-size: 0.8rem;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+
+  .chat-model-picker select {
+    max-width: min(280px, 42vw);
+    padding: 4px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--panel-bg);
+    color: var(--fg);
+    font-size: 0.9rem;
   }
 
   .messages {
@@ -5310,6 +7009,58 @@ Output only the summary text, no preamble.`;
     flex-wrap: wrap;
   }
 
+  .url-fetch-bar {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-wrap: wrap;
+    padding: 4px 0;
+    font-size: 0.78rem;
+  }
+
+  .url-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 2px 8px;
+    background: var(--panel-bg, #1a1a1a);
+    font-size: 0.75rem;
+    color: var(--muted);
+  }
+  .url-chip.detected { border-color: var(--accent, #555); }
+  .url-chip.fetching { border-color: var(--accent, #555); opacity: 0.7; }
+  .url-chip.done { border-color: var(--success, #4caf50); color: var(--fg); }
+  .url-chip.error { border-color: var(--error, #f44); }
+
+  .chip-label {
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .chip-error { color: var(--error, #f44); }
+  .chip-meta { color: var(--muted); font-size: 0.7rem; }
+
+  .chip-dismiss {
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    opacity: 0.5;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+  }
+  .chip-dismiss:hover { opacity: 1; }
+
+  .url-fetch-hint {
+    font-size: 0.7rem;
+    color: var(--success, #4caf50);
+    font-style: italic;
+  }
+
   .vision-attach button {
     padding: 4px 8px;
     font-size: 0.75rem;
@@ -5348,36 +7099,317 @@ Output only the summary text, no preamble.`;
   }
 
   .attached {
-    color: var(--success); 
+    color: var(--success);
+  }
 
+  .compare-view {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 20px;
+    max-width: 1100px;
+  }
+  .compare-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .compare-header h2 { margin: 0 0 4px; }
+  .compare-header-actions { flex-shrink: 0; }
+
+  .compare-controls { display: flex; flex-direction: column; gap: 14px; }
+  .compare-slot-section { display: flex; flex-direction: column; gap: 8px; }
+  .compare-slot-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .compare-mode-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  @media (max-width: 720px) {
+    .compare-mode-row { grid-template-columns: 1fr; }
+  }
+  .compare-mode-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    cursor: pointer;
+  }
+  .compare-mode-option.active {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 8%, var(--bg));
+  }
+  .compare-mode-option.warn:not(.active) {
+    border-color: color-mix(in srgb, var(--warning, #f59e0b) 45%, var(--border));
+  }
+  .compare-mode-option input { margin-top: 3px; flex-shrink: 0; }
+  .compare-mode-option span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .compare-mode-option strong { font-size: 0.88rem; }
+
+  .compare-mem-banner {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    font-size: 0.8rem;
+    background: var(--surface, var(--panel-bg));
+  }
+  .compare-mem-banner.ok {
+    border-color: color-mix(in srgb, var(--success, #22c55e) 40%, var(--border));
+  }
+  .compare-mem-banner.warn {
+    border-color: color-mix(in srgb, var(--warning, #f59e0b) 50%, var(--border));
+    background: color-mix(in srgb, var(--warning, #f59e0b) 8%, var(--panel-bg));
+  }
+  .mem-ok { color: var(--success, #22c55e); font-weight: 600; }
+  .mem-bad { color: var(--warning, #d97706); font-weight: 600; }
+  .mem-lines { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .badge.small.target-gpu {
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    color: var(--accent);
+  }
+  .badge.small.target-cpu {
+    background: color-mix(in srgb, var(--muted) 20%, transparent);
+  }
+  .badge.small.target-npu {
+    background: color-mix(in srgb, #a855f7 18%, transparent);
+    color: #a855f7;
+  }
+  .badge.small.target-unknown {
+    background: color-mix(in srgb, var(--warning, #f59e0b) 15%, transparent);
+  }
+
+  .compare-slots {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .compare-slot-chip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface, var(--panel-bg));
+    max-width: 100%;
+  }
+  .compare-slot-chip.ready { border-color: color-mix(in srgb, var(--success, #22c55e) 45%, var(--border)); }
+  .compare-slot-chip.need-dl { border-color: color-mix(in srgb, var(--warning, #f59e0b) 40%, var(--border)); }
+  .slot-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .slot-main strong { font-size: 0.88rem; }
+  .slot-badges { display: flex; flex-wrap: wrap; gap: 4px; }
+  .slot-actions { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+
+  .compare-picker {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel-bg);
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 320px;
+  }
+  .compare-picker-search {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+  }
+  .compare-picker-list {
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .compare-picker-model { border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent); padding-bottom: 4px; }
+  .picker-model-row, .picker-variant-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+  }
+  .picker-variants { padding-left: 28px; display: flex; flex-direction: column; gap: 2px; }
+  .picker-add {
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    cursor: pointer;
+    flex-shrink: 0;
+    font-weight: 700;
+  }
+  .picker-add:disabled { opacity: 0.4; cursor: not-allowed; }
+  .picker-name {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    background: none;
+    border: none;
+    color: var(--fg);
+    cursor: pointer;
+    text-align: left;
+    padding: 4px 0;
+    min-width: 0;
+  }
+  .picker-flags { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+
+  .compare-composer {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .compare-composer textarea {
+    width: 100%;
+    box-sizing: border-box;
+    resize: vertical;
+    min-height: 72px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    font: inherit;
+  }
+  .compare-composer-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+  .compare-send {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    border-radius: 8px;
+    border: none;
+    background: var(--accent);
+    color: white;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .compare-send:disabled { opacity: 0.5; cursor: not-allowed; }
+  .compare-prep-status { font-size: 0.8rem; color: var(--muted); }
+
+  .compare-results {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 12px;
+  }
   .compare-card {
     border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 10px;
+    border-radius: 8px;
+    padding: 12px;
     background: var(--panel-bg, #111);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 160px;
   }
+  .compare-card.has-error { border-color: color-mix(in srgb, #ef4444 50%, var(--border)); }
   .compare-card .card-header {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
     align-items: center;
-    margin-bottom: 8px;
   }
   .compare-card .badge {
     font-size: 0.7em;
-    background: var(--accent, #333);
+    background: color-mix(in srgb, var(--accent) 25%, var(--panel-bg));
     padding: 1px 6px;
     border-radius: 3px;
   }
+  .compare-card .result-body { flex: 1; font-size: 0.9rem; overflow-wrap: anywhere; }
   .compare-card .rating button {
     margin-right: 4px;
     opacity: 0.7;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+    padding: 2px 8px;
   }
   .compare-card .rating button.selected {
     opacity: 1;
     font-weight: bold;
+    border-color: var(--accent);
   }
-    font-size: 0.8rem;
+
+  .compare-history-panel {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    background: var(--surface, var(--panel-bg));
   }
+  .compare-history-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+  }
+  .compare-history-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 220px;
+    overflow-y: auto;
+  }
+  .compare-history-list li {
+    display: flex;
+    align-items: stretch;
+    gap: 6px;
+  }
+  .compare-history-list li.active .compare-history-item {
+    border-color: var(--accent);
+  }
+  .compare-history-item {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    text-align: left;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--fg);
+    cursor: pointer;
+  }
+  .cmp-hist-date { font-size: 0.72rem; color: var(--muted); }
+  .cmp-hist-prompt {
+    font-size: 0.85rem;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .cmp-hist-meta { font-size: 0.72rem; color: var(--muted); }
 
   .mini {
     padding: 0 2px !important;
@@ -6174,8 +8206,15 @@ Output only the summary text, no preamble.`;
     color: #86efac;
     padding: 0 4px;
     border-radius: 2px;
-    margin-left: 4px;
+    margin-left: 2px;
     font-weight: 600;
+    flex-shrink: 0;
+  }
+
+  .local-badge.muted-badge {
+    background: color-mix(in srgb, var(--muted) 35%, transparent);
+    color: var(--fg);
+    opacity: 0.85;
   }
 
   /* Persona manager modal */
@@ -6274,12 +8313,35 @@ Output only the summary text, no preamble.`;
   }
   .stream-elapsed { margin-left: auto; font-family: monospace; font-size: 0.8rem; opacity: 0.8; }
 
+  .resource-stack { display: flex; flex-direction: column; gap: 10px; }
   .resource-panel { background: var(--surface); border-radius: 8px; padding: 14px 16px; }
-  .resource-label { display: flex; justify-content: space-between; font-size: 0.82rem; margin-bottom: 8px; color: var(--muted); }
-  .resource-nums { font-family: monospace; }
+  .resource-label { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; font-size: 0.82rem; margin-bottom: 8px; color: var(--muted); }
+  .resource-title { display: inline-flex; align-items: center; gap: 8px; min-width: 0; color: var(--fg); }
+  .resource-device-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: min(420px, 55vw); }
+  .resource-kind-badge {
+    flex-shrink: 0;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    padding: 1px 6px;
+    border-radius: 4px;
+    line-height: 1.4;
+  }
+  .resource-kind-badge.kind-gpu {
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    color: var(--accent);
+  }
+  .resource-kind-badge.kind-npu {
+    background: color-mix(in srgb, #a855f7 18%, transparent);
+    color: #a855f7;
+  }
+  .resource-nums { font-family: monospace; flex-shrink: 0; white-space: nowrap; }
   .ram-bar-track { height: 10px; background: var(--border); border-radius: 5px; overflow: hidden; }
+  .ram-bar-track.ram-bar-unknown { opacity: 0.45; }
   .ram-bar-fill { height: 100%; background: var(--accent); border-radius: 5px; transition: width 0.4s ease; }
   .ram-bar-fill.ram-warn { background: #ef4444; }
+  .ram-bar-fill.ram-npu { background: #a855f7; }
+  .ram-bar-fill.ram-muted { background: color-mix(in srgb, var(--muted) 55%, transparent); }
   .resource-note { font-size: 0.72rem; color: var(--muted); margin: 6px 0 0; }
 
   .monitor-section { background: var(--surface); border-radius: 8px; padding: 14px 16px; }
@@ -6344,8 +8406,44 @@ Output only the summary text, no preamble.`;
   .setting-note { font-size: 0.77rem; color: var(--muted); margin: 0; }
   .setting-col { display: flex; flex-direction: column; gap: 8px; }
   .port-input { width: 80px; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); font-size: 0.85rem; text-align: right; }
-  .radio-option { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; cursor: pointer; }
-  .custom-bind-input { padding: 5px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); font-size: 0.85rem; }
+  .radio-group { display: flex; flex-direction: column; align-items: stretch; gap: 6px; }
+  .radio-option {
+    display: grid;
+    grid-template-columns: 16px 1fr;
+    align-items: center;
+    column-gap: 10px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    line-height: 1.35;
+    min-height: 22px;
+  }
+  .radio-option input[type="radio"] {
+    width: 14px;
+    height: 14px;
+    margin: 0;
+    padding: 0;
+    justify-self: center;
+    accent-color: var(--accent);
+    flex-shrink: 0;
+  }
+  .radio-option-text {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    min-width: 0;
+  }
+  .custom-bind-input {
+    margin-left: 26px; /* radio column + gap — aligns under option text */
+    width: min(240px, 100%);
+    box-sizing: border-box;
+    padding: 5px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    font-size: 0.85rem;
+  }
   .badge-recommend { font-size: 0.7rem; padding: 1px 5px; border-radius: 3px; background: color-mix(in srgb, var(--success) 15%, transparent); color: var(--success); font-weight: 600; }
   .warning-banner { padding: 8px 12px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent); background: color-mix(in srgb, var(--warning) 10%, transparent); color: var(--warning); font-size: 0.8rem; }
 

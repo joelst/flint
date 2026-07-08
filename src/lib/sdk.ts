@@ -102,10 +102,27 @@ export interface StreamingStatus {
   count: number;
 }
 
+export interface AcceleratorMemory {
+  kind: 'gpu' | 'npu';
+  name: string;
+  vendor?: string | null;
+  totalMb: number | null;
+  usedMb: number | null;
+  freeMb: number | null;
+  source: string;
+}
+
+export interface HostInfo {
+  platform?: string; // process.platform: darwin | win32 | linux
+  arch?: string;     // process.arch: arm64 | x64 | ...
+}
+
 export interface PoolStats {
   usedMemMb: number;
   totalMemMb: number;
   freeMemMb: number;
+  host?: HostInfo;
+  accelerators?: AcceleratorMemory[];
   tokenTotals: Array<{ alias: string; tokensIn: number; tokensOut: number }>;
   streaming: StreamingStatus | null;
 }
@@ -496,19 +513,45 @@ export async function refreshModels(): Promise<void> {
       if (ps.result) {
         updateState({
           pool: ps.result.models ?? [],
-          poolStats: {
-            usedMemMb: ps.result.usedMemMb ?? (ps.result.totalMemMb ?? 0) - (ps.result.freeMemMb ?? 0),
-            totalMemMb: ps.result.totalMemMb ?? 0,
-            freeMemMb: ps.result.freeMemMb ?? 0,
-            tokenTotals: ps.result.tokenTotals ?? [],
-            streaming: ps.result.streaming ?? null,
-          },
+          poolStats: mapPoolStats(ps.result),
         });
       }
     } catch {}
   } catch (e) {
     console.error('refreshModels via sidecar failed', e);
   }
+}
+
+function mapPoolStats(result: any): PoolStats {
+  const accelerators = Array.isArray(result?.accelerators)
+    ? result.accelerators
+        .map((a: any) => ({
+          kind: a?.kind === 'npu' ? 'npu' as const : 'gpu' as const,
+          name: String(a?.name || ''),
+          vendor: a?.vendor ?? null,
+          totalMb: a?.totalMb == null ? null : Number(a.totalMb),
+          usedMb: a?.usedMb == null ? null : Number(a.usedMb),
+          freeMb: a?.freeMb == null ? null : Number(a.freeMb),
+          source: String(a?.source || 'unknown'),
+        }))
+        .filter((a: AcceleratorMemory) => !!a.name)
+    : [];
+  const hostRaw = result?.host && typeof result.host === 'object' ? result.host : null;
+  const host: HostInfo | undefined = hostRaw
+    ? {
+        platform: hostRaw.platform ? String(hostRaw.platform) : undefined,
+        arch: hostRaw.arch ? String(hostRaw.arch) : undefined,
+      }
+    : undefined;
+  return {
+    usedMemMb: result.usedMemMb ?? (result.totalMemMb ?? 0) - (result.freeMemMb ?? 0),
+    totalMemMb: result.totalMemMb ?? 0,
+    freeMemMb: result.freeMemMb ?? 0,
+    host,
+    accelerators,
+    tokenTotals: result.tokenTotals ?? [],
+    streaming: result.streaming ?? null,
+  };
 }
 
 export async function getModel(alias: string) {
@@ -546,15 +589,15 @@ export async function unloadModel(model: any, lane?: LaneName) {
   await refreshModels();
 }
 
-export async function deleteModel(model: any) {
-  await send('deleteModel', { alias: model.alias });
+export async function deleteModel(model: any, variantId?: string) {
+  const payload: any = { alias: model.alias };
+  if (variantId) payload.variantId = variantId;
+  await send('deleteModel', payload);
   await refreshModels();
 }
 
-export async function removeFromCache(alias: string) {
-  // Not implemented in current sidecar for safety; can be added
-  console.warn('removeFromCache not wired to sidecar yet');
-  await refreshModels();
+export async function removeFromCache(alias: string, variantId?: string) {
+  await deleteModel({ alias }, variantId);
 }
 
 export async function getAccessLog(): Promise<any[]> {
@@ -567,13 +610,7 @@ export async function pollPoolStatus(): Promise<void> {
   if (ps?.result) {
     updateState({
       pool: ps.result.models ?? [],
-      poolStats: {
-        usedMemMb: ps.result.usedMemMb ?? (ps.result.totalMemMb ?? 0) - (ps.result.freeMemMb ?? 0),
-        totalMemMb: ps.result.totalMemMb ?? 0,
-        freeMemMb: ps.result.freeMemMb ?? 0,
-        tokenTotals: ps.result.tokenTotals ?? [],
-        streaming: ps.result.streaming ?? null,
-      },
+      poolStats: mapPoolStats(ps.result),
     });
   }
 }
@@ -651,6 +688,19 @@ export async function chatCompletionStream(
 
 export async function cancelChatRequest(requestId: number): Promise<void> {
   await send('cancelChatRequest', { requestId });
+}
+
+export interface FetchUrlResult {
+  url: string;
+  title: string;
+  text: string;
+  truncated: boolean;
+  charCount: number;
+}
+
+export async function fetchUrl(url: string, maxChars = 50000): Promise<FetchUrlResult> {
+  const res = await send('fetchUrl', { url, maxChars });
+  return res.result as FetchUrlResult;
 }
 
 export async function transcribeAudio(

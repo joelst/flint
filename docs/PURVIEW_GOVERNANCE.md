@@ -107,4 +107,4 @@ This memo satisfies the 0.3 requirement for a short (~2 page) governance design 
 
 ---
 
-**Cross-references:** See `docs/SPRINT_PLAN_0.3.md` (Item 0c), `RELEASE_ROADMAP.md`, and sidecar audit/access logging code for current implementation details.
+**Cross-references:** [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) (0.3 scorecard / 0.4 enterprise controls), archived sprint note in [docs/archive/SPRINT_PLAN_0.3.md](./archive/SPRINT_PLAN_0.3.md) (Item 0c), and sidecar audit/access logging code for current implementation details.

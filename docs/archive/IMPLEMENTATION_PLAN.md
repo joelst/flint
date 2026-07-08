@@ -1,3 +1,5 @@
+> **Archived.** Historical planning artifact. Current status: [RELEASE_ROADMAP.md](../../RELEASE_ROADMAP.md). Do not treat checklists in this file as live work.
+
 # FLInt Implementation Plan
 
 **Project:** FLInt (Foundry Local Interface)  

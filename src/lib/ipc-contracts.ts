@@ -10,7 +10,7 @@ export type SidecarCommand =
   | { cmd: 'download'; alias: string; variantId?: string }
   | { cmd: 'load'; alias: string; lane?: LaneName; variantId?: string }
   | { cmd: 'unload'; alias: string; lane?: LaneName }
-  | { cmd: 'deleteModel'; alias: string }
+  | { cmd: 'deleteModel'; alias: string; variantId?: string }
   | { cmd: 'getEndpoint' }
   | { cmd: 'chatCompletion'; model: string; messages: unknown[]; maxTokens?: number; temperature?: number; preferredEp?: string; stream?: boolean }
   | { cmd: 'cancelChatRequest'; requestId: number }

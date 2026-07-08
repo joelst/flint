@@ -1,6 +1,6 @@
 # Model Pool Spike — Protocol & Results Capture
 
-Investigation script for [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) MVP 0.3 item 1 (model pool).
+Investigation script for [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) MVP 0.3 model pool (complete; protocol retained for re-runs).
 
 ## What the spike answers
 

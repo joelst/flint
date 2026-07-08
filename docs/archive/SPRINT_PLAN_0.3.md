@@ -1,3 +1,5 @@
+> **Archived.** Historical planning artifact. Current status: [RELEASE_ROADMAP.md](../../RELEASE_ROADMAP.md). Do not treat checklists in this file as live work.
+
 # Flint Sprint Plan — MVP 0.3 (+ 0.4 pull-ins)
 
 **Date:** 2026-06-26  
