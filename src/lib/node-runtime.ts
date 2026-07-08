@@ -3,7 +3,8 @@
  * End-user installers still spawn `node` on PATH (see docs/BACKLOG.md).
  */
 
-export const MIN_NODE_VERSION = { major: 18, minor: 0, patch: 0 } as const;
+/** Oldest Node line still receiving security updates (Maintenance LTS as of mid-2026). */
+export const MIN_NODE_VERSION = { major: 22, minor: 0, patch: 0 } as const;
 
 export type NodeVersion = {
   major: number;
@@ -89,7 +90,7 @@ export function buildNodeProbeFailedMessage(detail?: string): string {
   const extra = detail ? `\nDetails: ${detail}` : '';
   return [
     'Could not verify the Node.js installation required for the Foundry sidecar.',
-    'Ensure Node.js 18+ is installed and on your PATH, then quit and reopen Flint.',
+    'Ensure Node.js 22+ is installed and on your PATH, then quit and reopen Flint.',
     'Download: https://nodejs.org',
     extra,
   ]

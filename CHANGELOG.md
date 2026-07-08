@@ -30,7 +30,7 @@ Entries are normally produced via [Changesets](https://github.com/changesets/cha
 - **Guarded web-fetch → chat context** — user-initiated URL fetch with SSRF/size limits and article extraction.
 - **Purview governance memo** — design-only (`docs/PURVIEW_GOVERNANCE.md`).
 - **Release pipeline scaffolding** — updater plugin hooks, signing workflow steps (self-signed bootstrap).
-- **Node.js preflight** — check Node 18+ on PATH before starting the JS sidecar; actionable install guidance when missing or too old.
+- **Node.js preflight** — check Node 22+ on PATH before starting the JS sidecar (security-supported floor); actionable install guidance when missing or too old.
 - **Docs consolidation** — living docs index, DEVELOPMENT/RELEASE guides, archived historical plans, backlog for deferred items.
 
 ### Changed

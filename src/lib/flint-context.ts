@@ -34,7 +34,7 @@ export const FLINT_FACT_SHEET = `[About FLInt & Foundry Local — use when the u
 ## FLInt (this app)
 - FLInt = Foundry Local Interface: desktop GUI to manage Foundry Local without deep CLI knowledge.
 - Features: model catalog + multi-model pool (download/load/unload), chat (multi-image vision, host context, optional URL→context fetch), audio STT, side-by-side Compare, Monitor (pool/resources/access+audit logs), Integrations snippets, Diagnostics/Settings (bind/port, autostart, shortcuts), Learn.
-- Dependencies: Foundry Local runtime is bundled; Node.js 18+ must be on PATH for the JS sidecar (until a self-contained/Rust bridge removes that).
+- Dependencies: Foundry Local runtime is bundled; Node.js 22+ must be on PATH for the JS sidecar (until a self-contained/Rust bridge removes that). Node 22 is the oldest line still receiving security updates.
 - Local-first UX: clear when inference is on-device; default bind is localhost for the service.
 - Chat window is display-only: it does not parse or execute tool calls, run shell/file ops, or make network requests for the model (guarded web-fetch is user-initiated URL context only).
 - External tools (Continue, Cline, Copilot custom provider, user code, etc.) can point at the local endpoint for agentic/tool workflows.
@@ -70,7 +70,6 @@ export function userAsksAboutFlint(text: string): boolean {
   const t = String(text || "").trim();
   if (!t || t.length > 2000) {
     // Very long pastes are rarely "about the app"; skip expanded sheet.
-    if (t.length > 2000) return false;
     return false;
   }
   // Short messages: still check patterns (e.g. "what is flint?")

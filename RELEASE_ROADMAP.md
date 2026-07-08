@@ -1,6 +1,6 @@
 # Flint Release Roadmap (0.1 → 1.0)
 
-**Last updated:** 2026-07-08 (rev. 4 — Node 18+ preflight + honest copy; CHANGELOG 0.3.0; updater endpoint `joelst/flint`; pubkey/secrets still open)  
+**Last updated:** 2026-07-08 (rev. 5 — Node 22+ preflight security floor; CHANGELOG 0.3.0; updater endpoint `joelst/flint`; pubkey/secrets still open)  
 **Original date:** 2026-06-24  
 **Scope:** Living release roadmap — tracks readiness decisions, known limitations, and per-release objectives from MVP 0.1 through 1.0. This is the **only** living release planner; do not maintain parallel sprint + remaining-implementation docs for the same milestone (see [docs/README.md](./docs/README.md)).
 
@@ -478,7 +478,7 @@ If 0.1 is "usable MVP" and 0.2 is "hardened + scalable architecture", then **1.0
 | 10 | Tag `v0.3.0` → signed release build | Dev | ⬜ |
 | 11 | Review draft release; publish | Dev | ⬜ |
 
-Also landed for dogfood UX: **Node.js 18+ preflight** before sidecar spawn + Learn/fact-sheet honesty ([docs/BACKLOG.md](./docs/BACKLOG.md)). **0.4+**: targeted Rust bridge for selected sidecar commands (not big-bang rewrite).
+Also landed for dogfood UX: **Node.js 22+ preflight** (oldest security-supported line) before sidecar spawn + Learn/fact-sheet honesty ([docs/BACKLOG.md](./docs/BACKLOG.md)). **0.4+**: targeted Rust bridge for selected sidecar commands (not big-bang rewrite).
 
 ### Start 0.4 planning (after 0.3 ships)
 

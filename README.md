@@ -61,7 +61,7 @@ Living scorecard and ship checklist: [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md)
 
 ## Known limitations (0.3)
 
-- Installers need **Node.js 18+ on PATH** for the JS sidecar (Foundry runtime is bundled; Node is not). Flint checks on launch and shows install guidance if Node is missing or too old.
+- Installers need **Node.js 22+ on PATH** for the JS sidecar (Foundry runtime is bundled; Node is not). Node 22 is the oldest line still receiving security updates; Flint checks on launch and shows install guidance if Node is missing or too old.
 - Updater **public key** may still be a placeholder until you generate and configure it — see [docs/RELEASE.md](./docs/RELEASE.md).
 - Self-signed installers (when used) trigger OS trust warnings until real code-signing certs are configured.
 - Test coverage is solid unit/contract baseline, not full UI/E2E depth.

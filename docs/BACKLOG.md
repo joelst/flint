@@ -6,10 +6,10 @@ Items found during docs consolidation and deferred follow-ups. Check boxes when 
 
 ## Product UI copy (code changes)
 
-- [x] **Learn tab accuracy pass** (`src/routes/+page.svelte` Learn view) — Node 18+ + bundled Foundry + Around the app.
-- [x] **`flint-context.ts` fact sheet** — 0.3 surfaces + Node 18+ dependency called out.
+- [x] **Learn tab accuracy pass** (`src/routes/+page.svelte` Learn view) — Node 22+ + bundled Foundry + Around the app.
+- [x] **`flint-context.ts` fact sheet** — 0.3 surfaces + Node 22+ dependency called out.
 - [x] **In-app Integrations / Diagnostics / boot copy** — boot notice shows Node preflight errors with guidance.
-- [x] **Node preflight** — `src/lib/node-runtime.ts` + `ensureNodeRuntime()` before sidecar spawn; shell allow `node -v` / `--version`.
+- [x] **Node preflight** — `src/lib/node-runtime.ts` + `ensureNodeRuntime()` before sidecar spawn; min **Node 22+** (security-supported floor); shell allow `node -v` / `--version`.
 
 ## Release process
 

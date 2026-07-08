@@ -40,7 +40,7 @@ describe('buildFlintAwareSystemPrompt', () => {
     expect(out).toContain(FLINT_FACT_SHEET);
     expect(out).toContain('Foundry Local (Microsoft)');
     expect(out).toContain('OpenAI-compatible');
-    expect(out).toContain('Node.js 18+');
+    expect(out).toContain('Node.js 22+');
     expect(out).toContain('Compare');
     expect(out).toMatch(/pool/i);
   });

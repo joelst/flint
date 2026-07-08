@@ -15,7 +15,7 @@ Before designing the model pool API in the sidecar, we need empirical answers to
 
 - Foundry Local installed and reachable (you must have run Flint successfully at least once).
 - Both candidate models already **downloaded** into the Foundry cache. The script does not download — it expects `await manager.catalog.getModel(alias).load()` to succeed against locally-cached weights.
-- Node 18+ (the script uses native `fetch` and ES modules).
+- Node 22+ (matches Flint app preflight; script uses native `fetch` and ES modules).
 - No other Foundry web service running on the chosen port (default `5273`).
 - Flint **not running** during the spike — we need exclusive access to the local service.
 

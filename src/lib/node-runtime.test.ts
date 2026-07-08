@@ -32,22 +32,23 @@ describe('parseNodeVersion', () => {
 });
 
 describe('isNodeVersionAtLeast', () => {
-  it('compares major/minor/patch', () => {
-    expect(isNodeVersionAtLeast({ major: 18, minor: 0, patch: 0 })).toBe(true);
-    expect(isNodeVersionAtLeast({ major: 18, minor: 1, patch: 0 })).toBe(true);
-    expect(isNodeVersionAtLeast({ major: 20, minor: 0, patch: 0 })).toBe(true);
-    expect(isNodeVersionAtLeast({ major: 17, minor: 9, patch: 9 })).toBe(false);
+  it('compares major/minor/patch against Node 22 floor', () => {
+    expect(isNodeVersionAtLeast({ major: 22, minor: 0, patch: 0 })).toBe(true);
+    expect(isNodeVersionAtLeast({ major: 22, minor: 1, patch: 0 })).toBe(true);
+    expect(isNodeVersionAtLeast({ major: 24, minor: 0, patch: 0 })).toBe(true);
+    expect(isNodeVersionAtLeast({ major: 20, minor: 20, patch: 2 })).toBe(false);
+    expect(isNodeVersionAtLeast({ major: 18, minor: 19, patch: 0 })).toBe(false);
     expect(
       isNodeVersionAtLeast(
-        { major: 18, minor: 0, patch: 0 },
-        { major: 18, minor: 0, patch: 1 },
+        { major: 22, minor: 0, patch: 0 },
+        { major: 22, minor: 0, patch: 1 },
       ),
     ).toBe(false);
   });
 });
 
 describe('evaluateNodeProbe', () => {
-  it('accepts current LTS-class versions', () => {
+  it('accepts Node 22+ (security-supported floor)', () => {
     const r = evaluateNodeProbe({ stdout: 'v22.11.0' });
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.version.major).toBe(22);
@@ -65,13 +66,15 @@ describe('evaluateNodeProbe', () => {
     }
   });
 
-  it('rejects too-old versions', () => {
-    const r = evaluateNodeProbe({ stdout: 'v16.20.2' });
-    expect(r.ok).toBe(false);
-    if (!r.ok) {
-      expect(r.code).toBe('NODE_TOO_OLD');
-      expect(r.message).toContain('v16.20.2');
-      expect(r.message).toContain('winget');
+  it('rejects EOL and pre-22 versions', () => {
+    for (const ver of ['v16.20.2', 'v18.19.0', 'v20.20.2']) {
+      const r = evaluateNodeProbe({ stdout: ver });
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.code).toBe('NODE_TOO_OLD');
+        expect(r.message).toContain(ver);
+        expect(r.message).toContain('winget');
+      }
     }
   });
 

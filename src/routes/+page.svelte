@@ -3945,7 +3945,7 @@ Output only the summary text, no preamble.`;
                 <pre class="error-guidance">{state.error}</pre>
                 <p class="small muted">
                   Foundry Local runtime is bundled with Flint. The JS sidecar still
-                  needs <strong>Node.js 18+</strong> on your PATH.
+                  needs <strong>Node.js 22+</strong> on your PATH.
                 </p>
               {:else}
                 <p>
@@ -5359,10 +5359,11 @@ Output only the summary text, no preamble.`;
             separate Foundry CLI install for normal use.
           </p>
           <p>
-            <strong>Node.js 18+ must be installed and on your PATH</strong> so
-            Flint can run the local JS sidecar that drives Foundry Local. On
-            launch we check for a suitable Node version and show install help if
-            it is missing or too old. Download LTS from
+            <strong>Node.js 22+ must be installed and on your PATH</strong> so
+            Flint can run the local JS sidecar that drives Foundry Local (Node 22
+            is the oldest release line still getting security updates). On launch
+            we check for a suitable Node version and show install help if it is
+            missing or too old. Download LTS from
             <a href="https://nodejs.org" target="_blank" rel="noopener noreferrer"
               >nodejs.org</a
             >, then quit and reopen Flint.
