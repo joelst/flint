@@ -2065,7 +2065,7 @@
   }
 
   async function init() {
-    statusMessage = "Initializing Foundry Local SDK...";
+    statusMessage = "Checking Node.js and starting Foundry Local...";
 
     // Load conversation history + custom personas
     loadConversations();
@@ -3735,7 +3735,10 @@ Output only the summary text, no preamble.`;
           <span class="endpoint">{state.endpoint}</span>
         {/if}
       {:else if state.error}
-        <span class="status error">● {state.error}</span>
+        <span
+          class="status error"
+          title={state.error}
+        >● {state.error.split("\n")[0]}</span>
       {:else}
         <span class="status">Connecting...</span>
       {/if}
@@ -3935,15 +3938,26 @@ Output only the summary text, no preamble.`;
 
           {#if !state.ready}
             <div class="notice">
-              <p>
-                <strong
-                  >Starting sidecar + bundled Foundry Local runtime...</strong
-                >
-              </p>
-              <p>
-                The runtime is bundled. The sidecar handles model management and
-                the local service.
-              </p>
+              {#if state.error}
+                <p>
+                  <strong>Could not start Foundry Local</strong>
+                </p>
+                <pre class="error-guidance">{state.error}</pre>
+                <p class="small muted">
+                  Foundry Local runtime is bundled with Flint. The JS sidecar still
+                  needs <strong>Node.js 18+</strong> on your PATH.
+                </p>
+              {:else}
+                <p>
+                  <strong
+                    >Starting sidecar + bundled Foundry Local runtime...</strong
+                  >
+                </p>
+                <p>
+                  Checking Node.js, then starting the sidecar for model management
+                  and the local service.
+                </p>
+              {/if}
               <button onclick={init}>Retry</button>
             </div>
           {:else}
@@ -5341,8 +5355,17 @@ Output only the summary text, no preamble.`;
         <div class="view">
           <h2>Learn about Foundry Local</h2>
           <p>
-            Flint bundles the Foundry Local runtime (~20MB) for a seamless
-            experience. No separate CLI or runtime install required.
+            Flint bundles the Foundry Local runtime (~20MB). You do not need a
+            separate Foundry CLI install for normal use.
+          </p>
+          <p>
+            <strong>Node.js 18+ must be installed and on your PATH</strong> so
+            Flint can run the local JS sidecar that drives Foundry Local. On
+            launch we check for a suitable Node version and show install help if
+            it is missing or too old. Download LTS from
+            <a href="https://nodejs.org" target="_blank" rel="noopener noreferrer"
+              >nodejs.org</a
+            >, then quit and reopen Flint.
           </p>
           <p>
             On first launch we detect your hardware accelerators and suggest 1-3
@@ -5352,6 +5375,15 @@ Output only the summary text, no preamble.`;
             <li>Models run entirely on your device</li>
             <li>Uses the same OpenAI-compatible interface as Azure</li>
             <li>Automatic hardware acceleration (CPU / GPU / NPU)</li>
+          </ul>
+
+          <h3>Around the app</h3>
+          <ul>
+            <li><strong>Models</strong> — catalog, multi-model pool, download/load/unload</li>
+            <li><strong>Chat / Audio / Compare</strong> — inference, STT, side-by-side bake-off</li>
+            <li><strong>Monitor</strong> — pool, resources, access and audit logs</li>
+            <li><strong>Integrations</strong> — copy-paste snippets for external tools</li>
+            <li><strong>Diagnostics / Settings</strong> — service, endpoint, bind/port, autostart, shortcuts</li>
           </ul>
 
           <h3>Using the Local Endpoint</h3>
@@ -6744,6 +6776,24 @@ Output only the summary text, no preamble.`;
     padding: 16px;
     border-radius: 8px;
     max-width: 520px;
+  }
+
+  .notice .error-guidance {
+    white-space: pre-wrap;
+    font-family: inherit;
+    font-size: 0.9rem;
+    line-height: 1.45;
+    margin: 0.75rem 0;
+    padding: 0.75rem;
+    background: color-mix(in srgb, var(--panel-bg) 80%, #000);
+    border-radius: 6px;
+    max-height: 240px;
+    overflow: auto;
+  }
+
+  .notice .small.muted {
+    opacity: 0.85;
+    font-size: 0.85rem;
   }
 
   .placeholder {

@@ -10,7 +10,7 @@ For signed release pipeline setup, see [RELEASE.md](./RELEASE.md).
 
 ## Prerequisites
 
-- **Node.js** + npm
+- **Node.js 18+** + npm (app preflight enforces 18+ before starting the sidecar)
 - **Rust** + Cargo (Tauri)
 - Windows: Visual Studio Build Tools / MSVC for native builds
 

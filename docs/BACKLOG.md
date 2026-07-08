@@ -1,38 +1,36 @@
 # Documentation & product-copy backlog
 
-Items found during docs consolidation that are **intentionally deferred**. Do not lose these; do not block the docs PR on them.
-
-Track progress by checking boxes and linking PRs when work starts.
+Items found during docs consolidation and deferred follow-ups. Check boxes when done; link PRs when useful.
 
 ---
 
 ## Product UI copy (code changes)
 
-- [ ] **Learn tab accuracy pass** (`src/routes/+page.svelte` Learn view)
-  - Align with README prerequisites: Foundry runtime **bundled**; call out **Node.js on PATH** for the JS sidecar if end users still need it.
-  - Keep tool-calling boundary accurate (Foundry emits `tool_calls`; Flint does not execute tools).
-  - Mention newer surfaces if useful (Monitor, Integrations, Compare) without turning Learn into a full manual.
-  - Source of truth after docs PR: [README.md](../README.md) + this backlog item.
+- [x] **Learn tab accuracy pass** (`src/routes/+page.svelte` Learn view) — Node 18+ + bundled Foundry + Around the app.
+- [x] **`flint-context.ts` fact sheet** — 0.3 surfaces + Node 18+ dependency called out.
+- [x] **In-app Integrations / Diagnostics / boot copy** — boot notice shows Node preflight errors with guidance.
+- [x] **Node preflight** — `src/lib/node-runtime.ts` + `ensureNodeRuntime()` before sidecar spawn; shell allow `node -v` / `--version`.
 
-- [ ] **`flint-context.ts` fact sheet** (`src/lib/flint-context.ts`)
-  - Keep feature list aligned with shipped 0.3+ capabilities when product docs change.
-  - Ensure host-aware context strings do not claim “no dependencies” if Node is still required for the sidecar.
+## Release process
 
-- [ ] **In-app Integrations / Diagnostics copy**
-  - Spot-check endpoint / Node / install wording against README after any runtime packaging change (e.g. self-contained sidecar).
+- [x] **CHANGELOG 0.3.0 section** — hand-written from scorecard + bonus features.
+- [x] **Updater endpoint URL** — `joelst/flint` in `tauri.conf.json`.
+- [ ] **Updater pubkey** — generate with `npx tauri signer generate -w ~/.tauri/flint.key`; replace `PLACEHOLDER` in `tauri.conf.json` (do not commit private key).
+- [ ] **GitHub signing secrets** — `WINDOWS_CERTIFICATE` + `WINDOWS_CERTIFICATE_PASSWORD` per [RELEASE.md](./RELEASE.md).
+- [ ] **RC / tag** — `workflow_dispatch` then `v0.3.0` per [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md).
 
-## Release process (not docs structure)
+## Runtime strategy (post-0.3)
 
-- [ ] **CHANGELOG 0.3.0 section** — hand-write or retroactive changeset covering scorecard + host-aware context + web-fetch (see [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) ship checklist).
-- [ ] **Updater pubkey + endpoint placeholders** — generate keys, set real `owner/repo` in `tauri.conf.json`.
-- [ ] **GitHub signing secrets** — configure per [RELEASE.md](./RELEASE.md).
+- [ ] **0.4+ targeted Rust bridge** — move selected sidecar commands into Tauri/Rust invoke (or thin Rust sidecar) incrementally; keep JS Node sidecar as fallback; shrink shell-spawn surface over time. Not a big-bang rewrite.
+- [ ] **Optional Node bundling spike** — only if dogfood still hurts after preflight: try pkg **or** stock Node binary; measure size + Foundry SDK native load before adopting. Do not claim “zero deps” until green.
+- [ ] **1.0 aspirational** — no end-user Node if Rust (or bundled runtime) covers the sidecar surface.
 
 ## Docs hygiene (later)
 
-- [ ] **Slim RELEASE_ROADMAP §1–2** (0.1 postmortem) into a short History appendix after `v0.3.0` is tagged.
-- [ ] **Optional root `CONTRIBUTING.md`** that only links [DEVELOPMENT.md](./DEVELOPMENT.md) (GitHub convention).
-- [ ] **Optional CI markdown link check** for `*.md` internal links.
-- [ ] **Local cleanup** of gitignored `docs/pool-spike-results/*-FAILED.*` on developer machines (not tracked).
+- [ ] **Slim RELEASE_ROADMAP §1–2** (0.1 postmortem) after `v0.3.0` tag.
+- [ ] **Optional root `CONTRIBUTING.md`** linking [DEVELOPMENT.md](./DEVELOPMENT.md).
+- [ ] **Optional CI markdown link check**.
+- [ ] **Local cleanup** of gitignored `docs/pool-spike-results/*-FAILED.*`.
 
 ## Process guardrails (already adopted)
 
@@ -41,4 +39,4 @@ Track progress by checking boxes and linking PRs when work starts.
 
 ---
 
-**Last updated:** 2026-07-08 (docs consolidation)
+**Last updated:** 2026-07-08 (Node preflight + deferred release ops)

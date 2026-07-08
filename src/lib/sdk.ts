@@ -2,7 +2,17 @@ import { writable, type Writable } from 'svelte/store';
 import { Command } from '@tauri-apps/plugin-shell';
 import { resolveResource, resourceDir } from '@tauri-apps/api/path';
 import type { LaneName, EndpointProfile } from './ipc-contracts';
+import {
+  evaluateNodeProbe,
+  buildNodeMissingMessage,
+  type NodePreflightResult,
+} from './node-runtime';
 export type { LaneName, EndpointProfile };
+export {
+  MIN_NODE_VERSION,
+  formatNodeVersion,
+  type NodePreflightResult,
+} from './node-runtime';
 
 // Sidecar-based implementation for clean production builds.
 // We never import 'foundry-local-sdk' in the web bundle.
@@ -50,6 +60,17 @@ function formatStartupFailure(
   closeData: any,
   commandError: string | null
 ): string {
+  const combined = [commandError, ...stderrLines].filter(Boolean).join(' ');
+  const lower = combined.toLowerCase();
+  if (
+    lower.includes('enoent') ||
+    lower.includes('not found') ||
+    lower.includes('is not recognized') ||
+    lower.includes('program not found')
+  ) {
+    return buildNodeMissingMessage();
+  }
+
   const details: string[] = [`stdout listener fired: ${stdoutEventFired}`];
 
   if (commandError) {
@@ -69,6 +90,39 @@ function formatStartupFailure(
   }
 
   return `Sidecar did not emit ready signal (${details.join(', ')})`;
+}
+
+/**
+ * Verify Node.js is on PATH and meets MIN_NODE_VERSION before spawning the sidecar.
+ */
+export async function ensureNodeRuntime(): Promise<NodePreflightResult> {
+  let stdout = '';
+  let probeError: string | null = null;
+  try {
+    const command = Command.create('node', ['-v']);
+    const output = await command.execute();
+    stdout = decodeShellOutput(output.stdout ?? '');
+    const stderr = decodeShellOutput(output.stderr ?? '').trim();
+    if (output.code !== 0 && output.code !== null && output.code !== undefined) {
+      probeError =
+        stderr ||
+        `node -v exited with code ${output.code}` +
+          (stdout ? ` (stdout: ${stdout.trim()})` : '');
+    } else if (!stdout.trim() && stderr) {
+      // Some environments print version to stderr.
+      stdout = stderr;
+    }
+  } catch (e: any) {
+    probeError = e?.message ? String(e.message) : String(e);
+  }
+
+  const result = evaluateNodeProbe({ stdout, probeError });
+  if (result.ok) {
+    console.log(`[sdk] Node preflight OK: ${result.version.raw}`);
+  } else {
+    console.error(`[sdk] Node preflight failed (${result.code}):`, result.message);
+  }
+  return result;
 }
 
 function getTauriDevRepoRoot(resolvedResourcePath: string): string | null {
@@ -182,6 +236,12 @@ export function getSDKState() {
 
 async function startSidecar() {
   if (sidecarProcess) return;
+
+  const nodeCheck = await ensureNodeRuntime();
+  if (!nodeCheck.ok) {
+    updateState({ ready: false, error: nodeCheck.message });
+    throw new Error(nodeCheck.message);
+  }
 
   // Resolve sidecar script path using resolveResource (handles dev + prod bundles correctly)
   let script: string;
@@ -459,7 +519,12 @@ export async function initializeSDK(config: Partial<any> = {}): Promise<boolean>
     }
     return true;
   } catch (e: any) {
-    const errMsg = `Sidecar init failed: ${e?.message || e}`;
+    const raw = String(e?.message || e || 'Unknown error');
+    // Node preflight messages are already complete user guidance — don't wrap them.
+    const errMsg =
+      raw.includes('nodejs.org') || raw.includes('Node.js')
+        ? raw
+        : `Sidecar init failed: ${raw}`;
     updateState({ error: errMsg, ready: false });
     return false;
   } finally {

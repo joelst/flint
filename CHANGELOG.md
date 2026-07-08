@@ -13,9 +13,33 @@ Entries are normally produced via [Changesets](https://github.com/changesets/cha
 
 - (Changesets will populate entries here when Version Packages PRs are merged.)
 
+## [0.3.0]
+
+### Added
+
+- **Model pool** — concurrent multi-model load with variant-ID HTTP routing; pool visible in Monitor.
+- **Monitor** — live pool table, resource gauges, access log, audit export (CSV/JSON).
+- **Access log + audit trail** — ring buffer + `~/.flint/logs/` rotation; audit entries for destructive/config sidecar commands.
+- **Network config** — configurable bind address and port in Settings (loopback default; warning for non-loopback).
+- **Keyboard shortcuts** — view navigation, new chat, send, push-to-talk, `?` reference panel.
+- **Autostart + defaults** — OS login-item toggle; default chat/audio model pre-selection.
+- **Vision** — multi-image attach (up to 4), thumbnails, paste and drag-and-drop.
+- **Model comparison** — side-by-side bake-off, ratings, markdown export.
+- **Integrations** — data-driven OpenAI-compatible tool snippets with OS toggle and copy.
+- **Host-aware chat context** — compact identity every turn; expanded fact sheet when the user asks about Flint/Foundry.
+- **Guarded web-fetch → chat context** — user-initiated URL fetch with SSRF/size limits and article extraction.
+- **Purview governance memo** — design-only (`docs/PURVIEW_GOVERNANCE.md`).
+- **Release pipeline scaffolding** — updater plugin hooks, signing workflow steps (self-signed bootstrap).
+- **Node.js preflight** — check Node 18+ on PATH before starting the JS sidecar; actionable install guidance when missing or too old.
+- **Docs consolidation** — living docs index, DEVELOPMENT/RELEASE guides, archived historical plans, backlog for deferred items.
+
+### Changed
+
+- README and design spec aligned to 0.3 status; honest prerequisites (bundled Foundry runtime; Node required for sidecar).
+
 ### Notes
 
-- App version may already read `0.3.0` in package manifests while this file awaits a reconciled **0.3.0** section (see [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) ship checklist and [docs/BACKLOG.md](./docs/BACKLOG.md)).
+- Version was bumped to 0.3.0 across package manifests; this section records shipped scope for the tag. Updater pubkey and code-signing secrets remain release-operator steps (see `docs/RELEASE.md` and `RELEASE_ROADMAP.md`).
 
 ## [0.2.0]
 

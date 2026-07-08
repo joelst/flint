@@ -1,6 +1,6 @@
 # Flint Release Roadmap (0.1 → 1.0)
 
-**Last updated:** 2026-07-08 (rev. 3 — docs consolidated; historical plans under `docs/archive/`; process: one living planner)  
+**Last updated:** 2026-07-08 (rev. 4 — Node 18+ preflight + honest copy; CHANGELOG 0.3.0; updater endpoint `joelst/flint`; pubkey/secrets still open)  
 **Original date:** 2026-06-24  
 **Scope:** Living release roadmap — tracks readiness decisions, known limitations, and per-release objectives from MVP 0.1 through 1.0. This is the **only** living release planner; do not maintain parallel sprint + remaining-implementation docs for the same milestone (see [docs/README.md](./docs/README.md)).
 
@@ -48,11 +48,11 @@ All planned 0.3 feature work is complete, and two unplanned features were delive
 ### Remaining 0.3 release blockers (in dependency order)
 
 1. **Generate updater signing key** — `npx tauri signer generate -w ~/.tauri/flint.key`; replace `PLACEHOLDER` pubkey in `src-tauri/tauri.conf.json` → `plugins.updater.pubkey`
-2. **Fix placeholder release URL** — `src-tauri/tauri.conf.json` updater endpoint still reads `github.com/YOUR_ORG/flint/...`; set to the real `owner/repo`
+2. ~~**Fix placeholder release URL**~~ — ✅ endpoint set to `joelst/flint`
 3. **Configure GitHub repo secrets** — `WINDOWS_CERTIFICATE` + `WINDOWS_CERTIFICATE_PASSWORD` (self-signed PFX); see [docs/RELEASE.md](./docs/RELEASE.md)
-4. **Reconcile CHANGELOG / changeset** — version is already at `0.3.0` but no changeset was recorded. Either author a retroactive changeset or hand-write the `0.3.0` `CHANGELOG.md` section covering all scorecard items **plus** the two bonus features (host-aware context, web-fetch)
+4. ~~**Reconcile CHANGELOG**~~ — ✅ hand-written `[0.3.0]` section in `CHANGELOG.md`
 5. **Pre-test release workflow** — `workflow_dispatch` on `.github/workflows/release.yml` with version `0.3.0-rc1` before tagging
-6. **PR `mvp-0.3` → `main`** — wait for CI green, merge (untracked files `flint-context.ts` / `.test.ts` / `flint-context` wiring must be committed first)
+6. **PR `mvp-0.3` → `main`** — wait for CI green, merge
 7. **Tag `v0.3.0`** — triggers release workflow → signed installers + updater metadata artifacts
 
 ---
@@ -464,19 +464,21 @@ If 0.1 is "usable MVP" and 0.2 is "hardened + scalable architecture", then **1.0
 
 > Version is already `0.3.0` in all three files, so the old "bump" steps are replaced by "commit the outstanding work + reconcile the changelog." The signing/secrets steps are unchanged and remain the true blockers.
 
-| Step | Action | Owner |
-|---|---|---|
-| 1 | **Commit outstanding 0.3 work** — the branch has uncommitted changes (sidecar `fetchUrl`, `sdk.ts`, `+page.svelte`) and untracked `src/lib/flint-context.ts` + `flint-context.test.ts` + `sidecar/scripts/accelerator-memory.ps1`. Stage, run `npm run check` + tests, commit. | Dev |
-| 2 | **Reconcile CHANGELOG** — author a retroactive changeset (or hand-write the `0.3.0` section) covering every scorecard row **plus** host-aware context and web-fetch. | Dev |
-| 3 | Generate Tauri updater signing key: `npx tauri signer generate -w ~/.tauri/flint.key` | Dev |
-| 4 | Replace `PLACEHOLDER` pubkey in `src-tauri/tauri.conf.json` → `plugins.updater.pubkey` | Dev |
-| 5 | Fix `YOUR_ORG` placeholder in the updater endpoint URL (`src-tauri/tauri.conf.json`) → real `owner/repo` | Dev |
-| 6 | Generate self-signed Windows PFX cert; set `WINDOWS_CERTIFICATE` + `WINDOWS_CERTIFICATE_PASSWORD` in GitHub repo secrets | Dev |
-| 7 | Test release workflow: `workflow_dispatch` on `.github/workflows/release.yml` with version `0.3.0-rc1` | Dev |
-| 8 | Fix any pipeline issues found in step 7 | Dev |
-| 9 | PR `mvp-0.3` → `main`; wait for CI green; merge | Dev |
-| 10 | `git tag v0.3.0 && git push origin v0.3.0` → triggers signed release build | Dev |
-| 11 | Review draft release on GitHub; publish when artifacts look correct | Dev |
+| Step | Action | Owner | Status |
+|---|---|---|---|
+| 1 | Commit outstanding 0.3 product work | Dev | ✅ Done |
+| 2 | Hand-write `CHANGELOG.md` **0.3.0** section | Dev | ✅ Done |
+| 3 | Generate Tauri updater signing key: `npx tauri signer generate -w ~/.tauri/flint.key` | Dev | ⬜ |
+| 4 | Replace `PLACEHOLDER` pubkey in `src-tauri/tauri.conf.json` | Dev | ⬜ |
+| 5 | Fix updater endpoint to real `owner/repo` | Dev | ✅ `joelst/flint` |
+| 6 | Self-signed Windows PFX → GitHub secrets (`WINDOWS_CERTIFICATE` + password) | Dev | ⬜ |
+| 7 | Test release workflow: `workflow_dispatch` with `0.3.0-rc1` | Dev | ⬜ |
+| 8 | Fix any pipeline issues from step 7 | Dev | ⬜ |
+| 9 | PR `mvp-0.3` → `main`; CI green; merge | Dev | ⬜ |
+| 10 | Tag `v0.3.0` → signed release build | Dev | ⬜ |
+| 11 | Review draft release; publish | Dev | ⬜ |
+
+Also landed for dogfood UX: **Node.js 18+ preflight** before sidecar spawn + Learn/fact-sheet honesty ([docs/BACKLOG.md](./docs/BACKLOG.md)). **0.4+**: targeted Rust bridge for selected sidecar commands (not big-bang rewrite).
 
 ### Start 0.4 planning (after 0.3 ships)
 

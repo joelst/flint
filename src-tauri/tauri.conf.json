@@ -41,7 +41,7 @@
     "updater": {
       "pubkey": "PLACEHOLDER - run: npx tauri signer generate   (copy the public key here for self-signed bootstrap)",
       "endpoints": [
-        "https://github.com/YOUR_ORG/flint/releases/download/{{current_version}}/latest.json"
+        "https://github.com/joelst/flint/releases/download/{{current_version}}/latest.json"
       ],
       "windows": {
         "installMode": "passive"

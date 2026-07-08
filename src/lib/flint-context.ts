@@ -23,7 +23,7 @@ export const FLINT_FACT_SHEET = `[About FLInt & Foundry Local — use when the u
 
 ## Foundry Local (Microsoft)
 - On-device AI runtime from Microsoft: download, cache, and run models locally (not cloud by default).
-- Ships as a compact runtime; FLInt can bundle/use it so users often need no separate CLI install.
+- Compact runtime; FLInt bundles it so users usually need no separate Foundry CLI install.
 - Model catalog with aliases and hardware-specific variants (CPU / GPU / NPU; e.g. CUDA, DirectML, CoreML/Metal, QNN).
 - OpenAI-compatible local HTTP API (chat completions, and audio/STT where models support it).
 - Tool/function calling: when a model supports it, the API can return tool_calls JSON; the *client* that calls the endpoint executes tools—not the runtime itself.
@@ -33,12 +33,13 @@ export const FLINT_FACT_SHEET = `[About FLInt & Foundry Local — use when the u
 
 ## FLInt (this app)
 - FLInt = Foundry Local Interface: desktop GUI to manage Foundry Local without deep CLI knowledge.
-- Features: model catalog (download/load/unload variants), chat, audio transcription, diagnostics/monitor, settings, Learn, Integrations snippets for external tools.
+- Features: model catalog + multi-model pool (download/load/unload), chat (multi-image vision, host context, optional URL→context fetch), audio STT, side-by-side Compare, Monitor (pool/resources/access+audit logs), Integrations snippets, Diagnostics/Settings (bind/port, autostart, shortcuts), Learn.
+- Dependencies: Foundry Local runtime is bundled; Node.js 18+ must be on PATH for the JS sidecar (until a self-contained/Rust bridge removes that).
 - Local-first UX: clear when inference is on-device; default bind is localhost for the service.
-- Chat window is display-only: it does not parse or execute tool calls, run shell/file ops, or make network requests for the model.
+- Chat window is display-only: it does not parse or execute tool calls, run shell/file ops, or make network requests for the model (guarded web-fetch is user-initiated URL context only).
 - External tools (Continue, Cline, Copilot custom provider, user code, etc.) can point at the local endpoint for agentic/tool workflows.
 - What you (the model in FLInt chat) cannot do: change UI, load/unload models, execute tools, access files, or browse the network on the user's behalf.
-- If asked how to do something in the app, give concise UI steps (Models / Chat / Audio / Settings / Integrations / Learn).
+- If asked how to do something in the app, give concise UI steps (Models / Chat / Audio / Compare / Monitor / Integrations / Diagnostics / Settings / Learn).
 - If unsure about a version-specific detail, say so rather than inventing.`;
 
 /** Patterns that suggest the user wants app/runtime help (not general knowledge). */
