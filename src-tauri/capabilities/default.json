@@ -11,8 +11,6 @@
     "autostart:allow-enable",
     "autostart:allow-disable",
     "autostart:allow-is-enabled",
-    // Updater permissions (added for 0.3 release pipeline / self-signed artifacts).
-    // Runtime "check for updates" UI is deferred until pre-1.0.
     "updater:allow-check",
     "updater:allow-download-and-install",
     {
