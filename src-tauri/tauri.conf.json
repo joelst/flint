@@ -45,7 +45,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "RWRm0j2GG3djmPfSJYpL1EmX2gjtpZE9b/u7mheiyGBDICy9pmEj9mw/",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc1NTI3QUZEMjQwRUQ2QzMKUldURDFnNGsvWHBTZFg1OHNjWXFDaVpCNk80Nlp3Sk5lVis1eEdSOGFQSXJJMStQR1lpSmNGcXUK",
       "endpoints": [
         "https://github.com/joelst/flint/releases/download/v{{current_version}}/latest.json"
       ],
