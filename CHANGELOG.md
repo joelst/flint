@@ -1,5 +1,12 @@
 # Flint Changelog
 
+## 0.3.1
+
+### Patch Changes
+
+- c413a91: Add acceleration-aware notifications for newer downloaded model variants.
+- 724eecf: Fix release build failure by using platform-specific bundle targets (msi/nsis on Windows, dmg/app on macOS) and enabling updater artifacts via `createUpdaterArtifacts` in the Tauri config.
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
