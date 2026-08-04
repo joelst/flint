@@ -8,6 +8,11 @@
     "opener:default",
     "fs:default",
     "dialog:default",
+    "autostart:allow-enable",
+    "autostart:allow-disable",
+    "autostart:allow-is-enabled",
+    "updater:allow-check",
+    "updater:allow-download-and-install",
     {
       "identifier": "shell:allow-spawn",
       "allow": [
@@ -15,6 +20,16 @@
           "name": "node",
           "cmd": "node",
           "args": [{ "validator": "^[^-].*[/\\\\]foundry-sidecar\\.js$" }]
+        }
+      ]
+    },
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "node",
+          "cmd": "node",
+          "args": [{ "validator": "^(-v|--version)$" }]
         }
       ]
     },

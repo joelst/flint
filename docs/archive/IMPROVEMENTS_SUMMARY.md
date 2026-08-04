@@ -1,3 +1,5 @@
+> **Archived.** Historical planning artifact. Current status: [RELEASE_ROADMAP.md](../../RELEASE_ROADMAP.md). Do not treat checklists in this file as live work.
+
 # Sidecar & Chat UI Improvements - Summary
 
 **Date:** 2026-06-24

@@ -3,14 +3,14 @@ export type LaneName = 'chat' | 'audio';
 export type SidecarCommand =
   | { cmd: 'init'; appName: string; logLevel: string }
   | { cmd: 'setLogLevel'; level: string }
-  | { cmd: 'startService'; port: number; alias?: string; preferredEp?: string }
+  | { cmd: 'startService'; port: number; alias?: string; preferredEp?: string; bindAddress?: string }
   | { cmd: 'stopService' }
   | { cmd: 'getStatus' }
   | { cmd: 'listModels' }
-  | { cmd: 'download'; alias: string }
-  | { cmd: 'load'; alias: string; lane?: LaneName }
+  | { cmd: 'download'; alias: string; variantId?: string }
+  | { cmd: 'load'; alias: string; lane?: LaneName; variantId?: string }
   | { cmd: 'unload'; alias: string; lane?: LaneName }
-  | { cmd: 'deleteModel'; alias: string }
+  | { cmd: 'deleteModel'; alias: string; variantId?: string }
   | { cmd: 'getEndpoint' }
   | { cmd: 'chatCompletion'; model: string; messages: unknown[]; maxTokens?: number; temperature?: number; preferredEp?: string; stream?: boolean }
   | { cmd: 'cancelChatRequest'; requestId: number }
@@ -18,7 +18,10 @@ export type SidecarCommand =
   | { cmd: 'getEps' }
   | { cmd: 'ensureAccelerators' }
   | { cmd: 'getVisionModels' }
-  | { cmd: 'getSTTModels' };
+  | { cmd: 'getSTTModels' }
+  | { cmd: 'poolStatus' }
+  | { cmd: 'getAccessLog' }
+  | { cmd: 'fetchUrl'; url: string; maxChars?: number };
 
 export type SidecarCommandName = SidecarCommand['cmd'];
 
@@ -27,6 +30,7 @@ export const KNOWN_COMMANDS = new Set<SidecarCommandName>([
   'listModels', 'download', 'load', 'unload', 'deleteModel', 'getEndpoint',
   'chatCompletion', 'cancelChatRequest', 'transcribeAudio',
   'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',
+  'poolStatus', 'getAccessLog', 'fetchUrl',
 ]);
 
 /**

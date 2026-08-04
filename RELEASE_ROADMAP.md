@@ -1,13 +1,66 @@
-# Flint Release Roadmap (0.1 -> 1.0)
+# Flint Release Roadmap (0.1 → 1.0)
 
-**Date:** 2026-06-24
-**Scope:** Readiness decision for MVP 0.1, known limitations, MVP 0.2 plan, and 1.0 definition.
+**Last updated:** 2026-08-03 (rev. 6 — acceleration-aware model update notifications pulled into 0.3; release configuration gates still open)
+**Original date:** 2026-06-24  
+**Scope:** Living release roadmap — tracks readiness decisions, known limitations, and per-release objectives from MVP 0.1 through 1.0. This is the **only** living release planner; do not maintain parallel sprint + remaining-implementation docs for the same milestone (see [docs/README.md](./docs/README.md)).
+
+---
+
+## Release Status Dashboard
+
+| Release | Branch | Version | Status |
+|---|---|---|---|
+| **0.1** | `mvp-0.1-alpha` | 0.1.0 | ✅ Released (dogfood baseline) |
+| **0.2** | merged → `main` | 0.2.0 | ✅ Released (security hardening + lane routing) |
+| **0.3** | `mvp-0.3` | **0.3.0 (bumped, unreleased)** | 🟡 Feature-complete + over-delivered; version bumped; awaiting updater key + signing secrets + release tag |
+| **0.4** | Not started | — | 📋 Planned |
+| **1.0** | Not started | — | 📋 Planned |
+
+---
+
+## 0.3 Progress Scorecard (as of 2026-07-08, rev. 2)
+
+All planned 0.3 feature work is complete, and three unplanned features were delivered on top of scope (host-aware chat context, a guarded web-fetch → chat-context pipeline, and acceleration-aware model update notifications). The version is already bumped to `0.3.0` across all three files. The remaining gate to shipping is release mechanics: generate the updater signing key, configure Windows signing secrets, restore green PR CI, validate the release workflow, and cut the tag.
+
+| Success Criterion | Status | Notes |
+|---|---|---|
+| Model pool (multi-model concurrent load + pool visible in Monitor) | ✅ Complete | `Map<alias,{catModel,variantId}>`, `ensureModel`, HTTP routing by variantId |
+| Access log (IPC requests in Monitor tab + `~/.flint/logs/`) | ✅ Complete | Ring buffer (500 entries) + 7-day disk rotation |
+| Audit trail (8 destructive/config commands produce `type:audit` entries) | ✅ Complete | `init`, `download`, `load`, `unload`, `deleteModel`, `startService`, `stopService`, `setLogLevel` |
+| Monitoring view (pool table, resource gauge, access log table, export) | ✅ Complete | Monitor tab with live polling, CSV/JSON export |
+| Network config (bind address + port configurable in Settings) | ✅ Complete | 127.0.0.1 default preserved; warning banner for non-loopback |
+| Keyboard shortcuts (send, new chat, view navigation, push-to-talk, `?` ref panel) | ✅ Complete | Ctrl/Cmd+1–5, B, N, `,`, Space, Enter; shortcut reference modal |
+| Auto-start (default chat + audio model pre-selected on launch) | ✅ Complete | `tauri-plugin-autostart` integrated; OS login-item toggle |
+| Vision: multiple images (up to 4, thumbnail strip, drag-and-drop) | ✅ Complete | `attachedImages[]` state, paste + drag-and-drop, vision-gated |
+| Model comparison / bake-off (two models side-by-side, ratings, export) | ✅ Complete | Compare tab, parallel non-streaming runs, thumbs up/down, markdown export |
+| Purview SDK governance memo | ✅ Complete | `docs/PURVIEW_GOVERNANCE.md` |
+| Integration snippets / tool onboarding | ✅ Complete | Integrations tab, data-driven catalog, OS toggle, copy buttons |
+| CI/CD: release pipeline scaffolding + updater plugin infrastructure | ⚠️ Partial | Workflow, updater plugin, signing steps in place; updater pubkey = PLACEHOLDER; certs not yet in repo secrets |
+| Version bump to 0.3.0 | 🟡 Done, no changeset | All three files at `0.3.0`; bumped directly, **skipping `npm run changeset`** → `CHANGELOG.md` has no 0.3 section yet |
+
+### Bonus — delivered beyond original 0.3 scope
+
+| Feature | Status | Notes |
+|---|---|---|
+| Host-aware chat context (`flint-context.ts`) | ✅ Complete | Compact identity line every turn + expanded Foundry/Flint fact sheet gated on app-intent regex; de-dupes against persona; unit-tested (`flint-context.test.ts`) |
+| Guarded web-fetch → chat context (`fetchUrl`) | ✅ Complete | Sidecar command: http/https-only, private/loopback SSRF block, size cap, `@mozilla/readability` + `jsdom` article extraction, access-log audit entry. SDK method + chat URL-detection chips + context injection. Type-checks clean; release build produced `Flint_0.3.0_x64_en-US.msi`. **This is a down-payment on 0.4 RAG** (the "inject external content as context" pipeline). |
+| Acceleration-aware model update notifications | ✅ Complete | Cached variants are compared only with newer catalog variants in the same SDK model-name/runtime track, preventing CPU/GPU/NPU cross-grade suggestions. Models view shows update counts and direct per-variant downloads. |
+
+### Remaining 0.3 release blockers (in dependency order)
+
+1. **Generate updater signing key** — `npx tauri signer generate -w ~/.tauri/flint.key`; replace `PLACEHOLDER` pubkey in `src-tauri/tauri.conf.json` → `plugins.updater.pubkey`
+2. ~~**Fix placeholder release URL**~~ — ✅ endpoint set to `joelst/flint`
+3. **Configure GitHub repo secrets** — `WINDOWS_CERTIFICATE` + `WINDOWS_CERTIFICATE_PASSWORD` (self-signed PFX); see [docs/RELEASE.md](./docs/RELEASE.md)
+4. ~~**Reconcile CHANGELOG**~~ — ✅ hand-written `[0.3.0]` section in `CHANGELOG.md`
+5. **Pre-test release workflow** — `workflow_dispatch` on `.github/workflows/release.yml` with version `0.3.0-rc1` before tagging
+6. **PR `mvp-0.3` → `main`** — wait for CI green, merge
+7. **Tag `v0.3.0`** — triggers release workflow → signed installers + updater metadata artifacts
 
 ---
 
 ## 1) MVP 0.1 Readiness Review (against original MVP plan)
 
-Original MVP expectation (from `FLINT_DESIGN_SPEC.md` and `MVP_FEATURE_COMPLETION_PLAN.md`) was:
+Original MVP expectation (from `FLINT_DESIGN_SPEC.md` and the archived `docs/archive/MVP_FEATURE_COMPLETION_PLAN.md`) was:
 
 - Model management (catalog/search/download/load/unload)
 - Streaming chat UX
@@ -144,9 +197,17 @@ This is not "feature complete forever"; it is a valid 0.1 checkpoint with clear 
 - **Tooling:** tool-calling boundaries are documented, and the Flint/Foundry Local split is explicit in docs and UI copy.
 - **Voice:** dictation can feed the chatbox in real time, with a clear fallback to the current transcription flow.
 
+### MVP 0.2 Status: ✅ RELEASED (v0.2.0)
+
+All exit criteria met. Merged to `main` as v0.2.0 via PR #2. Security hardening, lane routing, reliability improvements, and version/changeset infrastructure are all in place.
+
 ---
 
 ## 4) MVP 0.3 Plan
+
+> **Status (2026-07-08): Feature-complete on `mvp-0.3` branch. See the [0.3 Progress Scorecard](#03-progress-scorecard-as-of-2026-07-08) at the top of this document for the detailed grade. All core and stretch items are done; the remaining gate is cutting the signed release.**
+>
+> Items 3 (Vision multi-image) and 4 (Model comparison) were originally listed as 0.4 scope but were pulled into the 0.3 sprint and completed. Items A (Audit log export) and B (Network config UI) were similarly pulled from 0.4 and completed.
 
 ### 0.3 objectives
 
@@ -169,13 +230,56 @@ Routing in Flint touches several layers and needs deliberate design before any s
 
 ### What is in 0.3 (proposed)
 
+0. **Integration snippets / tool onboarding** (first milestone — easiest user-visible win)
+   - Dedicated **Integrations** nav section listing AI coding tools that can use Flint's local OpenAI-compatible endpoint.
+   - **Reference model**: Ollama's [integrations page](https://docs.ollama.com/integrations) — same shape (categorized tool cards with copy-paste setup), but Flint does **not** ship CLI installers / one-line install scripts. Snippets only; the user runs the tool install themselves.
+   - Data-driven catalog (`src/lib/integrations.ts`) with per-tool:
+     - Name, description, category, status (`verified` / `community` / `research-needed` / `unsupported`).
+     - OS-specific setup snippets (Windows PowerShell + macOS/Linux bash).
+     - Required env vars / config-file paths / CLI flags.
+     - Known limitations (e.g. requires translation proxy for non-OpenAI-protocol tools).
+     - Upstream docs link for verification.
+   - Card UI with OS toggle, copy buttons, expandable "limitations" panel, status badge.
+   - **Initial verified entries (target for first cut)**: Continue.dev, generic OpenAI SDK.
+   - **Community-reported entries**: GitHub Copilot for VS Code (native Foundry Local support), OpenClaw via LiteLLM proxy.
+   - **Research-needed scaffolds (banner says "unverified")**: OpenCode, Codex CLI, Cline, Hermes Agent, Droid, Pi.
+   - **Documented as unsupported / proxy-required**: Claude Code (Anthropic protocol — needs LiteLLM translation proxy), GitHub Copilot **CLI** (GH-proprietary backend, distinct from the VS Code extension), OpenAI Codex App (hosted, not redirectable).
+   - **Out of scope for 0.3**: auto-run "install for me" buttons that would write to user shell configs / VS Code settings. Snippets only — preserves the least-privilege shell capability work from 0.2.
+
+0b. **Local API-key proxy and multi-model routing** (research)
+
+   - Many OpenAI-compat clients enforce non-empty / well-formed API keys; "dummy" strings work in some clients and fail in others (header validation, key prefix checks, etc.). Some agentic tools also expect bearer tokens for sub-features (telemetry endpoints, billing checks) that fail noisily against a local endpoint that has no auth surface.
+   - **Investigate**: bundling a tiny optional auth-proxy in front of Flint's local endpoint that (a) accepts any key matching a user-issued local token, (b) optionally translates OpenAI → Anthropic protocol for Claude Code, (c) issues per-tool tokens visible in a "local API keys" UI for audit/revoke.
+   - **Two-for-one opportunity**: the same proxy layer could also provide the **request-routing fabric** called for in item 1 (model pool) and the routing-research block — LiteLLM-style proxies natively support cross-backend routing rules (capability-based, fallback, sticky). If Flint already runs a local proxy, the routing layer is "free."
+   - **Candidate stack**: LiteLLM (mature, already widely referenced for OpenClaw + Azure Foundry recipes).
+   - **Trade-offs to weigh explicitly before adopting**:
+     - **Pro**: solves dummy-keys, protocol translation, multi-backend routing, audit-able local tokens — all in one component already battle-tested across the ecosystem.
+     - **Pro**: removes the need for Flint to write a routing layer from scratch (less Flint code = less Flint security surface).
+     - **Con**: pulls in a Python runtime and its full transitive dependency tree (FastAPI, uvicorn, Pydantic, provider SDKs). Each is its own CVE surface to track.
+     - **Con**: LiteLLM ships frequent releases with breaking changes; bundling pins us to coordinating updates or shipping a wide version range.
+     - **Con**: violates the current "bundle is ~20 MB, runtime is just Foundry Local + Node sidecar" footprint promise. Embedding Python is a category change for Flint's install size and threat model.
+   - **Decision needed before implementation**: is this Flint-owned (bundled sub-process, integrated UI) or a documented external dependency (linked recipe, opt-in install)? Strong lean toward **documented external dependency** for 0.3 — keeps Flint small and lets the security-conscious user opt into the proxy explicitly. Bundling is a 0.4-or-later conversation, contingent on the routing layer becoming a must-have rather than a nice-to-have.
+   - **Direct-integration first; no compatibility hacks**: where a client supports a standard OpenAI base-URL override (e.g. OpenClaw per its [local-models docs](https://open-claw.bot/docs/gateway/local-models/#other-openai-compatible-local-proxies)), Flint documents the direct path. Where a client is wire-bound to a different protocol (e.g. Claude Code → Anthropic Messages API), we mark it **unsupported** and point users at OpenAI-compatible alternatives. We do not ship translation-proxy workarounds that "kinda work" — a lossy bridge to Claude Code (no prompt caching, broken extended thinking, fragile tool-use) is worse than a clear "use a different client" message.
+
+0c. **Governance & telemetry research — Microsoft Purview SDK**
+
+   - Investigate the Microsoft Purview SDK / APIs for capturing useful governance data about Flint usage in managed environments (model-load events, endpoint access patterns, prompt/response audit hooks where the user opts in).
+   - **Goals**: surface enterprise-relevant signals (which models were loaded, by which user, what data crossed the local endpoint, retention) without breaking Flint's local-first / no-telemetry-by-default posture.
+   - **Constraints**:
+     - All Purview reporting must be off by default and gated by explicit per-machine policy (consistent with 0.4 enterprise controls).
+     - Must respect the security organization instruction not to ship customer PII or employee pay/HR data through generated reports.
+     - Prompt/response content is the most sensitive surface — default to metadata-only (event types, counts, model aliases, timestamps) unless the operator opts content in.
+   - **Deliverable in 0.3**: a short design memo answering: which Purview ingestion path (Activity Log API, Audit log, Information Protection labels), what metadata schema to emit, and what the opt-in UX looks like. Implementation lands no earlier than 0.4 enterprise controls.
+
 1. **Model pool (replaces named lanes)**
    - Replace `lane.chat` / `lane.audio` with a `Map<alias, LoadedModel>` pool in the sidecar.
    - `ensureModel(alias)` loads into the pool if absent; all callers (chat, audio, dictation) request by alias.
    - Keep the current lane routing hints (`lane?: 'chat' | 'audio'`) as soft labels for routing preference, not hard ownership.
    - Hardware-aware admission: before loading, estimate model VRAM footprint from catalog metadata and compare against available headroom. Fail gracefully with a clear "not enough memory" message rather than silent eviction.
    - Hot-switch: when the user switches chat models, the old model stays resident until explicitly unloaded or memory pressure forces eviction. No forced unload on switch.
-   - **Prerequisite spike**: confirm whether Foundry Local will keep two chat-class models resident simultaneously without silently evicting one. If it evicts, design budget-aware proactive eviction instead of optimistic pooling. Run this spike before designing the pool API.
+   - **Prerequisite spike — COMPLETE. Verdict: `optimistic-pool-works`.** Both models (phi-4-mini 4.9 GB + mistral-7b 4.2 GB) loaded simultaneously at 10.37 GB RSS with no eviction. HTTP routing works; chat-A-2 (185 ms) was faster than chat-A-1 (231 ms) confirming A stayed resident. Full results: [docs/pool-spike-results/pool-spike-2026-06-26T05-38-18-941Z.md](./docs/pool-spike-results/pool-spike-2026-06-26T05-38-18-941Z.md). Protocol: [docs/POOL_SPIKE.md](./docs/POOL_SPIKE.md); script: [sidecar/scripts/pool-spike.mjs](./sidecar/scripts/pool-spike.mjs).
+   - **Design finding — HTTP endpoint routes by variant ID, not alias.** `model: "phi-4-mini"` returns HTTP 400; `model: "Phi-4-mini-instruct-generic-cpu:5"` returns HTTP 200. The `ModelPool` must store `Map<alias, { model, variantId }>` and use the variant ID in all HTTP requests to the local service. External tools connecting to Flint's endpoint also need the variant ID — the Integrations tab snippets must document how to discover it.
+   - **Sidecar bug — `startWebService` call signature**: `foundry-sidecar.js` currently calls `manager.startWebService({ port })` but in the installed SDK version `startWebService()` takes no arguments and returns void; the actual endpoint URLs are read from `manager.urls` after the call. The `{ port }` argument is silently ignored, and the port/fallback-URL chain in the sidecar accidentally works only because it falls back to the hardcoded `http://localhost:${port}/v1` string. Fix this as part of the pool redesign: remove the argument, read `manager.urls` afterward, and surface the real bound URL in `getStatus`.
 
 2. **Monitoring view** (new nav section)
    - Live snapshot of the model pool: each loaded model with alias, lane hint, estimated VRAM, and last-used timestamp.
@@ -211,15 +315,27 @@ Routing in Flint touches several layers and needs deliberate design before any s
 - Full endpoint scheduler (sticky routing, fallback, health-check-based failover).
 - Persistent telemetry storage across sessions (token trend graphs, memory history).
 - Role-based access controls for shared-machine or shared-network scenarios.
-- Azure AI Foundry cloud connections (still high-priority but blocked on 0.3 security foundation).
+- Azure AI Foundry cloud connections (still high-priority but now **unblocked** after 0.3 security foundation).
+- Inline image previews inside chat thread message bubbles (vision attach works; bubble display deferred).
+- Async streaming model comparison (synchronous comparison shipped in 0.3; streaming side-by-side deferred).
+- Auto-update UX: in-app "Check for updates" flow deferred until pre-1.0.
 
 ---
 
 ## 5) MVP 0.4 Plan (outline)
 
+> **Note (2026-07-08):** Several items that were originally listed here were pulled forward into the 0.3 sprint and are now **complete**:
+> - ✅ Vision multi-image + drag-and-drop (shipped in 0.3)
+> - ✅ Model comparison / bake-off (shipped in 0.3)
+> - ✅ Enterprise controls: audit log export (shipped in 0.3)
+> - ✅ Enterprise controls: network config UI / bind address (shipped in 0.3)
+> - 🟡 **RAG "external content → context" pipeline partially started** — the 0.3 web-fetch feature (`fetchUrl` + chat URL-context injection) already builds the fetch → sanitize → inject-as-context path. 0.4 RAG extends this from single-URL to indexed local files. See RAG item below.
+>
+> The 0.4 scope below reflects the updated plan after these pull-ins.
+
 ### 0.4 objectives
 
-Expand Flint's inference capabilities beyond single-turn chat into multi-modal, retrieval-augmented, and comparative workflows. Add the enterprise control layer that makes shared and managed deployments viable.
+Expand Flint's inference capabilities into retrieval-augmented generation and tool-calling. Add the remaining enterprise control layer. Land Azure AI Foundry cloud connections, now unblocked by the 0.3 security foundation.
 
 ### What is in 0.4 (proposed)
 
@@ -244,44 +360,51 @@ Reasons to delegate:
 - Security surface: every tool execution step that doesn't require confirmation is an attack surface. Flint's local-first posture makes this risk higher, not lower.
 
 The narrow exception — **user-initiated linear chains**:
-A linear chain (run prompt A → pipe output into prompt B → show final result, with user triggering each step) is meaningfully different from an autonomous loop. It is closer to the model bake-off feature (0.4) than to agentic execution. If demand exists, Flint could support 2–3 step user-confirmed pipelines as a UI feature without building a general agent runtime. This would look like a "chain" tab, not an "agent" mode.
+A linear chain (run prompt A → pipe output into prompt B → show final result, with user triggering each step) is meaningfully different from an autonomous loop. If demand exists, Flint could support 2–3 step user-confirmed pipelines as a UI feature without building a general agent runtime. This would look like a "chain" tab, not an "agent" mode.
 
 **Decision to make before 0.4 tool calling work begins**: confirm with OpenClaw and Scout maintainers whether there are integration gaps that only a Flint-native execution layer could fill. If the answer is no, keep the manual-gate model and improve the endpoint/tool-call visibility surface instead.
 
 2. **RAG (retrieval-augmented generation)**
+   - **Already started in 0.3**: the `fetchUrl` web-fetch pipeline (guarded fetch → Readability extraction → inject as chat context) is the single-source version of this. 0.4 generalizes it to a persistent, indexed knowledge base.
    - Index local folders or files into an embedded vector store (e.g. sqlite-vec or a lightweight HNSW store).
-   - At query time, retrieve relevant chunks and inject into the system/context window before sending to the model.
-   - UI: attach a knowledge base to a conversation; show which chunks were retrieved and their sources.
-   - Scope: local files only for 0.4. Remote/URL indexing deferred.
+   - At query time, retrieve relevant chunks and inject into the system/context window before sending to the model — reuse the 0.3 context-injection path rather than building a new one.
+   - UI: attach a knowledge base to a conversation; show which chunks were retrieved and their sources (the web-fetch chips are the UI precedent).
+   - Scope: local files only for 0.4. Remote/URL indexing deferred — but single-URL fetch already ships in 0.3.
 
-3. **Vision — multi-image and previews**
-   - Extend the existing single-image attach to support multiple images per message.
-   - Inline image preview thumbnails in the chat thread before and after submission.
-   - Drag-and-drop image attachment directly into the chat input area.
-   - Scope-gated by catalog: only surfaces for models whose capability flags include vision.
-
-1. **Model comparison / bake-off**
-   - Run a single prompt simultaneously against two or more loaded models and display responses side-by-side.
-   - Optional scoring: rate each response (thumbs up/down or 1–5) to build a local preference log.
-   - Export comparison results as markdown or JSON for external analysis.
-   - Depends on the 0.3 model pool — multiple models must be resident simultaneously for this to be low-latency.
-
-2. **Workspace export / import**
+3. **Workspace export / import**
    - Export a workspace bundle: selected models list, endpoint profiles, personas, conversation history, settings.
    - Import a bundle to restore or migrate to another machine.
    - Credentials (auth tokens) excluded from export bundles; user must re-enter on import.
 
-3. **Enterprise controls and policy engine**
-   - Network configuration: choose bind address, port, and allowed CIDR ranges for the local service.
-   - Access policies: per-model or per-endpoint allow/deny rules; optional API key requirement for the local service.
-   - Audit log export: structured JSON/CSV export of the access log (from 0.3 monitoring) with retention settings.
+4. **Azure AI Foundry cloud connections** *(unblocked by 0.3 security foundation)*
+   - Add endpoint profiles for Azure AI Foundry (name/type/base URL/auth/routing role).
+   - Connect to cloud-hosted models alongside local Foundry Local models in the same session.
+   - Surface cloud endpoints in the model catalog and lane routing UI.
+   - Credential storage: secure local storage (OS keychain) — no credentials in localStorage or on disk in plaintext.
+
+5. **Enterprise controls (remaining after 0.3 pull-ins)**
+   - Per-model or per-endpoint allow/deny rules; optional API key requirement for the local service.
    - Policy file: machine-level JSON config that can be pre-deployed by IT to enforce defaults before user launch.
+   - Purview SDK implementation — memo is done (`docs/PURVIEW_GOVERNANCE.md`); implement the ingestion path and opt-in UX defined there.
+   - Persistent token trend graphs and memory history across sessions.
+
+6. **Vision polish** *(deferred from 0.3)*
+   - Inline image preview thumbnails rendered inside the chat thread message bubbles (multi-attach works; bubble display was deferred).
+
+7. **Auto-update UX** *(deferred from 0.3 CI/CD work)*
+   - In-app "Check for updates" button calling the updater plugin APIs (`check()`, `downloadAndInstall()`).
+   - Release notes modal surfacing the changelog.
+   - The updater infrastructure (plugin, pubkey, endpoint) is already wired in 0.3 bundles — this is the user-facing layer.
+
+8. **Full endpoint scheduler** *(deferred from 0.3)*
+   - Sticky routing, fallback, and health-check-based failover.
+   - Route chat to local when context fits; escalate to cloud endpoint when prompt exceeds local context length.
 
 ### Deferred from 0.4 to later
 
-- Azure AI Foundry cloud connections.
 - Multi-user or shared-server deployment mode.
-- Persistent token trend graphs and memory history across sessions.
+- Async streaming model comparison (show responses as they stream side-by-side).
+- Load balancing across multiple Foundry Local instances.
 
 ---
 
@@ -333,3 +456,41 @@ Release 1.0 should represent **production-grade local AI operations**, not just 
 ### 1.0 statement
 
 If 0.1 is "usable MVP" and 0.2 is "hardened + scalable architecture", then **1.0 is "operationally trustworthy."**
+
+---
+
+## 8) Immediate Next Steps (as of 2026-07-08)
+
+### Ship 0.3 (this week)
+
+> Version is already `0.3.0` in all three files, so the old "bump" steps are replaced by "commit the outstanding work + reconcile the changelog." The signing/secrets steps are unchanged and remain the true blockers.
+
+| Step | Action | Owner | Status |
+|---|---|---|---|
+| 1 | Commit outstanding 0.3 product work | Dev | ✅ Done |
+| 2 | Hand-write `CHANGELOG.md` **0.3.0** section | Dev | ✅ Done |
+| 3 | Generate Tauri updater signing key: `npx tauri signer generate -w ~/.tauri/flint.key` | Dev | ⬜ |
+| 4 | Replace `PLACEHOLDER` pubkey in `src-tauri/tauri.conf.json` | Dev | ⬜ |
+| 5 | Fix updater endpoint to real `owner/repo` | Dev | ✅ `joelst/flint` |
+| 6 | Self-signed Windows PFX → GitHub secrets (`WINDOWS_CERTIFICATE` + password) | Dev | ⬜ |
+| 7 | Test release workflow: `workflow_dispatch` with `0.3.0-rc1` | Dev | ⬜ |
+| 8 | Fix any pipeline issues from step 7 | Dev | ⬜ |
+| 9 | PR `mvp-0.3` → `main`; CI green; merge | Dev | ⬜ |
+| 10 | Tag `v0.3.0` → signed release build | Dev | ⬜ |
+| 11 | Review draft release; publish | Dev | ⬜ |
+
+Also landed for dogfood UX: **Node.js 22+ preflight** (oldest security-supported line) before sidecar spawn + Learn/fact-sheet honesty ([docs/BACKLOG.md](./docs/BACKLOG.md)). **0.4+**: targeted Rust bridge for selected sidecar commands (not big-bang rewrite).
+
+### Start 0.4 planning (after 0.3 ships)
+
+1. **Plan in this file** — add a **0.4 Progress Scorecard** (same shape as the 0.3 scorecard above) with objectives, status, and ordered work. Prefer **not** creating a separate `SPRINT_PLAN_0.4.md` unless execution detail would bloat this roadmap past readability; if a sprint file is spun out, keep a single file and still use this roadmap as SSoT for status. Historical 0.3 sprint docs live under `docs/archive/`.
+2. **Prioritize 0.4 items** — recommended ordering based on dependency and impact:
+   - **P1**: Azure AI Foundry cloud connections (highest user demand; now unblocked)
+   - **P1**: Auto-update UX (infrastructure is ready; just the UI layer)
+   - **P2**: RAG with local file indexing
+   - **P2**: Enterprise controls remaining (policy file, per-endpoint allow/deny, Purview implementation)
+   - **P3**: Workspace export/import
+   - **P3**: Tool calling (requires architecture decision first — see agent loops section)
+3. **Branch**: create `mvp-0.4` from `main` after 0.3 merges.
+4. **Architecture decision**: before tool calling work begins, resolve the agent loop delegation question (Flint-native vs. OpenClaw) — this gates item ordering in 0.4.
+5. **Deferred product-copy items** (Learn tab, flint-context fact sheet): [docs/BACKLOG.md](./docs/BACKLOG.md).

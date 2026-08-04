@@ -1,3 +1,5 @@
+> **Archived.** Historical planning artifact. Current status: [RELEASE_ROADMAP.md](../../RELEASE_ROADMAP.md). Do not treat checklists in this file as live work.
+
 # FLInt Implementation Plan
 
 **Project:** FLInt (Foundry Local Interface)  
@@ -177,7 +179,7 @@ See spec roadmap.
 - `.github/workflows/release.yml`: On tag `v*` or manual
   - Builds release for win + mac using tauri-action
   - Creates GitHub Release draft with artifacts
-- `scripts/verify-bundle.js`: Post-build check for SDK resources inclusion
+- `scripts/verify-bundle.cjs`: Post-build check for SDK resources inclusion
 
 **Next for packaging:**
 - Test full `npm run tauri:build` and run verify

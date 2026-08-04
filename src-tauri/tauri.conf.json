@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Flint",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "identifier": "com.flint.flint",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -24,6 +24,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -35,6 +36,22 @@
       "../node_modules/foundry-local-sdk",
       "../node_modules/foundry-local-sdk-winml",
       "../sidecar"
-    ]
+    ],
+    "windows": {
+      "certificateThumbprint": "ECFFBBEB8B66B79D4B380AF690EF686D24FA4651",
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://timestamp.digicert.com"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "RWRm0j2GG3djmPfSJYpL1EmX2gjtpZE9b/u7mheiyGBDICy9pmEj9mw/",
+      "endpoints": [
+        "https://github.com/joelst/flint/releases/download/v{{current_version}}/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

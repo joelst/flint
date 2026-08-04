@@ -1,0 +1,10 @@
+# Raw JSON output from pool-spike.mjs — contains system fingerprint data (CPU, OS build, RAM)
+*.json
+
+# Failed/aborted runs — debugging artifacts, not meaningful records
+*-FAILED.*
+
+# Intermediate runs superseded by the final canonical result
+pool-spike-2026-06-26T05-32-00-655Z.md
+pool-spike-2026-06-26T05-34-24-113Z.md
+pool-spike-2026-06-26T05-35-27-045Z.md

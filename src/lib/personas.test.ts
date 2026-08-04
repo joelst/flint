@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { getAllPersonas, getModelTags, scorePersonaForModel } from './personas';
+import {
+  getAllPersonas,
+  getModelTags,
+  loadCustomPersonas,
+  saveCustomPersonas,
+  scorePersonaForModel,
+} from './personas';
 
 describe('persona helpers', () => {
   it('detects model tags from alias/task/capabilities', () => {
@@ -32,5 +38,26 @@ describe('persona helpers', () => {
     ]);
     const overridden = all.find((p) => p.id === 'default');
     expect(overridden?.name).toBe('My Default');
+  });
+
+  it('persists custom personas in local storage', () => {
+    const storage = new Map<string, string>();
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      value: {
+        clear: () => storage.clear(),
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => storage.set(key, value),
+      },
+    });
+    localStorage.clear();
+    expect(loadCustomPersonas()).toEqual([]);
+
+    const custom = [
+      { id: 'local', name: 'Local', prompt: 'Be local', tags: ['general'] },
+    ];
+    saveCustomPersonas(custom);
+
+    expect(loadCustomPersonas()).toEqual(custom);
   });
 });

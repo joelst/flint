@@ -2,7 +2,17 @@ import { writable, type Writable } from 'svelte/store';
 import { Command } from '@tauri-apps/plugin-shell';
 import { resolveResource, resourceDir } from '@tauri-apps/api/path';
 import type { LaneName, EndpointProfile } from './ipc-contracts';
+import {
+  evaluateNodeProbe,
+  buildNodeMissingMessage,
+  type NodePreflightResult,
+} from './node-runtime';
 export type { LaneName, EndpointProfile };
+export {
+  MIN_NODE_VERSION,
+  formatNodeVersion,
+  type NodePreflightResult,
+} from './node-runtime';
 
 // Sidecar-based implementation for clean production builds.
 // We never import 'foundry-local-sdk' in the web bundle.
@@ -15,7 +25,31 @@ export interface LogEntry {
   source: 'sidecar' | 'sdk' | 'app';
 }
 
-export interface IModel { alias: string; isCached?: boolean; isLoaded?: boolean; info?: any; }
+export interface ModelVariantUpdate {
+  currentVersion: number;
+  latestVersion: number;
+  latestVariantId: string;
+  deviceType?: string | null;
+  executionProvider?: string | null;
+}
+export interface ModelVariantInfo {
+  id: string;
+  deviceType?: string | null;
+  executionProvider?: string | null;
+  fileSizeMb?: number | null;
+  cached: boolean;
+  name?: string | null;
+  version?: number | null;
+  update?: ModelVariantUpdate | null;
+}
+export interface IModel {
+  alias: string;
+  isCached?: boolean;
+  isLoaded?: boolean;
+  info?: any;
+  variants?: ModelVariantInfo[];
+  updates?: Array<ModelVariantUpdate & { sourceVariantId: string }>;
+}
 export interface ModelContextInfo {
   alias: string;
   contextLength: number | null;
@@ -50,6 +84,17 @@ function formatStartupFailure(
   closeData: any,
   commandError: string | null
 ): string {
+  const combined = [commandError, ...stderrLines].filter(Boolean).join(' ');
+  const lower = combined.toLowerCase();
+  if (
+    lower.includes('enoent') ||
+    lower.includes('not found') ||
+    lower.includes('is not recognized') ||
+    lower.includes('program not found')
+  ) {
+    return buildNodeMissingMessage();
+  }
+
   const details: string[] = [`stdout listener fired: ${stdoutEventFired}`];
 
   if (commandError) {
@@ -71,6 +116,39 @@ function formatStartupFailure(
   return `Sidecar did not emit ready signal (${details.join(', ')})`;
 }
 
+/**
+ * Verify Node.js is on PATH and meets MIN_NODE_VERSION before spawning the sidecar.
+ */
+export async function ensureNodeRuntime(): Promise<NodePreflightResult> {
+  let stdout = '';
+  let probeError: string | null = null;
+  try {
+    const command = Command.create('node', ['-v']);
+    const output = await command.execute();
+    stdout = decodeShellOutput(output.stdout ?? '');
+    const stderr = decodeShellOutput(output.stderr ?? '').trim();
+    if (output.code !== 0 && output.code !== null && output.code !== undefined) {
+      probeError =
+        stderr ||
+        `node -v exited with code ${output.code}` +
+          (stdout ? ` (stdout: ${stdout.trim()})` : '');
+    } else if (!stdout.trim() && stderr) {
+      // Some environments print version to stderr.
+      stdout = stderr;
+    }
+  } catch (e: any) {
+    probeError = e?.message ? String(e.message) : String(e);
+  }
+
+  const result = evaluateNodeProbe({ stdout, probeError });
+  if (result.ok) {
+    console.log(`[sdk] Node preflight OK: ${result.version.raw}`);
+  } else {
+    console.error(`[sdk] Node preflight failed (${result.code}):`, result.message);
+  }
+  return result;
+}
+
 function getTauriDevRepoRoot(resolvedResourcePath: string): string | null {
   const normalized = resolvedResourcePath.replace(/\\/g, '/');
   const marker = '/src-tauri/target/';
@@ -88,6 +166,45 @@ function joinResourcePath(basePath: string, relativePath: string): string {
   return `${basePath.replace(/[\\/]+$/, '')}${separator}${relativePath.replace(/\//g, separator)}`;
 }
 
+export interface PoolEntry {
+  alias: string;
+  variantId: string;
+  isLoaded: boolean | null;
+}
+
+export interface StreamingStatus {
+  active: boolean;
+  type: 'chat' | 'audio' | null;
+  modelAlias: string | null;
+  elapsedMs: number | null;
+  count: number;
+}
+
+export interface AcceleratorMemory {
+  kind: 'gpu' | 'npu';
+  name: string;
+  vendor?: string | null;
+  totalMb: number | null;
+  usedMb: number | null;
+  freeMb: number | null;
+  source: string;
+}
+
+export interface HostInfo {
+  platform?: string; // process.platform: darwin | win32 | linux
+  arch?: string;     // process.arch: arm64 | x64 | ...
+}
+
+export interface PoolStats {
+  usedMemMb: number;
+  totalMemMb: number;
+  freeMemMb: number;
+  host?: HostInfo;
+  accelerators?: AcceleratorMemory[];
+  tokenTotals: Array<{ alias: string; tokensIn: number; tokensOut: number }>;
+  streaming: StreamingStatus | null;
+}
+
 export interface FlintSDKState {
   ready: boolean;
   error: string | null;
@@ -101,6 +218,8 @@ export interface FlintSDKState {
   logs: LogEntry[];
   chatLaneModel?: string;
   audioLaneModel?: string;
+  pool: PoolEntry[];
+  poolStats: PoolStats | null;
 }
 
 const initialState: FlintSDKState = {
@@ -116,6 +235,8 @@ const initialState: FlintSDKState = {
   logs: [],
   chatLaneModel: undefined,
   audioLaneModel: undefined,
+  pool: [],
+  poolStats: null,
 };
 
 export const sdkState: Writable<FlintSDKState> = writable(initialState);
@@ -139,6 +260,12 @@ export function getSDKState() {
 
 async function startSidecar() {
   if (sidecarProcess) return;
+
+  const nodeCheck = await ensureNodeRuntime();
+  if (!nodeCheck.ok) {
+    updateState({ ready: false, error: nodeCheck.message });
+    throw new Error(nodeCheck.message);
+  }
 
   // Resolve sidecar script path using resolveResource (handles dev + prod bundles correctly)
   let script: string;
@@ -416,7 +543,12 @@ export async function initializeSDK(config: Partial<any> = {}): Promise<boolean>
     }
     return true;
   } catch (e: any) {
-    const errMsg = `Sidecar init failed: ${e?.message || e}`;
+    const raw = String(e?.message || e || 'Unknown error');
+    // Node preflight messages are already complete user guidance — don't wrap them.
+    const errMsg =
+      raw.includes('Node.js')
+        ? raw
+        : `Sidecar init failed: ${raw}`;
     updateState({ error: errMsg, ready: false });
     return false;
   } finally {
@@ -446,11 +578,9 @@ export async function refreshModels(): Promise<void> {
       });
     }
 
-    const loadedAliases = new Set([
-      status?.result?.chatLane?.model,
-      status?.result?.audioLane?.model,
-      status?.result?.currentModel,
-    ].filter(Boolean));
+    const loadedAliases = new Set(
+      (status?.result?.pool ?? []).map((e: any) => e.alias).filter(Boolean)
+    );
 
     const models = list.map((m: any) => ({
       ...m,
@@ -465,9 +595,58 @@ export async function refreshModels(): Promise<void> {
       cachedModels: models.filter((m: ModelInfo) => m.isCached),
       loadedModels: models.filter((m: ModelInfo) => m.isLoaded),
     });
+
+    // Refresh pool detail + memory stats
+    try {
+      const ps = await send('poolStatus');
+      if (ps.result) {
+        updateState({
+          pool: ps.result.models ?? [],
+          poolStats: mapPoolStats(ps.result),
+        });
+      }
+    } catch (e) {
+      console.warn('[sdk] poolStatus refresh failed', e);
+    }
   } catch (e) {
     console.error('refreshModels via sidecar failed', e);
   }
+}
+
+function mapPoolStats(result: any): PoolStats {
+  const accelerators = Array.isArray(result?.accelerators)
+    ? result.accelerators
+        .map((a: any) => ({
+          kind: a?.kind === 'npu' ? 'npu' as const : 'gpu' as const,
+          name: String(a?.name || ''),
+          vendor: a?.vendor ?? null,
+          totalMb: a?.totalMb == null ? null : Number(a.totalMb),
+          usedMb: a?.usedMb == null ? null : Number(a.usedMb),
+          freeMb: a?.freeMb == null ? null : Number(a.freeMb),
+          source: String(a?.source || 'unknown'),
+        }))
+        .filter((a: AcceleratorMemory) => !!a.name)
+    : [];
+  const hostRaw = result?.host && typeof result.host === 'object' ? result.host : null;
+  const host: HostInfo | undefined = hostRaw
+    ? {
+        platform: hostRaw.platform ? String(hostRaw.platform) : undefined,
+        arch: hostRaw.arch ? String(hostRaw.arch) : undefined,
+      }
+    : undefined;
+  return {
+    usedMemMb:
+      result.usedMemMb ??
+      (result.totalMemMb != null && result.freeMemMb != null
+        ? Math.max(0, Number(result.totalMemMb) - Number(result.freeMemMb))
+        : 0),
+    totalMemMb: result.totalMemMb ?? 0,
+    freeMemMb: result.freeMemMb ?? 0,
+    host,
+    accelerators,
+    tokenTotals: result.tokenTotals ?? [],
+    streaming: result.streaming ?? null,
+  };
 }
 
 export async function getModel(alias: string) {
@@ -476,8 +655,10 @@ export async function getModel(alias: string) {
   return { alias } as any;
 }
 
-export async function downloadModel(model: any, onProgress?: (p: number) => void) {
-  await sendInternal('download', { alias: model.alias }, undefined, (id: number) => {
+export async function downloadModel(model: any, onProgress?: (p: number) => void, variantId?: string) {
+  const payload: any = { alias: model.alias };
+  if (variantId) payload.variantId = variantId;
+  await sendInternal('download', payload, undefined, (id: number) => {
     if (onProgress) {
       progressHandlers.set(id, onProgress);
     }
@@ -487,9 +668,10 @@ export async function downloadModel(model: any, onProgress?: (p: number) => void
   await refreshModels();
 }
 
-export async function loadModel(model: any, lane?: LaneName) {
+export async function loadModel(model: any, lane?: LaneName, variantId?: string) {
   const payload: any = { alias: model.alias };
   if (lane) payload.lane = lane;
+  if (variantId) payload.variantId = variantId;
   const res = await send('load', payload);
   await refreshModels();
   return res.result;
@@ -502,15 +684,30 @@ export async function unloadModel(model: any, lane?: LaneName) {
   await refreshModels();
 }
 
-export async function deleteModel(model: any) {
-  await send('deleteModel', { alias: model.alias });
+export async function deleteModel(model: any, variantId?: string) {
+  const payload: any = { alias: model.alias };
+  if (variantId) payload.variantId = variantId;
+  await send('deleteModel', payload);
   await refreshModels();
 }
 
-export async function removeFromCache(alias: string) {
-  // Not implemented in current sidecar for safety; can be added
-  console.warn('removeFromCache not wired to sidecar yet');
-  await refreshModels();
+export async function removeFromCache(alias: string, variantId?: string) {
+  await deleteModel({ alias }, variantId);
+}
+
+export async function getAccessLog(): Promise<any[]> {
+  const res = await send('getAccessLog');
+  return res?.result ?? [];
+}
+
+export async function pollPoolStatus(): Promise<void> {
+  const ps = await send('poolStatus');
+  if (ps?.result) {
+    updateState({
+      pool: ps.result.models ?? [],
+      poolStats: mapPoolStats(ps.result),
+    });
+  }
 }
 
 export async function getLocalEndpoint(): Promise<string | undefined> {
@@ -521,7 +718,8 @@ export async function getLocalEndpoint(): Promise<string | undefined> {
 export async function startService(
   port = 5272,
   alias?: string,
-  preferredEp?: string
+  preferredEp?: string,
+  bindAddress?: string
 ): Promise<string> {
   const payload: any = { port };
   if (alias) {
@@ -529,6 +727,9 @@ export async function startService(
   }
   if (preferredEp) {
     payload.preferredEp = preferredEp;
+  }
+  if (bindAddress) {
+    payload.bindAddress = bindAddress;
   }
   const res = await send('startService', payload);
   currentEndpoint = res.endpoint;
@@ -582,6 +783,19 @@ export async function chatCompletionStream(
 
 export async function cancelChatRequest(requestId: number): Promise<void> {
   await send('cancelChatRequest', { requestId });
+}
+
+export interface FetchUrlResult {
+  url: string;
+  title: string;
+  text: string;
+  truncated: boolean;
+  charCount: number;
+}
+
+export async function fetchUrl(url: string, maxChars = 50000): Promise<FetchUrlResult> {
+  const res = await send('fetchUrl', { url, maxChars });
+  return res.result as FetchUrlResult;
 }
 
 export async function transcribeAudio(
