@@ -40,7 +40,7 @@
     "windows": {
       "certificateThumbprint": "ECFFBBEB8B66B79D4B380AF690EF686D24FA4651",
       "digestAlgorithm": "sha256",
-      "timestampUrl": "http://timestamp.digicert.com"
+      "timestampUrl": "https://timestamp.digicert.com"
     }
   },
   "plugins": {

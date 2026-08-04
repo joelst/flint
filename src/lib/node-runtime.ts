@@ -90,7 +90,7 @@ export function buildNodeProbeFailedMessage(detail?: string): string {
   const extra = detail ? `\nDetails: ${detail}` : '';
   return [
     'Could not verify the Node.js installation required for the Foundry sidecar.',
-    'Ensure Node.js 22+ is installed and on your PATH, then quit and reopen Flint.',
+    `Ensure Node.js ${MIN_NODE_VERSION.major}+ is installed and on your PATH, then quit and reopen Flint.`,
     'Download: https://nodejs.org',
     extra,
   ]

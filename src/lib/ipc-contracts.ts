@@ -20,7 +20,8 @@ export type SidecarCommand =
   | { cmd: 'getVisionModels' }
   | { cmd: 'getSTTModels' }
   | { cmd: 'poolStatus' }
-  | { cmd: 'getAccessLog' };
+  | { cmd: 'getAccessLog' }
+  | { cmd: 'fetchUrl'; url: string; maxChars?: number };
 
 export type SidecarCommandName = SidecarCommand['cmd'];
 
@@ -29,7 +30,7 @@ export const KNOWN_COMMANDS = new Set<SidecarCommandName>([
   'listModels', 'download', 'load', 'unload', 'deleteModel', 'getEndpoint',
   'chatCompletion', 'cancelChatRequest', 'transcribeAudio',
   'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',
-  'poolStatus', 'getAccessLog',
+  'poolStatus', 'getAccessLog', 'fetchUrl',
 ]);
 
 /**
