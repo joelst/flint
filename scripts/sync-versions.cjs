@@ -13,23 +13,23 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 
-function readJson(file) {
+function readJson (file) {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
 
-function writeJson(file, data) {
+function writeJson (file, data) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n');
 }
 
-function main() {
-  // Allow explicit version from CLI: node scripts/sync-versions.js 1.2.3
+function main () {
+  // Allow explicit version from CLI: node scripts/sync-versions.cjs 1.2.3
   // Falls back to package.json (used by `npm run version`)
   const explicitVersion = process.argv[2];
   const pkgPath = path.join(ROOT, 'package.json');
   const pkg = readJson(pkgPath);
   const version = explicitVersion || pkg.version;
 
-  if (!version || !/^\d+\.\d+\.\d+/.test(version)) {
+  if (!version || !/^\d+\.\d+\.\d+(-[a-zA-Z0-9.-]+)?$/.test(version)) {
     console.error(`Invalid version: ${version}`);
     process.exit(1);
   }
@@ -41,7 +41,7 @@ function main() {
     console.log(`  ✓ Updated package.json to ${explicitVersion}`);
   }
 
-  console.log(`🔄 Syncing version ${version} across Tauri config files...`);
+  console.log(`Syncing version ${version} across Tauri config files...`);
 
   // --- 1. tauri.conf.json
   const tauriPath = path.join(ROOT, 'src-tauri', 'tauri.conf.json');
@@ -74,10 +74,10 @@ function main() {
       console.log('  ✓ src-tauri/Cargo.toml already matches');
     }
   } else {
-    console.warn('  ⚠ Could not locate [package] version in Cargo.toml');
+    console.warn('  Could not locate [package] version in Cargo.toml');
   }
 
-  console.log('✅ Version sync complete.');
+  console.log('Version sync complete.');
 }
 
 main();

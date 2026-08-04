@@ -48,6 +48,30 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Validate updater configuration
+        shell: bash
+        run: |
+          if grep -q "PLACEHOLDER" src-tauri/tauri.conf.json; then
+            echo "  Updater pubkey is still a PLACEHOLDER"
+            echo ""
+            echo "To generate a real updater key for releases:"
+            echo "  1. Run locally:  npx tauri signer generate -w <password>"
+            echo "  2. Copy the public key into src-tauri/tauri.conf.json pubkey field"
+            echo "  3. Store the private key securely (used by CI for signing updates)"
+            echo ""
+            if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+              echo " Cannot push to main branch with PLACEHOLDER pubkey"
+              exit 1
+            elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
+              echo " Cannot create release tags with PLACEHOLDER pubkey"
+              exit 1
+            else
+              echo " Development/PR builds allowed with placeholder (fix before release)"
+            fi
+          else
+            echo " Updater pubkey is configured"
+          fi
+
       - name: Enforce changeset for versioned PRs
         if: github.event_name == 'pull_request'
         shell: bash
@@ -76,6 +100,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -98,6 +124,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
