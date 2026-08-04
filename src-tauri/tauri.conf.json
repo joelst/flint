@@ -35,11 +35,16 @@
       "../node_modules/foundry-local-sdk",
       "../node_modules/foundry-local-sdk-winml",
       "../sidecar"
-    ]
+    ],
+    "windows": {
+      "certificateThumbprint": "ECFFBBEB8B66B79D4B380AF690EF686D24FA4651",
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://timestamp.digicert.com"
+    }
   },
   "plugins": {
     "updater": {
-      "pubkey": "PLACEHOLDER - run: npx tauri signer generate   (copy the public key here for self-signed bootstrap)",
+      "pubkey": "RWRm0j2GG3djmPfSJYpL1EmX2gjtpZE9b/u7mheiyGBDICy9pmEj9mw/",
       "endpoints": [
         "https://github.com/joelst/flint/releases/download/{{current_version}}/latest.json"
       ],
