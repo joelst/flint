@@ -22,8 +22,10 @@ jobs:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            bundles: msi,nsis
           - os: macos-latest
             target: aarch64-apple-darwin,x86_64-apple-darwin
+            bundles: dmg,app
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -88,7 +90,7 @@ jobs:
           releaseBody: "See CHANGELOG for details."
           releaseDraft: true
           prerelease: false
-          args: --target ${{ matrix.target }} --bundles msi,nsis,dmg,app,updater
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
 
       - name: Upload updater metadata
         uses: actions/upload-artifact@v4
