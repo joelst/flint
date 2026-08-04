@@ -1007,6 +1007,12 @@
         (m as any).family?.toLowerCase?.()?.includes(searchTerm.toLowerCase()),
     ),
   );
+  const modelUpdateCount = $derived(
+    (state.models || []).reduce(
+      (count: number, model: ModelInfo) => count + ((model as any).updates?.length || 0),
+      0,
+    ),
+  );
 
   // Persistence for chat history and current model
   const PERSIST_KEY = "flint-chat-persist";
@@ -4006,6 +4012,15 @@ Output only the summary text, no preamble.`;
               {/if}
             </div>
 
+            {#if modelUpdateCount > 0}
+              <div class="model-update-notice">
+                <strong>{modelUpdateCount} model update{modelUpdateCount === 1 ? "" : "s"} available</strong>
+                <span>
+                  Updates are matched to the downloaded acceleration variant, so CPU, GPU, and NPU artifacts are checked independently.
+                </span>
+              </div>
+            {/if}
+
             {#if recommendedStarters.length > 0}
               <div class="recommendations">
                 <h3>Recommended for your hardware</h3>
@@ -4111,6 +4126,11 @@ Output only the summary text, no preamble.`;
                         {#if model.isLoaded}<span class="badge loaded"
                             >Loaded</span
                           >{/if}
+                        {#if (model as any).updates?.length}
+                          <span class="badge update">
+                            {(model as any).updates.length} update{(model as any).updates.length === 1 ? "" : "s"}
+                          </span>
+                        {/if}
                       </span>
                     </div>
 
@@ -4191,6 +4211,14 @@ Output only the summary text, no preamble.`;
                                 {#if variant.cached}
                                   <span class="badge small cached">Downloaded</span>
                                 {/if}
+                                {#if variant.update}
+                                  <span
+                                    class="badge small update"
+                                    title={`Newer compatible ${badge.label} variant: v${variant.update.latestVersion}`}
+                                  >
+                                    v{variant.update.latestVersion} available
+                                  </span>
+                                {/if}
                                 {#if isCurrentlyLoaded}
                                   <span class="badge small loaded">Running</span>
                                 {/if}
@@ -4198,6 +4226,15 @@ Output only the summary text, no preamble.`;
                                   <span class="badge small current-chat-badge">Chat</span>
                                 {/if}
                                 <span class="variant-actions">
+                                  {#if variant.update}
+                                    <button
+                                      class="small update-btn"
+                                      onclick={() => downloadVariant(model, variant.update.latestVariantId)}
+                                      disabled={downloadingVariantIds[variant.update.latestVariantId]}
+                                    >
+                                      {downloadingVariantIds[variant.update.latestVariantId] ? 'Downloading…' : 'Download update'}
+                                    </button>
+                                  {/if}
                                   {#if !variant.cached}
                                     <button
                                       class="small"
@@ -4337,6 +4374,10 @@ Output only the summary text, no preamble.`;
                         <div><strong>Downloaded artifact:</strong> {detailModel.isCached ? "Model weights" : "Not downloaded"}</div>
                         <div><strong>Downloaded at:</strong> {formatMetaTimestamp(modelRuntimeMeta[detailModel.alias]?.downloadedAt)}</div>
                         <div><strong>Last used acceleration:</strong> {modelRuntimeMeta[detailModel.alias]?.lastUsedAcceleration || "Unknown"}</div>
+                        <div>
+                          <strong>Compatible updates:</strong>
+                          {(detailModel as any).updates?.length || 0}
+                        </div>
                         <div>
                           <strong>Applicable accelerations:</strong>
                           <span class="meta-badges">
@@ -6447,6 +6488,10 @@ Output only the summary text, no preamble.`;
     background: #1e40af;
     color: #93c5fd;
   }
+  .badge.update {
+    background: color-mix(in srgb, var(--warning) 22%, transparent);
+    color: var(--warning);
+  }
 
   .badge.warn {
     background: #7c2d12;
@@ -6620,6 +6665,25 @@ Output only the summary text, no preamble.`;
     flex-wrap: wrap;
     gap: 4px;
     margin-left: auto;
+  }
+
+  .model-update-notice {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 12px;
+    margin-bottom: 12px;
+    padding: 10px 12px;
+    border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border));
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--warning) 10%, var(--panel-bg));
+    color: var(--warning);
+    font-size: 0.82rem;
+  }
+
+  .update-btn {
+    border-color: color-mix(in srgb, var(--warning) 55%, var(--border));
+    color: var(--warning);
   }
 
   .current-chat-badge {

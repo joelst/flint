@@ -23,6 +23,7 @@ import fs from 'fs';
 import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { annotateVariantUpdates } from './model-updates.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -825,7 +826,7 @@ rl.on('line', async (line) => {
         ok: true, result: models.map(m => {
           // Prefer live isCached getters (query native cache). Catalog snapshot
           // info.cached is often stale after download until a full catalog refresh.
-          const variantRows = (m.variants || []).map(v => {
+          const variantRows = annotateVariantUpdates((m.variants || []).map(v => {
             let cached = false;
             try {
               cached = !!v.isCached;
@@ -839,8 +840,9 @@ rl.on('line', async (line) => {
               fileSizeMb: v.info?.fileSizeMb ?? null,
               cached,
               name: v.info?.name ?? null,
+              version: v.info?.version ?? null,
             };
-          });
+          }));
           let modelCached = false;
           try {
             modelCached = !!m.isCached;
@@ -862,6 +864,9 @@ rl.on('line', async (line) => {
             createdAt: m.info?.createdAt ?? m.info?.createdAtUnix ?? null,
             info: m.info || {},
             variants: variantRows,
+            updates: variantRows
+              .filter(v => v.update)
+              .map(v => ({ sourceVariantId: v.id, ...v.update })),
           };
         })
       });

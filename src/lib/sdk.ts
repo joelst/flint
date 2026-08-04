@@ -25,7 +25,31 @@ export interface LogEntry {
   source: 'sidecar' | 'sdk' | 'app';
 }
 
-export interface IModel { alias: string; isCached?: boolean; isLoaded?: boolean; info?: any; }
+export interface ModelVariantUpdate {
+  currentVersion: number;
+  latestVersion: number;
+  latestVariantId: string;
+  deviceType?: string | null;
+  executionProvider?: string | null;
+}
+export interface ModelVariantInfo {
+  id: string;
+  deviceType?: string | null;
+  executionProvider?: string | null;
+  fileSizeMb?: number | null;
+  cached: boolean;
+  name?: string | null;
+  version?: number | null;
+  update?: ModelVariantUpdate | null;
+}
+export interface IModel {
+  alias: string;
+  isCached?: boolean;
+  isLoaded?: boolean;
+  info?: any;
+  variants?: ModelVariantInfo[];
+  updates?: Array<ModelVariantUpdate & { sourceVariantId: string }>;
+}
 export interface ModelContextInfo {
   alias: string;
   contextLength: number | null;

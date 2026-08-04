@@ -25,6 +25,7 @@ Entries are normally produced via [Changesets](https://github.com/changesets/cha
 - **Autostart + defaults** — OS login-item toggle; default chat/audio model pre-selection.
 - **Vision** — multi-image attach (up to 4), thumbnails, paste and drag-and-drop.
 - **Model comparison** — side-by-side bake-off, ratings, markdown export.
+- **Model update notifications** — detect newer catalog versions for each downloaded acceleration-specific variant and provide a direct update download.
 - **Integrations** — data-driven OpenAI-compatible tool snippets with OS toggle and copy.
 - **Host-aware chat context** — compact identity every turn; expanded fact sheet when the user asks about Flint/Foundry.
 - **Guarded web-fetch → chat context** — user-initiated URL fetch with SSRF/size limits and article extraction.

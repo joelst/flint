@@ -1,6 +1,6 @@
 # Flint Release Roadmap (0.1 → 1.0)
 
-**Last updated:** 2026-07-08 (rev. 5 — Node 22+ preflight security floor; CHANGELOG 0.3.0; updater endpoint `joelst/flint`; pubkey/secrets still open)  
+**Last updated:** 2026-08-03 (rev. 6 — acceleration-aware model update notifications pulled into 0.3; release configuration gates still open)
 **Original date:** 2026-06-24  
 **Scope:** Living release roadmap — tracks readiness decisions, known limitations, and per-release objectives from MVP 0.1 through 1.0. This is the **only** living release planner; do not maintain parallel sprint + remaining-implementation docs for the same milestone (see [docs/README.md](./docs/README.md)).
 
@@ -20,7 +20,7 @@
 
 ## 0.3 Progress Scorecard (as of 2026-07-08, rev. 2)
 
-All planned 0.3 feature work is complete, and two unplanned features were delivered on top of scope (host-aware chat context and a guarded web-fetch → chat-context pipeline). The version is already bumped to `0.3.0` across all three files. The remaining gate to shipping is purely release mechanics: generate the updater signing key, configure Windows signing secrets, fix placeholder URLs, and cut the tag. **Process gap:** the version was bumped without a Changesets entry, so `CHANGELOG.md` has no 0.3 section — this must be reconciled before the tag.
+All planned 0.3 feature work is complete, and three unplanned features were delivered on top of scope (host-aware chat context, a guarded web-fetch → chat-context pipeline, and acceleration-aware model update notifications). The version is already bumped to `0.3.0` across all three files. The remaining gate to shipping is release mechanics: generate the updater signing key, configure Windows signing secrets, restore green PR CI, validate the release workflow, and cut the tag.
 
 | Success Criterion | Status | Notes |
 |---|---|---|
@@ -44,6 +44,7 @@ All planned 0.3 feature work is complete, and two unplanned features were delive
 |---|---|---|
 | Host-aware chat context (`flint-context.ts`) | ✅ Complete | Compact identity line every turn + expanded Foundry/Flint fact sheet gated on app-intent regex; de-dupes against persona; unit-tested (`flint-context.test.ts`) |
 | Guarded web-fetch → chat context (`fetchUrl`) | ✅ Complete | Sidecar command: http/https-only, private/loopback SSRF block, size cap, `@mozilla/readability` + `jsdom` article extraction, access-log audit entry. SDK method + chat URL-detection chips + context injection. Type-checks clean; release build produced `Flint_0.3.0_x64_en-US.msi`. **This is a down-payment on 0.4 RAG** (the "inject external content as context" pipeline). |
+| Acceleration-aware model update notifications | ✅ Complete | Cached variants are compared only with newer catalog variants in the same SDK model-name/runtime track, preventing CPU/GPU/NPU cross-grade suggestions. Models view shows update counts and direct per-variant downloads. |
 
 ### Remaining 0.3 release blockers (in dependency order)
 
@@ -493,4 +494,3 @@ Also landed for dogfood UX: **Node.js 22+ preflight** (oldest security-supported
 3. **Branch**: create `mvp-0.4` from `main` after 0.3 merges.
 4. **Architecture decision**: before tool calling work begins, resolve the agent loop delegation question (Flint-native vs. OpenClaw) — this gates item ordering in 0.4.
 5. **Deferred product-copy items** (Learn tab, flint-context fact sheet): [docs/BACKLOG.md](./docs/BACKLOG.md).
-
