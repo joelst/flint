@@ -123,8 +123,9 @@ jobs:
       - name: Build Tauri (debug for CI speed)
         uses: tauri-apps/tauri-action@v0
         with:
-          # Build debug to keep CI fast; release on tags
-          args: --debug
+          # Build debug to keep CI fast; release on tags.
+          # Updater artifacts require a signing key that isn't available in CI, so disable them here.
+          args: --debug --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
