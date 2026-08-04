@@ -581,7 +581,9 @@ export async function refreshModels(): Promise<void> {
           poolStats: mapPoolStats(ps.result),
         });
       }
-    } catch {}
+    } catch (e) {
+      console.warn('[sdk] poolStatus refresh failed', e);
+    }
   } catch (e) {
     console.error('refreshModels via sidecar failed', e);
   }
