@@ -546,7 +546,7 @@ export async function initializeSDK(config: Partial<any> = {}): Promise<boolean>
     const raw = String(e?.message || e || 'Unknown error');
     // Node preflight messages are already complete user guidance — don't wrap them.
     const errMsg =
-      raw.includes('nodejs.org') || raw.includes('Node.js')
+      raw.includes('Node.js')
         ? raw
         : `Sidecar init failed: ${raw}`;
     updateState({ error: errMsg, ready: false });
