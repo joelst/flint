@@ -609,7 +609,11 @@ function mapPoolStats(result: any): PoolStats {
       }
     : undefined;
   return {
-    usedMemMb: result.usedMemMb ?? (result.totalMemMb ?? 0) - (result.freeMemMb ?? 0),
+    usedMemMb:
+      result.usedMemMb ??
+      (result.totalMemMb != null && result.freeMemMb != null
+        ? Math.max(0, Number(result.totalMemMb) - Number(result.freeMemMb))
+        : 0),
     totalMemMb: result.totalMemMb ?? 0,
     freeMemMb: result.freeMemMb ?? 0,
     host,
