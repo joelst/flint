@@ -155,7 +155,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           # Build debug to keep CI fast; release on tags
-          args: --debug
+          args: --debug --no-sign
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
