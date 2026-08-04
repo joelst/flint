@@ -122,10 +122,12 @@ jobs:
 
       - name: Build Tauri (debug for CI speed)
         uses: tauri-apps/tauri-action@v0
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          # Build debug to keep CI fast; release on tags.
-          # Updater artifacts require a signing key that isn't available in CI, so disable them here.
-          args: --debug --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          # Build debug to keep CI fast; release on tags
+          args: --debug
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
