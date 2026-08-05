@@ -32,7 +32,9 @@ export function joinResourcePath(basePath: string, relativePath: string): string
 
 /** NODE_PATH entry separator: `;` on Windows, `:` on macOS/Linux. Infer from a native path sample. */
 export function nodePathDelimiter(samplePath: string): string {
-  return samplePath.includes('\\') ? ';' : ':';
+  const s = samplePath || '';
+  const isWindows = s.includes('\\') || /^[A-Za-z]:[\\/]/.test(s) || s.startsWith('\\\\');
+  return isWindows ? ';' : ':';
 }
 
 /**
