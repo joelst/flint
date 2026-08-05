@@ -1,5 +1,11 @@
 # Flint Changelog
 
+## 0.3.3
+
+### Patch Changes
+
+- f16d761: 0.3.2: package Foundry natives in installers as Flint.exe, fix production sidecar resolution and service rebind on network Apply & restart, and confirm non-loopback bind settings.
+
 ## 0.3.1
 
 ### Patch Changes

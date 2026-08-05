@@ -73,7 +73,7 @@ jobs:
           fi
 
       - name: Enforce changeset for versioned PRs
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'changeset-release/')
         shell: bash
         run: |
           BASE="${{ github.base_ref || 'main' }}"
