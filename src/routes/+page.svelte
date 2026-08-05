@@ -1123,17 +1123,17 @@
   }
 
   /** Select a bind-address option; confirm when leaving loopback. */
-  function selectBindAddress(next: string) {
-    const prev = networkBindAddress || '127.0.0.1';
-    const nextExposes = next === '0.0.0.0' || next === '' || !isLoopbackBind(next);
-    if (nextExposes && isLoopbackBind(prev)) {
-      const confirmLabel =
-        next === '0.0.0.0' ? '0.0.0.0 (all interfaces)' : next || 'a custom address';
-      if (!confirmExposeNetwork(confirmLabel)) return;
-    }
-    networkBindAddress = next;
-    persistChat();
+function selectBindAddress(next: string) {
+  const prev = (networkBindAddress || '127.0.0.1').trim();
+  const nextTrim = (next || '').trim();
+  const nextExposes = nextTrim === '0.0.0.0' || (nextTrim !== '' && !isLoopbackBind(nextTrim));
+  if (nextExposes && isLoopbackBind(prev)) {
+    const confirmLabel = nextTrim === '0.0.0.0' ? '0.0.0.0 (all interfaces)' : nextTrim;
+    if (!confirmExposeNetwork(confirmLabel)) return;
   }
+  networkBindAddress = nextTrim;
+  persistChat();
+}
 
   function discardNetworkSettings() {
     networkPort = appliedNetworkPort;
