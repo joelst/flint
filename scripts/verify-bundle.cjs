@@ -24,6 +24,10 @@ function bad(msg) {
   failed = true;
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function checkCoreAt(label, dir) {
   const corePath = path.join(dir, 'foundry-local-core', platformKey, coreFile);
   if (!fs.existsSync(corePath)) {
@@ -84,7 +88,7 @@ if (fs.existsSync(path.join(root, 'src-tauri', 'target', 'release'))) {
     const nsi = fs.readFileSync(nsiPath, 'utf8');
     // NSI lists each resource with File /oname=...foundry-local-core\win32-x64\...
     const coreRe = new RegExp(
-      `foundry-local-core[\\\\/]${platformKey}[\\\\/]${coreFile.replace(/\./g, '\\.')}`,
+      `foundry-local-core[\\\\/]${escapeRegExp(platformKey)}[\\\\/]${escapeRegExp(coreFile)}`,
       'i'
     );
     if (coreRe.test(nsi) || nsi.includes(coreFile)) {
