@@ -65,8 +65,9 @@ export interface Integration {
 
 /**
  * Substitute `{ENDPOINT}` and `{MODEL}` placeholders in a snippet body.
- * The endpoint is the user's live Flint endpoint (e.g. `http://localhost:5273/v1`);
- * the model placeholder is a generic alias hint shown in code.
+ * The endpoint is the client-facing loopback URL (always `http://127.0.0.1:<port>/v1`);
+ * bind address may be broader for LAN access — snippets still use the loopback connect URL.
+ * The model placeholder is a generic alias hint shown in code.
  */
 export function renderSnippet(
   body: string,

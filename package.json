@@ -1,6 +1,6 @@
 {
   "name": "flint",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Flint — Foundry Local Interface (desktop GUI for Microsoft Foundry Local)",
   "type": "module",
   "engines": {
@@ -16,7 +16,7 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri",
-    "setup:winml": "node -e \"process.platform === 'win32' && require('child_process').execSync('npm install foundry-local-sdk-winml', {stdio:'inherit'})\" || echo 'WinML setup skipped (not Windows)'",
+    "ensure:foundry": "node scripts/ensure-foundry-native.cjs",
     "tauri:build": "tauri build",
     "verify:bundle": "node scripts/verify-bundle.cjs",
     "run:built": "pwsh scripts/run-built.ps1",
@@ -34,7 +34,6 @@
     "@tauri-apps/plugin-shell": "^2.3.5",
     "@tauri-apps/plugin-updater": "^2",
     "foundry-local-sdk": "^1.2.3",
-    "foundry-local-sdk-winml": "^1.2.3",
     "marked": "^18.0.5"
   },
   "devDependencies": {
@@ -44,6 +43,7 @@
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
     "@tauri-apps/cli": "^2",
     "@testing-library/svelte": "^5.2.8",
+    "@types/node": "^26.1.2",
     "@vitest/coverage-v8": "^4.1.10",
     "jsdom": "^25.0.1",
     "svelte": "^5.0.0",

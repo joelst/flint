@@ -1,7 +1,6 @@
 import { defineConfig } from "vite";
 import { sveltekit } from "@sveltejs/kit/vite";
 
-// @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
@@ -11,7 +10,7 @@ export default defineConfig(() => ({
   // Externalize the Foundry SDK to avoid browser/Node builtin issues during build.
   // Real usage should move to Tauri commands or sidecar for production.
   optimizeDeps: {
-    exclude: ['foundry-local-sdk', 'foundry-local-sdk-winml']
+    exclude: ['foundry-local-sdk']
   },
   build: {
     rollupOptions: {

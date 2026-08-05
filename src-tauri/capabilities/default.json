@@ -7,6 +7,14 @@
     "core:default",
     "opener:default",
     "fs:default",
+    "fs:allow-exists",
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        { "path": "$RESOURCE/sidecar/**" },
+        { "path": "$RESOURCE/foundry-local-sdk/**" }
+      ]
+    },
     "dialog:default",
     "autostart:allow-enable",
     "autostart:allow-disable",

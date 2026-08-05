@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Flint",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "identifier": "com.flint.flint",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run ensure:foundry && npm run build",
     "frontendDist": "../build"
   },
   "app": {
@@ -32,11 +32,10 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": [
-      "../node_modules/foundry-local-sdk",
-      "../node_modules/foundry-local-sdk-winml",
-      "../sidecar"
-    ],
+    "resources": {
+      "../sidecar/": "sidecar/",
+      "../node_modules/foundry-local-sdk/": "foundry-local-sdk/"
+    },
     "windows": {
       "certificateThumbprint": "ECFFBBEB8B66B79D4B380AF690EF686D24FA4651",
       "digestAlgorithm": "sha256",

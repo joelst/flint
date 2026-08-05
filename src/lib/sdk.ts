@@ -1,12 +1,18 @@
 import { writable, type Writable } from 'svelte/store';
 import { Command } from '@tauri-apps/plugin-shell';
 import { resolveResource, resourceDir } from '@tauri-apps/api/path';
+import { exists } from '@tauri-apps/plugin-fs';
 import type { LaneName, EndpointProfile } from './ipc-contracts';
 import {
   evaluateNodeProbe,
   buildNodeMissingMessage,
   type NodePreflightResult,
 } from './node-runtime';
+import {
+  SIDECAR_RESOURCE_CANDIDATES,
+  selectSidecarSpawnPaths,
+  type ResolvedSidecarCandidate,
+} from './sidecar-paths';
 export type { LaneName, EndpointProfile };
 export {
   MIN_NODE_VERSION,
@@ -17,6 +23,7 @@ export {
 // Sidecar-based implementation for clean production builds.
 // We never import 'foundry-local-sdk' in the web bundle.
 // All heavy work (including Node natives) happens in the sidecar process.
+// Path layout helpers live in sidecar-paths.ts (unit-tested).
 
 export interface LogEntry {
   ts: number;
@@ -72,7 +79,6 @@ export type ModelInfo = IModel & {
 
 let managerInstance: any = null;
 let currentEndpoint: string | undefined = undefined;
-const sidecarResourcePath = 'sidecar/foundry-sidecar.js';
 
 function decodeShellOutput(data: string | Uint8Array): string {
   return typeof data === 'string' ? data : new TextDecoder().decode(data);
@@ -147,23 +153,6 @@ export async function ensureNodeRuntime(): Promise<NodePreflightResult> {
     console.error(`[sdk] Node preflight failed (${result.code}):`, result.message);
   }
   return result;
-}
-
-function getTauriDevRepoRoot(resolvedResourcePath: string): string | null {
-  const normalized = resolvedResourcePath.replace(/\\/g, '/');
-  const marker = '/src-tauri/target/';
-  const markerIndex = normalized.toLowerCase().indexOf(marker);
-  if (markerIndex < 0) {
-    return null;
-  }
-
-  const repoRoot = normalized.slice(0, markerIndex);
-  return resolvedResourcePath.includes('\\') ? repoRoot.replace(/\//g, '\\') : repoRoot;
-}
-
-function joinResourcePath(basePath: string, relativePath: string): string {
-  const separator = basePath.includes('\\') ? '\\' : '/';
-  return `${basePath.replace(/[\\/]+$/, '')}${separator}${relativePath.replace(/\//g, separator)}`;
 }
 
 export interface PoolEntry {
@@ -267,53 +256,61 @@ async function startSidecar() {
     throw new Error(nodeCheck.message);
   }
 
-  // Resolve sidecar script path using resolveResource (handles dev + prod bundles correctly)
-  let script: string;
-  let isDev = false;
-  let baseDir: string | undefined;
-  try {
-    const resolvedScript = await resolveResource(sidecarResourcePath);
-    const devRepoRoot = getTauriDevRepoRoot(resolvedScript);
-    if (devRepoRoot) {
-      script = joinResourcePath(devRepoRoot, sidecarResourcePath);
-      baseDir = devRepoRoot;
-      isDev = true;
-      console.log(`[sdk] Dev mode: resolved sidecar resource points at target dir, using repo path: ${script}`);
-    } else {
-      script = resolvedScript;
-      console.log(`[sdk] Resolved sidecar resource path: ${script}`);
-    }
-  } catch {
-    // In dev mode, resolveResource fails; use relative path from cwd
-    script = sidecarResourcePath;
-    isDev = true;
-    console.log(`[sdk] Dev mode: using relative sidecar path`);
-  }
-
-  // Determine base dir for cwd (helps node resolve sibling 'foundry-local-sdk' in prod bundle)
-  if (!baseDir) {
+  // Resolve resource keys via Tauri, then select layout (flattened / legacy / dev) with pure helpers.
+  // IMPORTANT: resolveResource only joins paths — it does not check the file exists.
+  const candidates: ResolvedSidecarCandidate[] = [];
+  for (const key of SIDECAR_RESOURCE_CANDIDATES) {
     try {
-      baseDir = await resourceDir();
-      console.log(`[sdk] Resource dir: ${baseDir}`);
-    } catch (e) {
-      console.log(`[sdk] resourceDir unavailable`);
+      const resolvedPath = await resolveResource(key);
+      let fileExists = false;
+      try {
+        fileExists = await exists(resolvedPath);
+      } catch (e) {
+        // fs scope may block; fall through with a packaged-path heuristic
+        console.log(`[sdk] exists() check failed for ${resolvedPath}: ${e}`);
+        fileExists = /[/\\]sidecar[/\\]foundry-sidecar\.js$/i.test(resolvedPath);
+      }
+      candidates.push({ key, resolvedPath, exists: fileExists });
+      if (!fileExists) {
+        console.log(`[sdk] Sidecar candidate missing (${key}): ${resolvedPath}`);
+      }
+    } catch {
+      // resolveResource unavailable for this key
     }
   }
 
-  if (isDev && baseDir && script === sidecarResourcePath) {
-    const devRepoRoot = getTauriDevRepoRoot(joinResourcePath(baseDir, sidecarResourcePath));
-    if (devRepoRoot) {
-      script = joinResourcePath(devRepoRoot, sidecarResourcePath);
-      baseDir = devRepoRoot;
-      console.log(`[sdk] Dev mode: using repo sidecar path from resource dir: ${script}`);
-    }
+  let resourceDirPath: string | undefined;
+  try {
+    resourceDirPath = await resourceDir();
+    console.log(`[sdk] Resource dir: ${resourceDirPath}`);
+  } catch {
+    console.log(`[sdk] resourceDir unavailable`);
+  }
+
+  const spawnPaths = selectSidecarSpawnPaths({
+    candidates,
+    resourceDir: resourceDirPath,
+  });
+  const { script, baseDir, isDev, nodePath } = spawnPaths;
+  if (isDev) {
+    console.log(`[sdk] Dev/fallback sidecar resolution: script=${script}`);
+  } else {
+    console.log(`[sdk] Production sidecar resolution: script=${script}`);
+  }
+
+  // NODE_PATH only; native Foundry core discovery stays in the sidecar (platform-correct).
+  const env: Record<string, string> = {};
+  if (nodePath) {
+    env.NODE_PATH = nodePath;
   }
 
   const opts: any = baseDir
-    ? { cwd: baseDir, env: { NODE_PATH: baseDir } }
-    : undefined;
+    ? { cwd: baseDir, env }
+    : Object.keys(env).length
+      ? { env }
+      : undefined;
 
-  console.log(`[sdk] Spawning sidecar - isDev=${isDev}, script=${script}`);
+  console.log(`[sdk] Spawning sidecar - isDev=${isDev}, script=${script}, NODE_PATH=${env.NODE_PATH || ''}`);
 
   const command = Command.create('node', [script], opts);
 
