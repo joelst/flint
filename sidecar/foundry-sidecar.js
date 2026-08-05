@@ -813,8 +813,8 @@ function resolveFoundryCoreLibraryPath () {
 }
 
 function toFileUrl (filePath) {
-  const normalized = path.resolve(filePath).replace(/\\/g, '/');
-  return 'file:///' + (normalized.startsWith('/') ? normalized.slice(1) : normalized);
+  const { pathToFileURL } = require('url');
+  return pathToFileURL(path.resolve(filePath)).href;
 }
 
 async function getFoundryManager () {
