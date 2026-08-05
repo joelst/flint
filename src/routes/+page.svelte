@@ -1193,12 +1193,11 @@
       }
 
       if (wasRunning) {
-        const ep = await startSvc(
-          selectedModelAlias || undefined,
-          selectedAccelerationPreference === 'auto' ? undefined : selectedAccelerationPreference,
-        );
-        markNetworkSettingsApplied();
-        updateStateFromSdk();
+const ep = await startSvc(
+  selectedModelAlias || undefined,
+  selectedAccelerationPreference === 'auto' ? undefined : selectedAccelerationPreference,
+);
+updateStateFromSdk();
         statusMessage = `Service restarted at ${ep} (bound ${bind}:${port})`;
         appendAppLog(`Service restarted at ${ep} (bind ${bind}:${port})`);
       } else {
