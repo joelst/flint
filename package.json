@@ -43,6 +43,7 @@
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
     "@tauri-apps/cli": "^2",
     "@testing-library/svelte": "^5.2.8",
+    "@types/node": "^26.1.2",
     "@vitest/coverage-v8": "^4.1.10",
     "jsdom": "^25.0.1",
     "svelte": "^5.0.0",
