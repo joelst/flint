@@ -14,7 +14,15 @@ For signed release pipeline setup, see [RELEASE.md](./RELEASE.md).
 - **Rust** + Cargo (Tauri)
 - Windows: Visual Studio Build Tools / MSVC for native builds (use `build-local.ps1` if `cl.exe` / SignTool paths need wiring)
 
-`npm install` runs the Foundry Local SDK install script, which downloads native core libraries into `node_modules/foundry-local-sdk/foundry-local-core/`. Release builds also run `npm run ensure:foundry` via Tauri `beforeBuildCommand`.
+`npm install` runs the Foundry Local SDK install script, which downloads native core libraries into `node_modules/foundry-local-sdk/foundry-local-core/<platform>/`. Release builds also run `npm run ensure:foundry` via Tauri `beforeBuildCommand`.
+
+`ensure:foundry` prefers the **build target**, not the host:
+
+- Uses `TAURI_ENV_PLATFORM` / `TAURI_ENV_ARCH` / `TAURI_ENV_TARGET_TRIPLE` when set by `tauri build --target …`
+- Overrides: `FOUNDRY_PLATFORM_KEY=darwin-arm64` or `npm run ensure:foundry -- --target aarch64-apple-darwin`
+- When host arch ≠ target, it re-runs the SDK install script with patched `os.platform()` / `os.arch()` so the correct NuGet RID is downloaded
+
+Supported Foundry core layouts today: `win32-x64`, `win32-arm64`, `linux-x64`, `linux-arm64`, `darwin-arm64` (no `darwin-x64` in current SDK).
 
 ---
 
@@ -22,8 +30,8 @@ For signed release pipeline setup, see [RELEASE.md](./RELEASE.md).
 
 | Command | Purpose |
 |---|---|
-| `npm install` | Install dependencies (+ Foundry native cores) |
-| `npm run ensure:foundry` | Re-download Foundry core binaries if missing |
+| `npm install` | Install dependencies (+ host Foundry native cores) |
+| `npm run ensure:foundry` | Ensure Foundry cores for host or build target |
 | `npm run tauri dev` | Dev app (hot reload + sidecar) |
 | `npm run check` | Svelte/TS check |
 | `npm run check:watch` | Watch mode type check |
