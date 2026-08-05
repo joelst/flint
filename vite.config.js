@@ -11,7 +11,7 @@ export default defineConfig(() => ({
   // Externalize the Foundry SDK to avoid browser/Node builtin issues during build.
   // Real usage should move to Tauri commands or sidecar for production.
   optimizeDeps: {
-    exclude: ['foundry-local-sdk', 'foundry-local-sdk-winml']
+    exclude: ['foundry-local-sdk']
   },
   build: {
     rollupOptions: {

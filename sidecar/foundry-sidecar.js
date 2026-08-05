@@ -761,6 +761,62 @@ function log (level, message) {
   writeToDisk(entry);
 }
 
+function coreLibraryFileName () {
+  if (process.platform === 'win32') return 'Microsoft.AI.Foundry.Local.Core.dll';
+  if (process.platform === 'darwin') return 'Microsoft.AI.Foundry.Local.Core.dylib';
+  return 'Microsoft.AI.Foundry.Local.Core.so';
+}
+
+/**
+ * Resolve the full path to Microsoft.AI.Foundry.Local.Core.* for FoundryLocalManager
+ * config.libraryPath (the SDK stores it as FoundryLocalCorePath).
+ *
+ * Layouts we support:
+ * - Dev:            <repo>/node_modules/foundry-local-sdk/foundry-local-core/<plat>/
+ * - Flattened prod: <res>/foundry-local-sdk/foundry-local-core/<plat>/
+ */
+function resolveFoundryCoreLibraryPath () {
+  if (process.env.FLINT_FOUNDRY_CORE_PATH && fs.existsSync(process.env.FLINT_FOUNDRY_CORE_PATH)) {
+    return process.env.FLINT_FOUNDRY_CORE_PATH;
+  }
+
+  const platformKey = `${process.platform}-${process.arch}`;
+  const coreFile = coreLibraryFileName();
+  const relativeCore = path.join('foundry-local-core', platformKey, coreFile);
+
+  const packageRoots = [];
+  const pushRoot = (p) => {
+    if (p && !packageRoots.includes(p)) packageRoots.push(p);
+  };
+
+  // Prefer roots relative to this script (most reliable in packaged apps)
+  const parent = path.resolve(__dirname, '..');
+  pushRoot(path.join(parent, 'foundry-local-sdk'));
+  pushRoot(path.join(parent, 'node_modules', 'foundry-local-sdk'));
+  // cwd may be $RESOURCE (flattened) or repo root (dev)
+  pushRoot(path.join(process.cwd(), 'foundry-local-sdk'));
+  pushRoot(path.join(process.cwd(), 'node_modules', 'foundry-local-sdk'));
+
+  // NODE_PATH entries (directories that should contain foundry-local-sdk)
+  const nodePath = process.env.NODE_PATH || '';
+  for (const entry of nodePath.split(path.delimiter).filter(Boolean)) {
+    pushRoot(path.join(entry, 'foundry-local-sdk'));
+  }
+
+  for (const root of packageRoots) {
+    const candidate = path.join(root, relativeCore);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function toFileUrl (filePath) {
+  const normalized = path.resolve(filePath).replace(/\\/g, '/');
+  return 'file:///' + (normalized.startsWith('/') ? normalized.slice(1) : normalized);
+}
+
 async function getFoundryManager () {
   if (FoundryLocalManager) return FoundryLocalManager;
   try {
@@ -769,16 +825,35 @@ async function getFoundryManager () {
     FoundryLocalManager = mod.FoundryLocalManager;
     return FoundryLocalManager;
   } catch (err) {
-    log('warn', `Normal SDK import failed (${err?.message || err}), trying bundled resource path`);
-    // In prod bundle: we ship ../node_modules/foundry-local-sdk via tauri resources
-    // sidecar is at <res>/sidecar/..., SDK at <res>/foundry-local-sdk/dist/index.js
-    const base = path.resolve(__dirname, '..');
-    const sdkEntry = path.join(base, 'foundry-local-sdk', 'dist', 'index.js').replace(/\\/g, '/');
-    const fileUrl = 'file:///' + (sdkEntry.startsWith('/') ? sdkEntry.slice(1) : sdkEntry);
-    const mod = await import(fileUrl);
-    FoundryLocalManager = mod.FoundryLocalManager;
-    return FoundryLocalManager;
+    log('warn', `Normal SDK import failed (${err?.message || err}), trying bundled resource paths`);
   }
+
+  // Packaged layout: sidecar next to foundry-local-sdk; dev uses node_modules
+  const parent = path.resolve(__dirname, '..');
+  const entryCandidates = [
+    path.join(parent, 'foundry-local-sdk', 'dist', 'index.js'),
+    path.join(parent, 'node_modules', 'foundry-local-sdk', 'dist', 'index.js'),
+    path.join(process.cwd(), 'foundry-local-sdk', 'dist', 'index.js'),
+    path.join(process.cwd(), 'node_modules', 'foundry-local-sdk', 'dist', 'index.js'),
+  ];
+
+  let lastErr = null;
+  for (const sdkEntry of entryCandidates) {
+    if (!fs.existsSync(sdkEntry)) continue;
+    try {
+      log('info', `Loading Foundry SDK from ${sdkEntry}`);
+      const mod = await import(toFileUrl(sdkEntry));
+      FoundryLocalManager = mod.FoundryLocalManager;
+      return FoundryLocalManager;
+    } catch (e) {
+      lastErr = e;
+      log('warn', `Failed loading SDK from ${sdkEntry}: ${e?.message || e}`);
+    }
+  }
+  throw lastErr || new Error(
+    'Could not load foundry-local-sdk from packaged resources. ' +
+    'Expected foundry-local-sdk next to the sidecar or under node_modules.'
+  );
 }
 
 rl.on('line', async (line) => {
@@ -815,10 +890,19 @@ rl.on('line', async (line) => {
     if (cmd === 'init') {
       const FManager = await getFoundryManager();
       const appName = payload.appName || 'flint';
-      initConfig = { appName, logLevel: payload.logLevel || 'info' };
+      const libraryPath = resolveFoundryCoreLibraryPath();
+      if (!libraryPath) {
+        throw new Error(
+          "FoundryLocalCorePath not specified in configuration and could not auto-discover binaries. " +
+          "Please run 'npm install' / 'npm run ensure:foundry' so native libraries are present, " +
+          "then rebuild the installer (natives must be packaged under foundry-local-sdk/foundry-local-core)."
+        );
+      }
+      log('info', `Using Foundry core library: ${libraryPath}`);
+      initConfig = { appName, logLevel: payload.logLevel || 'info', libraryPath };
       manager = FManager.create(initConfig);
       log('info', `SDK initialized for ${appName}`);
-      audit('init', { appName });
+      audit('init', { appName, libraryPath });
       reply({ ok: true, result: 'initialized' });
     } else if (cmd === 'listModels') {
       const models = await manager.catalog.getModels();
@@ -993,16 +1077,30 @@ rl.on('line', async (line) => {
         reply({ ok: true, result: { alias: payload.alias, count: deleted } });
       }
     } else if (cmd === 'startService') {
-      // Re-create the manager with webServiceUrls so startWebService() binds to the requested port.
-      // The manager from init() lacks webServiceUrls and would bind to whatever the SDK default is.
-      // Pool is cleared because catModel references from the old manager instance become stale.
-      // bindAddress controls the bind interface; sharedEndpoint always uses 127.0.0.1 for connecting.
+      // FoundryLocalManager.create() is a singleton: a second create() ignores new config.
+      // init() already created an instance without webServiceUrls, so we must clear the
+      // singleton before re-create or bind address/port never take effect (Apply & restart).
+      //
+      // bindAddress = listen interface for the native service.
+      // sharedEndpoint = client URL for this app and Integrations snippets — always loopback
+      // so local tools talk to 127.0.0.1 even when the service is bound to 0.0.0.0.
       const bindAddr = payload.bindAddress || '127.0.0.1';
       if (bindAddr !== '127.0.0.1') {
         log('warn', `Service binding to ${bindAddr} — accessible from other network interfaces`);
       }
       if (FoundryLocalManager && initConfig) {
         pool.clear();
+        if (manager && typeof manager.stopWebService === 'function') {
+          try { manager.stopWebService(); } catch (e) {
+            log('warn', `stopWebService before rebind (ignored): ${e?.message ?? e}`);
+          }
+        }
+        // Reset SDK singleton so create() applies the new webServiceUrls.
+        try {
+          FoundryLocalManager.instance = undefined;
+        } catch (e) {
+          log('warn', `Could not clear FoundryLocalManager.instance: ${e?.message ?? e}`);
+        }
         manager = FoundryLocalManager.create({
           ...initConfig,
           webServiceUrls: `http://${bindAddr}:${payload.port}`,
@@ -1012,6 +1110,7 @@ rl.on('line', async (line) => {
       if (typeof manager.startWebService === 'function') {
         manager.startWebService(); // synchronous, no args; port comes from webServiceUrls above
       }
+      // Client-facing endpoint stays on loopback (see comment above).
       sharedEndpoint = `http://127.0.0.1:${payload.port}/v1`;
       log('info', `Service started; bind=${bindAddr}:${payload.port} connect=${sharedEndpoint}`);
       audit('startService', { port: payload.port, bindAddress: bindAddr, endpoint: sharedEndpoint });

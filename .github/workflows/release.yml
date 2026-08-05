@@ -98,10 +98,10 @@ jobs:
       - name: Upload updater metadata
         uses: actions/upload-artifact@v4
         with:
-          name: updater-metadata-${{ matrix.os }}
+          name: updater-metadata-${{ matrix.target }}
           path: |
-            src-tauri/target/release/bundle/**/latest.json
-            src-tauri/target/release/bundle/**/*.sig
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/latest.json
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.sig
           retention-days: 7
           if-no-files-found: warn
 
@@ -109,6 +109,6 @@ jobs:
         if: matrix.os == 'windows-latest'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.os }}-symbols
-          path: src-tauri/target/release/*.pdb
+          name: ${{ matrix.target }}-symbols
+          path: src-tauri/target/${{ matrix.target }}/release/*.pdb
           retention-days: 30

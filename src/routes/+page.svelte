@@ -422,9 +422,13 @@
   let defaultAudioAlias = $state('');
   let osAutoStartEnabled = $state<boolean | null>(null);
 
-  // Settings: network
+  // Settings: network (draft UI values — Apply restarts service to take effect)
   let networkPort = $state(5272);
   let networkBindAddress = $state('127.0.0.1');
+  /** Last values successfully applied to a running/started service (or saved for next start). */
+  let appliedNetworkPort = $state(5272);
+  let appliedNetworkBindAddress = $state('127.0.0.1');
+  let networkApplyBusy = $state(false);
 
   // UI: keyboard shortcut help modal
   let showShortcutsHelp = $state(false);
@@ -1086,14 +1090,136 @@
         if (typeof data.autoStartService === 'boolean') autoStartService = data.autoStartService;
         if (typeof data.defaultChatAlias === 'string') defaultChatAlias = data.defaultChatAlias;
         if (typeof data.defaultAudioAlias === 'string') defaultAudioAlias = data.defaultAudioAlias;
-        if (typeof data.networkPort === 'number' && data.networkPort >= 1024 && data.networkPort <= 65535) networkPort = data.networkPort;
-        if (typeof data.networkBindAddress === 'string' && data.networkBindAddress) networkBindAddress = data.networkBindAddress;
+        if (typeof data.networkPort === 'number' && data.networkPort >= 1024 && data.networkPort <= 65535) {
+          networkPort = data.networkPort;
+          appliedNetworkPort = data.networkPort;
+        }
+        if (typeof data.networkBindAddress === 'string' && data.networkBindAddress) {
+          networkBindAddress = data.networkBindAddress;
+          appliedNetworkBindAddress = data.networkBindAddress;
+        }
       }
     } catch {}
   }
 
+  const networkSettingsDirty = $derived(
+    Number(networkPort) !== Number(appliedNetworkPort) ||
+      (networkBindAddress || '127.0.0.1').trim() !== (appliedNetworkBindAddress || '127.0.0.1').trim(),
+  );
+
+  function isLoopbackBind(addr: string): boolean {
+    const a = (addr || '').trim().toLowerCase();
+    return a === '127.0.0.1' || a === 'localhost' || a === '::1';
+  }
+
+  function confirmExposeNetwork(addr: string): boolean {
+    const label = (addr || '').trim() || 'a non-loopback address';
+    return globalThis.confirm(
+      `Bind the local inference service to ${label}?\n\n` +
+        `Other devices on the network may be able to reach your models and chat traffic. ` +
+        `Only continue on a trusted network with an appropriate firewall.\n\n` +
+        `OK to continue, Cancel to keep the current bind address.`,
+    );
+  }
+
+  /** Select a bind-address option; confirm when leaving loopback. */
+  function selectBindAddress(next: string) {
+    const prev = networkBindAddress || '127.0.0.1';
+    const nextExposes = next === '0.0.0.0' || next === '' || !isLoopbackBind(next);
+    if (nextExposes && isLoopbackBind(prev)) {
+      const confirmLabel =
+        next === '0.0.0.0' ? '0.0.0.0 (all interfaces)' : next || 'a custom address';
+      if (!confirmExposeNetwork(confirmLabel)) return;
+    }
+    networkBindAddress = next;
+    persistChat();
+  }
+
+  function discardNetworkSettings() {
+    networkPort = appliedNetworkPort;
+    networkBindAddress = appliedNetworkBindAddress;
+    persistChat();
+  }
+
+  function markNetworkSettingsApplied() {
+    appliedNetworkPort = Number(networkPort) || 5272;
+    appliedNetworkBindAddress = (networkBindAddress || '127.0.0.1').trim() || '127.0.0.1';
+  }
+
+  async function applyNetworkSettings() {
+    const port = Number(networkPort);
+    if (!Number.isFinite(port) || port < 1024 || port > 65535) {
+      statusMessage = 'Port must be between 1024 and 65535';
+      return;
+    }
+    const bind = (networkBindAddress || '127.0.0.1').trim();
+    if (!bind) {
+      statusMessage = 'Enter a custom bind address, or choose loopback / all interfaces';
+      return;
+    }
+    // Custom IP-ish validation (allow hostnames lightly; reject obvious junk)
+    if (!isLoopbackBind(bind) && bind !== '0.0.0.0') {
+      if (!/^[\w.:%-]+$/.test(bind)) {
+        statusMessage = 'Custom bind address looks invalid';
+        return;
+      }
+    }
+
+    if (!isLoopbackBind(bind) && isLoopbackBind(appliedNetworkBindAddress)) {
+      if (!confirmExposeNetwork(bind)) return;
+    }
+
+    if (state.serviceRunning) {
+      const restartOk = globalThis.confirm(
+        `Apply network settings and restart the local service?\n\n` +
+          `New listen address: ${bind}:${port}\n` +
+          `Active connections to the OpenAI-compatible endpoint will drop briefly.`,
+      );
+      if (!restartOk) return;
+    }
+
+    networkApplyBusy = true;
+    try {
+      networkPort = port;
+      networkBindAddress = bind;
+      persistChat();
+
+      const wasRunning = !!state.serviceRunning;
+      if (wasRunning) {
+        statusMessage = 'Restarting service with new network settings…';
+        appendAppLog(`Restarting service for network change → ${bind}:${port}`);
+        await stopService();
+        updateStateFromSdk();
+      }
+
+      if (wasRunning) {
+        const ep = await startSvc(
+          selectedModelAlias || undefined,
+          selectedAccelerationPreference === 'auto' ? undefined : selectedAccelerationPreference,
+        );
+        markNetworkSettingsApplied();
+        updateStateFromSdk();
+        statusMessage = `Service restarted at ${ep} (bound ${bind}:${port})`;
+        appendAppLog(`Service restarted at ${ep} (bind ${bind}:${port})`);
+      } else {
+        markNetworkSettingsApplied();
+        statusMessage = `Network settings saved (${bind}:${port}). Start the service to listen.`;
+        appendAppLog(`Network settings applied for next start: ${bind}:${port}`);
+      }
+    } catch (e: any) {
+      statusMessage = `Failed to apply network settings: ${e?.message || e}`;
+      appendAppLog(`Network settings apply failed: ${e?.message || e}`, 'error');
+      updateStateFromSdk();
+    } finally {
+      networkApplyBusy = false;
+    }
+  }
+
   function startSvc(alias?: string, preferredEp?: string) {
-    return startService(networkPort, alias, preferredEp, networkBindAddress || undefined);
+    return startService(networkPort, alias, preferredEp, networkBindAddress || undefined).then((ep) => {
+      markNetworkSettingsApplied();
+      return ep;
+    });
   }
 
   $effect(() => {
@@ -5025,6 +5151,10 @@ Output only the summary text, no preamble.`;
                   >Copy</button
                 >
               </div>
+              <p class="setting-note">
+                Client URL (always loopback). Bind address is configured under Settings → Network
+                and may differ from this host.
+              </p>
             {/if}
 
             <div class="service-actions">
@@ -5930,7 +6060,13 @@ Output only the summary text, no preamble.`;
 
           <div class="settings-section">
             <h3>Network</h3>
-            <p class="setting-note">Changes take effect after the next service restart.</p>
+            <p class="setting-note">
+              Edit port or bind address below, then use <strong>Apply &amp; restart</strong> so the
+              service rebinds. Draft changes are saved for the next start even if you do not apply yet.
+              The URL shown in Diagnostics / Integrations stays on
+              <code>http://127.0.0.1:&lt;port&gt;/v1</code> (loopback clients) even if the service
+              listens on <code>0.0.0.0</code> or a LAN address.
+            </p>
 
             <div class="setting-row">
               <div class="setting-info">
@@ -5955,28 +6091,85 @@ Output only the summary text, no preamble.`;
               <div class="radio-group" role="radiogroup" aria-label="Bind address">
                 <label class="radio-option">
                   <input type="radio" name="bind-addr" checked={networkBindAddress === '127.0.0.1'}
-                    onchange={() => { networkBindAddress = '127.0.0.1'; persistChat(); }} />
+                    onchange={() => selectBindAddress('127.0.0.1')} />
                   <span class="radio-option-text">127.0.0.1 — loopback only <span class="badge-recommend">Recommended</span></span>
                 </label>
                 <label class="radio-option">
                   <input type="radio" name="bind-addr" checked={networkBindAddress === '0.0.0.0'}
-                    onchange={() => { networkBindAddress = '0.0.0.0'; persistChat(); }} />
+                    onchange={() => selectBindAddress('0.0.0.0')} />
                   <span class="radio-option-text">0.0.0.0 — all interfaces</span>
                 </label>
                 <label class="radio-option">
                   <input type="radio" name="bind-addr" checked={networkBindAddress !== '127.0.0.1' && networkBindAddress !== '0.0.0.0'}
-                    onchange={() => { if (networkBindAddress === '127.0.0.1' || networkBindAddress === '0.0.0.0') { networkBindAddress = ''; } }} />
+                    onchange={() => {
+                      if (networkBindAddress === '127.0.0.1' || networkBindAddress === '0.0.0.0') {
+                        selectBindAddress('');
+                      }
+                    }} />
                   <span class="radio-option-text">Custom</span>
                 </label>
                 {#if networkBindAddress !== '127.0.0.1' && networkBindAddress !== '0.0.0.0'}
-                  <input type="text" class="custom-bind-input" bind:value={networkBindAddress} onchange={persistChat} placeholder="e.g. 192.168.1.100" />
+                  <input
+                    type="text"
+                    class="custom-bind-input"
+                    bind:value={networkBindAddress}
+                    onchange={persistChat}
+                    placeholder="e.g. 192.168.1.100"
+                    aria-label="Custom bind address"
+                  />
                 {/if}
               </div>
-              {#if networkBindAddress !== '127.0.0.1'}
+              {#if !isLoopbackBind(networkBindAddress)}
                 <div class="warning-banner">
                   Binding to {networkBindAddress || 'all interfaces'} exposes the local inference service to other machines on the same network. Ensure your OS firewall is configured appropriately.
                 </div>
               {/if}
+            </div>
+
+            <div class="network-apply-row">
+              <div class="setting-info">
+                <span class="setting-name">Active settings</span>
+                <span class="setting-desc">
+                  {#if networkSettingsDirty}
+                    Draft differs from applied: <code>{appliedNetworkBindAddress}:{appliedNetworkPort}</code>
+                    → <code>{(networkBindAddress || '127.0.0.1').trim() || '…'}:{networkPort}</code>
+                  {:else}
+                    Listening config: <code>{appliedNetworkBindAddress}:{appliedNetworkPort}</code>
+                    {#if state.serviceRunning}
+                      (service running)
+                    {:else}
+                      (service stopped)
+                    {/if}
+                  {/if}
+                </span>
+              </div>
+              <div class="network-apply-actions">
+                {#if networkSettingsDirty}
+                  <button
+                    type="button"
+                    class="btn-secondary"
+                    onclick={discardNetworkSettings}
+                    disabled={networkApplyBusy}
+                  >Discard</button>
+                {/if}
+                <button
+                  type="button"
+                  class="btn-primary"
+                  onclick={applyNetworkSettings}
+                  disabled={networkApplyBusy || !networkSettingsDirty}
+                  title={networkSettingsDirty
+                    ? (state.serviceRunning ? 'Stop and restart the service with these settings' : 'Save for the next service start')
+                    : 'No network changes to apply'}
+                >
+                  {#if networkApplyBusy}
+                    Applying…
+                  {:else if state.serviceRunning}
+                    Apply &amp; restart
+                  {:else}
+                    Apply
+                  {/if}
+                </button>
+              </div>
             </div>
           </div>
 
@@ -8561,6 +8754,46 @@ Output only the summary text, no preamble.`;
   }
   .badge-recommend { font-size: 0.7rem; padding: 1px 5px; border-radius: 3px; background: color-mix(in srgb, var(--success) 15%, transparent); color: var(--success); font-weight: 600; }
   .warning-banner { padding: 8px 12px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent); background: color-mix(in srgb, var(--warning) 10%, transparent); color: var(--warning); font-size: 0.8rem; }
+  .network-apply-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding-top: 4px;
+    border-top: 1px solid var(--border);
+  }
+  .network-apply-row code {
+    font-size: 0.78rem;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: var(--subtle-bg, color-mix(in srgb, var(--fg) 6%, transparent));
+  }
+  .network-apply-actions { display: flex; flex-wrap: wrap; gap: 8px; flex-shrink: 0; }
+  .network-apply-actions .btn-primary,
+  .network-apply-actions .btn-secondary {
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    border: 1px solid var(--border);
+  }
+  .network-apply-actions .btn-primary {
+    background: var(--accent);
+    color: white;
+    border-color: transparent;
+  }
+  .network-apply-actions .btn-primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .network-apply-actions .btn-secondary {
+    background: transparent;
+    color: var(--fg);
+  }
+  .network-apply-actions .btn-secondary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
 
   /* Keyboard shortcuts modal */
   .shortcuts-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55); display: grid; place-items: center; z-index: 1000; }

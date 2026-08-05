@@ -12,13 +12,9 @@ For signed release pipeline setup, see [RELEASE.md](./RELEASE.md).
 
 - **Node.js 22+** + npm (app preflight enforces 22+ — oldest security-supported line as of mid-2026)
 - **Rust** + Cargo (Tauri)
-- Windows: Visual Studio Build Tools / MSVC for native builds
+- Windows: Visual Studio Build Tools / MSVC for native builds (use `build-local.ps1` if `cl.exe` / SignTool paths need wiring)
 
-On Windows, install the WinML SDK variant for better acceleration:
-
-```bash
-npm run setup:winml
-```
+`npm install` runs the Foundry Local SDK install script, which downloads native core libraries into `node_modules/foundry-local-sdk/foundry-local-core/`. Release builds also run `npm run ensure:foundry` via Tauri `beforeBuildCommand`.
 
 ---
 
@@ -26,14 +22,15 @@ npm run setup:winml
 
 | Command | Purpose |
 |---|---|
-| `npm install` | Install dependencies |
+| `npm install` | Install dependencies (+ Foundry native cores) |
+| `npm run ensure:foundry` | Re-download Foundry core binaries if missing |
 | `npm run tauri dev` | Dev app (hot reload + sidecar) |
 | `npm run check` | Svelte/TS check |
 | `npm run check:watch` | Watch mode type check |
 | `npm test` | Vitest unit tests |
 | `npm run test:coverage` | Tests + coverage |
 | `npm run build` | Frontend web build only |
-| `npm run tauri:build` | Package installers (msi/nsis/dmg) |
+| `npm run tauri:build` | Package installers (msi/nsis/dmg); runs ensure:foundry first |
 | `npm run verify:bundle` | Post-build bundle resource check |
 | `npm run run:built` | Launch a release build without installing MSI |
 | `cd src-tauri && cargo check` | Rust/Tauri compile check |
@@ -45,9 +42,15 @@ npm run setup:winml
 - **Frontend:** Svelte 5 + SvelteKit SPA (`src/routes/+layout.ts` sets `ssr = false`). Most UI lives in `src/routes/+page.svelte`.
 - **SDK boundary:** `src/lib/sdk.ts` — do not import Foundry Local directly into the web bundle.
 - **Sidecar:** `sidecar/foundry-sidecar.js` speaks JSON-lines over stdio; Rust/Tauri is intentionally thin.
-- **Vite** externalizes `foundry-local-sdk`, `foundry-local-sdk-winml`, and Node builtins so the web bundle stays buildable.
+- **Vite** externalizes `foundry-local-sdk` and Node builtins so the web bundle stays buildable.
 
 When adding sidecar commands: update **both** `src/lib/sdk.ts` (and IPC contracts if applicable) and `sidecar/foundry-sidecar.js`.
+
+### Local OpenAI-compatible endpoint
+
+- **Bind address** (Settings → Network) controls which interface the service *listens* on (`127.0.0.1`, `0.0.0.0`, or a custom IP).
+- **Client / Integrations URL** (`sharedEndpoint`) is always `http://127.0.0.1:<port>/v1` so this app and local tools connect over loopback even when the service is bound to all interfaces.
+- Use **Apply & restart** after changing port or bind so the sidecar re-creates the Foundry manager with the new `webServiceUrls`.
 
 ### Why a sidecar?
 

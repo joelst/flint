@@ -83,14 +83,9 @@ npm run tauri dev
 
 **Prerequisites**
 
-- Node.js + npm
+- Node.js 22+ + npm
 - Rust + Cargo (for Tauri)
-
-On Windows, prefer the WinML SDK variant:
-
-```bash
-npm run setup:winml
-```
+- Windows: MSVC / Windows SDK for native builds
 
 Full contributor guide (scripts, sidecar, versioning, packaging): [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md)
 
