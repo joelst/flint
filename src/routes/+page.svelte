@@ -4314,6 +4314,18 @@ Output only the summary text, no preamble.`;
 
             {#if isLoadingModels && state.models.length === 0}
               <p>Loading catalog...</p>
+            {:else if filteredModels.length === 0}
+              <div class="empty-state-card">
+                {#if state.models.length === 0}
+                  <h3>No models in the catalog yet</h3>
+                  <p>Wait for Foundry Local to finish loading the catalog, or retry if something failed.</p>
+                  <button type="button" onclick={() => loadModels()}>Refresh catalog</button>
+                {:else}
+                  <h3>No models match “{searchTerm}”</h3>
+                  <p>Clear the search or try a family name (for example phi, whisper, qwen).</p>
+                  <button type="button" class="secondary" onclick={() => (searchTerm = "")}>Clear search</button>
+                {/if}
+              </div>
             {:else}
               <div class="model-grid">
                 {#each filteredModels as model (model.alias)}
@@ -4717,11 +4729,35 @@ Output only the summary text, no preamble.`;
 
               <div class="messages" bind:this={messagesContainer}>
                 {#if chatMessages.length === 0}
-                  <div class="empty-chat">
+                  <div class="empty-state-card empty-chat-card">
                     {#if !selectedModelAlias}
-                      Select a chat model above, or load one from the Models catalog.
+                      <h3>No chat model selected</h3>
+                      <p>Load a chat-capable model, then pick it here — or open the catalog to download one.</p>
+                      <div class="empty-state-actions">
+                        <button type="button" onclick={() => (currentView = "models")}>Open Models</button>
+                        {#if chatPickerModels.length > 0}
+                          <button
+                            type="button"
+                            class="secondary"
+                            onclick={() => setChatModel(chatPickerModels[0].alias)}
+                          >Use {chatPickerModels[0].alias}</button>
+                        {/if}
+                      </div>
+                    {:else if chatBlockedByLoadedSTT || !selectedModelSupportsChat}
+                      <h3>Chat isn’t available with the current model</h3>
+                      <p>Switch to a chat-capable model from the catalog (STT-only models stay on Audio).</p>
+                      <button type="button" onclick={() => (currentView = "models")}>Open Models</button>
                     {:else}
-                      Start a conversation. Your model is ready locally.
+                      <h3>Start a conversation</h3>
+                      <p><strong>{selectedModelAlias}</strong> is ready locally. Type below — nothing leaves your machine by default.</p>
+                      <button
+                        type="button"
+                        class="secondary"
+                        onclick={() => {
+                          const el = document.querySelector(".chat-input textarea, .chat-input input, textarea.chat-textarea") as HTMLElement | null;
+                          el?.focus();
+                        }}
+                      >Focus message box</button>
                     {/if}
                   </div>
                 {:else}
@@ -5410,7 +5446,11 @@ Output only the summary text, no preamble.`;
           <div class="monitor-section">
             <h3>Model Pool</h3>
             {#if state.pool.length === 0}
-              <p class="monitor-empty">No models loaded.</p>
+              <div class="empty-state-card empty-state-compact">
+                <h3>No models in the pool</h3>
+                <p>Load a model to see it here with device, tokens, and unload controls.</p>
+                <button type="button" onclick={() => (currentView = "models")}>Open Models</button>
+              </div>
             {:else}
               <table class="pool-table-full">
                 <thead>
