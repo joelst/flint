@@ -47,8 +47,8 @@
 
 | # | Item | Outcome | Priority |
 |---|---|---|---|
-| B1 | **First-run coach** | 3–4 steps: Node check → starter model → chat → optional service | P1 |
-| B2 | **Learn → Help** restructure | Why Flint / First 5 min / Tools / Troubleshoot / Shortcuts | P1 |
+| B1 | **First-run coach** | 3–4 steps: Node check → starter model → chat → optional service | ✅ Done (banner + dismiss) |
+| B2 | **Learn → Help** restructure | Why Flint / First 5 min / Tools / Troubleshoot / Shortcuts | ✅ Done |
 | B3 | **Contextual empty states** | Models/Chat/Compare/Monitor each have one next action | P2 |
 | B4 | **About** strip | Version, Node version, endpoint, link to docs/releases | P2 |
 
@@ -90,10 +90,11 @@ Defer: autonomous agent loops, full Purview implementation, full multi-endpoint 
 ## Sequencing
 
 ```text
-A1 README (now)
-  → B2 Help copy + B1 first-run (next product PR)
+A1 README ✅
+B1/B2 Help + first-run coach ✅
   → C1–C3 tag 0.3.x public
   → A2/A3 roadmap + user guide
+  → B3/B4 empty states + About polish
   → 0.4: auto-update UX + (RAG | Azure | Node spike)
   → 0.5–0.9: Node independence + hardening
   → 1.0: runtime + signed + help + core flows locked

@@ -77,8 +77,28 @@
   }
 
   // Simple client-side navigation
-  type View = "models" | "chat" | "audio" | "monitor" | "diagnostics" | "integrations" | "learn" | "settings" | "compare";
+  type View = "models" | "chat" | "audio" | "monitor" | "diagnostics" | "integrations" | "help" | "settings" | "compare";
   let currentView = $state<View>("models");
+
+  const FIRST_RUN_KEY = "flint-first-run-dismissed-v1";
+  let showFirstRunCoach = $state(false);
+
+  function dismissFirstRunCoach() {
+    showFirstRunCoach = false;
+    try {
+      localStorage.setItem(FIRST_RUN_KEY, "1");
+    } catch {}
+  }
+
+  function openFirstRunCoach() {
+    showFirstRunCoach = true;
+  }
+
+  const firstRunHasModel = $derived(state.models.some((m: ModelInfo) => m.isCached || m.isLoaded));
+  const firstRunHasChatReady = $derived(
+    !!selectedModelAlias && state.models.some((m: ModelInfo) => m.alias === selectedModelAlias && m.isLoaded),
+  );
+  const firstRunServiceOn = $derived(!!state.serviceRunning && !!state.endpoint);
 
   // Model capability helpers (based on catalog task/capabilities/family/alias)
   function modelSupportsChat(m: any): boolean {
@@ -2216,17 +2236,24 @@ updateStateFromSdk();
       // Auto setup accelerators (background)
       ensureHardwareAccel().catch(console.error);
 
-      // Auto first launch: if no cached models and no persisted chat, auto use first recommended
+      // First-run coach (dismissible); keep until user skips or completes basics
+      try {
+        const coachDismissed = localStorage.getItem(FIRST_RUN_KEY) === "1";
+        if (!coachDismissed) {
+          const hasAnyCached = state.models.some((m: ModelInfo) => m.isCached);
+          // Show coach when nothing cached yet, or always until dismissed after first install
+          showFirstRunCoach = !hasAnyCached || !localStorage.getItem(PERSIST_KEY);
+        }
+      } catch {
+        showFirstRunCoach = true;
+      }
+
+      // Auto first launch: if no cached models and no persisted chat, offer starter (do not force-download)
       const hasAnyCached = state.models.some((m: ModelInfo) => m.isCached);
       const hasPersisted = !!localStorage.getItem(PERSIST_KEY);
       if (!hasAnyCached && !hasPersisted && recommendedStarters.length > 0) {
-        statusMessage = `First launch detected — auto-starting with ${recommendedStarters[0].alias}...`;
-        // Auto do it after short delay so UI updates
-        setTimeout(() => {
-          if (recommendedStarters[0]) {
-            useStarterModel(recommendedStarters[0]);
-          }
-        }, 600);
+        statusMessage = `First launch — pick a starter model below, or open Help for a guided path.`;
+        currentView = "models";
       } else if (autoStartService) {
         const targetAlias = defaultChatAlias || selectedModelAlias;
         if (targetAlias && !selectedModel) {
@@ -4029,17 +4056,18 @@ Output only the summary text, no preamble.`;
       </button>
       <button
         class="nav-item"
-        class:active={currentView === "learn"}
-        onclick={() => (currentView = "learn")}
-        title="Learn"
+        class:active={currentView === "help"}
+        onclick={() => (currentView = "help")}
+        title="Help"
       >
         <span class="nav-icon" aria-hidden="true">
           <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M4.5 6.5C4.5 5.4 5.4 4.5 6.5 4.5H11V19.5H6.5C5.4 19.5 4.5 18.6 4.5 17.5V6.5Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
-            <path d="M19.5 6.5C19.5 5.4 18.6 4.5 17.5 4.5H13V19.5H17.5C18.6 19.5 19.5 18.6 19.5 17.5V6.5Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
+            <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8" />
+            <path d="M9.5 9.5a2.5 2.5 0 1 1 3.6 2.2c-.8.4-1.1.8-1.1 1.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+            <circle cx="12" cy="16.5" r="0.9" fill="currentColor" stroke="none" />
           </svg>
         </span>
-        <span class="nav-label">Learn</span>
+        <span class="nav-label">Help</span>
       </button>
 
       <button
@@ -4063,6 +4091,56 @@ Output only the summary text, no preamble.`;
     </nav>
 
     <section class="content">
+      {#if showFirstRunCoach}
+        <div class="first-run-coach" role="region" aria-label="Getting started with Flint">
+          <div class="first-run-head">
+            <div>
+              <h3>Get started with Flint</h3>
+              <p class="first-run-lede">
+                Local models via Foundry Local — broader catalog than the CLI alone, without writing your own wrapper.
+              </p>
+            </div>
+            <button type="button" class="first-run-dismiss" onclick={dismissFirstRunCoach} aria-label="Dismiss getting started">
+              Skip
+            </button>
+          </div>
+          <ol class="first-run-steps">
+            <li class:done={state.ready}>
+              <strong>Node.js 22+</strong>
+              {#if state.ready}
+                <span class="first-run-ok">Ready — sidecar connected</span>
+              {:else if state.error}
+                <span class="first-run-bad">Not ready — see the notice below or Help → Troubleshooting</span>
+              {:else}
+                <span class="muted">Checking…</span>
+              {/if}
+            </li>
+            <li class:done={firstRunHasModel}>
+              <strong>Get a model</strong>
+              <span class="muted">Download a small starter from Models (hardware-aware picks appear when available).</span>
+              <button type="button" class="small" onclick={() => (currentView = "models")}>Open Models</button>
+            </li>
+            <li class:done={firstRunHasChatReady}>
+              <strong>Chat locally</strong>
+              <span class="muted">Load a chat model, then send a message.</span>
+              <button type="button" class="small" onclick={() => (currentView = "chat")} disabled={!firstRunHasModel}>Open Chat</button>
+            </li>
+            <li class:done={firstRunServiceOn}>
+              <strong>Optional: endpoint for other tools</strong>
+              <span class="muted">Start the service (Diagnostics), then copy snippets from Integrations. Client URL is always loopback.</span>
+              <button type="button" class="small" onclick={() => (currentView = "diagnostics")}>Diagnostics</button>
+              <button type="button" class="small secondary" onclick={() => (currentView = "integrations")}>Integrations</button>
+            </li>
+          </ol>
+          <div class="first-run-foot">
+            <button type="button" class="link-like" onclick={() => (currentView = "help")}>Open Help</button>
+            {#if firstRunHasModel && firstRunHasChatReady}
+              <button type="button" class="small" onclick={dismissFirstRunCoach}>Done — hide this</button>
+            {/if}
+          </div>
+        </div>
+      {/if}
+
       {#if currentView === "models"}
         <div class="view models-view">
           <h2>Model Catalog</h2>
@@ -5521,102 +5599,133 @@ Output only the summary text, no preamble.`;
             {/each}
           </div>
         </div>
-      {:else if currentView === "learn"}
-        <div class="view">
-          <h2>Learn about Foundry Local</h2>
-          <p>
-            Flint bundles the Foundry Local runtime (~20MB). You do not need a
-            separate Foundry CLI install for normal use.
+      {:else if currentView === "help"}
+        <div class="view help-view">
+          <h2>Help</h2>
+          <p class="help-lede">
+            Flint is the desktop control plane for Microsoft Foundry Local: manage models, run chat and audio on-device,
+            and expose an OpenAI-compatible endpoint to tools you already use.
           </p>
-          <p>
-            <strong>Node.js 22+ must be installed and on your PATH</strong> so
-            Flint can run the local JS sidecar that drives Foundry Local (Node 22
-            is the oldest release line still getting security updates). On launch
-            we check for a suitable Node version and show install help if it is
-            missing or too old. Download LTS from
-            <a href="https://nodejs.org" target="_blank" rel="noopener noreferrer"
-              >nodejs.org</a
-            >, then quit and reopen Flint.
-          </p>
-          <p>
-            On first launch we detect your hardware accelerators and suggest 1-3
-            small starter models.
-          </p>
-          <ul>
-            <li>Models run entirely on your device</li>
-            <li>Uses the same OpenAI-compatible interface as Azure</li>
-            <li>Automatic hardware acceleration (CPU / GPU / NPU)</li>
-          </ul>
 
-          <h3>Around the app</h3>
-          <ul>
-            <li><strong>Models</strong> — catalog, multi-model pool, download/load/unload</li>
-            <li><strong>Chat / Audio / Compare</strong> — inference, STT, side-by-side bake-off</li>
-            <li><strong>Monitor</strong> — pool, resources, access and audit logs</li>
-            <li><strong>Integrations</strong> — copy-paste snippets for external tools</li>
-            <li><strong>Diagnostics / Settings</strong> — service, endpoint, bind/port, autostart, shortcuts</li>
-          </ul>
-
-          <h3>Using the Local Endpoint</h3>
-          {#if state.endpoint}
-            <div class="endpoint-snippet">
-              <strong>Endpoint:</strong> <code>{state.endpoint}</code>
-              <button
-                onclick={() =>
-                  navigator.clipboard.writeText(state.endpoint || "")}
-                >Copy</button
-              >
-            </div>
-            <p>
-              Full setup snippets for AI coding tools (Continue.dev, OpenCode,
-              Codex CLI, generic OpenAI SDKs, and more) live in the
-              <button class="link-like" onclick={() => (currentView = "integrations")}
-                >Integrations</button
-              > tab — with per-OS commands and copy buttons.
+          <section class="help-section">
+            <h3>Why Flint?</h3>
+            <ul>
+              <li><strong>Privacy by default</strong> — inference stays on your machine; loopback bind unless you change it.</li>
+              <li><strong>Fuller catalog than the CLI alone</strong> — Foundry Local CLI covers common flows; Flint uses the
+                <strong>official SDK</strong> so you get a broader model surface (chat, vision, STT, acceleration variants)
+                without maintaining your own service wrapper.</li>
+              <li><strong>One local endpoint</strong> — start the service and point IDEs/agents at
+                <code>http://127.0.0.1:&lt;port&gt;/v1</code>.</li>
+              <li><strong>Ops visibility</strong> — pool, resources, access and audit logs in Monitor.</li>
+            </ul>
+            <p class="muted">
+              More detail in the
+              <a href="https://github.com/joelst/flint#why-flint" target="_blank" rel="noopener noreferrer">project README</a>.
             </p>
-          {:else}
+          </section>
+
+          <section class="help-section">
+            <h3>First five minutes</h3>
+            <ol class="help-steps">
+              <li>
+                <strong>Node.js 22+</strong> on PATH (required for the JS sidecar). Install LTS from
+                <a href="https://nodejs.org" target="_blank" rel="noopener noreferrer">nodejs.org</a>, then restart Flint.
+                {#if state.ready}
+                  <span class="first-run-ok"> Detected and connected.</span>
+                {/if}
+              </li>
+              <li>
+                Open <button type="button" class="link-like" onclick={() => (currentView = "models")}>Models</button>,
+                download a small starter, then <strong>Load</strong>.
+              </li>
+              <li>
+                Open <button type="button" class="link-like" onclick={() => (currentView = "chat")}>Chat</button> and send a message.
+              </li>
+              <li>
+                Optional: <button type="button" class="link-like" onclick={() => (currentView = "diagnostics")}>Diagnostics</button>
+                → Start service, then
+                <button type="button" class="link-like" onclick={() => (currentView = "integrations")}>Integrations</button>
+                for copy-paste tool setup.
+              </li>
+            </ol>
+            {#if !showFirstRunCoach}
+              <button type="button" class="small" onclick={openFirstRunCoach}>Show the getting-started coach</button>
+            {/if}
+          </section>
+
+          <section class="help-section">
+            <h3>Around the app</h3>
+            <ul>
+              <li><strong>Models</strong> — catalog, multi-model pool, download/load/unload, update notifications</li>
+              <li><strong>Chat / Audio / Compare</strong> — inference, STT, side-by-side bake-off</li>
+              <li><strong>Monitor</strong> — pool, resources, access and audit logs</li>
+              <li><strong>Integrations</strong> — snippets for external OpenAI-compatible tools</li>
+              <li><strong>Diagnostics / Settings</strong> — service, bind/port (Apply &amp; restart), autostart, shortcuts (<kbd>?</kbd>)</li>
+            </ul>
+          </section>
+
+          <section class="help-section">
+            <h3>Local endpoint for other tools</h3>
             <p>
-              Start the service in Diagnostics, then open the
-              <button class="link-like" onclick={() => (currentView = "integrations")}
-                >Integrations</button
-              > tab for copy-paste setup snippets.
+              <strong>Client URL</strong> (what Integrations and this app use) is always loopback:
+              <code>http://127.0.0.1:&lt;port&gt;/v1</code>.
+              <strong>Bind address</strong> in Settings is what the service <em>listens</em> on and may be
+              <code>0.0.0.0</code> or a LAN IP — use <strong>Apply &amp; restart</strong> after changing it.
             </p>
-          {/if}
+            {#if state.endpoint}
+              <div class="endpoint-snippet">
+                <strong>Endpoint:</strong> <code>{state.endpoint}</code>
+                <button type="button" onclick={() => navigator.clipboard.writeText(state.endpoint || "")}>Copy</button>
+              </div>
+            {:else}
+              <p class="muted">
+                Service not running.
+                <button type="button" class="link-like" onclick={() => (currentView = "diagnostics")}>Start it in Diagnostics</button>.
+              </p>
+            {/if}
+          </section>
 
-          <h3>Tool Calling</h3>
-          <p>
-            Foundry Local exposes an OpenAI-compatible API, and many models on
-            this endpoint support tool calling (also called function calling) —
-            the model can emit a <code>tool_calls</code> object in its response
-            that describes what function to invoke. A <em>client application</em>
-            is then responsible for executing that call and returning the result.
-          </p>
-          <p><strong>What Foundry Local provides:</strong></p>
-          <ul>
-            <li>The model runtime and the OpenAI-compatible inference endpoint</li>
-            <li>Tool-call JSON in responses (<code>tool_calls</code> / <code>function_call</code>) when a model supports it</li>
-            <li>The surface that AI coding tools — Continue.dev, Cline, Claude Code, GitHub Copilot — connect to</li>
-          </ul>
-          <p><strong>What Flint does (and does not do):</strong></p>
-          <ul>
-            <li>Flint manages model loading, service configuration, and endpoint setup</li>
-            <li>Flint's chat window displays model responses — it does <strong>not</strong> parse, execute, or forward tool calls on your behalf</li>
-            <li>No shell commands, file operations, or network requests are run automatically based on model output</li>
-            <li>Tool execution belongs to the AI client you connect to the endpoint (Cline, Continue, your own code, etc.)</li>
-          </ul>
-          <p>
-            To use tool-capable models in a full agentic workflow, point one of
-            the clients above at the local endpoint shown in this tab. Flint's
-            role is to keep the model running — the calling client controls
-            which tools are allowed, when they run, and what confirmation the
-            user sees.
-          </p>
+          <section class="help-section">
+            <h3>Tool calling</h3>
+            <p>
+              Many models can emit <code>tool_calls</code> on the OpenAI-compatible API. A <em>client</em> (Continue, Cline, your code)
+              must execute tools and return results. Flint keeps the model and service running — the chat UI does
+              <strong>not</strong> auto-run shell, files, or network calls from model output.
+            </p>
+          </section>
 
-          <p>
-            <a href="https://github.com/microsoft/Foundry-Local" target="_blank"
-              >Official Foundry Local repo →</a
-            >
-          </p>
+          <section class="help-section">
+            <h3>Troubleshooting</h3>
+            <ul>
+              <li><strong>Could not start Foundry Local / Node errors</strong> — Install Node 22+ LTS, ensure <code>node -v</code> works in a terminal, restart Flint.</li>
+              <li><strong>No models</strong> — Open Models and download a starter; first run may show hardware-aware recommendations.</li>
+              <li><strong>Chat disabled</strong> — Load a chat-capable model (not STT-only). Unload audio-only models if they block the lane.</li>
+              <li><strong>Integrations show “not started”</strong> — Diagnostics → Start service.</li>
+              <li><strong>Bind / port changes</strong> — Settings → Network → Apply &amp; restart. Client URL stays on 127.0.0.1.</li>
+              <li><strong>SmartScreen / unidentified developer</strong> — Expected with self-signed installers until release certs are used.</li>
+            </ul>
+          </section>
+
+          <section class="help-section">
+            <h3>Keyboard shortcuts</h3>
+            <p>
+              Press <kbd>?</kbd> anytime for the shortcut reference (send, new chat, view navigation, push-to-talk, and more).
+            </p>
+            <button type="button" class="small" onclick={() => (showShortcutsHelp = true)}>Open shortcuts</button>
+          </section>
+
+          <section class="help-section help-about">
+            <h3>About</h3>
+            <p class="muted">
+              Flint uses Foundry Local via the official SDK. The Foundry runtime is bundled with the app;
+              the JS sidecar still needs <strong>Node.js 22+</strong> on your PATH.
+            </p>
+            <p>
+              <a href="https://github.com/joelst/flint" target="_blank" rel="noopener noreferrer">Flint on GitHub</a>
+              ·
+              <a href="https://github.com/microsoft/Foundry-Local" target="_blank" rel="noopener noreferrer">Foundry Local</a>
+            </p>
+          </section>
         </div>
       {:else if currentView === "compare"}
         <div class="view compare-view">
@@ -7025,6 +7134,110 @@ Output only the summary text, no preamble.`;
   button.secondary {
     background: var(--subtle-bg);
     color: var(--fg);
+  }
+
+  .first-run-coach {
+    margin: 0 0 16px;
+    padding: 14px 16px;
+    border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+    background: color-mix(in srgb, var(--accent) 8%, var(--panel-bg));
+    max-width: 720px;
+  }
+  .first-run-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: flex-start;
+  }
+  .first-run-head h3 {
+    margin: 0 0 4px;
+    font-size: 1rem;
+  }
+  .first-run-lede {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--muted);
+    max-width: 52ch;
+  }
+  .first-run-dismiss {
+    flex-shrink: 0;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    cursor: pointer;
+  }
+  .first-run-steps {
+    margin: 12px 0 8px;
+    padding-left: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    font-size: 0.88rem;
+  }
+  .first-run-steps li {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 10px;
+  }
+  .first-run-steps li.done strong {
+    color: var(--success, #16a34a);
+  }
+  .first-run-steps .muted {
+    flex: 1 1 100%;
+    font-size: 0.8rem;
+  }
+  .first-run-ok {
+    color: var(--success, #16a34a);
+    font-size: 0.8rem;
+  }
+  .first-run-bad {
+    color: var(--danger, #dc2626);
+    font-size: 0.8rem;
+  }
+  .first-run-foot {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    margin-top: 4px;
+  }
+  .help-view {
+    max-width: 640px;
+  }
+  .help-lede {
+    color: var(--muted);
+    font-size: 0.95rem;
+    line-height: 1.45;
+  }
+  .help-section {
+    margin-top: 1.25rem;
+  }
+  .help-section h3 {
+    margin: 0 0 0.5rem;
+    font-size: 0.95rem;
+  }
+  .help-section ul,
+  .help-steps {
+    margin: 0.35rem 0 0;
+    padding-left: 1.2rem;
+    line-height: 1.5;
+    font-size: 0.9rem;
+  }
+  .help-section kbd {
+    font-size: 0.8em;
+    padding: 1px 5px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    background: var(--subtle-bg, color-mix(in srgb, var(--fg) 6%, transparent));
+  }
+  .help-about {
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--border);
   }
 
   .notice {
