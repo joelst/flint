@@ -13,11 +13,23 @@ Manage models on your machine, chat and transcribe locally, compare models side-
 | You want… | Flint gives you… |
 |---|---|
 | **Privacy** | Inference stays on-device. Network bind defaults to loopback; non-loopback requires an explicit choice and confirmation. |
-| **Hardware you already paid for** | Catalog + acceleration-aware variants (CPU / GPU / NPU) via the official Foundry Local SDK. |
+| **Full catalog, not a CLI subset** | The Foundry Local **CLI** is great for quick experiments, but it only surfaces **part** of what the runtime can run. Flint talks to the **official SDK**, so you get the broader model catalog (chat, vision, STT, acceleration variants) without writing and maintaining your own wrapper around the service. |
+| **Hardware you already paid for** | Hardware-aware recommendations and CPU / GPU / NPU variants through the SDK—not guesswork from CLI flags alone. |
 | **One local endpoint for many tools** | Start a service and point Continue, Cline, OpenAI SDKs, and other clients at `http://127.0.0.1:<port>/v1`. |
 | **More than a single chat tab** | Multi-model **pool**, **Compare** bake-offs, chat + STT, Monitor (resources, access log, audit). |
-| **Foundry-native integration** | Built on `foundry-local-sdk`, not a fragile scrape of the CLI. |
+| **Foundry-native, not a hack** | Built on `foundry-local-sdk` (catalog, download, load, inference, service)—not fragile CLI scraping. |
 | **A path to cloud later** | Same OpenAI-shaped surface as Azure AI Foundry — local first, cloud profiles planned. |
+
+### Flint vs Foundry Local CLI
+
+| | Foundry Local CLI | Flint |
+|---|---|---|
+| **Model surface** | Practical subset for common CLI flows | Broader **SDK catalog** + acceleration-specific variants |
+| **Day-to-day UX** | Commands, scripts, your own glue | GUI for download/load/pool, chat, audio, compare, logs |
+| **External tools** | You stand up and wire the OpenAI-compatible service yourself | Start service, copy Integrations snippets, manage bind/port |
+| **Custom wrapper** | Often needed for a full app experience | **You don’t**—Flint *is* the maintained control plane on top of the SDK |
+
+Use the CLI when you want a terminal-first workflow. Use Flint when you want the full local model surface and a durable UI/endpoint without owning that wrapper.
 
 **Built for:** developers and power users who want local models *and* IDE/agent tools on one endpoint; privacy-sensitive or offline-friendly workflows; people evaluating models before committing disk and VRAM.
 
