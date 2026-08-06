@@ -16,10 +16,10 @@
 | **Installers** | Bundle Foundry natives + `Flint.exe`; sidecar path resolution hardened; `ensure:foundry` target-aware |
 | **Still required for a real public tag** | Updater private key + GitHub signing secrets; dogfood clean-machine install; honest CHANGELOG for 0.3.2/0.3.3 |
 | **End-user friction** | **Node.js 22+ on PATH** still required (JS sidecar) |
-| **Docs / help** | README still feature-list oriented (stale “0.3.0 unreleased”); Learn tab accurate but not first-run oriented; roadmap scorecard dates lag code |
+| **Docs / help** | README + Help + first-run coach + USER_GUIDE landed; roadmap dashboard refreshed |
 | **Mac Intel** | No Foundry `darwin-x64` cores — release matrix correctly limited to **darwin-arm64** (+ Windows) |
 
-**Bottom line:** Product capability is ahead of **storytelling, first-run help, and release ops**. Next value is not more features until 0.3.x is installable and understandable.
+**Bottom line:** Storytelling and first-run help are in better shape. Next value is **public tag / dogfood (C1–C3)** and empty-state polish (B3/B4), not more features.
 
 ---
 
@@ -37,9 +37,9 @@
 
 | # | Item | Outcome | Priority |
 |---|---|---|---|
-| A1 | **README rewrite** | Value prop, who it’s for, first run, honest limits, current version | **P0 — start now** |
-| A2 | Refresh **RELEASE_ROADMAP** dashboard | 0.3.x status matches code; 0.4/1.0 remaining clear | P1 |
-| A3 | **USER_GUIDE.md** (short) | Models → Chat → Service → Integrations; bind vs client URL | P1 |
+| A1 | **README rewrite** | Value prop, who it’s for, first run, honest limits, current version | ✅ Done |
+| A2 | Refresh **RELEASE_ROADMAP** dashboard | 0.3.x status matches code; 0.4/1.0 remaining clear | ✅ Done |
+| A3 | **USER_GUIDE.md** (short) | Models → Chat → Service → Integrations; bind vs client URL | ✅ Done |
 | A4 | **CONTRIBUTING.md** | Link DEVELOPMENT + PR/changeset norms | P2 |
 | A5 | Trim stale notes | Design spec winml install; BACKLOG release boxes after tag | P2 |
 
@@ -92,8 +92,8 @@ Defer: autonomous agent loops, full Purview implementation, full multi-endpoint 
 ```text
 A1 README ✅
 B1/B2 Help + first-run coach ✅
-  → C1–C3 tag 0.3.x public
-  → A2/A3 roadmap + user guide
+A2/A3 roadmap + USER_GUIDE ✅
+  → C1–C3 tag 0.3.x public (secrets, RC, dogfood)
   → B3/B4 empty states + About polish
   → 0.4: auto-update UX + (RAG | Azure | Node spike)
   → 0.5–0.9: Node independence + hardening

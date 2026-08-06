@@ -39,4 +39,4 @@ Items found during docs consolidation and deferred follow-ups. Check boxes when 
 
 ---
 
-**Last updated:** 2026-07-08 (Node preflight + deferred release ops)
+**Last updated:** 2026-08-06 (docs/Help landed; tag ops still open — see PRODUCT_PLAN + RELEASE_ROADMAP)

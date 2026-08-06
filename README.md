@@ -58,7 +58,7 @@ Use the CLI when you want a terminal-first workflow. Use Flint when you want the
 | **Packaging** | Installers ship **Flint.exe**, Foundry native cores, and fixed production sidecar paths |
 | **Public release** | Cut a tagged release when signing secrets + updater key + clean-machine dogfood are done — see [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) and [docs/RELEASE.md](./docs/RELEASE.md) |
 
-Living plan (docs, help, 0.4, 1.0): **[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md)**
+Living plan (docs, help, 0.4, 1.0): **[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md)** · End-user walkthrough: **[docs/USER_GUIDE.md](./docs/USER_GUIDE.md)**
 
 ---
 
