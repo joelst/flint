@@ -27,10 +27,14 @@
     appendAppLog,
     getAccessLog,
     pollPoolStatus,
+    ensureNodeRuntime,
+    formatNodeVersion,
+    MIN_NODE_VERSION,
     type ModelInfo,
     type EpInfo,
     type LogEntry,
   } from "$lib/sdk";
+  import packageJson from "../../package.json";
 
   import {
     PREDEFINED_PERSONAS,
@@ -82,6 +86,29 @@
 
   const FIRST_RUN_KEY = "flint-first-run-dismissed-v1";
   let showFirstRunCoach = $state(false);
+
+  /** About strip — app + Node + service (Help + Settings). */
+  const appVersion = String((packageJson as { version?: string }).version || "0.0.0");
+  let nodeVersionLabel = $state<string>("Checking…");
+  let nodeVersionOk = $state<boolean | null>(null);
+
+  async function refreshNodeAboutLine() {
+    try {
+      const r = await ensureNodeRuntime();
+      if (r.ok) {
+        nodeVersionLabel = r.version.raw;
+        nodeVersionOk = true;
+      } else {
+        nodeVersionLabel = r.found?.raw
+          ? `${r.found.raw} (need ${formatNodeVersion(MIN_NODE_VERSION)}+)`
+          : `Not found (need ${formatNodeVersion(MIN_NODE_VERSION)}+)`;
+        nodeVersionOk = false;
+      }
+    } catch {
+      nodeVersionLabel = "Unknown";
+      nodeVersionOk = null;
+    }
+  }
 
   function dismissFirstRunCoach() {
     showFirstRunCoach = false;
@@ -2221,8 +2248,10 @@ updateStateFromSdk();
     // Load conversation history + custom personas
     loadConversations();
     loadCustomPersonasState();
+    void refreshNodeAboutLine();
 
     const ok = await initializeSDK({ appName: "flint" });
+    void refreshNodeAboutLine();
 
     if (ok) {
       statusMessage = "Connected to Foundry Local";
@@ -5507,7 +5536,14 @@ Output only the summary text, no preamble.`;
             </div>
             <p class="log-note">In-memory: last 500 requests · Disk: <code>~/.flint/logs/</code> retained 7 days</p>
             {#if monitorLog.length === 0}
-              <p class="monitor-empty">No log entries yet. Send a message or transcribe audio to populate.</p>
+              <div class="empty-state-card empty-state-compact">
+                <h3>No access log entries yet</h3>
+                <p>Chat, transcribe, or call the local endpoint — requests show up here and under <code>~/.flint/logs/</code>.</p>
+                <div class="empty-state-actions">
+                  <button type="button" onclick={() => (currentView = "chat")}>Open Chat</button>
+                  <button type="button" class="secondary" onclick={() => (currentView = "audio")}>Open Audio</button>
+                </div>
+              </div>
             {:else}
               <div class="access-log-wrap" role="region" aria-label="Access log" onmouseenter={() => { monitorLogPaused = true; }} onmouseleave={() => { monitorLogPaused = false; }}>
                 <table class="access-log-table">
@@ -5756,12 +5792,59 @@ Output only the summary text, no preamble.`;
 
           <section class="help-section help-about">
             <h3>About</h3>
-            <p class="muted">
-              Flint uses Foundry Local via the official SDK. The Foundry runtime is bundled with the app;
-              the JS sidecar still needs <strong>Node.js 22+</strong> on your PATH.
+            <dl class="about-strip">
+              <div class="about-row">
+                <dt>Flint</dt>
+                <dd>v{appVersion}</dd>
+              </div>
+              <div class="about-row">
+                <dt>Node.js</dt>
+                <dd class:about-ok={nodeVersionOk === true} class:about-bad={nodeVersionOk === false}>
+                  {nodeVersionLabel}
+                  <button type="button" class="tiny about-refresh" onclick={() => refreshNodeAboutLine()}>Recheck</button>
+                </dd>
+              </div>
+              <div class="about-row">
+                <dt>Sidecar / Foundry</dt>
+                <dd class:about-ok={state.ready} class:about-bad={!state.ready && !!state.error}>
+                  {#if state.ready}
+                    Connected
+                  {:else if state.error}
+                    Not connected
+                  {:else}
+                    Starting…
+                  {/if}
+                </dd>
+              </div>
+              <div class="about-row">
+                <dt>Client endpoint</dt>
+                <dd>
+                  {#if state.endpoint}
+                    <code class="about-code">{state.endpoint}</code>
+                    <button type="button" class="tiny" onclick={() => navigator.clipboard.writeText(state.endpoint || "")}>Copy</button>
+                  {:else}
+                    <span class="muted">Not started</span>
+                    <button type="button" class="link-like" onclick={() => (currentView = "diagnostics")}>Diagnostics</button>
+                  {/if}
+                </dd>
+              </div>
+              <div class="about-row">
+                <dt>Network (applied)</dt>
+                <dd>
+                  <code class="about-code">{appliedNetworkBindAddress}:{appliedNetworkPort}</code>
+                  <span class="muted small">listen bind · client URL stays on 127.0.0.1</span>
+                </dd>
+              </div>
+            </dl>
+            <p class="muted small">
+              Foundry runtime is bundled. The JS sidecar still needs Node on PATH.
             </p>
-            <p>
-              <a href="https://github.com/joelst/flint" target="_blank" rel="noopener noreferrer">Flint on GitHub</a>
+            <p class="about-links">
+              <a href="https://github.com/joelst/flint/releases" target="_blank" rel="noopener noreferrer">Releases</a>
+              ·
+              <a href="https://github.com/joelst/flint" target="_blank" rel="noopener noreferrer">GitHub</a>
+              ·
+              <a href="https://github.com/joelst/flint/blob/main/docs/USER_GUIDE.md" target="_blank" rel="noopener noreferrer">User guide</a>
               ·
               <a href="https://github.com/microsoft/Foundry-Local" target="_blank" rel="noopener noreferrer">Foundry Local</a>
             </p>
@@ -5838,7 +5921,18 @@ Output only the summary text, no preamble.`;
               </div>
 
               {#if compareSlots.length === 0}
-                <p class="muted small">Add at least two chat models (or specific variants) to compare.</p>
+                <div class="empty-state-card empty-state-compact">
+                  <h3>No models selected for compare</h3>
+                  <p>Add at least two chat models (or specific variants), then enter one prompt for all of them.</p>
+                  <button
+                    type="button"
+                    onclick={() => {
+                      comparePickerOpen = true;
+                      comparePickerSearch = "";
+                    }}
+                    disabled={isComparing || comparePreparing}
+                  >Add model…</button>
+                </div>
               {:else}
                 <div class="compare-mode-row" role="group" aria-label="Comparison load mode">
                   <label class="compare-mode-option" class:active={compareOneAtATime}>
@@ -6342,6 +6436,46 @@ Output only the summary text, no preamble.`;
                 >Dark</button>
               </div>
             </div>
+          </div>
+
+          <div class="settings-section">
+            <h3>About</h3>
+            <dl class="about-strip">
+              <div class="about-row">
+                <dt>Flint</dt>
+                <dd>v{appVersion}</dd>
+              </div>
+              <div class="about-row">
+                <dt>Node.js</dt>
+                <dd class:about-ok={nodeVersionOk === true} class:about-bad={nodeVersionOk === false}>
+                  {nodeVersionLabel}
+                  <button type="button" class="tiny about-refresh" onclick={() => refreshNodeAboutLine()}>Recheck</button>
+                </dd>
+              </div>
+              <div class="about-row">
+                <dt>Sidecar / Foundry</dt>
+                <dd class:about-ok={state.ready} class:about-bad={!state.ready && !!state.error}>
+                  {state.ready ? "Connected" : state.error ? "Not connected" : "Starting…"}
+                </dd>
+              </div>
+              <div class="about-row">
+                <dt>Client endpoint</dt>
+                <dd>
+                  {#if state.endpoint}
+                    <code class="about-code">{state.endpoint}</code>
+                  {:else}
+                    <span class="muted">Not started</span>
+                  {/if}
+                </dd>
+              </div>
+            </dl>
+            <p class="about-links">
+              <a href="https://github.com/joelst/flint/releases" target="_blank" rel="noopener noreferrer">Releases</a>
+              ·
+              <button type="button" class="link-like" onclick={() => (currentView = "help")}>Help</button>
+              ·
+              <a href="https://github.com/joelst/flint/blob/main/docs/USER_GUIDE.md" target="_blank" rel="noopener noreferrer">User guide</a>
+            </p>
           </div>
         </div>
       {/if}
@@ -7279,6 +7413,51 @@ Output only the summary text, no preamble.`;
     padding-top: 0.75rem;
     border-top: 1px solid var(--border);
   }
+  .about-strip {
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .about-row {
+    display: grid;
+    grid-template-columns: 9rem 1fr;
+    gap: 8px 12px;
+    align-items: baseline;
+    font-size: 0.88rem;
+  }
+  .about-row dt {
+    margin: 0;
+    color: var(--muted);
+    font-weight: 500;
+  }
+  .about-row dd {
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+  }
+  .about-code {
+    font-size: 0.82rem;
+    word-break: break-all;
+  }
+  .about-ok {
+    color: var(--success, #16a34a);
+  }
+  .about-bad {
+    color: var(--danger, #dc2626);
+  }
+  .about-refresh {
+    margin-left: 2px;
+  }
+  .about-links {
+    margin: 12px 0 0;
+    font-size: 0.88rem;
+  }
+  .about-links a {
+    color: var(--accent);
+  }
 
   .notice {
     background: color-mix(in srgb, var(--danger) 10%, var(--panel-bg));
@@ -7458,6 +7637,37 @@ Output only the summary text, no preamble.`;
     color: var(--muted);
     text-align: center;
     padding: 40px 20px;
+  }
+
+  .empty-state-card {
+    max-width: 420px;
+    margin: 16px 0;
+    padding: 20px 18px;
+    border-radius: 10px;
+    border: 1px dashed var(--border);
+    background: color-mix(in srgb, var(--panel-bg) 90%, var(--subtle-bg, transparent));
+  }
+  .empty-state-card h3 {
+    margin: 0 0 8px;
+    font-size: 1rem;
+  }
+  .empty-state-card p {
+    margin: 0 0 14px;
+    font-size: 0.88rem;
+    color: var(--muted);
+    line-height: 1.45;
+  }
+  .empty-state-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .empty-state-compact {
+    margin-top: 8px;
+  }
+  .empty-chat-card {
+    margin: 24px auto;
+    text-align: left;
   }
 
   .message {

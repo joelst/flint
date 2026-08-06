@@ -49,7 +49,7 @@
 | B1 | **First-run coach** | 3–4 steps: Node check → starter model → chat → optional service | ✅ Done (banner + dismiss) |
 | B2 | **Learn → Help** restructure | Why Flint / First 5 min / Tools / Troubleshoot / Shortcuts | ✅ Done |
 | B3 | **Contextual empty states** | Models/Chat/Compare/Monitor each have one next action | ✅ Done |
-| B4 | **About** strip | Version, Node version, endpoint, link to docs/releases | P2 (still open for 0.4) |
+| B4 | **About** strip | Version, Node version, endpoint, link to docs/releases | ✅ Done (Help + Settings) |
 
 ### C. Release ops (ship with v0.4.0)
 
@@ -88,8 +88,7 @@ Defer past 0.4: autonomous agent loops, full Purview implementation, full multi-
 
 ```text
 v0.4.0 track:
-  A1 README ✅  B1/B2 Help + coach ✅  A2/A3 USER_GUIDE + roadmap ✅  B3 empty states ✅
-  → B4 About polish
+  A1 README ✅  B1/B2 Help + coach ✅  A2/A3 USER_GUIDE + roadmap ✅  B3 empty states ✅  B4 About ✅
   → C1–C3 secrets, RC, dogfood, tag v0.4.0
   → D: auto-update UX and/or RAG/Azure/Node spike (as capacity allows)
   → 0.5–0.9: Node independence + hardening
