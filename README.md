@@ -1,24 +1,54 @@
-# Flint — Foundry Local Interface (FLInt)
+# Flint
 
-**Flint** (also styled FLInt) is a lightweight desktop GUI for [Microsoft Foundry Local](https://github.com/microsoft/Foundry-Local).
+**The desktop control plane for [Microsoft Foundry Local](https://github.com/microsoft/Foundry-Local).**
 
-It provides an intuitive interface for:
+Manage models on your machine, chat and transcribe locally, compare models side-by-side, and expose an **OpenAI-compatible endpoint** to the coding tools you already use — without sending prompts to a cloud by default.
 
-- **Models** — catalog browse/search/filter, hardware-aware recommendations, download/load/unload with progress, multi-model **pool**
-- **Chat** — streaming, conversation sidebar, personas, system prompts, stop/cancel, multi-image vision attach, host-aware context, optional URL → context fetch
-- **Audio** — mic + file transcription (STT models), copy/download transcript
-- **Compare** — side-by-side model bake-off with ratings and export
-- **Monitor** — pool table, resource gauges, access log, audit export
-- **Integrations** — copy-paste snippets for OpenAI-compatible tools
-- **Diagnostics / Settings** — service controls, endpoint snippets, bind/port, autostart, default models, keyboard shortcuts
+> Also styled **FLInt** (Foundry Local INTerface). Product name: **Flint**.
 
-Everything runs **locally on your device** by default.
+---
+
+## Why Flint?
+
+| You want… | Flint gives you… |
+|---|---|
+| **Privacy** | Inference stays on-device. Network bind defaults to loopback; non-loopback requires an explicit choice and confirmation. |
+| **Hardware you already paid for** | Catalog + acceleration-aware variants (CPU / GPU / NPU) via the official Foundry Local SDK. |
+| **One local endpoint for many tools** | Start a service and point Continue, Cline, OpenAI SDKs, and other clients at `http://127.0.0.1:<port>/v1`. |
+| **More than a single chat tab** | Multi-model **pool**, **Compare** bake-offs, chat + STT, Monitor (resources, access log, audit). |
+| **Foundry-native integration** | Built on `foundry-local-sdk`, not a fragile scrape of the CLI. |
+| **A path to cloud later** | Same OpenAI-shaped surface as Azure AI Foundry — local first, cloud profiles planned. |
+
+**Built for:** developers and power users who want local models *and* IDE/agent tools on one endpoint; privacy-sensitive or offline-friendly workflows; people evaluating models before committing disk and VRAM.
+
+**Not built for:** zero-install “ChatGPT clone” installs (see [Requirements](#requirements)); fully autonomous agents *inside* the app (use an agent client against Flint’s endpoint); training or fine-tuning.
+
+---
+
+## What’s in the app
+
+- **Models** — catalog, search/filter, hardware-aware picks, download/load/unload, multi-model pool, update notifications per acceleration track  
+- **Chat** — streaming, conversations, personas, system prompts, multi-image vision, host-aware context, optional URL → context  
+- **Audio** — mic + file transcription (STT)  
+- **Compare** — side-by-side prompts, ratings, export  
+- **Monitor** — pool, resource gauges, access/audit logs  
+- **Integrations** — copy-paste setup for OpenAI-compatible tools  
+- **Diagnostics / Settings** — service start/stop, bind/port (Apply & restart), autostart, defaults, shortcuts (`?`)
+
+---
 
 ## Status
 
-**0.3.0** — feature-complete on branch `mvp-0.3` (version already bumped). Remaining work is **release mechanics** (updater key, signing secrets, changelog reconciliation, tag).
+| | |
+|---|---|
+| **Version** | **0.3.3** on `main` |
+| **Product** | 0.3 feature set is complete (pool, monitor, compare, integrations, network config, …) |
+| **Packaging** | Installers ship **Flint.exe**, Foundry native cores, and fixed production sidecar paths |
+| **Public release** | Cut a tagged release when signing secrets + updater key + clean-machine dogfood are done — see [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) and [docs/RELEASE.md](./docs/RELEASE.md) |
 
-Living scorecard and ship checklist: [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md)
+Living plan (docs, help, 0.4, 1.0): **[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md)**
+
+---
 
 ## Screenshots
 
@@ -59,62 +89,91 @@ Living scorecard and ship checklist: [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md)
 
 ![monitor resources](images/flint-monitor-page.png)
 
-## Known limitations (0.3)
+---
 
-- Installers need **Node.js 22+ on PATH** for the JS sidecar (Foundry runtime is bundled; Node is not). Node 22 is the oldest line still receiving security updates; Flint checks on launch and shows install guidance if Node is missing or too old.
-- Updater **public key** may still be a placeholder until you generate and configure it — see [docs/RELEASE.md](./docs/RELEASE.md).
-- Self-signed installers (when used) trigger OS trust warnings until real code-signing certs are configured.
-- Test coverage is solid unit/contract baseline, not full UI/E2E depth.
-- Some audio flows remain best-effort depending on model/runtime.
+## Requirements
 
-## Tech
+### End users (installed app)
 
-- Tauri 2 (Rust + WebView)
-- Svelte 5 + SvelteKit + TypeScript
-- `foundry-local-sdk` (primary) + WinML variant on Windows
-- Node stdio **sidecar** for Foundry Local SDK work
+| Requirement | Notes |
+|---|---|
+| **Windows** (primary) or **macOS Apple silicon** | Intel Mac not supported until Foundry publishes `darwin-x64` native cores |
+| **Node.js 22+ on PATH** | Required for the JS sidecar that drives Foundry Local. Flint checks on launch and shows install help if missing. Download LTS from [nodejs.org](https://nodejs.org) |
+| Foundry runtime | **Bundled** — you do not need a separate Foundry CLI for normal use |
 
-## Getting started (development)
+### Developers (building from source)
+
+- Node.js 22+ and npm  
+- Rust + Cargo (Tauri 2)  
+- Windows: MSVC + Windows SDK (see [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md); `build-local.ps1` helps wire `cl.exe` / SignTool)
+
+---
+
+## Quick start
+
+### Use a release build
+
+1. Install a build from [GitHub Releases](https://github.com/joelst/flint/releases) when available (or build below).  
+2. Ensure **Node.js 22+** is on your PATH.  
+3. Open Flint → download a small starter model → open **Chat**.  
+4. Optional: **Diagnostics → Start service**, then use **Integrations** to wire other tools.
+
+Client URL for tools is always **`http://127.0.0.1:<port>/v1`** (loopback). The **bind address** in Settings controls what the service *listens* on and may differ (e.g. `0.0.0.0` for LAN). Use **Apply & restart** after changing bind/port.
+
+### Develop from source
 
 ```bash
 npm install
 npm run tauri dev
 ```
 
-**Prerequisites**
-
-- Node.js 22+ + npm
-- Rust + Cargo (for Tauri)
-- Windows: MSVC / Windows SDK for native builds
-
-Full contributor guide (scripts, sidecar, versioning, packaging): [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md)
-
-## Building & packaging
-
 ```bash
-npm run tauri:build
-npm run verify:bundle
+npm run tauri:build    # runs ensure:foundry + frontend build + package
+npm run verify:bundle  # checks Foundry natives in the package
+npm run run:built      # launch the release binary without installing
 ```
 
-- **Dev:** `npm run tauri dev`
-- **Test a release build without installing:** `npm run run:built` (or `scripts\run-built.bat`)
-- **Distribute:** MSI/NSIS under `src-tauri/target/release/bundle/`
+Full scripts, sidecar, and versioning: [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md)  
+Signing and release pipeline: [docs/RELEASE.md](./docs/RELEASE.md)
 
-Signed release pipeline: [docs/RELEASE.md](./docs/RELEASE.md)
+---
+
+## Known limitations
+
+- **Node.js 22+** required on PATH until a future runtime ships without it (1.0 goal).  
+- **Code signing / updater keys** may still be operator-configured for public releases.  
+- **Self-signed** installers can trigger SmartScreen / Gatekeeper warnings.  
+- **Audio** quality depends on the STT model and runtime.  
+- **Tool calling:** models may emit `tool_calls`; Flint’s chat UI does **not** execute tools — use an agent client against the local endpoint.  
+- Unit/contract tests are strong; full UI E2E is still light.
+
+---
+
+## Tech stack
+
+- **Tauri 2** (Rust + system WebView)  
+- **Svelte 5** + SvelteKit + TypeScript  
+- **foundry-local-sdk** via a **Node stdio sidecar** (`sidecar/foundry-sidecar.js`)
+
+Architecture principles: [FLINT_DESIGN_SPEC.md](./FLINT_DESIGN_SPEC.md)
+
+---
 
 ## Documentation
 
 | Doc | Audience |
 |---|---|
-| [docs/README.md](./docs/README.md) | Full index |
-| [FLINT_DESIGN_SPEC.md](./FLINT_DESIGN_SPEC.md) | Architecture & principles |
-| [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) | Release status & plans |
-| [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) | Develop & version |
+| [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md) | Next work: docs, help, 0.4, 1.0 |
+| [docs/README.md](./docs/README.md) | Full doc index |
+| [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) | Release scorecards & plans |
+| [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) | Build, sidecar, versioning |
 | [docs/RELEASE.md](./docs/RELEASE.md) | Sign & ship |
-| [docs/BACKLOG.md](./docs/BACKLOG.md) | Deferred docs/UI-copy follow-ups |
+| [docs/BACKLOG.md](./docs/BACKLOG.md) | Deferred follow-ups |
 | [CHANGELOG.md](./CHANGELOG.md) | Release notes |
 
-Historical planning docs live under [docs/archive/](./docs/archive/).
+Historical plans: [docs/archive/](./docs/archive/).
+
+---
 
 ## License
 
@@ -122,8 +181,8 @@ MIT
 
 ## Contributing
 
-See [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) for setup and conventions. Scope and roadmap: [FLINT_DESIGN_SPEC.md](./FLINT_DESIGN_SPEC.md) and [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md).
+See [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md). Product direction: [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md) and [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md).
 
 ---
 
-Built to make Foundry Local approachable while staying true to its local-first roots.
+Local-first by default. Foundry Local underneath. Your hardware, your data, your tools.
