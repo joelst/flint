@@ -1,8 +1,8 @@
 # Flint Release Roadmap (0.1 → 1.0)
 
-**Last updated:** 2026-08-03 (rev. 6 — acceleration-aware model update notifications pulled into 0.3; release configuration gates still open)
+**Last updated:** 2026-08-06 (rev. 7 — packaging/rebind on main; docs & Help; 0.3.x tag still open)  
 **Original date:** 2026-06-24  
-**Scope:** Living release roadmap — tracks readiness decisions, known limitations, and per-release objectives from MVP 0.1 through 1.0. This is the **only** living release planner; do not maintain parallel sprint + remaining-implementation docs for the same milestone (see [docs/README.md](./docs/README.md)).
+**Scope:** Living release roadmap — tracks readiness decisions, known limitations, and per-release objectives from MVP 0.1 through 1.0. This is the **only** living release planner for scorecards and milestone scope. Day-to-day product sequencing (docs, help, 1.0 bar) lives in [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md).
 
 ---
 
@@ -12,15 +12,27 @@
 |---|---|---|---|
 | **0.1** | `mvp-0.1-alpha` | 0.1.0 | ✅ Released (dogfood baseline) |
 | **0.2** | merged → `main` | 0.2.0 | ✅ Released (security hardening + lane routing) |
-| **0.3** | `mvp-0.3` | **0.3.0 (bumped, unreleased)** | 🟡 Feature-complete + over-delivered; version bumped; awaiting updater key + signing secrets + release tag |
-| **0.4** | Not started | — | 📋 Planned |
-| **1.0** | Not started | — | 📋 Planned |
+| **0.3** | `main` | **0.3.3** (tree) | 🟡 **Feature-complete**; packaging + rebind + network Apply + Help/README landed. **Public `v*` tag** still needs secrets, dogfood, release workflow dry-run |
+| **0.4** | Not started | — | 📋 Planned (see §5; pick few flagships after 0.3 tag) |
+| **1.0** | Not started | — | 📋 Planned (no end-user Node on PATH; signed installs; help locked — [PRODUCT_PLAN §E](./docs/PRODUCT_PLAN.md)) |
+
+### 0.3.x packaging & product (landed on `main` after scorecard below)
+
+| Item | Status |
+|---|---|
+| Foundry natives in installers (`ensure:foundry`, target-aware) | ✅ |
+| Flattened resources; **Flint.exe**; production sidecar paths | ✅ |
+| Service rebind on network Apply & restart (singleton clear) | ✅ |
+| Drop unsupported `x86_64-apple-darwin` release target | ✅ |
+| README “why Flint” + CLI vs full SDK catalog | ✅ |
+| In-app **Help** + first-run coach | ✅ |
+| Short [USER_GUIDE.md](./docs/USER_GUIDE.md) | ✅ (docs track) |
 
 ---
 
-## 0.3 Progress Scorecard (as of 2026-07-08, rev. 2)
+## 0.3 Progress Scorecard (features as of 2026-07-08; packaging notes 2026-08-06)
 
-All planned 0.3 feature work is complete, and three unplanned features were delivered on top of scope (host-aware chat context, a guarded web-fetch → chat-context pipeline, and acceleration-aware model update notifications). The version is already bumped to `0.3.0` across all three files. The remaining gate to shipping is release mechanics: generate the updater signing key, configure Windows signing secrets, restore green PR CI, validate the release workflow, and cut the tag.
+All planned 0.3 **product** work is complete (plus bonus features). Code version is **0.3.3**. Remaining gate for a **public release tag** is release mechanics and dogfood — not more 0.3 features.
 
 | Success Criterion | Status | Notes |
 |---|---|---|
@@ -35,8 +47,8 @@ All planned 0.3 feature work is complete, and three unplanned features were deli
 | Model comparison / bake-off (two models side-by-side, ratings, export) | ✅ Complete | Compare tab, parallel non-streaming runs, thumbs up/down, markdown export |
 | Purview SDK governance memo | ✅ Complete | `docs/PURVIEW_GOVERNANCE.md` |
 | Integration snippets / tool onboarding | ✅ Complete | Integrations tab, data-driven catalog, OS toggle, copy buttons |
-| CI/CD: release pipeline scaffolding + updater plugin infrastructure | ⚠️ Partial | Workflow, updater plugin, signing steps in place; updater pubkey = PLACEHOLDER; certs not yet in repo secrets |
-| Version bump to 0.3.0 | 🟡 Done, no changeset | All three files at `0.3.0`; bumped directly, **skipping `npm run changeset`** → `CHANGELOG.md` has no 0.3 section yet |
+| CI/CD: release pipeline scaffolding + updater plugin infrastructure | ⚠️ Partial | Workflow + packaging fixes on `main`; **operator secrets / pubkey / tag** still the gate |
+| Version on `main` | ✅ 0.3.3 | Changesets used for later patches; hand-written `[0.3.0]` section exists in CHANGELOG |
 
 ### Bonus — delivered beyond original 0.3 scope
 
@@ -46,15 +58,15 @@ All planned 0.3 feature work is complete, and three unplanned features were deli
 | Guarded web-fetch → chat context (`fetchUrl`) | ✅ Complete | Sidecar command: http/https-only, private/loopback SSRF block, size cap, `@mozilla/readability` + `jsdom` article extraction, access-log audit entry. SDK method + chat URL-detection chips + context injection. Type-checks clean; release build produced `Flint_0.3.0_x64_en-US.msi`. **This is a down-payment on 0.4 RAG** (the "inject external content as context" pipeline). |
 | Acceleration-aware model update notifications | ✅ Complete | Cached variants are compared only with newer catalog variants in the same SDK model-name/runtime track, preventing CPU/GPU/NPU cross-grade suggestions. Models view shows update counts and direct per-variant downloads. |
 
-### Remaining 0.3 release blockers (in dependency order)
+### Remaining blockers for a public 0.3.x tag (in dependency order)
 
-1. **Generate updater signing key** — `npx tauri signer generate -w ~/.tauri/flint.key`; replace `PLACEHOLDER` pubkey in `src-tauri/tauri.conf.json` → `plugins.updater.pubkey`
-2. ~~**Fix placeholder release URL**~~ — ✅ endpoint set to `joelst/flint`
-3. **Configure GitHub repo secrets** — `WINDOWS_CERTIFICATE` + `WINDOWS_CERTIFICATE_PASSWORD` (self-signed PFX); see [docs/RELEASE.md](./docs/RELEASE.md)
-4. ~~**Reconcile CHANGELOG**~~ — ✅ hand-written `[0.3.0]` section in `CHANGELOG.md`
-5. **Pre-test release workflow** — `workflow_dispatch` on `.github/workflows/release.yml` with version `0.3.0-rc1` before tagging
-6. **PR `mvp-0.3` → `main`** — wait for CI green, merge
-7. **Tag `v0.3.0`** — triggers release workflow → signed installers + updater metadata artifacts
+1. **Updater signing key** — generate / confirm `plugins.updater.pubkey` and private key secret (see [docs/RELEASE.md](./docs/RELEASE.md)).
+2. **GitHub Actions secrets** — Windows code-signing cert + password (and macOS secrets if shipping Mac).
+3. **Release workflow dry-run** — `workflow_dispatch` with an RC version before a real `v*` tag.
+4. **Clean-machine dogfood** — install, Node-missing UX, model download/chat, service start, network Apply & restart, Integrations copy.
+5. **Tag `v0.3.3`** (or chosen 0.3.x) — produces draft GitHub Release with installers.
+
+Product sequencing while ops runs: [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md).
 
 ---
 
@@ -479,7 +491,7 @@ If 0.1 is "usable MVP" and 0.2 is "hardened + scalable architecture", then **1.0
 | 10 | Tag `v0.3.0` → signed release build | Dev | ⬜ |
 | 11 | Review draft release; publish | Dev | ⬜ |
 
-Also landed for dogfood UX: **Node.js 22+ preflight** (oldest security-supported line) before sidecar spawn + Learn/fact-sheet honesty ([docs/BACKLOG.md](./docs/BACKLOG.md)). **0.4+**: targeted Rust bridge for selected sidecar commands (not big-bang rewrite).
+Also landed for dogfood UX: **Node.js 22+ preflight** before sidecar spawn + Learn/fact-sheet honesty. **0.4 Spike A Go:** release builds **bundle Node 22** via Tauri `externalBin` (`npm run ensure:node` / `smoke:node`) — PATH Node is fallback ([docs/spikes/node-bundle-spike.md](./docs/spikes/node-bundle-spike.md)). **Later:** optional thin `flint` control CLI (not Ollama/Foundry clone); targeted Rust bridge for selected commands.
 
 ### Start 0.4 planning (after 0.3 ships)
 

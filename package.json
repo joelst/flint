@@ -17,6 +17,8 @@
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri",
     "ensure:foundry": "node scripts/ensure-foundry-native.cjs",
+    "ensure:node": "node scripts/ensure-bundled-node.cjs",
+    "smoke:node": "node scripts/smoke-bundled-node.cjs",
     "tauri:build": "tauri build",
     "verify:bundle": "node scripts/verify-bundle.cjs",
     "run:built": "pwsh scripts/run-built.ps1",

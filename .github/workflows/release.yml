@@ -44,6 +44,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Cache bundled Node binary
+        uses: actions/cache@v4
+        with:
+          path: |
+            src-tauri/binaries
+            runtime/node-staging
+          key: bundled-node-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-v22.18.0-${{ hashFiles('scripts/ensure-bundled-node.cjs') }}
+
+      # Tauri externalBin must exist before build; also stage target triple for cross builds.
+      - name: Stage bundled Node (externalBin)
+        run: npm run ensure:node -- --target ${{ matrix.target }}
+
       - name: Set version from tag or dispatch input
         id: version
         shell: bash

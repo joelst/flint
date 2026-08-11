@@ -58,7 +58,7 @@ Use the CLI when you want a terminal-first workflow. Use Flint when you want the
 | **Packaging** | Installers ship **Flint.exe**, Foundry native cores, and fixed production sidecar paths |
 | **Public release** | Cut a tagged release when signing secrets + updater key + clean-machine dogfood are done — see [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) and [docs/RELEASE.md](./docs/RELEASE.md) |
 
-Living plan (docs, help, 0.4, 1.0): **[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md)**
+Living plan (docs, help, 0.4, 1.0): **[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md)** · End-user walkthrough: **[docs/USER_GUIDE.md](./docs/USER_GUIDE.md)**
 
 ---
 
@@ -110,7 +110,7 @@ Living plan (docs, help, 0.4, 1.0): **[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN
 | Requirement | Notes |
 |---|---|
 | **Windows** (primary) or **macOS Apple silicon** | Intel Mac not supported until Foundry publishes `darwin-x64` native cores |
-| **Node.js 22+ on PATH** | Required for the JS sidecar that drives Foundry Local. Flint checks on launch and shows install help if missing. Download LTS from [nodejs.org](https://nodejs.org) |
+| **Node runtime (sidecar)** | **Release builds ship a bundled Node 22 binary** (Tauri externalBin) for the JS sidecar — PATH Node is not required when packaging is complete. Dev/fallback: Node 22+ on PATH. About shows `bundled` vs `PATH`. |
 | Foundry runtime | **Bundled** — you do not need a separate Foundry CLI for normal use |
 
 ### Developers (building from source)
@@ -126,9 +126,11 @@ Living plan (docs, help, 0.4, 1.0): **[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN
 ### Use a release build
 
 1. Install a build from [GitHub Releases](https://github.com/joelst/flint/releases) when available (or build below).  
-2. Ensure **Node.js 22+** is on your PATH.  
-3. Open Flint → download a small starter model → open **Chat**.  
-4. Optional: **Diagnostics → Start service**, then use **Integrations** to wire other tools.
+2. Open Flint (release installers include a bundled Node for the sidecar).  
+3. Download a small starter model → open **Chat**.  
+4. Optional: **Diagnostics → Start service**, then use **Integrations** to wire other tools.  
+
+If the app cannot start the sidecar, install **Node.js 22+** LTS as a fallback or reinstall Flint.
 
 Client URL for tools is always **`http://127.0.0.1:<port>/v1`** (loopback). The **bind address** in Settings controls what the service *listens* on and may differ (e.g. `0.0.0.0` for LAN). Use **Apply & restart** after changing bind/port.
 
@@ -152,7 +154,7 @@ Signing and release pipeline: [docs/RELEASE.md](./docs/RELEASE.md)
 
 ## Known limitations
 
-- **Node.js 22+** required on PATH until a future runtime ships without it (1.0 goal).  
+- **Node:** release builds prefer a **bundled** Node binary; PATH Node remains a dev/fallback. Long-term 1.0 goal is no end-user Node install at all (bundled or Rust).  
 - **Code signing / updater keys** may still be operator-configured for public releases.  
 - **Self-signed** installers can trigger SmartScreen / Gatekeeper warnings.  
 - **Audio** quality depends on the STT model and runtime.  

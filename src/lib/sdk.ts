@@ -6,11 +6,17 @@ import type { LaneName, EndpointProfile } from './ipc-contracts';
 import {
   evaluateNodeProbe,
   buildNodeMissingMessage,
+  pickBestNodePreflightFailure,
+  type NodePreflightFailure,
   type NodePreflightResult,
 } from './node-runtime';
 import {
   SIDECAR_RESOURCE_CANDIDATES,
   selectSidecarSpawnPaths,
+  parseNodeRuntimePreference,
+  nodeRuntimeProbeOrder,
+  shellProgramForNodeMode,
+  type NodeRuntimeMode,
   type ResolvedSidecarCandidate,
 } from './sidecar-paths';
 export type { LaneName, EndpointProfile };
@@ -19,6 +25,11 @@ export {
   formatNodeVersion,
   type NodePreflightResult,
 } from './node-runtime';
+export {
+  BUNDLED_NODE_SIDECAR,
+  PATH_NODE_SHELL_NAME,
+  type NodeRuntimeMode,
+} from './sidecar-paths';
 
 // Sidecar-based implementation for clean production builds.
 // We never import 'foundry-local-sdk' in the web bundle.
@@ -67,6 +78,8 @@ export interface EpDownloadResult { success: boolean; status: string; registered
 
 let sidecarProcess: any = null;
 let sidecarReady = false;
+/** Last successful Node runtime (bundled externalBin vs PATH). */
+let activeNodeMode: NodeRuntimeMode | null = null;
 let pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
 let streamHandlers = new Map<number, (delta: string) => void>();
 let progressHandlers = new Map<number, (p: number) => void>();
@@ -96,9 +109,14 @@ function formatStartupFailure(
     lower.includes('enoent') ||
     lower.includes('not found') ||
     lower.includes('is not recognized') ||
-    lower.includes('program not found')
+    lower.includes('program not found') ||
+    lower.includes('failed to find sidecar') ||
+    lower.includes('sidecar binary')
   ) {
-    return buildNodeMissingMessage();
+    return buildNodeMissingMessage(undefined, {
+      bundledOnly: activeNodeMode === 'bundled',
+      tried: activeNodeMode ? [activeNodeMode] : ['bundled', 'path'],
+    });
   }
 
   const details: string[] = [`stdout listener fired: ${stdoutEventFired}`];
@@ -122,21 +140,46 @@ function formatStartupFailure(
   return `Sidecar did not emit ready signal (${details.join(', ')})`;
 }
 
-/**
- * Verify Node.js is on PATH and meets MIN_NODE_VERSION before spawning the sidecar.
- */
-export async function ensureNodeRuntime(): Promise<NodePreflightResult> {
+function readNodeRuntimePreference(): ReturnType<typeof parseNodeRuntimePreference> {
+  // Vite can inject at build time; default auto (bundled then PATH).
+  try {
+    const env = (import.meta as any)?.env;
+    const fromVite = env?.VITE_FLINT_NODE_RUNTIME ?? env?.FLINT_NODE_RUNTIME;
+    if (fromVite) return parseNodeRuntimePreference(String(fromVite));
+  } catch {
+    /* ignore */
+  }
+  return 'auto';
+}
+
+function createNodeVersionCommand(mode: NodeRuntimeMode) {
+  const prog = shellProgramForNodeMode(mode);
+  if (prog.kind === 'sidecar') {
+    return Command.sidecar(prog.name, ['-v']);
+  }
+  return Command.create(prog.name, ['-v']);
+}
+
+function createSidecarSpawnCommand(mode: NodeRuntimeMode, script: string, opts: any) {
+  const prog = shellProgramForNodeMode(mode);
+  if (prog.kind === 'sidecar') {
+    return Command.sidecar(prog.name, [script], opts);
+  }
+  return Command.create(prog.name, [script], opts);
+}
+
+async function probeNodeMode(mode: NodeRuntimeMode): Promise<NodePreflightResult> {
   let stdout = '';
   let probeError: string | null = null;
   try {
-    const command = Command.create('node', ['-v']);
+    const command = createNodeVersionCommand(mode);
     const output = await command.execute();
     stdout = decodeShellOutput(output.stdout ?? '');
     const stderr = decodeShellOutput(output.stderr ?? '').trim();
     if (output.code !== 0 && output.code !== null && output.code !== undefined) {
       probeError =
         stderr ||
-        `node -v exited with code ${output.code}` +
+        `${mode} node -v exited with code ${output.code}` +
           (stdout ? ` (stdout: ${stdout.trim()})` : '');
     } else if (!stdout.trim() && stderr) {
       // Some environments print version to stderr.
@@ -146,13 +189,49 @@ export async function ensureNodeRuntime(): Promise<NodePreflightResult> {
     probeError = e?.message ? String(e.message) : String(e);
   }
 
-  const result = evaluateNodeProbe({ stdout, probeError });
-  if (result.ok) {
-    console.log(`[sdk] Node preflight OK: ${result.version.raw}`);
-  } else {
-    console.error(`[sdk] Node preflight failed (${result.code}):`, result.message);
+  return evaluateNodeProbe({
+    stdout,
+    probeError,
+    mode,
+    missingContext: { tried: [mode], bundledOnly: mode === 'bundled' },
+  });
+}
+
+/**
+ * Verify Node.js (bundled externalBin first, then PATH) meets MIN_NODE_VERSION
+ * before spawning the sidecar.
+ */
+export async function ensureNodeRuntime(): Promise<NodePreflightResult> {
+  const preference = readNodeRuntimePreference();
+  const order = nodeRuntimeProbeOrder(preference);
+  const failures: NodePreflightFailure[] = [];
+  const errors: string[] = [];
+
+  for (const mode of order) {
+    const result = await probeNodeMode(mode);
+    if (result.ok) {
+      activeNodeMode = mode;
+      console.log(`[sdk] Node preflight OK (${mode}): ${result.version.raw}`);
+      return result;
+    }
+    failures.push(result);
+    errors.push(`${mode}: ${result.code}`);
+    console.warn(`[sdk] Node probe failed (${mode}): ${result.code}`);
   }
+
+  activeNodeMode = null;
+  // Keep TOO_OLD / PROBE_FAILED guidance; only use full-order MISSING when that is all we have.
+  const result = pickBestNodePreflightFailure(failures, order);
+  console.error(
+    `[sdk] Node preflight failed (${result.code}; tried ${errors.join(', ') || 'none'}):`,
+    result.message,
+  );
   return result;
+}
+
+/** Last successful Node mode after ensureNodeRuntime / startSidecar. */
+export function getActiveNodeRuntimeMode(): NodeRuntimeMode | null {
+  return activeNodeMode;
 }
 
 export interface PoolEntry {
@@ -310,9 +389,12 @@ async function startSidecar() {
       ? { env }
       : undefined;
 
-  console.log(`[sdk] Spawning sidecar - isDev=${isDev}, script=${script}, NODE_PATH=${env.NODE_PATH || ''}`);
+  const nodeMode: NodeRuntimeMode = activeNodeMode ?? 'path';
+  console.log(
+    `[sdk] Spawning sidecar - node=${nodeMode}, isDev=${isDev}, script=${script}, NODE_PATH=${env.NODE_PATH || ''}`,
+  );
 
-  const command = Command.create('node', [script], opts);
+  const command = createSidecarSpawnCommand(nodeMode, script, opts);
 
   // Attach stdout listener to the command (works before/after spawn in plugin-shell)
   let stdoutBuffer = '';

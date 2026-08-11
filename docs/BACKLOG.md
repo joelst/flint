@@ -22,8 +22,17 @@ Items found during docs consolidation and deferred follow-ups. Check boxes when 
 ## Runtime strategy (post-0.3)
 
 - [ ] **0.4+ targeted Rust bridge** — move selected sidecar commands into Tauri/Rust invoke (or thin Rust sidecar) incrementally; keep JS Node sidecar as fallback; shrink shell-spawn surface over time. Not a big-bang rewrite.
-- [ ] **Optional Node bundling spike** — only if dogfood still hurts after preflight: try pkg **or** stock Node binary; measure size + Foundry SDK native load before adopting. Do not claim “zero deps” until green.
+- [x] **Node bundling spike (Spike A)** — **Go** 2026-08-10 ([spikes/node-bundle-spike.md](./spikes/node-bundle-spike.md)): `externalBin` + `smoke:node` N-API + release MSI/NSIS size delta. PATH remains dev fallback. Residual: clean-machine dogfood with Node uninstalled (C3).
 - [ ] **1.0 aspirational** — no end-user Node if Rust (or bundled runtime) covers the sidecar surface.
+
+## Optional control CLI (post–core solid; not 0.4)
+
+**Decision (2026-08-10):** do **not** build an Ollama-style model CLI or a second Foundry Local CLI inside Flint. Foundry already owns terminal-first `foundry model` / `foundry run` / `foundry server`. Flint’s wedge remains **SDK catalog + GUI + OpenAI endpoint + Integrations**.
+
+- [ ] **Optional later: thin `flint` control CLI** — only if automation demand is real after node-free + stable sidecar IPC. Map 1:1 to existing sidecar commands, e.g. `status`, `models list|download|load|unload`, `service start|stop`, `endpoint`. Same runtime as the GUI (no CLI-only product logic).
+- **Non-goals:** shadow/scrape `foundry` CLI; full `pull`/`run` REPL clone of Ollama; shipping a CLI before the desktop control plane is solid.
+
+See PRODUCT_PLAN non-goals and README “Flint vs Foundry Local CLI.”
 
 ## Docs hygiene (later)
 
@@ -39,4 +48,4 @@ Items found during docs consolidation and deferred follow-ups. Check boxes when 
 
 ---
 
-**Last updated:** 2026-07-08 (Node preflight + deferred release ops)
+**Last updated:** 2026-08-10 (CLI stance + Spike A Go — see PRODUCT_PLAN + spikes/node-bundle-spike.md)

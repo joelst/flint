@@ -8,8 +8,13 @@ import {
   buildNodePathEntries,
   formatNodePath,
   selectSidecarSpawnPaths,
+  parseNodeRuntimePreference,
+  nodeRuntimeProbeOrder,
+  shellProgramForNodeMode,
   SIDECAR_RESOURCE_KEY,
   SIDECAR_RESOURCE_CANDIDATES,
+  BUNDLED_NODE_SIDECAR,
+  PATH_NODE_SHELL_NAME,
 } from './sidecar-paths';
 
 describe('isAbsoluteFsPath', () => {
@@ -211,5 +216,33 @@ describe('selectSidecarSpawnPaths', () => {
 
   it('exposes a single flattened resource key', () => {
     expect(SIDECAR_RESOURCE_CANDIDATES).toEqual([SIDECAR_RESOURCE_KEY]);
+  });
+});
+
+describe('Node runtime preference (Spike A)', () => {
+  it('parses auto / bundled / path', () => {
+    expect(parseNodeRuntimePreference(undefined)).toBe('auto');
+    expect(parseNodeRuntimePreference('')).toBe('auto');
+    expect(parseNodeRuntimePreference('BUNDLED')).toBe('bundled');
+    expect(parseNodeRuntimePreference('path')).toBe('path');
+    expect(parseNodeRuntimePreference('nope')).toBe('auto');
+  });
+
+  it('orders probes: auto tries bundled then path', () => {
+    expect(nodeRuntimeProbeOrder('auto')).toEqual(['bundled', 'path']);
+    expect(nodeRuntimeProbeOrder('bundled')).toEqual(['bundled']);
+    expect(nodeRuntimeProbeOrder('path')).toEqual(['path']);
+  });
+
+  it('maps modes to shell program identities', () => {
+    expect(shellProgramForNodeMode('bundled')).toEqual({
+      kind: 'sidecar',
+      name: BUNDLED_NODE_SIDECAR,
+    });
+    expect(shellProgramForNodeMode('path')).toEqual({
+      kind: 'path',
+      name: PATH_NODE_SHELL_NAME,
+    });
+    expect(BUNDLED_NODE_SIDECAR).toBe('binaries/node');
   });
 });

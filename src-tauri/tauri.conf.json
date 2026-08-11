@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run ensure:foundry && npm run build",
+    "beforeBuildCommand": "npm run ensure:node && npm run ensure:foundry && npm run build",
     "frontendDist": "../build"
   },
   "app": {
@@ -31,6 +31,9 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "externalBin": [
+      "binaries/node"
     ],
     "resources": {
       "../sidecar/": "sidecar/",

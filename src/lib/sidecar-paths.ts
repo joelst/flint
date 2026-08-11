@@ -6,6 +6,10 @@
  * Production layout (flattened tauri resources):
  *   $RESOURCE/sidecar/foundry-sidecar.js
  *   $RESOURCE/foundry-local-sdk/...
+ *
+ * Node runtime (Spike A):
+ *   Prefer Tauri externalBin sidecar `binaries/node` (bundled Node 22).
+ *   Fall back to PATH `node` for dev machines without `npm run ensure:node`.
  */
 
 /** Flattened resource key (map-form tauri resources: `$RESOURCE/sidecar/...`). */
@@ -13,6 +17,56 @@ export const SIDECAR_RESOURCE_KEY = 'sidecar/foundry-sidecar.js';
 
 /** Ordered resource keys to try when resolving the sidecar script. */
 export const SIDECAR_RESOURCE_CANDIDATES = [SIDECAR_RESOURCE_KEY] as const;
+
+/** Tauri shell / externalBin name for the packaged Node binary. */
+export const BUNDLED_NODE_SIDECAR = 'binaries/node';
+
+/** Shell capability name for PATH `node` (dev fallback). */
+export const PATH_NODE_SHELL_NAME = 'node';
+
+/** How to pick a Node executable for the JS sidecar. */
+export type NodeRuntimePreference = 'auto' | 'bundled' | 'path';
+
+/** Which Node binary was actually selected. */
+export type NodeRuntimeMode = 'bundled' | 'path';
+
+/**
+ * Parse FLINT_NODE_RUNTIME / test overrides.
+ * - auto (default): try bundled externalBin, then PATH
+ * - bundled: only packaged Node
+ * - path: only PATH `node`
+ */
+export function parseNodeRuntimePreference(
+  raw: string | undefined | null,
+): NodeRuntimePreference {
+  const v = String(raw ?? 'auto')
+    .toLowerCase()
+    .trim();
+  if (v === 'bundled' || v === 'path' || v === 'auto') return v;
+  return 'auto';
+}
+
+/**
+ * Ordered modes to probe given preference.
+ */
+export function nodeRuntimeProbeOrder(
+  preference: NodeRuntimePreference = 'auto',
+): NodeRuntimeMode[] {
+  if (preference === 'bundled') return ['bundled'];
+  if (preference === 'path') return ['path'];
+  return ['bundled', 'path'];
+}
+
+/** Shell program identity for plugin-shell Command.create / Command.sidecar. */
+export function shellProgramForNodeMode(mode: NodeRuntimeMode): {
+  kind: 'sidecar' | 'path';
+  name: string;
+} {
+  if (mode === 'bundled') {
+    return { kind: 'sidecar', name: BUNDLED_NODE_SIDECAR };
+  }
+  return { kind: 'path', name: PATH_NODE_SHELL_NAME };
+}
 
 /** True for absolute filesystem paths (Windows drive/UNC or POSIX root). */
 export function isAbsoluteFsPath(p: string): boolean {

@@ -1,25 +1,25 @@
-# Flint product plan (docs → next ship → 1.0)
+# Flint product plan (docs → v0.4.0 → 1.0)
 
-**Last updated:** 2026-08-06  
-**Status:** Living plan after packaging work landed on `main`.  
+**Last updated:** 2026-08-10  
+**Target release for this track:** **v0.4.0** (docs, Help, empty states, and remaining 0.3.x polish ship under 0.4 — not a separate 0.3.x “docs only” tag).  
 **Companion docs:** [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) (release scorecards), [BACKLOG.md](./BACKLOG.md) (deferred items).
 
 ---
 
 ## Current status (rubber-duck check)
 
-| Area | State (as of 2026-08-06) |
+| Area | State (as of 2026-08-10) |
 |---|---|
-| **Version in tree** | **0.3.3** (`package.json` / Tauri / Cargo) |
-| **`main`** | Packaging + rebind + network Apply shipped (`f16d761` era); version packages (#11); release CI drops unsupported `x86_64-apple-darwin` (#12) |
-| **Product features (0.3)** | Models pool, chat/vision, audio STT, Compare, Monitor, Integrations, Settings network bind, shortcuts, autostart — **feature-complete** |
-| **Installers** | Bundle Foundry natives + `Flint.exe`; sidecar path resolution hardened; `ensure:foundry` target-aware |
-| **Still required for a real public tag** | Updater private key + GitHub signing secrets; dogfood clean-machine install; honest CHANGELOG for 0.3.2/0.3.3 |
-| **End-user friction** | **Node.js 22+ on PATH** still required (JS sidecar) |
-| **Docs / help** | README still feature-list oriented (stale “0.3.0 unreleased”); Learn tab accurate but not first-run oriented; roadmap scorecard dates lag code |
-| **Mac Intel** | No Foundry `darwin-x64` cores — release matrix correctly limited to **darwin-arm64** (+ Windows) |
+| **Version in tree** | **0.3.3** base; next product cut **0.4.0** |
+| **`main` / `0.4-mvp`** | Packaging + Help/coach/empty states/About; **Spike A Go** (bundled Node) |
+| **Product features (0.3)** | Models pool, chat/vision, audio STT, Compare, Monitor, Integrations, Settings — **feature-complete** |
+| **Installers** | Foundry natives + `Flint.exe` + **bundled Node** externalBin; target-aware `ensure:foundry`; no Intel Mac matrix |
+| **v0.4.0 still needs** | Release secrets/tag/dogfood (C1–C3); optional clean-machine Node-uninstall proof |
+| **End-user friction** | PATH Node **not required** for complete release packages (bundled Node 22); PATH = fallback |
+| **Mac Intel** | No Foundry `darwin-x64` cores — Windows + darwin-arm64 only |
+| **CLI** | **Not a 0.4 flagship** — optional thin `flint` control CLI later; not Ollama/Foundry clone ([BACKLOG](./BACKLOG.md)) |
 
-**Bottom line:** Product capability is ahead of **storytelling, first-run help, and release ops**. Next value is not more features until 0.3.x is installable and understandable.
+**Bottom line:** 0.4.0 is polish + release ops + Node-bundle spike complete; not a new CLI surface.
 
 ---
 
@@ -27,7 +27,7 @@
 
 1. Make the **why** of Flint obvious in 30 seconds (repo + app).  
 2. Make **first run** succeed without reading the design spec.  
-3. Sequence **0.3.x ship polish → 0.4 features → 1.0 bar** without parallel planners.
+3. Sequence **v0.4.0 (polish + ship + first flagships) → 1.0 bar** without parallel planners.
 
 ---
 
@@ -37,9 +37,9 @@
 
 | # | Item | Outcome | Priority |
 |---|---|---|---|
-| A1 | **README rewrite** | Value prop, who it’s for, first run, honest limits, current version | **P0 — start now** |
-| A2 | Refresh **RELEASE_ROADMAP** dashboard | 0.3.x status matches code; 0.4/1.0 remaining clear | P1 |
-| A3 | **USER_GUIDE.md** (short) | Models → Chat → Service → Integrations; bind vs client URL | P1 |
+| A1 | **README rewrite** | Value prop, who it’s for, first run, honest limits, current version | ✅ Done |
+| A2 | Refresh **RELEASE_ROADMAP** dashboard | 0.3.x status matches code; 0.4/1.0 remaining clear | ✅ Done |
+| A3 | **USER_GUIDE.md** (short) | Models → Chat → Service → Integrations; bind vs client URL | ✅ Done |
 | A4 | **CONTRIBUTING.md** | Link DEVELOPMENT + PR/changeset norms | P2 |
 | A5 | Trim stale notes | Design spec winml install; BACKLOG release boxes after tag | P2 |
 
@@ -49,28 +49,26 @@
 |---|---|---|---|
 | B1 | **First-run coach** | 3–4 steps: Node check → starter model → chat → optional service | ✅ Done (banner + dismiss) |
 | B2 | **Learn → Help** restructure | Why Flint / First 5 min / Tools / Troubleshoot / Shortcuts | ✅ Done |
-| B3 | **Contextual empty states** | Models/Chat/Compare/Monitor each have one next action | P2 |
-| B4 | **About** strip | Version, Node version, endpoint, link to docs/releases | P2 |
+| B3 | **Contextual empty states** | Models/Chat/Compare/Monitor each have one next action | ✅ Done |
+| B4 | **About** strip | Version, Node version, endpoint, link to docs/releases | ✅ Done (Help + Settings) |
 
-### C. Release ops (0.3.x close-out)
+### C. Release ops (ship with v0.4.0)
 
 | # | Item | Outcome | Priority |
 |---|---|---|---|
-| C1 | Updater key + repo secrets | Signed installers + updater metadata real | P0 for public tag |
-| C2 | `workflow_dispatch` RC then `v*` tag | Proves release.yml end-to-end | P0 for public tag |
+| C1 | Updater key + repo secrets | Signed installers + updater metadata real | P0 for tag |
+| C2 | `workflow_dispatch` RC then `v0.4.0` tag | Proves release.yml end-to-end | P0 for tag |
 | C3 | Clean-machine dogfood | Install, Node missing UX, rebind, Integrations | P0 |
-| C4 | CHANGELOG accuracy | 0.3.2 packaging + 0.3.3 notes human-readable | P1 |
+| C4 | CHANGELOG for 0.4.0 | Packaging + Help + empty states + any flagships | P1 |
 
-### D. Product (0.4+)
-
-Pick **few** flagships after C-track:
+### D. Product flagships (also v0.4.0 — pick few)
 
 1. In-app **auto-update UX** (infra already partial)  
 2. **Local RAG** (files → index → inject; extends 0.3 URL context)  
 3. **Azure AI Foundry** endpoint profiles  
-4. **Node-free runtime spike** (bundle Node or Rust bridge) — **must start before 1.0**
+4. **Node-free runtime** — **Spike A Go** (bundled Node via `externalBin`; [node-bundle-spike.md](./spikes/node-bundle-spike.md)). Rust listModels / process-free runtime still open for later.
 
-Defer: autonomous agent loops, full Purview implementation, full multi-endpoint scheduler.
+Defer past 0.4: autonomous agent loops, full Purview implementation, full multi-endpoint scheduler.
 
 ### E. 1.0 definition of done
 
@@ -90,12 +88,10 @@ Defer: autonomous agent loops, full Purview implementation, full multi-endpoint 
 ## Sequencing
 
 ```text
-A1 README ✅
-B1/B2 Help + first-run coach ✅
-  → C1–C3 tag 0.3.x public
-  → A2/A3 roadmap + user guide
-  → B3/B4 empty states + About polish
-  → 0.4: auto-update UX + (RAG | Azure | Node spike)
+v0.4.0 track:
+  A1 README ✅  B1/B2 Help + coach ✅  A2/A3 USER_GUIDE + roadmap ✅  B3 empty states ✅  B4 About ✅
+  → C1–C3 secrets, RC, dogfood, tag v0.4.0
+  → D: auto-update UX and/or RAG/Azure/Node spike (as capacity allows)
   → 0.5–0.9: Node independence + hardening
   → 1.0: runtime + signed + help + core flows locked
 ```
@@ -115,4 +111,5 @@ B1/B2 Help + first-run coach ✅
 
 - Rewriting archive plans.  
 - Building an in-app full documentation site.  
-- Committing to every 0.4 bullet in one release.
+- Committing to every 0.4 bullet in one release.  
+- **Ollama-style model CLI** or a **second Foundry Local CLI** inside Flint (document Foundry CLI for terminal; keep Flint as SDK GUI + endpoint). Optional later: thin `flint` control CLI over the same sidecar IPC — see [BACKLOG](./BACKLOG.md).

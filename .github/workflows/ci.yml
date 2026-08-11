@@ -48,6 +48,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Tauri externalBin (binaries/node) is required even for cargo check.
+      - name: Cache bundled Node binary
+        uses: actions/cache@v4
+        with:
+          path: |
+            src-tauri/binaries
+            runtime/node-staging
+          key: bundled-node-${{ runner.os }}-${{ runner.arch }}-v22.18.0-${{ hashFiles('scripts/ensure-bundled-node.cjs') }}
+
+      - name: Stage bundled Node (externalBin)
+        run: npm run ensure:node
+
       - name: Validate updater configuration
         shell: bash
         run: |
@@ -147,6 +159,17 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Cache bundled Node binary
+        uses: actions/cache@v4
+        with:
+          path: |
+            src-tauri/binaries
+            runtime/node-staging
+          key: bundled-node-${{ runner.os }}-${{ runner.arch }}-v22.18.0-${{ hashFiles('scripts/ensure-bundled-node.cjs') }}
+
+      - name: Stage bundled Node (externalBin)
+        run: npm run ensure:node
 
       - name: Build Tauri (debug for CI speed)
         uses: tauri-apps/tauri-action@v0
