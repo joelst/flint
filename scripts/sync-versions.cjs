@@ -21,13 +21,25 @@ function writeJson (file, data) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n');
 }
 
+// Release tags aren't always a full `major.minor.patch` (e.g. a tag like
+// `v0.4-mvp` yields the raw version `0.4-mvp`). Tauri/Cargo require strict
+// semver, so default a missing patch component to `0` before validating.
+function normalizeVersion (version) {
+  if (!version) return version;
+  const partial = version.match(/^(\d+\.\d+)(-[a-zA-Z0-9.-]+)?$/);
+  if (partial) {
+    return `${partial[1]}.0${partial[2] || ''}`;
+  }
+  return version;
+}
+
 function main () {
   // Allow explicit version from CLI: node scripts/sync-versions.cjs 1.2.3
   // Falls back to package.json (used by `npm run version`)
   const explicitVersion = process.argv[2];
   const pkgPath = path.join(ROOT, 'package.json');
   const pkg = readJson(pkgPath);
-  const version = explicitVersion || pkg.version;
+  const version = normalizeVersion(explicitVersion || pkg.version);
 
   if (!version || !/^\d+\.\d+\.\d+(-[a-zA-Z0-9.-]+)?$/.test(version)) {
     console.error(`Invalid version: ${version}`);
@@ -35,10 +47,10 @@ function main () {
   }
 
   // When an explicit version is provided, also update package.json first
-  if (explicitVersion && pkg.version !== explicitVersion) {
-    pkg.version = explicitVersion;
+  if (explicitVersion && pkg.version !== version) {
+    pkg.version = version;
     writeJson(pkgPath, pkg);
-    console.log(`  ✓ Updated package.json to ${explicitVersion}`);
+    console.log(`  ✓ Updated package.json to ${version}`);
   }
 
   console.log(`Syncing version ${version} across Tauri config files...`);
