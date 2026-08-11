@@ -25,6 +25,11 @@
       "identifier": "shell:allow-spawn",
       "allow": [
         {
+          "name": "binaries/node",
+          "sidecar": true,
+          "args": [{ "validator": "^[^-].*[/\\\\]foundry-sidecar\\.js$" }]
+        },
+        {
           "name": "node",
           "cmd": "node",
           "args": [{ "validator": "^[^-].*[/\\\\]foundry-sidecar\\.js$" }]
@@ -35,6 +40,11 @@
       "identifier": "shell:allow-execute",
       "allow": [
         {
+          "name": "binaries/node",
+          "sidecar": true,
+          "args": [{ "validator": "^(-v|--version)$" }]
+        },
+        {
           "name": "node",
           "cmd": "node",
           "args": [{ "validator": "^(-v|--version)$" }]
@@ -44,6 +54,11 @@
     {
       "identifier": "shell:allow-stdin-write",
       "allow": [
+        {
+          "name": "binaries/node",
+          "sidecar": true,
+          "args": [{ "validator": "^[^-].*[/\\\\]foundry-sidecar\\.js$" }]
+        },
         {
           "name": "node",
           "cmd": "node",

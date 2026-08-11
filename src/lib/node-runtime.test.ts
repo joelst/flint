@@ -86,11 +86,17 @@ describe('evaluateNodeProbe', () => {
 });
 
 describe('guidance messages', () => {
-  it('mention bundled Foundry and install paths', () => {
+  it('mention bundled runtime and PATH fallback', () => {
     const missing = buildNodeMissingMessage();
     expect(missing).toContain('bundled');
     expect(missing).toContain('winget');
     expect(missing).toContain('brew');
+    expect(missing).toContain('ensure:node');
+
+    const bundledOnly = buildNodeMissingMessage(undefined, { bundledOnly: true });
+    expect(bundledOnly).toContain('bundled Node');
+    expect(bundledOnly).toContain('reinstalling');
+    expect(bundledOnly).not.toContain('winget');
 
     const old = buildNodeTooOldMessage({
       major: 16,
@@ -100,5 +106,6 @@ describe('guidance messages', () => {
     });
     expect(old).toContain('too old');
     expect(old).toContain('nodejs.org');
+    expect(old).toContain('ensure:node');
   });
 });

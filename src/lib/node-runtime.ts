@@ -1,7 +1,11 @@
 /**
  * Node.js preflight for the Foundry JS sidecar.
- * End-user installers still spawn `node` on PATH (see docs/BACKLOG.md).
+ *
+ * Spike A: prefer bundled Node (Tauri externalBin `binaries/node`); fall back
+ * to PATH `node` for dev. See docs/DEVELOPMENT.md and scripts/ensure-bundled-node.cjs.
  */
+
+import type { NodeRuntimeMode } from './sidecar-paths';
 
 /** Oldest Node line still receiving security updates (Maintenance LTS as of mid-2026). */
 export const MIN_NODE_VERSION = { major: 22, minor: 0, patch: 0 } as const;
@@ -19,8 +23,21 @@ export type NodePreflightCode =
   | 'NODE_PROBE_FAILED';
 
 export type NodePreflightResult =
-  | { ok: true; version: NodeVersion }
-  | { ok: false; code: NodePreflightCode; message: string; found?: NodeVersion };
+  | { ok: true; version: NodeVersion; mode?: NodeRuntimeMode }
+  | {
+      ok: false;
+      code: NodePreflightCode;
+      message: string;
+      found?: NodeVersion;
+      mode?: NodeRuntimeMode;
+    };
+
+export type NodeMissingContext = {
+  /** Which modes were attempted (for message tone). */
+  tried?: NodeRuntimeMode[];
+  /** True when only bundled was required and it failed. */
+  bundledOnly?: boolean;
+};
 
 /** Parse `node -v` / `node --version` output (e.g. "v18.19.0", "18.19.0\n"). */
 export function parseNodeVersion(output: string): NodeVersion | null {
@@ -55,17 +72,28 @@ export function isNodeVersionAtLeast(
 
 export function buildNodeMissingMessage(
   min: { major: number; minor: number; patch: number } = MIN_NODE_VERSION,
+  ctx: NodeMissingContext = {},
 ): string {
   const minLabel = formatNodeVersion(min);
+  if (ctx.bundledOnly) {
+    return [
+      `Flint could not start its bundled Node.js ${minLabel}+ runtime for the Foundry sidecar.`,
+      'The packaged Node binary is missing or failed to launch.',
+      '',
+      'Try reinstalling Flint from the latest release.',
+      'Developers: run `npm run ensure:node` then rebuild (see docs/DEVELOPMENT.md).',
+    ].join('\n');
+  }
   return [
-    `Flint needs Node.js ${minLabel}+ on your PATH to run the local Foundry sidecar.`,
-    'Node.js was not found (or is not on PATH).',
+    `Flint needs Node.js ${minLabel}+ to run the local Foundry sidecar.`,
+    'Bundled runtime was not available, and Node.js was not found on PATH.',
     '',
     'Install the LTS build from https://nodejs.org then quit and reopen Flint.',
     'Windows (optional): winget install OpenJS.NodeJS.LTS',
     'macOS (optional): brew install node',
     '',
-    'Foundry Local runtime is already bundled with Flint; only Node is an external dependency for now.',
+    'Release builds ship a bundled Node binary (Spike A); PATH Node remains a dev fallback.',
+    'Developers: `npm run ensure:node` stages the binary under src-tauri/binaries/.',
   ].join('\n');
 }
 
@@ -75,14 +103,14 @@ export function buildNodeTooOldMessage(
 ): string {
   const minLabel = formatNodeVersion(min);
   return [
-    `Flint needs Node.js ${minLabel}+ on your PATH to run the local Foundry sidecar.`,
+    `Flint needs Node.js ${minLabel}+ to run the local Foundry sidecar.`,
     `Found ${found.raw}, which is too old.`,
     '',
     'Upgrade from https://nodejs.org (LTS recommended), then quit and reopen Flint.',
     'Windows (optional): winget install OpenJS.NodeJS.LTS',
     'macOS (optional): brew install node',
     '',
-    'Foundry Local runtime is already bundled with Flint; only Node is an external dependency for now.',
+    'Or rebuild with `npm run ensure:node` so the app uses the bundled Node 22 runtime.',
   ].join('\n');
 }
 
@@ -90,8 +118,8 @@ export function buildNodeProbeFailedMessage(detail?: string): string {
   const extra = detail ? `\nDetails: ${detail}` : '';
   return [
     'Could not verify the Node.js installation required for the Foundry sidecar.',
-    `Ensure Node.js ${MIN_NODE_VERSION.major}+ is installed and on your PATH, then quit and reopen Flint.`,
-    'Download: https://nodejs.org',
+    `Need Node.js ${MIN_NODE_VERSION.major}+ (bundled runtime or on PATH).`,
+    'Download: https://nodejs.org — or reinstall Flint / run `npm run ensure:node`.',
     extra,
   ]
     .filter(Boolean)
@@ -107,10 +135,14 @@ export function evaluateNodeProbe(options: {
   stdout?: string | null;
   probeError?: string | null;
   min?: { major: number; minor: number; patch: number };
+  missingContext?: NodeMissingContext;
+  mode?: NodeRuntimeMode;
 }): NodePreflightResult {
   const min = options.min ?? MIN_NODE_VERSION;
   const err = options.probeError ? String(options.probeError) : '';
   const stdout = options.stdout != null ? String(options.stdout) : '';
+  const missingCtx = options.missingContext ?? {};
+  const mode = options.mode;
 
   if (err) {
     const lower = err.toLowerCase();
@@ -120,9 +152,18 @@ export function evaluateNodeProbe(options: {
       lower.includes('cannot find') ||
       lower.includes('is not recognized') ||
       lower.includes('no such file') ||
-      lower.includes('program not found');
+      lower.includes('program not found') ||
+      lower.includes('sidecar not allowed') ||
+      lower.includes('unknown program') ||
+      lower.includes('failed to find sidecar') ||
+      lower.includes('sidecar binary');
     if (missing) {
-      return { ok: false, code: 'NODE_MISSING', message: buildNodeMissingMessage(min) };
+      return {
+        ok: false,
+        code: 'NODE_MISSING',
+        message: buildNodeMissingMessage(min, missingCtx),
+        mode,
+      };
     }
     // Some shells still return empty stdout with a generic failure when node is missing.
     if (!stdout.trim()) {
@@ -130,6 +171,7 @@ export function evaluateNodeProbe(options: {
         ok: false,
         code: 'NODE_PROBE_FAILED',
         message: buildNodeProbeFailedMessage(err),
+        mode,
       };
     }
   }
@@ -137,7 +179,12 @@ export function evaluateNodeProbe(options: {
   const version = parseNodeVersion(stdout);
   if (!version) {
     if (!stdout.trim() && !err) {
-      return { ok: false, code: 'NODE_MISSING', message: buildNodeMissingMessage(min) };
+      return {
+        ok: false,
+        code: 'NODE_MISSING',
+        message: buildNodeMissingMessage(min, missingCtx),
+        mode,
+      };
     }
     return {
       ok: false,
@@ -145,6 +192,7 @@ export function evaluateNodeProbe(options: {
       message: buildNodeProbeFailedMessage(
         err || (stdout ? `unrecognized version output: ${stdout.trim()}` : 'empty output'),
       ),
+      mode,
     };
   }
 
@@ -154,8 +202,9 @@ export function evaluateNodeProbe(options: {
       code: 'NODE_TOO_OLD',
       message: buildNodeTooOldMessage(version, min),
       found: version,
+      mode,
     };
   }
 
-  return { ok: true, version };
+  return { ok: true, version, mode };
 }

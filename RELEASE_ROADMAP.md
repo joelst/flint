@@ -491,7 +491,7 @@ If 0.1 is "usable MVP" and 0.2 is "hardened + scalable architecture", then **1.0
 | 10 | Tag `v0.3.0` → signed release build | Dev | ⬜ |
 | 11 | Review draft release; publish | Dev | ⬜ |
 
-Also landed for dogfood UX: **Node.js 22+ preflight** (oldest security-supported line) before sidecar spawn + Learn/fact-sheet honesty ([docs/BACKLOG.md](./docs/BACKLOG.md)). **0.4+**: targeted Rust bridge for selected sidecar commands (not big-bang rewrite).
+Also landed for dogfood UX: **Node.js 22+ preflight** before sidecar spawn + Learn/fact-sheet honesty. **0.4 Spike A Go:** release builds **bundle Node 22** via Tauri `externalBin` (`npm run ensure:node` / `smoke:node`) — PATH Node is fallback ([docs/spikes/node-bundle-spike.md](./docs/spikes/node-bundle-spike.md)). **Later:** optional thin `flint` control CLI (not Ollama/Foundry clone); targeted Rust bridge for selected commands.
 
 ### Start 0.4 planning (after 0.3 ships)
 

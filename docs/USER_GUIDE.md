@@ -8,10 +8,10 @@ Short path from install to chat and external tools. For **why** Flint exists, se
 
 - **Windows** (primary) or **macOS on Apple silicon**  
   Intel Mac is not supported until Foundry publishes `darwin-x64` native cores.
-- **Node.js 22+** on your PATH (JS sidecar). Install LTS from [nodejs.org](https://nodejs.org), then restart Flint.
+- **Node for the JS sidecar:** release builds ship a **bundled Node 22** binary; PATH Node is only a fallback (dev or incomplete install).  
 - Foundry Local **runtime is bundled** — you do not need a separate Foundry CLI for normal use.
 
-Flint checks Node on launch and shows guidance if it is missing or too old.
+Flint prefers the packaged Node on launch (About shows `bundled` vs `PATH`) and shows guidance if neither works.
 
 ---
 

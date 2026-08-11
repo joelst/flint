@@ -1,6 +1,6 @@
 # Flint product plan (docs → v0.4.0 → 1.0)
 
-**Last updated:** 2026-08-06  
+**Last updated:** 2026-08-10  
 **Target release for this track:** **v0.4.0** (docs, Help, empty states, and remaining 0.3.x polish ship under 0.4 — not a separate 0.3.x “docs only” tag).  
 **Companion docs:** [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) (release scorecards), [BACKLOG.md](./BACKLOG.md) (deferred items).
 
@@ -8,17 +8,18 @@
 
 ## Current status (rubber-duck check)
 
-| Area | State (as of 2026-08-06) |
+| Area | State (as of 2026-08-10) |
 |---|---|
 | **Version in tree** | **0.3.3** base; next product cut **0.4.0** |
-| **`main` / `0.4-mvp`** | Packaging + rebind + network Apply; README/Help/coach/USER_GUIDE in progress on 0.4 track |
+| **`main` / `0.4-mvp`** | Packaging + Help/coach/empty states/About; **Spike A Go** (bundled Node) |
 | **Product features (0.3)** | Models pool, chat/vision, audio STT, Compare, Monitor, Integrations, Settings — **feature-complete** |
-| **Installers** | Foundry natives + `Flint.exe`; target-aware `ensure:foundry`; no Intel Mac matrix target |
-| **v0.4.0 still needs** | Empty states (B3), About polish (B4), release secrets/tag/dogfood as part of 0.4 ship |
-| **End-user friction** | **Node.js 22+ on PATH** still required (JS sidecar) |
+| **Installers** | Foundry natives + `Flint.exe` + **bundled Node** externalBin; target-aware `ensure:foundry`; no Intel Mac matrix |
+| **v0.4.0 still needs** | Release secrets/tag/dogfood (C1–C3); optional clean-machine Node-uninstall proof |
+| **End-user friction** | PATH Node **not required** for complete release packages (bundled Node 22); PATH = fallback |
 | **Mac Intel** | No Foundry `darwin-x64` cores — Windows + darwin-arm64 only |
+| **CLI** | **Not a 0.4 flagship** — optional thin `flint` control CLI later; not Ollama/Foundry clone ([BACKLOG](./BACKLOG.md)) |
 
-**Bottom line:** 0.4.0 is the umbrella for polish (docs/help/empty states) + release ops + first post-0.3 feature bets.
+**Bottom line:** 0.4.0 is polish + release ops + Node-bundle spike complete; not a new CLI surface.
 
 ---
 
@@ -65,7 +66,7 @@
 1. In-app **auto-update UX** (infra already partial)  
 2. **Local RAG** (files → index → inject; extends 0.3 URL context)  
 3. **Azure AI Foundry** endpoint profiles  
-4. **Node-free runtime spike** (bundle Node or Rust bridge) — **start in 0.4, finish by 1.0**
+4. **Node-free runtime** — **Spike A Go** (bundled Node via `externalBin`; [node-bundle-spike.md](./spikes/node-bundle-spike.md)). Rust listModels / process-free runtime still open for later.
 
 Defer past 0.4: autonomous agent loops, full Purview implementation, full multi-endpoint scheduler.
 
@@ -110,4 +111,5 @@ v0.4.0 track:
 
 - Rewriting archive plans.  
 - Building an in-app full documentation site.  
-- Committing to every 0.4 bullet in one release.
+- Committing to every 0.4 bullet in one release.  
+- **Ollama-style model CLI** or a **second Foundry Local CLI** inside Flint (document Foundry CLI for terminal; keep Flint as SDK GUI + endpoint). Optional later: thin `flint` control CLI over the same sidecar IPC — see [BACKLOG](./BACKLOG.md).

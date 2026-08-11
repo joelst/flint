@@ -96,12 +96,13 @@
     try {
       const r = await ensureNodeRuntime();
       if (r.ok) {
-        nodeVersionLabel = r.version.raw;
+        const mode = r.mode === "bundled" ? "bundled" : r.mode === "path" ? "PATH" : "";
+        nodeVersionLabel = mode ? `${r.version.raw} (${mode})` : r.version.raw;
         nodeVersionOk = true;
       } else {
         nodeVersionLabel = r.found?.raw
           ? `${r.found.raw} (need ${formatNodeVersion(MIN_NODE_VERSION)}+)`
-          : `Not found (need ${formatNodeVersion(MIN_NODE_VERSION)}+)`;
+          : `Not found (need ${formatNodeVersion(MIN_NODE_VERSION)}+; bundled or PATH)`;
         nodeVersionOk = false;
       }
     } catch {
@@ -4135,13 +4136,13 @@ Output only the summary text, no preamble.`;
           </div>
           <ol class="first-run-steps">
             <li class:done={state.ready}>
-              <strong>Node.js 22+</strong>
+              <strong>Local runtime</strong>
               {#if state.ready}
-                <span class="first-run-ok">Ready — sidecar connected</span>
+                <span class="first-run-ok">Ready — sidecar connected (bundled Node preferred)</span>
               {:else if state.error}
                 <span class="first-run-bad">Not ready — see the notice below or Help → Troubleshooting</span>
               {:else}
-                <span class="muted">Checking…</span>
+                <span class="muted">Starting bundled Node + Foundry sidecar…</span>
               {/if}
             </li>
             <li class:done={firstRunHasModel}>
@@ -4182,8 +4183,9 @@ Output only the summary text, no preamble.`;
                 </p>
                 <pre class="error-guidance">{state.error}</pre>
                 <p class="small muted">
-                  Foundry Local runtime is bundled with Flint. The JS sidecar still
-                  needs <strong>Node.js 22+</strong> on your PATH.
+                  Foundry Local runtime is bundled. Release builds also ship a
+                  <strong>bundled Node</strong> binary for the JS sidecar; PATH Node is a
+                  fallback (dev / incomplete install). See Help → Troubleshooting.
                 </p>
               {:else}
                 <p>
@@ -5704,10 +5706,13 @@ Output only the summary text, no preamble.`;
             <h3>First five minutes</h3>
             <ol class="help-steps">
               <li>
-                <strong>Node.js 22+</strong> on PATH (required for the JS sidecar). Install LTS from
-                <a href="https://nodejs.org" target="_blank" rel="noopener noreferrer">nodejs.org</a>, then restart Flint.
+                <strong>Local runtime</strong> — release builds prefer a
+                <strong>bundled Node 22</strong> binary for the JS sidecar; PATH Node is a
+                fallback. If startup fails, install LTS from
+                <a href="https://nodejs.org" target="_blank" rel="noopener noreferrer">nodejs.org</a>,
+                or reinstall Flint, then restart.
                 {#if state.ready}
-                  <span class="first-run-ok"> Detected and connected.</span>
+                  <span class="first-run-ok"> Connected.</span>
                 {/if}
               </li>
               <li>
@@ -5773,7 +5778,7 @@ Output only the summary text, no preamble.`;
           <section class="help-section">
             <h3>Troubleshooting</h3>
             <ul>
-              <li><strong>Could not start Foundry Local / Node errors</strong> — Install Node 22+ LTS, ensure <code>node -v</code> works in a terminal, restart Flint.</li>
+              <li><strong>Could not start Foundry Local / Node errors</strong> — Prefer reinstalling Flint (bundled Node). Dev fallback: install Node 22+ LTS, ensure <code>node -v</code> works, restart Flint. About shows <code>bundled</code> vs <code>PATH</code>.</li>
               <li><strong>No models</strong> — Open Models and download a starter; first run may show hardware-aware recommendations.</li>
               <li><strong>Chat disabled</strong> — Load a chat-capable model (not STT-only). Unload audio-only models if they block the lane.</li>
               <li><strong>Integrations show “not started”</strong> — Diagnostics → Start service.</li>
@@ -5837,7 +5842,8 @@ Output only the summary text, no preamble.`;
               </div>
             </dl>
             <p class="muted small">
-              Foundry runtime is bundled. The JS sidecar still needs Node on PATH.
+              Foundry runtime is bundled. Node for the sidecar is preferably the packaged
+              binary (About shows <code>bundled</code> vs <code>PATH</code>).
             </p>
             <p class="about-links">
               <a href="https://github.com/joelst/flint/releases" target="_blank" rel="noopener noreferrer">Releases</a>

@@ -45,6 +45,46 @@ function checkCoreAt(label, dir) {
 console.log('Verifying Foundry Local SDK packaging prerequisites...');
 console.log(`Platform: ${platformKey}`);
 
+// --- Bundled Node (Spike A: Tauri externalBin binaries/node) ---
+function hostTripleForNode() {
+  const { platform, arch } = process;
+  if (platform === 'win32' && arch === 'x64') return 'x86_64-pc-windows-msvc';
+  if (platform === 'win32' && arch === 'arm64') return 'aarch64-pc-windows-msvc';
+  if (platform === 'darwin' && arch === 'arm64') return 'aarch64-apple-darwin';
+  if (platform === 'darwin' && arch === 'x64') return 'x86_64-apple-darwin';
+  if (platform === 'linux' && arch === 'x64') return 'x86_64-unknown-linux-gnu';
+  if (platform === 'linux' && arch === 'arm64') return 'aarch64-unknown-linux-gnu';
+  return null;
+}
+
+console.log('Checking bundled Node runtime (externalBin)...');
+const triple = hostTripleForNode();
+const nodeExt = process.platform === 'win32' ? '.exe' : '';
+const nodeBin = triple
+  ? path.join(root, 'src-tauri', 'binaries', `node-${triple}${nodeExt}`)
+  : null;
+const nodeVerFile = path.join(root, 'src-tauri', 'binaries', 'node.VERSION');
+if (!triple) {
+  bad(`unsupported platform for bundled Node: ${process.platform}-${process.arch}`);
+} else if (!fs.existsSync(nodeBin)) {
+  bad(
+    `missing ${path.relative(root, nodeBin)} — run: npm run ensure:node`,
+  );
+} else {
+  const st = fs.statSync(nodeBin);
+  const mb = st.size / (1024 * 1024);
+  if (mb < 20) {
+    bad(`${path.relative(root, nodeBin)} is only ${mb.toFixed(1)} MB (expected full Node binary)`);
+  } else {
+    ok(`bundled Node: ${path.relative(root, nodeBin)} (${mb.toFixed(1)} MB)`);
+  }
+  if (fs.existsSync(nodeVerFile)) {
+    ok(`node.VERSION: ${fs.readFileSync(nodeVerFile, 'utf8').trim()}`);
+  } else {
+    bad('missing src-tauri/binaries/node.VERSION');
+  }
+}
+
 const sdkRoot = path.join(root, 'node_modules', 'foundry-local-sdk');
 if (!fs.existsSync(sdkRoot)) {
   bad('node_modules/foundry-local-sdk not installed — run npm install');
@@ -133,6 +173,7 @@ if (fs.existsSync(path.join(root, 'src-tauri', 'target', 'release'))) {
 
 if (failed) {
   console.error('\nVerification FAILED. Fix with:');
+  console.error('  npm run ensure:node');
   console.error('  node scripts/ensure-foundry-native.cjs');
   console.error('  npm run tauri:build');
   console.error('  npm run verify:bundle');
