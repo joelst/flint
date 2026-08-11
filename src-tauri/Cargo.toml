@@ -1,6 +1,6 @@
 [package]
 name = "flint"
-version = "0.3.4"
+version = "0.4.0"
 description = "Flint — Foundry Local Interface, a desktop GUI for Microsoft Foundry Local"
 authors = []
 edition = "2021"
