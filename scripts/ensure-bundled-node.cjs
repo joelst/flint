@@ -10,15 +10,22 @@
 //   node scripts/ensure-bundled-node.cjs --force
 //
 // Env:
-//   FOUNDRY-style overrides not used; optional NODE_BUNDLE_VERSION=22.18.0
+//   NODE_BUNDLE_VERSION=22.18.0
+//   NODE_BUNDLE_DOWNLOAD_TIMEOUT_MS=120000  (per request; default 120s)
 //   TAURI_ENV_TARGET_TRIPLE when set by `tauri build --target …`
+//
+// Security:
+//   - HTTPS only (including redirects); never follows http://
+//   - Per-request timeout
+//   - Verifies archive SHA-256 against official SHASUMS256.txt before extract
 
 'use strict';
 
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
-const http = require('http');
+const crypto = require('crypto');
+const { URL } = require('url');
 const { execFileSync, spawnSync } = require('child_process');
 const { createWriteStream } = require('fs');
 
@@ -28,6 +35,14 @@ const stagingRoot = path.join(root, 'runtime', 'node-staging');
 
 /** Pinned Node 22 LTS line for the spike (override with NODE_BUNDLE_VERSION). */
 const DEFAULT_NODE_VERSION = process.env.NODE_BUNDLE_VERSION || '22.18.0';
+
+/** Per HTTPS request timeout (ms). Large archives need headroom on slow links. */
+const DOWNLOAD_TIMEOUT_MS = Math.max(
+  10_000,
+  Number(process.env.NODE_BUNDLE_DOWNLOAD_TIMEOUT_MS) || 120_000,
+);
+
+const MAX_REDIRECTS = 5;
 
 const TRIPLE_TO_NODE_DIST = {
   'x86_64-pc-windows-msvc': { dist: 'win-x64', archive: 'zip', binary: 'node.exe', outExt: '.exe' },
@@ -69,37 +84,182 @@ function distUrl(version, distKey, archive) {
   const file = archive === 'zip' ? `${base}.zip` : `${base}.${archive}`;
   return {
     url: `https://nodejs.org/dist/v${version}/${file}`,
+    shasumsUrl: `https://nodejs.org/dist/v${version}/SHASUMS256.txt`,
     fileName: file,
     folderName: base,
   };
 }
 
-function download(url, dest) {
+/**
+ * Parse and require an absolute https: URL. Rejects http and other schemes.
+ * @returns {URL}
+ */
+function assertHttpsUrl(urlString, context) {
+  let u;
+  try {
+    u = new URL(urlString);
+  } catch {
+    throw new Error(`Invalid URL (${context}): ${urlString}`);
+  }
+  if (u.protocol !== 'https:') {
+    throw new Error(
+      `Refusing non-HTTPS URL (${context}): ${urlString} (protocol=${u.protocol})`,
+    );
+  }
+  return u;
+}
+
+/**
+ * HTTPS GET to a file on disk. Follows redirects only when the next hop is HTTPS.
+ */
+function downloadHttpsToFile(urlString, dest, redirectCount = 0) {
+  const u = assertHttpsUrl(urlString, 'download');
+  if (redirectCount > MAX_REDIRECTS) {
+    return Promise.reject(new Error(`Too many HTTPS redirects (>${MAX_REDIRECTS}) for ${urlString}`));
+  }
+
   return new Promise((resolve, reject) => {
-    const client = url.startsWith('https') ? https : http;
-    const req = client.get(url, { headers: { 'User-Agent': 'flint-ensure-bundled-node' } }, (res) => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        res.resume();
-        download(res.headers.location, dest).then(resolve, reject);
-        return;
-      }
-      if (res.statusCode !== 200) {
-        res.resume();
-        reject(new Error(`GET ${url} → HTTP ${res.statusCode}`));
-        return;
-      }
-      const out = createWriteStream(dest);
-      res.pipe(out);
-      out.on('finish', () => out.close(() => resolve(dest)));
-      out.on('error', reject);
+    const req = https.get(
+      u,
+      {
+        headers: { 'User-Agent': 'flint-ensure-bundled-node' },
+        timeout: DOWNLOAD_TIMEOUT_MS,
+      },
+      (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          res.resume();
+          let nextHref;
+          try {
+            nextHref = new URL(res.headers.location, u).href;
+          } catch {
+            reject(new Error(`Bad redirect Location from ${urlString}: ${res.headers.location}`));
+            return;
+          }
+          // Enforce HTTPS on the resolved redirect target before following.
+          try {
+            assertHttpsUrl(nextHref, 'redirect');
+          } catch (e) {
+            reject(e);
+            return;
+          }
+          downloadHttpsToFile(nextHref, dest, redirectCount + 1).then(resolve, reject);
+          return;
+        }
+        if (res.statusCode !== 200) {
+          res.resume();
+          reject(new Error(`GET ${urlString} → HTTP ${res.statusCode}`));
+          return;
+        }
+        const out = createWriteStream(dest);
+        res.pipe(out);
+        out.on('finish', () => out.close((err) => (err ? reject(err) : resolve(dest))));
+        out.on('error', reject);
+        res.on('error', reject);
+      },
+    );
+    req.on('timeout', () => {
+      req.destroy(new Error(`Download timed out after ${DOWNLOAD_TIMEOUT_MS}ms: ${urlString}`));
     });
     req.on('error', reject);
   });
 }
 
+/**
+ * HTTPS GET entire body as utf8 string (for SHASUMS256.txt).
+ */
+function downloadHttpsText(urlString, redirectCount = 0) {
+  const u = assertHttpsUrl(urlString, 'download-text');
+  if (redirectCount > MAX_REDIRECTS) {
+    return Promise.reject(new Error(`Too many HTTPS redirects (>${MAX_REDIRECTS}) for ${urlString}`));
+  }
+
+  return new Promise((resolve, reject) => {
+    const req = https.get(
+      u,
+      {
+        headers: { 'User-Agent': 'flint-ensure-bundled-node' },
+        timeout: DOWNLOAD_TIMEOUT_MS,
+      },
+      (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          res.resume();
+          let nextHref;
+          try {
+            nextHref = new URL(res.headers.location, u).href;
+          } catch {
+            reject(new Error(`Bad redirect Location from ${urlString}: ${res.headers.location}`));
+            return;
+          }
+          try {
+            assertHttpsUrl(nextHref, 'redirect');
+          } catch (e) {
+            reject(e);
+            return;
+          }
+          downloadHttpsText(nextHref, redirectCount + 1).then(resolve, reject);
+          return;
+        }
+        if (res.statusCode !== 200) {
+          res.resume();
+          reject(new Error(`GET ${urlString} → HTTP ${res.statusCode}`));
+          return;
+        }
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+        res.on('error', reject);
+      },
+    );
+    req.on('timeout', () => {
+      req.destroy(new Error(`Download timed out after ${DOWNLOAD_TIMEOUT_MS}ms: ${urlString}`));
+    });
+    req.on('error', reject);
+  });
+}
+
+/** SHA-256 hex digest of a file (streaming). */
+function sha256File(filePath) {
+  const hash = crypto.createHash('sha256');
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const buf = Buffer.alloc(1024 * 1024);
+    let n;
+    while ((n = fs.readSync(fd, buf, 0, buf.length, null)) > 0) {
+      hash.update(buf.subarray(0, n));
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return hash.digest('hex');
+}
+
+/**
+ * Parse official SHASUMS256.txt and return expected hex digest for fileName.
+ * Lines: `<64-hex>  <filename>` (two spaces per Node dist convention).
+ */
+function expectedSha256FromSums(sumsText, fileName) {
+  for (const line of sumsText.split(/\r?\n/)) {
+    const m = line.match(/^([a-fA-F0-9]{64})\s+(\S+)\s*$/);
+    if (m && m[2] === fileName) {
+      return m[1].toLowerCase();
+    }
+  }
+  throw new Error(`No SHASUMS256 entry for ${fileName}`);
+}
+
+function verifyArchiveSha256(archivePath, fileName, sumsText) {
+  const expected = expectedSha256FromSums(sumsText, fileName);
+  const actual = sha256File(archivePath);
+  if (actual !== expected) {
+    throw new Error(
+      `SHA-256 mismatch for ${fileName}: expected ${expected}, got ${actual}. Refusing to extract.`,
+    );
+  }
+  return expected;
+}
+
 function extractZipWindows(zipPath, destDir) {
   fs.mkdirSync(destDir, { recursive: true });
-  // Prefer PowerShell Expand-Archive (available on supported Windows).
   execFileSync(
     'powershell.exe',
     [
@@ -114,7 +274,6 @@ function extractZipWindows(zipPath, destDir) {
 
 function extractTar(archivePath, destDir, kind) {
   fs.mkdirSync(destDir, { recursive: true });
-  // macOS/Linux ship tar; Windows 10+ often has tar for .zip/.gz too.
   const args =
     kind === 'tar.xz'
       ? ['-xJf', archivePath, '-C', destDir]
@@ -158,16 +317,32 @@ async function main() {
     return;
   }
 
-  const { url, fileName, folderName } = distUrl(version, mapping.dist, mapping.archive);
+  const { url, shasumsUrl, fileName, folderName } = distUrl(
+    version,
+    mapping.dist,
+    mapping.archive,
+  );
   fs.mkdirSync(stagingRoot, { recursive: true });
   const archivePath = path.join(stagingRoot, fileName);
   const extractDir = path.join(stagingRoot, `extract-${target}`);
+  const sumsPath = path.join(stagingRoot, `SHASUMS256-v${version}.txt`);
 
   console.log(`Fetching Node v${version} for ${target}…`);
-  console.log(`  ${url}`);
-  await download(url, archivePath);
+  console.log(`  archive:  ${url}`);
+  console.log(`  checksum: ${shasumsUrl}`);
+  console.log(`  timeout:  ${DOWNLOAD_TIMEOUT_MS}ms per request (HTTPS only)`);
+
+  console.log('  downloading SHASUMS256.txt…');
+  const sumsText = await downloadHttpsText(shasumsUrl);
+  fs.writeFileSync(sumsPath, sumsText, 'utf8');
+
+  console.log(`  downloading ${fileName}…`);
+  await downloadHttpsToFile(url, archivePath);
   const archMb = fs.statSync(archivePath).size / (1024 * 1024);
   console.log(`  downloaded ${archMb.toFixed(1)} MB → ${path.relative(root, archivePath)}`);
+
+  const digest = verifyArchiveSha256(archivePath, fileName, sumsText);
+  console.log(`  ✓ SHA-256 verified (${digest.slice(0, 12)}…)`);
 
   if (fs.existsSync(extractDir)) {
     fs.rmSync(extractDir, { recursive: true, force: true });
@@ -178,7 +353,6 @@ async function main() {
     if (process.platform === 'win32') {
       extractZipWindows(archivePath, extractDir);
     } else {
-      // tar can often open zip on non-Windows
       const r = spawnSync('tar', ['-xf', archivePath, '-C', extractDir], { stdio: 'inherit' });
       if (r.status !== 0) {
         throw new Error('Failed to extract Node zip (need unzip/tar)');
@@ -189,13 +363,11 @@ async function main() {
   }
 
   const extractedBinary = path.join(extractDir, folderName, mapping.binary);
-  // Some extractors put contents directly under extractDir
   const altBinary = path.join(extractDir, mapping.binary);
   let sourceBinary = null;
   if (fs.existsSync(extractedBinary)) sourceBinary = extractedBinary;
   else if (fs.existsSync(altBinary)) sourceBinary = altBinary;
   else {
-    // Walk one level for node.exe / node
     const walk = (dir, depth) => {
       if (depth > 3 || sourceBinary) return;
       let entries;
@@ -231,14 +403,15 @@ async function main() {
   }
 
   fs.writeFileSync(path.join(binariesDir, 'node.VERSION'), `${version}\n`, 'utf8');
-  // Marker for verify-bundle / humans
   fs.writeFileSync(
     path.join(binariesDir, 'node.README.txt'),
     [
       'Generated by scripts/ensure-bundled-node.cjs — do not commit node-* binaries.',
       `Node version: ${version}`,
       `Target: ${target}`,
+      `Archive SHA-256: ${digest}`,
       'Tauri externalBin name: binaries/node',
+      'Download: HTTPS-only + SHASUMS256 verify',
       '',
     ].join('\n'),
     'utf8',
