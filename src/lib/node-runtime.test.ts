@@ -86,18 +86,44 @@ describe('evaluateNodeProbe', () => {
 });
 
 describe('guidance messages', () => {
-  it('mention bundled runtime and PATH fallback', () => {
+  it('defaults to both-modes copy when no context', () => {
     const missing = buildNodeMissingMessage();
-    expect(missing).toContain('bundled');
+    expect(missing).toContain('Bundled runtime was not available');
+    expect(missing).toContain('PATH');
     expect(missing).toContain('winget');
     expect(missing).toContain('brew');
     expect(missing).toContain('ensure:node');
+  });
 
-    const bundledOnly = buildNodeMissingMessage(undefined, { bundledOnly: true });
-    expect(bundledOnly).toContain('bundled Node');
-    expect(bundledOnly).toContain('reinstalling');
-    expect(bundledOnly).not.toContain('winget');
+  it('uses bundled-only copy when only bundled was tried', () => {
+    const viaFlag = buildNodeMissingMessage(undefined, { bundledOnly: true });
+    expect(viaFlag).toContain('bundled Node');
+    expect(viaFlag).toContain('reinstalling');
+    expect(viaFlag).not.toContain('winget');
+    expect(viaFlag).not.toContain('not found on PATH');
 
+    const viaTried = buildNodeMissingMessage(undefined, { tried: ['bundled'] });
+    expect(viaTried).toContain('bundled Node');
+    expect(viaTried).not.toContain('winget');
+  });
+
+  it('uses PATH-only copy when only PATH was tried', () => {
+    const pathOnly = buildNodeMissingMessage(undefined, { tried: ['path'] });
+    expect(pathOnly).toContain('on your PATH');
+    expect(pathOnly).toContain('Node.js was not found');
+    expect(pathOnly).toContain('winget');
+    expect(pathOnly).not.toContain('Bundled runtime was not available');
+    expect(pathOnly).not.toContain('ensure:node');
+  });
+
+  it('mentions both when auto order failed', () => {
+    const both = buildNodeMissingMessage(undefined, { tried: ['bundled', 'path'] });
+    expect(both).toContain('Bundled runtime was not available');
+    expect(both).toContain('PATH');
+    expect(both).toContain('ensure:node');
+  });
+
+  it('too-old guidance still points at upgrade paths', () => {
     const old = buildNodeTooOldMessage({
       major: 16,
       minor: 0,

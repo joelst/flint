@@ -33,11 +33,35 @@ export type NodePreflightResult =
     };
 
 export type NodeMissingContext = {
-  /** Which modes were attempted (for message tone). */
+  /**
+   * Which modes were attempted (drives message copy).
+   * Prefer this over `bundledOnly` when both are available.
+   */
   tried?: NodeRuntimeMode[];
-  /** True when only bundled was required and it failed. */
+  /**
+   * True when only the bundled runtime was required/attempted.
+   * Still honored when `tried` is omitted (legacy callers).
+   */
   bundledOnly?: boolean;
 };
+
+/** Normalize which Node modes to describe in missing-runtime guidance. */
+export function resolveMissingModes(ctx: NodeMissingContext = {}): {
+  triedBundled: boolean;
+  triedPath: boolean;
+} {
+  if (ctx.tried && ctx.tried.length > 0) {
+    return {
+      triedBundled: ctx.tried.includes('bundled'),
+      triedPath: ctx.tried.includes('path'),
+    };
+  }
+  if (ctx.bundledOnly) {
+    return { triedBundled: true, triedPath: false };
+  }
+  // Default (no context): assume auto probe order — bundled then PATH.
+  return { triedBundled: true, triedPath: true };
+}
 
 /** Parse `node -v` / `node --version` output (e.g. "v18.19.0", "18.19.0\n"). */
 export function parseNodeVersion(output: string): NodeVersion | null {
@@ -75,7 +99,10 @@ export function buildNodeMissingMessage(
   ctx: NodeMissingContext = {},
 ): string {
   const minLabel = formatNodeVersion(min);
-  if (ctx.bundledOnly) {
+  const { triedBundled, triedPath } = resolveMissingModes(ctx);
+
+  // Only bundled was attempted (preference=bundled, or bundled-only probe).
+  if (triedBundled && !triedPath) {
     return [
       `Flint could not start its bundled Node.js ${minLabel}+ runtime for the Foundry sidecar.`,
       'The packaged Node binary is missing or failed to launch.',
@@ -84,6 +111,23 @@ export function buildNodeMissingMessage(
       'Developers: run `npm run ensure:node` then rebuild (see docs/DEVELOPMENT.md).',
     ].join('\n');
   }
+
+  // Only PATH was attempted (preference=path, or PATH-only probe).
+  if (triedPath && !triedBundled) {
+    return [
+      `Flint needs Node.js ${minLabel}+ on your PATH to run the local Foundry sidecar.`,
+      'Node.js was not found (or is not on PATH).',
+      '',
+      'Install the LTS build from https://nodejs.org then quit and reopen Flint.',
+      'Windows (optional): winget install OpenJS.NodeJS.LTS',
+      'macOS (optional): brew install node',
+      '',
+      'Tip: release builds prefer a bundled Node binary; use PATH only when that is unavailable',
+      'or when FLINT/VITE node runtime preference is set to `path`.',
+    ].join('\n');
+  }
+
+  // Auto / both attempted: bundled failed, then PATH failed.
   return [
     `Flint needs Node.js ${minLabel}+ to run the local Foundry sidecar.`,
     'Bundled runtime was not available, and Node.js was not found on PATH.',
@@ -92,7 +136,7 @@ export function buildNodeMissingMessage(
     'Windows (optional): winget install OpenJS.NodeJS.LTS',
     'macOS (optional): brew install node',
     '',
-    'Release builds ship a bundled Node binary (Spike A); PATH Node remains a dev fallback.',
+    'Release builds ship a bundled Node binary; PATH Node remains a dev fallback.',
     'Developers: `npm run ensure:node` stages the binary under src-tauri/binaries/.',
   ].join('\n');
 }
