@@ -7,6 +7,7 @@ import {
   MIN_NODE_VERSION,
   buildNodeMissingMessage,
   buildNodeTooOldMessage,
+  pickBestNodePreflightFailure,
 } from './node-runtime';
 
 describe('parseNodeVersion', () => {
@@ -133,5 +134,73 @@ describe('guidance messages', () => {
     expect(old).toContain('too old');
     expect(old).toContain('nodejs.org');
     expect(old).toContain('ensure:node');
+  });
+});
+
+describe('pickBestNodePreflightFailure', () => {
+  const missingBundled = {
+    ok: false as const,
+    code: 'NODE_MISSING' as const,
+    message: 'bundled missing',
+    mode: 'bundled' as const,
+  };
+  const missingPath = {
+    ok: false as const,
+    code: 'NODE_MISSING' as const,
+    message: 'path missing',
+    mode: 'path' as const,
+  };
+  const tooOldPath = {
+    ok: false as const,
+    code: 'NODE_TOO_OLD' as const,
+    message: buildNodeTooOldMessage({
+      major: 18,
+      minor: 0,
+      patch: 0,
+      raw: 'v18.0.0',
+    }),
+    mode: 'path' as const,
+    found: { major: 18, minor: 0, patch: 0, raw: 'v18.0.0' },
+  };
+  const probeFailed = {
+    ok: false as const,
+    code: 'NODE_PROBE_FAILED' as const,
+    message: 'weird probe',
+    mode: 'bundled' as const,
+  };
+
+  it('prefers NODE_TOO_OLD over NODE_MISSING', () => {
+    const r = pickBestNodePreflightFailure(
+      [missingBundled, tooOldPath],
+      ['bundled', 'path'],
+    );
+    expect(r.code).toBe('NODE_TOO_OLD');
+    expect(r.message).toContain('too old');
+    expect(r.found?.raw).toBe('v18.0.0');
+  });
+
+  it('prefers NODE_PROBE_FAILED over NODE_MISSING', () => {
+    const r = pickBestNodePreflightFailure(
+      [probeFailed, missingPath],
+      ['bundled', 'path'],
+    );
+    expect(r.code).toBe('NODE_PROBE_FAILED');
+    expect(r.message).toBe('weird probe');
+  });
+
+  it('rewrites NODE_MISSING with full tried modes', () => {
+    const r = pickBestNodePreflightFailure(
+      [missingBundled, missingPath],
+      ['bundled', 'path'],
+    );
+    expect(r.code).toBe('NODE_MISSING');
+    expect(r.message).toContain('Bundled runtime was not available');
+    expect(r.message).toContain('PATH');
+  });
+
+  it('returns empty-set as NODE_MISSING with tried context', () => {
+    const r = pickBestNodePreflightFailure([], ['path']);
+    expect(r.code).toBe('NODE_MISSING');
+    expect(r.message).toContain('on your PATH');
   });
 });

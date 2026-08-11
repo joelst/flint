@@ -6,6 +6,8 @@ import type { LaneName, EndpointProfile } from './ipc-contracts';
 import {
   evaluateNodeProbe,
   buildNodeMissingMessage,
+  pickBestNodePreflightFailure,
+  type NodePreflightFailure,
   type NodePreflightResult,
 } from './node-runtime';
 import {
@@ -202,6 +204,7 @@ async function probeNodeMode(mode: NodeRuntimeMode): Promise<NodePreflightResult
 export async function ensureNodeRuntime(): Promise<NodePreflightResult> {
   const preference = readNodeRuntimePreference();
   const order = nodeRuntimeProbeOrder(preference);
+  const failures: NodePreflightFailure[] = [];
   const errors: string[] = [];
 
   for (const mode of order) {
@@ -211,20 +214,14 @@ export async function ensureNodeRuntime(): Promise<NodePreflightResult> {
       console.log(`[sdk] Node preflight OK (${mode}): ${result.version.raw}`);
       return result;
     }
+    failures.push(result);
     errors.push(`${mode}: ${result.code}`);
     console.warn(`[sdk] Node probe failed (${mode}): ${result.code}`);
   }
 
   activeNodeMode = null;
-  const bundledOnly = preference === 'bundled';
-  const result: NodePreflightResult = {
-    ok: false,
-    code: 'NODE_MISSING',
-    message: buildNodeMissingMessage(undefined, {
-      bundledOnly,
-      tried: order,
-    }),
-  };
+  // Keep TOO_OLD / PROBE_FAILED guidance; only use full-order MISSING when that is all we have.
+  const result = pickBestNodePreflightFailure(failures, order);
   console.error(
     `[sdk] Node preflight failed (${result.code}; tried ${errors.join(', ') || 'none'}):`,
     result.message,

@@ -170,6 +170,60 @@ export function buildNodeProbeFailedMessage(detail?: string): string {
     .join('\n');
 }
 
+/** Higher = more actionable for the user when multiple modes fail. */
+const PREFLIGHT_FAILURE_RANK: Record<NodePreflightCode, number> = {
+  NODE_TOO_OLD: 3,
+  NODE_PROBE_FAILED: 2,
+  NODE_MISSING: 1,
+};
+
+export type NodePreflightFailure = Extract<NodePreflightResult, { ok: false }>;
+
+/**
+ * Choose the best failure when every Node runtime mode failed.
+ * Prefers TOO_OLD / PROBE_FAILED over a synthetic MISSING; on ties, prefers
+ * later probe order (e.g. PATH after bundled) so the user-facing runtime wins.
+ * NODE_MISSING results are rewritten with the full `tried` set for accurate copy.
+ */
+export function pickBestNodePreflightFailure(
+  failures: NodePreflightFailure[],
+  triedModes: NodeRuntimeMode[],
+): NodePreflightFailure {
+  if (!failures.length) {
+    return {
+      ok: false,
+      code: 'NODE_MISSING',
+      message: buildNodeMissingMessage(undefined, { tried: triedModes }),
+    };
+  }
+
+  let best = failures[0];
+  for (let i = 1; i < failures.length; i++) {
+    const candidate = failures[i];
+    const rankC = PREFLIGHT_FAILURE_RANK[candidate.code];
+    const rankB = PREFLIGHT_FAILURE_RANK[best.code];
+    if (rankC > rankB || rankC === rankB) {
+      // Higher rank wins; equal rank → later mode (PATH after bundled in auto).
+      best = candidate;
+    }
+  }
+
+  if (best.code === 'NODE_MISSING') {
+    return {
+      ok: false,
+      code: 'NODE_MISSING',
+      message: buildNodeMissingMessage(undefined, {
+        tried: triedModes.length ? triedModes : best.mode ? [best.mode] : undefined,
+        bundledOnly: triedModes.length === 1 && triedModes[0] === 'bundled',
+      }),
+      mode: best.mode,
+      found: best.found,
+    };
+  }
+
+  return best;
+}
+
 /**
  * Evaluate raw probe outcome into a structured preflight result.
  * `probeError` is set when the shell command failed to run.
