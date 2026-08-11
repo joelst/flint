@@ -40,6 +40,8 @@ npm run verify:bundle
 
 Spike A (2026-08-10): MSI ~**54 MB** / NSIS ~**38 MB** with bundled Node (~+30 / +20 MB vs pre-spike 0.3.1 artifacts). Details: [spikes/node-bundle-spike.md](./spikes/node-bundle-spike.md).
 
+**CI:** `cargo check` and Tauri builds require `src-tauri/binaries/node-<triple>` to exist (`externalBin`). Workflows run `npm run ensure:node` after `npm ci` (see `.github/workflows/ci.yml` and `release.yml`).
+
 `ensure:foundry` prefers the **build target**, not the host:
 
 - Uses `TAURI_ENV_PLATFORM` / `TAURI_ENV_ARCH` / `TAURI_ENV_TARGET_TRIPLE` when set by `tauri build --target …`
