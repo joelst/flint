@@ -73,6 +73,30 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           node scripts/sync-versions.cjs "$VERSION"
 
+          # Determine the pre-release identifier (text after the first hyphen, if any).
+          PRERELEASE_ID="${VERSION#*-}"
+          if [ "$PRERELEASE_ID" = "$VERSION" ]; then
+            PRERELEASE_ID=""
+          fi
+
+          if [ -n "$PRERELEASE_ID" ]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # The Windows MSI (WiX) bundler only accepts a numeric-only pre-release
+          # identifier (e.g. "1.2.3-1"); identifiers like "-mvp" or "-alpha" make
+          # WiX bail with "optional pre-release identifier ... must be
+          # numeric-only". NSIS has no such restriction, so fall back to NSIS
+          # only when the identifier isn't numeric-only, so Windows still
+          # produces an installer.
+          if [ -n "$PRERELEASE_ID" ] && ! [[ "$PRERELEASE_ID" =~ ^[0-9]+$ ]]; then
+            echo "win_bundles=nsis" >> "$GITHUB_OUTPUT"
+          else
+            echo "win_bundles=msi,nsis" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install Windows signing certificate
         if: ${{ matrix.os == 'windows-latest' }}
         shell: pwsh
@@ -101,8 +125,8 @@ jobs:
           releaseName: "Flint v${{ steps.version.outputs.version }}"
           releaseBody: "See CHANGELOG for details."
           releaseDraft: true
-          prerelease: false
-          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+          prerelease: ${{ steps.version.outputs.prerelease }}
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.os == 'windows-latest' && steps.version.outputs.win_bundles || matrix.bundles }}
 
       - name: Upload updater metadata
         uses: actions/upload-artifact@v4
