@@ -2,33 +2,41 @@
 
 How to produce **signed installers** and **updater-compatible artifacts** for Flint.
 
-Self-signed certificates are fine for dogfood / 0.3. They trigger SmartScreen / “unidentified developer” warnings. Plan to migrate to proper EV / Developer ID certificates before a wide 1.0 release.
+Windows release builds use Azure Trusted Signing with a private trust certificate profile. Local Windows builds skip code signing unless the Azure Trusted Signing environment variables are present.
 
 ---
 
-## 1. Local certificates (code signing)
+## 1. Code signing
 
-### Windows (self-signed PFX)
+### Windows (Azure Trusted Signing private trust)
 
-```powershell
-# Run as Administrator
-$cert = New-SelfSignedCertificate `
-  -Type CodeSigningCert `
-  -Subject "CN=Flint Local Dev" `
-  -KeyAlgorithm RSA `
-  -KeyLength 2048 `
-  -HashAlgorithm SHA256 `
-  -CertStoreLocation "Cert:\CurrentUser\My"
+Windows release builds sign through Azure Trusted Signing using `scripts/Invoke-AzureTrustedSigning.ps1` as Tauri's custom `signCommand`. The release workflow authenticates with Azure by GitHub OIDC, installs the `ArtifactSigning` PowerShell module, and signs each Windows binary/installer during `tauri build`.
 
-$pwd = ConvertTo-SecureString -String "your-strong-password" -Force -AsPlainText
-Export-PfxCertificate -Cert $cert -FilePath "flint-selfsigned.pfx" -Password $pwd
-```
+Azure setup:
 
-Base64-encode for GitHub:
+1. Create an Azure Trusted Signing account.
+2. Create a **Private Trust** certificate profile in that account.
+3. Create a Microsoft Entra app registration or managed identity for GitHub Actions OIDC.
+4. Add a federated credential for this repository/environment.
+5. Assign `Artifact Signing Certificate Profile Signer` on the private trust certificate profile (or the narrowest parent scope that is acceptable).
 
-```powershell
-[Convert]::ToBase64String([IO.File]::ReadAllBytes("flint-selfsigned.pfx")) | Out-File -Encoding ascii flint-selfsigned.pfx.base64
-```
+GitHub Actions secrets:
+
+| Secret | Description |
+|---|---|
+| `AZURE_CLIENT_ID` | Client/application ID for the OIDC-enabled Entra app or managed identity |
+| `AZURE_TENANT_ID` | Azure tenant ID |
+| `AZURE_SUBSCRIPTION_ID` | Azure subscription ID containing the Trusted Signing account |
+
+GitHub Actions variables:
+
+| Variable | Description |
+|---|---|
+| `AZURE_TRUSTED_SIGNING_ENDPOINT` | Trusted Signing endpoint, for example `https://eus.codesigning.azure.net/` |
+| `AZURE_TRUSTED_SIGNING_ACCOUNT_NAME` | Trusted Signing account name |
+| `AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME` | Private trust certificate profile name |
+
+The signing script fails in CI if any Azure Trusted Signing variable is missing. For local Windows release builds, the script warns and skips code signing when these variables are absent.
 
 ### macOS
 
@@ -43,7 +51,7 @@ codesign --force --options runtime --sign "Flint Dev" path/to/Flint.app
 
 ### Future migration
 
-When you obtain real certificates: replace secrets, enable full `notarytool` + hardened runtime on macOS, consider Azure Trusted Signing or an EV cert on Windows.
+Before a broad macOS release: enable full `notarytool` + hardened runtime with Apple Developer ID credentials.
 
 ---
 
@@ -53,7 +61,7 @@ When you obtain real certificates: replace secrets, enable full `notarytool` + h
 
 **Settings → Actions → General**
 
-- Workflow permissions: **Read and write permissions** (or rely on the workflow `permissions: contents: write` block).
+- Workflow permissions: **Read and write permissions** (or rely on the workflow `permissions` block).
 - Optional: artifact retention (e.g. 90 days).
 
 ### Required secrets
@@ -62,15 +70,16 @@ When you obtain real certificates: replace secrets, enable full `notarytool` + h
 
 | Secret | Description |
 |---|---|
-| `WINDOWS_CERTIFICATE` | Base64-encoded `.pfx` |
-| `WINDOWS_CERTIFICATE_PASSWORD` | PFX password |
+| `AZURE_CLIENT_ID` | Client/application ID for GitHub OIDC Azure login |
+| `AZURE_TENANT_ID` | Azure tenant ID |
+| `AZURE_SUBSCRIPTION_ID` | Azure subscription ID |
 | `APPLE_CERTIFICATE` | Base64-encoded `.p12` (macOS) |
 | `APPLE_CERTIFICATE_PASSWORD` | `.p12` password |
 | `APPLE_ID` | Apple ID (notarization) |
 | `APPLE_PASSWORD` | App-specific password |
 | `APPLE_TEAM_ID` | Apple Team ID |
 
-You can start with **Windows-only** secrets for the first self-signed pipeline.
+Set the Azure secrets plus the Azure Trusted Signing repository variables before cutting Windows releases.
 
 ### Workflow permissions (already in YAML)
 
@@ -79,9 +88,10 @@ You can start with **Windows-only** secrets for the first self-signed pipeline.
 ```yaml
 permissions:
   contents: write
+  id-token: write
 ```
 
-This lets `tauri-action` create releases and upload installers + updater metadata.
+This lets `tauri-action` create releases and upload installers + updater metadata, and lets `azure/login` request an OIDC token for Azure Trusted Signing.
 
 ### Optional environment hardening
 
@@ -134,7 +144,7 @@ Ship checklist (status and blockers) lives in [RELEASE_ROADMAP.md](../RELEASE_RO
 
 1. Reconcile `CHANGELOG.md` / changesets for the version.
 2. Updater pubkey + endpoint configured (not placeholders).
-3. Signing secrets present.
+3. Azure Trusted Signing secrets/variables present.
 4. Green CI on the release branch / PR to `main`.
 5. Tag `vX.Y.Z` → release workflow → review draft → publish.
 
@@ -147,7 +157,7 @@ Versioning details: [DEVELOPMENT.md](./DEVELOPMENT.md#versioning--changesets).
 | Problem | Likely cause | Fix |
 |---|---|---|
 | Cannot create release | Missing `contents: write` | Permissions block + repo Actions settings |
-| Signing skipped | Secrets missing/empty | Exact secret names (case-sensitive) |
+| Windows signing fails before build upload | Azure secrets/variables missing, OIDC not federated, or signer role missing | Verify Azure GitHub OIDC setup and `Artifact Signing Certificate Profile Signer` on the private trust profile |
 | macOS notarization fails | Apple ID / team ID | App-specific password + correct team |
 | `latest.json` missing | Updater plugin / pubkey not configured | `tauri.conf.json` plugins.updater |
 | “Resource not accessible” | Token scope | Repo workflow permissions |
@@ -161,4 +171,4 @@ Versioning details: [DEVELOPMENT.md](./DEVELOPMENT.md#versioning--changesets).
 - `src-tauri/tauri.conf.json` — updater plugin config
 - `.github/workflows/release.yml` — release workflow
 
-Update this document when secret names, workflow behavior, or signing requirements change.
+Update this document when secret names, workflow variables, or signing requirements change.
