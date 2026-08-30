@@ -39,7 +39,7 @@ Describe 'Invoke-AzureTrustedSigning.ps1' {
             $Endpoint -eq 'https://test.codesigning.azure.net/' -and
             $CodeSigningAccountName -eq 'flint-test' -and
             $CertificateProfileName -eq 'flint-test-profile' -and
-            $Files -eq $testFilePath -and
+            @($Files).Count -eq 1 -and @($Files)[0] -eq $testFilePath -and
             $FileDigest -eq 'SHA256' -and
             $TimestampRfc3161 -eq 'https://timestamp.acs.microsoft.com' -and
             $TimestampDigest -eq 'SHA256' -and
