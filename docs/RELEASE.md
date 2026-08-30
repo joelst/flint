@@ -38,6 +38,21 @@ GitHub Actions variables:
 
 The signing script fails in CI if any Azure Trusted Signing variable is missing. For local Windows release builds, the script warns and skips code signing when these variables are absent.
 
+#### Smoke-test the real signing path
+
+Before configuring production, provision a separate test/staging Trusted Signing account and private trust certificate profile with the GitHub OIDC federated credential and `Artifact Signing Certificate Profile Signer` role described above. Set the release workflow's Azure secrets and Trusted Signing variables to those staging values, then use **Actions → Release → Run workflow** with a test version.
+
+Download a produced Windows `.exe` or `.msi` and verify that Windows recognizes its signature:
+
+```powershell
+Get-ChildItem -Path . -File -Filter 'Flint_*' |
+  Where-Object { $_.Extension -in '.msi', '.exe' } |
+  ForEach-Object { Get-AuthenticodeSignature -FilePath $_.FullName } |
+  Format-List Status, StatusMessage, SignerCertificate
+```
+
+Confirm `Status` is `Valid` and the signer certificate is the expected staging profile before changing the secrets and variables to production values.
+
 ### macOS
 
 **Self-signed (quickest):**
