@@ -21,7 +21,7 @@ Azure setup:
    - **Entity type**: GitHub Actions deploying Azure resources (or "Environment" scenario)
    - **Organization**: `joelst`, **Repository**: `flint`
    - **Entity**: `Environment`, **GitHub environment name**: `release`
-   - This produces a subject of `repo:joelst/flint:environment:release`, which stays valid for every future release tag. Do **not** use the "Tag" entity type here — GitHub issues a distinct OIDC subject per tag (e.g. `repo:joelst/flint:ref:refs/tags/v0.4.1`), so a tag-scoped federated credential only works for that one tag and every new release tag fails with `AADSTS700213: No matching federated identity record found`. The release workflow's job runs under the `release` GitHub environment (`environment: release` in `.github/workflows/release.yml`) specifically so its OIDC subject stays constant across tags.
+   - This produces a subject of `repo:joelst/flint:environment:release`, which stays valid for every future release tag. Do **not** use the "Tag" entity type here — GitHub issues a distinct OIDC subject per tag (e.g. `repo:joelst/flint:ref:refs/tags/v0.4.1`), so a tag-scoped federated credential only works for that one tag and every new release tag fails with `AADSTS700213: No matching federated identity record found`. The release workflow's job runs under the `release` GitHub environment (`environment: release` in `.github/workflows/release.yml`) specifically so its OIDC subject stays constant across tags. The workflow also preflights the OIDC token before Azure login and fails with the observed subject if GitHub does not issue the expected environment-scoped token.
 5. Assign `Artifact Signing Certificate Profile Signer` on the private trust certificate profile (or the narrowest parent scope that is acceptable).
 
 GitHub Actions secrets:
@@ -44,7 +44,7 @@ The signing script fails in CI if any Azure Trusted Signing variable is missing.
 
 #### Smoke-test the real signing path
 
-Before configuring production, provision a separate test/staging Trusted Signing account and private trust certificate profile with the GitHub OIDC federated credential and `Artifact Signing Certificate Profile Signer` role described above. Set the release workflow's Azure secrets and Trusted Signing variables to those staging values, then use **Actions → Release → Run workflow** with a test version.
+Before configuring production, provision a separate test/staging Trusted Signing account and private trust certificate profile with the GitHub OIDC federated credential and `Artifact Signing Certificate Profile Signer` role described above. Set the release workflow's Azure secrets and Trusted Signing variables to those staging values, then use **Actions → Release → Run workflow** from the default branch with a test version.
 
 Download a produced Windows `.exe` or `.msi` and verify that Windows recognizes its signature:
 
@@ -149,6 +149,19 @@ git tag v0.3.0-test
 git push origin v0.3.0-test
 ```
 
+### Rebuild an existing tag after workflow fixes
+
+GitHub runs tag-triggered workflows from the workflow file stored at the tagged commit. If a tag was created before the `release` environment OIDC fix, rerunning that tag's workflow will keep requesting a tag-scoped OIDC subject such as `repo:joelst/flint:ref:refs/tags/v0.4.1`.
+
+To rebuild that existing source without retagging:
+
+1. Open **Actions → Release → Run workflow**.
+2. Select the default branch that contains the fixed workflow, not the old tag.
+3. Set `version` to the release version, for example `0.4.1`.
+4. Set `checkout_ref` to the tag to build, for example `v0.4.1`.
+
+This runs the fixed workflow under the `release` environment while checking out the tagged source for the build.
+
 ### Expected artifacts
 
 - Windows: `*.msi`, `*-setup.exe`
@@ -177,7 +190,7 @@ Versioning details: [DEVELOPMENT.md](./DEVELOPMENT.md#versioning--changesets).
 |---|---|---|
 | Cannot create release | Missing `contents: write` | Permissions block + repo Actions settings |
 | Windows signing fails before build upload | Azure secrets/variables missing, OIDC not federated, or signer role missing | Verify Azure GitHub OIDC setup and `Artifact Signing Certificate Profile Signer` on the private trust profile |
-| `AADSTS700213: No matching federated identity record found for presented assertion subject 'repo:joelst/flint:ref:refs/tags/vX.Y.Z'` | Federated credential is scoped to a specific tag instead of the `release` GitHub environment | Recreate the federated credential using the `Environment` entity type with GitHub environment `release`, so the subject is `repo:joelst/flint:environment:release` (see section 1 above) |
+| `AADSTS700213: No matching federated identity record found for presented assertion subject 'repo:joelst/flint:ref:refs/tags/vX.Y.Z'` | Federated credential is scoped to a specific tag, or the workflow is running from an old tag that predates the `release` environment fix | Recreate the federated credential using the `Environment` entity type with GitHub environment `release`, so the subject is `repo:joelst/flint:environment:release` (see section 1 above). If rebuilding an existing tag, run `workflow_dispatch` from the fixed default branch and put the tag in `checkout_ref`. |
 | macOS notarization fails | Apple ID / team ID | App-specific password + correct team |
 | `latest.json` missing | Updater plugin / pubkey not configured | `tauri.conf.json` plugins.updater |
 | “Resource not accessible” | Token scope | Repo workflow permissions |
