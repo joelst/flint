@@ -1,0 +1,26 @@
+name: Azure Trusted Signing Tests
+
+on:
+  pull_request:
+    paths:
+      - "scripts/Invoke-AzureTrustedSigning.ps1"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/azure-trusted-signing-tests.yml"
+      - "tests/Invoke-AzureTrustedSigning.Tests.ps1"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Pester
+        shell: pwsh
+        run: Install-Module -Name Pester -RequiredVersion 5.9.0 -Scope CurrentUser -Force -Repository PSGallery
+
+      - name: Test Azure Trusted Signing script
+        shell: pwsh
+        run: Invoke-Pester -Path tests/Invoke-AzureTrustedSigning.Tests.ps1 -Output Detailed -CI

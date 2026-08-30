@@ -1,0 +1,21 @@
+﻿<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<test-results xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="nunit_schema_2.5.xsd" name="Pester" total="4" errors="0" failures="0" not-run="0" inconclusive="0" ignored="0" skipped="0" invalid="0" date="2026-08-30" time="17:02:44">
+  <environment platform="Linux" user-domain="" cwd="/home/runner/work/flint/flint" user="runner" nunit-version="2.5.8.0" clr-version="10.0.11" machine-name="runnervmgx7h7" os-version="6.17.0-1022-azure" />
+  <culture-info current-culture="" current-uiculture="" />
+  <test-suite type="TestFixture" name="Pester" executed="True" result="Success" success="True" time="1.6643" asserts="0" description="Pester">
+    <results>
+      <test-suite type="TestFixture" name="/home/runner/work/flint/flint/tests/Invoke-AzureTrustedSigning.Tests.ps1" executed="True" result="Success" success="True" time="1.6643" asserts="0" description="/home/runner/work/flint/flint/tests/Invoke-AzureTrustedSigning.Tests.ps1">
+        <results>
+          <test-suite type="TestFixture" name="Invoke-AzureTrustedSigning.ps1" executed="True" result="Success" success="True" time="1.3292" asserts="0" description="Invoke-AzureTrustedSigning.ps1">
+            <results>
+              <test-case description="signs an existing file when Azure Trusted Signing is configured" name="Invoke-AzureTrustedSigning.ps1.signs an existing file when Azure Trusted Signing is configured" time="0.4611" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="warns and skips signing locally when Azure Trusted Signing is not configured" name="Invoke-AzureTrustedSigning.ps1.warns and skips signing locally when Azure Trusted Signing is not configured" time="0.7903" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="throws in CI when Azure Trusted Signing is not configured" name="Invoke-AzureTrustedSigning.ps1.throws in CI when Azure Trusted Signing is not configured" time="0.031" asserts="0" success="True" result="Success" executed="True" />
+              <test-case description="throws when the file to sign does not exist" name="Invoke-AzureTrustedSigning.ps1.throws when the file to sign does not exist" time="0.012" asserts="0" success="True" result="Success" executed="True" />
+            </results>
+          </test-suite>
+        </results>
+      </test-suite>
+    </results>
+  </test-suite>
+</test-results>
