@@ -2,4 +2,4 @@
 "flint": patch
 ---
 
-Add Azure Trusted Signing support for Windows releases.
+Add mocked Pester coverage for the Azure Trusted Signing invocation path.
