@@ -1,5 +1,11 @@
 # Flint Changelog
 
+## 0.4.3
+
+### Patch Changes
+
+- c86ce50: Surface the real Azure Trusted Signing failure instead of Tauri's opaque `failed to run pwsh`. The sign command now logs detailed errors to `src-tauri/target/flint-signing.log`, and the release workflow runs a signing preflight check and publishes the log.
+
 ## 0.4.2
 
 ### Patch Changes
