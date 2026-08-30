@@ -1,5 +1,13 @@
 # Flint Changelog
 
+## 0.4.1
+
+### Patch Changes
+
+- 5fdf366: Integrate Windows release code signing with Azure Trusted Signing private trust.
+- e8a7c81: Fix release workflow failing on non-strict-semver tags (e.g. `v0.4-mvp`) by normalizing a missing patch component to `0` before validating and syncing the version across `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml`.
+- a6a7e51: Add mocked Pester coverage for the Azure Trusted Signing invocation path.
+
 ## 0.4.0
 
 ### Minor Changes
