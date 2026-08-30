@@ -1,5 +1,11 @@
 # Flint Changelog
 
+## 0.4.4
+
+### Patch Changes
+
+- 6cf3df6: Fix `Sidecar init failed: require is not defined` on packaged builds. The SDK fallback loader used CommonJS `require` inside the ESM sidecar, so installed apps could never load `foundry-local-sdk` from bundled resources. Added a regression test that runs the sidecar against a simulated installer layout.
+
 ## 0.4.3
 
 ### Patch Changes

@@ -1,6 +1,6 @@
 {
   "name": "flint",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Flint — Foundry Local Interface (desktop GUI for Microsoft Foundry Local)",
   "type": "module",
   "engines": {
