@@ -17,6 +17,7 @@ permissions:
 
 jobs:
   release:
+    environment: release
     strategy:
       fail-fast: false
       matrix:
