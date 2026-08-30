@@ -40,9 +40,22 @@
       "../node_modules/foundry-local-sdk/": "foundry-local-sdk/"
     },
     "windows": {
-      "certificateThumbprint": "ECFFBBEB8B66B79D4B380AF690EF686D24FA4651",
       "digestAlgorithm": "sha256",
-      "timestampUrl": "http://timestamp.digicert.com"
+      "timestampUrl": "https://timestamp.acs.microsoft.com",
+      "tsp": true,
+      "signCommand": {
+        "cmd": "pwsh",
+        "args": [
+          "-NoLogo",
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          "../scripts/Invoke-AzureTrustedSigning.ps1",
+          "-FilePath",
+          "%1"
+        ]
+      }
     }
   },
   "plugins": {
