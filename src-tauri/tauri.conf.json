@@ -41,7 +41,7 @@
     },
     "windows": {
       "digestAlgorithm": "sha256",
-      "timestampUrl": "https://timestamp.acs.microsoft.com",
+      "timestampUrl": "http://timestamp.acs.microsoft.com",
       "tsp": true,
       "signCommand": {
         "cmd": "pwsh",
