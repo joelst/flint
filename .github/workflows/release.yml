@@ -154,6 +154,24 @@ jobs:
         run: |
           Install-Module -Name ArtifactSigning -RequiredVersion 0.1.8 -Scope CurrentUser -Force -Repository PSGallery
 
+      # Tauri swallows signCommand output, so a signing failure during the bundle
+      # step only reports `failed to run pwsh`. Sign a throwaway binary first so
+      # the real Azure error is visible and the job fails before the Rust build.
+      - name: Verify Azure Trusted Signing
+        if: ${{ matrix.os == 'windows-latest' }}
+        shell: pwsh
+        env:
+          AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ vars.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          AZURE_TRUSTED_SIGNING_ACCOUNT_NAME: ${{ vars.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
+          AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ vars.AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME }}
+        run: |
+          $probe = Join-Path $env:RUNNER_TEMP 'signing-probe.exe'
+          Copy-Item -LiteralPath (Join-Path $PSHOME 'pwsh.exe') -Destination $probe -Force
+          & ./scripts/Invoke-AzureTrustedSigning.ps1 -FilePath $probe
+          if ($LASTEXITCODE -ne 0) {
+            throw "Azure Trusted Signing preflight failed with exit code $($LASTEXITCODE)."
+          }
+
       - name: Build and Release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -170,6 +188,17 @@ jobs:
           releaseDraft: true
           prerelease: ${{ steps.version.outputs.prerelease }}
           args: --target ${{ matrix.target }} --bundles ${{ matrix.os == 'windows-latest' && steps.version.outputs.win_bundles || matrix.bundles }}
+
+      - name: Show Windows signing log
+        if: ${{ always() && matrix.os == 'windows-latest' }}
+        shell: pwsh
+        run: |
+          $log = 'src-tauri/target/flint-signing.log'
+          if (Test-Path -LiteralPath $log) {
+            Get-Content -LiteralPath $log
+          } else {
+            Write-Host "No signing log found at $($log)."
+          }
 
       - name: Upload updater metadata
         uses: actions/upload-artifact@v4

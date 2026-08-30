@@ -4,6 +4,12 @@ Describe 'Invoke-AzureTrustedSigning.ps1' {
         Remove-Item Env:AZURE_TRUSTED_SIGNING_ACCOUNT_NAME -ErrorAction SilentlyContinue
         Remove-Item Env:AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME -ErrorAction SilentlyContinue
         Remove-Item Env:CI -ErrorAction SilentlyContinue
+        # Keep signing logs out of the working tree during tests.
+        $env:FLINT_SIGNING_LOG_PATH = Join-Path $TestDrive 'default-flint-signing.log'
+    }
+
+    AfterEach {
+        Remove-Item Env:FLINT_SIGNING_LOG_PATH -ErrorAction SilentlyContinue
     }
 
     It 'signs an existing file when Azure Trusted Signing is configured' {
@@ -63,6 +69,59 @@ Describe 'Invoke-AzureTrustedSigning.ps1' {
         $LASTEXITCODE | Should -Be 0
         $output | Should -Match 'Azure Trusted Signing is not configured'
         $output | Should -Match 'Skipping local Windows code signing'
+    }
+
+    It 'reports the underlying error and exits non-zero when signing fails' {
+        $scriptPath = Join-Path $PSScriptRoot '../scripts/Invoke-AzureTrustedSigning.ps1'
+        $testFilePath = Join-Path $TestDrive 'Flint.exe'
+        Set-Content -LiteralPath $testFilePath -Value 'test artifact'
+        $logFilePath = Join-Path $TestDrive 'flint-signing.log'
+        $powerShell = Join-Path $PSHOME 'pwsh.exe'
+        if (-not (Test-Path -LiteralPath $powerShell)) {
+            $powerShell = Join-Path $PSHOME 'pwsh'
+        }
+
+        # A stub module lets the failure path run without the real Azure module.
+        $moduleRoot = Join-Path $TestDrive 'Modules/ArtifactSigning'
+        New-Item -ItemType Directory -Path $moduleRoot -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $moduleRoot 'ArtifactSigning.psm1') -Value @'
+function Invoke-ArtifactSigning {
+    [CmdletBinding()]
+    param(
+        $Endpoint,
+        $CodeSigningAccountName,
+        $CertificateProfileName,
+        [string[]] $Files,
+        $FileDigest,
+        $TimestampRfc3161,
+        $TimestampDigest,
+        $Description,
+        $DescriptionUrl
+    )
+
+    throw 'simulated trusted signing failure'
+}
+
+Export-ModuleMember -Function Invoke-ArtifactSigning
+'@
+
+        $env:AZURE_TRUSTED_SIGNING_ENDPOINT = 'https://test.codesigning.azure.net/'
+        $env:AZURE_TRUSTED_SIGNING_ACCOUNT_NAME = 'flint-test'
+        $env:AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME = 'flint-test-profile'
+        $env:FLINT_SIGNING_LOG_PATH = $logFilePath
+        $env:PSModulePath = '{0}{1}{2}' -f (Join-Path $TestDrive 'Modules'), [IO.Path]::PathSeparator, $env:PSModulePath
+
+        try {
+            $output = & $powerShell -NoProfile -File $scriptPath -FilePath $testFilePath 2>&1
+            $exitCode = $LASTEXITCODE
+        } finally {
+            Remove-Item Env:FLINT_SIGNING_LOG_PATH -ErrorAction SilentlyContinue
+        }
+
+        $exitCode | Should -Be 1
+        ($output -join [Environment]::NewLine) | Should -Match 'simulated trusted signing failure'
+        Test-Path -LiteralPath $logFilePath | Should -BeTrue
+        (Get-Content -LiteralPath $logFilePath -Raw) | Should -Match 'simulated trusted signing failure'
     }
 
     It 'throws in CI when Azure Trusted Signing is not configured' {
