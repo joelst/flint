@@ -45,7 +45,10 @@ Before configuring production, provision a separate test/staging Trusted Signing
 Download a produced Windows `.exe` or `.msi` and verify that Windows recognizes its signature:
 
 ```powershell
-Get-AuthenticodeSignature -FilePath .\Flint_*.msi | Format-List Status, StatusMessage, SignerCertificate
+Get-ChildItem -Path . -File -Filter 'Flint_*' |
+  Where-Object { $_.Extension -in '.msi', '.exe' } |
+  ForEach-Object { Get-AuthenticodeSignature -FilePath $_.FullName } |
+  Format-List Status, StatusMessage, SignerCertificate
 ```
 
 Confirm `Status` is `Valid` and the signer certificate is the expected staging profile before changing the secrets and variables to production values.
