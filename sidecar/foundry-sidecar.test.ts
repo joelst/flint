@@ -1,5 +1,8 @@
 // @vitest-environment node
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
+import { cpSync, mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 
 function waitForLine(
@@ -272,4 +275,55 @@ describe('foundry-sidecar error propagation and resilience', () => {
     expect(res.result.chatLane.model).toBeNull();
     expect(res.result.audioLane.model).toBeNull();
   });
+});
+
+describe('foundry-sidecar packaged resource layout', () => {
+  let stageDir: string;
+
+  beforeEach(() => {
+    // Mirror the installer layout: <resources>/sidecar/ next to
+    // <resources>/foundry-local-sdk/, with no package.json or node_modules
+    // above them. Bare-specifier import fails here, so the sidecar must fall
+    // back to loading the SDK by file path.
+    stageDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-'));
+    cpSync(join(process.cwd(), 'sidecar'), join(stageDir, 'sidecar'), { recursive: true });
+    cpSync(
+      join(process.cwd(), 'node_modules', 'foundry-local-sdk'),
+      join(stageDir, 'foundry-local-sdk'),
+      { recursive: true }
+    );
+  });
+
+  afterEach(() => {
+    // The SDK loads a native DLL, which Windows may still hold briefly after
+    // the child exits. Cleanup is best-effort so it never fails the test.
+    try {
+      rmSync(stageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    } catch {
+      // Leave the temp dir for the OS to reclaim.
+    }
+  });
+
+  it('loads the Foundry SDK from packaged resources without ESM/CJS errors', async () => {
+    const proc = spawn(process.execPath, [join(stageDir, 'sidecar', 'foundry-sidecar.js')], {
+      cwd: stageDir,
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+
+    try {
+      await waitForLine(proc, (msg) => msg.ready === true);
+      proc.stdin.write(
+        `${JSON.stringify({ id: 40, cmd: 'init', appName: 'flint', logLevel: 'info' })}\n`
+      );
+
+      const res = await waitForLine(proc, (msg) => msg.id === 40, 30000);
+      // `require is not defined` was a real regression: the fallback loader
+      // used CJS `require` inside this ESM module, so packaged builds could
+      // never load the SDK.
+      expect(String(res.error ?? '')).not.toContain('require is not defined');
+      expect(res.ok).toBe(true);
+    } finally {
+      if (!proc.killed) proc.kill();
+    }
+  }, 60000);
 });

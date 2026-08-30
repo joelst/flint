@@ -18,7 +18,7 @@
 
 import readline from 'readline';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import fs from 'fs';
 import os from 'os';
 import { execFile } from 'child_process';
@@ -813,7 +813,6 @@ function resolveFoundryCoreLibraryPath () {
 }
 
 function toFileUrl (filePath) {
-  const { pathToFileURL } = require('url');
   return pathToFileURL(path.resolve(filePath)).href;
 }
 
