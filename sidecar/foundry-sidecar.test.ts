@@ -163,6 +163,17 @@ describe('foundry-sidecar command schema validation', () => {
     expect(String(res.error)).toContain('exceeds maximum allowed size');
   });
 
+  it('rejects transcribeAudio whose bytes are not WAV despite a .wav name', async () => {
+    // The handler renames any payload to .wav for the strict AudioDecoder.
+    // Renaming does not convert, so non-WAV bytes must be rejected up front
+    // rather than failing later inside the native decoder.
+    const webm = Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0, 0, 0, 0, 0, 0, 0, 0]).toString('base64');
+    proc.stdin.write(`${JSON.stringify({ id: 17, cmd: 'transcribeAudio', audioBase64: webm, mimeType: 'audio/wav', fileName: 'recording.wav', model: 'm', language: 'en' })}\n`);
+    const res = await waitForLine(proc, (msg) => msg.id === 17, 10000);
+    expect(res.error).toBeTruthy();
+    expect(String(res.error)).toContain('not WAV');
+  });
+
   it('accepts well-formed commands without errors from schema', async () => {
     proc.stdin.write(`${JSON.stringify({ id: 15, cmd: 'getStatus' })}\n`);
     const res = await waitForLine(proc, (msg) => msg.id === 15);

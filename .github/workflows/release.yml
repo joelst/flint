@@ -202,6 +202,16 @@ jobs:
             Write-Host "No signing log found at $($log)."
           }
 
+      # Guards the failure mode where the native Foundry core is not staged into
+      # the bundle: the installer still builds, but every install is broken.
+      # --require-build makes a missing/renamed output tree a hard failure rather
+      # than a silent skip.
+      - name: Verify packaged bundle
+        run: npm run verify:bundle -- --target ${{ matrix.target }} --require-build
+
+      - name: Smoke test bundled Node + Foundry SDK
+        run: npm run smoke:node -- --target ${{ matrix.target }}
+
       - name: Upload updater metadata
         uses: actions/upload-artifact@v4
         with:

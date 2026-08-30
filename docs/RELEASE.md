@@ -132,6 +132,26 @@ npx tauri signer generate -w ~/.tauri/flint.key
 
 Private key stays offline (or a secure secret store). Standard Tauri release flow produces `latest.json` + `.sig` when the plugin is configured.
 
+### Updater endpoint
+
+The endpoint is the floating "latest release" URL:
+
+```
+https://github.com/joelst/flint/releases/latest/download/latest.json
+```
+
+GitHub's `/releases/latest/` pointer **skips drafts and pre-releases**. A release
+left as a draft, or published with "Set as a pre-release" checked, is invisible to
+the updater and every installed client silently reports "up to date". Publishing a
+release as the latest full release is therefore a required release step, not a
+cosmetic one.
+
+> **Do not** use `releases/download/v{{current_version}}/latest.json`. That resolves
+> to the manifest attached to the version the user is *already running*, so it always
+> reports the current version and the updater can never discover a newer one. Flint
+> shipped this bug through v0.4.4; those builds cannot self-update, but none were
+> distributed, so no rescue was needed.
+
 ---
 
 ## 4. Test the pipeline
@@ -179,6 +199,8 @@ Ship checklist (status and blockers) lives in [RELEASE_ROADMAP.md](../RELEASE_RO
 3. Azure Trusted Signing secrets/variables present.
 4. Green CI on the release branch / PR to `main`.
 5. Tag `vX.Y.Z` → release workflow → review draft → publish.
+6. Publish as the **latest full release** — leave "Set as a pre-release" unchecked,
+   or the updater will not see it (see section 3).
 
 Versioning details: [DEVELOPMENT.md](./DEVELOPMENT.md#versioning--changesets).
 
@@ -193,6 +215,7 @@ Versioning details: [DEVELOPMENT.md](./DEVELOPMENT.md#versioning--changesets).
 | `AADSTS700213: No matching federated identity record found for presented assertion subject 'repo:joelst/flint:ref:refs/tags/vX.Y.Z'` | Federated credential is scoped to a specific tag, or the workflow is running from an old tag that predates the `release` environment fix | Recreate the federated credential using the `Environment` entity type with GitHub environment `release`, so the subject is `repo:joelst/flint:environment:release` (see section 1 above). If rebuilding an existing tag, run `workflow_dispatch` from the fixed default branch and put the tag in `checkout_ref`. |
 | macOS notarization fails | Apple ID / team ID | App-specific password + correct team |
 | `latest.json` missing | Updater plugin / pubkey not configured | `tauri.conf.json` plugins.updater |
+| Updater always reports "up to date" | Release is still a draft or is flagged pre-release, so `/releases/latest/` skips it | Publish as the latest full release (see section 3) |
 | “Resource not accessible” | Token scope | Repo workflow permissions |
 
 ---

@@ -8,6 +8,32 @@ const fs = require('fs');
 const path = require('path');
 
 const root = path.resolve(__dirname, '..');
+
+// Release builds run `tauri build --target <triple>`, which puts output under
+// target/<triple>/release instead of target/release. Without --target the
+// staging and installer checks below silently find nothing and "pass".
+function parseArgs(argv) {
+  let target = process.env.FLINT_VERIFY_TARGET || null;
+  let requireBuild = false;
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === '--target') {
+      target = argv[i + 1];
+      i += 1;
+    } else if (arg.startsWith('--target=')) {
+      target = arg.slice('--target='.length);
+    } else if (arg === '--require-build') {
+      requireBuild = true;
+    }
+  }
+  return { target: target || null, requireBuild };
+}
+
+const { target: buildTarget, requireBuild } = parseArgs(process.argv.slice(2));
+const releaseDir = buildTarget
+  ? path.join(root, 'src-tauri', 'target', buildTarget, 'release')
+  : path.join(root, 'src-tauri', 'target', 'release');
+
 const platformKey = `${process.platform}-${process.arch}`;
 const coreExt =
   process.platform === 'win32' ? '.dll' : process.platform === 'darwin' ? '.dylib' : '.so';
@@ -99,10 +125,10 @@ if (!fs.existsSync(sdkRoot)) {
 }
 
 // Staged Tauri resource tree (present after a local release build)
-// Flattened map-form: target/release/foundry-local-sdk
-const stagedSdk = path.join(root, 'src-tauri', 'target', 'release', 'foundry-local-sdk');
-if (fs.existsSync(path.join(root, 'src-tauri', 'target', 'release'))) {
-  console.log('Checking release resource staging...');
+// Flattened map-form: <release>/foundry-local-sdk
+const stagedSdk = path.join(releaseDir, 'foundry-local-sdk');
+if (fs.existsSync(releaseDir)) {
+  console.log(`Checking release resource staging (${path.relative(root, releaseDir)})...`);
   if (!fs.existsSync(stagedSdk)) {
     bad(
       'no staged foundry-local-sdk under target/release (expected foundry-local-sdk/) — run tauri build'
@@ -123,7 +149,7 @@ if (fs.existsSync(path.join(root, 'src-tauri', 'target', 'release'))) {
   const versionNeedle = appVersion ? `_${appVersion}_` : null;
 
   // Tauri-generated NSIS script lists every bundled file — definitive for NSIS.
-  const nsiPath = path.join(root, 'src-tauri', 'target', 'release', 'nsis', 'x64', 'installer.nsi');
+  const nsiPath = path.join(releaseDir, 'nsis', 'x64', 'installer.nsi');
   if (fs.existsSync(nsiPath)) {
     const nsi = fs.readFileSync(nsiPath, 'utf8');
     // NSI lists each resource with File /oname=...foundry-local-core\win32-x64\...
@@ -141,14 +167,14 @@ if (fs.existsSync(path.join(root, 'src-tauri', 'target', 'release'))) {
   }
 
   function checkInstallers(dir, ext, minMb) {
-    if (!fs.existsSync(dir)) return;
+    if (!fs.existsSync(dir)) return 0;
     let names = fs.readdirSync(dir).filter((f) => f.endsWith(ext));
     if (versionNeedle) {
       const matched = names.filter((f) => f.includes(versionNeedle));
       if (matched.length) names = matched;
       else {
         console.log(`  (no ${ext} for version ${appVersion} in ${path.relative(root, dir)})`);
-        return;
+        return 0;
       }
     }
     for (const name of names) {
@@ -162,13 +188,29 @@ if (fs.existsSync(path.join(root, 'src-tauri', 'target', 'release'))) {
         ok(`${name}: ${mb.toFixed(1)} MB`);
       }
     }
+    return names.length;
   }
 
   // MSI: looser compression → higher floor. NSIS: solid LZMA → lower floor.
-  checkInstallers(path.join(root, 'src-tauri', 'target', 'release', 'bundle', 'msi'), '.msi', 20);
-  checkInstallers(path.join(root, 'src-tauri', 'target', 'release', 'bundle', 'nsis'), '.exe', 12);
+  let installerCount = 0;
+  installerCount += checkInstallers(path.join(releaseDir, 'bundle', 'msi'), '.msi', 20);
+  installerCount += checkInstallers(path.join(releaseDir, 'bundle', 'nsis'), '.exe', 12);
+  installerCount += checkInstallers(path.join(releaseDir, 'bundle', 'dmg'), '.dmg', 12);
+
+  if (requireBuild && installerCount === 0) {
+    bad(
+      `--require-build: no installers found under ${path.relative(root, path.join(releaseDir, 'bundle'))}`
+    );
+  }
+} else if (requireBuild) {
+  bad(
+    `--require-build: no release build at ${path.relative(root, releaseDir)}` +
+      (buildTarget ? '' : ' (pass --target <triple> if this was a --target build)')
+  );
 } else {
-  console.log('No release build under src-tauri/target/release — skipped staging/installer checks.');
+  console.log(
+    `No release build under ${path.relative(root, releaseDir)} — skipped staging/installer checks.`
+  );
 }
 
 if (failed) {

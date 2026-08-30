@@ -24,6 +24,7 @@ import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { annotateVariantUpdates } from './model-updates.js';
+import { assertWavBuffer } from './audio-format.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -1342,6 +1343,10 @@ rl.on('line', async (line) => {
       if (!payload.audioBase64) {
         throw new Error('audioBase64 is required');
       }
+      // Validate before touching a model: renaming to .wav does not convert, and
+      // loading a multi-GB STT model for undecodable bytes wastes minutes before
+      // failing with an opaque native decoder error.
+      assertWavBuffer(Buffer.from(payload.audioBase64, 'base64'), payload.fileName);
       const fileExt = (payload.fileName?.split('.').pop() ?? 'unknown').toLowerCase();
       log('debug', `Transcription: model=${payload.model} ext=.${fileExt} lang=${payload.language || 'auto'}`);
 
