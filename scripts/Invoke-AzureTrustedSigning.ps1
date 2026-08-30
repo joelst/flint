@@ -41,7 +41,7 @@ Invoke-ArtifactSigning `
     -CertificateProfileName $env:AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME `
     -Files $FilePath `
     -FileDigest SHA256 `
-    -TimestampRfc3161 'http://timestamp.acs.microsoft.com' `
+    -TimestampRfc3161 'https://timestamp.acs.microsoft.com' `
     -TimestampDigest SHA256 `
     -Description 'Flint' `
     -DescriptionUrl 'https://github.com/joelst/flint'
