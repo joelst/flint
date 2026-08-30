@@ -5,6 +5,23 @@
   import ConversationSidebar from "$lib/ConversationSidebar.svelte";
   import Icon from "$lib/Icon.svelte";
   import type { Conversation } from "$lib/ConversationSidebar.svelte";
+  import { planSegmentation } from "$lib/audio-segmentation";
+  import {
+    buildSrt,
+    buildVtt,
+    buildTimestampedText,
+    formatClockTime,
+    TIMESTAMP_DISCLAIMER,
+    type TranscriptSegment,
+  } from "$lib/transcript-format";
+  import {
+    MODEL_SORT_OPTIONS,
+    isModelSortKey,
+    modelMatchesSearch,
+    sortModels,
+    modelFamilyLabel,
+    type ModelSortKey,
+  } from "$lib/model-sort";
   import {
     initializeSDK,
     getSDKState,
@@ -388,6 +405,7 @@
   // Local UI state (runes)
   let isLoadingModels = $state(false);
   let searchTerm = $state("");
+  let modelSortKey = $state<ModelSortKey>("family");
   let statusMessage = $state("");
 
   // Mirror of SDK store for easy template access
@@ -696,6 +714,9 @@
   let isRecording = $state(false);
   let audioBlob = $state<Blob | null>(null);
   let transcription = $state("");
+  let transcriptionSegments = $state<TranscriptSegment[]>([]);
+  let transcriptionTimingSource = $state<string | null>(null);
+  let showTimestampedTranscript = $state(true);
   let isTranscribing = $state(false);
   let transcriptionProgress = $state<{ current: number; total: number } | null>(null);
   let transcriptionLanguage = $state("auto");
@@ -1051,12 +1072,13 @@
     sidecarLogs = s.logs ?? [];
   }
 
-  // Local reactive derived
+  // Local reactive derived.
+  // The filter is deliberately additive (alias OR derived family) so a model can
+  // never be hidden by a bad family derivation.
   const filteredModels = $derived(
-    (state.models || []).filter(
-      (m: ModelInfo) =>
-        m.alias?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        (m as any).family?.toLowerCase?.()?.includes(searchTerm.toLowerCase()),
+    sortModels(
+      (state.models || []).filter((m: ModelInfo) => modelMatchesSearch(m, searchTerm)),
+      modelSortKey,
     ),
   );
   const modelUpdateCount = $derived(
@@ -1099,6 +1121,7 @@
           defaultAudioAlias,
           networkPort,
           networkBindAddress,
+          modelSortKey,
         }),
       );
     } catch {}
@@ -1108,6 +1131,9 @@
       const raw = localStorage.getItem(PERSIST_KEY);
       if (raw) {
         const data = JSON.parse(raw);
+        // Guard with the type check so older persisted blobs (which have no
+        // modelSortKey) keep the default instead of breaking the Models view.
+        if (isModelSortKey(data.modelSortKey)) modelSortKey = data.modelSortKey;
         if (data.selectedModelAlias)
           selectedModelAlias = data.selectedModelAlias;
         if (data.selectedSTTModelAlias)
@@ -3685,6 +3711,16 @@ Output only the summary text, no preamble.`;
     return normalizeTranscriptText(merged);
   }
 
+  /**
+   * Trim words from the head of `next` that already appear at the tail of `previous`.
+   * Only used where windows deliberately overlap (hard splits).
+   */
+  function trimOverlapPrefix(previousText: string, nextText: string): string {
+    const overlapWords = findWordOverlapTailPrefix(previousText, nextText);
+    if (overlapWords <= 0) return normalizeTranscriptText(nextText);
+    return normalizeTranscriptText(nextText).split(" ").slice(overlapWords).join(" ").trim();
+  }
+
   async function transcribeLongAudio(
     audioBlob: Blob,
     model: string,
@@ -3695,24 +3731,29 @@ Output only the summary text, no preamble.`;
   ): Promise<any> {
     const mono = await getMono16kBuffer(audioBlob);
     const sr = 16000;
-    const chunkSec = 28;
-    const overlapSec = 4;
-    const chunkSamples = Math.floor(chunkSec * sr);
-    const step = chunkSamples - Math.floor(overlapSec * sr);
     const total = mono.length;
 
-    const texts: string[] = [];
-    let pos = 0;
-    let idx = 0;
-    const totalChunks = Math.max(1, Math.ceil(total / step));
+    // The model provides no timing data, so window boundaries are snapped to
+    // pauses in the audio where possible. Degenerate audio (continuous speech,
+    // noise, near-silence) falls back to fixed overlapping chunks.
+    const source = new Float32Array(total);
+    mono.copyFromChannel(source, 0);
+    const plan = planSegmentation(source, sr);
+    const windows = plan.windows;
+    const totalChunks = Math.max(1, windows.length);
 
-    while (pos < total) {
-      const end = Math.min(pos + chunkSamples, total);
-      const len = end - pos;
-      if (len < 1000) break; // too short
+    const texts: string[] = [];
+    const segments: TranscriptSegment[] = [];
+
+    for (let idx = 0; idx < windows.length; idx++) {
+      const win = windows[idx];
+      const startSample = Math.max(0, Math.floor(win.startSec * sr));
+      const endSample = Math.min(total, Math.ceil(win.endSec * sr));
+      const len = endSample - startSample;
+      if (len < 1000) continue; // too short to transcribe
 
       const data = new Float32Array(len);
-      mono.copyFromChannel(data, 0, pos);
+      mono.copyFromChannel(data, 0, startSample);
 
       // Small temp context just to build AudioBuffer for the chunk WAV
       const tmpCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -3727,18 +3768,40 @@ Output only the summary text, no preamble.`;
 
       try {
         const res = await transcribeAudio(wavBlob, model, language, `${fileNameBase}_part${idx}.wav`, options);
-        const t = getTranscriptTextFromResult(res);
-        if (t) texts.push(t);
+        let t = getTranscriptTextFromResult(res);
+        if (!t) continue;
+
+        // Only windows that overlap the previous one can repeat words.
+        // The overlap is re-read audio, so the trimmed text actually begins where
+        // the previous segment ended — report that, otherwise cues overlap on the
+        // time axis and captions would display two at once.
+        let segStartSec = win.startSec;
+        if (win.overlapsPrevious && texts.length > 0) {
+          t = trimOverlapPrefix(texts[texts.length - 1], t);
+          if (!t) continue;
+          const prev = segments[segments.length - 1];
+          if (prev) segStartSec = Math.max(segStartSec, prev.endSec);
+        }
+
+        texts.push(t);
+        segments.push({
+          index: segments.length,
+          startSec: segStartSec,
+          endSec: Math.max(win.endSec, segStartSec + 0.05),
+          text: t,
+          snapped: !win.hardSplitEnd,
+        });
       } catch (e) {
         console.warn('Chunk transcription failed', e);
       }
-
-      pos += step;
-      idx++;
     }
 
     if (onProgress) onProgress(totalChunks, totalChunks);
-    return { text: mergeTranscriptChunks(texts) };
+    return {
+      text: mergeTranscriptChunks(texts),
+      segments,
+      timingSource: plan.usedSilenceDetection ? 'silence-detection' : 'fixed-chunks',
+    };
   }
 
   async function getAudioDuration(blob: Blob): Promise<number> {
@@ -3774,6 +3837,8 @@ Output only the summary text, no preamble.`;
 
     isTranscribing = true;
     transcription = "";
+    transcriptionSegments = [];
+    transcriptionTimingSource = null;
     statusMessage = `Transcribing with ${sttAlias} via sidecar...`;
 
     try {
@@ -3833,6 +3898,17 @@ Output only the summary text, no preamble.`;
       const transcribed = getTranscriptTextFromResult(result);
       transcription = transcribed || JSON.stringify(result, null, 2);
 
+      // Timed segments only exist for the chunked long-audio path; a single-window
+      // transcription has no interior boundaries to derive timings from.
+      if (Array.isArray(result?.segments) && result.segments.length > 0 && result.segments[0]?.endSec != null) {
+        transcriptionSegments = result.segments;
+        transcriptionTimingSource = result.timingSource ?? null;
+        showTimestampedTranscript = true;
+      } else {
+        transcriptionSegments = [];
+        transcriptionTimingSource = null;
+      }
+
       // Helpful for debugging long audio: the backend may return duration or segments
       // even if .text is partial.
       if (result && typeof result.duration === 'number') {
@@ -3874,6 +3950,37 @@ Output only the summary text, no preamble.`;
     anchor.click();
     URL.revokeObjectURL(url);
     statusMessage = `Transcription downloaded: ${fileName}`;
+  }
+
+  async function copyTimestampedTranscript() {
+    const text = buildTimestampedText(transcriptionSegments);
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      statusMessage = "Timestamped transcript copied to clipboard";
+    } catch (e: any) {
+      statusMessage = `Failed to copy transcript: ${e?.message || e}`;
+    }
+  }
+
+  function downloadCaptions(format: "srt" | "vtt") {
+    if (!transcriptionSegments.length) return;
+    const body =
+      format === "srt" ? buildSrt(transcriptionSegments) : buildVtt(transcriptionSegments);
+    if (!body) {
+      statusMessage = "No timed segments available to export";
+      return;
+    }
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const fileName = `flint-transcription-${stamp}.${format}`;
+    const blob = new Blob([body], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = fileName;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    statusMessage = `Captions downloaded: ${fileName}`;
   }
 </script>
 
@@ -4207,6 +4314,17 @@ Output only the summary text, no preamble.`;
                 placeholder="Search models (alias or family)..."
                 bind:value={searchTerm}
               />
+              <label class="sort-label" for="model-sort">Sort by</label>
+              <select
+                id="model-sort"
+                class="sort-select"
+                bind:value={modelSortKey}
+                onchange={persistChat}
+              >
+                {#each MODEL_SORT_OPTIONS as opt (opt.value)}
+                  <option value={opt.value}>{opt.label}</option>
+                {/each}
+              </select>
               <span class="count">{filteredModels.length} models</span>
             </div>
 
@@ -4359,7 +4477,10 @@ Output only the summary text, no preamble.`;
               </div>
             {:else}
               <div class="model-grid">
-                {#each filteredModels as model (model.alias)}
+                {#each filteredModels as model, i (model.alias)}
+                  {#if modelSortKey === "family" && (i === 0 || modelFamilyLabel(filteredModels[i - 1]) !== modelFamilyLabel(model))}
+                    <h3 class="family-heading">{modelFamilyLabel(model)}</h3>
+                  {/if}
                   <div class="model-card">
                     <div class="model-header">
                       <strong title={getShortModelDescription(model)}>
@@ -5257,13 +5378,56 @@ Output only the summary text, no preamble.`;
           {#if transcription}
             <div class="transcription-result">
               <h3>Transcription:</h3>
-              <pre>{transcription}</pre>
+              {#if transcriptionSegments.length > 0}
+                <div class="transcript-toggle">
+                  <button
+                    class="small"
+                    class:secondary={showTimestampedTranscript}
+                    onclick={() => (showTimestampedTranscript = false)}>Plain text</button
+                  >
+                  <button
+                    class="small"
+                    class:secondary={!showTimestampedTranscript}
+                    onclick={() => (showTimestampedTranscript = true)}
+                    >Timestamps ({transcriptionSegments.length})</button
+                  >
+                </div>
+              {/if}
+
+              {#if showTimestampedTranscript && transcriptionSegments.length > 0}
+                <p class="timestamp-note" title={TIMESTAMP_DISCLAIMER}>
+                  {TIMESTAMP_DISCLAIMER}
+                  {#if transcriptionTimingSource === "fixed-chunks"}
+                    No clear pauses were detected, so fixed-length windows were used —
+                    boundaries are less precise.
+                  {/if}
+                </p>
+                <ol class="transcript-segments">
+                  {#each transcriptionSegments as seg (seg.index)}
+                    <li class="transcript-segment">
+                      <span class="segment-time" class:snapped={seg.snapped}>
+                        {formatClockTime(seg.startSec)} – {formatClockTime(seg.endSec)}
+                      </span>
+                      <span class="segment-text">{seg.text}</span>
+                    </li>
+                  {/each}
+                </ol>
+              {:else}
+                <pre>{transcription}</pre>
+              {/if}
               <div class="transcription-actions">
                 <button onclick={copyTranscriptionToClipboard}>Copy</button>
                 <button onclick={downloadTranscription}>Download .txt</button>
+                {#if transcriptionSegments.length > 0}
+                  <button onclick={copyTimestampedTranscript}>Copy with times</button>
+                  <button onclick={() => downloadCaptions("srt")}>Download .srt</button>
+                  <button onclick={() => downloadCaptions("vtt")}>Download .vtt</button>
+                {/if}
                 <button
                   onclick={() => {
                     transcription = "";
+                    transcriptionSegments = [];
+                    transcriptionTimingSource = null;
                   }}>Clear</button
                 >
               </div>
@@ -6867,6 +7031,22 @@ Output only the summary text, no preamble.`;
     display: flex;
     gap: 12px;
     margin-bottom: 16px;
+    align-items: center;
+  }
+
+  .toolbar input[type="text"] {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .sort-label {
+    color: var(--muted);
+    font-size: 0.8rem;
+    white-space: nowrap;
+  }
+
+  .sort-select {
+    white-space: nowrap;
   }
 
   .accel-panel {
@@ -6932,6 +7112,23 @@ Output only the summary text, no preamble.`;
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
     gap: 12px;
+  }
+
+  /* Family group headings span the full grid row. */
+  .family-heading {
+    grid-column: 1 / -1;
+    margin: 8px 0 0;
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 4px;
+  }
+
+  .family-heading:first-child {
+    margin-top: 0;
   }
 
   .model-card {
@@ -8773,6 +8970,58 @@ Output only the summary text, no preamble.`;
     font-family: monospace;
     max-height: 200px;
     overflow: auto;
+  }
+
+  .transcript-toggle {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+
+  .timestamp-note {
+    margin: 0 0 8px;
+    font-size: 0.75rem;
+    color: var(--muted);
+    line-height: 1.4;
+  }
+
+  .transcript-segments {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 260px;
+    overflow: auto;
+  }
+
+  .transcript-segment {
+    display: grid;
+    grid-template-columns: 108px 1fr;
+    gap: 0 10px;
+    padding: 4px 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 40%, transparent);
+    font-size: 0.85rem;
+    line-height: 1.5;
+  }
+
+  .transcript-segment:last-child {
+    border-bottom: none;
+  }
+
+  .segment-time {
+    color: var(--muted);
+    font-family: monospace;
+    font-size: 0.75rem;
+    white-space: nowrap;
+    padding-top: 2px;
+  }
+
+  /* A boundary snapped to a detected pause is more trustworthy than a hard split. */
+  .segment-time.snapped {
+    color: var(--accent);
+  }
+
+  .segment-text {
+    word-break: break-word;
   }
 
   /* Persona dropdown + manager */
