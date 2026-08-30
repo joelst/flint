@@ -167,7 +167,9 @@ jobs:
         run: |
           $probe = Join-Path $env:RUNNER_TEMP 'signing-probe.exe'
           Copy-Item -LiteralPath (Join-Path $PSHOME 'pwsh.exe') -Destination $probe -Force
-          & ./scripts/Invoke-AzureTrustedSigning.ps1 -FilePath $probe
+          # Invoke through a child pwsh exactly like Tauri's signCommand does so
+          # the exit code is meaningful.
+          & pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./scripts/Invoke-AzureTrustedSigning.ps1 -FilePath $probe
           if ($LASTEXITCODE -ne 0) {
             throw "Azure Trusted Signing preflight failed with exit code $($LASTEXITCODE)."
           }
