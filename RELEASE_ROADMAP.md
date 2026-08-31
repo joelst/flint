@@ -450,13 +450,15 @@ has none of these.
 | Streaming | **Works** — SSE, `[DONE]` terminator, and `usage` included in the stream. |
 | `usage` on non-streamed calls | Present. |
 | `POST /v1/embeddings` | Route **exists** (GET returns 405). |
-| Model not pre-loaded | **400 `Model is not loaded`** — see gap below. |
+| Model not pre-loaded | **400 `Model is not loaded`** — closed in 0.5 by Flint's gateway. |
 | `/v1/models` contents | **Cached models only** (35 of 128), and no loaded/unloaded state. |
 
-**The single real agent-compat gap:** a client reads `/v1/models`, picks an ID, POSTs,
-and gets `400 Model is not loaded`. Nothing in the OpenAI protocol lets a client load a
-model. Flint already owns a model pool — auto-load-on-demand is the fix, and it is
-squarely Flint's job as the control plane, not Foundry's.
+**The single real agent-compat gap — now closed.** A client read `/v1/models`, picked an ID,
+POSTed, and got `400 Model is not loaded`; nothing in the OpenAI protocol lets a client load
+a model, and Foundry exposes no HTTP load route. Flint owns the model pool, so it now owns
+the port: the gateway forwards to the native service and, on that exact rejection, loads and
+replays once. Measured end to end: cold request 200 in 15 s, warm 707 ms with no reload,
+unknown model a clean 400 with no download.
 
 ### 0.5 — Own the model, prove it loads
 
@@ -477,7 +479,12 @@ squarely Flint's job as the control plane, not Foundry's.
    and reclaimable bytes. Recommend; never delete across roots.
    Measured on the maintainer's machine: `~/.flint` 107 GB / 35 models vs `~/.foundry`
    31.4 GB / 7 models, **15.3 GB duplicated**.
-4. **Auto-load on demand at the endpoint** — close the `400 Model is not loaded` gap.
+4. **Auto-load on demand at the endpoint** — **done.** Flint's reverse proxy
+   (`sidecar/gateway.js`) owns the configured port and forwards to the native service,
+   which is only reachable once it reports its own port back: the native core initializes
+   once per process, so the manager cannot be re-created to choose one. On the exact
+   `400 ... is not loaded` the model is loaded and the request replayed once. This also
+   fixed service start, which had always failed with `Core is already initialized`.
 5. **Throughput instrumentation** with explicit definitions: model load time, TTFT,
    prompt tokens/sec, decode tokens/sec, end-to-end duration, warm/cold, resolved variant
    and execution provider. Never a single ambiguous "tokens/sec".

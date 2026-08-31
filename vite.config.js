@@ -69,12 +69,15 @@ export default defineConfig(() => ({
         'sidecar/byom-import.js',
         'sidecar/prompt-template.js',
         'src/lib/model-sort.ts',
+        'sidecar/gateway-http.js',
+        'sidecar/model-registry.js',
+        'sidecar/gateway.js',
       ],
       // Set just below the level the included files actually achieve, so the
       // gate catches regressions instead of rubber-stamping them. Raise these
       // as files are added rather than leaving slack.
       thresholds: {
-        lines: 96,
+        lines: 97,
         functions: 94,
         branches: 84,
         statements: 95

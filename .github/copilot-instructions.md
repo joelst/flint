@@ -14,14 +14,23 @@ Facts only — no history. Record what is true now; `git log` and `CHANGELOG.md`
 ## Commands (short)
 - `npm install` · `npm run tauri dev` · `npm run check` · `npm test` · `npm run tauri:build` · `npm run verify:bundle` · `npm run setup:winml`
 - Rust: `cd src-tauri && cargo check`
-- Coverage gate: `npm run test:coverage`, thresholds 88/72 over `src/lib/*` + `sidecar/*` in `vite.config.js` — add new pure modules to `coverage.include`.
+- Coverage gate: `npm run test:coverage`, thresholds lines 97 / functions 94 / branches 84 / statements 95 over an opt-in `coverage.include` list in `vite.config.js` — new pure modules are ungated until added there.
 
 ## Working style
 - Prefer the SDK/sidecar path in `src/lib/sdk.ts`; do not import Foundry Local into the web bundle.
-- Sidecar protocol is JSON-lines; new commands update `src/lib/sdk.ts` (and IPC contracts if needed) **and** `sidecar/foundry-sidecar.js`.
+- Sidecar protocol is JSON-lines; new commands update `src/lib/sdk.ts` (and IPC contracts if needed) **and** `sidecar/foundry-sidecar.js`. In the sidecar a command must be added in **three** places — `KNOWN_COMMANDS`, `FIELD_TYPES`, `COMMAND_SCHEMA` — plus any extra checks at the end of `validateCommand`.
 - SPA/client-only only — no SSR assumptions.
 - Keep Tauri resources in sync (`src-tauri/tauri.conf.json` + `scripts/verify-bundle.cjs`).
 - On Windows prefer `foundry-local-sdk-winml`.
+
+## Service and gateway
+- The native core initializes **once per process**: a second `FoundryLocalManager.create()` throws `Foundry Local Core is already initialized`, even after clearing the singleton. Never re-create the manager, and never set `webServiceUrls` outside `init`.
+- Consequently the native service picks its own port. Read it from `manager.urls[0]` after `startWebService()`; readiness is `GET /status` on that port (`startWebService()` returning proves nothing).
+- The port and bind address the user configures belong to Flint's proxy in `sidecar/gateway.js`, which forwards to the native port. `sharedEndpoint` is the proxy's address.
+- Autoload is reactive: forward first, and only on the exact `400 ... is not loaded` retry once after loading. Never check "is it loaded" up front, and never retry twice.
+- Only **cached** models are resolvable for autoload (`sidecar/model-registry.js`), so a stray identifier cannot start a download. Call `invalidateModelIndex()` wherever the cached set changes.
+- `catalog.getModel()` accepts **only** the friendly alias; the id in `/v1/models` throws. Loading needs `{alias, variantId}` — dropping the variant loads the wrong build.
+- Proxied traffic is deliberately absent from the access log: `writeToDisk()` appends synchronously and would stall the event loop.
 
 ## UI and state
 - Svelte 5 runes in `+page.svelte` (`// @ts-nocheck` there is intentional).

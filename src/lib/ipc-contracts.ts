@@ -3,7 +3,7 @@ export type LaneName = 'chat' | 'audio';
 export type SidecarCommand =
   | { cmd: 'init'; appName: string; logLevel: string }
   | { cmd: 'setLogLevel'; level: string }
-  | { cmd: 'startService'; port: number; alias?: string; preferredEp?: string; bindAddress?: string }
+  | { cmd: 'startService'; port: number; alias?: string; preferredEp?: string; bindAddress?: string; gateway?: boolean }
   | { cmd: 'stopService' }
   | { cmd: 'getStatus' }
   | { cmd: 'listModels' }

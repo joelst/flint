@@ -58,8 +58,10 @@ Verify an item against the tree before acting on it.
 - [x] **Sort the model list** — name, family, or last updated; persisted.
 - [ ] **Read-only cache inventory** — duplicates, partial downloads, reclaimable bytes.
       Recommend only; no cross-root deletion.
-- [ ] **Auto-load on demand** — clients get `400 Model is not loaded` today and the
-      OpenAI protocol gives them no way to load one.
+- [x] **Auto-load on demand** — Flint's reverse proxy owns the configured port, forwards to
+      the native service, and on the exact `400 ... is not loaded` loads the model and
+      replays the request once. Cached models only, so a stray id cannot start a download.
+      Also fixed service start, which always failed with `Core is already initialized`.
 - [ ] **Throughput metrics** — load time, TTFT, prompt tok/s, decode tok/s, end-to-end,
       warm/cold, resolved variant + execution provider. No single ambiguous "tokens/sec".
 

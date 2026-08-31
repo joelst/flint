@@ -25,6 +25,8 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { annotateVariantUpdates } from './model-updates.js';
 import { assertWavBuffer } from './audio-format.js';
+import { createGateway } from './gateway.js';
+import { buildModelIndex, resolveModelId } from './model-registry.js';
 import {
   validateModelFolder,
   buildInferenceModel,
@@ -58,7 +60,7 @@ const KNOWN_COMMANDS = new Set([
 const FIELD_TYPES = {
   init:              { appName: 'non-empty-string', logLevel: 'non-empty-string' },
   setLogLevel:       { level: 'non-empty-string' },
-  startService:      { port: 'number', bindAddress: 'string' },
+  startService:      { port: 'number', bindAddress: 'string', gateway: 'boolean' },
   download:          { alias: 'non-empty-string', variantId: 'non-empty-string' },
   load:              { alias: 'non-empty-string', variantId: 'non-empty-string' },
   unload:            { alias: 'non-empty-string' },
@@ -84,7 +86,7 @@ const VALID_LANES = new Set(['chat', 'audio']);
 const COMMAND_SCHEMA = {
   init:               { required: ['appName', 'logLevel'], optional: [] },
   setLogLevel:        { required: ['level'], optional: [] },
-  startService:       { required: ['port'], optional: ['alias', 'preferredEp', 'bindAddress'] },
+  startService:       { required: ['port'], optional: ['alias', 'preferredEp', 'bindAddress', 'gateway'] },
   stopService:        { required: [], optional: [] },
   getStatus:          { required: [], optional: [] },
   listModels:         { required: [], optional: [] },
@@ -143,6 +145,7 @@ function validateCommand(cmd, payload) {
       if (expected === 'non-empty-string' && (typeof value !== 'string' || !value.trim())) return `Command "${cmd}" field "${field}" must be a non-empty string`;
       if (expected === 'string' && typeof value !== 'string') return `Command "${cmd}" field "${field}" must be a string`;
       if (expected === 'array' && !Array.isArray(value)) return `Command "${cmd}" field "${field}" must be an array`;
+      if (expected === 'boolean' && typeof value !== 'boolean') return `Command "${cmd}" field "${field}" must be a boolean`;
     }
   }
   if (payload.preferredEp !== undefined && typeof payload.preferredEp !== 'string') return `Command "${cmd}" field "preferredEp" must be a string`;
@@ -195,8 +198,74 @@ const canceledRequests = new Set();
 const pool = new Map();
 let sharedEndpoint = null;
 
-// Per-request access log (IPC-originated requests only; direct HTTP to the Foundry Local
-// service is not intercepted — that requires a proxy layer, deferred to 0.3 item 0b).
+// The reverse proxy that fronts the native service so external OpenAI clients can trigger
+// a load. Null whenever the service is stopped or the gateway was disabled.
+let gateway = null;
+let upstreamPort = null;
+// Identifier → {alias, variantId} for autoload. Rebuilt lazily and invalidated whenever the
+// set of cached models changes, since a stale map would refuse a model the user just added.
+let modelIndex = null;
+
+function invalidateModelIndex () {
+  modelIndex = null;
+}
+
+async function resolveForGateway (requested) {
+  if (!modelIndex) {
+    if (!manager) return null;
+    try {
+      const models = await manager.catalog.getModels();
+      modelIndex = buildModelIndex(models.map(m => ({
+        alias: m.alias,
+        variants: (m.variants || []).map(v => {
+          let cached = false;
+          try { cached = !!v.isCached; } catch { cached = !!v.info?.cached; }
+          return { id: v.id, cached };
+        }),
+      })));
+    } catch (e) {
+      log('warn', `Gateway could not read the catalog: ${e?.message ?? e}`);
+      return null;
+    }
+  }
+  return resolveModelId(modelIndex, requested);
+}
+
+/**
+ * Close the proxy before the service behind it goes away, so a client gets a connection
+ * refused rather than a gateway that accepts requests it can no longer serve.
+ */
+async function stopGateway () {
+  if (!gateway) return;
+  const current = gateway;
+  gateway = null;
+  try {
+    await current.stop();
+  } catch (e) {
+    log('warn', `Gateway stop error (ignored): ${e?.message ?? e}`);
+  }
+}
+
+/** The native service reports readiness on /status; startWebService() returning does not. */async function waitForUpstream (port, deadlineMs = 20000) {
+  const started = Date.now();
+  let lastError = null;
+  while (Date.now() - started < deadlineMs) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/status`);
+      if (res.ok) return true;
+      lastError = `status ${res.status}`;
+    } catch (e) {
+      lastError = e?.message ?? String(e);
+    }
+    await new Promise(r => setTimeout(r, 150));
+  }
+  log('warn', `Upstream service not ready after ${deadlineMs}ms: ${lastError}`);
+  return false;
+}
+
+// Per-request access log. Covers IPC-originated requests only: traffic proxied through the
+// gateway is deliberately not logged here because writeToDisk() appends synchronously, and
+// putting a blocking write in front of every external request would stall the event loop.
 const ACCESS_LOG_MAX = 500;
 const accessLog = [];
 const tokenAccumulator = new Map(); // alias → { tokensIn: number, tokensOut: number }; reset on stopService
@@ -1350,6 +1419,7 @@ rl.on('line', async (line) => {
       await model.download((p) => send({ id, progress: p, alias: payload.alias }));
       // Force next catalog access to re-read model list metadata (info.cached, etc.).
       try { manager.catalog.invalidateCache?.(); } catch {}
+      invalidateModelIndex();
       audit('download.complete', { alias: payload.alias, variantId: payload.variantId ?? null });
       reply({ ok: true });
     } else if (cmd === 'load') {
@@ -1414,6 +1484,7 @@ rl.on('line', async (line) => {
           throw new Error('Runtime does not expose a variant deletion API (removeFromCache)');
         }
         try { manager.catalog.invalidateCache?.(); } catch {}
+        invalidateModelIndex();
         audit('deleteModel', { alias: payload.alias, variantId });
         reply({ ok: true, result: { alias: payload.alias, variantId } });
       } else {
@@ -1444,6 +1515,7 @@ rl.on('line', async (line) => {
         }
         try { manager.catalog.invalidateCache?.(); } catch {}
         log('info', `Deleted ${deleted} cached variant(s) for ${payload.alias}`);
+        invalidateModelIndex();
         audit('deleteModel', { alias: payload.alias, variantId: null, count: deleted });
         reply({ ok: true, result: { alias: payload.alias, count: deleted } });
       }
@@ -1452,11 +1524,13 @@ rl.on('line', async (line) => {
     } else if (cmd === 'importModelFolder') {
       const result = importModelFolder(payload);
       log('info', `Imported model ${result.name}:${result.version} from ${payload.folderPath}`);
+      invalidateModelIndex();
       audit('importModelFolder', { alias: result.name, variantId: `${result.name}:${result.version}`, kind: 'copy' });
       reply({ ok: true, result });
     } else if (cmd === 'linkModelFolder') {
       const result = linkModelFolder(payload);
       log('info', `Linked model ${result.name} -> ${result.target}`);
+      invalidateModelIndex();
       audit('linkModelFolder', { alias: result.name, variantId: null, kind: 'junction' });
       reply({ ok: true, result });
     } else if (cmd === 'getModelTemplate') {
@@ -1467,43 +1541,75 @@ rl.on('line', async (line) => {
       audit('setModelTemplate', { alias: result.name, variantId: null });
       reply({ ok: true, result });
     } else if (cmd === 'startService') {
-      // FoundryLocalManager.create() is a singleton: a second create() ignores new config.
-      // init() already created an instance without webServiceUrls, so we must clear the
-      // singleton before re-create or bind address/port never take effect (Apply & restart).
+      // The native core is process-global and can only be initialized once: a second
+      // FoundryLocalManager.create() throws "Foundry Local Core is already initialized"
+      // even after clearing the singleton, so the manager built during init() is the only
+      // one this process will ever have. That also means `webServiceUrls` cannot be set
+      // here, and startWebService() binds a port of its own choosing.
       //
-      // bindAddress = listen interface for the native service.
-      // sharedEndpoint = client URL for this app and Integrations snippets — always loopback
-      // so local tools talk to 127.0.0.1 even when the service is bound to 0.0.0.0.
+      // Which is fine, because the port the user configured is served by Flint's gateway,
+      // and the gateway simply proxies to whatever port the native service reports back.
+      // Discovering the port instead of dictating it also removes the reserve-then-bind
+      // race that picking one ourselves would have introduced.
       const bindAddr = payload.bindAddress || '127.0.0.1';
       if (bindAddr !== '127.0.0.1') {
         log('warn', `Service binding to ${bindAddr} — accessible from other network interfaces`);
       }
-      if (FoundryLocalManager && initConfig) {
-        pool.clear();
-        if (manager && typeof manager.stopWebService === 'function') {
-          try { manager.stopWebService(); } catch (e) {
-            log('warn', `stopWebService before rebind (ignored): ${e?.message ?? e}`);
-          }
+
+      const useGateway = payload.gateway !== false;
+      await stopGateway();
+
+      pool.clear();
+      if (manager && typeof manager.stopWebService === 'function') {
+        try { manager.stopWebService(); } catch (e) {
+          log('warn', `stopWebService before restart (ignored): ${e?.message ?? e}`);
         }
-        // Reset SDK singleton so create() applies the new webServiceUrls.
-        try {
-          FoundryLocalManager.instance = undefined;
-        } catch (e) {
-          log('warn', `Could not clear FoundryLocalManager.instance: ${e?.message ?? e}`);
-        }
-        manager = FoundryLocalManager.create({
-          ...initConfig,
-          webServiceUrls: `http://${bindAddr}:${payload.port}`,
-        });
       }
       // Start service BEFORE loading models so HTTP routing layer initializes with the registry.
       if (typeof manager.startWebService === 'function') {
-        manager.startWebService(); // synchronous, no args; port comes from webServiceUrls above
+        manager.startWebService(); // synchronous; the port it chose appears in manager.urls
       }
-      // Client-facing endpoint stays on loopback (see comment above).
-      sharedEndpoint = `http://127.0.0.1:${payload.port}/v1`;
-      log('info', `Service started; bind=${bindAddr}:${payload.port} connect=${sharedEndpoint}`);
-      audit('startService', { port: payload.port, bindAddress: bindAddr, endpoint: sharedEndpoint });
+
+      const nativeUrl = (manager.urls || [])[0];
+      if (!nativeUrl) {
+        throw new Error('The local service started but did not report an address.');
+      }
+      const nativePort = Number(new URL(nativeUrl).port);
+      upstreamPort = nativePort;
+      invalidateModelIndex();
+
+      if (!(await waitForUpstream(nativePort))) {
+        throw new Error('The local service did not become ready. Try starting it again.');
+      }
+
+      if (useGateway) {
+        gateway = createGateway({
+          publicPort: payload.port,
+          bindAddress: bindAddr,
+          upstreamPort: nativePort,
+          resolve: resolveForGateway,
+          load: async (alias, variantId) => { await ensureModel(alias, variantId); },
+          log,
+        });
+        try {
+          await gateway.start();
+        } catch (e) {
+          gateway = null;
+          throw new Error(
+            `Could not listen on ${bindAddr}:${payload.port} — ${e?.message ?? e}. `
+            + 'Another process may already be using that port.'
+          );
+        }
+      }
+
+      // Client-facing endpoint stays on loopback even when the gateway is bound to a wider
+      // interface, so this app and the Integrations snippets always target 127.0.0.1.
+      sharedEndpoint = useGateway ? `http://127.0.0.1:${payload.port}/v1` : `${nativeUrl}/v1`;
+      log('info', `Service started; bind=${bindAddr}:${payload.port} `
+        + `${useGateway ? `via gateway → 127.0.0.1:${nativePort} ` : ''}connect=${sharedEndpoint}`);
+      audit('startService', {
+        port: payload.port, bindAddress: bindAddr, endpoint: sharedEndpoint, gateway: useGateway,
+      });
       const desired = payload.alias;
       if (desired) {
         await ensureModel(desired);
@@ -1522,6 +1628,7 @@ rl.on('line', async (line) => {
         }
       });
     } else if (cmd === 'stopService') {
+      await stopGateway();
       if (manager && typeof manager.stopWebService === 'function') {
         try {
           manager.stopWebService(); // synchronous
@@ -1530,6 +1637,8 @@ rl.on('line', async (line) => {
         }
       }
       sharedEndpoint = null;
+      upstreamPort = null;
+      invalidateModelIndex();
       tokenAccumulator.clear();
       log('info', 'Service stopped');
       audit('stopService', {});
