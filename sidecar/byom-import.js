@@ -98,6 +98,76 @@ export function selectPromptTemplate (options = {}) {
   return { template: CHATML_TEMPLATE, templateSource: 'default (ChatML)', confident: false };
 }
 
+/** Roles the native prompt builder expects; `prompt` is the generation-turn suffix. */
+export const TEMPLATE_ROLES = ['system', 'user', 'assistant', 'prompt'];
+
+/** Named templates offered in the UI, so a user can switch family without hand-typing. */
+export const TEMPLATE_PRESETS = {
+  chatml: { label: 'ChatML (Qwen, Yi, InternLM)', template: CHATML_TEMPLATE },
+  llama3: { label: 'Llama 3', template: LLAMA3_TEMPLATE },
+  phi3: { label: 'Phi-3', template: PHI3_TEMPLATE },
+  gemma: { label: 'Gemma', template: GEMMA_TEMPLATE },
+};
+
+/**
+ * Check a user-edited prompt template before it is written to disk.
+ *
+ * A malformed template does not fail loudly — the model loads and then produces
+ * subtly wrong output — so the cheap structural checks are worth enforcing.
+ *
+ * @param {unknown} template
+ * @returns {{ ok: boolean, errors: string[], warnings: string[], template: object|null }}
+ */
+export function validatePromptTemplate (template) {
+  const errors = [];
+  const warnings = [];
+
+  if (!template || typeof template !== 'object' || Array.isArray(template)) {
+    return { ok: false, errors: ['Prompt template must be an object.'], warnings, template: null };
+  }
+
+  const cleaned = {};
+  for (const role of TEMPLATE_ROLES) {
+    const value = template[role];
+    if (value === undefined || value === null) {
+      errors.push(`Missing "${role}" template.`);
+      continue;
+    }
+    if (typeof value !== 'string') {
+      errors.push(`Template "${role}" must be a string.`);
+      continue;
+    }
+    if (!value.trim()) {
+      errors.push(`Template "${role}" is empty.`);
+      continue;
+    }
+    cleaned[role] = value;
+  }
+
+  const unknown = Object.keys(template).filter(k => !TEMPLATE_ROLES.includes(k));
+  if (unknown.length > 0) errors.push(`Unknown template field(s): ${unknown.join(', ')}.`);
+
+  // {Content} is substituted by the native prompt builder; without it the message
+  // text is dropped and the model sees only the wrapper tokens.
+  for (const role of ['system', 'user', 'assistant']) {
+    if (cleaned[role] && !cleaned[role].includes('{Content}')) {
+      errors.push(`Template "${role}" must contain the {Content} placeholder.`);
+    }
+  }
+  // The prompt turn ends where generation begins, so it deliberately has no {Content}
+  // of its own after the assistant marker; warn rather than fail if it lacks one.
+  if (cleaned.prompt && !cleaned.prompt.includes('{Content}')) {
+    warnings.push('The "prompt" template has no {Content}; the user message may be dropped.');
+  }
+
+  return {
+    ok: errors.length === 0,
+    errors,
+    warnings,
+    template: errors.length === 0 ? cleaned : null,
+  };
+}
+
 /**
  * Foundry model names appear in URLs and on disk, so keep them conservative.
  *
@@ -117,7 +187,10 @@ export function sanitizeModelName (raw) {
 /**
  * Build the `inference_model.json` payload the native scanner requires.
  *
- * @param {{ name: string, version?: number, chatTemplate?: string|null, architecture?: string|null }} options
+ * A caller-supplied `promptTemplate` always wins over detection, so a user can correct
+ * a wrong guess without editing files by hand.
+ *
+ * @param {{ name: string, version?: number, chatTemplate?: string|null, architecture?: string|null, promptTemplate?: object|null }} options
  * @returns {{ content: object, templateSource: string, confident: boolean }}
  */
 export function buildInferenceModel (options) {
@@ -125,6 +198,17 @@ export function buildInferenceModel (options) {
   if (!name) throw new Error('A model name is required to build inference_model.json.');
 
   const version = Number.isInteger(options?.version) && options.version > 0 ? options.version : 1;
+
+  if (options?.promptTemplate) {
+    const check = validatePromptTemplate(options.promptTemplate);
+    if (!check.ok) throw new Error(`Invalid prompt template:\n- ${check.errors.join('\n- ')}`);
+    return {
+      content: { Name: `${name}:${version}`, PromptTemplate: { ...check.template } },
+      templateSource: 'user-supplied',
+      confident: true,
+    };
+  }
+
   const { template, templateSource, confident } = selectPromptTemplate(options);
 
   return {
@@ -209,13 +293,14 @@ export function validateModelFolder (input) {
     warnings.push('The folder already has inference_model.json; Flint will keep the existing file.');
   }
 
-  const { templateSource, confident } = selectPromptTemplate({
+  const { template, templateSource, confident } = selectPromptTemplate({
     chatTemplate: input?.chatTemplate,
     architecture,
   });
   if (!confident) {
     warnings.push(
-      `Prompt template guessed from ${templateSource}. If replies look malformed, the template is the likely cause.`,
+      `Prompt template guessed from ${templateSource}. Review it before importing — a wrong ` +
+        'template is the usual cause of malformed replies.',
     );
   }
 
@@ -232,6 +317,9 @@ export function validateModelFolder (input) {
       hasInferenceModel: base.has('inference_model.json'),
       templateSource,
       templateConfident: confident,
+      // The resolved template travels with the report so the UI can show and edit it
+      // before anything is written.
+      promptTemplate: { ...template },
       fileCount: files.length,
     },
   };

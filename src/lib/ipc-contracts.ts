@@ -21,7 +21,20 @@ export type SidecarCommand =
   | { cmd: 'getSTTModels' }
   | { cmd: 'poolStatus' }
   | { cmd: 'getAccessLog' }
-  | { cmd: 'fetchUrl'; url: string; maxChars?: number };
+  | { cmd: 'fetchUrl'; url: string; maxChars?: number }
+  | { cmd: 'inspectModelFolder'; folderPath: string }
+  | { cmd: 'importModelFolder'; folderPath: string; name: string; publisher?: string; version?: number; promptTemplate?: PromptTemplate }
+  | { cmd: 'linkModelFolder'; folderPath: string; name: string; publisher?: string }
+  | { cmd: 'getModelTemplate'; name: string }
+  | { cmd: 'setModelTemplate'; name: string; promptTemplate: PromptTemplate };
+
+/** The four turn wrappers Foundry substitutes `{Content}` into when building a prompt. */
+export interface PromptTemplate {
+  system: string;
+  user: string;
+  assistant: string;
+  prompt: string;
+}
 
 export type SidecarCommandName = SidecarCommand['cmd'];
 
@@ -31,6 +44,8 @@ export const KNOWN_COMMANDS = new Set<SidecarCommandName>([
   'chatCompletion', 'cancelChatRequest', 'transcribeAudio',
   'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',
   'poolStatus', 'getAccessLog', 'fetchUrl',
+  'inspectModelFolder', 'importModelFolder', 'linkModelFolder',
+  'getModelTemplate', 'setModelTemplate',
 ]);
 
 /**

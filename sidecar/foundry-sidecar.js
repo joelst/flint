@@ -28,8 +28,10 @@ import { assertWavBuffer } from './audio-format.js';
 import {
   validateModelFolder,
   buildInferenceModel,
+  validatePromptTemplate,
   sanitizeModelName,
   isInsideRoot,
+  TEMPLATE_PRESETS,
   OWNERSHIP_MARKER,
 } from './byom-import.js';
 
@@ -48,6 +50,7 @@ const KNOWN_COMMANDS = new Set([
   'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',
   'poolStatus', 'getAccessLog', 'fetchUrl',
   'inspectModelFolder', 'importModelFolder', 'linkModelFolder',
+  'getModelTemplate', 'setModelTemplate',
 ]);
 
 // Per-command type requirements. Keys are required or optional field names; values are:
@@ -67,6 +70,8 @@ const FIELD_TYPES = {
   inspectModelFolder: { folderPath: 'non-empty-string' },
   importModelFolder: { folderPath: 'non-empty-string', name: 'non-empty-string' },
   linkModelFolder:   { folderPath: 'non-empty-string', name: 'non-empty-string' },
+  getModelTemplate:  { name: 'non-empty-string' },
+  setModelTemplate:  { name: 'non-empty-string' },
 };
 
 // Commands that accept a lane field; validated to 'chat' | 'audio'.
@@ -99,8 +104,10 @@ const COMMAND_SCHEMA = {
   getAccessLog:       { required: [], optional: [] },
   fetchUrl:           { required: ['url'], optional: ['maxChars'] },
   inspectModelFolder: { required: ['folderPath'], optional: [] },
-  importModelFolder:  { required: ['folderPath', 'name'], optional: ['publisher', 'version'] },
+  importModelFolder:  { required: ['folderPath', 'name'], optional: ['publisher', 'version', 'promptTemplate'] },
   linkModelFolder:    { required: ['folderPath', 'name'], optional: ['publisher'] },
+  getModelTemplate:   { required: ['name'], optional: [] },
+  setModelTemplate:   { required: ['name', 'promptTemplate'], optional: [] },
 };
 
 // Base64 character limit for transcribeAudio. 50 MB decoded audio is ~67 MB of base64.
@@ -166,6 +173,12 @@ function validateCommand(cmd, payload) {
       && payload.publisher !== undefined
       && (typeof payload.publisher !== 'string' || !payload.publisher.trim())) {
     return `Command "${cmd}" field "publisher" must be a non-empty string`;
+  }
+  if ((cmd === 'importModelFolder' || cmd === 'setModelTemplate') && payload.promptTemplate !== undefined) {
+    if (typeof payload.promptTemplate !== 'object' || payload.promptTemplate === null
+        || Array.isArray(payload.promptTemplate)) {
+      return `Command "${cmd}" field "promptTemplate" must be an object`;
+    }
   }
   return null;
 }
@@ -614,6 +627,10 @@ function inspectFolder(folderPath) {
     nested: !!modelDir && modelDir !== resolved,
     sizeBytes,
     suggestedName: sanitizeModelName(path.basename(resolved)),
+    // Offered so the UI can present alternatives when detection was not confident.
+    presets: Object.fromEntries(
+      Object.entries(TEMPLATE_PRESETS).map(([k, v]) => [k, { label: v.label, template: v.template }]),
+    ),
   };
 }
 
@@ -661,18 +678,19 @@ function importModelFolder(payload) {
   }
 
   const versionDir = path.join(stagingDir, `v${version}`);
+  let templateSource = 'existing inference_model.json';
   try {
     copyDirContents(inspection.modelDir, versionDir);
 
     // Only author inference_model.json when the source did not provide one.
     const infPath = path.join(versionDir, 'inference_model.json');
-    let templateSource = 'existing inference_model.json';
-    if (!fs.existsSync(infPath)) {
+    if (!fs.existsSync(infPath) || payload.promptTemplate) {
       const built = buildInferenceModel({
         name,
         version,
         chatTemplate: readTextIfPresent(versionDir, 'chat_template.jinja'),
         architecture: inspection.detected.architecture,
+        promptTemplate: payload.promptTemplate || null,
       });
       fs.writeFileSync(infPath, `${JSON.stringify(built.content, null, 2)}\n`, 'utf8');
       templateSource = built.templateSource;
@@ -705,6 +723,7 @@ function importModelFolder(payload) {
     name, version, publisher,
     path: finalDir,
     sizeBytes: inspection.sizeBytes,
+    templateSource,
     warnings: inspection.warnings,
   };
 }
@@ -749,6 +768,101 @@ function linkModelFolder(payload) {
 
   try { manager?.catalog?.invalidateCache?.(); } catch {}
   return { name, publisher, linkPath, target, warnings: inspection.warnings };
+}
+
+/**
+ * Locate an imported model's directory and its inference_model.json.
+ *
+ * Only directories carrying Flint's ownership marker are eligible: catalog models are
+ * managed by Foundry, and a linked model's files belong to the user's own folder, so
+ * neither may be rewritten from here.
+ */
+function resolveOwnedModelDir(name) {
+  const safeName = sanitizeModelName(name);
+  if (!safeName) throw new Error('Model name is empty after sanitizing.');
+  const root = modelCacheRoot();
+
+  let publishers = [];
+  try {
+    publishers = fs.readdirSync(root, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name);
+  } catch {
+    throw new Error('No model cache found yet.');
+  }
+
+  for (const publisher of publishers) {
+    const publisherDir = path.join(root, publisher);
+    let entries = [];
+    try {
+      entries = fs.readdirSync(publisherDir, { withFileTypes: true });
+    } catch { continue; }
+
+    for (const entry of entries) {
+      // A junction is a linked model; its contents are the user's, not Flint's.
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      if (entry.name !== safeName && !entry.name.startsWith(`${safeName}-`)) continue;
+
+      const dir = path.join(publisherDir, entry.name);
+      if (!isInsideRoot(root, dir)) continue;
+      if (!fs.existsSync(path.join(dir, OWNERSHIP_MARKER))) continue;
+
+      const versionDir = fs.readdirSync(dir, { withFileTypes: true })
+        .filter(e => e.isDirectory() && /^v\d+$/.test(e.name))
+        .map(e => path.join(dir, e.name))
+        .find(p => fs.existsSync(path.join(p, 'inference_model.json')));
+      if (versionDir) return { dir, versionDir, infPath: path.join(versionDir, 'inference_model.json') };
+    }
+  }
+  throw new Error(
+    `No Flint-imported model named "${safeName}" was found. Only models imported by Flint can be edited; ` +
+      'catalog and linked models are managed elsewhere.',
+  );
+}
+
+/** Read an imported model's current prompt template. */
+function getModelTemplate(name) {
+  const { infPath, dir } = resolveOwnedModelDir(name);
+  const content = JSON.parse(fs.readFileSync(infPath, 'utf8'));
+  let marker = null;
+  try { marker = JSON.parse(fs.readFileSync(path.join(dir, OWNERSHIP_MARKER), 'utf8')); } catch {}
+  return {
+    name: sanitizeModelName(name),
+    modelName: content?.Name ?? null,
+    promptTemplate: content?.PromptTemplate ?? null,
+    templateSource: marker?.templateSource ?? null,
+    presets: Object.fromEntries(Object.entries(TEMPLATE_PRESETS).map(([k, v]) => [k, { label: v.label, template: v.template }])),
+    path: infPath,
+  };
+}
+
+/**
+ * Replace an imported model's prompt template.
+ *
+ * Written to a temporary file and renamed, so an interrupted write cannot leave the
+ * model with a truncated inference_model.json — which would make it vanish from the
+ * catalog rather than fail visibly.
+ */
+function setModelTemplate(name, promptTemplate) {
+  const check = validatePromptTemplate(promptTemplate);
+  if (!check.ok) throw new Error(`Invalid prompt template:\n- ${check.errors.join('\n- ')}`);
+
+  const { dir, infPath } = resolveOwnedModelDir(name);
+  const content = JSON.parse(fs.readFileSync(infPath, 'utf8'));
+  content.PromptTemplate = { ...check.template };
+
+  const tmp = `${infPath}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(content, null, 2)}\n`, 'utf8');
+  fs.renameSync(tmp, infPath);
+
+  try {
+    const markerPath = path.join(dir, OWNERSHIP_MARKER);
+    const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+    marker.templateSource = 'user-edited';
+    marker.templateEditedAt = new Date().toISOString();
+    fs.writeFileSync(markerPath, `${JSON.stringify(marker, null, 2)}\n`, 'utf8');
+  } catch {}
+
+  try { manager?.catalog?.invalidateCache?.(); } catch {}
+  return { name: sanitizeModelName(name), promptTemplate: content.PromptTemplate, warnings: check.warnings };
 }
 
 async function ensureModel(alias, variantId) {  const existing = pool.get(alias);
@@ -1344,6 +1458,13 @@ rl.on('line', async (line) => {
       const result = linkModelFolder(payload);
       log('info', `Linked model ${result.name} -> ${result.target}`);
       audit('linkModelFolder', { alias: result.name, variantId: null, kind: 'junction' });
+      reply({ ok: true, result });
+    } else if (cmd === 'getModelTemplate') {
+      reply({ ok: true, result: getModelTemplate(payload.name) });
+    } else if (cmd === 'setModelTemplate') {
+      const result = setModelTemplate(payload.name, payload.promptTemplate);
+      log('info', `Updated prompt template for ${result.name}`);
+      audit('setModelTemplate', { alias: result.name, variantId: null });
       reply({ ok: true, result });
     } else if (cmd === 'startService') {
       // FoundryLocalManager.create() is a singleton: a second create() ignores new config.

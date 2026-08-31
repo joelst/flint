@@ -56,6 +56,9 @@ Facts only — no history. Record what is true now; `git log` and `CHANGELOG.md`
 - **Directory junctions inside the cache root are traversed**, surfacing models stored elsewhere with alias/provider/version intact — no copying and no writes to the foreign directory. Delete the link, never the target.
 - `addCatalog` / `registerModel` (the HuggingFace catalog API) exist in **neither** JS SDK 1.2.4 nor 2.0.0 — they appear to be C#-only. Flint must own import logic.
 - Foundry Local is **ONNX-only (onnxruntime-genai)**; it does not run GGUF.
+- `PromptTemplate` uses the literal `{Content}` placeholder (roles: `system`, `user`, `assistant`, `prompt`). A template missing it **does not error** — the model loads and silently drops message text, so validate before writing.
+- Almost no public ONNX repo ships `inference_model.json` (2 of 301 surveyed on HF); Flint authors it. A model's `chat_template.jinja` wins over its architecture, because a fine-tune can keep the architecture while changing turn markers.
+- `.flint-import.json` in a model dir is the ownership marker: only marked dirs may be modified or deleted by Flint. Catalog dirs and junctions (linked models) must never be rewritten.
 
 ## Tauri / Rust
 - Keep Rust thin; if you add invoke handlers, update capabilities and frontend call sites.

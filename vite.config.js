@@ -72,10 +72,10 @@ export default defineConfig(() => ({
       // gate catches regressions instead of rubber-stamping them. Raise these
       // as files are added rather than leaving slack.
       thresholds: {
-        lines: 95,
-        functions: 93,
-        branches: 81,
-        statements: 93
+        lines: 96,
+        functions: 94,
+        branches: 84,
+        statements: 95
       }
     }
   }

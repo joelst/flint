@@ -6,6 +6,9 @@ import {
   buildInferenceModel,
   sanitizeModelName,
   isInsideRoot,
+  validatePromptTemplate,
+  TEMPLATE_PRESETS,
+  TEMPLATE_ROLES,
 } from './byom-import.js';
 
 /** File list mirroring a real Foundry model dir (qwen3-0.6b-generic-cpu-4/v4). */
@@ -241,5 +244,115 @@ describe('isInsideRoot', () => {
   it('rejects a sibling whose name merely shares the prefix', () => {
     // /cache-evil must not count as inside /cache.
     expect(isInsideRoot(root, `${root}-evil`)).toBe(false);
+  });
+});
+
+describe('validatePromptTemplate', () => {
+  const good = TEMPLATE_PRESETS.chatml.template;
+
+  it('accepts every shipped preset', () => {
+    for (const [key, preset] of Object.entries(TEMPLATE_PRESETS)) {
+      const result = validatePromptTemplate(preset.template);
+      expect(result.ok, `${key} should be valid: ${result.errors.join(', ')}`).toBe(true);
+    }
+  });
+
+  it('returns a cleaned copy rather than the caller object', () => {
+    const result = validatePromptTemplate(good);
+    expect(result.template).toEqual(good);
+    expect(result.template).not.toBe(good);
+  });
+
+  it.each(TEMPLATE_ROLES)('rejects a template missing "%s"', (role) => {
+    const partial: Record<string, string> = { ...good };
+    delete partial[role];
+    const result = validatePromptTemplate(partial);
+    expect(result.ok).toBe(false);
+    expect(result.errors.join(' ')).toContain(role);
+  });
+
+  it('rejects a whitespace-only role', () => {
+    const result = validatePromptTemplate({ ...good, system: '   ' });
+    expect(result.ok).toBe(false);
+    expect(result.errors.join(' ')).toMatch(/empty/i);
+  });
+
+  it('rejects a non-string role', () => {
+    const result = validatePromptTemplate({ ...good, user: 42 as unknown as string });
+    expect(result.ok).toBe(false);
+    expect(result.errors.join(' ')).toMatch(/must be a string/i);
+  });
+
+  it('rejects unknown fields so typos are not silently ignored', () => {
+    const result = validatePromptTemplate({ ...good, sytem: 'oops' });
+    expect(result.ok).toBe(false);
+    expect(result.errors.join(' ')).toContain('sytem');
+  });
+
+  it('requires {Content} in system, user and assistant', () => {
+    for (const role of ['system', 'user', 'assistant']) {
+      const result = validatePromptTemplate({ ...good, [role]: 'no placeholder here' });
+      expect(result.ok, `${role} without {Content} must fail`).toBe(false);
+      expect(result.errors.join(' ')).toContain('{Content}');
+    }
+  });
+
+  it('only warns when the prompt turn omits {Content}', () => {
+    const result = validatePromptTemplate({ ...good, prompt: '<|im_start|>assistant' });
+    expect(result.ok).toBe(true);
+    expect(result.warnings.length).toBeGreaterThan(0);
+  });
+
+  it.each([null, undefined, 'chatml', 42, []])('rejects the non-object %p', (value) => {
+    const result = validatePromptTemplate(value as unknown as object);
+    expect(result.ok).toBe(false);
+    expect(result.template).toBeNull();
+  });
+});
+
+describe('buildInferenceModel with a user-supplied template', () => {
+  const custom = {
+    system: '[SYS]{Content}[/SYS]',
+    user: '[U]{Content}[/U]',
+    assistant: '[A]{Content}[/A]',
+    prompt: '[U]{Content}[/U][A]',
+  };
+
+  it('prefers the override over a detected jinja template', () => {
+    const built = buildInferenceModel({
+      name: 'my-model',
+      chatTemplate: "{% for m in messages %}<|im_start|>{{ m['role'] }}",
+      architecture: 'llama',
+      promptTemplate: custom,
+    });
+    expect(built.content.PromptTemplate).toEqual(custom);
+    expect(built.templateSource).toBe('user-supplied');
+    expect(built.confident).toBe(true);
+  });
+
+  it('throws with the specific errors when the override is invalid', () => {
+    expect(() => buildInferenceModel({
+      name: 'my-model',
+      promptTemplate: { ...custom, assistant: 'missing placeholder' },
+    })).toThrow(/\{Content\}/);
+  });
+
+  it('falls back to detection when no override is given', () => {
+    const built = buildInferenceModel({ name: 'my-model', architecture: 'llama' });
+    expect(built.templateSource).not.toBe('user-supplied');
+  });
+});
+
+describe('validateModelFolder template exposure', () => {
+  it('returns the resolved template so the UI can show it before import', () => {
+    const report = validateModelFolder({
+      files: goodFiles(),
+      dirName: 'some-model',
+      genaiConfig,
+      chatTemplate: null,
+    });
+    const template = report.detected.promptTemplate;
+    expect(template).toBeTruthy();
+    expect(validatePromptTemplate(template).ok).toBe(true);
   });
 });

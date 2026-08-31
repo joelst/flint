@@ -226,3 +226,149 @@ describe('BYOM discovery by the Foundry SDK', () => {
     expect(byAlias.id).toBe('discoverable-model:1');
   }, 60000);
 });
+
+describe('BYOM prompt template editing', () => {
+  const custom = {
+    system: '[SYS]{Content}[/SYS]',
+    user: '[U]{Content}[/U]',
+    assistant: '[A]{Content}[/A]',
+    prompt: '[U]{Content}[/U][A]',
+  };
+
+  it('honours a template supplied at import time', async () => {
+    const src = track(makeSourceRepo());
+    const res = await send('importModelFolder', { folderPath: src, name: 'tpl-import', promptTemplate: custom });
+    expect(res.ok, JSON.stringify(res)).toBe(true);
+
+    const inf = JSON.parse(fs.readFileSync(path.join(res.result.path, 'v1', 'inference_model.json'), 'utf8'));
+    expect(inf.PromptTemplate).toEqual(custom);
+    expect(res.result.templateSource).toBe('user-supplied');
+  });
+
+  it('rejects an invalid template at import time and imports nothing', async () => {
+    const src = track(makeSourceRepo());
+    const res = await send('importModelFolder', {
+      folderPath: src,
+      name: 'tpl-invalid',
+      promptTemplate: { ...custom, user: 'no placeholder' },
+    });
+    expect(res.ok).toBeFalsy();
+    expect(String(res.error)).toMatch(/\{Content\}/);
+    expect(fs.existsSync(path.join(cacheRoot, 'Imported', 'tpl-invalid'))).toBe(false);
+  });
+
+  it('reads back the template of an imported model along with the presets', async () => {
+    const src = track(makeSourceRepo());
+    await send('importModelFolder', { folderPath: src, name: 'tpl-read' });
+    const res = await send('getModelTemplate', { name: 'tpl-read' });
+    expect(res.ok, JSON.stringify(res)).toBe(true);
+    expect(res.result.modelName).toBe('tpl-read:1');
+    expect(res.result.promptTemplate.user).toContain('{Content}');
+    expect(Object.keys(res.result.presets)).toContain('chatml');
+  });
+
+  it('rewrites the template and the SDK still resolves the model', async () => {
+    const src = track(makeSourceRepo());
+    await send('importModelFolder', { folderPath: src, name: 'tpl-write' });
+
+    const res = await send('setModelTemplate', { name: 'tpl-write', promptTemplate: custom });
+    expect(res.ok, JSON.stringify(res)).toBe(true);
+
+    const readBack = await send('getModelTemplate', { name: 'tpl-write' });
+    expect(readBack.result.promptTemplate).toEqual(custom);
+    expect(readBack.result.templateSource).toBe('user-edited');
+
+    // The Name field must survive the rewrite, or the scanner drops the model.
+    const { FoundryLocalManager } = await import('foundry-local-sdk');
+    const mgr = (FoundryLocalManager as any).create({ appName: APP, logLevel: 'error', libraryPath });
+    const byAlias = await mgr.catalog.getModel('tpl-write');
+    expect(byAlias.id).toBe('tpl-write:1');
+  }, 60000);
+
+  it('leaves the previous template intact when the new one is invalid', async () => {
+    const src = track(makeSourceRepo());
+    await send('importModelFolder', { folderPath: src, name: 'tpl-guard' });
+    const before = await send('getModelTemplate', { name: 'tpl-guard' });
+
+    const res = await send('setModelTemplate', {
+      name: 'tpl-guard',
+      promptTemplate: { ...custom, assistant: '' },
+    });
+    expect(res.ok).toBeFalsy();
+
+    const after = await send('getModelTemplate', { name: 'tpl-guard' });
+    expect(after.result.promptTemplate).toEqual(before.result.promptTemplate);
+  });
+
+  it('refuses to edit a linked model, whose files belong to the user', async () => {
+    const src = track(makeSourceRepo({ nested: false }));
+    fs.writeFileSync(
+      path.join(src, 'inference_model.json'),
+      JSON.stringify({ Name: 'linked-tpl:1', PromptTemplate: { user: '<|im_start|>user\n{Content}<|im_end|>' } }),
+    );
+    const linked = await send('linkModelFolder', { folderPath: src, name: 'linked-tpl' });
+    expect(linked.ok, JSON.stringify(linked)).toBe(true);
+
+    const res = await send('setModelTemplate', { name: 'linked-tpl', promptTemplate: custom });
+    expect(res.ok).toBeFalsy();
+    expect(String(res.error)).toMatch(/only models imported by flint/i);
+
+    // The user's own file must be byte-identical after the refusal.
+    const inf = JSON.parse(fs.readFileSync(path.join(src, 'inference_model.json'), 'utf8'));
+    expect(inf.PromptTemplate).not.toEqual(custom);
+  });
+
+  it('errors for a model Flint never imported', async () => {
+    const res = await send('getModelTemplate', { name: 'never-imported-model' });
+    expect(res.ok).toBeFalsy();
+    expect(String(res.error)).toMatch(/no flint-imported model/i);
+  });
+
+  it('rejects a non-object promptTemplate on the command', async () => {
+    const res = await send('setModelTemplate', { name: 'tpl-read', promptTemplate: 'chatml' });
+    expect(res.ok).toBeFalsy();
+    expect(String(res.error)).toMatch(/must be an object/i);
+  });
+});
+
+describe('BYOM template ownership guard', () => {
+  const custom = {
+    system: '[SYS]{Content}[/SYS]',
+    user: '[U]{Content}[/U]',
+    assistant: '[A]{Content}[/A]',
+    prompt: '[U]{Content}[/U][A]',
+  };
+
+  /** A catalog-shaped model directory Flint did not create: no ownership marker. */
+  function makeForeignModelDir(name: string) {
+    const dir = path.join(cacheRoot, 'Microsoft', `${name}-1`);
+    fs.mkdirSync(path.join(dir, 'v1'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'v1', 'genai_config.json'),
+      JSON.stringify({ model: { type: 'qwen3', decoder: { filename: 'model.onnx' } } }),
+    );
+    fs.writeFileSync(
+      path.join(dir, 'v1', 'inference_model.json'),
+      JSON.stringify({ Name: `${name}:1`, PromptTemplate: { user: '<|im_start|>user\n{Content}<|im_end|>' } }),
+    );
+    return dir;
+  }
+
+  it('refuses to rewrite a model directory Flint did not import', async () => {
+    const dir = makeForeignModelDir('catalog-owned');
+    const infPath = path.join(dir, 'v1', 'inference_model.json');
+    const before = fs.readFileSync(infPath, 'utf8');
+
+    const res = await send('setModelTemplate', { name: 'catalog-owned', promptTemplate: custom });
+    expect(res.ok).toBeFalsy();
+    expect(String(res.error)).toMatch(/only models imported by flint/i);
+    expect(fs.readFileSync(infPath, 'utf8')).toBe(before);
+  });
+
+  it('refuses to read the template of a model Flint did not import', async () => {
+    makeForeignModelDir('catalog-owned-read');
+    const res = await send('getModelTemplate', { name: 'catalog-owned-read' });
+    expect(res.ok).toBeFalsy();
+    expect(String(res.error)).toMatch(/no flint-imported model/i);
+  });
+});
