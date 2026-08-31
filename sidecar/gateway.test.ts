@@ -256,6 +256,126 @@ describe('gateway autoload', () => {
   });
 });
 
+// Foundry routes variant ids but rejects the friendly alias outright, even while that model
+// is resident. The alias is exactly what Flint's own integration snippets tell users to
+// configure, so without a rewrite the gateway loads the model and still returns 400.
+describe('gateway model-name routing', () => {
+  const ALIAS = 'qwen2.5-0.5b';
+  const VARIANT = 'qwen2.5-0.5b-instruct-generic-cpu:4';
+
+  /** Upstream that behaves like the real service: only the variant id ever routes. */
+  async function startVariantOnlyUpstream () {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((req, res, body, state) => {
+      let model = null;
+      try { model = JSON.parse(body).model; } catch { /* not JSON */ }
+      if (!model || !state.loaded.has(model)) {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(NOT_LOADED(model));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, model }));
+    });
+  }
+
+  it('replays under the loaded variant id when the client sent an alias', async () => {
+    await startVariantOnlyUpstream();
+    gateway = await startGateway({
+      resolve: async id => (id === ALIAS ? { alias: ALIAS, variantId: null } : null),
+      // Mirrors ensureModel: loading by alias resolves a concrete variant.
+      load: async () => { upstream.state.loaded.add(VARIANT); return VARIANT; },
+    });
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: ALIAS, messages: [{ role: 'user', content: 'hi' }] }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body).model).toBe(VARIANT);
+    // The replay must carry the variant id, and must not lose the rest of the payload.
+    const replay = JSON.parse(upstream.state.hits[1].body);
+    expect(replay.model).toBe(VARIANT);
+    expect(replay.messages).toEqual([{ role: 'user', content: 'hi' }]);
+  });
+
+  it('reuses what it learned instead of paying the rejection every time', async () => {
+    await startVariantOnlyUpstream();
+    let loads = 0;
+    gateway = await startGateway({
+      resolve: async id => (id === ALIAS ? { alias: ALIAS, variantId: null } : null),
+      load: async () => { loads += 1; upstream.state.loaded.add(VARIANT); return VARIANT; },
+    });
+    const send = () => request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: ALIAS }),
+    });
+
+    expect((await send()).status).toBe(200); // 400 + replay
+    const afterFirst = upstream.state.hits.length;
+    expect((await send()).status).toBe(200);
+
+    expect(upstream.state.hits.length - afterFirst).toBe(1); // rewritten up front
+    expect(loads).toBe(1);
+  });
+
+  it('recovers when a learned routing goes stale', async () => {
+    await startVariantOnlyUpstream();
+    gateway = await startGateway({
+      resolve: async id => (id === ALIAS ? { alias: ALIAS, variantId: null } : null),
+      load: async () => { upstream.state.loaded.add(VARIANT); return VARIANT; },
+    });
+    const send = () => request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: ALIAS }),
+    });
+
+    expect((await send()).status).toBe(200);
+    upstream.state.loaded.clear(); // the model went away behind our back
+    expect((await send()).status).toBe(200);
+  });
+
+  it('leaves the body alone when the loader reports no variant', async () => {
+    await startVariantOnlyUpstream();
+    gateway = await startGateway({
+      resolve: async id => ({ alias: id, variantId: null }),
+      load: async alias => { upstream.state.loaded.add(alias); },
+    });
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: ALIAS }),
+    });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(upstream.state.hits[1].body).model).toBe(ALIAS);
+  });
+
+  it('honours an explicit variant id rather than substituting another', async () => {
+    await startVariantOnlyUpstream();
+    const asked = [];
+    gateway = await startGateway({
+      resolve: async id => ({ alias: ALIAS, variantId: id }),
+      load: async (alias, variantId) => {
+        asked.push(variantId);
+        upstream.state.loaded.add(variantId);
+        return variantId;
+      },
+    });
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: VARIANT }),
+    });
+    expect(res.status).toBe(200);
+    expect(asked).toEqual([VARIANT]);
+    expect(JSON.parse(res.body).model).toBe(VARIANT);
+  });
+});
+
 describe('gateway streaming', () => {
   it('streams SSE chunks as they are produced rather than buffering', async () => {
     await new Promise(r => upstream.server.close(r));

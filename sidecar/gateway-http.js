@@ -124,6 +124,36 @@ export function openAiError (message, type = 'server_error', code = null) {
 }
 
 /**
+ * Replace the `model` field of a buffered JSON body.
+ *
+ * Foundry routes by variant id (`qwen2.5-0.5b-instruct-generic-cpu`, with or without the
+ * `:<version>` suffix) and refuses the friendly alias (`qwen2.5-0.5b`) outright, returning
+ * "is not loaded" even while that very model is resident. A replay after an autoload must
+ * therefore name the variant that was actually loaded, or it fails exactly as the first
+ * attempt did — having spent the memory to load the model.
+ *
+ * Returns null when the body is not a JSON object, so the caller can send it untouched.
+ *
+ * @param {string} body
+ * @param {string} name
+ * @returns {string|null}
+ */
+export function rewriteModelName (body, name) {
+  if (typeof body !== 'string' || typeof name !== 'string' || !name.trim()) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  // Already correct: return the original rather than a re-serialised equivalent.
+  if (parsed.model === name) return body;
+  parsed.model = name;
+  return JSON.stringify(parsed);
+}
+
+/**
  * Rewrite Foundry's `/status` payload so it advertises the address clients actually use.
  *
  * Foundry is started on an internal loopback port and reports that port back. Echoing it

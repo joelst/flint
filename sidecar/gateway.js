@@ -25,6 +25,7 @@ import {
   shouldBufferBody,
   extractModelName,
   openAiError,
+  rewriteModelName,
   rewriteStatusEndpoints,
   isLoopbackAddress,
   DEFAULT_MAX_BUFFERED_BODY,
@@ -39,7 +40,8 @@ const UPSTREAM_TIMEOUT_MS = 0; // no timeout: generation can legitimately run fo
  * @param {string} options.bindAddress       interface to listen on
  * @param {number} options.upstreamPort      loopback port Foundry was started on
  * @param {(id: string) => Promise<{alias: string, variantId: string|null}|null>} options.resolve
- * @param {(alias: string, variantId: string|null) => Promise<void>} options.load
+ * @param {(alias: string, variantId: string|null) => Promise<string|null|void>} options.load
+ *        resolves to the variant id actually loaded, which the replay needs to name
  * @param {(level: string, msg: string) => void} [options.log]
  * @param {boolean} [options.autoload]       default true
  * @param {boolean} [options.loopbackOnlyAutoload] default true
@@ -71,6 +73,11 @@ export function createGateway (options) {
   let generation = 0; // bumped on stop, so a load resolving late cannot trigger a replay
   let boundPort = null; // actual port, which differs from publicPort when 0 was requested
 
+  // Identifiers we have learned need rewriting before Foundry will route them, mapped to
+  // the variant id that works. Bounded by the catalog, since a key is only recorded after
+  // resolving against the cached-model index.
+  const rewrites = new Map();
+
   function loadOnce (alias, variantId) {
     const key = `${alias}::${variantId ?? ''}`;
     const existing = inflight.get(key);
@@ -78,7 +85,7 @@ export function createGateway (options) {
 
     const run = loadChain.then(async () => {
       log('info', `Gateway autoload: ${alias}${variantId ? ` (${variantId})` : ''}`);
-      await load(alias, variantId);
+      return await load(alias, variantId);
     });
     // The chain must not break on failure, or every later load would reject immediately.
     loadChain = run.catch(() => {});
@@ -110,12 +117,20 @@ export function createGateway (options) {
     const buffered = await maybeBufferBody(req, res);
     if (buffered === ABORTED) return;
 
-    const attempt = await forward(req, res, buffered, { captureNotLoaded: true });
+    const requested = buffered === null ? null : extractModelName(buffered);
+
+    // An identifier that needed rewriting once needs it on every later request, and the
+    // upstream rejection that teaches us costs a round trip each time. Reuse it, and let
+    // the not-loaded path below correct the entry if it has gone stale.
+    let outgoing = buffered;
+    const known = requested ? rewrites.get(requested) : null;
+    if (known) outgoing = rewriteModelName(buffered, known) ?? buffered;
+
+    const attempt = await forward(req, res, outgoing, { captureNotLoaded: true });
     if (attempt === SENT) return;
 
     // Only reached when upstream returned the exact not-loaded rejection and the body was
     // buffered, so replaying it is safe.
-    const requested = extractModelName(buffered);
     const target = requested ? await resolve(requested) : null;
     if (!target) {
       // Nothing to load: hand back what upstream said rather than inventing an error.
@@ -123,17 +138,32 @@ export function createGateway (options) {
     }
 
     const gen = generation;
+    let loadedId = null;
     try {
-      await loadOnce(target.alias, target.variantId);
+      loadedId = await loadOnce(target.alias, target.variantId);
     } catch (err) {
       log('warn', `Gateway autoload failed for ${target.alias}: ${err?.message ?? err}`);
       return respondBuffered(res, attempt.status, attempt.headers, attempt.body);
     }
     if (gen !== generation || res.writableEnded || res.destroyed) return;
 
+    // Name the variant that was actually loaded. Foundry rejects the friendly alias even
+    // when that model is resident, so replaying the client's own wording would reproduce
+    // the very error the load was meant to resolve.
+    let replayBody = buffered;
+    const canonical = typeof loadedId === 'string' && loadedId ? loadedId : target.variantId;
+    if (canonical && canonical !== requested) {
+      const rewritten = rewriteModelName(buffered, canonical);
+      if (rewritten !== null) {
+        replayBody = rewritten;
+        rewrites.set(requested, canonical);
+        log('info', `Gateway routing ${requested} → ${canonical}`);
+      }
+    }
+
     // captureNotLoaded: false — the retry already happened, so a second rejection is the
     // real answer and belongs to the client rather than being swallowed again.
-    const second = await forward(req, res, buffered, { captureNotLoaded: false });
+    const second = await forward(req, res, replayBody, { captureNotLoaded: false });
     if (second !== SENT) {
       respondBuffered(res, attempt.status, attempt.headers, attempt.body);
     }
@@ -308,6 +338,8 @@ export function createGateway (options) {
     },
     stop () {
       generation += 1;
+      // Learned routings describe models loaded by the service we are dropping.
+      rewrites.clear();
       return new Promise(resolve2 => {
         agent.destroy();
         server.close(() => resolve2());

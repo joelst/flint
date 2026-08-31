@@ -30,6 +30,10 @@ Facts only — no history. Record what is true now; `git log` and `CHANGELOG.md`
 - Autoload is reactive: forward first, and only on the exact `400 ... is not loaded` retry once after loading. Never check "is it loaded" up front, and never retry twice.
 - Only **cached** models are resolvable for autoload (`sidecar/model-registry.js`), so a stray identifier cannot start a download. Call `invalidateModelIndex()` wherever the cached set changes.
 - `catalog.getModel()` accepts **only** the friendly alias; the id in `/v1/models` throws. Loading needs `{alias, variantId}` — dropping the variant loads the wrong build.
+- The HTTP router is the mirror image: it routes **variant ids only** (with or without `:<version>`) and rejects the alias with "is not loaded" even while that model is resident. The gateway therefore rewrites the replayed body to the variant id the loader reports, and caches that mapping. A request must never be replayed under the client's own alias.
+- Loading by alias resolves whichever variant suits the registered EPs, so it is only known after the load — `load()` returns it.
+- Execution providers are **not** registered automatically: `ensureAccelerators` (→ `downloadAndRegisterEps`) must run or only `CPUExecutionProvider` is available and every CUDA variant fails to load. The app calls it at startup; scripts and probes must call it too.
+- Within one alias the pool holds a single variant: requesting another triggers unload-then-load, so a model is never resident twice. Different aliases coexist, and nothing evicts them — residency is bounded only by memory.
 - Proxied traffic is deliberately absent from the access log: `writeToDisk()` appends synchronously and would stall the event loop.
 
 ## UI and state

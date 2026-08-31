@@ -1,15 +1,21 @@
 // Resolving the model identifier an OpenAI client sends into something loadable.
 //
 // The Foundry service advertises variant ids in `GET /v1/models` (`qwen3-0.6b-generic-cpu`)
-// and accepts all three identifier forms when routing a request. The SDK loader does not:
-// `catalog.getModel()` accepts **only** the friendly alias and throws on a variant id. So a
-// client that does the obvious thing — read /v1/models, POST the id it was given — names a
-// model that cannot be handed to the loader as-is.
+// and routes on that form, with or without the `:<version>` suffix. It does **not** route
+// the friendly alias: a request naming `qwen2.5-0.5b` is rejected with "is not loaded" even
+// while that exact model is resident (verified against a live service). The SDK loader is
+// the mirror image — `catalog.getModel()` accepts **only** the alias and throws on a variant
+// id. So the two halves of the job disagree about what a model is called, and neither
+// accepts the other's vocabulary.
 //
 // Resolution therefore has to yield both parts: the alias to load, and the specific variant
 // that was asked for. Dropping the variant would silently load a different one (a CPU build
 // when the client asked for the CUDA build), and the forwarded request still names the
 // original variant, so it would fail again with the same error it was meant to fix.
+//
+// An alias resolves with `variantId: null`, meaning "whatever the service picks". The
+// gateway learns the answer from the loader and rewrites the replayed request to match,
+// since the alias the client sent would never route on its own.
 //
 // Pure module: no SDK calls and no I/O, so the mapping rules are unit testable.
 

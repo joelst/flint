@@ -1592,7 +1592,9 @@ rl.on('line', async (line) => {
           bindAddress: bindAddr,
           upstreamPort: nativePort,
           resolve: resolveForGateway,
-          load: async (alias, variantId) => { await ensureModel(alias, variantId); },
+          // The loaded variant id is what the replayed request must name: Foundry rejects
+          // the friendly alias even once the model is resident.
+          load: async (alias, variantId) => (await ensureModel(alias, variantId))?.variantId ?? null,
           log,
         });
         try {

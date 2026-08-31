@@ -5,6 +5,7 @@ import {
   isModelNotLoadedError,
   shouldBufferBody,
   extractModelName,
+  rewriteModelName,
   rewriteStatusEndpoints,
   isLoopbackAddress,
 } from './gateway-http.js';
@@ -126,6 +127,46 @@ describe('extractModelName', () => {
     expect(extractModelName('not json')).toBe(null);
     expect(extractModelName('{"model":"  "}')).toBe(null);
     expect(extractModelName('{"model":42}')).toBe(null);
+  });
+});
+
+describe('rewriteModelName', () => {
+  it('replaces the model field and preserves everything else', () => {
+    const body = JSON.stringify({
+      model: 'qwen2.5-0.5b',
+      messages: [{ role: 'user', content: 'hi' }],
+      stream: true,
+      max_tokens: 8,
+    });
+    const out = rewriteModelName(body, 'qwen2.5-0.5b-instruct-generic-cpu:4');
+    const parsed = JSON.parse(out as string);
+    expect(parsed.model).toBe('qwen2.5-0.5b-instruct-generic-cpu:4');
+    expect(parsed.messages).toEqual([{ role: 'user', content: 'hi' }]);
+    expect(parsed.stream).toBe(true);
+    expect(parsed.max_tokens).toBe(8);
+  });
+
+  it('returns the original body untouched when the name already matches', () => {
+    const body = '{"model":"a","messages":[]}';
+    expect(rewriteModelName(body, 'a')).toBe(body);
+  });
+
+  it('adds the field when the body omits it', () => {
+    expect(JSON.parse(rewriteModelName('{"messages":[]}', 'a') as string).model).toBe('a');
+  });
+
+  // The caller falls back to sending the body untouched, so null must mean "cannot".
+  it('returns null when the body is not a JSON object', () => {
+    expect(rewriteModelName('not json', 'a')).toBe(null);
+    expect(rewriteModelName('[1,2]', 'a')).toBe(null);
+    expect(rewriteModelName('"str"', 'a')).toBe(null);
+    expect(rewriteModelName('null', 'a')).toBe(null);
+  });
+
+  it('returns null for an unusable replacement name', () => {
+    expect(rewriteModelName('{"model":"a"}', '')).toBe(null);
+    expect(rewriteModelName('{"model":"a"}', '   ')).toBe(null);
+    expect(rewriteModelName(null as any, 'a')).toBe(null);
   });
 });
 
