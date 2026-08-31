@@ -103,7 +103,7 @@ export function createGateway (options) {
 
   // A proxy that answers CONNECT or upgrades a connection becomes a tunnel to anywhere.
   // Foundry serves neither, so refusing is both correct and the safe default.
-  server.on('connect', socket => socket.destroy());
+  server.on('connect', (_req, socket) => socket.destroy());
   server.on('upgrade', (_req, socket) => socket.destroy());
 
   async function handleRequest (req, res) {

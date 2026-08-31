@@ -56,6 +56,7 @@ describe('isModelNotLoadedError', () => {
 
   it('matches the Foundry rejection on 400', () => {
     expect(isModelNotLoadedError(400, real)).toBe(true);
+    expect(isModelNotLoadedError(400, JSON.stringify({ error: { message: real } }))).toBe(true);
   });
 
   it('ignores the same text on other statuses', () => {
@@ -65,6 +66,7 @@ describe('isModelNotLoadedError', () => {
 
   it('ignores unrelated 400s', () => {
     expect(isModelNotLoadedError(400, 'model field is required')).toBe(false);
+    expect(isModelNotLoadedError(400, 'Model validation failed because it is not loaded')).toBe(false);
     expect(isModelNotLoadedError(400, '')).toBe(false);
   });
 });

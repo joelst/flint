@@ -69,9 +69,13 @@ export function isJsonContentType (contentType) {
 export function isModelNotLoadedError (status, body) {
   if (status !== 400) return false;
   const text = String(body || '');
-  if (!/is not loaded/i.test(text)) return false;
-  // Foundry's wording: "Model 'X' is not loaded. Please load the model before ...".
-  return /\bmodel\b/i.test(text);
+  let message = text;
+  try {
+    message = JSON.parse(text)?.error?.message;
+  } catch {
+    // Some callers provide the extracted message rather than the complete response body.
+  }
+  return /^Failed to handle OpenAI completion: Model '[^']+' is not loaded\. Please load the model before getting a ChatClient\.$/.test(message);
 }
 
 /** Bodies are only buffered so a request can be replayed; a giant upload is streamed. */
