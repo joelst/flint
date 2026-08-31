@@ -21,6 +21,11 @@ const libraryPath = path.resolve(
   'node_modules/foundry-local-sdk/foundry-local-core/win32-x64/Microsoft.AI.Foundry.Local.Core.dll',
 );
 
+// The native core is Windows-only and ships as a platform binary. Tests that ask the
+// real SDK to resolve an imported model can only run where that binary exists; the
+// rest of this file drives the sidecar directly and runs everywhere.
+const hasNativeSdk = process.platform === 'win32' && fs.existsSync(libraryPath);
+
 let proc: ChildProcessWithoutNullStreams;
 let nextId = 1;
 const pending = new Map<number, (msg: any) => void>();
@@ -208,7 +213,7 @@ describe('BYOM link', () => {
 });
 
 describe('BYOM discovery by the Foundry SDK', () => {
-  it('surfaces an imported model as a Local provider resolvable by alias', async () => {
+  it.skipIf(!hasNativeSdk)('surfaces an imported model as a Local provider resolvable by alias', async () => {
     const src = track(makeSourceRepo());
     const imported = await send('importModelFolder', { folderPath: src, name: 'discoverable-model' });
     expect(imported.ok, JSON.stringify(imported)).toBe(true);
@@ -267,9 +272,10 @@ describe('BYOM prompt template editing', () => {
     expect(Object.keys(res.result.presets)).toContain('chatml');
   });
 
-  it('rewrites the template and the SDK still resolves the model', async () => {
+  it('rewrites the template and reads back as user-edited', async () => {
     const src = track(makeSourceRepo());
-    await send('importModelFolder', { folderPath: src, name: 'tpl-write' });
+    const imported = await send('importModelFolder', { folderPath: src, name: 'tpl-write' });
+    expect(imported.ok, JSON.stringify(imported)).toBe(true);
 
     const res = await send('setModelTemplate', { name: 'tpl-write', promptTemplate: custom });
     expect(res.ok, JSON.stringify(res)).toBe(true);
@@ -279,10 +285,23 @@ describe('BYOM prompt template editing', () => {
     expect(readBack.result.templateSource).toBe('user-edited');
 
     // The Name field must survive the rewrite, or the scanner drops the model.
+    const inf = JSON.parse(
+      fs.readFileSync(path.join(imported.result.path, 'v1', 'inference_model.json'), 'utf8'),
+    );
+    expect(inf.Name).toBe('tpl-write:1');
+  });
+
+  it.skipIf(!hasNativeSdk)('rewrites the template and the SDK still resolves the model', async () => {
+    const src = track(makeSourceRepo());
+    await send('importModelFolder', { folderPath: src, name: 'tpl-write-sdk' });
+
+    const res = await send('setModelTemplate', { name: 'tpl-write-sdk', promptTemplate: custom });
+    expect(res.ok, JSON.stringify(res)).toBe(true);
+
     const { FoundryLocalManager } = await import('foundry-local-sdk');
     const mgr = (FoundryLocalManager as any).create({ appName: APP, logLevel: 'error', libraryPath });
-    const byAlias = await mgr.catalog.getModel('tpl-write');
-    expect(byAlias.id).toBe('tpl-write:1');
+    const byAlias = await mgr.catalog.getModel('tpl-write-sdk');
+    expect(byAlias.id).toBe('tpl-write-sdk:1');
   }, 60000);
 
   it('leaves the previous template intact when the new one is invalid', async () => {
