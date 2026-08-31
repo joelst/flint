@@ -1579,6 +1579,10 @@ rl.on('line', async (line) => {
       invalidateModelIndex();
 
       if (!(await waitForUpstream(nativePort))) {
+        // Wind back the half-started service so a retry begins from a clean state rather
+        // than tripping over a listener that never became usable.
+        try { manager.stopWebService?.(); } catch { /* already failing; nothing to add */ }
+        upstreamPort = null;
         throw new Error('The local service did not become ready. Try starting it again.');
       }
 
@@ -1595,6 +1599,11 @@ rl.on('line', async (line) => {
           await gateway.start();
         } catch (e) {
           gateway = null;
+          // The native service is already up at this point. Leaving it running would
+          // contradict the error the user is about to see, and would strand a listener on
+          // a port nothing advertises, so wind it back before reporting the failure.
+          try { manager.stopWebService?.(); } catch { /* already failing; nothing to add */ }
+          upstreamPort = null;
           throw new Error(
             `Could not listen on ${bindAddr}:${payload.port} — ${e?.message ?? e}. `
             + 'Another process may already be using that port.'
