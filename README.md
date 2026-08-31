@@ -54,13 +54,13 @@ No system Node install is required: release builds bundle their own Node 22 runt
 
 ## Status
 
-| | |
-|---|---|
-| **Version** | **0.4.4** — [signed installers on the releases page](https://github.com/joelst/flint/releases/latest) |
-| **Product** | 0.4 ships the bundled Node 22 sidecar runtime (no system Node required), first-run coaching, empty-state CTAs, and the About strip, on top of the complete 0.3 feature set |
-| **Packaging** | Windows installers are Authenticode-signed with Azure Trusted Signing; bundles carry Foundry native cores and a pinned Node 22 runtime, verified in CI |
-| **Updates** | In-app updater checks the latest GitHub release |
-| **Next** | See [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) and [docs/BACKLOG.md](./docs/BACKLOG.md) |
+**0.4.4** — [signed installers on the releases page](https://github.com/joelst/flint/releases/latest). Pre-1.0: expect breaking changes.
+
+- Windows installers are Authenticode-signed (Azure Trusted Signing); bundles ship the Foundry native cores and a pinned Node 22 runtime, verified in CI.
+- In-app updater tracks the latest GitHub release.
+- macOS builds are produced but not yet dogfooded.
+
+Next: [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) · [docs/BACKLOG.md](./docs/BACKLOG.md) · Release notes: [CHANGELOG.md](./CHANGELOG.md)
 
 Living plan (docs, help, 0.4, 1.0): **[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md)** · End-user walkthrough: **[docs/USER_GUIDE.md](./docs/USER_GUIDE.md)**
 
