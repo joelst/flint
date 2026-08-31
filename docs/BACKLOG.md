@@ -51,11 +51,11 @@ Verify an item against the tree before acting on it.
 
 ## Models and cache (0.5 — see RELEASE_ROADMAP §6)
 
-- [ ] **BYOM import from a local folder** — verified working on 1.2.4; needs staging,
-      validation, atomic activation, load smoke test, and rollback.
-- [ ] **Additional model folders via directory junctions** — verified traversable by the
-      native scanner. Keep `~/.flint` the only writable root; never write to a foreign
-      cache; delete the link, never the target.
+- [x] **BYOM import from a local folder** — inspect, validate, stage, atomically activate,
+      roll back. Prompt template is shown and editable at import and afterwards.
+- [x] **Additional model folders via directory junctions** — `linkModelFolder`. Never
+      writes to the foreign folder; delete the link, never the target.
+- [x] **Sort the model list** — name, family, or last updated; persisted.
 - [ ] **Read-only cache inventory** — duplicates, partial downloads, reclaimable bytes.
       Recommend only; no cross-root deletion.
 - [ ] **Auto-load on demand** — clients get `400 Model is not loaded` today and the

@@ -59,6 +59,9 @@ Facts only — no history. Record what is true now; `git log` and `CHANGELOG.md`
 - `PromptTemplate` uses the literal `{Content}` placeholder (roles: `system`, `user`, `assistant`, `prompt`). A template missing it **does not error** — the model loads and silently drops message text, so validate before writing.
 - Almost no public ONNX repo ships `inference_model.json` (2 of 301 surveyed on HF); Flint authors it. A model's `chat_template.jinja` wins over its architecture, because a fine-tune can keep the architecture while changing turn markers.
 - `.flint-import.json` in a model dir is the ownership marker: only marked dirs may be modified or deleted by Flint. Catalog dirs and junctions (linked models) must never be rewritten.
+- Prompt template rules live in `sidecar/prompt-template.js`, which imports **nothing** (not even Node builtins) so the browser bundle and the sidecar validate identically. `byom-import.js` re-exports it; `src/lib/sdk.ts` re-exports it to the UI. Adding a Node import there would break the web build.
+- Locally added models (imported or linked) are identified in the UI by `info.uri` starting with `local://`.
+- `listModels` returns `family` and `createdAt` (unix **seconds**, sometimes null) — those are the sortable fields. Sorting lives in `src/lib/model-sort.ts`, not in `+page.svelte`.
 
 ## Tauri / Rust
 - Keep Rust thin; if you add invoke handlers, update capabilities and frontend call sites.

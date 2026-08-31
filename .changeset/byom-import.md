@@ -19,4 +19,8 @@ Gemma), `importModelFolder` accepts a `promptTemplate` that overrides detection,
 model. Templates are validated before they are written — every turn must be present and the
 `{Content}` placeholder must appear, because a malformed template does not fail loudly but
 silently drops message text. Rewrites are refused for catalog and linked models, whose files
-Flint does not own.
+Flint does not own. Models are added from the Models tab: a folder picker validates the
+folder, shows what was detected, lets the prompt template be reviewed and edited before
+anything is copied, then either copies the folder into Flint's cache or links it in place.
+The template of an already-imported model can be reopened and changed from its card.
+The model list can be sorted by name, family, or last updated.
