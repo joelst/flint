@@ -40,6 +40,23 @@ Facts only — no history. Record what is true now; `git log` and `CHANGELOG.md`
 - CI and release both run `verify:bundle` and `smoke:node`. Keep them passing — packaging bugs are invisible to unit tests.
 - Updater endpoint is `releases/latest/download/latest.json`. Never use a `{{current_version}}` URL (it resolves to the version already installed). Drafts and pre-releases are invisible to `releases/latest`.
 
+## Endpoint / models (probed 2026-08-30, SDK 1.2.4, CLI 0.10.3)
+- The service **does** serve OpenAI-shaped `GET /v1/models` (200). `/openai/models` and `/foundry/list` are **404** — docs referencing them are stale.
+- `/v1/models` lists **cached models only**, with no loaded/unloaded state. `id` is the variant *without* the version suffix (`qwen3-0.6b-generic-cpu`); `parent` is the friendly alias.
+- **Alias routing works**: `model: "qwen3-0.6b"` succeeds, as do the variant with and without `:version`. The old pool-spike claim that clients must send variant IDs is obsolete.
+- Streaming works: SSE with a `[DONE]` terminator and `usage` included. `usage` is present on non-streamed calls too.
+- Responses carry **non-standard** fields (`IsDelta`, `Successful`, `HttpStatusCode`, and both `delta` and `message` in one choice). Strict OpenAI clients may reject them.
+- A model must be **loaded first** — otherwise requests fail `400 Model is not loaded`. Load via `catModel.load()` (there is no `manager.loadModel()`).
+- The catalog has **zero embedding models** (97 chat / 21 vision / 10 ASR of 128), so hiding them in the UI is a no-op; `/v1/embeddings` exists but needs a BYOM model. 75 of 128 declare `supportsToolCalling` — treat that as catalog-declared, not verified.
+
+## Model cache / BYOM
+- Cache root comes from `appName`: Flint uses `~/.flint`, the Foundry CLI uses `~/.foundry`. They do **not** share models, and duplication is real (15.3 GB measured).
+- `modelCacheDir` selects a **single** root — it is a cache *switcher*, not an additive search path. Setting it to a custom dir hides the normal catalog.
+- **BYOM works today**: a directory holding `genai_config.json` + `inference_model.json` (`{"Name":"<name>:<ver>", "PromptTemplate":{…}}`) and no `download.tmp` is discovered by `getCachedModels()` as `providerType: "Local"`, `uri: local://<name>`, resolvable by alias. The native scanner is recursive.
+- **Directory junctions inside the cache root are traversed**, surfacing models stored elsewhere with alias/provider/version intact — no copying and no writes to the foreign directory. Delete the link, never the target.
+- `addCatalog` / `registerModel` (the HuggingFace catalog API) exist in **neither** JS SDK 1.2.4 nor 2.0.0 — they appear to be C#-only. Flint must own import logic.
+- Foundry Local is **ONNX-only (onnxruntime-genai)**; it does not run GGUF.
+
 ## Tauri / Rust
 - Keep Rust thin; if you add invoke handlers, update capabilities and frontend call sites.
 - Bundle Foundry SDK assets + sidecar together when changing runtime files.

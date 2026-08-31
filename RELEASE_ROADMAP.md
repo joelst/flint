@@ -420,24 +420,129 @@ A linear chain (run prompt A → pipe output into prompt B → show final result
 
 ---
 
-## 6) Additional Future Milestones (post-0.4 ideas)
+## 6) The 0.5 → 1.0 Plan
 
-1. **Plugin-style connector framework**
-   - Add provider adapters (Azure/OpenAI-compatible, additional local runtimes) behind one interface.
-2. **Conversation intelligence**
-   - Per-conversation endpoint pinning, retry policy, and export/import.
-3. **Performance toolkit**
-   - Benchmark mode for model + endpoint comparisons (latency, throughput, memory).
-4. **User onboarding**
-   - Guided setup for endpoint profiles and tool integration recipes.
-5. **Model catalog details v2 (backlog)**
-   - Expand model details modal with full upstream metadata, benchmark notes, and platform-specific acceleration compatibility matrix (Windows/macOS/Linux).
-   - Replace heuristic memory guidance with measured baseline telemetry per model/provider where available.
-   - Add an inventory view that can list all models with per-model disk usage and supported acceleration providers.
-6. **Deferred hardening items (queued)**
-   - Add defensive environment guards for `DOMParser` / `NodeFilter` in message sanitization so utility calls remain safe if reused in non-browser execution contexts.
-   - Improve sidecar audio input reliability by validating actual WAV bytes (or adding explicit transcoding) instead of relying on filename extension conventions.
-   - Broaden coverage gating beyond the current narrow include list so new SDK/sidecar logic changes affect quality gates by default.
+Measured 2026-08-30 against SDK 1.2.4, Foundry CLI 0.10.3, and the live HTTP service.
+Numbers below are probe results, not estimates.
+
+### Positioning
+
+**The Windows control plane for Foundry Local**: hardware-aware model management, an
+observable OpenAI endpoint, and reliable integration with local AI clients.
+
+Flint does not compete with Ollama on model-library breadth, and says so. Foundry Local
+is ONNX-only; Ollama's ecosystem is GGUF. That trade is conceded openly — conceding it
+is what makes the rest of the pitch credible.
+
+Reasons to choose Flint over Ollama's desktop app, all already shipped: NPU/GPU/CPU
+variant selection, multi-model pool co-residency, side-by-side comparison, speech-to-text,
+audit logging, bind-address/network control, and a code-signed installer. Ollama's GUI
+has none of these.
+
+### What the endpoint actually does (probed, contradicts prior assumptions)
+
+| Behaviour | Result |
+| --- | --- |
+| `GET /v1/models` | **200, OpenAI-shaped** `{data:[…]}`. Not missing, as docs implied. |
+| `GET /openai/models`, `/foundry/list` | **404** — documented routes are stale. |
+| Model `id` in the list | Variant **without** version suffix (`qwen3-0.6b-generic-cpu`); `parent` carries the friendly alias. |
+| Routing by friendly alias | **Works** (`qwen3-0.6b` → 200). The old pool-spike note requiring variant IDs is obsolete. |
+| Streaming | **Works** — SSE, `[DONE]` terminator, and `usage` included in the stream. |
+| `usage` on non-streamed calls | Present. |
+| `POST /v1/embeddings` | Route **exists** (GET returns 405). |
+| Model not pre-loaded | **400 `Model is not loaded`** — see gap below. |
+| `/v1/models` contents | **Cached models only** (35 of 128), and no loaded/unloaded state. |
+
+**The single real agent-compat gap:** a client reads `/v1/models`, picks an ID, POSTs,
+and gets `400 Model is not loaded`. Nothing in the OpenAI protocol lets a client load a
+model. Flint already owns a model pool — auto-load-on-demand is the fix, and it is
+squarely Flint's job as the control plane, not Foundry's.
+
+### 0.5 — Own the model, prove it loads
+
+1. **BYOM import (local folder).** Verified working today: a directory with
+   `genai_config.json` + `inference_model.json` and no `download.tmp` is discovered by
+   `getCachedModels()` as `providerType: "Local"`, `uri: local://<name>`, resolvable by
+   alias. Pure filesystem; no SDK upgrade. Flint synthesises `inference_model.json` and
+   the prompt template.
+   Import must be **staged, validated, atomically activated, and load-smoke-tested**,
+   with rollback and clear ownership metadata so Flint knows which files it may delete.
+2. **Additional model folders via junctions.** Verified: a directory junction inside the
+   cache root is traversed by the native scanner, surfacing a model stored elsewhere with
+   its real alias, provider, and version intact — no copying, no writes to the foreign
+   directory. This replaces the unsafe "shared cache" idea: Flint keeps `~/.flint` as its
+   only writable root and links foreign models in. Deletion must remove the *link*, never
+   the target.
+3. **Cache inventory, read-only.** Report foreign models, duplicates, partial downloads,
+   and reclaimable bytes. Recommend; never delete across roots.
+   Measured on the maintainer's machine: `~/.flint` 107 GB / 35 models vs `~/.foundry`
+   31.4 GB / 7 models, **15.3 GB duplicated**.
+4. **Auto-load on demand at the endpoint** — close the `400 Model is not loaded` gap.
+5. **Throughput instrumentation** with explicit definitions: model load time, TTFT,
+   prompt tokens/sec, decode tokens/sec, end-to-end duration, warm/cold, resolved variant
+   and execution provider. Never a single ambiguous "tokens/sec".
+
+### 0.6 — Compatibility gateway
+
+Gateway work only. The tool-execution layer does **not** share this milestone.
+
+- Conformance self-test that checks *behaviour*, not route existence: does `/v1/models`
+  return the OpenAI envelope; can a returned ID be passed straight back to chat; does
+  streaming deliver a first token and terminate; does disconnect cancel generation; does
+  `usage` reconcile with output; does a tool-capable model emit valid `tool_calls`.
+- Stable model IDs across restarts; surface both alias and resolved variant.
+- Response-shape normalisation. The service returns non-standard extras (`IsDelta`,
+  `Successful`, `HttpStatusCode`, and both `delta` and `message` in the same choice) that
+  strict clients may reject.
+- `/v1/embeddings` served end-to-end — requires a BYOM embedding model, because the
+  Foundry catalog ships **zero** (97 chat, 21 vision, 10 ASR of 128). `createEmbeddingClient()`
+  exists in 1.2.4; only the model is missing. This is what unlocks RAG and Continue's indexer.
+- Verified integration recipes for OpenClaw, Cline, and Continue, pinned to tested client
+  versions. OpenClaw accepts any non-empty placeholder API key on loopback and
+  health-checks `GET /v1/models`.
+- Surface `supportsToolCalling` (75 of 128) and `contextLength`, labelled
+  **catalog-declared** vs **Flint-verified**. A catalog flag is not a guarantee.
+
+### 0.7 — Curated model acquisition
+
+A **Flint-validated ONNX catalog**, not a generic HuggingFace browser: pinned repo and
+revision, tested execution provider, required files, disk/memory footprint, chat-template
+source, tool-calling status, last-tested core version. Arbitrary repo import stays behind
+an "unverified" advanced option.
+
+Survey data (HF API, top 1000 onnx + text-generation by downloads): **166 ship
+`genai_config.json`**; 81% modified within a year, so the ecosystem is active, not fallow.
+But only **29 exceed 100 downloads/month** and **2 exceed 1000** — a live but thin niche
+dominated by AMD Ryzen AI builds (193 of 301 in a recency-sorted sample), with
+`onnx-community` and `microsoft` next. Critically, only **2 of 301 ship
+`inference_model.json`**, so Flint must synthesise it for essentially every import.
+A curated 20 that reliably work beats a browser exposing 300 that mostly do not.
+
+### Post-1.0 / non-goals
+
+- **Tokenomics deferred.** "Tokens × cloud list price" is not a defensible savings figure:
+  models are not quality-equivalent, tokenizers differ, and cloud pricing splits
+  input/cached/output/batch. If ever built, ship it as a **cost comparator** with visible
+  assumptions — never "savings". Tokens-per-watt needs idle-power baselining and
+  synchronised sampling; omit unless measurable as joules per output token.
+- **No Flint-native tool executor before 1.0.** Receiving a call, gating it, executing it,
+  and returning the result to the model *is* a manually gated agent loop — it inherits the
+  security surface while delivering a worse version of what Cline and OpenClaw already do.
+  The heuristic prompt-injection guard is not a real boundary and would create false
+  confidence. Flint displays and exports tool-call JSON for debugging; clients execute.
+- **Agent loops stay delegated**, and OpenClaw is treated as one integration, not a
+  strategic dependency. Flint should work with any conforming OpenAI client.
+- **Olive conversion (safetensors → ONNX)** stays a documented external recipe. Bundling
+  Python plus conversion, quantisation, and hardware targeting would overwhelm the app.
+- **No GGUF**, no `flint` CLI shadowing `foundry`, no model registry or push.
+
+### Upstream-churn risk
+
+Foundry Local's REST API is preview and explicitly subject to breaking change, and Flint
+is deliberately pinned to SDK 1.2.4 (2.0.0 drops `responsesClient.d.ts` and refactors
+AudioSession for no BYOM benefit). A CLI or core update can break cache, gateway, or BYOM
+assumptions with no Flint change. Add a startup SDK/core/CLI version check that warns
+visibly on untested combinations rather than failing obscurely.
 
 ---
 
