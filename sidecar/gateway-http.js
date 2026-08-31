@@ -69,13 +69,19 @@ export function isJsonContentType (contentType) {
 export function isModelNotLoadedError (status, body) {
   if (status !== 400) return false;
   const text = String(body || '');
+  // Foundry wraps the message as {"error":{"message":...}}, but some callers pass the
+  // extracted message on its own. Fall back to the raw text unless a message is found.
   let message = text;
   try {
-    message = JSON.parse(text)?.error?.message;
+    const parsed = JSON.parse(text)?.error?.message;
+    if (typeof parsed === 'string') message = parsed;
   } catch {
-    // Some callers provide the extracted message rather than the complete response body.
+    // Not JSON: treat the body as the message itself.
   }
-  return /^Failed to handle OpenAI completion: Model '[^']+' is not loaded\. Please load the model before getting a ChatClient\.$/.test(message);
+  // Keyed to the quoted model name, the one part of the sentence that cannot appear by
+  // accident. Anchoring the whole sentence instead would silently disable autoload the
+  // first time Foundry reworded the surrounding text.
+  return /\bModel '[^']+' is not loaded\b/i.test(message);
 }
 
 /** Bodies are only buffered so a request can be replayed; a giant upload is streamed. */

@@ -59,6 +59,27 @@ describe('isModelNotLoadedError', () => {
     expect(isModelNotLoadedError(400, JSON.stringify({ error: { message: real } }))).toBe(true);
   });
 
+  // Captured verbatim from a live Foundry service, apostrophes escaped as it sends them.
+  it('matches the exact body the service returns', () => {
+    const wire = '{"error":{"message":"Failed to handle OpenAI completion: Model '
+      + '\\u0027qwen3.5-4b-generic-cpu:3\\u0027 is not loaded. Please load the model '
+      + 'before getting a ChatClient.","type":"invalid_request_error","code":null}}';
+    expect(isModelNotLoadedError(400, wire)).toBe(true);
+  });
+
+  // Autoload must not silently stop working the first time Foundry rewords the sentence
+  // around the model name.
+  it('survives rewording around the quoted model name', () => {
+    expect(isModelNotLoadedError(400, "Model 'phi-4' is not loaded.")).toBe(true);
+    expect(isModelNotLoadedError(400, "Request failed: Model 'phi-4' is not loaded yet, sorry.")).toBe(true);
+  });
+
+  // A JSON body of some other shape must fall back to the raw text, not be discarded.
+  it('reads the raw body when the JSON is not the expected shape', () => {
+    expect(isModelNotLoadedError(400, JSON.stringify({ detail: real }))).toBe(true);
+    expect(isModelNotLoadedError(400, JSON.stringify({ error: { message: 'bad request' } }))).toBe(false);
+  });
+
   it('ignores the same text on other statuses', () => {
     expect(isModelNotLoadedError(500, real)).toBe(false);
     expect(isModelNotLoadedError(404, real)).toBe(false);
@@ -67,6 +88,7 @@ describe('isModelNotLoadedError', () => {
   it('ignores unrelated 400s', () => {
     expect(isModelNotLoadedError(400, 'model field is required')).toBe(false);
     expect(isModelNotLoadedError(400, 'Model validation failed because it is not loaded')).toBe(false);
+    expect(isModelNotLoadedError(400, 'The model is not loaded')).toBe(false);
     expect(isModelNotLoadedError(400, '')).toBe(false);
   });
 });
