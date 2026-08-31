@@ -72,6 +72,8 @@ export default defineConfig(() => ({
         'sidecar/gateway-http.js',
         'sidecar/model-registry.js',
         'sidecar/gateway.js',
+        'src/lib/memory-watchdog.ts',
+        'sidecar/pool-eviction.js',
       ],
       // Set just below the level the included files actually achieve, so the
       // gate catches regressions instead of rubber-stamping them. Raise these

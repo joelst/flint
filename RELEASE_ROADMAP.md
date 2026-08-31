@@ -487,6 +487,15 @@ unknown model a clean 400 with no download.
 5. **Throughput instrumentation** with explicit definitions: model load time, TTFT,
    prompt tokens/sec, decode tokens/sec, end-to-end duration, warm/cold, resolved variant
    and execution provider. Never a single ambiguous "tokens/sec".
+6. **Memory watchdog and pool eviction** — **done.** Nothing previously bounded pool
+   residency, so an autoloading endpoint could fill memory unattended. A watchdog samples
+   RAM and per-GPU VRAM on its own cadence regardless of the active tab and raises an
+   in-app banner plus a native OS notification; because the telemetry is system-wide it
+   only alerts while Flint holds resident models and never attributes the usage to Flint.
+   Eviction is opt-in — idle-unload and a max-resident LRU cap — with `pinned` models
+   never unloaded and in-flight requests, including proxied gateway traffic, protected via
+   the gateway's `onActivity` hook. Hardware-aware admission (item 1 of the 0.3 pool work)
+   remains open: Flint still reacts to memory pressure rather than predicting it.
 
 ### 0.6 — Compatibility gateway
 

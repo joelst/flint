@@ -21,6 +21,7 @@
     "autostart:allow-is-enabled",
     "updater:allow-check",
     "updater:allow-download-and-install",
+    "notification:default",
     {
       "identifier": "shell:allow-spawn",
       "allow": [

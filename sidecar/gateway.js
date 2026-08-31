@@ -43,6 +43,9 @@ const UPSTREAM_TIMEOUT_MS = 0; // no timeout: generation can legitimately run fo
  * @param {(alias: string, variantId: string|null) => Promise<string|null|void>} options.load
  *        resolves to the variant id actually loaded, which the replay needs to name
  * @param {(level: string, msg: string) => void} [options.log]
+ * @param {(model: string, phase: 'start'|'end') => void} [options.onActivity]
+ *        called around every request that names a model, so the owner can keep a model
+ *        alive while it is being served and record when it was last used
  * @param {boolean} [options.autoload]       default true
  * @param {boolean} [options.loopbackOnlyAutoload] default true
  * @param {number} [options.maxBufferedBody]
@@ -55,6 +58,7 @@ export function createGateway (options) {
     resolve,
     load,
     log = () => {},
+    onActivity = () => {},
     autoload = true,
     loopbackOnlyAutoload = true,
     maxBufferedBody = DEFAULT_MAX_BUFFERED_BODY,
@@ -113,11 +117,35 @@ export function createGateway (options) {
   server.on('connect', (_req, socket) => socket.destroy());
   server.on('upgrade', (_req, socket) => socket.destroy());
 
+  /** A hook the owner supplied must never be able to take a request down with it. */
+  function notifyActivity (model, phase) {
+    try {
+      onActivity(model, phase);
+    } catch (err) {
+      log('warn', `Gateway activity hook failed: ${err?.message ?? err}`);
+    }
+  }
+
   async function handleRequest (req, res) {
     const buffered = await maybeBufferBody(req, res);
     if (buffered === ABORTED) return;
 
     const requested = buffered === null ? null : extractModelName(buffered);
+    if (!requested) return route(req, res, buffered, requested);
+
+    // Mark the model busy for the whole life of the request, not just the load. Gateway
+    // traffic is proxied straight to Foundry, so the sidecar has no other way to tell a
+    // model generating a long completion apart from one sitting idle — and unloading the
+    // former would kill a live request.
+    notifyActivity(requested, 'start');
+    try {
+      return await route(req, res, buffered, requested);
+    } finally {
+      notifyActivity(requested, 'end');
+    }
+  }
+
+  async function route (req, res, buffered, requested) {
 
     // An identifier that needed rewriting once needs it on every later request, and the
     // upstream rejection that teaches us costs a round trip each time. Reuse it, and let

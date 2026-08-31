@@ -2,7 +2,7 @@ import { writable, type Writable } from 'svelte/store';
 import { Command } from '@tauri-apps/plugin-shell';
 import { resolveResource, resourceDir } from '@tauri-apps/api/path';
 import { exists } from '@tauri-apps/plugin-fs';
-import type { LaneName, EndpointProfile } from './ipc-contracts';
+import type { LaneName, EndpointProfile, ModelPriority, ModelPriorityEntry, EvictionConfig } from './ipc-contracts';
 import {
   evaluateNodeProbe,
   buildNodeMissingMessage,
@@ -238,6 +238,11 @@ export interface PoolEntry {
   alias: string;
   variantId: string;
   isLoaded: boolean | null;
+  /** Epoch ms of the most recent request; drives idle eviction. */
+  lastUsedAt?: number;
+  /** Requests currently being served. Non-zero means the model is exempt from eviction. */
+  inFlight?: number;
+  priority?: ModelPriority;
 }
 
 export interface StreamingStatus {
@@ -271,6 +276,8 @@ export interface PoolStats {
   accelerators?: AcceleratorMemory[];
   tokenTotals: Array<{ alias: string; tokensIn: number; tokensOut: number }>;
   streaming: StreamingStatus | null;
+  /** Echoed back by the sidecar so the UI shows the rules actually in force. */
+  eviction?: EvictionConfig;
 }
 
 export interface FlintSDKState {
@@ -725,6 +732,7 @@ function mapPoolStats(result: any): PoolStats {
     accelerators,
     tokenTotals: result.tokenTotals ?? [],
     streaming: result.streaming ?? null,
+    eviction: result.eviction ?? undefined,
   };
 }
 
@@ -760,6 +768,28 @@ export async function unloadModel(model: any, lane?: LaneName) {
   const payload: any = { alias: model.alias };
   if (lane) payload.lane = lane;
   await send('unload', payload);
+  await refreshModels();
+}
+
+/**
+ * Pushes the eviction rules to the sidecar, which owns the sweep. The UI is the source of
+ * truth for the settings; the sidecar holds them only while it runs.
+ */
+export async function setEvictionConfig(config: Partial<EvictionConfig>): Promise<EvictionConfig | null> {
+  const payload: any = {};
+  if (typeof config.idleUnloadEnabled === 'boolean') payload.idleUnloadEnabled = config.idleUnloadEnabled;
+  if (typeof config.idleTimeoutMs === 'number') payload.idleTimeoutMs = config.idleTimeoutMs;
+  if (typeof config.maxResidentEnabled === 'boolean') payload.maxResidentEnabled = config.maxResidentEnabled;
+  if (typeof config.maxResident === 'number') payload.maxResident = config.maxResident;
+  const res = await send('setEvictionConfig', payload);
+  // Applying the rules can unload models, so the pool view is stale the moment this returns.
+  await refreshModels();
+  return res.result?.config ?? null;
+}
+
+/** Replaces the whole priority map; anything omitted goes back to 'normal'. */
+export async function setModelPriorities(priorities: ModelPriorityEntry[]): Promise<void> {
+  await send('setModelPriorities', { priorities });
   await refreshModels();
 }
 

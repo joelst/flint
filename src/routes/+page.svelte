@@ -38,10 +38,22 @@
     validatePromptTemplate,
     TEMPLATE_ROLES,
     TEMPLATE_PRESETS,
+    setEvictionConfig as sdkSetEvictionConfig,
+    setModelPriorities as sdkSetModelPriorities,
     type ModelInfo,
     type EpInfo,
     type LogEntry,
   } from "$lib/sdk";
+  import {
+    evaluate as evaluateWatch,
+    emptyWatchState,
+    normalizeWatchConfig,
+    dismissAll as dismissAllWatch,
+    formatAlertSummary,
+    formatAlertAdvice,
+    toWatchSample,
+    DEFAULT_WATCH_CONFIG,
+  } from "$lib/memory-watchdog";
   import packageJson from "../../package.json";
 
   import {
@@ -1074,6 +1086,149 @@
     try { localStorage.setItem(MODEL_SORT_KEY, modelSortMode); } catch {}
   }
 
+  // --- Memory watchdog and pool eviction -------------------------------------------------
+  // The UI owns these settings; the sidecar holds them only while it runs and is re-told on
+  // every service start. Keeping one source of truth avoids the two disagreeing after a
+  // restart, which would be invisible until a model vanished unexpectedly.
+  const MEMORY_SETTINGS_KEY = "flint-memory-settings";
+
+  let watchConfig = $state({ ...DEFAULT_WATCH_CONFIG });
+  const EVICTION_DEFAULTS = {
+    idleUnloadEnabled: false,
+    idleTimeoutMs: 30 * 60 * 1000,
+    maxResidentEnabled: false,
+    maxResident: 3,
+  };
+  let evictionConfig = $state({ ...EVICTION_DEFAULTS });
+  /** alias → 'pinned' | 'low'. Absent means 'normal'; kept for models not currently resident. */
+  let modelPriorities = $state<Record<string, string>>({});
+
+  let watchState = emptyWatchState();
+  let watchAlerts = $state<any[]>([]);
+
+  try {
+    const raw = localStorage.getItem(MEMORY_SETTINGS_KEY);
+    if (raw) {
+      const saved = JSON.parse(raw);
+      watchConfig = normalizeWatchConfig(saved?.watchdog);
+      if (saved?.eviction && typeof saved.eviction === "object") {
+        evictionConfig = { ...EVICTION_DEFAULTS, ...saved.eviction };
+      }
+      if (saved?.priorities && typeof saved.priorities === "object") {
+        modelPriorities = { ...saved.priorities };
+      }
+    }
+  } catch {}
+
+  function persistMemorySettings() {
+    try {
+      localStorage.setItem(
+        MEMORY_SETTINGS_KEY,
+        JSON.stringify({ watchdog: watchConfig, eviction: evictionConfig, priorities: modelPriorities }),
+      );
+    } catch {}
+  }
+
+  /** Sends the eviction rules and the priority map to the sidecar, which runs the sweep. */
+  async function pushMemorySettings() {
+    try {
+      await sdkSetEvictionConfig(evictionConfig);
+      await sdkSetModelPriorities(
+        Object.entries(modelPriorities)
+          .filter(([, priority]) => priority === "pinned" || priority === "low")
+          .map(([alias, priority]) => ({ alias, priority })),
+      );
+    } catch (e) {
+      console.warn("[flint] could not apply memory settings", e);
+    }
+  }
+
+  function updateWatchConfig(patch: Record<string, unknown>) {
+    watchConfig = normalizeWatchConfig({ ...watchConfig, ...patch });
+    // Editing a threshold restarts any pending window inside evaluate(), so a lowered
+    // threshold cannot fire instantly off history gathered under the old one.
+    persistMemorySettings();
+    evaluateWatchdog();
+  }
+
+  function updateEvictionConfig(patch: Record<string, unknown>) {
+    evictionConfig = { ...evictionConfig, ...patch };
+    persistMemorySettings();
+    pushMemorySettings();
+  }
+
+  function setModelPriority(alias: string, priority: string) {
+    const next = { ...modelPriorities };
+    if (priority === "normal") delete next[alias];
+    else next[alias] = priority;
+    modelPriorities = next;
+    persistMemorySettings();
+    pushMemorySettings();
+  }
+
+  function priorityOf(alias: string): string {    return modelPriorities[alias] === "pinned" || modelPriorities[alias] === "low"
+      ? modelPriorities[alias]
+      : "normal";
+  }
+
+  /** Compact "how long since this model was last asked for anything". */
+  function formatIdleFor(lastUsedAt?: number): string {
+    if (!Number.isFinite(lastUsedAt)) return "—";
+    const seconds = Math.max(0, Math.round((Date.now() - Number(lastUsedAt)) / 1000));
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return `${minutes}m`;
+    return `${Math.round(minutes / 60)}h`;
+  }
+
+  function evaluateWatchdog() {
+    const status = { ...(state.poolStats ?? {}), models: state.pool ?? [] };
+    const result = evaluateWatch(watchState, toWatchSample(status, Date.now()), watchConfig);
+    watchState = result.state;
+    watchAlerts = result.active;
+    if (result.raised.length > 0) notifyHighUsage(result.raised);
+  }
+
+  function dismissWatchAlerts() {
+    watchState = dismissAllWatch(watchState);
+    watchAlerts = [];
+  }
+
+  /**
+   * The banner covers the case where Flint is on screen. It does not cover the case that
+   * matters most — an agent driving the gateway while Flint is minimised — so an unfocused
+   * window escalates to an OS notification instead.
+   */
+  async function notifyHighUsage(raised: any[]) {
+    const body = `${formatAlertSummary(raised)}. ${formatAlertAdvice((state.pool ?? []).length)}`;
+    try {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      if (await getCurrentWindow().isFocused()) return;
+      const notification = await import("@tauri-apps/plugin-notification");
+      let granted = await notification.isPermissionGranted();
+      if (!granted) granted = (await notification.requestPermission()) === "granted";
+      if (granted) notification.sendNotification({ title: "Flint — high memory usage", body });
+    } catch {
+      // No Tauri host (dev in a plain browser) or notifications refused: the banner stands.
+    }
+  }
+
+  // One poll shared by the Monitor tab and the watchdog. Two independent timers would let
+  // responses overlap and arrive out of order, and the watchdog measures elapsed time
+  // between samples, so ordering is not cosmetic.
+  let poolPollInFlight = false;
+  async function pollResources() {
+    if (poolPollInFlight) return;
+    poolPollInFlight = true;
+    try {
+      await pollPoolStatus();
+      evaluateWatchdog();
+    } catch {
+    } finally {
+      poolPollInFlight = false;
+    }
+  }
+
   const filteredModels = $derived(
     sortModels(
       (state.models || []).filter(
@@ -1482,7 +1637,7 @@ updateStateFromSdk();
       try {
         const [log] = await Promise.all([
           getAccessLog(),
-          pollPoolStatus(),
+          pollResources(),
         ]);
         if (!monitorLogPaused) {
           monitorLog = (log ?? []).slice(-100).reverse();
@@ -1493,6 +1648,27 @@ updateStateFromSdk();
     pollMonitor();
     const interval = setInterval(pollMonitor, 5000);
     return () => clearInterval(interval);
+  });
+
+  // Watchdog polling — deliberately not tied to a tab or to window visibility. The whole
+  // point is to catch pressure while the user is somewhere else and an external client is
+  // loading models through the gateway. Slower while nothing is resident, because with an
+  // empty pool there is nothing to warn about and the accelerator probe shells out.
+  $effect(() => {
+    if (!watchConfig.enabled) return;
+    if (!state.serviceRunning) return;
+    if (currentView === 'monitor') return; // the 5s poll above already feeds the watchdog
+
+    const resident = (state.pool ?? []).length > 0;
+    const interval = setInterval(pollResources, resident ? 30000 : 60000);
+    return () => clearInterval(interval);
+  });
+
+  // Re-apply the rules whenever the sidecar is (re)started, since it keeps them in memory
+  // only and would otherwise come back up with eviction silently switched off.
+  $effect(() => {
+    if (!state.serviceRunning) return;
+    pushMemorySettings();
   });
 
   async function refreshMonitorNow() {
@@ -4127,6 +4303,20 @@ Output only the summary text, no preamble.`;
     </div>
   </header>
 
+  {#if watchAlerts.length > 0}
+    <!-- One banner for every alerting device: a model load pushes RAM and VRAM at the same
+         time, and stacking a banner per device would bury the point. -->
+    <div class="memory-alert" role="status">
+      <Icon name="monitor" size={16} />
+      <div class="memory-alert-text">
+        <strong>High memory usage — {formatAlertSummary(watchAlerts)}</strong>
+        <span>{formatAlertAdvice((state.pool ?? []).length)}</span>
+      </div>
+      <button class="small" onclick={() => (currentView = "monitor")}>Open Monitor</button>
+      <button class="small secondary" onclick={dismissWatchAlerts}>Dismiss</button>
+    </div>
+  {/if}
+
   <div class="body">
     <nav class="sidebar" class:collapsed={sidebarCollapsed}>
       <button
@@ -5904,6 +6094,81 @@ Output only the summary text, no preamble.`;
 
           <!-- Pool table -->
           <div class="monitor-section">
+            <h3>Memory &amp; Pool Limits</h3>
+            <p class="log-note">
+              Readings are system-wide, not Flint's own usage — warnings only appear while
+              Flint has models loaded.
+            </p>
+            <div class="memory-settings">
+              <label class="memory-setting">
+                <input
+                  type="checkbox"
+                  checked={watchConfig.enabled}
+                  onchange={(e) => updateWatchConfig({ enabled: e.currentTarget.checked })}
+                />
+                Warn about high memory usage
+              </label>
+
+              <label class="memory-setting" class:disabled={!watchConfig.enabled}>
+                System RAM threshold
+                <input
+                  type="number" min="50" max="99"
+                  value={watchConfig.ramThresholdPct}
+                  disabled={!watchConfig.enabled}
+                  onchange={(e) => updateWatchConfig({ ramThresholdPct: Number(e.currentTarget.value) })}
+                /> %
+              </label>
+
+              <label class="memory-setting" class:disabled={!watchConfig.enabled}>
+                GPU memory threshold
+                <input
+                  type="number" min="50" max="99"
+                  value={watchConfig.vramThresholdPct}
+                  disabled={!watchConfig.enabled}
+                  onchange={(e) => updateWatchConfig({ vramThresholdPct: Number(e.currentTarget.value) })}
+                /> %
+              </label>
+
+              <hr class="memory-divider" />
+
+              <label class="memory-setting">
+                <input
+                  type="checkbox"
+                  checked={evictionConfig.idleUnloadEnabled}
+                  onchange={(e) => updateEvictionConfig({ idleUnloadEnabled: e.currentTarget.checked })}
+                />
+                Unload models left idle for
+                <input
+                  type="number" min="1" max="1440"
+                  value={Math.round(evictionConfig.idleTimeoutMs / 60000)}
+                  disabled={!evictionConfig.idleUnloadEnabled}
+                  onchange={(e) => updateEvictionConfig({ idleTimeoutMs: Number(e.currentTarget.value) * 60000 })}
+                /> min
+              </label>
+
+              <label class="memory-setting">
+                <input
+                  type="checkbox"
+                  checked={evictionConfig.maxResidentEnabled}
+                  onchange={(e) => updateEvictionConfig({ maxResidentEnabled: e.currentTarget.checked })}
+                />
+                Keep at most
+                <input
+                  type="number" min="1" max="32"
+                  value={evictionConfig.maxResident}
+                  disabled={!evictionConfig.maxResidentEnabled}
+                  onchange={(e) => updateEvictionConfig({ maxResident: Number(e.currentTarget.value) })}
+                /> models loaded
+              </label>
+
+              <p class="log-note">
+                Models set to <strong>Keep loaded</strong> below are never unloaded automatically,
+                and a model is never unloaded while it is serving a request.
+              </p>
+            </div>
+          </div>
+
+          <div class="monitor-section">
             <h3>Model Pool</h3>
             {#if state.pool.length === 0}
               <div class="empty-state-card empty-state-compact">
@@ -5921,6 +6186,8 @@ Output only the summary text, no preamble.`;
                     <th>Device</th>
                     <th title="Tokens in this session">↑ In</th>
                     <th title="Tokens out this session">↓ Out</th>
+                    <th title="Time since the last request for this model">Idle</th>
+                    <th title="Pinned models are never unloaded automatically; low priority models are unloaded first">Priority</th>
                     <th></th>
                   </tr>
                 </thead>
@@ -5945,6 +6212,25 @@ Output only the summary text, no preamble.`;
                       </td>
                       <td class="pool-tokens-cell">{tokens?.tokensIn ?? '—'}</td>
                       <td class="pool-tokens-cell">{tokens?.tokensOut ?? '—'}</td>
+                      <td class="pool-idle-cell">
+                        {#if (entry.inFlight ?? 0) > 0}
+                          <span class="badge loaded">In use</span>
+                        {:else}
+                          {formatIdleFor(entry.lastUsedAt)}
+                        {/if}
+                      </td>
+                      <td>
+                        <select
+                          class="pool-priority-select"
+                          value={priorityOf(entry.alias)}
+                          onchange={(e) => setModelPriority(entry.alias, e.currentTarget.value)}
+                          aria-label={`Eviction priority for ${entry.alias}`}
+                        >
+                          <option value="pinned">Keep loaded</option>
+                          <option value="normal">Normal</option>
+                          <option value="low">Unload first</option>
+                        </select>
+                      </td>
                       <td><button class="small danger-btn" onclick={() => sdkUnloadModel({ alias: entry.alias }).then(refreshMonitorNow)}>Unload</button></td>
                     </tr>
                   {/each}
@@ -9577,6 +9863,30 @@ Output only the summary text, no preamble.`;
   .ram-bar-track.ram-bar-unknown { opacity: 0.45; }
   .ram-bar-fill { height: 100%; background: var(--accent); border-radius: 5px; transition: width 0.4s ease; }
   .ram-bar-fill.ram-warn { background: #ef4444; }
+
+/* Memory watchdog banner — sits under the header so it is visible from every tab. */
+.memory-alert {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 1rem;
+  background: color-mix(in srgb, #f59e0b 18%, var(--bg));
+  border-bottom: 1px solid color-mix(in srgb, #f59e0b 45%, transparent);
+  color: var(--text);
+  font-size: 0.85rem;
+}
+.memory-alert-text { display: flex; flex-direction: column; gap: 0.1rem; flex: 1; min-width: 0; }
+.memory-alert-text strong { font-weight: 600; }
+.memory-alert-text span { color: var(--text-muted); font-size: 0.8rem; }
+
+.memory-settings { display: flex; flex-direction: column; gap: 0.5rem; }
+.memory-setting { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; }
+.memory-setting.disabled { opacity: 0.55; }
+.memory-setting input[type="number"] { width: 4.5rem; }
+.memory-divider { width: 100%; border: 0; border-top: 1px solid var(--border); margin: 0.35rem 0; }
+
+.pool-idle-cell { font-variant-numeric: tabular-nums; color: var(--text-muted); }
+.pool-priority-select { font-size: 0.78rem; padding: 0.15rem 0.3rem; }
   .ram-bar-fill.ram-npu { background: #a855f7; }
   .ram-bar-fill.ram-muted { background: color-mix(in srgb, var(--muted) 55%, transparent); }
   .resource-note { font-size: 0.72rem; color: var(--muted); margin: 6px 0 0; }

@@ -26,7 +26,28 @@ export type SidecarCommand =
   | { cmd: 'importModelFolder'; folderPath: string; name: string; publisher?: string; version?: number; promptTemplate?: PromptTemplate }
   | { cmd: 'linkModelFolder'; folderPath: string; name: string; publisher?: string }
   | { cmd: 'getModelTemplate'; name: string }
-  | { cmd: 'setModelTemplate'; name: string; promptTemplate: PromptTemplate };
+  | { cmd: 'setModelTemplate'; name: string; promptTemplate: PromptTemplate }
+  | { cmd: 'setEvictionConfig'; idleUnloadEnabled?: boolean; idleTimeoutMs?: number; maxResidentEnabled?: boolean; maxResident?: number }
+  | { cmd: 'setModelPriorities'; priorities: ModelPriorityEntry[] };
+
+/**
+ * How keen Flint is to unload a model when the pool needs to shrink.
+ * `pinned` is exempt from eviction entirely; `low` is unloaded before anything else.
+ */
+export type ModelPriority = 'pinned' | 'normal' | 'low';
+
+export interface ModelPriorityEntry {
+  alias: string;
+  priority: ModelPriority;
+}
+
+/** Bounds how many models stay resident. Both rules are off unless the user turns them on. */
+export interface EvictionConfig {
+  idleUnloadEnabled: boolean;
+  idleTimeoutMs: number;
+  maxResidentEnabled: boolean;
+  maxResident: number;
+}
 
 /** The four turn wrappers Foundry substitutes `{Content}` into when building a prompt. */
 export interface PromptTemplate {
@@ -46,6 +67,7 @@ export const KNOWN_COMMANDS = new Set<SidecarCommandName>([
   'poolStatus', 'getAccessLog', 'fetchUrl',
   'inspectModelFolder', 'importModelFolder', 'linkModelFolder',
   'getModelTemplate', 'setModelTemplate',
+  'setEvictionConfig', 'setModelPriorities',
 ]);
 
 /**

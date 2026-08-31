@@ -28,6 +28,13 @@ import { assertWavBuffer } from './audio-format.js';
 import { createGateway } from './gateway.js';
 import { buildModelIndex, resolveModelId } from './model-registry.js';
 import {
+  selectEvictions,
+  normalizeEvictionConfig,
+  normalizePriority,
+  describeEviction,
+  DEFAULT_EVICTION_CONFIG,
+} from './pool-eviction.js';
+import {
   validateModelFolder,
   buildInferenceModel,
   validatePromptTemplate,
@@ -53,6 +60,7 @@ const KNOWN_COMMANDS = new Set([
   'poolStatus', 'getAccessLog', 'fetchUrl',
   'inspectModelFolder', 'importModelFolder', 'linkModelFolder',
   'getModelTemplate', 'setModelTemplate',
+  'setEvictionConfig', 'setModelPriorities',
 ]);
 
 // Per-command type requirements. Keys are required or optional field names; values are:
@@ -74,6 +82,11 @@ const FIELD_TYPES = {
   linkModelFolder:   { folderPath: 'non-empty-string', name: 'non-empty-string' },
   getModelTemplate:  { name: 'non-empty-string' },
   setModelTemplate:  { name: 'non-empty-string' },
+  setEvictionConfig: {
+    idleUnloadEnabled: 'boolean', idleTimeoutMs: 'number',
+    maxResidentEnabled: 'boolean', maxResident: 'number',
+  },
+  setModelPriorities: { priorities: 'array' },
 };
 
 // Commands that accept a lane field; validated to 'chat' | 'audio'.
@@ -110,6 +123,8 @@ const COMMAND_SCHEMA = {
   linkModelFolder:    { required: ['folderPath', 'name'], optional: ['publisher'] },
   getModelTemplate:   { required: ['name'], optional: [] },
   setModelTemplate:   { required: ['name', 'promptTemplate'], optional: [] },
+  setEvictionConfig:  { required: [], optional: ['idleUnloadEnabled', 'idleTimeoutMs', 'maxResidentEnabled', 'maxResident'] },
+  setModelPriorities: { required: ['priorities'], optional: [] },
 };
 
 // Base64 character limit for transcribeAudio. 50 MB decoded audio is ~67 MB of base64.
@@ -194,9 +209,127 @@ const canceledRequests = new Set();
 
 // Model pool: Map<alias, { catModel, variantId }>
 // variantId is catModel.id (e.g. "Phi-4-mini-instruct-generic-cpu:5") — required for HTTP routing.
-// Multiple models coexist; no LRU eviction policy for MVP (spike confirmed co-residency).
+// Multiple models coexist; residency is bounded by the eviction rules below, which are off
+// by default (spike confirmed co-residency is safe until memory runs out).
 const pool = new Map();
 let sharedEndpoint = null;
+
+// Usage bookkeeping that drives eviction, kept beside the pool rather than inside it so a
+// variant switch (which replaces the pool entry) does not reset a model's history.
+/** @type {Map<string, { lastUsedAt: number, inFlight: number }>} */
+const usage = new Map();
+/** @type {Map<string, 'pinned'|'low'|'normal'>} set by the UI; absent means 'normal'. */
+const modelPriorities = new Map();
+let evictionConfig = { ...DEFAULT_EVICTION_CONFIG };
+let evictionTimer = null;
+
+/** How often the pool is checked. Fine-grained timing does not matter for a minutes-scale idle rule. */
+const EVICTION_SWEEP_MS = 30_000;
+
+function usageFor (alias) {
+  let entry = usage.get(alias);
+  if (!entry) {
+    entry = { lastUsedAt: Date.now(), inFlight: 0 };
+    usage.set(alias, entry);
+  }
+  return entry;
+}
+
+function touchModel (alias) {
+  if (alias) usageFor(alias).lastUsedAt = Date.now();
+}
+
+/**
+ * Clients name a model however their config happens to spell it — friendly alias, exact
+ * variant id, or versionless variant id — but the pool is keyed by alias only. Without
+ * this mapping, gateway traffic would never mark the model it is actually using as busy.
+ */
+function aliasForModelName (name) {
+  const wanted = String(name || '').trim().toLowerCase();
+  if (!wanted) return null;
+  if (pool.has(name)) return name;
+  for (const [alias, entry] of pool) {
+    if (alias.toLowerCase() === wanted) return alias;
+    const variantId = String(entry.variantId || '').toLowerCase();
+    if (!variantId) continue;
+    // Versionless form: "…-generic-cpu" should match "…-generic-cpu:4".
+    if (variantId === wanted || variantId.split(':')[0] === wanted) return alias;
+  }
+  return null;
+}
+
+/** Marks a model busy for the life of a request so eviction cannot unload it mid-flight. */
+function noteActivity (modelName, phase) {
+  const alias = aliasForModelName(modelName);
+  if (!alias) return;
+  const entry = usageFor(alias);
+  entry.lastUsedAt = Date.now();
+  if (phase === 'start') entry.inFlight++;
+  else entry.inFlight = Math.max(0, entry.inFlight - 1);
+}
+
+function poolEntriesForEviction () {
+  return [...pool.keys()].map(alias => {
+    const use = usageFor(alias);
+    return {
+      alias,
+      lastUsedAt: use.lastUsedAt,
+      inFlight: use.inFlight,
+      priority: normalizePriority(modelPriorities.get(alias)),
+    };
+  });
+}
+
+async function unloadAlias (alias) {
+  const entry = pool.get(alias);
+  if (!entry) return false;
+  try {
+    if (typeof entry.catModel.unload === 'function') await entry.catModel.unload();
+  } catch (e) {
+    // Report but still drop the entry: a model we cannot unload is not one we can keep
+    // accounting for, and retrying forever would spam the log every sweep.
+    log('warn', `Unload of ${alias} failed: ${e?.message || e}`);
+  }
+  pool.delete(alias);
+  usage.delete(alias);
+  return true;
+}
+
+/**
+ * @param {object} [options]
+ * @param {number} [options.admitting] models about to load, so room is freed before the
+ *   memory is spent rather than after
+ */
+async function runEvictionSweep (options = {}) {
+  if (!evictionConfig.idleUnloadEnabled && !evictionConfig.maxResidentEnabled) return [];
+  const plan = selectEvictions(poolEntriesForEviction(), evictionConfig, Date.now(), options);
+  const done = [];
+  for (const item of plan) {
+    // Re-check under the current state: sweeps are async, and a request may have arrived
+    // for this model since the plan was drawn up.
+    const use = usage.get(item.alias);
+    if (use && use.inFlight > 0) continue;
+    if (await unloadAlias(item.alias)) {
+      log('info', describeEviction(item, evictionConfig));
+      audit('evict', { alias: item.alias, reason: item.reason });
+      done.push(item);
+    }
+  }
+  return done;
+}
+
+function restartEvictionTimer () {
+  if (evictionTimer) {
+    clearInterval(evictionTimer);
+    evictionTimer = null;
+  }
+  if (!evictionConfig.idleUnloadEnabled && !evictionConfig.maxResidentEnabled) return;
+  evictionTimer = setInterval(() => {
+    runEvictionSweep().catch(e => log('warn', `Eviction sweep failed: ${e?.message || e}`));
+  }, EVICTION_SWEEP_MS);
+  // A background timer must never be the reason the process refuses to exit.
+  evictionTimer.unref?.();
+}
 
 // The reverse proxy that fronts the native service so external OpenAI clients can trigger
 // a load. Null whenever the service is stopped or the gateway was disabled.
@@ -951,8 +1084,17 @@ async function ensureModel(alias, variantId) {  const existing = pool.get(alias)
         await existing.catModel.load();
         log('info', `Model ${alias} reloaded after runtime eviction`);
       }
+      touchModel(alias);
       return existing;
     }
+  }
+  // Free room before committing memory rather than after. Counting this load against the
+  // cap is the difference between staying under the limit and briefly exceeding it, which
+  // on a tight machine is the moment the allocation fails.
+  try {
+    await runEvictionSweep({ admitting: 1 });
+  } catch (e) {
+    log('warn', `Eviction before load failed: ${e?.message || e}`);
   }
   const catModel = await manager.catalog.getModel(alias);
   if (variantId) {
@@ -975,6 +1117,7 @@ async function ensureModel(alias, variantId) {  const existing = pool.get(alias)
     pool.set(alias, { catModel, variantId: resolvedVariantId });
     log('info', `Model ${alias} loaded (variantId: ${resolvedVariantId})`);
   }
+  touchModel(alias);
   return pool.get(alias);
 }
 
@@ -1437,6 +1580,7 @@ rl.on('line', async (line) => {
       if (entry) {
         await entry.catModel.unload();
         pool.delete(alias);
+        usage.delete(alias);
         log('info', `Model ${alias} unloaded from pool`);
         audit('unload', { alias });
       }
@@ -1560,6 +1704,7 @@ rl.on('line', async (line) => {
       await stopGateway();
 
       pool.clear();
+      usage.clear();
       if (manager && typeof manager.stopWebService === 'function') {
         try { manager.stopWebService(); } catch (e) {
           log('warn', `stopWebService before restart (ignored): ${e?.message ?? e}`);
@@ -1595,6 +1740,9 @@ rl.on('line', async (line) => {
           // The loaded variant id is what the replayed request must name: Foundry rejects
           // the friendly alias even once the model is resident.
           load: async (alias, variantId) => (await ensureModel(alias, variantId))?.variantId ?? null,
+          // Proxied traffic never reaches this process, so without this hook a model
+          // serving a long completion would look idle and could be evicted underneath it.
+          onActivity: noteActivity,
           log,
         });
         try {
@@ -1681,6 +1829,7 @@ rl.on('line', async (line) => {
       let chatTokensIn = null, chatTokensOut = null, chatOk = false;
       activeStreamCount++;
       if (!activeStreamOldest) activeStreamOldest = { type: 'chat', modelAlias, startedAt: chatAccessTs };
+      noteActivity(modelAlias, 'start');
       try {
         const poolEntry = await ensureModel(modelAlias);
         const chatModel = poolEntry.catModel;
@@ -1829,6 +1978,7 @@ rl.on('line', async (line) => {
       } finally {
         activeStreamCount = Math.max(0, activeStreamCount - 1);
         if (activeStreamCount === 0) activeStreamOldest = null;
+        noteActivity(modelAlias, 'end');
         canceledRequests.delete(id);
         appendAccessLog({
           ts: chatAccessTs,
@@ -1885,6 +2035,7 @@ rl.on('line', async (line) => {
       let audioOk = false;
       activeStreamCount++;
       if (!activeStreamOldest) activeStreamOldest = { type: 'audio', modelAlias: requestedAlias, startedAt: audioAccessTs };
+      noteActivity(requestedAlias, 'start');
       try {
         // Prefer direct AudioClient (like we do for chat) — this avoids relying on the web service HTTP route
         // which may return 404 for /audio/transcriptions even for Whisper models.
@@ -2009,6 +2160,7 @@ rl.on('line', async (line) => {
       } finally {
         activeStreamCount = Math.max(0, activeStreamCount - 1);
         if (activeStreamCount === 0) activeStreamOldest = null;
+        noteActivity(requestedAlias, 'end');
         try { fs.unlinkSync(tempPath); } catch {}
         appendAccessLog({
           ts: audioAccessTs,
@@ -2027,11 +2179,17 @@ rl.on('line', async (line) => {
         const loaded = await manager.catalog.getLoadedModels();
         for (const m of loaded) loadedIds.add(m.id);
       } catch {}
-      const entries = [...pool.entries()].map(([alias, { catModel, variantId }]) => ({
-        alias,
-        variantId,
-        isLoaded: loadedIds.size > 0 ? loadedIds.has(variantId) : null,
-      }));
+      const entries = [...pool.entries()].map(([alias, { variantId }]) => {
+        const use = usageFor(alias);
+        return {
+          alias,
+          variantId,
+          isLoaded: loadedIds.size > 0 ? loadedIds.has(variantId) : null,
+          lastUsedAt: use.lastUsedAt,
+          inFlight: use.inFlight,
+          priority: normalizePriority(modelPriorities.get(alias)),
+        };
+      });
       const totalMemMb = Math.round(os.totalmem() / 1024 / 1024);
       const freeMemMb = Math.round(os.freemem() / 1024 / 1024);
       let accelerators = [];
@@ -2056,6 +2214,7 @@ rl.on('line', async (line) => {
             arch: process.arch,         // arm64 | x64 | ...
           },
           accelerators,
+          eviction: { ...evictionConfig },
           tokenTotals: [...tokenAccumulator.entries()].map(([alias, t]) => ({ alias, ...t })),
           streaming: activeStreamCount > 0 && activeStreamOldest ? {
             active: true,
@@ -2065,6 +2224,36 @@ rl.on('line', async (line) => {
             count: activeStreamCount,
           } : { active: false, type: null, modelAlias: null, elapsedMs: null, count: 0 },
         }
+      });
+    } else if (cmd === 'setEvictionConfig') {
+      evictionConfig = normalizeEvictionConfig({ ...evictionConfig, ...payload });
+      restartEvictionTimer();
+      // Apply immediately: a user who has just lowered the cap expects the pool to shrink
+      // now, not at some point in the next half minute.
+      const evicted = await runEvictionSweep();
+      log('info', `Eviction config: idle=${evictionConfig.idleUnloadEnabled ? `${Math.round(evictionConfig.idleTimeoutMs / 60_000)}min` : 'off'} `
+        + `cap=${evictionConfig.maxResidentEnabled ? evictionConfig.maxResident : 'off'}`);
+      reply({ ok: true, result: { config: { ...evictionConfig }, evicted } });
+    } else if (cmd === 'setModelPriorities') {
+      if (!Array.isArray(payload.priorities)) {
+        throw new Error('setModelPriorities requires a priorities array');
+      }
+      modelPriorities.clear();
+      for (const item of payload.priorities) {
+        const alias = typeof item?.alias === 'string' ? item.alias.trim() : '';
+        if (!alias) continue;
+        const priority = normalizePriority(item?.priority);
+        // 'normal' is the default, so storing it would only grow the map forever.
+        if (priority !== 'normal') modelPriorities.set(alias, priority);
+      }
+      // A model that just became evictable should not wait for the next sweep.
+      const evicted = await runEvictionSweep();
+      reply({
+        ok: true,
+        result: {
+          priorities: [...modelPriorities.entries()].map(([alias, priority]) => ({ alias, priority })),
+          evicted,
+        },
       });
     } else if (cmd === 'getAccessLog') {
       reply({ ok: true, result: accessLog });
