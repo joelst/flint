@@ -66,15 +66,16 @@ export default defineConfig(() => ({
         'src/lib/flint-context.ts',
         'sidecar/audio-format.js',
         'sidecar/model-updates.js',
+        'sidecar/byom-import.js',
       ],
       // Set just below the level the included files actually achieve, so the
       // gate catches regressions instead of rubber-stamping them. Raise these
       // as files are added rather than leaving slack.
       thresholds: {
-        lines: 90,
-        functions: 88,
-        branches: 72,
-        statements: 88
+        lines: 95,
+        functions: 93,
+        branches: 81,
+        statements: 93
       }
     }
   }

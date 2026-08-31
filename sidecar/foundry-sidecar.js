@@ -25,6 +25,13 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { annotateVariantUpdates } from './model-updates.js';
 import { assertWavBuffer } from './audio-format.js';
+import {
+  validateModelFolder,
+  buildInferenceModel,
+  sanitizeModelName,
+  isInsideRoot,
+  OWNERSHIP_MARKER,
+} from './byom-import.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -40,6 +47,7 @@ const KNOWN_COMMANDS = new Set([
   'chatCompletion', 'cancelChatRequest', 'transcribeAudio',
   'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',
   'poolStatus', 'getAccessLog', 'fetchUrl',
+  'inspectModelFolder', 'importModelFolder', 'linkModelFolder',
 ]);
 
 // Per-command type requirements. Keys are required or optional field names; values are:
@@ -56,6 +64,9 @@ const FIELD_TYPES = {
   cancelChatRequest: { requestId: 'number' },
   transcribeAudio:   { audioBase64: 'string', mimeType: 'non-empty-string', fileName: 'non-empty-string', model: 'non-empty-string', language: 'non-empty-string' },
   fetchUrl:          { url: 'non-empty-string' },
+  inspectModelFolder: { folderPath: 'non-empty-string' },
+  importModelFolder: { folderPath: 'non-empty-string', name: 'non-empty-string' },
+  linkModelFolder:   { folderPath: 'non-empty-string', name: 'non-empty-string' },
 };
 
 // Commands that accept a lane field; validated to 'chat' | 'audio'.
@@ -87,6 +98,9 @@ const COMMAND_SCHEMA = {
   poolStatus:         { required: [], optional: [] },
   getAccessLog:       { required: [], optional: [] },
   fetchUrl:           { required: ['url'], optional: ['maxChars'] },
+  inspectModelFolder: { required: ['folderPath'], optional: [] },
+  importModelFolder:  { required: ['folderPath', 'name'], optional: ['publisher', 'version'] },
+  linkModelFolder:    { required: ['folderPath', 'name'], optional: ['publisher'] },
 };
 
 // Base64 character limit for transcribeAudio. 50 MB decoded audio is ~67 MB of base64.
@@ -143,6 +157,15 @@ function validateCommand(cmd, payload) {
     if (payload.maxChars !== undefined && typeof payload.maxChars !== 'number') {
       return `Command "fetchUrl" field "maxChars" must be a number`;
     }
+  }
+  if (cmd === 'importModelFolder' && payload.version !== undefined
+      && (!Number.isInteger(payload.version) || payload.version < 1)) {
+    return `Command "importModelFolder" field "version" must be a positive integer`;
+  }
+  if ((cmd === 'importModelFolder' || cmd === 'linkModelFolder')
+      && payload.publisher !== undefined
+      && (typeof payload.publisher !== 'string' || !payload.publisher.trim())) {
+    return `Command "${cmd}" field "publisher" must be a non-empty string`;
   }
   return null;
 }
@@ -493,8 +516,242 @@ function resolveIsLoaded(model) {
   return null;
 }
 
-async function ensureModel(alias, variantId) {
-  const existing = pool.get(alias);
+// --- BYOM (bring your own model) import ---
+//
+// The native scanner accepts a directory as a model when it holds `genai_config.json`
+// plus an `inference_model.json` carrying a `Name`, and no `download.tmp`. Public ONNX
+// repositories almost never ship `inference_model.json`, so Flint writes it.
+//
+// Imports are staged in a sibling directory and moved into place with a single rename,
+// so a crash or a failed validation can never leave a half-written model where the
+// scanner would try to load it.
+
+/** Cache root for the running appName, e.g. ~/.flint/cache/models. */
+function modelCacheRoot() {
+  const appName = initConfig?.appName || 'flint';
+  return path.join(os.homedir(), `.${appName}`, 'cache', 'models');
+}
+
+/** Files worth reading to classify a candidate folder. */
+function readJsonIfPresent(dir, name) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function readTextIfPresent(dir, name) {
+  try {
+    return fs.readFileSync(path.join(dir, name), 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Locate the directory that actually holds genai_config.json.
+ *
+ * HuggingFace repos commonly nest weights one level down (`onnx/`, `cpu_and_mobile/…`),
+ * so accept a shallow search rather than forcing the user to find the right subfolder.
+ */
+function findModelDir(rootDir, maxDepth = 3) {
+  const queue = [{ dir: rootDir, depth: 0 }];
+  while (queue.length > 0) {
+    const { dir, depth } = queue.shift();
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    if (entries.some(e => e.isFile() && e.name.toLowerCase() === 'genai_config.json')) return dir;
+    if (depth >= maxDepth) continue;
+    for (const e of entries) {
+      // Never follow links while searching: a link could point outside the tree.
+      if (e.isDirectory() && !e.isSymbolicLink()) queue.push({ dir: path.join(dir, e.name), depth: depth + 1 });
+    }
+  }
+  return null;
+}
+
+/** Inspect a candidate folder without writing anything. */
+function inspectFolder(folderPath) {
+  const resolved = path.resolve(folderPath);
+  if (!fs.existsSync(resolved)) throw new Error(`Folder does not exist: ${resolved}`);
+  if (!fs.statSync(resolved).isDirectory()) throw new Error(`Not a folder: ${resolved}`);
+
+  const modelDir = findModelDir(resolved);
+  const scanDir = modelDir || resolved;
+  let names = [];
+  try {
+    names = fs.readdirSync(scanDir, { withFileTypes: true }).filter(e => e.isFile()).map(e => e.name);
+  } catch {
+    names = [];
+  }
+
+  const genaiConfig = readJsonIfPresent(scanDir, 'genai_config.json');
+  const chatTemplate =
+    readTextIfPresent(scanDir, 'chat_template.jinja') ??
+    readJsonIfPresent(scanDir, 'tokenizer_config.json')?.chat_template ??
+    null;
+
+  const report = validateModelFolder({
+    files: names,
+    dirName: path.basename(resolved),
+    genaiConfig,
+    chatTemplate: typeof chatTemplate === 'string' ? chatTemplate : null,
+  });
+
+  let sizeBytes = 0;
+  for (const n of names) {
+    try { sizeBytes += fs.statSync(path.join(scanDir, n)).size; } catch {}
+  }
+
+  return {
+    ...report,
+    modelDir: scanDir,
+    nested: !!modelDir && modelDir !== resolved,
+    sizeBytes,
+    suggestedName: sanitizeModelName(path.basename(resolved)),
+  };
+}
+
+function copyDirContents(srcDir, destDir) {
+  fs.mkdirSync(destDir, { recursive: true });
+  for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
+    // Only regular files: links are not followed, so an import cannot pull in
+    // arbitrary paths from outside the source folder.
+    if (!entry.isFile() || entry.isSymbolicLink()) continue;
+    fs.copyFileSync(path.join(srcDir, entry.name), path.join(destDir, entry.name));
+  }
+}
+
+/**
+ * Import a model folder into the Flint cache.
+ *
+ * Staged copy → write metadata → atomic rename → discovery check, with the staging
+ * directory removed on any failure so a partial import is never visible.
+ */
+function importModelFolder(payload) {
+  const inspection = inspectFolder(payload.folderPath);
+  if (!inspection.ok) {
+    throw new Error(`Folder is not an importable ONNX model:\n- ${inspection.reasons.join('\n- ')}`);
+  }
+
+  const name = sanitizeModelName(payload.name);
+  if (!name) throw new Error('Model name is empty after sanitizing.');
+  const version = Number.isInteger(payload.version) && payload.version > 0 ? payload.version : 1;
+  const publisher = sanitizeModelName(payload.publisher || 'Imported') || 'Imported';
+
+  const root = modelCacheRoot();
+  const finalDir = path.join(root, publisher, `${name}-${version}`);
+  const stagingDir = path.join(root, publisher, `.staging-${name}-${version}-${process.pid}`);
+
+  // Both paths are built from sanitized parts, but verify rather than assume.
+  if (!isInsideRoot(root, finalDir) || !isInsideRoot(root, stagingDir)) {
+    throw new Error('Refusing to write outside the model cache root.');
+  }
+  if (fs.existsSync(finalDir)) {
+    throw new Error(`A model named "${name}" version ${version} already exists. Choose another name or version.`);
+  }
+  // Importing a folder that already lives in the cache would duplicate gigabytes.
+  if (isInsideRoot(root, inspection.modelDir)) {
+    throw new Error('That folder is already inside the Flint model cache.');
+  }
+
+  const versionDir = path.join(stagingDir, `v${version}`);
+  try {
+    copyDirContents(inspection.modelDir, versionDir);
+
+    // Only author inference_model.json when the source did not provide one.
+    const infPath = path.join(versionDir, 'inference_model.json');
+    let templateSource = 'existing inference_model.json';
+    if (!fs.existsSync(infPath)) {
+      const built = buildInferenceModel({
+        name,
+        version,
+        chatTemplate: readTextIfPresent(versionDir, 'chat_template.jinja'),
+        architecture: inspection.detected.architecture,
+      });
+      fs.writeFileSync(infPath, `${JSON.stringify(built.content, null, 2)}\n`, 'utf8');
+      templateSource = built.templateSource;
+    }
+
+    // Ownership marker: proves Flint created this directory and may remove it.
+    fs.writeFileSync(
+      path.join(stagingDir, OWNERSHIP_MARKER),
+      `${JSON.stringify({
+        importedBy: 'flint',
+        importedAt: new Date().toISOString(),
+        sourcePath: inspection.modelDir,
+        kind: 'copy',
+        name,
+        version,
+        templateSource,
+      }, null, 2)}\n`,
+      'utf8',
+    );
+
+    fs.mkdirSync(path.dirname(finalDir), { recursive: true });
+    fs.renameSync(stagingDir, finalDir); // atomic within the same volume
+  } catch (e) {
+    try { fs.rmSync(stagingDir, { recursive: true, force: true }); } catch {}
+    throw e;
+  }
+
+  try { manager?.catalog?.invalidateCache?.(); } catch {}
+  return {
+    name, version, publisher,
+    path: finalDir,
+    sizeBytes: inspection.sizeBytes,
+    warnings: inspection.warnings,
+  };
+}
+
+/**
+ * Register a model that lives elsewhere by creating a directory junction.
+ *
+ * The native scanner traverses junctions, so a foreign model becomes visible without
+ * copying gigabytes and without writing a single byte into the foreign directory.
+ * Removing the model later deletes the link, never the target.
+ */
+function linkModelFolder(payload) {
+  const inspection = inspectFolder(payload.folderPath);
+  if (!inspection.ok) {
+    throw new Error(`Folder is not a usable ONNX model:\n- ${inspection.reasons.join('\n- ')}`);
+  }
+  // A link needs metadata the scanner can read, and the target must not be modified.
+  if (!inspection.detected.hasInferenceModel) {
+    throw new Error(
+      'That folder has no inference_model.json. Linking cannot add one because the ' +
+        'source folder is never modified — use Import (copy) instead.',
+    );
+  }
+
+  const name = sanitizeModelName(payload.name);
+  if (!name) throw new Error('Model name is empty after sanitizing.');
+  const publisher = sanitizeModelName(payload.publisher || 'Linked') || 'Linked';
+
+  const root = modelCacheRoot();
+  const linkPath = path.join(root, publisher, name);
+  if (!isInsideRoot(root, linkPath)) throw new Error('Refusing to link outside the model cache root.');
+  if (fs.existsSync(linkPath)) throw new Error(`A linked model named "${name}" already exists.`);
+  if (isInsideRoot(root, inspection.modelDir)) {
+    throw new Error('That folder is already inside the Flint model cache.');
+  }
+
+  // Link the parent of the version dir when the source is a Foundry-style layout,
+  // so the scanner sees the same shape it expects.
+  const target = inspection.modelDir;
+  fs.mkdirSync(path.dirname(linkPath), { recursive: true });
+  fs.symlinkSync(target, linkPath, 'junction');
+
+  try { manager?.catalog?.invalidateCache?.(); } catch {}
+  return { name, publisher, linkPath, target, warnings: inspection.warnings };
+}
+
+async function ensureModel(alias, variantId) {  const existing = pool.get(alias);
   if (existing) {
     if (variantId && existing.variantId !== variantId) {
       log('info', `Variant switch for ${alias}: ${existing.variantId} → ${variantId}`);
@@ -1076,6 +1333,18 @@ rl.on('line', async (line) => {
         audit('deleteModel', { alias: payload.alias, variantId: null, count: deleted });
         reply({ ok: true, result: { alias: payload.alias, count: deleted } });
       }
+    } else if (cmd === 'inspectModelFolder') {
+      reply({ ok: true, result: inspectFolder(payload.folderPath) });
+    } else if (cmd === 'importModelFolder') {
+      const result = importModelFolder(payload);
+      log('info', `Imported model ${result.name}:${result.version} from ${payload.folderPath}`);
+      audit('importModelFolder', { alias: result.name, variantId: `${result.name}:${result.version}`, kind: 'copy' });
+      reply({ ok: true, result });
+    } else if (cmd === 'linkModelFolder') {
+      const result = linkModelFolder(payload);
+      log('info', `Linked model ${result.name} -> ${result.target}`);
+      audit('linkModelFolder', { alias: result.name, variantId: null, kind: 'junction' });
+      reply({ ok: true, result });
     } else if (cmd === 'startService') {
       // FoundryLocalManager.create() is a singleton: a second create() ignores new config.
       // init() already created an instance without webServiceUrls, so we must clear the
