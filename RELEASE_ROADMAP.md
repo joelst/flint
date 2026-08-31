@@ -1,7 +1,7 @@
 # Flint Release Roadmap (0.1 → 1.0)
 
-**Last updated:** 2026-08-06 (rev. 7 — packaging/rebind on main; docs & Help; 0.3.x tag still open)  
-**Original date:** 2026-06-24  
+**Last updated:** 2026-08-06 (rev. 7 — packaging/rebind on main; docs & Help; 0.3.x tag still open)
+**Original date:** 2026-06-24
 **Scope:** Living release roadmap — tracks readiness decisions, known limitations, and per-release objectives from MVP 0.1 through 1.0. This is the **only** living release planner for scorecards and milestone scope. Day-to-day product sequencing (docs, help, 1.0 bar) lives in [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md).
 
 ---
@@ -427,7 +427,7 @@ Numbers below are probe results, not estimates.
 
 ### Positioning
 
-**The Windows control plane for Foundry Local**: hardware-aware model management, an
+**The friendly and full-featured control plane for Foundry Local**: hardware-aware model management, an
 observable OpenAI endpoint, and reliable integration with local AI clients.
 
 Flint does not compete with Ollama on model-library breadth, and says so. Foundry Local
@@ -436,12 +436,11 @@ is what makes the rest of the pitch credible.
 
 Reasons to choose Flint over Ollama's desktop app, all already shipped: NPU/GPU/CPU
 variant selection, multi-model pool co-residency, side-by-side comparison, speech-to-text,
-audit logging, bind-address/network control, and a code-signed installer. Ollama's GUI
-has none of these.
+audit logging, bind-address/network control.
 
 ### What the endpoint actually does (probed, contradicts prior assumptions)
 
-| Behaviour | Result |
+| Behavior | Result |
 | --- | --- |
 | `GET /v1/models` | **200, OpenAI-shaped** `{data:[…]}`. Not missing, as docs implied. |
 | `GET /openai/models`, `/foundry/list` | **404** — documented routes are stale. |
