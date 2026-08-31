@@ -62,7 +62,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc1NTI3QUZEMjQwRUQ2QzMKUldURDFnNGsvWHBTZFg1OHNjWXFDaVpCNk80Nlp3Sk5lVis1eEdSOGFQSXJJMStQR1lpSmNGcXUK",
       "endpoints": [
-        "https://github.com/joelst/flint/releases/download/v{{current_version}}/latest.json"
+        "https://github.com/joelst/flint/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"

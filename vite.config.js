@@ -61,12 +61,20 @@ export default defineConfig(() => ({
         'src/lib/message-rendering.ts',
         'src/lib/conversation-sidebar.ts',
         'src/lib/ipc-contracts.ts',
+        'src/lib/node-runtime.ts',
+        'src/lib/sidecar-paths.ts',
+        'src/lib/flint-context.ts',
+        'sidecar/audio-format.js',
+        'sidecar/model-updates.js',
       ],
+      // Set just below the level the included files actually achieve, so the
+      // gate catches regressions instead of rubber-stamping them. Raise these
+      // as files are added rather than leaving slack.
       thresholds: {
-        lines: 65,
-        functions: 65,
-        branches: 45,
-        statements: 65
+        lines: 90,
+        functions: 88,
+        branches: 72,
+        statements: 88
       }
     }
   }

@@ -10,6 +10,12 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 testResults.xml
 
+# Test coverage output (npm run test:coverage)
+/coverage/
+
+# Foundry sidecar debug logs (e.g. 26.08.log)
+*.log
+
 # Local Windows signing certificate artifacts
 flint-selfsigned.pfx
 flint-selfsigned.pfx.base64

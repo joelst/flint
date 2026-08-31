@@ -45,18 +45,22 @@ Use the CLI when you want a terminal-first workflow. Use Flint when you want the
 - **Compare** — side-by-side prompts, ratings, export  
 - **Monitor** — pool, resource gauges, access/audit logs  
 - **Integrations** — copy-paste setup for OpenAI-compatible tools  
-- **Diagnostics / Settings** — service start/stop, bind/port (Apply & restart), autostart, defaults, shortcuts (`?`)
+- **Diagnostics / Settings** — service start/stop, bind/port (Apply & restart), autostart, defaults, shortcuts (`?`)  
+- **Help** — first-run coaching, empty-state guidance, and an About strip
+
+No system Node install is required: release builds bundle their own Node 22 runtime for the Foundry sidecar.
 
 ---
 
 ## Status
 
-| | |
-|---|---|
-| **Version** | **0.3.3** on `main` |
-| **Product** | 0.3 feature set is complete (pool, monitor, compare, integrations, network config, …) |
-| **Packaging** | Installers ship **Flint.exe**, Foundry native cores, and fixed production sidecar paths |
-| **Public release** | Cut a tagged release when signing secrets + updater key + clean-machine dogfood are done — see [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) and [docs/RELEASE.md](./docs/RELEASE.md) |
+**0.4.4** — [signed installers on the releases page](https://github.com/joelst/flint/releases/latest). Pre-1.0: expect breaking changes.
+
+- Windows installers are Authenticode-signed (Azure Trusted Signing); bundles ship the Foundry native cores and a pinned Node 22 runtime, verified in CI.
+- In-app updater tracks the latest GitHub release.
+- macOS builds are produced but not yet dogfooded.
+
+Next: [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) · [docs/BACKLOG.md](./docs/BACKLOG.md) · Release notes: [CHANGELOG.md](./CHANGELOG.md)
 
 Living plan (docs, help, 0.4, 1.0): **[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md)** · End-user walkthrough: **[docs/USER_GUIDE.md](./docs/USER_GUIDE.md)**
 

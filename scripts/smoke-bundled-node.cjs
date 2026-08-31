@@ -30,6 +30,17 @@ function stagedNodePath() {
   return path.join(binariesDir, `node-${triple}${ext}`);
 }
 
+// `ensure:node --target <triple>` stages the binary for the build target, which
+// need not be the host. A cross-staged binary cannot be executed here, so skip
+// rather than report a misleading failure.
+function requestedTarget(argv) {
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === '--target') return argv[i + 1] || null;
+    if (argv[i].startsWith('--target=')) return argv[i].slice('--target='.length);
+  }
+  return process.env.FLINT_SMOKE_TARGET || null;
+}
+
 function run(bin, args, env = {}) {
   return spawnSync(bin, args, {
     cwd: root,
@@ -41,6 +52,14 @@ function run(bin, args, env = {}) {
 }
 
 function main() {
+  const target = requestedTarget(process.argv.slice(2));
+  if (target && target !== hostTriple()) {
+    console.log(
+      `Skipping smoke: staged for ${target}, host is ${hostTriple()} (cannot execute a cross-built Node).`,
+    );
+    return;
+  }
+
   const nodeBin = stagedNodePath();
   if (!fs.existsSync(nodeBin)) {
     console.error(`Missing ${path.relative(root, nodeBin)} — run: npm run ensure:node`);

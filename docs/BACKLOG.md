@@ -1,51 +1,63 @@
-# Documentation & product-copy backlog
+# Backlog
 
-Items found during docs consolidation and deferred follow-ups. Check boxes when done; link PRs when useful.
+Open work only. Completed items are deleted, not archived — `git log` and `CHANGELOG.md`
+hold the history. Durable facts belong in
+[`.github/copilot-instructions.md`](../.github/copilot-instructions.md), not here.
 
----
+Verify an item against the tree before acting on it.
 
-## Product UI copy (code changes)
+## Shipping integrity
 
-- [x] **Learn tab accuracy pass** (`src/routes/+page.svelte` Learn view) — Node 22+ + bundled Foundry + Around the app.
-- [x] **`flint-context.ts` fact sheet** — 0.3 surfaces + Node 22+ dependency called out.
-- [x] **In-app Integrations / Diagnostics / boot copy** — boot notice shows Node preflight errors with guidance.
-- [x] **Node preflight** — `src/lib/node-runtime.ts` + `ensureNodeRuntime()` before sidecar spawn; min **Node 22+** (security-supported floor); shell allow `node -v` / `--version`.
+- [ ] **Clean-machine dogfood** — install the signed build where no Node, Rust, or prior
+      Foundry exists; confirm first run downloads and loads a model.
+- [ ] **Boot smoke on the real installer** — CI checks bundle contents but never installs
+      the MSI/NSIS and launches. Decide: drive the installer on a Windows runner, or keep
+      the cheaper staged-layout test.
+- [ ] **macOS unverified** — DMG/app build and upload; nobody has confirmed an installed
+      macOS build boots. Dogfood it or declare macOS unsupported.
 
-## Release process
+## Updater
 
-- [x] **CHANGELOG 0.3.0 section** — hand-written from scorecard + bonus features.
-- [x] **Updater endpoint URL** — `joelst/flint` in `tauri.conf.json`.
-- [ ] **Updater pubkey** — generate with `npx tauri signer generate -w ~/.tauri/flint.key`; replace `PLACEHOLDER` in `tauri.conf.json` (do not commit private key).
-- [ ] **GitHub signing secrets** — `WINDOWS_CERTIFICATE` + `WINDOWS_CERTIFICATE_PASSWORD` per [RELEASE.md](./RELEASE.md).
-- [ ] **RC / tag** — `workflow_dispatch` then `v0.3.0` per [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md).
+- [ ] **Publishing is manual** — the workflow leaves a draft, and drafts/pre-releases are
+      invisible to `releases/latest`. Automate publishing or keep it a checklist step.
+- [ ] **No update-failure surface** — if the updater can't reach the endpoint the user
+      sees nothing. Show last-checked time and last error.
 
-## Runtime strategy (post-0.3)
+## Audio
 
-- [ ] **0.4+ targeted Rust bridge** — move selected sidecar commands into Tauri/Rust invoke (or thin Rust sidecar) incrementally; keep JS Node sidecar as fallback; shrink shell-spawn surface over time. Not a big-bang rewrite.
-- [x] **Node bundling spike (Spike A)** — **Go** 2026-08-10 ([spikes/node-bundle-spike.md](./spikes/node-bundle-spike.md)): `externalBin` + `smoke:node` N-API + release MSI/NSIS size delta. PATH remains dev fallback. Residual: clean-machine dogfood with Node uninstalled (C3).
-- [ ] **1.0 aspirational** — no end-user Node if Rust (or bundled runtime) covers the sidecar surface.
+- [ ] **Convert instead of rejecting** — non-WAV uploads are now rejected with a clear
+      error; transcoding WebM/Opus and MP3 to 16 kHz mono PCM would be better. Needs a
+      decoder that doesn't bloat the bundle.
+- [ ] **Word-level timestamps** — blocked upstream
+      ([microsoft/Foundry-Local#392](https://github.com/microsoft/Foundry-Local/issues/392),
+      open). Revisit when granularity lands; `parakeet-tdt-0.6b-v2` is already in the
+      catalog and produces word timings natively.
 
-## Optional control CLI (post–core solid; not 0.4)
+## Test coverage
 
-**Decision (2026-08-10):** do **not** build an Ollama-style model CLI or a second Foundry Local CLI inside Flint. Foundry already owns terminal-first `foundry model` / `foundry run` / `foundry server`. Flint’s wedge remains **SDK catalog + GUI + OpenAI endpoint + Integrations**.
+- [ ] **`+page.svelte` is untested** and holds most of the app (~337 KB, `@ts-nocheck`).
+      Keep extracting pure logic into `src/lib/*.ts` with tests rather than testing the
+      component.
+- [ ] **No Rust tests** — `cargo check` is the only gate on `src-tauri`.
 
-- [ ] **Optional later: thin `flint` control CLI** — only if automation demand is real after node-free + stable sidecar IPC. Map 1:1 to existing sidecar commands, e.g. `status`, `models list|download|load|unload`, `service start|stop`, `endpoint`. Same runtime as the GUI (no CLI-only product logic).
-- **Non-goals:** shadow/scrape `foundry` CLI; full `pull`/`run` REPL clone of Ollama; shipping a CLI before the desktop control plane is solid.
+## Runtime strategy
 
-See PRODUCT_PLAN non-goals and README “Flint vs Foundry Local CLI.”
+- [ ] **Targeted Rust bridge** — move selected sidecar commands to Tauri invoke
+      incrementally, JS sidecar as fallback. Not a big-bang rewrite.
+- [ ] **1.0: no end-user Node** — bundled Node 22 already removes the user-visible
+      requirement; this is about shrinking the spawn/attack surface.
 
-## Docs hygiene (later)
+## Control CLI — not planned
 
-- [ ] **Slim RELEASE_ROADMAP §1–2** (0.1 postmortem) after `v0.3.0` tag.
-- [ ] **Optional root `CONTRIBUTING.md`** linking [DEVELOPMENT.md](./DEVELOPMENT.md).
-- [ ] **Optional CI markdown link check**.
-- [ ] **Local cleanup** of gitignored `docs/pool-spike-results/*-FAILED.*`.
+Foundry owns terminal-first `foundry model` / `run` / `server`. Flint's wedge is SDK
+catalog + GUI + OpenAI endpoint + Integrations. Non-goals: shadowing the `foundry` CLI,
+cloning Ollama's `pull`/`run` REPL, any CLI before the desktop app is solid.
 
-## Process guardrails (already adopted)
+- [ ] Revisit only if automation demand proves real, as a thin wrapper mapping 1:1 to
+      existing sidecar commands with no CLI-only logic.
 
-- One living planner: `RELEASE_ROADMAP.md`. Prefer scorecard sections inside the roadmap over parallel sprint + remaining-implementation docs for the same milestone.
-- Archive completed plans under `docs/archive/` with an archived banner; do not “fix” historical checklists.
+## Docs
 
----
-
-**Last updated:** 2026-08-10 (CLI stance + Spike A Go — see PRODUCT_PLAN + spikes/node-bundle-spike.md)
+- [ ] **Slim RELEASE_ROADMAP §1–2** — ~40 KB; the 0.1 postmortem costs more to read than
+      it informs.
+- [ ] **Optional** root `CONTRIBUTING.md`; CI markdown link check.

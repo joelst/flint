@@ -38,7 +38,7 @@ Index by audience. Prefer these living docs over anything under `archive/`.
 
 - **Living planner:** [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) only.
 - Do **not** maintain parallel “sprint plan” + “remaining implementation plan” + roadmap for the same milestone.
-- Deferred follow-ups from docs work: [BACKLOG.md](./BACKLOG.md).
+- Deferred follow-ups: [BACKLOG.md](./BACKLOG.md) — open items only; completed work lives in `git log` and [CHANGELOG.md](../CHANGELOG.md).
 
 ## Archive
 

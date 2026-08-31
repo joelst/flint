@@ -171,6 +171,15 @@ jobs:
       - name: Stage bundled Node (externalBin)
         run: npm run ensure:node
 
+      # Packaging prerequisites and a real sidecar-runtime smoke. These catch the
+      # class of bug that only shows up in an installed build, which is invisible
+      # to the unit tests and shipped broken through several green releases.
+      - name: Verify packaging prerequisites
+        run: npm run verify:bundle
+
+      - name: Smoke test bundled Node + Foundry SDK
+        run: npm run smoke:node
+
       - name: Build Tauri (debug for CI speed)
         uses: tauri-apps/tauri-action@v0
         env:
