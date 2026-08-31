@@ -1,5 +1,12 @@
 # Flint Changelog
 
+## 0.4.5
+
+### Patch Changes
+
+- 7dc6efb: Fix the auto-updater never finding a new version. The endpoint resolved to the manifest attached to the release the user was already running, so every client reported "up to date"; it now points at the floating latest-release URL.
+- 7dc6efb: Harden release packaging and audio input. `verify:bundle` now understands `--target` builds (it previously inspected only `target/release`, so every check silently passed on the builds that ship) and gains `--require-build`; it and `smoke:node` now run in CI and at release. Non-WAV uploads are rejected by magic-byte sniffing before a model loads, instead of failing inside the native decoder. Coverage now includes the sidecar and runtime-path modules at 88/72.
+
 ## 0.4.4
 
 ### Patch Changes
