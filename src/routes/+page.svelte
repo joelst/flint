@@ -30,6 +30,14 @@
     ensureNodeRuntime,
     formatNodeVersion,
     MIN_NODE_VERSION,
+    inspectModelFolder,
+    importModelFolder,
+    linkModelFolder,
+    getModelTemplate,
+    setModelTemplate,
+    validatePromptTemplate,
+    TEMPLATE_ROLES,
+    TEMPLATE_PRESETS,
     type ModelInfo,
     type EpInfo,
     type LogEntry,
@@ -55,6 +63,7 @@
   } from "$lib/integrations";
 
   import { enable as autostartEnable, disable as autostartDisable, isEnabled as autostartIsEnabled } from '$lib/autostart';
+  import { sortModels, isModelSortMode, type ModelSortMode } from '$lib/model-sort';
   import {
     buildFlintAwareSystemPrompt,
     contentToPlainText,
@@ -1052,11 +1061,27 @@
   }
 
   // Local reactive derived
+  const MODEL_SORT_KEY = "flint-model-sort";
+  let modelSortMode = $state<ModelSortMode>("name");
+  try {
+    const saved = localStorage.getItem(MODEL_SORT_KEY);
+    if (isModelSortMode(saved)) modelSortMode = saved;
+  } catch {}
+
+  function setModelSortMode(mode: string) {
+    if (!isModelSortMode(mode)) return;
+    modelSortMode = mode;
+    try { localStorage.setItem(MODEL_SORT_KEY, modelSortMode); } catch {}
+  }
+
   const filteredModels = $derived(
-    (state.models || []).filter(
-      (m: ModelInfo) =>
-        m.alias?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        (m as any).family?.toLowerCase?.()?.includes(searchTerm.toLowerCase()),
+    sortModels(
+      (state.models || []).filter(
+        (m: ModelInfo) =>
+          m.alias?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+          (m as any).family?.toLowerCase?.()?.includes(searchTerm.toLowerCase()),
+      ),
+      modelSortMode,
     ),
   );
   const modelUpdateCount = $derived(
@@ -1065,6 +1090,152 @@
       0,
     ),
   );
+
+  // ---- BYOM: import an ONNX model folder that is not in the Foundry catalog ----
+
+  let byomOpen = $state(false);
+  let byomFolder = $state("");
+  let byomName = $state("");
+  let byomInspecting = $state(false);
+  let byomBusy = $state("");
+  let byomReport = $state<any>(null);
+  let byomError = $state("");
+  let byomTemplate = $state<Record<string, string> | null>(null);
+  let byomPreset = $state("");
+  let byomTemplateOpen = $state(false);
+
+  /** Locally imported and linked models report a `local://` uri; catalog models do not. */
+  function isLocalModel(model: any): boolean {
+    return String(model?.info?.uri || "").startsWith("local://");
+  }
+
+  const byomTemplateCheck = $derived(
+    byomTemplate ? validatePromptTemplate(byomTemplate) : null,
+  );
+
+  function resetByom() {
+    byomFolder = "";
+    byomName = "";
+    byomReport = null;
+    byomError = "";
+    byomTemplate = null;
+    byomPreset = "";
+    byomTemplateOpen = false;
+    byomBusy = "";
+  }
+
+  async function pickByomFolder() {
+    byomError = "";
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const picked = await open({ directory: true, multiple: false, title: "Select an ONNX model folder" });
+      if (typeof picked !== "string") return;
+      byomFolder = picked;
+      await inspectByomFolder();
+    } catch (e: any) {
+      byomError = `Could not open the folder picker: ${e?.message || e}`;
+    }
+  }
+
+  async function inspectByomFolder() {
+    if (!byomFolder) return;
+    byomInspecting = true;
+    byomError = "";
+    byomReport = null;
+    try {
+      const report = await inspectModelFolder(byomFolder);
+      byomReport = report;
+      byomName = report.suggestedName || "";
+      byomTemplate = { ...report.detected.promptTemplate };
+      byomPreset = "";
+      // A guess is worth showing up front; a confident detection can stay collapsed.
+      byomTemplateOpen = !report.detected.templateConfident;
+    } catch (e: any) {
+      byomError = e?.message || String(e);
+    } finally {
+      byomInspecting = false;
+    }
+  }
+
+  function applyByomPreset(key: string) {
+    byomPreset = key;
+    const preset = (byomReport?.presets || TEMPLATE_PRESETS)[key];
+    if (preset?.template) byomTemplate = { ...preset.template };
+  }
+
+  async function runByomImport(mode: "copy" | "link") {
+    if (!byomReport?.ok || !byomName.trim()) return;
+    byomBusy = mode;
+    byomError = "";
+    try {
+      if (mode === "link") {
+        await linkModelFolder({ folderPath: byomFolder, name: byomName.trim() });
+      } else {
+        await importModelFolder({
+          folderPath: byomFolder,
+          name: byomName.trim(),
+          // Only send a template when it differs from what the sidecar would pick anyway.
+          promptTemplate: byomTemplateDirty() ? (byomTemplate as any) : undefined,
+        });
+      }
+      appendAppLog(`Added model "${byomName.trim()}" (${mode === "link" ? "linked" : "copied"})`, "info");
+      byomOpen = false;
+      resetByom();
+    } catch (e: any) {
+      byomError = e?.message || String(e);
+    } finally {
+      byomBusy = "";
+    }
+  }
+
+  function byomTemplateDirty(): boolean {
+    const detected = byomReport?.detected?.promptTemplate;
+    if (!detected || !byomTemplate) return false;
+    return TEMPLATE_ROLES.some((r: string) => detected[r] !== byomTemplate?.[r]);
+  }
+
+  // ---- Editing the template of a model Flint already imported ----
+
+  let templateEditAlias = $state<string | null>(null);
+  let templateEdit = $state<Record<string, string> | null>(null);
+  let templateEditPresets = $state<Record<string, any>>({});
+  let templateEditSource = $state("");
+  let templateEditError = $state("");
+  let templateEditSaving = $state(false);
+
+  const templateEditCheck = $derived(
+    templateEdit ? validatePromptTemplate(templateEdit) : null,
+  );
+
+  async function openTemplateEditor(model: any) {
+    templateEditAlias = model.alias;
+    templateEdit = null;
+    templateEditError = "";
+    try {
+      const res = await getModelTemplate(model.alias);
+      templateEdit = { ...(res.promptTemplate as any) };
+      templateEditPresets = res.presets || {};
+      templateEditSource = res.templateSource || "";
+    } catch (e: any) {
+      templateEditError = e?.message || String(e);
+    }
+  }
+
+  async function saveTemplateEdit() {
+    if (!templateEditAlias || !templateEdit) return;
+    templateEditSaving = true;
+    templateEditError = "";
+    try {
+      await setModelTemplate(templateEditAlias, templateEdit as any);
+      appendAppLog(`Updated prompt template for "${templateEditAlias}"`, "info");
+      templateEditAlias = null;
+      templateEdit = null;
+    } catch (e: any) {
+      templateEditError = e?.message || String(e);
+    } finally {
+      templateEditSaving = false;
+    }
+  }
 
   // Persistence for chat history and current model
   const PERSIST_KEY = "flint-chat-persist";
@@ -4207,7 +4378,24 @@ Output only the summary text, no preamble.`;
                 placeholder="Search models (alias or family)..."
                 bind:value={searchTerm}
               />
+              <label class="sort-label" for="model-sort">Sort</label>
+              <select
+                id="model-sort"
+                value={modelSortMode}
+                onchange={(e) => setModelSortMode((e.currentTarget as HTMLSelectElement).value)}
+              >
+                <option value="name">Model name</option>
+                <option value="family">Model family</option>
+                <option value="updated">Last updated</option>
+              </select>
               <span class="count">{filteredModels.length} models</span>
+              <button
+                class="secondary"
+                onclick={() => { byomOpen = true; }}
+                title="Add an ONNX model folder that is not in the Foundry catalog"
+              >
+                Add model folder…
+              </button>
             </div>
 
             <div class="accel-panel">
@@ -4577,6 +4765,16 @@ Output only the summary text, no preamble.`;
                         Load on startup{#if startupModels[model.alias]}&nbsp;<span class="startup-variant-hint">({startupModels[model.alias]?.split(':')[0]?.split('-').slice(-2).join('-')})</span>{/if}
                       </label>
 
+                      {#if isLocalModel(model)}
+                        <button
+                          class="secondary"
+                          onclick={() => openTemplateEditor(model)}
+                          title="View or edit the prompt template Flint wrote for this model"
+                        >
+                          Prompt template
+                        </button>
+                      {/if}
+
                       <button
                         class="secondary"
                         onclick={() => (modelDetailsAlias = model.alias)}
@@ -4587,6 +4785,237 @@ Output only the summary text, no preamble.`;
                   </div>
                 {/each}
               </div>
+
+              {#if byomOpen}
+                <div
+                  class="model-modal-overlay"
+                  role="presentation"
+                  onclick={() => { byomOpen = false; resetByom(); }}
+                  onkeydown={(e) => { if (e.key === 'Escape') { byomOpen = false; resetByom(); } }}
+                >
+                  <div
+                    class="model-modal byom-modal"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-label="Add a model folder"
+                    tabindex="-1"
+                    onclick={(e) => e.stopPropagation()}
+                    onkeydown={(e) => { if (e.key === 'Escape') { byomOpen = false; resetByom(); } }}
+                  >
+                    <div class="modal-header">
+                      <h3>Add a model folder</h3>
+                      <button type="button" aria-label="Close" onclick={() => { byomOpen = false; resetByom(); }}><Icon name="x" size={14} /></button>
+                    </div>
+                    <div class="modal-body">
+                      <p class="small muted">
+                        Foundry Local runs <strong>ONNX</strong> models built for onnxruntime-genai — a folder
+                        with <code>genai_config.json</code> and a tokenizer. GGUF files will not work.
+                      </p>
+
+                      <div class="byom-row">
+                        <button type="button" onclick={pickByomFolder} disabled={byomInspecting || !!byomBusy}>
+                          Choose folder…
+                        </button>
+                        <span class="byom-path" title={byomFolder}>{byomFolder || "No folder selected"}</span>
+                      </div>
+
+                      {#if byomInspecting}
+                        <p class="small">Checking folder…</p>
+                      {/if}
+
+                      {#if byomError}
+                        <pre class="error-guidance">{byomError}</pre>
+                      {/if}
+
+                      {#if byomReport}
+                        {#if !byomReport.ok}
+                          <div class="byom-verdict bad">
+                            <strong>This folder cannot be used</strong>
+                            <ul>
+                              {#each byomReport.reasons as reason}<li>{reason}</li>{/each}
+                            </ul>
+                          </div>
+                        {:else}
+                          <div class="byom-verdict good">
+                            <strong>Looks like a usable ONNX model</strong>
+                            <div class="byom-facts">
+                              <span>Architecture: {byomReport.detected.architecture || "unknown"}</span>
+                              <span>Context: {byomReport.detected.contextLength ?? "unknown"}</span>
+                              <span>Size: {(byomReport.sizeBytes / (1024 * 1024)).toFixed(0)} MB</span>
+                              {#if byomReport.nested}
+                                <span title={byomReport.modelDir}>Found in a subfolder</span>
+                              {/if}
+                            </div>
+                          </div>
+                          {#if byomReport.warnings?.length}
+                            <ul class="byom-warnings">
+                              {#each byomReport.warnings as w}<li>{w}</li>{/each}
+                            </ul>
+                          {/if}
+
+                          <div class="byom-row">
+                            <label for="byom-name">Name</label>
+                            <input id="byom-name" type="text" bind:value={byomName} placeholder="my-model" />
+                          </div>
+
+                          <div class="byom-template">
+                            <button
+                              type="button"
+                              class="variant-toggle"
+                              onclick={() => (byomTemplateOpen = !byomTemplateOpen)}
+                            >
+                              Prompt template &nbsp;{byomTemplateOpen ? "▲" : "▼"}
+                            </button>
+                            <span
+                              class="badge small"
+                              class:cached={byomReport.detected.templateConfident}
+                              class:update={!byomReport.detected.templateConfident}
+                            >
+                              {byomReport.detected.templateConfident ? "Detected" : "Guessed"}
+                            </span>
+                            <span class="small muted">{byomReport.detected.templateSource}</span>
+                          </div>
+
+                          {#if byomTemplateOpen && byomTemplate}
+                            <p class="small muted">
+                              Foundry replaces <code>&#123;Content&#125;</code> with the message text. A template
+                              without it loads normally but silently drops what you type.
+                            </p>
+                            <div class="byom-row">
+                              <label for="byom-preset">Start from</label>
+                              <select
+                                id="byom-preset"
+                                value={byomPreset}
+                                onchange={(e) => applyByomPreset((e.currentTarget as HTMLSelectElement).value)}
+                              >
+                                <option value="" disabled>Choose a family…</option>
+                                {#each Object.entries(byomReport.presets || TEMPLATE_PRESETS) as [key, preset]}
+                                  <option value={key}>{(preset as any).label}</option>
+                                {/each}
+                              </select>
+                            </div>
+                            {#each TEMPLATE_ROLES as role}
+                              <div class="byom-tpl-field">
+                                <label for={`byom-tpl-${role}`}>{role}</label>
+                                <textarea id={`byom-tpl-${role}`} rows="2" bind:value={byomTemplate[role]}></textarea>
+                              </div>
+                            {/each}
+                            {#if byomTemplateCheck && !byomTemplateCheck.ok}
+                              <ul class="byom-errors">
+                                {#each byomTemplateCheck.errors as err}<li>{err}</li>{/each}
+                              </ul>
+                            {:else if byomTemplateCheck?.warnings?.length}
+                              <ul class="byom-warnings">
+                                {#each byomTemplateCheck.warnings as w}<li>{w}</li>{/each}
+                              </ul>
+                            {/if}
+                          {/if}
+                        {/if}
+                      {/if}
+                    </div>
+                    <div class="modal-footer byom-footer">
+                      <button
+                        type="button"
+                        onclick={() => runByomImport("copy")}
+                        disabled={!byomReport?.ok || !byomName.trim() || !!byomBusy || (byomTemplateCheck && !byomTemplateCheck.ok)}
+                        title="Copy the folder into Flint's model cache"
+                      >
+                        {byomBusy === "copy" ? "Copying…" : "Copy into Flint"}
+                      </button>
+                      <button
+                        type="button"
+                        class="secondary"
+                        onclick={() => runByomImport("link")}
+                        disabled={!byomReport?.ok || !byomName.trim() || !!byomBusy || !byomReport?.detected?.hasInferenceModel}
+                        title={byomReport && !byomReport.detected?.hasInferenceModel
+                          ? "Linking cannot add the missing inference_model.json, because the folder is never written to. Copy instead."
+                          : "Register the folder where it is, without copying it"}
+                      >
+                        {byomBusy === "link" ? "Linking…" : "Link in place"}
+                      </button>
+                      <button type="button" class="secondary" onclick={() => { byomOpen = false; resetByom(); }}>Cancel</button>
+                    </div>
+                  </div>
+                </div>
+              {/if}
+
+              {#if templateEditAlias}
+                <div
+                  class="model-modal-overlay"
+                  role="presentation"
+                  onclick={() => { templateEditAlias = null; templateEdit = null; }}
+                  onkeydown={(e) => { if (e.key === 'Escape') { templateEditAlias = null; templateEdit = null; } }}
+                >
+                  <div
+                    class="model-modal byom-modal"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-label={`Prompt template for ${templateEditAlias}`}
+                    tabindex="-1"
+                    onclick={(e) => e.stopPropagation()}
+                    onkeydown={(e) => { if (e.key === 'Escape') { templateEditAlias = null; templateEdit = null; } }}
+                  >
+                    <div class="modal-header">
+                      <h3>Prompt template — {templateEditAlias}</h3>
+                      <button type="button" aria-label="Close" onclick={() => { templateEditAlias = null; templateEdit = null; }}><Icon name="x" size={14} /></button>
+                    </div>
+                    <div class="modal-body">
+                      {#if templateEditError}
+                        <pre class="error-guidance">{templateEditError}</pre>
+                      {/if}
+                      {#if templateEdit}
+                        {#if templateEditSource}
+                          <p class="small muted">Current source: {templateEditSource}</p>
+                        {/if}
+                        <div class="byom-row">
+                          <label for="tpl-preset">Start from</label>
+                          <select
+                            id="tpl-preset"
+                            onchange={(e) => {
+                              const key = (e.currentTarget as HTMLSelectElement).value;
+                              const preset = templateEditPresets[key];
+                              if (preset?.template) templateEdit = { ...preset.template };
+                            }}
+                          >
+                            <option value="" selected disabled>Choose a family…</option>
+                            {#each Object.entries(templateEditPresets) as [key, preset]}
+                              <option value={key}>{(preset as any).label}</option>
+                            {/each}
+                          </select>
+                        </div>
+                        {#each TEMPLATE_ROLES as role}
+                          <div class="byom-tpl-field">
+                            <label for={`tpl-${role}`}>{role}</label>
+                            <textarea id={`tpl-${role}`} rows="2" bind:value={templateEdit[role]}></textarea>
+                          </div>
+                        {/each}
+                        {#if templateEditCheck && !templateEditCheck.ok}
+                          <ul class="byom-errors">
+                            {#each templateEditCheck.errors as err}<li>{err}</li>{/each}
+                          </ul>
+                        {:else if templateEditCheck?.warnings?.length}
+                          <ul class="byom-warnings">
+                            {#each templateEditCheck.warnings as w}<li>{w}</li>{/each}
+                          </ul>
+                        {/if}
+                        <p class="small muted">
+                          Reload the model after saving — a loaded model keeps the template it started with.
+                        </p>
+                      {/if}
+                    </div>
+                    <div class="modal-footer byom-footer">
+                      <button
+                        type="button"
+                        onclick={saveTemplateEdit}
+                        disabled={!templateEdit || templateEditSaving || (templateEditCheck && !templateEditCheck.ok)}
+                      >
+                        {templateEditSaving ? "Saving…" : "Save template"}
+                      </button>
+                      <button type="button" class="secondary" onclick={() => { templateEditAlias = null; templateEdit = null; }}>Cancel</button>
+                    </div>
+                  </div>
+                </div>
+              {/if}
 
               {#if modelDetailsAlias}
                 {@const detailModel = state.models.find((m: any) => m.alias === modelDetailsAlias)}
@@ -7295,6 +7724,38 @@ Output only the summary text, no preamble.`;
     font-size: 0.85rem;
     color: var(--muted);
   }
+
+  .byom-modal .modal-body { display: flex; flex-direction: column; gap: 10px; }
+  .byom-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .byom-row label { font-size: 0.8rem; color: var(--muted); min-width: 74px; }
+  .byom-row input[type="text"] { flex: 1; min-width: 180px; }
+  .byom-path {
+    font-family: var(--mono, monospace);
+    font-size: 0.75rem;
+    color: var(--muted);
+    overflow-wrap: anywhere;
+    flex: 1;
+  }
+  .byom-verdict { border-radius: 6px; padding: 8px 10px; font-size: 0.82rem; }
+  .byom-verdict.good { border: 1px solid var(--border); }
+  .byom-verdict.bad { border: 1px solid #b4462e; }
+  .byom-verdict ul { margin: 6px 0 0; padding-left: 18px; }
+  .byom-facts { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 6px; color: var(--muted); }
+  .byom-warnings, .byom-errors { margin: 0; padding-left: 18px; font-size: 0.78rem; }
+  .byom-warnings { color: var(--muted); }
+  .byom-errors { color: #d2603f; }
+  .byom-template { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .byom-tpl-field { display: flex; flex-direction: column; gap: 3px; }
+  .byom-tpl-field label { font-size: 0.75rem; color: var(--muted); text-transform: capitalize; }
+  .byom-tpl-field textarea {
+    font-family: var(--mono, monospace);
+    font-size: 0.75rem;
+    resize: vertical;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .byom-footer { display: flex; gap: 8px; justify-content: flex-end; padding: 10px 14px; }
+  .sort-label { font-size: 0.8rem; color: var(--muted); }
 
   button {
     padding: 6px 12px;

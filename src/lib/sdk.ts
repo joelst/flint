@@ -898,6 +898,93 @@ export async function transcribeAudio(
   return res.result;
 }
 
+/** The four turn wrappers Foundry substitutes `{Content}` into when building a prompt. */
+export interface PromptTemplate {
+  system: string;
+  user: string;
+  assistant: string;
+  prompt: string;
+}
+
+export interface TemplatePreset { label: string; template: PromptTemplate }
+
+/**
+ * Re-exported from the sidecar's Node-free template module so the editor validates with
+ * exactly the rules the sidecar enforces — a second copy of these rules would drift.
+ */
+export {
+  validatePromptTemplate,
+  selectPromptTemplate,
+  TEMPLATE_ROLES,
+  TEMPLATE_PRESETS,
+} from '../../sidecar/prompt-template.js';
+
+export interface InspectFolderResult {
+  ok: boolean;
+  reasons: string[];
+  warnings: string[];
+  detected: {
+    architecture: string | null;
+    contextLength: number | null;
+    hasInferenceModel: boolean;
+    templateSource: string;
+    templateConfident: boolean;
+    promptTemplate: PromptTemplate;
+  };
+  modelDir: string;
+  nested: boolean;
+  sizeBytes: number;
+  suggestedName: string;
+  presets: Record<string, TemplatePreset>;
+}
+
+export async function inspectModelFolder(folderPath: string): Promise<InspectFolderResult> {
+  const res = await send('inspectModelFolder', { folderPath });
+  return res.result as InspectFolderResult;
+}
+
+export async function importModelFolder(options: {
+  folderPath: string;
+  name: string;
+  publisher?: string;
+  version?: number;
+  promptTemplate?: PromptTemplate;
+}): Promise<any> {
+  const res = await send('importModelFolder', options);
+  await refreshModels();
+  return res.result;
+}
+
+export async function linkModelFolder(options: {
+  folderPath: string;
+  name: string;
+  publisher?: string;
+}): Promise<any> {
+  const res = await send('linkModelFolder', options);
+  await refreshModels();
+  return res.result;
+}
+
+export interface ModelTemplateResult {
+  name: string;
+  modelName: string | null;
+  promptTemplate: PromptTemplate | null;
+  templateSource: string | null;
+  presets: Record<string, TemplatePreset>;
+  path: string;
+}
+
+export async function getModelTemplate(name: string): Promise<ModelTemplateResult> {
+  const res = await send('getModelTemplate', { name });
+  return res.result as ModelTemplateResult;
+}
+
+export async function setModelTemplate(name: string, promptTemplate: PromptTemplate): Promise<any> {
+  const res = await send('setModelTemplate', { name, promptTemplate });
+  await refreshModels();
+  return res.result;
+}
+
 export function appendAppLog(message: string, level: LogEntry['level'] = 'info') {
   sdkState.update(s => ({ ...s, logs: [...s.logs.slice(-199), { ts: Date.now(), level, message, source: 'app' as const }] }));
 }

@@ -25,6 +25,17 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { annotateVariantUpdates } from './model-updates.js';
 import { assertWavBuffer } from './audio-format.js';
+import { createGateway } from './gateway.js';
+import { buildModelIndex, resolveModelId } from './model-registry.js';
+import {
+  validateModelFolder,
+  buildInferenceModel,
+  validatePromptTemplate,
+  sanitizeModelName,
+  isInsideRoot,
+  TEMPLATE_PRESETS,
+  OWNERSHIP_MARKER,
+} from './byom-import.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -40,6 +51,8 @@ const KNOWN_COMMANDS = new Set([
   'chatCompletion', 'cancelChatRequest', 'transcribeAudio',
   'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',
   'poolStatus', 'getAccessLog', 'fetchUrl',
+  'inspectModelFolder', 'importModelFolder', 'linkModelFolder',
+  'getModelTemplate', 'setModelTemplate',
 ]);
 
 // Per-command type requirements. Keys are required or optional field names; values are:
@@ -47,7 +60,7 @@ const KNOWN_COMMANDS = new Set([
 const FIELD_TYPES = {
   init:              { appName: 'non-empty-string', logLevel: 'non-empty-string' },
   setLogLevel:       { level: 'non-empty-string' },
-  startService:      { port: 'number', bindAddress: 'string' },
+  startService:      { port: 'number', bindAddress: 'string', gateway: 'boolean' },
   download:          { alias: 'non-empty-string', variantId: 'non-empty-string' },
   load:              { alias: 'non-empty-string', variantId: 'non-empty-string' },
   unload:            { alias: 'non-empty-string' },
@@ -56,6 +69,11 @@ const FIELD_TYPES = {
   cancelChatRequest: { requestId: 'number' },
   transcribeAudio:   { audioBase64: 'string', mimeType: 'non-empty-string', fileName: 'non-empty-string', model: 'non-empty-string', language: 'non-empty-string' },
   fetchUrl:          { url: 'non-empty-string' },
+  inspectModelFolder: { folderPath: 'non-empty-string' },
+  importModelFolder: { folderPath: 'non-empty-string', name: 'non-empty-string' },
+  linkModelFolder:   { folderPath: 'non-empty-string', name: 'non-empty-string' },
+  getModelTemplate:  { name: 'non-empty-string' },
+  setModelTemplate:  { name: 'non-empty-string' },
 };
 
 // Commands that accept a lane field; validated to 'chat' | 'audio'.
@@ -68,7 +86,7 @@ const VALID_LANES = new Set(['chat', 'audio']);
 const COMMAND_SCHEMA = {
   init:               { required: ['appName', 'logLevel'], optional: [] },
   setLogLevel:        { required: ['level'], optional: [] },
-  startService:       { required: ['port'], optional: ['alias', 'preferredEp', 'bindAddress'] },
+  startService:       { required: ['port'], optional: ['alias', 'preferredEp', 'bindAddress', 'gateway'] },
   stopService:        { required: [], optional: [] },
   getStatus:          { required: [], optional: [] },
   listModels:         { required: [], optional: [] },
@@ -87,6 +105,11 @@ const COMMAND_SCHEMA = {
   poolStatus:         { required: [], optional: [] },
   getAccessLog:       { required: [], optional: [] },
   fetchUrl:           { required: ['url'], optional: ['maxChars'] },
+  inspectModelFolder: { required: ['folderPath'], optional: [] },
+  importModelFolder:  { required: ['folderPath', 'name'], optional: ['publisher', 'version', 'promptTemplate'] },
+  linkModelFolder:    { required: ['folderPath', 'name'], optional: ['publisher'] },
+  getModelTemplate:   { required: ['name'], optional: [] },
+  setModelTemplate:   { required: ['name', 'promptTemplate'], optional: [] },
 };
 
 // Base64 character limit for transcribeAudio. 50 MB decoded audio is ~67 MB of base64.
@@ -122,6 +145,7 @@ function validateCommand(cmd, payload) {
       if (expected === 'non-empty-string' && (typeof value !== 'string' || !value.trim())) return `Command "${cmd}" field "${field}" must be a non-empty string`;
       if (expected === 'string' && typeof value !== 'string') return `Command "${cmd}" field "${field}" must be a string`;
       if (expected === 'array' && !Array.isArray(value)) return `Command "${cmd}" field "${field}" must be an array`;
+      if (expected === 'boolean' && typeof value !== 'boolean') return `Command "${cmd}" field "${field}" must be a boolean`;
     }
   }
   if (payload.preferredEp !== undefined && typeof payload.preferredEp !== 'string') return `Command "${cmd}" field "preferredEp" must be a string`;
@@ -144,6 +168,21 @@ function validateCommand(cmd, payload) {
       return `Command "fetchUrl" field "maxChars" must be a number`;
     }
   }
+  if (cmd === 'importModelFolder' && payload.version !== undefined
+      && (!Number.isInteger(payload.version) || payload.version < 1)) {
+    return `Command "importModelFolder" field "version" must be a positive integer`;
+  }
+  if ((cmd === 'importModelFolder' || cmd === 'linkModelFolder')
+      && payload.publisher !== undefined
+      && (typeof payload.publisher !== 'string' || !payload.publisher.trim())) {
+    return `Command "${cmd}" field "publisher" must be a non-empty string`;
+  }
+  if ((cmd === 'importModelFolder' || cmd === 'setModelTemplate') && payload.promptTemplate !== undefined) {
+    if (typeof payload.promptTemplate !== 'object' || payload.promptTemplate === null
+        || Array.isArray(payload.promptTemplate)) {
+      return `Command "${cmd}" field "promptTemplate" must be an object`;
+    }
+  }
   return null;
 }
 // --- end allowlist ---
@@ -159,8 +198,74 @@ const canceledRequests = new Set();
 const pool = new Map();
 let sharedEndpoint = null;
 
-// Per-request access log (IPC-originated requests only; direct HTTP to the Foundry Local
-// service is not intercepted — that requires a proxy layer, deferred to 0.3 item 0b).
+// The reverse proxy that fronts the native service so external OpenAI clients can trigger
+// a load. Null whenever the service is stopped or the gateway was disabled.
+let gateway = null;
+let upstreamPort = null;
+// Identifier → {alias, variantId} for autoload. Rebuilt lazily and invalidated whenever the
+// set of cached models changes, since a stale map would refuse a model the user just added.
+let modelIndex = null;
+
+function invalidateModelIndex () {
+  modelIndex = null;
+}
+
+async function resolveForGateway (requested) {
+  if (!modelIndex) {
+    if (!manager) return null;
+    try {
+      const models = await manager.catalog.getModels();
+      modelIndex = buildModelIndex(models.map(m => ({
+        alias: m.alias,
+        variants: (m.variants || []).map(v => {
+          let cached = false;
+          try { cached = !!v.isCached; } catch { cached = !!v.info?.cached; }
+          return { id: v.id, cached };
+        }),
+      })));
+    } catch (e) {
+      log('warn', `Gateway could not read the catalog: ${e?.message ?? e}`);
+      return null;
+    }
+  }
+  return resolveModelId(modelIndex, requested);
+}
+
+/**
+ * Close the proxy before the service behind it goes away, so a client gets a connection
+ * refused rather than a gateway that accepts requests it can no longer serve.
+ */
+async function stopGateway () {
+  if (!gateway) return;
+  const current = gateway;
+  gateway = null;
+  try {
+    await current.stop();
+  } catch (e) {
+    log('warn', `Gateway stop error (ignored): ${e?.message ?? e}`);
+  }
+}
+
+/** The native service reports readiness on /status; startWebService() returning does not. */async function waitForUpstream (port, deadlineMs = 20000) {
+  const started = Date.now();
+  let lastError = null;
+  while (Date.now() - started < deadlineMs) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/status`);
+      if (res.ok) return true;
+      lastError = `status ${res.status}`;
+    } catch (e) {
+      lastError = e?.message ?? String(e);
+    }
+    await new Promise(r => setTimeout(r, 150));
+  }
+  log('warn', `Upstream service not ready after ${deadlineMs}ms: ${lastError}`);
+  return false;
+}
+
+// Per-request access log. Covers IPC-originated requests only: traffic proxied through the
+// gateway is deliberately not logged here because writeToDisk() appends synchronously, and
+// putting a blocking write in front of every external request would stall the event loop.
 const ACCESS_LOG_MAX = 500;
 const accessLog = [];
 const tokenAccumulator = new Map(); // alias → { tokensIn: number, tokensOut: number }; reset on stopService
@@ -493,8 +598,343 @@ function resolveIsLoaded(model) {
   return null;
 }
 
-async function ensureModel(alias, variantId) {
-  const existing = pool.get(alias);
+// --- BYOM (bring your own model) import ---
+//
+// The native scanner accepts a directory as a model when it holds `genai_config.json`
+// plus an `inference_model.json` carrying a `Name`, and no `download.tmp`. Public ONNX
+// repositories almost never ship `inference_model.json`, so Flint writes it.
+//
+// Imports are staged in a sibling directory and moved into place with a single rename,
+// so a crash or a failed validation can never leave a half-written model where the
+// scanner would try to load it.
+
+/** Cache root for the running appName, e.g. ~/.flint/cache/models. */
+function modelCacheRoot() {
+  const appName = initConfig?.appName || 'flint';
+  return path.join(os.homedir(), `.${appName}`, 'cache', 'models');
+}
+
+/** Files worth reading to classify a candidate folder. */
+function readJsonIfPresent(dir, name) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function readTextIfPresent(dir, name) {
+  try {
+    return fs.readFileSync(path.join(dir, name), 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Locate the directory that actually holds genai_config.json.
+ *
+ * HuggingFace repos commonly nest weights one level down (`onnx/`, `cpu_and_mobile/…`),
+ * so accept a shallow search rather than forcing the user to find the right subfolder.
+ */
+function findModelDir(rootDir, maxDepth = 3) {
+  const queue = [{ dir: rootDir, depth: 0 }];
+  while (queue.length > 0) {
+    const { dir, depth } = queue.shift();
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    if (entries.some(e => e.isFile() && e.name.toLowerCase() === 'genai_config.json')) return dir;
+    if (depth >= maxDepth) continue;
+    for (const e of entries) {
+      // Never follow links while searching: a link could point outside the tree.
+      if (e.isDirectory() && !e.isSymbolicLink()) queue.push({ dir: path.join(dir, e.name), depth: depth + 1 });
+    }
+  }
+  return null;
+}
+
+/** Inspect a candidate folder without writing anything. */
+function inspectFolder(folderPath) {
+  const resolved = path.resolve(folderPath);
+  if (!fs.existsSync(resolved)) throw new Error(`Folder does not exist: ${resolved}`);
+  if (!fs.statSync(resolved).isDirectory()) throw new Error(`Not a folder: ${resolved}`);
+
+  const modelDir = findModelDir(resolved);
+  const scanDir = modelDir || resolved;
+  let names = [];
+  try {
+    names = fs.readdirSync(scanDir, { withFileTypes: true }).filter(e => e.isFile()).map(e => e.name);
+  } catch {
+    names = [];
+  }
+
+  const genaiConfig = readJsonIfPresent(scanDir, 'genai_config.json');
+  const chatTemplate =
+    readTextIfPresent(scanDir, 'chat_template.jinja') ??
+    readJsonIfPresent(scanDir, 'tokenizer_config.json')?.chat_template ??
+    null;
+
+  const report = validateModelFolder({
+    files: names,
+    dirName: path.basename(resolved),
+    genaiConfig,
+    chatTemplate: typeof chatTemplate === 'string' ? chatTemplate : null,
+  });
+
+  let sizeBytes = 0;
+  for (const n of names) {
+    try { sizeBytes += fs.statSync(path.join(scanDir, n)).size; } catch {}
+  }
+
+  return {
+    ...report,
+    modelDir: scanDir,
+    nested: !!modelDir && modelDir !== resolved,
+    sizeBytes,
+    suggestedName: sanitizeModelName(path.basename(resolved)),
+    // Offered so the UI can present alternatives when detection was not confident.
+    presets: Object.fromEntries(
+      Object.entries(TEMPLATE_PRESETS).map(([k, v]) => [k, { label: v.label, template: v.template }]),
+    ),
+  };
+}
+
+function copyDirContents(srcDir, destDir) {
+  fs.mkdirSync(destDir, { recursive: true });
+  for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
+    // Only regular files: links are not followed, so an import cannot pull in
+    // arbitrary paths from outside the source folder.
+    if (!entry.isFile() || entry.isSymbolicLink()) continue;
+    fs.copyFileSync(path.join(srcDir, entry.name), path.join(destDir, entry.name));
+  }
+}
+
+/**
+ * Import a model folder into the Flint cache.
+ *
+ * Staged copy → write metadata → atomic rename → discovery check, with the staging
+ * directory removed on any failure so a partial import is never visible.
+ */
+function importModelFolder(payload) {
+  const inspection = inspectFolder(payload.folderPath);
+  if (!inspection.ok) {
+    throw new Error(`Folder is not an importable ONNX model:\n- ${inspection.reasons.join('\n- ')}`);
+  }
+
+  const name = sanitizeModelName(payload.name);
+  if (!name) throw new Error('Model name is empty after sanitizing.');
+  const version = Number.isInteger(payload.version) && payload.version > 0 ? payload.version : 1;
+  const publisher = sanitizeModelName(payload.publisher || 'Imported') || 'Imported';
+
+  const root = modelCacheRoot();
+  const finalDir = path.join(root, publisher, `${name}-${version}`);
+  const stagingDir = path.join(root, publisher, `.staging-${name}-${version}-${process.pid}`);
+
+  // Both paths are built from sanitized parts, but verify rather than assume.
+  if (!isInsideRoot(root, finalDir) || !isInsideRoot(root, stagingDir)) {
+    throw new Error('Refusing to write outside the model cache root.');
+  }
+  if (fs.existsSync(finalDir)) {
+    throw new Error(`A model named "${name}" version ${version} already exists. Choose another name or version.`);
+  }
+  // Importing a folder that already lives in the cache would duplicate gigabytes.
+  if (isInsideRoot(root, inspection.modelDir)) {
+    throw new Error('That folder is already inside the Flint model cache.');
+  }
+
+  const versionDir = path.join(stagingDir, `v${version}`);
+  let templateSource = 'existing inference_model.json';
+  try {
+    copyDirContents(inspection.modelDir, versionDir);
+
+    // Only author inference_model.json when the source did not provide one.
+    const infPath = path.join(versionDir, 'inference_model.json');
+    if (!fs.existsSync(infPath) || payload.promptTemplate) {
+      const built = buildInferenceModel({
+        name,
+        version,
+        chatTemplate: readTextIfPresent(versionDir, 'chat_template.jinja'),
+        architecture: inspection.detected.architecture,
+        promptTemplate: payload.promptTemplate || null,
+      });
+      fs.writeFileSync(infPath, `${JSON.stringify(built.content, null, 2)}\n`, 'utf8');
+      templateSource = built.templateSource;
+    }
+
+    // Ownership marker: proves Flint created this directory and may remove it.
+    fs.writeFileSync(
+      path.join(stagingDir, OWNERSHIP_MARKER),
+      `${JSON.stringify({
+        importedBy: 'flint',
+        importedAt: new Date().toISOString(),
+        sourcePath: inspection.modelDir,
+        kind: 'copy',
+        name,
+        version,
+        templateSource,
+      }, null, 2)}\n`,
+      'utf8',
+    );
+
+    fs.mkdirSync(path.dirname(finalDir), { recursive: true });
+    fs.renameSync(stagingDir, finalDir); // atomic within the same volume
+  } catch (e) {
+    try { fs.rmSync(stagingDir, { recursive: true, force: true }); } catch {}
+    throw e;
+  }
+
+  try { manager?.catalog?.invalidateCache?.(); } catch {}
+  return {
+    name, version, publisher,
+    path: finalDir,
+    sizeBytes: inspection.sizeBytes,
+    templateSource,
+    warnings: inspection.warnings,
+  };
+}
+
+/**
+ * Register a model that lives elsewhere by creating a directory junction.
+ *
+ * The native scanner traverses junctions, so a foreign model becomes visible without
+ * copying gigabytes and without writing a single byte into the foreign directory.
+ * Removing the model later deletes the link, never the target.
+ */
+function linkModelFolder(payload) {
+  const inspection = inspectFolder(payload.folderPath);
+  if (!inspection.ok) {
+    throw new Error(`Folder is not a usable ONNX model:\n- ${inspection.reasons.join('\n- ')}`);
+  }
+  // A link needs metadata the scanner can read, and the target must not be modified.
+  if (!inspection.detected.hasInferenceModel) {
+    throw new Error(
+      'That folder has no inference_model.json. Linking cannot add one because the ' +
+        'source folder is never modified — use Import (copy) instead.',
+    );
+  }
+
+  const name = sanitizeModelName(payload.name);
+  if (!name) throw new Error('Model name is empty after sanitizing.');
+  const publisher = sanitizeModelName(payload.publisher || 'Linked') || 'Linked';
+
+  const root = modelCacheRoot();
+  const linkPath = path.join(root, publisher, name);
+  if (!isInsideRoot(root, linkPath)) throw new Error('Refusing to link outside the model cache root.');
+  if (fs.existsSync(linkPath)) throw new Error(`A linked model named "${name}" already exists.`);
+  if (isInsideRoot(root, inspection.modelDir)) {
+    throw new Error('That folder is already inside the Flint model cache.');
+  }
+
+  // Link the parent of the version dir when the source is a Foundry-style layout,
+  // so the scanner sees the same shape it expects.
+  const target = inspection.modelDir;
+  fs.mkdirSync(path.dirname(linkPath), { recursive: true });
+  fs.symlinkSync(target, linkPath, 'junction');
+
+  try { manager?.catalog?.invalidateCache?.(); } catch {}
+  return { name, publisher, linkPath, target, warnings: inspection.warnings };
+}
+
+/**
+ * Locate an imported model's directory and its inference_model.json.
+ *
+ * Only directories carrying Flint's ownership marker are eligible: catalog models are
+ * managed by Foundry, and a linked model's files belong to the user's own folder, so
+ * neither may be rewritten from here.
+ */
+function resolveOwnedModelDir(name) {
+  const safeName = sanitizeModelName(name);
+  if (!safeName) throw new Error('Model name is empty after sanitizing.');
+  const root = modelCacheRoot();
+
+  let publishers = [];
+  try {
+    publishers = fs.readdirSync(root, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name);
+  } catch {
+    throw new Error('No model cache found yet.');
+  }
+
+  for (const publisher of publishers) {
+    const publisherDir = path.join(root, publisher);
+    let entries = [];
+    try {
+      entries = fs.readdirSync(publisherDir, { withFileTypes: true });
+    } catch { continue; }
+
+    for (const entry of entries) {
+      // A junction is a linked model; its contents are the user's, not Flint's.
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      if (entry.name !== safeName && !entry.name.startsWith(`${safeName}-`)) continue;
+
+      const dir = path.join(publisherDir, entry.name);
+      if (!isInsideRoot(root, dir)) continue;
+      if (!fs.existsSync(path.join(dir, OWNERSHIP_MARKER))) continue;
+
+      const versionDir = fs.readdirSync(dir, { withFileTypes: true })
+        .filter(e => e.isDirectory() && /^v\d+$/.test(e.name))
+        .map(e => path.join(dir, e.name))
+        .find(p => fs.existsSync(path.join(p, 'inference_model.json')));
+      if (versionDir) return { dir, versionDir, infPath: path.join(versionDir, 'inference_model.json') };
+    }
+  }
+  throw new Error(
+    `No Flint-imported model named "${safeName}" was found. Only models imported by Flint can be edited; ` +
+      'catalog and linked models are managed elsewhere.',
+  );
+}
+
+/** Read an imported model's current prompt template. */
+function getModelTemplate(name) {
+  const { infPath, dir } = resolveOwnedModelDir(name);
+  const content = JSON.parse(fs.readFileSync(infPath, 'utf8'));
+  let marker = null;
+  try { marker = JSON.parse(fs.readFileSync(path.join(dir, OWNERSHIP_MARKER), 'utf8')); } catch {}
+  return {
+    name: sanitizeModelName(name),
+    modelName: content?.Name ?? null,
+    promptTemplate: content?.PromptTemplate ?? null,
+    templateSource: marker?.templateSource ?? null,
+    presets: Object.fromEntries(Object.entries(TEMPLATE_PRESETS).map(([k, v]) => [k, { label: v.label, template: v.template }])),
+    path: infPath,
+  };
+}
+
+/**
+ * Replace an imported model's prompt template.
+ *
+ * Written to a temporary file and renamed, so an interrupted write cannot leave the
+ * model with a truncated inference_model.json — which would make it vanish from the
+ * catalog rather than fail visibly.
+ */
+function setModelTemplate(name, promptTemplate) {
+  const check = validatePromptTemplate(promptTemplate);
+  if (!check.ok) throw new Error(`Invalid prompt template:\n- ${check.errors.join('\n- ')}`);
+
+  const { dir, infPath } = resolveOwnedModelDir(name);
+  const content = JSON.parse(fs.readFileSync(infPath, 'utf8'));
+  content.PromptTemplate = { ...check.template };
+
+  const tmp = `${infPath}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(content, null, 2)}\n`, 'utf8');
+  fs.renameSync(tmp, infPath);
+
+  try {
+    const markerPath = path.join(dir, OWNERSHIP_MARKER);
+    const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+    marker.templateSource = 'user-edited';
+    marker.templateEditedAt = new Date().toISOString();
+    fs.writeFileSync(markerPath, `${JSON.stringify(marker, null, 2)}\n`, 'utf8');
+  } catch {}
+
+  try { manager?.catalog?.invalidateCache?.(); } catch {}
+  return { name: sanitizeModelName(name), promptTemplate: content.PromptTemplate, warnings: check.warnings };
+}
+
+async function ensureModel(alias, variantId) {  const existing = pool.get(alias);
   if (existing) {
     if (variantId && existing.variantId !== variantId) {
       log('info', `Variant switch for ${alias}: ${existing.variantId} → ${variantId}`);
@@ -979,6 +1419,7 @@ rl.on('line', async (line) => {
       await model.download((p) => send({ id, progress: p, alias: payload.alias }));
       // Force next catalog access to re-read model list metadata (info.cached, etc.).
       try { manager.catalog.invalidateCache?.(); } catch {}
+      invalidateModelIndex();
       audit('download.complete', { alias: payload.alias, variantId: payload.variantId ?? null });
       reply({ ok: true });
     } else if (cmd === 'load') {
@@ -1043,6 +1484,7 @@ rl.on('line', async (line) => {
           throw new Error('Runtime does not expose a variant deletion API (removeFromCache)');
         }
         try { manager.catalog.invalidateCache?.(); } catch {}
+        invalidateModelIndex();
         audit('deleteModel', { alias: payload.alias, variantId });
         reply({ ok: true, result: { alias: payload.alias, variantId } });
       } else {
@@ -1073,47 +1515,112 @@ rl.on('line', async (line) => {
         }
         try { manager.catalog.invalidateCache?.(); } catch {}
         log('info', `Deleted ${deleted} cached variant(s) for ${payload.alias}`);
+        invalidateModelIndex();
         audit('deleteModel', { alias: payload.alias, variantId: null, count: deleted });
         reply({ ok: true, result: { alias: payload.alias, count: deleted } });
       }
+    } else if (cmd === 'inspectModelFolder') {
+      reply({ ok: true, result: inspectFolder(payload.folderPath) });
+    } else if (cmd === 'importModelFolder') {
+      const result = importModelFolder(payload);
+      log('info', `Imported model ${result.name}:${result.version} from ${payload.folderPath}`);
+      invalidateModelIndex();
+      audit('importModelFolder', { alias: result.name, variantId: `${result.name}:${result.version}`, kind: 'copy' });
+      reply({ ok: true, result });
+    } else if (cmd === 'linkModelFolder') {
+      const result = linkModelFolder(payload);
+      log('info', `Linked model ${result.name} -> ${result.target}`);
+      invalidateModelIndex();
+      audit('linkModelFolder', { alias: result.name, variantId: null, kind: 'junction' });
+      reply({ ok: true, result });
+    } else if (cmd === 'getModelTemplate') {
+      reply({ ok: true, result: getModelTemplate(payload.name) });
+    } else if (cmd === 'setModelTemplate') {
+      const result = setModelTemplate(payload.name, payload.promptTemplate);
+      log('info', `Updated prompt template for ${result.name}`);
+      audit('setModelTemplate', { alias: result.name, variantId: null });
+      reply({ ok: true, result });
     } else if (cmd === 'startService') {
-      // FoundryLocalManager.create() is a singleton: a second create() ignores new config.
-      // init() already created an instance without webServiceUrls, so we must clear the
-      // singleton before re-create or bind address/port never take effect (Apply & restart).
+      // The native core is process-global and can only be initialized once: a second
+      // FoundryLocalManager.create() throws "Foundry Local Core is already initialized"
+      // even after clearing the singleton, so the manager built during init() is the only
+      // one this process will ever have. That also means `webServiceUrls` cannot be set
+      // here, and startWebService() binds a port of its own choosing.
       //
-      // bindAddress = listen interface for the native service.
-      // sharedEndpoint = client URL for this app and Integrations snippets — always loopback
-      // so local tools talk to 127.0.0.1 even when the service is bound to 0.0.0.0.
+      // Which is fine, because the port the user configured is served by Flint's gateway,
+      // and the gateway simply proxies to whatever port the native service reports back.
+      // Discovering the port instead of dictating it also removes the reserve-then-bind
+      // race that picking one ourselves would have introduced.
       const bindAddr = payload.bindAddress || '127.0.0.1';
       if (bindAddr !== '127.0.0.1') {
         log('warn', `Service binding to ${bindAddr} — accessible from other network interfaces`);
       }
-      if (FoundryLocalManager && initConfig) {
-        pool.clear();
-        if (manager && typeof manager.stopWebService === 'function') {
-          try { manager.stopWebService(); } catch (e) {
-            log('warn', `stopWebService before rebind (ignored): ${e?.message ?? e}`);
-          }
+
+      const useGateway = payload.gateway !== false;
+      await stopGateway();
+
+      pool.clear();
+      if (manager && typeof manager.stopWebService === 'function') {
+        try { manager.stopWebService(); } catch (e) {
+          log('warn', `stopWebService before restart (ignored): ${e?.message ?? e}`);
         }
-        // Reset SDK singleton so create() applies the new webServiceUrls.
-        try {
-          FoundryLocalManager.instance = undefined;
-        } catch (e) {
-          log('warn', `Could not clear FoundryLocalManager.instance: ${e?.message ?? e}`);
-        }
-        manager = FoundryLocalManager.create({
-          ...initConfig,
-          webServiceUrls: `http://${bindAddr}:${payload.port}`,
-        });
       }
       // Start service BEFORE loading models so HTTP routing layer initializes with the registry.
       if (typeof manager.startWebService === 'function') {
-        manager.startWebService(); // synchronous, no args; port comes from webServiceUrls above
+        manager.startWebService(); // synchronous; the port it chose appears in manager.urls
       }
-      // Client-facing endpoint stays on loopback (see comment above).
-      sharedEndpoint = `http://127.0.0.1:${payload.port}/v1`;
-      log('info', `Service started; bind=${bindAddr}:${payload.port} connect=${sharedEndpoint}`);
-      audit('startService', { port: payload.port, bindAddress: bindAddr, endpoint: sharedEndpoint });
+
+      const nativeUrl = (manager.urls || [])[0];
+      if (!nativeUrl) {
+        throw new Error('The local service started but did not report an address.');
+      }
+      const nativePort = Number(new URL(nativeUrl).port);
+      upstreamPort = nativePort;
+      invalidateModelIndex();
+
+      if (!(await waitForUpstream(nativePort))) {
+        // Wind back the half-started service so a retry begins from a clean state rather
+        // than tripping over a listener that never became usable.
+        try { manager.stopWebService?.(); } catch { /* already failing; nothing to add */ }
+        upstreamPort = null;
+        throw new Error('The local service did not become ready. Try starting it again.');
+      }
+
+      if (useGateway) {
+        gateway = createGateway({
+          publicPort: payload.port,
+          bindAddress: bindAddr,
+          upstreamPort: nativePort,
+          resolve: resolveForGateway,
+          // The loaded variant id is what the replayed request must name: Foundry rejects
+          // the friendly alias even once the model is resident.
+          load: async (alias, variantId) => (await ensureModel(alias, variantId))?.variantId ?? null,
+          log,
+        });
+        try {
+          await gateway.start();
+        } catch (e) {
+          gateway = null;
+          // The native service is already up at this point. Leaving it running would
+          // contradict the error the user is about to see, and would strand a listener on
+          // a port nothing advertises, so wind it back before reporting the failure.
+          try { manager.stopWebService?.(); } catch { /* already failing; nothing to add */ }
+          upstreamPort = null;
+          throw new Error(
+            `Could not listen on ${bindAddr}:${payload.port} — ${e?.message ?? e}. `
+            + 'Another process may already be using that port.'
+          );
+        }
+      }
+
+      // Client-facing endpoint stays on loopback even when the gateway is bound to a wider
+      // interface, so this app and the Integrations snippets always target 127.0.0.1.
+      sharedEndpoint = useGateway ? `http://127.0.0.1:${payload.port}/v1` : `${nativeUrl}/v1`;
+      log('info', `Service started; bind=${bindAddr}:${payload.port} `
+        + `${useGateway ? `via gateway → 127.0.0.1:${nativePort} ` : ''}connect=${sharedEndpoint}`);
+      audit('startService', {
+        port: payload.port, bindAddress: bindAddr, endpoint: sharedEndpoint, gateway: useGateway,
+      });
       const desired = payload.alias;
       if (desired) {
         await ensureModel(desired);
@@ -1132,6 +1639,7 @@ rl.on('line', async (line) => {
         }
       });
     } else if (cmd === 'stopService') {
+      await stopGateway();
       if (manager && typeof manager.stopWebService === 'function') {
         try {
           manager.stopWebService(); // synchronous
@@ -1140,6 +1648,8 @@ rl.on('line', async (line) => {
         }
       }
       sharedEndpoint = null;
+      upstreamPort = null;
+      invalidateModelIndex();
       tokenAccumulator.clear();
       log('info', 'Service stopped');
       audit('stopService', {});

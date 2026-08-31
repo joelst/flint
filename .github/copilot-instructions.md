@@ -14,14 +14,27 @@ Facts only — no history. Record what is true now; `git log` and `CHANGELOG.md`
 ## Commands (short)
 - `npm install` · `npm run tauri dev` · `npm run check` · `npm test` · `npm run tauri:build` · `npm run verify:bundle` · `npm run setup:winml`
 - Rust: `cd src-tauri && cargo check`
-- Coverage gate: `npm run test:coverage`, thresholds 88/72 over `src/lib/*` + `sidecar/*` in `vite.config.js` — add new pure modules to `coverage.include`.
+- Coverage gate: `npm run test:coverage`, thresholds lines 97 / functions 94 / branches 84 / statements 95 over an opt-in `coverage.include` list in `vite.config.js` — new pure modules are ungated until added there.
 
 ## Working style
 - Prefer the SDK/sidecar path in `src/lib/sdk.ts`; do not import Foundry Local into the web bundle.
-- Sidecar protocol is JSON-lines; new commands update `src/lib/sdk.ts` (and IPC contracts if needed) **and** `sidecar/foundry-sidecar.js`.
+- Sidecar protocol is JSON-lines; new commands update `src/lib/sdk.ts` (and IPC contracts if needed) **and** `sidecar/foundry-sidecar.js`. In the sidecar a command must be added in **three** places — `KNOWN_COMMANDS`, `FIELD_TYPES`, `COMMAND_SCHEMA` — plus any extra checks at the end of `validateCommand`.
 - SPA/client-only only — no SSR assumptions.
 - Keep Tauri resources in sync (`src-tauri/tauri.conf.json` + `scripts/verify-bundle.cjs`).
 - On Windows prefer `foundry-local-sdk-winml`.
+
+## Service and gateway
+- The native core initializes **once per process**: a second `FoundryLocalManager.create()` throws `Foundry Local Core is already initialized`, even after clearing the singleton. Never re-create the manager, and never set `webServiceUrls` outside `init`.
+- Consequently the native service picks its own port. Read it from `manager.urls[0]` after `startWebService()`; readiness is `GET /status` on that port (`startWebService()` returning proves nothing).
+- The port and bind address the user configures belong to Flint's proxy in `sidecar/gateway.js`, which forwards to the native port. `sharedEndpoint` is the proxy's address.
+- Autoload is reactive: forward first, and only on the exact `400 ... is not loaded` retry once after loading. Never check "is it loaded" up front, and never retry twice.
+- Only **cached** models are resolvable for autoload (`sidecar/model-registry.js`), so a stray identifier cannot start a download. Call `invalidateModelIndex()` wherever the cached set changes.
+- `catalog.getModel()` accepts **only** the friendly alias; the id in `/v1/models` throws. Loading needs `{alias, variantId}` — dropping the variant loads the wrong build.
+- The HTTP router is the mirror image: it routes **variant ids only** (with or without `:<version>`) and rejects the alias with "is not loaded" even while that model is resident. The gateway therefore rewrites the replayed body to the variant id the loader reports, and caches that mapping. A request must never be replayed under the client's own alias.
+- Loading by alias resolves whichever variant suits the registered EPs, so it is only known after the load — `load()` returns it.
+- Execution providers are **not** registered automatically: `ensureAccelerators` (→ `downloadAndRegisterEps`) must run or only `CPUExecutionProvider` is available and every CUDA variant fails to load. The app calls it at startup; scripts and probes must call it too.
+- Within one alias the pool holds a single variant: requesting another triggers unload-then-load, so a model is never resident twice. Different aliases coexist, and nothing evicts them — residency is bounded only by memory.
+- Proxied traffic is deliberately absent from the access log: `writeToDisk()` appends synchronously and would stall the event loop.
 
 ## UI and state
 - Svelte 5 runes in `+page.svelte` (`// @ts-nocheck` there is intentional).
@@ -39,6 +52,29 @@ Facts only — no history. Record what is true now; `git log` and `CHANGELOG.md`
 - Release builds run `tauri build --target <triple>` → output is `src-tauri/target/<triple>/release`, not `target/release`. Pass `npm run verify:bundle -- --target <triple>`; add `--require-build` to fail on a missing output tree instead of skipping.
 - CI and release both run `verify:bundle` and `smoke:node`. Keep them passing — packaging bugs are invisible to unit tests.
 - Updater endpoint is `releases/latest/download/latest.json`. Never use a `{{current_version}}` URL (it resolves to the version already installed). Drafts and pre-releases are invisible to `releases/latest`.
+
+## Endpoint / models (probed 2026-08-30, SDK 1.2.4, CLI 0.10.3)
+- The service **does** serve OpenAI-shaped `GET /v1/models` (200). `/openai/models` and `/foundry/list` are **404** — docs referencing them are stale.
+- `/v1/models` lists **cached models only**, with no loaded/unloaded state. `id` is the variant *without* the version suffix (`qwen3-0.6b-generic-cpu`); `parent` is the friendly alias.
+- **Alias routing works**: `model: "qwen3-0.6b"` succeeds, as do the variant with and without `:version`. The old pool-spike claim that clients must send variant IDs is obsolete.
+- Streaming works: SSE with a `[DONE]` terminator and `usage` included. `usage` is present on non-streamed calls too.
+- Responses carry **non-standard** fields (`IsDelta`, `Successful`, `HttpStatusCode`, and both `delta` and `message` in one choice). Strict OpenAI clients may reject them.
+- A model must be **loaded first** — otherwise requests fail `400 Model is not loaded`. Load via `catModel.load()` (there is no `manager.loadModel()`).
+- The catalog has **zero embedding models** (97 chat / 21 vision / 10 ASR of 128), so hiding them in the UI is a no-op; `/v1/embeddings` exists but needs a BYOM model. 75 of 128 declare `supportsToolCalling` — treat that as catalog-declared, not verified.
+
+## Model cache / BYOM
+- Cache root comes from `appName`: Flint uses `~/.flint`, the Foundry CLI uses `~/.foundry`. They do **not** share models, and duplication is real (15.3 GB measured).
+- `modelCacheDir` selects a **single** root — it is a cache *switcher*, not an additive search path. Setting it to a custom dir hides the normal catalog.
+- **BYOM works today**: a directory holding `genai_config.json` + `inference_model.json` (`{"Name":"<name>:<ver>", "PromptTemplate":{…}}`) and no `download.tmp` is discovered by `getCachedModels()` as `providerType: "Local"`, `uri: local://<name>`, resolvable by alias. The native scanner is recursive.
+- **Directory junctions inside the cache root are traversed**, surfacing models stored elsewhere with alias/provider/version intact — no copying and no writes to the foreign directory. Delete the link, never the target.
+- `addCatalog` / `registerModel` (the HuggingFace catalog API) exist in **neither** JS SDK 1.2.4 nor 2.0.0 — they appear to be C#-only. Flint must own import logic.
+- Foundry Local is **ONNX-only (onnxruntime-genai)**; it does not run GGUF.
+- `PromptTemplate` uses the literal `{Content}` placeholder (roles: `system`, `user`, `assistant`, `prompt`). A template missing it **does not error** — the model loads and silently drops message text, so validate before writing.
+- Almost no public ONNX repo ships `inference_model.json` (2 of 301 surveyed on HF); Flint authors it. A model's `chat_template.jinja` wins over its architecture, because a fine-tune can keep the architecture while changing turn markers.
+- `.flint-import.json` in a model dir is the ownership marker: only marked dirs may be modified or deleted by Flint. Catalog dirs and junctions (linked models) must never be rewritten.
+- Prompt template rules live in `sidecar/prompt-template.js`, which imports **nothing** (not even Node builtins) so the browser bundle and the sidecar validate identically. `byom-import.js` re-exports it; `src/lib/sdk.ts` re-exports it to the UI. Adding a Node import there would break the web build.
+- Locally added models (imported or linked) are identified in the UI by `info.uri` starting with `local://`.
+- `listModels` returns `family` and `createdAt` (unix **seconds**, sometimes null) — those are the sortable fields. Sorting lives in `src/lib/model-sort.ts`, not in `+page.svelte`.
 
 ## Tauri / Rust
 - Keep Rust thin; if you add invoke handlers, update capabilities and frontend call sites.

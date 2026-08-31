@@ -46,6 +46,41 @@ Verify an item against the tree before acting on it.
       incrementally, JS sidecar as fallback. Not a big-bang rewrite.
 - [ ] **1.0: no end-user Node** — bundled Node 22 already removes the user-visible
       requirement; this is about shrinking the spawn/attack surface.
+- [ ] **Pin the SDK/core/CLI matrix** — Flint is on SDK 1.2.4; Foundry's REST API is
+      preview. Warn at startup on untested combinations instead of failing obscurely.
+
+## Models and cache (0.5 — see RELEASE_ROADMAP §6)
+
+- [x] **BYOM import from a local folder** — inspect, validate, stage, atomically activate,
+      roll back. Prompt template is shown and editable at import and afterwards.
+- [x] **Additional model folders via directory junctions** — `linkModelFolder`. Never
+      writes to the foreign folder; delete the link, never the target.
+- [x] **Sort the model list** — name, family, or last updated; persisted.
+- [ ] **Read-only cache inventory** — duplicates, partial downloads, reclaimable bytes.
+      Recommend only; no cross-root deletion.
+- [x] **Auto-load on demand** — Flint's reverse proxy owns the configured port, forwards to
+      the native service, and on the exact `400 ... is not loaded` loads the model and
+      replays the request once. Cached models only, so a stray id cannot start a download.
+      Also fixed service start, which always failed with `Core is already initialized`.
+- [ ] **Throughput metrics** — load time, TTFT, prompt tok/s, decode tok/s, end-to-end,
+      warm/cold, resolved variant + execution provider. No single ambiguous "tokens/sec".
+
+## Endpoint / agent compatibility (0.6)
+
+- [ ] **Behavioural conformance self-test** — not route-existence checks.
+- [ ] **Normalise response shape** — service emits non-standard `IsDelta`, `Successful`,
+      `HttpStatusCode`, and both `delta` and `message` in one choice.
+- [ ] **`/v1/embeddings` end-to-end** — route exists, but the catalog has zero embedding
+      models, so this depends on BYOM.
+- [ ] **Surface `supportsToolCalling` / `contextLength`**, labelled catalog-declared vs
+      Flint-verified.
+- [ ] **Verified recipes** for OpenClaw, Cline, Continue, pinned to tested versions.
+
+## Dependencies
+
+- [ ] **`adm-zip` advisory is transitive via `foundry-local-sdk`** — not fixable without
+      an SDK bump. `glib` is Linux/GTK-only and Flint ships Windows + macOS; `cookie` is
+      already patched. Re-check when the SDK pin moves.
 
 ## Control CLI — not planned
 
