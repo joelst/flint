@@ -1144,12 +1144,17 @@
   }
 
   /** Sends the eviction rules and the priority map to the sidecar, which runs the sweep. */
+  let pushMemorySeq = 0;
   async function pushMemorySettings() {
+    const seq = ++pushMemorySeq;
+    const currentEviction = { ...evictionConfig };
+    const currentPriorities = { ...modelPriorities };
     try {
-      const applied = await sdkSetEvictionConfig(evictionConfig);
-      if (applied) evictionConfig = applied;
+      const applied = await sdkSetEvictionConfig(currentEviction);
+      // Avoid out-of-order async completions overwriting newer UI state.
+      if (seq === pushMemorySeq && applied) evictionConfig = applied;
       await sdkSetModelPriorities(
-        Object.entries(modelPriorities)
+        Object.entries(currentPriorities)
           .filter(([, priority]) => priority === "pinned" || priority === "low")
           .map(([alias, priority]) => ({ alias, priority })),
       );
