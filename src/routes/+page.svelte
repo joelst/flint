@@ -79,6 +79,10 @@
   } from "$lib/integrations";
 
   import { enable as autostartEnable, disable as autostartDisable, isEnabled as autostartIsEnabled } from '$lib/autostart';
+  import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { TrayIcon } from "@tauri-apps/api/tray";
+  import { Menu, MenuItem } from "@tauri-apps/api/menu";
+  import { defaultWindowIcon } from "@tauri-apps/api/app";
   import { sortModels, isModelSortMode, type ModelSortMode } from '$lib/model-sort';
   import {
     buildFlintAwareSystemPrompt,
@@ -512,6 +516,13 @@
   let wslNatHelpOpen = $state(false);
   /** Set after a config write so the "Restart WSL" step is offered. */
   let wslRestartPending = $state(false);
+
+  // Settings: keep the local service alive when the window is closed. While the service is
+  // running, closing the window hides Flint to the system tray instead of quitting (the
+  // sidecar is a child process, so quitting the app would kill the endpoint).
+  let keepServiceInBackground = $state(true);
+  let trayIcon: TrayIcon | null = null;
+  let trayHideNotified = false;
 
   // UI: keyboard shortcut help modal
   let showShortcutsHelp = $state(false);
@@ -1458,6 +1469,7 @@
           defaultAudioAlias,
           networkPort,
           networkBindAddress,
+          keepServiceInBackground,
         }),
       );
     } catch {}
@@ -1495,6 +1507,7 @@
           startupModels = data.startupModels;
         }
         if (typeof data.autoStartService === 'boolean') autoStartService = data.autoStartService;
+        if (typeof data.keepServiceInBackground === 'boolean') keepServiceInBackground = data.keepServiceInBackground;
         if (typeof data.defaultChatAlias === 'string') defaultChatAlias = data.defaultChatAlias;
         if (typeof data.defaultAudioAlias === 'string') defaultAudioAlias = data.defaultAudioAlias;
         if (typeof data.networkPort === 'number' && data.networkPort >= 1024 && data.networkPort <= 65535) {
@@ -3054,6 +3067,80 @@ updateStateFromSdk();
     }
   }
 
+  // --- Close-to-tray: keep the local service alive when the window is closed ---
+
+  async function showMainWindow() {
+    try {
+      const win = getCurrentWindow();
+      await win.show();
+      await win.unminimize();
+      await win.setFocus();
+    } catch (e) {
+      console.warn("[flint] could not restore window from tray", e);
+    }
+  }
+
+  async function quitFromTray() {
+    try {
+      // Graceful stop, but never let a hung sidecar block quitting.
+      await Promise.race([stopService(), new Promise((r) => setTimeout(r, 5000))]);
+    } catch {}
+    try { await trayIcon?.close(); } catch {}
+    trayIcon = null;
+    // destroy() bypasses onCloseRequested, so this actually exits.
+    await getCurrentWindow().destroy();
+  }
+
+  async function ensureTray(): Promise<void> {
+    if (trayIcon) return;
+    const menu = await Menu.new({
+      items: [
+        await MenuItem.new({ id: "flint-open", text: "Open Flint", action: showMainWindow }),
+        await MenuItem.new({ id: "flint-quit", text: "Stop service and quit", action: quitFromTray }),
+      ],
+    });
+    trayIcon = await TrayIcon.new({
+      icon: (await defaultWindowIcon()) ?? undefined,
+      menu,
+      tooltip: "Flint — local inference service",
+      showMenuOnLeftClick: false,
+      action: (event: any) => {
+        if (event?.type === "Click" && event.button === "Left" && event.buttonState === "Up") {
+          showMainWindow();
+        }
+      },
+    });
+  }
+
+  async function handleCloseRequested(event: { preventDefault: () => void }) {
+    if (!keepServiceInBackground || !state.serviceRunning) return; // normal close = quit
+    // Create the tray BEFORE preventing the close: if the tray cannot be created, fall
+    // through to a normal quit rather than stranding a hidden window nothing can reopen.
+    try {
+      await ensureTray();
+    } catch (e: any) {
+      appendAppLog(`Tray unavailable (${e?.message || e}) — closing quits Flint`, 'warn');
+      return;
+    }
+    event.preventDefault();
+    await getCurrentWindow().hide();
+    appendAppLog("Window closed to tray — local service keeps running");
+    if (!trayHideNotified) {
+      trayHideNotified = true;
+      try {
+        const notification = await import("@tauri-apps/plugin-notification");
+        if (await notification.isPermissionGranted()) {
+          notification.sendNotification({
+            title: "Flint is still running",
+            body: `The local endpoint stays available at http://127.0.0.1:${appliedNetworkPort}/v1. Use the tray icon to reopen or quit.`,
+          });
+        }
+      } catch {}
+    }
+  }
+
+  let unlistenCloseRequested: (() => void) | null = null;
+
   onMount(() => {
     hostPlatform = detectHostPlatform();
     // Subscribe to the SDK store
@@ -3064,10 +3151,16 @@ updateStateFromSdk();
     init();
     document.addEventListener('keydown', handleGlobalKeydown);
 
+    getCurrentWindow()
+      .onCloseRequested(handleCloseRequested)
+      .then((un) => { unlistenCloseRequested = un; })
+      .catch((e) => console.warn("[flint] close-to-tray unavailable", e));
+
     return () => {
       if (unsubscribe) unsubscribe();
       saveConversations();
       document.removeEventListener('keydown', handleGlobalKeydown);
+      unlistenCloseRequested?.();
     };
   });
 
@@ -7079,6 +7172,19 @@ Output only the summary text, no preamble.`;
                 {/if}
               </div>
             {/if}
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-name">Keep service running in background</span>
+                <span class="setting-desc">
+                  While the local service is running, closing the window hides Flint to the system
+                  tray instead of quitting. Reopen or quit from the tray icon.
+                </span>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" bind:checked={keepServiceInBackground} onchange={persistChat} />
+                <span class="toggle-track"></span>
+              </label>
+            </div>
           </div>
 
           <div class="settings-section">
