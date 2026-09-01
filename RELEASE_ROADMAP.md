@@ -44,7 +44,7 @@ All planned 0.3 **product** work is complete (plus bonus features). Code version
 | Keyboard shortcuts (send, new chat, view navigation, push-to-talk, `?` ref panel) | ✅ Complete | Ctrl/Cmd+1–5, B, N, `,`, Space, Enter; shortcut reference modal |
 | Auto-start (default chat + audio model pre-selected on launch) | ✅ Complete | `tauri-plugin-autostart` integrated; OS login-item toggle |
 | Vision: multiple images (up to 4, thumbnail strip, drag-and-drop) | ✅ Complete | `attachedImages[]` state, paste + drag-and-drop, vision-gated |
-| Model comparison / bake-off (two models side-by-side, ratings, export) | ✅ Complete | Compare tab, parallel non-streaming runs, thumbs up/down, markdown export |
+| Model Arena / bake-off (two models side-by-side, ratings, export) | ✅ Complete | Model Arena tab (formerly "Compare"), parallel non-streaming runs, thumbs up/down, markdown export |
 | Purview SDK governance memo | ✅ Complete | `docs/PURVIEW_GOVERNANCE.md` |
 | Integration snippets / tool onboarding | ✅ Complete | Integrations tab, data-driven catalog, OS toggle, copy buttons |
 | CI/CD: release pipeline scaffolding + updater plugin infrastructure | ⚠️ Partial | Workflow + packaging fixes on `main`; **operator secrets / pubkey / tag** still the gate |
@@ -329,7 +329,7 @@ Routing in Flint touches several layers and needs deliberate design before any s
 - Role-based access controls for shared-machine or shared-network scenarios.
 - Azure AI Foundry cloud connections (still high-priority but now **unblocked** after 0.3 security foundation).
 - Inline image previews inside chat thread message bubbles (vision attach works; bubble display deferred).
-- Async streaming model comparison (synchronous comparison shipped in 0.3; streaming side-by-side deferred).
+- Async streaming Model Arena runs (synchronous runs shipped in 0.3; streaming side-by-side deferred).
 - Auto-update UX: in-app "Check for updates" flow deferred until pre-1.0.
 
 ---
@@ -415,7 +415,7 @@ A linear chain (run prompt A → pipe output into prompt B → show final result
 ### Deferred from 0.4 to later
 
 - Multi-user or shared-server deployment mode.
-- Async streaming model comparison (show responses as they stream side-by-side).
+- Async streaming Model Arena runs (show responses as they stream side-by-side).
 - Load balancing across multiple Foundry Local instances.
 
 ---
@@ -435,7 +435,7 @@ is ONNX-only; Ollama's ecosystem is GGUF. That trade is conceded openly — conc
 is what makes the rest of the pitch credible.
 
 Reasons to choose Flint over Ollama's desktop app, all already shipped: NPU/GPU/CPU
-variant selection, multi-model pool co-residency, side-by-side comparison, speech-to-text,
+variant selection, multi-model pool co-residency, the side-by-side Model Arena, speech-to-text,
 audit logging, bind-address/network control.
 
 ### What the endpoint actually does (probed, contradicts prior assumptions)
@@ -487,12 +487,21 @@ unknown model a clean 400 with no download.
 5. **Throughput instrumentation** with explicit definitions: model load time, TTFT,
    prompt tokens/sec, decode tokens/sec, end-to-end duration, warm/cold, resolved variant
    and execution provider. Never a single ambiguous "tokens/sec".
+6. **Memory watchdog and pool eviction** — **done.** Nothing previously bounded pool
+   residency, so an autoloading endpoint could fill memory unattended. A watchdog samples
+   RAM and per-GPU VRAM on its own cadence regardless of the active tab and raises an
+   in-app banner plus a native OS notification; because the telemetry is system-wide it
+   only alerts while Flint holds resident models and never attributes the usage to Flint.
+   Eviction is opt-in — idle-unload and a max-resident LRU cap — with `pinned` models
+   never unloaded and in-flight requests, including proxied gateway traffic, protected via
+   the gateway's `onActivity` hook. Hardware-aware admission (item 1 of the 0.3 pool work)
+   remains open: Flint still reacts to memory pressure rather than predicting it.
 
 ### 0.6 — Compatibility gateway
 
 Gateway work only. The tool-execution layer does **not** share this milestone.
 
-- Conformance self-test that checks *behaviour*, not route existence: does `/v1/models`
+- Conformance self-test that checks *behavior*, not route existence: does `/v1/models`
   return the OpenAI envelope; can a returned ID be passed straight back to chat; does
   streaming deliver a first token and terminate; does disconnect cancel generation; does
   `usage` reconcile with output; does a tool-capable model emit valid `tool_calls`.

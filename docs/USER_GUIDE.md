@@ -55,9 +55,9 @@ Flint prefers the packaged Node on launch (About shows `bundled` vs `PATH`) and 
 - **Audio** tab: pick an STT model, use mic or file.  
 - Chat and audio share the local service — only one “active” path at a time for some flows; load the right model for the task.
 
-### Compare models
+### Model Arena
 
-- **Compare**: pick 2–3 models/variants, one prompt, side-by-side results and ratings.  
+- **Model Arena**: pick 2–3 models/variants, one prompt, side-by-side results and ratings.  
 - Useful before downloading large weights.
 
 ### Monitor

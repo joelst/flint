@@ -33,8 +33,20 @@ Facts only — no history. Record what is true now; `git log` and `CHANGELOG.md`
 - The HTTP router is the mirror image: it routes **variant ids only** (with or without `:<version>`) and rejects the alias with "is not loaded" even while that model is resident. The gateway therefore rewrites the replayed body to the variant id the loader reports, and caches that mapping. A request must never be replayed under the client's own alias.
 - Loading by alias resolves whichever variant suits the registered EPs, so it is only known after the load — `load()` returns it.
 - Execution providers are **not** registered automatically: `ensureAccelerators` (→ `downloadAndRegisterEps`) must run or only `CPUExecutionProvider` is available and every CUDA variant fails to load. The app calls it at startup; scripts and probes must call it too.
-- Within one alias the pool holds a single variant: requesting another triggers unload-then-load, so a model is never resident twice. Different aliases coexist, and nothing evicts them — residency is bounded only by memory.
+- Within one alias the pool holds a single variant: requesting another triggers unload-then-load, so a model is never resident twice. Different aliases coexist; residency is bounded only by memory unless eviction is enabled.
 - Proxied traffic is deliberately absent from the access log: `writeToDisk()` appends synchronously and would stall the event loop.
+- Proxied requests never reach the sidecar's chat path, so the pool cannot see them. `createGateway({onActivity})` brackets each whole exchange (buffer → forward → autoload → replay) with one start/end pair; without it a model streaming a long completion looks idle and can be evicted mid-generation.
+
+## Memory watchdog / pool eviction
+- Eviction (`sidecar/pool-eviction.js`) is two independent rules, **both off by default**: idle-unload (timeout floored at 60 s) and a max-resident cap (1–32). Configure via the `setEvictionConfig` command; per-model `pinned`/`normal`/`low` via `setModelPriorities`.
+- Never evicted: `priority === 'pinned'` or `inFlight > 0` — pinned models stay resident even with idle-unload on. Order is `low` before `normal`, then least-recently-used, then alias. Missing `lastUsedAt` counts as just-used, never as never-used.
+- `ensureModel` sweeps with `admitting: 1` **before** loading, so the cap frees room ahead of committing memory. `runEvictionSweep` re-checks `inFlight` at execution time because the plan is drawn before the async unloads.
+- `poolStatus` returns `lastUsedAt`/`inFlight`/`priority` per entry plus an `eviction` block.
+- The watchdog (`src/lib/memory-watchdog.ts`) is pure and evaluated in the frontend; `poolStatus` memory telemetry is **system-wide** (`os.totalmem() - os.freemem()`), not Flint's, so alerts are gated on Flint having resident models and the copy must not blame Flint.
+- Sustain is elapsed time, not sample count (cadence varies 5 s → 60 s). A `maxSampleGapMs` gap, or a change to the config signature, marks the sample discontinuous and restarts the window so sleep/resume or an edited threshold cannot fire instantly.
+- Separate RAM (90%) and VRAM (95%) thresholds — a GPU legitimately runs hot during inference. Clearing needs `threshold - clearMarginPct` hysteresis.
+- On Apple Silicon accelerators are omitted entirely: unified memory would double-count the same bytes and raise two alerts for one problem.
+- The watchdog polls even when `document.hidden` — that is exactly when it matters.
 
 ## UI and state
 - Svelte 5 runes in `+page.svelte` (`// @ts-nocheck` there is intentional).

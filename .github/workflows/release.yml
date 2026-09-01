@@ -174,12 +174,42 @@ jobs:
             throw "Azure Trusted Signing preflight failed with exit code $($LASTEXITCODE)."
           }
 
+      # Flint ships unsigned macOS builds (no paid Apple Developer account).
+      # A browser-downloaded unsigned app is quarantined and Gatekeeper calls
+      # it "damaged"; users install via scripts/install-macos.sh or clear the
+      # quarantine attribute (docs/RELEASE.md section 1). If Apple signing
+      # secrets are ever added, tauri-action picks them up automatically —
+      # but a cert without notarization credentials still produces a blocked
+      # app, so fail on that half-configured state.
+      - name: Check Apple signing secrets
+        if: ${{ matrix.os == 'macos-latest' }}
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "::warning::No APPLE_CERTIFICATE secret; building an UNSIGNED macOS app. Browser downloads will show 'damaged' — point users at scripts/install-macos.sh or 'xattr -cr /Applications/Flint.app' (docs/RELEASE.md section 1)."
+          elif [ -z "$APPLE_ID" ] || [ -z "$APPLE_PASSWORD" ] || [ -z "$APPLE_TEAM_ID" ]; then
+            echo "::error::APPLE_CERTIFICATE is set but notarization secrets are incomplete. A signed-but-unnotarized app is still blocked by Gatekeeper; add APPLE_ID, APPLE_PASSWORD, and APPLE_TEAM_ID (and APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY as needed), or remove APPLE_CERTIFICATE to release unsigned."
+            exit 1
+          fi
+
       - name: Build and Release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # macOS code signing (tauri-action imports the cert into a temp keychain)
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # macOS notarization (notarytool)
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ vars.AZURE_TRUSTED_SIGNING_ENDPOINT }}
           AZURE_TRUSTED_SIGNING_ACCOUNT_NAME: ${{ vars.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
           AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ vars.AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME }}

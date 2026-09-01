@@ -41,7 +41,7 @@ describe('buildFlintAwareSystemPrompt', () => {
     expect(out).toContain('Foundry Local (Microsoft)');
     expect(out).toContain('OpenAI-compatible');
     expect(out).toMatch(/bundled Node|Node 22/i);
-    expect(out).toContain('Compare');
+    expect(out).toContain('Model Arena');
     expect(out).toMatch(/pool/i);
   });
 

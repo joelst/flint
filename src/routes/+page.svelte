@@ -1,6 +1,6 @@
 <script lang="ts">
   // @ts-nocheck  // runes ($state etc.) are handled by Svelte compiler, not raw TS
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import MessageRenderer from "$lib/MessageRenderer.svelte";
   import ConversationSidebar from "$lib/ConversationSidebar.svelte";
   import Icon from "$lib/Icon.svelte";
@@ -38,10 +38,26 @@
     validatePromptTemplate,
     TEMPLATE_ROLES,
     TEMPLATE_PRESETS,
+    setEvictionConfig as sdkSetEvictionConfig,
+    setModelPriorities as sdkSetModelPriorities,
+    getWslStatus,
+    enableWslMirroredNetworking,
+    shutdownWsl,
+    type WslStatusInfo,
     type ModelInfo,
     type EpInfo,
     type LogEntry,
   } from "$lib/sdk";
+  import {
+    evaluate as evaluateWatch,
+    emptyWatchState,
+    normalizeWatchConfig,
+    dismissAll as dismissAllWatch,
+    formatAlertSummary,
+    formatAlertAdvice,
+    toWatchSample,
+    DEFAULT_WATCH_CONFIG,
+  } from "$lib/memory-watchdog";
   import packageJson from "../../package.json";
 
   import {
@@ -63,6 +79,10 @@
   } from "$lib/integrations";
 
   import { enable as autostartEnable, disable as autostartDisable, isEnabled as autostartIsEnabled } from '$lib/autostart';
+  import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { TrayIcon } from "@tauri-apps/api/tray";
+  import { Menu, MenuItem } from "@tauri-apps/api/menu";
+  import { defaultWindowIcon } from "@tauri-apps/api/app";
   import { sortModels, isModelSortMode, type ModelSortMode } from '$lib/model-sort';
   import {
     buildFlintAwareSystemPrompt,
@@ -486,6 +506,23 @@
   let appliedNetworkPort = $state(5272);
   let appliedNetworkBindAddress = $state('127.0.0.1');
   let networkApplyBusy = $state(false);
+
+  // Settings: WSL clients (Windows host only). Status is fetched on demand —
+  // checking spawns wsl.exe, so it never runs unprompted at startup.
+  const isWindowsHost = detectPlatform() === 'windows';
+  let wslStatus = $state<WslStatusInfo | null>(null);
+  let wslBusy = $state(false);
+  let wslMessage = $state('');
+  let wslNatHelpOpen = $state(false);
+  /** Set after a config write so the "Restart WSL" step is offered. */
+  let wslRestartPending = $state(false);
+
+  // Settings: keep the local service alive when the window is closed. While the service is
+  // running, closing the window hides Flint to the system tray instead of quitting (the
+  // sidecar is a child process, so quitting the app would kill the endpoint).
+  let keepServiceInBackground = $state(true);
+  let trayIcon: TrayIcon | null = null;
+  let trayHideNotified = false;
 
   // UI: keyboard shortcut help modal
   let showShortcutsHelp = $state(false);
@@ -1074,6 +1111,172 @@
     try { localStorage.setItem(MODEL_SORT_KEY, modelSortMode); } catch {}
   }
 
+  // --- Memory watchdog and pool eviction -------------------------------------------------
+  // The UI owns these settings; the sidecar holds them only while it runs and is re-told on
+  // every service start. Keeping one source of truth avoids the two disagreeing after a
+  // restart, which would be invisible until a model vanished unexpectedly.
+  const MEMORY_SETTINGS_KEY = "flint-memory-settings";
+
+  let watchConfig = $state({ ...DEFAULT_WATCH_CONFIG });
+  const EVICTION_DEFAULTS = {
+    idleUnloadEnabled: false,
+    idleTimeoutMs: 30 * 60 * 1000,
+    maxResidentEnabled: false,
+    maxResident: 3,
+  };
+  let evictionConfig = $state({ ...EVICTION_DEFAULTS });
+  /** alias → 'pinned' | 'low'. Absent means 'normal'; kept for models not currently resident. */
+  let modelPriorities = $state<Record<string, string>>({});
+
+  let watchState = emptyWatchState();
+  let watchAlerts = $state<any[]>([]);
+
+  try {
+    const raw = localStorage.getItem(MEMORY_SETTINGS_KEY);
+    if (raw) {
+      const saved = JSON.parse(raw);
+      watchConfig = normalizeWatchConfig(saved?.watchdog);
+      if (saved?.eviction && typeof saved.eviction === "object") {
+        evictionConfig = { ...EVICTION_DEFAULTS, ...saved.eviction };
+      }
+      if (saved?.priorities && typeof saved.priorities === "object") {
+        modelPriorities = { ...saved.priorities };
+      }
+    }
+  } catch {}
+
+  function persistMemorySettings() {
+    try {
+      localStorage.setItem(
+        MEMORY_SETTINGS_KEY,
+        JSON.stringify({ watchdog: watchConfig, eviction: evictionConfig, priorities: modelPriorities }),
+      );
+    } catch {}
+  }
+
+  function evictionConfigsEqual(a: EvictionConfig, b: EvictionConfig): boolean {
+    return (
+      a.idleUnloadEnabled === b.idleUnloadEnabled &&
+      a.idleTimeoutMs === b.idleTimeoutMs &&
+      a.maxResidentEnabled === b.maxResidentEnabled &&
+      a.maxResident === b.maxResident
+    );
+  }
+
+  /** Sends the eviction rules and the priority map to the sidecar, which runs the sweep. */
+  let pushMemorySeq = 0;
+  async function pushMemorySettings() {
+    const seq = ++pushMemorySeq;
+    const currentEviction = { ...evictionConfig };
+    const currentPriorities = { ...modelPriorities };
+    try {
+      // Skip the intermediate model refresh; the priorities call below refreshes once.
+      const applied = await sdkSetEvictionConfig(currentEviction, { refresh: false });
+      // Adopt the sidecar's normalized config, but only on real change and only when no newer
+      // push is in flight — an unconditional assignment re-triggers every effect that reads
+      // evictionConfig (the serviceRunning re-apply effect looped on exactly that).
+      if (seq === pushMemorySeq && applied && !evictionConfigsEqual(applied, evictionConfig)) {
+        evictionConfig = applied;
+      }
+      // A newer push superseded this one while awaiting: leave the priorities (and the
+      // refresh) to it rather than racing stale values over the user's latest selection.
+      if (seq !== pushMemorySeq) return;
+      await sdkSetModelPriorities(
+        Object.entries(currentPriorities)
+          .filter(([, priority]) => priority === "pinned" || priority === "low")
+          .map(([alias, priority]) => ({ alias, priority })),
+      );
+    } catch (e) {
+      console.warn("[flint] could not apply memory settings", e);
+    }
+  }
+
+  function updateWatchConfig(patch: Record<string, unknown>) {
+    watchConfig = normalizeWatchConfig({ ...watchConfig, ...patch });
+    // Editing a threshold restarts any pending window inside evaluate(), so a lowered
+    // threshold cannot fire instantly off history gathered under the old one.
+    persistMemorySettings();
+    evaluateWatchdog();
+  }
+
+  function updateEvictionConfig(patch: Record<string, unknown>) {
+    evictionConfig = { ...evictionConfig, ...patch };
+    persistMemorySettings();
+    pushMemorySettings();
+  }
+
+  function setModelPriority(alias: string, priority: string) {
+    const next = { ...modelPriorities };
+    if (priority === "normal") delete next[alias];
+    else next[alias] = priority;
+    modelPriorities = next;
+    persistMemorySettings();
+    pushMemorySettings();
+  }
+
+  function priorityOf(alias: string): string {
+    const p = modelPriorities[alias];
+    return p === "pinned" || p === "low" ? p : "normal";
+  }
+
+  /** Compact "how long since this model was last asked for anything". */
+  function formatIdleFor(lastUsedAt?: number): string {
+    if (!Number.isFinite(lastUsedAt)) return "—";
+    const seconds = Math.max(0, Math.round((Date.now() - Number(lastUsedAt)) / 1000));
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return `${minutes}m`;
+    return `${Math.round(minutes / 60)}h`;
+  }
+
+  function evaluateWatchdog() {
+    const status = { ...(state.poolStats ?? {}), models: state.pool ?? [] };
+    const result = evaluateWatch(watchState, toWatchSample(status, Date.now()), watchConfig);
+    watchState = result.state;
+    watchAlerts = result.active;
+    if (result.raised.length > 0) notifyHighUsage(result.raised);
+  }
+
+  function dismissWatchAlerts() {
+    watchState = dismissAllWatch(watchState);
+    watchAlerts = [];
+  }
+
+  /**
+   * The banner covers the case where Flint is on screen. It does not cover the case that
+   * matters most — an agent driving the gateway while Flint is minimised — so an unfocused
+   * window escalates to an OS notification instead.
+   */
+  async function notifyHighUsage(raised: any[]) {
+    const body = `${formatAlertSummary(raised)}. ${formatAlertAdvice((state.pool ?? []).length)}`;
+    try {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      if (await getCurrentWindow().isFocused()) return;
+      const notification = await import("@tauri-apps/plugin-notification");
+      let granted = await notification.isPermissionGranted();
+      if (!granted) granted = (await notification.requestPermission()) === "granted";
+      if (granted) notification.sendNotification({ title: "Flint — high memory usage", body });
+    } catch {
+      // No Tauri host (dev in a plain browser) or notifications refused: the banner stands.
+    }
+  }
+
+  // One poll shared by the Monitor tab and the watchdog. Two independent timers would let
+  // responses overlap and arrive out of order, and the watchdog measures elapsed time
+  // between samples, so ordering is not cosmetic.
+  let poolPollInFlight = false;
+  async function pollResources() {
+    if (poolPollInFlight) return;
+    poolPollInFlight = true;
+    try {
+      await pollPoolStatus();
+      evaluateWatchdog();
+    } catch {
+    } finally {
+      poolPollInFlight = false;
+    }
+  }
+
   const filteredModels = $derived(
     sortModels(
       (state.models || []).filter(
@@ -1270,6 +1473,7 @@
           defaultAudioAlias,
           networkPort,
           networkBindAddress,
+          keepServiceInBackground,
         }),
       );
     } catch {}
@@ -1307,6 +1511,7 @@
           startupModels = data.startupModels;
         }
         if (typeof data.autoStartService === 'boolean') autoStartService = data.autoStartService;
+        if (typeof data.keepServiceInBackground === 'boolean') keepServiceInBackground = data.keepServiceInBackground;
         if (typeof data.defaultChatAlias === 'string') defaultChatAlias = data.defaultChatAlias;
         if (typeof data.defaultAudioAlias === 'string') defaultAudioAlias = data.defaultAudioAlias;
         if (typeof data.networkPort === 'number' && data.networkPort >= 1024 && data.networkPort <= 65535) {
@@ -1440,6 +1645,71 @@ updateStateFromSdk();
     });
   }
 
+  async function refreshWslStatus() {
+    wslBusy = true;
+    wslMessage = '';
+    try {
+      wslStatus = await getWslStatus();
+      if (wslStatus?.mirrored) wslRestartPending = false;
+    } catch (e: any) {
+      wslMessage = `Could not check WSL: ${e?.message || e}`;
+    } finally {
+      wslBusy = false;
+    }
+  }
+
+  async function enableWslMirrored() {
+    const configPath = wslStatus?.configPath || '%UserProfile%\\.wslconfig';
+    const ok = globalThis.confirm(
+      `Enable WSL mirrored networking?\n\n` +
+        `This writes networkingMode=mirrored into ${configPath} ` +
+        `(a backup of the original is kept next to it). ` +
+        `Other settings in the file are left untouched.\n\n` +
+        `The change takes effect after WSL restarts.`,
+    );
+    if (!ok) return;
+    wslBusy = true;
+    wslMessage = '';
+    try {
+      const result = await enableWslMirroredNetworking();
+      wslRestartPending = result.restartRequired;
+      wslMessage = result.changed
+        ? `Mirrored networking written to ${result.configPath}. Restart WSL to apply.`
+        : 'Mirrored networking was already enabled.';
+      appendAppLog(`WSL mirrored networking ${result.changed ? 'enabled' : 'already enabled'} (${result.configPath})`);
+      wslStatus = await getWslStatus();
+    } catch (e: any) {
+      wslMessage = `Failed to update .wslconfig: ${e?.message || e}`;
+      appendAppLog(`WSL mirrored enable failed: ${e?.message || e}`, 'error');
+    } finally {
+      wslBusy = false;
+    }
+  }
+
+  async function restartWsl() {
+    const ok = globalThis.confirm(
+      `Restart WSL now?\n\n` +
+        `This runs "wsl --shutdown", which terminates every running WSL distro ` +
+        `and anything inside them (shells, servers, editors). WSL starts again ` +
+        `automatically the next time you open it.`,
+    );
+    if (!ok) return;
+    wslBusy = true;
+    wslMessage = '';
+    try {
+      await shutdownWsl();
+      wslRestartPending = false;
+      wslMessage = 'WSL shut down. On next launch it comes back with mirrored networking — WSL clients can then use the loopback URL.';
+      appendAppLog('WSL shut down to apply mirrored networking');
+      wslStatus = await getWslStatus();
+    } catch (e: any) {
+      wslMessage = `Failed to restart WSL: ${e?.message || e}`;
+      appendAppLog(`WSL shutdown failed: ${e?.message || e}`, 'error');
+    } finally {
+      wslBusy = false;
+    }
+  }
+
   $effect(() => {
     // Persist on changes to chat + audio model state
     if (selectedModelAlias || selectedSTTModelAlias || chatMessages.length > 0 || systemPrompt) {
@@ -1482,7 +1752,7 @@ updateStateFromSdk();
       try {
         const [log] = await Promise.all([
           getAccessLog(),
-          pollPoolStatus(),
+          pollResources(),
         ]);
         if (!monitorLogPaused) {
           monitorLog = (log ?? []).slice(-100).reverse();
@@ -1493,6 +1763,30 @@ updateStateFromSdk();
     pollMonitor();
     const interval = setInterval(pollMonitor, 5000);
     return () => clearInterval(interval);
+  });
+
+  // Watchdog polling — deliberately not tied to a tab or to window visibility. The whole
+  // point is to catch pressure while the user is somewhere else and an external client is
+  // loading models through the gateway. Slower while nothing is resident, because with an
+  // empty pool there is nothing to warn about and the accelerator probe shells out.
+  $effect(() => {
+    if (!watchConfig.enabled) return;
+    if (!state.serviceRunning) return;
+    if (currentView === 'monitor') return; // the 5s poll above already feeds the watchdog
+
+    const resident = (state.pool ?? []).length > 0;
+    const interval = setInterval(pollResources, resident ? 30000 : 60000);
+    return () => clearInterval(interval);
+  });
+
+  // Re-apply the rules whenever the sidecar is (re)started, since it keeps them in memory
+  // only and would otherwise come back up with eviction silently switched off.
+  // untrack: this effect must fire on serviceRunning changes only. pushMemorySettings reads
+  // evictionConfig/modelPriorities synchronously and (on normalization) writes evictionConfig
+  // back, so tracking those reads turns the effect into a push → assign → push loop.
+  $effect(() => {
+    if (!state.serviceRunning) return;
+    untrack(() => pushMemorySettings());
   });
 
   async function refreshMonitorNow() {
@@ -1780,11 +2074,11 @@ updateStateFromSdk();
 
   function addCompareSlot(slot: CompareSlot) {
     if (compareSlots.some((s) => s.key === slot.key)) {
-      statusMessage = `Already in comparison: ${slot.label}`;
+      statusMessage = `Already in the arena: ${slot.label}`;
       return;
     }
     if (compareSlots.length >= COMPARE_MAX_SLOTS) {
-      statusMessage = `Comparison supports at most ${COMPARE_MAX_SLOTS} models`;
+      statusMessage = `The arena supports at most ${COMPARE_MAX_SLOTS} models`;
       return;
     }
     compareSlots = [...compareSlots, slot];
@@ -1820,7 +2114,7 @@ updateStateFromSdk();
 
   function saveCurrentComparison() {
     if (!comparePrompt.trim() || Object.keys(compareResults).length === 0 || compareSlots.length < 2) {
-      statusMessage = "Run a comparison first, then save.";
+      statusMessage = "Run the arena first, then save.";
       return;
     }
     const entry: SavedComparison = {
@@ -1832,7 +2126,7 @@ updateStateFromSdk();
     };
     compareHistory = [entry, ...compareHistory].slice(0, COMPARE_HISTORY_MAX);
     persistCompareHistory();
-    statusMessage = "Comparison saved for review";
+    statusMessage = "Arena run saved for review";
   }
 
   function openSavedComparison(entry: SavedComparison) {
@@ -1841,7 +2135,7 @@ updateStateFromSdk();
     comparePrompt = entry.prompt;
     compareResults = { ...entry.results };
     compareHistoryOpen = false;
-    statusMessage = `Reviewing comparison from ${new Date(entry.createdAt).toLocaleString()}`;
+    statusMessage = `Reviewing arena run from ${new Date(entry.createdAt).toLocaleString()}`;
   }
 
   function deleteSavedComparison(id: string) {
@@ -1949,7 +2243,7 @@ updateStateFromSdk();
         );
       }
       return (
-        `Not enough free memory for comparison. ${parts.join(" · ")}. ` +
+        `Not enough free memory for this arena run. ${parts.join(" · ")}. ` +
         `Free memory or remove a larger model/variant.`
       );
     }
@@ -2066,11 +2360,11 @@ updateStateFromSdk();
     }
 
     const lines: string[] = [
-      "Comparison may unload models that are already in memory.",
+      "This arena run may unload models that are already in memory.",
       "",
     ];
     if (oneAtATime && preloadedCompare.length > 0) {
-      lines.push("Already loaded (in this comparison set):");
+      lines.push("Already loaded (in this arena line-up):");
       for (const a of preloadedCompare) lines.push(`  • ${a}`);
       lines.push("");
       lines.push(
@@ -2083,14 +2377,14 @@ updateStateFromSdk();
       for (const v of variantSwaps) lines.push(`  • ${v}`);
       lines.push("");
     }
-    lines.push("Models not in this comparison will not be touched.");
+    lines.push("Models not in this arena run will not be touched.");
     lines.push("");
     lines.push("OK = allow unloading those models during the run");
-    lines.push("Cancel = abort comparison (nothing unloaded)");
+    lines.push("Cancel = abort the run (nothing unloaded)");
 
     const ok = globalThis.confirm(lines.join("\n"));
     if (!ok) {
-      statusMessage = "Comparison cancelled — existing loaded models left as-is.";
+      statusMessage = "Arena run cancelled — existing loaded models left as-is.";
       return { proceed: false, allowUnloadPreloaded: false };
     }
     return { proceed: true, allowUnloadPreloaded: true };
@@ -2257,9 +2551,9 @@ updateStateFromSdk();
       comparePrepStatus = "";
       statusMessage =
         failCount > 0
-          ? `Comparison finished with ${failCount} failure(s)` +
+          ? `Arena run finished with ${failCount} failure(s)` +
             (oneAtATime ? " (one-at-a-time)" : "")
-          : `Comparison complete` + (oneAtATime ? " (one-at-a-time)" : "");
+          : `Arena run complete` + (oneAtATime ? " (one-at-a-time)" : "");
     } finally {
       comparePreparing = false;
       comparePrepStatus = "";
@@ -2282,7 +2576,7 @@ updateStateFromSdk();
 
   function exportComparison() {
     if (!comparePrompt.trim() || Object.keys(compareResults).length === 0) return;
-    let md = `# Model Comparison\n\n**Date:** ${new Date().toISOString()}\n\n**Prompt:** ${comparePrompt}\n\n`;
+    let md = `# Model Arena\n\n**Date:** ${new Date().toISOString()}\n\n**Prompt:** ${comparePrompt}\n\n`;
     for (const slot of compareSlots) {
       const r = compareResults[slot.key];
       if (!r) continue;
@@ -2298,7 +2592,7 @@ updateStateFromSdk();
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `comparison-${Date.now()}.md`;
+    a.download = `model-arena-${Date.now()}.md`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -2777,6 +3071,80 @@ updateStateFromSdk();
     }
   }
 
+  // --- Close-to-tray: keep the local service alive when the window is closed ---
+
+  async function showMainWindow() {
+    try {
+      const win = getCurrentWindow();
+      await win.show();
+      await win.unminimize();
+      await win.setFocus();
+    } catch (e) {
+      console.warn("[flint] could not restore window from tray", e);
+    }
+  }
+
+  async function quitFromTray() {
+    try {
+      // Graceful stop, but never let a hung sidecar block quitting.
+      await Promise.race([stopService(), new Promise((r) => setTimeout(r, 5000))]);
+    } catch {}
+    try { await trayIcon?.close(); } catch {}
+    trayIcon = null;
+    // destroy() bypasses onCloseRequested, so this actually exits.
+    await getCurrentWindow().destroy();
+  }
+
+  async function ensureTray(): Promise<void> {
+    if (trayIcon) return;
+    const menu = await Menu.new({
+      items: [
+        await MenuItem.new({ id: "flint-open", text: "Open Flint", action: showMainWindow }),
+        await MenuItem.new({ id: "flint-quit", text: "Stop service and quit", action: quitFromTray }),
+      ],
+    });
+    trayIcon = await TrayIcon.new({
+      icon: (await defaultWindowIcon()) ?? undefined,
+      menu,
+      tooltip: "Flint — local inference service",
+      showMenuOnLeftClick: false,
+      action: (event: any) => {
+        if (event?.type === "Click" && event.button === "Left" && event.buttonState === "Up") {
+          showMainWindow();
+        }
+      },
+    });
+  }
+
+  async function handleCloseRequested(event: { preventDefault: () => void }) {
+    if (!keepServiceInBackground || !state.serviceRunning) return; // normal close = quit
+    // Create the tray BEFORE preventing the close: if the tray cannot be created, fall
+    // through to a normal quit rather than stranding a hidden window nothing can reopen.
+    try {
+      await ensureTray();
+    } catch (e: any) {
+      appendAppLog(`Tray unavailable (${e?.message || e}) — closing quits Flint`, 'warn');
+      return;
+    }
+    event.preventDefault();
+    await getCurrentWindow().hide();
+    appendAppLog("Window closed to tray — local service keeps running");
+    if (!trayHideNotified) {
+      trayHideNotified = true;
+      try {
+        const notification = await import("@tauri-apps/plugin-notification");
+        if (await notification.isPermissionGranted()) {
+          notification.sendNotification({
+            title: "Flint is still running",
+            body: `The local endpoint stays available at http://127.0.0.1:${appliedNetworkPort}/v1. Use the tray icon to reopen or quit.`,
+          });
+        }
+      } catch {}
+    }
+  }
+
+  let unlistenCloseRequested: (() => void) | null = null;
+
   onMount(() => {
     hostPlatform = detectHostPlatform();
     // Subscribe to the SDK store
@@ -2787,10 +3155,16 @@ updateStateFromSdk();
     init();
     document.addEventListener('keydown', handleGlobalKeydown);
 
+    getCurrentWindow()
+      .onCloseRequested(handleCloseRequested)
+      .then((un) => { unlistenCloseRequested = un; })
+      .catch((e) => console.warn("[flint] close-to-tray unavailable", e));
+
     return () => {
       if (unsubscribe) unsubscribe();
       saveConversations();
       document.removeEventListener('keydown', handleGlobalKeydown);
+      unlistenCloseRequested?.();
     };
   });
 
@@ -4127,6 +4501,20 @@ Output only the summary text, no preamble.`;
     </div>
   </header>
 
+  {#if watchAlerts.length > 0}
+    <!-- One banner for every alerting device: a model load pushes RAM and VRAM at the same
+         time, and stacking a banner per device would bury the point. -->
+    <div class="memory-alert" role="status">
+      <Icon name="monitor" size={16} />
+      <div class="memory-alert-text">
+        <strong>High memory usage — {formatAlertSummary(watchAlerts)}</strong>
+        <span>{formatAlertAdvice((state.pool ?? []).length)}</span>
+      </div>
+      <button class="small" onclick={() => (currentView = "monitor")}>Open Monitor</button>
+      <button class="small secondary" onclick={dismissWatchAlerts}>Dismiss</button>
+    </div>
+  {/if}
+
   <div class="body">
     <nav class="sidebar" class:collapsed={sidebarCollapsed}>
       <button
@@ -4234,7 +4622,7 @@ Output only the summary text, no preamble.`;
         class="nav-item"
         class:active={currentView === "compare"}
         onclick={() => (currentView = "compare")}
-        title="Compare models side-by-side"
+        title="Model Arena — run models side-by-side"
       >
         <span class="nav-icon" aria-hidden="true">
           <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -4242,7 +4630,7 @@ Output only the summary text, no preamble.`;
             <rect x="14" y="4" width="7" height="16" rx="1" stroke="currentColor" stroke-width="1.6"/>
           </svg>
         </span>
-        <span class="nav-label">Compare</span>
+        <span class="nav-label">Model Arena</span>
       </button>
       <button
         class="nav-item"
@@ -5904,6 +6292,81 @@ Output only the summary text, no preamble.`;
 
           <!-- Pool table -->
           <div class="monitor-section">
+            <h3>Memory &amp; Pool Limits</h3>
+            <p class="log-note">
+              Readings are system-wide, not Flint's own usage — warnings only appear while
+              Flint has models loaded.
+            </p>
+            <div class="memory-settings">
+              <label class="memory-setting">
+                <input
+                  type="checkbox"
+                  checked={watchConfig.enabled}
+                  onchange={(e) => updateWatchConfig({ enabled: e.currentTarget.checked })}
+                />
+                Warn about high memory usage
+              </label>
+
+              <label class="memory-setting" class:disabled={!watchConfig.enabled}>
+                System RAM threshold
+                <input
+                  type="number" min="50" max="99"
+                  value={watchConfig.ramThresholdPct}
+                  disabled={!watchConfig.enabled}
+                  onchange={(e) => updateWatchConfig({ ramThresholdPct: Number(e.currentTarget.value) })}
+                /> %
+              </label>
+
+              <label class="memory-setting" class:disabled={!watchConfig.enabled}>
+                GPU memory threshold
+                <input
+                  type="number" min="50" max="99"
+                  value={watchConfig.vramThresholdPct}
+                  disabled={!watchConfig.enabled}
+                  onchange={(e) => updateWatchConfig({ vramThresholdPct: Number(e.currentTarget.value) })}
+                /> %
+              </label>
+
+              <hr class="memory-divider" />
+
+              <label class="memory-setting">
+                <input
+                  type="checkbox"
+                  checked={evictionConfig.idleUnloadEnabled}
+                  onchange={(e) => updateEvictionConfig({ idleUnloadEnabled: e.currentTarget.checked })}
+                />
+                Unload models left idle for
+                <input
+                  type="number" min="1" max="1440"
+                  value={Math.round(evictionConfig.idleTimeoutMs / 60000)}
+                  disabled={!evictionConfig.idleUnloadEnabled}
+                  onchange={(e) => updateEvictionConfig({ idleTimeoutMs: Number(e.currentTarget.value) * 60000 })}
+                /> min
+              </label>
+
+              <label class="memory-setting">
+                <input
+                  type="checkbox"
+                  checked={evictionConfig.maxResidentEnabled}
+                  onchange={(e) => updateEvictionConfig({ maxResidentEnabled: e.currentTarget.checked })}
+                />
+                Keep at most
+                <input
+                  type="number" min="1" max="32"
+                  value={evictionConfig.maxResident}
+                  disabled={!evictionConfig.maxResidentEnabled}
+                  onchange={(e) => updateEvictionConfig({ maxResident: Number(e.currentTarget.value) })}
+                /> models loaded
+              </label>
+
+              <p class="log-note">
+                Models set to <strong>Keep loaded</strong> below are never unloaded automatically,
+                and a model is never unloaded while it is serving a request.
+              </p>
+            </div>
+          </div>
+
+          <div class="monitor-section">
             <h3>Model Pool</h3>
             {#if state.pool.length === 0}
               <div class="empty-state-card empty-state-compact">
@@ -5921,6 +6384,8 @@ Output only the summary text, no preamble.`;
                     <th>Device</th>
                     <th title="Tokens in this session">↑ In</th>
                     <th title="Tokens out this session">↓ Out</th>
+                    <th title="Time since the last request for this model">Idle</th>
+                    <th title="Pinned models are never unloaded automatically; low priority models are unloaded first">Priority</th>
                     <th></th>
                   </tr>
                 </thead>
@@ -5945,6 +6410,25 @@ Output only the summary text, no preamble.`;
                       </td>
                       <td class="pool-tokens-cell">{tokens?.tokensIn ?? '—'}</td>
                       <td class="pool-tokens-cell">{tokens?.tokensOut ?? '—'}</td>
+                      <td class="pool-idle-cell">
+                        {#if (entry.inFlight ?? 0) > 0}
+                          <span class="badge loaded">In use</span>
+                        {:else}
+                          {formatIdleFor(entry.lastUsedAt)}
+                        {/if}
+                      </td>
+                      <td>
+                        <select
+                          class="pool-priority-select"
+                          value={priorityOf(entry.alias)}
+                          onchange={(e) => setModelPriority(entry.alias, e.currentTarget.value)}
+                          aria-label={`Eviction priority for ${entry.alias}`}
+                        >
+                          <option value="pinned">Keep loaded</option>
+                          <option value="normal">Normal</option>
+                          <option value="low">Unload first</option>
+                        </select>
+                      </td>
                       <td><button class="small danger-btn" onclick={() => sdkUnloadModel({ alias: entry.alias }).then(refreshMonitorNow)}>Unload</button></td>
                     </tr>
                   {/each}
@@ -6167,7 +6651,7 @@ Output only the summary text, no preamble.`;
             <h3>Around the app</h3>
             <ul>
               <li><strong>Models</strong> — catalog, multi-model pool, download/load/unload, update notifications</li>
-              <li><strong>Chat / Audio / Compare</strong> — inference, STT, side-by-side bake-off</li>
+              <li><strong>Chat / Audio / Model Arena</strong> — inference, STT, side-by-side bake-off</li>
               <li><strong>Monitor</strong> — pool, resources, access and audit logs</li>
               <li><strong>Integrations</strong> — snippets for external OpenAI-compatible tools</li>
               <li><strong>Diagnostics / Settings</strong> — service, bind/port (Apply &amp; restart), autostart, shortcuts (<kbd>?</kbd>)</li>
@@ -6289,7 +6773,7 @@ Output only the summary text, no preamble.`;
         <div class="view compare-view">
           <div class="compare-header">
             <div>
-              <h2>Model Comparison</h2>
+              <h2>Model Arena</h2>
               <p class="muted">
                 Pick 2–{COMPARE_MAX_SLOTS} models or variants, then send one prompt. Missing models are downloaded and loaded automatically.
               </p>
@@ -6311,11 +6795,11 @@ Output only the summary text, no preamble.`;
           {#if compareHistoryOpen}
             <div class="compare-history-panel">
               <div class="compare-history-header">
-                <strong>Saved comparisons</strong>
+                <strong>Saved arena runs</strong>
                 <button type="button" class="tiny" onclick={() => (compareHistoryOpen = false)}>Close</button>
               </div>
               {#if compareHistory.length === 0}
-                <p class="muted small">No saved comparisons yet. Run one and click Save.</p>
+                <p class="muted small">No saved arena runs yet. Run one and click Save.</p>
               {:else}
                 <ul class="compare-history-list">
                   {#each compareHistory as entry (entry.id)}
@@ -6328,7 +6812,7 @@ Output only the summary text, no preamble.`;
                       <button
                         type="button"
                         class="tiny danger-btn"
-                        title="Delete saved comparison"
+                        title="Delete saved arena run"
                         onclick={() => deleteSavedComparison(entry.id)}
                       >×</button>
                     </li>
@@ -6357,7 +6841,7 @@ Output only the summary text, no preamble.`;
 
               {#if compareSlots.length === 0}
                 <div class="empty-state-card empty-state-compact">
-                  <h3>No models selected for compare</h3>
+                  <h3>No models in the arena yet</h3>
                   <p>Add at least two chat models (or specific variants), then enter one prompt for all of them.</p>
                   <button
                     type="button"
@@ -6369,7 +6853,7 @@ Output only the summary text, no preamble.`;
                   >Add model…</button>
                 </div>
               {:else}
-                <div class="compare-mode-row" role="group" aria-label="Comparison load mode">
+                <div class="compare-mode-row" role="group" aria-label="Arena load mode">
                   <label class="compare-mode-option" class:active={compareOneAtATime}>
                     <input type="radio" name="compare-mode" checked={compareOneAtATime}
                       onchange={() => { compareOneAtATime = true; }}
@@ -6493,7 +6977,7 @@ Output only the summary text, no preamble.`;
                         <button
                           type="button"
                           class="tiny"
-                          title="Remove from comparison"
+                          title="Remove from the arena"
                           disabled={isComparing || comparePreparing}
                           onclick={() => removeCompareSlot(slot.key)}
                         >×</button>
@@ -6601,13 +7085,13 @@ Output only the summary text, no preamble.`;
                 <button
                   type="submit"
                   class="compare-send"
-                  aria-label="Run comparison"
+                  aria-label="Run the arena"
                   disabled={compareSlots.length < 2 || !comparePrompt.trim() || isComparing || comparePreparing}
                   title={compareSlots.length < 2 ? "Add at least 2 models" : "Send prompt to all selected models"}
                 >
                   {#if isComparing || comparePreparing}
                     <Icon name="loader" size={15} class="spin" />
-                    <span>{comparePreparing ? "Preparing…" : "Comparing…"}</span>
+                    <span>{comparePreparing ? "Preparing…" : "Running…"}</span>
                   {:else}
                     <Icon name="send" size={15} />
                     <span>Send</span>
@@ -6634,7 +7118,7 @@ Output only the summary text, no preamble.`;
 
           {#if Object.keys(compareResults).length}
             {#if compareReviewId}
-              <p class="muted small">Reviewing a saved comparison — ratings auto-save.</p>
+              <p class="muted small">Reviewing a saved arena run — ratings auto-save.</p>
             {/if}
             <div class="compare-results">
               {#each compareSlots as slot (slot.key)}
@@ -6692,6 +7176,19 @@ Output only the summary text, no preamble.`;
                 {/if}
               </div>
             {/if}
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-name">Keep service running in background</span>
+                <span class="setting-desc">
+                  While the local service is running, closing the window hides Flint to the system
+                  tray instead of quitting. Reopen or quit from the tray icon.
+                </span>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" bind:checked={keepServiceInBackground} onchange={persistChat} />
+                <span class="toggle-track"></span>
+              </label>
+            </div>
           </div>
 
           <div class="settings-section">
@@ -6850,6 +7347,111 @@ Output only the summary text, no preamble.`;
             </div>
           </div>
 
+          {#if isWindowsHost}
+            <div class="settings-section">
+              <h3>WSL clients</h3>
+              <p class="setting-note">
+                Tools running inside WSL2 (OpenClaw, OpenCode, …) cannot reach
+                <code>127.0.0.1</code> on Windows in WSL's default NAT mode — the WSL VM has its own
+                loopback. WSL <strong>mirrored networking</strong> fixes this: the usual
+                <code>http://127.0.0.1:{appliedNetworkPort}/v1</code> URL works from inside WSL,
+                Flint keeps the recommended loopback-only bind, and automatic model loading keeps
+                working (it trusts loopback callers only).
+              </p>
+
+              <div class="setting-row">
+                <div class="setting-info">
+                  <span class="setting-name">Mirrored networking</span>
+                  <span class="setting-desc">
+                    {#if !wslStatus}
+                      Check whether WSL is installed and how it is configured.
+                    {:else if !wslStatus.wslPresent}
+                      WSL was not detected on this machine.
+                    {:else if wslStatus.mirrored}
+                      Enabled in <code>{wslStatus.configPath}</code> — WSL clients use
+                      <code>http://127.0.0.1:{appliedNetworkPort}/v1</code>.
+                    {:else if wslStatus.mirroredSupported}
+                      WSL {wslStatus.wslVersion} is in {wslStatus.networkingMode || 'NAT (default)'} mode —
+                      mirrored networking is available but not enabled.
+                    {:else}
+                      WSL detected{wslStatus.wslVersion ? ` (version ${wslStatus.wslVersion})` : ''}, but mirrored
+                      networking needs WSL 2.0+ (run <code>wsl --update</code>) on Windows 11 22H2 or newer.
+                      Use the manual NAT setup below instead.
+                    {/if}
+                  </span>
+                </div>
+                <div class="network-apply-actions">
+                  <button type="button" class="btn-secondary" onclick={refreshWslStatus} disabled={wslBusy}>
+                    {wslBusy ? 'Working…' : wslStatus ? 'Re-check' : 'Check WSL'}
+                  </button>
+                  {#if wslStatus?.wslPresent && wslStatus.mirroredSupported && !wslStatus.mirrored}
+                    <button type="button" class="btn-primary" onclick={enableWslMirrored} disabled={wslBusy}>
+                      Enable mirrored networking
+                    </button>
+                  {/if}
+                  {#if wslRestartPending}
+                    <button type="button" class="btn-primary" onclick={restartWsl} disabled={wslBusy}>
+                      Restart WSL now
+                    </button>
+                  {/if}
+                </div>
+              </div>
+
+              {#if wslMessage}
+                <p class="setting-note">{wslMessage}</p>
+              {/if}
+              {#if wslRestartPending}
+                <div class="warning-banner">
+                  The config change applies when WSL restarts. "Restart WSL now" runs
+                  <code>wsl --shutdown</code>, which terminates every running WSL distro and anything
+                  inside them — or simply close your WSL terminals, and it applies the next time WSL starts.
+                </div>
+              {/if}
+
+              <div class="setting-col">
+                <button
+                  type="button"
+                  class="btn-secondary"
+                  onclick={() => (wslNatHelpOpen = !wslNatHelpOpen)}
+                >{wslNatHelpOpen ? 'Hide' : 'Show'} manual setup (keep NAT mode)</button>
+                {#if wslNatHelpOpen}
+                  <div class="setting-note">
+                    <p>
+                      To keep NAT mode instead, WSL clients must connect to the Windows host address
+                      rather than loopback:
+                    </p>
+                    <ol>
+                      <li>
+                        Inside WSL, find the host address:
+                        <code>ip route show default | awk '&#123;print $3&#125;'</code>
+                        (typically <code>172.x.x.1</code>; it can change between reboots).
+                      </li>
+                      <li>
+                        Set <strong>Bind address</strong> above to <code>0.0.0.0</code> and use
+                        <strong>Apply &amp; restart</strong> — with the loopback-only bind, the service
+                        is unreachable from WSL.
+                      </li>
+                      <li>
+                        Allow the port through Windows Firewall, scoped to the WSL adapter so it stays
+                        closed to the rest of the LAN (admin PowerShell):<br />
+                        <code>New-NetFirewallRule -DisplayName "Flint WSL" -Direction Inbound -Protocol TCP -LocalPort {appliedNetworkPort} -InterfaceAlias "vEthernet (WSL)" -Action Allow</code><br />
+                        On newer builds the adapter is named <code>vEthernet (WSL (Hyper-V firewall))</code> —
+                        check <code>Get-NetAdapter</code> if the rule does not take.
+                      </li>
+                      <li>
+                        Point the WSL tool at <code>http://&lt;host address&gt;:{appliedNetworkPort}/v1</code>.
+                      </li>
+                      <li>
+                        Load the model in Flint first: requests that do not arrive over loopback are
+                        served, but never trigger an automatic model load.
+                      </li>
+                    </ol>
+                  </div>
+                {/if}
+              </div>
+            </div>
+          {/if}
+
           <div class="settings-section">
             <h3>Appearance</h3>
             <div class="setting-row">
@@ -6934,6 +7536,7 @@ Output only the summary text, no preamble.`;
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+3</td><td>Audio</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+4</td><td>Monitor</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+5</td><td>Integrations</td></tr>
+            <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+6</td><td>Model Arena</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+,</td><td>Settings</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+B</td><td>Toggle sidebar</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+Space</td><td>Toggle dictation</td></tr>
@@ -7355,6 +7958,14 @@ Output only the summary text, no preamble.`;
     border: 1px solid var(--border);
     color: var(--fg);
     border-radius: 6px;
+  }
+
+  /* The flex/padding above is for text fields sharing a row with a button. Toggles are
+     sized by the UA; letting them flex-grow strands the box far left of its label text. */
+  input[type="checkbox"],
+  input[type="radio"] {
+    flex: 0 0 auto;
+    padding: 0;
   }
 
   .model-grid {
@@ -9577,6 +10188,30 @@ Output only the summary text, no preamble.`;
   .ram-bar-track.ram-bar-unknown { opacity: 0.45; }
   .ram-bar-fill { height: 100%; background: var(--accent); border-radius: 5px; transition: width 0.4s ease; }
   .ram-bar-fill.ram-warn { background: #ef4444; }
+
+/* Memory watchdog banner — sits under the header so it is visible from every tab. */
+.memory-alert {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 1rem;
+  background: color-mix(in srgb, #f59e0b 18%, var(--bg));
+  border-bottom: 1px solid color-mix(in srgb, #f59e0b 45%, transparent);
+  color: var(--text);
+  font-size: 0.85rem;
+}
+.memory-alert-text { display: flex; flex-direction: column; gap: 0.1rem; flex: 1; min-width: 0; }
+.memory-alert-text strong { font-weight: 600; }
+.memory-alert-text span { color: var(--text-muted); font-size: 0.8rem; }
+
+.memory-settings { display: flex; flex-direction: column; gap: 0.5rem; }
+.memory-setting { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; }
+.memory-setting.disabled { opacity: 0.55; }
+.memory-setting input[type="number"] { width: 4.5rem; flex: 0 0 auto; padding: 4px 8px; }
+.memory-divider { width: 100%; border: 0; border-top: 1px solid var(--border); margin: 0.35rem 0; }
+
+.pool-idle-cell { font-variant-numeric: tabular-nums; color: var(--text-muted); }
+.pool-priority-select { font-size: 0.78rem; padding: 0.15rem 0.3rem; }
   .ram-bar-fill.ram-npu { background: #a855f7; }
   .ram-bar-fill.ram-muted { background: color-mix(in srgb, var(--muted) 55%, transparent); }
   .resource-note { font-size: 0.72rem; color: var(--muted); margin: 6px 0 0; }

@@ -560,3 +560,60 @@ describe('gateway failure handling', () => {
     })).rejects.toThrow();
   });
 });
+
+describe('gateway activity hook', () => {
+  const post = (port, model) => request(port, '/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model }),
+  });
+
+  it('brackets a request that names a model', async () => {
+    const events = [];
+    upstream.state.loaded.add('phi-4-mini');
+    gateway = await startGateway({ onActivity: (model, phase) => events.push([model, phase]) });
+    const res = await post(gateway.publicPort, 'phi-4-mini');
+    expect(res.status).toBe(200);
+    expect(events).toEqual([['phi-4-mini', 'start'], ['phi-4-mini', 'end']]);
+  });
+
+  it('reports nothing for a request that names no model', async () => {
+    const events = [];
+    gateway = await startGateway({ onActivity: (...a) => events.push(a) });
+    await request(gateway.publicPort, '/v1/models');
+    expect(events).toEqual([]);
+  });
+
+  it('stays open across an autoload and replay rather than reporting twice', async () => {
+    // The whole exchange is one request; ending after the first attempt would leave the
+    // model evictable during its own replay.
+    const events = [];
+    gateway = await startGateway({
+      load: async alias => { upstream.state.loaded.add(alias); },
+      onActivity: (model, phase) => events.push([model, phase]),
+    });
+    const res = await post(gateway.publicPort, 'qwen3-0.6b');
+    expect(res.status).toBe(200);
+    expect(upstream.state.hits).toHaveLength(2);
+    expect(events).toEqual([['qwen3-0.6b', 'start'], ['qwen3-0.6b', 'end']]);
+  });
+
+  it('closes the bracket when the request fails', async () => {
+    // Without this an in-flight counter would leak and the model could never be evicted.
+    const events = [];
+    gateway = await startGateway({
+      load: async () => { throw new Error('no disk space'); },
+      onActivity: (model, phase) => events.push([model, phase]),
+    });
+    const res = await post(gateway.publicPort, 'qwen3-0.6b');
+    expect(res.status).toBe(400);
+    expect(events.map(e => e[1])).toEqual(['start', 'end']);
+  });
+
+  it('serves the request even if the hook throws', async () => {
+    upstream.state.loaded.add('phi-4-mini');
+    gateway = await startGateway({ onActivity: () => { throw new Error('hook exploded'); } });
+    const res = await post(gateway.publicPort, 'phi-4-mini');
+    expect(res.status).toBe(200);
+  });
+});

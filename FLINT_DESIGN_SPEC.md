@@ -71,7 +71,7 @@ The app is designed to:
 
 - **Chat** — streaming, personas, system prompts, conversation history, vision image attach when supported
 - **Audio** — microphone + file transcription (STT models)
-- **Compare** — side-by-side model responses (bake-off)
+- **Model Arena** — side-by-side model responses (bake-off)
 
 ### Operations & education
 

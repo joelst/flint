@@ -2,7 +2,7 @@ import { writable, type Writable } from 'svelte/store';
 import { Command } from '@tauri-apps/plugin-shell';
 import { resolveResource, resourceDir } from '@tauri-apps/api/path';
 import { exists } from '@tauri-apps/plugin-fs';
-import type { LaneName, EndpointProfile } from './ipc-contracts';
+import type { LaneName, EndpointProfile, ModelPriority, ModelPriorityEntry, EvictionConfig } from './ipc-contracts';
 import {
   evaluateNodeProbe,
   buildNodeMissingMessage,
@@ -92,6 +92,8 @@ export type ModelInfo = IModel & {
 
 let managerInstance: any = null;
 let currentEndpoint: string | undefined = undefined;
+/** Init payload of the last successful init, so a crash-respawned sidecar can be re-inited. */
+let lastInitPayload: { appName: string; logLevel: string } | null = null;
 
 function decodeShellOutput(data: string | Uint8Array): string {
   return typeof data === 'string' ? data : new TextDecoder().decode(data);
@@ -238,6 +240,11 @@ export interface PoolEntry {
   alias: string;
   variantId: string;
   isLoaded: boolean | null;
+  /** Epoch ms of the most recent request; drives idle eviction. */
+  lastUsedAt?: number;
+  /** Requests currently being served. Non-zero means the model is exempt from eviction. */
+  inFlight?: number;
+  priority?: ModelPriority;
 }
 
 export interface StreamingStatus {
@@ -271,6 +278,8 @@ export interface PoolStats {
   accelerators?: AcceleratorMemory[];
   tokenTotals: Array<{ alias: string; tokensIn: number; tokensOut: number }>;
   streaming: StreamingStatus | null;
+  /** Echoed back by the sidecar so the UI shows the rules actually in force. */
+  eviction?: EvictionConfig;
 }
 
 export interface FlintSDKState {
@@ -554,6 +563,18 @@ async function sendInternal(
 ): Promise<any> {
   if (!sidecarProcess || !sidecarReady) {
     await startSidecar();
+    // A fresh sidecar process has no SDK manager. If we had initialized before — i.e. this
+    // spawn is a respawn after a crash — re-init transparently, or every catalog-touching
+    // command would fail until the whole app restarts. (Models/service state still needs
+    // reloading by the user; this only restores basic operability.)
+    if (lastInitPayload && cmd !== 'init') {
+      try {
+        await sendInternal('init', lastInitPayload);
+        console.log('[sdk] Sidecar respawned — SDK re-initialized');
+      } catch (e) {
+        console.warn('[sdk] Sidecar respawn re-init failed', e);
+      }
+    }
   }
   const id = ++msgId;
   if (onAssignedId) {
@@ -604,8 +625,10 @@ export async function initializeSDK(config: Partial<any> = {}): Promise<boolean>
   updateState({ error: null });
 
   try {
-    await send('init', { appName: config.appName || 'flint', logLevel: config.logLevel || 'info' });
+    const initPayload = { appName: config.appName || 'flint', logLevel: config.logLevel || 'info' };
+    await send('init', initPayload);
     await send('setLogLevel', { level: 'info' }); // at least enabling logging
+    lastInitPayload = initPayload;
 
     managerInstance = true;
     updateState({ ready: true, error: null });
@@ -725,6 +748,7 @@ function mapPoolStats(result: any): PoolStats {
     accelerators,
     tokenTotals: result.tokenTotals ?? [],
     streaming: result.streaming ?? null,
+    eviction: result.eviction ?? undefined,
   };
 }
 
@@ -763,6 +787,35 @@ export async function unloadModel(model: any, lane?: LaneName) {
   await refreshModels();
 }
 
+/**
+ * Pushes the eviction rules to the sidecar, which owns the sweep. The UI is the source of
+ * truth for the settings; the sidecar holds them only while it runs.
+ */
+export async function setEvictionConfig(
+  config: Partial<EvictionConfig>,
+  opts: { refresh?: boolean } = {},
+): Promise<EvictionConfig | null> {
+  const payload: any = {};
+  if (typeof config.idleUnloadEnabled === 'boolean') payload.idleUnloadEnabled = config.idleUnloadEnabled;
+  if (typeof config.idleTimeoutMs === 'number') payload.idleTimeoutMs = config.idleTimeoutMs;
+  if (typeof config.maxResidentEnabled === 'boolean') payload.maxResidentEnabled = config.maxResidentEnabled;
+  if (typeof config.maxResident === 'number') payload.maxResident = config.maxResident;
+  const res = await send('setEvictionConfig', payload);
+  // Applying the rules can unload models, so the pool view is stale the moment this returns.
+  // Callers that immediately follow up with another refreshing call can skip this one.
+  if (opts.refresh !== false) await refreshModels();
+  return res.result?.config ?? null;
+}
+
+/** Replaces the whole priority map; anything omitted goes back to 'normal'. */
+export async function setModelPriorities(
+  priorities: ModelPriorityEntry[],
+  opts: { refresh?: boolean } = {},
+): Promise<void> {
+  await send('setModelPriorities', { priorities });
+  if (opts.refresh !== false) await refreshModels();
+}
+
 export async function deleteModel(model: any, variantId?: string) {
   const payload: any = { alias: model.alias };
   if (variantId) payload.variantId = variantId;
@@ -777,6 +830,44 @@ export async function removeFromCache(alias: string, variantId?: string) {
 export async function getAccessLog(): Promise<any[]> {
   const res = await send('getAccessLog');
   return res?.result ?? [];
+}
+
+/** State of WSL on this machine, for Settings → Network → WSL clients. */
+export interface WslStatusInfo {
+  platform: string;
+  wslPresent: boolean;
+  wslVersion: string | null;
+  windowsBuild: number | null;
+  /** WSL >= 2.0 on Windows 11 22H2+, i.e. mirrored networking is available. */
+  mirroredSupported: boolean;
+  networkingMode: string | null;
+  mirrored: boolean;
+  configPath: string | null;
+  configExists: boolean;
+}
+
+export interface WslEnableMirroredResult {
+  changed: boolean;
+  configPath: string;
+  backupPath: string | null;
+  restartRequired: boolean;
+}
+
+export async function getWslStatus(): Promise<WslStatusInfo | null> {
+  const res = await send('wslStatus');
+  return res?.result ?? null;
+}
+
+/** Writes networkingMode=mirrored into %UserProfile%\.wslconfig (backing up the original first). */
+export async function enableWslMirroredNetworking(): Promise<WslEnableMirroredResult> {
+  const res = await send('wslEnableMirrored');
+  if (!res?.result) throw new Error('wslEnableMirrored returned no result');
+  return res.result as WslEnableMirroredResult;
+}
+
+/** Runs `wsl --shutdown` — terminates all running WSL distros so the config change applies. */
+export async function shutdownWsl(): Promise<void> {
+  await send('wslShutdown');
 }
 
 export async function pollPoolStatus(): Promise<void> {
@@ -1001,6 +1092,7 @@ export function resetSDK() {
   sidecarProcess = null;
   sidecarReady = false;
   managerInstance = null;
+  lastInitPayload = null; // a deliberate reset must not auto-re-init on the next send
   currentEndpoint = undefined;
   sdkState.set(initialState);
 }
