@@ -272,7 +272,6 @@ function aliasForModelName (name) {
   return null;
 }
 
-/** Marks a model busy for the life of a request so eviction cannot unload it mid-flight. */
 function noteActivity (modelName, phase) {
   let alias = aliasForModelName(modelName);
   // During gateway autoload the model is not resident yet, so fall back to resolving from the
@@ -282,8 +281,14 @@ function noteActivity (modelName, phase) {
   if (!alias) return;
   const entry = usageFor(alias);
   entry.lastUsedAt = Date.now();
-  if (phase === 'start') entry.inFlight++;
-  else entry.inFlight = Math.max(0, entry.inFlight - 1);
+  if (phase === 'start') {
+    entry.inFlight++;
+  } else {
+    entry.inFlight = Math.max(0, entry.inFlight - 1);
+    // If the request never corresponded to a resident model, drop the bookkeeping so random
+    // model names can't grow the map without bound.
+    if (entry.inFlight === 0 && !pool.has(alias)) usage.delete(alias);
+  }
 }
 
 function poolEntriesForEviction () {
