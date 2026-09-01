@@ -2,27 +2,27 @@
 
 How to produce **signed installers** and **updater-compatible artifacts** for Flint.
 
-Windows release builds use Azure Trusted Signing with a private trust certificate profile. Local Windows builds skip code signing unless the Azure Trusted Signing environment variables are present.
+Windows release builds use Azure Trusted Signing with a **public trust** certificate profile, so installers verify against the Microsoft-managed public root on any machine. Local Windows builds skip code signing unless the Azure Trusted Signing environment variables are present.
 
 ---
 
 ## 1. Code signing
 
-### Windows (Azure Trusted Signing private trust)
+### Windows (Azure Trusted Signing, public trust)
 
 Windows release builds sign through Azure Trusted Signing using `scripts/Invoke-AzureTrustedSigning.ps1` as Tauri's custom `signCommand`. The release workflow authenticates with Azure by GitHub OIDC, installs the `ArtifactSigning` PowerShell module, and signs each Windows binary/installer during `tauri build`.
 
 Azure setup:
 
 1. Create an Azure Trusted Signing account.
-2. Create a **Private Trust** certificate profile in that account.
+2. Create a **Public Trust** certificate profile in that account (requires identity validation; the current profile is `personal-public-trust-cert`).
 3. Create a Microsoft Entra app registration or managed identity for GitHub Actions OIDC.
 4. Add a federated credential for this repository, with:
    - **Entity type**: GitHub Actions deploying Azure resources (or "Environment" scenario)
    - **Organization**: `joelst`, **Repository**: `flint`
    - **Entity**: `Environment`, **GitHub environment name**: `release`
    - This produces a subject of `repo:joelst/flint:environment:release`, which stays valid for every future release tag. Do **not** use the "Tag" entity type here — GitHub issues a distinct OIDC subject per tag (e.g. `repo:joelst/flint:ref:refs/tags/v0.4.1`), so a tag-scoped federated credential only works for that one tag and every new release tag fails with `AADSTS700213: No matching federated identity record found`. The release workflow's job runs under the `release` GitHub environment (`environment: release` in `.github/workflows/release.yml`) specifically so its OIDC subject stays constant across tags. The workflow also preflights the OIDC token before Azure login and fails with the observed subject if GitHub does not issue the expected environment-scoped token.
-5. Assign `Artifact Signing Certificate Profile Signer` on the private trust certificate profile (or the narrowest parent scope that is acceptable).
+5. Assign `Artifact Signing Certificate Profile Signer` on the certificate profile (or the narrowest parent scope that is acceptable).
 
 GitHub Actions secrets:
 
@@ -38,13 +38,13 @@ GitHub Actions variables:
 |---|---|
 | `AZURE_TRUSTED_SIGNING_ENDPOINT` | Trusted Signing endpoint, for example `https://eus.codesigning.azure.net/` |
 | `AZURE_TRUSTED_SIGNING_ACCOUNT_NAME` | Trusted Signing account name |
-| `AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME` | Private trust certificate profile name |
+| `AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME` | Public trust certificate profile name (currently `personal-public-trust-cert`) |
 
 The signing script fails in CI if any Azure Trusted Signing variable is missing. For local Windows release builds, the script warns and skips code signing when these variables are absent.
 
 #### Smoke-test the real signing path
 
-Before configuring production, provision a separate test/staging Trusted Signing account and private trust certificate profile with the GitHub OIDC federated credential and `Artifact Signing Certificate Profile Signer` role described above. Set the release workflow's Azure secrets and Trusted Signing variables to those staging values, then use **Actions → Release → Run workflow** from the default branch with a test version.
+Before configuring production, provision a separate test/staging Trusted Signing account and certificate profile with the GitHub OIDC federated credential and `Artifact Signing Certificate Profile Signer` role described above. Set the release workflow's Azure secrets and Trusted Signing variables to those staging values, then use **Actions → Release → Run workflow** from the default branch with a test version.
 
 Download a produced Windows `.exe` or `.msi` and verify that Windows recognizes its signature:
 
@@ -230,7 +230,7 @@ Versioning details: [DEVELOPMENT.md](./DEVELOPMENT.md#versioning--changesets).
 | Problem | Likely cause | Fix |
 |---|---|---|
 | Cannot create release | Missing `contents: write` | Permissions block + repo Actions settings |
-| Windows signing fails before build upload | Azure secrets/variables missing, OIDC not federated, or signer role missing | Verify Azure GitHub OIDC setup and `Artifact Signing Certificate Profile Signer` on the private trust profile |
+| Windows signing fails before build upload | Azure secrets/variables missing, OIDC not federated, or signer role missing | Verify Azure GitHub OIDC setup and `Artifact Signing Certificate Profile Signer` on the certificate profile |
 | Local Windows build fails with only `failed to run pwsh` | Tauri swallows the signCommand output; the real error is in `src-tauri/target/flint-signing.log`. A 403 during "Submitting digest" means the *local* Azure identity (whatever `DefaultAzureCredential` resolves — usually `az login`) lacks the signer role, which CI's federated identity has but your user does not | Assign `Artifact Signing Certificate Profile Signer` to your user, scoped to the Trusted Signing account; allow a minute for RBAC propagation. To see signtool's real output, run `scripts/Invoke-AzureTrustedSigning.ps1 -FilePath <copy of any exe>` directly with the three `AZURE_TRUSTED_SIGNING_*` env vars set |
 | `AADSTS700213: No matching federated identity record found for presented assertion subject 'repo:joelst/flint:ref:refs/tags/vX.Y.Z'` | Federated credential is scoped to a specific tag, or the workflow is running from an old tag that predates the `release` environment fix | Recreate the federated credential using the `Environment` entity type with GitHub environment `release`, so the subject is `repo:joelst/flint:environment:release` (see section 1 above). If rebuilding an existing tag, run `workflow_dispatch` from the fixed default branch and put the tag in `checkout_ref`. |
 | macOS notarization fails | Apple ID / team ID | App-specific password + correct team |
