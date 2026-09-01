@@ -2354,7 +2354,7 @@ rl.on('line', async (line) => {
           variantId,
           isLoaded: loadedIds.size > 0 ? loadedIds.has(variantId) : null,
           lastUsedAt: use.lastUsedAt,
-          inFlight: use.inFlight,
+          inFlight: inFlightFor(alias),
           priority: normalizePriority(modelPriorities.get(alias)),
         };
       });
