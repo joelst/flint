@@ -1186,10 +1186,10 @@
     pushMemorySettings();
   }
 
-function priorityOf(alias: string): string {
-  const p = modelPriorities[alias];
-  return p === "pinned" || p === "low" ? p : "normal";
-}
+  function priorityOf(alias: string): string {
+    const p = modelPriorities[alias];
+    return p === "pinned" || p === "low" ? p : "normal";
+  }
 
   /** Compact "how long since this model was last asked for anything". */
   function formatIdleFor(lastUsedAt?: number): string {

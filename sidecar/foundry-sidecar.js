@@ -272,32 +272,59 @@ function aliasForModelName (name) {
   return null;
 }
 
+/** Marks a model busy for the life of a request so eviction cannot unload it mid-flight. */
 function noteActivity (modelName, phase) {
-  let alias = aliasForModelName(modelName);
-  // During gateway autoload the model is not resident yet, so fall back to resolving from the
-  // cached-model index (when available) or to the requested alias string.
-  if (!alias && modelIndex) alias = resolveModelId(modelIndex, modelName)?.alias ?? null;
-  if (!alias && typeof modelName === 'string') alias = modelName.trim();
-  if (!alias) return;
+  // Candidate keys, best first: resident pool alias, catalog alias, the raw requested name.
+  // During gateway autoload the model is not resident yet (and the lazy modelIndex may not be
+  // built), so the start phase can only book against a fallback key. Resolution is therefore
+  // state-dependent — by the end of the request the pool may resolve the same string to a
+  // different key — so the end phase must decrement whichever candidate actually holds the
+  // in-flight count, not whatever the current pool state resolves to.
+  const candidates = [];
+  const resident = aliasForModelName(modelName);
+  if (resident) candidates.push(resident);
+  if (modelIndex) {
+    const fromIndex = resolveModelId(modelIndex, modelName)?.alias;
+    if (fromIndex && !candidates.includes(fromIndex)) candidates.push(fromIndex);
+  }
+  const raw = typeof modelName === 'string' ? modelName.trim() : '';
+  if (raw && !candidates.includes(raw)) candidates.push(raw);
+  if (candidates.length === 0) return;
+
+  let alias = candidates[0];
+  if (phase !== 'start') {
+    alias = candidates.find(k => (usage.get(k)?.inFlight ?? 0) > 0) ?? alias;
+    // Keep the resident model's idle clock accurate even when the count sat on a fallback key.
+    if (resident && resident !== alias) touchModel(resident);
+  }
   const entry = usageFor(alias);
   entry.lastUsedAt = Date.now();
   if (phase === 'start') {
     entry.inFlight++;
   } else {
     entry.inFlight = Math.max(0, entry.inFlight - 1);
-    // If the request never corresponded to a resident model, drop the bookkeeping so random
-    // model names can't grow the map without bound.
+    // Bookkeeping for names that never became a resident model must not grow the map without
+    // bound (random names spammed at the gateway).
     if (entry.inFlight === 0 && !pool.has(alias)) usage.delete(alias);
   }
 }
 
 function poolEntriesForEviction () {
+  // An in-flight count can sit under a non-resident key when a request started before its
+  // model finished autoloading (see noteActivity). Credit those to the resident alias they
+  // resolve to, so a sweep never unloads a model that is mid-request.
+  const strayInFlight = new Map();
+  for (const [key, use] of usage) {
+    if (use.inFlight <= 0 || pool.has(key)) continue;
+    const alias = aliasForModelName(key);
+    if (alias) strayInFlight.set(alias, (strayInFlight.get(alias) || 0) + use.inFlight);
+  }
   return [...pool.keys()].map(alias => {
     const use = usageFor(alias);
     return {
       alias,
       lastUsedAt: use.lastUsedAt,
-      inFlight: use.inFlight,
+      inFlight: use.inFlight + (strayInFlight.get(alias) || 0),
       priority: normalizePriority(modelPriorities.get(alias)),
     };
   });
@@ -1365,10 +1392,10 @@ function wslConfigPath () {
   return path.join(os.homedir(), '.wslconfig');
 }
 
-/** Windows build number from os.release() ("10.0.26100" → 26100). */
+/** Windows build number from os.release() ("10.0.26100" → 26100), or null when unparsable. */
 function windowsBuildNumber () {
   const m = os.release().match(/^\d+\.\d+\.(\d+)/);
-  return m ? Number(m[1]) : 0;
+  return m ? Number(m[1]) : null;
 }
 
 async function getWslStatus () {

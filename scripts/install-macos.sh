@@ -23,7 +23,9 @@ echo "Looking up the latest Flint release..."
 LATEST_JSON="$(curl -fsSL "https://github.com/$REPO/releases/latest/download/latest.json")"
 # latest.json is the Tauri updater manifest; the darwin entry's url is the
 # .app.tar.gz updater archive, which is also a perfectly good install source.
-URL="$(printf '%s' "$LATEST_JSON" | grep -oE 'https://[^"]+\.app\.tar\.gz' | head -n 1)"
+# `|| true` because grep exits 1 on no match, which `set -euo pipefail` would turn into a
+# silent early exit before the friendly error below.
+URL="$(printf '%s' "$LATEST_JSON" | grep -oE 'https://[^"]+\.app\.tar\.gz' | head -n 1 || true)"
 if [ -z "$URL" ]; then
   echo "Could not find a macOS .app.tar.gz asset in the latest release manifest." >&2
   exit 1
