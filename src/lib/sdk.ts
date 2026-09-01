@@ -92,6 +92,8 @@ export type ModelInfo = IModel & {
 
 let managerInstance: any = null;
 let currentEndpoint: string | undefined = undefined;
+/** Init payload of the last successful init, so a crash-respawned sidecar can be re-inited. */
+let lastInitPayload: { appName: string; logLevel: string } | null = null;
 
 function decodeShellOutput(data: string | Uint8Array): string {
   return typeof data === 'string' ? data : new TextDecoder().decode(data);
@@ -561,6 +563,18 @@ async function sendInternal(
 ): Promise<any> {
   if (!sidecarProcess || !sidecarReady) {
     await startSidecar();
+    // A fresh sidecar process has no SDK manager. If we had initialized before — i.e. this
+    // spawn is a respawn after a crash — re-init transparently, or every catalog-touching
+    // command would fail until the whole app restarts. (Models/service state still needs
+    // reloading by the user; this only restores basic operability.)
+    if (lastInitPayload && cmd !== 'init') {
+      try {
+        await sendInternal('init', lastInitPayload);
+        console.log('[sdk] Sidecar respawned — SDK re-initialized');
+      } catch (e) {
+        console.warn('[sdk] Sidecar respawn re-init failed', e);
+      }
+    }
   }
   const id = ++msgId;
   if (onAssignedId) {
@@ -611,8 +625,10 @@ export async function initializeSDK(config: Partial<any> = {}): Promise<boolean>
   updateState({ error: null });
 
   try {
-    await send('init', { appName: config.appName || 'flint', logLevel: config.logLevel || 'info' });
+    const initPayload = { appName: config.appName || 'flint', logLevel: config.logLevel || 'info' };
+    await send('init', initPayload);
     await send('setLogLevel', { level: 'info' }); // at least enabling logging
+    lastInitPayload = initPayload;
 
     managerInstance = true;
     updateState({ ready: true, error: null });
@@ -1069,6 +1085,7 @@ export function resetSDK() {
   sidecarProcess = null;
   sidecarReady = false;
   managerInstance = null;
+  lastInitPayload = null; // a deliberate reset must not auto-re-init on the next send
   currentEndpoint = undefined;
   sdkState.set(initialState);
 }

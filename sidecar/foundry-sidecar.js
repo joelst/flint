@@ -141,6 +141,17 @@ const COMMAND_SCHEMA = {
   wslShutdown:        { required: [], optional: [] },
 };
 
+// Commands that dereference the SDK manager. A sidecar asked to run one of these before
+// `init` — typically because the host respawned it after a crash and forgot to re-init —
+// must answer with something actionable instead of a null-deref
+// ("Cannot read properties of null (reading 'catalog')").
+const NEEDS_INIT = new Set([
+  'listModels', 'download', 'load', 'unload', 'deleteModel', 'chatCompletion',
+  'transcribeAudio', 'getVisionModels', 'getSTTModels', 'startService',
+  'getEps', 'ensureAccelerators', 'inspectModelFolder', 'importModelFolder',
+  'linkModelFolder', 'getModelTemplate', 'setModelTemplate',
+]);
+
 // Base64 character limit for transcribeAudio. 50 MB decoded audio is ~67 MB of base64.
 const AUDIO_BASE64_MAX_CHARS = Math.ceil(50 * 1024 * 1024 * 4 / 3);
 
@@ -190,6 +201,17 @@ function validateCommand(cmd, payload) {
   }
   if (cmd === 'transcribeAudio' && payload.audioBase64.length > AUDIO_BASE64_MAX_CHARS) {
     return `Command "transcribeAudio" audioBase64 exceeds maximum allowed size`;
+  }
+  if (cmd === 'transcribeAudio') {
+    // Container sniffing is pure input validation, so it runs here — before the
+    // state-dependent NEEDS_INIT guard — and only needs the first bytes (the sniffer
+    // reads at most 12). Renaming to .wav does not convert, so non-WAV bytes must be
+    // rejected up front rather than deep inside the native decoder.
+    try {
+      assertWavBuffer(Buffer.from(String(payload.audioBase64).slice(0, 32), 'base64'), payload.fileName);
+    } catch (e) {
+      return e.message;
+    }
   }
   if (cmd === 'fetchUrl') {
     try { new URL(payload.url); } catch { return `Command "fetchUrl" field "url" must be a valid URL`; }
@@ -1602,6 +1624,11 @@ rl.on('line', async (line) => {
   if (validationError) {
     log('warn', `IPC validation rejected: cmd=${String(cmd).slice(0, 40)} error=${validationError}`);
     reply({ error: validationError });
+    return;
+  }
+
+  if (NEEDS_INIT.has(cmd) && !manager) {
+    reply({ error: `Foundry SDK not initialized — "init" must run before "${cmd}" (the sidecar may have restarted)` });
     return;
   }
 
