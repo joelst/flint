@@ -1,6 +1,6 @@
 <script lang="ts">
   // @ts-nocheck  // runes ($state etc.) are handled by Svelte compiler, not raw TS
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import MessageRenderer from "$lib/MessageRenderer.svelte";
   import ConversationSidebar from "$lib/ConversationSidebar.svelte";
   import Icon from "$lib/Icon.svelte";
@@ -1143,6 +1143,15 @@
     } catch {}
   }
 
+  function evictionConfigsEqual(a: EvictionConfig, b: EvictionConfig): boolean {
+    return (
+      a.idleUnloadEnabled === b.idleUnloadEnabled &&
+      a.idleTimeoutMs === b.idleTimeoutMs &&
+      a.maxResidentEnabled === b.maxResidentEnabled &&
+      a.maxResident === b.maxResident
+    );
+  }
+
   /** Sends the eviction rules and the priority map to the sidecar, which runs the sweep. */
   let pushMemorySeq = 0;
   async function pushMemorySettings() {
@@ -1151,8 +1160,12 @@
     const currentPriorities = { ...modelPriorities };
     try {
       const applied = await sdkSetEvictionConfig(currentEviction);
-      // Avoid out-of-order async completions overwriting newer UI state.
-      if (seq === pushMemorySeq && applied) evictionConfig = applied;
+      // Adopt the sidecar's normalized config, but only on real change and only when no newer
+      // push is in flight — an unconditional assignment re-triggers every effect that reads
+      // evictionConfig (the serviceRunning re-apply effect looped on exactly that).
+      if (seq === pushMemorySeq && applied && !evictionConfigsEqual(applied, evictionConfig)) {
+        evictionConfig = applied;
+      }
       await sdkSetModelPriorities(
         Object.entries(currentPriorities)
           .filter(([, priority]) => priority === "pinned" || priority === "low")
@@ -1751,9 +1764,12 @@ updateStateFromSdk();
 
   // Re-apply the rules whenever the sidecar is (re)started, since it keeps them in memory
   // only and would otherwise come back up with eviction silently switched off.
+  // untrack: this effect must fire on serviceRunning changes only. pushMemorySettings reads
+  // evictionConfig/modelPriorities synchronously and (on normalization) writes evictionConfig
+  // back, so tracking those reads turns the effect into a push → assign → push loop.
   $effect(() => {
     if (!state.serviceRunning) return;
-    pushMemorySettings();
+    untrack(() => pushMemorySettings());
   });
 
   async function refreshMonitorNow() {
