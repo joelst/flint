@@ -501,7 +501,7 @@ unknown model a clean 400 with no download.
 
 Gateway work only. The tool-execution layer does **not** share this milestone.
 
-- Conformance self-test that checks *behaviour*, not route existence: does `/v1/models`
+- Conformance self-test that checks *behavior*, not route existence: does `/v1/models`
   return the OpenAI envelope; can a returned ID be passed straight back to chat; does
   streaming deliver a first token and terminate; does disconnect cancel generation; does
   `usage` reconcile with output; does a tool-capable model emit valid `tool_calls`.
