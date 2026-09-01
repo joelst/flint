@@ -1146,7 +1146,8 @@
   /** Sends the eviction rules and the priority map to the sidecar, which runs the sweep. */
   async function pushMemorySettings() {
     try {
-      await sdkSetEvictionConfig(evictionConfig);
+      const applied = await sdkSetEvictionConfig(evictionConfig);
+      if (applied) evictionConfig = applied;
       await sdkSetModelPriorities(
         Object.entries(modelPriorities)
           .filter(([, priority]) => priority === "pinned" || priority === "low")
