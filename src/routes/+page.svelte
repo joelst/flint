@@ -7850,6 +7850,14 @@ Output only the summary text, no preamble.`;
     border-radius: 6px;
   }
 
+  /* The flex/padding above is for text fields sharing a row with a button. Toggles are
+     sized by the UA; letting them flex-grow strands the box far left of its label text. */
+  input[type="checkbox"],
+  input[type="radio"] {
+    flex: 0 0 auto;
+    padding: 0;
+  }
+
   .model-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
@@ -10089,7 +10097,7 @@ Output only the summary text, no preamble.`;
 .memory-settings { display: flex; flex-direction: column; gap: 0.5rem; }
 .memory-setting { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; }
 .memory-setting.disabled { opacity: 0.55; }
-.memory-setting input[type="number"] { width: 4.5rem; }
+.memory-setting input[type="number"] { width: 4.5rem; flex: 0 0 auto; padding: 4px 8px; }
 .memory-divider { width: 100%; border: 0; border-top: 1px solid var(--border); margin: 0.35rem 0; }
 
 .pool-idle-cell { font-variant-numeric: tabular-nums; color: var(--text-muted); }
