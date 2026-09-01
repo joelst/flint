@@ -331,22 +331,27 @@ function noteActivity (modelName, phase) {
   }
 }
 
-function poolEntriesForEviction () {
-  // An in-flight count can sit under a non-resident key when a request started before its
-  // model finished autoloading (see noteActivity). Credit those to the resident alias they
-  // resolve to, so a sweep never unloads a model that is mid-request.
-  const strayInFlight = new Map();
+/**
+ * Total in-flight count for a resident alias, including requests booked under a
+ * non-resident key while their model was still autoloading (see noteActivity). Every
+ * eviction decision must use this, not the alias's usage entry alone.
+ */
+function inFlightFor (alias) {
+  let count = usage.get(alias)?.inFlight ?? 0;
   for (const [key, use] of usage) {
-    if (use.inFlight <= 0 || pool.has(key)) continue;
-    const alias = aliasForModelName(key);
-    if (alias) strayInFlight.set(alias, (strayInFlight.get(alias) || 0) + use.inFlight);
+    if (key === alias || use.inFlight <= 0 || pool.has(key)) continue;
+    if (aliasForModelName(key) === alias) count += use.inFlight;
   }
+  return count;
+}
+
+function poolEntriesForEviction () {
   return [...pool.keys()].map(alias => {
     const use = usageFor(alias);
     return {
       alias,
       lastUsedAt: use.lastUsedAt,
-      inFlight: use.inFlight + (strayInFlight.get(alias) || 0),
+      inFlight: inFlightFor(alias),
       priority: normalizePriority(modelPriorities.get(alias)),
     };
   });
@@ -378,9 +383,9 @@ async function runEvictionSweep (options = {}) {
   const done = [];
   for (const item of plan) {
     // Re-check under the current state: sweeps are async, and a request may have arrived
-    // for this model since the plan was drawn up.
-    const use = usage.get(item.alias);
-    if (use && use.inFlight > 0) continue;
+    // for this model since the plan was drawn up. Use the derived count so requests still
+    // booked under a non-resident key (gateway autoload) are respected here too.
+    if (inFlightFor(item.alias) > 0) continue;
     if (await unloadAlias(item.alias)) {
       log('info', describeEviction(item, evictionConfig));
       audit('evict', { alias: item.alias, reason: item.reason });

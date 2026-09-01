@@ -791,7 +791,10 @@ export async function unloadModel(model: any, lane?: LaneName) {
  * Pushes the eviction rules to the sidecar, which owns the sweep. The UI is the source of
  * truth for the settings; the sidecar holds them only while it runs.
  */
-export async function setEvictionConfig(config: Partial<EvictionConfig>): Promise<EvictionConfig | null> {
+export async function setEvictionConfig(
+  config: Partial<EvictionConfig>,
+  opts: { refresh?: boolean } = {},
+): Promise<EvictionConfig | null> {
   const payload: any = {};
   if (typeof config.idleUnloadEnabled === 'boolean') payload.idleUnloadEnabled = config.idleUnloadEnabled;
   if (typeof config.idleTimeoutMs === 'number') payload.idleTimeoutMs = config.idleTimeoutMs;
@@ -799,14 +802,18 @@ export async function setEvictionConfig(config: Partial<EvictionConfig>): Promis
   if (typeof config.maxResident === 'number') payload.maxResident = config.maxResident;
   const res = await send('setEvictionConfig', payload);
   // Applying the rules can unload models, so the pool view is stale the moment this returns.
-  await refreshModels();
+  // Callers that immediately follow up with another refreshing call can skip this one.
+  if (opts.refresh !== false) await refreshModels();
   return res.result?.config ?? null;
 }
 
 /** Replaces the whole priority map; anything omitted goes back to 'normal'. */
-export async function setModelPriorities(priorities: ModelPriorityEntry[]): Promise<void> {
+export async function setModelPriorities(
+  priorities: ModelPriorityEntry[],
+  opts: { refresh?: boolean } = {},
+): Promise<void> {
   await send('setModelPriorities', { priorities });
-  await refreshModels();
+  if (opts.refresh !== false) await refreshModels();
 }
 
 export async function deleteModel(model: any, variantId?: string) {

@@ -1170,13 +1170,17 @@
     const currentEviction = { ...evictionConfig };
     const currentPriorities = { ...modelPriorities };
     try {
-      const applied = await sdkSetEvictionConfig(currentEviction);
+      // Skip the intermediate model refresh; the priorities call below refreshes once.
+      const applied = await sdkSetEvictionConfig(currentEviction, { refresh: false });
       // Adopt the sidecar's normalized config, but only on real change and only when no newer
       // push is in flight — an unconditional assignment re-triggers every effect that reads
       // evictionConfig (the serviceRunning re-apply effect looped on exactly that).
       if (seq === pushMemorySeq && applied && !evictionConfigsEqual(applied, evictionConfig)) {
         evictionConfig = applied;
       }
+      // A newer push superseded this one while awaiting: leave the priorities (and the
+      // refresh) to it rather than racing stale values over the user's latest selection.
+      if (seq !== pushMemorySeq) return;
       await sdkSetModelPriorities(
         Object.entries(currentPriorities)
           .filter(([, priority]) => priority === "pinned" || priority === "low")
