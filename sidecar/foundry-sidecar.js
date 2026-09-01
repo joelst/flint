@@ -28,6 +28,16 @@ import { assertWavBuffer } from './audio-format.js';
 import { createGateway } from './gateway.js';
 import { buildModelIndex, resolveModelId } from './model-registry.js';
 import {
+  detectConfigEncoding,
+  decodeConfig,
+  encodeConfig,
+  getWsl2Setting,
+  upsertWsl2Setting,
+  parseWslVersionOutput,
+  supportsMirrored,
+  decodeWslOutput,
+} from './wsl-config.js';
+import {
   selectEvictions,
   normalizeEvictionConfig,
   normalizePriority,
@@ -61,6 +71,7 @@ const KNOWN_COMMANDS = new Set([
   'inspectModelFolder', 'importModelFolder', 'linkModelFolder',
   'getModelTemplate', 'setModelTemplate',
   'setEvictionConfig', 'setModelPriorities',
+  'wslStatus', 'wslEnableMirrored', 'wslShutdown',
 ]);
 
 // Per-command type requirements. Keys are required or optional field names; values are:
@@ -125,6 +136,9 @@ const COMMAND_SCHEMA = {
   setModelTemplate:   { required: ['name', 'promptTemplate'], optional: [] },
   setEvictionConfig:  { required: [], optional: ['idleUnloadEnabled', 'idleTimeoutMs', 'maxResidentEnabled', 'maxResident'] },
   setModelPriorities: { required: ['priorities'], optional: [] },
+  wslStatus:          { required: [], optional: [] },
+  wslEnableMirrored:  { required: [], optional: [] },
+  wslShutdown:        { required: [], optional: [] },
 };
 
 // Base64 character limit for transcribeAudio. 50 MB decoded audio is ~67 MB of base64.
@@ -1329,6 +1343,92 @@ function writeToDisk(entry) {
   }
 }
 
+// --- WSL mirrored networking ------------------------------------------------
+// WSL2's default NAT mode gives the VM its own loopback, so a client inside
+// WSL (OpenClaw etc.) cannot reach Flint on 127.0.0.1. Mirrored networking
+// shares the host's interfaces, loopback included, keeping Flint bound to
+// 127.0.0.1 and keeping the gateway's loopback-only autoload trust intact for
+// WSL callers. These commands power Settings → Network → "WSL clients".
+
+const WSLCONFIG_BACKUP_SUFFIX = '.flint-backup';
+
+function wslConfigPath () {
+  return path.join(os.homedir(), '.wslconfig');
+}
+
+/** Windows build number from os.release() ("10.0.26100" → 26100). */
+function windowsBuildNumber () {
+  const m = os.release().match(/^\d+\.\d+\.(\d+)/);
+  return m ? Number(m[1]) : 0;
+}
+
+async function getWslStatus () {
+  if (process.platform !== 'win32') {
+    return {
+      platform: process.platform, wslPresent: false, wslVersion: null, windowsBuild: null,
+      mirroredSupported: false, networkingMode: null, mirrored: false,
+      configPath: null, configExists: false,
+    };
+  }
+  let wslPresent = true;
+  let wslVersion = null;
+  try {
+    const { stdout } = await execFileAsync('wsl.exe', ['--version'], {
+      windowsHide: true, encoding: 'buffer', timeout: 15000,
+    });
+    wslVersion = parseWslVersionOutput(decodeWslOutput(stdout));
+  } catch (e) {
+    // ENOENT: no WSL at all. Any other failure is the inbox (pre-store)
+    // wsl.exe, which doesn't know --version — present, but too old for
+    // mirrored networking either way.
+    if (e?.code === 'ENOENT') wslPresent = false;
+  }
+  const configPath = wslConfigPath();
+  let configExists = false;
+  let networkingMode = null;
+  try {
+    const buf = fs.readFileSync(configPath);
+    configExists = true;
+    networkingMode = getWsl2Setting(decodeConfig(buf), 'networkingMode');
+  } catch {}
+  const windowsBuild = windowsBuildNumber();
+  return {
+    platform: 'win32',
+    wslPresent,
+    wslVersion,
+    windowsBuild,
+    mirroredSupported: wslPresent && supportsMirrored(wslVersion, windowsBuild),
+    networkingMode,
+    mirrored: /^mirrored$/i.test(networkingMode ?? ''),
+    configPath,
+    configExists,
+  };
+}
+
+async function enableWslMirrored () {
+  if (process.platform !== 'win32') {
+    throw new Error('WSL configuration is only available on Windows.');
+  }
+  const configPath = wslConfigPath();
+  let buf = null;
+  try { buf = fs.readFileSync(configPath); } catch {}
+  const encoding = buf ? detectConfigEncoding(buf) : 'utf8';
+  const text = buf ? decodeConfig(buf) : '';
+  if (/^mirrored$/i.test(getWsl2Setting(text, 'networkingMode') ?? '')) {
+    return { changed: false, configPath, backupPath: null, restartRequired: false };
+  }
+  // Keep a one-time backup of the user's original file; a second enable after
+  // they reverted must not overwrite the true original.
+  let backupPath = null;
+  if (buf) {
+    backupPath = configPath + WSLCONFIG_BACKUP_SUFFIX;
+    if (!fs.existsSync(backupPath)) fs.writeFileSync(backupPath, buf);
+  }
+  const updated = upsertWsl2Setting(text, 'networkingMode', 'mirrored');
+  fs.writeFileSync(configPath, encodeConfig(updated, encoding));
+  return { changed: true, configPath, backupPath, restartRequired: true };
+}
+
 function audit(cmd, detail) {
   const entry = { type: 'audit', ts: Date.now(), pid: process.pid, cmd, detail };
   send(entry);
@@ -2398,6 +2498,21 @@ rl.on('line', async (line) => {
       log('info', `Log level set to ${payload.level}`);
       audit('setLogLevel', { level: payload.level });
       reply({ ok: true });
+    } else if (cmd === 'wslStatus') {
+      reply({ ok: true, result: await getWslStatus() });
+    } else if (cmd === 'wslEnableMirrored') {
+      const result = await enableWslMirrored();
+      log('info', result.changed
+        ? `WSL mirrored networking written to ${result.configPath} (backup: ${result.backupPath ?? 'none needed'})`
+        : 'WSL mirrored networking already enabled — no changes made');
+      audit('wsl.enableMirrored', { changed: result.changed, backupPath: result.backupPath });
+      reply({ ok: true, result });
+    } else if (cmd === 'wslShutdown') {
+      if (process.platform !== 'win32') throw new Error('WSL is only available on Windows.');
+      await execFileAsync('wsl.exe', ['--shutdown'], { windowsHide: true, timeout: 30000 });
+      log('info', 'WSL shut down; it restarts automatically on next use');
+      audit('wsl.shutdown', {});
+      reply({ ok: true, result: { ok: true } });
     } else {
       reply({ error: `Unknown command: ${cmd}` });
     }

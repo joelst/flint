@@ -809,6 +809,43 @@ export async function getAccessLog(): Promise<any[]> {
   return res?.result ?? [];
 }
 
+/** State of WSL on this machine, for Settings → Network → WSL clients. */
+export interface WslStatusInfo {
+  platform: string;
+  wslPresent: boolean;
+  wslVersion: string | null;
+  windowsBuild: number | null;
+  /** WSL >= 2.0 on Windows 11 22H2+, i.e. mirrored networking is available. */
+  mirroredSupported: boolean;
+  networkingMode: string | null;
+  mirrored: boolean;
+  configPath: string | null;
+  configExists: boolean;
+}
+
+export interface WslEnableMirroredResult {
+  changed: boolean;
+  configPath: string;
+  backupPath: string | null;
+  restartRequired: boolean;
+}
+
+export async function getWslStatus(): Promise<WslStatusInfo | null> {
+  const res = await send('wslStatus');
+  return res?.result ?? null;
+}
+
+/** Writes networkingMode=mirrored into %UserProfile%\.wslconfig (backing up the original first). */
+export async function enableWslMirroredNetworking(): Promise<WslEnableMirroredResult> {
+  const res = await send('wslEnableMirrored');
+  return res?.result;
+}
+
+/** Runs `wsl --shutdown` — terminates all running WSL distros so the config change applies. */
+export async function shutdownWsl(): Promise<void> {
+  await send('wslShutdown');
+}
+
 export async function pollPoolStatus(): Promise<void> {
   const ps = await send('poolStatus');
   if (ps?.result) {

@@ -33,13 +33,13 @@ export const FLINT_FACT_SHEET = `[About FLInt & Foundry Local — use when the u
 
 ## FLInt (this app)
 - FLInt = Foundry Local Interface: desktop GUI to manage Foundry Local without deep CLI knowledge.
-- Features: model catalog + multi-model pool (download/load/unload), chat (multi-image vision, host context, optional URL→context fetch), audio STT, side-by-side Compare, Monitor (pool/resources/access+audit logs), Integrations snippets, Diagnostics/Settings (bind/port, autostart, shortcuts), Learn.
+- Features: model catalog + multi-model pool (download/load/unload), chat (multi-image vision, host context, optional URL→context fetch), audio STT, Model Arena (side-by-side bake-off), Monitor (pool/resources/access+audit logs), Integrations snippets, Diagnostics/Settings (bind/port, autostart, shortcuts), Learn.
 - Dependencies: Foundry Local runtime is bundled; the JS sidecar prefers a **bundled Node 22** binary in release builds, with PATH Node as fallback. A full Rust bridge remains a longer-term option to remove the Node process.
 - Local-first UX: clear when inference is on-device; default bind is localhost for the service.
 - Chat window is display-only: it does not parse or execute tool calls, run shell/file ops, or make network requests for the model (guarded web-fetch is user-initiated URL context only).
 - External tools (Continue, Cline, Copilot custom provider, user code, etc.) can point at the local endpoint for agentic/tool workflows.
 - What you (the model in FLInt chat) cannot do: change UI, load/unload models, execute tools, access files, or browse the network on the user's behalf.
-- If asked how to do something in the app, give concise UI steps (Models / Chat / Audio / Compare / Monitor / Integrations / Diagnostics / Settings / Learn).
+- If asked how to do something in the app, give concise UI steps (Models / Chat / Audio / Model Arena / Monitor / Integrations / Diagnostics / Settings / Learn).
 - If unsure about a version-specific detail, say so rather than inventing.`;
 
 /** Patterns that suggest the user wants app/runtime help (not general knowledge). */

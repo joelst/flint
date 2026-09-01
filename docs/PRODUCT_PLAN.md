@@ -12,7 +12,7 @@
 |---|---|
 | **Version in tree** | **0.3.3** base; next product cut **0.4.0** |
 | **`main` / `0.4-mvp`** | Packaging + Help/coach/empty states/About; **Spike A Go** (bundled Node) |
-| **Product features (0.3)** | Models pool, chat/vision, audio STT, Compare, Monitor, Integrations, Settings — **feature-complete** |
+| **Product features (0.3)** | Models pool, chat/vision, audio STT, Model Arena, Monitor, Integrations, Settings — **feature-complete** |
 | **Installers** | Foundry natives + `Flint.exe` + **bundled Node** externalBin; target-aware `ensure:foundry`; no Intel Mac matrix |
 | **v0.4.0 still needs** | Release secrets/tag/dogfood (C1–C3); optional clean-machine Node-uninstall proof |
 | **End-user friction** | PATH Node **not required** for complete release packages (bundled Node 22); PATH = fallback |
@@ -49,7 +49,7 @@
 |---|---|---|---|
 | B1 | **First-run coach** | 3–4 steps: Node check → starter model → chat → optional service | ✅ Done (banner + dismiss) |
 | B2 | **Learn → Help** restructure | Why Flint / First 5 min / Tools / Troubleshoot / Shortcuts | ✅ Done |
-| B3 | **Contextual empty states** | Models/Chat/Compare/Monitor each have one next action | ✅ Done |
+| B3 | **Contextual empty states** | Models/Chat/Model Arena/Monitor each have one next action | ✅ Done |
 | B4 | **About** strip | Version, Node version, endpoint, link to docs/releases | ✅ Done (Help + Settings) |
 
 ### C. Release ops (ship with v0.4.0)

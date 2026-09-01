@@ -59,18 +59,36 @@ Confirm `Status` is `Valid` and the signer certificate is the expected staging p
 
 ### macOS
 
-**Self-signed (quickest):**
+Any app downloaded through a browser gets a quarantine attribute. Unless it is signed with an Apple **Developer ID Application** certificate *and* notarized, Gatekeeper reports it as **"Flint is damaged and can't be opened"**. There is no free signing route: Developer ID is not an App Store thing — it is Apple's certificate for distributing *outside* the App Store, and it still requires the paid ($99/yr) developer account. Self-signed and ad-hoc signatures do not satisfy Gatekeeper.
 
-```bash
-security create-keypair -t rsa -b 2048 -s "Flint Dev" -k ~/Library/Keychains/login.keychain-db
-codesign --force --options runtime --sign "Flint Dev" path/to/Flint.app
-```
+Flint currently ships **unsigned** macOS builds and works around quarantine instead:
 
-**Long-term:** Apple Developer ID Application certificate (export `.p12`), plus app-specific password for notarization. Notarization can be skipped while using self-signed certs.
+- **Recommended install path** — `scripts/install-macos.sh` fetches the latest release with `curl`, which never applies the quarantine attribute, so the app runs with no Gatekeeper interaction at all:
 
-### Future migration
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/joelst/flint/main/scripts/install-macos.sh | bash
+  ```
 
-Before a broad macOS release: enable full `notarytool` + hardened runtime with Apple Developer ID credentials.
+- **Manual DMG install** — after dragging Flint to Applications, clear the quarantine attribute (the "damaged" dialog offers no "Open Anyway" path for unsigned apps, so right-click → Open does not help):
+
+  ```bash
+  xattr -cr /Applications/Flint.app
+  ```
+
+- Once installed, the built-in Tauri updater downloads updates itself (not through a browser), so updates are not re-quarantined.
+
+The release workflow warns when building unsigned, and fails only on the half-configured state (certificate present but notarization secrets missing), because a signed-but-unnotarized app is still blocked.
+
+#### Optional: Developer ID signing + notarization
+
+If a paid Apple Developer account is ever added, set the secrets below and `tauri-action` signs and notarizes automatically — no workflow changes needed:
+
+1. In the Apple Developer portal, create a **Developer ID Application** certificate and export it (with its private key) as a `.p12` from Keychain Access.
+2. Base64-encode the `.p12` (`base64 -i cert.p12 | pbcopy`) → `APPLE_CERTIFICATE` secret; its password → `APPLE_CERTIFICATE_PASSWORD`.
+3. Set `APPLE_SIGNING_IDENTITY` to the certificate's full identity name, e.g. `Developer ID Application: Your Name (TEAMID)`.
+4. For notarization, create an app-specific password at appleid.apple.com → `APPLE_PASSWORD`, plus `APPLE_ID` (the account email) and `APPLE_TEAM_ID`.
+
+`tauri-action` imports the certificate into a temporary keychain, signs the bundle with the hardened runtime, and submits it to `notarytool` when the notarization secrets are present.
 
 ---
 
@@ -92,11 +110,12 @@ Before a broad macOS release: enable full `notarytool` + hardened runtime with A
 | `AZURE_CLIENT_ID` | Client/application ID for GitHub OIDC Azure login |
 | `AZURE_TENANT_ID` | Azure tenant ID |
 | `AZURE_SUBSCRIPTION_ID` | Azure subscription ID |
-| `APPLE_CERTIFICATE` | Base64-encoded `.p12` (macOS) |
-| `APPLE_CERTIFICATE_PASSWORD` | `.p12` password |
-| `APPLE_ID` | Apple ID (notarization) |
-| `APPLE_PASSWORD` | App-specific password |
-| `APPLE_TEAM_ID` | Apple Team ID |
+| `APPLE_CERTIFICATE` | *Optional* — Base64-encoded `.p12` (macOS). Unset = unsigned macOS builds (see section 1) |
+| `APPLE_CERTIFICATE_PASSWORD` | *Optional* — `.p12` password |
+| `APPLE_SIGNING_IDENTITY` | *Optional* — certificate identity, e.g. `Developer ID Application: Name (TEAMID)` |
+| `APPLE_ID` | *Optional* — Apple ID; required if `APPLE_CERTIFICATE` is set (notarization) |
+| `APPLE_PASSWORD` | *Optional* — app-specific password; required if `APPLE_CERTIFICATE` is set |
+| `APPLE_TEAM_ID` | *Optional* — Apple Team ID; required if `APPLE_CERTIFICATE` is set |
 
 Set the Azure secrets plus the Azure Trusted Signing repository variables before cutting Windows releases.
 
@@ -196,7 +215,7 @@ Ship checklist (status and blockers) lives in [RELEASE_ROADMAP.md](../RELEASE_RO
 
 1. Reconcile `CHANGELOG.md` / changesets for the version.
 2. Updater pubkey + endpoint configured (not placeholders).
-3. Azure Trusted Signing secrets/variables present.
+3. Azure Trusted Signing secrets/variables present (Windows). Apple secrets are optional — without them the macOS build ships unsigned (see section 1 for user install instructions).
 4. Green CI on the release branch / PR to `main`.
 5. Tag `vX.Y.Z` → release workflow → review draft → publish.
 6. Publish as the **latest full release** — leave "Set as a pre-release" unchecked,
@@ -214,6 +233,8 @@ Versioning details: [DEVELOPMENT.md](./DEVELOPMENT.md#versioning--changesets).
 | Windows signing fails before build upload | Azure secrets/variables missing, OIDC not federated, or signer role missing | Verify Azure GitHub OIDC setup and `Artifact Signing Certificate Profile Signer` on the private trust profile |
 | `AADSTS700213: No matching federated identity record found for presented assertion subject 'repo:joelst/flint:ref:refs/tags/vX.Y.Z'` | Federated credential is scoped to a specific tag, or the workflow is running from an old tag that predates the `release` environment fix | Recreate the federated credential using the `Environment` entity type with GitHub environment `release`, so the subject is `repo:joelst/flint:environment:release` (see section 1 above). If rebuilding an existing tag, run `workflow_dispatch` from the fixed default branch and put the tag in `checkout_ref`. |
 | macOS notarization fails | Apple ID / team ID | App-specific password + correct team |
+| macOS says the app is "damaged" after install | Unsigned build downloaded through a browser gets quarantined; Gatekeeper blocks it (expected for Flint's unsigned releases) | Install via `scripts/install-macos.sh`, or run `xattr -cr /Applications/Flint.app` after a DMG install; signing/notarization secrets (section 1) make it go away entirely |
+| macOS app shows the wrong icon | `src-tauri/icons/icon.icns` is stale (it is generated separately from the PNG/ICO icons) | Regenerate with `npx tauri icon` from the master `icon.png` |
 | `latest.json` missing | Updater plugin / pubkey not configured | `tauri.conf.json` plugins.updater |
 | Updater always reports "up to date" | Release is still a draft or is flagged pre-release, so `/releases/latest/` skips it | Publish as the latest full release (see section 3) |
 | “Resource not accessible” | Token scope | Repo workflow permissions |

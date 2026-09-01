@@ -28,7 +28,10 @@ export type SidecarCommand =
   | { cmd: 'getModelTemplate'; name: string }
   | { cmd: 'setModelTemplate'; name: string; promptTemplate: PromptTemplate }
   | { cmd: 'setEvictionConfig'; idleUnloadEnabled?: boolean; idleTimeoutMs?: number; maxResidentEnabled?: boolean; maxResident?: number }
-  | { cmd: 'setModelPriorities'; priorities: ModelPriorityEntry[] };
+  | { cmd: 'setModelPriorities'; priorities: ModelPriorityEntry[] }
+  | { cmd: 'wslStatus' }
+  | { cmd: 'wslEnableMirrored' }
+  | { cmd: 'wslShutdown' };
 
 /**
  * How keen Flint is to unload a model when the pool needs to shrink.
@@ -68,6 +71,7 @@ export const KNOWN_COMMANDS = new Set<SidecarCommandName>([
   'inspectModelFolder', 'importModelFolder', 'linkModelFolder',
   'getModelTemplate', 'setModelTemplate',
   'setEvictionConfig', 'setModelPriorities',
+  'wslStatus', 'wslEnableMirrored', 'wslShutdown',
 ]);
 
 /**

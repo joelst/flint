@@ -40,6 +40,10 @@
     TEMPLATE_PRESETS,
     setEvictionConfig as sdkSetEvictionConfig,
     setModelPriorities as sdkSetModelPriorities,
+    getWslStatus,
+    enableWslMirroredNetworking,
+    shutdownWsl,
+    type WslStatusInfo,
     type ModelInfo,
     type EpInfo,
     type LogEntry,
@@ -498,6 +502,16 @@
   let appliedNetworkPort = $state(5272);
   let appliedNetworkBindAddress = $state('127.0.0.1');
   let networkApplyBusy = $state(false);
+
+  // Settings: WSL clients (Windows host only). Status is fetched on demand —
+  // checking spawns wsl.exe, so it never runs unprompted at startup.
+  const isWindowsHost = detectPlatform() === 'windows';
+  let wslStatus = $state<WslStatusInfo | null>(null);
+  let wslBusy = $state(false);
+  let wslMessage = $state('');
+  let wslNatHelpOpen = $state(false);
+  /** Set after a config write so the "Restart WSL" step is offered. */
+  let wslRestartPending = $state(false);
 
   // UI: keyboard shortcut help modal
   let showShortcutsHelp = $state(false);
@@ -1595,6 +1609,71 @@ updateStateFromSdk();
     });
   }
 
+  async function refreshWslStatus() {
+    wslBusy = true;
+    wslMessage = '';
+    try {
+      wslStatus = await getWslStatus();
+      if (wslStatus?.mirrored) wslRestartPending = false;
+    } catch (e: any) {
+      wslMessage = `Could not check WSL: ${e?.message || e}`;
+    } finally {
+      wslBusy = false;
+    }
+  }
+
+  async function enableWslMirrored() {
+    const configPath = wslStatus?.configPath || '%UserProfile%\\.wslconfig';
+    const ok = globalThis.confirm(
+      `Enable WSL mirrored networking?\n\n` +
+        `This writes networkingMode=mirrored into ${configPath} ` +
+        `(a backup of the original is kept next to it). ` +
+        `Other settings in the file are left untouched.\n\n` +
+        `The change takes effect after WSL restarts.`,
+    );
+    if (!ok) return;
+    wslBusy = true;
+    wslMessage = '';
+    try {
+      const result = await enableWslMirroredNetworking();
+      wslRestartPending = result.restartRequired;
+      wslMessage = result.changed
+        ? `Mirrored networking written to ${result.configPath}. Restart WSL to apply.`
+        : 'Mirrored networking was already enabled.';
+      appendAppLog(`WSL mirrored networking ${result.changed ? 'enabled' : 'already enabled'} (${result.configPath})`);
+      wslStatus = await getWslStatus();
+    } catch (e: any) {
+      wslMessage = `Failed to update .wslconfig: ${e?.message || e}`;
+      appendAppLog(`WSL mirrored enable failed: ${e?.message || e}`, 'error');
+    } finally {
+      wslBusy = false;
+    }
+  }
+
+  async function restartWsl() {
+    const ok = globalThis.confirm(
+      `Restart WSL now?\n\n` +
+        `This runs "wsl --shutdown", which terminates every running WSL distro ` +
+        `and anything inside them (shells, servers, editors). WSL starts again ` +
+        `automatically the next time you open it.`,
+    );
+    if (!ok) return;
+    wslBusy = true;
+    wslMessage = '';
+    try {
+      await shutdownWsl();
+      wslRestartPending = false;
+      wslMessage = 'WSL shut down. On next launch it comes back with mirrored networking — WSL clients can then use the loopback URL.';
+      appendAppLog('WSL shut down to apply mirrored networking');
+      wslStatus = await getWslStatus();
+    } catch (e: any) {
+      wslMessage = `Failed to restart WSL: ${e?.message || e}`;
+      appendAppLog(`WSL shutdown failed: ${e?.message || e}`, 'error');
+    } finally {
+      wslBusy = false;
+    }
+  }
+
   $effect(() => {
     // Persist on changes to chat + audio model state
     if (selectedModelAlias || selectedSTTModelAlias || chatMessages.length > 0 || systemPrompt) {
@@ -1956,11 +2035,11 @@ updateStateFromSdk();
 
   function addCompareSlot(slot: CompareSlot) {
     if (compareSlots.some((s) => s.key === slot.key)) {
-      statusMessage = `Already in comparison: ${slot.label}`;
+      statusMessage = `Already in the arena: ${slot.label}`;
       return;
     }
     if (compareSlots.length >= COMPARE_MAX_SLOTS) {
-      statusMessage = `Comparison supports at most ${COMPARE_MAX_SLOTS} models`;
+      statusMessage = `The arena supports at most ${COMPARE_MAX_SLOTS} models`;
       return;
     }
     compareSlots = [...compareSlots, slot];
@@ -1996,7 +2075,7 @@ updateStateFromSdk();
 
   function saveCurrentComparison() {
     if (!comparePrompt.trim() || Object.keys(compareResults).length === 0 || compareSlots.length < 2) {
-      statusMessage = "Run a comparison first, then save.";
+      statusMessage = "Run the arena first, then save.";
       return;
     }
     const entry: SavedComparison = {
@@ -2008,7 +2087,7 @@ updateStateFromSdk();
     };
     compareHistory = [entry, ...compareHistory].slice(0, COMPARE_HISTORY_MAX);
     persistCompareHistory();
-    statusMessage = "Comparison saved for review";
+    statusMessage = "Arena run saved for review";
   }
 
   function openSavedComparison(entry: SavedComparison) {
@@ -2017,7 +2096,7 @@ updateStateFromSdk();
     comparePrompt = entry.prompt;
     compareResults = { ...entry.results };
     compareHistoryOpen = false;
-    statusMessage = `Reviewing comparison from ${new Date(entry.createdAt).toLocaleString()}`;
+    statusMessage = `Reviewing arena run from ${new Date(entry.createdAt).toLocaleString()}`;
   }
 
   function deleteSavedComparison(id: string) {
@@ -2125,7 +2204,7 @@ updateStateFromSdk();
         );
       }
       return (
-        `Not enough free memory for comparison. ${parts.join(" · ")}. ` +
+        `Not enough free memory for this arena run. ${parts.join(" · ")}. ` +
         `Free memory or remove a larger model/variant.`
       );
     }
@@ -2242,11 +2321,11 @@ updateStateFromSdk();
     }
 
     const lines: string[] = [
-      "Comparison may unload models that are already in memory.",
+      "This arena run may unload models that are already in memory.",
       "",
     ];
     if (oneAtATime && preloadedCompare.length > 0) {
-      lines.push("Already loaded (in this comparison set):");
+      lines.push("Already loaded (in this arena line-up):");
       for (const a of preloadedCompare) lines.push(`  • ${a}`);
       lines.push("");
       lines.push(
@@ -2259,14 +2338,14 @@ updateStateFromSdk();
       for (const v of variantSwaps) lines.push(`  • ${v}`);
       lines.push("");
     }
-    lines.push("Models not in this comparison will not be touched.");
+    lines.push("Models not in this arena run will not be touched.");
     lines.push("");
     lines.push("OK = allow unloading those models during the run");
-    lines.push("Cancel = abort comparison (nothing unloaded)");
+    lines.push("Cancel = abort the run (nothing unloaded)");
 
     const ok = globalThis.confirm(lines.join("\n"));
     if (!ok) {
-      statusMessage = "Comparison cancelled — existing loaded models left as-is.";
+      statusMessage = "Arena run cancelled — existing loaded models left as-is.";
       return { proceed: false, allowUnloadPreloaded: false };
     }
     return { proceed: true, allowUnloadPreloaded: true };
@@ -2433,9 +2512,9 @@ updateStateFromSdk();
       comparePrepStatus = "";
       statusMessage =
         failCount > 0
-          ? `Comparison finished with ${failCount} failure(s)` +
+          ? `Arena run finished with ${failCount} failure(s)` +
             (oneAtATime ? " (one-at-a-time)" : "")
-          : `Comparison complete` + (oneAtATime ? " (one-at-a-time)" : "");
+          : `Arena run complete` + (oneAtATime ? " (one-at-a-time)" : "");
     } finally {
       comparePreparing = false;
       comparePrepStatus = "";
@@ -2458,7 +2537,7 @@ updateStateFromSdk();
 
   function exportComparison() {
     if (!comparePrompt.trim() || Object.keys(compareResults).length === 0) return;
-    let md = `# Model Comparison\n\n**Date:** ${new Date().toISOString()}\n\n**Prompt:** ${comparePrompt}\n\n`;
+    let md = `# Model Arena\n\n**Date:** ${new Date().toISOString()}\n\n**Prompt:** ${comparePrompt}\n\n`;
     for (const slot of compareSlots) {
       const r = compareResults[slot.key];
       if (!r) continue;
@@ -2474,7 +2553,7 @@ updateStateFromSdk();
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `comparison-${Date.now()}.md`;
+    a.download = `model-arena-${Date.now()}.md`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -4424,7 +4503,7 @@ Output only the summary text, no preamble.`;
         class="nav-item"
         class:active={currentView === "compare"}
         onclick={() => (currentView = "compare")}
-        title="Compare models side-by-side"
+        title="Model Arena — run models side-by-side"
       >
         <span class="nav-icon" aria-hidden="true">
           <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -4432,7 +4511,7 @@ Output only the summary text, no preamble.`;
             <rect x="14" y="4" width="7" height="16" rx="1" stroke="currentColor" stroke-width="1.6"/>
           </svg>
         </span>
-        <span class="nav-label">Compare</span>
+        <span class="nav-label">Model Arena</span>
       </button>
       <button
         class="nav-item"
@@ -6453,7 +6532,7 @@ Output only the summary text, no preamble.`;
             <h3>Around the app</h3>
             <ul>
               <li><strong>Models</strong> — catalog, multi-model pool, download/load/unload, update notifications</li>
-              <li><strong>Chat / Audio / Compare</strong> — inference, STT, side-by-side bake-off</li>
+              <li><strong>Chat / Audio / Model Arena</strong> — inference, STT, side-by-side bake-off</li>
               <li><strong>Monitor</strong> — pool, resources, access and audit logs</li>
               <li><strong>Integrations</strong> — snippets for external OpenAI-compatible tools</li>
               <li><strong>Diagnostics / Settings</strong> — service, bind/port (Apply &amp; restart), autostart, shortcuts (<kbd>?</kbd>)</li>
@@ -6575,7 +6654,7 @@ Output only the summary text, no preamble.`;
         <div class="view compare-view">
           <div class="compare-header">
             <div>
-              <h2>Model Comparison</h2>
+              <h2>Model Arena</h2>
               <p class="muted">
                 Pick 2–{COMPARE_MAX_SLOTS} models or variants, then send one prompt. Missing models are downloaded and loaded automatically.
               </p>
@@ -6597,11 +6676,11 @@ Output only the summary text, no preamble.`;
           {#if compareHistoryOpen}
             <div class="compare-history-panel">
               <div class="compare-history-header">
-                <strong>Saved comparisons</strong>
+                <strong>Saved arena runs</strong>
                 <button type="button" class="tiny" onclick={() => (compareHistoryOpen = false)}>Close</button>
               </div>
               {#if compareHistory.length === 0}
-                <p class="muted small">No saved comparisons yet. Run one and click Save.</p>
+                <p class="muted small">No saved arena runs yet. Run one and click Save.</p>
               {:else}
                 <ul class="compare-history-list">
                   {#each compareHistory as entry (entry.id)}
@@ -6614,7 +6693,7 @@ Output only the summary text, no preamble.`;
                       <button
                         type="button"
                         class="tiny danger-btn"
-                        title="Delete saved comparison"
+                        title="Delete saved arena run"
                         onclick={() => deleteSavedComparison(entry.id)}
                       >×</button>
                     </li>
@@ -6643,7 +6722,7 @@ Output only the summary text, no preamble.`;
 
               {#if compareSlots.length === 0}
                 <div class="empty-state-card empty-state-compact">
-                  <h3>No models selected for compare</h3>
+                  <h3>No models in the arena yet</h3>
                   <p>Add at least two chat models (or specific variants), then enter one prompt for all of them.</p>
                   <button
                     type="button"
@@ -6655,7 +6734,7 @@ Output only the summary text, no preamble.`;
                   >Add model…</button>
                 </div>
               {:else}
-                <div class="compare-mode-row" role="group" aria-label="Comparison load mode">
+                <div class="compare-mode-row" role="group" aria-label="Arena load mode">
                   <label class="compare-mode-option" class:active={compareOneAtATime}>
                     <input type="radio" name="compare-mode" checked={compareOneAtATime}
                       onchange={() => { compareOneAtATime = true; }}
@@ -6779,7 +6858,7 @@ Output only the summary text, no preamble.`;
                         <button
                           type="button"
                           class="tiny"
-                          title="Remove from comparison"
+                          title="Remove from the arena"
                           disabled={isComparing || comparePreparing}
                           onclick={() => removeCompareSlot(slot.key)}
                         >×</button>
@@ -6887,13 +6966,13 @@ Output only the summary text, no preamble.`;
                 <button
                   type="submit"
                   class="compare-send"
-                  aria-label="Run comparison"
+                  aria-label="Run the arena"
                   disabled={compareSlots.length < 2 || !comparePrompt.trim() || isComparing || comparePreparing}
                   title={compareSlots.length < 2 ? "Add at least 2 models" : "Send prompt to all selected models"}
                 >
                   {#if isComparing || comparePreparing}
                     <Icon name="loader" size={15} class="spin" />
-                    <span>{comparePreparing ? "Preparing…" : "Comparing…"}</span>
+                    <span>{comparePreparing ? "Preparing…" : "Running…"}</span>
                   {:else}
                     <Icon name="send" size={15} />
                     <span>Send</span>
@@ -6920,7 +6999,7 @@ Output only the summary text, no preamble.`;
 
           {#if Object.keys(compareResults).length}
             {#if compareReviewId}
-              <p class="muted small">Reviewing a saved comparison — ratings auto-save.</p>
+              <p class="muted small">Reviewing a saved arena run — ratings auto-save.</p>
             {/if}
             <div class="compare-results">
               {#each compareSlots as slot (slot.key)}
@@ -7136,6 +7215,111 @@ Output only the summary text, no preamble.`;
             </div>
           </div>
 
+          {#if isWindowsHost}
+            <div class="settings-section">
+              <h3>WSL clients</h3>
+              <p class="setting-note">
+                Tools running inside WSL2 (OpenClaw, OpenCode, …) cannot reach
+                <code>127.0.0.1</code> on Windows in WSL's default NAT mode — the WSL VM has its own
+                loopback. WSL <strong>mirrored networking</strong> fixes this: the usual
+                <code>http://127.0.0.1:{appliedNetworkPort}/v1</code> URL works from inside WSL,
+                Flint keeps the recommended loopback-only bind, and automatic model loading keeps
+                working (it trusts loopback callers only).
+              </p>
+
+              <div class="setting-row">
+                <div class="setting-info">
+                  <span class="setting-name">Mirrored networking</span>
+                  <span class="setting-desc">
+                    {#if !wslStatus}
+                      Check whether WSL is installed and how it is configured.
+                    {:else if !wslStatus.wslPresent}
+                      WSL was not detected on this machine.
+                    {:else if wslStatus.mirrored}
+                      Enabled in <code>{wslStatus.configPath}</code> — WSL clients use
+                      <code>http://127.0.0.1:{appliedNetworkPort}/v1</code>.
+                    {:else if wslStatus.mirroredSupported}
+                      WSL {wslStatus.wslVersion} is in {wslStatus.networkingMode || 'NAT (default)'} mode —
+                      mirrored networking is available but not enabled.
+                    {:else}
+                      WSL detected{wslStatus.wslVersion ? ` (version ${wslStatus.wslVersion})` : ''}, but mirrored
+                      networking needs WSL 2.0+ (run <code>wsl --update</code>) on Windows 11 22H2 or newer.
+                      Use the manual NAT setup below instead.
+                    {/if}
+                  </span>
+                </div>
+                <div class="network-apply-actions">
+                  <button type="button" class="btn-secondary" onclick={refreshWslStatus} disabled={wslBusy}>
+                    {wslBusy ? 'Working…' : wslStatus ? 'Re-check' : 'Check WSL'}
+                  </button>
+                  {#if wslStatus?.wslPresent && wslStatus.mirroredSupported && !wslStatus.mirrored}
+                    <button type="button" class="btn-primary" onclick={enableWslMirrored} disabled={wslBusy}>
+                      Enable mirrored networking
+                    </button>
+                  {/if}
+                  {#if wslRestartPending}
+                    <button type="button" class="btn-primary" onclick={restartWsl} disabled={wslBusy}>
+                      Restart WSL now
+                    </button>
+                  {/if}
+                </div>
+              </div>
+
+              {#if wslMessage}
+                <p class="setting-note">{wslMessage}</p>
+              {/if}
+              {#if wslRestartPending}
+                <div class="warning-banner">
+                  The config change applies when WSL restarts. "Restart WSL now" runs
+                  <code>wsl --shutdown</code>, which terminates every running WSL distro and anything
+                  inside them — or simply close your WSL terminals, and it applies the next time WSL starts.
+                </div>
+              {/if}
+
+              <div class="setting-col">
+                <button
+                  type="button"
+                  class="btn-secondary"
+                  onclick={() => (wslNatHelpOpen = !wslNatHelpOpen)}
+                >{wslNatHelpOpen ? 'Hide' : 'Show'} manual setup (keep NAT mode)</button>
+                {#if wslNatHelpOpen}
+                  <div class="setting-note">
+                    <p>
+                      To keep NAT mode instead, WSL clients must connect to the Windows host address
+                      rather than loopback:
+                    </p>
+                    <ol>
+                      <li>
+                        Inside WSL, find the host address:
+                        <code>ip route show default | awk '&#123;print $3&#125;'</code>
+                        (typically <code>172.x.x.1</code>; it can change between reboots).
+                      </li>
+                      <li>
+                        Set <strong>Bind address</strong> above to <code>0.0.0.0</code> and use
+                        <strong>Apply &amp; restart</strong> — with the loopback-only bind, the service
+                        is unreachable from WSL.
+                      </li>
+                      <li>
+                        Allow the port through Windows Firewall, scoped to the WSL adapter so it stays
+                        closed to the rest of the LAN (admin PowerShell):<br />
+                        <code>New-NetFirewallRule -DisplayName "Flint WSL" -Direction Inbound -Protocol TCP -LocalPort {appliedNetworkPort} -InterfaceAlias "vEthernet (WSL)" -Action Allow</code><br />
+                        On newer builds the adapter is named <code>vEthernet (WSL (Hyper-V firewall))</code> —
+                        check <code>Get-NetAdapter</code> if the rule does not take.
+                      </li>
+                      <li>
+                        Point the WSL tool at <code>http://&lt;host address&gt;:{appliedNetworkPort}/v1</code>.
+                      </li>
+                      <li>
+                        Load the model in Flint first: requests that do not arrive over loopback are
+                        served, but never trigger an automatic model load.
+                      </li>
+                    </ol>
+                  </div>
+                {/if}
+              </div>
+            </div>
+          {/if}
+
           <div class="settings-section">
             <h3>Appearance</h3>
             <div class="setting-row">
@@ -7220,6 +7404,7 @@ Output only the summary text, no preamble.`;
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+3</td><td>Audio</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+4</td><td>Monitor</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+5</td><td>Integrations</td></tr>
+            <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+6</td><td>Model Arena</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+,</td><td>Settings</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+B</td><td>Toggle sidebar</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+Space</td><td>Toggle dictation</td></tr>

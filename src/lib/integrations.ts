@@ -439,6 +439,7 @@ openclaw  # then select {MODEL} in the model picker
       ],
     },
     limitations: [
+      'Running OpenClaw inside WSL2? The default NAT mode cannot reach 127.0.0.1 on the Windows host. Enable WSL mirrored networking (Settings → Network → WSL clients has a one-click setup) or follow the manual NAT steps there.',
       'Tool-calling and streaming features depend on the loaded Flint model exposing OpenAI-style `tool_calls` / streaming.',
       'Optional advanced setup — a LiteLLM proxy in front of Flint provides cross-backend routing (e.g. fallback between local Flint and Azure AI Foundry) and uniform API-key handling, but is not required for direct OpenClaw → Flint use.',
       'See also: flthibau/sample-OpenClaw-on-Azure-with-AI-Foundry, the techbloat.com OpenClaw + Azure Foundry + LiteLLM guide, and the Feb 2026 azurefeeds.com walkthrough — those describe the LiteLLM routing pattern for multi-backend setups.',
