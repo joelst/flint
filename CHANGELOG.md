@@ -1,5 +1,117 @@
 # Flint Changelog
 
+## 0.5.0
+
+### Minor Changes
+
+- 6dac51a: Serve models on demand, so any OpenAI-compatible client works without loading a model in
+  Flint first. Foundry Local only answers for a model that is already resident in memory, and
+  it exposes no HTTP route to load one, so a coding agent or IDE plugin that read `/v1/models`
+  and posted to a model it found there received `400 Model 'X' is not loaded` with no way to
+  recover. Flint now listens on the configured port itself and forwards to the native service,
+  and when that specific rejection comes back it loads the model and replays the request once.
+
+  The proxy forwards first and inspects afterwards, so Foundry still performs all routing and
+  request validation and a bad request cannot trigger a multi-gigabyte load. Only the exact
+  not-loaded rejection is retried, only once, and only for a model that is already downloaded,
+  so a stray or hostile identifier can never start a download. Loads are serialised and
+  deduplicated, which collapses a burst of concurrent requests for the same model into one
+  load. Streaming responses are passed through untouched, so tokens still arrive as they are
+  produced, including on the replayed request.
+
+  Requests naming a model by its friendly alias now work. Foundry routes variant ids but
+  rejects the alias outright, answering "is not loaded" even while that exact model is
+  resident, and the alias is the form Flint's own integration snippets tell users to
+  configure. The proxy now replays under the variant id the loader actually chose, and
+  remembers the mapping so later requests are rewritten before they are sent rather than
+  paying the rejection every time.
+
+  This also fixes service start, which failed with `Foundry Local Core is already initialized`
+  every time it ran after initialization. The native core can only be initialized once per
+  process, so the manager can never be re-created to change its port; Flint now takes the
+  port the service reports and proxies the configured port to it. As a result the configured
+  port and bind address are honoured for the first time.
+
+- 6dac51a: Add BYOM (bring your own model) import so Flint can run ONNX models that are not in the
+  Foundry catalog. `inspectModelFolder` validates a folder and explains why it is unusable
+  (GGUF, missing tokenizer, incomplete download, weights that `genai_config.json` does not
+  point at) before anything is copied. `importModelFolder` stages the copy, authors the
+  Foundry-specific `inference_model.json` — which almost no public ONNX repo ships — picks a
+  prompt template from the model's own chat template, then activates it with a single atomic
+  rename and removes the staging directory on any failure. `linkModelFolder` registers a
+  model that lives elsewhere through a directory junction, so a second copy of a multi-gigabyte
+  model is unnecessary and the source folder is never written to.
+
+  The prompt template is now visible and editable rather than an invisible guess. Inspecting a
+  folder returns the template Flint would use plus the known presets (ChatML, Llama 3, Phi-3,
+  Gemma), `importModelFolder` accepts a `promptTemplate` that overrides detection, and
+  `getModelTemplate` / `setModelTemplate` read and rewrite the template of an already-imported
+  model. Templates are validated before they are written — every turn must be present and the
+  `{Content}` placeholder must appear, because a malformed template does not fail loudly but
+  silently drops message text. Rewrites are refused for catalog and linked models, whose files
+  Flint does not own. Models are added from the Models tab: a folder picker validates the
+  folder, shows what was detected, lets the prompt template be reviewed and edited before
+  anything is copied, then either copies the folder into Flint's cache or links it in place.
+  The template of an already-imported model can be reopened and changed from its card.
+  The model list can be sorted by name, family, or last updated.
+
+- 9c45fbc: Warn before the machine runs out of memory, and give the model pool a way to bound itself.
+
+  A memory watchdog now samples system RAM and per-GPU VRAM regardless of which tab is open,
+  raises an in-app banner and a native OS notification when usage stays high, and clears itself
+  once usage drops back below the threshold with hysteresis. RAM and VRAM have separate limits
+  because a GPU legitimately runs near capacity during inference. The sustain window is measured
+  in elapsed time rather than samples, since polling slows down in the background, and a gap in
+  sampling — a suspended laptop, a throttled webview — or an edited threshold restarts the window
+  instead of firing immediately on stale history. Because the underlying telemetry is system-wide
+  rather than Flint's own footprint, alerts only appear while Flint actually has models resident
+  and the wording never claims the memory is Flint's. Alerts can be dismissed per device, the
+  thresholds and sustain window are adjustable, and the whole watchdog can be turned off.
+
+  The model pool can now evict. Two independent rules, both off by default, unload models after
+  an idle timeout or keep at most N resident, evicting least-recently-used first. Models can be
+  marked `pinned` so they are never unloaded — including while idle-unload is on — or `low` so
+  they are given up first. A model is never evicted while a request is in flight, including
+  requests arriving through the OpenAI-compatible gateway, which the pool previously could not
+  see. When the cap is in force, room is freed before a new load commits memory rather than
+  after. Idle time and priority are shown per model in the pool table.
+
+- 9c45fbc: Keep the local service running when the window is closed.
+
+  The inference service lives in Flint's sidecar process, so quitting the app always killed the
+  endpoint that external tools were pointed at. Now, while the service is running, closing the
+  window hides Flint to the system tray instead of quitting — the endpoint stays available, a
+  one-time notification says so, and the tray menu offers "Open Flint" and "Stop service and
+  quit" (which stops the service gracefully before exiting). The behavior is controlled by a new
+  "Keep service running in background" toggle in Settings → System (on by default), only kicks in
+  while the service is actually running, and falls back to a normal quit if the tray cannot be
+  created so a hidden window can never be stranded.
+
+- 9c45fbc: Fix macOS releases, reach Flint from WSL, and rename Compare to Model Arena.
+
+  macOS builds no longer ship broken. The release workflow now signs and notarizes the app
+  automatically when Apple Developer secrets are present, and otherwise builds unsigned with a
+  loud warning instead of failing — a half-configured state (certificate without notarization
+  credentials) still fails, because that app would be blocked anyway. Since unsigned browser
+  downloads are quarantined and reported as "damaged" by Gatekeeper, a new curl-based installer
+  (`scripts/install-macos.sh`) installs the latest release without any Gatekeeper interaction,
+  and the docs cover the `xattr -cr` fix for DMG installs. The mac app icon is also finally the
+  Flint logo — `icon.icns` had shipped the default template icon since the initial check-in.
+
+  Tools running inside WSL2 (OpenClaw, OpenCode, …) can't reach `127.0.0.1` on the host in WSL's
+  default NAT mode. A new Settings → Network → WSL clients section detects WSL and enables
+  mirrored networking with one click: it writes `networkingMode=mirrored` into `.wslconfig`
+  (backing up the original, preserving everything else in the file), and offers a confirmed
+  `wsl --shutdown` to apply. Mirrored mode keeps Flint on the recommended loopback-only bind and
+  keeps gateway autoload working for WSL callers. A manual NAT walkthrough (host IP, `0.0.0.0`
+  bind, scoped firewall rule, no-autoload caveat) is included for those who prefer it.
+
+  The Compare tab is now **Model Arena** — page, sidebar, status messages, markdown export, help,
+  and docs. The keyboard shortcuts dialog also gains the previously undocumented Ctrl/⌘+6 entry.
+  Saved runs carry over unchanged.
+
+  Also: a Linux build plan landed in `docs/LINUX_BUILD_PLAN.md`.
+
 ## 0.4.5
 
 ### Patch Changes
