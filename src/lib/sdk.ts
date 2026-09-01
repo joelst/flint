@@ -835,10 +835,10 @@ export async function getWslStatus(): Promise<WslStatusInfo | null> {
   return res?.result ?? null;
 }
 
-/** Writes networkingMode=mirrored into %UserProfile%\.wslconfig (backing up the original first). */
 export async function enableWslMirroredNetworking(): Promise<WslEnableMirroredResult> {
   const res = await send('wslEnableMirrored');
-  return res?.result;
+  if (!res?.result) throw new Error('wslEnableMirrored returned no result');
+  return res.result as WslEnableMirroredResult;
 }
 
 /** Runs `wsl --shutdown` — terminates all running WSL distros so the config change applies. */
