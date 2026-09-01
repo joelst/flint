@@ -274,7 +274,11 @@ function aliasForModelName (name) {
 
 /** Marks a model busy for the life of a request so eviction cannot unload it mid-flight. */
 function noteActivity (modelName, phase) {
-  const alias = aliasForModelName(modelName);
+  let alias = aliasForModelName(modelName);
+  // During gateway autoload the model is not resident yet, so fall back to resolving from the
+  // cached-model index (when available) or to the requested alias string.
+  if (!alias && modelIndex) alias = resolveModelId(modelIndex, modelName)?.alias ?? null;
+  if (!alias && typeof modelName === 'string') alias = modelName.trim();
   if (!alias) return;
   const entry = usageFor(alias);
   entry.lastUsedAt = Date.now();
