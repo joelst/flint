@@ -181,20 +181,38 @@ jobs:
       # secrets are ever added, tauri-action picks them up automatically —
       # but a cert without notarization credentials still produces a blocked
       # app, so fail on that half-configured state.
+      # tauri-bundler checks these with Rust's `env::var_os`, which returns
+      # Some("") for a step `env:` set from an empty secret — not None. So
+      # these must never be forwarded to the build step as empty strings, or
+      # tauri tries to import an empty certificate and codesigning fails with
+      # "SecKeychainItemImport: ... not valid" even though signing was never
+      # requested. Only export them (via GITHUB_ENV) when actually present.
       - name: Check Apple signing secrets
         if: ${{ matrix.os == 'macos-latest' }}
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           if [ -z "$APPLE_CERTIFICATE" ]; then
             echo "::warning::No APPLE_CERTIFICATE secret; building an UNSIGNED macOS app. Browser downloads will show 'damaged' — point users at scripts/install-macos.sh or 'xattr -cr /Applications/Flint.app' (docs/RELEASE.md section 1)."
-          elif [ -z "$APPLE_ID" ] || [ -z "$APPLE_PASSWORD" ] || [ -z "$APPLE_TEAM_ID" ]; then
+            exit 0
+          fi
+          if [ -z "$APPLE_ID" ] || [ -z "$APPLE_PASSWORD" ] || [ -z "$APPLE_TEAM_ID" ]; then
             echo "::error::APPLE_CERTIFICATE is set but notarization secrets are incomplete. A signed-but-unnotarized app is still blocked by Gatekeeper; add APPLE_ID, APPLE_PASSWORD, and APPLE_TEAM_ID (and APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY as needed), or remove APPLE_CERTIFICATE to release unsigned."
             exit 1
           fi
+          {
+            echo "APPLE_CERTIFICATE=$APPLE_CERTIFICATE"
+            echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD"
+            echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY"
+            echo "APPLE_ID=$APPLE_ID"
+            echo "APPLE_PASSWORD=$APPLE_PASSWORD"
+            echo "APPLE_TEAM_ID=$APPLE_TEAM_ID"
+          } >> "$GITHUB_ENV"
 
       - name: Build and Release
         uses: tauri-apps/tauri-action@v0
@@ -202,14 +220,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # macOS code signing (tauri-action imports the cert into a temp keychain)
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          # macOS notarization (notarytool)
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # macOS code signing/notarization vars (APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD,
+          # APPLE_SIGNING_IDENTITY, APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID) are intentionally NOT
+          # set here. The "Check Apple signing secrets" step forwards them via GITHUB_ENV only
+          # when APPLE_CERTIFICATE is actually configured; setting them here unconditionally would
+          # give tauri-bundler an empty (but "present") APPLE_CERTIFICATE env var and it would try
+          # to import an empty certificate, failing codesigning even for unsigned builds.
           AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ vars.AZURE_TRUSTED_SIGNING_ENDPOINT }}
           AZURE_TRUSTED_SIGNING_ACCOUNT_NAME: ${{ vars.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
           AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ vars.AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME }}
