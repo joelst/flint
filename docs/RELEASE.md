@@ -36,7 +36,7 @@ GitHub Actions variables:
 
 | Variable | Description |
 |---|---|
-| `AZURE_TRUSTED_SIGNING_ENDPOInt` | Trusted Signing endpoint, for example `https://eus.codesigning.azure.net/` |
+| `AZURE_TRUSTED_SIGNING_ENDPOINT` | Trusted Signing endpoint, for example `https://eus.codesigning.azure.net/` |
 | `AZURE_TRUSTED_SIGNING_ACCOUNT_NAME` | Trusted Signing account name |
 | `AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME` | Public trust certificate profile name (currently `personal-public-trust-cert`) |
 
