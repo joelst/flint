@@ -21,7 +21,7 @@ A stage is recorded here only once the pull request delivering it is merged to
 | Phase | Stage | Delivered by |
 |---|---|---|
 | 0 | Containment: hydration/write guards, async ownership epochs, single-instance and macOS Reopen, microphone metadata, local unsigned-build profile, single-flight service startup, gateway activity leases and pool admission safety | #35 |
-| 1A | 1A-1 versioned conversation schema, legacy migration, supported rollback floor | #38, #43 |
+| 1A | 1A-1 versioned conversation schema, legacy migration, supported rollback floor | #38 |
 | 1A | 1A-2 `ConversationRepository` storage layer with byte preservation | #43 |
 | 1A | 1A-3a conversation contracts and title derivation from plain text | #43 |
 | 1A | 1A-3b multipart-preserving request builder and chat transport | #42 |
