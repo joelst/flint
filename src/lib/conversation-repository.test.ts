@@ -499,6 +499,27 @@ describe('preserveBytes', () => {
     expect(preserveBytes(storage, ARCHIVE_BACKUP_KEY, 'abc')).toBe(false);
   });
 
+  it('gives up rather than probing forever when no slot is ever free', () => {
+    // The probe runs on the open path, so an adapter that reports every candidate as occupied
+    // would hang the UI instead of failing. Bounded, it fails closed: the caller sees "not
+    // preserved" and blocks the write rather than overwriting bytes that were never copied.
+    let reads = 0;
+    const storage: StorageAdapter = {
+      getItem: (key) => {
+        reads += 1;
+        // Anything but an exact match, so every slot looks occupied by different bytes.
+        return `occupied:${key}`;
+      },
+      setItem: () => {
+        throw new Error('must not write when no slot was found');
+      },
+      removeItem: () => {},
+    };
+    expect(preserveBytes(storage, ARCHIVE_BACKUP_KEY, 'payload')).toBe(false);
+    // Terminated, and cheaply: one read for the base key plus the bounded probe.
+    expect(reads).toBeLessThanOrEqual(64);
+  });
+
   it('refuses to claim a backup that did not actually persist', () => {
     // A storage that accepts writes without retaining them would otherwise report a backup we
     // do not have, authorizing the original bytes to be overwritten.

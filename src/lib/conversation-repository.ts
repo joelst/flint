@@ -94,6 +94,16 @@ export interface SaveResult {
  * live key: overwriting it would destroy the only copy of data we already know we failed to
  * read correctly.
  */
+/**
+ * How many content-addressed backup slots to probe before giving up.
+ *
+ * Each extra slot past the first means another payload that hashes identically, so a legitimate
+ * run of even a few is already implausible. The bound exists for the implausible case — a
+ * storage adapter that never reports a free key — where the alternative is an infinite loop on
+ * the open path.
+ */
+const MAX_BACKUP_SLOT_PROBES = 32;
+
 export function preserveBytes(storage: StorageAdapter, backupKey: string, raw: string): boolean {
   try {
     const existing = storage.getItem(backupKey);
@@ -109,8 +119,8 @@ export function preserveBytes(storage: StorageAdapter, backupKey: string, raw: s
       // first: destroying the only copy of data, which is precisely what this function exists
       // to prevent.
       const base = `${backupKey}.${hashString(raw)}`;
-      target = base;
-      for (let attempt = 0; ; attempt += 1) {
+      let slot: string | null = null;
+      for (let attempt = 0; attempt < MAX_BACKUP_SLOT_PROBES; attempt += 1) {
         const candidate = attempt === 0 ? base : `${base}-${attempt}`;
         const parked = storage.getItem(candidate);
         // These bytes are already preserved under their content address; nothing to do. Without
@@ -118,11 +128,17 @@ export function preserveBytes(storage: StorageAdapter, backupKey: string, raw: s
         // until quota ran out, and then block writing despite an exact copy already existing.
         if (parked === raw) return true;
         if (parked === null) {
-          target = candidate;
+          slot = candidate;
           break;
         }
         // Occupied by different bytes (a hash collision). Never overwrite; step aside.
       }
+      // Bounded so a storage adapter that reports every key as occupied cannot spin here. This
+      // runs on the open path, so an unbounded probe would hang the UI rather than fail. Giving
+      // up reports "not preserved", which blocks the write — the safe direction, since the
+      // whole point of this function is to refuse to overwrite bytes we have not copied.
+      if (slot === null) return false;
+      target = slot;
     }
 
     storage.setItem(target, raw);
