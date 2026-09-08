@@ -337,10 +337,23 @@ describe('migrateLegacyConversations', () => {
   });
 
   it('handles a first run with nothing stored at all', () => {
-    const r = migrateLegacyConversations({ legacyIndex: null, legacyMessages: null, now: 1 });
+    // `undefined`, not `null`, is what the reader produces for a key that was never written.
+    const r = migrateLegacyConversations({ legacyIndex: null, legacyMessages: undefined, now: 1 });
     expect(r.archive.conversations).toHaveLength(0);
     expect(r.archive.activeId).toBeNull();
     expect(r.archive.version).toBe(CONVERSATION_SCHEMA_VERSION);
+    expect(r.legacyThreadMalformed).toBe(false);
+    expect(r.legacyLossy).toBe(false);
+  });
+
+  it('reports a stored null thread as damage rather than as absence', () => {
+    // `{"chatMessages": null}` is a value that was written, not a key that is missing. Reading
+    // it as absence would report a clean empty start and clear the retirement gate, deleting
+    // the very source that could not be read.
+    const r = migrateLegacyConversations({ legacyIndex: null, legacyMessages: null, now: 1 });
+    expect(r.legacyThreadMalformed).toBe(true);
+    expect(r.legacyThreadPresent).toBe(true);
+    expect(r.legacyLossy).toBe(true);
   });
 
   it('recovers a thread even when the legacy index is unusable', () => {
@@ -971,10 +984,35 @@ describe('readConversationSettings', () => {
     expect(r.invalidKeys.sort()).toEqual(['contextTurns', 'modelAlias', 'showFullHistory']);
   });
 
-  it('rejects a non-finite contextTurns', () => {
-    for (const contextTurns of [NaN, Infinity, -Infinity]) {
+  it('rejects a contextTurns the app would refuse to apply', () => {
+    // The app restores `contextTurns` only when it is `> 0` and the picker offers whole turns,
+    // so accepting 0, a negative, or a fraction here would put a value in the archive that is
+    // reported as a setting and then never used.
+    for (const contextTurns of [NaN, Infinity, -Infinity, 0, -1, -0.5, 2.5, 12.0001]) {
       expect(readConversationSettings({ contextTurns }).invalidKeys).toEqual(['contextTurns']);
     }
+  });
+
+  it('accepts the whole-number turn counts the app offers', () => {
+    for (const contextTurns of [1, 4, 8, 12, 20, 30, 100]) {
+      const r = readConversationSettings({ contextTurns });
+      expect(r.settings.contextTurns).toBe(contextTurns);
+      expect(r.invalidKeys).toEqual([]);
+    }
+  });
+
+  it('keeps a rejected contextTurns in the stored bag', () => {
+    // `readConversationSettings` is a typed view, not a rewrite: refusing to present a value
+    // must not delete it, or a downgrade would lose a setting this build merely disagreed with.
+    const { conversation } = normalizeConversation({
+      id: 'c1',
+      title: 't',
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [],
+      settings: { contextTurns: 0, modelAlias: 'phi' },
+    });
+    expect(conversation?.settings).toEqual({ contextTurns: 0, modelAlias: 'phi' });
   });
 
   it('accepts a false showFullHistory as a real value', () => {

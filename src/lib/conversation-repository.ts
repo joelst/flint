@@ -183,11 +183,14 @@ export function readLegacyThread(raw: string | null): unknown {
   if (raw === null) return undefined;
   const parsed = parseJson(raw);
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    // The blob itself is damaged, so we cannot prove a thread was absent. Return the raw bytes
-    // rather than `null`: the migrator reads `null` as absence, which would report a total
-    // loss as a clean empty start and then let the damaged source be retired.
+    // The blob itself is damaged, so we cannot prove a thread was absent. Return the raw bytes,
+    // which the migrator classifies as damage; `undefined` is reserved for a key that was never
+    // stored, and reporting a total loss as a clean empty start would let the damaged source be
+    // retired.
     return raw;
   }
+  // Distinguishes a key that was never written from one holding an unusable value: only the
+  // former is absence. A stored `null` is passed through as-is so the migrator can report it.
   const messages = (parsed as Record<string, unknown>).chatMessages;
   return messages === undefined ? undefined : messages;
 }

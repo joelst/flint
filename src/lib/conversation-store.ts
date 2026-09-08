@@ -264,8 +264,16 @@ export function readConversationSettings(raw: unknown): ConversationSettingsRead
         else invalidKeys.push(key);
         break;
       case 'contextTurns':
-        if (typeof value === 'number' && Number.isFinite(value)) settings.contextTurns = value;
-        else invalidKeys.push(key);
+        // Must match what the app will actually accept, which is a positive whole number of
+        // turns (`+page.svelte` restores it only when `> 0`, and the picker offers 4/8/12/20/30).
+        // Storing 0, a negative, or a fraction would put a value in the archive that the app
+        // silently refuses to apply, so the conversation would keep reporting a context window
+        // it never uses. Rejecting it here reports it through `invalidKeys` instead of
+        // presenting it as usable; the stored bag is kept verbatim by `normalizeConversation`,
+        // so this is a view-level judgement and the original value is not discarded.
+        if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
+          settings.contextTurns = value;
+        } else invalidKeys.push(key);
         break;
       case 'showFullHistory':
         if (typeof value === 'boolean') settings.showFullHistory = value;
@@ -1035,10 +1043,13 @@ export function migrateLegacyConversations(input: LegacyMigrationInput): LegacyM
   }
   const importedFromIndex = archive.conversations.length;
 
+  // `undefined` is the only value that means "no thread was stored"; the reader maps a missing
+  // key to it deliberately. Everything else was read off disk, so anything that is not an array
+  // is a stored value that is not a thread — including `null`. Treating `null` as absence would
+  // report a damaged source as a clean empty start and then let the retirement gate delete it,
+  // which is the one outcome this migration exists to prevent.
   const legacyThreadMalformed =
-    input.legacyMessages !== undefined &&
-    input.legacyMessages !== null &&
-    !Array.isArray(input.legacyMessages);
+    input.legacyMessages !== undefined && !Array.isArray(input.legacyMessages);
   const messages: StoredMessage[] = [];
   const rawMessages = Array.isArray(input.legacyMessages) ? input.legacyMessages : [];
   let droppedLegacyMessages = 0;
