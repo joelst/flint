@@ -41,7 +41,10 @@ export function parsePersistedState(raw: string | null | undefined): PersistPars
   return { data: parsed as Record<string, any>, corrupt: false };
 }
 
-/** Read the persisted theme without restoring anything else (used before first paint). */export function readPersistedTheme(raw: string | null | undefined): 'light' | 'dark' | null {
+/** Read the persisted theme without restoring anything else (used before first paint). */
+export function readPersistedTheme(
+  raw: string | null | undefined
+): 'light' | 'dark' | null {
   const { data } = parsePersistedState(raw);
   const theme = data?.theme;
   return theme === 'light' || theme === 'dark' ? theme : null;
