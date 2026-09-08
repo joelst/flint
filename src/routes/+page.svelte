@@ -107,6 +107,7 @@
     ensureMessageIds,
     findConversation,
     selectConversation as selectSessionConversation,
+    snapshotMessages,
     summarizeConversations,
   } from "$lib/conversation-session";
   import { createEmptyArchive, type ConversationArchive } from "$lib/conversation-store";
@@ -967,11 +968,23 @@
   }
 
   /** Install a thread loaded from the archive, so it may be written back to that conversation. */
+  /**
+   * Make a thread the live one.
+   *
+   * Snapshots unconditionally rather than trusting the caller. The UI mutates message objects
+   * in place — `msg.pinned = !msg.pinned`, `m.condensed = true` — so a thread sharing objects
+   * with the archive would write those edits straight into it, bypassing `captureThread` and
+   * defeating its change detection at the same time: the stored copy is already mutated, so
+   * the edit looks like no change and is never saved. The pin then vanishes on restart.
+   *
+   * Doing it here rather than at each call site means a new one cannot reintroduce the bug. The
+   * session transitions already snapshot, so this is a cheap second copy on those paths.
+   */
   function adoptThread(id: string | null, messages: any[]) {
     chatThreadEpoch += 1;
     chatInput = "";
     lastAutoSummaryCount = 0;
-    chatMessages = messages;
+    chatMessages = snapshotMessages(messages as any) as any;
     threadLoadedFor = id;
   }
 
@@ -1216,7 +1229,8 @@
 
     const active = findConversation(opened.archive, opened.archive.activeId);
     if (active) {
-      adoptThread(active.id, [...active.messages] as any);
+      // adoptThread snapshots, so the archive's own message objects are not handed to the UI.
+      adoptThread(active.id, active.messages as any);
       // Deferred, not applied here: restoreChat() runs next and restores the app-level settings,
       // which would overwrite these. The conversation's overrides must sit on top of the app
       // defaults, so they are applied once restoreChat() has established them.

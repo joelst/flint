@@ -379,13 +379,6 @@ function allocateUniqueId(preferred: string, taken: Set<string>): string {
 }
 
 /**
- * Compare dotted versions for a compatibility gate.
- *
- * A pre-release sorts *below* its release (0.6.0-rc < 0.6.0), because a release candidate must
- * not be trusted to satisfy a floor its final build defines. Callers should validate with
- * `isUsableVersion()`; any non-numeric core component is treated as 0 for ordering.
- */
-/**
  * Whether a build is new enough to read an archive with this floor.
  *
  * Deliberately compares release cores and ignores any pre-release identifier. Semver orders
@@ -400,6 +393,16 @@ export function meetsArchiveFloor(appVersion: string, floor: string): boolean {
   return compareVersions(core(appVersion), core(floor)) >= 0;
 }
 
+/**
+ * Compare dotted versions by strict SemVer precedence.
+ *
+ * A pre-release sorts *below* its release (`0.6.0-rc.1` < `0.6.0`). That is precedence, not
+ * capability — for the archive floor use `meetsArchiveFloor`, which deliberately ignores
+ * pre-release identifiers and explains why.
+ *
+ * Callers should validate with `isUsableVersion()`; any non-numeric core component is treated
+ * as 0 for ordering.
+ */
 export function compareVersions(a: string, b: string): number {
   const split = (v: string) => {
     const [core, ...rest] = String(v ?? '').trim().split('-');

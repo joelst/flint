@@ -171,6 +171,40 @@ describe('the archive never aliases the UI message objects', () => {
     expect(findConversation(result.archive, 'b')!.messages[0].pinned).toBeUndefined();
   });
 
+  it('detects an in-place edit to a thread hydrated from the archive at startup', () => {
+    // The startup path reads the active conversation straight out of the opened archive. A
+    // shallow array copy is not enough — `[...conversation.messages]` clones the array but
+    // shares every message object, so a later pin writes into the archive without a capture and
+    // change detection then compares an object with itself and reports no change. `adoptThread`
+    // snapshots for exactly this reason; this pins the behaviour it depends on.
+    const stored = [msg('m1', 'Question'), msg('m2', 'answer', 'assistant')];
+    const archive = archiveOf(conv('a', stored, { title: 'Question' }));
+
+    const hydrated = snapshotMessages(findConversation(archive, 'a')!.messages);
+    (hydrated[1] as any).pinned = true;
+
+    // The archive is untouched until a capture says so.
+    expect(findConversation(archive, 'a')!.messages[1].pinned).toBeUndefined();
+
+    const captured = captureThread(state(archive, 'a', hydrated), { now: NOW + 1 });
+    expect(captured.changed).toBe(true);
+    expect(findConversation(captured.archive, 'a')!.messages[1].pinned).toBe(true);
+  });
+
+  it('would miss that edit if the thread were only array-copied', () => {
+    // Documents the hazard the snapshot removes, so a future change that drops it fails here
+    // rather than silently losing pins on restart.
+    const stored = [msg('m1', 'Question'), msg('m2', 'answer', 'assistant')];
+    const archive = archiveOf(conv('a', stored, { title: 'Question' }));
+
+    const aliased = [...findConversation(archive, 'a')!.messages];
+    (aliased[1] as any).pinned = true;
+
+    // The edit reached the archive without any capture: the ownership guard was bypassed.
+    expect(findConversation(archive, 'a')!.messages[1].pinned).toBe(true);
+    expect(captureThread(state(archive, 'a', aliased), { now: NOW + 1 }).changed).toBe(false);
+  });
+
   it('still reports no change when nothing was actually edited', () => {
     const thread = [msg('m1', 'Question')];
     const archive = archiveOf(conv('a', snapshotMessages(thread), { title: 'Question' }));
