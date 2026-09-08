@@ -185,6 +185,12 @@ export interface ArchiveParseResult {
   /** Content parts kept but not understood by this build. */
   unrecognizedParts: number;
   /**
+   * True when a stored field had to be substituted or rebuilt. Distinct from
+   * `unrecognizedParts`, which is data we deliberately preserved: a repair means the record we
+   * read back is not the record that was written.
+   */
+  repaired: boolean;
+  /**
    * True when anything at all was dropped, repaired, or not understood. The repository must
    * back the original bytes up before its first write whenever this is set — otherwise the
    * reduced form silently replaces data we could not represent.
@@ -533,6 +539,7 @@ export function parseConversationArchive(
     droppedMessages: 0,
     droppedParts: 0,
     unrecognizedParts: 0,
+    repaired: false,
     lossy: false,
     reason: null,
   };
@@ -661,6 +668,7 @@ export function parseConversationArchive(
     droppedMessages,
     droppedParts,
     unrecognizedParts,
+    repaired,
     lossy,
     reason: lossy ? 'Part of the stored conversations could not be read exactly as written.' : null,
   };
@@ -735,6 +743,32 @@ export interface LegacyMigrationResult {
 }
 
 /**
+ * Derive a stable id from the legacy thread's own bytes.
+ *
+ * Using the clock would mint a new conversation every time an interrupted migration is retried,
+ * so the same input must always yield the same id. FNV-1a is sufficient here: this is a
+ * de-duplication key, not a security boundary.
+ */
+export function hashString(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(36);
+}
+
+export function deriveRecoveredId(legacyMessages: unknown): string {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(legacyMessages) ?? '';
+  } catch {
+    serialized = String(legacyMessages);
+  }
+  return `recovered-${hashString(serialized)}`;
+}
+
+/**
  * Convert the pre-v2 layout into a v2 archive.
  *
  * The legacy index never stored messages, so its entries can only contribute titles. The one
@@ -756,28 +790,6 @@ export interface LegacyMigrationResult {
  * `recoveredId` is derived from the legacy content rather than the clock so an interrupted and
  * retried migration reuses the same id instead of minting a duplicate conversation.
  */
-/**
- * Derive a stable id from the legacy thread's own bytes.
- *
- * Using the clock would mint a new conversation every time an interrupted migration is retried,
- * so the same input must always yield the same id. FNV-1a is sufficient here: this is a
- * de-duplication key, not a security boundary.
- */
-export function deriveRecoveredId(legacyMessages: unknown): string {
-  let serialized: string;
-  try {
-    serialized = JSON.stringify(legacyMessages) ?? '';
-  } catch {
-    serialized = String(legacyMessages);
-  }
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < serialized.length; i += 1) {
-    hash ^= serialized.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return `recovered-${hash.toString(36)}`;
-}
-
 export function migrateLegacyConversations(input: LegacyMigrationInput): LegacyMigrationResult {
   const archive = createEmptyArchive();
   const legacyIndexMalformed =

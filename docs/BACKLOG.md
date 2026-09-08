@@ -93,6 +93,14 @@ Windows/macOS fixes do not establish Linux release support.
 
 ## Dependencies
 
+- [ ] **`foundry-local-sdk` postinstall downloads a native binary at install time** — every
+      `npm ci`, including every CI job, fetches `Microsoft.AI.Foundry.Local.Core` from
+      `api.nuget.org` and falls back to an Azure DevOps feed that returns **401**. So there is
+      no working fallback: a hiccup at nuget.org fails the whole matrix. Observed on
+      joelst/flint#38, where the same commit passed and then failed minutes later. Consider
+      caching `node_modules`/the native payload in CI, or vendoring the binary.
+- [ ] **macOS quarantines the SDK's ad-hoc-signed dylib** — see docs/DEVELOPMENT.md. Not
+      fixable here (Microsoft would need to notarize it); revisit when the SDK pin moves.
 - [ ] **`adm-zip` advisory is transitive via `foundry-local-sdk`** — not fixable without
       an SDK bump. `glib` is Linux/GTK-only and Flint ships Windows + macOS; `cookie` is
       already patched. Re-check when the SDK pin moves.
