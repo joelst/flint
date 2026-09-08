@@ -16,6 +16,9 @@
     "opener:default",
     "fs:default",
     "fs:allow-exists",
+    "fs:allow-write-text-file",
+    "fs:allow-stat",
+    "fs:allow-lstat",
     {
       "identifier": "fs:scope",
       "allow": [

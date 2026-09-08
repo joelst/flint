@@ -305,7 +305,7 @@ export function openConversationArchive(options: OpenOptions): OpenResult {
         notice:
           `${parsed.reason ?? 'Saved conversations could not be read.'} ` +
           (backedUp
-            ? `This session will not be saved, and the existing data was copied to "${ARCHIVE_BACKUP_KEY}".`
+            ? 'This session will not be saved, and a copy of the existing data was kept. Use Export to save it to a file.'
             : 'This session will not be saved, and the existing data was left untouched.'),
       };
     }
@@ -320,7 +320,7 @@ export function openConversationArchive(options: OpenOptions): OpenResult {
         writeBlockReason: backedUp ? null : 'backup-failed',
         backedUp,
         notice: backedUp
-          ? `Some saved conversation data could not be read by this version. The original was copied to "${ARCHIVE_BACKUP_KEY}" before any changes are saved.`
+          ? 'Some saved conversation data could not be read by this version. A copy of the original was kept before any changes are saved; use Export to save it to a file.'
           : 'Some saved conversation data could not be read and a backup could not be written, so this session will not be saved.',
       };
     }

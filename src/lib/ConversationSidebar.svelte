@@ -24,6 +24,8 @@
   export let onNewChat: () => void = () => {};
   export let onSelectConversation: (id: string) => void = () => {};
   export let onDeleteConversation: (id: string) => void = () => {};
+  export let onExport: () => void = () => {};
+  export let exportBusy = false;
 
   function formatTime(timestamp: number): string {
     const now = Date.now();
@@ -43,9 +45,19 @@
 <div class="conversation-sidebar">
   <div class="sidebar-header">
     <h3>Conversations</h3>
-    <button class="new-chat-btn" title="New conversation" onclick={onNewChat}>
-      ➕ New
-    </button>
+    <div class="sidebar-header-actions">
+      <button
+        class="export-btn"
+        title="Save a copy of every conversation to a file, including any that Flint could not read"
+        disabled={exportBusy}
+        onclick={onExport}
+      >
+        {exportBusy ? "Saving…" : "Export"}
+      </button>
+      <button class="new-chat-btn" title="New conversation" onclick={onNewChat}>
+        ➕ New
+      </button>
+    </div>
   </div>
 
   <div class="conversations-list">
@@ -148,6 +160,32 @@
 
   .new-chat-btn:hover {
     background: color-mix(in srgb, var(--accent) 80%, #000);
+  }
+
+  .sidebar-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .export-btn {
+    padding: 4px 8px;
+    background: transparent;
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    font-size: 0.75rem;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .export-btn:hover:not(:disabled) {
+    background: var(--panel-hover, rgba(127, 127, 127, 0.12));
+  }
+
+  .export-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
   }
 
   .conversations-list {
