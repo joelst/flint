@@ -26,6 +26,7 @@ A stage is recorded here only once the pull request delivering it is merged to
 | 1A | 1A-3a conversation contracts and title derivation from plain text | #43 |
 | 1A | 1A-3b multipart-preserving request builder and chat transport | #42 |
 | 1A | 1A-3c conversation session wiring: switching, creation, deletion, and flush | #45 |
+| 1A | 1A-3d per-conversation settings resolved against an application baseline | #49 |
 
 Phase 1A closed its acceptance gate for storage, migration, rollback, multipart
 preservation, and conversation switching. Three items were split out rather than
@@ -34,9 +35,8 @@ persistence*:
 
 - Native quit is a best-effort flush; a guaranteed flush needs a Rust
   `ExitRequested` handshake, which belongs to Workstream C.
-- Per-conversation settings are stored and round-tripped but not applied, because
-  applying them without an app-default baseline would leak the previous
-  conversation's model and persona.
+- The settings baseline that per-conversation settings resolve against is stable by
+  design and has no editing control, so it cannot be moved after the upgrade.
 - In-flight streaming is discarded across a conversation switch rather than
   being allowed to finish in its originating conversation.
 

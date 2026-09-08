@@ -109,7 +109,19 @@
     snapshotMessages,
     summarizeConversations,
   } from "$lib/conversation-session";
-  import { createEmptyArchive, type ConversationArchive } from "$lib/conversation-store";
+  import {
+    createEmptyArchive,
+    readConversationSettings,
+    type ConversationArchive,
+  } from "$lib/conversation-store";
+  import {
+    DEFAULT_APP_SETTINGS,
+    appSettingDefaultsToPersisted,
+    readAppSettingDefaults,
+    resolveConversationSettings,
+    seedSettingsFor,
+    type AppSettingDefaults,
+  } from "$lib/conversation-settings";
   import { isFetchableUrl, detectFetchableUrls } from "$lib/url-chips";
   import {
     normalizeForAlternatingChat,
@@ -570,6 +582,21 @@
   // Whether to show the complete uncondensed thread (for reading full history)
   let showFullHistory = $state(false);
 
+  /**
+   * The application-level baseline a conversation inherits from when it stores no override.
+   *
+   * The four variables above are the *effective* values for the conversation currently loaded.
+   * This is the separate record of the defaults they resolve against — without it an absent
+   * conversation key would inherit whatever the previously selected conversation happened to
+   * leave in those variables. It is what `persistChat` writes to the application settings blob,
+   * under the same key names as before, so an older build rolls back to exactly these values.
+   *
+   * It is deliberately not updated when the user changes a setting inside a chat: that change
+   * belongs to the chat. Moving the baseline under every inheriting conversation at the same
+   * time is a different operation.
+   */
+  let appSettingDefaults = $state<AppSettingDefaults>({ ...DEFAULT_APP_SETTINGS });
+
   // Collapsible left sidebar
   let sidebarCollapsed = $state(false);
 
@@ -718,7 +745,9 @@
 
   function applyRecommendedContext() {
     if (recommendedMaxTurns) {
-      contextTurns = recommendedMaxTurns;
+      // Committed, unlike the automatic clamp that uses the same value: the user pressed a
+      // button, so this is a choice about this chat and must survive switching away from it.
+      commitChatSettings({ contextTurns: recommendedMaxTurns });
       statusMessage = `Context set to recommended ${recommendedMaxTurns} turns for this model`;
     }
   }
@@ -847,6 +876,25 @@
         return String(a.alias).localeCompare(String(b.alias));
       }),
   );
+
+  /**
+   * True when the chat names a model the catalog does not offer.
+   *
+   * A conversation stores the model it was using, so it can now name one that has since been
+   * deleted, or that never existed on this machine because the archive came from another one.
+   * The picker has no option for it, so without saying anything the header would silently show
+   * a blank selection while the chat still claimed that model.
+   */
+  const chatModelUnavailable = $derived.by(() => {
+    if (!selectedModelAlias) return false;
+    // An empty catalog means "not listed yet" as often as "nothing installed", so stay quiet
+    // until there is something to compare against rather than accuse a model that is fine.
+    if (state.models.length === 0) return false;
+    const known = state.models.find((m: any) => m.alias === selectedModelAlias);
+    // Catalog membership is not installation: a model can be listed and downloadable while
+    // having no local weights, and it cannot answer in that state either.
+    return !known || !(known.isCached || known.isLoaded);
+  });
 
   // If an STT model was loaded via the main UI / top bar / Models list,
   // the Audio page should inherit it automatically as the current STT model.
@@ -997,6 +1045,17 @@
     return { token: chatNavigationToken, epoch: chatThreadEpoch };
   }
 
+  /**
+   * Observe the current navigation without claiming it.
+   *
+   * `beginChatNavigation()` takes ownership, which is right for a flow the user just started and
+   * wrong for startup: incrementing the token there would invalidate a Load & Chat the user
+   * kicked off first. Startup only needs to notice that it has been superseded.
+   */
+  function currentChatNavigation(): { token: number; epoch: number } {
+    return { token: chatNavigationToken, epoch: chatThreadEpoch };
+  }
+
   /** True while this navigation is still the one the user is waiting for. */
   function chatNavigationCurrent(nav: { token: number; epoch: number }): boolean {
     return nav.token === chatNavigationToken && nav.epoch === chatThreadEpoch;
@@ -1032,6 +1091,11 @@
    * `beginNewChatThread()` alone leaves the thread unattributed, so nothing the user then types
    * is ever persisted. Reuses the current conversation when it is already empty, so repeatedly
    * starting a chat from a model card does not fill the sidebar with blank entries.
+   *
+   * Callers set the model they want *before* calling this, so the live values are already the
+   * configuration the fresh chat should have. Creation seeds from them; the reuse branch has to
+   * stamp them itself, because reusing a conversation is not a transition and would otherwise
+   * leave the chosen model unrecorded on the conversation the user is about to type into.
    */
   function startFreshConversation() {
     const active = findConversation(conversationArchive, conversationArchive.activeId);
@@ -1041,18 +1105,36 @@
       lastAutoSummaryCount = 0;
       clearImages();
       clearUrlFetches();
+      // Only the model, and only when one was chosen. This conversation already exists and may
+      // hold settings the user configured or that this build cannot use; stamping every
+      // effective value onto it would overwrite them, and would persist the automatic context
+      // clamp that the commit rules deliberately keep out of storage.
+      if (hydrated && selectedModelAlias) commitChatSettings({ modelAlias: selectedModelAlias });
       return;
     }
     createNewConversation();
   }
 
-  function createNewConversation() {
+  function createNewConversation(seedOverrides: Record<string, any> = {}) {
     const result = createSessionConversation(sessionState(), {
       id: generateConversationId(),
       now: Date.now(),
+      // Stamped explicitly rather than left to inherit, so the baseline only ever governs
+      // conversations that predate this feature. `seedOverrides` carries a choice the user made
+      // before the conversation existed — picking a model from a model card, for instance —
+      // which must win over the settings of the chat being left.
+      //
+      // Before hydration the live values are not a chat's configuration, they are the
+      // component's initial state: `loadConversations` reaches here on an empty archive, and
+      // stamping those onto the very first conversation would fabricate overrides for settings
+      // the user has not chosen and `restoreChat` has not yet read.
+      settings: (hydrated
+        ? seedSettingsFor(currentChatSettings(), seedOverrides)
+        : seedOverrides) as any,
     });
     conversationArchive = result.archive;
     adoptThread(result.conversation.id, []);
+    applyConversationSettings(result.conversation.settings);
     clearImages(); // clear any pending vision attachments for new chat
     clearUrlFetches();
     conversationsDirty = true;
@@ -1067,31 +1149,108 @@
       adoptThread(result.thread.loadedFor, result.thread.messages as any);
       clearImages();
       clearUrlFetches();
-      applyConversationSettings(result.settings);
+      // The raw bag, not `result.settings`: that is a filtered typed view, and resolving from it
+      // would silently drop the report of any stored value this build cannot use.
+      applyConversationSettings(result.conversation.settings);
     }
     if (result.changed) conversationsDirty = true;
     saveConversations();
   }
 
-  /** Set by loadConversations(); see applyConversationSettings for why it is not applied yet. */
-  let pendingConversationSettings: Record<string, any> | null = null;
+  /**
+   * The model the conversation restored at startup asked for, or empty if it named none.
+   *
+   * Read once by init(). Not reactive state: it exists to order two startup steps, and a later
+   * conversation switch must not retroactively change what was prewarmed.
+   */
+  let startupConversationAlias = "";
+
+  /** Set by loadConversations() before the archive is adopted; applied once hydration finishes. */
+  let pendingConversationSettings: unknown = undefined;
+  /**
+   * Whether a pending bag was recorded at all.
+   *
+   * `undefined` is a real value here — a conversation that stores no settings must still be
+   * resolved against the baseline, because the live values at that moment are whatever the
+   * previous session's blob happened to seed.
+   */
+  let pendingConversationSettingsSet = false;
 
   /**
-   * Per-conversation settings are stored and round-tripped, but deliberately not applied yet.
+   * The model the loaded conversation stores, if any.
    *
-   * Applying them without also *writing* them is worse than doing neither. An absent key means
-   * "inherit the app default", and this build keeps no separate record of those defaults — the
-   * settings variables simply hold whatever the last conversation left behind. Selecting a
-   * conversation with no overrides would therefore inherit the *previous* conversation's model
-   * and persona, and `persistChat` would then write that leaked value into the app-level
-   * settings key as though the user had chosen it.
-   *
-   * Nothing is lost by waiting: the archive preserves the settings bag untouched. Applying it
-   * needs an app-default baseline to resolve against, which belongs with the stage that also
-   * adds the controls for setting these per conversation.
+   * Distinguishes an explicit stored choice from an inherited or leftover global selection, so
+   * cleanup that exists to unpin a stale fallback cannot discard a conversation's own model.
    */
-  function applyConversationSettings(_settings: Record<string, any>) {
-    // Intentionally empty. See above.
+  function activeConversationModelAlias(): string {
+    const active = findConversation(conversationArchive, threadLoadedFor);
+    return readConversationSettings(active?.settings).settings.modelAlias || "";
+  }
+
+  /** The four settings as they currently apply to the loaded chat. */
+  function currentChatSettings(): AppSettingDefaults {
+    return {
+      modelAlias: selectedModelAlias,
+      systemPrompt,
+      contextTurns,
+      showFullHistory,
+    };
+  }
+
+  /**
+   * Load a conversation's settings into the live chat.
+   *
+   * Read-only by design. Resolving a conversation for display must not write anything back:
+   * materialising the inherited values as explicit overrides would freeze today's baseline into
+   * a record that had chosen to inherit it, and would replace any stored value this build
+   * rejects but is obliged to preserve. Writes happen only through `commitChatSettings`, one
+   * explicit patch at a time.
+   */
+  function applyConversationSettings(raw: unknown) {
+    const { effective } = resolveConversationSettings(raw, appSettingDefaults);
+    systemPrompt = effective.systemPrompt;
+    contextTurns = effective.contextTurns;
+    showFullHistory = effective.showFullHistory;
+    // A plain assignment, not `setChatModel`. That function is async: it loads the model and can
+    // start the service, so driving it from a synchronous switch would let two overlapping
+    // switches each decide the service was stopped and queue a restart, tearing down the
+    // endpoint the first one had just made ready. It also refuses an alias the catalog has not
+    // listed yet, which at startup is every alias. Selection is a UI fact; loading is the
+    // gateway's job, and it loads a cached model on demand.
+    //
+    // Never blanked: an empty resolution means the conversation predates model tracking, and the
+    // running chat should keep the model it already has rather than lose it on a switch.
+    if (effective.modelAlias && effective.modelAlias !== selectedModelAlias) {
+      selectedModelAlias = effective.modelAlias;
+      selectedModel = { alias: effective.modelAlias };
+      chatClient = null;
+    }
+  }
+
+  /**
+   * Record a settings change the user made, against the conversation it was made in.
+   *
+   * This is the only writer. It takes a *patch* so that changing one setting cannot overwrite
+   * the others — an untouched key must keep inheriting rather than be frozen at whatever it
+   * currently resolves to.
+   *
+   * Deliberately excluded: runtime fallbacks and limits. Clearing the alias because its model
+   * files were deleted, auto-selecting the first available model, and clamping the context
+   * length to what a small model supports are all things Flint did to the chat, not choices the
+   * user made about it, so they change the live values without being stored.
+   */
+  function commitChatSettings(patch: Record<string, any>) {
+    if ('systemPrompt' in patch) systemPrompt = patch.systemPrompt;
+    if ('contextTurns' in patch) contextTurns = patch.contextTurns;
+    if ('showFullHistory' in patch) showFullHistory = patch.showFullHistory;
+    if (!threadLoadedFor) return;
+    const result = captureThread(sessionState(), { now: Date.now(), settings: patch as any });
+    if (!result.changed) return;
+    conversationArchive = result.archive;
+    conversationsDirty = true;
+    // Marking dirty is not enough on its own: the autosave effect tracks the thread, not the
+    // settings, so a settings-only change would sit unwritten until the next message.
+    saveConversations();
   }
 
   function deleteConversation(id: string) {
@@ -1104,7 +1263,11 @@
       // conversation they were staged in, and must not be sent from its neighbour.
       clearImages();
       clearUrlFetches();
-      applyConversationSettings(result.settings);
+      // Null when the archive is now empty: the thread is unloaded and there is no neighbour to
+      // resolve. Dereferencing it here threw before `conversationsDirty` was set and before the
+      // replacement was created, leaving the UI attributed to nothing — so everything typed
+      // afterwards had no destination and neither autosave nor the flush could store it.
+      if (result.conversation) applyConversationSettings(result.conversation.settings);
     }
     conversationsDirty = true;
     if (result.archive.conversations.length === 0) {
@@ -1233,7 +1396,8 @@
       // Deferred, not applied here: restoreChat() runs next and restores the app-level settings,
       // which would overwrite these. The conversation's overrides must sit on top of the app
       // defaults, so they are applied once restoreChat() has established them.
-      pendingConversationSettings = (active.settings ?? {}) as Record<string, any>;
+      pendingConversationSettings = active.settings;
+      pendingConversationSettingsSet = true;
     } else if (opened.writable) {
       createNewConversation();
     }
@@ -1253,7 +1417,7 @@
   }
 
   function choosePersona(p: Persona) {
-    systemPrompt = p.prompt;
+    commitChatSettings({ systemPrompt: p.prompt });
     statusMessage = `Persona set: ${p.name}`;
   }
 
@@ -1332,8 +1496,8 @@
     }
     saveCustomPersonasState();
     closePersonaManager();
-    // Apply it immediately
-    systemPrompt = newP.prompt;
+    // Apply it immediately, to the conversation it was applied from.
+    commitChatSettings({ systemPrompt: newP.prompt });
   }
 
   function deleteCustomPersona(id: string) {
@@ -1357,7 +1521,7 @@
     saveCustomPersonasState();
     managerNewName = "";
     managerNewPrompt = "";
-    systemPrompt = newP.prompt;
+    commitChatSettings({ systemPrompt: newP.prompt });
   }
 
   // Sidecar logs (basic for now)
@@ -1779,9 +1943,11 @@
           // remaining copy of the pre-v2 thread, kept both for rollback and as the migration
           // source if the archive commit failed. So it is preserved exactly and never extended.
           chatMessages: legacyThreadAtLaunch,
-          systemPrompt,
-          contextTurns,
-          showFullHistory,
+          // The baseline, not the values the loaded conversation happens to be using. Writing
+          // the effective values here would republish one chat's model and persona as the
+          // setting every conversation without an override inherits. The key names are
+          // unchanged, so an older build still reads these as its globals.
+          ...appSettingDefaultsToPersisted(appSettingDefaults),
           sidebarCollapsed,
           theme,
           modelRuntimeMeta,
@@ -1864,13 +2030,12 @@
         // It is captured instead, so rewriting this key cannot destroy it.
         // Settings below are still restored: they are app-level and were never per-conversation.
         if (data.chatMessages !== undefined) legacyThreadAtLaunch = data.chatMessages;
-        if (data.systemPrompt) systemPrompt = data.systemPrompt;
-        if (typeof data.contextTurns === 'number' && data.contextTurns > 0) {
-          contextTurns = data.contextTurns;
-        }
-        if (typeof data.showFullHistory === 'boolean') {
-          showFullHistory = data.showFullHistory;
-        }
+        // The baseline every conversation without an override resolves against, and the seed
+        // for the live values until a conversation is loaded over them.
+        appSettingDefaults = readAppSettingDefaults(data, DEFAULT_APP_SETTINGS);
+        systemPrompt = appSettingDefaults.systemPrompt;
+        contextTurns = appSettingDefaults.contextTurns;
+        showFullHistory = appSettingDefaults.showFullHistory;
         if (typeof data.sidebarCollapsed === 'boolean') {
           sidebarCollapsed = data.sidebarCollapsed;
         }
@@ -3137,6 +3302,11 @@ updateStateFromSdk();
   async function init() {
     statusMessage = "Checking Node.js and starting Foundry Local...";
 
+    // Taken before the first await, and observed rather than claimed. Everything below awaits
+    // the SDK, the model list and the recommendations, and the user can select a conversation or
+    // a model throughout — after which the startup selection must not be published over theirs.
+    const startupNav = currentChatNavigation();
+
     // Persisted state (chat, conversations, personas) is hydrated in onMount, before autosave
     // is enabled — restoring it here would race the autosave effect.
     void refreshNodeAboutLine();
@@ -3160,8 +3330,15 @@ updateStateFromSdk();
 
       // A restored alias for a model that is no longer in the catalog would otherwise pin the
       // selection forever, because the auto-select effect bails out whenever an alias is set.
+      //
+      // Not applied to an alias the active conversation asked for explicitly. That is a stored
+      // choice rather than a stale global fallback, so clearing it would replace the "not
+      // installed" explanation with a silently auto-selected substitute — and the conversation
+      // would still be storing the model it is no longer shown as using. Read live rather than
+      // from the startup snapshot, because the user may already have switched conversations.
       if (
         selectedModelAlias &&
+        selectedModelAlias !== activeConversationModelAlias() &&
         state.models.length > 0 &&
         !state.models.some((m: ModelInfo) => m.alias === selectedModelAlias)
       ) {
@@ -3192,13 +3369,17 @@ updateStateFromSdk();
         statusMessage = `First launch — pick a starter model below, or open Help for a guided path.`;
         currentView = "models";
       } else if (autoStartService) {
-        const targetAlias = defaultChatAlias || selectedModelAlias;
-        if (targetAlias && !selectedModel) {
+        // A conversation restored at startup names the model this chat will actually use, so it
+        // outranks the configured default. Prewarming must also still run for it even though
+        // applying the conversation already installed a model handle, or the restored model
+        // would be selected in the header while the service came up on a different one.
+        const targetAlias = startupConversationAlias || defaultChatAlias || selectedModelAlias;
+        if (targetAlias && (!selectedModel || !!startupConversationAlias)) {
           const existing = state.models.find(
             (m: ModelInfo) => m.alias === targetAlias,
           );
           if (existing?.isCached) {
-            const usingDefault = !!defaultChatAlias;
+            const usingDefault = !startupConversationAlias && !!defaultChatAlias;
             try {
               if (!existing.isLoaded) {
                 statusMessage = usingDefault
@@ -3211,12 +3392,17 @@ updateStateFromSdk();
                   selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
                 );
               }
-              selectedModelAlias = targetAlias;
-              selectedModel = { alias: targetAlias };
-              chatClient = null;
-              statusMessage = usingDefault
-                ? `${targetAlias} ready`
-                : `${targetAlias} restored from previous session`;
+              if (chatNavigationCurrent(startupNav)) {
+                selectedModelAlias = targetAlias;
+                selectedModel = { alias: targetAlias };
+                chatClient = null;
+                statusMessage = usingDefault
+                  ? `${targetAlias} ready`
+                  : `${targetAlias} restored from previous session`;
+              } else {
+                // The load still did useful work, so say so rather than silently doing nothing.
+                statusMessage = `${targetAlias} is ready. The chat changed while it loaded.`;
+              }
             } catch (e: any) {
               statusMessage = `Failed to restore ${targetAlias}: ${e?.message || e}`;
             }
@@ -3639,9 +3825,16 @@ updateStateFromSdk();
       mayPersist = restoreChat();
       // Overrides sit on top of the app defaults restoreChat() just restored, so that a startup
       // and a later selection of the same conversation produce the same configuration.
-      if (pendingConversationSettings) {
+      if (pendingConversationSettingsSet) {
+        // Read from the raw stored bag, not from `selectedModelAlias` after resolution. A
+        // conversation that stores no model inherits the baseline's last-used alias, and taking
+        // the resolved value would present that inherited alias as an explicit request — which
+        // would then outrank the user's configured default chat model at startup.
+        startupConversationAlias =
+          readConversationSettings(pendingConversationSettings).settings.modelAlias || "";
         applyConversationSettings(pendingConversationSettings);
-        pendingConversationSettings = null;
+        pendingConversationSettings = undefined;
+        pendingConversationSettingsSet = false;
       }
       loadCompareHistory();
       loadCustomPersonasState();
@@ -3755,6 +3948,14 @@ updateStateFromSdk();
       statusMessage = `${next} is not a chat model.`;
       return;
     }
+    // Recorded before the first await, against the conversation that was active when the user
+    // picked. Loading a model can take a long time, and a switch made while it loads must not
+    // receive this choice.
+    commitChatSettings({ modelAlias: next });
+    // Claimed synchronously: an explicit pick outranks anything already in flight. Without this
+    // the startup prewarm, which only checks whether it has been superseded, would still
+    // consider itself current and would publish its own model over the one just chosen.
+    const nav = beginChatNavigation();
     try {
       selectedModelAlias = next;
       selectedModel = { alias: next };
@@ -3769,7 +3970,7 @@ updateStateFromSdk();
           );
         } catch {}
       }
-      statusMessage = `Chatting with ${next}`;
+      if (chatNavigationCurrent(nav)) statusMessage = `Chatting with ${next}`;
       persistChat();
     } catch (e: any) {
       statusMessage = `Failed to select ${next}: ${e?.message || e}`;
@@ -6073,6 +6274,12 @@ Output only the summary text, no preamble.`;
                   <strong>{loadedAudioModel?.alias}</strong> is currently active for audio transcription.
                   Text chat is temporarily disabled. Load a chat model from the Models view to continue.
                 </div>
+              {:else if chatModelUnavailable}
+                <div class="notice" style="margin: 12px; padding: 12px;">
+                  This conversation used <strong>{selectedModelAlias}</strong>, which is not
+                  installed on this computer. Download it from the Models view, or pick another
+                  model above — the choice is saved to this conversation.
+                </div>
               {:else if !selectedModelSupportsChat}
                 <div class="notice" style="margin: 12px; padding: 12px;">
                   <strong>{selectedModelAlias}</strong> is an STT/audio-only model and does not support chat completions.
@@ -6087,10 +6294,18 @@ Output only the summary text, no preamble.`;
                     <select
                       value={selectedModelAlias}
                       disabled={isStreaming || chatPickerModels.length === 0}
+                      class:unavailable={chatModelUnavailable}
                       title="Model used for this chat. Loaded models are preferred; choosing an unloaded model will load it."
                       onchange={(e) => setChatModel((e.currentTarget as HTMLSelectElement).value)}
                     >
-                      {#if chatPickerModels.length === 0}
+                      {#if chatModelUnavailable}
+                        <!-- Rendered independently of the list: with no installed chat models at
+                             all the picker would otherwise drop the conversation's stored choice
+                             and show a blank selection for a model it still intends to use. -->
+                        <option value={selectedModelAlias} disabled>
+                          {selectedModelAlias} (not installed)
+                        </option>
+                      {:else if chatPickerModels.length === 0}
                         <option value="">No chat models available</option>
                       {:else if !selectedModelAlias}
                         <option value="">Select model…</option>
@@ -6107,7 +6322,7 @@ Output only the summary text, no preamble.`;
                   <button
                     type="button"
                     class="compact-btn full-thread-btn"
-                    onclick={() => (showFullHistory = !showFullHistory)}
+                    onclick={() => commitChatSettings({ showFullHistory: !showFullHistory })}
                     title="Toggle between compact (recommended for inference) and full uncondensed thread"
                   >
                     {#if showFullHistory}<Icon name="scroll" size={13} /> Compact{:else}<Icon name="book" size={13} /> Full thread{/if}
@@ -6163,6 +6378,10 @@ Output only the summary text, no preamble.`;
                           >Use {chatPickerModels[0].alias}</button>
                         {/if}
                       </div>
+                    {:else if chatModelUnavailable}
+                      <h3>This conversation's model isn't installed</h3>
+                      <p><strong>{selectedModelAlias}</strong> is not available on this computer. Download it, or choose another model in the header — the choice is saved to this conversation.</p>
+                      <button type="button" onclick={() => (currentView = "models")}>Open Models</button>
                     {:else if chatBlockedByLoadedSTT || !selectedModelSupportsChat}
                       <h3>Chat isn’t available with the current model</h3>
                       <p>Switch to a chat-capable model from the catalog (STT-only models stay on Audio).</p>
@@ -6267,7 +6486,7 @@ Output only the summary text, no preamble.`;
                             class="persona-item"
                             class:matches={scorePersonaForModel(p, currentModelTags) > 1.5}
                             onclick={() => {
-                              systemPrompt = p.prompt;
+                              commitChatSettings({ systemPrompt: p.prompt });
                               showPersonaMenu = false;
                               statusMessage = `Persona: ${p.name}`;
                             }}
@@ -6296,7 +6515,11 @@ Output only the summary text, no preamble.`;
                   <label for="ctx-select" title="Context window for this model">Ctx</label>
                   <select
                     id="ctx-select"
-                    bind:value={contextTurns}
+                    value={contextTurns}
+                    onchange={(e) =>
+                      commitChatSettings({
+                        contextTurns: Number((e.currentTarget as HTMLSelectElement).value),
+                      })}
                     title={`Keep last N turns. Model context: ${currentModelContextLength ? currentModelContextLength + ' tokens' : 'unknown'}. Lower = faster & lower energy.`}
                     disabled={isStreaming}
                   >
@@ -9302,6 +9525,11 @@ Output only the summary text, no preamble.`;
     background: var(--panel-bg);
     color: var(--fg);
     font-size: 0.9rem;
+  }
+
+  /* The stored model is missing locally; the option itself reads "(not installed)". */
+  .chat-model-picker select.unavailable {
+    border-color: var(--warning);
   }
 
   .messages {
