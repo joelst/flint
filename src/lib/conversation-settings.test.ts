@@ -96,6 +96,15 @@ describe('resolveConversationSettings', () => {
     expect(resolved.fromDefault).toContain('modelAlias');
   });
 
+  it('reads a stored empty alias as absent, matching what the seeder writes', () => {
+    const resolved = resolveConversationSettings({ modelAlias: '' }, baseline);
+    // Inherit rather than resolve to '': the caller does not blank the picker on an empty
+    // resolution, so an empty override would silently leave the previous chat's model selected.
+    expect(resolved.effective.modelAlias).toBe('phi-4-mini');
+    expect(resolved.fromDefault).toContain('modelAlias');
+    expect(resolved.invalidKeys).toEqual([]);
+  });
+
   it('honours a stored false rather than reading it as absent', () => {
     const resolved = resolveConversationSettings({ showFullHistory: false }, {
       ...baseline,

@@ -133,7 +133,13 @@ export function resolveConversationSettings(
     else effective[key] = stored;
   };
 
-  take('modelAlias', settings.modelAlias);
+  // An empty alias is the absence of a choice, not a choice of nothing — the same rule
+  // `seedSettingsFor` applies when writing. It matters here because the caller deliberately
+  // does not blank the picker on an empty resolution (an empty resolution means the
+  // conversation predates model tracking), so a stored `''` treated as an override would leave
+  // the previous conversation's model selected: exactly the leak per-conversation settings
+  // exist to close. Flint never writes `''`, so this guards archives written by something else.
+  take('modelAlias', settings.modelAlias === '' ? undefined : settings.modelAlias);
   take('systemPrompt', settings.systemPrompt);
   take('contextTurns', settings.contextTurns);
   take('showFullHistory', settings.showFullHistory);
