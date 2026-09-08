@@ -94,8 +94,22 @@
     parsePersistedState,
     readPersistedTheme,
     mayEnableAutosave,
-    parsePersistedConversations,
   } from "$lib/chat-persistence";
+  import {
+    openConversationArchive,
+    saveConversationArchive,
+    ARCHIVE_BACKUP_KEY,
+  } from "$lib/conversation-repository";
+  import {
+    captureThread,
+    createConversation as createSessionConversation,
+    deleteConversation as deleteSessionConversation,
+    ensureMessageIds,
+    findConversation,
+    selectConversation as selectSessionConversation,
+    summarizeConversations,
+  } from "$lib/conversation-session";
+  import { createEmptyArchive, type ConversationArchive } from "$lib/conversation-store";
   import { isFetchableUrl, detectFetchableUrls } from "$lib/url-chips";
   import {
     normalizeForAlternatingChat,
@@ -899,25 +913,66 @@
   }
 
   // Conversation management
-  let conversations = $state<Conversation[]>([]);
-  let currentConversationId = $state<string | null>(null);
-  const CHATS_PERSIST_KEY = "flint-chats-v1";
-  const CHATS_BACKUP_KEY = "flint-chats-v1.corrupt";
-  // Cleared when the stored index cannot be read or preserved; every conversation writer
-  // honours it so an unreadable list is never replaced by a fresh one.
+  //
+  // Backed by the v2 archive (src/lib/conversation-*.ts). The pre-v2 scheme kept a single global
+  // thread plus a title-only index, so selecting a conversation could not load anything — it
+  // blanked the thread. The transitions live in `conversation-session.ts` because this file is
+  // excluded from coverage and these are the paths that destroy history when they are wrong.
+  let conversationArchive = $state<ConversationArchive>(createEmptyArchive());
+  /**
+   * Which conversation `chatMessages` was loaded from, or null when nothing is loaded.
+   *
+   * This is the guard that makes a save safe: an empty `chatMessages` means both "this
+   * conversation is empty" and "nothing loaded yet", and only the first may be written back.
+   */
+  let threadLoadedFor = $state<string | null>(null);
+  const currentConversationId = $derived(conversationArchive.activeId);
+  const conversations = $derived(
+    summarizeConversations(conversationArchive, {
+      loadedFor: threadLoadedFor,
+      messages: chatMessages as any,
+    }),
+  );
+  // Cleared when the stored archive cannot be read or preserved; every conversation writer
+  // honours it so unreadable data is never replaced by a fresh archive.
   let conversationsWritable = true;
+  /**
+   * Set when the in-memory archive is ahead of storage, cleared only by a confirmed save.
+   *
+   * A change flag derived from the archive alone cannot survive a failed write: the next capture
+   * would compare against the already-updated in-memory copy, report no change, and never retry.
+   * The unsaved turns would then be lost at exit.
+   */
+  let conversationsDirty = false;
 
   // Monotonic id for the visible chat thread. Anything that replaces the thread bumps it, so an
   // in-flight completion or summarization can tell that its output no longer belongs anywhere.
   // Deliberately a plain `let`: it is only read from async continuations, never rendered.
   let chatThreadEpoch = 0;
 
-  /** Replace the visible thread, invalidating any in-flight work that targets it. */
+  /**
+   * Replace the visible thread, invalidating any in-flight work that targets it.
+   *
+   * Clearing `threadLoadedFor` is load-bearing. Several callers blank the thread without
+   * changing conversation (starting a chat from a model card, for example); leaving the thread
+   * attributed to the previous conversation would let the next save store this empty array over
+   * that conversation's real history.
+   */
   function beginNewChatThread() {
     chatThreadEpoch += 1;
     chatMessages = [];
     chatInput = "";
     lastAutoSummaryCount = 0;
+    threadLoadedFor = null;
+  }
+
+  /** Install a thread loaded from the archive, so it may be written back to that conversation. */
+  function adoptThread(id: string | null, messages: any[]) {
+    chatThreadEpoch += 1;
+    chatInput = "";
+    lastAutoSummaryCount = 0;
+    chatMessages = messages;
+    threadLoadedFor = id;
   }
 
   // Guards the async "load this model, then open chat with it" flows. Each captures a token
@@ -939,95 +994,243 @@
     return `chat-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
   }
 
-  function generateConversationTitle(): string {
-    // Vision turns carry an array of content parts, so this must not assume a string.
-    const firstMsg =
-      contentToPlainText(chatMessages.find((m: any) => m.role === "user")?.content).trim() ||
-      "New chat";
-    return firstMsg.substring(0, 50).trim() + (firstMsg.length > 50 ? "…" : "");
+  /**
+   * Give every loaded turn an id, in place.
+   *
+   * Must run before *any* transition, not just before a save: create/select/delete each capture
+   * the outgoing thread themselves, so a turn that reached the archive without an id would make
+   * the whole archive fail validation — and keep failing until that conversation was revisited.
+   */
+  function stampThreadIds() {
+    const stamped = ensureMessageIds(chatMessages as any, (i) => `msg-${Date.now()}-${i}`);
+    if (stamped.changed) chatMessages = stamped.messages as any;
+    return stamped.messages;
+  }
+
+  function sessionState() {
+    return {
+      archive: conversationArchive,
+      thread: { loadedFor: threadLoadedFor, messages: stampThreadIds() as any },
+    };
+  }
+
+  /**
+   * Begin a fresh thread that has somewhere to be saved.
+   *
+   * `beginNewChatThread()` alone leaves the thread unattributed, so nothing the user then types
+   * is ever persisted. Reuses the current conversation when it is already empty, so repeatedly
+   * starting a chat from a model card does not fill the sidebar with blank entries.
+   */
+  function startFreshConversation() {
+    const active = findConversation(conversationArchive, conversationArchive.activeId);
+    if (active && active.messages.length === 0 && chatMessages.length === 0 && threadLoadedFor === active.id) {
+      chatThreadEpoch += 1;
+      chatInput = "";
+      lastAutoSummaryCount = 0;
+      clearImages();
+      clearUrlFetches();
+      return;
+    }
+    createNewConversation();
   }
 
   function createNewConversation() {
-    const id = generateConversationId();
-    currentConversationId = id;
-    beginNewChatThread();
+    const result = createSessionConversation(sessionState(), {
+      id: generateConversationId(),
+      now: Date.now(),
+    });
+    conversationArchive = result.archive;
+    adoptThread(result.conversation.id, []);
     clearImages(); // clear any pending vision attachments for new chat
     clearUrlFetches();
-    conversations = [
-      ...conversations,
-      { id, title: "New chat", createdAt: Date.now(), messageCount: 0 },
-    ];
+    conversationsDirty = true;
     saveConversations();
   }
 
   function selectConversation(id: string) {
-    if (currentConversationId === id) return;
+    const result = selectSessionConversation(sessionState(), id, { now: Date.now() });
+    if (!result.conversation) return;
+    conversationArchive = result.archive;
+    if (result.thread.loadedFor !== threadLoadedFor) {
+      adoptThread(result.thread.loadedFor, result.thread.messages as any);
+      clearImages();
+      clearUrlFetches();
+      applyConversationSettings(result.settings);
+    }
+    if (result.changed) conversationsDirty = true;
     saveConversations();
-    currentConversationId = id;
-    beginNewChatThread();
+  }
+
+  /** Set by loadConversations(); see applyConversationSettings for why it is not applied yet. */
+  let pendingConversationSettings: Record<string, any> | null = null;
+
+  /**
+   * Per-conversation settings are stored and round-tripped, but deliberately not applied yet.
+   *
+   * Applying them without also *writing* them is worse than doing neither. An absent key means
+   * "inherit the app default", and this build keeps no separate record of those defaults — the
+   * settings variables simply hold whatever the last conversation left behind. Selecting a
+   * conversation with no overrides would therefore inherit the *previous* conversation's model
+   * and persona, and `persistChat` would then write that leaked value into the app-level
+   * settings key as though the user had chosen it.
+   *
+   * Nothing is lost by waiting: the archive preserves the settings bag untouched. Applying it
+   * needs an app-default baseline to resolve against, which belongs with the stage that also
+   * adds the controls for setting these per conversation.
+   */
+  function applyConversationSettings(_settings: Record<string, any>) {
+    // Intentionally empty. See above.
   }
 
   function deleteConversation(id: string) {
-    conversations = conversations.filter((c) => c.id !== id);
-    if (currentConversationId === id) {
-      if (conversations.length > 0) {
-        selectConversation(conversations[0].id);
-      } else {
-        createNewConversation();
-      }
+    const result = deleteSessionConversation(sessionState(), id, { now: Date.now() });
+    if (!result.removed) return;
+    conversationArchive = result.archive;
+    if (result.thread.loadedFor !== threadLoadedFor) {
+      adoptThread(result.thread.loadedFor, result.thread.messages as any);
+      // Same cleanup as an ordinary switch: pending images and fetched pages belong to the
+      // conversation they were staged in, and must not be sent from its neighbour.
+      clearImages();
+      clearUrlFetches();
+      applyConversationSettings(result.settings);
+    }
+    conversationsDirty = true;
+    if (result.archive.conversations.length === 0) {
+      createNewConversation();
+      return;
     }
     saveConversations();
   }
 
+  /**
+   * Store the loaded thread and commit the archive.
+   *
+   * Every turn is given an id first. The UI creates the user turn, the injected web-context pair,
+   * and the generated summary without one, and the storage layer counts a minted id as a repair —
+   * which makes it refuse the whole archive. Without this, saving would stop working silently the
+   * first time anyone sent a message.
+   */
   function saveConversations() {
-    // Disabled when the stored index could not be read or preserved, so a fresh list can never
-    // replace conversation titles we were unable to parse.
+    // Disabled when the stored archive could not be read or preserved, so a fresh archive can
+    // never replace conversations we were unable to parse.
     if (!conversationsWritable) return;
-    try {
-      if (currentConversationId) {
-        const conv = conversations.find((c) => c.id === currentConversationId);
-        if (conv) {
-          conv.title = generateConversationTitle();
-          conv.messageCount = chatMessages.length;
-        }
+
+    if (threadLoadedFor) {
+      const captured = captureThread(
+        { archive: conversationArchive, thread: { loadedFor: threadLoadedFor, messages: stampThreadIds() } },
+        { now: Date.now() },
+      );
+      if (captured.changed) {
+        conversationArchive = captured.archive;
+        conversationsDirty = true;
       }
-      localStorage.setItem(CHATS_PERSIST_KEY, JSON.stringify(conversations));
-      conversationsError = null;
-    } catch (e: any) {
-      conversationsError = `Conversation list could not be saved: ${e?.message || e}`;
-      appendAppLog(`Conversation save failed: ${e?.message || e}`, 'error');
     }
+
+    if (!conversationsDirty) return;
+    const result = saveConversationArchive(localStorage, conversationArchive);
+    if (result.ok) {
+      // Only a confirmed write clears the flag, so a transient failure is retried rather than
+      // forgotten.
+      conversationsDirty = false;
+      conversationsError = null;
+      cancelConversationRetry();
+      return;
+    }
+    conversationsError = result.error;
+    appendAppLog(`Conversation save failed: ${result.error}`, 'error');
+    scheduleConversationRetry();
+  }
+
+  /**
+   * Last-chance write before the window goes away.
+   *
+   * `saveConversations()` returns early when nothing is outstanding, so calling this on a clean
+   * session costs nothing. When a previous save failed, `conversationsDirty` is still set and
+   * this is the retry — the autosave effect only fires on a *further* thread change, so storage
+   * recovering on its own would otherwise never be noticed.
+   */
+  function flushConversations() {
+    try {
+      saveConversations();
+    } catch (e: any) {
+      appendAppLog(`Conversation flush failed: ${e?.message || e}`, 'error');
+    }
+  }
+
+  // Retry a failed save on a timer rather than waiting for the next edit.
+  //
+  // The autosave effect only fires on a further thread change, so storage recovering on its own
+  // — a quota freed, a transient failure passing — would otherwise go unnoticed until the user
+  // happened to type again. Exit hooks cannot be relied on to catch it either: on macOS neither
+  // Cmd+Q nor Dock Quit reliably reaches the frontend (tauri-apps/tauri#9198).
+  //
+  // Deliberately not capped at a maximum number of attempts. Giving up leaves the app holding
+  // unsaved messages with no route to disk, so a recovery after the final attempt would be
+  // missed and the next quit would lose them. Backoff instead settles at a slow poll, which
+  // costs one timer while the error the user can already see remains on screen.
+  let conversationRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  let conversationRetries = 0;
+  const MAX_CONVERSATION_RETRY_DELAY = 30000;
+
+  function scheduleConversationRetry() {
+    if (conversationRetryTimer || mountDisposed) return;
+    const delay = Math.min(MAX_CONVERSATION_RETRY_DELAY, 1000 * 2 ** conversationRetries);
+    conversationRetries += 1;
+    conversationRetryTimer = setTimeout(() => {
+      conversationRetryTimer = null;
+      // A disposed component must not write: its archive is stale and would overwrite whatever
+      // replaced it.
+      if (mountDisposed) return;
+      if (conversationsDirty) flushConversations();
+    }, delay);
+  }
+
+  function cancelConversationRetry() {
+    if (conversationRetryTimer) clearTimeout(conversationRetryTimer);
+    conversationRetryTimer = null;
+    conversationRetries = 0;
+  }
+
+  /**
+   * Flush when the window is hidden or backgrounded.
+   *
+   * This is the closest thing to a reliable shutdown signal available from the frontend: hiding,
+   * blurring, and page-hide all fire before the process goes away on a native quit, which the
+   * close handler does not see. Cheap enough to run on every occurrence — `saveConversations()`
+   * returns immediately when nothing is outstanding.
+   */
+  function flushOnHide() {
+    if (mountDisposed) return;
+    if (conversationsDirty) flushConversations();
   }
 
   function loadConversations() {
-    let stored: string | null = null;
-    try {
-      stored = localStorage.getItem(CHATS_PERSIST_KEY);
-    } catch (e: any) {
-      conversationsWritable = false;
-      hydrationNotice = `The saved conversation list could not be read (${e?.message || e}). It is left untouched for this session.`;
-      if (!currentConversationId) createNewConversation();
-      return;
-    }
+    const opened = openConversationArchive({
+      storage: localStorage,
+      appVersion: appVersion,
+      now: Date.now(),
+    });
+    conversationArchive = opened.archive;
+    conversationsWritable = opened.writable;
+    if (opened.notice) hydrationNotice = opened.notice;
 
-    const parsed = parsePersistedConversations(stored);
-    if (parsed.corrupt) {
-      // Do not silently discard the index: keep the bytes so the titles can be recovered.
-      const preserved = preserveCorruptValue(CHATS_BACKUP_KEY, stored as string);
-      conversationsWritable = preserved;
-      hydrationNotice = preserved
-        ? `Part of the saved conversation list was unreadable. The previous list was kept under "${CHATS_BACKUP_KEY}".`
-        : `The saved conversation list is unreadable and a backup could not be written (storage may be full). It is left untouched for this session.`;
-    }
-    if (parsed.data && parsed.data.length > 0) {
-      conversations = parsed.data;
-      currentConversationId = conversations[0].id;
-    }
-    if (!currentConversationId) {
+    const active = findConversation(opened.archive, opened.archive.activeId);
+    if (active) {
+      adoptThread(active.id, [...active.messages] as any);
+      // Deferred, not applied here: restoreChat() runs next and restores the app-level settings,
+      // which would overwrite these. The conversation's overrides must sit on top of the app
+      // defaults, so they are applied once restoreChat() has established them.
+      pendingConversationSettings = (active.settings ?? {}) as Record<string, any>;
+    } else if (opened.writable) {
       createNewConversation();
     }
+    // A migrated archive is only in memory until it is committed; the legacy keys are left in
+    // place either way, so a failure here costs nothing but a repeated migration next launch.
+    if (opened.migrated && opened.writable) {
+      conversationsDirty = true;
+      saveConversations();
+    }
   }
-
   function loadCustomPersonasState() {
     customPersonas = loadCustomPersonas();
   }
@@ -1529,6 +1732,13 @@
 
   // Captured before anything can write, so first-run detection is not fooled by our own writes.
   let hadPersistedChatAtLaunch = false;
+  /**
+   * The pre-v2 global thread exactly as found on disk, or undefined if there was none.
+   *
+   * Preserved verbatim so `persistChat` can rewrite its key without destroying it. See the
+   * payload in `persistChat` for why it is neither dropped nor kept up to date.
+   */
+  let legacyThreadAtLaunch: unknown = undefined;
 
   // Load theme early (before first paint) to avoid flash
   try {
@@ -1550,7 +1760,12 @@
           selectedModelAlias,
           selectedSTTModelAlias,
           selectedAccelerationPreference,
-          chatMessages,
+          // Frozen at launch rather than tracking the live thread. Conversations now live in the
+          // v2 archive, so writing the thread here too would double every message against a ~5MB
+          // localStorage budget. Rewriting the key without it would be worse: it is the only
+          // remaining copy of the pre-v2 thread, kept both for rollback and as the migration
+          // source if the archive commit failed. So it is preserved exactly and never extended.
+          chatMessages: legacyThreadAtLaunch,
           systemPrompt,
           contextTurns,
           showFullHistory,
@@ -1628,7 +1843,14 @@
         if (typeof data.selectedAccelerationPreference === "string") {
           selectedAccelerationPreference = data.selectedAccelerationPreference;
         }
-        if (data.chatMessages?.length) chatMessages = data.chatMessages;
+        // Deliberately NOT restoring `data.chatMessages` into the visible thread. The legacy blob
+        // holds the single pre-v2 global thread, which the archive migration has already imported
+        // as its own "Recovered chat" conversation. Restoring it here would overwrite the thread
+        // just loaded from the archive while it is still attributed to that conversation — so the
+        // next save would write the legacy messages over a real conversation's history.
+        // It is captured instead, so rewriting this key cannot destroy it.
+        // Settings below are still restored: they are app-level and were never per-conversation.
+        if (data.chatMessages !== undefined) legacyThreadAtLaunch = data.chatMessages;
         if (data.systemPrompt) systemPrompt = data.systemPrompt;
         if (typeof data.contextTurns === 'number' && data.contextTurns > 0) {
           contextTurns = data.contextTurns;
@@ -3189,7 +3411,7 @@ updateStateFromSdk();
       selectedModelAlias = alias;
       selectedModel = { alias }; // minimal handle
       chatClient = null; // use HTTP from sidecar
-      beginNewChatThread();
+      startFreshConversation();
 
       // Auto start service and switch to chat
       if (!state.serviceRunning) {
@@ -3219,7 +3441,7 @@ updateStateFromSdk();
       selectedModelAlias = model.alias;
       selectedModel = { alias: model.alias };
       chatClient = null;
-      beginNewChatThread();
+      startFreshConversation();
       currentView = "chat";
       statusMessage = `Chatting with ${model.alias}`;
 
@@ -3299,12 +3521,17 @@ updateStateFromSdk();
   }
 
   async function quitFromTray() {
+    // destroy() below bypasses every other shutdown path, so this is the only chance to write.
+    flushConversations();
     try {
       // Graceful stop, but never let a hung sidecar block quitting.
       await Promise.race([stopService(), new Promise((r) => setTimeout(r, 5000))]);
     } catch {}
     try { await trayIcon?.close(); } catch {}
     trayIcon = null;
+    // Again, after the awaits. A streaming callback can land while the service is stopping, so
+    // the flush above is not necessarily the last state worth writing.
+    flushConversations();
     // destroy() bypasses onCloseRequested, so this actually exits.
     await getCurrentWindow().destroy();
   }
@@ -3331,6 +3558,10 @@ updateStateFromSdk();
   }
 
   async function handleCloseRequested(event: { preventDefault: () => void }) {
+    // Flush first, before any branch can let the window go. Component cleanup is not a reliable
+    // shutdown hook, so this is the last point at which unsaved conversations can still be
+    // written.
+    flushConversations();
     if (!keepServiceInBackground || !state.serviceRunning) return; // normal close = quit
     // Create the tray BEFORE preventing the close: if the tray cannot be created, fall
     // through to a normal quit rather than stranding a hidden window nothing can reopen.
@@ -3368,6 +3599,11 @@ updateStateFromSdk();
     // Register lifecycle listeners before any fallible storage work, so a storage failure
     // can never leave the app without a keyboard handler or close-to-tray hook.
     document.addEventListener('keydown', handleGlobalKeydown);
+    // Native quit does not reach handleCloseRequested, so treat losing the window as a cue to
+    // write. See flushOnHide.
+    document.addEventListener('visibilitychange', flushOnHide);
+    window.addEventListener('pagehide', flushOnHide);
+    window.addEventListener('blur', flushOnHide);
     getCurrentWindow()
       .onCloseRequested(handleCloseRequested)
       .then((un) => {
@@ -3381,13 +3617,19 @@ updateStateFromSdk();
     // Hydrate every persisted store *before* enabling autosave, and before init() starts any
     // async work. persistChat() is inert until `hydrated` flips.
     //
-    // Order matters: loadConversations() bootstraps an empty conversation when the index is
-    // missing, and that clears chatMessages — so it has to run before restoreChat() fills the
-    // thread, not after.
+    // Order matters: loadConversations() opens the archive and installs the active
+    // conversation's thread, so it must run before restoreChat(), which restores only app-level
+    // settings and must not touch the thread it just loaded.
     let mayPersist = true;
     try {
       loadConversations();
       mayPersist = restoreChat();
+      // Overrides sit on top of the app defaults restoreChat() just restored, so that a startup
+      // and a later selection of the same conversation produce the same configuration.
+      if (pendingConversationSettings) {
+        applyConversationSettings(pendingConversationSettings);
+        pendingConversationSettings = null;
+      }
       loadCompareHistory();
       loadCustomPersonasState();
     } finally {
@@ -3401,15 +3643,32 @@ updateStateFromSdk();
       if (unsubscribe) unsubscribe();
       document.removeEventListener('keydown', handleGlobalKeydown);
       unlistenCloseRequested?.();
-      saveConversations();
+      document.removeEventListener('visibilitychange', flushOnHide);
+      window.removeEventListener('pagehide', flushOnHide);
+      window.removeEventListener('blur', flushOnHide);
+      flushConversations();
+      // After the final flush: a pending retry would hold this component's archive and could
+      // overwrite whatever replaced it.
+      cancelConversationRetry();
     };
   });
 
-  // Auto-save conversations when messages change (Svelte 5 runes style)
+  // Auto-save the loaded conversation when its thread changes.
+  //
+  // Gated on the thread being attributed rather than on it being non-empty: emptying a
+  // conversation is a change that must be stored, and `captureThread` refuses an unattributed
+  // thread anyway, so the old `length > 0` guard only suppressed legitimate saves.
+  // untrack: saveConversations() both reads and writes `conversationArchive`, so tracking its
+  // reads would make this effect invalidate itself on every save — a save → assign → save loop.
+  // The dependencies that should fire it are read directly here instead.
   $effect(() => {
-    if (currentConversationId && chatMessages.length > 0) {
-      saveConversations();
-    }
+    if (!hydrated) return;
+    const loaded = threadLoadedFor;
+    // Establishes the dependency on the thread itself. Every mutation path reassigns
+    // `chatMessages` (in-place flag edits are followed by a spread) so this sees them all.
+    void chatMessages.length;
+    if (!loaded) return;
+    untrack(() => saveConversations());
   });
 
   async function downloadAndTrack(model: any) {
@@ -3567,7 +3826,7 @@ updateStateFromSdk();
       selectedModelAlias = model.alias;
       selectedModel = { alias: model.alias };
       chatClient = null;
-      beginNewChatThread();
+      startFreshConversation();
       if (recommendedMaxTurns && recommendedMaxTurns !== contextTurns) {
         contextTurns = recommendedMaxTurns;
       }

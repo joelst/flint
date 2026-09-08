@@ -69,6 +69,7 @@ export default defineConfig(() => ({
         'src/lib/conversation-store.ts',
         'src/lib/conversation-repository.ts',
         'src/lib/conversation-title.ts',
+        'src/lib/conversation-session.ts',
         'src/lib/chat-request.ts',
         'sidecar/chat-transport.js',
         'sidecar/audio-format.js',

@@ -385,6 +385,21 @@ function allocateUniqueId(preferred: string, taken: Set<string>): string {
  * not be trusted to satisfy a floor its final build defines. Callers should validate with
  * `isUsableVersion()`; any non-numeric core component is treated as 0 for ordering.
  */
+/**
+ * Whether a build is new enough to read an archive with this floor.
+ *
+ * Deliberately compares release cores and ignores any pre-release identifier. Semver orders
+ * `0.6.0-rc.1` *below* `0.6.0`, which is right for precedence but wrong for capability: a
+ * release candidate is built from the code heading to that release, so it has exactly the schema
+ * support the floor is asking about. Using raw precedence here would make every `-rc`, `-alpha`,
+ * and `-beta` build reject the archives it had just written — the release workflow stamps the
+ * app version from the git tag, so a pre-release tag alone would ship that failure to testers.
+ */
+export function meetsArchiveFloor(appVersion: string, floor: string): boolean {
+  const core = (v: string) => v.split('-')[0];
+  return compareVersions(core(appVersion), core(floor)) >= 0;
+}
+
 export function compareVersions(a: string, b: string): number {
   const split = (v: string) => {
     const [core, ...rest] = String(v ?? '').trim().split('-');
@@ -794,7 +809,7 @@ export function parseConversationArchive(
     if (!isUsableVersion(appVersion)) {
       return { ...empty, incompatible: true, reason: `Cannot verify compatibility: "${appVersion}" is not a usable version.` };
     }
-    if (compareVersions(appVersion, minAppVersion) < 0) {
+    if (!meetsArchiveFloor(appVersion, minAppVersion)) {
       return {
         ...empty,
         incompatible: true,
