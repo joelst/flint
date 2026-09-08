@@ -35,8 +35,10 @@ persistence*:
 
 - Native quit is a best-effort flush; a guaranteed flush needs a Rust
   `ExitRequested` handshake, which belongs to Workstream C.
-- The settings baseline that per-conversation settings resolve against is stable by
-  design and has no editing control, so it cannot be moved after the upgrade.
+- The persona, context length and thread view that per-conversation settings resolve
+  against are stable by design and have no editing control, so they cannot be moved
+  after the upgrade. The baseline model alias is deliberately not frozen: it is the
+  application's existing "last model used" value and still moves as models are picked.
 - In-flight streaming is discarded across a conversation switch rather than
   being allowed to finish in its originating conversation.
 
