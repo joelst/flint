@@ -217,8 +217,8 @@ function allocateUniqueId(preferred: string, taken: Set<string>): string {
  * Compare dotted versions for a compatibility gate.
  *
  * A pre-release sorts *below* its release (0.6.0-rc < 0.6.0), because a release candidate must
- * not be trusted to satisfy a floor its final build defines. Non-numeric components are
- * unusable for ordering, so they are treated as absent rather than silently as zero.
+ * not be trusted to satisfy a floor its final build defines. Callers should validate with
+ * `isUsableVersion()`; any non-numeric core component is treated as 0 for ordering.
  */
 export function compareVersions(a: string, b: string): number {
   const split = (v: string) => {
