@@ -583,7 +583,7 @@ export function parseConversationArchive(
   // Any effective floor that differs from what was stored means we will rewrite the header on
   // the next save. That is a change to the record, so it must not report as a clean read —
   // including the case where the running build happens to satisfy the raised floor.
-  let repairedHeader = minAppVersion !== rawMinAppVersion;
+  const repairedHeader = minAppVersion !== rawMinAppVersion;
 
   if (appVersion !== SKIP_APP_VERSION_GATE) {
     if (!isUsableVersion(appVersion)) {
