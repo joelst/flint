@@ -24,6 +24,7 @@ import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { annotateVariantUpdates } from './model-updates.js';
+import { selectChatTransport } from './chat-transport.js';
 import { assertWavBuffer } from './audio-format.js';
 import { createGateway } from './gateway.js';
 import { buildModelIndex, resolveModelId } from './model-registry.js';
@@ -2227,7 +2228,14 @@ rl.on('line', async (line) => {
         }
 
         // Prefer direct SDK inference to avoid web-service schema/version mismatch issues.
-        if (typeof chatModel?.createChatClient === 'function') {
+        // Vision is the exception: the SDK client rejects non-string content outright, so a
+        // multipart request has to take the HTTP endpoint or it cannot be served at all.
+        const { transport, reason: transportReason } = selectChatTransport(sdkMessages, {
+          hasChatClient: typeof chatModel?.createChatClient === 'function',
+          hasEndpoint: !!sharedEndpoint,
+        });
+        if (!transport) throw new Error(transportReason);
+        if (transport === 'sdk') {
           const client = chatModel.createChatClient();
           if (shouldStream && typeof client?.completeStreamingChat === 'function') {
             let content = '';
@@ -2326,9 +2334,6 @@ rl.on('line', async (line) => {
             throw new Error('Model chat client does not expose completion methods');
           }
         } else {
-          if (!sharedEndpoint) {
-            throw new Error('Service endpoint unavailable and direct chat client is unsupported.');
-          }
           const resp = await fetch(`${apiBase}/chat/completions`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -2347,6 +2352,20 @@ rl.on('line', async (line) => {
           const httpResult = await resp.json();
           chatTokensIn = httpResult?.usage?.prompt_tokens ?? null;
           chatTokensOut = httpResult?.usage?.completion_tokens ?? null;
+          // This response is not streamed, but a caller that asked for a stream is waiting on
+          // deltas to render. Emitting the whole text as one delta keeps the streaming
+          // contract, exactly as the non-streaming SDK branch above does.
+          if (shouldStream && !canceledRequests.has(id)) {
+            const content = httpResult?.choices?.[0]?.message?.content || '';
+            if (content) {
+              send({
+                id,
+                stream: true,
+                delta: content,
+                chunk: { choices: [{ delta: { role: 'assistant', content } }] }
+              });
+            }
+          }
           chatOk = true;
           reply({
             ok: true,

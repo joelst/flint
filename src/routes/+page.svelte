@@ -97,6 +97,10 @@
     parsePersistedConversations,
   } from "$lib/chat-persistence";
   import { isFetchableUrl, detectFetchableUrls } from "$lib/url-chips";
+  import {
+    normalizeForAlternatingChat,
+    isEmptyAssistantPlaceholder,
+  } from "$lib/chat-request";
 
   // Integrations tab state
   let integrationsOS = $state<'windows' | 'unix'>(detectPlatform());
@@ -3870,65 +3874,6 @@ updateStateFromSdk();
     statusMessage = "Generation stopped by user";
   }
 
-  /**
-   * Normalizes messages for strict chat templates (e.g., Mistral Instruct)
-   * that require only user/assistant roles and strict alternation.
-   */
-  function normalizeForAlternatingChat(
-    messages: Array<{ role: string; content: any }>,
-    systemInstruction?: string,
-  ): Array<{ role: "user" | "assistant"; content: string }> {
-    const instructionParts: string[] = [];
-    if (systemInstruction?.trim()) instructionParts.push(systemInstruction.trim());
-
-    const normalized: Array<{ role: "user" | "assistant"; content: any }> = [];
-    for (const message of messages || []) {
-      const role = String(message?.role || "").toLowerCase();
-      const rawContent = message?.content;
-      // For vision: keep array form; for text keep string
-      const content = Array.isArray(rawContent) ? rawContent : String(rawContent ?? "").trim();
-      if (!content || (typeof content === 'string' && !content)) continue;
-      if (role === "system" && typeof content === 'string') {
-        instructionParts.push(content);
-        continue;
-      }
-      if (role === "user" || role === "assistant") {
-        normalized.push({ role, content });
-      }
-    }
-
-    const instructionText = instructionParts.length
-      ? `Follow these instructions:\n${instructionParts.join("\n\n")}`
-      : "";
-
-    if (instructionText) {
-      if (normalized.length > 0 && normalized[0].role === "user") {
-        normalized[0] = {
-          role: "user",
-          content: `${instructionText}\n\n${normalized[0].content}`,
-        };
-      } else {
-        normalized.unshift({ role: "user", content: instructionText });
-      }
-    }
-
-    const alternating: Array<{ role: "user" | "assistant"; content: string }> = [];
-    for (const message of normalized) {
-      if (alternating.length === 0) {
-        if (message.role !== "user") continue;
-        alternating.push(message);
-        continue;
-      }
-      const previous = alternating[alternating.length - 1];
-      if (previous.role === message.role) {
-        previous.content = `${previous.content}\n\n${message.content}`;
-        continue;
-      }
-      alternating.push(message);
-    }
-
-    return alternating;
-  }
 
   /**
    * Builds the messages array to send to the model.
@@ -3943,8 +3888,7 @@ updateStateFromSdk();
     // Remove any trailing empty assistant placeholder (from streaming setup)
     let history = [...chatMessages];
     if (history.length > 0) {
-      const last = history[history.length - 1];
-      if (last.role === 'assistant' && !last.content?.trim()) {
+      if (isEmptyAssistantPlaceholder(history[history.length - 1])) {
         history = history.slice(0, -1);
       }
     }
@@ -3981,12 +3925,13 @@ updateStateFromSdk();
     }
     const effectiveSystem = buildFlintAwareSystemPrompt(systemPrompt, latestUserText);
 
-    return normalizeForAlternatingChat([
-      ...combined.map((m: any) => ({
+    return normalizeForAlternatingChat(
+      combined.map((m: any) => ({
         role: m.role,
         content: m.content, // can be string or vision array [{type,text}, {type:'image_url',...}]
       })),
-    ], effectiveSystem);
+      { systemInstruction: effectiveSystem },
+    );
   }
 
   /**
@@ -4055,9 +4000,13 @@ Summarize the following conversation history concisely in 4-8 sentences.
 Focus on: key facts the user shared, important decisions, open questions, user goals/preferences, and any code or specific details worth remembering.
 Output only the summary text, no preamble.`;
 
-    const summaryMessages = normalizeForAlternatingChat([
-      ...oldMessages.map((m: any) => ({ role: m.role, content: m.content }))
-    ], summaryPrompt);
+    // `textOnly`: the output here is a text summary, so an image contributes nothing while
+    // costing a base64 payload — and the SDK fallback below rejects non-string content outright,
+    // so a thread containing images would otherwise fail and silently degrade to condense.
+    const summaryMessages = normalizeForAlternatingChat(
+      oldMessages.map((m: any) => ({ role: m.role, content: m.content })),
+      { systemInstruction: summaryPrompt, textOnly: true },
+    );
 
     statusMessage = "Summarizing older context...";
     let summary = "";
@@ -4076,7 +4025,11 @@ Output only the summary text, no preamble.`;
         try {
           const result: any = await (chatClient as any).completeChat?.(summaryMessages) || {};
           summary = result.choices?.[0]?.message?.content || "";
-        } catch {}
+        } catch (e: any) {
+          // Swallowed deliberately — the caller falls back to condense — but not silently, or a
+          // persistently failing summarizer looks like a model that simply never summarizes.
+          console.warn("Summarization via SDK client failed:", e);
+        }
       }
     } catch (e: any) {
       if (chatThreadEpoch !== epoch) return;
