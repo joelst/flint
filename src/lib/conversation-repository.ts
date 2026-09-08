@@ -88,13 +88,6 @@ export interface SaveResult {
 }
 
 /**
- * Park bytes we could not fully understand so they can be recovered by hand.
- *
- * Returns false only when nothing could be preserved. The caller must then stop writing to the
- * live key: overwriting it would destroy the only copy of data we already know we failed to
- * read correctly.
- */
-/**
  * How many content-addressed backup slots to probe before giving up.
  *
  * Each extra slot past the first means another payload that hashes identically, so a legitimate
@@ -104,6 +97,13 @@ export interface SaveResult {
  */
 const MAX_BACKUP_SLOT_PROBES = 32;
 
+/**
+ * Park bytes we could not fully understand so they can be recovered by hand.
+ *
+ * Returns false only when nothing could be preserved. The caller must then stop writing to the
+ * live key: overwriting it would destroy the only copy of data we already know we failed to
+ * read correctly.
+ */
 export function preserveBytes(storage: StorageAdapter, backupKey: string, raw: string): boolean {
   try {
     const existing = storage.getItem(backupKey);
