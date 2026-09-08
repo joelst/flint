@@ -430,7 +430,7 @@ describe('what the migration notice tells the user', () => {
   });
 
   it('reads correctly for a single dropped entry and message', () => {
-    const r = openWith([{ title: 'no id' }], [{ role: 'nonsense', content: 'x' }]);
+    const r = openWith([{ title: 'no id' }], [{ role: 'user', content: { a: 1 } }]);
     expect(r.notice).toContain('1 unreadable entry');
     expect(r.notice).toContain('1 unreadable message');
   });
@@ -576,10 +576,22 @@ describe('a save cannot be the thing that loses data', () => {
     const storage = new MemoryStorage({ [ARCHIVE_KEY]: previous });
     const r = saveConversationArchive(storage, {
       ...createEmptyArchive(),
-      conversations: [conv({ messages: [{ id: 'm', role: 'wizard', content: 'x' } as any] })],
+      conversations: [conv({ messages: [{ id: 'm', role: 'user', content: { a: 1 } } as any] })],
     });
     expect(r.ok).toBe(false);
     expect(storage.map.get(ARCHIVE_KEY)).toBe(previous);
+  });
+
+  it('accepts a candidate carrying a role this build does not know', () => {
+    // An unrecognized role round-trips exactly, so it is not a loss and must not block the
+    // save — otherwise one message from a newer build freezes the archive permanently.
+    const storage = new MemoryStorage({ [ARCHIVE_KEY]: archiveWith([conv()], 'c1') });
+    const r = saveConversationArchive(storage, {
+      ...createEmptyArchive(),
+      conversations: [conv({ messages: [{ id: 'm', role: 'wizard', content: 'x' } as any] })],
+    });
+    expect(r.ok).toBe(true);
+    expect(storage.map.get(ARCHIVE_KEY)).toContain('wizard');
   });
 
   it('rejects an unusable messages container that would reopen empty', () => {
