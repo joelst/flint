@@ -379,11 +379,29 @@ function allocateUniqueId(preferred: string, taken: Set<string>): string {
 }
 
 /**
- * Compare dotted versions for a compatibility gate.
+ * Whether a build is new enough to read an archive with this floor.
  *
- * A pre-release sorts *below* its release (0.6.0-rc < 0.6.0), because a release candidate must
- * not be trusted to satisfy a floor its final build defines. Callers should validate with
- * `isUsableVersion()`; any non-numeric core component is treated as 0 for ordering.
+ * Deliberately compares release cores and ignores any pre-release identifier. Semver orders
+ * `0.6.0-rc.1` *below* `0.6.0`, which is right for precedence but wrong for capability: a
+ * release candidate is built from the code heading to that release, so it has exactly the schema
+ * support the floor is asking about. Using raw precedence here would make every `-rc`, `-alpha`,
+ * and `-beta` build reject the archives it had just written — the release workflow stamps the
+ * app version from the git tag, so a pre-release tag alone would ship that failure to testers.
+ */
+export function meetsArchiveFloor(appVersion: string, floor: string): boolean {
+  const core = (v: string) => v.split('-')[0];
+  return compareVersions(core(appVersion), core(floor)) >= 0;
+}
+
+/**
+ * Compare dotted versions by strict SemVer precedence.
+ *
+ * A pre-release sorts *below* its release (`0.6.0-rc.1` < `0.6.0`). That is precedence, not
+ * capability — for the archive floor use `meetsArchiveFloor`, which deliberately ignores
+ * pre-release identifiers and explains why.
+ *
+ * Callers should validate with `isUsableVersion()`; any non-numeric core component is treated
+ * as 0 for ordering.
  */
 export function compareVersions(a: string, b: string): number {
   const split = (v: string) => {
@@ -794,7 +812,7 @@ export function parseConversationArchive(
     if (!isUsableVersion(appVersion)) {
       return { ...empty, incompatible: true, reason: `Cannot verify compatibility: "${appVersion}" is not a usable version.` };
     }
-    if (compareVersions(appVersion, minAppVersion) < 0) {
+    if (!meetsArchiveFloor(appVersion, minAppVersion)) {
       return {
         ...empty,
         incompatible: true,

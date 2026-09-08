@@ -18,6 +18,7 @@ import {
   isUsableVersion,
   MIN_ROLLBACK_APP_VERSION,
   compareVersions,
+  meetsArchiveFloor,
   normalizeContent,
   contentToText,
   normalizeMessage,
@@ -1219,3 +1220,52 @@ describe('keys that collide with Object.prototype', () => {
     expect(({} as any).kept).toBeUndefined();
   });
 });
+
+describe('the running build can always reopen what it writes', () => {
+  it('ships an app version at or above the archive rollback floor', async () => {
+    // `saveConversationArchive` stamps MIN_ROLLBACK_APP_VERSION into every archive, and
+    // `parseConversationArchive` refuses an archive whose floor is above the running build. If
+    // the floor ever exceeds the shipped version, the app writes an archive on first launch and
+    // then rejects it on the next one: no conversations, writes disabled, for every user.
+    const pkg = await import('../../package.json');
+    const appVersion = String((pkg as any).default?.version ?? (pkg as any).version);
+    expect(isUsableVersion(appVersion)).toBe(true);
+    // Uses the same predicate as the gate, so a pre-release tag such as 0.6.0-rc.1 is judged
+    // exactly as the running app would judge it rather than failing on semver precedence.
+    expect(meetsArchiveFloor(appVersion, MIN_ROLLBACK_APP_VERSION)).toBe(true);
+  });
+
+  it('accepts an archive stamped with its own floor', () => {
+    const archive = createEmptyArchive('c1');
+    const parsed = parseConversationArchive(JSON.stringify(archive), MIN_ROLLBACK_APP_VERSION);
+    expect(parsed.archive).not.toBeNull();
+    expect(parsed.incompatible).toBe(false);
+  });
+});
+
+describe('meetsArchiveFloor treats a pre-release as its release', () => {
+  it('accepts a release candidate of the floor version', () => {
+    // Semver orders 0.6.0-rc.1 below 0.6.0. Applying that to the capability gate would make
+    // every pre-release build refuse the archives it had just written, and the release workflow
+    // stamps the app version straight from the git tag — so a `-rc` tag would ship that.
+    expect(meetsArchiveFloor('0.6.0-rc.1', '0.6.0')).toBe(true);
+    expect(meetsArchiveFloor('0.6.0-alpha', '0.6.0')).toBe(true);
+  });
+
+  it('still rejects a genuinely older build', () => {
+    expect(meetsArchiveFloor('0.5.9', '0.6.0')).toBe(false);
+    expect(meetsArchiveFloor('0.5.0', '0.6.0')).toBe(false);
+    expect(meetsArchiveFloor('0.5.9-rc.1', '0.6.0')).toBe(false);
+  });
+
+  it('accepts newer builds', () => {
+    expect(meetsArchiveFloor('0.6.1', '0.6.0')).toBe(true);
+    expect(meetsArchiveFloor('1.0.0', '0.6.0')).toBe(true);
+  });
+
+  it('lets a pre-release build open an archive stamped with the floor', () => {
+    const parsed = parseConversationArchive(JSON.stringify(createEmptyArchive('c1')), '0.6.0-rc.1');
+    expect(parsed.incompatible).toBe(false);
+    expect(parsed.archive).not.toBeNull();
+  });
+})

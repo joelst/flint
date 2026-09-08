@@ -105,6 +105,30 @@ Windows/macOS fixes do not establish Linux release support.
       an SDK bump. `glib` is Linux/GTK-only and Flint ships Windows + macOS; `cookie` is
       already patched. Re-check when the SDK pin moves.
 
+## Conversation persistence
+
+- [ ] **Native quit does not reach the frontend flush.** Conversation saves are retried on a
+      backoff that never gives up, and flushed on hide/blur/pagehide and on the close-requested
+      handler, so a recovered storage failure is retried without waiting for the next edit. Those
+      hooks are best-effort opportunities rather than guaranteed delivery. What is still missing is
+      a deterministic handshake: on macOS neither Cmd+Q nor Dock → Quit reliably invokes the
+      frontend (tauri-apps/tauri#9198), so a quit in the window between storage recovering and
+      the next retry can still drop the outstanding turns. Closing it needs a native
+      `ExitRequested` → frontend flush → acknowledgement round trip, which is Rust work rather
+      than a frontend fix.
+- [ ] **Per-conversation settings are stored but not applied.** The archive round-trips a
+      settings bag per conversation (`modelAlias`, `systemPrompt`, `contextTurns`,
+      `showFullHistory`) and nothing is lost, but `applyConversationSettings` is deliberately a
+      no-op. Applying them requires an app-default baseline to resolve absent keys against;
+      without one, selecting a conversation with no overrides inherits the *previous*
+      conversation's model and persona, and `persistChat` then writes that leaked value into the
+      app-level settings key. Do this with the stage that adds the per-conversation controls.
+- [ ] **Switching conversations discards the rest of an in-flight generation.** The epoch guard
+      rejects deltas after the thread is replaced, so the archive keeps the partial answer.
+      Pre-existing behaviour, not introduced by the archive work. Fixing it means routing
+      streamed updates by originating conversation id rather than by "is this still the visible
+      thread".
+
 ## Control CLI — not planned
 
 Foundry owns terminal-first `foundry model` / `run` / `server`. Flint's wedge is SDK

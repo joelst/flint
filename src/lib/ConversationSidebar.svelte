@@ -4,6 +4,15 @@
     title: string;
     createdAt: number;
     messageCount: number;
+    /** Imported from the pre-v2 global thread, which had no provable owner in the old index. */
+    recovered?: boolean;
+    /**
+     * The pre-v2 index recorded a turn count for this conversation but never stored the turns
+     * themselves. Showing "0 messages" here would read as deletion, so the claimed count is
+     * shown and labelled instead.
+     */
+    messagesUnavailable?: boolean;
+    unavailableMessageCount?: number;
   }
 </script>
 
@@ -62,8 +71,29 @@
             {truncateConversationTitle(conv.title)}
           </div>
           <div class="conv-meta">
-            {conv.messageCount} messages • {formatTime(conv.createdAt)}
+            {#if conv.messagesUnavailable}
+              <span
+                class="conv-unavailable"
+                title="An earlier version of Flint recorded this conversation's title and message count but never stored its messages, so they are not available here. It kept a single chat history, which Flint imports separately as a recovered conversation; some of these messages may be in it, but which conversation they belonged to was never recorded."
+              >
+                {conv.unavailableMessageCount ?? 0} earlier messages unavailable
+              </span>
+              {#if conv.messageCount > 0}
+                • {conv.messageCount} since
+              {/if}
+            {:else}
+              {conv.messageCount} messages
+            {/if}
+            • {formatTime(conv.createdAt)}
           </div>
+          {#if conv.recovered}
+            <div
+              class="conv-badge"
+              title="Recovered from the single chat history kept by an earlier version of Flint. It could not be matched to a conversation in the old list."
+            >
+              Recovered
+            </div>
+          {/if}
           <button
             type="button"
             class="delete-btn"
@@ -171,6 +201,21 @@
 
   .conv-meta {
     font-size: 0.7rem;
+    color: var(--muted);
+  }
+
+  /* Not styled as an error: the data is genuinely gone, but nothing is wrong right now. */
+  .conv-unavailable {
+    font-style: italic;
+  }
+
+  .conv-badge {
+    display: inline-block;
+    margin-top: 4px;
+    padding: 1px 6px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: 0.65rem;
     color: var(--muted);
   }
 
