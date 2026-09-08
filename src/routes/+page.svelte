@@ -15,6 +15,7 @@
     getSTTModels,
     startService,
     stopService,
+    withServiceTransition,
     downloadModel,
     loadModel as sdkLoadModel,
     unloadModel as sdkUnloadModel,
@@ -40,6 +41,7 @@
     TEMPLATE_PRESETS,
     setEvictionConfig as sdkSetEvictionConfig,
     setModelPriorities as sdkSetModelPriorities,
+    applyMemorySettings as sdkApplyMemorySettings,
     getWslStatus,
     enableWslMirroredNetworking,
     shutdownWsl,
@@ -88,6 +90,13 @@
     buildFlintAwareSystemPrompt,
     contentToPlainText,
   } from "$lib/flint-context";
+  import {
+    parsePersistedState,
+    readPersistedTheme,
+    mayEnableAutosave,
+    parsePersistedConversations,
+  } from "$lib/chat-persistence";
+  import { isFetchableUrl, detectFetchableUrls } from "$lib/url-chips";
 
   // Integrations tab state
   let integrationsOS = $state<'windows' | 'unix'>(detectPlatform());
@@ -554,15 +563,13 @@
   let attachedImages: string[] = $state([]); // array of base64 data urls for vision
 
   // URL-fetch (Option A web fetch): pending URL chips and their fetched content
-  let pendingUrlFetches: { url: string; status: 'pending' | 'fetching' | 'done' | 'error'; title?: string; text?: string; error?: string }[] = $state([]);
+  let pendingUrlFetches: { url: string; attempt: number; status: 'pending' | 'fetching' | 'done' | 'error'; title?: string; text?: string; error?: string }[] = $state([]);
   let isFetchingUrl = $state(false);
 
   // Detects URLs typed/pasted into the chat input that haven't been fetched yet
-  let detectedUrls = $derived.by(() => {
-    const matches = chatInput.match(/https?:\/\/[^\s"'<>)]+/g) ?? [];
-    const alreadyQueued = new Set(pendingUrlFetches.map(f => f.url));
-    return [...new Set(matches)].filter(u => !alreadyQueued.has(u));
-  });
+  let detectedUrls = $derived.by(() =>
+    detectFetchableUrls(chatInput, pendingUrlFetches.map(f => f.url))
+  );
 
   // Proper vision capability detection based on model metadata (not just alias name).
   // We gate multi-image UI on the *selected* model being vision-capable.
@@ -754,7 +761,11 @@
   let dictationChunks: Blob[] = [];
   let dictationMediaRecorder: MediaRecorder | null = null;
   let dictationStream: MediaStream | null = null;
-  let isRollingTranscribe = false;
+  // Session that currently owns the rolling-transcription pass (0 = free). A session id rather
+  // than a boolean so a stale pass cannot release the current session's lock.
+  let rollingOwner = 0;
+  // Monotonic id for the current dictation recording; see toggleDictation.
+  let dictationSession = 0;
   let sttModels = $state<ModelInfo[]>([]);
   let selectedSTTModelAlias = $state("");
   // Tracks the alias of a model explicitly loaded into the audio lane via
@@ -887,23 +898,55 @@
   let conversations = $state<Conversation[]>([]);
   let currentConversationId = $state<string | null>(null);
   const CHATS_PERSIST_KEY = "flint-chats-v1";
+  const CHATS_BACKUP_KEY = "flint-chats-v1.corrupt";
+  // Cleared when the stored index cannot be read or preserved; every conversation writer
+  // honours it so an unreadable list is never replaced by a fresh one.
+  let conversationsWritable = true;
+
+  // Monotonic id for the visible chat thread. Anything that replaces the thread bumps it, so an
+  // in-flight completion or summarization can tell that its output no longer belongs anywhere.
+  // Deliberately a plain `let`: it is only read from async continuations, never rendered.
+  let chatThreadEpoch = 0;
+
+  /** Replace the visible thread, invalidating any in-flight work that targets it. */
+  function beginNewChatThread() {
+    chatThreadEpoch += 1;
+    chatMessages = [];
+    chatInput = "";
+    lastAutoSummaryCount = 0;
+  }
+
+  // Guards the async "load this model, then open chat with it" flows. Each captures a token
+  // before its first await; a later flow — or a manual conversation switch — invalidates
+  // whatever is still loading, so a slow load cannot wipe a thread the user has moved on to.
+  let chatNavigationToken = 0;
+
+  function beginChatNavigation(): { token: number; epoch: number } {
+    chatNavigationToken += 1;
+    return { token: chatNavigationToken, epoch: chatThreadEpoch };
+  }
+
+  /** True while this navigation is still the one the user is waiting for. */
+  function chatNavigationCurrent(nav: { token: number; epoch: number }): boolean {
+    return nav.token === chatNavigationToken && nav.epoch === chatThreadEpoch;
+  }
 
   function generateConversationId(): string {
     return `chat-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
   }
 
   function generateConversationTitle(): string {
+    // Vision turns carry an array of content parts, so this must not assume a string.
     const firstMsg =
-      chatMessages.find((m: any) => m.role === "user")?.content || "New chat";
+      contentToPlainText(chatMessages.find((m: any) => m.role === "user")?.content).trim() ||
+      "New chat";
     return firstMsg.substring(0, 50).trim() + (firstMsg.length > 50 ? "…" : "");
   }
 
   function createNewConversation() {
     const id = generateConversationId();
     currentConversationId = id;
-    chatMessages = [];
-    chatInput = "";
-    lastAutoSummaryCount = 0;
+    beginNewChatThread();
     clearImages(); // clear any pending vision attachments for new chat
     clearUrlFetches();
     conversations = [
@@ -917,8 +960,7 @@
     if (currentConversationId === id) return;
     saveConversations();
     currentConversationId = id;
-    chatMessages = [];
-    chatInput = "";
+    beginNewChatThread();
   }
 
   function deleteConversation(id: string) {
@@ -934,27 +976,48 @@
   }
 
   function saveConversations() {
-    if (currentConversationId) {
-      const conv = conversations.find((c) => c.id === currentConversationId);
-      if (conv) {
-        conv.title = generateConversationTitle();
-        conv.messageCount = chatMessages.length;
+    // Disabled when the stored index could not be read or preserved, so a fresh list can never
+    // replace conversation titles we were unable to parse.
+    if (!conversationsWritable) return;
+    try {
+      if (currentConversationId) {
+        const conv = conversations.find((c) => c.id === currentConversationId);
+        if (conv) {
+          conv.title = generateConversationTitle();
+          conv.messageCount = chatMessages.length;
+        }
       }
+      localStorage.setItem(CHATS_PERSIST_KEY, JSON.stringify(conversations));
+      conversationsError = null;
+    } catch (e: any) {
+      conversationsError = `Conversation list could not be saved: ${e?.message || e}`;
+      appendAppLog(`Conversation save failed: ${e?.message || e}`, 'error');
     }
-    localStorage.setItem(CHATS_PERSIST_KEY, JSON.stringify(conversations));
   }
 
   function loadConversations() {
+    let stored: string | null = null;
     try {
-      const stored = localStorage.getItem(CHATS_PERSIST_KEY);
-      if (stored) {
-        conversations = JSON.parse(stored);
-        if (conversations.length > 0) {
-          currentConversationId = conversations[0].id;
-        }
-      }
-    } catch (e) {
-      console.warn("Failed to load conversations:", e);
+      stored = localStorage.getItem(CHATS_PERSIST_KEY);
+    } catch (e: any) {
+      conversationsWritable = false;
+      hydrationNotice = `The saved conversation list could not be read (${e?.message || e}). It is left untouched for this session.`;
+      if (!currentConversationId) createNewConversation();
+      return;
+    }
+
+    const parsed = parsePersistedConversations(stored);
+    if (parsed.corrupt) {
+      // Do not silently discard the index: keep the bytes so the titles can be recovered.
+      const preserved = preserveCorruptValue(CHATS_BACKUP_KEY, stored as string);
+      conversationsWritable = preserved;
+      hydrationNotice = preserved
+        ? `Part of the saved conversation list was unreadable. The previous list was kept under "${CHATS_BACKUP_KEY}".`
+        : `The saved conversation list is unreadable and a backup could not be written (storage may be full). It is left untouched for this session.`;
+    }
+    if (parsed.data && parsed.data.length > 0) {
+      conversations = parsed.data;
+      currentConversationId = conversations[0].id;
     }
     if (!currentConversationId) {
       createNewConversation();
@@ -1163,29 +1226,27 @@
     );
   }
 
-  /** Sends the eviction rules and the priority map to the sidecar, which runs the sweep. */
+  /** Sends the priority map and the eviction rules to the sidecar, which runs the sweep. */
   let pushMemorySeq = 0;
   async function pushMemorySettings() {
     const seq = ++pushMemorySeq;
     const currentEviction = { ...evictionConfig };
     const currentPriorities = { ...modelPriorities };
     try {
-      // Skip the intermediate model refresh; the priorities call below refreshes once.
-      const applied = await sdkSetEvictionConfig(currentEviction, { refresh: false });
+      // One command, one sweep. Sent as two commands, the first sweeps under half-updated
+      // settings — enough to evict the very model the user just chose to keep loaded.
+      const applied = await sdkApplyMemorySettings(
+        Object.entries(currentPriorities)
+          .filter(([, priority]) => priority === "pinned" || priority === "low")
+          .map(([alias, priority]) => ({ alias, priority })),
+        currentEviction,
+      );
       // Adopt the sidecar's normalized config, but only on real change and only when no newer
       // push is in flight — an unconditional assignment re-triggers every effect that reads
       // evictionConfig (the serviceRunning re-apply effect looped on exactly that).
       if (seq === pushMemorySeq && applied && !evictionConfigsEqual(applied, evictionConfig)) {
         evictionConfig = applied;
       }
-      // A newer push superseded this one while awaiting: leave the priorities (and the
-      // refresh) to it rather than racing stale values over the user's latest selection.
-      if (seq !== pushMemorySeq) return;
-      await sdkSetModelPriorities(
-        Object.entries(currentPriorities)
-          .filter(([, priority]) => priority === "pinned" || priority === "low")
-          .map(([alias, priority]) => ({ alias, priority })),
-      );
     } catch (e) {
       console.warn("[flint] could not apply memory settings", e);
     }
@@ -1442,17 +1503,42 @@
 
   // Persistence for chat history and current model
   const PERSIST_KEY = "flint-chat-persist";
+  const PERSIST_BACKUP_KEY = "flint-chat-persist.corrupt";
+
+  // Autosave stays disabled until every localStorage read has completed. Without this gate the
+  // persistence effect below runs at mount (its old guard was always true because systemPrompt
+  // has a non-empty default) and writes in-memory defaults over the saved blob before
+  // restoreChat() ever reads it.
+  let hydrated = $state(false);
+  // Split by source: a successful chat write must not clear a conversation-store failure, and
+  // neither write may clear the one-time hydration notice the user has not seen yet.
+  let persistError = $state<string | null>(null);
+  let conversationsError = $state<string | null>(null);
+  let hydrationNotice = $state<string | null>(null);
+  const storageError = $derived(persistError || conversationsError || hydrationNotice);
+
+  function dismissStorageError() {
+    persistError = null;
+    conversationsError = null;
+    hydrationNotice = null;
+  }
+
+  // Captured before anything can write, so first-run detection is not fooled by our own writes.
+  let hadPersistedChatAtLaunch = false;
 
   // Load theme early (before first paint) to avoid flash
   try {
     const raw = localStorage.getItem(PERSIST_KEY);
-    if (raw) {
-      const d = JSON.parse(raw);
-      if (d.theme === 'light' || d.theme === 'dark') theme = d.theme;
-    }
+    hadPersistedChatAtLaunch = !!raw;
+    const storedTheme = readPersistedTheme(raw);
+    if (storedTheme) theme = storedTheme;
   } catch {}
 
   function persistChat() {
+    // Every writer must honour this, not just the autosave effect: several call sites invoke
+    // persistChat() directly, and any of them could otherwise replace a blob we failed to read
+    // or failed to back up.
+    if (!hydrated) return;
     try {
       localStorage.setItem(
         PERSIST_KEY,
@@ -1476,13 +1562,61 @@
           keepServiceInBackground,
         }),
       );
-    } catch {}
+      // Persist immediately so a failure is not sticky. Assigning the same value is a no-op in
+      // Svelte 5, and not *reading* persistError keeps it out of the effect's dependencies.
+      persistError = null;
+    } catch (e: any) {
+      persistError = `Settings and chat history could not be saved: ${e?.message || e}`;
+      appendAppLog(`Persist failed: ${e?.message || e}`, 'error');
+    }
   }
-  function restoreChat() {
+
+  /**
+   * Keep unparseable bytes so they can be recovered by hand. Returns false when nothing could
+   * be preserved, in which case the caller must stop writing to the live key — replacing it
+   * would destroy the only copy.
+   */
+  function preserveCorruptValue(backupKey: string, raw: string): boolean {
     try {
-      const raw = localStorage.getItem(PERSIST_KEY);
-      if (raw) {
-        const data = JSON.parse(raw);
+      const existing = localStorage.getItem(backupKey);
+      if (existing === raw) return true;
+      if (existing === null) {
+        localStorage.setItem(backupKey, raw);
+        return true;
+      }
+      // A different blob is already parked there; keep both rather than choosing between them.
+      localStorage.setItem(`${backupKey}.${Date.now()}`, raw);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Restore persisted state. Returns false when autosave must stay disabled. */
+  function restoreChat(): boolean {
+    let raw: string | null = null;
+    try {
+      raw = localStorage.getItem(PERSIST_KEY);
+    } catch (e: any) {
+      // The saved blob may still be there and readable later; enabling autosave now would let
+      // a default-state write replace it.
+      hydrationNotice = `Saved settings could not be read (${e?.message || e}). Autosave is off for this session so existing data is left untouched.`;
+      return false;
+    }
+
+    const parsed = parsePersistedState(raw);
+    if (parsed.corrupt) {
+      const preserved = preserveCorruptValue(PERSIST_BACKUP_KEY, raw as string);
+      hydrationNotice = preserved
+        ? `Saved settings were unreadable, so Flint started with defaults. The previous data was kept under "${PERSIST_BACKUP_KEY}".`
+        : `Saved settings are unreadable and a backup could not be written (storage may be full). Autosave is off so the existing data is left untouched.`;
+      return mayEnableAutosave(parsed, preserved);
+    }
+    const data = parsed.data;
+    if (!data) return true;
+
+    try {
+      {
         if (data.selectedModelAlias)
           selectedModelAlias = data.selectedModelAlias;
         if (data.selectedSTTModelAlias)
@@ -1523,7 +1657,13 @@
           appliedNetworkBindAddress = data.networkBindAddress;
         }
       }
-    } catch {}
+      return true;
+    } catch (e: any) {
+      // A field-level failure leaves partially restored state; keeping autosave off would
+      // strand the user with no persistence at all, so save but make the fault visible.
+      hydrationNotice = `Some saved settings could not be restored: ${e?.message || e}`;
+      return true;
+    }
   }
 
   const networkSettingsDirty = $derived(
@@ -1645,6 +1785,49 @@ updateStateFromSdk();
     });
   }
 
+  // Drives UI disable only. Real serialization lives in sdk.ts, where every startService /
+  // stopService transition queues on one lock — this flag cannot cover the paths inside the SDK.
+  let serviceTransitionBusy = $state(false);
+
+  /**
+   * Make the service usable for `alias` with the least disruption.
+   *
+   * If the service is already up we load the model in place rather than restarting, because a
+   * restart would evict every other resident model and reset usage counters — an "Ensure
+   * service" action must not do that. Runs inside the SDK's service-transition lock so a
+   * concurrent Stop or Apply cannot tear the service down mid-load.
+   *
+   * Note: `preferredEp` can only be applied when the service is (re)started. On the
+   * already-running path the caller is told the existing acceleration setting stands.
+   */
+  async function ensureServiceRunning(alias?: string, preferredEp?: string): Promise<string | undefined> {
+    serviceTransitionBusy = true;
+    try {
+      return await withServiceTransition(async ({ startNow }) => {
+        if (state.serviceRunning && state.endpoint) {
+          if (alias) {
+            const resident = (state.pool || []).some((e: any) => e.alias === alias);
+            if (!resident) {
+              await sdkLoadModel({ alias }, "audio");
+            }
+            if (preferredEp) {
+              appendAppLog(
+                `Ensure service: ${alias} loaded into the running service (left up to preserve other loaded models); acceleration preference "${preferredEp}" is applied per transcription request.`,
+              );
+            }
+          }
+          return state.endpoint;
+        }
+        // Already holding the transition lock — the queued startService would deadlock here.
+        const ep = await startNow(networkPort, alias, preferredEp, networkBindAddress || undefined);
+        markNetworkSettingsApplied();
+        return ep;
+      });
+    } finally {
+      serviceTransitionBusy = false;
+    }
+  }
+
   async function refreshWslStatus() {
     wslBusy = true;
     wslMessage = '';
@@ -1711,10 +1894,11 @@ updateStateFromSdk();
   }
 
   $effect(() => {
-    // Persist on changes to chat + audio model state
-    if (selectedModelAlias || selectedSTTModelAlias || chatMessages.length > 0 || systemPrompt) {
-      persistChat();
-    }
+    // Persist on any change to saved state. Dependencies are tracked through persistChat()'s
+    // reads; the hydrated gate keeps mount-time defaults from overwriting the saved blob
+    // regardless of whether this effect or onMount runs first.
+    if (!hydrated) return;
+    persistChat();
   });
 
   function setModelRuntimeMeta(
@@ -1735,9 +1919,12 @@ updateStateFromSdk();
   // Apply theme
   $effect(() => {
     document.documentElement.setAttribute('data-theme', theme);
-    // Persist immediately
+    // Persist immediately — but never before hydration, or this read-modify-write would
+    // create/alter the persisted blob ahead of restoreChat().
+    if (!hydrated) return;
     try {
       const existing = JSON.parse(localStorage.getItem(PERSIST_KEY) || '{}');
+      if (!existing || typeof existing !== 'object' || Array.isArray(existing)) return;
       existing.theme = theme;
       localStorage.setItem(PERSIST_KEY, JSON.stringify(existing));
     } catch {}
@@ -2711,12 +2898,19 @@ updateStateFromSdk();
   async function init() {
     statusMessage = "Checking Node.js and starting Foundry Local...";
 
-    // Load conversation history + custom personas
-    loadConversations();
-    loadCustomPersonasState();
+    // Persisted state (chat, conversations, personas) is hydrated in onMount, before autosave
+    // is enabled — restoring it here would race the autosave effect.
     void refreshNodeAboutLine();
 
-    const ok = await initializeSDK({ appName: "flint" });
+    // Settings are hydrated by this point (onMount runs restoreChat before init), so the
+    // service honors the user's autostart choice, port and bind address instead of a hardcoded
+    // 5272 that opened a port they never configured.
+    const ok = await initializeSDK({
+      appName: "flint",
+      autoStartService,
+      servicePort: networkPort,
+      bindAddress: networkBindAddress || undefined,
+    });
     void refreshNodeAboutLine();
 
     if (ok) {
@@ -2725,8 +2919,17 @@ updateStateFromSdk();
       await loadRecommendations();
       await loadSTTModels();
 
-      // Restore previous chat if any
-      restoreChat();
+      // A restored alias for a model that is no longer in the catalog would otherwise pin the
+      // selection forever, because the auto-select effect bails out whenever an alias is set.
+      if (
+        selectedModelAlias &&
+        state.models.length > 0 &&
+        !state.models.some((m: ModelInfo) => m.alias === selectedModelAlias)
+      ) {
+        appendAppLog(`Previously selected model "${selectedModelAlias}" is no longer available`, 'warn');
+        selectedModelAlias = "";
+        selectedModel = null;
+      }
 
       // Auto setup accelerators (background)
       ensureHardwareAccel().catch(console.error);
@@ -2737,7 +2940,7 @@ updateStateFromSdk();
         if (!coachDismissed) {
           const hasAnyCached = state.models.some((m: ModelInfo) => m.isCached);
           // Show coach when nothing cached yet, or always until dismissed after first install
-          showFirstRunCoach = !hasAnyCached || !localStorage.getItem(PERSIST_KEY);
+          showFirstRunCoach = !hasAnyCached || !hadPersistedChatAtLaunch;
         }
       } catch {
         showFirstRunCoach = true;
@@ -2745,7 +2948,7 @@ updateStateFromSdk();
 
       // Auto first launch: if no cached models and no persisted chat, offer starter (do not force-download)
       const hasAnyCached = state.models.some((m: ModelInfo) => m.isCached);
-      const hasPersisted = !!localStorage.getItem(PERSIST_KEY);
+      const hasPersisted = hadPersistedChatAtLaunch;
       if (!hasAnyCached && !hasPersisted && recommendedStarters.length > 0) {
         statusMessage = `First launch — pick a starter model below, or open Help for a guided path.`;
         currentView = "models";
@@ -2963,6 +3166,7 @@ updateStateFromSdk();
     }
     try {
       const alias = model.alias;
+      const nav = beginChatNavigation();
 
       if (!model.isCached) {
         statusMessage = `Downloading recommended model ${alias}...`;
@@ -2973,12 +3177,15 @@ updateStateFromSdk();
         await loadModelAndMaybeStart(model);
       }
 
+      if (!chatNavigationCurrent(nav)) {
+        statusMessage = `${alias} is ready. The chat changed while it loaded — pick it in the chat header to use it.`;
+        return;
+      }
+
       selectedModelAlias = alias;
       selectedModel = { alias }; // minimal handle
       chatClient = null; // use HTTP from sidecar
-      chatMessages = [];
-      chatInput = "";
-      lastAutoSummaryCount = 0;
+      beginNewChatThread();
 
       // Auto start service and switch to chat
       if (!state.serviceRunning) {
@@ -3008,10 +3215,8 @@ updateStateFromSdk();
       selectedModelAlias = model.alias;
       selectedModel = { alias: model.alias };
       chatClient = null;
-      chatMessages = [];
-      chatInput = "";
+      beginNewChatThread();
       currentView = "chat";
-      lastAutoSummaryCount = 0;
       statusMessage = `Chatting with ${model.alias}`;
 
       // === Step 4: apply good default for this model
@@ -3040,7 +3245,12 @@ updateStateFromSdk();
       return;
     }
     try {
+      const nav = beginChatNavigation();
       await loadModelAndMaybeStart(model);
+      if (!chatNavigationCurrent(nav)) {
+        statusMessage = `${model.alias} is loaded. The chat changed while it loaded — pick it in the chat header to use it.`;
+        return;
+      }
       await selectAndChat(model);
     } catch (e: any) {
       statusMessage = `Load failed: ${e?.message || e}`;
@@ -3144,27 +3354,50 @@ updateStateFromSdk();
   }
 
   let unlistenCloseRequested: (() => void) | null = null;
+  let mountDisposed = false;
 
   onMount(() => {
     hostPlatform = detectHostPlatform();
     // Subscribe to the SDK store
     unsubscribe = sdkStateStore.subscribe(syncFromStore);
-    // Load conversation history
-    loadConversations();
-    loadCompareHistory();
-    init();
-    document.addEventListener('keydown', handleGlobalKeydown);
 
+    // Register lifecycle listeners before any fallible storage work, so a storage failure
+    // can never leave the app without a keyboard handler or close-to-tray hook.
+    document.addEventListener('keydown', handleGlobalKeydown);
     getCurrentWindow()
       .onCloseRequested(handleCloseRequested)
-      .then((un) => { unlistenCloseRequested = un; })
+      .then((un) => {
+        // The component can be torn down before this resolves; drop the listener instead of
+        // leaking it.
+        if (mountDisposed) un();
+        else unlistenCloseRequested = un;
+      })
       .catch((e) => console.warn("[flint] close-to-tray unavailable", e));
 
+    // Hydrate every persisted store *before* enabling autosave, and before init() starts any
+    // async work. persistChat() is inert until `hydrated` flips.
+    //
+    // Order matters: loadConversations() bootstraps an empty conversation when the index is
+    // missing, and that clears chatMessages — so it has to run before restoreChat() fills the
+    // thread, not after.
+    let mayPersist = true;
+    try {
+      loadConversations();
+      mayPersist = restoreChat();
+      loadCompareHistory();
+      loadCustomPersonasState();
+    } finally {
+      hydrated = mayPersist;
+    }
+
+    init();
+
     return () => {
+      mountDisposed = true;
       if (unsubscribe) unsubscribe();
-      saveConversations();
       document.removeEventListener('keydown', handleGlobalKeydown);
       unlistenCloseRequested?.();
+      saveConversations();
     };
   });
 
@@ -3315,6 +3548,7 @@ updateStateFromSdk();
       return;
     }
     try {
+      const nav = beginChatNavigation();
       const alreadyThis =
         state.pool.some((e: any) => e.alias === model.alias && e.variantId === variantId);
       if (!alreadyThis) {
@@ -3322,12 +3556,14 @@ updateStateFromSdk();
         appendAppLog(`Load & Chat: ${model.alias} variant ${variantId}`);
         await sdkLoadModel(model, "chat", variantId);
       }
+      if (!chatNavigationCurrent(nav)) {
+        statusMessage = `${model.alias} is loaded. The chat changed while it loaded — pick it in the chat header to use it.`;
+        return;
+      }
       selectedModelAlias = model.alias;
       selectedModel = { alias: model.alias };
       chatClient = null;
-      chatMessages = [];
-      chatInput = "";
-      lastAutoSummaryCount = 0;
+      beginNewChatThread();
       if (recommendedMaxTurns && recommendedMaxTurns !== contextTurns) {
         contextTurns = recommendedMaxTurns;
       }
@@ -3515,6 +3751,22 @@ updateStateFromSdk();
     abortController = requestController;
     activeStreamRequestId = null;
 
+    // Ownership: if the thread is replaced mid-flight (new chat, conversation switch, Load &
+    // Chat) the deltas below must not land in whatever thread is on screen now. Index-based
+    // writes to `chatMessages.length - 1` would silently corrupt the new conversation.
+    const epoch = chatThreadEpoch;
+    const assistantId = `asst-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    const ownsThread = () => chatThreadEpoch === epoch;
+    /** Patch this request's assistant message by identity. Returns false if it is gone. */
+    function updateAssistantMessage(patch: Record<string, any>): boolean {
+      if (!ownsThread()) return false;
+      const i = chatMessages.findIndex((m: any) => m.id === assistantId);
+      if (i < 0) return false;
+      chatMessages[i] = { ...chatMessages[i], ...patch };
+      chatMessages = [...chatMessages];
+      return true;
+    }
+
     // Scroll to bottom
     setTimeout(() => {
       if (messagesContainer)
@@ -3523,7 +3775,7 @@ updateStateFromSdk();
 
     try {
       let assistantContent = "";
-      chatMessages = [...chatMessages, { role: "assistant", content: "" }];
+      chatMessages = [...chatMessages, { role: "assistant", content: "", id: assistantId }];
 
       // Prefer HTTP endpoint from sidecar when available (clean architecture)
       const endpoint = state.endpoint;
@@ -3535,21 +3787,18 @@ updateStateFromSdk();
           (delta: string) => {
             if (requestController.signal.aborted) return;
             assistantContent += delta;
-            const lastIndex = chatMessages.length - 1;
-            chatMessages[lastIndex] = {
-              ...chatMessages[lastIndex],
-              content: assistantContent,
-            };
-            chatMessages = [...chatMessages];
+            updateAssistantMessage({ content: assistantContent });
           },
           {
             preferredEp: selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
           },
           (requestId: number) => {
-            activeStreamRequestId = requestId;
+            // Only the current request owns the cancellation token; a superseded stream
+            // assigning here would make Stop cancel the wrong generation.
+            if (abortController === requestController) activeStreamRequestId = requestId;
           },
         );
-        if (requestController.signal.aborted) {
+        if (requestController.signal.aborted || !ownsThread()) {
           return;
         }
         const endpointAcceleration = String(data?.acceleration?.active || "").trim();
@@ -3557,12 +3806,7 @@ updateStateFromSdk();
           setModelRuntimeMeta(selectedModelAlias, { lastUsedAcceleration: endpointAcceleration });
         }
         assistantContent = data?.choices?.[0]?.message?.content || assistantContent;
-        const lastIndex = chatMessages.length - 1;
-        chatMessages[lastIndex] = {
-          ...chatMessages[lastIndex],
-          content: assistantContent,
-        };
-        chatMessages = [...chatMessages];
+        updateAssistantMessage({ content: assistantContent });
         setTimeout(() => {
           if (messagesContainer)
             messagesContainer.scrollTop = messagesContainer.scrollHeight;
@@ -3571,55 +3815,59 @@ updateStateFromSdk();
         // Fallback to direct client (dev only)
         const inferenceMessages = getMessagesForInference();
         for await (const chunk of chatClient.completeStreamingChat(inferenceMessages)) {
-          if (requestController.signal.aborted) break;
+          if (requestController.signal.aborted || !ownsThread()) break;
           const delta = chunk.choices?.[0]?.delta?.content || "";
           if (delta) {
             assistantContent += delta;
-            const lastIndex = chatMessages.length - 1;
-            chatMessages[lastIndex] = {
-              ...chatMessages[lastIndex],
-              content: assistantContent,
-            };
-            chatMessages = [...chatMessages];
+            updateAssistantMessage({ content: assistantContent });
           }
         }
       }
     } catch (err: any) {
       if (!requestController.signal.aborted) {
-        const lastIndex = chatMessages.length - 1;
-        chatMessages[lastIndex] = {
-          ...chatMessages[lastIndex],
+        updateAssistantMessage({
           isError: true,
-          content:
-            (chatMessages[lastIndex].content || "") +
-            "\n\n[Error: " +
-            (err?.message || err) +
-            "]",
-        };
-        chatMessages = [...chatMessages];
+          content: `${assistantContentSoFar(assistantId)}\n\n[Error: ${err?.message || err}]`,
+        });
       }
     } finally {
-      isStreaming = false;
-      activeStreamRequestId = null;
+      // A superseded request must not clear the control state of the one that replaced it,
+      // which would hide the Stop button and strand the new stream uncancellable.
       if (abortController === requestController) {
+        isStreaming = false;
+        activeStreamRequestId = null;
         abortController = null;
       }
     }
   }
 
+  /** Current text of an in-flight assistant message, for appending an error to. */
+  function assistantContentSoFar(assistantId: string): string {
+    const msg = chatMessages.find((m: any) => m.id === assistantId);
+    return String(msg?.content || "");
+  }
+
   async function stopGeneration() {
-    if (abortController) {
-      abortController.abort();
-      if (activeStreamRequestId != null) {
-        try {
-          await cancelChatRequest(activeStreamRequestId);
-        } catch (e: any) {
-          statusMessage = `Stop warning: ${e?.message || e}`;
-        }
-      }
+    // Take ownership of the control state up front: the aborted request's `finally` may not run
+    // until after the user has started another one, and it must not clobber that one.
+    const controller = abortController;
+    if (!controller) return;
+    const requestId = activeStreamRequestId;
+    controller.abort();
+    if (abortController === controller) {
+      abortController = null;
+      activeStreamRequestId = null;
       isStreaming = false;
-      statusMessage = "Generation stopped by user";
     }
+    if (requestId != null) {
+      try {
+        await cancelChatRequest(requestId);
+      } catch (e: any) {
+        statusMessage = `Stop warning: ${e?.message || e}`;
+        return;
+      }
+    }
+    statusMessage = "Generation stopped by user";
   }
 
   /**
@@ -3723,7 +3971,7 @@ updateStateFromSdk();
       if (!combined.includes(m)) combined.push(m);
     }
 
-    // Latest user turn drives optional FLInt fact-sheet expansion (token-efficient).
+    // Latest user turn drives optional Flint fact-sheet expansion (token-efficient).
     let latestUserText = "";
     for (let i = combined.length - 1; i >= 0; i--) {
       if (combined[i]?.role === "user") {
@@ -3797,7 +4045,10 @@ updateStateFromSdk();
 
     const splitIndex = chatMessages.length - turnsToKeep * 2;
     const oldMessages = chatMessages.slice(0, splitIndex);
-    const keepMessages = chatMessages.slice(splitIndex);
+    // Identity anchor: after the await the thread may have grown, so a stored index would
+    // splice at the wrong place and drop whatever arrived in the meantime.
+    const boundaryMessage = oldMessages[oldMessages.length - 1];
+    const epoch = chatThreadEpoch;
 
     const summaryPrompt = `You are a precise conversation summarizer.
 Summarize the following conversation history concisely in 4-8 sentences.
@@ -3828,6 +4079,7 @@ Output only the summary text, no preamble.`;
         } catch {}
       }
     } catch (e: any) {
+      if (chatThreadEpoch !== epoch) return;
       statusMessage = `Summarization failed: ${e?.message || e}. Using condense instead.`;
       // Non-destructive fallback
       oldMessages.forEach((m: any) => { if (!m.pinned && !m.isSummary) m.condensed = true; });
@@ -3835,10 +4087,21 @@ Output only the summary text, no preamble.`;
       return;
     }
 
+    // The thread was replaced while the summary was being generated — it belongs nowhere now.
+    if (chatThreadEpoch !== epoch) return;
+
     if (!summary.trim()) {
       statusMessage = "Summary was empty. Condensed instead.";
       oldMessages.forEach((m: any) => { if (!m.pinned && !m.isSummary) m.condensed = true; });
       chatMessages = [...chatMessages];
+      return;
+    }
+
+    // Locate the boundary in the *live* thread rather than trusting the pre-await index, so
+    // turns added while the summary was generating are preserved.
+    const insertAt = boundaryMessage ? chatMessages.indexOf(boundaryMessage) + 1 : 0;
+    if (insertAt <= 0) {
+      statusMessage = "Summary discarded — the conversation changed while it was generating.";
       return;
     }
 
@@ -3853,8 +4116,11 @@ Output only the summary text, no preamble.`;
       if (!m.pinned && !m.isSummary) m.condensed = true;
     });
 
-    // Insert the summary at the position where the old part started
-    chatMessages = [...chatMessages.slice(0, splitIndex), summaryMessage, ...keepMessages];
+    chatMessages = [
+      ...chatMessages.slice(0, insertAt),
+      summaryMessage,
+      ...chatMessages.slice(insertAt),
+    ];
     statusMessage = "Conversation compacted with summary. Full thread still available via toggle.";
   }
 
@@ -3901,26 +4167,58 @@ Output only the summary text, no preamble.`;
   }
 
   // URL fetch helpers
+  let urlFetchAttemptSeq = 0;
+
   async function queueUrlFetch(url: string) {
+    if (!isFetchableUrl(url)) {
+      statusMessage = `Not a fetchable URL: ${url}`;
+      return;
+    }
     if (pendingUrlFetches.some(f => f.url === url)) return;
-    pendingUrlFetches = [...pendingUrlFetches, { url, status: 'pending' }];
+    urlFetchAttemptSeq += 1;
+    pendingUrlFetches = [...pendingUrlFetches, { url, status: 'pending', attempt: urlFetchAttemptSeq }];
+  }
+
+  /** Hide a detected URL without fetching it. Dismissals are chips too, so they need an attempt id. */
+  function dismissDetectedUrl(url: string) {
+    urlFetchAttemptSeq += 1;
+    pendingUrlFetches = [
+      ...pendingUrlFetches,
+      { url, attempt: urlFetchAttemptSeq, status: 'error', error: 'dismissed' },
+    ];
+  }
+
+  // Concurrent fetches share the spinner; a plain boolean would be cleared by whichever
+  // request finished first while the others were still running.
+  let inFlightUrlFetches = 0;
+
+  /**
+   * Patch a chip by attempt id. Matching on the URL alone is not enough: the user can remove a
+   * chip mid-fetch and re-queue the same URL, and the old response would then patch — or
+   * resurrect — that newer chip.
+   */
+  function patchUrlFetch(attempt: number, patch: Record<string, any>) {
+    const i = pendingUrlFetches.findIndex(f => f.attempt === attempt);
+    if (i < 0) return; // the user removed this chip — drop the result
+    pendingUrlFetches[i] = { ...pendingUrlFetches[i], ...patch };
+    pendingUrlFetches = [...pendingUrlFetches];
   }
 
   async function executeFetch(url: string) {
-    const idx = pendingUrlFetches.findIndex(f => f.url === url);
-    if (idx < 0) return;
-    pendingUrlFetches[idx] = { ...pendingUrlFetches[idx], status: 'fetching' };
-    pendingUrlFetches = [...pendingUrlFetches];
+    const chip = pendingUrlFetches.find(f => f.url === url);
+    if (!chip) return;
+    const attempt = chip.attempt;
+    patchUrlFetch(attempt, { status: 'fetching' });
+    inFlightUrlFetches += 1;
     isFetchingUrl = true;
     try {
       const result = await fetchUrl(url);
-      pendingUrlFetches[idx] = { url, status: 'done', title: result.title, text: result.text };
-      pendingUrlFetches = [...pendingUrlFetches];
+      patchUrlFetch(attempt, { status: 'done', title: result.title, text: result.text, error: undefined });
     } catch (e: any) {
-      pendingUrlFetches[idx] = { url, status: 'error', error: e?.message || String(e) };
-      pendingUrlFetches = [...pendingUrlFetches];
+      patchUrlFetch(attempt, { status: 'error', error: e?.message || String(e) });
     } finally {
-      isFetchingUrl = false;
+      inFlightUrlFetches = Math.max(0, inFlightUrlFetches - 1);
+      isFetchingUrl = inFlightUrlFetches > 0;
     }
   }
 
@@ -4017,58 +4315,97 @@ Output only the summary text, no preamble.`;
       if (dictationMediaRecorder && dictationMediaRecorder.state !== 'inactive') {
         dictationMediaRecorder.stop();
       }
-    } else {
-      const sttAlias = effectiveSTTModelAlias || 'whisper-tiny';
-      try {
-        dictationStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        dictationMediaRecorder = new MediaRecorder(dictationStream);
-        dictationChunks = [];
-        dictationInterim = '';
-        isRollingTranscribe = false;
+      return;
+    }
 
-        dictationMediaRecorder.ondataavailable = (event) => {
-          if (event.data.size > 0) {
-            dictationChunks = [...dictationChunks, event.data];
-            if (!isRollingTranscribe) triggerRollingTranscription(sttAlias);
-          }
-        };
+    const sttAlias = effectiveSTTModelAlias || 'whisper-tiny';
 
-        dictationMediaRecorder.onstop = async () => {
-          dictationStream?.getTracks().forEach((t) => t.stop());
-          isDictating = false;
-          const chunks = dictationChunks;
-          dictationChunks = [];
-          if (chunks.length === 0) { dictationInterim = ''; return; }
-          try {
-            const fullBlob = new Blob(chunks, { type: 'audio/webm' });
-            const wavBlob = await convertAudioBlobToWav(fullBlob).catch(() => fullBlob);
-            const res = await transcribeAudio(wavBlob, sttAlias, transcriptionLanguage, 'dictation.wav', { temperature: 0 });
-            const text = getTranscriptTextFromResult(res);
-            if (text) chatInput = chatInput ? `${chatInput} ${text}` : text;
-          } catch (err) {
-            statusMessage = `Dictation failed: ${err}`;
-          } finally {
-            dictationInterim = '';
-          }
-        };
+    // Identify this recording *before* the first await. `getUserMedia` and transcription both
+    // outlive the recorder, so two starts can be pending at once and a finalizer or rolling
+    // pass from an earlier session must never write into a later one — they all share
+    // dictationInterim / dictationChunks / dictationStream. The chat epoch is captured here so
+    // the transcript belongs to the conversation the user was dictating *into*.
+    dictationSession += 1;
+    const session = dictationSession;
+    const startEpoch = chatThreadEpoch;
+    const isCurrent = () => session === dictationSession;
 
-        dictationMediaRecorder.start(2000);
-        isDictating = true;
-      } catch (err) {
-        dictationStream?.getTracks().forEach((t) => t.stop());
-        dictationStream = null;
-        dictationMediaRecorder = null;
-        dictationChunks = [];
-        dictationInterim = '';
-        isDictating = false;
-        statusMessage = `Dictation mic error: ${err}`;
+    let stream: MediaStream | null = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!isCurrent()) {
+        // A newer start superseded us while the permission prompt was open.
+        stream.getTracks().forEach((t) => t.stop());
+        return;
       }
+
+      const recorder = new MediaRecorder(stream);
+      dictationStream = stream;
+      dictationMediaRecorder = recorder;
+      dictationChunks = [];
+      dictationInterim = '';
+      rollingOwner = 0;
+
+      recorder.ondataavailable = (event) => {
+        if (!isCurrent()) return;
+        if (event.data.size > 0) {
+          dictationChunks = [...dictationChunks, event.data];
+          if (rollingOwner === 0) triggerRollingTranscription(sttAlias, session);
+        }
+      };
+
+      recorder.onstop = async () => {
+        // Stop the stream this session captured, never the global one — that may belong to a
+        // newer session by now.
+        stream?.getTracks().forEach((t) => t.stop());
+        if (!isCurrent()) return;
+
+        isDictating = false;
+        const chunks = dictationChunks;
+        dictationChunks = [];
+        if (chunks.length === 0) {
+          dictationInterim = '';
+          return;
+        }
+        try {
+          const fullBlob = new Blob(chunks, { type: 'audio/webm' });
+          const wavBlob = await convertAudioBlobToWav(fullBlob).catch(() => fullBlob);
+          const res = await transcribeAudio(wavBlob, sttAlias, transcriptionLanguage, 'dictation.wav', { temperature: 0 });
+          const text = getTranscriptTextFromResult(res);
+          if (!text) {
+            // nothing to place
+          } else if (!isCurrent()) {
+            statusMessage = 'Dictation discarded — a newer recording started while it was transcribing.';
+          } else if (chatThreadEpoch !== startEpoch) {
+            statusMessage = 'Dictation discarded — the chat changed while it was transcribing.';
+          } else {
+            chatInput = chatInput ? `${chatInput} ${text}` : text;
+          }
+        } catch (err) {
+          if (isCurrent()) statusMessage = `Dictation failed: ${err}`;
+        } finally {
+          if (isCurrent()) dictationInterim = '';
+        }
+      };
+
+      recorder.start(2000);
+      isDictating = true;
+    } catch (err) {
+      stream?.getTracks().forEach((t) => t.stop());
+      if (!isCurrent()) return; // a newer session owns the shared state now
+      dictationStream = null;
+      dictationMediaRecorder = null;
+      dictationChunks = [];
+      dictationInterim = '';
+      isDictating = false;
+      statusMessage = `Dictation mic error: ${err}`;
     }
   }
 
-  async function triggerRollingTranscription(sttAlias: string) {
-    if (isRollingTranscribe || dictationChunks.length === 0) return;
-    isRollingTranscribe = true;
+  async function triggerRollingTranscription(sttAlias: string, session: number) {
+    if (session !== dictationSession) return;
+    if (rollingOwner !== 0 || dictationChunks.length === 0) return;
+    rollingOwner = session;
     const snapshotLen = dictationChunks.length;
     try {
       const windowChunks = dictationChunks.slice(-2); // ~last 4s (timeslice=2000ms)
@@ -4076,13 +4413,14 @@ Output only the summary text, no preamble.`;
       const wavBlob = await convertAudioBlobToWav(blob).catch(() => blob);
       const res = await transcribeAudio(wavBlob, sttAlias, transcriptionLanguage, 'dictation-interim.wav', { temperature: 0 });
       const text = getTranscriptTextFromResult(res);
-      if (text && isDictating) dictationInterim = text;
+      if (text && isDictating && session === dictationSession) dictationInterim = text;
     } catch {
       // rolling transcription is best-effort; failures are silent
     } finally {
-      isRollingTranscribe = false;
-      if (isDictating && dictationChunks.length > snapshotLen) {
-        triggerRollingTranscription(sttAlias);
+      // Release only our own lock: a stale pass must not unlock the current session.
+      if (rollingOwner === session) rollingOwner = 0;
+      if (isDictating && session === dictationSession && dictationChunks.length > snapshotLen) {
+        triggerRollingTranscription(sttAlias, session);
       }
     }
   }
@@ -4322,8 +4660,9 @@ Output only the summary text, no preamble.`;
     statusMessage = `Transcribing with ${sttAlias} via sidecar...`;
 
     try {
-      // Ensure the local service is running with an STT-capable model.
-      await startSvc(
+      // Ensure the local service is running with an STT-capable model. Deliberately NOT
+      // startSvc: a restart would evict the user's chat models mid-session.
+      await ensureServiceRunning(
         sttAlias,
         selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
       );
@@ -4426,7 +4765,7 @@ Output only the summary text, no preamble.`;
   <header class="header">
     <div class="brand" data-tooltip="Foundry Local Interface">
       <img class="brand-logo" src="/favicon.png" alt="Flint logo" />
-      <strong>FLInt</strong>
+      <strong>Flint</strong>
     </div>
 
     <div class="status-bar">
@@ -4680,6 +5019,14 @@ Output only the summary text, no preamble.`;
     </nav>
 
     <section class="content">
+      {#if storageError}
+        <div class="storage-error" role="alert">
+          <span class="storage-error-text">{storageError}</span>
+          <button type="button" class="storage-error-dismiss" onclick={dismissStorageError} aria-label="Dismiss storage warning">
+            Dismiss
+          </button>
+        </div>
+      {/if}
       {#if showFirstRunCoach}
         <div class="first-run-coach" role="region" aria-label="Getting started with Flint">
           <div class="first-run-head">
@@ -5786,7 +6133,7 @@ Output only the summary text, no preamble.`;
                         <button type="button" onclick={() => queueUrlFetch(url)} title="Fetch this page as context">
                           <Icon name="download" size={11} /> Fetch
                         </button>
-                        <button type="button" class="chip-dismiss" onclick={() => pendingUrlFetches = [...pendingUrlFetches, { url, status: 'error', error: 'dismissed' }]} title="Dismiss">
+                        <button type="button" class="chip-dismiss" onclick={() => dismissDetectedUrl(url)} title="Dismiss">
                           <Icon name="x" size={10} />
                         </button>
                       </span>
@@ -5999,12 +6346,17 @@ Output only the summary text, no preamble.`;
             {#if effectiveSTTModelAlias}
               <button
                 class="tiny"
+                disabled={serviceTransitionBusy}
                 onclick={async () => {
-                  await startSvc(
-                    effectiveSTTModelAlias,
-                    selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
-                  );
-                  statusMessage = `Service ensured with ${effectiveSTTModelAlias}`;
+                  try {
+                    await ensureServiceRunning(
+                      effectiveSTTModelAlias,
+                      selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+                    );
+                    statusMessage = `Service ensured with ${effectiveSTTModelAlias}`;
+                  } catch (e: any) {
+                    statusMessage = `Could not ensure service: ${e?.message || e}`;
+                  }
                 }}
               >
                 Ensure service
@@ -8388,6 +8740,32 @@ Output only the summary text, no preamble.`;
     color: var(--fg);
   }
 
+  .storage-error {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 0 0 12px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--danger, #e5484d) 45%, var(--border));
+    background: color-mix(in srgb, var(--danger, #e5484d) 10%, var(--panel-bg));
+    max-width: 720px;
+    font-size: 13px;
+  }
+  .storage-error-text {
+    flex: 1;
+  }
+  .storage-error-dismiss {
+    flex: none;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    cursor: pointer;
+    font-size: 12px;
+    padding: 4px 10px;
+  }
   .first-run-coach {
     margin: 0 0 16px;
     padding: 14px 16px;

@@ -91,6 +91,8 @@ export type ModelInfo = IModel & {
 };
 
 let managerInstance: any = null;
+/** Bumped for every sidecar child, so async work can tell whether its child is still the live one. */
+let sidecarGeneration = 0;
 let currentEndpoint: string | undefined = undefined;
 /** Init payload of the last successful init, so a crash-respawned sidecar can be re-inited. */
 let lastInitPayload: { appName: string; logLevel: string } | null = null;
@@ -335,7 +337,26 @@ export function getSDKState() {
   return sdkState;
 }
 
-async function startSidecar() {
+let startPromise: Promise<void> | null = null;
+
+/**
+ * Spawn the sidecar, at most once at a time.
+ *
+ * The `sidecarProcess` guard alone is not enough: the function awaits the Node preflight and
+ * resource resolution *before* assigning `sidecarProcess`, so two callers arriving together
+ * would both pass the check and spawn a child. The second child's stdout is never read, and it
+ * keeps a second Foundry core alive.
+ */
+async function startSidecar(): Promise<void> {
+  if (sidecarProcess) return;
+  if (startPromise) return startPromise;
+  startPromise = spawnSidecar().finally(() => {
+    startPromise = null;
+  });
+  return startPromise;
+}
+
+async function spawnSidecar() {
   if (sidecarProcess) return;
 
   const nodeCheck = await ensureNodeRuntime();
@@ -497,18 +518,48 @@ async function startSidecar() {
     sdkState.update(s => ({ ...s, logs: [...s.logs.slice(-199), { ts: Date.now(), level: 'error' as const, message: text, source: 'sdk' as const }] }));
   });
 
+  // Set once spawn() resolves. Until then this attempt has no generation, but it is still the
+  // only attempt in flight (startSidecar is single-flight), so its close/error events are ours.
+  let myGeneration: number | null = null;
+  const ownsGlobalState = () => myGeneration === null || myGeneration === sidecarGeneration;
+
   command.on('close', (data: any) => {
     closeData = data;
     console.log(`[sdk] Sidecar process closed (exit code: ${data?.code})`);
+    // A killed older child can emit `close` after Retry already spawned a replacement. Leaving
+    // this unguarded would invalidate the new child and drain its pending requests.
+    if (!ownsGlobalState()) {
+      console.log('[sdk] Ignoring close from a superseded sidecar child');
+      return;
+    }
     sidecarReady = false;
     sidecarProcess = null;
-    updateState({ ready: false, error: 'Sidecar closed' });
+    // The manager lived inside that process. Leaving `managerInstance` set would make
+    // initializeSDK() return true immediately on the next Retry, reporting "ready" without
+    // ever running init — the app would look healthy against a dead child.
+    managerInstance = null;
+    currentEndpoint = undefined;
+    // Residency, the gateway and the native service all belonged to that process. Leaving the
+    // pool populated would show models as resident — and let callers skip loading them —
+    // against a child that no longer exists.
+    sdkState.update((s) => ({
+      ...s,
+      ready: false,
+      error: 'Sidecar closed',
+      serviceRunning: false,
+      endpoint: undefined,
+      pool: [],
+      poolStats: null,
+      loadedModels: [],
+      models: s.models.map((m) => (m.isLoaded ? { ...m, isLoaded: false } : m)),
+    }));
     drainPending(new Error('Sidecar closed'));
   });
 
   command.on('error', (error: any) => {
     commandError = String(error);
     console.error(`[sdk] Sidecar error event:`, error);
+    if (!ownsGlobalState()) return;
     updateState({ error: `Sidecar error: ${error}` });
     drainPending(new Error(`Sidecar error: ${error}`));
   });
@@ -516,6 +567,7 @@ async function startSidecar() {
   // spawn() returns the Child process which has .write()
   console.log(`[sdk] Calling spawn()...`);
   sidecarProcess = await command.spawn();
+  myGeneration = ++sidecarGeneration;
   console.log(`[sdk] Sidecar process spawned, waiting for ready signal...`);
 
   // Wait for the sidecar to signal ready (it sends { ready: true } on startup)
@@ -567,9 +619,9 @@ async function sendInternal(
     // spawn is a respawn after a crash — re-init transparently, or every catalog-touching
     // command would fail until the whole app restarts. (Models/service state still needs
     // reloading by the user; this only restores basic operability.)
-    if (lastInitPayload && cmd !== 'init') {
+    if (lastInitPayload && cmd !== 'init' && !initializing) {
       try {
-        await sendInternal('init', lastInitPayload);
+        await ensureInitialized(lastInitPayload);
         console.log('[sdk] Sidecar respawned — SDK re-initialized');
       } catch (e) {
         console.warn('[sdk] Sidecar respawn re-init failed', e);
@@ -613,35 +665,109 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
-let isInitializing = false;
+let initPromise: Promise<void> | null = null;
+// True while performInit is running, so the crash-recovery path in sendInternal does not try to
+// recover the very commands init itself is issuing (which would await its own promise forever).
+let initializing = false;
 
-export async function initializeSDK(config: Partial<any> = {}): Promise<boolean> {
-  if (managerInstance) {
-    updateState({ ready: true });
-    return true;
+async function performInit(payload: { appName: string; logLevel: string }) {
+  initializing = true;
+  try {
+    // Ensure the child exists *before* capturing its generation — otherwise `sendInternal`
+    // would spawn one below, bump the generation, and the check would always fail on a normal
+    // cold start.
+    await startSidecar();
+    // Initialization belongs to one specific child. If that child dies mid-init, a replacement
+    // is spawned that has never seen `init`, and the remaining steps would succeed against it
+    // while its native manager is absent — leaving `ready: true` on an uninitialized process.
+    const generation = sidecarGeneration;
+    const stillOurChild = () =>
+      generation === sidecarGeneration && !!sidecarProcess && sidecarReady;
+
+    await sendInternal('init', payload);
+    if (!stillOurChild()) {
+      throw new Error('Sidecar was replaced during initialization');
+    }
+    await sendInternal('setLogLevel', { level: 'info' });
+    if (!stillOurChild()) {
+      throw new Error('Sidecar was replaced during initialization');
+    }
+    lastInitPayload = payload;
+    managerInstance = true;
+    updateState({ ready: true, error: null });
+    // The previous child's residency is meaningless; refresh before anyone reads the pool.
+    try {
+      await refreshModels();
+    } catch (e) {
+      console.warn('[sdk] Post-init model refresh failed', e);
+    }
+  } finally {
+    initializing = false;
   }
-  if (isInitializing) return false;
-  isInitializing = true;
+}
+
+/**
+ * Initialize the SDK against the current sidecar child, at most once at a time.
+ *
+ * Foundry Local's native core initializes once per process — a second `init` throws
+ * "already initialized". After a crash several concurrent commands (plus a user-pressed Retry)
+ * can all reach for recovery simultaneously, so every path must share one attempt.
+ */
+function ensureInitialized(payload: { appName: string; logLevel: string }): Promise<void> {
+  if (managerInstance) return Promise.resolve();
+  if (initPromise) return initPromise;
+  initPromise = performInit(payload).finally(() => {
+    initPromise = null;
+  });
+  return initPromise;
+}
+
+let initializeSDKPromise: Promise<boolean> | null = null;
+
+/**
+ * Bring the SDK up: initialize the core, then start or adopt the local service.
+ *
+ * Single-flighted as a whole, not just around the core init — otherwise a double Retry would
+ * share the init but each caller would still run its own autostart, and `startService` is a
+ * destructive restart that would clear the pool out from under the first caller.
+ */
+export async function initializeSDK(config: Partial<any> = {}): Promise<boolean> {
+  if (initializeSDKPromise) return initializeSDKPromise;
+  initializeSDKPromise = performInitializeSDK(config).finally(() => {
+    initializeSDKPromise = null;
+  });
+  return initializeSDKPromise;
+}
+
+async function performInitializeSDK(config: Partial<any>): Promise<boolean> {
+  const initPayload = { appName: config.appName || 'flint', logLevel: config.logLevel || 'info' };
+  const alreadyInitialized = !!managerInstance;
   updateState({ error: null });
 
   try {
-    const initPayload = { appName: config.appName || 'flint', logLevel: config.logLevel || 'info' };
-    await send('init', initPayload);
-    await send('setLogLevel', { level: 'info' }); // at least enabling logging
-    lastInitPayload = initPayload;
-
-    managerInstance = true;
-    updateState({ ready: true, error: null });
-    await refreshModels();
-    // Auto start service for endpoint exposure (MVP requirement)
+    await ensureInitialized(initPayload);
+    // Autostart is a user setting, and the port/bind address belong to the frontend. Starting
+    // the service here unconditionally on a hardcoded 5272 both ignored "don't autostart" and
+    // opened a port the user had not configured. A repeat call against an already-initialized
+    // manager must not restart the service either — that would clear the pool.
     try {
-      await send('startService', { port: 5272 });
-      const status = await send('getStatus');
-      if (status.result?.endpoint) {
-        updateState({ endpoint: status.result.endpoint, serviceRunning: true });
+      if (config.autoStartService && !alreadyInitialized) {
+        await startService(
+          config.servicePort || 5272,
+          undefined,
+          undefined,
+          config.bindAddress || undefined,
+        );
+      } else {
+        // Adopt whatever is actually running — including a service started before this init.
+        const status = await send('getStatus');
+        if (status.result?.endpoint) {
+          currentEndpoint = status.result.endpoint;
+          updateState({ endpoint: status.result.endpoint, serviceRunning: true });
+        }
       }
     } catch (e) {
-      console.warn('Auto-start service failed (can be started manually)', e);
+      console.warn('Service start/probe failed (can be started manually)', e);
     }
     return true;
   } catch (e: any) {
@@ -653,8 +779,6 @@ export async function initializeSDK(config: Partial<any> = {}): Promise<boolean>
         : `Sidecar init failed: ${raw}`;
     updateState({ error: errMsg, ready: false });
     return false;
-  } finally {
-    isInitializing = false;
   }
 }
 
@@ -816,6 +940,25 @@ export async function setModelPriorities(
   if (opts.refresh !== false) await refreshModels();
 }
 
+/**
+ * Install eviction rules and model priorities together.
+ *
+ * One command because each of the two older commands sweeps immediately: sending them
+ * separately means the first sweep runs under half-updated settings and can unload a model the
+ * user just pinned.
+ */
+export async function applyMemorySettings(
+  priorities: ModelPriorityEntry[],
+  eviction?: Partial<EvictionConfig>,
+): Promise<EvictionConfig | null> {
+  const res = await send('applyMemorySettings', {
+    priorities,
+    ...(eviction ? { eviction } : {}),
+  });
+  await refreshModels();
+  return res.result?.config ?? null;
+}
+
 export async function deleteModel(model: any, variantId?: string) {
   const payload: any = { alias: model.alias };
   if (variantId) payload.variantId = variantId;
@@ -885,7 +1028,37 @@ export async function getLocalEndpoint(): Promise<string | undefined> {
   return res.endpoint;
 }
 
-export async function startService(
+/**
+ * Serializes every service lifecycle transition.
+ *
+ * The sidecar's `startService` is a *destructive restart*: it tears down the gateway and clears
+ * the model pool and usage counters. Overlapping a start with a stop, a settings re-apply or a
+ * second start strands in-flight work against an endpoint that is being replaced, so all of
+ * them queue here rather than each caller guarding itself.
+ */
+let serviceTransition: Promise<unknown> = Promise.resolve();
+
+function queueServiceTransition<T>(fn: () => Promise<T>): Promise<T> {
+  const next = serviceTransition.then(fn, fn);
+  // Keep the chain alive even when a transition fails; a rejected tail would reject every
+  // subsequent transition.
+  serviceTransition = next.catch(() => {});
+  return next;
+}
+
+/** True while a start/stop/restart is in progress, for disabling UI that would overlap it. */
+export function isServiceTransitioning(): boolean {
+  return serviceTransitionDepth > 0;
+}
+
+let serviceTransitionDepth = 0;
+
+/**
+ * Start the service *without* taking the transition lock. Only reachable through the
+ * `startNow` handle `withServiceTransition` passes to its callback, so the serialization
+ * invariant cannot be bypassed from outside this module.
+ */
+async function startServiceLocked(
   port = 5272,
   alias?: string,
   preferredEp?: string,
@@ -907,10 +1080,60 @@ export async function startService(
   return currentEndpoint!;
 }
 
+export async function startService(
+  port = 5272,
+  alias?: string,
+  preferredEp?: string,
+  bindAddress?: string
+): Promise<string> {
+  return withServiceTransition(() => startServiceLocked(port, alias, preferredEp, bindAddress));
+}
+
 export async function stopService(): Promise<void> {
-  await send('stopService');
-  currentEndpoint = undefined;
-  updateState({ endpoint: undefined, serviceRunning: false });
+  return withServiceTransition(async () => {
+    await send('stopService');
+    currentEndpoint = undefined;
+    updateState({ endpoint: undefined, serviceRunning: false });
+  });
+}
+
+/** The lock-free lifecycle operations handed to a `withServiceTransition` callback. */
+export interface ServiceTransitionHandle {
+  startNow(port?: number, alias?: string, preferredEp?: string, bindAddress?: string): Promise<string>;
+}
+
+/**
+ * Run `fn` while holding the service-transition lock, so work that depends on the service
+ * staying up (e.g. loading an STT model before transcribing) cannot be torn down mid-flight by
+ * a concurrent restart.
+ *
+ * `fn` must never call the queued `startService` / `stopService` — that would enqueue behind
+ * the lock it already holds and deadlock. Use the passed handle instead.
+ */
+export async function withServiceTransition<T>(
+  fn: (handle: ServiceTransitionHandle) => Promise<T>
+): Promise<T> {
+  return queueServiceTransition(async () => {
+    serviceTransitionDepth += 1;
+    // The handle is only valid for the duration of the callback. Retaining it and calling
+    // startNow() later would run a destructive restart with no lock held.
+    let handleActive = true;
+    try {
+      return await fn({
+        startNow(port, alias, preferredEp, bindAddress) {
+          if (!handleActive) {
+            return Promise.reject(
+              new Error('Service transition handle used after its transition completed'),
+            );
+          }
+          return startServiceLocked(port, alias, preferredEp, bindAddress);
+        },
+      });
+    } finally {
+      handleActive = false;
+      serviceTransitionDepth -= 1;
+    }
+  });
 }
 
 export async function chatCompletion(

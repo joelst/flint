@@ -311,10 +311,14 @@ export function createGateway (options) {
 
         if (!mayRetry && !isStatus) {
           res.writeHead(status, outHeaders);
+          // Resolve only when the pipeline finishes, not when it is registered. The caller
+          // brackets the activity lease around this promise, so resolving early reports the
+          // model idle while it is still streaming tokens — long enough for the eviction
+          // sweep to unload it mid-generation.
           pipeline(upRes, res, () => {
             res.off('close', onClientClose);
+            resolve2(SENT);
           });
-          resolve2(SENT);
           return;
         }
 

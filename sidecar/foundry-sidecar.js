@@ -70,7 +70,7 @@ const KNOWN_COMMANDS = new Set([
   'poolStatus', 'getAccessLog', 'fetchUrl',
   'inspectModelFolder', 'importModelFolder', 'linkModelFolder',
   'getModelTemplate', 'setModelTemplate',
-  'setEvictionConfig', 'setModelPriorities',
+  'setEvictionConfig', 'setModelPriorities', 'applyMemorySettings',
   'wslStatus', 'wslEnableMirrored', 'wslShutdown',
 ]);
 
@@ -98,6 +98,7 @@ const FIELD_TYPES = {
     maxResidentEnabled: 'boolean', maxResident: 'number',
   },
   setModelPriorities: { priorities: 'array' },
+  applyMemorySettings: { priorities: 'array' },
 };
 
 // Commands that accept a lane field; validated to 'chat' | 'audio'.
@@ -136,6 +137,7 @@ const COMMAND_SCHEMA = {
   setModelTemplate:   { required: ['name', 'promptTemplate'], optional: [] },
   setEvictionConfig:  { required: [], optional: ['idleUnloadEnabled', 'idleTimeoutMs', 'maxResidentEnabled', 'maxResident'] },
   setModelPriorities: { required: ['priorities'], optional: [] },
+  applyMemorySettings: { required: ['priorities'], optional: ['eviction'] },
   wslStatus:          { required: [], optional: [] },
   wslEnableMirrored:  { required: [], optional: [] },
   wslShutdown:        { required: [], optional: [] },
@@ -159,6 +161,14 @@ const AUDIO_BASE64_MAX_CHARS = Math.ceil(50 * 1024 * 1024 * 4 / 3);
  * Validates a command name and its payload fields.
  * Returns an error string if invalid, or null if the command is well-formed.
  */
+/** Nested types for the eviction patch, mirroring setEvictionConfig's own FIELD_TYPES entry. */
+const EVICTION_FIELD_TYPES = {
+  idleUnloadEnabled: 'boolean',
+  idleTimeoutMs: 'number',
+  maxResidentEnabled: 'boolean',
+  maxResident: 'number',
+};
+
 function validateCommand(cmd, payload) {
   if (!KNOWN_COMMANDS.has(cmd)) {
     return `Unknown command: ${cmd}`;
@@ -194,6 +204,21 @@ function validateCommand(cmd, payload) {
   if (cmd === 'chatCompletion') {
     if (payload.stream !== undefined && typeof payload.stream !== 'boolean') return `Command "chatCompletion" field "stream" must be a boolean`;
     if (payload.maxTokens !== undefined && typeof payload.maxTokens !== 'number') return `Command "chatCompletion" field "maxTokens" must be a number`;
+  }
+  if (cmd === 'applyMemorySettings' && payload.eviction !== undefined) {
+    const ev = payload.eviction;
+    if (typeof ev !== 'object' || ev === null || Array.isArray(ev)) {
+      return `Command "applyMemorySettings" field "eviction" must be an object`;
+    }
+    // Same strictness the standalone setEvictionConfig gets from COMMAND_SCHEMA/FIELD_TYPES:
+    // a misspelled key or a string "false" would otherwise normalize to a silent default.
+    for (const [key, value] of Object.entries(ev)) {
+      const expected = EVICTION_FIELD_TYPES[key];
+      if (!expected) return `Command "applyMemorySettings" eviction has unknown field "${key}"`;
+      if (typeof value !== expected) {
+        return `Command "applyMemorySettings" eviction field "${key}" must be a ${expected}`;
+      }
+    }
   }
   // Lane validation for commands that accept a lane field
   if (LANE_CMDS.has(cmd) && payload.lane !== undefined && !VALID_LANES.has(payload.lane)) {
@@ -363,29 +388,68 @@ async function unloadAlias (alias) {
   try {
     if (typeof entry.catModel.unload === 'function') await entry.catModel.unload();
   } catch (e) {
-    // Report but still drop the entry: a model we cannot unload is not one we can keep
-    // accounting for, and retrying forever would spam the log every sweep.
+    // A model we could not unload is still resident. Dropping it from the pool would hide
+    // it from every later sweep and from poolStatus while it keeps consuming memory, and
+    // reporting success would let the caller admit another model in its place.
     log('warn', `Unload of ${alias} failed: ${e?.message || e}`);
+    return false;
   }
   pool.delete(alias);
-  usage.delete(alias);
+  // Usage carries inFlight; discarding it while a request is still running would lose that
+  // request's accounting and let the next sweep treat the alias as idle.
+  const use = usage.get(alias);
+  if (!use || use.inFlight <= 0) usage.delete(alias);
   return true;
 }
+
+/**
+ * Serializes every eviction sweep and admission decision.
+ *
+ * A sweep draws a plan from the current pool and then unloads asynchronously. Two overlapping
+ * sweeps — the timer, a config change and two admissions, say — would each plan against the
+ * same pool, each count only its own admission, and both proceed: with a cap of 1 and an empty
+ * pool that ends with two resident models.
+ */
+let sweepChain = Promise.resolve();
+
+function withSweepLock (fn) {
+  const next = sweepChain.then(fn, fn);
+  sweepChain = next.catch(() => {});
+  return next;
+}
+
+/** Loads that have been admitted but have not finished, so the planner can count them. */
+let pendingAdmissions = 0;
 
 /**
  * @param {object} [options]
  * @param {number} [options.admitting] models about to load, so room is freed before the
  *   memory is spent rather than after
+ * @param {string} [options.excludeAlias] an alias whose slot is about to be freed, so the
+ *   planner sees the pool as it will be rather than as it is
  */
 async function runEvictionSweep (options = {}) {
+  return withSweepLock(() => runEvictionSweepLocked(options));
+}
+
+async function runEvictionSweepLocked (options = {}) {
   if (!evictionConfig.idleUnloadEnabled && !evictionConfig.maxResidentEnabled) return [];
-  const plan = selectEvictions(poolEntriesForEviction(), evictionConfig, Date.now(), options);
+  // Loads that are already admitted but still loading are not in the pool yet, so a sweep
+  // that ignored them would plan against a pool that is about to grow and free nothing.
+  const admitting = options.admitting ?? pendingAdmissions;
+  const entries = options.excludeAlias
+    ? poolEntriesForEviction().filter(e => e.alias !== options.excludeAlias)
+    : poolEntriesForEviction();
+  const plan = selectEvictions(entries, evictionConfig, Date.now(), { ...options, admitting });
   const done = [];
   for (const item of plan) {
     // Re-check under the current state: sweeps are async, and a request may have arrived
     // for this model since the plan was drawn up. Use the derived count so requests still
     // booked under a non-resident key (gateway autoload) are respected here too.
     if (inFlightFor(item.alias) > 0) continue;
+    // Priorities can change mid-sweep too, and a model the user just pinned must survive
+    // the plan that was drawn before the pin.
+    if (normalizePriority(modelPriorities.get(item.alias)) === 'pinned') continue;
     if (await unloadAlias(item.alias)) {
       log('info', describeEviction(item, evictionConfig));
       audit('evict', { alias: item.alias, reason: item.reason });
@@ -393,6 +457,99 @@ async function runEvictionSweep (options = {}) {
     }
   }
   return done;
+}
+
+/**
+ * Reserve room for one load of `alias`, freeing it first.
+ *
+ * Returns a `release()` the caller must invoke once the load settles. Throws when the cap
+ * cannot be honoured — an unload that failed leaves its model resident, and loading anyway is
+ * exactly the memory overcommit the pre-load sweep exists to prevent.
+ */
+async function admitModel (alias, replacement = null) {
+  await withSweepLock(async () => {
+    pendingAdmissions += 1;
+    try {
+      // Validate before destroying anything. A replacement checks that its swap is still
+      // legal, but does not unload yet: if admission then fails the caller would be left
+      // with a failed load *and* no working model.
+      if (replacement) await replacement.precheck();
+      try {
+        // Free room before committing memory rather than after. Counting this load against the
+        // cap is the difference between staying under the limit and briefly exceeding it, which
+        // on a tight machine is the moment the allocation fails.
+        // A replacement's own slot is about to be freed, so the planner must not count it —
+        // otherwise it evicts an unrelated model to make room the swap already provides.
+        await runEvictionSweepLocked({
+          admitting: pendingAdmissions,
+          excludeAlias: replacement ? alias : undefined,
+        });
+      } catch (e) {
+        log('warn', `Eviction before load failed: ${e?.message || e}`);
+      }
+      if (evictionConfig.maxResidentEnabled) {
+        const resident = [...pool.keys()].filter(a => a !== alias).length;
+        if (resident + pendingAdmissions > evictionConfig.maxResident) {
+          throw new Error(
+            `Cannot load ${alias}: the ${evictionConfig.maxResident}-model limit is reached and `
+            + `no loaded model could be unloaded to make room.`,
+          );
+        }
+      }
+      // Admission is assured, so the outgoing variant can now be given up. This still runs
+      // under the sweep lock, so no other admission can claim the slot it frees.
+      if (replacement) await replacement.commit();
+    } catch (e) {
+      // The reservation never becomes a load, so it must not linger in the count. The
+      // caller's `release()` is unreachable when admission throws.
+      pendingAdmissions = Math.max(0, pendingAdmissions - 1);
+      throw e;
+    }
+  });
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    pendingAdmissions = Math.max(0, pendingAdmissions - 1);
+  };
+}
+
+/**
+ * Install new memory settings and sweep as one operation.
+ *
+ * Installing outside the lock is not enough: an older sweep already between its asynchronous
+ * unloads drew its plan under the previous settings, so a model pinned a moment ago could
+ * still be unloaded by it. Holding the lock across the install means every sweep either sees
+ * all of the new settings or none of them.
+ */
+async function installAndSweep (install) {
+  return withSweepLock(async () => {
+    install();
+    return runEvictionSweepLocked();
+  });
+}
+
+/** Install eviction rules without sweeping, so a caller can batch settings before one sweep. */
+function installEvictionConfig (patch) {
+  evictionConfig = normalizeEvictionConfig({ ...evictionConfig, ...patch });
+  restartEvictionTimer();
+  log('info', `Eviction config: idle=${evictionConfig.idleUnloadEnabled ? `${Math.round(evictionConfig.idleTimeoutMs / 60_000)}min` : 'off'} `
+    + `cap=${evictionConfig.maxResidentEnabled ? evictionConfig.maxResident : 'off'}`);
+}
+
+/** Install the priority map without sweeping. */
+function installModelPriorities (priorities) {
+  if (!Array.isArray(priorities)) {
+    throw new Error('priorities must be an array');
+  }
+  modelPriorities.clear();
+  for (const item of priorities) {
+    const alias = typeof item?.alias === 'string' ? item.alias.trim() : '';
+    if (!alias) continue;
+    const priority = normalizePriority(item?.priority);
+    // 'normal' is the default, so storing it would only grow the map forever.
+    if (priority !== 'normal') modelPriorities.set(alias, priority);
+  }
 }
 
 function restartEvictionTimer () {
@@ -1144,12 +1301,41 @@ function setModelTemplate(name, promptTemplate) {
   return { name: sanitizeModelName(name), promptTemplate: content.PromptTemplate, warnings: check.warnings };
 }
 
-async function ensureModel(alias, variantId) {  const existing = pool.get(alias);
+/**
+ * Serializes ensureModel per alias. Two concurrent requests for the same alias would otherwise
+ * both miss the pool, both run an eviction sweep and both call load() — loading the model
+ * twice, or unloading and reloading it underneath the first request.
+ * @type {Map<string, Promise<any>>}
+ */
+const ensureModelLocks = new Map();
+
+function ensureModel(alias, variantId) {
+  const inFlightLoad = ensureModelLocks.get(alias);
+  const next = (inFlightLoad ? inFlightLoad.catch(() => {}) : Promise.resolve())
+    .then(() => ensureModelLocked(alias, variantId));
+  ensureModelLocks.set(alias, next);
+  const release = () => {
+    if (ensureModelLocks.get(alias) === next) ensureModelLocks.delete(alias);
+  };
+  next.then(release, release);
+  return next;
+}
+
+async function ensureModelLocked(alias, variantId) {
+  const existing = pool.get(alias);
+  let switchingVariant = false;
   if (existing) {
     if (variantId && existing.variantId !== variantId) {
-      log('info', `Variant switch for ${alias}: ${existing.variantId} → ${variantId}`);
-      await existing.catModel.unload();
-      pool.delete(alias);
+      // A variant switch is an unload of the resident build. Doing that while requests are
+      // running against it fails them mid-flight, so the caller must retry rather than be
+      // silently served the variant it did not ask for.
+      if (inFlightFor(alias) > 0) {
+        throw new Error(
+          `Cannot switch ${alias} to variant ${variantId} while requests are in flight `
+          + `(currently ${existing.variantId}). Retry once they finish.`,
+        );
+      }
+      switchingVariant = true;
     } else {
       let loaded = null;
       if (typeof existing.catModel.isLoaded === 'function') {
@@ -1165,34 +1351,65 @@ async function ensureModel(alias, variantId) {  const existing = pool.get(alias)
       return existing;
     }
   }
-  // Free room before committing memory rather than after. Counting this load against the
-  // cap is the difference between staying under the limit and briefly exceeding it, which
-  // on a tight machine is the moment the allocation fails.
+  // Reserve a slot (freeing room first) and hold it until the load settles, so a concurrent
+  // load of a different alias cannot admit itself against the same free capacity. A variant
+  // switch reserves *before* unloading the old build: releasing the slot first would let
+  // another alias claim it and leave this load with nowhere to go, having already destroyed
+  // the variant the caller was using.
+  const releaseAdmission = await admitModel(alias, switchingVariant ? {
+    // Nothing here may destroy state: admission can still be refused after this runs.
+    precheck: async () => {
+      const current = pool.get(alias);
+      // A concurrent sweep may already have unloaded it, which is the outcome we wanted.
+      if (!current || current.variantId === variantId) return;
+      // Re-check in-flight: acquiring the sweep lock awaited, and a request may have arrived.
+      if (inFlightFor(alias) > 0) {
+        throw new Error(
+          `Cannot switch ${alias} to variant ${variantId} while requests are in flight `
+          + `(currently ${current.variantId}). Retry once they finish.`,
+        );
+      }
+    },
+    commit: async () => {
+      const current = pool.get(alias);
+      if (!current || current.variantId === variantId) return;
+      // Still under the sweep lock, but the pool was re-read after awaits, so re-check.
+      if (inFlightFor(alias) > 0) {
+        throw new Error(
+          `Cannot switch ${alias} to variant ${variantId} while requests are in flight `
+          + `(currently ${current.variantId}). Retry once they finish.`,
+        );
+      }
+      log('info', `Variant switch for ${alias}: ${current.variantId} → ${variantId}`);
+      if (!(await unloadAlias(alias))) {
+        throw new Error(`Could not unload ${alias} to switch variant to ${variantId}`);
+      }
+    },
+  } : null);
   try {
-    await runEvictionSweep({ admitting: 1 });
-  } catch (e) {
-    log('warn', `Eviction before load failed: ${e?.message || e}`);
-  }
-  const catModel = await manager.catalog.getModel(alias);
-  if (variantId) {
-    const variant = await manager.catalog.getModelVariant(variantId);
-    const fileSizeMb = variant.info?.fileSizeMb;
-    if (fileSizeMb && os.freemem() < fileSizeMb * 1024 * 1024 * 1.15) {
-      log('warn', `Low memory: loading ${alias} (${fileSizeMb} MB) but only ${Math.round(os.freemem() / 1024 / 1024)} MB free`);
+    const catModel = await manager.catalog.getModel(alias);
+    if (variantId) {
+      const variant = await manager.catalog.getModelVariant(variantId);
+      const fileSizeMb = variant.info?.fileSizeMb;
+      if (fileSizeMb && os.freemem() < fileSizeMb * 1024 * 1024 * 1.15) {
+        log('warn', `Low memory: loading ${alias} (${fileSizeMb} MB) but only ${Math.round(os.freemem() / 1024 / 1024)} MB free`);
+      }
+      catModel.selectVariant(variant);
+      await catModel.load();
+      pool.set(alias, { catModel, variantId });
+      log('info', `Model ${alias} loaded (variantId: ${variantId})`);
+    } else {
+      const fileSizeMb = catModel.info?.fileSizeMb;
+      if (fileSizeMb && os.freemem() < fileSizeMb * 1024 * 1024 * 1.15) {
+        log('warn', `Low memory: loading ${alias} (${fileSizeMb} MB) but only ${Math.round(os.freemem() / 1024 / 1024)} MB free`);
+      }
+      await catModel.load();
+      const resolvedVariantId = catModel.id;
+      pool.set(alias, { catModel, variantId: resolvedVariantId });
+      log('info', `Model ${alias} loaded (variantId: ${resolvedVariantId})`);
     }
-    catModel.selectVariant(variant);
-    await catModel.load();
-    pool.set(alias, { catModel, variantId });
-    log('info', `Model ${alias} loaded (variantId: ${variantId})`);
-  } else {
-    const fileSizeMb = catModel.info?.fileSizeMb;
-    if (fileSizeMb && os.freemem() < fileSizeMb * 1024 * 1024 * 1.15) {
-      log('warn', `Low memory: loading ${alias} (${fileSizeMb} MB) but only ${Math.round(os.freemem() / 1024 / 1024)} MB free`);
-    }
-    await catModel.load();
-    const resolvedVariantId = catModel.id;
-    pool.set(alias, { catModel, variantId: resolvedVariantId });
-    log('info', `Model ${alias} loaded (variantId: ${resolvedVariantId})`);
+  } finally {
+    releaseAdmission();
   }
   touchModel(alias);
   return pool.get(alias);
@@ -2394,31 +2611,32 @@ rl.on('line', async (line) => {
         }
       });
     } else if (cmd === 'setEvictionConfig') {
-      evictionConfig = normalizeEvictionConfig({ ...evictionConfig, ...payload });
-      restartEvictionTimer();
       // Apply immediately: a user who has just lowered the cap expects the pool to shrink
       // now, not at some point in the next half minute.
-      const evicted = await runEvictionSweep();
-      log('info', `Eviction config: idle=${evictionConfig.idleUnloadEnabled ? `${Math.round(evictionConfig.idleTimeoutMs / 60_000)}min` : 'off'} `
-        + `cap=${evictionConfig.maxResidentEnabled ? evictionConfig.maxResident : 'off'}`);
+      const evicted = await installAndSweep(() => installEvictionConfig(payload));
       reply({ ok: true, result: { config: { ...evictionConfig }, evicted } });
     } else if (cmd === 'setModelPriorities') {
-      if (!Array.isArray(payload.priorities)) {
-        throw new Error('setModelPriorities requires a priorities array');
-      }
-      modelPriorities.clear();
-      for (const item of payload.priorities) {
-        const alias = typeof item?.alias === 'string' ? item.alias.trim() : '';
-        if (!alias) continue;
-        const priority = normalizePriority(item?.priority);
-        // 'normal' is the default, so storing it would only grow the map forever.
-        if (priority !== 'normal') modelPriorities.set(alias, priority);
-      }
       // A model that just became evictable should not wait for the next sweep.
-      const evicted = await runEvictionSweep();
+      const evicted = await installAndSweep(() => installModelPriorities(payload.priorities));
       reply({
         ok: true,
         result: {
+          priorities: [...modelPriorities.entries()].map(([alias, priority]) => ({ alias, priority })),
+          evicted,
+        },
+      });
+    } else if (cmd === 'applyMemorySettings') {
+      // Both settings, then exactly one sweep. Sending them as two commands means the first
+      // sweep runs under half-old settings — enough to evict a model the user just pinned, or
+      // to evict under a cap they were in the process of raising.
+      const evicted = await installAndSweep(() => {
+        installModelPriorities(payload.priorities);
+        if (payload.eviction !== undefined) installEvictionConfig(payload.eviction);
+      });
+      reply({
+        ok: true,
+        result: {
+          config: { ...evictionConfig },
           priorities: [...modelPriorities.entries()].map(([alias, priority]) => ({ alias, priority })),
           evicted,
         },

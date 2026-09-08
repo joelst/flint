@@ -34,7 +34,7 @@ Dev without staging still works if Node 22+ is on PATH. For release/dogfood of �
 npm run ensure:node
 npm run smoke:node
 # Windows local: use build-local.ps1 so cl.exe / SignTool are on PATH
-npm run tauri:build
+npm run tauri:build:local
 npm run verify:bundle
 ```
 
@@ -67,6 +67,7 @@ Supported Foundry core layouts today: `win32-x64`, `win32-arm64`, `linux-x64`, `
 | `npm run test:coverage` | Tests + coverage |
 | `npm run build` | Frontend web build only |
 | `npm run tauri:build` | Package installers (msi/nsis/dmg); runs ensure:node + ensure:foundry first |
+| `npm run tauri:build:local` | Local package via `--no-sign`: skips **all** code signing (updater signatures, Windows Authenticode, macOS bundle signing), so no `TAURI_SIGNING_PRIVATE_KEY` is needed. Never use for a release. |
 | `npm run verify:bundle` | Post-build bundle resource check |
 | `npm run run:built` | Launch a release build without installing MSI |
 | `cd src-tauri && cargo check` | Rust/Tauri compile check |
@@ -104,6 +105,23 @@ The sidecar emits `{ "ready": true }` after listener setup and lazy-loads the SD
 npm run tauri:build
 npm run verify:bundle
 ```
+
+`tauri:build` signs the updater artifacts and therefore requires `TAURI_SIGNING_PRIVATE_KEY`.
+Without it the build compiles and bundles the app, then fails at the last step with
+`A public key has been found, but no private key`. For a local build, use:
+
+```bash
+npm run tauri:build:local
+npm run verify:bundle
+```
+
+`--no-sign` skips **all** code signing — updater signatures, Windows Authenticode and macOS
+bundle signing alike — so release builds must keep using `tauri:build`. The release workflow
+invokes `tauri-action` directly and is unaffected by the local script.
+
+macOS builds are Apple Silicon only and declare a minimum of macOS 14.0, because the bundled
+`libonnxruntime.dylib` is built with `minos 14.0` and `foundry-local-sdk` ships no `darwin-x64`
+prebuild.
 
 - **Dev:** `npm run tauri dev`
 - **Test release exe without MSI:** `npm run run:built` or `scripts\run-built.bat`

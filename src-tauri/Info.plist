@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Merged into the generated bundle Info.plist by tauri-bundler.
+
+	  macOS terminates a process that attempts audio capture without this key, so the Audio
+	  tab's recorder would kill the app rather than surface a permission prompt.
+	-->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Flint needs microphone access to record audio for on-device speech-to-text. Recordings stay on this Mac and are transcribed locally by Foundry Local.</string>
+</dict>
+</plist>
