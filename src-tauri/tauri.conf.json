@@ -39,6 +39,9 @@
       "../sidecar/": "sidecar/",
       "../node_modules/foundry-local-sdk/": "foundry-local-sdk/"
     },
+    "macOS": {
+      "minimumSystemVersion": "14.0"
+    },
     "windows": {
       "digestAlgorithm": "sha256",
       "timestampUrl": "http://timestamp.acs.microsoft.com",

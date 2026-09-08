@@ -8,7 +8,7 @@ Index by audience. Prefer these living docs over anything under `archive/`.
 |---|---|
 | [README.md](../README.md) | Why Flint, who it’s for, screenshots, quick start |
 | [USER_GUIDE.md](./USER_GUIDE.md) | First run, common tasks, bind vs client URL, troubleshooting |
-| [PRODUCT_PLAN.md](./PRODUCT_PLAN.md) | Living plan: docs/help polish, next release, 1.0 bar |
+| [PRODUCT_PLAN.md](./PRODUCT_PLAN.md) | Reliability execution plan, finding register, acceptance gates, and Rust supervision decision |
 | [CHANGELOG.md](../CHANGELOG.md) | Versioned release notes |
 
 ## Contributors

@@ -19,6 +19,15 @@ if [ "$ARCH" != "arm64" ]; then
   exit 1
 fi
 
+# The bundled libonnxruntime.dylib is built with minos 14.0, and the app declares
+# LSMinimumSystemVersion 14.0 — installing on an older macOS produces an app that
+# LaunchServices simply refuses to open. Fail here with a reason instead.
+DARWIN_MAJOR="$(uname -r | cut -d. -f1)"
+if [ "$DARWIN_MAJOR" -lt 23 ]; then
+  echo "Flint requires macOS 14 (Sonoma) or later; this Mac reports macOS $(sw_vers -productVersion)." >&2
+  exit 1
+fi
+
 echo "Looking up the latest Flint release..."
 LATEST_JSON="$(curl -fsSL "https://github.com/$REPO/releases/latest/download/latest.json")"
 # latest.json is the Tauri updater manifest; the darwin entry's url is the

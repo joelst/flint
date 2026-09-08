@@ -217,7 +217,7 @@ if (failed) {
   console.error('\nVerification FAILED. Fix with:');
   console.error('  npm run ensure:node');
   console.error('  node scripts/ensure-foundry-native.cjs');
-  console.error('  npm run tauri:build');
+  console.error('  npm run tauri:build:local');
   console.error('  npm run verify:bundle');
   process.exit(1);
 }

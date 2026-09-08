@@ -1,18 +1,18 @@
 # FLInt – Foundry Local Interface Design Spec
 
-**Project Name:** FLInt  
-**Full Name:** Foundry Local Interface (FLInt)  
-**Backronym / Tagline:** Foundry Local INTerface  
+**Project Name:** Flint 
+**Full Name:** Foundry Local Interface (Flint)  
+**Backronym / Tagline:** Foundry Local Interface  
 **Spec revision:** 0.5 (docs consolidation; architecture baseline)  
 **Repository / Folder:** flint  
 **License:** MIT (most permissive)  
-**Date:** June 2026 (revised July 2026)
+**Date:** September 2026
 
 > **Versioned product plans and release status** live in [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md). This file is the architectural and product-principles baseline — not a sprint tracker.
 
 ## 1. Executive Summary
 
-**FLInt** (Foundry Local Interface) is a lightweight, privacy-first desktop GUI for Microsoft Foundry Local. It provides an intuitive interface for model management, core inference (chat, audio transcription, and vision where supported), diagnostics/monitoring, integrations, and education about Foundry Local (and Azure AI Foundry as a future cloud path).
+**Flint** (Foundry Local Interface) is a lightweight, privacy-first desktop GUI for Microsoft Foundry Local. It provides an intuitive interface for model management, core inference (chat, audio transcription, and vision where supported), diagnostics/monitoring, integrations, and education about Foundry Local (and Azure AI Foundry as a future cloud path).
 
 The app is designed to:
 
@@ -164,7 +164,7 @@ Versioned timing is in [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) (Azure targete
 
 ## Summary
 
-FLInt is a focused, privacy-first GUI that makes Foundry Local approachable while staying local-first. It prioritizes an understandable JS/TS codebase, an official SDK path, and a clear split between model runtime and tool execution.
+Flint is a focused, privacy-first GUI that makes Foundry Local approachable while staying local-first. It prioritizes an understandable JS/TS codebase, an official SDK path, and a clear split between model runtime and tool execution.
 
 **Living release plans:** [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md)  
 **Contributor how-to:** [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md)

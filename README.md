@@ -4,8 +4,6 @@
 
 Manage models on your machine, chat and transcribe locally, pit models against each other in the Model Arena, and expose an **OpenAI-compatible endpoint** to the coding tools you already use — without sending prompts to a cloud by default.
 
-> Also styled **FLInt** (Foundry Local INTerface). Product name: **Flint**.
-
 ---
 
 ## Why Flint?
@@ -113,7 +111,7 @@ Living plan (docs, help, 0.4, 1.0): **[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN
 
 | Requirement | Notes |
 |---|---|
-| **Windows** (primary) or **macOS Apple silicon** | Intel Mac not supported until Foundry publishes `darwin-x64` native cores |
+| **Windows** (primary) or **macOS 14+ Apple silicon** | Intel Mac not supported until Foundry publishes `darwin-x64` native cores. macOS 14 is the floor because the bundled `libonnxruntime.dylib` is built with `minos 14.0`. |
 | **Node runtime (sidecar)** | **Release builds ship a bundled Node 22 binary** (Tauri externalBin) for the JS sidecar — PATH Node is not required when packaging is complete. Dev/fallback: Node 22+ on PATH. About shows `bundled` vs `PATH`. |
 | Foundry runtime | **Bundled** — you do not need a separate Foundry CLI for normal use |
 
@@ -153,10 +151,13 @@ npm run tauri dev
 ```
 
 ```bash
-npm run tauri:build    # runs ensure:foundry + frontend build + package
-npm run verify:bundle  # checks Foundry natives in the package
-npm run run:built      # launch the release binary without installing
+npm run tauri:build:local  # local package; --no-sign skips all code signing
+npm run verify:bundle      # checks Foundry natives in the package
+npm run run:built          # launch the release binary without installing
 ```
+
+`npm run tauri:build` is the release command: it signs the updater artifacts and needs
+`TAURI_SIGNING_PRIVATE_KEY`.
 
 Full scripts, sidecar, and versioning: [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md)  
 Signing and release pipeline: [docs/RELEASE.md](./docs/RELEASE.md)

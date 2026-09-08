@@ -6,6 +6,17 @@ hold the history. Durable facts belong in
 
 Verify an item against the tree before acting on it.
 
+## Current execution priorities
+
+The [reliability execution plan](./PRODUCT_PLAN.md) owns the review findings,
+implementation dependencies, and acceptance gates. Fix data loss and runtime
+correctness without waiting for a backend rewrite. Expedite thin native
+lifecycle/process supervision; defer wholesale Foundry runtime replacement.
+
+**Linux work is deferred:** preserve existing checks and mappings. Continue
+Linux-specific work only where it is already part of another feature; shared
+Windows/macOS fixes do not establish Linux release support.
+
 ## Shipping integrity
 
 - [ ] **Clean-machine dogfood** — install the signed build where no Node, Rust, or prior
@@ -42,8 +53,12 @@ Verify an item against the tree before acting on it.
 
 ## Runtime strategy
 
-- [ ] **Targeted Rust bridge** — move selected sidecar commands to Tauri invoke
-      incrementally, JS sidecar as fallback. Not a big-bang rewrite.
+- [ ] **Thin Rust supervisor** — expedite native tray/reopen/quit, single-instance
+      behavior, and exclusive runtime-child ownership after the transport contract
+      is stable. See [PRODUCT_PLAN](./PRODUCT_PLAN.md#workstream-c-thin-native-ownership----expedited).
+- [ ] **Rust runtime replacement** — deferred pending parity and measured benefit.
+      Preserve one model-manager authority and separate-process crash isolation;
+      do not keep competing JS/Rust runtimes or replay uncertain operations.
 - [ ] **1.0: no end-user Node** — bundled Node 22 already removes the user-visible
       requirement; this is about shrinking the spawn/attack surface.
 - [ ] **Pin the SDK/core/CLI matrix** — Flint is on SDK 1.2.4; Foundry's REST API is

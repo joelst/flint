@@ -1,14 +1,14 @@
 > **Archived.** Historical planning artifact. Current status: [RELEASE_ROADMAP.md](../../RELEASE_ROADMAP.md). Do not treat checklists in this file as live work.
 
-# FLInt Implementation Plan
+# Flint Implementation Plan
 
-**Project:** FLInt (Foundry Local Interface)  
+**Project:** Flint (Foundry Local Interface)  
 **Based on:** FLINT_DESIGN_SPEC.md (v0.4 after review adjustments)  
 **Date:** 2026-06-24  
 **Status:** Active – MVP 0.1 baseline reached; 0.2 planning in progress
 
 ## Objectives
-Deliver a working MVP desktop app (FLInt) that makes Foundry Local delightful to use:
+Deliver a working MVP desktop app (Flint) that makes Foundry Local delightful to use:
 - Zero CLI required for common tasks
 - Beautiful, fast, privacy-first experience
 - SDK-first integration for reliability
