@@ -512,13 +512,10 @@ function numberOr(value: unknown, fallback: number): number {
 }
 
 /**
- * Parse a stored archive blob.
+ * Parse a stored archive blob against the running application version.
  *
  * Unparseable input, a non-object root, and a missing or unknown version are all corrupt: the
  * caller must preserve the bytes rather than start fresh over them.
- */
-/**
- * Parse a stored archive blob against the running application version.
  *
  * `appVersion` is **required**: an optional rollback gate is applied only by callers who
  * remember it, which is the same as having no gate. Tests that genuinely do not care may pass
