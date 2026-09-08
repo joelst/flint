@@ -245,7 +245,16 @@ export function hasRecoveryCopies(storage: EnumerableStorage): RecoveryCopyStatu
     const count = storage.length;
     for (let i = 0; i < count; i += 1) {
       const name = storage.key(i);
-      if (typeof name === 'string' && isRecoveryCopyKey(name)) return 'present';
+      if (typeof name === 'string') {
+        if (isRecoveryCopyKey(name)) return 'present';
+        continue;
+      }
+      // An index below the reported length that yields no name means the listing moved under
+      // the walk — another writer removed a key — so the indices after it refer to entries this
+      // pass never saw. `key()` returns null rather than throwing for that, so without this the
+      // walk would finish and report `absent`, retiring the at-risk warning on the strength of a
+      // scan that had skipped part of storage.
+      return 'unknown';
     }
   } catch {
     // Not the same as finding none. A healthy archive read leaves the session writable, so
@@ -365,7 +374,12 @@ function pad(value: number, width = 2): string {
 }
 
 /**
- * A filename that sorts chronologically and does not collide within a second.
+ * A filename that sorts chronologically, resolved to the second.
+ *
+ * Two exports started within the same second therefore suggest the same name. That is a
+ * deliberately harmless collision: the suggestion is only the dialog's starting point, and the
+ * write refuses to replace an existing file, so accepting it twice is declined rather than
+ * overwriting the first copy.
  *
  * Local time, because the name is read by a person looking for the copy they made this morning,
  * not by a machine reconciling zones.

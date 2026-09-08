@@ -315,6 +315,29 @@ describe('hasRecoveryCopies', () => {
       hasRecoveryCopies(fakeStorage({ [ARCHIVE_BACKUP_KEY]: 'x' }, { failEnumeration: true })),
     ).toBe('unknown');
   });
+
+  it('reports unknown when the listing shrinks under the walk', () => {
+    // Another writer removes a key mid-scan, so an index below the reported length yields no
+    // name. `key()` answers null rather than throwing, and the entries after the removed one
+    // were never examined — so this cannot be reported as "no recovery copies exist".
+    const entries: Record<string, string> = { a: '1', b: '2', [ARCHIVE_BACKUP_KEY]: 'x' };
+    const keys = Object.keys(entries);
+    let reads = 0;
+    const shrinking: EnumerableStorage = {
+      get length() {
+        return keys.length;
+      },
+      key(index: number) {
+        reads += 1;
+        if (reads > 1) return null;
+        return keys[index] ?? null;
+      },
+      getItem: (key: string) => entries[key] ?? null,
+      setItem() {},
+      removeItem() {},
+    };
+    expect(hasRecoveryCopies(shrinking)).toBe('unknown');
+  });
 });
 
 describe('buildExportDocument session status', () => {

@@ -1369,6 +1369,8 @@
   let exportBusy = $state(false);
   /** Outcome of the last export. Its own channel: a conversation save must not clear it. */
   let exportNotice = $state<string | null>(null);
+  /** Whether the notice reports a clean export or one carrying a caveat. Never a failure. */
+  let exportNoticeTone = $state<"ok" | "caution">("ok");
   let exportError = $state<string | null>(null);
 
   /**
@@ -1439,19 +1441,24 @@
           appDirsIncomplete = true;
         }
       }
-      const classified = appDirsIncomplete
-        ? "unverified"
-        : await classifyDestination(target, appDirs, {
-            stat: async (path: string) => {
-              const info: any = await stat(path);
-              return { dev: info?.dev ?? null, ino: info?.ino ?? null };
-            },
-            lstat: async (path: string) => {
-              const info: any = await lstat(path);
-              return { dev: info?.dev ?? null, ino: info?.ino ?? null };
-            },
-            dirname: (path: string) => pathApi.dirname(path),
-          });
+      // Classified against whatever roots were obtained, even when the set is short. A missing
+      // root can only hide a match, never invent one, so `inside` stays trustworthy and must
+      // still refuse — skipping the check entirely would wave through a destination plainly
+      // within a root that did resolve. Only `outside` depends on having looked everywhere, so
+      // that is the answer downgraded when the set is incomplete.
+      const verdict = await classifyDestination(target, appDirs, {
+        stat: async (path: string) => {
+          const info: any = await stat(path);
+          return { dev: info?.dev ?? null, ino: info?.ino ?? null };
+        },
+        lstat: async (path: string) => {
+          const info: any = await lstat(path);
+          return { dev: info?.dev ?? null, ino: info?.ino ?? null };
+        },
+        dirname: (path: string) => pathApi.dirname(path),
+      });
+      const classified =
+        appDirsIncomplete && verdict === "outside" ? "unverified" : verdict;
       if (classified === "inside") {
         exportError =
           "That folder is inside Flint's own application data, which is deleted when Flint is " +
@@ -1473,17 +1480,24 @@
       await writeTextFile(target, contents, { createNew: true });
 
       appendAppLog(`Exported conversations to ${target}`, "info");
+      // The file was written, so none of these are failures and none is styled or announced as
+      // one. They are still qualified rather than clean: each names something the export could
+      // not establish, and the caution tone keeps that visible without claiming the export did
+      // not happen. `exportError` stays reserved for a refusal or a write that did not complete.
       if (!doc.complete) {
         // Deliberately not "data is missing": when only attribution failed the messages are all
         // present in `liveThread`. What is true in every case is that completeness is unproven.
-        exportError =
+        exportNoticeTone = "caution";
+        exportNotice =
           `Exported to ${target}, but Flint could not confirm that everything saved on this ` +
           `computer is in the file. Do not clear or reinstall Flint on the strength of it.`;
       } else if (classified === "unverified") {
-        exportError =
+        exportNoticeTone = "caution";
+        exportNotice =
           `Exported to ${target}, but Flint could not confirm that this location is outside its ` +
           `own application data. If it is not, clearing Flint's data would delete this file too.`;
       } else {
+        exportNoticeTone = "ok";
         exportNotice = `Conversations exported to ${target}.`;
       }
     } catch (e: any) {
@@ -5742,7 +5756,7 @@ Output only the summary text, no preamble.`;
         </div>
       {/if}
       {#if exportNotice}
-        <div class="storage-error" role="status">
+        <div class="storage-notice" class:caution={exportNoticeTone === "caution"} role="status">
           <span class="storage-error-text">{exportNotice}</span>
           <button type="button" class="storage-error-dismiss" onclick={() => (exportNotice = null)} aria-label="Dismiss export message">
             Dismiss
@@ -9498,6 +9512,27 @@ Output only the summary text, no preamble.`;
     background: color-mix(in srgb, var(--danger, #e5484d) 10%, var(--panel-bg));
     max-width: 720px;
     font-size: 13px;
+  }
+
+  /* The export succeeded. Neutral by default, and cautioned rather than alarmed when the
+     result carries a caveat, so a written file is never dressed as a failed one. */
+  .storage-notice {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 0 0 12px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--panel-bg);
+    max-width: 720px;
+    font-size: 13px;
+  }
+
+  .storage-notice.caution {
+    border-color: color-mix(in srgb, var(--warning, #f5a524) 45%, var(--border));
+    background: color-mix(in srgb, var(--warning, #f5a524) 10%, var(--panel-bg));
   }
 
   .storage-risk {

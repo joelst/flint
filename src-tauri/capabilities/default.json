@@ -16,10 +16,14 @@
     "opener:default",
     "fs:default",
     "fs:allow-exists",
-    "fs:allow-write-text-file",
+    {
+      "identifier": "fs:allow-write-text-file",
+      "deny": [{ "path": "$RESOURCE/**" }]
+    },
     "fs:allow-stat",
     "fs:allow-lstat",
     {
+      "_comment": "Read-only reach into packaged resources, for locating the sidecar and SDK. Writes are denied there on the write command above: the frontend must never be able to rewrite foundry-sidecar.js, which Node is then spawned to execute. The export's own destination needs no entry here, because the save dialog grants the chosen file at runtime.",
       "identifier": "fs:scope",
       "allow": [
         { "path": "$RESOURCE/sidecar/**" },
