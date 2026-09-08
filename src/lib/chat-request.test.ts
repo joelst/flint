@@ -7,6 +7,7 @@ import {
   isEmptyAssistantPlaceholder,
   hasSendableContent,
   DEFAULT_INSTRUCTION_PREFIX,
+  DEFAULT_IMAGE_PLACEHOLDER,
   type PromptPart,
 } from './chat-request';
 import { OPAQUE_PART_TYPE } from './conversation-store';
@@ -271,6 +272,13 @@ describe('normalizeForAlternatingChat', () => {
       ]);
     });
 
+    it('keeps a leading assistant turn only because the instruction precedes it', () => {
+      // Without an instruction there is no user turn to alternate against, so the same thread
+      // loses that turn. Pinned because the two cases read as contradictory otherwise.
+      const out = normalizeForAlternatingChat([{ role: 'assistant', content: 'greeting' }]);
+      expect(out).toEqual([]);
+    });
+
     it('ignores a blank instruction rather than sending an empty preamble', () => {
       const out = normalizeForAlternatingChat([{ role: 'user', content: 'hi' }], {
         systemInstruction: '   ',
@@ -529,5 +537,65 @@ describe('hasSendableContent', () => {
 
   it('is true for an image with no text at all', () => {
     expect(hasSendableContent([image('u')])).toBe(true);
+  });
+});
+
+describe('textOnly', () => {
+  it('replaces an image with a placeholder instead of dropping the turn', () => {
+    // A summarizer that never learns an image was shared can describe a conversation as though
+    // nothing was. Dropping the turn entirely would also break alternation for what follows.
+    const out = normalizeForAlternatingChat(
+      [{ role: 'user', content: [text('look at this'), image('data:image/png;base64,AAAA')] }],
+      { textOnly: true },
+    );
+    expect(out).toEqual([
+      { role: 'user', content: `look at this${DEFAULT_IMAGE_PLACEHOLDER}` },
+    ]);
+  });
+
+  it('never emits multipart content, which is what the SDK transport rejects', () => {
+    const out = normalizeForAlternatingChat(
+      [
+        { role: 'user', content: [image('a')] },
+        { role: 'assistant', content: 'I see it' },
+        { role: 'user', content: [text('and this'), image('b')] },
+      ],
+      { textOnly: true, systemInstruction: 'Summarize' },
+    );
+    for (const message of out) {
+      expect(typeof message.content).toBe('string');
+    }
+  });
+
+  it('keeps an image-only turn rather than letting it vanish', () => {
+    const out = normalizeForAlternatingChat([{ role: 'user', content: [image('a')] }], {
+      textOnly: true,
+    });
+    expect(out).toEqual([{ role: 'user', content: DEFAULT_IMAGE_PLACEHOLDER }]);
+  });
+
+  it('uses an injected placeholder', () => {
+    const out = normalizeForAlternatingChat([{ role: 'user', content: [image('a')] }], {
+      textOnly: true,
+      imagePlaceholder: '<img>',
+    });
+    expect(out).toEqual([{ role: 'user', content: '<img>' }]);
+  });
+
+  it('leaves a text-only thread exactly as it would be without the flag', () => {
+    const messages = [
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: 'hello' },
+    ];
+    expect(normalizeForAlternatingChat(messages, { textOnly: true })).toEqual(
+      normalizeForAlternatingChat(messages),
+    );
+  });
+
+  it('preserves multipart when the flag is absent', () => {
+    const out = normalizeForAlternatingChat([
+      { role: 'user', content: [text('t'), image('a')] },
+    ]);
+    expect(Array.isArray(out[0].content)).toBe(true);
   });
 });

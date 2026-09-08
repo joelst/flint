@@ -12,9 +12,17 @@
  * schema mismatch. This module is pure so the decision can be tested without a running service.
  */
 
-/** True when any message carries multipart (vision) content the SDK client cannot accept. */
+/**
+ * True when any message carries multipart (vision) content the SDK client cannot accept.
+ *
+ * A non-array argument is treated as carrying nothing rather than throwing. This module exists
+ * to turn an unroutable request into a reason the user can read, so throwing from the check
+ * would defeat its own purpose: `selectChatTransport` would propagate a TypeError instead of
+ * reporting what is missing.
+ */
 export function hasMultipartContent (messages) {
-  return (messages || []).some((m) => Array.isArray(m?.content));
+  if (!Array.isArray(messages)) return false;
+  return messages.some((m) => Array.isArray(m?.content));
 }
 
 /**

@@ -29,6 +29,16 @@ describe('hasMultipartContent', () => {
   it('tolerates a malformed entry', () => {
     expect(hasMultipartContent([null, undefined, 7, text('a')])).toBe(false);
   });
+
+  it('treats a non-array argument as carrying nothing rather than throwing', () => {
+    // This module turns an unroutable request into a reason the user can read, so throwing here
+    // would replace that reason with a TypeError from inside selectChatTransport.
+    for (const bogus of [{ 0: text('a') }, 'messages', 42, true]) {
+      expect(() => hasMultipartContent(bogus)).not.toThrow();
+      expect(hasMultipartContent(bogus)).toBe(false);
+    }
+    expect(selectChatTransport({}, { hasChatClient: true }).transport).toBe('sdk');
+  });
 });
 
 describe('selectChatTransport', () => {

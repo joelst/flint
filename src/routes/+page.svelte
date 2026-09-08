@@ -4000,9 +4000,12 @@ Summarize the following conversation history concisely in 4-8 sentences.
 Focus on: key facts the user shared, important decisions, open questions, user goals/preferences, and any code or specific details worth remembering.
 Output only the summary text, no preamble.`;
 
+    // `textOnly`: the output here is a text summary, so an image contributes nothing while
+    // costing a base64 payload — and the SDK fallback below rejects non-string content outright,
+    // so a thread containing images would otherwise fail and silently degrade to condense.
     const summaryMessages = normalizeForAlternatingChat(
       oldMessages.map((m: any) => ({ role: m.role, content: m.content })),
-      { systemInstruction: summaryPrompt },
+      { systemInstruction: summaryPrompt, textOnly: true },
     );
 
     statusMessage = "Summarizing older context...";
@@ -4022,7 +4025,11 @@ Output only the summary text, no preamble.`;
         try {
           const result: any = await (chatClient as any).completeChat?.(summaryMessages) || {};
           summary = result.choices?.[0]?.message?.content || "";
-        } catch {}
+        } catch (e: any) {
+          // Swallowed deliberately — the caller falls back to condense — but not silently, or a
+          // persistently failing summarizer looks like a model that simply never summarizes.
+          console.warn("Summarization via SDK client failed:", e);
+        }
       }
     } catch (e: any) {
       if (chatThreadEpoch !== epoch) return;

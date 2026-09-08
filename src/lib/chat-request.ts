@@ -132,9 +132,39 @@ export interface AlternatingOptions {
   systemInstruction?: string;
   /** Wording of the folded-in instruction. Injected so the prompt text is testable. */
   instructionPrefix?: string;
+  /**
+   * Reduce every turn to plain text, replacing images with a placeholder.
+   *
+   * For requests whose *output* is text about the thread rather than a reply to it —
+   * summarization is the case that exists — where the image contributes nothing but has to
+   * travel as base64. It also keeps such a request on the SDK transport, which rejects
+   * non-string content outright, so a vision thread would otherwise fail the moment no HTTP
+   * endpoint was available.
+   *
+   * A placeholder rather than a deletion: the model should know a turn carried an image, or a
+   * summary can end up describing a conversation that reads as though nothing was shared.
+   */
+  textOnly?: boolean;
+  /** Stand-in for an image when `textOnly` is set. Injected so the prompt text is testable. */
+  imagePlaceholder?: string;
 }
 
 export const DEFAULT_INSTRUCTION_PREFIX = 'Follow these instructions:';
+
+export const DEFAULT_IMAGE_PLACEHOLDER = '[image]';
+
+/**
+ * Collapse parts to text, standing an image in with a placeholder.
+ *
+ * Adjacent text is joined without a separator: parts of one message are fragments of a single
+ * piece of text, and inserting anything between them would reformat the user's content.
+ */
+function flattenPartsToText(parts: PromptPart[], placeholder: string): PromptPart[] {
+  const text = parts
+    .map((part) => (part.type === 'text' ? part.text : placeholder))
+    .join('');
+  return text.trim() ? [{ type: 'text', text }] : [];
+}
 
 /**
  * Normalize a thread for templates that accept only user/assistant, strictly alternating.
@@ -149,7 +179,10 @@ export const DEFAULT_INSTRUCTION_PREFIX = 'Follow these instructions:';
  *  - Consecutive same-role turns are merged structurally, never by stringification.
  *
  * A thread that opens with an assistant turn has that turn dropped, since a template requiring
- * alternation has nowhere to put it.
+ * alternation has nowhere to put it — unless `systemInstruction` is set, which prepends a user
+ * turn and so gives the assistant turn a valid position to occupy.
+ *
+ * With `textOnly`, images are replaced by a placeholder and every turn collapses to a string.
  */
 export function normalizeForAlternatingChat(
   messages: Array<{ role?: unknown; content?: unknown }>,
@@ -163,7 +196,10 @@ export function normalizeForAlternatingChat(
   for (const message of messages ?? []) {
     const role = message?.role;
     if (!isPromptRole(role)) continue;
-    const parts = toPromptParts(message?.content);
+    const raw = toPromptParts(message?.content);
+    const parts = options.textOnly
+      ? flattenPartsToText(raw, options.imagePlaceholder ?? DEFAULT_IMAGE_PLACEHOLDER)
+      : raw;
     if (!hasSendableContent(parts)) continue;
     if (role === 'system') {
       // An image in a system turn has nowhere to go once the instruction is folded into a user
