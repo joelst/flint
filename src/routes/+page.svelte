@@ -45,6 +45,9 @@
     getWslStatus,
     enableWslMirroredNetworking,
     shutdownWsl,
+    isUncertainOutcome,
+    cancelBeforeDispatch,
+    isServiceStartUncertain,
     type WslStatusInfo,
     type ModelInfo,
     type EpInfo,
@@ -2415,6 +2418,10 @@ function selectBindAddress(next: string) {
       persistChat();
 
       const wasRunning = !!state.serviceRunning;
+      // No clearing of the SDK latch: an explicit transition bypasses the guard by not passing
+      // `convenience`, so it needs no authorization, and clearing the shared latch would also
+      // release any convenience start already queued behind the lock. The mirror is refreshed
+      // from the attempt's own outcome below.
       if (wasRunning) {
         statusMessage = 'Restarting service with new network settings…';
         appendAppLog(`Restarting service for network change → ${bind}:${port}`);
@@ -2436,6 +2443,7 @@ updateStateFromSdk();
         appendAppLog(`Network settings applied for next start: ${bind}:${port}`);
       }
     } catch (e: any) {
+      serviceStartUncertain = isServiceStartUncertain();
       statusMessage = `Failed to apply network settings: ${e?.message || e}`;
       appendAppLog(`Network settings apply failed: ${e?.message || e}`, 'error');
       updateStateFromSdk();
@@ -2444,8 +2452,14 @@ updateStateFromSdk();
     }
   }
 
-  function startSvc(alias?: string, preferredEp?: string) {
-    return startService(networkPort, alias, preferredEp, networkBindAddress || undefined).then((ep) => {
+  function startSvc(alias?: string, preferredEp?: string, opts?: { convenience?: boolean }) {
+    return startService(
+      networkPort,
+      alias,
+      preferredEp,
+      networkBindAddress || undefined,
+      opts,
+    ).then((ep) => {
       markNetworkSettingsApplied();
       return ep;
     });
@@ -2454,6 +2468,69 @@ updateStateFromSdk();
   // Drives UI disable only. Real serialization lives in sdk.ts, where every startService /
   // stopService transition queues on one lock — this flag cannot cover the paths inside the SDK.
   let serviceTransitionBusy = $state(false);
+
+  /**
+   * Mirrors the SDK's stand-down state for display only.
+   *
+   * The authoritative flag lives in `sdk.ts`, checked under the service-transition lock: a flag
+   * consulted here, before queuing, would let two convenience starts both pass while neither had
+   * run, so the first one's uncertainty could not stop the second. This copy exists so the UI can
+   * say why convenience starts are standing down.
+   */
+  let serviceStartUncertain = $state(false);
+
+  /**
+   * Start the service for a model on a convenience path.
+   *
+   * These call sites are opportunistic: the user asked to load or chat with a model, not to
+   * perform a service transition. So an ordinary failure is logged rather than raised. An
+   * *uncertain* one is different — the start may have taken effect — and it surfaces.
+   *
+   * Returns *why* it did not start. "Already running" and "stood down after an unestablished
+   * outcome" must not both read as successful continuation to a caller about to announce ready.
+   */
+  /** What became of a convenience service start. */
+  type ServiceStartOutcome = "started" | "already-running" | "blocked" | "failed";
+
+  /** An attempt's outcome plus the error behind it, so callers can preserve the cause. */
+  type ServiceStartAttempt = { result: ServiceStartOutcome; error?: any };
+
+  /**
+   * The clause to append to a "ready" message when the service did not actually start.
+   *
+   * A sticky stand-down is defensible; a sticky stand-down the user cannot see, announced as
+   * "ready", is not — the model is selected but nothing is serving it.
+   */
+  function serviceQualifier(result: ServiceStartOutcome): string {
+    if (result === "blocked")
+      return " The service did not start: an earlier start never reported its outcome. Start it from Settings when you have checked.";
+    if (result === "failed") return " The service could not be started.";
+    return "";
+  }
+
+  async function startServiceForModel(alias: string): Promise<ServiceStartAttempt> {
+    if (state.serviceRunning) return { result: "already-running" };
+    try {
+      await startSvc(
+        alias,
+        selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+        { convenience: true },
+      );
+      // Read back rather than assumed: the SDK owns the latch and retires it on a start that
+      // reported its own outcome.
+      serviceStartUncertain = isServiceStartUncertain();
+      return { result: "started" };
+    } catch (e: any) {
+      console.warn("Auto-start service failed", e);
+      if (isUncertainOutcome(e)) {
+        serviceStartUncertain = true;
+        statusMessage = e?.message || String(e);
+        return { result: "blocked", error: e };
+      }
+      serviceStartUncertain = isServiceStartUncertain();
+      return { result: serviceStartUncertain ? "blocked" : "failed", error: e };
+    }
+  }
 
   /**
    * Make the service usable for `alias` with the least disruption.
@@ -2466,7 +2543,11 @@ updateStateFromSdk();
    * Note: `preferredEp` can only be applied when the service is (re)started. On the
    * already-running path the caller is told the existing acceleration setting stands.
    */
-  async function ensureServiceRunning(alias?: string, preferredEp?: string): Promise<string | undefined> {
+  async function ensureServiceRunning(
+    alias?: string,
+    preferredEp?: string,
+    opts?: { convenience?: boolean },
+  ): Promise<string | undefined> {
     serviceTransitionBusy = true;
     try {
       return await withServiceTransition(async ({ startNow }) => {
@@ -2485,7 +2566,17 @@ updateStateFromSdk();
           return state.endpoint;
         }
         // Already holding the transition lock — the queued startService would deadlock here.
-        const ep = await startNow(networkPort, alias, preferredEp, networkBindAddress || undefined);
+        // The caller says whether this start is a decision the user made. Reached from
+        // Transcribe it is a side effect, so it must respect an earlier unestablished start
+        // rather than issue a second destructive restart; the "Ensure service" button is an
+        // explicit request and passes nothing.
+        const ep = await startNow(
+          networkPort,
+          alias,
+          preferredEp,
+          networkBindAddress || undefined,
+          opts,
+        );
         markNetworkSettingsApplied();
         return ep;
       });
@@ -3019,12 +3110,19 @@ updateStateFromSdk();
   async function ensureServiceForCompare(alias: string) {
     if (state.serviceRunning) return;
     comparePrepStatus = "Starting local service…";
-    try {
-      await startSvc(
-        alias,
-        selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+    const { result, error } = await startServiceForModel(alias);
+    // A blocked start is not a detail to skip past. Note the wording: readiness could not be
+    // *established*, which is what an unestablished outcome supports — not the stronger claim
+    // that the service is not running. Aborting here is a conservative availability policy
+    // rather than a technical necessity, since the sidecar can serve text Compare through
+    // direct SDK inference with no HTTP endpoint.
+    if (result === "blocked" || result === "failed") {
+      throw new Error(
+        `Service readiness could not be established.${serviceQualifier(result)}`.trim(),
+        // Preserved so the caller can still tell an uncertain start from an ordinary failure.
+        error ? { cause: error } : undefined,
       );
-    } catch {}
+    }
   }
 
   async function loadCompareSlot(slot: CompareSlot): Promise<void> {
@@ -3643,27 +3741,27 @@ updateStateFromSdk();
           if (existing?.isCached) {
             const usingDefault = !startupConversationAlias && !!defaultChatAlias;
             try {
+              let startResult: ServiceStartAttempt = { result: "already-running" };
               if (!existing.isLoaded) {
                 statusMessage = usingDefault
                   ? `Auto-loading ${targetAlias}...`
                   : `Restoring ${targetAlias} from previous session...`;
-                await loadModelAndMaybeStart(existing);
-              } else if (!state.serviceRunning) {
-                await startSvc(
-                  targetAlias,
-                  selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
-                );
+                startResult = await loadModelAndMaybeStart(existing);
+              } else {
+                startResult = await startServiceForModel(targetAlias);
               }
+              const qualifier = serviceQualifier(startResult.result);
               if (chatNavigationCurrent(startupNav)) {
                 selectedModelAlias = targetAlias;
                 selectedModel = { alias: targetAlias };
                 chatClient = null;
-                statusMessage = usingDefault
-                  ? `${targetAlias} ready`
-                  : `${targetAlias} restored from previous session`;
+                statusMessage =
+                  (usingDefault
+                    ? `${targetAlias} ready`
+                    : `${targetAlias} restored from previous session`) + qualifier;
               } else {
                 // The load still did useful work, so say so rather than silently doing nothing.
-                statusMessage = `${targetAlias} is ready. The chat changed while it loaded.`;
+                statusMessage = `${targetAlias} is ready. The chat changed while it loaded.${qualifier}`;
               }
             } catch (e: any) {
               statusMessage = `Failed to restore ${targetAlias}: ${e?.message || e}`;
@@ -3740,16 +3838,20 @@ updateStateFromSdk();
 
   async function startLocalService() {
     try {
+      // An explicit start bypasses the stand-down guard on its own (it passes no `convenience`
+      // flag), so nothing is cleared here. The latch is retired only by this attempt succeeding.
       statusMessage = "Starting local service...";
       appendAppLog('Starting local OpenAI-compatible service');
       const ep = await startSvc(
         selectedModelAlias || undefined,
         selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
       );
+      serviceStartUncertain = isServiceStartUncertain();
       updateStateFromSdk();
       statusMessage = `Service running at ${ep}`;
       appendAppLog(`Service started at ${ep}`);
     } catch (e: any) {
+      serviceStartUncertain = isServiceStartUncertain();
       statusMessage = `Failed to start service: ${e?.message || e}`;
       appendAppLog(`Service start failed: ${e?.message || e}`, 'error');
     }
@@ -3758,6 +3860,10 @@ updateStateFromSdk();
   async function stopLocalService() {
     try {
       await stopService();
+      // The mirror is re-read rather than assumed: a Stop acknowledgement does not prove an
+      // earlier start whose outcome was never established has finished, so the SDK keeps the
+      // latch and the UI must keep showing it.
+      serviceStartUncertain = isServiceStartUncertain();
       updateStateFromSdk();
       statusMessage = "Service stopped";
       appendAppLog('Service stopped');
@@ -3875,16 +3981,9 @@ updateStateFromSdk();
       startFreshConversation();
 
       // Auto start service and switch to chat
-      if (!state.serviceRunning) {
-        try {
-          await startSvc(
-            alias,
-            selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
-          );
-        } catch {}
-      }
+      const startResult = await startServiceForModel(alias);
 
-      statusMessage = `${alias} ready. Switching to chat...`;
+      statusMessage = `${alias} ready. Switching to chat...${serviceQualifier(startResult.result)}`;
       currentView = "chat";
     } catch (e: any) {
       statusMessage = `Failed with starter: ${e?.message || e}`;
@@ -3911,14 +4010,8 @@ updateStateFromSdk();
         contextTurns = recommendedMaxTurns;
       }
 
-      if (!state.serviceRunning) {
-        try {
-          await startSvc(
-            model.alias,
-            selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
-          );
-        } catch {}
-      }
+      const startResult = await startServiceForModel(model.alias);
+      statusMessage = `Chatting with ${model.alias}${serviceQualifier(startResult.result)}`;
     } catch (e: any) {
       statusMessage = `Failed to select: ${e?.message || e}`;
     }
@@ -4159,27 +4252,39 @@ updateStateFromSdk();
     }
   }
 
-  async function loadModelAndMaybeStart(model: any) {
+  /**
+   * Load a model into the chat lane and, opportunistically, bring the service up for it.
+   *
+   * Returns the service-start outcome so a caller about to announce "ready" can qualify it. The
+   * value describes the *service* only; a failed load never returns, it throws.
+   *
+   * The load is the prerequisite, so any load failure propagates. Returning "failed" for it
+   * would be indistinguishable from a failed service start, and callers would go on to announce
+   * the model ready while reporting a service problem — losing both the operation that actually
+   * failed and its explanation. An uncertain load matters twice over, because `startService`
+   * makes the sidecar run `ensureModel(alias)` and would load the same model again.
+   */
+  async function loadModelAndMaybeStart(model: any): Promise<ServiceStartAttempt> {
+    let loadResult: any;
     try {
       statusMessage = `Loading ${model.alias}...`;
       appendAppLog(`Loading model ${model.alias} (chat lane)`);
-      const loadResult = await sendLoadToSidecar(model, 'chat');
+      loadResult = await sendLoadToSidecar(model, 'chat');
+    } catch (e: any) {
+      statusMessage = `Load failed: ${e?.message || e}`;
+      throw e;
+    }
+
+    try {
       const loadAccel = String(loadResult?.acceleration?.active || "").trim();
       if (loadAccel) {
         setModelRuntimeMeta(model.alias, { lastUsedAcceleration: loadAccel });
       }
       statusMessage = `${model.alias} loaded`;
 
-      if (!state.serviceRunning) {
-        try {
-          await startSvc(
-            model.alias,
-            selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
-          );
-          statusMessage = `${model.alias} loaded + service started`;
-        } catch (e) {
-          console.warn("Auto-start service failed", e);
-        }
+      const startResult = await startServiceForModel(model.alias);
+      if (startResult.result === "started") {
+        statusMessage = `${model.alias} loaded + service started`;
       }
 
       await refreshModels();
@@ -4196,8 +4301,10 @@ updateStateFromSdk();
       if (modelSupportsAudio(model)) {
         selectedSTTModelAlias = model.alias;
       }
+      return startResult;
     } catch (e: any) {
       statusMessage = `Load failed: ${e?.message || e}`;
+      return { result: "failed", error: e };
     }
   }
 
@@ -4222,17 +4329,11 @@ updateStateFromSdk();
       selectedModelAlias = next;
       selectedModel = { alias: next };
       chatClient = null;
-      if (!model.isLoaded) {
-        await loadModelAndMaybeStart(model);
-      } else if (!state.serviceRunning) {
-        try {
-          await startSvc(
-            next,
-            selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
-          );
-        } catch {}
-      }
-      if (chatNavigationCurrent(nav)) statusMessage = `Chatting with ${next}`;
+      const startResult = !model.isLoaded
+        ? await loadModelAndMaybeStart(model)
+        : await startServiceForModel(next);
+      if (chatNavigationCurrent(nav))
+        statusMessage = `Chatting with ${next}${serviceQualifier(startResult.result)}`;
       persistChat();
     } catch (e: any) {
       statusMessage = `Failed to select ${next}: ${e?.message || e}`;
@@ -4265,15 +4366,8 @@ updateStateFromSdk();
       statusMessage = `Loading ${model.alias} (${shortVariantLabel(variantId)})...`;
       appendAppLog(`Loading model ${model.alias} variant ${variantId}`);
       await sdkLoadModel(model, "chat", variantId);
-      statusMessage = `${model.alias} loaded (${shortVariantLabel(variantId)})`;
-      if (!state.serviceRunning) {
-        try {
-          await startSvc(
-            model.alias,
-            selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
-          );
-        } catch {}
-      }
+      const startResult = await startServiceForModel(model.alias);
+      statusMessage = `${model.alias} loaded (${shortVariantLabel(variantId)})${serviceQualifier(startResult.result)}`;
       await refreshModels();
     } catch (e: any) {
       statusMessage = `Load failed: ${e?.message || e}`;
@@ -4306,16 +4400,9 @@ updateStateFromSdk();
       if (recommendedMaxTurns && recommendedMaxTurns !== contextTurns) {
         contextTurns = recommendedMaxTurns;
       }
-      if (!state.serviceRunning) {
-        try {
-          await startSvc(
-            model.alias,
-            selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
-          );
-        } catch {}
-      }
+      const startResult = await startServiceForModel(model.alias);
       await refreshModels();
-      statusMessage = `Chatting with ${model.alias} (${shortVariantLabel(variantId)})`;
+      statusMessage = `Chatting with ${model.alias} (${shortVariantLabel(variantId)})${serviceQualifier(startResult.result)}`;
       currentView = "chat";
       persistChat();
     } catch (e: any) {
@@ -4439,7 +4526,12 @@ updateStateFromSdk();
       statusMessage = `${model.alias} deleted`;
       await refreshModels();
     } catch (e: any) {
-      statusMessage = `Delete failed: ${e?.message || e}`;
+      // "Delete failed: it may have completed" is a contradiction, so an uncertain outcome
+      // states itself rather than being introduced as a failure.
+      statusMessage = isUncertainOutcome(e)
+        ? e?.message || String(e)
+        : `Delete failed: ${e?.message || e}`;
+      await refreshModels().catch(() => {});
     }
   }
 
@@ -4599,12 +4691,22 @@ updateStateFromSdk();
       isStreaming = false;
     }
     if (requestId != null) {
+      // Provable only before the request is written. After that the sidecar is asked to stop,
+      // which streaming honours at the next chunk and a non-streamed completion cannot honour
+      // at all — so the claim below is about what Flint shows, not about the model.
+      const abandoned = cancelBeforeDispatch(requestId);
+      if (abandoned) {
+        statusMessage = "Generation cancelled before it started";
+        return;
+      }
       try {
         await cancelChatRequest(requestId);
       } catch (e: any) {
         statusMessage = `Stop warning: ${e?.message || e}`;
         return;
       }
+      statusMessage = "Stopped. A response already under way may still finish in the background.";
+      return;
     }
     statusMessage = "Generation stopped by user";
   }
@@ -5273,6 +5375,9 @@ Output only the summary text, no preamble.`;
     const total = mono.length;
 
     const texts: string[] = [];
+    // Tracked so the caller can qualify the result rather than report an unqualified success.
+    let failedChunks = 0;
+    let uncertainChunks = 0;
     let pos = 0;
     let idx = 0;
     const totalChunks = Math.max(1, Math.ceil(total / step));
@@ -5301,7 +5406,11 @@ Output only the summary text, no preamble.`;
         const t = getTranscriptTextFromResult(res);
         if (t) texts.push(t);
       } catch (e) {
+        // Counted, not just logged. A swallowed segment leaves a silent hole in the transcript,
+        // and reporting the result as complete would assert something this loop cannot know.
         console.warn('Chunk transcription failed', e);
+        failedChunks += 1;
+        if (isUncertainOutcome(e)) uncertainChunks += 1;
       }
 
       pos += step;
@@ -5309,7 +5418,7 @@ Output only the summary text, no preamble.`;
     }
 
     if (onProgress) onProgress(totalChunks, totalChunks);
-    return { text: mergeTranscriptChunks(texts) };
+    return { text: mergeTranscriptChunks(texts), totalChunks, failedChunks, uncertainChunks };
   }
 
   async function getAudioDuration(blob: Blob): Promise<number> {
@@ -5353,6 +5462,7 @@ Output only the summary text, no preamble.`;
       await ensureServiceRunning(
         sttAlias,
         selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+        { convenience: true },
       );
 
       const dur = await getAudioDuration(audioBlob);
@@ -5412,9 +5522,24 @@ Output only the summary text, no preamble.`;
       }
       transcriptionProgress = null;
       const path = result?.transcriptionPath ? ` via ${result.transcriptionPath}` : "";
-      statusMessage = dur > 90
-        ? `Transcription complete (full long audio via chunks${path})`
-        : `Transcription complete (via sidecar${path})`;
+      if (dur > 90) {
+        const failed = Number(result?.failedChunks || 0);
+        const uncertain = Number(result?.uncertainChunks || 0);
+        const totalSegments = Number(result?.totalChunks || 0);
+        if (failed > 0) {
+          // The transcript has gaps. Saying "complete" would present a partial result as whole,
+          // and the missing audio is invisible once the segments are merged.
+          const detail =
+            uncertain > 0
+              ? `${failed} of ${totalSegments} segments did not complete (${uncertain} were interrupted without an answer, so they may have run)`
+              : `${failed} of ${totalSegments} segments failed`;
+          statusMessage = `Transcription incomplete: ${detail}. The text below is missing those parts.${path}`;
+        } else {
+          statusMessage = `Transcription complete (${totalSegments} segments${path})`;
+        }
+      } else {
+        statusMessage = `Transcription complete (via sidecar${path})`;
+      }
     } catch (err: any) {
       transcription = `Error: ${err.message || err}`;
       statusMessage = "Transcription failed";
@@ -6187,7 +6312,7 @@ Output only the summary text, no preamble.`;
                       {/if}
 
                       {#if model.isCached && !model.isLoaded}
-                        <button onclick={() => loadModelAndMaybeStart(model)}
+                        <button onclick={() => { void loadModelAndMaybeStart(model).catch(() => {}); }}
                           >Load</button
                         >
                         {#if modelSupportsChat(model)}
