@@ -123,6 +123,26 @@ macOS builds are Apple Silicon only and declare a minimum of macOS 14.0, because
 `libonnxruntime.dylib` is built with `minos 14.0` and `foundry-local-sdk` ships no `darwin-x64`
 prebuild.
 
+### macOS: Gatekeeper quarantines the Foundry native library
+
+`foundry-local-sdk` ships `Microsoft.AI.Foundry.Local.Core.dylib` **ad-hoc signed only** — it
+carries no Developer ID signature and is not notarized. macOS therefore tags it with
+`com.apple.quarantine` on install and refuses to `dlopen` it, showing a *"Apple could not verify
+… is free of malware"* dialog. Choose **Done**, never *Move to Trash* — trashing it breaks
+`node_modules`.
+
+The symptom is a block of sidecar test failures that look unrelated to your change (the SDK
+load probe and every BYOM end-to-end case), so it is easy to mistake for a pre-existing
+baseline. Clear the attribute after any `npm install` that refreshes the SDK:
+
+```bash
+xattr -d -r com.apple.quarantine node_modules/foundry-local-sdk
+```
+
+Verify with `xattr -r -p com.apple.quarantine node_modules/foundry-local-sdk`, which should
+print nothing. This is deliberately not automated in `postinstall`: stripping Gatekeeper
+metadata is a decision each developer should make knowingly.
+
 - **Dev:** `npm run tauri dev`
 - **Test release exe without MSI:** `npm run run:built` or `scripts\run-built.bat`
 - **Distribute:** MSI/NSIS under `src-tauri/target/release/bundle/`

@@ -66,6 +66,7 @@ export default defineConfig(() => ({
         'src/lib/flint-context.ts',
         'src/lib/chat-persistence.ts',
         'src/lib/url-chips.ts',
+        'src/lib/conversation-store.ts',
         'sidecar/audio-format.js',
         'sidecar/model-updates.js',
         'sidecar/byom-import.js',
