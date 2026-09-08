@@ -1,6 +1,8 @@
 # Flint reliability execution plan
 
-**Status:** Planned; no implementation is implied by this document.
+**Status:** In progress. Phase 0 and Phase 1A are delivered; see
+[Delivery status](#delivery-status). Everything else in this document remains
+planned and implies no implementation.
 
 **Scope:** Address the project review's data-integrity, lifecycle, inference, model,
 audio, packaging, and observability findings. Supported-platform work targets
@@ -9,6 +11,37 @@ Windows and macOS Apple Silicon.
 **Release ownership:** [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) owns version
 assignments and release scorecards. This document owns implementation sequencing
 and acceptance gates. [BACKLOG.md](./BACKLOG.md) holds deferred work.
+
+## Delivery status
+
+A stage is recorded here only once the pull request delivering it is merged to
+`main`. Work that was consciously deferred rather than completed is listed in
+[BACKLOG.md](./BACKLOG.md) and is not counted against a stage.
+
+| Phase | Stage | Delivered by |
+|---|---|---|
+| 0 | Containment: hydration/write guards, async ownership epochs, single-instance and macOS Reopen, microphone metadata, local unsigned-build profile, single-flight service startup, gateway activity leases and pool admission safety | #35 |
+| 1A | 1A-1 versioned conversation schema, legacy migration, supported rollback floor | #38, #43 |
+| 1A | 1A-2 `ConversationRepository` storage layer with byte preservation | #43 |
+| 1A | 1A-3a conversation contracts and title derivation from plain text | #43 |
+| 1A | 1A-3b multipart-preserving request builder and chat transport | #42 |
+| 1A | 1A-3c conversation session wiring: switching, creation, deletion, and flush | #45 |
+
+Phase 1A closed its acceptance gate for storage, migration, rollback, multipart
+preservation, and conversation switching. Three items were split out rather than
+completed and are tracked in [BACKLOG.md](./BACKLOG.md) under *Conversation
+persistence*:
+
+- Native quit is a best-effort flush; a guaranteed flush needs a Rust
+  `ExitRequested` handshake, which belongs to Workstream C.
+- Per-conversation settings are stored and round-tripped but not applied, because
+  applying them without an app-default baseline would leak the previous
+  conversation's model and persona.
+- In-flight streaming is discarded across a conversation switch rather than
+  being allowed to finish in its originating conversation.
+
+The remaining Phase 1A work is the export/backup foundation, which the acceptance
+gate requires before any destructive reset decision is offered.
 
 ## Decisions
 
@@ -56,8 +89,8 @@ with each fix rather than postponing it to a final testing phase.
 
 | Phase | Work | Dependencies and exit condition |
 |---|---|---|
-| **0: Contain existing failures** | Hydration/write guards, stale-result guards, truthful errors, immediate Mac metadata and Dock-reopen fixes, local-build profile, idempotent service ensure, startup deduplication, and urgent eviction protections | No runtime rewrite or storage-migration prerequisite. Each corrected failure has a focused regression case; affected packaged paths also have artifact-level evidence. |
-| **1A: Durable conversation state** | Versioned conversation repository, legacy recovery, multipart storage, supported rollback, export/backup foundation | Hydration protection is already in place. Migration can be interrupted/retried without overwriting either legacy or new data. |
+| **0: Contain existing failures** *(delivered)* | Hydration/write guards, stale-result guards, truthful errors, immediate Mac metadata and Dock-reopen fixes, local-build profile, idempotent service ensure, startup deduplication, and urgent eviction protections | No runtime rewrite or storage-migration prerequisite. Each corrected failure has a focused regression case; affected packaged paths also have artifact-level evidence. |
+| **1A: Durable conversation state** *(delivered except export/backup)* | Versioned conversation repository, legacy recovery, multipart storage, supported rollback, export/backup foundation | Hydration protection is already in place. Migration can be interrupted/retried without overwriting either legacy or new data. |
 | **1B: Runtime correctness** | Runtime/service contracts, admission and leases, inference adapter, cache ownership, audio sessions, and renderer-independent monitoring | Starts on the existing transport. Domain fixes may ship independently; shared contracts must be stable before native transport cutover. |
 | **2: Native ownership cutover** | Thin Rust supervisor, native tray/reopen/quit, single-instance behavior, process-generation transport | May overlap Phase 1 once contracts are fixed. Exactly one child and one manager owner; rollback happens at a clean startup boundary. |
 | **Every affected release** | Complete resource packaging, installed-app scenarios, updater/install integrity, SDK/core matrix, current documentation | Runs continuously, not just at the end. Windows/macOS only; release signing remains mandatory for signed channels. |
