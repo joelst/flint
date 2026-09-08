@@ -38,7 +38,44 @@ export function isUsableVersion(value: unknown): boolean {
   return /^\d+(\.\d+)*(-.+)?$/.test(value.trim());
 }
 
-export type MessageRole = 'system' | 'user' | 'assistant';
+/**
+ * Roles this build understands well enough to render and to send to a model.
+ *
+ * `tool` is listed because tool-calling models emit it, but it is deliberately *not* a prompt
+ * role: a faithful tool turn also carries `tool_call_id`, which this schema does not model.
+ * Listing it keeps such a turn readable and round-trippable; `isPromptRole` keeps it out of
+ * requests until the tool-call fields are modelled properly.
+ */
+export const KNOWN_MESSAGE_ROLES = ['system', 'user', 'assistant', 'tool'] as const;
+
+export type KnownMessageRole = (typeof KNOWN_MESSAGE_ROLES)[number];
+
+/**
+ * Any non-empty role string, not just the ones above.
+ *
+ * A closed union here would mean a newer build's roles are unreadable by an older one, and the
+ * old behaviour on an unreadable role was to drop the entire message — losing its content to
+ * protect a type. Preserving the role verbatim costs nothing and keeps a downgrade
+ * non-destructive; `isKnownRole` is how callers decide what to do with one they do not know.
+ */
+export type MessageRole = KnownMessageRole | (string & {});
+
+const KNOWN_ROLE_SET: ReadonlySet<string> = new Set<string>(KNOWN_MESSAGE_ROLES);
+
+/** True when this build can render and reason about the role. */
+export function isKnownRole(role: unknown): role is KnownMessageRole {
+  return typeof role === 'string' && KNOWN_ROLE_SET.has(role);
+}
+
+/**
+ * True when a message with this role may be sent to a model as-is.
+ *
+ * Unknown roles are excluded because their meaning is unknown by definition, and `tool` because
+ * this schema cannot reproduce the call linkage a tool turn requires.
+ */
+export function isPromptRole(role: unknown): role is 'system' | 'user' | 'assistant' {
+  return role === 'system' || role === 'user' || role === 'assistant';
+}
 
 export interface TextPart {
   type: 'text';
@@ -134,8 +171,21 @@ export interface StoredConversation {
   createdAt: number;
   updatedAt: number;
   messages: StoredMessage[];
-  /** Conversation-scoped settings (model alias, persona, sampling). Opaque here. */
+  /**
+   * Conversation-scoped settings (model alias, persona, sampling).
+   *
+   * Deliberately an opaque bag rather than a typed object: narrowing it at the storage boundary
+   * would drop any key this build does not know, which is exactly how a downgrade destroys a
+   * newer build's settings. `readConversationSettings` / `mergeConversationSettings` provide the
+   * typed contract over it without ever discarding a key.
+   */
   settings?: Record<string, unknown>;
+  /**
+   * True when the title was chosen by a human rather than derived from the first turn.
+   *
+   * Without this, every save re-derives the title and silently overwrites a deliberate name.
+   */
+  titlePinned?: boolean;
   /**
    * True for a thread imported from the pre-v2 global history, which had no provable owner
    * in the sidebar index. The UI must label it rather than claim it belongs to a title.
@@ -156,9 +206,110 @@ export interface StoredConversation {
 }
 
 const KNOWN_CONVERSATION_KEYS = new Set<string>([
-  'id', 'title', 'createdAt', 'updatedAt', 'messages', 'settings',
+  'id', 'title', 'createdAt', 'updatedAt', 'messages', 'settings', 'titlePinned',
   'recovered', 'messagesUnavailable', 'unavailableMessageCount', 'extra',
 ]);
+
+/**
+ * Per-conversation settings this build understands.
+ *
+ * Every field is optional and absence is meaningful: it means "inherit the app default", which
+ * is not the same as a stored value that happens to equal the default. Writing defaults in
+ * eagerly would freeze today's defaults into every conversation ever saved.
+ */
+export interface ConversationSettings {
+  /** Model this conversation was held with. */
+  modelAlias?: string;
+  /** Persona / system prompt in force for this conversation. */
+  systemPrompt?: string;
+  /** How many prior turns to include when building a request. */
+  contextTurns?: number;
+  /** Whether the UI shows the full thread rather than the condensed one. */
+  showFullHistory?: boolean;
+}
+
+/** Keys `ConversationSettings` owns. Anything else is passthrough. */
+export const CONVERSATION_SETTING_KEYS = [
+  'modelAlias', 'systemPrompt', 'contextTurns', 'showFullHistory',
+] as const;
+
+export interface ConversationSettingsRead {
+  /** Known keys that held a usable value. */
+  settings: ConversationSettings;
+  /**
+   * Keys this build does not interpret, preserved verbatim so a downgrade cannot delete them.
+   */
+  passthrough: Record<string, unknown>;
+  /**
+   * Known keys whose stored value was the wrong type. They are ignored rather than coerced —
+   * a coerced setting is a silent behaviour change — but they are still reported, and
+   * `mergeConversationSettings` still round-trips them.
+   */
+  invalidKeys: string[];
+}
+
+/** Read the typed view of a settings bag without discarding anything it does not recognize. */
+export function readConversationSettings(raw: unknown): ConversationSettingsRead {
+  const settings: ConversationSettings = {};
+  const passthrough: Record<string, unknown> = {};
+  const invalidKeys: string[] = [];
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { settings, passthrough, invalidKeys };
+  }
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    switch (key) {
+      case 'modelAlias':
+      case 'systemPrompt':
+        if (typeof value === 'string') settings[key] = value;
+        else invalidKeys.push(key);
+        break;
+      case 'contextTurns':
+        // Must match what the app will actually accept, which is a positive whole number of
+        // turns (`+page.svelte` restores it only when `> 0`, and the picker offers 4/8/12/20/30).
+        // Storing 0, a negative, or a fraction would put a value in the archive that the app
+        // silently refuses to apply, so the conversation would keep reporting a context window
+        // it never uses. Rejecting it here reports it through `invalidKeys` instead of
+        // presenting it as usable; the stored bag is kept verbatim by `normalizeConversation`,
+        // so this is a view-level judgement and the original value is not discarded.
+        if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
+          settings.contextTurns = value;
+        } else invalidKeys.push(key);
+        break;
+      case 'showFullHistory':
+        if (typeof value === 'boolean') settings.showFullHistory = value;
+        else invalidKeys.push(key);
+        break;
+      default:
+        // `key` is arbitrary stored input, so it cannot be assigned directly.
+        setOwn(passthrough, key, value);
+    }
+  }
+  return { settings, passthrough, invalidKeys };
+}
+
+/**
+ * Apply a typed patch to a stored settings bag.
+ *
+ * `prior` is merged rather than replaced so unknown keys — and known keys the patch does not
+ * mention — survive. An explicit `undefined` in the patch clears that key; a key the patch
+ * omits entirely is left alone, which is what makes a partial update safe.
+ *
+ * Returns `undefined` when nothing would be stored, so an empty bag is never written.
+ */
+export function mergeConversationSettings(
+  prior: Record<string, unknown> | undefined,
+  patch: ConversationSettings,
+): Record<string, unknown> | undefined {
+  const merged: Record<string, unknown> =
+    prior && typeof prior === 'object' && !Array.isArray(prior) ? { ...prior } : {};
+  for (const key of CONVERSATION_SETTING_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(patch, key)) continue;
+    const value = patch[key];
+    if (value === undefined) delete merged[key];
+    else merged[key] = value;
+  }
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
 
 export interface ConversationArchive {
   version: number;
@@ -185,6 +336,12 @@ export interface ArchiveParseResult {
   /** Content parts kept but not understood by this build. */
   unrecognizedParts: number;
   /**
+   * True when a stored field had to be substituted or rebuilt. Distinct from
+   * `unrecognizedParts`, which is data we deliberately preserved: a repair means the record we
+   * read back is not the record that was written.
+   */
+  repaired: boolean;
+  /**
    * True when anything at all was dropped, repaired, or not understood. The repository must
    * back the original bytes up before its first write whenever this is set — otherwise the
    * reduced form silently replaces data we could not represent.
@@ -194,7 +351,15 @@ export interface ArchiveParseResult {
   reason: string | null;
 }
 
-const VALID_ROLES = new Set<MessageRole>(['system', 'user', 'assistant']);
+/**
+ * A role is usable when it is a non-empty string, whether or not this build knows it.
+ *
+ * The check is deliberately not `isKnownRole`: rejecting an unrecognized role would discard the
+ * message body along with it, which is the one outcome this schema exists to prevent.
+ */
+function isStorableRole(role: unknown): role is MessageRole {
+  return typeof role === 'string' && role.trim().length > 0;
+}
 
 /**
  * Allocate an id that is definitely unused.
@@ -343,6 +508,43 @@ export function contentToText(content: unknown): string {
     .join('\n');
 }
 
+/**
+ * Store a key that came from untrusted JSON.
+ *
+ * Plain assignment routes `__proto__` through the inherited setter, so the key is neither stored
+ * nor reported — silently losing the one key in a mechanism whose entire purpose is to lose
+ * nothing. `JSON.parse` produces `__proto__` as an ordinary own property, so this is reachable
+ * from any stored archive.
+ */
+function setOwn(target: Record<string, unknown>, key: string, value: unknown): void {
+  Object.defineProperty(target, key, { value, writable: true, enumerable: true, configurable: true });
+}
+
+/**
+ * Fold `extra` back into a record before reading it.
+ *
+ * `extra` exists so a build that does not know a field carries it through instead of deleting
+ * it. That promise is only half kept if the build that *does* know the field then ignores the
+ * copy sitting in `extra`: a new → old → new round trip loses the field at the final step,
+ * silently and with no repair flag, because by then it looks like an ordinary absent field.
+ *
+ * A value present at the top level always wins — the copy in `extra` is a stale duplicate in
+ * that case, which is why it is not treated as a conflict.
+ */
+function withPromotedExtra<T>(raw: T, knownKeys: ReadonlySet<string>): T {
+  const extra = (raw as any)?.extra;
+  if (!extra || typeof extra !== 'object' || Array.isArray(extra)) return raw;
+  let promoted: Record<string, unknown> | null = null;
+  for (const [key, value] of Object.entries(extra)) {
+    if (key === 'extra' || !knownKeys.has(key)) continue;
+    if ((raw as any)[key] !== undefined) continue;
+    promoted ??= { ...(raw as object) } as Record<string, unknown>;
+    // `key` is a known schema field, never arbitrary input, so plain assignment is safe here.
+    promoted[key] = value;
+  }
+  return (promoted ?? raw) as T;
+}
+
 export interface MessageNormalization {
   message: StoredMessage | null;
   droppedParts: number;
@@ -351,11 +553,12 @@ export interface MessageNormalization {
   repaired: boolean;
 }
 
-export function normalizeMessageDetailed(raw: unknown, fallbackId: string): MessageNormalization {
+export function normalizeMessageDetailed(input: unknown, fallbackId: string): MessageNormalization {
   const nothing = { message: null, droppedParts: 0, unrecognizedParts: 0, repaired: false };
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return nothing;
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return nothing;
+  const raw = withPromotedExtra(input, KNOWN_MESSAGE_KEYS);
   const role = (raw as any).role;
-  if (!VALID_ROLES.has(role)) return nothing;
+  if (!isStorableRole(role)) return nothing;
   const { content, droppedParts, unrecognizedParts } = normalizeContentDetailed((raw as any).content);
   if (content === null) return nothing;
 
@@ -388,13 +591,13 @@ export function normalizeMessageDetailed(raw: unknown, fallbackId: string): Mess
   if (priorExtra && typeof priorExtra === 'object' && !Array.isArray(priorExtra)) {
     // A key this schema now owns must not shadow the real field from `extra`.
     for (const [key, value] of Object.entries(priorExtra)) {
-      if (!KNOWN_MESSAGE_KEYS.has(key)) extra[key] = value;
+      if (!KNOWN_MESSAGE_KEYS.has(key)) setOwn(extra, key, value);
     }
   } else if (priorExtra !== undefined) {
     repaired = true;
   }
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (!KNOWN_MESSAGE_KEYS.has(key)) extra[key] = value;
+    if (!KNOWN_MESSAGE_KEYS.has(key)) setOwn(extra, key, value);
   }
   if (Object.keys(extra).length > 0) message.extra = extra;
 
@@ -415,11 +618,12 @@ export interface NormalizedConversation {
   repaired: boolean;
 }
 
-export function normalizeConversation(raw: unknown): NormalizedConversation {
+export function normalizeConversation(input: unknown): NormalizedConversation {
   const nothing = {
     conversation: null, droppedMessages: 0, droppedParts: 0, unrecognizedParts: 0, repaired: false,
   };
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return nothing;
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return nothing;
+  const raw = withPromotedExtra(input, KNOWN_CONVERSATION_KEYS);
   const id = (raw as any).id;
   // Without an id the entry cannot be selected, deleted, or written back to.
   if (typeof id !== 'string' || !id) return nothing;
@@ -477,7 +681,7 @@ export function normalizeConversation(raw: unknown): NormalizedConversation {
   } else if (settings !== undefined) {
     repaired = true;
   }
-  for (const flag of ['recovered', 'messagesUnavailable'] as const) {
+  for (const flag of ['recovered', 'messagesUnavailable', 'titlePinned'] as const) {
     const value = (raw as any)[flag];
     if (value === true) conversation[flag] = true;
     else if (value !== undefined && value !== false) repaired = true;
@@ -494,13 +698,13 @@ export function normalizeConversation(raw: unknown): NormalizedConversation {
   if (priorExtra && typeof priorExtra === 'object' && !Array.isArray(priorExtra)) {
     // A key this schema now owns must not shadow the real field from `extra`.
     for (const [key, value] of Object.entries(priorExtra)) {
-      if (!KNOWN_CONVERSATION_KEYS.has(key)) extra[key] = value;
+      if (!KNOWN_CONVERSATION_KEYS.has(key)) setOwn(extra, key, value);
     }
   } else if (priorExtra !== undefined) {
     repaired = true;
   }
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (!KNOWN_CONVERSATION_KEYS.has(key)) extra[key] = value;
+    if (!KNOWN_CONVERSATION_KEYS.has(key)) setOwn(extra, key, value);
   }
   if (Object.keys(extra).length > 0) conversation.extra = extra;
 
@@ -533,6 +737,7 @@ export function parseConversationArchive(
     droppedMessages: 0,
     droppedParts: 0,
     unrecognizedParts: 0,
+    repaired: false,
     lossy: false,
     reason: null,
   };
@@ -661,6 +866,7 @@ export function parseConversationArchive(
     droppedMessages,
     droppedParts,
     unrecognizedParts,
+    repaired,
     lossy,
     reason: lossy ? 'Part of the stored conversations could not be read exactly as written.' : null,
   };
@@ -735,6 +941,32 @@ export interface LegacyMigrationResult {
 }
 
 /**
+ * Derive a stable id from the legacy thread's own bytes.
+ *
+ * Using the clock would mint a new conversation every time an interrupted migration is retried,
+ * so the same input must always yield the same id. FNV-1a is sufficient here: this is a
+ * de-duplication key, not a security boundary.
+ */
+export function hashString(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(36);
+}
+
+export function deriveRecoveredId(legacyMessages: unknown): string {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(legacyMessages) ?? '';
+  } catch {
+    serialized = String(legacyMessages);
+  }
+  return `recovered-${hashString(serialized)}`;
+}
+
+/**
  * Convert the pre-v2 layout into a v2 archive.
  *
  * The legacy index never stored messages, so its entries can only contribute titles. The one
@@ -756,28 +988,6 @@ export interface LegacyMigrationResult {
  * `recoveredId` is derived from the legacy content rather than the clock so an interrupted and
  * retried migration reuses the same id instead of minting a duplicate conversation.
  */
-/**
- * Derive a stable id from the legacy thread's own bytes.
- *
- * Using the clock would mint a new conversation every time an interrupted migration is retried,
- * so the same input must always yield the same id. FNV-1a is sufficient here: this is a
- * de-duplication key, not a security boundary.
- */
-export function deriveRecoveredId(legacyMessages: unknown): string {
-  let serialized: string;
-  try {
-    serialized = JSON.stringify(legacyMessages) ?? '';
-  } catch {
-    serialized = String(legacyMessages);
-  }
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < serialized.length; i += 1) {
-    hash ^= serialized.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return `recovered-${hash.toString(36)}`;
-}
-
 export function migrateLegacyConversations(input: LegacyMigrationInput): LegacyMigrationResult {
   const archive = createEmptyArchive();
   const legacyIndexMalformed =
@@ -833,10 +1043,13 @@ export function migrateLegacyConversations(input: LegacyMigrationInput): LegacyM
   }
   const importedFromIndex = archive.conversations.length;
 
+  // `undefined` is the only value that means "no thread was stored"; the reader maps a missing
+  // key to it deliberately. Everything else was read off disk, so anything that is not an array
+  // is a stored value that is not a thread — including `null`. Treating `null` as absence would
+  // report a damaged source as a clean empty start and then let the retirement gate delete it,
+  // which is the one outcome this migration exists to prevent.
   const legacyThreadMalformed =
-    input.legacyMessages !== undefined &&
-    input.legacyMessages !== null &&
-    !Array.isArray(input.legacyMessages);
+    input.legacyMessages !== undefined && !Array.isArray(input.legacyMessages);
   const messages: StoredMessage[] = [];
   const rawMessages = Array.isArray(input.legacyMessages) ? input.legacyMessages : [];
   let droppedLegacyMessages = 0;
