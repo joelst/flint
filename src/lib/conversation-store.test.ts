@@ -1,4 +1,11 @@
 import { describe, it, expect } from 'vitest';
+import { applyConversationTitle } from './conversation-title';
+
+/** Mirrors the schema's own known-key list; kept local so the test states its assumption. */
+const KNOWN_CONVERSATION_KEYS_FOR_TEST = new Set([
+  'id', 'title', 'createdAt', 'updatedAt', 'messages', 'settings', 'titlePinned',
+  'recovered', 'messagesUnavailable', 'unavailableMessageCount', 'extra',
+]);
 import {
   CONVERSATION_SCHEMA_VERSION,
   normalizeContentDetailed,
@@ -17,6 +24,11 @@ import {
   normalizeConversation,
   parseConversationArchive,
   deriveConversationTitle,
+  KNOWN_MESSAGE_ROLES,
+  isKnownRole,
+  isPromptRole,
+  readConversationSettings,
+  mergeConversationSettings,
   createEmptyArchive,
   migrateLegacyConversations,
 } from './conversation-store';
@@ -136,8 +148,11 @@ describe('normalizeMessage', () => {
     expect(m).toEqual({ id: 'a1', role: 'assistant', content: 'ok', createdAt: 5 });
   });
 
-  it('rejects an unknown role', () => {
-    expect(normalizeMessage({ role: 'tool', content: 'x' }, 'x')).toBeNull();
+  it('rejects a message with no usable role', () => {
+    // An unrecognized-but-present role is kept (see "message roles" below); only a role that
+    // is not a usable string at all makes the message unstorable.
+    expect(normalizeMessage({ role: '', content: 'x' }, 'x')).toBeNull();
+    expect(normalizeMessage({ content: 'x' }, 'x')).toBeNull();
   });
 
   it('rejects a message whose content cannot be stored', () => {
@@ -161,7 +176,7 @@ describe('normalizeConversation', () => {
       id: 'c1',
       title: 't',
       createdAt: 1,
-      messages: [textMsg('user', 'keep'), { role: 'nope', content: 'x' }],
+      messages: [textMsg('user', 'keep'), { role: 'user', content: { a: 1 } }],
     });
     expect(result.conversation?.messages).toHaveLength(1);
     expect(result.droppedMessages).toBe(1);
@@ -620,7 +635,7 @@ describe('migration idempotency and honesty', () => {
 
     const unreadable = migrateLegacyConversations({
       legacyIndex,
-      legacyMessages: [{ role: 'tool', content: 'x' }, 'junk'],
+      legacyMessages: [{ role: 'user', content: { a: 1 } }, 'junk'],
       now: 1,
     });
     expect(unreadable.legacyThreadPresent).toBe(true);
@@ -859,5 +874,310 @@ describe('header and legacy identity repairs are reported', () => {
       expect(r.archive.conversations[0].messagesUnavailable).toBeUndefined();
       expect(r.archive.conversations[0].unavailableMessageCount).toBeUndefined();
     }
+  });
+});
+
+describe('message roles', () => {
+  it('recognizes the roles this build understands', () => {
+    expect([...KNOWN_MESSAGE_ROLES]).toEqual(['system', 'user', 'assistant', 'tool']);
+    for (const role of KNOWN_MESSAGE_ROLES) expect(isKnownRole(role)).toBe(true);
+  });
+
+  it('does not treat an unknown or malformed role as known', () => {
+    for (const role of ['function', 'developer', '', ' user ', null, 7, undefined]) {
+      expect(isKnownRole(role)).toBe(false);
+    }
+  });
+
+  it('only allows system/user/assistant into a prompt', () => {
+    expect(isPromptRole('system')).toBe(true);
+    expect(isPromptRole('user')).toBe(true);
+    expect(isPromptRole('assistant')).toBe(true);
+    // A faithful tool turn needs a tool_call_id this schema does not model, so replaying it
+    // would send a structurally invalid request.
+    expect(isPromptRole('tool')).toBe(false);
+    expect(isPromptRole('function')).toBe(false);
+  });
+
+  it('keeps a tool message instead of dropping it', () => {
+    const r = normalizeMessageDetailed({ id: 'm1', role: 'tool', content: '{"ok":true}' }, 'fb');
+    expect(r.message).toEqual({ id: 'm1', role: 'tool', content: '{"ok":true}' });
+    expect(r.repaired).toBe(false);
+  });
+
+  it('preserves a role from a newer build verbatim and without flagging a repair', () => {
+    // Flagging this as a repair would make any archive containing such a message permanently
+    // unsaveable, which is the same trap unrecognized parts avoid.
+    const r = normalizeMessageDetailed({ id: 'm1', role: 'developer', content: 'hi' }, 'fb');
+    expect(r.message?.role).toBe('developer');
+    expect(r.repaired).toBe(false);
+  });
+
+  it('round-trips an unknown role through a full archive', () => {
+    const archive = {
+      version: CONVERSATION_SCHEMA_VERSION,
+      minAppVersion: MIN_ROLLBACK_APP_VERSION,
+      activeId: 'c1',
+      conversations: [{
+        id: 'c1', title: 'T', createdAt: 1, updatedAt: 2,
+        messages: [{ id: 'm1', role: 'developer', content: 'hi' }],
+      }],
+    };
+    const parsed = parseConversationArchive(JSON.stringify(archive), SKIP_APP_VERSION_GATE);
+    expect(parsed.archive?.conversations[0].messages[0].role).toBe('developer');
+    expect(parsed.droppedMessages).toBe(0);
+    expect(parsed.repaired).toBe(false);
+  });
+
+  it('still drops a message whose role is not a usable string', () => {
+    for (const role of [undefined, null, '', '   ', 5, {}, ['user']]) {
+      expect(normalizeMessageDetailed({ id: 'm', role, content: 'x' }, 'fb').message).toBeNull();
+    }
+  });
+
+  it('derives a title only from the user role, ignoring lookalikes', () => {
+    expect(deriveConversationTitle([
+      { id: 'a', role: 'tool', content: 'tool output' },
+      { id: 'b', role: 'user', content: 'the real question' },
+    ])).toBe('the real question');
+  });
+});
+
+describe('readConversationSettings', () => {
+  it('reads every known key', () => {
+    const r = readConversationSettings({
+      modelAlias: 'qwen3-0.6b',
+      systemPrompt: 'Be brief',
+      contextTurns: 6,
+      showFullHistory: true,
+    });
+    expect(r.settings).toEqual({
+      modelAlias: 'qwen3-0.6b', systemPrompt: 'Be brief', contextTurns: 6, showFullHistory: true,
+    });
+    expect(r.passthrough).toEqual({});
+    expect(r.invalidKeys).toEqual([]);
+  });
+
+  it('preserves keys this build does not interpret', () => {
+    const r = readConversationSettings({ modelAlias: 'a', reasoningEffort: 'high', tools: [1] });
+    expect(r.settings).toEqual({ modelAlias: 'a' });
+    expect(r.passthrough).toEqual({ reasoningEffort: 'high', tools: [1] });
+  });
+
+  it('ignores rather than coerces a known key of the wrong type', () => {
+    // Coercion here would silently change model behaviour; "3" turns as a string is not 3.
+    const r = readConversationSettings({ contextTurns: '3', showFullHistory: 'yes', modelAlias: 9 });
+    expect(r.settings).toEqual({});
+    expect(r.invalidKeys.sort()).toEqual(['contextTurns', 'modelAlias', 'showFullHistory']);
+  });
+
+  it('rejects a non-finite contextTurns', () => {
+    for (const contextTurns of [NaN, Infinity, -Infinity]) {
+      expect(readConversationSettings({ contextTurns }).invalidKeys).toEqual(['contextTurns']);
+    }
+  });
+
+  it('accepts a false showFullHistory as a real value', () => {
+    // `false` is a stored choice, not an absence; treating it as absent would re-apply a
+    // default of `true` on every read.
+    expect(readConversationSettings({ showFullHistory: false }).settings).toEqual({ showFullHistory: false });
+  });
+
+  it('returns empty results for a missing or non-object bag', () => {
+    for (const raw of [undefined, null, 'x', 7, ['a'], true]) {
+      const r = readConversationSettings(raw);
+      expect(r).toEqual({ settings: {}, passthrough: {}, invalidKeys: [] });
+    }
+  });
+});
+
+describe('mergeConversationSettings', () => {
+  it('creates a bag from nothing', () => {
+    expect(mergeConversationSettings(undefined, { modelAlias: 'a' })).toEqual({ modelAlias: 'a' });
+  });
+
+  it('preserves unknown keys through a patch', () => {
+    const merged = mergeConversationSettings(
+      { reasoningEffort: 'high', modelAlias: 'old' },
+      { modelAlias: 'new' },
+    );
+    expect(merged).toEqual({ reasoningEffort: 'high', modelAlias: 'new' });
+  });
+
+  it('leaves known keys the patch omits alone', () => {
+    const merged = mergeConversationSettings({ modelAlias: 'a', contextTurns: 4 }, { contextTurns: 9 });
+    expect(merged).toEqual({ modelAlias: 'a', contextTurns: 9 });
+  });
+
+  it('an explicit undefined clears a key', () => {
+    const merged = mergeConversationSettings({ modelAlias: 'a', contextTurns: 4 }, { modelAlias: undefined });
+    expect(merged).toEqual({ contextTurns: 4 });
+  });
+
+  it('returns undefined rather than storing an empty bag', () => {
+    expect(mergeConversationSettings(undefined, {})).toBeUndefined();
+    expect(mergeConversationSettings({ modelAlias: 'a' }, { modelAlias: undefined })).toBeUndefined();
+  });
+
+  it('does not mutate the prior bag', () => {
+    const prior = { modelAlias: 'a' };
+    mergeConversationSettings(prior, { modelAlias: 'b' });
+    expect(prior).toEqual({ modelAlias: 'a' });
+  });
+
+  it('ignores a non-object prior rather than throwing', () => {
+    expect(mergeConversationSettings(['x'] as any, { modelAlias: 'a' })).toEqual({ modelAlias: 'a' });
+  });
+
+  it('writes a false value rather than treating it as a clear', () => {
+    expect(mergeConversationSettings(undefined, { showFullHistory: false })).toEqual({ showFullHistory: false });
+  });
+
+  it('round-trips through the reader', () => {
+    const bag = mergeConversationSettings({ custom: 1 }, { modelAlias: 'm', contextTurns: 3 });
+    const read = readConversationSettings(bag);
+    expect(read.settings).toEqual({ modelAlias: 'm', contextTurns: 3 });
+    expect(read.passthrough).toEqual({ custom: 1 });
+  });
+});
+
+describe('titlePinned', () => {
+  it('survives a normalize round-trip', () => {
+    const c = normalizeConversation({
+      id: 'c1', title: 'Mine', createdAt: 1, updatedAt: 2, messages: [], titlePinned: true,
+    });
+    expect(c.conversation?.titlePinned).toBe(true);
+    expect(c.repaired).toBe(false);
+  });
+
+  it('is absent rather than false when not set', () => {
+    const c = normalizeConversation({ id: 'c1', title: 'T', createdAt: 1, updatedAt: 2, messages: [] });
+    expect(c.conversation?.titlePinned).toBeUndefined();
+    expect(c.repaired).toBe(false);
+  });
+
+  it('flags a repair when the stored value is not a boolean', () => {
+    const c = normalizeConversation({
+      id: 'c1', title: 'T', createdAt: 1, updatedAt: 2, messages: [], titlePinned: 'yes',
+    });
+    expect(c.repaired).toBe(true);
+  });
+
+  it('does not leak into extra', () => {
+    const c = normalizeConversation({
+      id: 'c1', title: 'T', createdAt: 1, updatedAt: 2, messages: [], titlePinned: true,
+    });
+    expect(c.conversation?.extra).toBeUndefined();
+  });
+});
+
+describe('extra survives a new -> old -> new round trip', () => {
+  // The `extra` bag makes a *downgrade* non-destructive. These cover the other half: the build
+  // that owns the field again must recover it, or the field is lost on the way back up —
+  // silently, with no repair flag, because by then it looks like an ordinary absent field.
+
+  it('promotes a conversation field an older build parked in extra', () => {
+    const c = normalizeConversation({
+      id: 'c1', title: 'Mine', createdAt: 1, updatedAt: 2, messages: [],
+      extra: { titlePinned: true },
+    });
+    expect(c.conversation?.titlePinned).toBe(true);
+    // The value is represented at the top level now, so keeping a duplicate in `extra` would
+    // let the two disagree after the next edit.
+    expect(c.conversation?.extra).toBeUndefined();
+    expect(c.repaired).toBe(false);
+  });
+
+  it('lets a top-level value win over a stale copy in extra', () => {
+    const c = normalizeConversation({
+      id: 'c1', title: 'T', createdAt: 1, updatedAt: 2, messages: [],
+      recovered: true, extra: { recovered: false },
+    });
+    expect(c.conversation?.recovered).toBe(true);
+    expect(c.repaired).toBe(false);
+  });
+
+  it('flags a repair when the promoted value is unusable', () => {
+    const c = normalizeConversation({
+      id: 'c1', title: 'T', createdAt: 1, updatedAt: 2, messages: [],
+      extra: { titlePinned: 'yes' },
+    });
+    expect(c.repaired).toBe(true);
+  });
+
+  it('promotes a message field an older build parked in extra', () => {
+    const r = normalizeMessageDetailed(
+      { id: 'm1', role: 'user', content: 'hi', extra: { pinned: true } },
+      'fb',
+    );
+    expect(r.message?.pinned).toBe(true);
+    expect(r.message?.extra).toBeUndefined();
+    expect(r.repaired).toBe(false);
+  });
+
+  it('keeps genuinely unknown keys in extra while promoting known ones', () => {
+    const c = normalizeConversation({
+      id: 'c1', title: 'T', createdAt: 1, updatedAt: 2, messages: [],
+      extra: { titlePinned: true, fromTheFuture: 42 },
+    });
+    expect(c.conversation?.titlePinned).toBe(true);
+    expect(c.conversation?.extra).toEqual({ fromTheFuture: 42 });
+  });
+
+  it('survives the full downgrade and re-upgrade of a pinned title', () => {
+    // Simulates the real sequence: a new build writes `titlePinned`, an old build that has
+    // never heard of it reads and rewrites the archive, then a new build reads it again.
+    const asStored = {
+      id: 'c1', title: 'Budget notes', createdAt: 1, updatedAt: 2, titlePinned: true,
+      messages: [{ id: 'm1', role: 'user', content: 'unrelated text' }],
+    };
+    const oldBuildKnownKeys = new Set(
+      [...KNOWN_CONVERSATION_KEYS_FOR_TEST].filter((k) => k !== 'titlePinned'),
+    );
+    const parked: Record<string, unknown> = { extra: {} as Record<string, unknown> };
+    for (const [k, v] of Object.entries(asStored)) {
+      if (oldBuildKnownKeys.has(k)) parked[k] = v;
+      else (parked.extra as Record<string, unknown>)[k] = v;
+    }
+    const back = normalizeConversation(parked);
+    expect(back.conversation?.titlePinned).toBe(true);
+    expect(applyConversationTitle(back.conversation!).title).toBe('Budget notes');
+  });
+});
+
+describe('keys that collide with Object.prototype', () => {
+  // `JSON.parse` produces `__proto__` as an ordinary own property, so a stored archive can
+  // reach this. Plain assignment would route it to the inherited setter: neither stored nor
+  // reported, which is the one silent loss the `extra` mechanism exists to prevent.
+  const evil = () => JSON.parse('{"__proto__": "kept", "constructor": "also kept"}');
+
+  it('preserves them in a message extra bag', () => {
+    const r = normalizeMessageDetailed({ id: 'm', role: 'user', content: 'x', ...evil() }, 'fb');
+    expect(Object.getOwnPropertyDescriptor(r.message?.extra ?? {}, '__proto__')?.value).toBe('kept');
+    expect(({} as any).polluted).toBeUndefined();
+  });
+
+  it('preserves them in a conversation extra bag', () => {
+    const c = normalizeConversation({
+      id: 'c1', title: 'T', createdAt: 1, updatedAt: 2, messages: [], ...evil(),
+    });
+    expect(Object.getOwnPropertyDescriptor(c.conversation?.extra ?? {}, '__proto__')?.value).toBe('kept');
+  });
+
+  it('preserves them in a settings passthrough bag', () => {
+    const r = readConversationSettings({ modelAlias: 'a', ...evil() });
+    expect(Object.getOwnPropertyDescriptor(r.passthrough, '__proto__')?.value).toBe('kept');
+    expect(r.passthrough.constructor).toBe('also kept');
+  });
+
+  it('round-trips them through JSON, which is the only thing that matters downstream', () => {
+    const r = readConversationSettings(evil());
+    expect(JSON.parse(JSON.stringify(r.passthrough))).toEqual(evil());
+  });
+
+  it('does not pollute Object.prototype', () => {
+    normalizeConversation({ id: 'c', title: '', createdAt: 1, updatedAt: 1, messages: [], ...evil() });
+    expect(Object.prototype.hasOwnProperty.call({}, '__proto__')).toBe(false);
+    expect(({} as any).kept).toBeUndefined();
   });
 });
