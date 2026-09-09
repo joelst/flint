@@ -1,8 +1,8 @@
 # Flint reliability execution plan
 
-**Status:** In progress. Phase 0 and Phase 1A are delivered; see
-[Delivery status](#delivery-status). Everything
-else in this document remains planned and implies no implementation.
+**Status:** In progress. Phase 0 and Phase 1A are delivered and Phase 1B is
+underway; see [Delivery status](#delivery-status). Everything else in this
+document remains planned and implies no implementation.
 
 **Scope:** Address the project review's data-integrity, lifecycle, inference, model,
 audio, packaging, and observability findings. Supported-platform work targets
@@ -28,23 +28,17 @@ A stage is recorded here only once the pull request delivering it is merged to
 | 1A | 1A-3c conversation session wiring: switching, creation, deletion, and flush | #45 |
 | 1A | 1A-3d per-conversation settings resolved against an application baseline | #49 |
 | 1A | 1A-4 conversation export and at-risk storage reporting | #52 |
-| 1B | 1B-1 typed operation outcomes: settlement revokes dispatch, convenience-start authorization, honest interruption reporting | (pending) |
+| 1B | 1B-1 typed operation outcomes: settlement revokes dispatch, convenience-start authorization, honest interruption reporting | #53 |
 
 Phase 1A closed its acceptance gate for storage, migration, rollback, multipart
-preservation, conversation switching, and export. Three items were split out rather
-than completed and are tracked in [BACKLOG.md](./BACKLOG.md) under *Conversation
-persistence*:
+preservation, conversation switching, and export. Phase 1B is in progress: 1B-1
+delivered the transport half of the Workstream B gate — typed outcomes, dispatch
+revocation, serialized start authorization, and honest reporting of interrupted
+work — and the remainder of that gate is not yet met.
 
-- Native quit is a best-effort flush; a guaranteed flush needs a Rust
-  `ExitRequested` handshake, which belongs to Workstream C.
-- The persona, context length and thread view that per-conversation settings resolve
-  against are stable by design and have no editing control, so they cannot be moved
-  after the upgrade. The baseline model alias is deliberately not frozen: it is the
-  application's existing "last model used" value and still moves as models are picked.
-- In-flight streaming is discarded across a conversation switch rather than
-  being allowed to finish in its originating conversation.
-
-Phase 1A is complete. Phase 1B is the next phase.
+Work split out of a delivered stage rather than completed is listed in
+[BACKLOG.md](./BACKLOG.md) under *Conversation persistence* and *Operation
+outcomes*, and is not counted against the stage that produced it.
 
 ## Decisions
 
@@ -93,42 +87,21 @@ with each fix rather than postponing it to a final testing phase.
 | Phase | Work | Dependencies and exit condition |
 |---|---|---|
 | **0: Contain existing failures** *(delivered)* | Hydration/write guards, stale-result guards, truthful errors, immediate Mac metadata and Dock-reopen fixes, local-build profile, idempotent service ensure, startup deduplication, and urgent eviction protections | No runtime rewrite or storage-migration prerequisite. Each corrected failure has a focused regression case; affected packaged paths also have artifact-level evidence. |
-| **1A: Durable conversation state** *(delivered except export/backup)* | Versioned conversation repository, legacy recovery, multipart storage, supported rollback, export/backup foundation | Hydration protection is already in place. Migration can be interrupted/retried without overwriting either legacy or new data. |
-| **1B: Runtime correctness** | Runtime/service contracts, admission and leases, inference adapter, cache ownership, audio sessions, and renderer-independent monitoring | Starts on the existing transport. Domain fixes may ship independently; shared contracts must be stable before native transport cutover. |
+| **1A: Durable conversation state** *(delivered)* | Versioned conversation repository, legacy recovery, multipart storage, supported rollback, export/backup foundation | Hydration protection is already in place. Migration can be interrupted/retried without overwriting either legacy or new data. |
+| **1B: Runtime correctness** *(in progress)* | Runtime/service contracts, admission and leases, inference adapter, cache ownership, audio sessions, and renderer-independent monitoring | Starts on the existing transport. Domain fixes may ship independently; shared contracts must be stable before native transport cutover. |
 | **2: Native ownership cutover** | Thin Rust supervisor, native tray/reopen/quit, single-instance behavior, process-generation transport | May overlap Phase 1 once contracts are fixed. Exactly one child and one manager owner; rollback happens at a clean startup boundary. |
 | **Every affected release** | Complete resource packaging, installed-app scenarios, updater/install integrity, SDK/core matrix, current documentation | Runs continuously, not just at the end. Windows/macOS only; release signing remains mandatory for signed channels. |
 | **3: Useful options** | Operation queue, conversation controls, device selection, endpoint profiles, diagnostics, updater UI, and richer metrics | Each option depends on working underlying behavior. No automatic cloud fallback or silent model/provider substitution. |
 | **Later decision** | Replace selected runtime implementation with Rust if justified | Requires supported bindings, Windows/macOS parity, measured benefit, and preserved process isolation. Not a committed rewrite. |
 
-### Independently shippable containment changes
-
-- Preserve an immutable snapshot of legacy storage before any autosave; expose
-  storage errors and keep history recovery independent of SDK availability.
-- Apply late compaction/URL/stream results only to their originating identities.
-  Discard unsafe stale results rather than replacing live state. If necessary,
-  temporarily disable an unsafe action with a visible explanation until fixed.
-- Make runtime startup single-flight and clear actual state after child death.
-  Remove the unconditional default-port startup; hydrate intent first.
-- Make Audio's "ensure service" non-destructive. Serialize service transitions
-  across all callers, not merely the Settings Apply button.
-- Correct gateway stream lifetime, pin ordering, admission protection, and failed
-  unload bookkeeping without waiting for a Rust backend.
-- Add microphone privacy metadata, align macOS minimum deployment requirements,
-  and provide a local unsigned-build script without changing release signing.
-- Add native Dock restoration for the existing hidden window independently of
-  the larger process-supervision cutover. This small native fix need not wait for
-  transport changes.
-- Surface unsupported vision/provider behavior instead of silently dropping an
-  image or claiming an unsupported setting took effect.
-
-Do not silently disable memory protections to make loading succeed. When safety
-cannot be established, refuse or defer the unsafe operation with an actionable
-status.
-
 ## Workstream A: Data and asynchronous ownership
 
 **Primary surfaces:** `src/routes/+page.svelte`, conversation/sidebar helpers,
 message rendering, and the SDK request adapter.
+
+**Delivered in Phase 1A (#38, #42, #43, #45, #49, #52).** The acceptance gate below
+is met. Remaining gaps are recorded in [BACKLOG.md](./BACKLOG.md) under *Conversation
+persistence*, not here.
 
 ### Required changes
 
@@ -138,10 +111,12 @@ message rendering, and the SDK request adapter.
 - Introduce a typed `ConversationRepository`: conversation IDs, message IDs,
   active conversation ID, conversation-specific settings, and typed text/image
   parts. Save/load the actual history when switching, not just sidebar metadata.
-- Use a versioned transactional store for the new format. The proposed backend
-  is built-in IndexedDB, subject to a short Windows/macOS retention, transaction,
-  quota, and recovery qualification before migration implementation. This choice
-  must not delay the emergency hydration guard.
+- Use a versioned store for the new format. Delivered on `localStorage` under the
+  key `flint-conversations-v2`, not the IndexedDB backend originally proposed: a
+  single key is replaced atomically, which gives the whole archive one commit point
+  and avoids a partially applied multi-record transaction. The cost is the ~5 MB
+  budget, which is why the thread is not duplicated into the settings blob and why
+  storage errors are surfaced rather than retried silently.
 - Retain the original legacy payload until a validated migration commits.
   Migration must be idempotent. Where the global legacy history has no provable
   sidebar owner, import it as a clearly labeled recovered conversation; do not
@@ -177,6 +152,13 @@ delete new turns, modify another conversation, or clear a newer request's contro
 
 **Primary surfaces:** `src/lib/sdk.ts`, `src/lib/ipc-contracts.ts`,
 `sidecar/foundry-sidecar.js`, and gateway lifecycle.
+
+**Delivered in 1B-1 (#53):** typed operation outcomes classified by command effect
+(`src/lib/operation-outcome.ts`); settlement revokes a request's permission to
+dispatch; convenience service starts are authorized per request and evaluated inside
+the transition lock; a Stop acknowledgement no longer retires start uncertainty;
+model-load failures propagate instead of being reported as service failures; and
+uncertain work is never automatically repeated. The rest of this list is outstanding.
 
 ### Required changes
 
@@ -544,23 +526,23 @@ architecture work. "Risk" means establish behavior before claiming a failure.
 
 ### Source anchors
 
-- Data/requests: `src/routes/+page.svelte:895-961`, `1455-1479`, `1713-1718`,
-  `2719-2732`, `3503-3676`, `3797-3857`, `3909-3934`.
-- Runtime transport: `src/lib/sdk.ts:338-341`, `500-590`, `618-715`, `888-952`.
-- Service/inference: `sidecar/foundry-sidecar.js:459-473`, `1855-1989`,
-  `2011-2150`, `2466-2568`.
-- Pool/gateway: `sidecar/gateway.js:85-100`, `130-145`, `207-214`, `311-318`,
-  `367-375`; `sidecar/foundry-sidecar.js:360-405`, `1147-1199`, `2396-2418`.
-- Models/import: `sidecar/foundry-sidecar.js:828-834`, `885-994`, `1059-1133`,
-  `1756-1835`; `sidecar/model-registry.js:84-88`.
-- Audio/memory: `src/routes/+page.svelte:824-855`, `1173-1214`, `1747-1779`,
-  `2006-2049`, `2283-2315`, `3976-4082`, `4241-4390`.
+- Data/requests: `src/routes/+page.svelte`, `src/lib/conversation-repository.ts`,
+  `src/lib/conversation-store.ts`, `src/lib/conversation-session.ts`,
+  `src/lib/conversation-settings.ts`, `src/lib/conversation-export.ts`,
+  `src/lib/chat-request.ts`.
+- Runtime transport: `src/lib/sdk.ts`, `src/lib/operation-outcome.ts`.
+- Service/inference: `sidecar/foundry-sidecar.js`.
+- Pool/gateway: `sidecar/gateway.js`, `sidecar/pool-eviction.js`.
+- Models/import: `sidecar/byom-import.js`, `sidecar/prompt-template.js`,
+  `sidecar/model-registry.js`.
+- Audio/memory: `sidecar/audio-format.js`, `src/lib/memory-watchdog.ts`, and
+  `transcribeLongAudio` in `src/routes/+page.svelte`.
 - Desktop/packaging: `src-tauri/src/lib.rs`, `src-tauri/tauri.conf.json`,
-  `src/routes/+page.svelte:3076-3168`, `scripts/install-macos.sh:48-52`,
-  `scripts/verify-bundle.cjs:32-40,195-203`,
-  `scripts/smoke-bundled-node.cjs:83-104`, `vite.config.js:59-77`.
+  `src-tauri/capabilities/default.json`, `scripts/verify-bundle.cjs`,
+  `scripts/smoke-bundled-node.cjs`, `vite.config.js`.
 
-Line numbers identify the review baseline; follow symbols as implementation moves.
+Follow symbols rather than line numbers; the review-baseline line ranges these
+anchors originally carried no longer track the tree.
 
 ## Options after the corresponding correctness gates
 

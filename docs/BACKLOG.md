@@ -46,7 +46,7 @@ Windows/macOS fixes do not establish Linux release support.
 
 ## Test coverage
 
-- [ ] **`+page.svelte` is untested** and holds most of the app (~337 KB, `@ts-nocheck`).
+- [ ] **`+page.svelte` is untested** and holds most of the app (~444 KB, `@ts-nocheck`).
       Keep extracting pure logic into `src/lib/*.ts` with tests rather than testing the
       component.
 - [ ] **No Rust tests** — `cargo check` is the only gate on `src-tauri`.
