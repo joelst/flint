@@ -22,6 +22,9 @@ Facts only — no history. Record what is true now; `git log` and `CHANGELOG.md`
 - SPA/client-only only — no SSR assumptions.
 - Keep Tauri resources in sync (`src-tauri/tauri.conf.json` + `scripts/verify-bundle.cjs`).
 - On Windows prefer `foundry-local-sdk-winml`.
+- Extract logic into pure `src/lib/*.ts` modules with tests rather than testing `+page.svelte`, which is `@ts-nocheck` and unverified by the compiler — a stale call site there produces no error.
+- A new guard's test is not trusted until it has been seen to **fail**: revert the guard, confirm red, restore. Several guards here passed for the wrong reason until checked this way.
+- Coverage is gated over an opt-in `coverage.include` list in `vite.config.js`; add each new pure module or it is ungated.
 
 ## Service and gateway
 - The native core initializes **once per process**: a second `FoundryLocalManager.create()` throws `Foundry Local Core is already initialized`, even after clearing the singleton. Never re-create the manager, and never set `webServiceUrls` outside `init`.
@@ -50,14 +53,32 @@ Facts only — no history. Record what is true now; `git log` and `CHANGELOG.md`
 
 ## UI and state
 - Svelte 5 runes in `+page.svelte` (`// @ts-nocheck` there is intentional).
-- Chat persistence: `localStorage` key `flint-chat-persist`.
+- `flint-chat-persist` now holds app-level settings only; conversations live in the v2 archive (see *Conversations and storage*).
 - STT/vision filtering is metadata-driven (`task`, `capabilities`, aliases).
 - Diagnostics/Integrations endpoint display must match sidecar service state.
 
+## Conversations and storage
+- Conversations live in `localStorage` under `flint-conversations-v2` (`src/lib/conversation-repository.ts`), with `…-v2.backup` holding bytes that could not be parsed. Legacy keys `flint-chats-v1` and `flint-chat-persist` are read for migration and **never** rewritten — `flint-chat-persist` still holds the only copy of the pre-v2 thread.
+- One key, replaced atomically, is the whole commit point. That is why the live thread is not duplicated into the settings blob (the ~5 MB budget) and why a failed write is surfaced rather than retried silently.
+- Never write to storage before hydration completes; a read-modify-write on an unhydrated state replaces a blob that was never read.
+- Per-conversation settings resolve against a baseline (`src/lib/conversation-settings.ts`). An **empty `modelAlias` means absence, not a choice** — in both the seeder and the resolver, because the caller deliberately does not blank the picker on an empty resolution, so an empty override would leak the previous conversation's model.
+- `localStorage.key(i)` returns null rather than throwing when the set changes mid-walk, and a removal paired with an addition leaves `length` unchanged. Index-based enumeration therefore proves nothing on its own: list through `listKeys`, list **twice**, and compare the sets before concluding a key is absent.
+
+## Operation outcomes
+- `src/lib/operation-outcome.ts` classifies every sidecar command by effect. `COMMAND_EFFECTS` is an exhaustive `Record<SidecarCommandName, …>`, not a set plus complement, so a new command does not compile until it is classified; a contract test reads the sidecar's command list as text to catch drift.
+- **A rejected `write()` is not evidence.** It resolves when bytes reach the pipe and says nothing about what the child already read. Only `'not-dispatched'` proves an operation did not happen; never automatically replay anything else.
+- **Settling a request must revoke its permission to dispatch.** Settle-once protects the promise's answer, not against doing the work after answering — re-check ownership after every await, and immediately before `write()`.
+- Publish the pending entry only **after** its promise exists, or cancelling inside `onAssignedId` finds a placeholder `reject` and strands the caller forever.
+- Convenience service starts carry authorization per request and the guard is evaluated **inside** the transition lock; a check before queuing lets two starts both pass, and clearing a shared latch releases every start queued behind it.
+- A Stop acknowledgement is not a quiescence guarantee: the sidecar handles commands concurrently and clears the gateway reference before awaiting shutdown.
+- Model-load failures **throw**; the returned outcome describes the *service* only. Returning `'failed'` for a load is indistinguishable from a failed start, and callers then announce a model ready that never loaded.
+- Report only what Flint can establish. Interrupted generation may already have been persisted (streaming writes deltas and autosave keeps them), so never claim nothing was saved; long audio counts failed and uncertain segments and only a clean run reports completion.
+
 ## Audio / STT
 - Foundry Local returns **no timing data**: `transcribe()` has no `segments` and `duration` is always 0; `transcribeStreaming()` emits one chunk per word with no timings; live-session `start_time`/`end_time` are declared in the SDK types but the native core always returns null; live sessions are Nemotron-only and throw for Whisper.
-- Timestamps in Flint are **derived from silence detection** (`src/lib/audio-segmentation.ts`) and are approximate — never label them as model output.
-- Long audio uses ~28 s windows snapped to detected pauses; short clips make Whisper hallucinate, so do not transcribe per-utterance.
+- Flint therefore surfaces **no timestamps at all**. There is no segmentation module; do not cite one. Any timestamp feature must be built and labelled as derived, never as model output.
+- Long audio is chunked in `transcribeLongAudio` (`+page.svelte`) into fixed **28 s windows with 4 s overlap**, stitched by longest word-overlap between a chunk's tail and the next chunk's head. The overlap exists because the ONNX/GenAI backend only reliably processes a limited prefix of a long file; short clips make Whisper hallucinate, so do not transcribe per-utterance.
+- That merge is text-only heuristic recovery: it counts failed and uncertain chunks and the caller must qualify the transcript rather than report an unqualified success.
 - Audio reaching `transcribeAudio` must be **real WAV**. The sidecar renames uploads to `.wav` (the decoder is strict) but renaming does not convert, so `sidecar/audio-format.js` sniffs magic bytes before a model loads.
 
 ## Packaging / release
@@ -90,11 +111,17 @@ Facts only — no history. Record what is true now; `git log` and `CHANGELOG.md`
 
 ## Tauri / Rust
 - Keep Rust thin; if you add invoke handlers, update capabilities and frontend call sites.
+- `tauri-plugin-dialog`'s open/save **grants the chosen path to the fs scope at runtime** (`s.allow_file`), so a user-picked export destination needs no static `fs:scope` entry. Do not pre-authorize Downloads/Documents: that grants a whole directory instead of one file.
+- `fs:allow-write-text-file` must keep its own `deny` on `$RESOURCE/**`. The resource scope is read-only reach for locating the sidecar and SDK, and the frontend must never be able to rewrite `foundry-sidecar.js`, which Node is then spawned to execute.
+- In `tauri-plugin-fs`, command scopes union with the global scope and `is_forbidden` is evaluated before `is_allowed`, so a per-command deny wins without affecting other commands.
 - Bundle Foundry SDK assets + sidecar together when changing runtime files.
 
 ## Versioning
 - Version in three places: `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`.
 - Code PRs: `npm run changeset` → commit `.changeset/*.md`. CI enforces changesets on code changes.
+- Keep a changeset **one or two lines**, describing the user-visible effect. Detail belongs in the commit message and PR body; changesets are concatenated into `CHANGELOG.md`.
+- The **empty form** (`---`/`---` plus prose) is valid and produces no version bump — use it for docs-only PRs that CI still gates.
+- CI runs only on PRs targeting `main`/`master`, so a **stacked PR gets no checks** until its base lands and it is retargeted. Validate stacked work locally.
 - `npm run version` → changeset version + `scripts/sync-versions.cjs`.
 - Releases: push `v*` tag. Details: [docs/RELEASE.md](../docs/RELEASE.md).
 - Docs-only PRs: skip changeset if CI allows.
