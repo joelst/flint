@@ -1372,11 +1372,12 @@ async function startServiceLocked(
   } catch (e) {
     currentEndpoint = undefined;
     updateState({ endpoint: undefined, serviceRunning: false });
-    updateRuntime({ service: 'failed' });
     // Recorded before the lock is released, so the next transition in the queue sees it.
     if (isUncertainOutcome(e)) {
       serviceStartUncertain = true;
       updateRuntime({ service: 'unknown' });
+    } else {
+      updateRuntime({ service: 'failed' });
     }
     throw e;
   }
