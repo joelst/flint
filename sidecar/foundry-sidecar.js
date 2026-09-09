@@ -30,6 +30,12 @@ import { createGateway } from './gateway.js';
 import { formatPublicEndpoint } from './gateway-http.js';
 import { buildModelIndex, resolveModelId } from './model-registry.js';
 import {
+  createServiceTransitionLock,
+  stopPartiallyStartedService,
+} from './service-lifecycle.js';
+import { applyPreferredExecutionProvider as applyPreferredExecutionProviderTo } from './execution-provider.js';
+import { stopNativeWebService as stopNativeWebServiceFor } from './native-service.js';
+import {
   detectConfigEncoding,
   decodeConfig,
   encodeConfig,
@@ -269,7 +275,9 @@ function validateCommand(cmd, payload) {
 let manager = null;
 let FoundryLocalManager = null;
 let initConfig = null; // { appName, logLevel } — kept so startService can re-create manager with webServiceUrls
+let nativeServiceStartAttempted = false;
 const canceledRequests = new Set();
+const acquireServiceTransition = createServiceTransitionLock();
 
 // Model pool: Map<alias, { catModel, variantId }>
 // variantId is catModel.id (e.g. "Phi-4-mini-instruct-generic-cpu:5") — required for HTTP routing.
@@ -614,6 +622,29 @@ async function stopGateway () {
   } catch (e) {
     log('warn', `Gateway stop error (ignored): ${e?.message ?? e}`);
   }
+}
+
+function clearPublishedService () {
+  sharedEndpoint = null;
+  upstreamPort = null;
+  invalidateModelIndex();
+}
+
+async function rollbackPartialServiceStart () {
+  await stopPartiallyStartedService({
+    stopGateway,
+    stopNativeService: stopNativeWebService,
+    clearPublishedService,
+    log,
+  });
+}
+
+function stopNativeWebService () {
+  const stopped = stopNativeWebServiceFor({
+    manager,
+    startAttempted: nativeServiceStartAttempted,
+  });
+  if (stopped) nativeServiceStartAttempted = false;
 }
 
 /** The native service reports readiness on /status; startWebService() returning does not. */async function waitForUpstream (port, deadlineMs = 20000) {
@@ -1419,36 +1450,12 @@ async function ensureModelLocked(alias, variantId) {
 }
 
 async function applyPreferredExecutionProvider (preferredEp, model) {
-  const value = String(preferredEp || '').trim();
-  if (!value || !manager) {
-    return { requested: value || null, applied: null, method: null };
-  }
-
-  const candidateTargets = [manager, model].filter(Boolean);
-  const candidateMethods = [
-    'setPreferredExecutionProvider',
-    'setPreferredEp',
-    'setExecutionProviderPreference',
-    'setEpPreference'
-  ];
-
-  for (const target of candidateTargets) {
-    for (const methodName of candidateMethods) {
-      const method = target?.[methodName];
-      if (typeof method === 'function') {
-        try {
-          await method.call(target, value);
-          log('info', `Applied preferred execution provider "${value}" via ${methodName}`);
-          return { requested: value, applied: value, method: methodName };
-        } catch (err) {
-          log('warn', `Failed applying preferred EP via ${methodName}: ${err?.message || err}`);
-        }
-      }
-    }
-  }
-
-  log('warn', `Preferred execution provider "${value}" is not supported by this runtime API`);
-  return { requested: value, applied: null, method: null };
+  return applyPreferredExecutionProviderTo({
+    preferredEp,
+    manager,
+    model,
+    log,
+  });
 }
 
 async function detectActiveExecutionProvider (model) {
@@ -1862,6 +1869,10 @@ rl.on('line', async (line) => {
     return;
   }
 
+  const releaseServiceTransition = (
+    cmd === 'startService' || cmd === 'stopService'
+  ) ? await acquireServiceTransition() : null;
+
   try {
     if (cmd === 'init') {
       const FManager = await getFoundryManager();
@@ -2095,104 +2106,102 @@ rl.on('line', async (line) => {
 
       const useGateway = payload.gateway !== false;
       await stopGateway();
+      // A destructive restart has withdrawn its old gateway. Do not leave its advertised
+      // endpoint behind if the replacement never reaches a usable state.
+      clearPublishedService();
 
       pool.clear();
       usage.clear();
-      if (manager && typeof manager.stopWebService === 'function') {
-        try { manager.stopWebService(); } catch (e) {
-          log('warn', `stopWebService before restart (ignored): ${e?.message ?? e}`);
-        }
-      }
-      // Start service BEFORE loading models so HTTP routing layer initializes with the registry.
-      if (typeof manager.startWebService === 'function') {
-        manager.startWebService(); // synchronous; the port it chose appears in manager.urls
-      }
-
-      const nativeUrl = (manager.urls || [])[0];
-      if (!nativeUrl) {
-        throw new Error('The local service started but did not report an address.');
-      }
-      const nativePort = Number(new URL(nativeUrl).port);
-      upstreamPort = nativePort;
-      invalidateModelIndex();
-
-      if (!(await waitForUpstream(nativePort))) {
-        // Wind back the half-started service so a retry begins from a clean state rather
-        // than tripping over a listener that never became usable.
-        try { manager.stopWebService?.(); } catch { /* already failing; nothing to add */ }
-        upstreamPort = null;
-        throw new Error('The local service did not become ready. Try starting it again.');
-      }
-
-      if (useGateway) {
-        gateway = createGateway({
-          publicPort: payload.port,
-          bindAddress: bindAddr,
-          upstreamPort: nativePort,
-          resolve: resolveForGateway,
-          // The loaded variant id is what the replayed request must name: Foundry rejects
-          // the friendly alias even once the model is resident.
-          load: async (alias, variantId) => (await ensureModel(alias, variantId))?.variantId ?? null,
-          // Proxied traffic never reaches this process, so without this hook a model
-          // serving a long completion would look idle and could be evicted underneath it.
-          onActivity: noteActivity,
-          log,
-        });
-        try {
-          await gateway.start();
-        } catch (e) {
-          gateway = null;
-          // The native service is already up at this point. Leaving it running would
-          // contradict the error the user is about to see, and would strand a listener on
-          // a port nothing advertises, so wind it back before reporting the failure.
-          try { manager.stopWebService?.(); } catch { /* already failing; nothing to add */ }
-          upstreamPort = null;
-          throw new Error(
-            `Could not listen on ${bindAddr}:${payload.port} — ${e?.message ?? e}. `
-            + 'Another process may already be using that port.'
-          );
-        }
-      }
-
-      // Client-facing endpoint reflects the gateway bind; all-interface binds use loopback for
-      // Flint's local clients while a specific interface remains reachable by that address.
-      sharedEndpoint = useGateway
-        ? `${formatPublicEndpoint(bindAddr, gateway?.publicPort ?? payload.port)}/v1`
-        : `${nativeUrl}/v1`;
-      log('info', `Service started; bind=${bindAddr}:${payload.port} `
-        + `${useGateway ? `via gateway → 127.0.0.1:${nativePort} ` : ''}connect=${sharedEndpoint}`);
-      audit('startService', {
-        port: payload.port, bindAddress: bindAddr, endpoint: sharedEndpoint, gateway: useGateway,
-      });
-      const desired = payload.alias;
-      if (desired) {
-        await ensureModel(desired);
-      }
-      const firstModel = desired ? pool.get(desired)?.catModel : [...pool.values()][0]?.catModel;
-      const preferred = await applyPreferredExecutionProvider(payload.preferredEp, firstModel);
-      reply({
-        ok: true,
-        endpoint: sharedEndpoint,
-        result: {
-          acceleration: {
-            requested: preferred?.requested ?? null,
-            preferredApplied: preferred?.applied ?? null,
-            active: await detectActiveExecutionProvider(firstModel)
+      try {
+        if (manager && typeof manager.stopWebService === 'function') {
+          try { stopNativeWebService(); } catch (e) {
+            log('warn', `stopWebService before restart (ignored): ${e?.message ?? e}`);
           }
         }
-      });
+        // Start service BEFORE loading models so HTTP routing layer initializes with the registry.
+        if (typeof manager.startWebService === 'function') {
+          nativeServiceStartAttempted = true;
+          manager.startWebService(); // synchronous; the port it chose appears in manager.urls
+        }
+
+        const nativeUrl = (manager.urls || [])[0];
+        if (!nativeUrl) {
+          throw new Error('The local service started but did not report an address.');
+        }
+        const nativePort = Number(new URL(nativeUrl).port);
+        upstreamPort = nativePort;
+        invalidateModelIndex();
+
+        if (!(await waitForUpstream(nativePort))) {
+          throw new Error('The local service did not become ready. Try starting it again.');
+        }
+
+        if (useGateway) {
+          gateway = createGateway({
+            publicPort: payload.port,
+            bindAddress: bindAddr,
+            upstreamPort: nativePort,
+            resolve: resolveForGateway,
+            // The loaded variant id is what the replayed request must name: Foundry rejects
+            // the friendly alias even once the model is resident.
+            load: async (alias, variantId) => (await ensureModel(alias, variantId))?.variantId ?? null,
+            // Proxied traffic never reaches this process, so without this hook a model
+            // serving a long completion would look idle and could be evicted underneath it.
+            onActivity: noteActivity,
+            log,
+          });
+          try {
+            await gateway.start();
+          } catch (e) {
+            gateway = null;
+            throw new Error(
+              `Could not listen on ${bindAddr}:${payload.port} — ${e?.message ?? e}. `
+              + 'Another process may already be using that port.'
+            );
+          }
+        }
+
+        // Client-facing endpoint reflects the gateway bind; all-interface binds use loopback for
+        // Flint's local clients while a specific interface remains reachable by that address.
+        sharedEndpoint = useGateway
+          ? `${formatPublicEndpoint(bindAddr, gateway?.publicPort ?? payload.port)}/v1`
+          : `${nativeUrl}/v1`;
+        log('info', `Service started; bind=${bindAddr}:${payload.port} `
+          + `${useGateway ? `via gateway → 127.0.0.1:${nativePort} ` : ''}connect=${sharedEndpoint}`);
+        audit('startService', {
+          port: payload.port, bindAddress: bindAddr, endpoint: sharedEndpoint, gateway: useGateway,
+        });
+        const desired = payload.alias;
+        if (desired) {
+          await ensureModel(desired);
+        }
+        const firstModel = desired ? pool.get(desired)?.catModel : [...pool.values()][0]?.catModel;
+        const preferred = await applyPreferredExecutionProvider(payload.preferredEp, firstModel);
+        reply({
+          ok: true,
+          endpoint: sharedEndpoint,
+          result: {
+            acceleration: {
+              requested: preferred?.requested ?? null,
+              preferredApplied: preferred?.applied ?? null,
+              active: await detectActiveExecutionProvider(firstModel)
+            }
+          }
+        });
+      } catch (e) {
+        await rollbackPartialServiceStart();
+        throw e;
+      }
     } else if (cmd === 'stopService') {
       await stopGateway();
       if (manager && typeof manager.stopWebService === 'function') {
         try {
-          manager.stopWebService(); // synchronous
+          stopNativeWebService(); // synchronous
         } catch (e) {
           log('warn', `stopWebService error (ignored): ${e?.message ?? e}`);
         }
       }
-      sharedEndpoint = null;
-      upstreamPort = null;
-      invalidateModelIndex();
+      clearPublishedService();
       tokenAccumulator.clear();
       log('info', 'Service stopped');
       audit('stopService', {});
@@ -2832,6 +2841,8 @@ rl.on('line', async (line) => {
     }
   } catch (e) {
     reply({ error: e.message || String(e) });
+  } finally {
+    releaseServiceTransition?.();
   }
 });
 
