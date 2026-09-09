@@ -454,6 +454,20 @@ describe('classification of an interrupted mutation', () => {
 });
 
 describe('service start uncertainty', () => {
+  it('does not restart a confirmed running service when ensuring readiness', async () => {
+    const sdk = await loadSdk();
+    const start = sdk.startService(5272);
+    const startId = await waitForWrite('startService');
+    harness.emitStdout({ id: startId, endpoint: 'http://127.0.0.1:5272' });
+    await start;
+
+    const before = harness.writes.filter((w) => w.includes('startService')).length;
+    const endpoint = await sdk.ensureServiceRunning(5272);
+
+    expect(endpoint).toBe('http://127.0.0.1:5272');
+    expect(harness.writes.filter((w) => w.includes('startService')).length).toBe(before);
+  });
+
   it('stands down a convenience start after an unestablished outcome', async () => {
     const sdk = await loadSdk();
     const first = capture(sdk.startService(5272, undefined, undefined, undefined, {
