@@ -40,10 +40,10 @@ Phase 1A closed its acceptance gate for storage, migration, rollback, multipart
 preservation, conversation switching, and export. Phase 1B is in progress:
 1B-1 through 1B-6 delivered typed outcomes, versioned transport/readiness
 contracts, truthful catalog failures, non-destructive service ensure, and stale
-endpoint invalidation, Stop fencing, and reachable public endpoint reporting. The remaining Workstream B gate covers partial-start
-rollback, actual listener reachability, hydrated startup sequencing, deadlines,
-stop semantics, and observability.
-
+endpoint invalidation, Stop fencing, and reachable public endpoint reporting.
+The remaining Workstream B gate covers partial-start rollback, actual listener
+reachability, hydrated startup sequencing, deadlines, stop semantics, and
+observability.
 Work split out of a delivered stage rather than completed is listed in
 [BACKLOG.md](./BACKLOG.md) under *Conversation persistence* and *Operation
 outcomes*, and is not counted against the stage that produced it.
