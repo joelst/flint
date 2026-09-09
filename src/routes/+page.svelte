@@ -3726,24 +3726,24 @@ updateStateFromSdk();
             await ensureHardwareAccel({ throwOnError: true });
           },
           startService: async () => {
-              // Re-read after the awaited prerequisites: the user may have changed autostart or
-              // manually started the service while accelerator registration was in flight.
-              if (
-                !autoStartService ||
-                !startupAuthorization.isCurrent(startupAuthorizationToken)
-              ) return;
-                statusMessage = "Starting local service...";
-              const ensured = await sdkEnsureServiceRunning(
-                networkPort,
-                undefined,
-                selectedAccelerationPreference === "auto"
-                  ? undefined
-                  : selectedAccelerationPreference,
-                networkBindAddress || undefined,
-                { convenience: true },
-              );
-              if (ensured.started) markNetworkSettingsApplied();
-            },
+            // Re-read after the awaited prerequisites: the user may have changed autostart or
+            // manually started the service while accelerator registration was in flight.
+            if (
+              !autoStartService ||
+              !startupAuthorization.isCurrent(startupAuthorizationToken)
+            ) return;
+            statusMessage = "Starting local service...";
+            const ensured = await sdkEnsureServiceRunning(
+              networkPort,
+              undefined,
+              selectedAccelerationPreference === "auto"
+                ? undefined
+                : selectedAccelerationPreference,
+              networkBindAddress || undefined,
+              { convenience: true },
+            );
+            if (ensured.started) markNetworkSettingsApplied();
+          },
         });
       } catch (e: any) {
         statusMessage = `Runtime startup stopped before model preload: ${e?.message || e}`;

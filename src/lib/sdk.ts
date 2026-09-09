@@ -975,8 +975,11 @@ function ensureInitialized(payload: { appName: string; logLevel: string }): Prom
   if (managerInstance) {
     if (initPromise) return initPromise;
     const generation = sidecarGeneration;
-    initPromise = refreshModels()
-      .then(() => {
+    initPromise = (async () => {
+      initializing = true;
+      updateRuntime({ manager: 'initializing' });
+      try {
+        await refreshModels();
         if (
           generation !== sidecarGeneration ||
           !sidecarProcess ||
@@ -988,7 +991,10 @@ function ensureInitialized(payload: { appName: string; logLevel: string }): Prom
         managerReady = true;
         updateState({ ready: true, error: null });
         updateRuntime({ manager: 'ready' });
-      })
+      } finally {
+        initializing = false;
+      }
+    })()
       .finally(() => {
         initPromise = null;
       });
