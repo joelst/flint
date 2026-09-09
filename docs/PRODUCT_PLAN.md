@@ -34,15 +34,16 @@ A stage is recorded here only once the pull request delivering it is merged to
 | 1B | 1B-4 non-destructive service ensure under the lifecycle transition lock | #60 |
 | 1B | 1B-5 failed or uncertain service transitions invalidate stale endpoint state | #61 |
 | 1B | 1B-6 Stop fences older queued starts, including transition-handle starts | #63 |
+| 1B | 1B-7 public endpoints reflect the configured reachable bind and effective port | #65 |
 
 Phase 1A closed its acceptance gate for storage, migration, rollback, multipart
 preservation, conversation switching, and export. Phase 1B is in progress:
 1B-1 through 1B-6 delivered typed outcomes, versioned transport/readiness
 contracts, truthful catalog failures, non-destructive service ensure, and stale
-endpoint invalidation plus Stop fencing. The remaining Workstream B gate covers partial-start
-rollback, actual listener reachability, hydrated startup sequencing, deadlines,
-stop semantics, and observability.
-
+endpoint invalidation, Stop fencing, and reachable public endpoint reporting.
+The remaining Workstream B gate covers partial-start rollback, actual listener
+reachability, hydrated startup sequencing, deadlines, stop semantics, and
+observability.
 Work split out of a delivered stage rather than completed is listed in
 [BACKLOG.md](./BACKLOG.md) under *Conversation persistence* and *Operation
 outcomes*, and is not counted against the stage that produced it.
