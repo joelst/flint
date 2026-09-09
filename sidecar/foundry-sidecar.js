@@ -38,6 +38,10 @@ import {
 } from './execution-provider.js';
 import { stopNativeWebService as stopNativeWebServiceFor } from './native-service.js';
 import {
+  DEFAULT_FETCH_BODY_LIMIT,
+  fetchBoundedResponseText,
+} from './fetch-response.js';
+import {
   detectConfigEncoding,
   decodeConfig,
   encodeConfig,
@@ -2680,7 +2684,6 @@ rl.on('line', async (line) => {
       reply({ ok: true, result: accessLog });
     } else if (cmd === 'fetchUrl') {
       const fetchTs = Date.now();
-      let fetchOk = false;
       const rawUrl = String(payload.url).trim();
       const maxChars = typeof payload.maxChars === 'number' ? payload.maxChars : 50000;
 
@@ -2717,28 +2720,14 @@ rl.on('line', async (line) => {
       }
 
       try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 15000);
-        let resp;
-        try {
-          resp = await fetch(rawUrl, {
-            signal: controller.signal,
-            headers: { 'User-Agent': 'Flint/0.3 (local-AI-client; +https://github.com/joelst/flint)' },
-            redirect: 'follow',
-          });
-        } finally {
-          clearTimeout(timeoutId);
-        }
+        const raw = await fetchBoundedResponseText(fetch, rawUrl, {
+          maxBytes: DEFAULT_FETCH_BODY_LIMIT,
+          headers: { 'User-Agent': 'Flint/0.3 (local-AI-client; +https://github.com/joelst/flint)' },
+          redirect: 'follow',
+        });
 
-        if (!resp.ok) {
-          throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
-        }
-
-        const contentType = resp.headers.get('content-type') || '';
-        // Cap raw download at 2 MB to avoid OOM on large pages
-        const RAW_LIMIT = 2 * 1024 * 1024;
-        const rawText = await resp.text();
-        const capped = rawText.length > RAW_LIMIT ? rawText.slice(0, RAW_LIMIT) : rawText;
+        const contentType = raw.response.headers.get('content-type') || '';
+        const capped = raw.text;
 
         let title = '';
         let extractedText = '';
@@ -2748,7 +2737,6 @@ rl.on('line', async (line) => {
           const { JSDOM } = await import('jsdom');
           const { Readability } = await import('@mozilla/readability');
           const dom = new JSDOM(capped, { url: rawUrl });
-          // Extract <title> as fallback
           title = dom.window.document.title?.trim() || '';
           const reader = new Readability(dom.window.document, { charThreshold: 50 });
           const article = reader.parse();
@@ -2756,18 +2744,17 @@ rl.on('line', async (line) => {
             title = article.title?.trim() || title;
             extractedText = article.textContent?.replace(/\s+/g, ' ').trim() || '';
           } else {
-            // Readability couldn't parse it; strip tags as a rough fallback
             extractedText = dom.window.document.body?.textContent?.replace(/\s+/g, ' ').trim() || '';
           }
         } else {
-          // Plain text, JSON, markdown, etc. — use as-is (already text/utf-8 from resp.text())
           extractedText = capped.replace(/\s+/g, ' ').trim();
         }
 
-        const truncated = extractedText.length > maxChars;
-        const finalText = truncated ? extractedText.slice(0, maxChars) : extractedText;
+        const truncated = raw.truncated || extractedText.length > maxChars;
+        const finalText = extractedText.length > maxChars
+          ? extractedText.slice(0, maxChars)
+          : extractedText;
 
-        fetchOk = true;
         appendAccessLog({
           ts: fetchTs,
           type: 'fetchUrl',
