@@ -4256,8 +4256,8 @@ updateStateFromSdk();
    * Load a model into the chat lane and, opportunistically, bring the service up for it.
    *
    * Returns the service-start outcome so a caller about to announce "ready" can qualify it. The
-   * value describes the *service* only; a failed load never returns, it throws.
-   *
+   * value describes the *service* only; a failed load throws.
+   * Other post-load failures (e.g. refreshing models) return `{ result: "failed", error }`.
    * The load is the prerequisite, so any load failure propagates. Returning "failed" for it
    * would be indistinguishable from a failed service start, and callers would go on to announce
    * the model ready while reporting a service problem — losing both the operation that actually
