@@ -1407,10 +1407,10 @@ export async function ensureServiceRunning(
   preferredEp?: string,
   bindAddress?: string,
   opts?: { convenience?: boolean },
-): Promise<string> {
+): Promise<{ endpoint: string; started: boolean }> {
   return withServiceTransition(async ({ startNow }) => {
     if (currentEndpoint && currentRuntimeServiceState === 'running') {
-      return currentEndpoint;
+      return { endpoint: currentEndpoint, started: false };
     }
 
     try {
@@ -1420,7 +1420,7 @@ export async function ensureServiceRunning(
         currentEndpoint = endpoint;
         updateState({ endpoint, serviceRunning: true });
         updateRuntime({ service: 'running' });
-        return endpoint;
+        return { endpoint, started: false };
       }
     } catch (e) {
       // A failed probe is not proof that the service is stopped; startService below preserves
@@ -1428,7 +1428,10 @@ export async function ensureServiceRunning(
       console.warn('[sdk] service status probe failed during ensure', e);
     }
 
-    return startNow(port, alias, preferredEp, bindAddress, opts);
+    return {
+      endpoint: await startNow(port, alias, preferredEp, bindAddress, opts),
+      started: true,
+    };
   });
 }
 

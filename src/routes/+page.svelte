@@ -2559,24 +2559,24 @@ updateStateFromSdk();
   ): Promise<string | undefined> {
     serviceTransitionBusy = true;
     try {
-      const ep = await sdkEnsureServiceRunning(
+      const ensured = await sdkEnsureServiceRunning(
         networkPort,
         alias,
         preferredEp,
         networkBindAddress || undefined,
         opts,
       );
-      markNetworkSettingsApplied();
+      if (ensured.started) markNetworkSettingsApplied();
       if (alias) {
         const resident = (state.pool || []).some((e: any) => e.alias === alias);
         if (!resident) await sdkLoadModel({ alias }, "audio");
-        if (preferredEp) {
+        if (preferredEp && !ensured.started) {
           appendAppLog(
             `Ensure service: ${alias} loaded into the running service (left up to preserve other loaded models); acceleration preference "${preferredEp}" is applied per transcription request.`,
           );
         }
       }
-      return ep;
+      return ensured.endpoint;
     } finally {
       serviceTransitionBusy = false;
     }

@@ -462,9 +462,9 @@ describe('service start uncertainty', () => {
     await start;
 
     const before = harness.writes.filter((w) => w.includes('startService')).length;
-    const endpoint = await sdk.ensureServiceRunning(5272);
+    const ensured = await sdk.ensureServiceRunning(5272);
 
-    expect(endpoint).toBe('http://127.0.0.1:5272');
+    expect(ensured).toEqual({ endpoint: 'http://127.0.0.1:5272', started: false });
     expect(harness.writes.filter((w) => w.includes('startService')).length).toBe(before);
   });
 
