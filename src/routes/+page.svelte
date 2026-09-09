@@ -473,6 +473,13 @@
 
   // Mirror of SDK store for easy template access
   let state = $state({
+    runtime: {
+      process: "stopped",
+      manager: "unknown",
+      service: "unknown",
+      models: "unknown",
+      generation: 0,
+    },
     ready: false,
     error: null as string | null,
     models: [] as ModelInfo[],
@@ -1777,6 +1784,7 @@
   let unsubscribe: (() => void) | null = null;
 
   function syncFromStore(s: any) {
+    state.runtime = s.runtime ?? state.runtime;
     state.ready = s.ready;
     state.error = s.error;
     state.models = s.models ?? [];
