@@ -54,14 +54,36 @@ describe('prepareHydratedRuntime', () => {
       const first = singleFlight();
       const second = singleFlight();
       expect(first).toBe(second);
+      expect(run).not.toHaveBeenCalled();
+      await Promise.resolve();
       expect(run).toHaveBeenCalledOnce();
       release();
       await expect(first).resolves.toBe(1);
 
       const retry = singleFlight();
+      await Promise.resolve();
       expect(run).toHaveBeenCalledTimes(2);
       release();
       await expect(retry).resolves.toBe(2);
+    });
+
+    it('shares a synchronous failure and permits a later retry', async () => {
+      const run = vi.fn<() => Promise<number>>();
+      run.mockImplementationOnce(() => {
+        throw new Error('synchronous startup failure');
+      });
+      run.mockResolvedValueOnce(2);
+      const singleFlight = createSingleFlight(run);
+
+      const first = singleFlight();
+      const second = singleFlight();
+      expect(first).toBe(second);
+      expect(run).not.toHaveBeenCalled();
+      await expect(first).rejects.toThrow('synchronous startup failure');
+      expect(run).toHaveBeenCalledOnce();
+
+      await expect(singleFlight()).resolves.toBe(2);
+      expect(run).toHaveBeenCalledTimes(2);
     });
 
     describe('createStartupAuthorization', () => {
