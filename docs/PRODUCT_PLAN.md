@@ -159,12 +159,13 @@ delete new turns, modify another conversation, or clear a newer request's contro
 **Primary surfaces:** `src/lib/sdk.ts`, `src/lib/ipc-contracts.ts`,
 `sidecar/foundry-sidecar.js`, and gateway lifecycle.
 
-**Delivered in 1B-1 (#53):** typed operation outcomes classified by command effect
-(`src/lib/operation-outcome.ts`); settlement revokes a request's permission to
-dispatch; convenience service starts are authorized per request and evaluated inside
-the transition lock; a Stop acknowledgement no longer retires start uncertainty;
-model-load failures propagate instead of being reported as service failures; and
-uncertain work is never automatically repeated. The rest of this list is outstanding.
+**Delivered through 1B-5 (#53, #55-#61):** typed operation outcomes classified by
+command effect (`src/lib/operation-outcome.ts`); settlement revokes a request's
+permission to dispatch; versioned handshakes and process generations; independent
+runtime readiness states; convenience service starts authorized inside the transition
+lock; non-destructive service ensure; stale endpoint invalidation; catalog and
+model-load failure propagation; and honest interruption reporting. The remaining
+items below are outstanding.
 
 ### Required changes
 
