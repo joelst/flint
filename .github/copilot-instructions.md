@@ -29,6 +29,7 @@ Facts only — no history. Record what is true now; `git log` and `CHANGELOG.md`
 ## Service and gateway
 - The native core initializes **once per process**: a second `FoundryLocalManager.create()` throws `Foundry Local Core is already initialized`, even after clearing the singleton. Never re-create the manager, and never set `webServiceUrls` outside `init`.
 - Consequently the native service picks its own port. Read it from `manager.urls[0]` after `startWebService()`; readiness is `GET /status` on that port (`startWebService()` returning proves nothing).
+- Bound each native `/status` readiness attempt by the remaining overall startup deadline and discard its response body. A zero deadline performs no request. This finite control-plane deadline must not be applied to inference traffic.
 - The port and bind address the user configures belong to Flint's proxy in `sidecar/gateway.js`, which forwards to the native port. `sharedEndpoint` is the proxy's address.
 - Autoload is reactive: forward first, and only on the exact `400 ... is not loaded` retry once after loading. Never check "is it loaded" up front, and never retry twice.
 - Only **cached** models are resolvable for autoload (`sidecar/model-registry.js`), so a stray identifier cannot start a download. Call `invalidateModelIndex()` wherever the cached set changes.
