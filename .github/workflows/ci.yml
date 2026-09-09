@@ -37,6 +37,11 @@ jobs:
 
       - name: Install Linux system dependencies
         run: |
+          # Remove the preinstalled Google Chrome apt source: it is unrelated to
+          # our build dependencies and its Packages.gz occasionally fails the
+          # runner's mirror sync with a "Hash Sum mismatch", which aborts
+          # apt-get update for every other source too.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
           sudo apt-get update
           sudo apt-get install -y \
             libglib2.0-dev \

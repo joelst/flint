@@ -33,7 +33,10 @@ import {
   createServiceTransitionLock,
   stopPartiallyStartedService,
 } from './service-lifecycle.js';
-import { applyPreferredExecutionProvider as applyPreferredExecutionProviderTo } from './execution-provider.js';
+import {
+  applyPreferredExecutionProvider as applyPreferredExecutionProviderTo,
+  assertAcceleratorRegistrationSucceeded,
+} from './execution-provider.js';
 import { stopNativeWebService as stopNativeWebServiceFor } from './native-service.js';
 import {
   detectConfigEncoding,
@@ -2807,11 +2810,14 @@ rl.on('line', async (line) => {
       reply({ ok: true, result: eps });
     } else if (cmd === 'ensureAccelerators') {
       if (typeof manager.downloadAndRegisterEps === 'function') {
-        await manager.downloadAndRegisterEps((name, pct) => {
+        const result = await manager.downloadAndRegisterEps((name, pct) => {
           send({ id, progress: pct, ep: name });
         });
+        assertAcceleratorRegistrationSucceeded(result);
+        reply({ ok: true, result: result ?? null });
+      } else {
+        reply({ ok: true, result: null });
       }
-      reply({ ok: true });
     } else if (cmd === 'setLogLevel') {
       // Enable logging at requested level (SDK supports via config or we just log here)
       log('info', `Log level set to ${payload.level}`);

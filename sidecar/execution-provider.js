@@ -50,3 +50,11 @@ export async function applyPreferredExecutionProvider({
   log('warn', `Preferred execution provider "${value}" is not supported by this runtime API`);
   return { requested: value, applied: null, method: null };
 }
+
+export function assertAcceleratorRegistrationSucceeded(result) {
+  if (result?.success !== false) return;
+  const failed = Array.isArray(result.failedEps)
+    ? result.failedEps.map((ep) => ep?.name || ep?.epName || String(ep)).join(', ')
+    : '';
+  throw new Error(`Accelerator registration failed${failed ? `: ${failed}` : '.'}`);
+}

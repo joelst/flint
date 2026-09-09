@@ -646,6 +646,29 @@ describe('service start uncertainty', () => {
     await stop.tracked;
   });
 
+  it('cancels an ensure queued before Stop without dispatching a start', async () => {
+    const sdk = await loadSdk();
+    let release!: () => void;
+    const hold = sdk.withServiceTransition(
+      () => new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    );
+    await waitFor('the transition lock to be held', () => typeof release === 'function');
+
+    const ensure = capture(sdk.ensureServiceRunning(5272));
+    const stop = capture(sdk.stopService());
+    release();
+    await hold;
+    await ensure.tracked;
+
+    expect(ensure.box.err.certainty).toBe('cancelled');
+    expect(harness.writes.filter((w) => w.includes('startService'))).toHaveLength(0);
+    const stopId = await waitForWrite('stopService');
+    harness.emitStdout({ id: stopId, result: {} });
+    await stop.tracked;
+  });
+
   function getLastSdkSnapshot(sdk: { getSDKState: () => { subscribe: (fn: (state: any) => void) => () => void } }) {
     let snapshot: any;
     const unsubscribe = sdk.getSDKState().subscribe((state) => {
@@ -654,6 +677,106 @@ describe('service start uncertainty', () => {
     unsubscribe();
     return snapshot;
   }
+});
+
+describe('initialization readiness recovery', () => {
+  it('does not publish readiness when the initial child is lost during catalog refresh', async () => {
+    const sdk = await loadSdk();
+    const first = sdk.initializeSDK({ autoStartService: false });
+
+    const initId = await waitForWrite('init');
+    harness.emitStdout({ id: initId, result: 'initialized' });
+    const logId = await waitForWrite('setLogLevel');
+    harness.emitStdout({ id: logId, result: {} });
+    const listId = await waitForWrite('listModels');
+    harness.emitStdout({ id: listId, result: [] });
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, result: { serviceRunning: false, endpoint: null } });
+    await waitForWrite('poolStatus');
+    harness.emitClose({ code: 1 });
+
+    await expect(first).resolves.toBe(false);
+  }, 15000);
+
+  it('refreshes an initialized manager after catalog failure without sending init twice', async () => {
+    const sdk = await loadSdk();
+    const first = sdk.initializeSDK({ autoStartService: false });
+
+    const initId = await waitForWrite('init');
+    harness.emitStdout({ id: initId, result: 'initialized' });
+    const logId = await waitForWrite('setLogLevel');
+    harness.emitStdout({ id: logId, result: {} });
+    const firstListId = await waitForWrite('listModels');
+    harness.emitStdout({ id: firstListId, error: 'catalog unavailable' });
+    await expect(first).resolves.toBe(false);
+
+    const retry = sdk.initializeSDK({ autoStartService: false });
+    const secondListId = await waitForWrite('listModels', 1);
+    harness.emitStdout({ id: secondListId, result: [] });
+    const refreshStatusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: refreshStatusId, result: { serviceRunning: false, endpoint: null } });
+    const poolId = await waitForWrite('poolStatus');
+    harness.emitStdout({ id: poolId, result: { models: [] } });
+    const startupStatusId = await waitForWrite('getStatus', 1);
+    harness.emitStdout({ id: startupStatusId, result: { serviceRunning: false, endpoint: null } });
+    await expect(retry).resolves.toBe(true);
+
+    expect(harness.writes.filter((line) => line.includes('"cmd":"init"'))).toHaveLength(1);
+  }, 15000);
+
+  it('does not restore readiness when the sidecar is replaced during recovery', async () => {
+    const sdk = await loadSdk();
+    const first = sdk.initializeSDK({ autoStartService: false });
+
+    const initId = await waitForWrite('init');
+    harness.emitStdout({ id: initId, result: 'initialized' });
+    const logId = await waitForWrite('setLogLevel');
+    harness.emitStdout({ id: logId, result: {} });
+    const firstListId = await waitForWrite('listModels');
+    harness.emitStdout({ id: firstListId, error: 'catalog unavailable' });
+    await expect(first).resolves.toBe(false);
+
+    const retry = sdk.initializeSDK({ autoStartService: false });
+    const secondListId = await waitForWrite('listModels', 1);
+    harness.emitStdout({ id: secondListId, result: [] });
+    const refreshStatusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: refreshStatusId, result: { serviceRunning: false, endpoint: null } });
+    await waitForWrite('poolStatus');
+    harness.emitClose({ code: 1 });
+
+    await expect(retry).resolves.toBe(false);
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+    unsubscribe();
+    expect(snapshot.ready).toBe(false);
+  }, 15000);
+
+  it('does not return success when the child is lost during the final status probe', async () => {
+    const sdk = await loadSdk();
+    const first = sdk.initializeSDK({ autoStartService: false });
+
+    const initId = await waitForWrite('init');
+    harness.emitStdout({ id: initId, result: 'initialized' });
+    const logId = await waitForWrite('setLogLevel');
+    harness.emitStdout({ id: logId, result: {} });
+    const firstListId = await waitForWrite('listModels');
+    harness.emitStdout({ id: firstListId, error: 'catalog unavailable' });
+    await expect(first).resolves.toBe(false);
+
+    const retry = sdk.initializeSDK({ autoStartService: false });
+    const secondListId = await waitForWrite('listModels', 1);
+    harness.emitStdout({ id: secondListId, result: [] });
+    const refreshStatusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: refreshStatusId, result: { serviceRunning: false, endpoint: null } });
+    const poolId = await waitForWrite('poolStatus');
+    harness.emitStdout({ id: poolId, result: { models: [] } });
+    await waitForWrite('getStatus', 1);
+    harness.emitClose({ code: 1 });
+
+    await expect(retry).resolves.toBe(false);
+  }, 15000);
 });
 
 describe('cancellation from inside onAssignedId', () => {
