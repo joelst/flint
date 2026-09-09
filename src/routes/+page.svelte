@@ -3783,7 +3783,6 @@ updateStateFromSdk();
           if (existing?.isCached) {
             const usingDefault = !startupConversationAlias && !!defaultChatAlias;
             try {
-              let startResult: ServiceStartAttempt = { result: "already-running" };
               if (!existing.isLoaded) {
                 statusMessage = usingDefault
                   ? `Auto-loading ${targetAlias}...`
@@ -3791,7 +3790,6 @@ updateStateFromSdk();
                 await sdkLoadModel(existing);
               }
               if (!startupAuthorization.isCurrent(startupAuthorizationToken)) return;
-              const qualifier = serviceQualifier(startResult.result);
               if (chatNavigationCurrent(startupNav)) {
                 selectedModelAlias = targetAlias;
                 selectedModel = { alias: targetAlias };
@@ -3799,10 +3797,10 @@ updateStateFromSdk();
                 statusMessage =
                   (usingDefault
                     ? `${targetAlias} ready`
-                    : `${targetAlias} restored from previous session`) + qualifier;
+                    : `${targetAlias} restored from previous session`);
               } else {
                 // The load still did useful work, so say so rather than silently doing nothing.
-                statusMessage = `${targetAlias} is ready. The chat changed while it loaded.${qualifier}`;
+                statusMessage = `${targetAlias} is ready. The chat changed while it loaded.`;
               }
             } catch (e: any) {
               statusMessage = `Failed to restore ${targetAlias}: ${e?.message || e}`;
