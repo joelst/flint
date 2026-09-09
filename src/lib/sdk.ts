@@ -1370,9 +1370,15 @@ async function startServiceLocked(
   try {
     res = await send('startService', payload);
   } catch (e) {
-    updateRuntime({ service: 'failed' });
+    currentEndpoint = undefined;
+    updateState({ endpoint: undefined, serviceRunning: false });
     // Recorded before the lock is released, so the next transition in the queue sees it.
-    if (isUncertainOutcome(e)) serviceStartUncertain = true;
+    if (isUncertainOutcome(e)) {
+      serviceStartUncertain = true;
+      updateRuntime({ service: 'unknown' });
+    } else {
+      updateRuntime({ service: 'failed' });
+    }
     throw e;
   }
   // A confirmed start settles the question the flag existed to represent.
@@ -1441,6 +1447,8 @@ export async function stopService(): Promise<void> {
     try {
       await send('stopService');
     } catch (e) {
+      currentEndpoint = undefined;
+      updateState({ endpoint: undefined, serviceRunning: false });
       updateRuntime({ service: isUncertainOutcome(e) ? 'unknown' : 'failed' });
       throw e;
     }
