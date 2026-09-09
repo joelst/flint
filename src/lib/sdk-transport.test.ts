@@ -210,6 +210,24 @@ afterEach(() => {
 });
 
 describe('settlement revokes permission to dispatch', () => {
+  it('publishes independent process and manager readiness', async () => {
+    const sdk = await loadSdk();
+    const request = capture(sdk.getEps());
+    await waitForWrite('getEps');
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+    expect(snapshot.runtime.process).toBe('ready');
+    expect(snapshot.runtime.manager).toBe('uninitialized');
+    expect(snapshot.runtime.generation).toBeGreaterThan(0);
+    harness.emitClose({ code: 1 });
+    await request.tracked;
+    expect(snapshot.runtime.process).toBe('crashed');
+    expect(snapshot.runtime.manager).toBe('unknown');
+    unsubscribe();
+  });
+
   it('rejects a sidecar with an incompatible handshake before sending requests', async () => {
     const sdk = await loadSdk();
     readyProtocolVersion = 999;

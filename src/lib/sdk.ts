@@ -315,7 +315,21 @@ export interface PoolStats {
   eviction?: EvictionConfig;
 }
 
+export type RuntimeProcessState = 'stopped' | 'starting' | 'ready' | 'crashed';
+export type RuntimeManagerState = 'unknown' | 'uninitialized' | 'initializing' | 'ready' | 'failed';
+export type RuntimeServiceState = 'unknown' | 'stopped' | 'starting' | 'running' | 'failed';
+export type RuntimeModelState = 'unknown' | 'empty' | 'loading' | 'ready';
+
+export interface RuntimeState {
+  process: RuntimeProcessState;
+  manager: RuntimeManagerState;
+  service: RuntimeServiceState;
+  models: RuntimeModelState;
+  generation: number;
+}
+
 export interface FlintSDKState {
+  runtime: RuntimeState;
   ready: boolean;
   error: string | null;
   models: ModelInfo[];
@@ -333,6 +347,13 @@ export interface FlintSDKState {
 }
 
 const initialState: FlintSDKState = {
+  runtime: {
+    process: 'stopped',
+    manager: 'unknown',
+    service: 'unknown',
+    models: 'unknown',
+    generation: 0,
+  },
   ready: false,
   error: null,
   models: [],
@@ -372,6 +393,10 @@ function updateState(partial: Partial<FlintSDKState>) {
   sdkState.update((s) => ({ ...s, ...partial }));
 }
 
+function updateRuntime(partial: Partial<RuntimeState>) {
+  sdkState.update((s) => ({ ...s, runtime: { ...s.runtime, ...partial } }));
+}
+
 export function getSDKState() {
   return sdkState;
 }
@@ -397,6 +422,7 @@ async function startSidecar(): Promise<void> {
 
 async function spawnSidecar() {
   if (sidecarProcess) return;
+  updateRuntime({ process: 'starting', manager: 'unknown', service: 'unknown', models: 'unknown' });
 
   const nodeCheck = await ensureNodeRuntime();
   if (!nodeCheck.ok) {
@@ -539,6 +565,7 @@ async function spawnSidecar() {
         }
         console.log(`[sdk] Sidecar ready signal received (protocol ${msg.protocolVersion})!`);
         sidecarReady = true;
+        updateRuntime({ process: 'ready', manager: 'uninitialized' });
       }
     } catch (e) {
       // Ignore parse errors for non-json lines
@@ -607,6 +634,14 @@ async function spawnSidecar() {
     // against a child that no longer exists.
     sdkState.update((s) => ({
       ...s,
+      runtime: {
+        ...s.runtime,
+        process: 'crashed',
+        manager: 'unknown',
+        service: 'unknown',
+        models: 'unknown',
+        generation: sidecarGeneration,
+      },
       ready: false,
       error: 'Sidecar closed',
       serviceRunning: false,
@@ -631,6 +666,7 @@ async function spawnSidecar() {
   console.log(`[sdk] Calling spawn()...`);
   sidecarProcess = await command.spawn();
   myGeneration = ++sidecarGeneration;
+  updateRuntime({ generation: myGeneration, process: sidecarReady ? 'ready' : 'starting' });
   console.log(`[sdk] Sidecar process spawned, waiting for ready signal...`);
 
   // Wait for the sidecar to signal ready (it sends { ready: true } on startup)
@@ -886,6 +922,7 @@ let initializing = false;
 
 async function performInit(payload: { appName: string; logLevel: string }) {
   initializing = true;
+  updateRuntime({ manager: 'initializing' });
   try {
     // Ensure the child exists *before* capturing its generation — otherwise `sendInternal`
     // would spawn one below, bump the generation, and the check would always fail on a normal
@@ -909,6 +946,7 @@ async function performInit(payload: { appName: string; logLevel: string }) {
     lastInitPayload = payload;
     managerInstance = true;
     updateState({ ready: true, error: null });
+    updateRuntime({ manager: 'ready', models: 'unknown' });
     // The previous child's residency is meaningless; refresh before anyone reads the pool.
     try {
       await refreshModels();
@@ -995,11 +1033,13 @@ async function performInitializeSDK(config: Partial<any>): Promise<boolean> {
         ? raw
         : `Sidecar init failed: ${raw}`;
     updateState({ error: errMsg, ready: false });
+    updateRuntime({ manager: 'failed', service: 'unknown', models: 'unknown' });
     return false;
   }
 }
 
 export async function refreshModels(): Promise<void> {
+  updateRuntime({ models: 'loading' });
   try {
     const res = await send('listModels');
     const list = res.result || [];
@@ -1038,6 +1078,7 @@ export async function refreshModels(): Promise<void> {
       cachedModels: models.filter((m: ModelInfo) => m.isCached),
       loadedModels: models.filter((m: ModelInfo) => m.isLoaded),
     });
+    updateRuntime({ models: models.some((m: ModelInfo) => m.isLoaded) ? 'ready' : 'empty' });
 
     // Refresh pool detail + memory stats
     try {
@@ -1053,6 +1094,7 @@ export async function refreshModels(): Promise<void> {
     }
   } catch (e) {
     console.error('refreshModels via sidecar failed', e);
+    updateRuntime({ models: 'unknown' });
   }
 }
 
@@ -1324,9 +1366,11 @@ async function startServiceLocked(
     payload.bindAddress = bindAddress;
   }
   let res: any;
+  updateRuntime({ service: 'starting' });
   try {
     res = await send('startService', payload);
   } catch (e) {
+    updateRuntime({ service: 'failed' });
     // Recorded before the lock is released, so the next transition in the queue sees it.
     if (isUncertainOutcome(e)) serviceStartUncertain = true;
     throw e;
@@ -1335,6 +1379,7 @@ async function startServiceLocked(
   serviceStartUncertain = false;
   currentEndpoint = res.endpoint;
   updateState({ endpoint: currentEndpoint, serviceRunning: true });
+  updateRuntime({ service: 'running' });
   return currentEndpoint!;
 }
 
@@ -1352,7 +1397,13 @@ export async function startService(
 
 export async function stopService(): Promise<void> {
   return withServiceTransition(async () => {
-    await send('stopService');
+    updateRuntime({ service: 'stopped' });
+    try {
+      await send('stopService');
+    } catch (e) {
+      updateRuntime({ service: 'failed' });
+      throw e;
+    }
     // The latch is deliberately **not** cleared here. A Stop acknowledgement is not a quiescence
     // guarantee: the sidecar handles commands concurrently, so a start whose acknowledgement was
     // lost may still be inside `startWebService()` and can bring the service up again after Stop
@@ -1360,6 +1411,7 @@ export async function stopService(): Promise<void> {
     // a start that reports its own outcome can retire the uncertainty.
     currentEndpoint = undefined;
     updateState({ endpoint: undefined, serviceRunning: false });
+    updateRuntime({ service: 'stopped' });
   });
 }
 
