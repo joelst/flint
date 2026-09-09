@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { evaluateStartupPreload } from './accelerator-readiness';
+import {
+  evaluateStartupPreload,
+  hasRegisteredAccelerator,
+} from './accelerator-readiness';
 
 const partialReadiness = {
   generation: 1,
@@ -29,6 +32,22 @@ const model = {
 describe('evaluateStartupPreload', () => {
   it('allows alias-only loads for runtime provider resolution', () => {
     expect(evaluateStartupPreload(model, null, partialReadiness).allowed).toBe(true);
+  });
+
+  describe('hasRegisteredAccelerator', () => {
+    it('does not count the CPU provider as hardware acceleration', () => {
+      expect(hasRegisteredAccelerator([
+        { name: 'CPUExecutionProvider', isRegistered: true },
+        { name: 'CUDAExecutionProvider', isRegistered: false },
+      ])).toBe(false);
+    });
+
+    it('requires a registered non-CPU provider', () => {
+      expect(hasRegisteredAccelerator([
+        { name: 'CPUExecutionProvider', isRegistered: true },
+        { name: 'QNNExecutionProvider', isRegistered: true },
+      ])).toBe(true);
+    });
   });
 
   it('allows CPU and successfully registered accelerator variants', () => {

@@ -35,6 +35,13 @@ function normalizeProviderName(value: string | null | undefined): string {
   return normalized;
 }
 
+export function hasRegisteredAccelerator(providers: EpInfo[]): boolean {
+  return providers.some(
+    (provider) =>
+      provider.isRegistered && normalizeProviderName(provider.name) !== 'cpu',
+  );
+}
+
 function registeredProviderNames(readiness: AcceleratorReadiness): Set<string> {
   const names = [
     ...readiness.providers

@@ -53,7 +53,10 @@ import {
   isUncertainOutcome,
   type InterruptionCause,
 } from './operation-outcome';
-import type { AcceleratorReadiness } from './accelerator-readiness';
+import {
+  hasRegisteredAccelerator,
+  type AcceleratorReadiness,
+} from './accelerator-readiness';
 export {
   SidecarOperationError,
   isUncertainOutcome,
@@ -1841,7 +1844,7 @@ export function resetSDK() {
 export async function getEps(): Promise<EpInfo[]> {
   const res = await send('getEps');
   const eps = res.result || [];
-  updateState({ eps, acceleratorsReady: eps.some((e: EpInfo) => e.isRegistered) });
+  updateState({ eps, acceleratorsReady: hasRegisteredAccelerator(eps) });
   return eps;
 }
 
