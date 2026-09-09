@@ -174,6 +174,15 @@ export function rewriteStatusEndpoints (body, publicEndpoint) {
   }
 }
 
+export function formatPublicEndpoint (bindAddress, port) {
+  const configured = String(bindAddress || '127.0.0.1').trim();
+  const host = configured === '0.0.0.0' || configured === '::'
+    ? '127.0.0.1'
+    : configured || '127.0.0.1';
+  const urlHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+  return `http://${urlHost}:${port}`;
+}
+
 /** Loopback callers are trusted for autoload; see gateway.js for why that matters. */
 export function isLoopbackAddress (address) {
   const addr = String(address || '').replace(/^::ffff:/, '');

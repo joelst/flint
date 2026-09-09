@@ -27,6 +27,7 @@ import { annotateVariantUpdates } from './model-updates.js';
 import { selectChatTransport } from './chat-transport.js';
 import { assertWavBuffer } from './audio-format.js';
 import { createGateway } from './gateway.js';
+import { formatPublicEndpoint } from './gateway-http.js';
 import { buildModelIndex, resolveModelId } from './model-registry.js';
 import {
   detectConfigEncoding,
@@ -2153,9 +2154,11 @@ rl.on('line', async (line) => {
         }
       }
 
-      // Client-facing endpoint stays on loopback even when the gateway is bound to a wider
-      // interface, so this app and the Integrations snippets always target 127.0.0.1.
-      sharedEndpoint = useGateway ? `http://127.0.0.1:${payload.port}/v1` : `${nativeUrl}/v1`;
+      // Client-facing endpoint reflects the gateway bind; all-interface binds use loopback for
+      // Flint's local clients while a specific interface remains reachable by that address.
+      sharedEndpoint = useGateway
+        ? `${formatPublicEndpoint(bindAddr, gateway?.publicPort ?? payload.port)}/v1`
+        : `${nativeUrl}/v1`;
       log('info', `Service started; bind=${bindAddr}:${payload.port} `
         + `${useGateway ? `via gateway → 127.0.0.1:${nativePort} ` : ''}connect=${sharedEndpoint}`);
       audit('startService', {

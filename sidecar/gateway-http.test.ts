@@ -7,6 +7,7 @@ import {
   extractModelName,
   rewriteModelName,
   rewriteStatusEndpoints,
+  formatPublicEndpoint,
   isLoopbackAddress,
 } from './gateway-http.js';
 import { buildModelIndex, resolveModelId, stripVersion } from './model-registry.js';
@@ -181,6 +182,18 @@ describe('rewriteStatusEndpoints', () => {
   it('passes through anything unexpected', () => {
     expect(rewriteStatusEndpoints('nope', 'http://x')).toBe('nope');
     expect(rewriteStatusEndpoints('{"a":1}', 'http://x')).toBe('{"a":1}');
+  });
+});
+
+describe('formatPublicEndpoint', () => {
+  it('uses loopback for all-interface binds', () => {
+    expect(formatPublicEndpoint('0.0.0.0', 5273)).toBe('http://127.0.0.1:5273');
+    expect(formatPublicEndpoint(' :: ', 5273)).toBe('http://127.0.0.1:5273');
+  });
+
+  it('publishes a specific interface address', () => {
+    expect(formatPublicEndpoint(' 192.168.1.20 ', 5273)).toBe('http://192.168.1.20:5273');
+    expect(formatPublicEndpoint('::1', 5273)).toBe('http://[::1]:5273');
   });
 });
 
