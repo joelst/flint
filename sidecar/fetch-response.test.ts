@@ -47,6 +47,22 @@ describe('readBoundedResponseText', () => {
     expect(onCancel).toHaveBeenCalledOnce();
   });
 
+  it('supports a zero-byte headers-only read without consuming the body', async () => {
+    const pull = vi.fn();
+    const cancel = vi.fn();
+    const response = {
+      body: new ReadableStream<Uint8Array>({ pull, cancel }),
+    } as Response;
+
+    await expect(readBoundedResponseText(response, 0)).resolves.toEqual({
+      text: '',
+      truncated: true,
+      byteCount: 0,
+    });
+    expect(pull).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
   it('preserves complete UTF-8 characters split across chunks', async () => {
     const bytes = new TextEncoder().encode('A😀B');
     let index = 0;

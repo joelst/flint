@@ -12,7 +12,10 @@ export async function readBoundedResponseText(
   response,
   maxBytes = DEFAULT_FETCH_BODY_LIMIT,
 ) {
-  const limit = Math.max(1, Math.floor(Number(maxBytes) || DEFAULT_FETCH_BODY_LIMIT));
+  const numericLimit = Number(maxBytes);
+  const limit = Number.isFinite(numericLimit)
+    ? Math.max(0, Math.floor(numericLimit))
+    : DEFAULT_FETCH_BODY_LIMIT;
   if (response?.body === null) {
     return { text: '', truncated: false, byteCount: 0 };
   }
@@ -21,6 +24,19 @@ export async function readBoundedResponseText(
   }
 
   const reader = response.body.getReader();
+  if (limit === 0) {
+    try {
+      await reader.cancel('Response body exceeded Flint fetch limit');
+    } finally {
+      try {
+        reader.releaseLock();
+      } catch {
+        // A cancelled stream may already have released its reader.
+      }
+    }
+    return { text: '', truncated: true, byteCount: 0 };
+  }
+
   const decoder = new TextDecoder();
   let text = '';
   let byteCount = 0;

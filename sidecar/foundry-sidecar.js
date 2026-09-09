@@ -2726,57 +2726,57 @@ rl.on('line', async (line) => {
           redirect: 'follow',
         });
 
-          const contentType = raw.response.headers.get('content-type') || '';
-          const capped = raw.text;
+        const contentType = raw.response.headers.get('content-type') || '';
+        const capped = raw.text;
 
-          let title = '';
-          let extractedText = '';
+        let title = '';
+        let extractedText = '';
 
-          if (contentType.includes('text/html')) {
-            // Dynamically import jsdom + readability (both ship in node_modules)
-            const { JSDOM } = await import('jsdom');
-            const { Readability } = await import('@mozilla/readability');
-            const dom = new JSDOM(capped, { url: rawUrl });
-            title = dom.window.document.title?.trim() || '';
-            const reader = new Readability(dom.window.document, { charThreshold: 50 });
-            const article = reader.parse();
-            if (article) {
-              title = article.title?.trim() || title;
-              extractedText = article.textContent?.replace(/\s+/g, ' ').trim() || '';
-            } else {
-              extractedText = dom.window.document.body?.textContent?.replace(/\s+/g, ' ').trim() || '';
-            }
+        if (contentType.includes('text/html')) {
+          // Dynamically import jsdom + readability (both ship in node_modules)
+          const { JSDOM } = await import('jsdom');
+          const { Readability } = await import('@mozilla/readability');
+          const dom = new JSDOM(capped, { url: rawUrl });
+          title = dom.window.document.title?.trim() || '';
+          const reader = new Readability(dom.window.document, { charThreshold: 50 });
+          const article = reader.parse();
+          if (article) {
+            title = article.title?.trim() || title;
+            extractedText = article.textContent?.replace(/\s+/g, ' ').trim() || '';
           } else {
-            extractedText = capped.replace(/\s+/g, ' ').trim();
+            extractedText = dom.window.document.body?.textContent?.replace(/\s+/g, ' ').trim() || '';
           }
+        } else {
+          extractedText = capped.replace(/\s+/g, ' ').trim();
+        }
 
-          const truncated = raw.truncated || extractedText.length > maxChars;
-          const finalText = extractedText.length > maxChars
-            ? extractedText.slice(0, maxChars)
-            : extractedText;
+        const truncated = raw.truncated || extractedText.length > maxChars;
+        const finalText = extractedText.length > maxChars
+          ? extractedText.slice(0, maxChars)
+          : extractedText;
 
-          appendAccessLog({
-            ts: fetchTs,
-            type: 'fetchUrl',
-            modelAlias: null,
-            durationMs: Date.now() - fetchTs,
-            tokensIn: null,
-            tokensOut: null,
-            source: 'ipc',
-            ok: true,
-            url: parsedUrl.hostname, // host only, not full URL (privacy)
-          });
-          log('info', `fetchUrl: fetched ${parsedUrl.hostname} (${finalText.length} chars, truncated=${truncated})`);
-          reply({
-            ok: true,
-            result: {
-              url: rawUrl,
-              title,
-              text: finalText,
-              truncated,
-              charCount: finalText.length,
-            }
-          });
+        appendAccessLog({
+          ts: fetchTs,
+          type: 'fetchUrl',
+          modelAlias: null,
+          durationMs: Date.now() - fetchTs,
+          tokensIn: null,
+          tokensOut: null,
+          source: 'ipc',
+          ok: true,
+          url: parsedUrl.hostname, // host only, not full URL (privacy)
+        });
+        log('info', `fetchUrl: fetched ${parsedUrl.hostname} (${finalText.length} chars, truncated=${truncated})`);
+        reply({
+          ok: true,
+          result: {
+            url: rawUrl,
+            title,
+            text: finalText,
+            truncated,
+            charCount: finalText.length,
+          }
+        });
       } catch (err) {
         appendAccessLog({
           ts: fetchTs,
