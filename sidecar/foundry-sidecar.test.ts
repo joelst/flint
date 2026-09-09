@@ -63,6 +63,7 @@ describe('foundry-sidecar protocol basics', () => {
     try {
       const ready = await waitForLine(proc, (msg) => msg.ready === true);
       expect(ready.ready).toBe(true);
+      expect(ready.protocolVersion).toBe(1);
 
       proc.stdin.write('not-json\n');
       const invalid = await waitForLine(proc, (msg) => msg.error === 'Invalid JSON');
@@ -102,6 +103,17 @@ describe('foundry-sidecar command schema validation', () => {
     proc.stdin.write(`${JSON.stringify({ id: 10, cmd: 'runArbitraryCode' })}\n`);
     const res = await waitForLine(proc, (msg) => msg.id === 10);
     expect(String(res.error)).toContain('Unknown command');
+  });
+
+  it('rejects a request using an unsupported protocol version', async () => {
+    proc.stdin.write(`${JSON.stringify({
+      id: 9,
+      protocolVersion: 999,
+      cmd: 'listModels',
+    })}\n`);
+    const res = await waitForLine(proc, (msg) => msg.id === 9);
+    expect(res.protocolVersion).toBe(1);
+    expect(String(res.error)).toContain('Unsupported sidecar protocol version');
   });
 
   it('rejects payloads with unknown fields', async () => {

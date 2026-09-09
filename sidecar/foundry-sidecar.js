@@ -61,6 +61,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+const SIDECAR_PROTOCOL_VERSION = 1;
 
 // --- Command allowlist and schema (mirrors src/lib/ipc-contracts.ts) ---
 const KNOWN_COMMANDS = new Set([
@@ -1837,11 +1838,16 @@ rl.on('line', async (line) => {
     return;
   }
 
-  const { id, cmd, ...payload } = msg;
+  const { id, cmd, protocolVersion, ...payload } = msg;
 
   const reply = (result) => {
-    send({ id, ...result });
+    send({ id, protocolVersion: SIDECAR_PROTOCOL_VERSION, ...result });
   };
+
+  if (protocolVersion !== undefined && protocolVersion !== SIDECAR_PROTOCOL_VERSION) {
+    reply({ error: `Unsupported sidecar protocol version: ${String(protocolVersion)}` });
+    return;
+  }
 
   const validationError = validateCommand(cmd, payload);
   if (validationError) {
@@ -2831,7 +2837,12 @@ initDiskLog();
 
 // Send ready as early as possible (after readline setup) so the host does not time out.
 // We lazy-load the heavy Foundry SDK only on first 'init' command.
-const readyMsg = { ready: true, pid: process.pid, version: '0.1.0' };
+const readyMsg = {
+  ready: true,
+  protocolVersion: SIDECAR_PROTOCOL_VERSION,
+  pid: process.pid,
+  version: '0.1.0',
+};
 send(readyMsg);
 log('info', `Sidecar process started (pid ${process.pid}) and listening`);
 

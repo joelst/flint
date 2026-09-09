@@ -2,7 +2,14 @@ import { writable, type Writable } from 'svelte/store';
 import { Command } from '@tauri-apps/plugin-shell';
 import { resolveResource, resourceDir } from '@tauri-apps/api/path';
 import { exists } from '@tauri-apps/plugin-fs';
-import type { LaneName, EndpointProfile, ModelPriority, ModelPriorityEntry, EvictionConfig } from './ipc-contracts';
+import {
+  SIDECAR_PROTOCOL_VERSION,
+  type LaneName,
+  type EndpointProfile,
+  type ModelPriority,
+  type ModelPriorityEntry,
+  type EvictionConfig,
+} from './ipc-contracts';
 import {
   evaluateNodeProbe,
   buildNodeMissingMessage,
@@ -20,6 +27,8 @@ import {
   type ResolvedSidecarCandidate,
 } from './sidecar-paths';
 export type { LaneName, EndpointProfile };
+
+export { SIDECAR_PROTOCOL_VERSION };
 export {
   MIN_NODE_VERSION,
   formatNodeVersion,
@@ -462,9 +471,20 @@ async function spawnSidecar() {
   const stderrLines: string[] = [];
   let closeData: any = null;
   let commandError: string | null = null;
+  // Set once spawn() resolves. A child keeps its own event listeners after a replacement is
+  // spawned, so every incoming line must be checked against the live process generation too.
+  let myGeneration: number | null = null;
+  let supersededOutputLogged = false;
 
   const processStdoutLine = (line: string) => {
     if (!line.trim()) return;
+    if (myGeneration !== null && myGeneration !== sidecarGeneration) {
+      if (!supersededOutputLogged) {
+        console.warn('[sdk] Ignoring stdout from a superseded sidecar child');
+        supersededOutputLogged = true;
+      }
+      return;
+    }
     console.log(`[sidecar stdout] ${line}`);
     try {
       const msg = JSON.parse(line);
@@ -510,7 +530,14 @@ async function spawnSidecar() {
         console.log(`[sidecar] ${msg.level}: ${msg.message}`);
         sdkState.update(s => ({ ...s, logs: [...s.logs.slice(-199), { ts: msg.timestamp ?? Date.now(), level: msg.level ?? 'info', message: msg.message, source: 'sidecar' as const }] }));
       } else if (msg.ready) {
-        console.log(`[sdk] Sidecar ready signal received!`);
+        if (msg.protocolVersion !== SIDECAR_PROTOCOL_VERSION) {
+          console.error(
+            `[sdk] Unsupported sidecar protocol version: ${String(msg.protocolVersion)}`,
+          );
+          commandError = `Unsupported sidecar protocol version: ${String(msg.protocolVersion)}`;
+          return;
+        }
+        console.log(`[sdk] Sidecar ready signal received (protocol ${msg.protocolVersion})!`);
         sidecarReady = true;
       }
     } catch (e) {
@@ -555,9 +582,8 @@ async function spawnSidecar() {
     sdkState.update(s => ({ ...s, logs: [...s.logs.slice(-199), { ts: Date.now(), level: 'error' as const, message: text, source: 'sdk' as const }] }));
   });
 
-  // Set once spawn() resolves. Until then this attempt has no generation, but it is still the
-  // only attempt in flight (startSidecar is single-flight), so its close/error events are ours.
-  let myGeneration: number | null = null;
+  // Until spawn() resolves this attempt has no generation, but it is still the only attempt in
+  // flight (startSidecar is single-flight), so its close/error events are ours.
   const ownsGlobalState = () => myGeneration === null || myGeneration === sidecarGeneration;
 
   command.on('close', (data: any) => {
@@ -762,7 +788,12 @@ function sendInternal(
 
       let line: string;
       try {
-        line = JSON.stringify({ id, cmd, ...payload }) + '\n';
+        line = JSON.stringify({
+          id,
+          protocolVersion: SIDECAR_PROTOCOL_VERSION,
+          cmd,
+          ...payload,
+        }) + '\n';
       } catch (e) {
         // Nothing reached the pipe, so nothing ran.
         settle(() =>
