@@ -53,13 +53,15 @@ Facts only — no history. Record what is true now; `git log` and `CHANGELOG.md`
 
 ## UI and state
 - Svelte 5 runes in `+page.svelte` (`// @ts-nocheck` there is intentional).
-- `flint-chat-persist` now holds app-level settings only; conversations live in the v2 archive (see *Conversations and storage*).
+- `flint-chat-persist` holds app-level settings **and** the pre-v2 thread frozen at launch; conversations live in the v2 archive (see *Conversations and storage*).
 - STT/vision filtering is metadata-driven (`task`, `capabilities`, aliases).
 - Diagnostics/Integrations endpoint display must match sidecar service state.
 
 ## Conversations and storage
-- Conversations live in `localStorage` under `flint-conversations-v2` (`src/lib/conversation-repository.ts`), with `…-v2.backup` holding bytes that could not be parsed. Legacy keys `flint-chats-v1` and `flint-chat-persist` are read for migration and **never** rewritten — `flint-chat-persist` still holds the only copy of the pre-v2 thread.
-- One key, replaced atomically, is the whole commit point. That is why the live thread is not duplicated into the settings blob (the ~5 MB budget) and why a failed write is surfaced rather than retried silently.
+- Conversations live in `localStorage` under `flint-conversations-v2` (`src/lib/conversation-repository.ts`), with `…-v2.backup` holding bytes that could not be parsed.
+- `flint-chat-persist` **is** rewritten on every save, but its `chatMessages` is captured once at launch (`legacyThreadAtLaunch`) and written back **verbatim**: it is the only remaining copy of the pre-v2 thread, kept for rollback and as the migration source if the archive commit failed. Never extend it with live messages (that would double every message against the ~5 MB budget) and never drop it while rewriting the key.
+- `flint-chats-v1` is retired only by an explicit `retireLegacyKeys` call, never automatically, and `canRetireLegacyKeys` permits it only after a migration that lost nothing.
+- One key, replaced atomically, is the whole commit point — the reason the store is `localStorage` rather than IndexedDB. A failed write is surfaced, never retried silently.
 - Never write to storage before hydration completes; a read-modify-write on an unhydrated state replaces a blob that was never read.
 - Per-conversation settings resolve against a baseline (`src/lib/conversation-settings.ts`). An **empty `modelAlias` means absence, not a choice** — in both the seeder and the resolver, because the caller deliberately does not blank the picker on an empty resolution, so an empty override would leak the previous conversation's model.
 - `localStorage.key(i)` returns null rather than throwing when the set changes mid-walk, and a removal paired with an addition leaves `length` unchanged. Index-based enumeration therefore proves nothing on its own: list through `listKeys`, list **twice**, and compare the sets before concluding a key is absent.
