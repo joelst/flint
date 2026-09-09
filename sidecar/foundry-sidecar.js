@@ -36,7 +36,10 @@ import {
 import {
   applyPreferredExecutionProvider as applyPreferredExecutionProviderTo,
 } from './execution-provider.js';
-import { stopNativeWebService as stopNativeWebServiceFor } from './native-service.js';
+import {
+  stopNativeWebService as stopNativeWebServiceFor,
+  waitForHttpReady,
+} from './native-service.js';
 import {
   DEFAULT_FETCH_BODY_LIMIT,
   fetchBoundedResponseText,
@@ -653,21 +656,17 @@ function stopNativeWebService () {
   if (stopped) nativeServiceStartAttempted = false;
 }
 
-/** The native service reports readiness on /status; startWebService() returning does not. */async function waitForUpstream (port, deadlineMs = 20000) {
-  const started = Date.now();
-  let lastError = null;
-  while (Date.now() - started < deadlineMs) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/status`);
-      if (res.ok) return true;
-      lastError = `status ${res.status}`;
-    } catch (e) {
-      lastError = e?.message ?? String(e);
-    }
-    await new Promise(r => setTimeout(r, 150));
+/** The native service reports readiness on /status; startWebService() returning does not. */
+async function waitForUpstream (port, deadlineMs = 20000) {
+  const result = await waitForHttpReady({
+    fetchImpl: fetch,
+    url: `http://127.0.0.1:${port}/status`,
+    deadlineMs,
+  });
+  if (!result.ready) {
+    log('warn', `Upstream service not ready after ${deadlineMs}ms: ${result.lastError}`);
   }
-  log('warn', `Upstream service not ready after ${deadlineMs}ms: ${lastError}`);
-  return false;
+  return result.ready;
 }
 
 // Per-request access log. Covers IPC-originated requests only: traffic proxied through the
