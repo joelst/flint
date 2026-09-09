@@ -39,6 +39,10 @@ Facts only — no history. Record what is true now; `git log` and `CHANGELOG.md`
 - Within one alias the pool holds a single variant: requesting another triggers unload-then-load, so a model is never resident twice. Different aliases coexist; residency is bounded only by memory unless eviction is enabled.
 - Proxied traffic is deliberately absent from the access log: `writeToDisk()` appends synchronously and would stall the event loop.
 - Proxied requests never reach the sidecar's chat path, so the pool cannot see them. `createGateway({onActivity})` brackets each whole exchange (buffer → forward → autoload → replay) with one start/end pair; without it a model streaming a long completion looks idle and can be evicted mid-generation.
+- Service starts and stops are serialized **inside the sidecar as well as in `src/lib/sdk.ts`**. A failed start owns rollback until cleanup finishes, so it cannot tear down a newer successful transition.
+- A failed replacement start unconditionally clears `sharedEndpoint`/`upstreamPort` and awaits best-effort teardown of the partial gateway and native listener while preserving the original start error. A teardown failure means listener termination is unconfirmed; never describe endpoint withdrawal as proof that the listener stopped.
+- SDK 1.2.4's `stopWebService()` sends `stop_service` only when `manager.urls` is non-empty. If `start_service` opened a listener but URL decoding/publication failed, stop it through the manager's existing `coreInterop.executeCommand('stop_service')`; do not gate that fallback on `stopWebService` existing.
+- A requested execution-provider preference is optional only when the runtime exposes no compatible setter. If one or more supported setters reject the request and none succeeds, fail the start and run partial-start cleanup rather than reporting success.
 
 ## Memory watchdog / pool eviction
 - Eviction (`sidecar/pool-eviction.js`) is two independent rules, **both off by default**: idle-unload (timeout floored at 60 s) and a max-resident cap (1–32). Configure via the `setEvictionConfig` command; per-model `pinned`/`normal`/`low` via `setModelPriorities`.
