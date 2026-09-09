@@ -54,8 +54,10 @@ Windows/macOS fixes do not establish Linux release support.
 ## Runtime strategy
 
 - [ ] **Thin Rust supervisor** — expedite native tray/reopen/quit, single-instance
-      behavior, and exclusive runtime-child ownership after the transport contract
-      is stable. See [PRODUCT_PLAN](./PRODUCT_PLAN.md#workstream-c-thin-native-ownership----expedited).
+      behavior, and exclusive runtime-child ownership after the remaining service
+      lifecycle contracts are stable. The versioned transport and readiness
+      contracts are now delivered; see
+      [PRODUCT_PLAN](./PRODUCT_PLAN.md#workstream-c-thin-native-ownership----expedited).
 - [ ] **Rust runtime replacement** — deferred pending parity and measured benefit.
       Preserve one model-manager authority and separate-process crash isolation;
       do not keep competing JS/Rust runtimes or replay uncertain operations.
