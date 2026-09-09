@@ -575,6 +575,25 @@ describe('service start uncertainty', () => {
     unsubscribe();
   });
 
+  it('does not advertise the old endpoint after a failed restart', async () => {
+    const sdk = await loadSdk();
+    const start = sdk.startService(5272);
+    const startId = await waitForWrite('startService');
+    harness.emitStdout({ id: startId, endpoint: 'http://127.0.0.1:5272' });
+    await start;
+
+    const restart = capture(sdk.startService(5273));
+    const restartId = await waitForWrite('startService', 1);
+    harness.emitStdout({ id: restartId, error: 'address already in use' });
+    await restart.tracked;
+
+    const snapshot = getLastSdkSnapshot(sdk);
+    expect(restart.box.err.certainty).toBe('failed');
+    expect(snapshot.endpoint).toBeUndefined();
+    expect(snapshot.serviceRunning).toBe(false);
+    expect(snapshot.runtime.service).toBe('failed');
+  });
+
   it('blocks a convenience start that was queued before the first outcome was known', async () => {
     const sdk = await loadSdk();
     // Warm the child so both starts queue against a live transport.
@@ -601,6 +620,15 @@ describe('service start uncertainty', () => {
     expect(harness.writes.filter((w) => w.includes('startService')).length).toBe(before + 1);
     expect(second.box.err.certainty).toBe('unknown');
   });
+
+  function getLastSdkSnapshot(sdk: { getSDKState: () => { subscribe: (fn: (state: any) => void) => () => void } }) {
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+    unsubscribe();
+    return snapshot;
+  }
 });
 
 describe('cancellation from inside onAssignedId', () => {
