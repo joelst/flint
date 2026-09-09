@@ -338,6 +338,62 @@ describe('hasRecoveryCopies', () => {
     };
     expect(hasRecoveryCopies(shrinking)).toBe('unknown');
   });
+
+  it('reports unknown when the listing churns without changing its length', () => {
+    // The hard case: one key removed and another added, so `length` never moves and `key()`
+    // never answers null. The indices still shift, so a single walk can step over the recovery
+    // copy entirely and see nothing unusual. Only comparing the key set across two listings
+    // catches it.
+    // Each walk sees a same-sized set, and neither happens to include the recovery copy the
+    // shifting indices stepped over. Nothing within a single walk looks wrong: no null, no
+    // duplicate, no length change. The sets simply disagree, which is the only available
+    // evidence that the walk cannot be trusted to have seen everything.
+    const listings = [
+      ['a', 'b', 'c'],
+      ['a', 'b', 'd'],
+    ];
+    let walk = -1;
+    const current = () => listings[Math.min(Math.max(walk, 0), listings.length - 1)];
+    const churning: EnumerableStorage = {
+      get length() {
+        // Deliberately not tied to the length read: `listKeys` checks the length twice per walk,
+        // so advancing here would make the fake depend on that detail rather than on the churn
+        // it is meant to model.
+        return current().length;
+      },
+      key(i: number) {
+        // A walk always starts at index 0, so that is where the next listing takes effect.
+        if (i === 0) walk += 1;
+        return current()[i] ?? null;
+      },
+      getItem: () => null,
+      setItem() {},
+      removeItem() {},
+    };
+    expect(hasRecoveryCopies(churning)).toBe('unknown');
+  });
+
+  it('reports present from an unstable listing, since a listed key really existed', () => {
+    // Churn can hide a key but cannot invent one, so seeing the copy is conclusive even though
+    // the enumeration is not trustworthy enough to prove absence.
+    const entries = ['a', ARCHIVE_BACKUP_KEY];
+    let reads = 0;
+    const unstable: EnumerableStorage = {
+      get length() {
+        return entries.length;
+      },
+      key(index: number) {
+        reads += 1;
+        // Duplicate name, which `listKeys` treats as proof the set shifted mid-walk.
+        if (reads > entries.length) return 'a';
+        return entries[index] ?? null;
+      },
+      getItem: () => null,
+      setItem() {},
+      removeItem() {},
+    };
+    expect(hasRecoveryCopies(unstable)).toBe('present');
+  });
 });
 
 describe('buildExportDocument session status', () => {

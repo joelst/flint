@@ -239,28 +239,30 @@ export function emptyCollection(enumerationFailed: boolean): CollectionResult {
 /** Whether recovery copies remain in storage. `'unknown'` when it could not be enumerated. */
 export type RecoveryCopyStatus = 'present' | 'absent' | 'unknown';
 
-/** Whether any recovery copy is still in storage, whichever launch created it. */
+/**
+ * Whether any recovery copy is still in storage, whichever launch created it.
+ *
+ * Enumerated through `listKeys` and confirmed with a second listing, exactly as
+ * `collectPreservedPayloads` does, because index-based iteration is only as trustworthy as the
+ * key set holding still. A removal alone shortens the listing, but a removal paired with an
+ * addition leaves `length` unchanged while the indices shift, so a walk can step straight over a
+ * recovery copy without `key()` ever answering null. Comparing the set before and after is what
+ * detects that; the duplicate and length checks inside `listKeys` catch the rest.
+ *
+ * The three answers are deliberately asymmetric. A key that was listed really was there, so
+ * `present` stands even on an unstable listing — churn can hide a key, never invent one. Only
+ * `absent` depends on having seen the whole set, and that is the answer worth being careful
+ * about: it retires a warning about data the user may be about to lose.
+ */
 export function hasRecoveryCopies(storage: EnumerableStorage): RecoveryCopyStatus {
-  try {
-    const count = storage.length;
-    for (let i = 0; i < count; i += 1) {
-      const name = storage.key(i);
-      if (typeof name === 'string') {
-        if (isRecoveryCopyKey(name)) return 'present';
-        continue;
-      }
-      // An index below the reported length that yields no name means the listing moved under
-      // the walk — another writer removed a key — so the indices after it refer to entries this
-      // pass never saw. `key()` returns null rather than throwing for that, so without this the
-      // walk would finish and report `absent`, retiring the at-risk warning on the strength of a
-      // scan that had skipped part of storage.
-      return 'unknown';
-    }
-  } catch {
-    // Not the same as finding none. A healthy archive read leaves the session writable, so
-    // nothing else would raise this, and claiming "absent" would quietly retire the warning.
-    return 'unknown';
-  }
+  const first = listKeys(storage);
+  for (const name of first.keys) if (isRecoveryCopyKey(name)) return 'present';
+  if (first.failed || first.unstable) return 'unknown';
+
+  const second = listKeys(storage);
+  for (const name of second.keys) if (isRecoveryCopyKey(name)) return 'present';
+  if (second.failed || second.unstable || !sameKeys(first.keys, second.keys)) return 'unknown';
+
   return 'absent';
 }
 
