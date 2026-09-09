@@ -175,9 +175,10 @@ export function rewriteStatusEndpoints (body, publicEndpoint) {
 }
 
 export function formatPublicEndpoint (bindAddress, port) {
-  const host = String(bindAddress || '127.0.0.1') === '0.0.0.0'
+  const configured = String(bindAddress || '127.0.0.1').trim();
+  const host = configured === '0.0.0.0' || configured === '::'
     ? '127.0.0.1'
-    : String(bindAddress || '127.0.0.1');
+    : configured || '127.0.0.1';
   const urlHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
   return `http://${urlHost}:${port}`;
 }
