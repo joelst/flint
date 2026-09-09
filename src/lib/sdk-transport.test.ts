@@ -47,6 +47,7 @@ let live: {
 let pendingWriteError: string | null = null;
 /** When set, `spawn()` waits on this so a test can act while startup is still in flight. */
 let gateSpawn = false;
+let readyProtocolVersion = 1;
 
 function makeCommand() {
   const listeners: Record<string, Array<(arg: any) => void>> = {};
@@ -102,7 +103,7 @@ function makeCommand() {
       }
       // The transport waits for a `{ready:true}` line before it will send anything. Delivered on
       // a later tick so it lands after `spawn()` resolves, as the real child's would.
-      queueMicrotask(() => live?.emitStdout({ ready: true, protocolVersion: 1 }));
+      queueMicrotask(() => live?.emitStdout({ ready: true, protocolVersion: readyProtocolVersion }));
       return child;
     },
   };
@@ -144,6 +145,7 @@ async function loadSdk() {
     spawnEntered: false,
   };
   gateSpawn = false;
+  readyProtocolVersion = 1;
   pendingWriteError = null;
   live = null;
   return await import('./sdk');
@@ -208,6 +210,16 @@ afterEach(() => {
 });
 
 describe('settlement revokes permission to dispatch', () => {
+  it('rejects a sidecar with an incompatible handshake before sending requests', async () => {
+    const sdk = await loadSdk();
+    readyProtocolVersion = 999;
+    const { box, tracked } = capture(sdk.getEps());
+    await tracked;
+    expect(box.err).toBeDefined();
+    expect(String(box.err.message)).toContain('Unsupported sidecar protocol version');
+    expect(harness.writes).toHaveLength(0);
+  });
+
   it('never writes a request that was drained while the runtime was starting', async () => {
     const sdk = await loadSdk();
     gateSpawn = true;

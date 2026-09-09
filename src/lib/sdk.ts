@@ -474,11 +474,15 @@ async function spawnSidecar() {
   // Set once spawn() resolves. A child keeps its own event listeners after a replacement is
   // spawned, so every incoming line must be checked against the live process generation too.
   let myGeneration: number | null = null;
+  let supersededOutputLogged = false;
 
   const processStdoutLine = (line: string) => {
     if (!line.trim()) return;
     if (myGeneration !== null && myGeneration !== sidecarGeneration) {
-      console.log('[sdk] Ignoring stdout from a superseded sidecar child');
+      if (!supersededOutputLogged) {
+        console.warn('[sdk] Ignoring stdout from a superseded sidecar child');
+        supersededOutputLogged = true;
+      }
       return;
     }
     console.log(`[sidecar stdout] ${line}`);
