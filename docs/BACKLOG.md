@@ -116,13 +116,22 @@ Windows/macOS fixes do not establish Linux release support.
       the next retry can still drop the outstanding turns. Closing it needs a native
       `ExitRequested` → frontend flush → acknowledgement round trip, which is Rust work rather
       than a frontend fix.
-- [ ] **Per-conversation settings are stored but not applied.** The archive round-trips a
-      settings bag per conversation (`modelAlias`, `systemPrompt`, `contextTurns`,
-      `showFullHistory`) and nothing is lost, but `applyConversationSettings` is deliberately a
-      no-op. Applying them requires an app-default baseline to resolve absent keys against;
-      without one, selecting a conversation with no overrides inherits the *previous*
-      conversation's model and persona, and `persistChat` then writes that leaked value into the
-      app-level settings key. Do this with the stage that adds the per-conversation controls.
+- [ ] **The settings baseline cannot be edited.** Per-conversation settings now apply, resolved
+      against an application baseline held in `appSettingDefaults`. That baseline is deliberately
+      stable — an in-chat change belongs to the chat, and moving the baseline underneath every
+      conversation that inherits from it is a different operation — but there is no control that
+      performs that different operation. Persona, context length and thread view are therefore
+      frozen at whatever was persisted before the upgrade: the projection that writes the
+      settings blob deliberately does not emit them from the live chat.
+
+      The model alias is the exception, and intentionally so. It is read back from
+      `selectedModelAlias`, the application's pre-existing "last model used" value, which drives
+      startup prewarming and is what a rolled-back build would chat with. The component still
+      writes it on every model switch, so the alias part of the baseline does move between
+      sessions. That is the right trade: an inheriting conversation should open with a model that
+      works, and unlike a persona an alias does not carry the previous chat's character. Only
+      conversations created before this feature inherit at all, since new ones are stamped
+      explicitly. Closing this means a "defaults for new chats" control in Settings.
 - [ ] **Switching conversations discards the rest of an in-flight generation.** The epoch guard
       rejects deltas after the thread is replaced, so the archive keeps the partial answer.
       Pre-existing behaviour, not introduced by the archive work. Fixing it means routing

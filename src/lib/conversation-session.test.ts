@@ -310,6 +310,21 @@ describe('captureThread and settings', () => {
     expect(findConversation(result.archive, 'a')!.settings).toEqual({ contextTurns: 12 });
   });
 
+  it('preserves a stored value this build rejects when an unrelated key is patched', () => {
+    // Changing the persona must not repair or discard a context length this build considers
+    // unusable. Resolution substitutes the app default for display, so a full-value capture
+    // would write that substitute over the original and lose it permanently.
+    const archive = archiveOf(conv('a', [], { settings: { contextTurns: 0, systemPrompt: 'old' } }));
+    const result = captureThread(state(archive, 'a', []), {
+      now: NOW,
+      settings: { systemPrompt: 'new' },
+    });
+    expect(findConversation(result.archive, 'a')!.settings).toEqual({
+      contextTurns: 0,
+      systemPrompt: 'new',
+    });
+  });
+
   it('removes the bag rather than storing an empty object', () => {
     const archive = archiveOf(conv('a', [], { settings: { modelAlias: 'phi-4' } }));
     const result = captureThread(state(archive, 'a', []), {
@@ -474,6 +489,12 @@ describe('deleteConversation', () => {
     expect(result.archive.conversations).toEqual([]);
     expect(result.archive.activeId).toBeNull();
     expect(result.thread).toEqual(EMPTY_THREAD);
+    // Pinned because the caller reads settings off this to reconfigure the chat for the
+    // neighbour it switched to. There is no neighbour here, so it must be null rather than a
+    // stand-in the caller could dereference: doing so threw before the replacement conversation
+    // was created, which left the UI attributed to nothing and unable to save anything typed
+    // afterwards.
+    expect(result.conversation).toBeNull();
   });
 
   it('does not store the deleted conversation thread back', () => {
