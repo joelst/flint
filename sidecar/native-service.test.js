@@ -14,19 +14,16 @@ describe('stopNativeWebService', () => {
 
   it('uses core stop_service when startup did not publish an address', () => {
     const executeCommand = vi.fn();
-    const stopWebService = vi.fn();
 
     stopNativeWebService({
       manager: {
         urls: [],
-        stopWebService,
         coreInterop: { executeCommand },
       },
       startAttempted: true,
     });
 
     expect(executeCommand).toHaveBeenCalledWith('stop_service');
-    expect(stopWebService).not.toHaveBeenCalled();
   });
 
   it('fails explicitly when an unpublished native listener has no teardown path', () => {

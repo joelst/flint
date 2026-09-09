@@ -2113,10 +2113,8 @@ rl.on('line', async (line) => {
       pool.clear();
       usage.clear();
       try {
-        if (manager && typeof manager.stopWebService === 'function') {
-          try { stopNativeWebService(); } catch (e) {
-            log('warn', `stopWebService before restart (ignored): ${e?.message ?? e}`);
-          }
+        try { stopNativeWebService(); } catch (e) {
+          log('warn', `stopWebService before restart (ignored): ${e?.message ?? e}`);
         }
         // Start service BEFORE loading models so HTTP routing layer initializes with the registry.
         if (typeof manager.startWebService === 'function') {
@@ -2194,12 +2192,10 @@ rl.on('line', async (line) => {
       }
     } else if (cmd === 'stopService') {
       await stopGateway();
-      if (manager && typeof manager.stopWebService === 'function') {
-        try {
-          stopNativeWebService(); // synchronous
-        } catch (e) {
-          log('warn', `stopWebService error (ignored): ${e?.message ?? e}`);
-        }
+      try {
+        stopNativeWebService(); // synchronous
+      } catch (e) {
+        log('warn', `stopWebService error (ignored): ${e?.message ?? e}`);
       }
       clearPublishedService();
       tokenAccumulator.clear();
