@@ -1311,6 +1311,8 @@ export function isServiceTransitioning(): boolean {
 }
 
 let serviceTransitionDepth = 0;
+/** Invalidates starts that were queued before the most recent Stop request. */
+let serviceStopFence = 0;
 
 /**
  * Set when a start's outcome could not be established — the acknowledgement was lost, so the
@@ -1344,8 +1346,16 @@ async function startServiceLocked(
   alias?: string,
   preferredEp?: string,
   bindAddress?: string,
-  opts?: { convenience?: boolean }
+  opts?: { convenience?: boolean },
+  fence?: number,
 ): Promise<string> {
+  if (fence !== undefined && fence !== serviceStopFence) {
+    throw new SidecarOperationError(
+      'startService',
+      'cancelled',
+      'This start was queued before a Stop request and was cancelled before dispatch.',
+    );
+  }
   // Evaluated here, at execution time under the lock, so a start queued before an earlier one
   // reported uncertainty still sees that uncertainty.
   if (opts?.convenience && serviceStartUncertain) {
@@ -1396,8 +1406,9 @@ export async function startService(
   bindAddress?: string,
   opts?: { convenience?: boolean }
 ): Promise<string> {
+  const fence = serviceStopFence;
   return withServiceTransition(() =>
-    startServiceLocked(port, alias, preferredEp, bindAddress, opts),
+    startServiceLocked(port, alias, preferredEp, bindAddress, opts, fence),
   );
 }
 
@@ -1442,6 +1453,7 @@ export async function ensureServiceRunning(
 }
 
 export async function stopService(): Promise<void> {
+  serviceStopFence += 1;
   return withServiceTransition(async () => {
     updateRuntime({ service: 'stopping' });
     try {
@@ -1487,6 +1499,7 @@ export async function withServiceTransition<T>(
 ): Promise<T> {
   return queueServiceTransition(async () => {
     serviceTransitionDepth += 1;
+    const transitionFence = serviceStopFence;
     // The handle is only valid for the duration of the callback. Retaining it and calling
     // startNow() later would run a destructive restart with no lock held.
     let handleActive = true;
@@ -1498,7 +1511,7 @@ export async function withServiceTransition<T>(
               new Error('Service transition handle used after its transition completed'),
             );
           }
-          return startServiceLocked(port, alias, preferredEp, bindAddress, opts);
+          return startServiceLocked(port, alias, preferredEp, bindAddress, opts, transitionFence);
         },
       });
     } finally {
