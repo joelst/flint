@@ -116,6 +116,7 @@ let streamHandlers = new Map<number, (delta: string) => void>();
 let progressHandlers = new Map<number, (p: number) => void>();
 let msgId = 0;
 let currentStatus: any = { initialized: false, modelLoaded: false, serviceRunning: false };
+let currentRuntimeServiceState: RuntimeServiceState = 'unknown';
 export type ModelInfo = IModel & {
   isCached?: boolean;
   isLoaded?: boolean;
@@ -394,6 +395,7 @@ function updateState(partial: Partial<FlintSDKState>) {
 }
 
 function updateRuntime(partial: Partial<RuntimeState>) {
+  if (partial.service) currentRuntimeServiceState = partial.service;
   sdkState.update((s) => ({ ...s, runtime: { ...s.runtime, ...partial } }));
 }
 
@@ -1391,6 +1393,46 @@ export async function startService(
   return withServiceTransition(() =>
     startServiceLocked(port, alias, preferredEp, bindAddress, opts),
   );
+}
+
+/**
+ * Ensure the HTTP service is running without restarting a healthy endpoint.
+ *
+ * The status probe and possible start share the transition lock, so a concurrent Stop or
+ * explicit restart cannot make the decision against a stale endpoint.
+ */
+export async function ensureServiceRunning(
+  port = 5272,
+  alias?: string,
+  preferredEp?: string,
+  bindAddress?: string,
+  opts?: { convenience?: boolean },
+): Promise<{ endpoint: string; started: boolean }> {
+  return withServiceTransition(async ({ startNow }) => {
+    if (currentEndpoint && currentRuntimeServiceState === 'running') {
+      return { endpoint: currentEndpoint, started: false };
+    }
+
+    try {
+      const status = await send('getStatus');
+      const endpoint = status.result?.endpoint;
+      if (status.result?.serviceRunning && endpoint) {
+        currentEndpoint = endpoint;
+        updateState({ endpoint, serviceRunning: true });
+        updateRuntime({ service: 'running' });
+        return { endpoint, started: false };
+      }
+    } catch (e) {
+      // A failed probe is not proof that the service is stopped; startService below preserves
+      // the existing uncertainty rules if it must attempt a destructive transition.
+      console.warn('[sdk] service status probe failed during ensure', e);
+    }
+
+    return {
+      endpoint: await startNow(port, alias, preferredEp, bindAddress, opts),
+      started: true,
+    };
+  });
 }
 
 export async function stopService(): Promise<void> {

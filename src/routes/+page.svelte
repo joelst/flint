@@ -14,6 +14,7 @@
     getRecommendedStarterModels,
     getSTTModels,
     startService,
+    ensureServiceRunning as sdkEnsureServiceRunning,
     stopService,
     withServiceTransition,
     downloadModel,
@@ -2558,36 +2559,24 @@ updateStateFromSdk();
   ): Promise<string | undefined> {
     serviceTransitionBusy = true;
     try {
-      return await withServiceTransition(async ({ startNow }) => {
-        if (state.serviceRunning && state.endpoint) {
-          if (alias) {
-            const resident = (state.pool || []).some((e: any) => e.alias === alias);
-            if (!resident) {
-              await sdkLoadModel({ alias }, "audio");
-            }
-            if (preferredEp) {
-              appendAppLog(
-                `Ensure service: ${alias} loaded into the running service (left up to preserve other loaded models); acceleration preference "${preferredEp}" is applied per transcription request.`,
-              );
-            }
-          }
-          return state.endpoint;
+      const ensured = await sdkEnsureServiceRunning(
+        networkPort,
+        alias,
+        preferredEp,
+        networkBindAddress || undefined,
+        opts,
+      );
+      if (ensured.started) markNetworkSettingsApplied();
+      if (alias) {
+        const resident = (state.pool || []).some((e: any) => e.alias === alias);
+        if (!resident) await sdkLoadModel({ alias }, "audio");
+        if (preferredEp && !ensured.started) {
+          appendAppLog(
+            `Ensure service: ${alias} loaded into the running service (left up to preserve other loaded models); acceleration preference "${preferredEp}" is applied per transcription request.`,
+          );
         }
-        // Already holding the transition lock — the queued startService would deadlock here.
-        // The caller says whether this start is a decision the user made. Reached from
-        // Transcribe it is a side effect, so it must respect an earlier unestablished start
-        // rather than issue a second destructive restart; the "Ensure service" button is an
-        // explicit request and passes nothing.
-        const ep = await startNow(
-          networkPort,
-          alias,
-          preferredEp,
-          networkBindAddress || undefined,
-          opts,
-        );
-        markNetworkSettingsApplied();
-        return ep;
-      });
+      }
+      return ensured.endpoint;
     } finally {
       serviceTransitionBusy = false;
     }
