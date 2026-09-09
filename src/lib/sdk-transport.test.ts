@@ -218,6 +218,7 @@ describe('settlement revokes permission to dispatch', () => {
     const unsubscribe = sdk.getSDKState().subscribe((state) => {
       snapshot = state;
     });
+
     expect(snapshot.runtime.process).toBe('ready');
     expect(snapshot.runtime.manager).toBe('uninitialized');
     expect(snapshot.runtime.generation).toBeGreaterThan(0);

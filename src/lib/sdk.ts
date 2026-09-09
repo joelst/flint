@@ -317,7 +317,7 @@ export interface PoolStats {
 
 export type RuntimeProcessState = 'stopped' | 'starting' | 'ready' | 'crashed';
 export type RuntimeManagerState = 'unknown' | 'uninitialized' | 'initializing' | 'ready' | 'failed';
-export type RuntimeServiceState = 'unknown' | 'stopped' | 'starting' | 'running' | 'failed';
+export type RuntimeServiceState = 'unknown' | 'stopped' | 'starting' | 'stopping' | 'running' | 'failed';
 export type RuntimeModelState = 'unknown' | 'empty' | 'loading' | 'ready';
 
 export interface RuntimeState {
@@ -427,6 +427,7 @@ async function spawnSidecar() {
   const nodeCheck = await ensureNodeRuntime();
   if (!nodeCheck.ok) {
     updateState({ ready: false, error: nodeCheck.message });
+    updateRuntime({ process: 'stopped', manager: 'unknown', service: 'unknown', models: 'unknown' });
     throw new Error(nodeCheck.message);
   }
 
@@ -1397,7 +1398,7 @@ export async function startService(
 
 export async function stopService(): Promise<void> {
   return withServiceTransition(async () => {
-    updateRuntime({ service: 'stopped' });
+    updateRuntime({ service: 'stopping' });
     try {
       await send('stopService');
     } catch (e) {
