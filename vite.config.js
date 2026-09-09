@@ -71,6 +71,7 @@ export default defineConfig(() => ({
         'src/lib/conversation-title.ts',
         'src/lib/conversation-session.ts',
         'src/lib/conversation-settings.ts',
+        'src/lib/conversation-export.ts',
         'src/lib/chat-request.ts',
         'sidecar/chat-transport.js',
         'sidecar/audio-format.js',

@@ -137,6 +137,18 @@ Windows/macOS fixes do not establish Linux release support.
       Pre-existing behaviour, not introduced by the archive work. Fixing it means routing
       streamed updates by originating conversation id rather than by "is this still the visible
       thread".
+- [ ] **The export cannot always prove where it landed.** `classifyDestination` refuses an
+      application-data destination by comparing filesystem identity, and detects a symlinked
+      ancestor by disagreement between `stat` and `lstat`. It cannot see aliasing that leaves no
+      link — a bind mount, or a hard-linked directory — and Windows reports no `dev`/`ino` through
+      the pinned `plugin-fs`, so the whole check degrades to "unverified" there. The Save dialog
+      also grants the chosen file rather than its ancestors, so an ordinary Downloads export is
+      expected to report unverified. The file is written either way and the uncertainty is stated
+      rather than hidden. Closing this means a native resolver that canonicalises the path.
+- [ ] **Storage inventory is assessed once per launch.** `storageInventoryUnknown` is computed
+      when conversations load and stays set for the session, so a warning survives storage
+      recovering underneath it. Closing this means re-taking the inventory after a later
+      successful enumeration.
 
 ## Control CLI — not planned
 

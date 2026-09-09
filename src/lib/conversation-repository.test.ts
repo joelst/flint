@@ -157,7 +157,10 @@ describe('a read we did not fully understand never becomes a write', () => {
     expect(r.writable).toBe(true);
     expect(r.backedUp).toBe(true);
     expect(storage.map.get(ARCHIVE_BACKUP_KEY)).toBe(raw);
-    expect(r.notice).toContain(ARCHIVE_BACKUP_KEY);
+    // The notice must not name the storage key. Nothing in the app can show or extract one, so
+    // naming it is actionable only from a developer console — the user is pointed at Export.
+    expect(r.notice).not.toContain(ARCHIVE_BACKUP_KEY);
+    expect(r.notice).toContain('Export');
   });
 
   it('stops writing when a lossy archive could not be backed up', () => {

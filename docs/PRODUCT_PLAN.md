@@ -1,7 +1,7 @@
 # Flint reliability execution plan
 
-**Status:** In progress. Phase 0 is delivered; Phase 1A is delivered except the
-export/backup foundation; see [Delivery status](#delivery-status). Everything
+**Status:** In progress. Phase 0 and Phase 1A are delivered; see
+[Delivery status](#delivery-status). Everything
 else in this document remains planned and implies no implementation.
 
 **Scope:** Address the project review's data-integrity, lifecycle, inference, model,
@@ -27,10 +27,11 @@ A stage is recorded here only once the pull request delivering it is merged to
 | 1A | 1A-3b multipart-preserving request builder and chat transport | #42 |
 | 1A | 1A-3c conversation session wiring: switching, creation, deletion, and flush | #45 |
 | 1A | 1A-3d per-conversation settings resolved against an application baseline | #49 |
+| 1A | 1A-4 conversation export and at-risk storage reporting | #52 |
 
 Phase 1A closed its acceptance gate for storage, migration, rollback, multipart
-preservation, and conversation switching. Three items were split out rather than
-completed and are tracked in [BACKLOG.md](./BACKLOG.md) under *Conversation
+preservation, conversation switching, and export. Three items were split out rather
+than completed and are tracked in [BACKLOG.md](./BACKLOG.md) under *Conversation
 persistence*:
 
 - Native quit is a best-effort flush; a guaranteed flush needs a Rust
@@ -42,8 +43,7 @@ persistence*:
 - In-flight streaming is discarded across a conversation switch rather than
   being allowed to finish in its originating conversation.
 
-The remaining Phase 1A work is the export/backup foundation, which the acceptance
-gate requires before any destructive reset decision is offered.
+Phase 1A is complete. Phase 1B is the next phase.
 
 ## Decisions
 

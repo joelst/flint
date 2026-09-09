@@ -100,6 +100,16 @@
     saveConversationArchive,
   } from "$lib/conversation-repository";
   import {
+    collectStoredArchive,
+    collectPreservedPayloads,
+    emptyCollection,
+    hasRecoveryCopies,
+    classifyDestination,
+    buildExportDocument,
+    serializeExportDocument,
+    exportFileName,
+  } from "$lib/conversation-export";
+  import {
     captureThread,
     createConversation as createSessionConversation,
     deleteConversation as deleteSessionConversation,
@@ -983,7 +993,29 @@
   );
   // Cleared when the stored archive cannot be read or preserved; every conversation writer
   // honours it so unreadable data is never replaced by a fresh archive.
-  let conversationsWritable = true;
+  //
+  // Reactive because the risk bar reads it: a session that cannot save must keep saying so for as
+  // long as it lasts, not only until the one-time notice is dismissed.
+  let conversationsWritable = $state(true);
+  /**
+   * True when recovery copies are sitting in application storage.
+   *
+   * Derived from what is actually stored rather than from what this launch happened to do. A
+   * lossy archive is backed up once and then saved in its normalized form, so every subsequent
+   * launch opens cleanly — and the copy holding the parts that could not be read is still there,
+   * still only inside application data, with nothing on screen to say so.
+   */
+  let conversationsBackedUp = $state(false);
+  /**
+   * True when saved settings could not be read this launch.
+   *
+   * Tracked separately from preservation succeeding: a corrupt settings blob can hold a pre-v2
+   * chat thread, and when the copy could *not* be written the live value is the only record of it
+   * — which is more urgent, not less.
+   */
+  let settingsUnreadable = $state(false);
+  /** True when storage could not be listed, so unknown recovery copies may exist. */
+  let storageInventoryUnknown = $state(false);
   /**
    * Set when the in-memory archive is ahead of storage, cleared only by a confirmed save.
    *
@@ -1278,6 +1310,206 @@
   }
 
   /**
+   * The archive as the user currently sees it, without writing anything.
+   *
+   * `saveConversations()` cannot be used for this: it returns early on a read-only session, and it
+   * returns *before* capturing the thread — so in exactly the sessions worth exporting, the
+   * messages on screen have never been folded into the archive. The capture is pure, so producing
+   * the snapshot costs nothing and commits nothing.
+   *
+   * A thread with no owning conversation is carried out separately rather than dropped. Opening
+   * an incompatible archive leaves the session with no conversation at all, and nothing prevents
+   * the user picking a model and chatting anyway; those turns live only in memory, so the export
+   * is their only way out.
+   */
+  function snapshotConversationArchive() {
+    let messages: unknown[] = [];
+    try {
+      messages = stampThreadIds() as any;
+    } catch {
+      messages = (chatMessages as any) ?? [];
+    }
+
+    if (!threadLoadedFor) {
+      return {
+        archive: conversationArchive,
+        liveThread: messages.length ? { loadedFor: null, messages } : null,
+        captured: true,
+      };
+    }
+
+    try {
+      const captured = captureThread(
+        { archive: conversationArchive, thread: { loadedFor: threadLoadedFor, messages: messages as any } },
+        { now: Date.now() },
+      );
+      if (captured.changed) {
+        return { archive: captured.archive, liveThread: null, captured: true };
+      }
+      // Nothing changed either because the archive already matches, or because the conversation
+      // is gone from it. The second case would silently lose the thread, so carry it out too —
+      // duplicating a few messages costs nothing next to dropping them.
+      const attributed = captured.skipped !== 'conversation-absent';
+      return {
+        archive: conversationArchive,
+        liveThread: attributed ? null : { loadedFor: threadLoadedFor, messages },
+        captured: attributed,
+      };
+    } catch {
+      // The archive is now of unknown currency, so the thread goes out verbatim and the document
+      // says the capture failed rather than presenting a possibly stale archive as complete.
+      return {
+        archive: conversationArchive,
+        liveThread: { loadedFor: threadLoadedFor, messages },
+        captured: false,
+      };
+    }
+  }
+
+  let exportBusy = $state(false);
+  /** Outcome of the last export. Its own channel: a conversation save must not clear it. */
+  let exportNotice = $state<string | null>(null);
+  /** Whether the notice reports a clean export or one carrying a caveat. Never a failure. */
+  let exportNoticeTone = $state<"ok" | "caution">("ok");
+  let exportError = $state<string | null>(null);
+
+  /**
+   * Write every recoverable byte to a file the user chooses.
+   *
+   * Flint's own recovery copies live in browser storage inside the application's data directory,
+   * which is precisely what gets destroyed by a reinstall or by clearing application data. This is
+   * the only route out of it.
+   */
+  async function exportConversations() {
+    if (exportBusy) return;
+    exportBusy = true;
+    // Cleared together, so a failure is never read alongside the previous attempt's success.
+    exportNotice = null;
+    exportError = null;
+    try {
+      // Reaching the property can itself throw when site data is blocked, and that must cost the
+      // stored bytes rather than the whole export — the messages on screen are still rescuable.
+      let storage: any = null;
+      try {
+        storage = localStorage;
+      } catch {
+        storage = null;
+      }
+
+      const stored = storage ? collectStoredArchive(storage) : { raw: null, ok: false };
+      const preserved = storage ? collectPreservedPayloads(storage) : emptyCollection(true);
+      const exportedAt = new Date();
+      const doc = buildExportDocument({
+        session: snapshotConversationArchive(),
+        storedArchive: stored,
+        preserved,
+        appVersion,
+        exportedAt,
+      });
+      // Serialized before the dialog, so what is written is the state at the moment the user asked
+      // rather than whatever it drifted to while they browsed for a folder.
+      const contents = serializeExportDocument(doc);
+
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const { writeTextFile, exists, stat, lstat } = await import("@tauri-apps/plugin-fs");
+      const pathApi = await import("@tauri-apps/api/path");
+
+      let defaultPath = exportFileName(exportedAt);
+      try {
+        defaultPath = await pathApi.join(await pathApi.downloadDir(), defaultPath);
+      } catch {
+        // No download directory: let the dialog choose where to open.
+      }
+
+      const target = await save({
+        defaultPath,
+        filters: [{ name: "Flint export", extensions: ["json"] }],
+      });
+      if (!target) return;
+
+      // A file inside Flint's own data is destroyed by the very act the export exists to survive.
+      // Compared by filesystem identity rather than by spelling, because an application directory
+      // reached through a symlink or a junction has a different name and the same location.
+      const appDirs: string[] = [];
+      let appDirsIncomplete = false;
+      for (const dir of [pathApi.appDataDir, pathApi.appLocalDataDir, pathApi.appConfigDir]) {
+        try {
+          appDirs.push(await dir());
+        } catch {
+          // A root we cannot name cannot be compared against, so the comparison set is short and
+          // the classifier must not be allowed to answer "outside" on the strength of it.
+          appDirsIncomplete = true;
+        }
+      }
+      // Classified against whatever roots were obtained, even when the set is short. A missing
+      // root can only hide a match, never invent one, so `inside` stays trustworthy and must
+      // still refuse — skipping the check entirely would wave through a destination plainly
+      // within a root that did resolve. Only `outside` depends on having looked everywhere, so
+      // that is the answer downgraded when the set is incomplete.
+      const verdict = await classifyDestination(target, appDirs, {
+        stat: async (path: string) => {
+          const info: any = await stat(path);
+          return { dev: info?.dev ?? null, ino: info?.ino ?? null };
+        },
+        lstat: async (path: string) => {
+          const info: any = await lstat(path);
+          return { dev: info?.dev ?? null, ino: info?.ino ?? null };
+        },
+        dirname: (path: string) => pathApi.dirname(path),
+      });
+      const classified =
+        appDirsIncomplete && verdict === "outside" ? "unverified" : verdict;
+      if (classified === "inside") {
+        exportError =
+          "That folder is inside Flint's own application data, which is deleted when Flint is " +
+          "reinstalled or its data is cleared — the same event this file is meant to survive. " +
+          "Choose somewhere else, such as Documents or Downloads.";
+        return;
+      }
+
+      // Refuse to replace an existing file. The obvious thing to overwrite is an earlier export,
+      // and a write that fails partway through would have already truncated it — destroying a
+      // backup in the act of making one. `createNew` is the real guarantee; the check above it
+      // exists only to explain the refusal in words rather than as a filesystem error.
+      if (await exists(target)) {
+        exportError =
+          "That file already exists. Flint will not replace an existing file, so an earlier " +
+          "backup cannot be damaged — choose a different name.";
+        return;
+      }
+      await writeTextFile(target, contents, { createNew: true });
+
+      appendAppLog(`Exported conversations to ${target}`, "info");
+      // The file was written, so none of these are failures and none is styled or announced as
+      // one. They are still qualified rather than clean: each names something the export could
+      // not establish, and the caution tone keeps that visible without claiming the export did
+      // not happen. `exportError` stays reserved for a refusal or a write that did not complete.
+      if (!doc.complete) {
+        // Deliberately not "data is missing": when only attribution failed the messages are all
+        // present in `liveThread`. What is true in every case is that completeness is unproven.
+        exportNoticeTone = "caution";
+        exportNotice =
+          `Exported to ${target}, but Flint could not confirm that everything saved on this ` +
+          `computer is in the file. Do not clear or reinstall Flint on the strength of it.`;
+      } else if (classified === "unverified") {
+        exportNoticeTone = "caution";
+        exportNotice =
+          `Exported to ${target}, but Flint could not confirm that this location is outside its ` +
+          `own application data. If it is not, clearing Flint's data would delete this file too.`;
+      } else {
+        exportNoticeTone = "ok";
+        exportNotice = `Conversations exported to ${target}.`;
+      }
+    } catch (e: any) {
+      const message = e?.message || e;
+      exportError = `Export failed: ${message}`;
+      appendAppLog(`Conversation export failed: ${message}`, "error");
+    } finally {
+      exportBusy = false;
+    }
+  }
+
+  /**
    * Store the loaded thread and commit the archive.
    *
    * Every turn is given an id first. The UI creates the user turn, the injected web-context pair,
@@ -1387,6 +1619,18 @@
     });
     conversationArchive = opened.archive;
     conversationsWritable = opened.writable;
+    // Asked of storage, not inferred from this open: a copy parked by an earlier launch is just
+    // as much at risk, and by then nothing about the open looks unusual.
+    let recovery: string = 'unknown';
+    try {
+      recovery = hasRecoveryCopies(localStorage as any);
+    } catch {
+      recovery = 'unknown';
+    }
+    conversationsBackedUp = opened.backedUp || recovery === 'present';
+    // A storage we cannot list may hold copies we cannot name; saying nothing would retire the
+    // warning on the strength of a check that did not run.
+    storageInventoryUnknown = recovery === 'unknown';
     if (opened.notice) hydrationNotice = opened.notice;
 
     const active = findConversation(opened.archive, opened.archive.activeId);
@@ -1901,6 +2145,16 @@
   let hydrationNotice = $state<string | null>(null);
   const storageError = $derived(persistError || conversationsError || hydrationNotice);
 
+  /**
+   * True while conversation data is only in application storage that a reinstall would take.
+   *
+   * Deliberately not part of `storageError`: that banner is dismissible, and dismissing a warning
+   * does not make the data safe. This stays until the condition does.
+   */
+  const conversationsAtRisk = $derived(
+    !conversationsWritable || conversationsBackedUp || settingsUnreadable || storageInventoryUnknown,
+  );
+
   function dismissStorageError() {
     persistError = null;
     conversationsError = null;
@@ -1998,6 +2252,9 @@
     } catch (e: any) {
       // The saved blob may still be there and readable later; enabling autosave now would let
       // a default-state write replace it.
+      // Older versions of Flint kept conversations inside this same record, so a value we cannot
+      // read may hold messages that exist nowhere else.
+      settingsUnreadable = true;
       hydrationNotice = `Saved settings could not be read (${e?.message || e}). Autosave is off for this session so existing data is left untouched.`;
       return false;
     }
@@ -2006,8 +2263,13 @@
     if (parsed.corrupt) {
       const preserved = preserveCorruptValue(PERSIST_BACKUP_KEY, raw as string);
       hydrationNotice = preserved
-        ? `Saved settings were unreadable, so Flint started with defaults. The previous data was kept under "${PERSIST_BACKUP_KEY}".`
+        ? `Saved settings were unreadable, so Flint started with defaults. A copy of the previous data was kept; use Export to save it to a file.`
         : `Saved settings are unreadable and a backup could not be written (storage may be full). Autosave is off so the existing data is left untouched.`;
+      // The pre-v2 build stored the chat thread inside the settings value, so this blob can hold
+      // the only surviving record of a conversation — and autosave is about to replace the live
+      // key with defaults. Flagged whether or not the copy was written: a failed copy is the more
+      // urgent case, not the lesser one.
+      settingsUnreadable = true;
       return mayEnableAutosave(parsed, preserved);
     }
     const data = parsed.data;
@@ -5453,6 +5715,54 @@ Output only the summary text, no preamble.`;
           </button>
         </div>
       {/if}
+      {#if conversationsAtRisk}
+        <div class="storage-risk" role="status">
+          <span class="storage-risk-text">
+            {#if !conversationsWritable}
+              Flint could not read some saved conversations, so nothing will be saved this
+              session. The original data is untouched, but it is stored inside Flint's own
+              application data — reinstalling Flint or clearing its data will delete it.
+            {:else if settingsUnreadable}
+              Saved settings could not be read. Older versions of Flint kept conversations in that
+              same record, so it may hold messages that exist nowhere else — and it is stored
+              inside Flint's own application data, which reinstalling or clearing will delete.
+            {:else if conversationsBackedUp}
+              Some saved conversation data could not be read, and a copy of the original was kept
+              inside Flint's application data. Reinstalling Flint or clearing its data will delete
+              that copy.
+            {:else}
+              Flint could not list its own stored data, so it cannot tell whether earlier recovery
+              copies are still present. Anything that is would be inside Flint's application data,
+              which reinstalling or clearing will delete.
+            {/if}
+            Export a file to somewhere Flint does not control before doing either.
+          </span>
+          <button
+            type="button"
+            class="storage-risk-action"
+            disabled={exportBusy}
+            onclick={exportConversations}
+          >
+            {exportBusy ? "Saving…" : "Export a copy"}
+          </button>
+        </div>
+      {/if}
+      {#if exportError}
+        <div class="storage-error" role="alert">
+          <span class="storage-error-text">{exportError}</span>
+          <button type="button" class="storage-error-dismiss" onclick={() => (exportError = null)} aria-label="Dismiss export error">
+            Dismiss
+          </button>
+        </div>
+      {/if}
+      {#if exportNotice}
+        <div class="storage-notice" class:caution={exportNoticeTone === "caution"} role="status">
+          <span class="storage-error-text">{exportNotice}</span>
+          <button type="button" class="storage-error-dismiss" onclick={() => (exportNotice = null)} aria-label="Dismiss export message">
+            Dismiss
+          </button>
+        </div>
+      {/if}
       {#if showFirstRunCoach}
         <div class="first-run-coach" role="region" aria-label="Getting started with Flint">
           <div class="first-run-head">
@@ -6266,6 +6576,8 @@ Output only the summary text, no preamble.`;
               onNewChat={createNewConversation}
               onSelectConversation={selectConversation}
               onDeleteConversation={deleteConversation}
+              onExport={exportConversations}
+              {exportBusy}
             />
 
             <div class="chat-main">
@@ -9200,6 +9512,66 @@ Output only the summary text, no preamble.`;
     background: color-mix(in srgb, var(--danger, #e5484d) 10%, var(--panel-bg));
     max-width: 720px;
     font-size: 13px;
+  }
+
+  /* The export succeeded. Neutral by default, and cautioned rather than alarmed when the
+     result carries a caveat, so a written file is never dressed as a failed one. */
+  .storage-notice {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 0 0 12px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--panel-bg);
+    max-width: 720px;
+    font-size: 13px;
+  }
+
+  .storage-notice.caution {
+    border-color: color-mix(in srgb, var(--warning, #f5a524) 45%, var(--border));
+    background: color-mix(in srgb, var(--warning, #f5a524) 10%, var(--panel-bg));
+  }
+
+  .storage-risk {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 0 0 12px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--warning, #f5a524) 50%, var(--border));
+    background: color-mix(in srgb, var(--warning, #f5a524) 12%, var(--panel-bg));
+    max-width: 720px;
+    font-size: 13px;
+  }
+
+  .storage-risk-text {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .storage-risk-action {
+    flex: 0 0 auto;
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--panel-bg);
+    color: var(--fg);
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .storage-risk-action:hover:not(:disabled) {
+    background: var(--panel-hover, rgba(127, 127, 127, 0.12));
+  }
+
+  .storage-risk-action:disabled {
+    opacity: 0.6;
+    cursor: default;
   }
   .storage-error-text {
     flex: 1;
