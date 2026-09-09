@@ -84,6 +84,7 @@ export default defineConfig(() => ({
         'sidecar/service-lifecycle.js',
         'sidecar/execution-provider.js',
         'sidecar/native-service.js',
+        'sidecar/fetch-response.js',
         'src/lib/model-sort.ts',
         'sidecar/gateway-http.js',
         'sidecar/model-registry.js',
