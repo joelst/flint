@@ -75,6 +75,7 @@ export default defineConfig(() => ({
         'src/lib/operation-outcome.ts',
         'src/lib/chat-request.ts',
         'src/lib/startup-sequence.ts',
+        'src/lib/accelerator-readiness.ts',
         'sidecar/chat-transport.js',
         'sidecar/audio-format.js',
         'sidecar/model-updates.js',

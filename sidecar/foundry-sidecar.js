@@ -35,7 +35,6 @@ import {
 } from './service-lifecycle.js';
 import {
   applyPreferredExecutionProvider as applyPreferredExecutionProviderTo,
-  assertAcceleratorRegistrationSucceeded,
 } from './execution-provider.js';
 import { stopNativeWebService as stopNativeWebServiceFor } from './native-service.js';
 import {
@@ -2813,7 +2812,6 @@ rl.on('line', async (line) => {
         const result = await manager.downloadAndRegisterEps((name, pct) => {
           send({ id, progress: pct, ep: name });
         });
-        assertAcceleratorRegistrationSucceeded(result);
         reply({ ok: true, result: result ?? null });
       } else {
         reply({ ok: true, result: null });

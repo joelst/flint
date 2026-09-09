@@ -184,6 +184,23 @@ async function waitForWrite(cmd: string, afterCount = 0): Promise<number> {
   return JSON.parse(line).id;
 }
 
+async function completeInitialization(sdk: Awaited<ReturnType<typeof loadSdk>>): Promise<void> {
+  const initialized = sdk.initializeSDK({ autoStartService: false });
+  const initId = await waitForWrite('init');
+  harness.emitStdout({ id: initId, result: 'initialized' });
+  const logId = await waitForWrite('setLogLevel');
+  harness.emitStdout({ id: logId, result: {} });
+  const listId = await waitForWrite('listModels');
+  harness.emitStdout({ id: listId, result: [] });
+  const statusId = await waitForWrite('getStatus');
+  harness.emitStdout({ id: statusId, result: { serviceRunning: false, endpoint: null } });
+  const poolId = await waitForWrite('poolStatus');
+  harness.emitStdout({ id: poolId, result: { models: [] } });
+  const finalStatusId = await waitForWrite('getStatus', 1);
+  harness.emitStdout({ id: finalStatusId, result: { serviceRunning: false, endpoint: null } });
+  await expect(initialized).resolves.toBe(true);
+}
+
 /** Capture a rejection without triggering an unhandled-rejection warning. */
 function capture<T>(p: Promise<T>) {
   const box: { err?: any; done: boolean } = { done: false };
@@ -776,6 +793,205 @@ describe('initialization readiness recovery', () => {
     harness.emitClose({ code: 1 });
 
     await expect(retry).resolves.toBe(false);
+  }, 15000);
+});
+
+describe('accelerator readiness ownership', () => {
+  it('rejects a registration result when its sidecar exits before provider discovery', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const readiness = sdk.ensureAccelerators();
+    const registrationId = await waitForWrite('ensureAccelerators');
+    harness.emitStdout({
+      id: registrationId,
+      result: {
+        success: false,
+        status: 'QNN registered; CUDA failed',
+        registeredEps: ['QNNExecutionProvider'],
+        failedEps: ['CUDAExecutionProvider'],
+      },
+    });
+    harness.emitClose({ code: 1 });
+
+    await expect(readiness).rejects.toThrow('lost after accelerator registration');
+    expect(harness.writes.filter((line) => line.includes('"cmd":"getEps"'))).toHaveLength(0);
+  }, 15000);
+
+  it('rejects provider discovery completed by a sidecar that exits before confirmation', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const readiness = sdk.ensureAccelerators();
+    const registrationId = await waitForWrite('ensureAccelerators');
+    harness.emitStdout({
+      id: registrationId,
+      result: {
+        success: true,
+        status: 'registered',
+        registeredEps: ['QNNExecutionProvider'],
+        failedEps: [],
+      },
+    });
+    const epsId = await waitForWrite('getEps');
+    harness.emitStdout({
+      id: epsId,
+      result: [{ name: 'QNNExecutionProvider', isRegistered: true }],
+    });
+    harness.emitClose({ code: 1 });
+
+    await expect(readiness).rejects.toThrow('replaced while confirming accelerator readiness');
+  }, 15000);
+
+  it('binds accelerator readiness to the generation that received the registration request', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+    const dispatchedGeneration = snapshot.runtime.generation;
+
+    const readiness = sdk.ensureAccelerators();
+    const registrationId = await waitForWrite('ensureAccelerators');
+    harness.emitStdout({
+      id: registrationId,
+      result: {
+        success: true,
+        status: 'registered',
+        registeredEps: ['QNNExecutionProvider'],
+        failedEps: [],
+      },
+    });
+    const epsId = await waitForWrite('getEps');
+    harness.emitStdout({
+      id: epsId,
+      result: [{ name: 'QNNExecutionProvider', isRegistered: true }],
+    });
+
+    await expect(readiness).resolves.toMatchObject({ generation: dispatchedGeneration });
+    unsubscribe();
+  }, 15000);
+
+  it('does not start HTTP with readiness owned by an exited sidecar', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const readinessPromise = sdk.ensureAccelerators();
+    const registrationId = await waitForWrite('ensureAccelerators');
+    harness.emitStdout({
+      id: registrationId,
+      result: {
+        success: true,
+        status: 'registered',
+        registeredEps: ['QNNExecutionProvider'],
+        failedEps: [],
+      },
+    });
+    const epsId = await waitForWrite('getEps');
+    harness.emitStdout({
+      id: epsId,
+      result: [{ name: 'QNNExecutionProvider', isRegistered: true }],
+    });
+    const readiness = await readinessPromise;
+    expect(sdk.isAcceleratorReadinessCurrent(readiness)).toBe(true);
+
+    harness.emitClose({ code: 1 });
+    expect(sdk.isAcceleratorReadinessCurrent(readiness)).toBe(false);
+    await expect(sdk.ensureServiceRunning(
+      5272,
+      undefined,
+      undefined,
+      undefined,
+      { convenience: true, expectedGeneration: readiness.generation },
+    )).rejects.toThrow('Runtime changed before the service could start');
+    expect(harness.writes.filter((line) => line.includes('"cmd":"startService"'))).toHaveLength(0);
+  }, 15000);
+
+  it('does not adopt a running endpoint from a status probe answered by an exited sidecar', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+
+    const ensured = sdk.ensureServiceRunning(
+      5272,
+      undefined,
+      undefined,
+      undefined,
+      { convenience: true, expectedGeneration: snapshot.runtime.generation },
+    );
+    const statusId = await waitForWrite('getStatus', 2);
+    harness.emitStdout({
+      id: statusId,
+      result: { serviceRunning: true, endpoint: 'http://127.0.0.1:5272' },
+    });
+    harness.emitClose({ code: 1 });
+
+    await expect(ensured).rejects.toThrow('Runtime changed before the service could start');
+    expect(snapshot.serviceRunning).toBe(false);
+    expect(snapshot.endpoint).toBeUndefined();
+    unsubscribe();
+  }, 15000);
+
+  it('does not publish an endpoint when the sidecar exits after the start reply', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+
+    const ensured = sdk.ensureServiceRunning(
+      5272,
+      undefined,
+      undefined,
+      undefined,
+      { convenience: true, expectedGeneration: snapshot.runtime.generation },
+    );
+    const statusId = await waitForWrite('getStatus', 2);
+    harness.emitStdout({ id: statusId, result: { serviceRunning: false, endpoint: null } });
+    const startId = await waitForWrite('startService');
+    harness.emitStdout({ id: startId, endpoint: 'http://127.0.0.1:5272' });
+    harness.emitClose({ code: 1 });
+
+    await expect(ensured).rejects.toThrow('endpoint is no longer available');
+    expect(snapshot.serviceRunning).toBe(false);
+    expect(snapshot.endpoint).toBeUndefined();
+    unsubscribe();
+  }, 15000);
+
+  it('does not report a model load after its sidecar exits before refresh', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const load = sdk.loadModel({ alias: 'example' });
+    const loadId = await waitForWrite('load');
+    harness.emitStdout({ id: loadId, result: { alias: 'example', variantId: 'example-qnn-npu:1' } });
+    harness.emitClose({ code: 1 });
+
+    await expect(load).rejects.toThrow('lost after loading the model');
+    expect(harness.writes.filter((line) => line.includes('"cmd":"listModels"'))).toHaveLength(1);
+  }, 15000);
+
+  it('does not report a model load when its refresh completes on an exited sidecar', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const load = sdk.loadModel({ alias: 'example' });
+    const loadId = await waitForWrite('load');
+    harness.emitStdout({ id: loadId, result: { alias: 'example', variantId: 'example-qnn-npu:1' } });
+    const listId = await waitForWrite('listModels', 1);
+    harness.emitStdout({ id: listId, result: [] });
+    const statusId = await waitForWrite('getStatus', 2);
+    harness.emitStdout({ id: statusId, result: { serviceRunning: false, endpoint: null } });
+    const poolId = await waitForWrite('poolStatus', 1);
+    harness.emitStdout({ id: poolId, result: { models: [] } });
+    harness.emitClose({ code: 1 });
+
+    await expect(load).rejects.toThrow('replaced while confirming the loaded model');
   }, 15000);
 });
 
