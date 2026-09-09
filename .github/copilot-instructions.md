@@ -47,7 +47,9 @@ Facts only — no history. Record what is true now; `git log` and `CHANGELOG.md`
 - The complete page startup is single-flight, including synchronous failures. Explicit Stop revokes authorization for deferred service startup and remaining preloads.
 - `managerInstance` means a manager exists in the current sidecar process; `managerReady` means catalog/readiness establishment completed for the live generation. Recovery must reuse the existing manager, never initialize the process-global native core twice.
 - Publish runtime readiness only while the owning sidecar generation is still live and ready. Guard both initial and recovery refreshes against recursive initialization.
-- `downloadAndRegisterEps()` can resolve with `success: false`; treat that as failure rather than relying only on promise rejection.
+- `downloadAndRegisterEps()` can partially succeed with `success: false`; preserve `registeredEps`/`failedEps` instead of converting the result into an exception. CPU registration alone is not hardware acceleration.
+- Accelerator readiness, model-load acknowledgements, and service-start acknowledgements belong to the sidecar generation that received their bytes. Capture ownership immediately before `write()`, then re-check it after every confirmation await before publishing success.
+- When an explicit startup variant has known non-CPU provider metadata, preload it only if that provider is registered in the current readiness snapshot. Unknown metadata proceeds to the runtime load and may fail there; alias-only loads remain runtime-resolved, and CPU-compatible loads continue after partial accelerator failure.
 
 ## Memory watchdog / pool eviction
 - Eviction (`sidecar/pool-eviction.js`) is two independent rules, **both off by default**: idle-unload (timeout floored at 60 s) and a max-resident cap (1–32). Configure via the `setEvictionConfig` command; per-model `pinned`/`normal`/`low` via `setModelPriorities`.

@@ -37,14 +37,16 @@ A stage is recorded here only once the pull request delivering it is merged to
 | 1B | 1B-7 public endpoints reflect the configured reachable bind and effective port | #65 |
 | 1B | 1B-8 failed service restarts withdraw the endpoint and clean up partial listeners | #67 |
 | 1B | 1B-9 hydrated runtime policy and accelerator readiness precede service startup and model preloads | #69 |
+| 1B | 1B-10 partial accelerator registration preserves compatible startup preloads | #72 |
 
 Phase 1A closed its acceptance gate for storage, migration, rollback, multipart
 preservation, conversation switching, and export. Phase 1B is in progress:
-1B-1 through 1B-9 delivered typed outcomes, versioned transport/readiness
+1B-1 through 1B-10 delivered typed outcomes, versioned transport/readiness
 contracts, truthful catalog failures, non-destructive service ensure, and stale
 endpoint invalidation, Stop fencing, reachable public endpoint reporting, and
-failed-restart cleanup, plus startup sequencing from hydrated runtime intent. The
-remaining Workstream B gate covers deadlines, stop semantics, and observability.
+failed-restart cleanup, plus startup sequencing from hydrated runtime intent and
+partial accelerator readiness. The remaining Workstream B gate covers deadlines,
+stop semantics, and observability.
 Work split out of a delivered stage rather than completed is listed in
 [BACKLOG.md](./BACKLOG.md) under *Conversation persistence* and *Operation
 outcomes*, and is not counted against the stage that produced it.
@@ -162,15 +164,16 @@ delete new turns, modify another conversation, or clear a newer request's contro
 **Primary surfaces:** `src/lib/sdk.ts`, `src/lib/ipc-contracts.ts`,
 `sidecar/foundry-sidecar.js`, and gateway lifecycle.
 
-**Delivered through 1B-9 (#53, #55-#61, #63, #65, #67, #69):** typed operation outcomes classified by
+**Delivered through 1B-10 (#53, #55-#61, #63, #65, #67, #69, #72):** typed operation outcomes classified by
 command effect (`src/lib/operation-outcome.ts`); settlement revokes a request's
 permission to dispatch; versioned handshakes and process generations; independent
 runtime readiness states; convenience service starts authorized inside the transition
 lock; non-destructive service ensure; stale endpoint invalidation; catalog and
 model-load failure propagation; Stop fencing; reachable endpoint publication;
 partial-start cleanup; honest requested-EP application; startup sequenced from
-hydrated runtime intent; and honest interruption reporting. The remaining items
-below are outstanding.
+hydrated runtime intent; structured partial accelerator readiness with compatible
+startup preloads; and honest interruption reporting. The remaining items below are
+outstanding.
 
 ### Required changes
 
@@ -205,8 +208,11 @@ below are outstanding.
   child restart, never a second native manager inside the same process.
 - Preserve structured accelerator registration results, including partial
   failure. Block incompatible preloads until their requirements are met.
-  A requested device preference whose available setters reject it now fails;
-  structured registration results and incompatible-preload blocking remain.
+  A requested device preference whose available setters reject it fails.
+  Registration results remain structured; alias/CPU-compatible startup loads
+  continue while explicit variants with known requirements for unavailable
+  providers are skipped. Unknown provider metadata proceeds to the runtime load,
+  which remains responsible for reporting incompatibility. Delivered.
 - Add operation-specific deadlines and progress handling. Bound readiness
   attempts, headers and response bodies, and total buffered bytes. Do not clear
   fetch timeouts when only headers have arrived.
