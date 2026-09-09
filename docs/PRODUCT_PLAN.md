@@ -29,12 +29,18 @@ A stage is recorded here only once the pull request delivering it is merged to
 | 1A | 1A-3d per-conversation settings resolved against an application baseline | #49 |
 | 1A | 1A-4 conversation export and at-risk storage reporting | #52 |
 | 1B | 1B-1 typed operation outcomes: settlement revokes dispatch, convenience-start authorization, honest interruption reporting | #53 |
+| 1B | 1B-2 versioned sidecar handshake, process generations, and independent runtime readiness states | #55, #56, #57, #58 |
+| 1B | 1B-3 catalog refresh failures propagate and mark model readiness unknown | #59 |
+| 1B | 1B-4 non-destructive service ensure under the lifecycle transition lock | #60 |
+| 1B | 1B-5 failed or uncertain service transitions invalidate stale endpoint state | #61 |
 
 Phase 1A closed its acceptance gate for storage, migration, rollback, multipart
-preservation, conversation switching, and export. Phase 1B is in progress: 1B-1
-delivered the transport half of the Workstream B gate — typed outcomes, dispatch
-revocation, serialized start authorization, and honest reporting of interrupted
-work — and the remainder of that gate is not yet met.
+preservation, conversation switching, and export. Phase 1B is in progress:
+1B-1 through 1B-5 delivered typed outcomes, versioned transport/readiness
+contracts, truthful catalog failures, non-destructive service ensure, and stale
+endpoint invalidation. The remaining Workstream B gate covers partial-start
+rollback, actual listener reachability, hydrated startup sequencing, deadlines,
+stop semantics, and observability.
 
 Work split out of a delivered stage rather than completed is listed in
 [BACKLOG.md](./BACKLOG.md) under *Conversation persistence* and *Operation
@@ -153,12 +159,13 @@ delete new turns, modify another conversation, or clear a newer request's contro
 **Primary surfaces:** `src/lib/sdk.ts`, `src/lib/ipc-contracts.ts`,
 `sidecar/foundry-sidecar.js`, and gateway lifecycle.
 
-**Delivered in 1B-1 (#53):** typed operation outcomes classified by command effect
-(`src/lib/operation-outcome.ts`); settlement revokes a request's permission to
-dispatch; convenience service starts are authorized per request and evaluated inside
-the transition lock; a Stop acknowledgement no longer retires start uncertainty;
-model-load failures propagate instead of being reported as service failures; and
-uncertain work is never automatically repeated. The rest of this list is outstanding.
+**Delivered through 1B-5 (#53, #55-#61):** typed operation outcomes classified by
+command effect (`src/lib/operation-outcome.ts`); settlement revokes a request's
+permission to dispatch; versioned handshakes and process generations; independent
+runtime readiness states; convenience service starts authorized inside the transition
+lock; non-destructive service ensure; stale endpoint invalidation; catalog and
+model-load failure propagation; and honest interruption reporting. The remaining
+items below are outstanding.
 
 ### Required changes
 
@@ -173,10 +180,12 @@ uncertain work is never automatically repeated. The rest of this list is outstan
   or mutation merely because its acknowledgement was lost.
 - Separate `ensureServiceRunning` from explicit restart. Serialize transitions
   across startup, Audio, Diagnostics, and Settings. Stop fences older queued
-  starts so late work cannot revive the endpoint.
+  starts so late work cannot revive the endpoint. The ensure/restart split and
+  transition serialization are delivered; stop fencing remains.
 - Make partial starts and failed Apply explicit. Either restore the last working
   configuration through a deliberate rollback or remain stopped with the error;
-  do not advertise an old endpoint as running.
+  do not advertise an old endpoint as running. Stale endpoint invalidation is
+  delivered; deliberate rollback and failed-Apply UX remain.
 - Derive published endpoints from the actual listener address/port. Establish
   client reachability for specific-interface binds and automatically assigned
   ports; do not assume a listener bound to a LAN address also accepts loopback.
@@ -198,6 +207,8 @@ uncertain work is never automatically repeated. The rest of this list is outstan
   alone must not trigger an automatic restart of legitimate native work.
 - Propagate model-load and catalog-refresh failures to their callers. Replace
   empty refresh placeholders, swallowed errors, and success-shaped fallbacks.
+  Model-load and catalog-refresh propagation are delivered; remaining refresh
+  placeholders and success-shaped fallbacks are still outstanding.
 - Make log-level changes effective or explicitly restart-required. Interpret a
   successful empty loaded-model enumeration as empty, not as failed telemetry.
 - Use bounded asynchronous logging and explicit retention. Adding gateway
