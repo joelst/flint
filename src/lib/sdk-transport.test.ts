@@ -621,6 +621,31 @@ describe('service start uncertainty', () => {
     expect(second.box.err.certainty).toBe('unknown');
   });
 
+  it('cancels a start queued before Stop without dispatching it', async () => {
+    const sdk = await loadSdk();
+    let release!: () => void;
+    const hold = sdk.withServiceTransition(
+      () => new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    );
+    await waitFor('the transition lock to be held', () => typeof release === 'function');
+
+    const start = capture(sdk.startService(5272));
+    const stop = capture(sdk.stopService());
+    release();
+    await hold;
+    await start.tracked;
+
+    const starts = harness.writes.filter((w) => w.includes('startService'));
+    expect(starts).toHaveLength(0);
+    expect(start.box.err.certainty).toBe('cancelled');
+
+    const stopId = await waitForWrite('stopService');
+    harness.emitStdout({ id: stopId, result: {} });
+    await stop.tracked;
+  });
+
   function getLastSdkSnapshot(sdk: { getSDKState: () => { subscribe: (fn: (state: any) => void) => () => void } }) {
     let snapshot: any;
     const unsubscribe = sdk.getSDKState().subscribe((state) => {
