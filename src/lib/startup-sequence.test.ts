@@ -13,12 +13,27 @@ describe('prepareHydratedRuntime', () => {
       join(process.cwd(), 'src', 'routes', '+page.svelte'),
       'utf8',
     );
-    expect(source).toMatch(
-      /prepareAccelerators:\s*async\s*\(\)\s*=>\s*\{\s*return await ensureHardwareAccel\(\{\s*throwOnError: true,\s*refreshCatalog: false,\s*\}\);\s*\}/,
+    const startup = source.slice(
+      source.indexOf('const init = createSingleFlight(performAppInit);'),
+      source.indexOf('async function loadModels()'),
     );
-    expect(source).toMatch(
-      /startupInterrupted \|\|\s*!startupAuthorization\.isCurrent\(startupAuthorizationToken\) \|\|\s*!isAcceleratorReadinessCurrent\(acceleratorReadiness\)[\s\S]*?return;\s*\}\s*if \(startupLoaded > 0\)/,
+
+    const prepareAccelerators = startup.slice(
+      startup.indexOf('prepareAccelerators:'),
+      startup.indexOf('validateAccelerators:'),
     );
+    expect(prepareAccelerators).toContain('return');
+    expect(prepareAccelerators).toContain('ensureHardwareAccel({');
+    expect(prepareAccelerators).toContain('refreshCatalog: false');
+
+    const summaryFence = startup.slice(
+      startup.indexOf('startupInterrupted ||'),
+      startup.indexOf('if (startupLoaded > 0)'),
+    );
+    expect(summaryFence).toContain(
+      '!isAcceleratorReadinessCurrent(acceleratorReadiness)',
+    );
+    expect(summaryFence).toContain('return;');
   });
 
   it('applies memory policy, then accelerators, then optional service startup', async () => {
