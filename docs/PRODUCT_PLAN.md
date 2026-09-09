@@ -36,14 +36,15 @@ A stage is recorded here only once the pull request delivering it is merged to
 | 1B | 1B-6 Stop fences older queued starts, including transition-handle starts | #63 |
 | 1B | 1B-7 public endpoints reflect the configured reachable bind and effective port | #65 |
 | 1B | 1B-8 failed service restarts withdraw the endpoint and clean up partial listeners | #67 |
+| 1B | 1B-9 hydrated runtime policy and accelerator readiness precede service startup and model preloads | #69 |
 
 Phase 1A closed its acceptance gate for storage, migration, rollback, multipart
 preservation, conversation switching, and export. Phase 1B is in progress:
-1B-1 through 1B-8 delivered typed outcomes, versioned transport/readiness
+1B-1 through 1B-9 delivered typed outcomes, versioned transport/readiness
 contracts, truthful catalog failures, non-destructive service ensure, and stale
 endpoint invalidation, Stop fencing, reachable public endpoint reporting, and
-failed-restart cleanup. The remaining Workstream B gate covers hydrated startup
-sequencing, deadlines, stop semantics, and observability.
+failed-restart cleanup, plus startup sequencing from hydrated runtime intent. The
+remaining Workstream B gate covers deadlines, stop semantics, and observability.
 Work split out of a delivered stage rather than completed is listed in
 [BACKLOG.md](./BACKLOG.md) under *Conversation persistence* and *Operation
 outcomes*, and is not counted against the stage that produced it.
@@ -161,14 +162,15 @@ delete new turns, modify another conversation, or clear a newer request's contro
 **Primary surfaces:** `src/lib/sdk.ts`, `src/lib/ipc-contracts.ts`,
 `sidecar/foundry-sidecar.js`, and gateway lifecycle.
 
-**Delivered through 1B-8 (#53, #55-#61, #63, #65, #67):** typed operation outcomes classified by
+**Delivered through 1B-9 (#53, #55-#61, #63, #65, #67, #69):** typed operation outcomes classified by
 command effect (`src/lib/operation-outcome.ts`); settlement revokes a request's
 permission to dispatch; versioned handshakes and process generations; independent
 runtime readiness states; convenience service starts authorized inside the transition
 lock; non-destructive service ensure; stale endpoint invalidation; catalog and
 model-load failure propagation; Stop fencing; reachable endpoint publication;
-partial-start cleanup; honest requested-EP application; and honest interruption
-reporting. The remaining items below are outstanding.
+partial-start cleanup; honest requested-EP application; startup sequenced from
+hydrated runtime intent; and honest interruption reporting. The remaining items
+below are outstanding.
 
 ### Required changes
 
@@ -197,7 +199,7 @@ reporting. The remaining items below are outstanding.
 - Sequence startup from hydrated intent: runtime initialization, atomic
   priorities/eviction configuration, accelerator readiness, optional HTTP
   startup, and requested model preloading. Keep local history/settings usable
-  while runtime stages are unavailable.
+  while runtime stages are unavailable. Delivered.
 - Honor service autostart, configured port/bind, and exact selected variants.
   Configuration changes requiring native reinitialization use a controlled
   child restart, never a second native manager inside the same process.

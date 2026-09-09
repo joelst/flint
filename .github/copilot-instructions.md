@@ -43,6 +43,11 @@ Facts only — no history. Record what is true now; `git log` and `CHANGELOG.md`
 - A failed replacement start unconditionally clears `sharedEndpoint`/`upstreamPort` and awaits best-effort teardown of the partial gateway and native listener while preserving the original start error. A teardown failure means listener termination is unconfirmed; never describe endpoint withdrawal as proof that the listener stopped.
 - SDK 1.2.4's `stopWebService()` sends `stop_service` only when `manager.urls` is non-empty. If `start_service` opened a listener but URL decoding/publication failed, stop it through the manager's existing `coreInterop.executeCommand('stop_service')`; do not gate that fallback on `stopWebService` existing.
 - A requested execution-provider preference is optional only when the runtime exposes no compatible setter. If one or more supported setters reject the request and none succeeds, fail the start and run partial-start cleanup rather than reporting success.
+- Initialize the manager without HTTP autostart. After hydration, startup order is atomic memory policy, awaited accelerator registration, optional non-destructive service ensure, then requested model preloads.
+- The complete page startup is single-flight, including synchronous failures. Explicit Stop revokes authorization for deferred service startup and remaining preloads.
+- `managerInstance` means a manager exists in the current sidecar process; `managerReady` means catalog/readiness establishment completed for the live generation. Recovery must reuse the existing manager, never initialize the process-global native core twice.
+- Publish runtime readiness only while the owning sidecar generation is still live and ready. Guard both initial and recovery refreshes against recursive initialization.
+- `downloadAndRegisterEps()` can resolve with `success: false`; treat that as failure rather than relying only on promise rejection.
 
 ## Memory watchdog / pool eviction
 - Eviction (`sidecar/pool-eviction.js`) is two independent rules, **both off by default**: idle-unload (timeout floored at 60 s) and a max-resident cap (1–32). Configure via the `setEvictionConfig` command; per-model `pinned`/`normal`/`low` via `setModelPriorities`.
