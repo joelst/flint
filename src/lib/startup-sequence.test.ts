@@ -13,23 +13,26 @@ describe('prepareHydratedRuntime', () => {
       join(process.cwd(), 'src', 'routes', '+page.svelte'),
       'utf8',
     );
-    const startup = source.slice(
-      source.indexOf('const init = createSingleFlight(performAppInit);'),
-      source.indexOf('async function loadModels()'),
-    );
+    const startupStart = source.indexOf('const init = createSingleFlight(performAppInit);');
+    const startupEnd = source.indexOf('async function loadModels()');
+    expect(startupStart, 'startup sequence start marker not found').toBeGreaterThan(-1);
+    expect(startupEnd, 'startup sequence end marker not found').toBeGreaterThan(startupStart);
+    const startup = source.slice(startupStart, startupEnd);
 
-    const prepareAccelerators = startup.slice(
-      startup.indexOf('prepareAccelerators:'),
-      startup.indexOf('validateAccelerators:'),
-    );
+    const prepareStart = startup.indexOf('prepareAccelerators:');
+    const prepareEnd = startup.indexOf('validateAccelerators:');
+    expect(prepareStart, 'accelerator stage marker not found').toBeGreaterThan(-1);
+    expect(prepareEnd, 'accelerator validator marker not found').toBeGreaterThan(prepareStart);
+    const prepareAccelerators = startup.slice(prepareStart, prepareEnd);
     expect(prepareAccelerators).toContain('return');
     expect(prepareAccelerators).toContain('ensureHardwareAccel({');
     expect(prepareAccelerators).toContain('refreshCatalog: false');
 
-    const summaryFence = startup.slice(
-      startup.indexOf('startupInterrupted ||'),
-      startup.indexOf('if (startupLoaded > 0)'),
-    );
+    const fenceStart = startup.indexOf('startupInterrupted ||');
+    const fenceEnd = startup.indexOf('if (startupLoaded > 0)');
+    expect(fenceStart, 'startup summary fence marker not found').toBeGreaterThan(-1);
+    expect(fenceEnd, 'startup summary marker not found').toBeGreaterThan(fenceStart);
+    const summaryFence = startup.slice(fenceStart, fenceEnd);
     expect(summaryFence).toContain(
       '!isAcceleratorReadinessCurrent(acceleratorReadiness)',
     );

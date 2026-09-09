@@ -439,12 +439,16 @@
     return "Provider selected. Runtime compatibility depends on model format and installed kernels.";
   }
 
-  async function refreshExecutionProviders(options?: { throwOnError?: boolean }) {
+  async function refreshExecutionProviders(
+    options?: { throwOnError?: boolean; refreshRecommendations?: boolean },
+  ) {
     if (!state.ready) return;
     try {
       await getEps();
       statusMessage = `${state.eps.length} execution providers detected`;
-      await loadRecommendations();
+      if (options?.refreshRecommendations !== false) {
+        await loadRecommendations();
+      }
     } catch (e: any) {
       statusMessage = `Provider check failed: ${e?.message || e}`;
       if (options?.throwOnError) throw e;
@@ -3764,7 +3768,10 @@ updateStateFromSdk();
         if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
           throw new Error("Runtime changed while preparing hardware accelerators");
         }
-        await refreshExecutionProviders({ throwOnError: true });
+        await refreshExecutionProviders({
+          throwOnError: true,
+          refreshRecommendations: false,
+        });
         if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
           throw new Error("Runtime changed while refreshing execution providers");
         }
@@ -4076,7 +4083,10 @@ updateStateFromSdk();
         statusMessage = `Accelerator ${epName}: ${pct.toFixed(0)}%`;
       });
       if (options?.refreshCatalog !== false) {
-        await refreshExecutionProviders({ throwOnError: true });
+        await refreshExecutionProviders({
+          throwOnError: true,
+          refreshRecommendations: false,
+        });
         if (!isAcceleratorReadinessCurrent(readiness)) {
           throw new Error("Runtime changed while refreshing execution providers");
         }
