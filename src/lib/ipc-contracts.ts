@@ -1,5 +1,8 @@
 export type LaneName = 'chat' | 'audio';
 
+/** Version of the JSON-lines transport handshake shared with the sidecar. */
+export const SIDECAR_PROTOCOL_VERSION = 1;
+
 export type SidecarCommand =
   | { cmd: 'init'; appName: string; logLevel: string }
   | { cmd: 'setLogLevel'; level: string }

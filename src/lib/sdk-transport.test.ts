@@ -102,7 +102,7 @@ function makeCommand() {
       }
       // The transport waits for a `{ready:true}` line before it will send anything. Delivered on
       // a later tick so it lands after `spawn()` resolves, as the real child's would.
-      queueMicrotask(() => live?.emitStdout({ ready: true }));
+      queueMicrotask(() => live?.emitStdout({ ready: true, protocolVersion: 1 }));
       return child;
     },
   };
