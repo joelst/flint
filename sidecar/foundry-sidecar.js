@@ -2684,7 +2684,6 @@ rl.on('line', async (line) => {
       reply({ ok: true, result: accessLog });
     } else if (cmd === 'fetchUrl') {
       const fetchTs = Date.now();
-      let fetchOk = false;
       const rawUrl = String(payload.url).trim();
       const maxChars = typeof payload.maxChars === 'number' ? payload.maxChars : 50000;
 
@@ -2722,9 +2721,9 @@ rl.on('line', async (line) => {
 
       try {
         const raw = await fetchBoundedResponseText(fetch, rawUrl, {
-            maxBytes: DEFAULT_FETCH_BODY_LIMIT,
-            headers: { 'User-Agent': 'Flint/0.3 (local-AI-client; +https://github.com/joelst/flint)' },
-            redirect: 'follow',
+          maxBytes: DEFAULT_FETCH_BODY_LIMIT,
+          headers: { 'User-Agent': 'Flint/0.3 (local-AI-client; +https://github.com/joelst/flint)' },
+          redirect: 'follow',
         });
 
           const contentType = raw.response.headers.get('content-type') || '';
@@ -2756,7 +2755,6 @@ rl.on('line', async (line) => {
             ? extractedText.slice(0, maxChars)
             : extractedText;
 
-          fetchOk = true;
           appendAccessLog({
             ts: fetchTs,
             type: 'fetchUrl',
