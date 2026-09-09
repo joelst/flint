@@ -843,6 +843,36 @@ describe('accelerator readiness ownership', () => {
     await expect(readiness).rejects.toThrow('replaced while confirming accelerator readiness');
   }, 15000);
 
+  it('binds accelerator readiness to the generation that received the registration request', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+    const dispatchedGeneration = snapshot.runtime.generation;
+
+    const readiness = sdk.ensureAccelerators();
+    const registrationId = await waitForWrite('ensureAccelerators');
+    harness.emitStdout({
+      id: registrationId,
+      result: {
+        success: true,
+        status: 'registered',
+        registeredEps: ['QNNExecutionProvider'],
+        failedEps: [],
+      },
+    });
+    const epsId = await waitForWrite('getEps');
+    harness.emitStdout({
+      id: epsId,
+      result: [{ name: 'QNNExecutionProvider', isRegistered: true }],
+    });
+
+    await expect(readiness).resolves.toMatchObject({ generation: dispatchedGeneration });
+    unsubscribe();
+  }, 15000);
+
   it('does not start HTTP with readiness owned by an exited sidecar', async () => {
     const sdk = await loadSdk();
     await completeInitialization(sdk);

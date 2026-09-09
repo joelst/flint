@@ -1229,13 +1229,22 @@ export async function loadModel(model: any, lane?: LaneName, variantId?: string)
   const payload: any = { alias: model.alias };
   if (lane) payload.lane = lane;
   if (variantId) payload.variantId = variantId;
-  const res = await send('load', payload);
-  const generation = sidecarGeneration;
+  let generation: number | null = null;
+  const res = await sendInternal(
+    'load',
+    payload,
+    undefined,
+    undefined,
+    (dispatchedGeneration) => {
+      generation = dispatchedGeneration;
+    },
+  );
   if (!sidecarProcess || !sidecarReady) {
     throw new Error('Sidecar was lost after loading the model');
   }
   await refreshModels();
   if (
+    generation === null ||
     generation !== sidecarGeneration ||
     !sidecarProcess ||
     !sidecarReady
@@ -1851,19 +1860,28 @@ export async function getEps(): Promise<EpInfo[]> {
 export async function ensureAccelerators(
   onProgress?: (epName: string, percent: number) => void,
 ): Promise<AcceleratorReadiness> {
-  const res = await sendInternal('ensureAccelerators', {}, undefined, (id: number) => {
-    if (onProgress) {
-      progressHandlers.set(id, (percent, detail) => {
-        onProgress(String(detail?.ep || 'accelerator'), percent);
-      });
-    }
-  });
-  const generation = sidecarGeneration;
+  let generation: number | null = null;
+  const res = await sendInternal(
+    'ensureAccelerators',
+    {},
+    undefined,
+    (id: number) => {
+      if (onProgress) {
+        progressHandlers.set(id, (percent, detail) => {
+          onProgress(String(detail?.ep || 'accelerator'), percent);
+        });
+      }
+    },
+    (dispatchedGeneration) => {
+      generation = dispatchedGeneration;
+    },
+  );
   if (!sidecarProcess || !sidecarReady) {
     throw new Error('Sidecar was lost after accelerator registration');
   }
   const providers = await getEps();
   if (
+    generation === null ||
     generation !== sidecarGeneration ||
     !sidecarProcess ||
     !sidecarReady
