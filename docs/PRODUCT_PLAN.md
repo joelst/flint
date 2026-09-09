@@ -28,6 +28,7 @@ A stage is recorded here only once the pull request delivering it is merged to
 | 1A | 1A-3c conversation session wiring: switching, creation, deletion, and flush | #45 |
 | 1A | 1A-3d per-conversation settings resolved against an application baseline | #49 |
 | 1A | 1A-4 conversation export and at-risk storage reporting | #52 |
+| 1B | 1B-1 typed operation outcomes: settlement revokes dispatch, convenience-start authorization, honest interruption reporting | (pending) |
 
 Phase 1A closed its acceptance gate for storage, migration, rollback, multipart
 preservation, conversation switching, and export. Three items were split out rather

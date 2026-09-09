@@ -30,6 +30,19 @@ export {
   PATH_NODE_SHELL_NAME,
   type NodeRuntimeMode,
 } from './sidecar-paths';
+import {
+  SidecarOperationError,
+  certaintyFor,
+  isUncertainOutcome,
+  type InterruptionCause,
+} from './operation-outcome';
+export {
+  SidecarOperationError,
+  isUncertainOutcome,
+  describeOutcome,
+  effectOf,
+  type OutcomeCertainty,
+} from './operation-outcome';
 
 // Sidecar-based implementation for clean production builds.
 // We never import 'foundry-local-sdk' in the web bundle.
@@ -80,7 +93,16 @@ let sidecarProcess: any = null;
 let sidecarReady = false;
 /** Last successful Node runtime (bundled externalBin vs PATH). */
 let activeNodeMode: NodeRuntimeMode | null = null;
-let pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
+let pending = new Map<
+  number,
+  {
+    resolve: (v: any) => void;
+    reject: (e: any) => void;
+    cmd: string;
+    /** Whether the bytes are known to have left. Only `false` proves the request never ran. */
+    dispatched: boolean;
+  }
+>();
 let streamHandlers = new Map<number, (delta: string) => void>();
 let progressHandlers = new Map<number, (p: number) => void>();
 let msgId = 0;
@@ -320,9 +342,17 @@ const initialState: FlintSDKState = {
 
 export const sdkState: Writable<FlintSDKState> = writable(initialState);
 
-function drainPending(reason: Error) {
-  for (const { reject } of pending.values()) {
-    reject(reason);
+/**
+ * Reject everything outstanding, saying what is known about each.
+ *
+ * The requests are not in the same position. A query that was interrupted changed nothing; a
+ * mutation may have completed with its acknowledgement lost in the dead process. Rejecting them
+ * all with one message would tell the user something false about the second kind.
+ */
+function drainPending(cause: InterruptionCause, detail: string) {
+  for (const { reject, cmd, dispatched } of pending.values()) {
+    const actual: InterruptionCause = dispatched ? cause : 'not-dispatched';
+    reject(new SidecarOperationError(cmd, certaintyFor(cmd, actual), detail));
   }
   pending.clear();
   streamHandlers.clear();
@@ -465,10 +495,17 @@ async function spawnSidecar() {
       }
       if (msg.id && pending.has(msg.id)) {
         const p = pending.get(msg.id)!;
+        // Settled here and nowhere else afterwards: a `close` following a reply, or a write
+        // rejection that lands late, must not overwrite an answer the child actually gave.
         pending.delete(msg.id);
         streamHandlers.delete(msg.id);
         progressHandlers.delete(msg.id);
-        msg.error ? p.reject(new Error(msg.error)) : p.resolve(msg);
+        // The child answered, so this is not a lost acknowledgement — the operation genuinely
+        // did not complete. It may still have done part of its work, which `describeOutcome`
+        // says rather than implying a rollback that never happens.
+        msg.error
+          ? p.reject(new SidecarOperationError(p.cmd, 'failed', String(msg.error)))
+          : p.resolve(msg);
       } else if (msg.type === 'log') {
         console.log(`[sidecar] ${msg.level}: ${msg.message}`);
         sdkState.update(s => ({ ...s, logs: [...s.logs.slice(-199), { ts: msg.timestamp ?? Date.now(), level: msg.level ?? 'info', message: msg.message, source: 'sidecar' as const }] }));
@@ -553,7 +590,7 @@ async function spawnSidecar() {
       loadedModels: [],
       models: s.models.map((m) => (m.isLoaded ? { ...m, isLoaded: false } : m)),
     }));
-    drainPending(new Error('Sidecar closed'));
+    drainPending('connection-lost', 'The runtime process stopped.');
   });
 
   command.on('error', (error: any) => {
@@ -561,7 +598,7 @@ async function spawnSidecar() {
     console.error(`[sdk] Sidecar error event:`, error);
     if (!ownsGlobalState()) return;
     updateState({ error: `Sidecar error: ${error}` });
-    drainPending(new Error(`Sidecar error: ${error}`));
+    drainPending('connection-lost', `The runtime process reported an error: ${error}`);
   });
 
   // spawn() returns the Child process which has .write()
@@ -607,47 +644,193 @@ async function spawnSidecar() {
   }
 }
 
-async function sendInternal(
+/**
+ * Send one command and resolve when the sidecar answers it.
+ *
+ * Deliberately **not** `async`. The returned promise is the request's own settlement promise,
+ * handed back before the runtime is started, so anything that settles the request during that
+ * preparation — a cancellation, a drain on process death — reaches the caller at once. An
+ * `async` wrapper would have parked the caller on the preparation instead, and a request already
+ * answered as cancelled would have gone on waiting for a start it was no longer part of.
+ */
+function sendInternal(
   cmd: string,
   payload: any = {},
   onStream?: (delta: string) => void,
   onAssignedId?: (id: number) => void
 ): Promise<any> {
-  if (!sidecarProcess || !sidecarReady) {
-    await startSidecar();
-    // A fresh sidecar process has no SDK manager. If we had initialized before — i.e. this
-    // spawn is a respawn after a crash — re-init transparently, or every catalog-touching
-    // command would fail until the whole app restarts. (Models/service state still needs
-    // reloading by the user; this only restores basic operability.)
-    if (lastInitPayload && cmd !== 'init' && !initializing) {
-      try {
-        await ensureInitialized(lastInitPayload);
-        console.log('[sdk] Sidecar respawned — SDK re-initialized');
-      } catch (e) {
-        console.warn('[sdk] Sidecar respawn re-init failed', e);
-      }
-    }
-  }
+  // Allocated before anything is awaited, so a Stop arriving while the sidecar is still starting
+  // has an id to name. Previously the id existed only after startup finished, so a stop during
+  // that window had nothing to cancel and the request was written anyway once startup completed.
   const id = ++msgId;
-  if (onAssignedId) {
-    onAssignedId(id);
-  }
-  return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject });
-    if (onStream) {
-      streamHandlers.set(id, onStream);
-    }
-    // write is async in recent plugin-shell
-    // write returns Promise<void>
-    sidecarProcess.write(JSON.stringify({ id, cmd, ...payload }) + '\n')
-      .then(() => { /* written */ })
-      .catch((e: any) => {
-        pending.delete(id);
-        streamHandlers.delete(id);
-        progressHandlers.delete(id);
-        reject(e);
-      });
+  const entry = {
+    resolve: (_v: any) => {},
+    reject: (_e: any) => {},
+    cmd,
+    dispatched: false,
+  };
+
+  // The promise is built, and its real handlers installed, *before* the entry is published or
+  // any callback runs. Publishing first would leave a window in which the entry is cancellable
+  // while `reject` is still the placeholder no-op: cancelling from inside `onAssignedId` would
+  // remove the entry, call nothing, and leave a promise nobody can ever settle.
+  const promise = new Promise<any>((resolve, reject) => {
+    entry.resolve = resolve;
+    entry.reject = reject;
   });
+
+  // Registered before the entry becomes visible, so a cancellation during `onAssignedId` removes
+  // the stream handler along with the entry rather than orphaning it.
+  if (onStream) {
+    streamHandlers.set(id, onStream);
+  }
+
+  pending.set(id, entry);
+
+  if (onAssignedId) {
+    try {
+      onAssignedId(id);
+    } catch (e) {
+      // The callback is the caller's code. Letting it escape would abandon a published entry
+      // with nothing left to settle it, so the request is retired as never sent.
+      pending.delete(id);
+      streamHandlers.delete(id);
+      progressHandlers.delete(id);
+      entry.reject(
+        new SidecarOperationError(cmd, 'failed', 'The request was abandoned before it was sent.', e),
+      );
+      return promise;
+    }
+  }
+
+  /** Settles once. A later close, or a write rejection that lands after a reply, is ignored. */
+  const settle = (fn: () => void) => {
+    if (!pending.has(id)) return;
+    pending.delete(id);
+    streamHandlers.delete(id);
+    progressHandlers.delete(id);
+    fn();
+  };
+
+  /**
+   * Whether this request may still act.
+   *
+   * Settling removes the entry, and this is checked after every await and immediately before the
+   * write. Settling has to revoke permission to dispatch, not merely fix the answer: a request
+   * drained as "never sent" while the runtime was starting would otherwise carry on and write
+   * itself to the child that the drain did not kill, so a deletion could be reported as not
+   * having happened and then happen.
+   */
+  const active = () => pending.get(id) === entry;
+
+  void (async () => {
+    // Cancelled from inside `onAssignedId`, before this continuation began.
+    if (!active()) return;
+    try {
+      if (!sidecarProcess || !sidecarReady) {
+        await startSidecar();
+        if (!active()) return;
+        // A fresh sidecar process has no SDK manager. If we had initialized before — i.e. this
+        // spawn is a respawn after a crash — re-init transparently, or every catalog-touching
+        // command would fail until the whole app restarts. This re-initializes a *new* process
+        // whose native manager never existed; it does not replay the request that was lost.
+        if (lastInitPayload && cmd !== 'init' && !initializing) {
+          try {
+            await ensureInitialized(lastInitPayload);
+            console.log('[sdk] Sidecar respawned — SDK re-initialized');
+          } catch (e) {
+            // Not swallowed. This command needs the manager that re-init was creating, so a
+            // failure here is a failure of the command — sending it anyway would ask a child
+            // with no manager to do the work and report whatever it made of that.
+            console.warn('[sdk] Sidecar respawn re-init failed', e);
+            settle(() =>
+              entry.reject(
+                new SidecarOperationError(
+                  cmd,
+                  'failed',
+                  'The runtime restarted and could not be prepared, so the request was not sent.',
+                  e,
+                ),
+              ),
+            );
+            return;
+          }
+          if (!active()) return;
+        }
+      }
+      if (!active()) return;
+
+      let line: string;
+      try {
+        line = JSON.stringify({ id, cmd, ...payload }) + '\n';
+      } catch (e) {
+        // Nothing reached the pipe, so nothing ran.
+        settle(() =>
+          entry.reject(
+            new SidecarOperationError(cmd, 'failed', 'The request could not be encoded.', e),
+          ),
+        );
+        return;
+      }
+      if (!sidecarProcess) {
+        settle(() =>
+          entry.reject(
+            new SidecarOperationError(cmd, 'failed', 'The runtime process is not running.'),
+          ),
+        );
+        return;
+      }
+
+      // Last check before the bytes can move. Nothing is awaited between here and `write()`, so
+      // no handler can settle the entry in between.
+      if (!active()) return;
+
+      // From here the bytes may reach the child, so the outcome stops being provably negative.
+      entry.dispatched = true;
+      sidecarProcess.write(line).catch((e: any) => {
+        // A rejected write does not prove the bytes never arrived — it resolves when they reach
+        // the pipe, and rejecting says nothing about what the child had already read. So this
+        // is classified by what the command would have done, not treated as a clean failure.
+        settle(() =>
+          entry.reject(
+            new SidecarOperationError(cmd, certaintyFor(cmd, 'write-failed'), String(e), e),
+          ),
+        );
+      });
+    } catch (e) {
+      // Startup itself failed, so the request was never written.
+      settle(() =>
+        entry.reject(
+          e instanceof SidecarOperationError
+            ? e
+            : new SidecarOperationError(cmd, 'failed', String((e as any)?.message ?? e), e),
+        ),
+      );
+    }
+  })();
+
+  return promise;
+}
+
+/**
+ * Abandon a request that has not been written yet.
+ *
+ * Returns true only when the request is known not to have been sent. Once it is dispatched,
+ * stopping it is a request to the sidecar rather than something the transport can guarantee.
+ *
+ * Settles immediately rather than leaving a flag for the send path to notice. That path may be
+ * parked on a runtime start that never finishes, and a caller told its request was cancelled
+ * must not go on waiting for it — nor later receive `failed` because the start it was no longer
+ * part of eventually gave up.
+ */
+export function cancelBeforeDispatch(id: number): boolean {
+  const entry = pending.get(id);
+  if (!entry || entry.dispatched) return false;
+  pending.delete(id);
+  streamHandlers.delete(id);
+  progressHandlers.delete(id);
+  entry.reject(new SidecarOperationError(entry.cmd, 'cancelled'));
+  return true;
 }
 
 async function send(cmd: string, payload: any = {}): Promise<any> {
@@ -757,6 +940,9 @@ async function performInitializeSDK(config: Partial<any>): Promise<boolean> {
           undefined,
           undefined,
           config.bindAddress || undefined,
+          // Automatic, not user-driven: it must both respect an earlier unestablished outcome
+          // and record its own, since the error is swallowed just below.
+          { convenience: true },
         );
       } else {
         // Adopt whatever is actually running — including a service started before this init.
@@ -1054,6 +1240,28 @@ export function isServiceTransitioning(): boolean {
 let serviceTransitionDepth = 0;
 
 /**
+ * Set when a start's outcome could not be established — the acknowledgement was lost, so the
+ * service may well be running.
+ *
+ * Held here rather than in the UI because the check has to happen *inside* the transition lock.
+ * A flag consulted before queuing lets two convenience starts both pass while neither has run,
+ * so the first one's uncertainty cannot stop the second. Starting is a destructive restart: it
+ * tears down the gateway and clears the pool, so repeating one blindly is the specific harm.
+ *
+ * Deliberately **not** clearable from outside. An explicit start is authorized by passing no
+ * `convenience` flag, which bypasses the guard for that one attempt; clearing the shared latch
+ * instead would also release every convenience start already queued behind the lock, so one
+ * authorized retry would license several destructive restarts. The latch is updated only by an
+ * attempt's own outcome.
+ */
+let serviceStartUncertain = false;
+
+/** Whether convenience starts are currently standing down after an unestablished outcome. */
+export function isServiceStartUncertain(): boolean {
+  return serviceStartUncertain;
+}
+
+/**
  * Start the service *without* taking the transition lock. Only reachable through the
  * `startNow` handle `withServiceTransition` passes to its callback, so the serialization
  * invariant cannot be bypassed from outside this module.
@@ -1062,8 +1270,18 @@ async function startServiceLocked(
   port = 5272,
   alias?: string,
   preferredEp?: string,
-  bindAddress?: string
+  bindAddress?: string,
+  opts?: { convenience?: boolean }
 ): Promise<string> {
+  // Evaluated here, at execution time under the lock, so a start queued before an earlier one
+  // reported uncertainty still sees that uncertainty.
+  if (opts?.convenience && serviceStartUncertain) {
+    throw new SidecarOperationError(
+      'startService',
+      'unknown',
+      'A previous start did not report its outcome, so the service may already be running. Start it explicitly from Settings to try again.',
+    );
+  }
   const payload: any = { port };
   if (alias) {
     payload.alias = alias;
@@ -1074,7 +1292,16 @@ async function startServiceLocked(
   if (bindAddress) {
     payload.bindAddress = bindAddress;
   }
-  const res = await send('startService', payload);
+  let res: any;
+  try {
+    res = await send('startService', payload);
+  } catch (e) {
+    // Recorded before the lock is released, so the next transition in the queue sees it.
+    if (isUncertainOutcome(e)) serviceStartUncertain = true;
+    throw e;
+  }
+  // A confirmed start settles the question the flag existed to represent.
+  serviceStartUncertain = false;
   currentEndpoint = res.endpoint;
   updateState({ endpoint: currentEndpoint, serviceRunning: true });
   return currentEndpoint!;
@@ -1084,14 +1311,22 @@ export async function startService(
   port = 5272,
   alias?: string,
   preferredEp?: string,
-  bindAddress?: string
+  bindAddress?: string,
+  opts?: { convenience?: boolean }
 ): Promise<string> {
-  return withServiceTransition(() => startServiceLocked(port, alias, preferredEp, bindAddress));
+  return withServiceTransition(() =>
+    startServiceLocked(port, alias, preferredEp, bindAddress, opts),
+  );
 }
 
 export async function stopService(): Promise<void> {
   return withServiceTransition(async () => {
     await send('stopService');
+    // The latch is deliberately **not** cleared here. A Stop acknowledgement is not a quiescence
+    // guarantee: the sidecar handles commands concurrently, so a start whose acknowledgement was
+    // lost may still be inside `startWebService()` and can bring the service up again after Stop
+    // has replied. The sidecar also reports Stop as successful when the native stop throws. Only
+    // a start that reports its own outcome can retire the uncertainty.
     currentEndpoint = undefined;
     updateState({ endpoint: undefined, serviceRunning: false });
   });
@@ -1099,7 +1334,13 @@ export async function stopService(): Promise<void> {
 
 /** The lock-free lifecycle operations handed to a `withServiceTransition` callback. */
 export interface ServiceTransitionHandle {
-  startNow(port?: number, alias?: string, preferredEp?: string, bindAddress?: string): Promise<string>;
+  startNow(
+    port?: number,
+    alias?: string,
+    preferredEp?: string,
+    bindAddress?: string,
+    opts?: { convenience?: boolean },
+  ): Promise<string>;
 }
 
 /**
@@ -1120,13 +1361,13 @@ export async function withServiceTransition<T>(
     let handleActive = true;
     try {
       return await fn({
-        startNow(port, alias, preferredEp, bindAddress) {
+        startNow(port, alias, preferredEp, bindAddress, opts) {
           if (!handleActive) {
             return Promise.reject(
               new Error('Service transition handle used after its transition completed'),
             );
           }
-          return startServiceLocked(port, alias, preferredEp, bindAddress);
+          return startServiceLocked(port, alias, preferredEp, bindAddress, opts);
         },
       });
     } finally {

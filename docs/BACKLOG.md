@@ -105,6 +105,15 @@ Windows/macOS fixes do not establish Linux release support.
       an SDK bump. `glib` is Linux/GTK-only and Flint ships Windows + macOS; `cookie` is
       already patched. Re-check when the SDK pin moves.
 
+## Operation outcomes
+
+- [ ] **Text Compare aborts on an ordinary service-start failure, which is a policy choice
+      rather than a technical requirement.** The sidecar can serve text Compare through direct
+      SDK inference with no HTTP endpoint, so a run could in principle proceed without the web
+      service. Compare currently requires the endpoint for every slot because that is the path
+      it shares with the rest of the app; relaxing it would mean a second inference path to keep
+      correct. Revisit if endpoint startup proves to be a common failure in practice.
+
 ## Conversation persistence
 
 - [ ] **Native quit does not reach the frontend flush.** Conversation saves are retried on a
