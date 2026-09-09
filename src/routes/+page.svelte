@@ -64,6 +64,11 @@
     toWatchSample,
     DEFAULT_WATCH_CONFIG,
   } from "$lib/memory-watchdog";
+  import {
+    createSingleFlight,
+    createStartupAuthorization,
+    prepareHydratedRuntime,
+  } from "$lib/startup-sequence";
   import packageJson from "../../package.json";
 
   import {
@@ -1868,7 +1873,7 @@
 
   /** Sends the priority map and the eviction rules to the sidecar, which runs the sweep. */
   let pushMemorySeq = 0;
-  async function pushMemorySettings() {
+  async function pushMemorySettings(options?: { throwOnError?: boolean }) {
     const seq = ++pushMemorySeq;
     const currentEviction = { ...evictionConfig };
     const currentPriorities = { ...modelPriorities };
@@ -1889,6 +1894,7 @@
       }
     } catch (e) {
       console.warn("[flint] could not apply memory settings", e);
+      if (options?.throwOnError) throw e;
     }
   }
 
@@ -3656,7 +3662,11 @@ updateStateFromSdk();
     setTimeout(() => URL.revokeObjectURL(url), 10000);
   }
 
-  async function init() {
+  const init = createSingleFlight(performAppInit);
+  const startupAuthorization = createStartupAuthorization();
+
+  async function performAppInit() {
+    const startupAuthorizationToken = startupAuthorization.capture();
     statusMessage = "Checking Node.js and starting Foundry Local...";
 
     // Taken before the first await, and observed rather than claimed. Everything below awaits
@@ -3673,7 +3683,9 @@ updateStateFromSdk();
     // 5272 that opened a port they never configured.
     const ok = await initializeSDK({
       appName: "flint",
-      autoStartService,
+      // Hydrated runtime policy and accelerator registration must land before HTTP startup or
+      // any model preload. Autostart is performed below after those prerequisites complete.
+      autoStartService: false,
       servicePort: networkPort,
       bindAddress: networkBindAddress || undefined,
     });
@@ -3704,8 +3716,41 @@ updateStateFromSdk();
         selectedModel = null;
       }
 
-      // Auto setup accelerators (background)
-      ensureHardwareAccel().catch(console.error);
+      try {
+        await prepareHydratedRuntime({
+          applyMemorySettings: async () => {
+            statusMessage = "Applying memory policy...";
+            await pushMemorySettings({ throwOnError: true });
+          },
+          prepareAccelerators: async () => {
+            await ensureHardwareAccel({ throwOnError: true });
+          },
+          startService: async () => {
+              // Re-read after the awaited prerequisites: the user may have changed autostart or
+              // manually started the service while accelerator registration was in flight.
+              if (
+                !autoStartService ||
+                !startupAuthorization.isCurrent(startupAuthorizationToken)
+              ) return;
+                statusMessage = "Starting local service...";
+              const ensured = await sdkEnsureServiceRunning(
+                networkPort,
+                undefined,
+                selectedAccelerationPreference === "auto"
+                  ? undefined
+                  : selectedAccelerationPreference,
+                networkBindAddress || undefined,
+                { convenience: true },
+              );
+              if (ensured.started) markNetworkSettingsApplied();
+            },
+        });
+      } catch (e: any) {
+        statusMessage = `Runtime startup stopped before model preload: ${e?.message || e}`;
+        appendAppLog(statusMessage, "error");
+        return;
+      }
+      if (!startupAuthorization.isCurrent(startupAuthorizationToken)) return;
 
       // First-run coach (dismissible); keep until user skips or completes basics
       try {
@@ -3743,10 +3788,9 @@ updateStateFromSdk();
                 statusMessage = usingDefault
                   ? `Auto-loading ${targetAlias}...`
                   : `Restoring ${targetAlias} from previous session...`;
-                startResult = await loadModelAndMaybeStart(existing);
-              } else {
-                startResult = await startServiceForModel(targetAlias);
+                await sdkLoadModel(existing);
               }
+              if (!startupAuthorization.isCurrent(startupAuthorizationToken)) return;
               const qualifier = serviceQualifier(startResult.result);
               if (chatNavigationCurrent(startupNav)) {
                 selectedModelAlias = targetAlias;
@@ -3773,6 +3817,7 @@ updateStateFromSdk();
       if (startupEntries.length > 0) {
         let startupLoaded = 0;
         for (const [alias, variantId] of startupEntries) {
+          if (!startupAuthorization.isCurrent(startupAuthorizationToken)) break;
           if (alias === selectedModelAlias) continue; // already loading above
           const model = state.models.find((m: ModelInfo) => m.alias === alias);
           if (model?.isCached) {
@@ -3855,6 +3900,7 @@ updateStateFromSdk();
   }
 
   async function stopLocalService() {
+    startupAuthorization.invalidate();
     try {
       await stopService();
       // The mirror is re-read rather than assumed: a Stop acknowledgement does not prove an
@@ -3930,7 +3976,7 @@ updateStateFromSdk();
     // The sdk.ts already updates the store on refresh/startService
   }
 
-  async function ensureHardwareAccel() {
+  async function ensureHardwareAccel(options?: { throwOnError?: boolean }) {
     if (!state.ready) return;
     statusMessage = "Setting up hardware accelerators...";
     try {
@@ -3946,6 +3992,7 @@ updateStateFromSdk();
       await loadRecommendations();
     } catch (e: any) {
       statusMessage = `Accel setup: ${e?.message || "partial"}`;
+      if (options?.throwOnError) throw e;
     }
   }
 

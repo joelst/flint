@@ -123,6 +123,7 @@ export type ModelInfo = IModel & {
 };
 
 let managerInstance: any = null;
+let managerReady = false;
 /** Bumped for every sidecar child, so async work can tell whether its child is still the live one. */
 let sidecarGeneration = 0;
 let currentEndpoint: string | undefined = undefined;
@@ -631,6 +632,7 @@ async function spawnSidecar() {
     // initializeSDK() return true immediately on the next Retry, reporting "ready" without
     // ever running init — the app would look healthy against a dead child.
     managerInstance = null;
+    managerReady = false;
     currentEndpoint = undefined;
     // Residency, the gateway and the native service all belonged to that process. Leaving the
     // pool populated would show models as resident — and let callers skip loading them —
@@ -948,10 +950,14 @@ async function performInit(payload: { appName: string; logLevel: string }) {
     }
     lastInitPayload = payload;
     managerInstance = true;
-    updateState({ ready: true, error: null });
     updateRuntime({ manager: 'ready', models: 'unknown' });
     // The previous child's residency is meaningless; refresh before anyone reads the pool.
     await refreshModels();
+    if (!stillOurChild()) {
+      throw new Error('Sidecar was replaced while establishing manager readiness');
+    }
+    managerReady = true;
+    updateState({ ready: true, error: null });
   } finally {
     initializing = false;
   }
@@ -965,7 +971,29 @@ async function performInit(payload: { appName: string; logLevel: string }) {
  * can all reach for recovery simultaneously, so every path must share one attempt.
  */
 function ensureInitialized(payload: { appName: string; logLevel: string }): Promise<void> {
-  if (managerInstance) return Promise.resolve();
+  if (managerInstance && managerReady) return Promise.resolve();
+  if (managerInstance) {
+    if (initPromise) return initPromise;
+    const generation = sidecarGeneration;
+    initPromise = refreshModels()
+      .then(() => {
+        if (
+          generation !== sidecarGeneration ||
+          !sidecarProcess ||
+          !sidecarReady ||
+          !managerInstance
+        ) {
+          throw new Error('Sidecar was replaced while restoring manager readiness');
+        }
+        managerReady = true;
+        updateState({ ready: true, error: null });
+        updateRuntime({ manager: 'ready' });
+      })
+      .finally(() => {
+        initPromise = null;
+      });
+    return initPromise;
+  }
   if (initPromise) return initPromise;
   initPromise = performInit(payload).finally(() => {
     initPromise = null;
@@ -997,6 +1025,7 @@ async function performInitializeSDK(config: Partial<any>): Promise<boolean> {
 
   try {
     await ensureInitialized(initPayload);
+    const readyGeneration = sidecarGeneration;
     // Autostart is a user setting, and the port/bind address belong to the frontend. Starting
     // the service here unconditionally on a hardcoded 5272 both ignored "don't autostart" and
     // opened a port the user had not configured. A repeat call against an already-initialized
@@ -1022,6 +1051,15 @@ async function performInitializeSDK(config: Partial<any>): Promise<boolean> {
       }
     } catch (e) {
       console.warn('Service start/probe failed (can be started manually)', e);
+    }
+    if (
+      readyGeneration !== sidecarGeneration ||
+      !sidecarProcess ||
+      !sidecarReady ||
+      !managerInstance ||
+      !managerReady
+    ) {
+      throw new Error('Sidecar became unavailable during initialization');
     }
     return true;
   } catch (e: any) {
@@ -1425,7 +1463,18 @@ export async function ensureServiceRunning(
   bindAddress?: string,
   opts?: { convenience?: boolean },
 ): Promise<{ endpoint: string; started: boolean }> {
+  const authorizationFence = serviceStopFence;
   return withServiceTransition(async ({ startNow }) => {
+    const assertAuthorized = () => {
+      if (authorizationFence !== serviceStopFence) {
+        throw new SidecarOperationError(
+          'startService',
+          'cancelled',
+          'This service ensure was queued before a Stop request and was cancelled.',
+        );
+      }
+    };
+    assertAuthorized();
     if (currentEndpoint && currentRuntimeServiceState === 'running') {
       return { endpoint: currentEndpoint, started: false };
     }
@@ -1445,6 +1494,7 @@ export async function ensureServiceRunning(
       console.warn('[sdk] service status probe failed during ensure', e);
     }
 
+    assertAuthorized();
     return {
       endpoint: await startNow(port, alias, preferredEp, bindAddress, opts),
       started: true,
@@ -1700,6 +1750,7 @@ export function resetSDK() {
   sidecarProcess = null;
   sidecarReady = false;
   managerInstance = null;
+  managerReady = false;
   lastInitPayload = null; // a deliberate reset must not auto-re-init on the next send
   currentEndpoint = undefined;
   sdkState.set(initialState);
