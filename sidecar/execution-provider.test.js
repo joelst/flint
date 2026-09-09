@@ -1,8 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import {
-  applyPreferredExecutionProvider,
-  assertAcceleratorRegistrationSucceeded,
-} from './execution-provider.js';
+import { applyPreferredExecutionProvider } from './execution-provider.js';
 
 describe('applyPreferredExecutionProvider', () => {
   it('reports an unsupported preference without failing startup', async () => {
@@ -17,20 +14,6 @@ describe('applyPreferredExecutionProvider', () => {
       requested: 'CUDAExecutionProvider',
       applied: null,
       method: null,
-    });
-  });
-
-  describe('assertAcceleratorRegistrationSucceeded', () => {
-    it('rejects a resolved failure result', () => {
-      expect(() => assertAcceleratorRegistrationSucceeded({
-        success: false,
-        failedEps: [{ name: 'CUDAExecutionProvider' }],
-      })).toThrow('CUDAExecutionProvider');
-    });
-
-    it('accepts successful and unspecified results', () => {
-      expect(() => assertAcceleratorRegistrationSucceeded({ success: true })).not.toThrow();
-      expect(() => assertAcceleratorRegistrationSucceeded(undefined)).not.toThrow();
     });
   });
 

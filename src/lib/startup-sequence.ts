@@ -1,7 +1,8 @@
-export interface HydratedStartupStages {
+export interface HydratedStartupStages<TAccelerators = void> {
   applyMemorySettings(): Promise<void>;
-  prepareAccelerators(): Promise<void>;
-  startService?: () => Promise<void>;
+  prepareAccelerators(): Promise<TAccelerators>;
+  validateAccelerators?: (accelerators: TAccelerators) => void;
+  startService?: (accelerators: TAccelerators) => Promise<void>;
 }
 
 /**
@@ -10,10 +11,14 @@ export interface HydratedStartupStages {
  * A failed prerequisite stops the sequence; callers keep the already-hydrated local UI usable
  * and surface the stage error instead of starting with a partially applied configuration.
  */
-export async function prepareHydratedRuntime(stages: HydratedStartupStages): Promise<void> {
+export async function prepareHydratedRuntime<TAccelerators>(
+  stages: HydratedStartupStages<TAccelerators>,
+): Promise<TAccelerators> {
   await stages.applyMemorySettings();
-  await stages.prepareAccelerators();
-  await stages.startService?.();
+  const accelerators = await stages.prepareAccelerators();
+  stages.validateAccelerators?.(accelerators);
+  await stages.startService?.(accelerators);
+  return accelerators;
 }
 
 export function createSingleFlight<T>(run: () => Promise<T>): () => Promise<T> {

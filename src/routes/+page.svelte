@@ -11,6 +11,7 @@
     getEps,
     refreshModels,
     ensureAccelerators,
+    isAcceleratorReadinessCurrent,
     getRecommendedStarterModels,
     getSTTModels,
     startService,
@@ -52,8 +53,10 @@
     type WslStatusInfo,
     type ModelInfo,
     type EpInfo,
+    type AcceleratorReadiness,
     type LogEntry,
   } from "$lib/sdk";
+  import { evaluateStartupPreload } from "$lib/accelerator-readiness";
   import {
     evaluate as evaluateWatch,
     emptyWatchState,
@@ -436,7 +439,7 @@
     return "Provider selected. Runtime compatibility depends on model format and installed kernels.";
   }
 
-  async function refreshExecutionProviders() {
+  async function refreshExecutionProviders(options?: { throwOnError?: boolean }) {
     if (!state.ready) return;
     try {
       await getEps();
@@ -444,6 +447,7 @@
       await loadRecommendations();
     } catch (e: any) {
       statusMessage = `Provider check failed: ${e?.message || e}`;
+      if (options?.throwOnError) throw e;
     }
   }
 
@@ -3716,16 +3720,25 @@ updateStateFromSdk();
         selectedModel = null;
       }
 
+      let acceleratorReadiness: AcceleratorReadiness;
       try {
-        await prepareHydratedRuntime({
+        acceleratorReadiness = await prepareHydratedRuntime({
           applyMemorySettings: async () => {
             statusMessage = "Applying memory policy...";
             await pushMemorySettings({ throwOnError: true });
           },
           prepareAccelerators: async () => {
-            await ensureHardwareAccel({ throwOnError: true });
+            return await ensureHardwareAccel({
+              throwOnError: true,
+              refreshCatalog: false,
+            });
           },
-          startService: async () => {
+          validateAccelerators: (readiness) => {
+            if (!isAcceleratorReadinessCurrent(readiness)) {
+              throw new Error("Runtime changed while preparing hardware accelerators");
+            }
+          },
+          startService: async (readiness) => {
             // Re-read after the awaited prerequisites: the user may have changed autostart or
             // manually started the service while accelerator registration was in flight.
             if (
@@ -3740,11 +3753,29 @@ updateStateFromSdk();
                 ? undefined
                 : selectedAccelerationPreference,
               networkBindAddress || undefined,
-              { convenience: true },
+              {
+                convenience: true,
+                expectedGeneration: readiness.generation,
+              },
             );
             if (ensured.started) markNetworkSettingsApplied();
           },
         });
+        if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
+          throw new Error("Runtime changed while preparing hardware accelerators");
+        }
+        await refreshExecutionProviders({ throwOnError: true });
+        if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
+          throw new Error("Runtime changed while refreshing execution providers");
+        }
+        await refreshModels();
+        if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
+          throw new Error("Runtime changed while refreshing the model catalog");
+        }
+        await loadRecommendations();
+        if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
+          throw new Error("Runtime changed while refreshing recommendations");
+        }
       } catch (e: any) {
         statusMessage = `Runtime startup stopped before model preload: ${e?.message || e}`;
         appendAppLog(statusMessage, "error");
@@ -3790,6 +3821,11 @@ updateStateFromSdk();
                 await sdkLoadModel(existing);
               }
               if (!startupAuthorization.isCurrent(startupAuthorizationToken)) return;
+              if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
+                statusMessage = `Runtime changed while restoring ${targetAlias}`;
+                appendAppLog(statusMessage, "warn");
+                return;
+              }
               if (chatNavigationCurrent(startupNav)) {
                 selectedModelAlias = targetAlias;
                 selectedModel = { alias: targetAlias };
@@ -3814,23 +3850,77 @@ updateStateFromSdk();
       const startupEntries = Object.entries(startupModels);
       if (startupEntries.length > 0) {
         let startupLoaded = 0;
+        let startupBlocked = 0;
+        let startupInterrupted = false;
         for (const [alias, variantId] of startupEntries) {
           if (!startupAuthorization.isCurrent(startupAuthorizationToken)) break;
+          if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
+            statusMessage = "Runtime changed before startup models could finish loading";
+            appendAppLog(statusMessage, "warn");
+            startupInterrupted = true;
+            break;
+          }
           if (alias === selectedModelAlias) continue; // already loading above
           const model = state.models.find((m: ModelInfo) => m.alias === alias);
           if (model?.isCached) {
+            const compatibility = evaluateStartupPreload(
+              model,
+              variantId,
+              acceleratorReadiness,
+            );
+            if (!compatibility.allowed) {
+              startupBlocked++;
+              appendAppLog(
+                `Skipped startup model: ${compatibility.reason}`,
+                "warn",
+              );
+              continue;
+            }
             try {
               statusMessage = `Auto-loading ${alias}...`;
               await sdkLoadModel({ alias }, undefined, variantId ?? undefined);
+              if (
+                !startupAuthorization.isCurrent(startupAuthorizationToken) ||
+                !isAcceleratorReadinessCurrent(acceleratorReadiness)
+              ) {
+                statusMessage = `Runtime changed while loading startup model ${alias}`;
+                appendAppLog(statusMessage, "warn");
+                startupInterrupted = true;
+                break;
+              }
               startupLoaded++;
             } catch (e: any) {
+              if (
+                !startupAuthorization.isCurrent(startupAuthorizationToken) ||
+                !isAcceleratorReadinessCurrent(acceleratorReadiness)
+              ) {
+                statusMessage = `Runtime changed while loading startup model ${alias}`;
+                appendAppLog(statusMessage, "warn");
+                startupInterrupted = true;
+                break;
+              }
               console.warn(`Startup auto-load failed for ${alias}:`, e);
             }
           }
         }
+        if (
+          startupInterrupted ||
+          !startupAuthorization.isCurrent(startupAuthorizationToken) ||
+          !isAcceleratorReadinessCurrent(acceleratorReadiness)
+        ) {
+          if (!startupInterrupted) {
+            statusMessage = "Runtime changed before startup model results could be published";
+            appendAppLog(statusMessage, "warn");
+          }
+          return;
+        }
         if (startupLoaded > 0) {
-          await refreshModels();
-          statusMessage = `${startupLoaded} startup model${startupLoaded !== 1 ? 's' : ''} loaded`;
+          statusMessage =
+            `${startupLoaded} startup model${startupLoaded !== 1 ? 's' : ''} loaded` +
+            (startupBlocked > 0 ? `; ${startupBlocked} skipped for unavailable acceleration` : "");
+        } else if (startupBlocked > 0) {
+          statusMessage =
+            `${startupBlocked} startup model${startupBlocked !== 1 ? "s" : ""} skipped for unavailable acceleration`;
         }
       }
     } else {
@@ -3974,23 +4064,45 @@ updateStateFromSdk();
     // The sdk.ts already updates the store on refresh/startService
   }
 
-  async function ensureHardwareAccel(options?: { throwOnError?: boolean }) {
-    if (!state.ready) return;
+  async function ensureHardwareAccel(
+    options?: { throwOnError?: boolean; refreshCatalog?: boolean },
+  ): Promise<AcceleratorReadiness> {
+    if (!state.ready) {
+      return { generation: -1, registration: null, providers: [] };
+    }
     statusMessage = "Setting up hardware accelerators...";
     try {
-      await ensureAccelerators((epName, pct) => {
+      const readiness = await ensureAccelerators((epName, pct) => {
         statusMessage = `Accelerator ${epName}: ${pct.toFixed(0)}%`;
       });
-      statusMessage =
-        state.acceleratorsReady ?
-          "Hardware acceleration ready"
-        : "Accelerators configured";
-      await refreshExecutionProviders();
-      await refreshModels();
-      await loadRecommendations();
+      if (options?.refreshCatalog !== false) {
+        await refreshExecutionProviders({ throwOnError: true });
+        if (!isAcceleratorReadinessCurrent(readiness)) {
+          throw new Error("Runtime changed while refreshing execution providers");
+        }
+        await refreshModels();
+        if (!isAcceleratorReadinessCurrent(readiness)) {
+          throw new Error("Runtime changed while refreshing the model catalog");
+        }
+        await loadRecommendations();
+        if (!isAcceleratorReadinessCurrent(readiness)) {
+          throw new Error("Runtime changed while refreshing recommendations");
+        }
+      }
+      if (readiness.registration?.success === false) {
+        statusMessage = readiness.registration.status || "Some accelerators could not be registered";
+        appendAppLog(statusMessage, "warn");
+      } else {
+        statusMessage =
+          state.acceleratorsReady
+            ? "Hardware acceleration ready"
+            : "Accelerators configured";
+      }
+      return readiness;
     } catch (e: any) {
       statusMessage = `Accel setup: ${e?.message || "partial"}`;
       if (options?.throwOnError) throw e;
+      return { generation: -1, registration: null, providers: state.eps };
     }
   }
 

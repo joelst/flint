@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   createSingleFlight,
   createStartupAuthorization,
@@ -6,6 +8,19 @@ import {
 } from './startup-sequence';
 
 describe('prepareHydratedRuntime', () => {
+  it('keeps the page wiring from discarding accelerator readiness', () => {
+    const source = readFileSync(
+      join(process.cwd(), 'src', 'routes', '+page.svelte'),
+      'utf8',
+    );
+    expect(source).toMatch(
+      /prepareAccelerators:\s*async\s*\(\)\s*=>\s*\{\s*return await ensureHardwareAccel\(\{\s*throwOnError: true,\s*refreshCatalog: false,\s*\}\);\s*\}/,
+    );
+    expect(source).toMatch(
+      /startupInterrupted \|\|\s*!startupAuthorization\.isCurrent\(startupAuthorizationToken\) \|\|\s*!isAcceleratorReadinessCurrent\(acceleratorReadiness\)[\s\S]*?return;\s*\}\s*if \(startupLoaded > 0\)/,
+    );
+  });
+
   it('applies memory policy, then accelerators, then optional service startup', async () => {
     const order: string[] = [];
     let releaseMemory!: () => void;
@@ -111,14 +126,38 @@ describe('prepareHydratedRuntime', () => {
     expect(startService).not.toHaveBeenCalled();
   });
 
+  it('validates accelerator ownership before service startup', async () => {
+    const startService = vi.fn();
+
+    await expect(prepareHydratedRuntime({
+      applyMemorySettings: async () => {},
+      prepareAccelerators: async () => ({ generation: 1 }),
+      validateAccelerators: () => {
+        throw new Error('accelerator readiness is stale');
+      },
+      startService,
+    })).rejects.toThrow('accelerator readiness is stale');
+
+    expect(startService).not.toHaveBeenCalled();
+  });
+
   it('does not require HTTP autostart', async () => {
     const order: string[] = [];
 
-    await prepareHydratedRuntime({
+    const readiness = await prepareHydratedRuntime({
       applyMemorySettings: async () => { order.push('memory'); },
-      prepareAccelerators: async () => { order.push('accelerators'); },
+      prepareAccelerators: async () => {
+        order.push('accelerators');
+        return { generation: 1, success: false, registeredEps: ['QNN'], failedEps: ['CUDA'] };
+      },
     });
 
     expect(order).toEqual(['memory', 'accelerators']);
+    expect(readiness).toEqual({
+      generation: 1,
+      success: false,
+      registeredEps: ['QNN'],
+      failedEps: ['CUDA'],
+    });
   });
 });

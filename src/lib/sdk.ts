@@ -9,6 +9,8 @@ import {
   type ModelPriority,
   type ModelPriorityEntry,
   type EvictionConfig,
+  type EpInfo,
+  type EpDownloadResult,
 } from './ipc-contracts';
 import {
   evaluateNodeProbe,
@@ -26,7 +28,13 @@ import {
   type NodeRuntimeMode,
   type ResolvedSidecarCandidate,
 } from './sidecar-paths';
-export type { LaneName, EndpointProfile };
+export type {
+  LaneName,
+  EndpointProfile,
+  EpInfo,
+  EpDownloadResult,
+  AcceleratorReadiness,
+};
 
 export { SIDECAR_PROTOCOL_VERSION };
 export {
@@ -45,6 +53,7 @@ import {
   isUncertainOutcome,
   type InterruptionCause,
 } from './operation-outcome';
+import type { AcceleratorReadiness } from './accelerator-readiness';
 export {
   SidecarOperationError,
   isUncertainOutcome,
@@ -95,9 +104,6 @@ export interface ModelContextInfo {
   contextLength: number | null;
   family: string | null;
 }
-export interface EpInfo { name: string; isRegistered: boolean; }
-export interface EpDownloadResult { success: boolean; status: string; registeredEps?: string[]; failedEps?: string[]; }
-
 let sidecarProcess: any = null;
 let sidecarReady = false;
 /** Last successful Node runtime (bundled externalBin vs PATH). */
@@ -113,7 +119,7 @@ let pending = new Map<
   }
 >();
 let streamHandlers = new Map<number, (delta: string) => void>();
-let progressHandlers = new Map<number, (p: number) => void>();
+let progressHandlers = new Map<number, (p: number, detail?: any) => void>();
 let msgId = 0;
 let currentStatus: any = { initialized: false, modelLoaded: false, serviceRunning: false };
 let currentRuntimeServiceState: RuntimeServiceState = 'unknown';
@@ -536,7 +542,7 @@ async function spawnSidecar() {
         // The final reply (with ok or error) will do that.
         const handler = progressHandlers.get(msg.id);
         if (handler) {
-          try { handler(Number(msg.progress)); } catch {}
+          try { handler(Number(msg.progress), msg); } catch {}
         }
         if (msg.alias) {
           console.log(`[sdk] download progress ${msg.alias}: ${msg.progress}%`);
@@ -724,7 +730,8 @@ function sendInternal(
   cmd: string,
   payload: any = {},
   onStream?: (delta: string) => void,
-  onAssignedId?: (id: number) => void
+  onAssignedId?: (id: number) => void,
+  onDispatch?: (generation: number) => void,
 ): Promise<any> {
   // Allocated before anything is awaited, so a Stop arriving while the sidecar is still starting
   // has an id to name. Previously the id existed only after startup finished, so a stop during
@@ -856,6 +863,24 @@ function sendInternal(
       // Last check before the bytes can move. Nothing is awaited between here and `write()`, so
       // no handler can settle the entry in between.
       if (!active()) return;
+
+      if (onDispatch) {
+        try {
+          onDispatch(sidecarGeneration);
+        } catch (e) {
+          settle(() =>
+            entry.reject(
+              new SidecarOperationError(
+                cmd,
+                'failed',
+                'The request was abandoned before it was sent.',
+                e,
+              ),
+            ),
+          );
+          return;
+        }
+      }
 
       // From here the bytes may reach the child, so the outcome stops being provably negative.
       entry.dispatched = true;
@@ -1098,7 +1123,6 @@ export async function refreshModels(): Promise<void> {
       updateState({
         endpoint: currentEndpoint || undefined,
         serviceRunning: !!status.result.serviceRunning,
-        acceleratorsReady: true, // simplified
         chatLaneModel,
         audioLaneModel,
       });
@@ -1203,7 +1227,18 @@ export async function loadModel(model: any, lane?: LaneName, variantId?: string)
   if (lane) payload.lane = lane;
   if (variantId) payload.variantId = variantId;
   const res = await send('load', payload);
+  const generation = sidecarGeneration;
+  if (!sidecarProcess || !sidecarReady) {
+    throw new Error('Sidecar was lost after loading the model');
+  }
   await refreshModels();
+  if (
+    generation !== sidecarGeneration ||
+    !sidecarProcess ||
+    !sidecarReady
+  ) {
+    throw new Error('Sidecar was replaced while confirming the loaded model');
+  }
   return res.result;
 }
 
@@ -1420,9 +1455,18 @@ async function startServiceLocked(
     payload.bindAddress = bindAddress;
   }
   let res: any;
+  let generation: number | null = null;
   updateRuntime({ service: 'starting' });
   try {
-    res = await send('startService', payload);
+    res = await sendInternal(
+      'startService',
+      payload,
+      undefined,
+      undefined,
+      (dispatchedGeneration) => {
+        generation = dispatchedGeneration;
+      },
+    );
   } catch (e) {
     currentEndpoint = undefined;
     updateState({ endpoint: undefined, serviceRunning: false });
@@ -1434,6 +1478,20 @@ async function startServiceLocked(
       updateRuntime({ service: 'failed' });
     }
     throw e;
+  }
+  if (
+    generation === null ||
+    generation !== sidecarGeneration ||
+    !sidecarProcess ||
+    !sidecarReady
+  ) {
+    currentEndpoint = undefined;
+    updateState({ endpoint: undefined, serviceRunning: false });
+    throw new SidecarOperationError(
+      'startService',
+      'failed',
+      'The sidecar exited after starting the service, so its endpoint is no longer available.',
+    );
   }
   // A confirmed start settles the question the flag existed to represent.
   serviceStartUncertain = false;
@@ -1467,7 +1525,7 @@ export async function ensureServiceRunning(
   alias?: string,
   preferredEp?: string,
   bindAddress?: string,
-  opts?: { convenience?: boolean },
+  opts?: { convenience?: boolean; expectedGeneration?: number },
 ): Promise<{ endpoint: string; started: boolean }> {
   const authorizationFence = serviceStopFence;
   return withServiceTransition(async ({ startNow }) => {
@@ -1477,6 +1535,20 @@ export async function ensureServiceRunning(
           'startService',
           'cancelled',
           'This service ensure was queued before a Stop request and was cancelled.',
+        );
+      }
+      if (
+        opts?.expectedGeneration !== undefined &&
+        (
+          opts.expectedGeneration !== sidecarGeneration ||
+          !sidecarProcess ||
+          !sidecarReady
+        )
+      ) {
+        throw new SidecarOperationError(
+          'startService',
+          'cancelled',
+          'Runtime changed before the service could start.',
         );
       }
     };
@@ -1489,6 +1561,7 @@ export async function ensureServiceRunning(
       const status = await send('getStatus');
       const endpoint = status.result?.endpoint;
       if (status.result?.serviceRunning && endpoint) {
+        assertAuthorized();
         currentEndpoint = endpoint;
         updateState({ endpoint, serviceRunning: true });
         updateRuntime({ service: 'running' });
@@ -1772,9 +1845,39 @@ export async function getEps(): Promise<EpInfo[]> {
   return eps;
 }
 
-export async function ensureAccelerators(): Promise<void> {
-  await send('ensureAccelerators');
-  await getEps();
+export async function ensureAccelerators(
+  onProgress?: (epName: string, percent: number) => void,
+): Promise<AcceleratorReadiness> {
+  const res = await sendInternal('ensureAccelerators', {}, undefined, (id: number) => {
+    if (onProgress) {
+      progressHandlers.set(id, (percent, detail) => {
+        onProgress(String(detail?.ep || 'accelerator'), percent);
+      });
+    }
+  });
+  const generation = sidecarGeneration;
+  if (!sidecarProcess || !sidecarReady) {
+    throw new Error('Sidecar was lost after accelerator registration');
+  }
+  const providers = await getEps();
+  if (
+    generation !== sidecarGeneration ||
+    !sidecarProcess ||
+    !sidecarReady
+  ) {
+    throw new Error('Sidecar was replaced while confirming accelerator readiness');
+  }
+  return {
+    generation,
+    registration: res.result ?? null,
+    providers,
+  };
+}
+
+export function isAcceleratorReadinessCurrent(
+  readiness: AcceleratorReadiness,
+): boolean {
+  return readiness.generation === sidecarGeneration && !!sidecarProcess && sidecarReady;
 }
 
 /**

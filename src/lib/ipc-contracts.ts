@@ -56,6 +56,20 @@ export interface EvictionConfig {
   maxResident: number;
 }
 
+/** A discoverable execution provider and whether the native runtime can currently use it. */
+export interface EpInfo {
+  name: string;
+  isRegistered: boolean;
+}
+
+/** The native result of attempting to register every discoverable accelerator provider. */
+export interface EpDownloadResult {
+  success: boolean;
+  status: string;
+  registeredEps: string[];
+  failedEps: string[];
+}
+
 /** The four turn wrappers Foundry substitutes `{Content}` into when building a prompt. */
 export interface PromptTemplate {
   system: string;
