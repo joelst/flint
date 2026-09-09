@@ -1402,7 +1402,7 @@ export async function stopService(): Promise<void> {
     try {
       await send('stopService');
     } catch (e) {
-      updateRuntime({ service: 'failed' });
+      updateRuntime({ service: isUncertainOutcome(e) ? 'unknown' : 'failed' });
       throw e;
     }
     // The latch is deliberately **not** cleared here. A Stop acknowledgement is not a quiescence

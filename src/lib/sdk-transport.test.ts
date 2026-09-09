@@ -540,6 +540,27 @@ describe('service start uncertainty', () => {
     expect(sdk.isServiceStartUncertain()).toBe(true);
   });
 
+  it('keeps service state unknown when Stop delivery is uncertain', async () => {
+    const sdk = await loadSdk();
+    const warmup = capture(sdk.getEps());
+    const warmupId = await waitForWrite('getEps');
+    harness.emitStdout({ id: warmupId, result: [] });
+    await warmup.tracked;
+
+    harness.failNextWrite('EPIPE');
+    const stop = capture(sdk.stopService());
+    const stopId = await waitForWrite('stopService');
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+    await stop.tracked;
+    expect(stop.box.err.certainty).toBe('unknown');
+    expect(snapshot.runtime.service).toBe('unknown');
+    expect(stopId).toBeGreaterThan(0);
+    unsubscribe();
+  });
+
   it('blocks a convenience start that was queued before the first outcome was known', async () => {
     const sdk = await loadSdk();
     // Warm the child so both starts queue against a live transport.
