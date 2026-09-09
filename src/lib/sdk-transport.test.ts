@@ -692,4 +692,21 @@ describe('cancellation from inside onAssignedId', () => {
     await settleStartup();
     expect(harness.writes.filter((w) => w.includes('chatCompletion'))).toHaveLength(0);
   });
+
+  it('fences startNow when Stop is queued during the same transition', async () => {
+    const sdk = await loadSdk();
+    let stop!: Promise<void>;
+    let start!: ReturnType<typeof capture>;
+    await sdk.withServiceTransition(async ({ startNow }) => {
+      stop = sdk.stopService();
+      start = capture(startNow(5272));
+      await start.tracked;
+    });
+
+    expect(start.box.err.certainty).toBe('cancelled');
+    expect(harness.writes.filter((w) => w.includes('startService'))).toHaveLength(0);
+    const stopId = await waitForWrite('stopService');
+    harness.emitStdout({ id: stopId, result: {} });
+    await stop;
+  });
 });

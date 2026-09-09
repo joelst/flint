@@ -1499,6 +1499,7 @@ export async function withServiceTransition<T>(
 ): Promise<T> {
   return queueServiceTransition(async () => {
     serviceTransitionDepth += 1;
+    const transitionFence = serviceStopFence;
     // The handle is only valid for the duration of the callback. Retaining it and calling
     // startNow() later would run a destructive restart with no lock held.
     let handleActive = true;
@@ -1510,7 +1511,7 @@ export async function withServiceTransition<T>(
               new Error('Service transition handle used after its transition completed'),
             );
           }
-          return startServiceLocked(port, alias, preferredEp, bindAddress, opts);
+          return startServiceLocked(port, alias, preferredEp, bindAddress, opts, transitionFence);
         },
       });
     } finally {
