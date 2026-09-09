@@ -4257,12 +4257,19 @@ updateStateFromSdk();
    *
    * Returns the service-start outcome so a caller about to announce "ready" can qualify it. The
    * value describes the *service* only; a failed load throws.
-   * Other post-load failures (e.g. refreshing models) return `{ result: "failed", error }`.
+   *
    * The load is the prerequisite, so any load failure propagates. Returning "failed" for it
    * would be indistinguishable from a failed service start, and callers would go on to announce
    * the model ready while reporting a service problem — losing both the operation that actually
    * failed and its explanation. An uncertain load matters twice over, because `startService`
    * makes the sidecar run `ensureModel(alias)` and would load the same model again.
+   *
+   * The bookkeeping after the load — refreshing the list, recording acceleration, adopting the
+   * model into the chat and audio lanes — is not part of either operation. It runs in its own
+   * guard so that a failure there neither claims the load failed nor is reported as a service
+   * problem, since by then the model is loaded and the service is in whatever state the start
+   * left it. Most callers ignore the return value, so a bookkeeping failure that came back as
+   * `failed` was simply lost; it is surfaced in the status line instead, where it is read.
    */
   async function loadModelAndMaybeStart(model: any): Promise<ServiceStartAttempt> {
     let loadResult: any;
@@ -4275,37 +4282,44 @@ updateStateFromSdk();
       throw e;
     }
 
-    try {
-      const loadAccel = String(loadResult?.acceleration?.active || "").trim();
-      if (loadAccel) {
-        setModelRuntimeMeta(model.alias, { lastUsedAcceleration: loadAccel });
-      }
-      statusMessage = `${model.alias} loaded`;
-
-      const startResult = await startServiceForModel(model.alias);
-      if (startResult.result === "started") {
-        statusMessage = `${model.alias} loaded + service started`;
-      }
-
-      await refreshModels();
-
-      // Chat: plain "Load" should become the current chat model when none is set.
-      if (modelSupportsChat(model) && !selectedModelAlias) {
-        selectedModelAlias = model.alias;
-        selectedModel = { alias: model.alias };
-        chatClient = null;
-      }
-
-      // If this was an STT model loaded from the main UI (e.g. Models tab "Load" button),
-      // make the Audio page inherit it automatically.
-      if (modelSupportsAudio(model)) {
-        selectedSTTModelAlias = model.alias;
-      }
-      return startResult;
-    } catch (e: any) {
-      statusMessage = `Load failed: ${e?.message || e}`;
-      return { result: "failed", error: e };
+    const loadAccel = String(loadResult?.acceleration?.active || "").trim();
+    if (loadAccel) {
+      setModelRuntimeMeta(model.alias, { lastUsedAcceleration: loadAccel });
     }
+    statusMessage = `${model.alias} loaded`;
+
+    // Never throws: it reports its outcome in the returned value.
+    const startResult = await startServiceForModel(model.alias);
+    if (startResult.result === "started") {
+      statusMessage = `${model.alias} loaded + service started`;
+    }
+
+    try {
+      await refreshModels();
+    } catch (e: any) {
+      // The list is a view of the model, not the model itself, so a stale list does not make the
+      // loaded model unusable — and saying "load failed" about a model that is loaded would send
+      // the user to fix the wrong thing.
+      const detail = e?.message || e;
+      appendAppLog(`Model list refresh failed after loading ${model.alias}: ${detail}`, "error");
+      statusMessage = `${model.alias} loaded, but the model list could not be refreshed: ${detail}`;
+    }
+
+    // Deliberately outside the guard above: adopting the model into a lane depends on the load,
+    // not on the list having been refreshed.
+    // Chat: plain "Load" should become the current chat model when none is set.
+    if (modelSupportsChat(model) && !selectedModelAlias) {
+      selectedModelAlias = model.alias;
+      selectedModel = { alias: model.alias };
+      chatClient = null;
+    }
+
+    // If this was an STT model loaded from the main UI (e.g. Models tab "Load" button),
+    // make the Audio page inherit it automatically.
+    if (modelSupportsAudio(model)) {
+      selectedSTTModelAlias = model.alias;
+    }
+    return startResult;
   }
 
   /** Switch the active chat model (does not clear conversation history). */
