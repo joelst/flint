@@ -27,6 +27,7 @@ import {
   openAiError,
   rewriteModelName,
   rewriteStatusEndpoints,
+  formatPublicEndpoint,
   isLoopbackAddress,
   DEFAULT_MAX_BUFFERED_BODY,
 } from './gateway-http.js';
@@ -340,7 +341,7 @@ export function createGateway (options) {
           }
 
           const finalBody = isStatus
-            ? rewriteStatusEndpoints(body, `http://127.0.0.1:${boundPort ?? publicPort}`)
+            ? rewriteStatusEndpoints(body, formatPublicEndpoint(bindAddress, boundPort ?? publicPort))
             : body;
           respondBuffered(res, status, outHeaders, finalBody);
           resolve2(SENT);
