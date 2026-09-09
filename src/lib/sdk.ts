@@ -949,11 +949,7 @@ async function performInit(payload: { appName: string; logLevel: string }) {
     updateState({ ready: true, error: null });
     updateRuntime({ manager: 'ready', models: 'unknown' });
     // The previous child's residency is meaningless; refresh before anyone reads the pool.
-    try {
-      await refreshModels();
-    } catch (e) {
-      console.warn('[sdk] Post-init model refresh failed', e);
-    }
+    await refreshModels();
   } finally {
     initializing = false;
   }
@@ -1096,6 +1092,7 @@ export async function refreshModels(): Promise<void> {
   } catch (e) {
     console.error('refreshModels via sidecar failed', e);
     updateRuntime({ models: 'unknown' });
+    throw e;
   }
 }
 
