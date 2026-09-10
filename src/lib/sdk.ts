@@ -29,6 +29,10 @@ import {
   type NodeRuntimeMode,
   type ResolvedSidecarCandidate,
 } from './sidecar-paths';
+import {
+  createProgressStallWatchdog,
+  type ProgressStallWatchdog,
+} from './progress-stall';
 export type {
   LaneName,
   EndpointProfile,
@@ -123,7 +127,11 @@ type PendingRequest = {
 };
 let pending = new Map<number, PendingRequest>();
 let streamHandlers = new Map<number, (delta: string) => void>();
-let progressHandlers = new Map<number, (p: number, detail?: any) => void>();
+type ProgressHandler = {
+  onProgress?: (p: number, detail?: any) => void;
+  watchdog?: ProgressStallWatchdog;
+};
+let progressHandlers = new Map<number, ProgressHandler>();
 let msgId = 0;
 let currentStatus: any = { initialized: false, modelLoaded: false, serviceRunning: false };
 let currentRuntimeServiceState: RuntimeServiceState = 'unknown';
@@ -399,7 +407,33 @@ function drainPending(cause: InterruptionCause, detail: string) {
   }
   pending.clear();
   streamHandlers.clear();
+  clearProgressHandlers();
+}
+
+function deleteProgressHandler(id: number) {
+  progressHandlers.get(id)?.watchdog?.stop();
+  progressHandlers.delete(id);
+}
+
+function clearProgressHandlers() {
+  for (const handler of progressHandlers.values()) handler.watchdog?.stop();
   progressHandlers.clear();
+}
+
+function registerProgressHandler(
+  id: number,
+  onProgress?: (p: number, detail?: any) => void,
+  onStall?: () => void,
+) {
+  if (!onProgress && !onStall) return;
+  progressHandlers.set(id, {
+    onProgress,
+    watchdog: onStall
+      ? createProgressStallWatchdog(() => {
+          try { onStall(); } catch {}
+        })
+      : undefined,
+  });
 }
 
 function updateState(partial: Partial<FlintSDKState>) {
@@ -547,7 +581,8 @@ async function spawnSidecar() {
         // The final reply (with ok or error) will do that.
         const handler = progressHandlers.get(msg.id);
         if (handler) {
-          try { handler(Number(msg.progress), msg); } catch {}
+          handler.watchdog?.progress();
+          try { handler.onProgress?.(Number(msg.progress), msg); } catch {}
         }
         if (msg.alias) {
           console.log(`[sdk] download progress ${msg.alias}: ${msg.progress}%`);
@@ -561,7 +596,7 @@ async function spawnSidecar() {
         pending.delete(msg.id);
         if (p.deadlineTimer) clearTimeout(p.deadlineTimer);
         streamHandlers.delete(msg.id);
-        progressHandlers.delete(msg.id);
+        deleteProgressHandler(msg.id);
         // The child answered, so this is not a lost acknowledgement — the operation genuinely
         // did not complete. It may still have done part of its work, which `describeOutcome`
         // says rather than implying a rollback that never happens.
@@ -775,7 +810,7 @@ function sendInternal(
       // with nothing left to settle it, so the request is retired as never sent.
       pending.delete(id);
       streamHandlers.delete(id);
-      progressHandlers.delete(id);
+      deleteProgressHandler(id);
       entry.reject(
         new SidecarOperationError(cmd, 'failed', 'The request was abandoned before it was sent.', e),
       );
@@ -789,7 +824,7 @@ function sendInternal(
     pending.delete(id);
     if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer);
     streamHandlers.delete(id);
-    progressHandlers.delete(id);
+    deleteProgressHandler(id);
     fn();
   };
 
@@ -907,6 +942,7 @@ function sendInternal(
 
       // From here the bytes may reach the child, so the outcome stops being provably negative.
       entry.dispatched = true;
+      progressHandlers.get(id)?.watchdog?.start();
       sidecarProcess.write(line).catch((e: any) => {
         // A rejected write does not prove the bytes never arrived — it resolves when they reach
         // the pipe, and rejecting says nothing about what the child had already read. So this
@@ -949,7 +985,7 @@ export function cancelBeforeDispatch(id: number): boolean {
   pending.delete(id);
   if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer);
   streamHandlers.delete(id);
-  progressHandlers.delete(id);
+  deleteProgressHandler(id);
   entry.reject(new SidecarOperationError(entry.cmd, 'cancelled'));
   return true;
 }
@@ -1233,13 +1269,16 @@ export async function getModel(alias: string) {
   return { alias } as any;
 }
 
-export async function downloadModel(model: any, onProgress?: (p: number) => void, variantId?: string) {
+export async function downloadModel(
+  model: any,
+  onProgress?: (p: number) => void,
+  variantId?: string,
+  onStall?: () => void,
+) {
   const payload: any = { alias: model.alias };
   if (variantId) payload.variantId = variantId;
   await sendInternal('download', payload, undefined, (id: number) => {
-    if (onProgress) {
-      progressHandlers.set(id, onProgress);
-    }
+    registerProgressHandler(id, onProgress, onStall);
   });
   // Sidecar sends progress messages via stdout; onAssignedId registers the handler above.
   // The pending promise resolves only on the final reply (see stdout processing).
@@ -1855,9 +1894,10 @@ export function getManager(): any {
 }
 
 export function resetSDK() {
+  drainPending('connection-lost', 'The runtime was reset before answering.');
+  sidecarGeneration += 1;
   if (sidecarProcess) {
-    // best effort
-    sidecarProcess.kill();
+    try { sidecarProcess.kill(); } catch {}
   }
   sidecarProcess = null;
   sidecarReady = false;
@@ -1880,6 +1920,7 @@ export async function getEps(): Promise<EpInfo[]> {
 
 export async function ensureAccelerators(
   onProgress?: (epName: string, percent: number) => void,
+  onStall?: () => void,
 ): Promise<AcceleratorReadiness> {
   let generation: number | null = null;
   const res = await sendInternal(
@@ -1887,11 +1928,15 @@ export async function ensureAccelerators(
     {},
     undefined,
     (id: number) => {
-      if (onProgress) {
-        progressHandlers.set(id, (percent, detail) => {
-          onProgress(String(detail?.ep || 'accelerator'), percent);
-        });
-      }
+      registerProgressHandler(
+        id,
+        onProgress
+          ? (percent, detail) => {
+              onProgress(String(detail?.ep || 'accelerator'), percent);
+            }
+          : undefined,
+        onStall,
+      );
     },
     (dispatchedGeneration) => {
       generation = dispatchedGeneration;

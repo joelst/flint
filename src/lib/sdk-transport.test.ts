@@ -223,6 +223,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -364,6 +365,73 @@ describe('cancellation before dispatch', () => {
 
     harness.emitStdout({ id: assigned, result: { choices: [] } });
     await expect(p).resolves.toBeDefined();
+  });
+});
+
+describe('progress stall notices', () => {
+  it('starts the download quiet period at dispatch and resets it on progress', async () => {
+    const sdk = await loadSdk();
+    gateSpawn = true;
+    const progress: number[] = [];
+    const onStall = vi.fn();
+
+    vi.useFakeTimers();
+    const download = capture(
+      sdk.downloadModel(
+        { alias: 'model-a' },
+        (percent) => progress.push(percent),
+        undefined,
+        onStall,
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(harness.spawnEntered).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(onStall).not.toHaveBeenCalled();
+
+    harness.releaseSpawn?.();
+    await vi.advanceTimersByTimeAsync(0);
+    const downloadLine = harness.writes.find((line) => line.includes('"download"'))!;
+    const downloadId = JSON.parse(downloadLine).id;
+
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(onStall).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(onStall).toHaveBeenCalledTimes(1);
+    expect(download.box.done).toBe(false);
+
+    harness.emitStdout({ id: downloadId, progress: 42, alias: 'model-a' });
+    expect(progress).toEqual([42]);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(onStall).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(onStall).toHaveBeenCalledTimes(2);
+    expect(download.box.done).toBe(false);
+
+    harness.emitStdout({ id: downloadId, error: 'download failed' });
+    await download.tracked;
+    expect(download.box.err.message).toContain('download failed');
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(onStall).toHaveBeenCalledTimes(2);
+  });
+
+  it('retires accelerator stall notices when reset makes the outcome unknown', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    const onStall = vi.fn();
+
+    vi.useFakeTimers();
+    const readiness = capture(sdk.ensureAccelerators(undefined, onStall));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(harness.writes.some((line) => line.includes('"ensureAccelerators"'))).toBe(true);
+
+    sdk.resetSDK();
+    await readiness.tracked;
+    expect(readiness.box.err.certainty).toBe('unknown');
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(onStall).not.toHaveBeenCalled();
   });
 });
 
