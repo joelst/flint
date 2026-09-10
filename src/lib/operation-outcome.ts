@@ -90,6 +90,8 @@ export type InterruptionCause =
   | 'not-dispatched'
   /** The write rejected. Bytes may still have reached the child before it did. */
   | 'write-failed'
+  /** The transport stopped waiting after dispatch; the child may still finish later. */
+  | 'deadline-expired'
   /** The child died or errored with the request outstanding. */
   | 'connection-lost';
 

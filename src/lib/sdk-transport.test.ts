@@ -368,6 +368,111 @@ describe('cancellation before dispatch', () => {
 });
 
 describe('one answer per request', () => {
+  it('bounds a dispatched read-only query and ignores a late reply', async () => {
+    const sdk = await loadSdk();
+    const warmup = sdk.getEps();
+    const warmupId = await waitForWrite('getEps');
+    harness.emitStdout({ id: warmupId, result: [] });
+    await warmup;
+
+    vi.useFakeTimers();
+    try {
+      const query = capture(sdk.getEps());
+      const queryLine = harness.writes.filter((w) => w.includes('getEps')).at(-1)!;
+      const queryId = JSON.parse(queryLine).id;
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      await query.tracked;
+      expect(query.box.err.certainty).toBe('failed');
+      expect(query.box.err.message).toContain('10 seconds');
+
+      harness.emitStdout({ id: queryId, result: [{ name: 'late' }] });
+      expect(query.box.err.certainty).toBe('failed');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('revokes an undispatched query when its deadline expires during startup', async () => {
+    const sdk = await loadSdk();
+    gateSpawn = true;
+
+    vi.useFakeTimers();
+    try {
+      const query = capture(sdk.getEps());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(harness.spawnEntered).toBe(true);
+      expect(harness.writes).toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      await query.tracked;
+      expect(query.box.err.certainty).toBe('failed');
+
+      harness.releaseSpawn?.();
+      await vi.advanceTimersByTimeAsync(250);
+      expect(harness.writes.filter((w) => w.includes('getEps'))).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not apply query deadlines to effectful work', async () => {
+    const sdk = await loadSdk();
+    const warmup = sdk.getEps();
+    const warmupId = await waitForWrite('getEps');
+    harness.emitStdout({ id: warmupId, result: [] });
+    await warmup;
+
+    vi.useFakeTimers();
+    try {
+      const mutation = capture(sdk.shutdownWsl());
+      const mutationLine = harness.writes.find((w) => w.includes('wslShutdown'))!;
+      const mutationId = JSON.parse(mutationLine).id;
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(mutation.box.done).toBe(false);
+
+      harness.emitStdout({ id: mutationId, result: {} });
+      await mutation.tracked;
+      expect(mutation.box.err).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('allows pool telemetry to return after the accelerator probe budget', async () => {
+    const sdk = await loadSdk();
+    const warmup = sdk.getEps();
+    const warmupId = await waitForWrite('getEps');
+    harness.emitStdout({ id: warmupId, result: [] });
+    await warmup;
+
+    vi.useFakeTimers();
+    try {
+      const poll = capture(sdk.pollPoolStatus());
+      const poolLine = harness.writes.find((w) => w.includes('poolStatus'))!;
+      const poolId = JSON.parse(poolLine).id;
+
+      await vi.advanceTimersByTimeAsync(10_001);
+      expect(poll.box.done).toBe(false);
+
+      harness.emitStdout({
+        id: poolId,
+        result: {
+          models: [],
+          usedMemMb: 1,
+          totalMemMb: 2,
+          freeMemMb: 1,
+          accelerators: [],
+        },
+      });
+      await poll.tracked;
+      expect(poll.box.err).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps the sidecar reply when a close arrives afterwards', async () => {
     const sdk = await loadSdk();
     const p = sdk.getEps();

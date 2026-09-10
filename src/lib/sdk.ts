@@ -11,6 +11,7 @@ import {
   type EvictionConfig,
   type EpInfo,
   type EpDownloadResult,
+  type SidecarCommandName,
 } from './ipc-contracts';
 import {
   evaluateNodeProbe,
@@ -57,6 +58,7 @@ import {
   hasRegisteredAccelerator,
   type AcceleratorReadiness,
 } from './accelerator-readiness';
+import { deadlineForCommand } from './ipc-deadlines';
 export {
   SidecarOperationError,
   isUncertainOutcome,
@@ -111,16 +113,15 @@ let sidecarProcess: any = null;
 let sidecarReady = false;
 /** Last successful Node runtime (bundled externalBin vs PATH). */
 let activeNodeMode: NodeRuntimeMode | null = null;
-let pending = new Map<
-  number,
-  {
-    resolve: (v: any) => void;
-    reject: (e: any) => void;
-    cmd: string;
-    /** Whether the bytes are known to have left. Only `false` proves the request never ran. */
-    dispatched: boolean;
-  }
->();
+type PendingRequest = {
+  resolve: (v: any) => void;
+  reject: (e: any) => void;
+  cmd: string;
+  /** Whether the bytes are known to have left. Only `false` proves the request never ran. */
+  dispatched: boolean;
+  deadlineTimer?: ReturnType<typeof setTimeout>;
+};
+let pending = new Map<number, PendingRequest>();
 let streamHandlers = new Map<number, (delta: string) => void>();
 let progressHandlers = new Map<number, (p: number, detail?: any) => void>();
 let msgId = 0;
@@ -391,7 +392,8 @@ export const sdkState: Writable<FlintSDKState> = writable(initialState);
  * all with one message would tell the user something false about the second kind.
  */
 function drainPending(cause: InterruptionCause, detail: string) {
-  for (const { reject, cmd, dispatched } of pending.values()) {
+  for (const { reject, cmd, dispatched, deadlineTimer } of pending.values()) {
+    if (deadlineTimer) clearTimeout(deadlineTimer);
     const actual: InterruptionCause = dispatched ? cause : 'not-dispatched';
     reject(new SidecarOperationError(cmd, certaintyFor(cmd, actual), detail));
   }
@@ -557,6 +559,7 @@ async function spawnSidecar() {
         // Settled here and nowhere else afterwards: a `close` following a reply, or a write
         // rejection that lands late, must not overwrite an answer the child actually gave.
         pending.delete(msg.id);
+        if (p.deadlineTimer) clearTimeout(p.deadlineTimer);
         streamHandlers.delete(msg.id);
         progressHandlers.delete(msg.id);
         // The child answered, so this is not a lost acknowledgement — the operation genuinely
@@ -730,7 +733,7 @@ async function spawnSidecar() {
  * answered as cancelled would have gone on waiting for a start it was no longer part of.
  */
 function sendInternal(
-  cmd: string,
+  cmd: SidecarCommandName,
   payload: any = {},
   onStream?: (delta: string) => void,
   onAssignedId?: (id: number) => void,
@@ -740,7 +743,7 @@ function sendInternal(
   // has an id to name. Previously the id existed only after startup finished, so a stop during
   // that window had nothing to cancel and the request was written anyway once startup completed.
   const id = ++msgId;
-  const entry = {
+  const entry: PendingRequest = {
     resolve: (_v: any) => {},
     reject: (_e: any) => {},
     cmd,
@@ -782,8 +785,9 @@ function sendInternal(
 
   /** Settles once. A later close, or a write rejection that lands after a reply, is ignored. */
   const settle = (fn: () => void) => {
-    if (!pending.has(id)) return;
+    if (pending.get(id) !== entry) return;
     pending.delete(id);
+    if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer);
     streamHandlers.delete(id);
     progressHandlers.delete(id);
     fn();
@@ -799,6 +803,22 @@ function sendInternal(
    * having happened and then happen.
    */
   const active = () => pending.get(id) === entry;
+
+  const deadlineMs = deadlineForCommand(cmd);
+  if (deadlineMs !== null) {
+    entry.deadlineTimer = setTimeout(() => {
+      const cause: InterruptionCause = entry.dispatched ? 'deadline-expired' : 'not-dispatched';
+      settle(() =>
+        entry.reject(
+          new SidecarOperationError(
+            cmd,
+            certaintyFor(cmd, cause),
+            `The runtime did not answer within ${deadlineMs / 1000} seconds.`,
+          ),
+        ),
+      );
+    }, deadlineMs);
+  }
 
   void (async () => {
     // Cancelled from inside `onAssignedId`, before this continuation began.
@@ -927,13 +947,14 @@ export function cancelBeforeDispatch(id: number): boolean {
   const entry = pending.get(id);
   if (!entry || entry.dispatched) return false;
   pending.delete(id);
+  if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer);
   streamHandlers.delete(id);
   progressHandlers.delete(id);
   entry.reject(new SidecarOperationError(entry.cmd, 'cancelled'));
   return true;
 }
 
-async function send(cmd: string, payload: any = {}): Promise<any> {
+async function send(cmd: SidecarCommandName, payload: any = {}): Promise<any> {
   return sendInternal(cmd, payload);
 }
 
