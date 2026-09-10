@@ -51,7 +51,7 @@ failed-restart cleanup, plus startup sequencing from hydrated runtime intent and
 partial accelerator readiness. Webpage fetches now bound total duration and
 response bytes before parsing, and each native readiness probe is bounded by the
 remaining startup deadline. Gateway responses buffered for `/status` rewriting or
-first-pass autoload error inspection now have a byte cap without limiting streamed
+first-pass autoload-error inspection now have a byte cap without limiting streamed
 inference. The remaining Workstream B gate covers other operation deadlines and
 response limits, stop semantics, and observability.
 Work split out of a delivered stage rather than completed is listed in
