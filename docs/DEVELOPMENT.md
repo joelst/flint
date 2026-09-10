@@ -3,7 +3,7 @@
 How to build, run, test, and version Flint locally.
 
 For product overview and screenshots, see [README.md](../README.md).  
-For release status and planning, see [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md).  
+For the forward plan through 1.0, see [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md).  
 For signed release pipeline setup, see [RELEASE.md](./RELEASE.md).
 
 ---

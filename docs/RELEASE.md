@@ -211,8 +211,6 @@ This runs the fixed workflow under the `release` environment while checking out 
 
 ## 5. Cut a real release
 
-Ship checklist (status and blockers) lives in [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md). In short:
-
 1. Reconcile `CHANGELOG.md` / changesets for the version.
 2. Updater pubkey + endpoint configured (not placeholders).
 3. Azure Trusted Signing secrets/variables present (Windows). Apple secrets are optional — without them the macOS build ships unsigned (see section 1 for user install instructions).
@@ -244,7 +242,7 @@ Versioning details: [DEVELOPMENT.md](./DEVELOPMENT.md#versioning--changesets).
 
 ## Related
 
-- [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) — release status and ship checklist
+- [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) — forward plan through 1.0
 - [DEVELOPMENT.md](./DEVELOPMENT.md) — local build and versioning
 - `src-tauri/tauri.conf.json` — updater plugin config
 - `.github/workflows/release.yml` — release workflow
