@@ -90,6 +90,9 @@ export const DEFAULT_MAX_BUFFERED_BODY = 32 * 1024 * 1024;
 /** Control/error responses are expected to be tiny; never buffer an arbitrary upstream body. */
 export const DEFAULT_MAX_BUFFERED_RESPONSE = 1024 * 1024;
 
+/** Captured control/error bodies must finish promptly; ordinary inference remains streamed. */
+export const DEFAULT_BUFFERED_RESPONSE_TIMEOUT_MS = 5_000;
+
 /**
  * Decide whether a request body should be held in memory for a possible replay.
  *

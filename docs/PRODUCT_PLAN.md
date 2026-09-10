@@ -42,10 +42,12 @@ A stage is recorded here only once the pull request delivering it is merged to
 | 1B | 1B-11b native service readiness probes are bounded by the startup deadline | #76 |
 | 1B | 1B-11c gateway control and autoload-error response captures are byte-bounded | #78 |
 | 1B | 1B-11d finite read-only IPC queries have operation-specific transport deadlines | #80 |
+| 1B | 1B-11e downloads and accelerator setup surface non-cancelling progress-stall notices | #82 |
+| 1B | 1B-11f native error diagnostics and gateway request captures complete bounded operation handling | #83 |
 
 Phase 1A closed its acceptance gate for storage, migration, rollback, multipart
 preservation, conversation switching, and export. Phase 1B is in progress:
-1B-1 through 1B-11d delivered typed outcomes, versioned transport/readiness
+1B-1 through 1B-11f delivered typed outcomes, versioned transport/readiness
 contracts, truthful catalog failures, non-destructive service ensure, and stale
 endpoint invalidation, Stop fencing, reachable public endpoint reporting, and
 failed-restart cleanup, plus startup sequencing from hydrated runtime intent and
@@ -54,9 +56,11 @@ response bytes before parsing, and each native readiness probe is bounded by the
 remaining startup deadline. Gateway responses buffered for `/status` rewriting or
 first-pass autoload-error inspection now have a byte cap without limiting streamed
 inference. Finite read-only IPC queries now stop waiting after operation-specific
-deadlines without applying those deadlines to inference or effectful work. The
-remaining Workstream B gate covers other operation deadlines and response limits,
-stop semantics, and observability.
+deadlines without applying those deadlines to inference or effectful work. Long-running
+downloads and accelerator setup report prolonged progress silence without cancellation,
+native HTTP error diagnostics are bounded by time and bytes, and gateway request capture
+limits reject invalid configuration. The remaining Workstream B gate covers stop
+semantics, failure propagation, and observability.
 Work split out of a delivered stage rather than completed is listed in
 [BACKLOG.md](./BACKLOG.md) under *Conversation persistence* and *Operation
 outcomes*, and is not counted against the stage that produced it.
@@ -174,7 +178,7 @@ delete new turns, modify another conversation, or clear a newer request's contro
 **Primary surfaces:** `src/lib/sdk.ts`, `src/lib/ipc-contracts.ts`,
 `sidecar/foundry-sidecar.js`, and gateway lifecycle.
 
-**Delivered through 1B-11d (#53, #55-#61, #63, #65, #67, #69, #72, #74, #76, #78, #80):** typed operation outcomes classified by
+**Delivered through 1B-11f (#53, #55-#61, #63, #65, #67, #69, #72, #74, #76, #78, #80, #82, #83):** typed operation outcomes classified by
 command effect (`src/lib/operation-outcome.ts`); settlement revokes a request's
 permission to dispatch; versioned handshakes and process generations; independent
 runtime readiness states; convenience service starts authorized inside the transition
@@ -184,8 +188,9 @@ partial-start cleanup; honest requested-EP application; startup sequenced from
 hydrated runtime intent; structured partial accelerator readiness with compatible
 startup preloads; bounded webpage fetch duration and response bytes; bounded native
 readiness probes; bounded gateway control and autoload-error captures; bounded finite
-read-only IPC queries; and honest interruption reporting. The remaining items below
-are outstanding.
+read-only IPC queries; non-cancelling progress-stall notices; bounded native HTTP error
+diagnostics; validated gateway request-capture limits; and honest interruption reporting.
+The remaining items below are outstanding.
 
 ### Required changes
 
@@ -236,8 +241,13 @@ are outstanding.
   prevents later dispatch, and ignores late replies. Outer deadlines retain headroom
   beyond legitimate nested probe budgets. Inference and effectful IPC operations remain
   unbounded because transport expiry would not establish native cancellation or outcome.
-  Other buffered responses and operation-specific progress handling still require
-  explicit bounds.
+  Downloads and accelerator registration instead surface a notice after 60 seconds
+  without reported progress; the operation remains pending, resumed progress restarts
+  the quiet period, and settlement or runtime loss retires the notice. Native chat and
+  transcription HTTP error diagnostics are capped at 64 KiB with a five-second body
+  deadline. Gateway request replay limits are finite, non-negative, normalized once,
+  and enforced while undeclared bodies stream; buffered `/status` and first-pass
+  autoload-error captures also have a five-second completion deadline. Delivered.
 - Distinguish "Stop HTTP", "Stop and unload", and "Quit runtime". Define draining,
   queued cancellation, stdin EOF, signals, and escalation. A blocked heartbeat
   alone must not trigger an automatic restart of legitimate native work.

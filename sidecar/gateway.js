@@ -29,6 +29,7 @@ import {
   rewriteStatusEndpoints,
   formatPublicEndpoint,
   isLoopbackAddress,
+  DEFAULT_BUFFERED_RESPONSE_TIMEOUT_MS,
   DEFAULT_MAX_BUFFERED_BODY,
   DEFAULT_MAX_BUFFERED_RESPONSE,
 } from './gateway-http.js';
@@ -52,6 +53,7 @@ const UPSTREAM_TIMEOUT_MS = 0; // no timeout: generation can legitimately run fo
  * @param {boolean} [options.loopbackOnlyAutoload] default true
  * @param {number} [options.maxBufferedBody]
  * @param {number} [options.maxBufferedResponse]
+ * @param {number} [options.bufferedResponseTimeoutMs]
  */
 export function createGateway (options) {
   const {
@@ -66,13 +68,26 @@ export function createGateway (options) {
     loopbackOnlyAutoload = true,
     maxBufferedBody = DEFAULT_MAX_BUFFERED_BODY,
     maxBufferedResponse = DEFAULT_MAX_BUFFERED_RESPONSE,
+    bufferedResponseTimeoutMs = DEFAULT_BUFFERED_RESPONSE_TIMEOUT_MS,
   } = options;
   if (typeof maxBufferedResponse !== 'number'
       || !Number.isFinite(maxBufferedResponse)
       || maxBufferedResponse < 0) {
     throw new RangeError('maxBufferedResponse must be a finite non-negative number.');
   }
+  if (typeof maxBufferedBody !== 'number'
+      || !Number.isFinite(maxBufferedBody)
+      || maxBufferedBody < 0) {
+    throw new RangeError('maxBufferedBody must be a finite non-negative number.');
+  }
+  if (typeof bufferedResponseTimeoutMs !== 'number'
+      || !Number.isFinite(bufferedResponseTimeoutMs)
+      || bufferedResponseTimeoutMs < 0) {
+    throw new RangeError('bufferedResponseTimeoutMs must be a finite non-negative number.');
+  }
+  const bufferedBodyLimit = Math.floor(maxBufferedBody);
   const bufferedResponseLimit = Math.floor(maxBufferedResponse);
+  const bufferedResponseTimeout = Math.floor(bufferedResponseTimeoutMs);
 
   // Keep-alive to upstream: without it every request pays a fresh TCP handshake, and a
   // busy client can exhaust ephemeral ports with sockets stuck in TIME_WAIT.
@@ -218,7 +233,7 @@ export function createGateway (options) {
       method: req.method,
       contentType: req.headers['content-type'],
       contentLength: Number.isFinite(declared) ? declared : null,
-      maxBytes: maxBufferedBody,
+      maxBytes: bufferedBodyLimit,
     }) && autoloadAllowedFor(req);
 
     if (!wanted) return Promise.resolve(null);
@@ -231,7 +246,7 @@ export function createGateway (options) {
 
       req.on('data', chunk => {
         size += chunk.length;
-        if (size > maxBufferedBody) {
+        if (size > bufferedBodyLimit) {
           // Undeclared oversize. The stream is already partly consumed, so it can no
           // longer be forwarded faithfully; refusing is the only honest answer.
           //
@@ -335,9 +350,11 @@ export function createGateway (options) {
         const chunks = [];
         let size = 0;
         let settled = false;
+        let captureTimer = null;
         const finish = callback => {
           if (settled) return;
           settled = true;
+          if (captureTimer) clearTimeout(captureTimer);
           res.off('close', onClientClose);
           callback();
         };
@@ -351,6 +368,17 @@ export function createGateway (options) {
           );
           resolve2(SENT);
         });
+        const failBufferedResponseTimeout = () => finish(() => {
+          upRes.destroy();
+          respondBuffered(
+            res,
+            502,
+            { 'content-type': 'application/json' },
+            openAiError('Upstream control response timed out.', 'server_error'),
+          );
+          resolve2(SENT);
+        });
+        captureTimer = setTimeout(failBufferedResponseTimeout, bufferedResponseTimeout);
         const declaredLength = Number(upRes.headers['content-length']);
         const bodyAllowed = req.method !== 'HEAD'
           && status !== 204

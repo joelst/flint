@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  DEFAULT_BUFFERED_RESPONSE_TIMEOUT_MS,
   stripHopByHopHeaders,
   isJsonContentType,
   isModelNotLoadedError,
@@ -11,6 +12,12 @@ import {
   isLoopbackAddress,
 } from './gateway-http.js';
 import { buildModelIndex, resolveModelId, stripVersion } from './model-registry.js';
+
+describe('gateway capture limits', () => {
+  it('uses a five-second buffered response deadline', () => {
+    expect(DEFAULT_BUFFERED_RESPONSE_TIMEOUT_MS).toBe(5_000);
+  });
+});
 
 describe('stripHopByHopHeaders', () => {
   it('removes the fixed hop-by-hop set', () => {

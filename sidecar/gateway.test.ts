@@ -172,6 +172,20 @@ describe('gateway pass-through', () => {
     await vi.waitFor(() => expect(upstreamClosed).toBe(true));
   });
 
+  it('bounds a stalled /status response capture', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.write('{"endpoints":');
+    });
+    gateway = await startGateway({ bufferedResponseTimeoutMs: 20 });
+
+    const res = await request(gateway.publicPort, '/status');
+
+    expect(res.status).toBe(502);
+    expect(JSON.parse(res.body).error.message).toContain('timed out');
+  });
+
   it.each([
     ['HEAD', 200],
     ['GET', 304],
@@ -258,6 +272,29 @@ describe('gateway autoload', () => {
     });
 
     expect(res.status).toBe(502);
+    expect(called).toBe(false);
+  });
+
+  it('does not autoload from a stalled captured error', async () => {
+    let called = false;
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.write('{"error":');
+    });
+    gateway = await startGateway({
+      bufferedResponseTimeoutMs: 20,
+      load: async () => { called = true; },
+    });
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3-0.6b' }),
+    });
+
+    expect(res.status).toBe(502);
+    expect(JSON.parse(res.body).error.message).toContain('timed out');
     expect(called).toBe(false);
   });
 
@@ -548,6 +585,19 @@ describe('gateway streaming', () => {
     expect(JSON.parse(res.body).error.type).toBe('invalid_request_error');
   });
 
+  it('accepts an undeclared body exactly at the configured cap', async () => {
+    const body = JSON.stringify({ model: 'm', pad: '' });
+    gateway = await startGateway({ maxBufferedBody: Buffer.byteLength(body) });
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'transfer-encoding': 'chunked' },
+      body,
+    });
+
+    expect(res.status).toBe(400);
+    expect(upstream.state.hits.at(-1)?.body).toBe(body);
+  });
+
   it('does not autoload for a non-loopback caller', async () => {
     let called = false;
     gateway = await startGateway({
@@ -586,6 +636,35 @@ describe('gateway failure handling', () => {
       );
     },
   );
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1])(
+    'rejects an invalid buffered request limit of %s',
+    async maxBufferedBody => {
+      await expect(startGateway({ maxBufferedBody })).rejects.toThrow(
+        'maxBufferedBody must be a finite non-negative number.'
+      );
+    },
+  );
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1])(
+    'rejects an invalid buffered response timeout of %s',
+    async bufferedResponseTimeoutMs => {
+      await expect(startGateway({ bufferedResponseTimeoutMs })).rejects.toThrow(
+        'bufferedResponseTimeoutMs must be a finite non-negative number.'
+      );
+    },
+  );
+
+  it('honours a zero-byte buffered request limit', async () => {
+    gateway = await startGateway({ maxBufferedBody: 0 });
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'transfer-encoding': 'chunked' },
+      body: '{}',
+    });
+    expect(res.status).toBe(413);
+    expect(upstream.state.hits).toHaveLength(0);
+  });
 
   it('honours a zero-byte buffered response limit', async () => {
     gateway = await startGateway({ maxBufferedResponse: 0 });
