@@ -72,6 +72,12 @@ export function createGateway (options) {
       || maxBufferedResponse < 0) {
     throw new RangeError('maxBufferedResponse must be a finite non-negative number.');
   }
+  if (typeof maxBufferedBody !== 'number'
+      || !Number.isFinite(maxBufferedBody)
+      || maxBufferedBody < 0) {
+    throw new RangeError('maxBufferedBody must be a finite non-negative number.');
+  }
+  const bufferedBodyLimit = Math.floor(maxBufferedBody);
   const bufferedResponseLimit = Math.floor(maxBufferedResponse);
 
   // Keep-alive to upstream: without it every request pays a fresh TCP handshake, and a
@@ -218,7 +224,7 @@ export function createGateway (options) {
       method: req.method,
       contentType: req.headers['content-type'],
       contentLength: Number.isFinite(declared) ? declared : null,
-      maxBytes: maxBufferedBody,
+      maxBytes: bufferedBodyLimit,
     }) && autoloadAllowedFor(req);
 
     if (!wanted) return Promise.resolve(null);
@@ -231,7 +237,7 @@ export function createGateway (options) {
 
       req.on('data', chunk => {
         size += chunk.length;
-        if (size > maxBufferedBody) {
+        if (size > bufferedBodyLimit) {
           // Undeclared oversize. The stream is already partly consumed, so it can no
           // longer be forwarded faithfully; refusing is the only honest answer.
           //
