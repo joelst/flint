@@ -40,17 +40,20 @@ A stage is recorded here only once the pull request delivering it is merged to
 | 1B | 1B-10 partial accelerator registration preserves compatible startup preloads | #72 |
 | 1B | 1B-11a webpage fetches have a total deadline and bounded response body | #74 |
 | 1B | 1B-11b native service readiness probes are bounded by the startup deadline | #76 |
+| 1B | 1B-11c gateway control and autoload-error response captures are byte-bounded | #78 |
 
 Phase 1A closed its acceptance gate for storage, migration, rollback, multipart
 preservation, conversation switching, and export. Phase 1B is in progress:
-1B-1 through 1B-11b delivered typed outcomes, versioned transport/readiness
+1B-1 through 1B-11c delivered typed outcomes, versioned transport/readiness
 contracts, truthful catalog failures, non-destructive service ensure, and stale
 endpoint invalidation, Stop fencing, reachable public endpoint reporting, and
 failed-restart cleanup, plus startup sequencing from hydrated runtime intent and
 partial accelerator readiness. Webpage fetches now bound total duration and
 response bytes before parsing, and each native readiness probe is bounded by the
-remaining startup deadline. The remaining Workstream B gate covers other
-operation deadlines and response limits, stop semantics, and observability.
+remaining startup deadline. Gateway responses buffered for `/status` rewriting or
+first-pass autoload-error inspection now have a byte cap without limiting streamed
+inference. The remaining Workstream B gate covers other operation deadlines and
+response limits, stop semantics, and observability.
 Work split out of a delivered stage rather than completed is listed in
 [BACKLOG.md](./BACKLOG.md) under *Conversation persistence* and *Operation
 outcomes*, and is not counted against the stage that produced it.
@@ -168,7 +171,7 @@ delete new turns, modify another conversation, or clear a newer request's contro
 **Primary surfaces:** `src/lib/sdk.ts`, `src/lib/ipc-contracts.ts`,
 `sidecar/foundry-sidecar.js`, and gateway lifecycle.
 
-**Delivered through 1B-11b (#53, #55-#61, #63, #65, #67, #69, #72, #74, #76):** typed operation outcomes classified by
+**Delivered through 1B-11c (#53, #55-#61, #63, #65, #67, #69, #72, #74, #76, #78):** typed operation outcomes classified by
 command effect (`src/lib/operation-outcome.ts`); settlement revokes a request's
 permission to dispatch; versioned handshakes and process generations; independent
 runtime readiness states; convenience service starts authorized inside the transition
@@ -177,8 +180,8 @@ model-load failure propagation; Stop fencing; reachable endpoint publication;
 partial-start cleanup; honest requested-EP application; startup sequenced from
 hydrated runtime intent; structured partial accelerator readiness with compatible
 startup preloads; bounded webpage fetch duration and response bytes; bounded native
-readiness probes; and honest interruption reporting. The remaining items below are
-outstanding.
+readiness probes; bounded gateway control and autoload-error captures; and honest
+interruption reporting. The remaining items below are outstanding.
 
 ### Required changes
 
@@ -222,7 +225,9 @@ outstanding.
   keep one deadline active through headers and body consumption, stream at most
   the configured byte limit before parsing, and cancel unused response bodies.
   Native `/status` readiness attempts are bounded by the remaining overall startup
-  deadline and discard their unused bodies. IPC waits, gateway captures, and other
+  deadline and discard their unused bodies. Gateway `/status` rewrites and first-pass
+  autoload-error inspection buffer no more than the configured byte cap; ordinary and
+  replayed inference responses remain streamed without this cap. IPC waits and other
   buffered responses still require explicit bounds.
 - Distinguish "Stop HTTP", "Stop and unload", and "Quit runtime". Define draining,
   queued cancellation, stdin EOF, signals, and escalation. A blocked heartbeat
