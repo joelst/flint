@@ -7,7 +7,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import http from 'node:http';
-import { createGateway } from './gateway.js';
+import { createGateway, respondBuffered } from './gateway.js';
 
 /** @type {{ server: http.Server, port: number, loaded: Set<string>, hits: any[] }} */
 let upstream;
@@ -567,6 +567,17 @@ describe('gateway streaming', () => {
 });
 
 describe('gateway failure handling', () => {
+  it('does not write a buffered response after the client disconnects', () => {
+    const res = {
+      destroyed: true,
+      writableEnded: false,
+      writeHead: () => { throw new Error('write after disconnect'); },
+      end: () => { throw new Error('end after disconnect'); },
+    };
+
+    expect(() => respondBuffered(res, 502, {}, 'error')).not.toThrow();
+  });
+
   it.each([Number.NaN, Number.POSITIVE_INFINITY, -1])(
     'rejects an invalid buffered response limit of %s',
     async maxBufferedResponse => {
@@ -598,6 +609,43 @@ describe('gateway failure handling', () => {
     // Either a 502 body or a torn-down connection is acceptable; what must not happen is
     // a hang or a partial body presented as complete.
     expect([0, 400, 502]).toContain(res.status);
+  });
+
+  it('stays available when a client disconnects during response capture', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((req, res) => {
+      if (req.url === '/v1/models') {
+        res.end('pong');
+        return;
+      }
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.write('{"error":');
+      setTimeout(() => {
+        if (!res.destroyed) res.end('"late"}');
+      }, 100);
+    });
+    gateway = await startGateway();
+
+    await new Promise(resolve => {
+      const req = http.request({
+        host: '127.0.0.1',
+        port: gateway.publicPort,
+        path: '/v1/chat/completions',
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+      });
+      req.on('error', resolve);
+      req.end(JSON.stringify({ model: 'qwen3-0.6b' }));
+      setTimeout(() => {
+        req.destroy();
+        resolve();
+      }, 30);
+    });
+    await new Promise(r => setTimeout(r, 120));
+
+    const res = await request(gateway.publicPort, '/v1/models');
+    expect(res.status).toBe(200);
+    expect(res.body).toBe('pong');
   });
 
   it('answers 502 when the resolver itself fails', async () => {

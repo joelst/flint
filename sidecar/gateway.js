@@ -343,8 +343,12 @@ export function createGateway (options) {
         };
         const failBufferedResponse = () => finish(() => {
           upRes.destroy();
-          if (!res.headersSent) res.writeHead(502, { 'content-type': 'application/json' });
-          res.end(openAiError('Upstream control response exceeded the gateway limit.', 'server_error'));
+          respondBuffered(
+            res,
+            502,
+            { 'content-type': 'application/json' },
+            openAiError('Upstream control response exceeded the gateway limit.', 'server_error'),
+          );
           resolve2(SENT);
         });
         const declaredLength = Number(upRes.headers['content-length']);
@@ -367,8 +371,12 @@ export function createGateway (options) {
           chunks.push(c);
         });
         upRes.on('error', () => finish(() => {
-          if (!res.headersSent) res.writeHead(502, { 'content-type': 'application/json' });
-          res.end(openAiError('Upstream response failed.', 'server_error'));
+          respondBuffered(
+            res,
+            502,
+            { 'content-type': 'application/json' },
+            openAiError('Upstream response failed.', 'server_error'),
+          );
           resolve2(SENT);
         }));
         upRes.on('end', () => finish(() => {
@@ -429,7 +437,7 @@ function isStatusPath (url) {
   return path === '/status' || path === '/v1/status';
 }
 
-function respondBuffered (res, status, headers, body) {
+export function respondBuffered (res, status, headers, body) {
   if (res.writableEnded || res.destroyed) return;
   const out = { ...headers };
   delete out['content-length'];
