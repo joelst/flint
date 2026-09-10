@@ -17,10 +17,6 @@ function responseFromChunks(chunks: string[], onCancel = vi.fn()) {
             controller.close();
             return;
           }
-
-          afterEach(() => {
-            vi.useRealTimers();
-          });
           controller.enqueue(encoder.encode(chunks[index++]));
         },
         cancel: onCancel,
@@ -29,6 +25,10 @@ function responseFromChunks(chunks: string[], onCancel = vi.fn()) {
     onCancel,
   };
 }
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe('readBoundedResponseText', () => {
   it('reads a complete response below the byte limit', async () => {
@@ -54,19 +54,23 @@ describe('readBoundedResponseText', () => {
   });
 
   it('supports a zero-byte headers-only read without consuming the body', async () => {
+    vi.useFakeTimers();
     const pull = vi.fn();
     const cancel = vi.fn();
     const response = {
       body: new ReadableStream<Uint8Array>({ pull, cancel }),
     } as Response;
 
-    await expect(readBoundedResponseText(response, 0)).resolves.toEqual({
+    await expect(readBoundedResponseText(response, 0, { timeoutMs: 20 })).resolves.toEqual({
       text: '',
       truncated: true,
       byteCount: 0,
     });
     expect(pull).not.toHaveBeenCalled();
     expect(cancel).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(20);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('preserves complete UTF-8 characters split across chunks', async () => {
@@ -101,6 +105,39 @@ describe('readBoundedResponseText', () => {
       truncated: true,
       byteCount: 3,
     });
+  });
+
+  it('clears an active deadline after a successful read', async () => {
+    vi.useFakeTimers();
+    const { response } = responseFromChunks(['ok']);
+
+    await expect(readBoundedResponseText(response, 16, { timeoutMs: 100 }))
+      .resolves.toMatchObject({ text: 'ok', truncated: false });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('clears an active deadline after overflow', async () => {
+    vi.useFakeTimers();
+    const { response } = responseFromChunks(['overflow']);
+
+    await expect(readBoundedResponseText(response, 1, { timeoutMs: 100 }))
+      .resolves.toMatchObject({ text: 'o', truncated: true });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('clears an active deadline after a read failure', async () => {
+    vi.useFakeTimers();
+    const response = {
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.error(new Error('read failed'));
+        },
+      }),
+    } as Response;
+
+    await expect(readBoundedResponseText(response, 16, { timeoutMs: 100 }))
+      .rejects.toThrow('read failed');
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 
@@ -163,6 +200,33 @@ describe('readBoundedErrorBody', () => {
     await expect(readBoundedErrorBody(response)).resolves.toBe('{"error":"bad"}');
   });
 
+  it('preserves malformed JSON as bounded text', async () => {
+    const { response } = responseFromChunks(['{"error":']);
+    Object.defineProperty(response, 'headers', {
+      value: new Headers({ 'content-type': 'application/json' }),
+    });
+
+    await expect(readBoundedErrorBody(response)).resolves.toBe('{"error":');
+  });
+
+  it('preserves a truncated JSON prefix with an explicit marker', async () => {
+    const onCancel = vi.fn();
+    const response = {
+      headers: new Headers({ 'content-type': 'application/json' }),
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"error":"too long"}'));
+        },
+        cancel: onCancel,
+      }),
+    } as Response;
+
+    await expect(readBoundedErrorBody(response, { maxBytes: 10 })).resolves.toBe(
+      '{"error":" [truncated after 10 bytes]',
+    );
+    expect(onCancel).toHaveBeenCalledOnce();
+  });
+
   it('caps oversized diagnostics and marks them as truncated', async () => {
     const limit = 64 * 1024;
     const onCancel = vi.fn();
@@ -183,6 +247,23 @@ describe('readBoundedErrorBody', () => {
     expect(onCancel).toHaveBeenCalledOnce();
   });
 
+  it('does not wait indefinitely for overflow cancellation', async () => {
+    const cancel = vi.fn(() => new Promise(() => {}));
+    const response = {
+      headers: new Headers({ 'content-type': 'text/plain' }),
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('overflow'));
+        },
+        cancel,
+      }),
+    } as Response;
+
+    await expect(readBoundedErrorBody(response, { maxBytes: 1, timeoutMs: 20 }))
+      .resolves.toBe('o [truncated after 1 bytes]');
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
   it('bounds a stalled error body and preserves an explicit diagnostic', async () => {
     vi.useFakeTimers();
     const cancel = vi.fn();
@@ -196,5 +277,23 @@ describe('readBoundedErrorBody', () => {
 
     await expect(result).resolves.toBe('[Response body read timed out after 0.1 seconds]');
     expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it('uses a five-second default error-body deadline', async () => {
+    vi.useFakeTimers();
+    const response = {
+      headers: new Headers({ 'content-type': 'text/plain' }),
+      body: new ReadableStream<Uint8Array>({ cancel() {} }),
+    } as Response;
+    let settled = false;
+    const result = readBoundedErrorBody(response).then((value) => {
+      settled = true;
+      return value;
+    });
+
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(result).resolves.toBe('[Response body read timed out after 5 seconds]');
   });
 });

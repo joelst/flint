@@ -28,6 +28,16 @@ export async function readBoundedResponseText(
   }
 
   const reader = response.body.getReader();
+  if (limit === 0) {
+    void reader.cancel('Response body exceeded Flint fetch limit').catch(() => {});
+    try {
+      reader.releaseLock();
+    } catch {
+      // Cancellation may still own the reader.
+    }
+    return { text: '', truncated: true, byteCount: 0 };
+  }
+
   const numericTimeout = Number(options.timeoutMs);
   const timeoutMs = Number.isFinite(numericTimeout)
     ? Math.max(1, Math.floor(numericTimeout))
@@ -41,19 +51,6 @@ export async function readBoundedResponseText(
           void reader.cancel('Response body read timed out').catch(() => {});
         }, timeoutMs);
       });
-  if (limit === 0) {
-    try {
-      await reader.cancel('Response body exceeded Flint fetch limit');
-    } finally {
-      try {
-        reader.releaseLock();
-      } catch {
-        // A cancelled stream may already have released its reader.
-      }
-    }
-    return { text: '', truncated: true, byteCount: 0 };
-  }
-
   const decoder = new TextDecoder();
   let text = '';
   let byteCount = 0;
@@ -75,7 +72,7 @@ export async function readBoundedResponseText(
           byteCount += remaining;
         }
         truncated = true;
-        await reader.cancel('Response body exceeded Flint fetch limit');
+        void reader.cancel('Response body exceeded Flint fetch limit').catch(() => {});
         break;
       }
 
