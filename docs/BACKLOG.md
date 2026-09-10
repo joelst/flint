@@ -66,7 +66,7 @@ Windows/macOS fixes do not establish Linux release support.
 - [ ] **Pin the SDK/core/CLI matrix** — Flint is on SDK 1.2.4; Foundry's REST API is
       preview. Warn at startup on untested combinations instead of failing obscurely.
 
-## Models and cache (0.5 — see RELEASE_ROADMAP §6)
+## Models and cache (see [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md), "Plan: 0.5 → 1.0")
 
 - [x] **BYOM import from a local folder** — inspect, validate, stage, atomically activate,
       roll back. Prompt template is shown and editable at import and afterwards.
@@ -82,7 +82,7 @@ Windows/macOS fixes do not establish Linux release support.
 - [ ] **Throughput metrics** — load time, TTFT, prompt tok/s, decode tok/s, end-to-end,
       warm/cold, resolved variant + execution provider. No single ambiguous "tokens/sec".
 
-## Endpoint / agent compatibility (0.6)
+## Endpoint / agent compatibility (see [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md), "Plan: 0.5 → 1.0")
 
 - [ ] **Behavioural conformance self-test** — not route-existence checks.
 - [ ] **Normalise response shape** — service emits non-standard `IsDelta`, `Successful`,
@@ -161,6 +161,42 @@ Windows/macOS fixes do not establish Linux release support.
       recovering underneath it. Closing this means re-taking the inventory after a later
       successful enumeration.
 
+## Future features (unscheduled)
+
+Not yet started; no version assigned. Depend on Phase 1B/2 reliability work landing
+first per [PRODUCT_PLAN.md](./PRODUCT_PLAN.md) — these are not reliability work.
+
+- [ ] **Tool-calling execution layer** — opt-in, user-confirmed execution of a limited
+      tool allowlist inside Flint (shell/file/HTTP), with a visible audit trail and a
+      prompt-injection heuristic scan before execution. **Decision: delegate autonomous
+      multi-step agent loops to purpose-built tools (OpenClaw, Scout, etc.) rather than
+      building a Flint-native agent runtime** — duplicating loop/sandbox/permission
+      logic is a worse version of what those tools already do, and every unconfirmed
+      step is attack surface Flint's local-first posture makes riskier, not safer. The
+      narrow exception worth revisiting: a 2–3 step user-confirmed linear chain ("run
+      prompt A → pipe into prompt B → show result"), which is not an autonomous loop.
+- [ ] **RAG (local file indexing)** — extend the existing `fetchUrl` fetch → sanitize →
+      inject-as-context pipeline from single-URL to an indexed local knowledge base
+      (embedded vector store). Show retrieved chunks and sources in the UI, following
+      the URL-fetch chip precedent. Needs an embedding model — the Foundry catalog ships
+      zero; see the `/v1/embeddings` item above.
+- [ ] **Workspace export/import** — bundle selected models, endpoint profiles, personas,
+      conversation history, and settings for backup or migration. Exclude credentials;
+      require re-entry on import.
+- [ ] **Azure AI Foundry cloud connections** — endpoint profiles (name/type/base
+      URL/auth/routing role) alongside local models in the same session. Secure local
+      credential storage (OS keychain) — never localStorage or plaintext disk.
+- [ ] **Enterprise controls** — per-model/per-endpoint allow/deny rules, optional local
+      API key requirement, an IT-deployable machine-level policy file, and the Purview
+      SDK implementation (design memo already done: [PURVIEW_GOVERNANCE.md](./PURVIEW_GOVERNANCE.md)).
+- [ ] **Full endpoint scheduler** — sticky routing, fallback, and health-check-based
+      failover; escalate chat from local to a cloud endpoint when a prompt exceeds local
+      context length.
+- [ ] **Vision polish** — inline image preview thumbnails inside chat message bubbles
+      (multi-image attach already works; bubble display was deferred).
+- [ ] **In-app update UX** — a "Check for updates" action calling the already-wired
+      updater plugin (`check()`, `downloadAndInstall()`), plus a release-notes modal.
+
 ## Control CLI — not planned
 
 Foundry owns terminal-first `foundry model` / `run` / `server`. Flint's wedge is SDK
@@ -172,6 +208,4 @@ cloning Ollama's `pull`/`run` REPL, any CLI before the desktop app is solid.
 
 ## Docs
 
-- [ ] **Slim RELEASE_ROADMAP §1–2** — ~40 KB; the 0.1 postmortem costs more to read than
-      it informs.
 - [ ] **Optional** root `CONTRIBUTING.md`; CI markdown link check.

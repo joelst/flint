@@ -1,6 +1,6 @@
 # Flint documentation
 
-Index by audience. Prefer these living docs over anything under `archive/`.
+Index by audience. These are the living docs; there is no archive.
 
 ## Users
 
@@ -24,22 +24,21 @@ Index by audience. Prefer these living docs over anything under `archive/`.
 | Doc | Purpose |
 |---|---|
 | [RELEASE.md](./RELEASE.md) | Signing, GitHub secrets, updater keys, test pipeline |
-| [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) | Living release status, scorecards, 0.4+ plans |
+| [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) | Shipped-version history, the 0.5→1.0 plan, and the 1.0 release bar |
 
 ## Design / research
 
 | Doc | Purpose |
 |---|---|
-| [PURVIEW_GOVERNANCE.md](./PURVIEW_GOVERNANCE.md) | Enterprise audit / Purview memo (implementation later) |
+| [PURVIEW_GOVERNANCE.md](./PURVIEW_GOVERNANCE.md) | Enterprise audit / Purview memo (implementation unscheduled) |
+| [LINUX_BUILD_PLAN.md](./LINUX_BUILD_PLAN.md) | Linux build plan (deferred — not an active workstream; see [BACKLOG.md](./BACKLOG.md)) |
 | [POOL_SPIKE.md](./POOL_SPIKE.md) | Model pool co-residency spike protocol |
 | [pool-spike-results/](./pool-spike-results/) | Canonical spike result |
 
 ## Planning process
 
-- **Living planner:** [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) only.
-- Do **not** maintain parallel “sprint plan” + “remaining implementation plan” + roadmap for the same milestone.
+- **Implementation sequencing and acceptance gates:** [PRODUCT_PLAN.md](./PRODUCT_PLAN.md).
+- **Release status and version scorecards:** [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md).
+- Do **not** maintain a separate sprint plan or remaining-implementation-plan file for
+  work already covered by one of the two docs above.
 - Deferred follow-ups: [BACKLOG.md](./BACKLOG.md) — open items only; completed work lives in `git log` and [CHANGELOG.md](../CHANGELOG.md).
-
-## Archive
-
-Historical execution plans (not live status): [archive/](./archive/).

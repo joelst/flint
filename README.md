@@ -52,7 +52,7 @@ No system Node install is required: release builds bundle their own Node 22 runt
 
 ## Status
 
-**0.4.4** — [signed installers on the releases page](https://github.com/joelst/flint/releases/latest). Pre-1.0: expect breaking changes.
+Pre-1.0: expect breaking changes. [Signed installers and release notes](https://github.com/joelst/flint/releases/latest).
 
 - Windows installers are Authenticode-signed (Azure Trusted Signing); bundles ship the Foundry native cores and a pinned Node 22 runtime, verified in CI.
 - In-app updater tracks the latest GitHub release.
@@ -60,7 +60,7 @@ No system Node install is required: release builds bundle their own Node 22 runt
 
 Next: [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) · [docs/BACKLOG.md](./docs/BACKLOG.md) · Release notes: [CHANGELOG.md](./CHANGELOG.md)
 
-Living plan (docs, help, 0.4, 1.0): **[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md)** · End-user walkthrough: **[docs/USER_GUIDE.md](./docs/USER_GUIDE.md)**
+Living reliability plan: **[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md)** · End-user walkthrough: **[docs/USER_GUIDE.md](./docs/USER_GUIDE.md)**
 
 ---
 
@@ -189,15 +189,13 @@ Architecture principles: [FLINT_DESIGN_SPEC.md](./FLINT_DESIGN_SPEC.md)
 
 | Doc | Audience |
 |---|---|
-| [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md) | Next work: docs, help, 0.4, 1.0 |
+| [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md) | Reliability execution plan and current phase status |
 | [docs/README.md](./docs/README.md) | Full doc index |
 | [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) | Release scorecards & plans |
 | [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) | Build, sidecar, versioning |
 | [docs/RELEASE.md](./docs/RELEASE.md) | Sign & ship |
 | [docs/BACKLOG.md](./docs/BACKLOG.md) | Deferred follow-ups |
 | [CHANGELOG.md](./CHANGELOG.md) | Release notes |
-
-Historical plans: [docs/archive/](./docs/archive/).
 
 ---
 

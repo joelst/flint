@@ -1,7 +1,13 @@
 # Linux Build Plan
 
-Plan for shipping a Linux build of Flint. Written 2026-09-01; status lives here until the work
-lands, then this folds into [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md).
+**Deferred.** Per [PRODUCT_PLAN.md](./PRODUCT_PLAN.md)'s decisions, Linux-only work is
+not an active workstream: this plan is retained as ready-to-execute research (inventory
+of what already works, unknowns to spike) for whenever Linux support is prioritized, not
+as a commitment or a schedule. Continue Linux-specific work only where it is already part
+of another feature.
+
+Written 2026-09-01; status lives here until the work lands, then this folds into
+[RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md).
 
 ## Goal and scope
 

@@ -103,7 +103,8 @@ The app is designed to:
 3. Additional local backends  
 4. Smart routing and fallback between providers  
 
-Versioned timing is in [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) (Azure targeted for 0.4+).
+Azure connections and other future feature work are tracked in
+[docs/BACKLOG.md](./docs/BACKLOG.md) (unscheduled — no version assigned).
 
 ## 7. Security & Privacy
 
@@ -127,15 +128,15 @@ Versioned timing is in [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) (Azure targete
 **Phase 2 – Incremental Rust + polish**
 
 - Move selected hot paths or packaging concerns to Rust when reliability/footprint benefits are clear
-- Self-contained sidecar would remove the end-user Node-on-PATH requirement
-- Azure connections and advanced enterprise controls per roadmap
+- A native Rust supervisor (see [PRODUCT_PLAN.md Workstream C](./docs/PRODUCT_PLAN.md#workstream-c-thin-native-ownership----expedited)) would remove the Node *process*, not just PATH dependence — bundled Node already removed the PATH requirement
+- Azure connections and advanced enterprise controls: see [docs/BACKLOG.md](./docs/BACKLOG.md)
 
 ## 9. Prerequisites & first-run
 
 **Product packaging (current intent):**
 
 - Foundry Local **runtime is bundled** with Flint builds for a seamless first run (see in-app Learn copy).
-- The **JS sidecar still requires Node.js on PATH** for end-user installers until a self-contained sidecar ships. Document this honestly in user-facing docs.
+- Release installers **bundle a Node 22 runtime** for the JS sidecar (Tauri `externalBin`); PATH Node remains a dev/fallback requirement, not an end-user one. See [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md).
 - SDK package selection (winml vs standard) is handled at build/install time.
 - First-run: accelerator detection + starter model recommendations when no persisted state exists.
 

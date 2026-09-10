@@ -1,7 +1,8 @@
 # Purview SDK Governance Memo for Flint
 
 **Date:** 2026-06-28  
-**Status:** Draft for 0.3 (design memo only; implementation deferred to 0.4+)
+**Status:** Design memo (written for 0.3). Implementation is unscheduled — see
+[docs/BACKLOG.md](./BACKLOG.md#future-features-unscheduled).
 
 ## 1. Background
 
@@ -101,10 +102,11 @@ Proposed events (all metadata-only; no prompt or response content):
 - Tenant configuration: how does the app discover the customer's Purview endpoint/tenant ID?
 - Retention & eDiscovery integration.
 - DLP / sensitivity label application to any exported records.
-- Full implementation and UI (including toggle, status, and export history) lands in 0.4 enterprise controls.
+- Full implementation and UI (including toggle, status, and export history) is unscheduled; see [docs/BACKLOG.md](./BACKLOG.md#future-features-unscheduled).
 
 This memo satisfies the 0.3 requirement for a short (~2 page) governance design document. Implementation is explicitly out of scope for this release.
 
 ---
 
-**Cross-references:** [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) (0.3 scorecard / 0.4 enterprise controls), archived sprint note in [docs/archive/SPRINT_PLAN_0.3.md](./archive/SPRINT_PLAN_0.3.md) (Item 0c), and sidecar audit/access logging code for current implementation details.
+**Cross-references:** [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) (release status) and
+sidecar audit/access logging code for current implementation details.
