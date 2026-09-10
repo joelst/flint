@@ -8,9 +8,10 @@ document remains planned and implies no implementation.
 audio, packaging, and observability findings. Supported-platform work targets
 Windows and macOS Apple Silicon.
 
-**Release ownership:** [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) owns version
-assignments and release scorecards. This document owns implementation sequencing
-and acceptance gates. [BACKLOG.md](./BACKLOG.md) holds deferred work.
+**Release ownership:** [CHANGELOG.md](../CHANGELOG.md) owns version assignments and
+release history. [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) owns the forward plan
+through 1.0. This document owns implementation sequencing and acceptance gates.
+[BACKLOG.md](./BACKLOG.md) holds deferred work.
 
 ## Delivery status
 

@@ -66,7 +66,7 @@ Windows/macOS fixes do not establish Linux release support.
 - [ ] **Pin the SDK/core/CLI matrix** — Flint is on SDK 1.2.4; Foundry's REST API is
       preview. Warn at startup on untested combinations instead of failing obscurely.
 
-## Models and cache (see [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md), "Plan: 0.5 → 1.0")
+## Models and cache (see [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md), "Plan: current → 1.0")
 
 - [x] **BYOM import from a local folder** — inspect, validate, stage, atomically activate,
       roll back. Prompt template is shown and editable at import and afterwards.
@@ -74,7 +74,8 @@ Windows/macOS fixes do not establish Linux release support.
       writes to the foreign folder; delete the link, never the target.
 - [x] **Sort the model list** — name, family, or last updated; persisted.
 - [ ] **Read-only cache inventory** — duplicates, partial downloads, reclaimable bytes.
-      Recommend only; no cross-root deletion.
+      Recommend only; no cross-root deletion. Measured on the maintainer's machine:
+      `~/.flint` 107 GB / 35 models vs `~/.foundry` 31.4 GB / 7 models, 15.3 GB duplicated.
 - [x] **Auto-load on demand** — Flint's reverse proxy owns the configured port, forwards to
       the native service, and on the exact `400 ... is not loaded` loads the model and
       replays the request once. Cached models only, so a stray id cannot start a download.
@@ -82,7 +83,7 @@ Windows/macOS fixes do not establish Linux release support.
 - [ ] **Throughput metrics** — load time, TTFT, prompt tok/s, decode tok/s, end-to-end,
       warm/cold, resolved variant + execution provider. No single ambiguous "tokens/sec".
 
-## Endpoint / agent compatibility (see [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md), "Plan: 0.5 → 1.0")
+## Endpoint / agent compatibility (see [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md), "Plan: current → 1.0")
 
 - [ ] **Behavioural conformance self-test** — not route-existence checks.
 - [ ] **Normalise response shape** — service emits non-standard `IsDelta`, `Successful`,

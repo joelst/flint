@@ -112,8 +112,7 @@
 Detailed per-release entries below only go back to 0.6.0, where Changesets began
 authoring this file automatically. Earlier releases are summarized here at a
 high level; for full commit-level detail see `git log` (tags exist only from
-`v0.4.0-alpha` onward — earlier versions predate tagging) and the shipped-versions
-table in [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md).
+`v0.4.0-alpha` onward — earlier versions predate tagging).
 
 - **0.5.0** — BYOM import + linked model folders, gateway auto-load-on-demand
   (closes the "model not loaded" agent-compat gap), memory watchdog + pool

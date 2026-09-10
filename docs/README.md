@@ -24,7 +24,7 @@ Index by audience. These are the living docs; there is no archive.
 | Doc | Purpose |
 |---|---|
 | [RELEASE.md](./RELEASE.md) | Signing, GitHub secrets, updater keys, test pipeline |
-| [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) | Shipped-version history, the 0.5→1.0 plan, and the 1.0 release bar |
+| [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) | Current probe-backed plan through 1.0 and the 1.0 release bar (release history: [CHANGELOG.md](../CHANGELOG.md)) |
 
 ## Design / research
 
@@ -38,7 +38,8 @@ Index by audience. These are the living docs; there is no archive.
 ## Planning process
 
 - **Implementation sequencing and acceptance gates:** [PRODUCT_PLAN.md](./PRODUCT_PLAN.md).
-- **Release status and version scorecards:** [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md).
+- **Forward plan through 1.0 and the 1.0 release bar:** [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md).
+- **Release history:** [CHANGELOG.md](../CHANGELOG.md).
 - Do **not** maintain a separate sprint plan or remaining-implementation-plan file for
   work already covered by one of the two docs above.
 - Deferred follow-ups: [BACKLOG.md](./BACKLOG.md) — open items only; completed work lives in `git log` and [CHANGELOG.md](../CHANGELOG.md).

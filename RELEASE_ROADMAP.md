@@ -1,46 +1,18 @@
 # Flint Release Roadmap
 
-**Scope:** Living release status — shipped versions, the current probe-backed
-plan through 1.0, and the 1.0 release bar. Day-to-day implementation
-sequencing and acceptance gates live in [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md).
-Open follow-up items live in [docs/BACKLOG.md](./docs/BACKLOG.md).
-Per-release detail in [CHANGELOG.md](./CHANGELOG.md) is complete from 0.6.0
-onward; earlier releases (0.1.0–0.5.0) are summarized there at a high level
-only — see `git log` for full history, since most pre-0.5.0 versions were
-never tagged or published as a [GitHub Release](https://github.com/joelst/flint/releases).
+**Scope:** The current probe-backed plan through 1.0, and the 1.0 release bar.
+Day-to-day implementation sequencing and acceptance gates live in
+[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md). Open follow-up items live in
+[docs/BACKLOG.md](./docs/BACKLOG.md). Per-release detail lives in
+[CHANGELOG.md](./CHANGELOG.md); project positioning and non-goals live in
+[FLINT_DESIGN_SPEC.md](./FLINT_DESIGN_SPEC.md).
 
 ---
 
-## Released versions
-
-| Version | Highlights |
-|---|---|
-| 0.1.0 | MVP baseline: model catalog, streaming chat, audio transcription, diagnostics |
-| 0.2.0 | Security hardening (sidecar schema/allowlist, least-privilege shell capability), chat/audio lane routing, realtime voice dictation |
-| 0.3.x | Model pool, Monitor view (resources, access log, audit trail), network bind config, keyboard shortcuts, autostart, vision multi-image, Model Arena, Integrations tab, Purview governance memo |
-| 0.4.x | Bundled Node 22 runtime for the sidecar, Help/first-run coach, signed Windows releases via Azure Trusted Signing, macOS build/notarization fixes, working auto-updater endpoint |
-| 0.5.0 | BYOM import + linked model folders, gateway auto-load-on-demand (closes the "model not loaded" agent-compat gap), memory watchdog + pool eviction, keep-service-running-in-tray, WSL mirrored networking, Compare renamed to Model Arena |
-| 0.6.0 *(in progress)* | Durable versioned conversation storage (Phase 1A) and runtime lifecycle correctness (Phase 1B) — see [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md) |
-
----
-
-## Plan: 0.5 → 1.0
+## Plan: current → 1.0
 
 Measured 2026-08-30 against SDK 1.2.4, Foundry CLI 0.10.3, and the live HTTP service.
 Numbers below are probe results, not estimates.
-
-### Positioning
-
-**The friendly and full-featured control plane for Foundry Local**: hardware-aware model management, an
-observable OpenAI endpoint, and reliable integration with local AI clients.
-
-Flint does not compete with Ollama on model-library breadth, and says so. Foundry Local
-is ONNX-only; Ollama's ecosystem is GGUF. That trade is conceded openly — conceding it
-is what makes the rest of the pitch credible.
-
-Reasons to choose Flint over Ollama's desktop app, all already shipped: NPU/GPU/CPU
-variant selection, multi-model pool co-residency, the side-by-side Model Arena, speech-to-text,
-audit logging, bind-address/network control.
 
 ### What the endpoint actually does (probed, contradicts prior assumptions)
 
@@ -53,7 +25,7 @@ audit logging, bind-address/network control.
 | Streaming | **Works** — SSE, `[DONE]` terminator, and `usage` included in the stream. |
 | `usage` on non-streamed calls | Present. |
 | `POST /v1/embeddings` | Route **exists** (GET returns 405). |
-| Model not pre-loaded | **400 `Model is not loaded`** — closed in 0.5 by Flint's gateway. |
+| Model not pre-loaded | **400 `Model is not loaded`** — closed by Flint's gateway auto-load-on-demand. |
 | `/v1/models` contents | **Cached models only** (35 of 128), and no loaded/unloaded state. |
 
 **The single real agent-compat gap — now closed.** A client read `/v1/models`, picked an ID,
@@ -63,46 +35,7 @@ the port: the gateway forwards to the native service and, on that exact rejectio
 replays once. Measured end to end: cold request 200 in 15 s, warm 707 ms with no reload,
 unknown model a clean 400 with no download.
 
-### 0.5 — Own the model, prove it loads
-
-1. **BYOM import (local folder).** Verified working today: a directory with
-   `genai_config.json` + `inference_model.json` and no `download.tmp` is discovered by
-   `getCachedModels()` as `providerType: "Local"`, `uri: local://<name>`, resolvable by
-   alias. Pure filesystem; no SDK upgrade. Flint synthesises `inference_model.json` and
-   the prompt template.
-   Import must be **staged, validated, atomically activated, and load-smoke-tested**,
-   with rollback and clear ownership metadata so Flint knows which files it may delete.
-2. **Additional model folders via junctions.** Verified: a directory junction inside the
-   cache root is traversed by the native scanner, surfacing a model stored elsewhere with
-   its real alias, provider, and version intact — no copying, no writes to the foreign
-   directory. This replaces the unsafe "shared cache" idea: Flint keeps `~/.flint` as its
-   only writable root and links foreign models in. Deletion must remove the *link*, never
-   the target.
-3. **Cache inventory, read-only** — **open** (see [BACKLOG.md](./docs/BACKLOG.md)). Report
-   foreign models, duplicates, partial downloads, and reclaimable bytes. Recommend; never
-   delete across roots. Measured on the maintainer's machine: `~/.flint` 107 GB / 35 models
-   vs `~/.foundry` 31.4 GB / 7 models, **15.3 GB duplicated**.
-4. **Auto-load on demand at the endpoint** — **done.** Flint's reverse proxy
-   (`sidecar/gateway.js`) owns the configured port and forwards to the native service,
-   which is only reachable once it reports its own port back: the native core initializes
-   once per process, so the manager cannot be re-created to choose one. On the exact
-   `400 ... is not loaded` the model is loaded and the request replayed once. This also
-   fixed service start, which had always failed with `Core is already initialized`.
-5. **Throughput instrumentation** — **open** (see [BACKLOG.md](./docs/BACKLOG.md)), with
-   explicit definitions: model load time, TTFT, prompt tokens/sec, decode tokens/sec,
-   end-to-end duration, warm/cold, resolved variant and execution provider. Never a single
-   ambiguous "tokens/sec".
-6. **Memory watchdog and pool eviction** — **done.** Nothing previously bounded pool
-   residency, so an autoloading endpoint could fill memory unattended. A watchdog samples
-   RAM and per-GPU VRAM on its own cadence regardless of the active tab and raises an
-   in-app banner plus a native OS notification; because the telemetry is system-wide it
-   only alerts while Flint holds resident models and never attributes the usage to Flint.
-   Eviction is opt-in — idle-unload and a max-resident LRU cap — with `pinned` models
-   never unloaded and in-flight requests, including proxied gateway traffic, protected via
-   the gateway's `onActivity` hook. Hardware-aware admission (item 1 of the 0.3 pool work)
-   remains open: Flint still reacts to memory pressure rather than predicting it.
-
-### 0.6 — Compatibility gateway
+### Next: compatibility gateway
 
 Gateway work only. The tool-execution layer does **not** share this milestone.
 
@@ -123,7 +56,7 @@ Gateway work only. The tool-execution layer does **not** share this milestone.
 - Surface `supportsToolCalling` (75 of 128) and `contextLength`, labelled
   **catalog-declared** vs **Flint-verified**. A catalog flag is not a guarantee.
 
-### 0.7 — Curated model acquisition
+### Then: curated model acquisition
 
 A **Flint-validated ONNX catalog**, not a generic HuggingFace browser: pinned repo and
 revision, tested execution provider, required files, disk/memory footprint, chat-template
@@ -137,32 +70,6 @@ dominated by AMD Ryzen AI builds (193 of 301 in a recency-sorted sample), with
 `onnx-community` and `microsoft` next. Critically, only **2 of 301 ship
 `inference_model.json`**, so Flint must synthesise it for essentially every import.
 A curated 20 that reliably work beats a browser exposing 300 that mostly do not.
-
-### Post-1.0 / non-goals
-
-- **Tokenomics deferred.** "Tokens × cloud list price" is not a defensible savings figure:
-  models are not quality-equivalent, tokenizers differ, and cloud pricing splits
-  input/cached/output/batch. If ever built, ship it as a **cost comparator** with visible
-  assumptions — never "savings". Tokens-per-watt needs idle-power baselining and
-  synchronised sampling; omit unless measurable as joules per output token.
-- **No Flint-native tool executor before 1.0.** Receiving a call, gating it, executing it,
-  and returning the result to the model *is* a manually gated agent loop — it inherits the
-  security surface while delivering a worse version of what Cline and OpenClaw already do.
-  The heuristic prompt-injection guard is not a real boundary and would create false
-  confidence. Flint displays and exports tool-call JSON for debugging; clients execute.
-- **Agent loops stay delegated**, and OpenClaw is treated as one integration, not a
-  strategic dependency. Flint should work with any conforming OpenAI client.
-- **Olive conversion (safetensors → ONNX)** stays a documented external recipe. Bundling
-  Python plus conversion, quantisation, and hardware targeting would overwhelm the app.
-- **No GGUF**, no `flint` CLI shadowing `foundry`, no model registry or push.
-
-### Upstream-churn risk
-
-Foundry Local's REST API is preview and explicitly subject to breaking change, and Flint
-is deliberately pinned to SDK 1.2.4 (2.0.0 drops `responsesClient.d.ts` and refactors
-AudioSession for no BYOM benefit). A CLI or core update can break cache, gateway, or BYOM
-assumptions with no Flint change. Add a startup SDK/core/CLI version check that warns
-visibly on untested combinations rather than failing obscurely.
 
 ---
 
@@ -192,6 +99,8 @@ Release 1.0 should represent **production-grade local AI operations**, not just 
 
 ### 1.0 statement
 
-If 0.1 is "usable MVP" and 0.2 is "hardened + scalable architecture", then **1.0 is "operationally trustworthy."**
+**1.0 is "operationally trustworthy."** Early releases proved the app usable, then hardened
+its architecture; the remaining bar for 1.0 is the seven criteria above holding under
+real-world use, not new features.
 
 ---

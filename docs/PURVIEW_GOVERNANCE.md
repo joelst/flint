@@ -108,5 +108,5 @@ This memo satisfies the 0.3 requirement for a short (~2 page) governance design 
 
 ---
 
-**Cross-references:** [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) (release status) and
-sidecar audit/access logging code for current implementation details.
+**Cross-references:** [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) (forward plan through
+1.0) and sidecar audit/access logging code for current implementation details.

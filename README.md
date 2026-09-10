@@ -191,7 +191,7 @@ Architecture principles: [FLINT_DESIGN_SPEC.md](./FLINT_DESIGN_SPEC.md)
 |---|---|
 | [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md) | Reliability execution plan and current phase status |
 | [docs/README.md](./docs/README.md) | Full doc index |
-| [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) | Release scorecards & plans |
+| [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) | Forward plan through 1.0 & the 1.0 release bar |
 | [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) | Build, sidecar, versioning |
 | [docs/RELEASE.md](./docs/RELEASE.md) | Sign & ship |
 | [docs/BACKLOG.md](./docs/BACKLOG.md) | Deferred follow-ups |
