@@ -191,6 +191,38 @@ describe('readBoundedErrorBody', () => {
     expect(DEFAULT_ERROR_BODY_LIMIT).toBe(64 * 1024);
   });
 
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1])(
+    'falls back to the error diagnostic cap for invalid maxBytes %s',
+    async maxBytes => {
+      const limit = 64 * 1024;
+      const response = {
+        headers: new Headers({ 'content-type': 'text/plain' }),
+        body: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(`${'x'.repeat(limit)}overflow`));
+          },
+        }),
+      } as Response;
+
+      await expect(readBoundedErrorBody(response, { maxBytes })).resolves.toBe(
+        `${'x'.repeat(limit)} [truncated after ${limit} bytes]`,
+      );
+    },
+  );
+
+  it('honours an explicit zero-byte diagnostic cap', async () => {
+    const cancel = vi.fn();
+    const response = {
+      headers: new Headers({ 'content-type': 'text/plain' }),
+      body: new ReadableStream<Uint8Array>({ cancel }),
+    } as Response;
+
+    await expect(readBoundedErrorBody(response, { maxBytes: 0 })).resolves.toBe(
+      '[truncated after 0 bytes]',
+    );
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
   it('normalizes a bounded JSON error body', async () => {
     const { response } = responseFromChunks(['{ "error": "bad" }']);
     Object.defineProperty(response, 'headers', {

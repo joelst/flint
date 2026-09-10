@@ -99,7 +99,10 @@ export async function readBoundedResponseText(
  * @param {{maxBytes?: number, timeoutMs?: number}} [options]
  */
 export async function readBoundedErrorBody(response, options = {}) {
-  const maxBytes = options.maxBytes ?? DEFAULT_ERROR_BODY_LIMIT;
+  const numericMaxBytes = Number(options.maxBytes ?? DEFAULT_ERROR_BODY_LIMIT);
+  const maxBytes = Number.isFinite(numericMaxBytes) && numericMaxBytes >= 0
+    ? Math.floor(numericMaxBytes)
+    : DEFAULT_ERROR_BODY_LIMIT;
   const numericTimeout = Number(options.timeoutMs ?? DEFAULT_ERROR_BODY_TIMEOUT_MS);
   const timeoutMs = Number.isFinite(numericTimeout) && numericTimeout >= 0
     ? Math.max(1, Math.floor(numericTimeout))
@@ -117,7 +120,8 @@ export async function readBoundedErrorBody(response, options = {}) {
         // A truncated or malformed JSON error is still useful as bounded text.
       }
     }
-    return `${raw}${suffix}` || '(empty response body)';
+    if (raw) return `${raw}${suffix}`;
+    return suffix.trimStart() || '(empty response body)';
   } catch (error) {
     return `[${error?.message || error}]`;
   }
