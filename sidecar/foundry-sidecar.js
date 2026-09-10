@@ -72,6 +72,7 @@ import {
   TEMPLATE_PRESETS,
   OWNERSHIP_MARKER,
 } from './byom-import.js';
+import { createAsyncLogWriter } from './async-log-writer.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -800,8 +801,8 @@ async function waitForUpstream (port, deadlineMs = 20000) {
 }
 
 // Per-request access log. Covers IPC-originated requests only: traffic proxied through the
-// gateway is deliberately not logged here because writeToDisk() appends synchronously, and
-// putting a blocking write in front of every external request would stall the event loop.
+// Gateway traffic is deliberately not logged here because request bodies and external traffic
+// would add volume and privacy risk beyond this IPC-oriented diagnostic log.
 const ACCESS_LOG_MAX = 500;
 const accessLog = [];
 const tokenAccumulator = new Map(); // alias → { tokensIn: number, tokensOut: number }; reset on stopService
@@ -1730,11 +1731,12 @@ function buildTranscriptResult (candidate, extras = {}) {
 }
 
 // --- Disk log ---
-// appendFileSync for crash durability — a buffered stream loses its tail on OOM/kill/segfault,
-// which is exactly when the log matters most. Date is computed once at startup; a sidecar
-// running past midnight continues to the same file. Fine for MVP.
+// Date is computed once at startup; a sidecar running past midnight continues to the same file.
+// The bounded async writer keeps logging off the request path without allowing an unbounded queue.
 const LOG_DIR = path.join(os.homedir(), '.flint', 'logs');
+const LOG_QUEUE_MAX = 1000;
 let diskLogPath = null;
+let diskLogWriter = null;
 
 function initDiskLog() {
   try {
@@ -1749,18 +1751,41 @@ function initDiskLog() {
     }
     const today = new Date().toISOString().slice(0, 10);
     diskLogPath = path.join(LOG_DIR, `sidecar-${today}.log`);
+    diskLogWriter = createAsyncLogWriter({
+      maxQueue: LOG_QUEUE_MAX,
+      append: (chunk) => fs.promises.appendFile(diskLogPath, chunk, 'utf8'),
+      onError: (err) => {
+        // Calling log() here would recurse through the same failed writer.
+        console.error('[sidecar] Disk write failed:', err?.message || err);
+      },
+    });
   } catch (err) {
     console.error('[sidecar] Failed to initialize disk log:', err?.message || err);
   }
 }
 
-function writeToDisk(entry) {
-  if (!diskLogPath) return;
+async function flushDiskLog (timeoutMs = 1000) {
+  if (!diskLogWriter) return;
+  let timeout;
   try {
-    fs.appendFileSync(diskLogPath, JSON.stringify(entry) + '\n');
+    await Promise.race([
+      diskLogWriter.flush(),
+      new Promise((resolve) => {
+        timeout = setTimeout(resolve, timeoutMs);
+        timeout.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+function writeToDisk(entry) {
+  if (!diskLogPath || !diskLogWriter) return;
+  try {
+    diskLogWriter.write(`${JSON.stringify(entry)}\n`);
   } catch (err) {
-    // Use console.error here — calling log() would recurse.
-    console.error('[sidecar] Disk write failed:', err?.message || err);
+    console.error('[sidecar] Disk log queue failed:', err?.message || err);
   }
 }
 
@@ -2382,7 +2407,9 @@ rl.on('line', async (line) => {
         result.cleanup === 'confirmed' ? 'info' : 'warn',
         `Runtime shutdown cleanup=${result.cleanup} active=${result.activeOperations.length}`,
       );
-      reply({ ok: true, result }, () => process.exit(0));
+      reply({ ok: true, result }, () => {
+        void flushDiskLog().finally(() => process.exit(0));
+      });
     } else if (cmd === 'getEndpoint') {
       reply({ ok: true, endpoint: sharedEndpoint });
     } else if (cmd === 'getStatus') {
@@ -3024,9 +3051,13 @@ function shutdownAfterInputClosed (reason) {
   const forcedExit = setTimeout(() => process.exit(1), 10_000);
   void performRuntimeShutdown()
     .then(() => {
-      if (!explicitShutdownInProgress) process.exit(0);
+      if (!explicitShutdownInProgress) {
+        void flushDiskLog().finally(() => process.exit(0));
+      }
     }, () => {
-      if (!explicitShutdownInProgress) process.exit(1);
+      if (!explicitShutdownInProgress) {
+        void flushDiskLog().finally(() => process.exit(1));
+      }
     });
 }
 

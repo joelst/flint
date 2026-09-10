@@ -280,7 +280,9 @@ The remaining items below are outstanding.
   Delivered for runtime initialization and explicit restart-required changes.
 - Use bounded asynchronous logging and explicit retention. Adding gateway
   observability must not introduce synchronous disk writes on every proxied
-  request or record sensitive request bodies.
+  request or record sensitive request bodies. Delivered: disk writes use a
+  bounded asynchronous queue, seven-day file retention remains enforced, and
+  queue overflow drops new log entries rather than blocking runtime work.
 
 ### Acceptance gate
 
