@@ -61,6 +61,7 @@ export default defineConfig(() => ({
         'src/lib/message-rendering.ts',
         'src/lib/conversation-sidebar.ts',
         'src/lib/ipc-contracts.ts',
+        'src/lib/ipc-deadlines.ts',
         'src/lib/node-runtime.ts',
         'src/lib/sidecar-paths.ts',
         'src/lib/flint-context.ts',
