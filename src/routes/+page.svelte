@@ -3948,7 +3948,7 @@ updateStateFromSdk();
       await refreshModels();
       statusMessage = `${state.models.length} models available`;
       // Keep STT list fresh too (metadata driven)
-      loadSTTModels().catch(() => {});
+      await loadSTTModels();
     } catch (e: any) {
       statusMessage = `Failed to load catalog: ${e?.message || e}`;
     } finally {
@@ -3974,8 +3974,10 @@ updateStateFromSdk();
     try {
       sttModels = await getSTTModels();
     } catch (e) {
+      const detail = e?.message || String(e);
       console.warn("Failed to load STT models", e);
-      sttModels = [];
+      statusMessage = `STT catalog unavailable: ${detail}`;
+      appendAppLog(`STT catalog refresh failed: ${detail}`, "error");
     }
   }
 

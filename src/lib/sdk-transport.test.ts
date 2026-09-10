@@ -194,8 +194,11 @@ async function waitForWrite(cmd: string, afterCount = 0): Promise<number> {
   return JSON.parse(line).id;
 }
 
-async function completeInitialization(sdk: Awaited<ReturnType<typeof loadSdk>>): Promise<void> {
-  const initialized = sdk.initializeSDK({ autoStartService: false });
+async function completeInitialization(
+  sdk: Awaited<ReturnType<typeof loadSdk>>,
+  logLevel = 'info',
+): Promise<void> {
+  const initialized = sdk.initializeSDK({ autoStartService: false, logLevel });
   const initId = await waitForWrite('init');
   harness.emitStdout({ id: initId, result: 'initialized' });
   const logId = await waitForWrite('setLogLevel');
@@ -238,6 +241,35 @@ afterEach(() => {
 });
 
 describe('settlement revokes permission to dispatch', () => {
+  it('propagates a failed STT catalog query instead of returning an empty list', async () => {
+    const sdk = await loadSdk();
+    const request = capture(sdk.getSTTModels());
+    const id = await waitForWrite('getSTTModels');
+    harness.emitStdout({ id, error: 'catalog unavailable' });
+    await request.tracked;
+    expect(request.box.err?.message).toContain('catalog unavailable');
+  });
+
+  it('passes the configured log level through initialization', async () => {
+    const sdk = await loadSdk();
+    const initialized = sdk.initializeSDK({ autoStartService: false, logLevel: 'debug' });
+    const initId = await waitForWrite('init');
+    harness.emitStdout({ id: initId, result: 'initialized' });
+    const logId = await waitForWrite('setLogLevel');
+    const logLine = JSON.parse(harness.writes.find((line) => line.includes('"cmd":"setLogLevel"'))!);
+    expect(logLine.level).toBe('debug');
+    harness.emitStdout({ id: logId, result: {} });
+    const listId = await waitForWrite('listModels');
+    harness.emitStdout({ id: listId, result: [] });
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, result: { serviceRunning: false, endpoint: null } });
+    const poolId = await waitForWrite('poolStatus');
+    harness.emitStdout({ id: poolId, result: { models: [] } });
+    const finalStatusId = await waitForWrite('getStatus', 1);
+    harness.emitStdout({ id: finalStatusId, result: { serviceRunning: false, endpoint: null } });
+    await expect(initialized).resolves.toBe(true);
+  });
+
   it('publishes independent process and manager readiness', async () => {
     const sdk = await loadSdk();
     const request = capture(sdk.getEps());

@@ -83,6 +83,8 @@ const SIDECAR_PROTOCOL_VERSION = 1;
 const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS = 5_000;
 const operationAdmission = createOperationAdmission();
 let explicitShutdownInProgress = false;
+const LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'fatal'];
+let activeLogLevel = 'info';
 
 // --- Command allowlist and schema (mirrors src/lib/ipc-contracts.ts) ---
 const KNOWN_COMMANDS = new Set([
@@ -1859,6 +1861,7 @@ function send (msg, callback) {
 }
 
 function log (level, message) {
+  if (LOG_LEVELS.indexOf(level) < LOG_LEVELS.indexOf(activeLogLevel)) return;
   const entry = { type: 'log', level, message, timestamp: Date.now() };
   send(entry);
   writeToDisk(entry);
@@ -2035,6 +2038,10 @@ rl.on('line', async (line) => {
       }
       log('info', `Using Foundry core library: ${libraryPath}`);
       initConfig = { appName, logLevel: payload.logLevel || 'info', libraryPath };
+      if (!LOG_LEVELS.includes(initConfig.logLevel)) {
+        throw new Error(`Unsupported log level "${initConfig.logLevel}". Expected one of: ${LOG_LEVELS.join(', ')}`);
+      }
+      activeLogLevel = initConfig.logLevel;
       manager = FManager.create(initConfig);
       log('info', `SDK initialized for ${appName}`);
       audit('init', { appName, libraryPath });
@@ -2963,8 +2970,15 @@ rl.on('line', async (line) => {
         reply({ ok: true, result: null });
       }
     } else if (cmd === 'setLogLevel') {
-      // Enable logging at requested level (SDK supports via config or we just log here)
-      log('info', `Log level set to ${payload.level}`);
+      if (!LOG_LEVELS.includes(payload.level)) {
+        throw new Error(`Unsupported log level "${payload.level}". Expected one of: ${LOG_LEVELS.join(', ')}`);
+      }
+      if (initConfig && payload.level !== initConfig.logLevel) {
+        throw new Error(
+          `Native log level is fixed at runtime initialization (${initConfig.logLevel}); restart the runtime to change it.`,
+        );
+      }
+      activeLogLevel = payload.level;
       audit('setLogLevel', { level: payload.level });
       reply({ ok: true });
     } else if (cmd === 'wslStatus') {
