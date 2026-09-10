@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  createOperationAdmission,
   createServiceTransitionLock,
   stopPartiallyStartedService,
 } from './service-lifecycle.js';
@@ -93,5 +94,76 @@ describe('createServiceTransitionLock', () => {
     const secondRelease = await second;
     expect(secondEntered).toBe(true);
     secondRelease();
+  });
+});
+
+describe('createOperationAdmission', () => {
+  it('atomically fences new work and reports operations already in flight', () => {
+    const admission = createOperationAdmission();
+    expect(admission.admit(1, 'load')).toBe(true);
+    expect(admission.beginDrain()).toEqual([{ id: 1, command: 'load' }]);
+    expect(admission.admit(2, 'download')).toBe(false);
+    expect(admission.snapshot()).toEqual([{ id: 1, command: 'load' }]);
+  });
+
+  it('resolves a drain only after every admitted operation completes', async () => {
+    const admission = createOperationAdmission();
+    admission.admit(1, 'load');
+    admission.admit(2, 'chatCompletion');
+    admission.beginDrain();
+
+    const drained = admission.waitForDrain(100);
+    admission.complete(1);
+    await Promise.resolve();
+    let settled = false;
+    drained.then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    admission.complete(2);
+    await expect(drained).resolves.toBe(true);
+  });
+
+  it('reports a bounded drain timeout without forgetting active work', async () => {
+    vi.useFakeTimers();
+    const admission = createOperationAdmission();
+    admission.admit(7, 'transcribeAudio');
+    admission.beginDrain();
+
+    const drained = admission.waitForDrain(50);
+    await vi.advanceTimersByTimeAsync(49);
+    let settled = false;
+    drained.then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(drained).resolves.toBe(false);
+    expect(admission.snapshot()).toEqual([{ id: 7, command: 'transcribeAudio' }]);
+  });
+
+  it('does not wait when the drain deadline is already exhausted', async () => {
+    const admission = createOperationAdmission();
+    admission.admit(7, 'transcribeAudio');
+    admission.beginDrain();
+
+    await expect(admission.waitForDrain(0)).resolves.toBe(false);
+    expect(admission.snapshot()).toEqual([{ id: 7, command: 'transcribeAudio' }]);
+  });
+
+  it('can resume admission after a non-terminal drain', () => {
+    const admission = createOperationAdmission();
+    admission.beginDrain();
+    expect(admission.admit(1, 'load')).toBe(false);
+    admission.resume();
+    expect(admission.admit(1, 'load')).toBe(true);
+  });
+
+  it('never reopens admission after a terminal drain begins', () => {
+    const admission = createOperationAdmission();
+    admission.beginDrain();
+    admission.beginDrain({ terminal: true });
+    admission.resume();
+    expect(admission.admit(1, 'load')).toBe(false);
   });
 });

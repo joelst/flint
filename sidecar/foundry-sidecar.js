@@ -30,6 +30,7 @@ import { createGateway } from './gateway.js';
 import { formatPublicEndpoint } from './gateway-http.js';
 import { buildModelIndex, resolveModelId } from './model-registry.js';
 import {
+  createOperationAdmission,
   createServiceTransitionLock,
   stopPartiallyStartedService,
 } from './service-lifecycle.js';
@@ -79,10 +80,13 @@ const __dirname = path.dirname(__filename);
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 const SIDECAR_PROTOCOL_VERSION = 1;
+const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS = 5_000;
+const operationAdmission = createOperationAdmission();
+let explicitShutdownInProgress = false;
 
 // --- Command allowlist and schema (mirrors src/lib/ipc-contracts.ts) ---
 const KNOWN_COMMANDS = new Set([
-  'init', 'setLogLevel', 'startService', 'stopService', 'getStatus',
+  'init', 'setLogLevel', 'startService', 'stopService', 'stopAndUnload', 'shutdownRuntime', 'getStatus',
   'listModels', 'download', 'load', 'unload', 'deleteModel', 'getEndpoint',
   'chatCompletion', 'cancelChatRequest', 'transcribeAudio',
   'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',
@@ -99,6 +103,8 @@ const FIELD_TYPES = {
   init:              { appName: 'non-empty-string', logLevel: 'non-empty-string' },
   setLogLevel:       { level: 'non-empty-string' },
   startService:      { port: 'number', bindAddress: 'string', gateway: 'boolean' },
+  stopAndUnload:     { drainTimeoutMs: 'number' },
+  shutdownRuntime:   { drainTimeoutMs: 'number' },
   download:          { alias: 'non-empty-string', variantId: 'non-empty-string' },
   load:              { alias: 'non-empty-string', variantId: 'non-empty-string' },
   unload:            { alias: 'non-empty-string' },
@@ -132,6 +138,8 @@ const COMMAND_SCHEMA = {
   setLogLevel:        { required: ['level'], optional: [] },
   startService:       { required: ['port'], optional: ['alias', 'preferredEp', 'bindAddress', 'gateway'] },
   stopService:        { required: [], optional: [] },
+  stopAndUnload:      { required: [], optional: ['drainTimeoutMs'] },
+  shutdownRuntime:    { required: [], optional: ['drainTimeoutMs'] },
   getStatus:          { required: [], optional: [] },
   listModels:         { required: [], optional: [] },
   download:           { required: ['alias'], optional: ['variantId'] },
@@ -245,6 +253,13 @@ function validateCommand(cmd, payload) {
   }
   if (cmd === 'transcribeAudio' && payload.audioBase64.length > AUDIO_BASE64_MAX_CHARS) {
     return `Command "transcribeAudio" audioBase64 exceeds maximum allowed size`;
+  }
+  if (
+    (cmd === 'stopAndUnload' || cmd === 'shutdownRuntime') &&
+    payload.drainTimeoutMs !== undefined &&
+    (!Number.isFinite(payload.drainTimeoutMs) || payload.drainTimeoutMs < 0)
+  ) {
+    return `Command "${cmd}" field "drainTimeoutMs" must be a finite non-negative number`;
   }
   if (cmd === 'transcribeAudio') {
     // Container sniffing is pure input validation, so it runs here — before the
@@ -377,6 +392,13 @@ function noteActivity (modelName, phase) {
   }
 }
 
+function stopGatewayAccepting () {
+  const current = gateway;
+  gateway = null;
+  current?.beginStop();
+  return current;
+}
+
 /**
  * Total in-flight count for a resident alias, including requests booked under a
  * non-resident key while their model was still autoloading (see noteActivity). Every
@@ -421,6 +443,109 @@ async function unloadAlias (alias) {
   const use = usage.get(alias);
   if (!use || use.inFlight <= 0) usage.delete(alias);
   return true;
+}
+
+/**
+ * Stop admitting work, let already-admitted commands finish for a bounded period, then release
+ * native resources only when doing so cannot race an operation that still owns a model.
+ */
+async function performRuntimeCleanup (
+  drainTimeoutMs = DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS,
+  { terminal = false } = {},
+) {
+  try {
+    const deadline = Date.now() + Math.floor(drainTimeoutMs);
+    operationAdmission.beginDrain({ terminal });
+    if (evictionTimer) {
+      clearInterval(evictionTimer);
+      evictionTimer = null;
+    }
+
+    const drainingGateway = stopGatewayAccepting();
+
+    const remainingMs = () => Math.max(0, deadline - Date.now());
+    const waitWithinDeadline = async (promise) => {
+      const remaining = remainingMs();
+      return Promise.race([
+        Promise.resolve(promise).then(() => true, () => false),
+        new Promise(resolve => setTimeout(() => resolve(false), Math.max(1, remaining))),
+      ]);
+    };
+
+    const operationsDrained = await operationAdmission.waitForDrain(remainingMs());
+    const gatewayDrained = !drainingGateway ||
+      (operationsDrained && await waitWithinDeadline(drainingGateway.beginStop()));
+    const sweepsDrained = operationsDrained && gatewayDrained &&
+      await waitWithinDeadline(sweepChain);
+    const drained = operationsDrained && gatewayDrained && sweepsDrained;
+    const activeOperations = operationAdmission.snapshot();
+    const modelsUnloaded = [];
+    const unloadFailures = [];
+
+    if (drained) {
+      await withSweepLock(async () => {
+        for (const alias of [...pool.keys()]) {
+          if (await unloadAlias(alias)) modelsUnloaded.push(alias);
+          else unloadFailures.push(alias);
+        }
+      });
+    }
+
+    if (!drained) {
+      await drainingGateway?.stop({ force: true });
+    } else {
+      await drainingGateway?.stop({ force: false });
+    }
+    clearPublishedService();
+
+    let nativeServiceStopped = !nativeServiceStartAttempted;
+    if (drained) {
+      try {
+        nativeServiceStopped = stopNativeWebService() || !nativeServiceStartAttempted;
+      } catch (e) {
+        log('warn', `Native service stop during runtime shutdown failed: ${e?.message ?? e}`);
+      }
+    }
+    tokenAccumulator.clear();
+
+    const result = {
+      endpointWithdrawn: true,
+      serviceStopped: nativeServiceStopped,
+      drained,
+      activeOperations,
+      modelsUnloaded,
+      unloadFailures,
+      nativeServiceStopped,
+      cleanup: !drained
+        ? 'timed-out'
+        : unloadFailures.length || !nativeServiceStopped
+          ? 'failed'
+          : 'confirmed',
+    };
+    return result;
+  } finally {
+    if (!terminal) {
+      operationAdmission.resume();
+      restartEvictionTimer();
+    }
+  }
+}
+
+let runtimeShutdownPromise = null;
+
+function performRuntimeShutdown (drainTimeoutMs = DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS) {
+  if (!runtimeShutdownPromise) {
+    operationAdmission.beginDrain({ terminal: true });
+    runtimeShutdownPromise = (async () => {
+      const release = await acquireServiceTransition();
+      try {
+        return await performRuntimeCleanup(drainTimeoutMs, { terminal: true });
+      } finally {
+        release();
+      }
+    })();
+  }
+  return runtimeShutdownPromise;
 }
 
 /**
@@ -589,6 +714,7 @@ function restartEvictionTimer () {
 // The reverse proxy that fronts the native service so external OpenAI clients can trigger
 // a load. Null whenever the service is stopped or the gateway was disabled.
 let gateway = null;
+let gatewayOperationId = 0;
 let upstreamPort = null;
 // Identifier → {alias, variantId} for autoload. Rebuilt lazily and invalidated whenever the
 // set of cached models changes, since a stale map would refuse a model the user just added.
@@ -655,6 +781,7 @@ function stopNativeWebService () {
     startAttempted: nativeServiceStartAttempted,
   });
   if (stopped) nativeServiceStartAttempted = false;
+  return stopped;
 }
 
 /** The native service reports readiness on /status; startWebService() returning does not. */
@@ -1497,6 +1624,12 @@ function getOpenAiApiBase (endpoint) {
   return /\/v1$/i.test(trimmed) ? trimmed : `${trimmed}/v1`;
 }
 
+function getNativeOpenAiApiBase () {
+  return upstreamPort
+    ? `http://127.0.0.1:${upstreamPort}/v1`
+    : getOpenAiApiBase(sharedEndpoint);
+}
+
 async function readErrorBody (resp) {
   return readBoundedErrorBody(resp);
 }
@@ -1721,8 +1854,8 @@ function audit(cmd, detail) {
   writeToDisk(entry);
 }
 
-function send (msg) {
-  process.stdout.write(JSON.stringify(msg) + '\n');
+function send (msg, callback) {
+  process.stdout.write(JSON.stringify(msg) + '\n', callback);
 }
 
 function log (level, message) {
@@ -1844,8 +1977,8 @@ rl.on('line', async (line) => {
 
   const { id, cmd, protocolVersion, ...payload } = msg;
 
-  const reply = (result) => {
-    send({ id, protocolVersion: SIDECAR_PROTOCOL_VERSION, ...result });
+  const reply = (result, callback) => {
+    send({ id, protocolVersion: SIDECAR_PROTOCOL_VERSION, ...result }, callback);
   };
 
   if (protocolVersion !== undefined && protocolVersion !== SIDECAR_PROTOCOL_VERSION) {
@@ -1865,8 +1998,27 @@ rl.on('line', async (line) => {
     return;
   }
 
+  const isRuntimeShutdown = cmd === 'shutdownRuntime';
+  const isDrainCommand = cmd === 'stopAndUnload' || isRuntimeShutdown;
+  let operationAdmitted = false;
+  if (isDrainCommand) {
+    // Fence synchronously, before waiting for the service-transition lock. Otherwise commands
+    // arriving while shutdown is queued could still be admitted behind it.
+    operationAdmission.beginDrain({ terminal: isRuntimeShutdown });
+    if (isRuntimeShutdown) explicitShutdownInProgress = true;
+  } else {
+    operationAdmitted = operationAdmission.admit(id, cmd);
+    if (!operationAdmitted) {
+      reply({
+        error: `Runtime is draining; "${cmd}" was not started`,
+        certainty: 'cancelled',
+      });
+      return;
+    }
+  }
+
   const releaseServiceTransition = (
-    cmd === 'startService' || cmd === 'stopService'
+    cmd === 'startService' || cmd === 'stopService' || cmd === 'stopAndUnload'
   ) ? await acquireServiceTransition() : null;
 
   try {
@@ -2142,6 +2294,11 @@ rl.on('line', async (line) => {
             // Proxied traffic never reaches this process, so without this hook a model
             // serving a long completion would look idle and could be evicted underneath it.
             onActivity: noteActivity,
+            admitRequest: () => {
+              const operationId = `gateway:${++gatewayOperationId}`;
+              if (!operationAdmission.admit(operationId, 'gatewayRequest')) return null;
+              return () => operationAdmission.complete(operationId);
+            },
             log,
           });
           try {
@@ -2198,6 +2355,24 @@ rl.on('line', async (line) => {
       log('info', 'Service stopped');
       audit('stopService', {});
       reply({ ok: true });
+    } else if (cmd === 'stopAndUnload') {
+      const drainTimeoutMs = payload.drainTimeoutMs === undefined
+        ? DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS
+        : Math.floor(payload.drainTimeoutMs);
+      const result = await performRuntimeCleanup(drainTimeoutMs);
+      audit('stopAndUnload', result);
+      reply({ ok: true, result });
+    } else if (cmd === 'shutdownRuntime') {
+      const drainTimeoutMs = payload.drainTimeoutMs === undefined
+        ? DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS
+        : Math.floor(payload.drainTimeoutMs);
+      const result = await performRuntimeShutdown(drainTimeoutMs);
+      audit('shutdownRuntime', result);
+      log(
+        result.cleanup === 'confirmed' ? 'info' : 'warn',
+        `Runtime shutdown cleanup=${result.cleanup} active=${result.activeOperations.length}`,
+      );
+      reply({ ok: true, result }, () => process.exit(0));
     } else if (cmd === 'getEndpoint') {
       reply({ ok: true, endpoint: sharedEndpoint });
     } else if (cmd === 'getStatus') {
@@ -2229,7 +2404,7 @@ rl.on('line', async (line) => {
       try {
         const poolEntry = await ensureModel(modelAlias);
         const chatModel = poolEntry.catModel;
-        const apiBase = getOpenAiApiBase(sharedEndpoint);
+        const apiBase = getNativeOpenAiApiBase();
         const preferred = await applyPreferredExecutionProvider(payload.preferredEp, chatModel);
 
         const sdkMessages = toSdkMessages(payload.messages);
@@ -2250,10 +2425,7 @@ rl.on('line', async (line) => {
           if (shouldStream && typeof client?.completeStreamingChat === 'function') {
             let content = '';
             for await (const chunk of client.completeStreamingChat(sdkMessages)) {
-              if (canceledRequests.has(id)) {
-                log('info', `Chat stream canceled for request ${id}`);
-                break;
-              }
+              if (canceledRequests.has(id)) continue;
               const deltaText = chunk?.choices?.[0]?.delta?.content;
               const messageText = chunk?.choices?.[0]?.message?.content ?? chunk?.message?.content;
               let delta = '';
@@ -2321,10 +2493,7 @@ rl.on('line', async (line) => {
           } else if (typeof client?.completeStreamingChat === 'function') {
             let content = '';
             for await (const chunk of client.completeStreamingChat(sdkMessages)) {
-              if (canceledRequests.has(id)) {
-                log('info', `Chat stream canceled for request ${id}`);
-                break;
-              }
+              if (canceledRequests.has(id)) continue;
               const delta = chunk?.choices?.[0]?.delta?.content || '';
               if (delta) content += delta;
             }
@@ -2542,7 +2711,7 @@ rl.on('line', async (line) => {
         if (!sharedEndpoint) {
           throw new Error('Service endpoint unavailable and model has no direct audio client.');
         }
-        const apiBase = getOpenAiApiBase(sharedEndpoint);
+        const apiBase = getNativeOpenAiApiBase();
         const blob = new Blob([bytes], { type: payload.mimeType || 'application/octet-stream' });
         const form = new FormData();
         form.append('file', blob, payload.fileName || 'audio.webm');
@@ -2819,9 +2988,34 @@ rl.on('line', async (line) => {
   } catch (e) {
     reply({ error: e.message || String(e) });
   } finally {
+    if (operationAdmitted) operationAdmission.complete(id);
     releaseServiceTransition?.();
   }
 });
+
+let shutdownExitScheduled = false;
+
+function shutdownAfterInputClosed (reason) {
+  if (shutdownExitScheduled) return;
+  shutdownExitScheduled = true;
+  writeToDisk({
+    type: 'log',
+    level: 'info',
+    message: `Runtime shutdown requested by ${reason}`,
+    timestamp: Date.now(),
+  });
+  const forcedExit = setTimeout(() => process.exit(1), 10_000);
+  void performRuntimeShutdown()
+    .then(() => {
+      if (!explicitShutdownInProgress) process.exit(0);
+    }, () => {
+      if (!explicitShutdownInProgress) process.exit(1);
+    });
+}
+
+rl.on('close', () => shutdownAfterInputClosed('stdin close'));
+process.once('SIGTERM', () => shutdownAfterInputClosed('SIGTERM'));
+process.once('SIGINT', () => shutdownAfterInputClosed('SIGINT'));
 
 // initDiskLog opens today's log file and prunes files older than 7 days.
 initDiskLog();

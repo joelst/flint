@@ -76,11 +76,46 @@ describe('foundry-sidecar protocol basics', () => {
       proc.stdin.write(`${JSON.stringify({ id: 2, cmd: 'unknownCommand' })}\n`);
       const unknown = await waitForLine(proc, (msg) => msg.id === 2);
       expect(String(unknown.error)).toContain('Unknown command');
+
+      proc.stdin.write(`${JSON.stringify({ id: 4, cmd: 'stopAndUnload', drainTimeoutMs: 0 })}\n`);
+      const stopped = await waitForLine(proc, (msg) => msg.id === 4);
+      expect(stopped.result).toMatchObject({ drained: true, cleanup: 'confirmed' });
+
+      proc.stdin.write(`${JSON.stringify({ id: 5, cmd: 'getStatus' })}\n`);
+      const status = await waitForLine(proc, (msg) => msg.id === 5);
+      expect(status.ok).toBe(true);
     } finally {
       if (!proc.killed) {
         proc.kill();
       }
     }
+  });
+
+  it('acknowledges runtime cleanup before exiting on explicit shutdown', async () => {
+    const proc = spawn(process.execPath, ['sidecar/foundry-sidecar.js'], {
+      cwd: process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+      proc.once('exit', (code, signal) => resolve({ code, signal }));
+    });
+
+    await waitForLine(proc, (msg) => msg.ready === true);
+    proc.stdin.write(`${JSON.stringify({ id: 3, cmd: 'shutdownRuntime', drainTimeoutMs: 0 })}\n`);
+    const response = await waitForLine(proc, (msg) => msg.id === 3);
+
+    expect(response.ok).toBe(true);
+    expect(response.result).toMatchObject({
+      endpointWithdrawn: true,
+      serviceStopped: true,
+      drained: true,
+      activeOperations: [],
+      modelsUnloaded: [],
+      unloadFailures: [],
+      nativeServiceStopped: true,
+      cleanup: 'confirmed',
+    });
+    await expect(exited).resolves.toEqual({ code: 0, signal: null });
   });
 });
 
@@ -143,6 +178,12 @@ describe('foundry-sidecar command schema validation', () => {
     const res = await waitForLine(proc, (msg) => msg.id === 14);
     // requestId is present but wrong type; sidecar rejects at the handler level
     expect(res.error).toBeTruthy();
+  });
+
+  it('rejects invalid runtime shutdown drain deadlines', async () => {
+    proc.stdin.write(`${JSON.stringify({ id: 18, cmd: 'stopAndUnload', drainTimeoutMs: -1 })}\n`);
+    const res = await waitForLine(proc, (msg) => msg.id === 18);
+    expect(String(res.error)).toContain('finite non-negative number');
   });
 
   it('rejects load with invalid lane name', async () => {

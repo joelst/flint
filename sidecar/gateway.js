@@ -49,6 +49,8 @@ const UPSTREAM_TIMEOUT_MS = 0; // no timeout: generation can legitimately run fo
  * @param {(model: string, phase: 'start'|'end') => void} [options.onActivity]
  *        called around every request that names a model, so the owner can keep a model
  *        alive while it is being served and record when it was last used
+ * @param {() => (() => void)|null} [options.admitRequest]
+ *        atomically admits a request and returns its completion callback; null rejects it
  * @param {boolean} [options.autoload]       default true
  * @param {boolean} [options.loopbackOnlyAutoload] default true
  * @param {number} [options.maxBufferedBody]
@@ -64,6 +66,7 @@ export function createGateway (options) {
     load,
     log = () => {},
     onActivity = () => {},
+    admitRequest,
     autoload = true,
     loopbackOnlyAutoload = true,
     maxBufferedBody = DEFAULT_MAX_BUFFERED_BODY,
@@ -152,6 +155,20 @@ export function createGateway (options) {
   }
 
   async function handleRequest (req, res) {
+    const completeAdmission = admitRequest?.();
+    if (admitRequest && !completeAdmission) {
+      res.writeHead(503, { 'content-type': 'application/json' });
+      res.end(openAiError('The local runtime is draining and is not accepting new work.', 'server_error'));
+      return;
+    }
+    try {
+      return await handleAdmittedRequest(req, res);
+    } finally {
+      completeAdmission?.();
+    }
+  }
+
+  async function handleAdmittedRequest (req, res) {
     const buffered = await maybeBufferBody(req, res);
     if (buffered === ABORTED) return;
 
@@ -428,6 +445,22 @@ export function createGateway (options) {
     });
   }
 
+  let closePromise = null;
+
+  function beginStop () {
+    if (closePromise) return closePromise;
+    closePromise = new Promise(resolve2 => {
+      if (!server.listening) {
+        resolve2();
+        return;
+      }
+      server.close(() => resolve2());
+      server.closeIdleConnections?.();
+    });
+    closePromise.then(() => rewrites.clear());
+    return closePromise;
+  }
+
   return {
     get publicPort () { return boundPort ?? publicPort; },
     /** Bind before Foundry starts so a port clash surfaces as a clear error, not a hang. */
@@ -444,15 +477,16 @@ export function createGateway (options) {
         server.listen(publicPort, bindAddress);
       });
     },
-    stop () {
-      generation += 1;
-      // Learned routings describe models loaded by the service we are dropping.
-      rewrites.clear();
-      return new Promise(resolve2 => {
+    beginStop,
+    stop ({ force = true } = {}) {
+      const closing = beginStop();
+      if (force) {
+        generation += 1;
+        rewrites.clear();
         agent.destroy();
-        server.close(() => resolve2());
         server.closeAllConnections?.();
-      });
+      }
+      return closing;
     },
   };
 }

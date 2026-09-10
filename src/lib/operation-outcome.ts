@@ -65,6 +65,8 @@ export const COMMAND_EFFECTS: Record<SidecarCommandName, OperationEffect> = {
   setLogLevel: 'effectful',
   startService: 'effectful',
   stopService: 'effectful',
+  stopAndUnload: 'effectful',
+  shutdownRuntime: 'effectful',
   load: 'effectful',
   unload: 'effectful',
   ensureAccelerators: 'effectful',
@@ -146,6 +148,8 @@ function recoveryAdvice(cmd: string): string {
       return "Reopen the model's prompt template to see which version was saved.";
     case 'startService':
     case 'stopService':
+    case 'stopAndUnload':
+    case 'shutdownRuntime':
     case 'init':
     case 'setLogLevel':
     case 'load':

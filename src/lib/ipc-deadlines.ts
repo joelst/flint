@@ -31,6 +31,8 @@ export const IPC_COMMAND_DEADLINES_MS: Record<SidecarCommandName, number | null>
   setLogLevel: null,
   startService: null,
   stopService: null,
+  stopAndUnload: null,
+  shutdownRuntime: null,
   load: null,
   unload: null,
   ensureAccelerators: null,

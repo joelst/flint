@@ -115,6 +115,9 @@ export interface ModelContextInfo {
 }
 let sidecarProcess: any = null;
 let sidecarReady = false;
+let runtimeQuitRequested = false;
+let expectedShutdownGeneration: number | null = null;
+const closeObservers = new Map<number, Set<() => void>>();
 /** Last successful Node runtime (bundled externalBin vs PATH). */
 let activeNodeMode: NodeRuntimeMode | null = null;
 type PendingRequest = {
@@ -335,9 +338,9 @@ export interface PoolStats {
   eviction?: EvictionConfig;
 }
 
-export type RuntimeProcessState = 'stopped' | 'starting' | 'ready' | 'crashed';
+export type RuntimeProcessState = 'stopped' | 'starting' | 'ready' | 'stopping' | 'crashed' | 'unknown';
 export type RuntimeManagerState = 'unknown' | 'uninitialized' | 'initializing' | 'ready' | 'failed';
-export type RuntimeServiceState = 'unknown' | 'stopped' | 'starting' | 'stopping' | 'running' | 'failed';
+export type RuntimeServiceState = 'unknown' | 'stopped' | 'starting' | 'draining' | 'stopping' | 'running' | 'failed';
 export type RuntimeModelState = 'unknown' | 'empty' | 'loading' | 'ready';
 
 export interface RuntimeState {
@@ -410,6 +413,40 @@ function drainPending(cause: InterruptionCause, detail: string) {
   clearProgressHandlers();
 }
 
+function cancelUndispatchedForRuntimeQuit() {
+  for (const [id, entry] of [...pending]) {
+    if (!entry.dispatched) cancelBeforeDispatch(id);
+  }
+}
+
+function observeSidecarClose(generation: number, timeoutMs: number): Promise<boolean> {
+  if (generation !== sidecarGeneration || !sidecarProcess) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (closed: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const observers = closeObservers.get(generation);
+      observers?.delete(onClose);
+      if (observers?.size === 0) closeObservers.delete(generation);
+      resolve(closed);
+    };
+    const onClose = () => finish(true);
+    const timer = setTimeout(() => finish(false), Math.max(1, timeoutMs));
+    const observers = closeObservers.get(generation) ?? new Set();
+    observers.add(onClose);
+    closeObservers.set(generation, observers);
+  });
+}
+
+function notifySidecarClose(generation: number) {
+  const observers = closeObservers.get(generation);
+  if (!observers) return;
+  closeObservers.delete(generation);
+  for (const resolve of observers) resolve();
+}
+
 function deleteProgressHandler(id: number) {
   progressHandlers.get(id)?.watchdog?.stop();
   progressHandlers.delete(id);
@@ -470,6 +507,9 @@ async function startSidecar(): Promise<void> {
 
 async function spawnSidecar() {
   if (sidecarProcess) return;
+  if (runtimeQuitRequested) {
+    throw new Error('The runtime is shutting down.');
+  }
   updateRuntime({ process: 'starting', manager: 'unknown', service: 'unknown', models: 'unknown' });
 
   const nodeCheck = await ensureNodeRuntime();
@@ -601,7 +641,13 @@ async function spawnSidecar() {
         // did not complete. It may still have done part of its work, which `describeOutcome`
         // says rather than implying a rollback that never happens.
         msg.error
-          ? p.reject(new SidecarOperationError(p.cmd, 'failed', String(msg.error)))
+          ? p.reject(
+              new SidecarOperationError(
+                p.cmd,
+                msg.certainty === 'cancelled' ? 'cancelled' : 'failed',
+                String(msg.error),
+              ),
+            )
           : p.resolve(msg);
       } else if (msg.type === 'log') {
         console.log(`[sidecar] ${msg.level}: ${msg.message}`);
@@ -673,6 +719,8 @@ async function spawnSidecar() {
       console.log('[sdk] Ignoring close from a superseded sidecar child');
       return;
     }
+    const closedGeneration = myGeneration ?? sidecarGeneration;
+    const expectedShutdown = expectedShutdownGeneration === closedGeneration;
     sidecarReady = false;
     sidecarProcess = null;
     // The manager lived inside that process. Leaving `managerInstance` set would make
@@ -688,14 +736,14 @@ async function spawnSidecar() {
       ...s,
       runtime: {
         ...s.runtime,
-        process: 'crashed',
+        process: expectedShutdown ? 'stopped' : 'crashed',
         manager: 'unknown',
-        service: 'unknown',
-        models: 'unknown',
+        service: expectedShutdown ? 'stopped' : 'unknown',
+        models: expectedShutdown ? 'empty' : 'unknown',
         generation: sidecarGeneration,
       },
       ready: false,
-      error: 'Sidecar closed',
+      error: expectedShutdown ? null : 'Sidecar closed',
       serviceRunning: false,
       endpoint: undefined,
       pool: [],
@@ -704,6 +752,8 @@ async function spawnSidecar() {
       models: s.models.map((m) => (m.isLoaded ? { ...m, isLoaded: false } : m)),
     }));
     drainPending('connection-lost', 'The runtime process stopped.');
+    notifySidecarClose(closedGeneration);
+    if (expectedShutdown) expectedShutdownGeneration = null;
   });
 
   command.on('error', (error: any) => {
@@ -716,8 +766,21 @@ async function spawnSidecar() {
 
   // spawn() returns the Child process which has .write()
   console.log(`[sdk] Calling spawn()...`);
-  sidecarProcess = await command.spawn();
+  const spawnedProcess = await command.spawn();
+  if (closeData) {
+    throw new Error(formatStartupFailure(stdoutEventFired, stderrLines, closeData, commandError));
+  }
+  sidecarProcess = spawnedProcess;
   myGeneration = ++sidecarGeneration;
+  if (runtimeQuitRequested) {
+    expectedShutdownGeneration = myGeneration;
+    updateRuntime({ generation: myGeneration, process: 'stopping' });
+    try {
+      const killing = sidecarProcess.kill?.();
+      Promise.resolve(killing).catch(() => {});
+    } catch {}
+    throw new Error('The runtime was asked to shut down while it was starting.');
+  }
   updateRuntime({ generation: myGeneration, process: sidecarReady ? 'ready' : 'starting' });
   console.log(`[sdk] Sidecar process spawned, waiting for ready signal...`);
 
@@ -751,8 +814,12 @@ async function spawnSidecar() {
   } catch (e) {
     // Best effort cleanup so next attempt can retry fresh
     if (readyTimeout) clearTimeout(readyTimeout);
-    try { sidecarProcess?.kill?.(); } catch {}
-    sidecarProcess = null;
+    if (!runtimeQuitRequested) {
+      try {
+        const killing = sidecarProcess?.kill?.();
+        Promise.resolve(killing).catch(() => {});
+      } catch {}
+    }
     sidecarReady = false;
     throw e;
   }
@@ -774,6 +841,15 @@ function sendInternal(
   onAssignedId?: (id: number) => void,
   onDispatch?: (generation: number) => void,
 ): Promise<any> {
+  if (runtimeQuitRequested && cmd !== 'shutdownRuntime') {
+    return Promise.reject(
+      new SidecarOperationError(
+        cmd,
+        'cancelled',
+        'The runtime is shutting down, so this request was not sent.',
+      ),
+    );
+  }
   // Allocated before anything is awaited, so a Stop arriving while the sidecar is still starting
   // has an id to name. Previously the id existed only after startup finished, so a stop during
   // that window had nothing to cancel and the request was written anyway once startup completed.
@@ -862,6 +938,18 @@ function sendInternal(
       if (!sidecarProcess || !sidecarReady) {
         await startSidecar();
         if (!active()) return;
+        if (!sidecarProcess || !sidecarReady) {
+          settle(() =>
+            entry.reject(
+              new SidecarOperationError(
+                cmd,
+                'failed',
+                'The runtime process did not become ready.',
+              ),
+            ),
+          );
+          return;
+        }
         // A fresh sidecar process has no SDK manager. If we had initialized before — i.e. this
         // spawn is a respawn after a crash — re-init transparently, or every catalog-touching
         // command would fail until the whole app restarts. This re-initializes a *new* process
@@ -1676,6 +1764,185 @@ export async function stopService(): Promise<void> {
   });
 }
 
+export interface RuntimeShutdownCleanup {
+  endpointWithdrawn: boolean;
+  serviceStopped: boolean;
+  drained: boolean;
+  activeOperations: Array<{ id: number | string; command: string }>;
+  modelsUnloaded: string[];
+  unloadFailures: string[];
+  nativeServiceStopped: boolean;
+  cleanup: 'confirmed' | 'timed-out' | 'failed';
+}
+
+export interface RuntimeQuitResult {
+  cleanup: RuntimeShutdownCleanup | null;
+  termination: 'confirmed' | 'escalated-confirmed' | 'unconfirmed';
+}
+
+let runtimeQuitPromise: Promise<RuntimeQuitResult> | null = null;
+
+function normalizeRuntimeTimeout(value: number | undefined, fallback: number, minimum: number): number {
+  return Number.isFinite(value) && value! >= 0
+    ? Math.max(minimum, Math.floor(value!))
+    : fallback;
+}
+
+/** Stop HTTP traffic and unload models after already-admitted work drains. */
+export async function stopAndUnload(options: {
+  drainTimeoutMs?: number;
+} = {}): Promise<RuntimeShutdownCleanup> {
+  serviceStopFence += 1;
+  return withServiceTransition(async () => {
+    updateRuntime({ service: 'draining' });
+    const drainTimeoutMs = normalizeRuntimeTimeout(options.drainTimeoutMs, 5_000, 0);
+    let result: RuntimeShutdownCleanup;
+    try {
+      const response = await send('stopAndUnload', { drainTimeoutMs });
+      result = response.result as RuntimeShutdownCleanup;
+    } catch (e) {
+      currentEndpoint = undefined;
+      updateState({ endpoint: undefined, serviceRunning: false });
+      updateRuntime({
+        service: isUncertainOutcome(e) ? 'unknown' : 'failed',
+        models: 'unknown',
+      });
+      throw e;
+    }
+
+    const unloaded = new Set(result.modelsUnloaded);
+    currentEndpoint = undefined;
+    currentRuntimeServiceState = result.serviceStopped ? 'stopped' : 'failed';
+    sdkState.update((state) => ({
+      ...state,
+      endpoint: undefined,
+      serviceRunning: false,
+      pool: state.pool.filter((entry) => !unloaded.has(entry.alias)),
+      loadedModels: state.loadedModels.filter((model) => !unloaded.has(model.alias)),
+      models: state.models.map((model) =>
+        unloaded.has(model.alias) ? { ...model, isLoaded: false } : model
+      ),
+      runtime: {
+        ...state.runtime,
+        service: result.serviceStopped ? 'stopped' : 'failed',
+        models: result.drained && result.unloadFailures.length === 0 ? 'empty' : 'unknown',
+      },
+    }));
+    return result;
+  });
+}
+
+/**
+ * Shut down the runtime process, escalating to the owned child handle only when graceful cleanup
+ * does not produce a close event. Process termination is reported only from that close event.
+ */
+export function quitRuntime(options: {
+  drainTimeoutMs?: number;
+  gracefulTimeoutMs?: number;
+  killTimeoutMs?: number;
+} = {}): Promise<RuntimeQuitResult> {
+  if (runtimeQuitPromise) return runtimeQuitPromise;
+
+  runtimeQuitRequested = true;
+  serviceStopFence += 1;
+  cancelUndispatchedForRuntimeQuit();
+
+  const quitting = (async (): Promise<RuntimeQuitResult> => {
+    const gracefulTimeoutMs = normalizeRuntimeTimeout(options.gracefulTimeoutMs, 6_000, 1);
+    if (!sidecarProcess && startPromise) {
+      await Promise.race([
+        startPromise.catch(() => {}),
+        new Promise((resolve) => setTimeout(resolve, gracefulTimeoutMs)),
+      ]);
+    }
+
+    const processToStop = sidecarProcess;
+    const generation = sidecarGeneration;
+    if (!processToStop) {
+      if (startPromise) {
+        updateRuntime({ process: 'unknown', service: 'unknown', models: 'unknown' });
+        updateState({ ready: false, error: 'Runtime termination could not be confirmed.' });
+        return { cleanup: null, termination: 'unconfirmed' };
+      }
+      updateRuntime({ process: 'stopped', service: 'stopped', models: 'empty' });
+      updateState({
+        ready: false,
+        error: null,
+        endpoint: undefined,
+        serviceRunning: false,
+        pool: [],
+        poolStats: null,
+        loadedModels: [],
+      });
+      return { cleanup: null, termination: 'confirmed' };
+    }
+
+    const drainTimeoutMs = normalizeRuntimeTimeout(options.drainTimeoutMs, 4_000, 0);
+    const killTimeoutMs = normalizeRuntimeTimeout(options.killTimeoutMs, 2_000, 1);
+    expectedShutdownGeneration = generation;
+    updateRuntime({ process: 'stopping', service: 'draining' });
+
+    if (!sidecarReady) {
+      const forcedClose = observeSidecarClose(generation, killTimeoutMs);
+      try {
+        const killing = processToStop.kill?.();
+        Promise.resolve(killing).catch((e) => {
+          console.warn('[sdk] Failed to terminate sidecar while it was starting', e);
+        });
+      } catch (e) {
+        console.warn('[sdk] Failed to terminate sidecar while it was starting', e);
+      }
+      if (await forcedClose) {
+        return { cleanup: null, termination: 'escalated-confirmed' };
+      }
+      updateRuntime({ process: 'unknown', service: 'unknown', models: 'unknown' });
+      updateState({ ready: false, error: 'Runtime termination could not be confirmed.' });
+      return { cleanup: null, termination: 'unconfirmed' };
+    }
+
+    const gracefulClose = observeSidecarClose(generation, gracefulTimeoutMs);
+    const command = sendInternal('shutdownRuntime', { drainTimeoutMs }).then(
+      (response) => ({ kind: 'reply' as const, cleanup: response.result as RuntimeShutdownCleanup }),
+      (error) => ({ kind: 'error' as const, error }),
+    );
+    const first = await Promise.race([
+      gracefulClose.then((closed) => ({ kind: 'close' as const, closed })),
+      command,
+    ]);
+
+    const cleanup: RuntimeShutdownCleanup | null =
+      first.kind === 'reply' ? first.cleanup : null;
+    let closed = first.kind === 'close' ? first.closed : await gracefulClose;
+    if (closed) return { cleanup, termination: 'confirmed' };
+
+    const forcedClose = observeSidecarClose(generation, killTimeoutMs);
+    try {
+      const killing = processToStop.kill?.();
+      Promise.resolve(killing).catch((e) => {
+        console.warn('[sdk] Failed to terminate sidecar after graceful shutdown timed out', e);
+      });
+    } catch (e) {
+      console.warn('[sdk] Failed to terminate sidecar after graceful shutdown timed out', e);
+    }
+    closed = await forcedClose;
+    if (closed) return { cleanup, termination: 'escalated-confirmed' };
+
+    updateRuntime({ process: 'unknown', service: 'unknown', models: 'unknown' });
+    updateState({
+      ready: false,
+      error: 'Runtime termination could not be confirmed.',
+      endpoint: undefined,
+      serviceRunning: false,
+    });
+    return { cleanup, termination: 'unconfirmed' };
+  })();
+  const resultPromise = quitting.finally(() => {
+    runtimeQuitPromise = null;
+  });
+  runtimeQuitPromise = resultPromise;
+  return resultPromise;
+}
+
 /** The lock-free lifecycle operations handed to a `withServiceTransition` callback. */
 export interface ServiceTransitionHandle {
   startNow(
@@ -1905,6 +2172,10 @@ export function resetSDK() {
   managerReady = false;
   lastInitPayload = null; // a deliberate reset must not auto-re-init on the next send
   currentEndpoint = undefined;
+  runtimeQuitRequested = false;
+  runtimeQuitPromise = null;
+  expectedShutdownGeneration = null;
+  closeObservers.clear();
   sdkState.set(initialState);
 }
 

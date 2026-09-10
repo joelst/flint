@@ -8,6 +8,8 @@ export type SidecarCommand =
   | { cmd: 'setLogLevel'; level: string }
   | { cmd: 'startService'; port: number; alias?: string; preferredEp?: string; bindAddress?: string; gateway?: boolean }
   | { cmd: 'stopService' }
+  | { cmd: 'stopAndUnload'; drainTimeoutMs?: number }
+  | { cmd: 'shutdownRuntime'; drainTimeoutMs?: number }
   | { cmd: 'getStatus' }
   | { cmd: 'listModels' }
   | { cmd: 'download'; alias: string; variantId?: string }
@@ -81,7 +83,7 @@ export interface PromptTemplate {
 export type SidecarCommandName = SidecarCommand['cmd'];
 
 export const KNOWN_COMMANDS = new Set<SidecarCommandName>([
-  'init', 'setLogLevel', 'startService', 'stopService', 'getStatus',
+  'init', 'setLogLevel', 'startService', 'stopService', 'stopAndUnload', 'shutdownRuntime', 'getStatus',
   'listModels', 'download', 'load', 'unload', 'deleteModel', 'getEndpoint',
   'chatCompletion', 'cancelChatRequest', 'transcribeAudio',
   'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',

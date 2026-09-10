@@ -7,6 +7,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import http from 'node:http';
+import net from 'node:net';
 import { createGateway, respondBuffered } from './gateway.js';
 
 /** @type {{ server: http.Server, port: number, loaded: Set<string>, hits: any[] }} */
@@ -847,5 +848,127 @@ describe('gateway activity hook', () => {
     gateway = await startGateway({ onActivity: () => { throw new Error('hook exploded'); } });
     const res = await post(gateway.publicPort, 'phi-4-mini');
     expect(res.status).toBe(200);
+  });
+
+  it('holds an admission lease across autoload and replay', async () => {
+    const events = [];
+    gateway = await startGateway({
+      load: async alias => { upstream.state.loaded.add(alias); },
+      admitRequest: () => {
+        events.push('admit');
+        return () => events.push('complete');
+      },
+    });
+
+    const res = await post(gateway.publicPort, 'qwen3-0.6b');
+    expect(res.status).toBe(200);
+    expect(events).toEqual(['admit', 'complete']);
+  });
+
+  it('rejects new model work when admission is fenced', async () => {
+    gateway = await startGateway({ admitRequest: () => null });
+    const res = await post(gateway.publicPort, 'qwen3-0.6b');
+
+    expect(res.status).toBe(503);
+    expect(upstream.state.hits).toHaveLength(0);
+  });
+
+  it('rejects non-model requests when admission is fenced', async () => {
+    gateway = await startGateway({ admitRequest: () => null });
+    const res = await request(gateway.publicPort, '/v1/models');
+
+    expect(res.status).toBe(503);
+    expect(upstream.state.hits).toHaveLength(0);
+  });
+
+  it('stops accepting without destroying an admitted response', async () => {
+    await new Promise(r => upstream.server.close(r));
+    let finish;
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('data: first\n\n');
+      finish = () => res.end('data: [DONE]\n\n');
+    });
+    const events = [];
+    gateway = await startGateway({
+      admitRequest: () => {
+        events.push('admit');
+        return () => events.push('complete');
+      },
+    });
+
+    const response = request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'phi-4-mini' }),
+    });
+    while (!finish) await new Promise(r => setTimeout(r, 1));
+    let stopped = false;
+    const stopping = gateway.beginStop().then(() => { stopped = true; });
+    await new Promise(r => setTimeout(r, 10));
+    expect(stopped).toBe(false);
+    expect(events).toEqual(['admit']);
+
+    finish();
+    await expect(response).resolves.toMatchObject({ status: 200 });
+    await stopping;
+    expect(events).toEqual(['admit', 'complete']);
+  });
+
+  it('allows an admitted autoload to replay during graceful listener shutdown', async () => {
+    let releaseLoad;
+    let loadStarted = false;
+    gateway = await startGateway({
+      load: alias => new Promise(resolve => {
+        loadStarted = true;
+        releaseLoad = () => {
+          upstream.state.loaded.add(alias);
+          resolve(alias);
+        };
+      }),
+      admitRequest: () => () => {},
+    });
+
+    const response = post(gateway.publicPort, 'qwen3-0.6b');
+    while (!loadStarted) await new Promise(r => setTimeout(r, 1));
+    const stopping = gateway.beginStop();
+    releaseLoad();
+
+    await expect(response).resolves.toMatchObject({ status: 200 });
+    await stopping;
+    expect(upstream.state.hits).toHaveLength(2);
+  });
+
+  it('force-closes a partial connection left after graceful accepting stops', async () => {
+    let admitted = false;
+    gateway = await startGateway({
+      admitRequest: () => {
+        admitted = true;
+        return () => {};
+      },
+    });
+    const socket = net.connect(gateway.publicPort, '127.0.0.1');
+    await new Promise<void>((resolve, reject) => {
+      socket.once('connect', resolve);
+      socket.once('error', reject);
+    });
+    socket.write(
+      'POST /v1/chat/completions HTTP/1.1\r\n'
+      + 'Host: localhost\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n'
+      + '{"model":"partial"',
+    );
+    while (!admitted) await new Promise(r => setTimeout(r, 1));
+
+    let stopped = false;
+    gateway.beginStop().then(() => { stopped = true; });
+    await new Promise(r => setTimeout(r, 10));
+    expect(stopped).toBe(false);
+
+    await gateway.stop({ force: true });
+    expect(stopped).toBe(true);
+    for (let i = 0; i < 50 && !socket.destroyed; i += 1) {
+      await new Promise(r => setTimeout(r, 1));
+    }
+    expect(socket.destroyed).toBe(true);
   });
 });

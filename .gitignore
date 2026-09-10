@@ -9,6 +9,7 @@ node_modules
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 testResults.xml
+.npm-cache/*
 
 # Test coverage output (npm run test:coverage)
 /coverage/
