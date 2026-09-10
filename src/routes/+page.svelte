@@ -17,6 +17,8 @@
     startService,
     ensureServiceRunning as sdkEnsureServiceRunning,
     stopService,
+    stopAndUnload,
+    quitRuntime,
     withServiceTransition,
     downloadModel,
     loadModel as sdkLoadModel,
@@ -4015,6 +4017,25 @@ updateStateFromSdk();
     }
   }
 
+  async function stopAndUnloadModels() {
+    startupAuthorization.invalidate();
+    try {
+      statusMessage = "Stopping service and waiting for active work...";
+      const result = await stopAndUnload();
+      serviceStartUncertain = isServiceStartUncertain();
+      updateStateFromSdk();
+      statusMessage = result.cleanup === "confirmed"
+        ? "Service stopped and models unloaded"
+        : result.serviceStopped
+          ? `Service stopped; model cleanup ${result.cleanup}`
+          : `Endpoint withdrawn; native service cleanup ${result.cleanup}`;
+      appendAppLog(statusMessage, result.cleanup === "confirmed" ? "info" : "warn");
+    } catch (e: any) {
+      statusMessage = `Failed to stop and unload: ${e?.message || e}`;
+      appendAppLog(statusMessage, "error");
+    }
+  }
+
   async function refreshServiceStatus() {
     await refreshModels();
     updateStateFromSdk();
@@ -4251,9 +4272,18 @@ updateStateFromSdk();
     // destroy() below bypasses every other shutdown path, so this is the only chance to write.
     flushConversations();
     try {
-      // Graceful stop, but never let a hung sidecar block quitting.
-      await Promise.race([stopService(), new Promise((r) => setTimeout(r, 5000))]);
-    } catch {}
+      const shutdown = await quitRuntime();
+      if (shutdown.termination === "unconfirmed") {
+        appendAppLog("Runtime termination could not be confirmed before Flint exited", "warn");
+      } else if (shutdown.cleanup && shutdown.cleanup.cleanup !== "confirmed") {
+        appendAppLog(
+          `Runtime exited after cleanup was ${shutdown.cleanup.cleanup}; some active work may not have drained`,
+          "warn",
+        );
+      }
+    } catch (e: any) {
+      appendAppLog(`Runtime shutdown failed before exit: ${e?.message || e}`, "warn");
+    }
     try { await trayIcon?.close(); } catch {}
     trayIcon = null;
     // Again, after the awaits. A streaming callback can land while the service is stopping, so
@@ -4289,7 +4319,11 @@ updateStateFromSdk();
     // shutdown hook, so this is the last point at which unsaved conversations can still be
     // written.
     flushConversations();
-    if (!keepServiceInBackground || !state.serviceRunning) return; // normal close = quit
+    if (!keepServiceInBackground || !state.serviceRunning) {
+      event.preventDefault();
+      await quitFromTray();
+      return;
+    }
     // Create the tray BEFORE preventing the close: if the tray cannot be created, fall
     // through to a normal quit rather than stranding a hidden window nothing can reopen.
     try {
@@ -7568,6 +7602,12 @@ Output only the summary text, no preamble.`;
                 disabled={!state.serviceRunning}
               >
                 Stop Service
+              </button>
+              <button
+                onclick={stopAndUnloadModels}
+                disabled={!state.ready}
+              >
+                Stop &amp; Unload
               </button>
               <button onclick={refreshServiceStatus} disabled={!state.ready}>
                 Refresh Status

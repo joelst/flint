@@ -34,6 +34,9 @@ type Harness = {
   releaseSpawn?: () => void;
   /** True once `spawn()` has been entered, so a test can act during a gated startup. */
   spawnEntered: boolean;
+  spawnCount: number;
+  killCount: number;
+  hangKill: boolean;
 };
 
 let harness: Harness;
@@ -63,7 +66,10 @@ function makeCommand() {
       }
       return Promise.resolve();
     },
-    kill: () => {},
+    kill: () => {
+      harness.killCount += 1;
+      if (harness.hangKill) return new Promise(() => {});
+    },
   };
 
   live = {
@@ -96,6 +102,7 @@ function makeCommand() {
     },
     async spawn() {
       harness.spawnEntered = true;
+      harness.spawnCount += 1;
       if (gateSpawn) {
         await new Promise<void>((resolve) => {
           harness.releaseSpawn = resolve;
@@ -143,6 +150,9 @@ async function loadSdk() {
       live.emitError(err);
     },
     spawnEntered: false,
+    spawnCount: 0,
+    killCount: 0,
+    hangKill: false,
   };
   gateSpawn = false;
   readyProtocolVersion = 1;
@@ -257,6 +267,34 @@ describe('settlement revokes permission to dispatch', () => {
     expect(harness.writes).toHaveLength(0);
   });
 
+  it('does not claim a failed-start child terminated without a close event', async () => {
+    const sdk = await loadSdk();
+    readyProtocolVersion = 999;
+    const request = capture(sdk.getEps());
+    await request.tracked;
+    expect(harness.killCount).toBe(1);
+
+    const result = await sdk.quitRuntime({ killTimeoutMs: 10 });
+    expect(harness.killCount).toBe(2);
+    expect(result.termination).toBe('unconfirmed');
+  });
+
+  it('uses close evidence even when a late-spawn kill acknowledgement hangs', async () => {
+    const sdk = await loadSdk();
+    gateSpawn = true;
+    harness.hangKill = true;
+    const request = capture(sdk.getEps());
+    await waitFor('the send path to reach the gated spawn', () => harness.spawnEntered);
+
+    const quitting = sdk.quitRuntime({ gracefulTimeoutMs: 100, killTimeoutMs: 100 });
+    harness.releaseSpawn?.();
+    await waitFor('the late-spawn kill request', () => harness.killCount >= 1);
+    harness.emitClose({ code: null, signal: 'SIGTERM' });
+
+    await request.tracked;
+    await expect(quitting).resolves.toMatchObject({ termination: 'confirmed' });
+  });
+
   it('never writes a request that was drained while the runtime was starting', async () => {
     const sdk = await loadSdk();
     gateSpawn = true;
@@ -276,6 +314,24 @@ describe('settlement revokes permission to dispatch', () => {
     harness.releaseSpawn?.();
     await settleStartup();
     expect(harness.writes.filter((w) => w.includes('deleteModel'))).toHaveLength(0);
+  });
+
+  it('does not retain a child that closed before spawn resolved', async () => {
+    const sdk = await loadSdk();
+    gateSpawn = true;
+    const first = capture(sdk.getEps());
+    await waitFor('the first spawn to be pending', () => harness.spawnEntered);
+    harness.emitClose({ code: 1 });
+    harness.releaseSpawn?.();
+    await first.tracked;
+    expect(first.box.err).toBeDefined();
+
+    gateSpawn = false;
+    const retry = sdk.getEps();
+    const retryId = await waitForWrite('getEps');
+    harness.emitStdout({ id: retryId, result: [] });
+    await expect(retry).resolves.toEqual([]);
+    expect(harness.spawnCount).toBe(2);
   });
 
   it('reports a drained undispatched request as failed, not unknown', async () => {
@@ -641,6 +697,21 @@ describe('classification of an interrupted mutation', () => {
     await tracked;
     expect(box.err.certainty).toBe('failed');
   });
+
+  it('preserves a sidecar-confirmed cancellation as not executed', async () => {
+    const sdk = await loadSdk();
+    const request = capture(sdk.deleteModel({ alias: 'late-model' } as any));
+    const id = await waitForWrite('deleteModel');
+    harness.emitStdout({
+      id,
+      error: 'Runtime is draining; "deleteModel" was not started',
+      certainty: 'cancelled',
+    });
+
+    await request.tracked;
+    expect(request.box.err.certainty).toBe('cancelled');
+    expect(request.box.err.message).toContain('did not run');
+  });
 });
 
 describe('service start uncertainty', () => {
@@ -742,6 +813,160 @@ describe('service start uncertainty', () => {
     // The sidecar handles commands concurrently, so the earlier start may still be inside
     // startWebService() and can bring the service up again after Stop has replied.
     expect(sdk.isServiceStartUncertain()).toBe(true);
+  });
+
+  it('stops and unloads without terminating the reusable runtime', async () => {
+    const sdk = await loadSdk();
+    const start = sdk.startService(5272);
+    const startId = await waitForWrite('startService');
+    harness.emitStdout({ id: startId, endpoint: 'http://127.0.0.1:5272' });
+    await start;
+
+    const stopping = sdk.stopAndUnload({ drainTimeoutMs: 25 });
+    const stopId = await waitForWrite('stopAndUnload');
+    const cleanup = {
+      endpointWithdrawn: true,
+      serviceStopped: true,
+      drained: true,
+      activeOperations: [],
+      modelsUnloaded: [],
+      unloadFailures: [],
+      nativeServiceStopped: true,
+      cleanup: 'confirmed',
+    };
+    harness.emitStdout({ id: stopId, result: cleanup });
+
+    await expect(stopping).resolves.toEqual(cleanup);
+    expect(harness.killCount).toBe(0);
+    const snapshot = getLastSdkSnapshot(sdk);
+    expect(snapshot.runtime.process).toBe('ready');
+    expect(snapshot.runtime.service).toBe('stopped');
+    expect(snapshot.runtime.models).toBe('empty');
+  });
+
+  it('does not publish a stopped native service when cleanup reports failure', async () => {
+    const sdk = await loadSdk();
+    const warmup = sdk.getEps();
+    const warmupId = await waitForWrite('getEps');
+    harness.emitStdout({ id: warmupId, result: [] });
+    await warmup;
+
+    const stopping = sdk.stopAndUnload();
+    const stopId = await waitForWrite('stopAndUnload');
+    harness.emitStdout({
+      id: stopId,
+      result: {
+        endpointWithdrawn: true,
+        serviceStopped: false,
+        drained: true,
+        activeOperations: [],
+        modelsUnloaded: [],
+        unloadFailures: [],
+        nativeServiceStopped: false,
+        cleanup: 'failed',
+      },
+    });
+    await stopping;
+
+    const snapshot = getLastSdkSnapshot(sdk);
+    expect(snapshot.endpoint).toBeUndefined();
+    expect(snapshot.serviceRunning).toBe(false);
+    expect(snapshot.runtime.service).toBe('failed');
+  });
+
+  it('confirms runtime quit only after the child closes', async () => {
+    const sdk = await loadSdk();
+    const warmup = sdk.getEps();
+    const warmupId = await waitForWrite('getEps');
+    harness.emitStdout({ id: warmupId, result: [] });
+    await warmup;
+
+    const quitting = sdk.quitRuntime({ gracefulTimeoutMs: 100, killTimeoutMs: 100 });
+    const shutdownId = await waitForWrite('shutdownRuntime');
+    const cleanup = {
+      endpointWithdrawn: true,
+      serviceStopped: true,
+      drained: true,
+      activeOperations: [],
+      modelsUnloaded: ['model-a'],
+      unloadFailures: [],
+      nativeServiceStopped: true,
+      cleanup: 'confirmed',
+    };
+    harness.emitStdout({ id: shutdownId, result: cleanup });
+    await Promise.resolve();
+    expect(harness.killCount).toBe(0);
+
+    harness.emitClose({ code: 0 });
+    await expect(quitting).resolves.toEqual({
+      cleanup,
+      termination: 'confirmed',
+    });
+    expect(getLastSdkSnapshot(sdk).runtime.process).toBe('stopped');
+  });
+
+  it('escalates runtime quit only after the graceful close deadline', async () => {
+    const sdk = await loadSdk();
+    const warmup = sdk.getEps();
+    const warmupId = await waitForWrite('getEps');
+    harness.emitStdout({ id: warmupId, result: [] });
+    await warmup;
+
+    const quitting = sdk.quitRuntime({ gracefulTimeoutMs: 20, killTimeoutMs: 100 });
+    await waitForWrite('shutdownRuntime');
+    expect(harness.killCount).toBe(0);
+    harness.hangKill = true;
+    await waitFor('the sidecar kill escalation', () => harness.killCount === 1);
+    harness.emitClose({ code: null, signal: 'SIGTERM' });
+
+    await expect(quitting).resolves.toEqual({
+      cleanup: null,
+      termination: 'escalated-confirmed',
+    });
+  });
+
+  it('starts the quit deadline without waiting for a blocked service transition', async () => {
+    const sdk = await loadSdk();
+    const warmup = sdk.getEps();
+    const warmupId = await waitForWrite('getEps');
+    harness.emitStdout({ id: warmupId, result: [] });
+    await warmup;
+
+    let release!: () => void;
+    const blocked = sdk.withServiceTransition(
+      () => new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    );
+    await waitFor('the service transition to be blocked', () => typeof release === 'function');
+
+    const quitting = sdk.quitRuntime({ gracefulTimeoutMs: 20, killTimeoutMs: 100 });
+    await waitForWrite('shutdownRuntime');
+    await waitFor('the sidecar kill escalation', () => harness.killCount === 1);
+    harness.emitClose({ code: null, signal: 'SIGTERM' });
+    await expect(quitting).resolves.toMatchObject({ termination: 'escalated-confirmed' });
+
+    release();
+    await blocked;
+  });
+
+  it('rejects new work before dispatch once runtime quit begins', async () => {
+    const sdk = await loadSdk();
+    const warmup = sdk.getEps();
+    const warmupId = await waitForWrite('getEps');
+    harness.emitStdout({ id: warmupId, result: [] });
+    await warmup;
+
+    const quitting = sdk.quitRuntime({ gracefulTimeoutMs: 100, killTimeoutMs: 100 });
+    await waitForWrite('shutdownRuntime');
+    const later = capture(sdk.deleteModel({ alias: 'late-model' } as any));
+    await later.tracked;
+
+    expect(later.box.err.certainty).toBe('cancelled');
+    expect(harness.writes.filter((line) => line.includes('late-model'))).toHaveLength(0);
+
+    harness.emitClose({ code: 0 });
+    await quitting;
   });
 
   it('keeps service state unknown when Stop delivery is uncertain', async () => {

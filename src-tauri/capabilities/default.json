@@ -81,6 +81,7 @@
           "args": [{ "validator": "^[^-].*[/\\\\]foundry-sidecar\\.js$" }]
         }
       ]
-    }
+    },
+    "shell:allow-kill"
   ]
 }
