@@ -3,9 +3,11 @@
 **Scope:** Living release status — shipped versions, the current probe-backed
 plan through 1.0, and the 1.0 release bar. Day-to-day implementation
 sequencing and acceptance gates live in [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md).
-Open follow-up items live in [docs/BACKLOG.md](./docs/BACKLOG.md). Full
-per-release detail lives in [CHANGELOG.md](./CHANGELOG.md) and
-[GitHub Releases](https://github.com/joelst/flint/releases).
+Open follow-up items live in [docs/BACKLOG.md](./docs/BACKLOG.md).
+Per-release detail in [CHANGELOG.md](./CHANGELOG.md) is complete from 0.6.0
+onward; earlier releases (0.1.0–0.5.0) are summarized there at a high level
+only — see `git log` for full history, since most pre-0.5.0 versions were
+never tagged or published as a [GitHub Release](https://github.com/joelst/flint/releases).
 
 ---
 
