@@ -91,6 +91,10 @@ Facts only — no history. Record what is true now; `git log` and `CHANGELOG.md`
 - Publish the pending entry only **after** its promise exists, or cancelling inside `onAssignedId` finds a placeholder `reject` and strands the caller forever.
 - Convenience service starts carry authorization per request and the guard is evaluated **inside** the transition lock; a check before queuing lets two starts both pass, and clearing a shared latch releases every start queued behind it.
 - A Stop acknowledgement is not a quiescence guarantee: the sidecar handles commands concurrently and clears the gateway reference before awaiting shutdown.
+- Keep three shutdown meanings separate: Stop Service withdraws HTTP only; Stop & Unload fences new IPC/gateway work and unloads only after admitted work and eviction finish; Quit Runtime additionally requires a child `close` event, escalating through the owned child handle after the graceful deadline and reporting unconfirmed termination if no close arrives.
+- Gateway shutdown first stops accepting connections without invalidating admitted autoload/replay work. Forced teardown may destroy residual sockets only after the drain deadline. IPC HTTP fallback uses the private native endpoint while admitted work drains.
+- Runtime admission enters an irreversible terminal state for Quit/EOF/signals. A non-terminal Stop & Unload may resume admission afterward, but cannot reopen it once terminal shutdown has begun.
+- Native chat cancellation suppresses further output while continuing to consume the SDK stream; iterator `return()` does not prove the underlying native inference stopped.
 - Model-load failures **throw**; the returned outcome describes the *service* only. Returning `'failed'` for a load is indistinguishable from a failed start, and callers then announce a model ready that never loaded.
 - Report only what Flint can establish. Interrupted generation may already have been persisted (streaming writes deltas and autosave keeps them), so never claim nothing was saved; long audio counts failed and uncertain segments and only a clean run reports completion.
 
