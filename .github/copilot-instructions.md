@@ -81,6 +81,7 @@ Facts only — no history. Record what is true now; `git log` and `CHANGELOG.md`
 
 ## Operation outcomes
 - `fetchUrl` uses one deadline for both headers and body. Response bytes are streamed and capped before parsing; unused error or overflow bodies are cancelled, bodyless success is valid, and deliberate UTF-8 truncation drops an incomplete trailing character.
+- IPC transport deadlines are exhaustive by command and apply only to finite read-only queries. Start the timer when the pending request is published so startup waits count; expiry must remove the entry, prevent later dispatch, and ignore late replies. Keep outer deadlines longer than legitimate nested probe budgets. Inference and effectful operations remain unbounded because transport expiry does not establish native cancellation or outcome.
 - `src/lib/operation-outcome.ts` classifies every sidecar command by effect. `COMMAND_EFFECTS` is an exhaustive `Record<SidecarCommandName, …>`, not a set plus complement, so a new command does not compile until it is classified; a contract test reads the sidecar's command list as text to catch drift.
 - **A rejected `write()` is not evidence.** It resolves when bytes reach the pipe and says nothing about what the child already read. Only `'not-dispatched'` proves an operation did not happen; never automatically replay anything else.
 - **Settling a request must revoke its permission to dispatch.** Settle-once protects the promise's answer, not against doing the work after answering — re-check ownership after every await, and immediately before `write()`.
