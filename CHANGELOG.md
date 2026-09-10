@@ -109,7 +109,7 @@
 
 ## Earlier releases (0.1.0 – 0.5.0)
 
-Detailed per-release entries below only go back to 0.6.0, where Changesets began
+Detailed per-release entries above only go back to 0.6.0, where Changesets began
 authoring this file automatically. Earlier releases are summarized here at a
 high level; for full commit-level detail see `git log` (tags exist only from
 `v0.4.0-alpha` onward — earlier versions predate tagging).
