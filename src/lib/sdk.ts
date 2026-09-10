@@ -116,7 +116,7 @@ let activeNodeMode: NodeRuntimeMode | null = null;
 type PendingRequest = {
   resolve: (v: any) => void;
   reject: (e: any) => void;
-  cmd: string;
+  cmd: SidecarCommandName;
   /** Whether the bytes are known to have left. Only `false` proves the request never ran. */
   dispatched: boolean;
   deadlineTimer?: ReturnType<typeof setTimeout>;
