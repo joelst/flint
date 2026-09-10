@@ -5,9 +5,9 @@
 // The fake reproduces the one behaviour the gateway is built around — a 400 until the model
 // is resident — and lets every branch be driven deterministically.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import http from 'node:http';
-import { createGateway } from './gateway.js';
+import { createGateway, respondBuffered } from './gateway.js';
 
 /** @type {{ server: http.Server, port: number, loaded: Set<string>, hits: any[] }} */
 let upstream;
@@ -124,6 +124,73 @@ describe('gateway pass-through', () => {
     expect(parsed.endpoints).toEqual([`http://127.0.0.1:${gateway.publicPort}`]);
     expect(res.body).not.toContain(String(upstream.port));
   });
+
+  it('rejects a declared /status response over the capture limit', async () => {
+    let upstreamClosed = false;
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.on('close', () => { upstreamClosed = true; });
+      res.writeHead(200, {
+        'content-type': 'application/json',
+        'content-length': '1000',
+      });
+      res.flushHeaders();
+    });
+    gateway = await startGateway({ maxBufferedResponse: 64 });
+
+    const res = await new Promise((resolve, reject) => {
+      const req = http.request({
+        host: '127.0.0.1',
+        port: gateway.publicPort,
+        path: '/status',
+      }, response => {
+        const chunks = [];
+        response.on('data', c => chunks.push(c));
+        response.on('end', () => {
+          clearTimeout(timer);
+          resolve({
+            status: response.statusCode,
+            body: Buffer.concat(chunks).toString('utf8'),
+            timedOut: false,
+          });
+        });
+      });
+      const timer = setTimeout(() => {
+        req.destroy();
+        resolve({ status: 0, body: '', timedOut: true });
+      }, 300);
+      req.on('error', error => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      req.end();
+    });
+
+    expect(res.timedOut).toBe(false);
+    expect(res.status).toBe(502);
+    expect(JSON.parse(res.body).error.message).toContain('exceeded the gateway limit');
+    await vi.waitFor(() => expect(upstreamClosed).toBe(true));
+  });
+
+  it.each([
+    ['HEAD', 200],
+    ['GET', 304],
+  ])('does not reject bodyless %s /status responses by declared length', async (method, status) => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(status, {
+        'content-type': 'application/json',
+        'content-length': '1000',
+      });
+      res.end();
+    });
+    gateway = await startGateway({ maxBufferedResponse: 64 });
+
+    const res = await request(gateway.publicPort, '/status', { method });
+
+    expect(res.status).toBe(status);
+    expect(res.body).toBe('');
+  });
 });
 
 describe('gateway autoload', () => {
@@ -169,6 +236,29 @@ describe('gateway autoload', () => {
     });
     expect(res.status).toBe(400);
     expect(upstream.state.hits).toHaveLength(1);
+  });
+
+  it('does not autoload from an oversized captured error', async () => {
+    let called = false;
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.write(NOT_LOADED('qwen3-0.6b'));
+      res.end('x'.repeat(1000));
+    });
+    gateway = await startGateway({
+      maxBufferedResponse: 64,
+      load: async () => { called = true; },
+    });
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3-0.6b' }),
+    });
+
+    expect(res.status).toBe(502);
+    expect(called).toBe(false);
   });
 
   it('returns the upstream error unchanged when the id cannot be resolved', async () => {
@@ -384,7 +474,7 @@ describe('gateway streaming', () => {
       res.write('data: one\n\n');
       setTimeout(() => { res.write('data: two\n\n'); res.end(); }, 60);
     });
-    gateway = await startGateway();
+    gateway = await startGateway({ maxBufferedResponse: 1 });
 
     const seen = await new Promise((resolve, reject) => {
       const times = [];
@@ -477,6 +567,32 @@ describe('gateway streaming', () => {
 });
 
 describe('gateway failure handling', () => {
+  it('does not write a buffered response after the client disconnects', () => {
+    const res = {
+      destroyed: true,
+      writableEnded: false,
+      writeHead: () => { throw new Error('write after disconnect'); },
+      end: () => { throw new Error('end after disconnect'); },
+    };
+
+    expect(() => respondBuffered(res, 502, {}, 'error')).not.toThrow();
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1])(
+    'rejects an invalid buffered response limit of %s',
+    async maxBufferedResponse => {
+      await expect(startGateway({ maxBufferedResponse })).rejects.toThrow(
+        'maxBufferedResponse must be a finite non-negative number.'
+      );
+    },
+  );
+
+  it('honours a zero-byte buffered response limit', async () => {
+    gateway = await startGateway({ maxBufferedResponse: 0 });
+    const res = await request(gateway.publicPort, '/status');
+    expect(res.status).toBe(502);
+  });
+
   it('answers 502 when upstream dies mid-response', async () => {
     await new Promise(r => upstream.server.close(r));
     upstream = await startUpstream((req, res) => {
@@ -493,6 +609,43 @@ describe('gateway failure handling', () => {
     // Either a 502 body or a torn-down connection is acceptable; what must not happen is
     // a hang or a partial body presented as complete.
     expect([0, 400, 502]).toContain(res.status);
+  });
+
+  it('stays available when a client disconnects during response capture', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((req, res) => {
+      if (req.url === '/v1/models') {
+        res.end('pong');
+        return;
+      }
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.write('{"error":');
+      setTimeout(() => {
+        if (!res.destroyed) res.end('"late"}');
+      }, 100);
+    });
+    gateway = await startGateway();
+
+    await new Promise(resolve => {
+      const req = http.request({
+        host: '127.0.0.1',
+        port: gateway.publicPort,
+        path: '/v1/chat/completions',
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+      });
+      req.on('error', resolve);
+      req.end(JSON.stringify({ model: 'qwen3-0.6b' }));
+      setTimeout(() => {
+        req.destroy();
+        resolve();
+      }, 30);
+    });
+    await new Promise(r => setTimeout(r, 120));
+
+    const res = await request(gateway.publicPort, '/v1/models');
+    expect(res.status).toBe(200);
+    expect(res.body).toBe('pong');
   });
 
   it('answers 502 when the resolver itself fails', async () => {
