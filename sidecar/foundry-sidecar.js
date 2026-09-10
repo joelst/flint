@@ -2503,10 +2503,11 @@ rl.on('line', async (line) => {
             });
           } else if (typeof client?.completeChat === 'function') {
             const result = await client.completeChat(sdkMessages);
-            chatTokensIn = result?.usage?.prompt_tokens ?? null;
-            chatTokensOut = result?.usage?.completion_tokens ?? null;
+            const normalizedResult = normalizeChatResponse(result);
+            chatTokensIn = normalizedResult?.usage?.prompt_tokens ?? null;
+            chatTokensOut = normalizedResult?.usage?.completion_tokens ?? null;
             if (shouldStream) {
-              const content = result?.choices?.[0]?.message?.content || '';
+              const content = normalizedResult?.choices?.[0]?.message?.content || '';
               if (content) {
                 send({
                   id,
@@ -2522,7 +2523,7 @@ rl.on('line', async (line) => {
             reply({
               ok: true,
               result: {
-                ...normalizeChatResponse(result),
+                ...normalizedResult,
                 acceleration: {
                   requested: preferred?.requested ?? null,
                   preferredApplied: preferred?.applied ?? null,
