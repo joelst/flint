@@ -2036,12 +2036,12 @@ rl.on('line', async (line) => {
           "then rebuild the installer (natives must be packaged under foundry-local-sdk/foundry-local-core)."
         );
       }
-      log('info', `Using Foundry core library: ${libraryPath}`);
       initConfig = { appName, logLevel: payload.logLevel || 'info', libraryPath };
       if (!LOG_LEVELS.includes(initConfig.logLevel)) {
         throw new Error(`Unsupported log level "${initConfig.logLevel}". Expected one of: ${LOG_LEVELS.join(', ')}`);
       }
       activeLogLevel = initConfig.logLevel;
+      log('info', `Using Foundry core library: ${libraryPath}`);
       manager = FManager.create(initConfig);
       log('info', `SDK initialized for ${appName}`);
       audit('init', { appName, libraryPath });

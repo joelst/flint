@@ -240,7 +240,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('settlement revokes permission to dispatch', () => {
+describe('catalog queries', () => {
   it('propagates a failed STT catalog query instead of returning an empty list', async () => {
     const sdk = await loadSdk();
     const request = capture(sdk.getSTTModels());
@@ -249,7 +249,9 @@ describe('settlement revokes permission to dispatch', () => {
     await request.tracked;
     expect(request.box.err?.message).toContain('catalog unavailable');
   });
+});
 
+describe('initialization', () => {
   it('passes the configured log level through initialization', async () => {
     const sdk = await loadSdk();
     const initialized = sdk.initializeSDK({ autoStartService: false, logLevel: 'debug' });
@@ -269,7 +271,9 @@ describe('settlement revokes permission to dispatch', () => {
     harness.emitStdout({ id: finalStatusId, result: { serviceRunning: false, endpoint: null } });
     await expect(initialized).resolves.toBe(true);
   });
+});
 
+describe('settlement revokes permission to dispatch', () => {
   it('publishes independent process and manager readiness', async () => {
     const sdk = await loadSdk();
     const request = capture(sdk.getEps());

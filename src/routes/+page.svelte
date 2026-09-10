@@ -3948,7 +3948,7 @@ updateStateFromSdk();
       await refreshModels();
       statusMessage = `${state.models.length} models available`;
       // Keep STT list fresh too (metadata driven)
-      await loadSTTModels();
+      void loadSTTModels();
     } catch (e: any) {
       statusMessage = `Failed to load catalog: ${e?.message || e}`;
     } finally {
