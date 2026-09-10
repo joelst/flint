@@ -1,6 +1,6 @@
 # Linux Build Plan
 
-**Deferred.** Per [PRODUCT_PLAN.md](./PRODUCT_PLAN.md)'s decisions, Linux-only work is
+**Deferred.** Per the decisions in [PRODUCT_PLAN.md](./PRODUCT_PLAN.md), Linux-only work is
 not an active workstream: this plan is retained as ready-to-execute research (inventory
 of what already works, unknowns to spike) for whenever Linux support is prioritized, not
 as a commitment or a schedule. Continue Linux-specific work only where it is already part
