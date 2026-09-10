@@ -189,6 +189,7 @@ Architecture principles: [FLINT_DESIGN_SPEC.md](./FLINT_DESIGN_SPEC.md)
 
 | Doc | Audience |
 |---|---|
+| [AGENTS.md](./AGENTS.md) | AI agents — token-saving map of which doc to load |
 | [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md) | Reliability execution plan and current phase status |
 | [docs/README.md](./docs/README.md) | Full doc index |
 | [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) | Forward plan through 1.0 & the 1.0 release bar |

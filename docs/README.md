@@ -1,6 +1,8 @@
 # Flint documentation
 
-Index by audience. These are the living docs; there is no archive.
+Index by audience. These are the living docs; there is no archive. AI/agent
+contributors: start at [AGENTS.md](../AGENTS.md) for a token-saving map of which doc
+to load for a given task.
 
 ## Users
 
@@ -28,12 +30,19 @@ Index by audience. These are the living docs; there is no archive.
 
 ## Design / research
 
+Optional deep-dive reading — not required to build or contribute. Some are empirical
+results kept because they came from real measurement and would cost real time to
+reproduce (POOL_SPIKE, pool-spike-results, node-bundle-spike); others are design memos
+or deferred plans kept for the analysis they contain, not measured data
+(PURVIEW_GOVERNANCE, LINUX_BUILD_PLAN).
+
 | Doc | Purpose |
 |---|---|
 | [PURVIEW_GOVERNANCE.md](./PURVIEW_GOVERNANCE.md) | Enterprise audit / Purview memo (implementation unscheduled) |
 | [LINUX_BUILD_PLAN.md](./LINUX_BUILD_PLAN.md) | Linux build plan (deferred — not an active workstream; see [BACKLOG.md](./BACKLOG.md)) |
-| [POOL_SPIKE.md](./POOL_SPIKE.md) | Model pool co-residency spike protocol |
-| [pool-spike-results/](./pool-spike-results/) | Canonical spike result |
+| [POOL_SPIKE.md](./POOL_SPIKE.md) | Model pool co-residency spike protocol (complete; retained for re-runs) |
+| [pool-spike-results/](./pool-spike-results/) | Canonical pool-spike result |
+| [spikes/node-bundle-spike.md](./spikes/node-bundle-spike.md) | Bundled-Node packaging size/approach spike (referenced from [DEVELOPMENT.md](./DEVELOPMENT.md)) |
 
 ## Planning process
 

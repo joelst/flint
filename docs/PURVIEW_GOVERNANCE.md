@@ -69,7 +69,7 @@ Proposed events (all metadata-only; no prompt or response content):
 
 ## 4. Opt-in UX
 
-**Location:** Settings → Enterprise / Compliance (or a new "Governance" section). Placed behind an "Advanced" toggle or feature flag for 0.4 implementation.
+**Location:** Settings → Enterprise / Compliance (or a new "Governance" section). Placed behind an "Advanced" toggle or feature flag — implementation is unscheduled (see [BACKLOG.md](./BACKLOG.md#future-features-unscheduled)).
 
 **Toggle label:** "Enable Microsoft Purview audit logging (enterprise only)"
 
@@ -83,7 +83,7 @@ Proposed events (all metadata-only; no prompt or response content):
 - Local logs continue to be written (user can still inspect `~/.flint/logs/`).
 - Toggle can be disabled at any time (stops new exports; may require admin policy to re-enable).
 
-**Admin / machine-level controls (0.4+):**
+**Admin / machine-level controls (once implemented):**
 - Registry key or config file override to force the setting on or off.
 - Group policy support for enterprise deployment.
 
@@ -93,7 +93,8 @@ Proposed events (all metadata-only; no prompt or response content):
 - No PII or content ever leaves the machine without opt-in.
 - All reporting respects existing local-first posture and `~/.flint` directory conventions.
 - Events are aggregated where possible to minimize record volume/cost.
-- Scope strictly limited to 0.4+ implementation (this memo is design only for 0.3).
+- Scope strictly limited to implementation that has actually landed; this memo is
+  design only, unscheduled (see [BACKLOG.md](./BACKLOG.md#future-features-unscheduled)).
 - Must integrate cleanly with existing access/audit log machinery (reuse `audit()` and `appendAccessLog`).
 
 ## 6. Open Questions & Next Steps (post-0.3)
@@ -104,7 +105,8 @@ Proposed events (all metadata-only; no prompt or response content):
 - DLP / sensitivity label application to any exported records.
 - Full implementation and UI (including toggle, status, and export history) is unscheduled; see [docs/BACKLOG.md](./BACKLOG.md#future-features-unscheduled).
 
-This memo satisfies the 0.3 requirement for a short (~2 page) governance design document. Implementation is explicitly out of scope for this release.
+This memo satisfies the original 0.3-era requirement for a short (~2 page) governance
+design document. Implementation remains explicitly out of scope until scheduled.
 
 ---
 

@@ -1,6 +1,6 @@
 # Copilot instructions for Flint
 
-Full human guide: [docs/DEVELOPMENT.md](../docs/DEVELOPMENT.md). Doc index: [docs/README.md](../docs/README.md). Living release plan: [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md). Open follow-ups: [docs/BACKLOG.md](../docs/BACKLOG.md).
+Doc map for agents: [AGENTS.md](../AGENTS.md). Full human guide: [docs/DEVELOPMENT.md](../docs/DEVELOPMENT.md). Doc index: [docs/README.md](../docs/README.md). Living release plan: [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md). Open follow-ups: [docs/BACKLOG.md](../docs/BACKLOG.md).
 
 Facts only — no history. Record what is true now; `git log` and `CHANGELOG.md` hold the rest.
 
