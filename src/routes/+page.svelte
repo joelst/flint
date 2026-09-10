@@ -6878,7 +6878,15 @@ Output only the summary text, no preamble.`;
                         <div><strong>Size:</strong> {formatSizeLabel(detailModel)}</div>
                         <div><strong>Estimated memory:</strong> {estimateMemoryRequirement(detailModel)}</div>
                         <div><strong>Updated:</strong> {formatModelUpdated(detailModel)}</div>
-                        <div><strong>Context:</strong> {formatContextLength(detailModel)}</div>
+                        <div><strong>Context (catalog):</strong> {formatContextLength(detailModel)}</div>
+                        <div>
+                          <strong>Tool calling (catalog):</strong>
+                          {detailModel.supportsToolCalling === true
+                            ? "Declared supported"
+                            : detailModel.supportsToolCalling === false
+                              ? "Declared unsupported"
+                              : "Unknown"}
+                        </div>
                         <div><strong>Downloaded artifact:</strong> {detailModel.isCached ? "Model weights" : "Not downloaded"}</div>
                         <div><strong>Downloaded at:</strong> {formatMetaTimestamp(modelRuntimeMeta[detailModel.alias]?.downloadedAt)}</div>
                         <div><strong>Last used acceleration:</strong> {modelRuntimeMeta[detailModel.alias]?.lastUsedAcceleration || "Unknown"}</div>

@@ -141,6 +141,8 @@ let currentRuntimeServiceState: RuntimeServiceState = 'unknown';
 export type ModelInfo = IModel & {
   isCached?: boolean;
   isLoaded?: boolean;
+  contextLength?: number | null;
+  supportsToolCalling?: boolean | null;
 };
 
 let managerInstance: any = null;
@@ -2247,11 +2249,6 @@ export function getModelContextInfo(alias: string): ModelContextInfo | null {
   return null; // caller should use state.models
 }
 
-/**
- * Get recommended small starter models based on current hardware/EPs and available catalog.
- * Returns up to `count` suitable lightweight models.
- * Prefers models good for the detected acceleration.
- */
 /** Returns catalog models identified as vision-capable by the sidecar metadata filter. */
 export async function getVisionModels(): Promise<ModelInfo[]> {
   const res = await send('getVisionModels');
@@ -2267,6 +2264,11 @@ export async function getSTTModels(): Promise<ModelInfo[]> {
   return (res.result || []).map((m: any) => ({ ...m, isCached: !!m.cached } as ModelInfo));
 }
 
+/**
+ * Get recommended small starter models based on current hardware/EPs and available catalog.
+ * Returns up to `count` suitable lightweight models.
+ * Prefers models good for the detected acceleration.
+ */
 export async function getRecommendedStarterModels(count: number = 3): Promise<ModelInfo[]> {
   try {
     const res = await send('listModels');
