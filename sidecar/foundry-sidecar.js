@@ -801,8 +801,8 @@ async function waitForUpstream (port, deadlineMs = 20000) {
 }
 
 // Per-request access log. Covers IPC-originated requests only: traffic proxied through the
-// gateway is deliberately not logged here because writeToDisk() appends synchronously, and
-// putting a blocking write in front of every external request would stall the event loop.
+// Gateway traffic is deliberately not logged here because request bodies and external traffic
+// would add volume and privacy risk beyond this IPC-oriented diagnostic log.
 const ACCESS_LOG_MAX = 500;
 const accessLog = [];
 const tokenAccumulator = new Map(); // alias → { tokensIn: number, tokensOut: number }; reset on stopService

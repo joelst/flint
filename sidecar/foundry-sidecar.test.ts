@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
-import { cpSync, mkdtempSync, rmSync } from 'fs';
+import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
@@ -92,9 +92,11 @@ describe('foundry-sidecar protocol basics', () => {
   });
 
   it('acknowledges runtime cleanup before exiting on explicit shutdown', async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-home-'));
     const proc = spawn(process.execPath, ['sidecar/foundry-sidecar.js'], {
       cwd: process.cwd(),
-      stdio: ['pipe', 'pipe', 'pipe']
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, HOME: homeDir, USERPROFILE: homeDir },
     });
     const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
       proc.once('exit', (code, signal) => resolve({ code, signal }));
@@ -116,6 +118,12 @@ describe('foundry-sidecar protocol basics', () => {
       cleanup: 'confirmed',
     });
     await expect(exited).resolves.toEqual({ code: 0, signal: null });
+    const logDir = join(homeDir, '.flint', 'logs');
+    const logFile = readdirSync(logDir).find((name) => name.endsWith('.log'));
+    expect(logFile).toBeDefined();
+    const log = readFileSync(join(logDir, logFile!), 'utf8');
+    expect(log).toContain('"cmd":"shutdownRuntime"');
+    rmSync(homeDir, { recursive: true, force: true });
   });
 });
 
