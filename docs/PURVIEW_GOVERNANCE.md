@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-28  
 **Status:** Design memo (written for 0.3). Implementation is unscheduled — see
-[docs/BACKLOG.md](./BACKLOG.md#future-features-unscheduled).
+[BACKLOG.md](./BACKLOG.md#future-features-unscheduled).
 
 ## 1. Background
 
