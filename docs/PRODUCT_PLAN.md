@@ -44,7 +44,7 @@ A stage is recorded here only once the pull request delivering it is merged to
 | 1B | 1B-11d finite read-only IPC queries have operation-specific transport deadlines | #80 |
 | 1B | 1B-11e downloads and accelerator setup surface non-cancelling progress-stall notices | #82 |
 | 1B | 1B-11f native error diagnostics and gateway request captures complete bounded operation handling | #83 |
-| 1B | 1B-12 explicit Stop HTTP, Stop-and-Unload, and confirmed Quit Runtime semantics | Current change |
+| 1B | 1B-12 explicit Stop HTTP, Stop-and-Unload, and confirmed Quit Runtime semantics | #84 |
 
 Phase 1A closed its acceptance gate for storage, migration, rollback, multipart
 preservation, conversation switching, and export. Phase 1B is in progress:
@@ -182,7 +182,7 @@ delete new turns, modify another conversation, or clear a newer request's contro
 **Primary surfaces:** `src/lib/sdk.ts`, `src/lib/ipc-contracts.ts`,
 `sidecar/foundry-sidecar.js`, and gateway lifecycle.
 
-**Delivered through 1B-12 (#53, #55-#61, #63, #65, #67, #69, #72, #74, #76, #78, #80, #82, #83, current change):** typed operation outcomes classified by
+**Delivered through 1B-12 (#53, #55-#61, #63, #65, #67, #69, #72, #74, #76, #78, #80, #82-#84):** typed operation outcomes classified by
 command effect (`src/lib/operation-outcome.ts`); settlement revokes a request's
 permission to dispatch; versioned handshakes and process generations; independent
 runtime readiness states; convenience service starts authorized inside the transition
