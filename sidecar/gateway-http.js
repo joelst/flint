@@ -87,6 +87,9 @@ export function isModelNotLoadedError (status, body) {
 /** Bodies are only buffered so a request can be replayed; a giant upload is streamed. */
 export const DEFAULT_MAX_BUFFERED_BODY = 32 * 1024 * 1024;
 
+/** Control/error responses are expected to be tiny; never buffer an arbitrary upstream body. */
+export const DEFAULT_MAX_BUFFERED_RESPONSE = 1024 * 1024;
+
 /**
  * Decide whether a request body should be held in memory for a possible replay.
  *

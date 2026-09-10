@@ -30,6 +30,7 @@ import {
   formatPublicEndpoint,
   isLoopbackAddress,
   DEFAULT_MAX_BUFFERED_BODY,
+  DEFAULT_MAX_BUFFERED_RESPONSE,
 } from './gateway-http.js';
 
 /** Upstream is on loopback, so a long timeout only ever means the model is thinking. */
@@ -50,6 +51,7 @@ const UPSTREAM_TIMEOUT_MS = 0; // no timeout: generation can legitimately run fo
  * @param {boolean} [options.autoload]       default true
  * @param {boolean} [options.loopbackOnlyAutoload] default true
  * @param {number} [options.maxBufferedBody]
+ * @param {number} [options.maxBufferedResponse]
  */
 export function createGateway (options) {
   const {
@@ -63,7 +65,14 @@ export function createGateway (options) {
     autoload = true,
     loopbackOnlyAutoload = true,
     maxBufferedBody = DEFAULT_MAX_BUFFERED_BODY,
+    maxBufferedResponse = DEFAULT_MAX_BUFFERED_RESPONSE,
   } = options;
+  if (typeof maxBufferedResponse !== 'number'
+      || !Number.isFinite(maxBufferedResponse)
+      || maxBufferedResponse < 0) {
+    throw new RangeError('maxBufferedResponse must be a finite non-negative number.');
+  }
+  const bufferedResponseLimit = Math.floor(maxBufferedResponse);
 
   // Keep-alive to upstream: without it every request pays a fresh TCP handshake, and a
   // busy client can exhaust ephemeral ports with sockets stuck in TIME_WAIT.
@@ -324,15 +333,45 @@ export function createGateway (options) {
         }
 
         const chunks = [];
-        upRes.on('data', c => chunks.push(c));
-        upRes.on('error', () => {
+        let size = 0;
+        let settled = false;
+        const finish = callback => {
+          if (settled) return;
+          settled = true;
           res.off('close', onClientClose);
+          callback();
+        };
+        const failBufferedResponse = () => finish(() => {
+          upRes.destroy();
+          if (!res.headersSent) res.writeHead(502, { 'content-type': 'application/json' });
+          res.end(openAiError('Upstream control response exceeded the gateway limit.', 'server_error'));
+          resolve2(SENT);
+        });
+        const declaredLength = Number(upRes.headers['content-length']);
+        const bodyAllowed = req.method !== 'HEAD'
+          && status !== 204
+          && status !== 304
+          && (status < 100 || status >= 200);
+        if (bodyAllowed
+            && Number.isFinite(declaredLength)
+            && declaredLength > bufferedResponseLimit) {
+          failBufferedResponse();
+          return;
+        }
+        upRes.on('data', c => {
+          size += c.length;
+          if (size > bufferedResponseLimit) {
+            failBufferedResponse();
+            return;
+          }
+          chunks.push(c);
+        });
+        upRes.on('error', () => finish(() => {
           if (!res.headersSent) res.writeHead(502, { 'content-type': 'application/json' });
           res.end(openAiError('Upstream response failed.', 'server_error'));
           resolve2(SENT);
-        });
-        upRes.on('end', () => {
-          res.off('close', onClientClose);
+        }));
+        upRes.on('end', () => finish(() => {
           const body = Buffer.concat(chunks).toString('utf8');
 
           if (mayRetry && isModelNotLoadedError(status, body)) {
@@ -345,7 +384,7 @@ export function createGateway (options) {
             : body;
           respondBuffered(res, status, outHeaders, finalBody);
           resolve2(SENT);
-        });
+        }));
       });
 
       if (buffered !== null) upstream.end(buffered);
