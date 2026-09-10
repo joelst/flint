@@ -37,12 +37,12 @@ describe('hasMultipartContent', () => {
       expect(() => hasMultipartContent(bogus)).not.toThrow();
       expect(hasMultipartContent(bogus)).toBe(false);
     }
-    expect(selectChatTransport({}, { hasChatClient: true }).transport).toBe('sdk');
+    expect(selectChatTransport({}, { chatClient: 'available' }).transport).toBe('sdk');
   });
 });
 
 describe('selectChatTransport', () => {
-  const both = { hasChatClient: true, hasEndpoint: true };
+  const both = { chatClient: 'available', serviceEndpoint: 'available' };
 
   it('prefers the SDK for a text-only request', () => {
     // The SDK path avoids web-service schema and version mismatches.
@@ -61,14 +61,14 @@ describe('selectChatTransport', () => {
   });
 
   it('falls back to HTTP for text when there is no chat client', () => {
-    expect(selectChatTransport([text('a')], { hasChatClient: false, hasEndpoint: true })).toEqual({
+    expect(selectChatTransport([text('a')], { chatClient: 'unsupported', serviceEndpoint: 'available' })).toEqual({
       transport: 'http',
       reason: null,
     });
   });
 
   it('refuses a vision request with no endpoint, naming the real cause', () => {
-    const r = selectChatTransport([vision()], { hasChatClient: true, hasEndpoint: false });
+    const r = selectChatTransport([vision()], { chatClient: 'available', serviceEndpoint: 'unavailable' });
     expect(r.transport).toBeNull();
     // The SDK's own failure here is an opaque validator message about content types, which
     // tells the user nothing about what to do.
@@ -76,7 +76,7 @@ describe('selectChatTransport', () => {
   });
 
   it('refuses a text request with neither transport available', () => {
-    const r = selectChatTransport([text('a')], { hasChatClient: false, hasEndpoint: false });
+    const r = selectChatTransport([text('a')], { chatClient: 'unsupported', serviceEndpoint: 'unavailable' });
     expect(r.transport).toBeNull();
     expect(r.reason).toContain('Service endpoint unavailable');
   });
@@ -88,9 +88,9 @@ describe('selectChatTransport', () => {
 
   it('never returns a null transport without a reason', () => {
     const cases = [
-      [[text('a')], { hasChatClient: false, hasEndpoint: false }],
-      [[vision()], { hasChatClient: true, hasEndpoint: false }],
-      [[vision()], { hasChatClient: false, hasEndpoint: false }],
+      [[text('a')], { chatClient: 'unsupported', serviceEndpoint: 'unavailable' }],
+      [[vision()], { chatClient: 'available', serviceEndpoint: 'unavailable' }],
+      [[vision()], { chatClient: 'unsupported', serviceEndpoint: 'unavailable' }],
     ];
     for (const [messages, caps] of cases) {
       const r = selectChatTransport(messages, caps);

@@ -34,8 +34,8 @@ export function hasMultipartContent (messages) {
  */
 export function selectChatTransport (messages, capabilities) {
   const multipart = hasMultipartContent(messages);
-  const hasChatClient = !!capabilities?.hasChatClient;
-  const hasEndpoint = !!capabilities?.hasEndpoint;
+  const hasChatClient = capabilities?.chatClient === 'available';
+  const hasEndpoint = capabilities?.serviceEndpoint === 'available';
 
   if (multipart) {
     if (hasEndpoint) return { transport: 'http', reason: null };

@@ -73,6 +73,7 @@ import {
   OWNERSHIP_MARKER,
 } from './byom-import.js';
 import { createAsyncLogWriter } from './async-log-writer.js';
+import { normalizeChatResponse } from './chat-response.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -2453,8 +2454,8 @@ rl.on('line', async (line) => {
         // Vision is the exception: the SDK client rejects non-string content outright, so a
         // multipart request has to take the HTTP endpoint or it cannot be served at all.
         const { transport, reason: transportReason } = selectChatTransport(sdkMessages, {
-          hasChatClient: typeof chatModel?.createChatClient === 'function',
-          hasEndpoint: !!sharedEndpoint,
+          chatClient: typeof chatModel?.createChatClient === 'function' ? 'available' : 'unsupported',
+          serviceEndpoint: sharedEndpoint ? 'available' : 'unavailable',
         });
         if (!transport) throw new Error(transportReason);
         if (transport === 'sdk') {
@@ -2490,7 +2491,9 @@ rl.on('line', async (line) => {
             reply({
               ok: true,
               result: {
-                choices: [{ message: { role: 'assistant', content } }],
+                ...normalizeChatResponse({
+                  choices: [{ message: { role: 'assistant', content } }],
+                }),
                 acceleration: {
                   requested: preferred?.requested ?? null,
                   preferredApplied: preferred?.applied ?? null,
@@ -2500,10 +2503,11 @@ rl.on('line', async (line) => {
             });
           } else if (typeof client?.completeChat === 'function') {
             const result = await client.completeChat(sdkMessages);
-            chatTokensIn = result?.usage?.prompt_tokens ?? null;
-            chatTokensOut = result?.usage?.completion_tokens ?? null;
+            const normalizedResult = normalizeChatResponse(result);
+            chatTokensIn = normalizedResult?.usage?.prompt_tokens ?? null;
+            chatTokensOut = normalizedResult?.usage?.completion_tokens ?? null;
             if (shouldStream) {
-              const content = result?.choices?.[0]?.message?.content || '';
+              const content = normalizedResult?.choices?.[0]?.message?.content || '';
               if (content) {
                 send({
                   id,
@@ -2519,7 +2523,7 @@ rl.on('line', async (line) => {
             reply({
               ok: true,
               result: {
-                ...result,
+                ...normalizedResult,
                 acceleration: {
                   requested: preferred?.requested ?? null,
                   preferredApplied: preferred?.applied ?? null,
@@ -2538,7 +2542,9 @@ rl.on('line', async (line) => {
             reply({
               ok: true,
               result: {
-                choices: [{ message: { role: 'assistant', content } }],
+                ...normalizeChatResponse({
+                  choices: [{ message: { role: 'assistant', content } }],
+                }),
                 acceleration: {
                   requested: preferred?.requested ?? null,
                   preferredApplied: preferred?.applied ?? null,
@@ -2566,13 +2572,14 @@ rl.on('line', async (line) => {
             throw new Error(`Chat completion failed (${resp.status} ${resp.statusText}): ${details}`);
           }
           const httpResult = await resp.json();
-          chatTokensIn = httpResult?.usage?.prompt_tokens ?? null;
-          chatTokensOut = httpResult?.usage?.completion_tokens ?? null;
+          const normalizedHttpResult = normalizeChatResponse(httpResult);
+          chatTokensIn = normalizedHttpResult?.usage?.prompt_tokens ?? null;
+          chatTokensOut = normalizedHttpResult?.usage?.completion_tokens ?? null;
           // This response is not streamed, but a caller that asked for a stream is waiting on
           // deltas to render. Emitting the whole text as one delta keeps the streaming
           // contract, exactly as the non-streaming SDK branch above does.
           if (shouldStream && !canceledRequests.has(id)) {
-            const content = httpResult?.choices?.[0]?.message?.content || '';
+            const content = normalizedHttpResult?.choices?.[0]?.message?.content || '';
             if (content) {
               send({
                 id,
@@ -2586,7 +2593,7 @@ rl.on('line', async (line) => {
           reply({
             ok: true,
             result: {
-              ...httpResult,
+              ...normalizedHttpResult,
               acceleration: {
                 requested: preferred?.requested ?? null,
                 preferredApplied: preferred?.applied ?? null,
