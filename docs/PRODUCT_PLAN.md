@@ -386,8 +386,10 @@ compaction, and capability/metric reporting.
 
 - Make chat adapter capabilities explicit and normalize native response-shape
   differences. Transport selection now reports named client/endpoint availability,
-  and SDK/HTTP completions remove Foundry-only status fields while returning one
-  OpenAI-shaped message or delta choice. Delivered.
+  and sidecar IPC SDK/HTTP completions remove Foundry-only status fields while
+  returning one OpenAI-shaped message or delta choice. Gateway HTTP responses
+  remain unchanged pending the behavioral compatibility harness. Adapter scope
+  delivered.
 - Introduce explicit adapter capabilities for multipart input, streaming,
   generation settings, cancellation, and usage reporting.
 - Preserve first- and later-turn images end to end. Use a verified supported

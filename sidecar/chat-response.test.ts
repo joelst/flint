@@ -36,6 +36,21 @@ describe('normalizeChatResponse', () => {
     });
   });
 
+  it('merges a partial message with delta content', () => {
+    expect(normalizeChatResponse({
+      choices: [{
+        message: { role: 'assistant' },
+        delta: { content: 'hello' },
+      }],
+    })).toEqual({
+      choices: [{
+        index: 0,
+        message: { content: 'hello', role: 'assistant' },
+        finish_reason: null,
+      }],
+    });
+  });
+
   it('normalizes streaming choices without exposing both forms', () => {
     expect(normalizeChatResponse({
       choices: [{

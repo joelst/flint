@@ -11,16 +11,24 @@ function copyStandardFields (value) {
   );
 }
 
+function mergeChoiceParts (primary, secondary) {
+  const first = copyStandardFields(primary);
+  const fallback = copyStandardFields(secondary);
+  return { ...fallback, ...first };
+}
+
 function normalizeChoice (choice, stream) {
   const source = copyStandardFields(choice);
-  const content = stream ? (source.delta ?? source.message) : (source.message ?? source.delta);
+  const content = stream
+    ? mergeChoiceParts(source.delta, source.message)
+    : mergeChoiceParts(source.message, source.delta);
   const normalized = {
     index: source.index ?? 0,
     finish_reason: source.finish_reason ?? null,
   };
   if (source.logprobs !== undefined) normalized.logprobs = source.logprobs;
-  if (stream) normalized.delta = copyStandardFields(content);
-  else normalized.message = copyStandardFields(content);
+  if (stream) normalized.delta = content;
+  else normalized.message = content;
   return normalized;
 }
 
