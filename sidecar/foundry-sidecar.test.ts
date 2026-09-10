@@ -166,6 +166,12 @@ describe('foundry-sidecar command schema validation', () => {
     expect(String(res.error)).toContain('missing required field');
   });
 
+  it('rejects unsupported log levels explicitly', async () => {
+    proc.stdin.write(`${JSON.stringify({ id: 17, cmd: 'setLogLevel', level: 'verbose' })}\n`);
+    const res = await waitForLine(proc, (msg) => msg.id === 17);
+    expect(String(res.error)).toContain('Unsupported log level');
+  });
+
   it('rejects chatCompletion with missing model', async () => {
     proc.stdin.write(`${JSON.stringify({ id: 13, cmd: 'chatCompletion', messages: [] })}\n`);
     const res = await waitForLine(proc, (msg) => msg.id === 13);

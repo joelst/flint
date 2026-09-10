@@ -266,10 +266,14 @@ The remaining items below are outstanding.
   terminal cleanup with an outer exit bound. Delivered.
 - Propagate model-load and catalog-refresh failures to their callers. Replace
   empty refresh placeholders, swallowed errors, and success-shaped fallbacks.
-  Model-load and catalog-refresh propagation are delivered; remaining refresh
-  placeholders and success-shaped fallbacks are still outstanding.
+  Model-load and catalog-refresh propagation are delivered. The UI now
+  preserves the last known STT catalog when its focused refresh fails and reports
+  the failure instead of replacing it with an empty success-shaped list. Runtime
+  log-level requests now preserve the configured initialization level and reject
+  unsupported changes with an explicit restart-required error.
 - Make log-level changes effective or explicitly restart-required. Interpret a
   successful empty loaded-model enumeration as empty, not as failed telemetry.
+  Delivered for runtime initialization and explicit restart-required changes.
 - Use bounded asynchronous logging and explicit retention. Adding gateway
   observability must not introduce synchronous disk writes on every proxied
   request or record sensitive request bodies.

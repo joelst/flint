@@ -1117,7 +1117,7 @@ async function performInit(payload: { appName: string; logLevel: string }) {
     if (!stillOurChild()) {
       throw new Error('Sidecar was replaced during initialization');
     }
-    await sendInternal('setLogLevel', { level: 'info' });
+    await sendInternal('setLogLevel', { level: payload.logLevel });
     if (!stillOurChild()) {
       throw new Error('Sidecar was replaced during initialization');
     }
@@ -2252,25 +2252,19 @@ export function getModelContextInfo(alias: string): ModelContextInfo | null {
  * Returns up to `count` suitable lightweight models.
  * Prefers models good for the detected acceleration.
  */
+/** Returns catalog models identified as vision-capable by the sidecar metadata filter. */
+export async function getVisionModels(): Promise<ModelInfo[]> {
+  const res = await send('getVisionModels');
+  return (res.result || []).map((m: any) => ({ ...m, isCached: !!m.cached } as ModelInfo));
+}
+
 /**
  * Returns models that support Speech-to-Text / automatic speech recognition.
  * Uses the `task` field and capabilities to avoid hardcoding families (Whisper, Nemotron Speech, etc.).
  */
-export async function getVisionModels(): Promise<ModelInfo[]> {
-  try {
-    const res = await send('getVisionModels');
-    return (res.result || []).map((m: any) => ({ ...m, isCached: !!m.cached } as ModelInfo));
-  } catch { return []; }
-}
-
 export async function getSTTModels(): Promise<ModelInfo[]> {
-  try {
-    const res = await send('getSTTModels');
-    return (res.result || []).map((m: any) => ({ ...m, isCached: !!m.cached } as ModelInfo));
-  } catch (e) {
-    console.warn('Failed to get STT models', e);
-    return [];
-  }
+  const res = await send('getSTTModels');
+  return (res.result || []).map((m: any) => ({ ...m, isCached: !!m.cached } as ModelInfo));
 }
 
 export async function getRecommendedStarterModels(count: number = 3): Promise<ModelInfo[]> {
