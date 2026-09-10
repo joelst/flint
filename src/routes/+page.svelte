@@ -3114,6 +3114,10 @@ updateStateFromSdk();
         statusMessage = comparePrepStatus;
       },
       slot.variantId ?? undefined,
+      () => {
+        comparePrepStatus = `Downloading ${slot.label}: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.`;
+        statusMessage = comparePrepStatus;
+      },
     );
     await refreshModels();
   }
@@ -4079,9 +4083,14 @@ updateStateFromSdk();
     }
     statusMessage = "Setting up hardware accelerators...";
     try {
-      const readiness = await ensureAccelerators((epName, pct) => {
-        statusMessage = `Accelerator ${epName}: ${pct.toFixed(0)}%`;
-      });
+      const readiness = await ensureAccelerators(
+        (epName, pct) => {
+          statusMessage = `Accelerator ${epName}: ${pct.toFixed(0)}%`;
+        },
+        () => {
+          statusMessage = "Accelerator setup: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.";
+        },
+      );
       if (options?.refreshCatalog !== false) {
         await refreshExecutionProviders({
           throwOnError: true,
@@ -4400,9 +4409,16 @@ updateStateFromSdk();
     downloadingModelAliases = { ...downloadingModelAliases, [model.alias]: true };
     try {
       statusMessage = `Downloading ${model.alias}...`;
-      await downloadModel(model, (p: number) => {
-        statusMessage = `Downloading ${model.alias}: ${p.toFixed(1)}%`;
-      });
+      await downloadModel(
+        model,
+        (p: number) => {
+          statusMessage = `Downloading ${model.alias}: ${p.toFixed(1)}%`;
+        },
+        undefined,
+        () => {
+          statusMessage = `Downloading ${model.alias}: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.`;
+        },
+      );
       setModelRuntimeMeta(model.alias, { downloadedAt: new Date().toISOString() });
       statusMessage = `${model.alias} downloaded`;
       await refreshModels();
@@ -4592,9 +4608,16 @@ updateStateFromSdk();
     downloadingVariantIds = { ...downloadingVariantIds, [variantId]: true };
     try {
       statusMessage = `Downloading ${model.alias} variant...`;
-      await downloadModel(model, (p: number) => {
-        statusMessage = `Downloading ${model.alias}: ${p.toFixed(1)}%`;
-      }, variantId);
+      await downloadModel(
+        model,
+        (p: number) => {
+          statusMessage = `Downloading ${model.alias}: ${p.toFixed(1)}%`;
+        },
+        variantId,
+        () => {
+          statusMessage = `Downloading ${model.alias}: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.`;
+        },
+      );
       setModelRuntimeMeta(model.alias, { downloadedAt: new Date().toISOString() });
       statusMessage = `${model.alias} variant downloaded`;
       await refreshModels();
