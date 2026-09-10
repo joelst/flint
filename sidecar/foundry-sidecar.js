@@ -2085,6 +2085,9 @@ rl.on('line', async (line) => {
             task: m.info?.task,
             capabilities: m.info?.capabilities,
             contextLength: m.info?.contextLength ?? m.info?.maxContext ?? null,
+            supportsToolCalling: typeof m.info?.supportsToolCalling === 'boolean'
+              ? m.info.supportsToolCalling
+              : null,
             family: m.info?.family || null,
             // Live catalog uses createdAt (unix seconds); older SDK typings said createdAtUnix.
             createdAt: m.info?.createdAt ?? m.info?.createdAtUnix ?? null,

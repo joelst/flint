@@ -141,6 +141,8 @@ let currentRuntimeServiceState: RuntimeServiceState = 'unknown';
 export type ModelInfo = IModel & {
   isCached?: boolean;
   isLoaded?: boolean;
+  contextLength?: number | null;
+  supportsToolCalling?: boolean | null;
 };
 
 let managerInstance: any = null;

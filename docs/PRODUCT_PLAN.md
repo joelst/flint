@@ -271,6 +271,10 @@ The remaining items below are outstanding.
   the failure instead of replacing it with an empty success-shaped list. Runtime
   log-level requests now preserve the configured initialization level and reject
   unsupported changes with an explicit restart-required error.
+- Surface `supportsToolCalling` and `contextLength` as catalog-declared metadata,
+  clearly distinguished from Flint-verified behavior.
+  Delivered for the model details view; neither field is presented as a runtime
+  conformance guarantee.
 - Make log-level changes effective or explicitly restart-required. Interpret a
   successful empty loaded-model enumeration as empty, not as failed telemetry.
   Delivered for runtime initialization and explicit restart-required changes.
