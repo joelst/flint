@@ -296,4 +296,43 @@ describe('readBoundedErrorBody', () => {
     await vi.advanceTimersByTimeAsync(1);
     await expect(result).resolves.toBe('[Response body read timed out after 5 seconds]');
   });
+
+  it('honours an explicit zero timeout as the minimum deadline', async () => {
+    vi.useFakeTimers();
+    const response = {
+      headers: new Headers({ 'content-type': 'text/plain' }),
+      body: new ReadableStream<Uint8Array>({ cancel() {} }),
+    } as Response;
+    let settled = false;
+    const result = readBoundedErrorBody(response, { timeoutMs: 0 }).then((value) => {
+      settled = true;
+      return value;
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(result).resolves.toBe('[Response body read timed out after 0.001 seconds]');
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1])(
+    'falls back to the default deadline for invalid timeout %s',
+    async timeoutMs => {
+      vi.useFakeTimers();
+      const response = {
+        headers: new Headers({ 'content-type': 'text/plain' }),
+        body: new ReadableStream<Uint8Array>({ cancel() {} }),
+      } as Response;
+      let settled = false;
+      const result = readBoundedErrorBody(response, { timeoutMs }).then((value) => {
+        settled = true;
+        return value;
+      });
+
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(result).resolves.toBe('[Response body read timed out after 5 seconds]');
+    },
+  );
 });

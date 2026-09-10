@@ -100,10 +100,10 @@ export async function readBoundedResponseText(
  */
 export async function readBoundedErrorBody(response, options = {}) {
   const maxBytes = options.maxBytes ?? DEFAULT_ERROR_BODY_LIMIT;
-  const timeoutMs = Math.max(
-    1,
-    Math.floor(Number(options.timeoutMs) || DEFAULT_ERROR_BODY_TIMEOUT_MS),
-  );
+  const numericTimeout = Number(options.timeoutMs ?? DEFAULT_ERROR_BODY_TIMEOUT_MS);
+  const timeoutMs = Number.isFinite(numericTimeout) && numericTimeout >= 0
+    ? Math.max(1, Math.floor(numericTimeout))
+    : DEFAULT_ERROR_BODY_TIMEOUT_MS;
 
   try {
     const result = await readBoundedResponseText(response, maxBytes, { timeoutMs });
