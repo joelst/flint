@@ -142,6 +142,15 @@ describe('createOperationAdmission', () => {
     expect(admission.snapshot()).toEqual([{ id: 7, command: 'transcribeAudio' }]);
   });
 
+  it('does not wait when the drain deadline is already exhausted', async () => {
+    const admission = createOperationAdmission();
+    admission.admit(7, 'transcribeAudio');
+    admission.beginDrain();
+
+    await expect(admission.waitForDrain(0)).resolves.toBe(false);
+    expect(admission.snapshot()).toEqual([{ id: 7, command: 'transcribeAudio' }]);
+  });
+
   it('can resume admission after a non-terminal drain', () => {
     const admission = createOperationAdmission();
     admission.beginDrain();

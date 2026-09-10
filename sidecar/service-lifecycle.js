@@ -81,6 +81,7 @@ export function createOperationAdmission() {
     },
     async waitForDrain(timeoutMs) {
       if (active.size === 0) return true;
+      if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return false;
       return new Promise((resolve) => {
         let settled = false;
         const finish = (drained) => {
@@ -91,7 +92,7 @@ export function createOperationAdmission() {
           resolve(drained);
         };
         const onDrained = () => finish(true);
-        const timer = setTimeout(() => finish(false), Math.max(1, timeoutMs));
+        const timer = setTimeout(() => finish(false), timeoutMs);
         waiters.add(onDrained);
       });
     },
