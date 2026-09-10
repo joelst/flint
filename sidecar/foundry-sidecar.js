@@ -43,6 +43,7 @@ import {
 import {
   DEFAULT_FETCH_BODY_LIMIT,
   fetchBoundedResponseText,
+  readBoundedErrorBody,
 } from './fetch-response.js';
 import {
   detectConfigEncoding,
@@ -1497,17 +1498,7 @@ function getOpenAiApiBase (endpoint) {
 }
 
 async function readErrorBody (resp) {
-  const contentType = resp.headers.get('content-type') || '';
-  if (contentType.includes('application/json')) {
-    try {
-      const json = await resp.json();
-      return JSON.stringify(json);
-    } catch {
-      // fall back to text
-    }
-  }
-  const text = await resp.text();
-  return text || '';
+  return readBoundedErrorBody(resp);
 }
 
 function toSdkMessages (messages) {

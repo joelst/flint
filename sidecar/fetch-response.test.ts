@@ -1,6 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  DEFAULT_ERROR_BODY_LIMIT,
   fetchBoundedResponseText,
+  readBoundedErrorBody,
   readBoundedResponseText,
 } from './fetch-response.js';
 
@@ -15,6 +17,10 @@ function responseFromChunks(chunks: string[], onCancel = vi.fn()) {
             controller.close();
             return;
           }
+
+          afterEach(() => {
+            vi.useRealTimers();
+          });
           controller.enqueue(encoder.encode(chunks[index++]));
         },
         cancel: onCancel,
@@ -139,6 +145,56 @@ describe('fetchBoundedResponseText', () => {
       fetchImpl as typeof fetch,
       'https://example.test',
     )).rejects.toThrow('HTTP 500 Internal Server Error');
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+});
+
+describe('readBoundedErrorBody', () => {
+  it('keeps default diagnostics within 64 KiB', () => {
+    expect(DEFAULT_ERROR_BODY_LIMIT).toBe(64 * 1024);
+  });
+
+  it('normalizes a bounded JSON error body', async () => {
+    const { response } = responseFromChunks(['{ "error": "bad" }']);
+    Object.defineProperty(response, 'headers', {
+      value: new Headers({ 'content-type': 'application/json' }),
+    });
+
+    await expect(readBoundedErrorBody(response)).resolves.toBe('{"error":"bad"}');
+  });
+
+  it('caps oversized diagnostics and marks them as truncated', async () => {
+    const limit = 64 * 1024;
+    const onCancel = vi.fn();
+    const bytes = new TextEncoder().encode(`${'x'.repeat(limit)}overflow`);
+    const response = {
+      headers: new Headers({ 'content-type': 'text/plain' }),
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(bytes);
+        },
+        cancel: onCancel,
+      }),
+    } as Response;
+
+    await expect(readBoundedErrorBody(response)).resolves.toBe(
+      `${'x'.repeat(limit)} [truncated after ${limit} bytes]`,
+    );
+    expect(onCancel).toHaveBeenCalledOnce();
+  });
+
+  it('bounds a stalled error body and preserves an explicit diagnostic', async () => {
+    vi.useFakeTimers();
+    const cancel = vi.fn();
+    const response = {
+      headers: new Headers({ 'content-type': 'text/plain' }),
+      body: new ReadableStream<Uint8Array>({ cancel }),
+    } as Response;
+
+    const result = readBoundedErrorBody(response, { timeoutMs: 100 });
+    await vi.advanceTimersByTimeAsync(100);
+
+    await expect(result).resolves.toBe('[Response body read timed out after 0.1 seconds]');
     expect(cancel).toHaveBeenCalledOnce();
   });
 });
