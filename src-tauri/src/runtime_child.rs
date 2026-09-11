@@ -104,9 +104,16 @@ mod tests {
         #[cfg(windows)]
         {
             Command::new("tasklist")
-                .args(["/FI", &format!("PID eq {pid}")])
+                .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
                 .output()
-                .map(|output| String::from_utf8_lossy(&output.stdout).contains(&pid.to_string()))
+                .map(|output| {
+                    String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+                        line.split(',')
+                            .nth(1)
+                            .map(|field| field.trim_matches('"') == pid.to_string())
+                            .unwrap_or(false)
+                    })
+                })
                 .unwrap_or(false)
         }
     }
