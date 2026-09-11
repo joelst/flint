@@ -73,7 +73,8 @@ Windows/macOS fixes do not establish Linux release support.
       The tested native generation/phase state model is groundwork only; child
       ownership and transport cutover remain open; the generation-tagged child
       handle and one-child supervisor coordinator are delivered groundwork for
-      that work.
+      that work; the bounded native JSON-lines codec is also delivered
+      transport groundwork, while live transport cutover remains open.
 - [ ] **Rust runtime replacement** — deferred pending parity and measured benefit.
       Preserve one model-manager authority and separate-process crash isolation;
       do not keep competing JS/Rust runtimes or replay uncertain operations.
