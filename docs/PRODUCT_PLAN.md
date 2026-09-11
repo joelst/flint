@@ -26,6 +26,8 @@ delete or reorder deferred backlog items.
    observe exit, preserve truthful operation outcomes, and keep tray/Open/Quit
    and macOS Reopen recoverable. Keep Foundry manager, catalog, pool, gateway,
    cache, and inference ownership in the Node sidecar.
+   The first independently shippable slice is native single-instance
+   enforcement with focus/restore of the existing main window.
 2. Add Rust and installed-path smoke coverage for duplicate launch, sidecar
    startup failure, sidecar crash, graceful quit, failed quit, and reopen.
 3. Build and verify the Windows installer and macOS Apple Silicon artifact,
