@@ -60,6 +60,7 @@ impl Drop for RuntimeChild {
 #[cfg(test)]
 mod tests {
     use super::RuntimeChild;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn reports_generation_on_exit() {
@@ -88,5 +89,27 @@ mod tests {
         let exit = child.wait().expect("wait for terminated child");
         assert_eq!(exit.generation, 7);
         assert_ne!(exit.code, Some(0));
+    }
+
+    #[test]
+    fn try_wait_distinguishes_live_and_exited_children() {
+        let mut child = RuntimeChild::spawn(9, if cfg!(windows) { "ping" } else { "sleep" }, if cfg!(windows) {
+            vec!["-n", "30", "127.0.0.1"]
+        } else {
+            vec!["30"]
+        })
+        .expect("spawn long-lived test child");
+
+        assert!(child.try_wait().expect("poll live child").is_none());
+        child.terminate().expect("terminate test child");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let exit = loop {
+            if let Some(exit) = child.try_wait().expect("poll terminated child") {
+                break exit;
+            }
+            assert!(Instant::now() < deadline, "terminated child did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(exit.generation, 9);
     }
 }
