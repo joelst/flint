@@ -13,8 +13,9 @@ pub struct RuntimeChild {
 }
 
 impl RuntimeChild {
-    pub fn spawn<I, S>(generation: u64, program: &str, args: I) -> io::Result<Self>
+    pub fn spawn<P, I, S>(generation: u64, program: P, args: I) -> io::Result<Self>
     where
+        P: AsRef<std::ffi::OsStr>,
         I: IntoIterator<Item = S>,
         S: AsRef<std::ffi::OsStr>,
     {
@@ -44,6 +45,15 @@ impl RuntimeChild {
             generation: self.generation,
             code: status.code(),
         })
+    }
+}
+
+impl Drop for RuntimeChild {
+    fn drop(&mut self) {
+        if matches!(self.child.try_wait(), Ok(None)) {
+            let _ = self.child.kill();
+        }
+        let _ = self.child.wait();
     }
 }
 
