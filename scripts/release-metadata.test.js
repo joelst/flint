@@ -40,6 +40,13 @@ describe('release metadata validation', () => {
     expect(isCanonicalUpdaterEndpoint(CANONICAL_UPDATER_ENDPOINT)).toBe(true);
     expect(isCanonicalUpdaterEndpoint('https://github.com/other/project/releases/latest/download/latest.json')).toBe(false);
     expect(isCanonicalUpdaterEndpoint(`${CANONICAL_UPDATER_ENDPOINT}?wrong=true`)).toBe(false);
+    expect(isCanonicalUpdaterEndpoint('not a URL')).toBe(false);
+    expect(isCanonicalUpdaterEndpoint(null)).toBe(false);
+  });
+
+  it('rejects invalid release inputs', () => {
+    expect(validateReleaseInputs('', 'stable')).toBe('invalid version or release channel');
+    expect(validateReleaseInputs('0.7.0', 'unknown')).toBe('invalid version or release channel');
   });
 
   it('covers the checker filesystem and failure paths', () => {
@@ -52,7 +59,7 @@ describe('release metadata validation', () => {
         version: versions.tauri,
         plugins: { updater: { endpoints } },
       }));
-      writeFileSync(join(tauriDir, 'Cargo.toml'), `[package]\nversion = "${versions.cargo}"\n`);
+      writeFileSync(join(tauriDir, 'Cargo.toml'), `[package]\nname = "flint"\nversion = "${versions.cargo}"\n`);
     };
     const log = { log: () => {}, error: () => {} };
     try {
@@ -61,11 +68,24 @@ describe('release metadata validation', () => {
         [CANONICAL_UPDATER_ENDPOINT],
       );
       expect(verifyReleaseMetadata(root, '0.7.0', 'evaluation', log)).toBe(true);
+      writeFileSync(join(tauriDir, 'Cargo.toml'), '[package]\nname = "flint"\nversion = "0.7.0"\n\n[dependencies]\nversion = "9.9.9"\n');
+      expect(verifyReleaseMetadata(root, '0.7.0', 'evaluation', log)).toBe(true);
       writeFixture(
         { package: '0.6.0', tauri: '0.7.0', cargo: '0.7.0' },
         [CANONICAL_UPDATER_ENDPOINT],
       );
       expect(verifyReleaseMetadata(root, '0.7.0', 'evaluation', log)).toBe(false);
+      const errors = [];
+      writeFixture(
+        { package: '0.7.0', tauri: '0.7.0', cargo: '0.7.0' },
+        [CANONICAL_UPDATER_ENDPOINT],
+      );
+      writeFileSync(join(tauriDir, 'Cargo.toml'), '[package]\nname = "flint"\n\n[dependencies]\nversion = "0.7.0"\n');
+      expect(verifyReleaseMetadata(root, '0.7.0', 'evaluation', {
+        log: () => {},
+        error: (message) => errors.push(message),
+      })).toBe(false);
+      expect(errors).toContain('✗ could not read release metadata: Could not find the Cargo package version');
       writeFixture(
         { package: '0.7.0', tauri: '0.7.0', cargo: '0.7.0' },
         [CANONICAL_UPDATER_ENDPOINT, 'https://example.com/updates.json'],

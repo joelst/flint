@@ -10,7 +10,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { normalizeVersion } = require('./release-metadata.cjs');
+const { isStrictSemver, normalizeVersion } = require('./release-metadata.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 
@@ -30,7 +30,7 @@ function main () {
   const pkg = readJson(pkgPath);
   const version = normalizeVersion(explicitVersion || pkg.version);
 
-  if (!version || !/^\d+\.\d+\.\d+(-[a-zA-Z0-9.-]+)?$/.test(version)) {
+  if (!version || !isStrictSemver(version)) {
     console.error(`Invalid version: ${version}`);
     process.exit(1);
   }

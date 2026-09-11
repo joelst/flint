@@ -25,7 +25,12 @@ function readJson(rootPath, relativePath) {
 
 function readCargoVersion(rootPath) {
   const cargo = fs.readFileSync(path.join(rootPath, 'src-tauri', 'Cargo.toml'), 'utf8');
-  const match = cargo.match(/^\[package\][\s\S]*?^version\s*=\s*"([^"]+)"/m);
+  const packageStart = cargo.indexOf('[package]');
+  if (packageStart === -1) throw new Error('Could not find the Cargo package version');
+  const afterPackage = cargo.slice(packageStart + '[package]'.length);
+  const nextSection = afterPackage.search(/^\[[^\]]+\]\s*$/m);
+  const packageSection = nextSection === -1 ? afterPackage : afterPackage.slice(0, nextSection);
+  const match = packageSection.match(/^\s*version\s*=\s*"([^"]+)"/m);
   if (!match) throw new Error('Could not find the Cargo package version');
   return match[1];
 }
@@ -38,11 +43,21 @@ function verifyReleaseMetadata(rootPath, rawExpected, channel, log = console) {
     return false;
   }
 
-  const tauriConfig = readJson(rootPath, 'src-tauri/tauri.conf.json');
+  let tauriConfig;
+  let cargoVersion;
+  let packageVersion;
+  try {
+    tauriConfig = readJson(rootPath, 'src-tauri/tauri.conf.json');
+    packageVersion = readJson(rootPath, 'package.json').version;
+    cargoVersion = readCargoVersion(rootPath);
+  } catch (error) {
+    log.error(`✗ could not read release metadata: ${error.message}`);
+    return false;
+  }
   const actual = {
-    package: readJson(rootPath, 'package.json').version,
+    package: packageVersion,
     tauri: tauriConfig.version,
-    cargo: readCargoVersion(rootPath),
+    cargo: cargoVersion,
   };
   let failed = false;
   for (const [source, version] of Object.entries(actual)) {
