@@ -36,9 +36,10 @@ Windows/macOS fixes do not establish Linux release support.
 
 ## Audio
 
-- [ ] **Convert instead of rejecting** — non-WAV uploads are now rejected with a clear
-      error; transcoding WebM/Opus and MP3 to 16 kHz mono PCM would be better. Needs a
-      decoder that doesn't bloat the bundle.
+- [ ] **Convert instead of rejecting** — the browser now transcodes formats its audio
+      decoder supports to 16 kHz mono PCM WAV and rejects conversion failures without
+      sending invalid bytes; broader WebM/Opus and MP3 coverage still needs a decoder
+      that doesn't bloat the bundle.
 - [ ] **Word-level timestamps** — blocked upstream
       ([microsoft/Foundry-Local#392](https://github.com/microsoft/Foundry-Local/issues/392),
       open). Revisit when granularity lands; `parakeet-tdt-0.6b-v2` is already in the

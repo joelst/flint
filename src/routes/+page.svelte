@@ -5396,7 +5396,7 @@ Output only the summary text, no preamble.`;
         }
         try {
           const fullBlob = new Blob(chunks, { type: 'audio/webm' });
-          const wavBlob = await convertAudioBlobToWav(fullBlob).catch(() => fullBlob);
+          const wavBlob = await convertAudioBlobToWav(fullBlob);
           const res = await transcribeAudio(wavBlob, sttAlias, transcriptionLanguage, 'dictation.wav', { temperature: 0 });
           const text = getTranscriptTextFromResult(res);
           if (!text) {
@@ -5437,12 +5437,14 @@ Output only the summary text, no preamble.`;
     try {
       const windowChunks = dictationChunks.slice(-2); // ~last 4s (timeslice=2000ms)
       const blob = new Blob(windowChunks, { type: 'audio/webm' });
-      const wavBlob = await convertAudioBlobToWav(blob).catch(() => blob);
+      const wavBlob = await convertAudioBlobToWav(blob);
       const res = await transcribeAudio(wavBlob, sttAlias, transcriptionLanguage, 'dictation-interim.wav', { temperature: 0 });
       const text = getTranscriptTextFromResult(res);
       if (text && isDictating && session === dictationSession) dictationInterim = text;
-    } catch {
-      // rolling transcription is best-effort; failures are silent
+    } catch (error) {
+      if (session === dictationSession) {
+        statusMessage = `Live dictation preview unavailable: ${error}`;
+      }
     } finally {
       // Release only our own lock: a stale pass must not unlock the current session.
       if (rollingOwner === session) rollingOwner = 0;
@@ -5726,20 +5728,13 @@ Output only the summary text, no preamble.`;
           preferredEp: selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference
         });
       } else {
-        let sendBlob = audioBlob;
-        let sendName = "audio.webm";
-        try {
-          sendBlob = await convertAudioBlobToWav(audioBlob);
-          sendName = "audio.wav";
-        } catch (convErr) {
-          console.warn("WAV normalization failed, trying original", convErr);
-        }
+        const sendBlob = await convertAudioBlobToWav(audioBlob);
 
         result = await transcribeAudio(
           sendBlob,
           sttAlias,
           transcriptionLanguage,
-          sendName,
+          "audio.wav",
           {
             temperature: 0,
             preferredEp: selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference
