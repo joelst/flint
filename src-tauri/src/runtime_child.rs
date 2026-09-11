@@ -50,7 +50,7 @@ impl RuntimeChild {
 
 impl Drop for RuntimeChild {
     fn drop(&mut self) {
-        if matches!(self.child.try_wait(), Ok(None)) {
+        if !matches!(self.child.try_wait(), Ok(Some(_))) {
             let _ = self.child.kill();
         }
         let _ = self.child.wait();
