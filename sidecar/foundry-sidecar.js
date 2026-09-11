@@ -1483,8 +1483,18 @@ const ensureModelLocks = new Map();
 
 function ensureModel(alias, variantId) {
   const inFlightLoad = ensureModelLocks.get(alias);
+  const hadExistingModel = pool.has(alias);
   const next = (inFlightLoad ? inFlightLoad.catch(() => {}) : Promise.resolve())
-    .then(() => ensureModelLocked(alias, variantId));
+    .then(async () => {
+      const result = await ensureModelLocked(alias, variantId);
+      // A request that arrived while a cold load was already queued cannot truthfully claim
+      // warm access: the model was absent when this request began, but the shared load may have
+      // completed before its serialized probe ran.
+      if (inFlightLoad && !hadExistingModel) {
+        return { ...result, loadedNow: null };
+      }
+      return result;
+    });
   ensureModelLocks.set(alias, next);
   const release = () => {
     if (ensureModelLocks.get(alias) === next) ensureModelLocks.delete(alias);

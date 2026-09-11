@@ -89,5 +89,16 @@ describe('buildInferenceMetrics', () => {
       decodeTokensPerSecond: null,
       promptTokensPerSecond: null,
     });
+
+    expect(buildInferenceMetrics({
+      startedAt: 1000,
+      firstTokenAt: 3000,
+      completedAt: 2000,
+      tokensIn: 10,
+    })).toMatchObject({
+      durationMs: 1000,
+      ttftMs: null,
+      promptTokensPerSecond: null,
+    });
   });
 });

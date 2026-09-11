@@ -28,7 +28,9 @@ export function buildInferenceMetrics ({
     ? completedAt - startedAt
     : null;
   const ttftMs = Number.isFinite(firstTokenAt) && Number.isFinite(startedAt)
+    && Number.isFinite(completedAt)
     && firstTokenAt >= startedAt
+    && firstTokenAt <= completedAt
     ? firstTokenAt - startedAt
     : null;
   const decodeMs = ttftMs === null || durationMs === null
