@@ -1,3 +1,5 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   extractFieldsByCommand,
@@ -8,7 +10,10 @@ import {
   splitTopLevelEntries,
   splitUnionVariants,
   verifyIpcContractSources,
+  verifyIpcContracts,
 } from './verify-ipc-contracts.cjs';
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /** Minimal, valid fixture set mirroring the real files' shape for one command. */
 function fixtures() {
@@ -203,6 +208,21 @@ describe('verifyIpcContractSources', () => {
     );
     expect(() => verifyIpcContractSources(broken, { log: () => {} })).toThrow(
       /unload required fields \(typed vs COMMAND_SCHEMA\) drifted/,
+    );
+  });
+});
+
+describe('verifyIpcContracts', () => {
+  it('reads the real repo files and reports the current command count without throwing', () => {
+    const messages = [];
+    const count = verifyIpcContracts(repoRoot, { log: (message) => messages.push(message) });
+    expect(count).toBeGreaterThan(0);
+    expect(messages[0]).toMatch(/IPC contracts verified: \d+ commands/);
+  });
+
+  it('throws with a path reference when a source file is missing', () => {
+    expect(() => verifyIpcContracts(path.join(repoRoot, 'does-not-exist'), { log: () => {} })).toThrow(
+      /ENOENT/,
     );
   });
 });
