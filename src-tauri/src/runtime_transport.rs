@@ -132,7 +132,8 @@ mod tests {
     fn rejects_invalid_and_incomplete_frames() {
         let mut invalid = JsonLinesDecoder::new(128).expect("decoder");
         assert!(invalid.push(b"{broken}\n").is_err());
-        assert!(invalid.push(b"\x0b\n").is_err());
+        let mut invalid_whitespace = JsonLinesDecoder::new(128).expect("decoder");
+        assert!(invalid_whitespace.push(b"\x0b\n").is_err());
 
         let mut incomplete = JsonLinesDecoder::new(128).expect("decoder");
         incomplete.push(b"{\"id\": 1}").expect("partial frame");

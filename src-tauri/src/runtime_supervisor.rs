@@ -149,8 +149,7 @@ mod tests {
             .start(command().0, command().1)
             .expect("start child");
         let mut child = supervisor.child.take().expect("child handle");
-        let exit = child.wait().expect("wait child");
-        supervisor.state.observe_exit(exit.generation);
+        child.wait().expect("wait child");
         assert_eq!(
             supervisor.shutdown(generation).expect("missing child"),
             None
