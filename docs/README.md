@@ -21,6 +21,7 @@ to load for a given task.
 | [EXTENDING.md](./EXTENDING.md) | Architecture boundaries and safe extension guide for contributors |
 | [FLINT_DESIGN_SPEC.md](../FLINT_DESIGN_SPEC.md) | Architecture and product principles |
 | [`.github/copilot-instructions.md`](../.github/copilot-instructions.md) | Short AI/contributor conventions |
+| [CONTRIBUTING.md](../CONTRIBUTING.md) | Entry point: which doc to read, pre-PR checklist |
 
 ## Release operators
 

@@ -27,6 +27,7 @@
 - [ ] `npm run check`
 - [ ] Focused tests
 - [ ] `npm run verify:ipc-contracts` (when IPC/runtime files change)
+- [ ] `npm run verify:markdown-links` (when docs/README/markdown links change)
 - [ ] `npm run verify:bundle` (when resources/runtime packaging changes)
 - [ ] `git diff --check`
 

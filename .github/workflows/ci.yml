@@ -115,6 +115,9 @@ jobs:
       - name: IPC contract check
         run: npm run verify:ipc-contracts
 
+      - name: Markdown link check
+        run: npm run verify:markdown-links
+
       - name: Rust check
         working-directory: src-tauri
         run: cargo check
