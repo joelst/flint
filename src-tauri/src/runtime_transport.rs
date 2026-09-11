@@ -62,7 +62,7 @@ impl JsonLinesDecoder {
 
     fn decode_buffer(&mut self, frames: &mut Vec<Value>) -> io::Result<()> {
         let line = self.buffer.strip_suffix(b"\r").unwrap_or(&self.buffer);
-        if line.iter().all(u8::is_ascii_whitespace) {
+        if line.iter().copied().all(is_json_whitespace) {
             self.buffer.clear();
             return Ok(());
         }
@@ -78,7 +78,7 @@ impl JsonLinesDecoder {
     }
 
     pub fn finish(self) -> io::Result<Vec<Value>> {
-        if self.buffer.iter().all(u8::is_ascii_whitespace) {
+        if self.buffer.iter().copied().all(is_json_whitespace) {
             return Ok(Vec::new());
         }
         Err(io::Error::new(
@@ -86,6 +86,10 @@ impl JsonLinesDecoder {
             "JSON-lines stream ended with an incomplete frame",
         ))
     }
+}
+
+fn is_json_whitespace(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
 }
 
 pub fn encode_json_line(value: &Value) -> io::Result<Vec<u8>> {
@@ -122,10 +126,16 @@ mod tests {
     fn rejects_invalid_and_incomplete_frames() {
         let mut invalid = JsonLinesDecoder::new(128).expect("decoder");
         assert!(invalid.push(b"{broken}\n").is_err());
+        assert!(invalid.push(b"\x0b\n").is_err());
 
         let mut incomplete = JsonLinesDecoder::new(128).expect("decoder");
         incomplete.push(b"{\"id\": 1}").expect("partial frame");
         assert!(incomplete.finish().is_err());
+        let mut invalid_trailing = JsonLinesDecoder::new(128).expect("decoder");
+        invalid_trailing
+            .push(b"\x0c")
+            .expect("partial invalid frame");
+        assert!(invalid_trailing.finish().is_err());
     }
 
     #[test]
