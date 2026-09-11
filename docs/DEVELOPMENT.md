@@ -86,18 +86,8 @@ When adding sidecar commands: update **both** `src/lib/sdk.ts` (and IPC contract
 
 ### Parallel contributor handoff
 
-Keep each pull request within one work lane: frontend/persistence, SDK/IPC
-contracts, sidecar/runtime, Rust/Tauri shell, packaging/release, or
-documentation. Name the touched seam, runtime owner, operation effect,
-cancellation behavior, and validation in the pull request. Shared hotspots
-such as `+page.svelte`, `sdk.ts`, `ipc-contracts.ts`, the sidecar, and the lockfile
-require a rebase and a full contract check after conflict resolution.
-
-For SDK/IPC or runtime changes, run:
-
-```bash
-npm run verify:ipc-contracts
-```
+See [EXTENDING.md](./EXTENDING.md#working-safely-in-parallel) for work lanes,
+shared hotspots, and the `npm run verify:ipc-contracts` check.
 
 ### Local OpenAI-compatible endpoint
 
