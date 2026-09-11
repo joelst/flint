@@ -1483,15 +1483,17 @@ const ensureModelLocks = new Map();
 
 function ensureModel(alias, variantId) {
   const inFlightLoad = ensureModelLocks.get(alias);
-  const hadExistingModel = pool.has(alias);
-  const next = (inFlightLoad ? inFlightLoad.catch(() => {}) : Promise.resolve())
-    .then(async () => {
+  const previousResult = inFlightLoad ? inFlightLoad.catch(() => null) : Promise.resolve(null);
+  const next = previousResult.then(async (previous) => {
       const result = await ensureModelLocked(alias, variantId);
-      // A request that arrived while a cold load was already queued cannot truthfully claim
-      // warm access: the model was absent when this request began, but the shared load may have
-      // completed before its serialized probe ran.
-      if (inFlightLoad && !hadExistingModel) {
-        return { ...result, loadedNow: null };
+      if (inFlightLoad && result.loadedNow !== true) {
+        // A preceding request may have loaded or reloaded this model while this request waited.
+        // Only a preceding known-warm result remains warm; the other cases are unknowable from
+        // the current request's serialized probe.
+        return {
+          ...result,
+          loadedNow: previous?.loadedNow === false ? false : null,
+        };
       }
       return result;
     });
