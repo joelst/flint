@@ -27,8 +27,8 @@ describe('cache inventory summary', () => {
       { path: '', alias: 'ignored', variantId: null, sizeBytes: 9, partial: false, linked: false, owned: false },
     ]);
 
-    expect(result.entries).toHaveLength(2);
-    expect(result.totalBytes).toBe(9);
+    expect(result.entries).toHaveLength(1);
+    expect(result.totalBytes).toBe(0);
     expect(result.duplicateGroups).toEqual([]);
   });
 });

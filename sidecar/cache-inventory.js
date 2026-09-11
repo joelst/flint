@@ -21,7 +21,9 @@
  * @param {CacheEntry[]} entries
  */
 export function summarizeCacheInventory(entries) {
-  const safeEntries = Array.isArray(entries) ? entries.filter(entry => entry && typeof entry.path === 'string') : [];
+  const safeEntries = Array.isArray(entries)
+    ? entries.filter(entry => entry && typeof entry.path === 'string' && entry.path.length > 0)
+    : [];
   const byAlias = new Map();
 
   for (const entry of safeEntries) {

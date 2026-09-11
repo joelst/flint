@@ -1165,7 +1165,7 @@ function isLinkedOrForeign(root, target) {
   }
 }
 
-function directoryBytesAndMarkers(dir, root) {
+async function directoryBytesAndMarkers(dir, root, budget) {
   let sizeBytes = 0;
   let partial = false;
   let entries;
@@ -1175,13 +1175,14 @@ function directoryBytesAndMarkers(dir, root) {
     return { sizeBytes: 0, partial: false };
   }
   for (const entry of entries) {
+    await budget.yieldIfNeeded();
     const child = path.join(dir, entry.name);
     if (entry.isSymbolicLink() || isLinkedOrForeign(root, child)) continue;
     if (entry.isFile()) {
       if (entry.name === 'download.tmp') partial = true;
       try { sizeBytes += fs.statSync(child).size; } catch {}
     } else if (entry.isDirectory()) {
-      const nested = directoryBytesAndMarkers(child, root);
+      const nested = await directoryBytesAndMarkers(child, root, budget);
       sizeBytes += nested.sizeBytes;
       partial ||= nested.partial;
     }
@@ -1189,11 +1190,20 @@ function directoryBytesAndMarkers(dir, root) {
   return { sizeBytes, partial };
 }
 
-function cacheInventoryEntries(root) {
+async function cacheInventoryEntries(root) {
   const found = [];
   const visited = new Set();
+  const budget = {
+    count: 0,
+    async yieldIfNeeded() {
+      if (++this.count % 100 === 0) await new Promise(resolve => setImmediate(resolve));
+    },
+  };
+  let canonicalRoot;
+  try { canonicalRoot = fs.realpathSync(root); } catch { return found; }
 
-  function walk(dir) {
+  async function walk(dir) {
+    await budget.yieldIfNeeded();
     let real;
     try { real = fs.realpathSync(dir); } catch { return; }
     if (visited.has(real)) return;
@@ -1202,8 +1212,9 @@ function cacheInventoryEntries(root) {
     let entries;
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const entry of entries) {
+      await budget.yieldIfNeeded();
       const child = path.join(dir, entry.name);
-      if (entry.isSymbolicLink() || isLinkedOrForeign(root, child)) {
+      if (entry.isSymbolicLink() || isLinkedOrForeign(canonicalRoot, child)) {
         found.push({
           path: child,
           alias: null,
@@ -1217,17 +1228,17 @@ function cacheInventoryEntries(root) {
       }
       if (!entry.isDirectory()) continue;
 
-      const inferencePath = path.join(child, 'inference_model.json');
       const childEntries = (() => {
         try { return fs.readdirSync(child, { withFileTypes: true }); } catch { return []; }
       })();
-      const hasDirectPartial = childEntries.some(e => e.isFile() && e.name === 'download.tmp');
-      if (fs.existsSync(inferencePath)) {
+      const hasMetadata = name => childEntries.some(e => e.isFile() && e.name === name);
+      const hasDirectPartial = hasMetadata('download.tmp');
+      if (hasMetadata('genai_config.json') && hasMetadata('inference_model.json')) {
         const metadata = readJsonIfPresent(child, 'inference_model.json');
         const name = typeof metadata?.Name === 'string' ? metadata.Name : '';
         const separator = name.lastIndexOf(':');
         const alias = separator > 0 ? name.slice(0, separator) : name || null;
-        const stats = directoryBytesAndMarkers(child, root);
+        const stats = await directoryBytesAndMarkers(child, canonicalRoot, budget);
         found.push({
           path: child,
           alias,
@@ -1235,12 +1246,12 @@ function cacheInventoryEntries(root) {
           sizeBytes: stats.sizeBytes,
           partial: stats.partial,
           linked: false,
-          owned: hasOwnershipMarker(child, root),
+          owned: hasOwnershipMarker(child, canonicalRoot),
         });
         continue;
       }
       if (hasDirectPartial) {
-        const stats = directoryBytesAndMarkers(child, root);
+        const stats = await directoryBytesAndMarkers(child, canonicalRoot, budget);
         found.push({
           path: child,
           alias: null,
@@ -1248,35 +1259,37 @@ function cacheInventoryEntries(root) {
           sizeBytes: stats.sizeBytes,
           partial: true,
           linked: false,
-          owned: hasOwnershipMarker(child, root),
+          owned: hasOwnershipMarker(child, canonicalRoot),
         });
         continue;
       }
 
-      walk(child);
+      await walk(child);
     }
   }
 
-  walk(root);
+  await walk(root);
   return found;
 }
 
 function hasOwnershipMarker(dir, root) {
-  let current = path.resolve(dir);
+  let current;
+  try { current = fs.realpathSync(dir); } catch { current = path.resolve(dir); }
   const boundary = path.resolve(root);
-  while (isInsideRoot(boundary, current)) {
+  while (true) {
     if (fs.existsSync(path.join(current, OWNERSHIP_MARKER))) return true;
     if (current === boundary) break;
     const parent = path.dirname(current);
     if (parent === current) break;
+    if (!isInsideRoot(boundary, parent)) break;
     current = parent;
   }
   return false;
 }
 
-function getCacheInventory() {
+async function getCacheInventory() {
   const root = modelCacheRoot();
-  return summarizeCacheInventory(fs.existsSync(root) ? cacheInventoryEntries(root) : []);
+  return summarizeCacheInventory(fs.existsSync(root) ? await cacheInventoryEntries(root) : []);
 }
 
 /** Files worth reading to classify a candidate folder. */
@@ -3041,7 +3054,7 @@ rl.on('line', async (line) => {
         }
       });
     } else if (cmd === 'getCacheInventory') {
-      reply({ ok: true, result: getCacheInventory() });
+      reply({ ok: true, result: await getCacheInventory() });
     } else if (cmd === 'setEvictionConfig') {
       // Apply immediately: a user who has just lowered the cap expects the pool to shrink
       // now, not at some point in the next half minute.

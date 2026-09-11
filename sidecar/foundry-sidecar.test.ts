@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
-import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
@@ -54,6 +54,47 @@ function waitForLine(
 }
 
 describe('foundry-sidecar protocol basics', () => {
+  it('scans the cache inventory through IPC without traversing linked targets', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'flint-inventory-home-'));
+    const root = join(home, '.flint', 'cache', 'models');
+    const model = join(root, 'Imported', 'demo-1', 'v1');
+    const partial = join(root, 'Catalog', 'partial');
+    const foreign = mkdtempSync(join(tmpdir(), 'flint-inventory-foreign-'));
+    mkdirSync(model, { recursive: true });
+    mkdirSync(partial, { recursive: true });
+    writeFileSync(join(model, 'genai_config.json'), '{}');
+    writeFileSync(join(model, 'inference_model.json'), JSON.stringify({ Name: 'demo:1' }));
+    writeFileSync(join(model, 'weights.onnx'), Buffer.alloc(7));
+    writeFileSync(join(root, 'Imported', 'demo-1', '.flint-import.json'), '{}');
+    writeFileSync(join(partial, 'download.tmp'), Buffer.alloc(11));
+    writeFileSync(join(foreign, 'genai_config.json'), '{}');
+    writeFileSync(join(foreign, 'inference_model.json'), JSON.stringify({ Name: 'foreign:1' }));
+    symlinkSync(foreign, join(root, 'Linked'), 'junction');
+
+    const proc = spawn(process.execPath, ['sidecar/foundry-sidecar.js'], {
+      cwd: process.cwd(),
+      env: { ...process.env, HOME: home, USERPROFILE: home },
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+    try {
+      await waitForLine(proc, (msg) => msg.ready === true);
+      proc.stdin.write(`${JSON.stringify({ id: 91, cmd: 'getCacheInventory' })}\n`);
+      const response = await waitForLine(proc, (msg) => msg.id === 91);
+      expect(response.ok).toBe(true);
+      expect(response.result.totalBytes).toBeGreaterThan(11);
+      expect(response.result.partialBytes).toBe(11);
+      expect(response.result.entries).toEqual(expect.arrayContaining([
+        expect.objectContaining({ path: join(root, 'Linked'), linked: true, sizeBytes: 0 }),
+        expect.objectContaining({ alias: 'demo', owned: true }),
+      ]));
+      expect(response.result.entries.some((entry: any) => entry.alias === 'foreign')).toBe(false);
+    } finally {
+      proc.kill();
+      rmSync(home, { recursive: true, force: true });
+      rmSync(foreign, { recursive: true, force: true });
+    }
+  });
+
   it('emits ready and handles basic request/validation messages', async () => {
     const proc = spawn(process.execPath, ['sidecar/foundry-sidecar.js'], {
       cwd: process.cwd(),

@@ -7667,8 +7667,37 @@ Output only the summary text, no preamble.`;
                 <p class="setting-note">
                   These are recommendations only. Flint does not delete cache files from this view.
                 </p>
+                {#if cacheInventory.partialEntries.length}
+                  <h4>Partial downloads</h4>
+                  <ul class="diagnostic-list">
+                    {#each cacheInventory.partialEntries as entry}
+                      <li><code>{entry.path}</code> · {(entry.bytes / 1024 / 1024).toFixed(1)} MB</li>
+                    {/each}
+                  </ul>
+                {/if}
+                {#if cacheInventory.duplicateGroups.length}
+                  <h4>Duplicate aliases</h4>
+                  <ul class="diagnostic-list">
+                    {#each cacheInventory.duplicateGroups as group}
+                      <li>
+                        <strong>{group.alias}</strong> · {(group.bytes / 1024 / 1024).toFixed(1)} MB reviewable
+                        <ul>
+                          {#each group.entries as entry}<li><code>{entry}</code></li>{/each}
+                        </ul>
+                      </li>
+                    {/each}
+                  </ul>
+                {/if}
               {:else}
                 <p class="setting-note">No partial downloads or duplicate aliases were found.</p>
+              {/if}
+              {#if cacheInventory.entries.some((entry) => entry.linked)}
+                <h4>Linked entries</h4>
+                <ul class="diagnostic-list">
+                  {#each cacheInventory.entries.filter((entry) => entry.linked) as entry}
+                    <li><code>{entry.path}</code> · foreign target not scanned</li>
+                  {/each}
+                </ul>
               {/if}
             </div>
           {/if}
