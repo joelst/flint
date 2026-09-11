@@ -5442,7 +5442,7 @@ Output only the summary text, no preamble.`;
       const text = getTranscriptTextFromResult(res);
       if (text && isDictating && session === dictationSession) dictationInterim = text;
     } catch (error) {
-      if (session === dictationSession) {
+      if (session === dictationSession && isDictating) {
         statusMessage = `Live dictation preview unavailable: ${error}`;
       }
     } finally {
