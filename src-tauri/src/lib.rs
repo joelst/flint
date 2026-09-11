@@ -1,4 +1,5 @@
 pub mod runtime_state;
+pub mod runtime_child;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

@@ -368,6 +368,11 @@ prevents overlapping starts, and distinguishes starting, ready, shutting down,
 and exited phases. This is groundwork for native child ownership; it does not
 yet move sidecar spawning out of the frontend shell transport.
 
+The native layer also has a generation-tagged child handle with explicit exit
+observation and termination. It owns only the operating-system child process;
+Foundry manager, model, gateway, cache, and inference ownership stay in the
+Node sidecar until the transport cutover is complete.
+
 ### Native responsibilities
 
 - Single-instance behavior and ownership of exactly one runtime child.
