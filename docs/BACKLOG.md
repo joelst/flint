@@ -68,6 +68,8 @@ Windows/macOS fixes do not establish Linux release support.
       needed for a shareable Windows/macOS prerelease: one owned sidecar child,
       exit observation, truthful shutdown, and renderer-independent recovery.
       This is a release gate for the item above, not a replacement for it.
+      The tested native generation/phase state model is groundwork only; child
+      ownership and transport cutover remain open.
 - [ ] **Rust runtime replacement** — deferred pending parity and measured benefit.
       Preserve one model-manager authority and separate-process crash isolation;
       do not keep competing JS/Rust runtimes or replay uncertain operations.
