@@ -7,6 +7,7 @@ import {
   extractQuotedValues,
   extractSchemaRequiredOptional,
   extractTypedCommandFields,
+  findObjectBody,
   splitTopLevelEntries,
   splitUnionVariants,
   verifyIpcContractSources,
@@ -70,12 +71,42 @@ describe('verify-ipc-contracts fixture parsing', () => {
     ).toThrow(/Unsupported syntax/);
   });
 
+  it('throws when the start marker is missing', () => {
+    expect(() => extractQuotedValues("new Set([\n  'a',\n]);", 'no such marker', ']);')).toThrow(
+      /Could not find no such marker/,
+    );
+  });
+
+  it('throws when the end marker is missing', () => {
+    expect(() =>
+      extractQuotedValues("new Set([\n  'a',\n]);", 'new Set([', 'no such marker'),
+    ).toThrow(/Could not find no such marker/);
+  });
+
   it('extracts top-level object keys, ignoring nested object keys', () => {
     const keys = extractObjectKeys(
       'const X = {\n  a: { nested: 1 },\n  b: 2,\n};',
       'const X =',
     );
     expect(keys).toEqual(['a', 'b']);
+  });
+
+  it('throws when findObjectBody cannot locate the marker', () => {
+    expect(() => findObjectBody('const X = {\n  a: 1,\n};', 'no such marker')).toThrow(
+      /Could not find no such marker/,
+    );
+  });
+
+  it('throws when findObjectBody cannot locate an opening brace after the marker', () => {
+    expect(() => findObjectBody('const X = 1;', 'const X =')).toThrow(
+      /Could not find object body for const X =/,
+    );
+  });
+
+  it('throws when findObjectBody never finds a matching closing brace', () => {
+    expect(() => findObjectBody('const X = {\n  a: 1,\n', 'const X =')).toThrow(
+      /Could not close object for const X =/,
+    );
   });
 
   it('splits top-level entries without breaking on nested commas', () => {
