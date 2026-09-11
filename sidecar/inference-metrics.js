@@ -24,14 +24,17 @@ export function buildInferenceMetrics ({
   const validTokensOut = Number.isFinite(tokensOut) && tokensOut >= 0 ? tokensOut : null;
   const validLoadMs = Number.isFinite(loadMs) && loadMs >= 0 ? loadMs : null;
   const durationMs = Number.isFinite(startedAt) && Number.isFinite(completedAt)
-    ? Math.max(0, completedAt - startedAt)
+    && completedAt >= startedAt
+    ? completedAt - startedAt
     : null;
   const ttftMs = Number.isFinite(firstTokenAt) && Number.isFinite(startedAt)
-    ? Math.max(0, firstTokenAt - startedAt)
+    && firstTokenAt >= startedAt
+    ? firstTokenAt - startedAt
     : null;
   const decodeMs = ttftMs === null || durationMs === null
+    || durationMs < ttftMs
     ? null
-    : Math.max(0, durationMs - ttftMs);
+    : durationMs - ttftMs;
   const promptMs = ttftMs === null || validLoadMs === null
     ? null
     : Math.max(0, ttftMs - validLoadMs);

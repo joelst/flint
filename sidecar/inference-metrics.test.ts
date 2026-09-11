@@ -44,7 +44,7 @@ describe('buildInferenceMetrics', () => {
     });
   });
 
-  it('rejects invalid or negative timing through null/clamped values', () => {
+  it('rejects invalid or negative timing through null values', () => {
     expect(buildInferenceMetrics({
       startedAt: 2000,
       loadMs: -5,
@@ -53,9 +53,9 @@ describe('buildInferenceMetrics', () => {
       tokensIn: -1,
       tokensOut: '20',
     })).toMatchObject({
-      durationMs: 0,
+      durationMs: null,
       loadMs: null,
-      ttftMs: 0,
+      ttftMs: null,
       tokensIn: null,
       tokensOut: null,
       promptTokensPerSecond: null,
@@ -72,6 +72,21 @@ describe('buildInferenceMetrics', () => {
       tokensIn: 10,
     })).toMatchObject({
       loadMs: null,
+      promptTokensPerSecond: null,
+    });
+  });
+
+  it('rejects event orderings that would fabricate timing', () => {
+    expect(buildInferenceMetrics({
+      startedAt: 2000,
+      firstTokenAt: 1500,
+      completedAt: 2500,
+      tokensIn: 10,
+      tokensOut: 20,
+    })).toMatchObject({
+      durationMs: 500,
+      ttftMs: null,
+      decodeTokensPerSecond: null,
       promptTokensPerSecond: null,
     });
   });

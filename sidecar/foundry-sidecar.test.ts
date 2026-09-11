@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
-import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'fs';
+import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
@@ -124,6 +124,130 @@ describe('foundry-sidecar protocol basics', () => {
     const log = readFileSync(join(logDir, logFile!), 'utf8');
     expect(log).toContain('"cmd":"shutdownRuntime"');
     rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  it('records streaming and buffered chat metrics through the sidecar handler', async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-chat-home-'));
+    const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
+    const corePath = join(homeDir, 'fake-core.dylib');
+    writeFileSync(corePath, '');
+    writeFileSync(loaderPath, `
+      const sdk = \`
+        class FakeModel {
+          constructor() { this.id = 'fake-variant'; this.loaded = false; }
+          async load() { this.loaded = true; }
+          isLoaded() { return this.loaded; }
+          getExecutionProvider() { return 'CPUExecutionProvider'; }
+          createChatClient() {
+            return {
+              async *completeStreamingChat() {
+                yield { choices: [{ delta: { content: 'hello' } }] };
+                await new Promise((resolve) => setTimeout(resolve, 20));
+                yield { usage: { input_tokens: 3, output_tokens: 2 } };
+              },
+              async completeChat() {
+                return {
+                  choices: [{ message: { role: 'assistant', content: 'buffered' } }],
+                  usage: { prompt_tokens: 4, completion_tokens: 3 },
+                };
+              },
+            };
+          }
+        }
+        class FakeManager {
+          constructor() {
+            this.catalog = {
+              getModel: async () => new FakeModel(),
+              getModels: async () => [],
+            };
+          }
+          static create() { return new FakeManager(); }
+        }
+        export { FakeManager as FoundryLocalManager };
+      \`;
+      export async function resolve(specifier, context, nextResolve) {
+        if (specifier === 'foundry-local-sdk') {
+          return { url: 'data:text/javascript,' + encodeURIComponent(sdk), shortCircuit: true };
+        }
+        return nextResolve(specifier, context);
+      }
+      export async function load(url, context, nextLoad) {
+        if (url.startsWith('data:text/javascript,')) {
+          return { format: 'module', source: decodeURIComponent(url.slice('data:text/javascript,'.length)), shortCircuit: true };
+        }
+        return nextLoad(url, context);
+      }
+    `);
+    const proc = spawn(process.execPath, [
+      '--experimental-loader', loaderPath, 'sidecar/foundry-sidecar.js'
+    ], {
+      cwd: process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        HOME: homeDir,
+        USERPROFILE: homeDir,
+        FLINT_FOUNDRY_CORE_PATH: corePath,
+      },
+    });
+
+    try {
+      await waitForLine(proc, (msg) => msg.ready === true);
+      proc.stdin.write(`${JSON.stringify({
+        id: 40, cmd: 'init', appName: 'flint-test', logLevel: 'info'
+      })}\n`);
+      expect((await waitForLine(proc, (msg) => msg.id === 40)).ok).toBe(true);
+
+      proc.stdin.write(`${JSON.stringify({
+        id: 41,
+        cmd: 'chatCompletion',
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'hello' }],
+        stream: true,
+      })}\n`);
+      await waitForLine(proc, (msg) => msg.id === 41 && msg.stream === true);
+      proc.stdin.write(`${JSON.stringify({
+        id: 44, cmd: 'cancelChatRequest', requestId: 41
+      })}\n`);
+      expect((await waitForLine(proc, (msg) => msg.id === 44)).ok).toBe(true);
+      const streamed = await waitForLine(proc, (msg) => msg.id === 41 && msg.ok === true);
+      expect(streamed.ok).toBe(true);
+
+      proc.stdin.write(`${JSON.stringify({
+        id: 42,
+        cmd: 'chatCompletion',
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'hello' }],
+        stream: false,
+      })}\n`);
+      expect((await waitForLine(proc, (msg) => msg.id === 42)).ok).toBe(true);
+
+      proc.stdin.write(`${JSON.stringify({ id: 43, cmd: 'getAccessLog' })}\n`);
+      const accessLog = (await waitForLine(proc, (msg) => msg.id === 43)).result;
+      const chats = accessLog.filter((entry: any) => entry.type === 'chat');
+      expect(chats).toHaveLength(2);
+      expect(chats[0]).toMatchObject({
+        source: 'ipc',
+        ok: true,
+        warm: false,
+        tokensIn: 3,
+        tokensOut: 2,
+        executionProvider: 'CPUExecutionProvider',
+      });
+      expect(chats[0].ttftMs).toBeTypeOf('number');
+      expect(chats[1]).toMatchObject({
+        source: 'ipc',
+        ok: true,
+        warm: true,
+        loadMs: 0,
+        tokensIn: 4,
+        tokensOut: 3,
+        executionProvider: 'CPUExecutionProvider',
+      });
+    } finally {
+      if (!proc.killed) proc.kill();
+      rmSync(homeDir, { recursive: true, force: true });
+    }
   });
 });
 

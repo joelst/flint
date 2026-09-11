@@ -1520,7 +1520,10 @@ async function ensureModelLocked(alias, variantId) {
         log('info', `Model ${alias} reloaded after runtime eviction`);
       }
       touchModel(alias);
-      return { ...existing, loadedNow: loaded === null ? null : loaded === false };
+      return {
+        ...existing,
+        loadedNow: loaded === true ? false : loaded === false ? true : null,
+      };
     }
   }
   // Reserve a slot (freeing room first) and hold it until the load settles, so a concurrent
@@ -2439,6 +2442,7 @@ rl.on('line', async (line) => {
       let chatTokensIn = null, chatTokensOut = null, chatOk = false;
       let chatLoadMs = null, chatFirstTokenAt = null;
       let chatVariantId = null, chatExecutionProvider = null;
+      let chatModelForMetrics = null;
       let chatWarm = null;
       activeStreamCount++;
       if (!activeStreamOldest) activeStreamOldest = { type: 'chat', modelAlias, startedAt: chatAccessTs };
@@ -2449,9 +2453,12 @@ rl.on('line', async (line) => {
         chatLoadMs = poolEntry.loadedNow === true
           ? Date.now() - loadStartedAt
           : poolEntry.loadedNow === false ? 0 : null;
-        chatWarm = typeof poolEntry.loadedNow === 'boolean' ? !poolEntry.loadedNow : null;
+        chatWarm = poolEntry.loadedNow === true
+          ? false
+          : poolEntry.loadedNow === false ? true : null;
         chatVariantId = poolEntry.variantId ?? null;
         const chatModel = poolEntry.catModel;
+        chatModelForMetrics = chatModel;
         const apiBase = getNativeOpenAiApiBase();
         const preferred = await applyPreferredExecutionProvider(payload.preferredEp, chatModel);
 
@@ -2473,10 +2480,10 @@ rl.on('line', async (line) => {
           if (shouldStream && typeof client?.completeStreamingChat === 'function') {
             let content = '';
             for await (const chunk of client.completeStreamingChat(sdkMessages)) {
-              if (canceledRequests.has(id)) continue;
               const usage = chunk?.usage;
               chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
               chatTokensOut = usage?.completion_tokens ?? usage?.output_tokens ?? chatTokensOut;
+              if (canceledRequests.has(id)) continue;
               const deltaText = chunk?.choices?.[0]?.delta?.content;
               const messageText = chunk?.choices?.[0]?.message?.content ?? chunk?.message?.content;
               let delta = '';
@@ -2552,10 +2559,10 @@ rl.on('line', async (line) => {
           } else if (typeof client?.completeStreamingChat === 'function') {
             let content = '';
             for await (const chunk of client.completeStreamingChat(sdkMessages)) {
-              if (canceledRequests.has(id)) continue;
               const usage = chunk?.usage;
               chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
               chatTokensOut = usage?.completion_tokens ?? usage?.output_tokens ?? chatTokensOut;
+              if (canceledRequests.has(id)) continue;
               const delta = chunk?.choices?.[0]?.delta?.content || '';
               if (delta) {
                 chatFirstTokenAt ??= Date.now();
@@ -2631,6 +2638,13 @@ rl.on('line', async (line) => {
           });
         }
       } finally {
+        if (chatModelForMetrics && !chatExecutionProvider) {
+          try {
+            chatExecutionProvider = await detectActiveExecutionProvider(chatModelForMetrics);
+          } catch (err) {
+            log('warn', `Execution provider probe failed during chat cleanup: ${err?.message || err}`);
+          }
+        }
         activeStreamCount = Math.max(0, activeStreamCount - 1);
         if (activeStreamCount === 0) activeStreamOldest = null;
         noteActivity(modelAlias, 'end');
