@@ -35,6 +35,8 @@ delete or reorder deferred backlog items.
    supported core flow from the packaged artifacts: first launch, model
    download/load, chat streaming, transcription, service start, endpoint
    client connection, restart, and quit.
+   The release metadata gate is automated by
+   `npm run verify:release -- 0.7.0 --channel=evaluation`.
 4. Share a clearly labelled `0.7.0` evaluation prerelease outside the updater
    channel, with supported platforms, known limitations, explicit
    0.6.0/0.7.0 upgrade and rollback expectations, and a short feedback route

@@ -69,6 +69,7 @@ Supported Foundry core layouts today: `win32-x64`, `win32-arm64`, `linux-x64`, `
 | `npm run tauri:build` | Package installers (msi/nsis/dmg); runs ensure:node + ensure:foundry first |
 | `npm run tauri:build:local` | Local package via `--no-sign`: skips **all** code signing (updater signatures, Windows Authenticode, macOS bundle signing), so no `TAURI_SIGNING_PRIVATE_KEY` is needed. Never use for a release. |
 | `npm run verify:bundle` | Post-build bundle resource check |
+| `npm run verify:release -- 0.7.0 --channel=evaluation` | Verify package/Tauri/Cargo versions and explicit evaluation-channel metadata |
 | `npm run run:built` | Launch a release build without installing MSI |
 | `cd src-tauri && cargo check` | Rust/Tauri compile check |
 

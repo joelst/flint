@@ -10,6 +10,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { isStrictSemver, normalizeVersion } = require('./release-metadata.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 
@@ -21,18 +22,6 @@ function writeJson (file, data) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n');
 }
 
-// Release tags aren't always a full `major.minor.patch` (e.g. a tag like
-// `v0.4-mvp` yields the raw version `0.4-mvp`). Tauri/Cargo require strict
-// semver, so default a missing patch component to `0` before validating.
-function normalizeVersion (version) {
-  if (!version) return version;
-  const partial = version.match(/^(\d+\.\d+)(-[a-zA-Z0-9.-]+)?$/);
-  if (partial) {
-    return `${partial[1]}.0${partial[2] || ''}`;
-  }
-  return version;
-}
-
 function main () {
   // Allow explicit version from CLI: node scripts/sync-versions.cjs 1.2.3
   // Falls back to package.json (used by `npm run version`)
@@ -41,7 +30,7 @@ function main () {
   const pkg = readJson(pkgPath);
   const version = normalizeVersion(explicitVersion || pkg.version);
 
-  if (!version || !/^\d+\.\d+\.\d+(-[a-zA-Z0-9.-]+)?$/.test(version)) {
+  if (!version || !isStrictSemver(version)) {
     console.error(`Invalid version: ${version}`);
     process.exit(1);
   }
