@@ -50,7 +50,10 @@ impl RuntimeState {
 
     pub fn begin_shutdown(&mut self, generation: u64) -> bool {
         if self.generation != generation
-            || !matches!(self.phase, RuntimePhase::Starting | RuntimePhase::Ready)
+            || !matches!(
+                self.phase,
+                RuntimePhase::Starting | RuntimePhase::Ready | RuntimePhase::ShuttingDown
+            )
         {
             return false;
         }
