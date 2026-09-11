@@ -536,8 +536,10 @@ Windows/macOS workflows, updater presentation, and current documentation.
   signed macOS channel. Do not block unrelated fixes or weaken managed-device
   protections to conceal that dependency.
 - Surface updater availability, last-check/error, progress, and restart/defer
-  state. Keep publication/draft handling explicit; only published compatible
-  artifacts belong on the latest-update path.
+  state. The About view now exposes an explicit update check, availability, and
+  last error; installation/progress/restart/defer handling remains planned.
+  Keep publication/draft handling explicit; only published compatible artifacts
+  belong on the latest-update path.
 - Make startup/native/EP download failures actionable. A working npm registry
   does not configure every Node, NuGet, catalog, and model-download endpoint.
   Richer diagnostics must respect approved trust/proxy configuration and redact

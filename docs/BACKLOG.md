@@ -31,8 +31,9 @@ Windows/macOS fixes do not establish Linux release support.
 
 - [ ] **Publishing is manual** — the workflow leaves a draft, and drafts/pre-releases are
       invisible to `releases/latest`. Automate publishing or keep it a checklist step.
-- [ ] **No update-failure surface** — if the updater can't reach the endpoint the user
-      sees nothing. Show last-checked time and last error.
+- [ ] **Updater installation flow** — About exposes an explicit update check,
+      availability, last error, and completed check time. Installation/progress/
+      restart/defer handling remains to be added.
 
 ## Audio
 
