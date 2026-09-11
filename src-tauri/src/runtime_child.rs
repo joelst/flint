@@ -10,6 +10,7 @@ pub struct ChildExit {
 pub struct RuntimeChild {
     generation: u64,
     child: Child,
+    exit: Option<ChildExit>,
 }
 
 impl RuntimeChild {
@@ -20,7 +21,11 @@ impl RuntimeChild {
         S: AsRef<std::ffi::OsStr>,
     {
         let child = Command::new(program).args(args).spawn()?;
-        Ok(Self { generation, child })
+        Ok(Self {
+            generation,
+            child,
+            exit: None,
+        })
     }
 
     pub fn generation(&self) -> u64 {
@@ -28,10 +33,17 @@ impl RuntimeChild {
     }
 
     pub fn try_wait(&mut self) -> io::Result<Option<ChildExit>> {
+        if self.exit.is_some() {
+            return Ok(self.exit);
+        }
         self.child.try_wait().map(|status| {
-            status.map(|status| ChildExit {
-                generation: self.generation,
-                code: status.code(),
+            status.map(|status| {
+                let exit = ChildExit {
+                    generation: self.generation,
+                    code: status.code(),
+                };
+                self.exit = Some(exit);
+                exit
             })
         })
     }
@@ -41,9 +53,16 @@ impl RuntimeChild {
     }
 
     pub fn wait(&mut self) -> io::Result<ChildExit> {
-        self.child.wait().map(|status| ChildExit {
-            generation: self.generation,
-            code: status.code(),
+        if let Some(exit) = self.exit {
+            return Ok(exit);
+        }
+        self.child.wait().map(|status| {
+            let exit = ChildExit {
+                generation: self.generation,
+                code: status.code(),
+            };
+            self.exit = Some(exit);
+            exit
         })
     }
 }
@@ -64,11 +83,15 @@ mod tests {
 
     #[test]
     fn reports_generation_on_exit() {
-        let mut child = RuntimeChild::spawn(42, if cfg!(windows) { "cmd" } else { "sh" }, if cfg!(windows) {
-            vec!["/C", "exit 7"]
-        } else {
-            vec!["-c", "exit 7"]
-        })
+        let mut child = RuntimeChild::spawn(
+            42,
+            if cfg!(windows) { "cmd" } else { "sh" },
+            if cfg!(windows) {
+                vec!["/C", "exit 7"]
+            } else {
+                vec!["-c", "exit 7"]
+            },
+        )
         .expect("spawn test child");
 
         let exit = child.wait().expect("wait for test child");
@@ -78,11 +101,15 @@ mod tests {
 
     #[test]
     fn termination_is_explicit_and_observable() {
-        let mut child = RuntimeChild::spawn(7, if cfg!(windows) { "ping" } else { "sleep" }, if cfg!(windows) {
-            vec!["-n", "30", "127.0.0.1"]
-        } else {
-            vec!["30"]
-        })
+        let mut child = RuntimeChild::spawn(
+            7,
+            if cfg!(windows) { "ping" } else { "sleep" },
+            if cfg!(windows) {
+                vec!["-n", "30", "127.0.0.1"]
+            } else {
+                vec!["30"]
+            },
+        )
         .expect("spawn long-lived test child");
 
         child.terminate().expect("terminate test child");
@@ -93,11 +120,15 @@ mod tests {
 
     #[test]
     fn try_wait_distinguishes_live_and_exited_children() {
-        let mut child = RuntimeChild::spawn(9, if cfg!(windows) { "ping" } else { "sleep" }, if cfg!(windows) {
-            vec!["-n", "30", "127.0.0.1"]
-        } else {
-            vec!["30"]
-        })
+        let mut child = RuntimeChild::spawn(
+            9,
+            if cfg!(windows) { "ping" } else { "sleep" },
+            if cfg!(windows) {
+                vec!["-n", "30", "127.0.0.1"]
+            } else {
+                vec!["30"]
+            },
+        )
         .expect("spawn long-lived test child");
 
         assert!(child.try_wait().expect("poll live child").is_none());
@@ -111,5 +142,28 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         };
         assert_eq!(exit.generation, 9);
+    }
+
+    #[test]
+    fn wait_returns_the_exit_already_observed_by_try_wait() {
+        let mut child = RuntimeChild::spawn(
+            11,
+            if cfg!(windows) { "cmd" } else { "sh" },
+            if cfg!(windows) {
+                vec!["/C", "exit 3"]
+            } else {
+                vec!["-c", "exit 3"]
+            },
+        )
+        .expect("spawn test child");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let polled = loop {
+            if let Some(exit) = child.try_wait().expect("poll child") {
+                break exit;
+            }
+            assert!(Instant::now() < deadline, "child did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(child.wait().expect("wait after poll"), polled);
     }
 }
