@@ -101,6 +101,22 @@ mod tests {
         }
     }
 
+    fn failing_command() -> (&'static str, Vec<&'static str>) {
+        if cfg!(windows) {
+            ("cmd", vec!["/C", "exit 5"])
+        } else {
+            ("sh", vec!["-c", "exit 5"])
+        }
+    }
+
+    fn nonexistent_program() -> &'static str {
+        if cfg!(windows) {
+            "C:\\does\\not\\exist\\flint-test-missing.exe"
+        } else {
+            "/does/not/exist/flint-test-missing"
+        }
+    }
+
     #[test]
     fn admits_one_child_and_requires_its_generation() {
         let (program, args) = long_command();
@@ -117,7 +133,7 @@ mod tests {
 
     #[test]
     fn observes_exit_and_allows_a_new_generation() {
-        let (program, args) = command();
+        let (program, args) = failing_command();
         let mut supervisor = RuntimeSupervisor::default();
         let first = supervisor.start(program, args).expect("start child");
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -129,15 +145,90 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         };
         assert_eq!(exit.generation, first);
+        assert_eq!(exit.code, Some(5));
         assert_eq!(supervisor.phase(), RuntimePhase::Exited);
         let second = supervisor
-            .start(program, command().1)
+            .start(command().0, command().1)
             .expect("restart child");
         assert_ne!(first, second);
         assert!(supervisor
             .shutdown(second)
             .expect("shutdown child")
             .is_some());
+    }
+
+    #[test]
+    fn a_failed_spawn_does_not_strand_the_supervisor() {
+        let mut supervisor = RuntimeSupervisor::default();
+        assert!(supervisor.start(nonexistent_program(), Vec::<&str>::new()).is_err());
+        assert_eq!(supervisor.phase(), RuntimePhase::Exited);
+        assert!(supervisor.child.is_none());
+
+        let (program, args) = command();
+        let generation = supervisor
+            .start(program, args)
+            .expect("start after a failed spawn must succeed");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while supervisor.poll_exit().expect("poll child").is_none() {
+            assert!(Instant::now() < deadline, "child did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(supervisor.generation(), generation);
+        assert_eq!(supervisor.phase(), RuntimePhase::Exited);
+    }
+
+    #[test]
+    fn a_stale_shutdown_never_terminates_the_live_child() {
+        let (program, args) = long_command();
+        let mut supervisor = RuntimeSupervisor::default();
+        let stale = supervisor.start(program, args).expect("start child");
+        assert!(supervisor.mark_ready(stale));
+        assert!(supervisor.shutdown(stale).expect("shutdown child").is_some());
+
+        let current = supervisor
+            .start(program, long_command().1)
+            .expect("restart child");
+        assert_ne!(stale, current);
+        assert!(supervisor.mark_ready(current));
+
+        assert_eq!(supervisor.shutdown(stale).expect("stale shutdown"), None);
+        assert_eq!(supervisor.phase(), RuntimePhase::Ready);
+        assert_eq!(supervisor.generation(), current);
+        assert!(supervisor
+            .child
+            .as_mut()
+            .expect("stale shutdown must retain the owned child")
+            .try_wait()
+            .expect("poll retained child")
+            .is_none());
+
+        let exit = supervisor
+            .shutdown(current)
+            .expect("shutdown the live child")
+            .expect("live child must report an exit");
+        assert_eq!(exit.generation, current);
+    }
+
+    #[test]
+    fn repeated_shutdown_of_the_same_generation_does_not_double_terminate() {
+        let (program, args) = long_command();
+        let mut supervisor = RuntimeSupervisor::default();
+        let generation = supervisor.start(program, args).expect("start child");
+        assert!(supervisor.mark_ready(generation));
+
+        let first = supervisor
+            .shutdown(generation)
+            .expect("first shutdown")
+            .expect("live child must report an exit");
+        assert_eq!(first.generation, generation);
+        assert_eq!(supervisor.phase(), RuntimePhase::Exited);
+        assert!(supervisor.child.is_none());
+
+        assert_eq!(
+            supervisor.shutdown(generation).expect("repeated shutdown"),
+            None
+        );
+        assert_eq!(supervisor.phase(), RuntimePhase::Exited);
     }
 
     #[test]
