@@ -18,7 +18,8 @@
 // Foundry validate first means we only ever load in response to a request it accepted.
 
 import http from 'node:http';
-import { pipeline } from 'node:stream';
+import { Transform, pipeline } from 'node:stream';
+import { normalizeChatResponse } from './chat-response.js';
 import {
   stripHopByHopHeaders,
   isModelNotLoadedError,
@@ -29,6 +30,7 @@ import {
   rewriteStatusEndpoints,
   formatPublicEndpoint,
   isLoopbackAddress,
+  isJsonContentType,
   DEFAULT_BUFFERED_RESPONSE_TIMEOUT_MS,
   DEFAULT_MAX_BUFFERED_BODY,
   DEFAULT_MAX_BUFFERED_RESPONSE,
@@ -351,13 +353,17 @@ export function createGateway (options) {
         const mayRetry = captureNotLoaded && buffered !== null && status === 400;
         const isStatus = isStatusPath(req.url);
 
-        if (!mayRetry && !isStatus) {
+        const isChatJson = isChatCompletionPath(req.url) && isJsonContentType(upRes.headers['content-type']);
+        if (!mayRetry && !isStatus && !isChatJson) {
           res.writeHead(status, outHeaders);
           // Resolve only when the pipeline finishes, not when it is registered. The caller
           // brackets the activity lease around this promise, so resolving early reports the
           // model idle while it is still streaming tokens — long enough for the eviction
           // sweep to unload it mid-generation.
-          pipeline(upRes, res, () => {
+          const stream = isChatCompletionPath(req.url) && isEventStream(upRes.headers['content-type'])
+            ? normalizeChatStream(upRes)
+            : upRes;
+          pipeline(stream, res, () => {
             res.off('close', onClientClose);
             resolve2(SENT);
           });
@@ -434,7 +440,9 @@ export function createGateway (options) {
 
           const finalBody = isStatus
             ? rewriteStatusEndpoints(body, formatPublicEndpoint(bindAddress, boundPort ?? publicPort))
-            : body;
+            : isChatCompletionPath(req.url) && isJsonContentType(upRes.headers['content-type'])
+              ? normalizeChatJsonBody(body)
+              : body;
           respondBuffered(res, status, outHeaders, finalBody);
           resolve2(SENT);
         }));
@@ -443,6 +451,48 @@ export function createGateway (options) {
       if (buffered !== null) upstream.end(buffered);
       else pipeline(req, upstream, () => {});
     });
+  }
+
+  function isChatCompletionPath (url) {
+    return String(url || '').split('?')[0].replace(/\/+$/, '') === '/v1/chat/completions';
+  }
+
+  function isEventStream (contentType) {
+    return String(contentType || '').split(';')[0].trim().toLowerCase() === 'text/event-stream';
+  }
+
+  function normalizeChatJsonBody (body) {
+    try {
+      return JSON.stringify(normalizeChatResponse(JSON.parse(body)));
+    } catch {
+      return body;
+    }
+  }
+
+  function normalizeChatStream (upstream) {
+    let pending = '';
+    return upstream.pipe(new Transform({
+      transform (chunk, _encoding, callback) {
+        pending += chunk.toString('utf8');
+        const lines = pending.split(/\r?\n/);
+        pending = lines.pop() || '';
+        callback(null, lines.map(normalizeSseLine).join('\n') + (lines.length ? '\n' : ''));
+      },
+      flush (callback) {
+        callback(null, pending ? normalizeSseLine(pending) : null);
+      },
+    }));
+  }
+
+  function normalizeSseLine (line) {
+    if (!line.startsWith('data:')) return line;
+    const payload = line.slice(5).trimStart();
+    if (payload === '[DONE]') return line;
+    try {
+      return `data: ${JSON.stringify(normalizeChatResponse(JSON.parse(payload), { stream: true }))}`;
+    } catch {
+      return line;
+    }
   }
 
   let closePromise = null;

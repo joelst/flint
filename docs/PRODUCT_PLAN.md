@@ -387,9 +387,10 @@ compaction, and capability/metric reporting.
 - Make chat adapter capabilities explicit and normalize native response-shape
   differences. Transport selection now reports named client/endpoint availability,
   and sidecar IPC SDK/HTTP completions remove Foundry-only status fields while
-  returning one OpenAI-shaped message or delta choice. Gateway HTTP responses
-  remain unchanged pending the behavioral compatibility harness. Adapter scope
-  delivered.
+  returning one OpenAI-shaped message or delta choice. Gateway HTTP chat responses
+  now apply the same normalization to bounded JSON completions and streamed SSE
+  chunks while preserving `[DONE]`; non-chat and ordinary streaming responses remain
+  pass-through. Adapter scope delivered.
 - Introduce explicit adapter capabilities for multipart input, streaming,
   generation settings, cancellation, and usage reporting.
 - Preserve first- and later-turn images end to end. Use a verified supported
@@ -409,8 +410,11 @@ compaction, and capability/metric reporting.
   Distinguish TTFT, load time, end-to-end time, and decode throughput; label
   unavailable metrics rather than inventing values.
 - Cover SDK/native response-shape differences and streaming terminators with a
-  behavioral compatibility harness. Do not promise tool/embedding support based
-  only on route existence or catalog metadata.
+  gateway behavioral compatibility harness. The harness exercises status rewriting,
+  model routing/autoload replay, normalized JSON/SSE chat responses, and `[DONE]`.
+  Do not promise tool/embedding support based only on route existence or catalog
+  metadata. Delivered for the gateway chat boundary; broader capability checks
+  remain open.
 
 ### Acceptance gate
 
