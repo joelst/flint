@@ -393,6 +393,8 @@ export interface CacheInventory {
     recommendation: string;
   }>;
   partialEntries: Array<{ path: string; bytes: number; recommendation: string }>;
+  scanComplete: boolean;
+  scanErrors: Array<{ path: string; message: string }>;
   scannedAt: number;
 }
 

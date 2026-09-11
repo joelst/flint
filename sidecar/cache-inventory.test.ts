@@ -31,4 +31,11 @@ describe('cache inventory summary', () => {
     expect(result.totalBytes).toBe(0);
     expect(result.duplicateGroups).toEqual([]);
   });
+
+  it('marks results incomplete when filesystem inspection reports errors', () => {
+    const result = summarizeCacheInventory([], [{ path: '/cache/models/missing', message: 'ENOENT' }]);
+
+    expect(result.scanComplete).toBe(false);
+    expect(result.scanErrors).toEqual([{ path: '/cache/models/missing', message: 'ENOENT' }]);
+  });
 });

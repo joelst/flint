@@ -19,8 +19,9 @@
 
 /**
  * @param {CacheEntry[]} entries
+ * @param {{path?: string, message?: string}[]} [scanErrors]
  */
-export function summarizeCacheInventory(entries) {
+export function summarizeCacheInventory(entries, scanErrors = []) {
   const safeEntries = Array.isArray(entries)
     ? entries.filter(entry => entry && typeof entry.path === 'string' && entry.path.length > 0)
     : [];
@@ -57,6 +58,11 @@ export function summarizeCacheInventory(entries) {
       path: entry.path,
       bytes: nonNegativeBytes(entry.sizeBytes),
       recommendation: 'Review interrupted download; do not delete automatically.',
+    })),
+    scanComplete: scanErrors.length === 0,
+    scanErrors: scanErrors.map(error => ({
+      path: String(error?.path || ''),
+      message: String(error?.message || 'Unable to inspect cache entry'),
     })),
     scannedAt: Date.now(),
   };

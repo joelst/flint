@@ -7663,6 +7663,16 @@ Output only the summary text, no preamble.`;
                 <span>Duplicate aliases:</span>
                 <strong>{cacheInventory.duplicateGroups.length} · {(cacheInventory.duplicateBytes / 1024 / 1024 / 1024).toFixed(2)} GB</strong>
               </div>
+              {#if !cacheInventory.scanComplete}
+                <p class="setting-note" style="color: var(--warning, #fbbf24)">
+                  Inventory incomplete: {cacheInventory.scanErrors.length} cache paths could not be inspected.
+                </p>
+                <ul class="diagnostic-list">
+                  {#each cacheInventory.scanErrors as error}
+                    <li><code>{error.path}</code> · {error.message}</li>
+                  {/each}
+                </ul>
+              {/if}
               {#if cacheInventory.partialEntries.length || cacheInventory.duplicateGroups.length}
                 <p class="setting-note">
                   These are recommendations only. Flint does not delete cache files from this view.

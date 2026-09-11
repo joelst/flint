@@ -1171,7 +1171,8 @@ async function directoryBytesAndMarkers(dir, root, budget) {
   let entries;
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
+  } catch (error) {
+    budget.errors.push({ path: dir, message: error?.message || 'Unable to read directory' });
     return { sizeBytes: 0, partial: false };
   }
   for (const entry of entries) {
@@ -1180,7 +1181,9 @@ async function directoryBytesAndMarkers(dir, root, budget) {
     if (entry.isSymbolicLink() || isLinkedOrForeign(root, child)) continue;
     if (entry.isFile()) {
       if (entry.name === 'download.tmp') partial = true;
-      try { sizeBytes += fs.statSync(child).size; } catch {}
+      try { sizeBytes += fs.statSync(child).size; } catch (error) {
+        budget.errors.push({ path: child, message: error?.message || 'Unable to stat file' });
+      }
     } else if (entry.isDirectory()) {
       const nested = await directoryBytesAndMarkers(child, root, budget);
       sizeBytes += nested.sizeBytes;
@@ -1195,12 +1198,15 @@ async function cacheInventoryEntries(root) {
   const visited = new Set();
   const budget = {
     count: 0,
+    errors: [],
     async yieldIfNeeded() {
       if (++this.count % 100 === 0) await new Promise(resolve => setImmediate(resolve));
     },
   };
   let canonicalRoot;
-  try { canonicalRoot = fs.realpathSync(root); } catch { return found; }
+  try { canonicalRoot = fs.realpathSync(root); } catch (error) {
+    return { entries: found, errors: [{ path: root, message: error?.message || 'Unable to resolve cache root' }] };
+  }
 
   async function walk(dir) {
     await budget.yieldIfNeeded();
@@ -1210,7 +1216,10 @@ async function cacheInventoryEntries(root) {
     visited.add(real);
 
     let entries;
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (error) {
+      budget.errors.push({ path: dir, message: error?.message || 'Unable to read directory' });
+      return;
+    }
     for (const entry of entries) {
       await budget.yieldIfNeeded();
       const child = path.join(dir, entry.name);
@@ -1229,12 +1238,15 @@ async function cacheInventoryEntries(root) {
       if (!entry.isDirectory()) continue;
 
       const childEntries = (() => {
-        try { return fs.readdirSync(child, { withFileTypes: true }); } catch { return []; }
+        try { return fs.readdirSync(child, { withFileTypes: true }); } catch (error) {
+          budget.errors.push({ path: child, message: error?.message || 'Unable to read directory' });
+          return [];
+        }
       })();
       const hasMetadata = name => childEntries.some(e => e.isFile() && e.name === name);
       const hasDirectPartial = hasMetadata('download.tmp');
       if (hasMetadata('genai_config.json') && hasMetadata('inference_model.json')) {
-        const metadata = readJsonIfPresent(child, 'inference_model.json');
+        const metadata = readJsonIfPresent(child, 'inference_model.json', budget);
         const name = typeof metadata?.Name === 'string' ? metadata.Name : '';
         const separator = name.lastIndexOf(':');
         const alias = separator > 0 ? name.slice(0, separator) : name || null;
@@ -1269,7 +1281,7 @@ async function cacheInventoryEntries(root) {
   }
 
   await walk(root);
-  return found;
+  return { entries: found, errors: budget.errors };
 }
 
 function hasOwnershipMarker(dir, root) {
@@ -1289,14 +1301,44 @@ function hasOwnershipMarker(dir, root) {
 
 async function getCacheInventory() {
   const root = modelCacheRoot();
-  return summarizeCacheInventory(fs.existsSync(root) ? await cacheInventoryEntries(root) : []);
+  if (!fs.existsSync(root)) return summarizeCacheInventory([]);
+  const catalogAliases = new Map();
+  try {
+    for (const model of await manager.catalog.getModels()) {
+      for (const variant of model.variants || []) {
+        const alias = model.alias || model.id || null;
+        for (const identifier of [variant.id, variant.name]) {
+          if (!identifier || !alias) continue;
+          catalogAliases.set(String(identifier), alias);
+          catalogAliases.set(String(identifier).replace(/:\d+$/, ''), alias);
+        }
+      }
+    }
+  } catch (error) {
+    log('warn', `Cache inventory catalog lookup failed: ${error?.message || error}`);
+  }
+  const scanned = await cacheInventoryEntries(root);
+  for (const entry of scanned.entries) {
+    if (entry.variantId && catalogAliases.has(entry.variantId)) entry.alias = catalogAliases.get(entry.variantId);
+    else if (entry.variantId) {
+      const bare = entry.variantId.replace(/:\d+$/, '');
+      if (catalogAliases.has(bare)) entry.alias = catalogAliases.get(bare);
+    }
+  }
+  return summarizeCacheInventory(scanned.entries, scanned.errors);
 }
 
 /** Files worth reading to classify a candidate folder. */
-function readJsonIfPresent(dir, name) {
+function readJsonIfPresent(dir, name, budget) {
   try {
     return JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
-  } catch {
+  } catch (error) {
+    if (budget) {
+      budget.errors.push({
+        path: path.join(dir, name),
+        message: error?.message || 'Unable to read metadata',
+      });
+    }
     return null;
   }
 }
