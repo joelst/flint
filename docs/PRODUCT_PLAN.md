@@ -388,7 +388,7 @@ compaction, and capability/metric reporting.
   differences. Transport selection now reports named client/endpoint availability,
   and sidecar IPC SDK/HTTP completions remove Foundry-only status fields while
   returning one OpenAI-shaped message or delta choice. Gateway HTTP chat responses
-  now apply the same normalization to bounded JSON completions and streamed SSE
+  now apply the same normalization to JSON completions and streamed SSE
   chunks while preserving `[DONE]`; non-chat and ordinary streaming responses remain
   pass-through. Adapter scope delivered.
 - Introduce explicit adapter capabilities for multipart input, streaming,

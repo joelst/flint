@@ -312,6 +312,7 @@ export function createGateway (options) {
       // Upstream is addressed by us, never derived from the client's Host header — that
       // would let a request choose its own destination.
       headers.host = `127.0.0.1:${upstreamPort}`;
+      headers['accept-encoding'] = 'identity';
       if (buffered !== null) headers['content-length'] = String(Buffer.byteLength(buffered));
 
       const upstream = http.request({
@@ -379,7 +380,7 @@ export function createGateway (options) {
           delete outHeaders['content-length'];
           delete outHeaders['Content-Length'];
           res.writeHead(status, outHeaders);
-          pipeline(upRes, normalizeChatJsonStream(), res, () => {
+          pipeline(upRes, normalizeChatJsonStream(bufferedResponseLimit), res, () => {
             res.off('close', onClientClose);
             resolve2(SENT);
           });
@@ -475,16 +476,32 @@ export function createGateway (options) {
     return String(contentType || '').split(';')[0].trim().toLowerCase() === 'text/event-stream';
   }
 
-  function normalizeChatJsonStream () {
-    const decoder = new StringDecoder('utf8');
-    let body = '';
+  function normalizeChatJsonStream (normalizationLimit) {
+    let chunks = [];
+    let size = 0;
+    let passthrough = normalizationLimit === 0;
     return new Transform({
       transform (chunk, _encoding, callback) {
-        body += decoder.write(chunk);
+        if (passthrough) {
+          callback(null, chunk);
+          return;
+        }
+        size += chunk.length;
+        chunks.push(chunk);
+        if (size > normalizationLimit) {
+          passthrough = true;
+          callback(null, Buffer.concat(chunks));
+          chunks = [];
+          return;
+        }
         callback();
       },
       flush (callback) {
-        body += decoder.end();
+        if (passthrough) {
+          callback();
+          return;
+        }
+        const body = Buffer.concat(chunks).toString('utf8');
         try {
           callback(null, JSON.stringify(normalizeChatResponse(JSON.parse(body))));
         } catch {

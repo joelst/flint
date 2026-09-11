@@ -542,6 +542,43 @@ describe('gateway streaming', () => {
     }]);
   });
 
+  it('requests identity encoding for responses it may transform', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }));
+    });
+    gateway = await startGateway();
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'accept-encoding': 'gzip' },
+      body: JSON.stringify({ model: 'qwen3-0.6b' }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(upstream.state.hits.at(-1)?.headers['accept-encoding']).toBe('identity');
+  });
+
+  it('passes through oversized JSON inference without applying the control cap', async () => {
+    await new Promise(r => upstream.server.close(r));
+    const content = 'x'.repeat(128);
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content } }] }));
+    });
+    gateway = await startGateway({ maxBufferedResponse: 32 });
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3-0.6b' }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body).choices[0].message.content).toBe(content);
+  });
+
   it('streams SSE chunks as they are produced rather than buffering', async () => {
     await new Promise(r => upstream.server.close(r));
     upstream = await startUpstream((req, res) => {
