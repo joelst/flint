@@ -482,7 +482,9 @@ runtime transcription, and operation presentation.
   Default to stopping capture on hide unless the user explicitly enables
   background recording; show an ongoing-recording indicator and usable Stop.
 - Produce valid standalone WAV data. Never fall back to passing original
-  non-WAV bytes to the WAV-only path after conversion failure.
+  non-WAV bytes to the WAV-only path after conversion failure. The current
+  browser path decodes supported uploads/recordings to 16 kHz mono PCM WAV and
+  reports conversion failures instead of sending the original bytes.
 - Do not assume the last two MediaRecorder fragments form a decodable file.
   Choose a supported capture/chunk pipeline for each shipped webview.
 - Determine useful model input windows through model-specific capability and
