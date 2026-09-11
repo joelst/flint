@@ -379,6 +379,11 @@ generation-checked shutdown. It is not yet connected to the production
 frontend transport; that cutover remains a separate decision at a clean
 startup boundary.
 
+The native transport boundary now has a bounded JSON-lines codec covering
+fragmented input, CRLF framing, blank lines, invalid JSON, incomplete frames,
+and newline-terminated output. It is contract groundwork only; the live
+frontend/Node transport remains the sole runtime owner until cutover.
+
 ### Native responsibilities
 
 - Single-instance behavior and ownership of exactly one runtime child.
