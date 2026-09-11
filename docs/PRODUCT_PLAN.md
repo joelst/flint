@@ -407,7 +407,10 @@ compaction, and capability/metric reporting.
   memory protection where stopping display does not stop computation.
 - Record actual resolved variant/provider and available timing/usage data.
   Distinguish TTFT, load time, end-to-end time, and decode throughput; label
-  unavailable metrics rather than inventing values.
+  unavailable metrics rather than inventing values. Delivered for sidecar IPC
+  chat access logs: cold/warm state, load and end-to-end time, observed TTFT,
+  usage-derived rates when measurable, resolved variant, and active provider
+  are recorded; buffered transports leave unavailable timing as null.
 - Cover SDK/native response-shape differences and streaming terminators with a
   behavioral compatibility harness. Do not promise tool/embedding support based
   only on route existence or catalog metadata.

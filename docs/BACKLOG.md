@@ -81,7 +81,9 @@ Windows/macOS fixes do not establish Linux release support.
       replays the request once. Cached models only, so a stray id cannot start a download.
       Also fixed service start, which always failed with `Core is already initialized`.
 - [ ] **Throughput metrics** — load time, TTFT, prompt tok/s, decode tok/s, end-to-end,
-      warm/cold, resolved variant + execution provider. No single ambiguous "tokens/sec".
+      warm/cold, resolved variant + execution provider. Sidecar IPC chat access logs now
+      record these fields when observable and use null for buffered/unavailable timing;
+      gateway and other inference paths remain open. No single ambiguous "tokens/sec".
 
 ## Endpoint / agent compatibility (see [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md), "Plan: current → 1.0")
 

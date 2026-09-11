@@ -74,6 +74,7 @@ import {
 } from './byom-import.js';
 import { createAsyncLogWriter } from './async-log-writer.js';
 import { normalizeChatResponse } from './chat-response.js';
+import { buildInferenceMetrics } from './inference-metrics.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -1482,8 +1483,20 @@ const ensureModelLocks = new Map();
 
 function ensureModel(alias, variantId) {
   const inFlightLoad = ensureModelLocks.get(alias);
-  const next = (inFlightLoad ? inFlightLoad.catch(() => {}) : Promise.resolve())
-    .then(() => ensureModelLocked(alias, variantId));
+  const previousResult = inFlightLoad ? inFlightLoad.catch(() => null) : Promise.resolve(null);
+  const next = previousResult.then(async (previous) => {
+      const result = await ensureModelLocked(alias, variantId);
+      if (inFlightLoad && result.loadedNow !== true) {
+        // A preceding request may have loaded or reloaded this model while this request waited.
+        // Only a preceding known-warm result remains warm; the other cases are unknowable from
+        // the current request's serialized probe.
+        return {
+          ...result,
+          loadedNow: previous?.loadedNow === false ? false : null,
+        };
+      }
+      return result;
+    });
   ensureModelLocks.set(alias, next);
   const release = () => {
     if (ensureModelLocks.get(alias) === next) ensureModelLocks.delete(alias);
@@ -1519,7 +1532,10 @@ async function ensureModelLocked(alias, variantId) {
         log('info', `Model ${alias} reloaded after runtime eviction`);
       }
       touchModel(alias);
-      return existing;
+      return {
+        ...existing,
+        loadedNow: loaded === true ? false : loaded === false ? true : null,
+      };
     }
   }
   // Reserve a slot (freeing room first) and hold it until the load settles, so a concurrent
@@ -1583,7 +1599,7 @@ async function ensureModelLocked(alias, variantId) {
     releaseAdmission();
   }
   touchModel(alias);
-  return pool.get(alias);
+  return { ...pool.get(alias), loadedNow: true };
 }
 
 async function applyPreferredExecutionProvider (preferredEp, model) {
@@ -2436,12 +2452,25 @@ rl.on('line', async (line) => {
       log('debug', `Chat completion: model=${modelAlias} msgs=${payload.messages?.length ?? 0} stream=${shouldStream}`);
       const chatAccessTs = Date.now();
       let chatTokensIn = null, chatTokensOut = null, chatOk = false;
+      let chatLoadMs = null, chatFirstTokenAt = null;
+      let chatVariantId = null, chatExecutionProvider = null;
+      let chatModelForMetrics = null;
+      let chatWarm = null;
       activeStreamCount++;
       if (!activeStreamOldest) activeStreamOldest = { type: 'chat', modelAlias, startedAt: chatAccessTs };
       noteActivity(modelAlias, 'start');
       try {
+        const loadStartedAt = Date.now();
         const poolEntry = await ensureModel(modelAlias);
+        chatLoadMs = poolEntry.loadedNow === true
+          ? Date.now() - loadStartedAt
+          : poolEntry.loadedNow === false ? 0 : null;
+        chatWarm = poolEntry.loadedNow === true
+          ? false
+          : poolEntry.loadedNow === false ? true : null;
+        chatVariantId = poolEntry.variantId ?? null;
         const chatModel = poolEntry.catModel;
+        chatModelForMetrics = chatModel;
         const apiBase = getNativeOpenAiApiBase();
         const preferred = await applyPreferredExecutionProvider(payload.preferredEp, chatModel);
 
@@ -2463,6 +2492,9 @@ rl.on('line', async (line) => {
           if (shouldStream && typeof client?.completeStreamingChat === 'function') {
             let content = '';
             for await (const chunk of client.completeStreamingChat(sdkMessages)) {
+              const usage = chunk?.usage;
+              chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
+              chatTokensOut = usage?.completion_tokens ?? usage?.output_tokens ?? chatTokensOut;
               if (canceledRequests.has(id)) continue;
               const deltaText = chunk?.choices?.[0]?.delta?.content;
               const messageText = chunk?.choices?.[0]?.message?.content ?? chunk?.message?.content;
@@ -2476,6 +2508,7 @@ rl.on('line', async (line) => {
                   : messageText;
               }
               if (delta) {
+                chatFirstTokenAt ??= Date.now();
                 content += delta;
                 send({
                   id,
@@ -2488,6 +2521,7 @@ rl.on('line', async (line) => {
               }
             }
             chatOk = true;
+            chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
             reply({
               ok: true,
               result: {
@@ -2497,15 +2531,17 @@ rl.on('line', async (line) => {
                 acceleration: {
                   requested: preferred?.requested ?? null,
                   preferredApplied: preferred?.applied ?? null,
-                  active: await detectActiveExecutionProvider(chatModel)
+                  active: chatExecutionProvider
                 }
               }
             });
           } else if (typeof client?.completeChat === 'function') {
             const result = await client.completeChat(sdkMessages);
             const normalizedResult = normalizeChatResponse(result);
-            chatTokensIn = normalizedResult?.usage?.prompt_tokens ?? null;
-            chatTokensOut = normalizedResult?.usage?.completion_tokens ?? null;
+            chatTokensIn = normalizedResult?.usage?.prompt_tokens
+              ?? normalizedResult?.usage?.input_tokens ?? null;
+            chatTokensOut = normalizedResult?.usage?.completion_tokens
+              ?? normalizedResult?.usage?.output_tokens ?? null;
             if (shouldStream) {
               const content = normalizedResult?.choices?.[0]?.message?.content || '';
               if (content) {
@@ -2520,6 +2556,7 @@ rl.on('line', async (line) => {
               }
             }
             chatOk = true;
+            chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
             reply({
               ok: true,
               result: {
@@ -2527,18 +2564,25 @@ rl.on('line', async (line) => {
                 acceleration: {
                   requested: preferred?.requested ?? null,
                   preferredApplied: preferred?.applied ?? null,
-                  active: await detectActiveExecutionProvider(chatModel)
+                  active: chatExecutionProvider
                 }
               }
             });
           } else if (typeof client?.completeStreamingChat === 'function') {
             let content = '';
             for await (const chunk of client.completeStreamingChat(sdkMessages)) {
+              const usage = chunk?.usage;
+              chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
+              chatTokensOut = usage?.completion_tokens ?? usage?.output_tokens ?? chatTokensOut;
               if (canceledRequests.has(id)) continue;
               const delta = chunk?.choices?.[0]?.delta?.content || '';
-              if (delta) content += delta;
+              if (delta) {
+                chatFirstTokenAt ??= Date.now();
+                content += delta;
+              }
             }
             chatOk = true;
+            chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
             reply({
               ok: true,
               result: {
@@ -2548,7 +2592,7 @@ rl.on('line', async (line) => {
                 acceleration: {
                   requested: preferred?.requested ?? null,
                   preferredApplied: preferred?.applied ?? null,
-                  active: await detectActiveExecutionProvider(chatModel)
+                  active: chatExecutionProvider
                 }
               }
             });
@@ -2573,8 +2617,10 @@ rl.on('line', async (line) => {
           }
           const httpResult = await resp.json();
           const normalizedHttpResult = normalizeChatResponse(httpResult);
-          chatTokensIn = normalizedHttpResult?.usage?.prompt_tokens ?? null;
-          chatTokensOut = normalizedHttpResult?.usage?.completion_tokens ?? null;
+          chatTokensIn = normalizedHttpResult?.usage?.prompt_tokens
+            ?? normalizedHttpResult?.usage?.input_tokens ?? null;
+          chatTokensOut = normalizedHttpResult?.usage?.completion_tokens
+            ?? normalizedHttpResult?.usage?.output_tokens ?? null;
           // This response is not streamed, but a caller that asked for a stream is waiting on
           // deltas to render. Emitting the whole text as one delta keeps the streaming
           // contract, exactly as the non-streaming SDK branch above does.
@@ -2590,6 +2636,7 @@ rl.on('line', async (line) => {
             }
           }
           chatOk = true;
+          chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
           reply({
             ok: true,
             result: {
@@ -2597,12 +2644,19 @@ rl.on('line', async (line) => {
               acceleration: {
                 requested: preferred?.requested ?? null,
                 preferredApplied: preferred?.applied ?? null,
-                active: await detectActiveExecutionProvider(chatModel)
+                active: chatExecutionProvider
               }
             }
           });
         }
       } finally {
+        if (chatModelForMetrics && !chatExecutionProvider) {
+          try {
+            chatExecutionProvider = await detectActiveExecutionProvider(chatModelForMetrics);
+          } catch (err) {
+            log('warn', `Execution provider probe failed during chat cleanup: ${err?.message || err}`);
+          }
+        }
         activeStreamCount = Math.max(0, activeStreamCount - 1);
         if (activeStreamCount === 0) activeStreamOldest = null;
         noteActivity(modelAlias, 'end');
@@ -2611,9 +2665,17 @@ rl.on('line', async (line) => {
           ts: chatAccessTs,
           type: 'chat',
           modelAlias,
-          durationMs: Date.now() - chatAccessTs,
-          tokensIn: chatTokensIn,
-          tokensOut: chatTokensOut,
+          ...buildInferenceMetrics({
+            startedAt: chatAccessTs,
+            loadMs: chatLoadMs,
+            firstTokenAt: chatFirstTokenAt,
+            completedAt: Date.now(),
+            tokensIn: chatTokensIn,
+            tokensOut: chatTokensOut,
+            variantId: chatVariantId,
+            executionProvider: chatExecutionProvider,
+            warm: chatWarm,
+          }),
           source: 'ipc',
           ok: chatOk,
         });
