@@ -22,6 +22,7 @@
     "tauri:build": "tauri build",
     "tauri:build:local": "tauri build --no-sign",
     "verify:bundle": "node scripts/verify-bundle.cjs",
+    "verify:release": "node scripts/verify-release-metadata.cjs",
     "run:built": "pwsh scripts/run-built.ps1",
     "changeset": "changeset",
     "version": "changeset version && node scripts/sync-versions.cjs"

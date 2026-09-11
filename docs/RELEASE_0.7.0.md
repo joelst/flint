@@ -27,6 +27,8 @@ those capabilities are separately validated.
 
 - [ ] Version is `0.7.0` in `package.json`, `src-tauri/tauri.conf.json`, and
   `src-tauri/Cargo.toml`.
+- [ ] `npm run verify:release -- 0.7.0` passes before publishing or sharing the
+  handoff packet.
 - [ ] Windows installer is built and signed through the normal release path.
 - [ ] macOS Apple Silicon DMG/app is built and its unsigned-install limitation
   is called out in the release notes.
