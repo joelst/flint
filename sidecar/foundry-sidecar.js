@@ -1520,7 +1520,7 @@ async function ensureModelLocked(alias, variantId) {
         log('info', `Model ${alias} reloaded after runtime eviction`);
       }
       touchModel(alias);
-      return { ...existing, loadedNow: loaded === false };
+      return { ...existing, loadedNow: loaded === null ? null : loaded === false };
     }
   }
   // Reserve a slot (freeing room first) and hold it until the load settles, so a concurrent
@@ -2446,8 +2446,10 @@ rl.on('line', async (line) => {
       try {
         const loadStartedAt = Date.now();
         const poolEntry = await ensureModel(modelAlias);
-        chatLoadMs = Date.now() - loadStartedAt;
-        chatWarm = poolEntry.loadedNow === undefined ? null : !poolEntry.loadedNow;
+        chatLoadMs = poolEntry.loadedNow === true
+          ? Date.now() - loadStartedAt
+          : poolEntry.loadedNow === false ? 0 : null;
+        chatWarm = typeof poolEntry.loadedNow === 'boolean' ? !poolEntry.loadedNow : null;
         chatVariantId = poolEntry.variantId ?? null;
         const chatModel = poolEntry.catModel;
         const apiBase = getNativeOpenAiApiBase();
@@ -2472,6 +2474,9 @@ rl.on('line', async (line) => {
             let content = '';
             for await (const chunk of client.completeStreamingChat(sdkMessages)) {
               if (canceledRequests.has(id)) continue;
+              const usage = chunk?.usage;
+              chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
+              chatTokensOut = usage?.completion_tokens ?? usage?.output_tokens ?? chatTokensOut;
               const deltaText = chunk?.choices?.[0]?.delta?.content;
               const messageText = chunk?.choices?.[0]?.message?.content ?? chunk?.message?.content;
               let delta = '';
@@ -2514,8 +2519,10 @@ rl.on('line', async (line) => {
           } else if (typeof client?.completeChat === 'function') {
             const result = await client.completeChat(sdkMessages);
             const normalizedResult = normalizeChatResponse(result);
-            chatTokensIn = normalizedResult?.usage?.prompt_tokens ?? null;
-            chatTokensOut = normalizedResult?.usage?.completion_tokens ?? null;
+            chatTokensIn = normalizedResult?.usage?.prompt_tokens
+              ?? normalizedResult?.usage?.input_tokens ?? null;
+            chatTokensOut = normalizedResult?.usage?.completion_tokens
+              ?? normalizedResult?.usage?.output_tokens ?? null;
             if (shouldStream) {
               const content = normalizedResult?.choices?.[0]?.message?.content || '';
               if (content) {
@@ -2546,8 +2553,14 @@ rl.on('line', async (line) => {
             let content = '';
             for await (const chunk of client.completeStreamingChat(sdkMessages)) {
               if (canceledRequests.has(id)) continue;
+              const usage = chunk?.usage;
+              chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
+              chatTokensOut = usage?.completion_tokens ?? usage?.output_tokens ?? chatTokensOut;
               const delta = chunk?.choices?.[0]?.delta?.content || '';
-              if (delta) content += delta;
+              if (delta) {
+                chatFirstTokenAt ??= Date.now();
+                content += delta;
+              }
             }
             chatOk = true;
             chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
@@ -2585,8 +2598,10 @@ rl.on('line', async (line) => {
           }
           const httpResult = await resp.json();
           const normalizedHttpResult = normalizeChatResponse(httpResult);
-          chatTokensIn = normalizedHttpResult?.usage?.prompt_tokens ?? null;
-          chatTokensOut = normalizedHttpResult?.usage?.completion_tokens ?? null;
+          chatTokensIn = normalizedHttpResult?.usage?.prompt_tokens
+            ?? normalizedHttpResult?.usage?.input_tokens ?? null;
+          chatTokensOut = normalizedHttpResult?.usage?.completion_tokens
+            ?? normalizedHttpResult?.usage?.output_tokens ?? null;
           // This response is not streamed, but a caller that asked for a stream is waiting on
           // deltas to render. Emitting the whole text as one delta keeps the streaming
           // contract, exactly as the non-streaming SDK branch above does.

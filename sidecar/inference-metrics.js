@@ -22,6 +22,7 @@ export function buildInferenceMetrics ({
 }) {
   const validTokensIn = Number.isFinite(tokensIn) && tokensIn >= 0 ? tokensIn : null;
   const validTokensOut = Number.isFinite(tokensOut) && tokensOut >= 0 ? tokensOut : null;
+  const validLoadMs = Number.isFinite(loadMs) && loadMs >= 0 ? loadMs : null;
   const durationMs = Number.isFinite(startedAt) && Number.isFinite(completedAt)
     ? Math.max(0, completedAt - startedAt)
     : null;
@@ -31,13 +32,13 @@ export function buildInferenceMetrics ({
   const decodeMs = ttftMs === null || durationMs === null
     ? null
     : Math.max(0, durationMs - ttftMs);
-  const promptMs = ttftMs === null || loadMs === null
+  const promptMs = ttftMs === null || validLoadMs === null
     ? null
-    : Math.max(0, ttftMs - loadMs);
+    : Math.max(0, ttftMs - validLoadMs);
 
   return {
     durationMs,
-    loadMs: Number.isFinite(loadMs) ? Math.max(0, loadMs) : null,
+    loadMs: validLoadMs,
     ttftMs,
     promptTokensPerSecond: ratePerSecond(validTokensIn, promptMs),
     decodeTokensPerSecond: ratePerSecond(validTokensOut, decodeMs),

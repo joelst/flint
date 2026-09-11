@@ -54,12 +54,25 @@ describe('buildInferenceMetrics', () => {
       tokensOut: '20',
     })).toMatchObject({
       durationMs: 0,
-      loadMs: 0,
+      loadMs: null,
       ttftMs: 0,
       tokensIn: null,
       tokensOut: null,
       promptTokensPerSecond: null,
       decodeTokensPerSecond: null,
+    });
+  });
+
+  it('does not derive a rate from invalid load time', () => {
+    expect(buildInferenceMetrics({
+      startedAt: 1000,
+      loadMs: -5,
+      firstTokenAt: 1500,
+      completedAt: 2000,
+      tokensIn: 10,
+    })).toMatchObject({
+      loadMs: null,
+      promptTokensPerSecond: null,
     });
   });
 });
