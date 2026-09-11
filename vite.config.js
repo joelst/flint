@@ -97,6 +97,7 @@ export default defineConfig(() => ({
         'sidecar/chat-response.js',
         'sidecar/inference-metrics.js',
         'sidecar/cache-inventory.js',
+        'scripts/release-metadata.cjs',
       ],
       // Set just below the level the included files actually achieve, so the
       // gate catches regressions instead of rubber-stamping them. Raise these

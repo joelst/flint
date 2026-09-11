@@ -7,6 +7,10 @@ import {
   parseSemver,
   validateReleaseInputs,
 } from './release-metadata.cjs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { verifyReleaseMetadata } from './verify-release-metadata.cjs';
 
 describe('release metadata validation', () => {
   it('accepts the release versions used by the workflow', () => {
@@ -36,5 +40,39 @@ describe('release metadata validation', () => {
     expect(isCanonicalUpdaterEndpoint(CANONICAL_UPDATER_ENDPOINT)).toBe(true);
     expect(isCanonicalUpdaterEndpoint('https://github.com/other/project/releases/latest/download/latest.json')).toBe(false);
     expect(isCanonicalUpdaterEndpoint(`${CANONICAL_UPDATER_ENDPOINT}?wrong=true`)).toBe(false);
+  });
+
+  it('covers the checker filesystem and failure paths', () => {
+    const root = mkdtempSync(join(tmpdir(), 'flint-release-'));
+    const tauriDir = join(root, 'src-tauri');
+    mkdirSync(tauriDir);
+    const writeFixture = (versions, endpoints) => {
+      writeFileSync(join(root, 'package.json'), JSON.stringify({ version: versions.package }));
+      writeFileSync(join(tauriDir, 'tauri.conf.json'), JSON.stringify({
+        version: versions.tauri,
+        plugins: { updater: { endpoints } },
+      }));
+      writeFileSync(join(tauriDir, 'Cargo.toml'), `[package]\nversion = "${versions.cargo}"\n`);
+    };
+    const log = { log: () => {}, error: () => {} };
+    try {
+      writeFixture(
+        { package: '0.7.0', tauri: '0.7.0', cargo: '0.7.0' },
+        [CANONICAL_UPDATER_ENDPOINT],
+      );
+      expect(verifyReleaseMetadata(root, '0.7.0', 'evaluation', log)).toBe(true);
+      writeFixture(
+        { package: '0.6.0', tauri: '0.7.0', cargo: '0.7.0' },
+        [CANONICAL_UPDATER_ENDPOINT],
+      );
+      expect(verifyReleaseMetadata(root, '0.7.0', 'evaluation', log)).toBe(false);
+      writeFixture(
+        { package: '0.7.0', tauri: '0.7.0', cargo: '0.7.0' },
+        [CANONICAL_UPDATER_ENDPOINT, 'https://example.com/updates.json'],
+      );
+      expect(verifyReleaseMetadata(root, '0.7.0', 'evaluation', log)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
