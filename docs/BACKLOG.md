@@ -215,8 +215,9 @@ first per [PRODUCT_PLAN.md](./PRODUCT_PLAN.md) — these are not reliability wor
       context length.
 - [ ] **Vision polish** — inline image preview thumbnails inside chat message bubbles
       (multi-image attach already works; bubble display was deferred).
-- [ ] **In-app update UX** — a "Check for updates" action calling the already-wired
-      updater plugin (`check()`, `downloadAndInstall()`), plus a release-notes modal.
+- [ ] **In-app update UX** — installation/progress/restart/defer handling for the
+      already-wired updater plugin (`downloadAndInstall()`), plus a release-notes
+      modal. The explicit availability/error/check-time action is delivered.
 
 ## Control CLI — not planned
 
