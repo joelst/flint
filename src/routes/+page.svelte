@@ -9124,6 +9124,28 @@ Output only the summary text, no preamble.`;
                   {/if}
                 </dd>
               </div>
+              <div class="about-row">
+                <dt>Updates</dt>
+                <dd>
+                  {#if updateCheckState === "checking"}
+                    <span class="muted">Checking…</span>
+                  {:else if availableUpdate}
+                    <strong>v{availableUpdate.version} available</strong>
+                  {:else if updateCheckError}
+                    <span class="about-bad">Check failed: {updateCheckError}</span>
+                  {:else if updateCheckState === "current"}
+                    <span class="muted">No update available</span>
+                  {:else}
+                    <span class="muted">Not checked</span>
+                  {/if}
+                  {#if updateCheckAt && updateCheckState !== "checking"}
+                    <span class="muted small"> · checked {new Date(updateCheckAt).toLocaleString()}</span>
+                  {/if}
+                  <button type="button" class="tiny" onclick={() => refreshUpdateStatus()} disabled={updateCheckBusy}>
+                    {updateCheckBusy ? "Checking…" : "Check"}
+                  </button>
+                </dd>
+              </div>
             </dl>
             <p class="about-links">
               <a href="https://github.com/joelst/flint/releases" target="_blank" rel="noopener noreferrer">Releases</a>
