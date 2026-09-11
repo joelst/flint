@@ -371,6 +371,31 @@ export interface FlintSDKState {
   poolStats: PoolStats | null;
 }
 
+export interface CacheInventoryEntry {
+  path: string;
+  alias: string | null;
+  variantId: string | null;
+  sizeBytes: number;
+  partial: boolean;
+  linked: boolean;
+  owned: boolean;
+}
+
+export interface CacheInventory {
+  entries: CacheInventoryEntry[];
+  totalBytes: number;
+  partialBytes: number;
+  duplicateBytes: number;
+  duplicateGroups: Array<{
+    alias: string;
+    entries: string[];
+    bytes: number;
+    recommendation: string;
+  }>;
+  partialEntries: Array<{ path: string; bytes: number; recommendation: string }>;
+  scannedAt: number;
+}
+
 const initialState: FlintSDKState = {
   runtime: {
     process: 'stopped',
@@ -1473,6 +1498,12 @@ export async function removeFromCache(alias: string, variantId?: string) {
 export async function getAccessLog(): Promise<any[]> {
   const res = await send('getAccessLog');
   return res?.result ?? [];
+}
+
+export async function getCacheInventory(): Promise<CacheInventory> {
+  const res = await send('getCacheInventory');
+  if (!res?.result) throw new Error('getCacheInventory returned no result');
+  return res.result as CacheInventory;
 }
 
 /** State of WSL on this machine, for Settings → Network → WSL clients. */

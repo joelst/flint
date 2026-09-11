@@ -75,6 +75,7 @@ import {
 import { createAsyncLogWriter } from './async-log-writer.js';
 import { normalizeChatResponse } from './chat-response.js';
 import { buildInferenceMetrics } from './inference-metrics.js';
+import { summarizeCacheInventory } from './cache-inventory.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -96,6 +97,7 @@ const KNOWN_COMMANDS = new Set([
   'chatCompletion', 'cancelChatRequest', 'transcribeAudio',
   'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',
   'poolStatus', 'getAccessLog', 'fetchUrl',
+  'getCacheInventory',
   'inspectModelFolder', 'importModelFolder', 'linkModelFolder',
   'getModelTemplate', 'setModelTemplate',
   'setEvictionConfig', 'setModelPriorities', 'applyMemorySettings',
@@ -161,6 +163,7 @@ const COMMAND_SCHEMA = {
   getSTTModels:       { required: [], optional: [] },
   poolStatus:         { required: [], optional: [] },
   getAccessLog:       { required: [], optional: [] },
+  getCacheInventory:  { required: [], optional: [] },
   fetchUrl:           { required: ['url'], optional: ['maxChars'] },
   inspectModelFolder: { required: ['folderPath'], optional: [] },
   importModelFolder:  { required: ['folderPath', 'name'], optional: ['publisher', 'version', 'promptTemplate'] },
@@ -1151,6 +1154,129 @@ function resolveIsLoaded(model) {
 function modelCacheRoot() {
   const appName = initConfig?.appName || 'flint';
   return path.join(os.homedir(), `.${appName}`, 'cache', 'models');
+}
+
+function isLinkedOrForeign(root, target) {
+  try {
+    if (fs.lstatSync(target).isSymbolicLink()) return true;
+    return !isInsideRoot(root, fs.realpathSync(target));
+  } catch {
+    return false;
+  }
+}
+
+function directoryBytesAndMarkers(dir, root) {
+  let sizeBytes = 0;
+  let partial = false;
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return { sizeBytes: 0, partial: false };
+  }
+  for (const entry of entries) {
+    const child = path.join(dir, entry.name);
+    if (entry.isSymbolicLink() || isLinkedOrForeign(root, child)) continue;
+    if (entry.isFile()) {
+      if (entry.name === 'download.tmp') partial = true;
+      try { sizeBytes += fs.statSync(child).size; } catch {}
+    } else if (entry.isDirectory()) {
+      const nested = directoryBytesAndMarkers(child, root);
+      sizeBytes += nested.sizeBytes;
+      partial ||= nested.partial;
+    }
+  }
+  return { sizeBytes, partial };
+}
+
+function cacheInventoryEntries(root) {
+  const found = [];
+  const visited = new Set();
+
+  function walk(dir) {
+    let real;
+    try { real = fs.realpathSync(dir); } catch { return; }
+    if (visited.has(real)) return;
+    visited.add(real);
+
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const child = path.join(dir, entry.name);
+      if (entry.isSymbolicLink() || isLinkedOrForeign(root, child)) {
+        found.push({
+          path: child,
+          alias: null,
+          variantId: null,
+          sizeBytes: 0,
+          partial: false,
+          linked: true,
+          owned: false,
+        });
+        continue;
+      }
+      if (!entry.isDirectory()) continue;
+
+      const inferencePath = path.join(child, 'inference_model.json');
+      const childEntries = (() => {
+        try { return fs.readdirSync(child, { withFileTypes: true }); } catch { return []; }
+      })();
+      const hasDirectPartial = childEntries.some(e => e.isFile() && e.name === 'download.tmp');
+      if (fs.existsSync(inferencePath)) {
+        const metadata = readJsonIfPresent(child, 'inference_model.json');
+        const name = typeof metadata?.Name === 'string' ? metadata.Name : '';
+        const separator = name.lastIndexOf(':');
+        const alias = separator > 0 ? name.slice(0, separator) : name || null;
+        const stats = directoryBytesAndMarkers(child, root);
+        found.push({
+          path: child,
+          alias,
+          variantId: name || null,
+          sizeBytes: stats.sizeBytes,
+          partial: stats.partial,
+          linked: false,
+          owned: hasOwnershipMarker(child, root),
+        });
+        continue;
+      }
+      if (hasDirectPartial) {
+        const stats = directoryBytesAndMarkers(child, root);
+        found.push({
+          path: child,
+          alias: null,
+          variantId: null,
+          sizeBytes: stats.sizeBytes,
+          partial: true,
+          linked: false,
+          owned: hasOwnershipMarker(child, root),
+        });
+        continue;
+      }
+
+      walk(child);
+    }
+  }
+
+  walk(root);
+  return found;
+}
+
+function hasOwnershipMarker(dir, root) {
+  let current = path.resolve(dir);
+  const boundary = path.resolve(root);
+  while (isInsideRoot(boundary, current)) {
+    if (fs.existsSync(path.join(current, OWNERSHIP_MARKER))) return true;
+    if (current === boundary) break;
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return false;
+}
+
+function getCacheInventory() {
+  const root = modelCacheRoot();
+  return summarizeCacheInventory(fs.existsSync(root) ? cacheInventoryEntries(root) : []);
 }
 
 /** Files worth reading to classify a candidate folder. */
@@ -2914,6 +3040,8 @@ rl.on('line', async (line) => {
           } : { active: false, type: null, modelAlias: null, elapsedMs: null, count: 0 },
         }
       });
+    } else if (cmd === 'getCacheInventory') {
+      reply({ ok: true, result: getCacheInventory() });
     } else if (cmd === 'setEvictionConfig') {
       // Apply immediately: a user who has just lowered the cap expects the pool to shrink
       // now, not at some point in the next half minute.

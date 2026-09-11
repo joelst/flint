@@ -10,6 +10,7 @@ export const IPC_COMMAND_DEADLINES_MS: Record<SidecarCommandName, number | null>
   getStatus: 10_000,
   getEndpoint: 10_000,
   getAccessLog: 10_000,
+  getCacheInventory: 30_000,
   // Windows accelerator telemetry has its own 10-second fallback budget.
   poolStatus: 20_000,
   getEps: 10_000,

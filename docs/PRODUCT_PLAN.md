@@ -444,6 +444,8 @@ registry/model operations, and model/import UI.
   excluded by the recursive native scanner.
 - Recover or clean interrupted staging using explicit ownership records only.
   Invalidate cached-model indexes after every relevant mutation.
+- Provide a read-only cache inventory for duplicate aliases, partial downloads, and
+  reclaimable byte totals; recommendations must never authorize cross-root deletion. Delivered.
 - Define safe behavior for editing a loaded model: defer changes or perform an
   explicit lease-aware unload/reload. Do not silently modify active state.
 - Provide distinct **Unlink** and **Delete owned copy** operations. Generic native
