@@ -104,6 +104,47 @@ Never replay a command merely because `write()` rejected. Only an explicit
 handler must re-check ownership immediately before dispatch and after
 confirmation awaits.
 
+### Worked example: `getCacheInventory`
+
+`getCacheInventory` is a shipped, read-only query that walks the checklist
+above end to end. Reading it in one pass is faster than following the
+checklist in the abstract:
+
+1. **Typed contract** — `src/lib/ipc-contracts.ts` lists `getCacheInventory` in
+   `KNOWN_COMMANDS`/`SidecarCommand` with no request fields (it takes no
+   arguments).
+2. **Sidecar validation** — `sidecar/foundry-sidecar.js` declares it in
+   `KNOWN_COMMANDS`, `COMMAND_SCHEMA` (`{ required: [], optional: [] }`), and
+   dispatches it in the command switch to the `getCacheInventory()` handler.
+3. **Effect classification** — `src/lib/operation-outcome.ts` marks it
+   `'query'` in `COMMAND_EFFECTS`: it only reads the filesystem and never
+   mutates runtime state, so it is safe to treat as idempotent and
+   interruption-tolerant.
+4. **Handler** — the sidecar's `getCacheInventory()` resolves the configured
+   cache root, tolerates a missing root or scan errors without throwing, and
+   delegates classification to the pure module `sidecar/cache-inventory.js`
+   (`summarizeCacheInventory`), keeping filesystem I/O and pure
+   duplicate/partial-entry classification separate and independently
+   testable.
+5. **Deadline** — `src/lib/ipc-deadlines.ts` gives it a finite `30_000` ms
+   transport deadline, appropriate because it is a bounded read-only query,
+   not an inference or effectful operation.
+6. **SDK wrapper** — `src/lib/sdk.ts`'s `getCacheInventory()` sends the
+   command and throws if the sidecar returned no result, so the frontend never
+   silently treats a malformed reply as an empty inventory.
+7. **UI usage** — `src/routes/+page.svelte`'s `scanCacheInventory()` calls the
+   SDK method, sets a loading flag, and reports failure through
+   `statusMessage`/`appendAppLog` rather than leaving stale or ambiguous state
+   on screen; the incomplete-scan case (`cacheInventory.scanComplete === false`)
+   is rendered explicitly instead of being presented as a clean success.
+8. **Tests** — `sidecar/cache-inventory.test.ts` covers the pure
+   classification logic directly; `scripts/verify-ipc-contracts.cjs` covers
+   the cross-file contract drift for the command.
+
+A new read-only query command can follow this same shape: pure classification
+module + thin sidecar handler + typed SDK wrapper + UI state that distinguishes
+loading, error, and incomplete-but-successful results.
+
 ## Model and endpoint rules
 
 - Friendly aliases are for catalog lookup; loading requires the alias and the

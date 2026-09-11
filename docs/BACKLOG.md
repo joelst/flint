@@ -239,12 +239,8 @@ cloning Ollama's `pull`/`run` REPL, any CLI before the desktop app is solid.
 
 - [ ] Revisit only if automation demand proves real, as a thin wrapper mapping 1:1 to
       existing sidecar commands with no CLI-only logic.
-
 ## Docs
 
-- [ ] **Extension guide examples** — extend the shipped
-      [EXTENDING.md](./EXTENDING.md) guide with one or two complete,
-      user-facing examples (for example an embedding-backed workflow or a
-      diagnostic panel) after the core command and test seams are stable.
-      Keep the architecture boundaries and safe-extension rules in the guide;
-      target the Foundry Local Explorer team and future contributors.
+- [x] **Extension guide example** — [EXTENDING.md](./EXTENDING.md) includes a
+      complete `getCacheInventory` example that follows the command contract,
+      SDK boundary, UI wiring, and test seams used by Flint.
