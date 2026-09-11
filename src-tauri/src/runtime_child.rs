@@ -49,7 +49,16 @@ impl RuntimeChild {
     }
 
     pub fn terminate(&mut self) -> io::Result<()> {
-        self.child.kill()
+        if self.exit.is_some() {
+            return Ok(());
+        }
+        match self.child.kill() {
+            Ok(()) => Ok(()),
+            Err(error) => match self.try_wait() {
+                Ok(Some(_)) => Ok(()),
+                _ => Err(error),
+            },
+        }
     }
 
     pub fn wait(&mut self) -> io::Result<ChildExit> {
@@ -69,17 +78,38 @@ impl RuntimeChild {
 
 impl Drop for RuntimeChild {
     fn drop(&mut self) {
-        if !matches!(self.child.try_wait(), Ok(Some(_))) {
+        if self.exit.is_none() && !matches!(self.child.try_wait(), Ok(Some(_))) {
             let _ = self.child.kill();
+            let _ = self.child.wait();
         }
-        let _ = self.child.wait();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::RuntimeChild;
+    use std::process::Command;
     use std::time::{Duration, Instant};
+
+    fn process_exists(pid: u32) -> bool {
+        #[cfg(unix)]
+        {
+            Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false)
+        }
+        #[cfg(windows)]
+        {
+            Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {pid}")])
+                .output()
+                .map(|output| String::from_utf8_lossy(&output.stdout).contains(&pid.to_string()))
+                .unwrap_or(false)
+        }
+    }
 
     #[test]
     fn reports_generation_on_exit() {
@@ -165,5 +195,52 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         };
         assert_eq!(child.wait().expect("wait after poll"), polled);
+    }
+
+    #[test]
+    fn terminate_is_idempotent_after_polling_exit() {
+        let mut child = RuntimeChild::spawn(
+            13,
+            if cfg!(windows) { "cmd" } else { "sh" },
+            if cfg!(windows) {
+                vec!["/C", "exit 0"]
+            } else {
+                vec!["-c", "exit 0"]
+            },
+        )
+        .expect("spawn test child");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while child.try_wait().expect("poll child").is_none() {
+            assert!(Instant::now() < deadline, "child did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        child.terminate().expect("terminate already-exited child");
+    }
+
+    #[test]
+    fn dropping_live_child_does_not_wait_for_natural_exit() {
+        let child = RuntimeChild::spawn(
+            15,
+            if cfg!(windows) { "ping" } else { "sleep" },
+            if cfg!(windows) {
+                vec!["-n", "30", "127.0.0.1"]
+            } else {
+                vec!["30"]
+            },
+        )
+        .expect("spawn long-lived test child");
+        let pid = child.child.id();
+        assert!(process_exists(pid));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let drop_started = Instant::now();
+        drop(child);
+        assert!(
+            drop_started.elapsed() < Duration::from_secs(2),
+            "drop waited for natural exit"
+        );
+        while process_exists(pid) {
+            assert!(Instant::now() < deadline, "dropped child still exists");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
