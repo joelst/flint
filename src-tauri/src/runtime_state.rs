@@ -35,7 +35,7 @@ impl RuntimeState {
         if !matches!(self.phase, RuntimePhase::Stopped | RuntimePhase::Exited) {
             return None;
         }
-        self.generation = self.generation.saturating_add(1);
+        self.generation = self.generation.checked_add(1)?;
         self.phase = RuntimePhase::Starting;
         Some(self.generation)
     }
@@ -106,5 +106,16 @@ mod tests {
         assert!(state.begin_shutdown(generation));
         assert!(state.observe_exit(generation));
         assert!(!state.begin_shutdown(generation));
+    }
+
+    #[test]
+    fn generation_exhaustion_fails_closed() {
+        let mut state = RuntimeState {
+            generation: u64::MAX,
+            phase: RuntimePhase::Exited,
+        };
+        assert!(state.begin_start().is_none());
+        assert_eq!(state.generation(), u64::MAX);
+        assert_eq!(state.phase(), RuntimePhase::Exited);
     }
 }
