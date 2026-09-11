@@ -1,3 +1,5 @@
+pub mod runtime_state;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()

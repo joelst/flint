@@ -55,7 +55,9 @@ Windows/macOS fixes do not establish Linux release support.
 - [ ] **`+page.svelte` is untested** and holds most of the app (~444 KB, `@ts-nocheck`).
       Keep extracting pure logic into `src/lib/*.ts` with tests rather than testing the
       component.
-- [ ] **No Rust tests** — `cargo check` is the only gate on `src-tauri`.
+- [ ] **Rust supervisor coverage** — expand beyond the current runtime-state
+      unit tests to cover native child ownership, transport, exit observation,
+      shutdown confirmation, and installed-app lifecycle paths.
 
 ## Runtime strategy
 
@@ -68,6 +70,8 @@ Windows/macOS fixes do not establish Linux release support.
       needed for a shareable Windows/macOS prerelease: one owned sidecar child,
       exit observation, truthful shutdown, and renderer-independent recovery.
       This is a release gate for the item above, not a replacement for it.
+      The tested native generation/phase state model is groundwork only; child
+      ownership and transport cutover remain open.
 - [ ] **Rust runtime replacement** — deferred pending parity and measured benefit.
       Preserve one model-manager authority and separate-process crash isolation;
       do not keep competing JS/Rust runtimes or replay uncertain operations.

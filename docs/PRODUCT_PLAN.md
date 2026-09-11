@@ -360,6 +360,14 @@ partial EP failure is visible, and uncertain work is not automatically repeated.
 **Primary surfaces:** `src-tauri/src/lib.rs`, capabilities, typed frontend
 transport, and native lifecycle handlers.
 
+### First process-state slice
+
+The native layer now has a tested generation/phase state model for one runtime
+child. It rejects stale readiness and exit notifications from an older child,
+prevents overlapping starts, and distinguishes starting, ready, shutting down,
+and exited phases. This is groundwork for native child ownership; it does not
+yet move sidecar spawning out of the frontend shell transport.
+
 ### Native responsibilities
 
 - Single-instance behavior and ownership of exactly one runtime child.
