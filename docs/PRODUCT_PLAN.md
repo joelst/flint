@@ -389,8 +389,9 @@ compaction, and capability/metric reporting.
   and sidecar IPC SDK/HTTP completions remove Foundry-only status fields while
   returning one OpenAI-shaped message or delta choice. Gateway HTTP chat responses
   now apply the same normalization to JSON completions and streamed SSE
-  chunks while preserving `[DONE]`; non-chat and ordinary streaming responses remain
-  pass-through. Adapter scope delivered.
+  chunks while preserving `[DONE]`; JSON normalization is attempted within a bounded
+  threshold and larger JSON responses remain byte-preserving pass-through. Non-chat
+  and ordinary streaming responses remain pass-through. Adapter scope delivered.
 - Introduce explicit adapter capabilities for multipart input, streaming,
   generation settings, cancellation, and usage reporting.
 - Preserve first- and later-turn images end to end. Use a verified supported
@@ -413,8 +414,8 @@ compaction, and capability/metric reporting.
   gateway behavioral compatibility harness. The harness exercises status rewriting,
   model routing/autoload replay, normalized JSON/SSE chat responses, and `[DONE]`.
   Do not promise tool/embedding support based only on route existence or catalog
-  metadata. Delivered for the gateway chat boundary; broader capability checks
-  remain open.
+  metadata. Delivered for the gateway chat boundary within the normalization threshold;
+  broader capability checks remain open.
 
 ### Acceptance gate
 

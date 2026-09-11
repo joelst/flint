@@ -89,9 +89,11 @@ Windows/macOS fixes do not establish Linux release support.
       behavioral coverage now verifies status rewriting, model routing/autoload
       replay, normalized JSON/SSE chat responses, and `[DONE]`; a user-facing
       diagnostic self-test remains open.
-- [ ] **Normalise response shape** — gateway chat JSON and SSE responses now remove
-      Foundry-only fields and emit one OpenAI-shaped message or delta choice.
-      Broader endpoint capability conformance remains open.
+- [ ] **Normalise response shape** — gateway chat JSON and SSE responses remove
+      Foundry-only fields and emit one OpenAI-shaped message or delta choice when
+      JSON is within the bounded normalization threshold; larger JSON responses
+      remain byte-preserving pass-through. Broader endpoint capability conformance
+      remains open.
 - [ ] **`/v1/embeddings` end-to-end** — route exists, but the catalog has zero embedding
       models, so this depends on BYOM.
 - [ ] **Surface `supportsToolCalling` / `contextLength`**, labelled catalog-declared vs

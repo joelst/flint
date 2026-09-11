@@ -565,7 +565,12 @@ describe('gateway streaming', () => {
     const content = 'x'.repeat(128);
     upstream = await startUpstream((_req, res) => {
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ choices: [{ message: { content } }] }));
+      res.end(JSON.stringify({
+        IsDelta: false,
+        Successful: true,
+        HttpStatusCode: 200,
+        choices: [{ message: { content }, delta: { content: 'native' } }],
+      }));
     });
     gateway = await startGateway({ maxBufferedResponse: 32 });
 
@@ -576,7 +581,11 @@ describe('gateway streaming', () => {
     });
 
     expect(res.status).toBe(200);
-    expect(JSON.parse(res.body).choices[0].message.content).toBe(content);
+    const body = JSON.parse(res.body);
+    expect(body.IsDelta).toBe(false);
+    expect(body.Successful).toBe(true);
+    expect(body.HttpStatusCode).toBe(200);
+    expect(body.choices[0].delta.content).toBe('native');
   });
 
   it('streams SSE chunks as they are produced rather than buffering', async () => {
