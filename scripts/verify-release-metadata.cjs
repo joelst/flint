@@ -14,7 +14,10 @@ const path = require('path');
 const root = path.resolve(__dirname, '..');
 const expected = process.argv[2] || process.env.FLINT_RELEASE_VERSION;
 
-if (!expected || !/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(expected)) {
+const strictSemver =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+if (!expected || !strictSemver.test(expected)) {
   console.error('Usage: node scripts/verify-release-metadata.cjs <version>');
   process.exit(1);
 }
@@ -48,13 +51,11 @@ for (const [source, version] of Object.entries(actual)) {
 
 const updaterEndpoints = readJson('src-tauri/tauri.conf.json').plugins?.updater?.endpoints || [];
 const latestEndpoint = updaterEndpoints.find((endpoint) => endpoint.includes('/releases/latest/'));
-if (expected.includes('-') && latestEndpoint) {
-  console.error(
-    `✗ ${expected} is a prerelease but updater endpoint targets releases/latest: ${latestEndpoint}`,
-  );
-  failed = true;
-} else if (latestEndpoint) {
+if (latestEndpoint) {
   console.log(`✓ updater endpoint uses published latest release: ${latestEndpoint}`);
+} else {
+  console.error('✗ updater configuration has no canonical /releases/latest/ endpoint');
+  failed = true;
 }
 
 if (failed) {
