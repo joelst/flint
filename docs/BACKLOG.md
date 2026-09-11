@@ -242,7 +242,6 @@ cloning Ollama's `pull`/`run` REPL, any CLI before the desktop app is solid.
 
 ## Docs
 
-- [ ] **Optional** root `CONTRIBUTING.md`; CI markdown link check.
 - [ ] **Extension guide examples** — extend the shipped
       [EXTENDING.md](./EXTENDING.md) guide with one or two complete,
       user-facing examples (for example an embedding-backed workflow or a

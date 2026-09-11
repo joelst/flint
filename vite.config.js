@@ -99,6 +99,7 @@ export default defineConfig(() => ({
         'sidecar/cache-inventory.js',
         'scripts/release-metadata.cjs',
         'scripts/verify-ipc-contracts.cjs',
+        'scripts/verify-markdown-links.cjs',
       ],
       // Set just below the level the included files actually achieve, so the
       // gate catches regressions instead of rubber-stamping them. Raise these

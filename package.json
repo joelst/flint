@@ -23,6 +23,7 @@
     "tauri:build:local": "tauri build --no-sign",
     "verify:bundle": "node scripts/verify-bundle.cjs",
     "verify:ipc-contracts": "node scripts/verify-ipc-contracts.cjs",
+    "verify:markdown-links": "node scripts/verify-markdown-links.cjs",
     "verify:release": "node scripts/verify-release-metadata.cjs",
     "run:built": "pwsh scripts/run-built.ps1",
     "changeset": "changeset",
