@@ -133,6 +133,73 @@ function extractObjectKeys(source, marker) {
 }
 
 /**
+ * Splits a `SidecarCommand` union body into its `| { ... }` variant bodies (without the
+ * surrounding braces), respecting `{}`/`[]`/`()` depth so a field's array or tuple type
+ * cannot be mistaken for a `|` variant boundary or the terminating `;`.
+ */
+function splitUnionVariants(source, marker) {
+  const start = source.indexOf(marker);
+  if (start < 0) throw new Error(`Could not find ${marker}`);
+  let depth = 0;
+  let segmentStart = start + marker.length;
+  const segments = [];
+  let index = segmentStart;
+  for (; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === '{' || char === '[' || char === '(') depth += 1;
+    if (char === '}' || char === ']' || char === ')') depth -= 1;
+    if (depth === 0 && char === '|') {
+      segments.push(source.slice(segmentStart, index));
+      segmentStart = index + 1;
+    }
+    if (depth === 0 && char === ';') break;
+  }
+  if (index >= source.length) throw new Error(`Could not find terminating ";" for ${marker}`);
+  segments.push(source.slice(segmentStart, index));
+
+  return segments
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+    .map((segment) => {
+      if (!segment.startsWith('{') || !segment.endsWith('}')) {
+        throw new Error(`Expected a "{ ... }" union variant, got: "${segment}"`);
+      }
+      return segment.slice(1, -1);
+    });
+}
+
+/**
+ * Parses the typed `SidecarCommand` union into per-command required/optional field lists.
+ *
+ * Each variant is `{ cmd: 'name'; field?: type; field2: type }`. A field name ending in
+ * `?` before its colon is optional; every other field is required. `cmd` itself is the
+ * command name, not a payload field.
+ */
+function extractTypedCommandFields(source, marker) {
+  const byCommand = new Map();
+  for (const variant of splitUnionVariants(source, marker)) {
+    const fields = variant
+      .split(';')
+      .map((field) => field.trim())
+      .filter(Boolean);
+    if (fields.length === 0) throw new Error(`Union variant has no "cmd" field: "${variant}"`);
+    const [cmdField, ...payloadFields] = fields;
+    const cmdMatch = cmdField.match(/^cmd\s*:\s*'([^']+)'$/);
+    if (!cmdMatch) throw new Error(`Expected "cmd: 'name'" as the first field, got: "${cmdField}"`);
+    const command = cmdMatch[1];
+    const required = [];
+    const optional = [];
+    for (const field of payloadFields) {
+      const match = field.match(/^([A-Za-z][A-Za-z0-9]*)(\?)?\s*:/);
+      if (!match) throw new Error(`Could not parse field in "${command}": "${field}"`);
+      (match[2] ? optional : required).push(match[1]);
+    }
+    byCommand.set(command, { required, optional });
+  }
+  return byCommand;
+}
+
+/**
  * Extracts, per command, every field name declared inside its value.
  *
  * Used for both `COMMAND_SCHEMA` (whose value is `{ required: [...], optional: [...] }`,
@@ -147,6 +214,26 @@ function extractFieldsByCommand(source, marker, { fieldsAsQuotedLiterals }) {
       ? [...value.matchAll(/'([^']+)'/g)].map((match) => match[1])
       : splitTopLevelEntries(value.replace(/^\{/, '').replace(/\}$/, '')).map(([field]) => field);
     byCommand.set(command, fields);
+  }
+  return byCommand;
+}
+
+/**
+ * Extracts `COMMAND_SCHEMA`'s `required`/`optional` arrays separately per command, so they
+ * can be compared against the typed union's own required/optional split rather than just
+ * the flattened set of field names.
+ */
+function extractSchemaRequiredOptional(source, marker) {
+  const entries = splitTopLevelEntries(findObjectBody(source, marker));
+  const byCommand = new Map();
+  for (const [command, value] of entries) {
+    const body = splitTopLevelEntries(value.replace(/^\{/, '').replace(/\}$/, ''));
+    const asList = (key) => {
+      const entry = body.find(([field]) => field === key);
+      if (!entry) throw new Error(`COMMAND_SCHEMA.${command} is missing "${key}"`);
+      return [...entry[1].matchAll(/'([^']+)'/g)].map((match) => match[1]);
+    };
+    byCommand.set(command, { required: asList('required'), optional: asList('optional') });
   }
   return byCommand;
 }
@@ -179,11 +266,14 @@ function verifyIpcContractSources({ typed, sidecar, outcomes, deadlines }, log =
   const fieldTypesByCommand = extractFieldsByCommand(sidecar, 'const FIELD_TYPES =', {
     fieldsAsQuotedLiterals: false,
   });
+  const schemaRequiredOptional = extractSchemaRequiredOptional(sidecar, 'const COMMAND_SCHEMA =');
+  const typedRequiredOptional = extractTypedCommandFields(typed, 'export type SidecarCommand =');
 
   assertEqual('sidecar command allowlist', sidecarCommands, typedCommands);
   assertEqual('sidecar command schema', sidecarSchemas, typedCommands);
   assertEqual('operation effect classification', effectCommands, typedCommands);
   assertEqual('IPC deadline classification', deadlineCommands, typedCommands);
+  assertEqual('typed SidecarCommand union', [...typedRequiredOptional.keys()], typedCommands);
 
   for (const [command, fields] of fieldTypesByCommand) {
     const schemaFields = schemaFieldsByCommand.get(command);
@@ -200,6 +290,13 @@ function verifyIpcContractSources({ typed, sidecar, outcomes, deadlines }, log =
     }
   }
 
+  for (const [command, typedFields] of typedRequiredOptional) {
+    const schemaFields = schemaRequiredOptional.get(command);
+    if (!schemaFields) throw new Error(`COMMAND_SCHEMA has no entry for typed command: ${command}`);
+    assertEqual(`${command} required fields (typed vs COMMAND_SCHEMA)`, typedFields.required, schemaFields.required);
+    assertEqual(`${command} optional fields (typed vs COMMAND_SCHEMA)`, typedFields.optional, schemaFields.optional);
+  }
+
   log.log(`IPC contracts verified: ${typedCommands.length} commands`);
   return typedCommands.length;
 }
@@ -209,8 +306,11 @@ module.exports = {
   extractFieldsByCommand,
   extractObjectKeys,
   extractQuotedValues,
+  extractSchemaRequiredOptional,
+  extractTypedCommandFields,
   findObjectBody,
   splitTopLevelEntries,
+  splitUnionVariants,
   verifyIpcContractSources,
   verifyIpcContracts,
 };

@@ -3,7 +3,10 @@ import {
   extractFieldsByCommand,
   extractObjectKeys,
   extractQuotedValues,
+  extractSchemaRequiredOptional,
+  extractTypedCommandFields,
   splitTopLevelEntries,
+  splitUnionVariants,
   verifyIpcContractSources,
 } from './verify-ipc-contracts.cjs';
 
@@ -11,6 +14,10 @@ import {
 function fixtures() {
   return {
     typed: `
+      export type SidecarCommand =
+        | { cmd: 'getStatus' }
+        | { cmd: 'unload'; alias: string; lane?: LaneName };
+
       export const KNOWN_COMMANDS = new Set<SidecarCommandName>([
         'getStatus', 'unload',
       ]);
@@ -93,6 +100,29 @@ describe('verify-ipc-contracts fixture parsing', () => {
     });
     expect(fieldTypes.get('unload')).toEqual(['alias']);
   });
+
+  it('splits SidecarCommand union variants on top-level "|" and stops at the terminating ";"', () => {
+    const variants = splitUnionVariants(
+      fixtures().typed,
+      'export type SidecarCommand =',
+    );
+    expect(variants).toEqual([
+      " cmd: 'getStatus' ",
+      " cmd: 'unload'; alias: string; lane?: LaneName ",
+    ]);
+  });
+
+  it('parses typed command fields into required/optional, excluding "cmd" itself', () => {
+    const fields = extractTypedCommandFields(fixtures().typed, 'export type SidecarCommand =');
+    expect(fields.get('getStatus')).toEqual({ required: [], optional: [] });
+    expect(fields.get('unload')).toEqual({ required: ['alias'], optional: ['lane'] });
+  });
+
+  it('extracts COMMAND_SCHEMA required/optional arrays separately per command', () => {
+    const schema = extractSchemaRequiredOptional(fixtures().sidecar, 'const COMMAND_SCHEMA =');
+    expect(schema.get('getStatus')).toEqual({ required: [], optional: [] });
+    expect(schema.get('unload')).toEqual({ required: ['alias'], optional: ['lane'] });
+  });
 });
 
 describe('verifyIpcContractSources', () => {
@@ -151,6 +181,28 @@ describe('verifyIpcContractSources', () => {
     );
     expect(() => verifyIpcContractSources(broken, { log: () => {} })).toThrow(
       /FIELD_TYPES declares an unknown command: ghost/,
+    );
+  });
+
+  it('detects a typed field missing from COMMAND_SCHEMA', () => {
+    const broken = fixtures();
+    broken.typed = broken.typed.replace(
+      "| { cmd: 'unload'; alias: string; lane?: LaneName };",
+      "| { cmd: 'unload'; alias: string; lane?: LaneName; variantId?: string };",
+    );
+    expect(() => verifyIpcContractSources(broken, { log: () => {} })).toThrow(
+      /unload optional fields \(typed vs COMMAND_SCHEMA\) drifted/,
+    );
+  });
+
+  it('detects a required typed field that COMMAND_SCHEMA treats as optional', () => {
+    const broken = fixtures();
+    broken.typed = broken.typed.replace(
+      "| { cmd: 'unload'; alias: string; lane?: LaneName };",
+      "| { cmd: 'unload'; alias: string; lane: LaneName };",
+    );
+    expect(() => verifyIpcContractSources(broken, { log: () => {} })).toThrow(
+      /unload required fields \(typed vs COMMAND_SCHEMA\) drifted/,
     );
   });
 });
