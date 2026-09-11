@@ -112,6 +112,9 @@ jobs:
       - name: Frontend check
         run: npm run check
 
+      - name: IPC contract check
+        run: npm run verify:ipc-contracts
+
       - name: Rust check
         working-directory: src-tauri
         run: cargo check

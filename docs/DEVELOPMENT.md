@@ -84,6 +84,11 @@ Supported Foundry core layouts today: `win32-x64`, `win32-arm64`, `linux-x64`, `
 
 When adding sidecar commands: update **both** `src/lib/sdk.ts` (and IPC contracts if applicable) and `sidecar/foundry-sidecar.js`.
 
+### Parallel contributor handoff
+
+See [EXTENDING.md](./EXTENDING.md#working-safely-in-parallel) for work lanes,
+shared hotspots, and the `npm run verify:ipc-contracts` check.
+
 ### Local OpenAI-compatible endpoint
 
 - **Bind address** (Settings → Network) controls which interface the service *listens* on (`127.0.0.1`, `0.0.0.0`, or a custom IP).
