@@ -78,6 +78,12 @@ impl JsonLinesDecoder {
     }
 
     pub fn finish(self) -> io::Result<Vec<Value>> {
+        if self.pending_cr {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "JSON-lines stream ended after a carriage return",
+            ));
+        }
         if self.buffer.iter().copied().all(is_json_whitespace) {
             return Ok(Vec::new());
         }
@@ -136,6 +142,10 @@ mod tests {
             .push(b"\x0c")
             .expect("partial invalid frame");
         assert!(invalid_trailing.finish().is_err());
+
+        let mut incomplete_crlf = JsonLinesDecoder::new(128).expect("decoder");
+        incomplete_crlf.push(b"\r").expect("partial CRLF");
+        assert!(incomplete_crlf.finish().is_err());
     }
 
     #[test]
