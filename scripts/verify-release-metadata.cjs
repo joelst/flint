@@ -10,44 +10,17 @@
 
 const fs = require('fs');
 const path = require('path');
+const {
+  CANONICAL_UPDATER_ENDPOINT,
+  isCanonicalUpdaterEndpoint,
+  isStrictSemver,
+  validateReleaseInputs,
+} = require('./release-metadata.cjs');
 
 const root = path.resolve(__dirname, '..');
 const expected = process.argv[2] || process.env.FLINT_RELEASE_VERSION;
 const channelArgument = process.argv.find((arg) => arg.startsWith('--channel='));
 const channel = channelArgument ? channelArgument.slice('--channel='.length) : 'stable';
-
-function isNumericIdentifier(value) {
-  return /^(0|[1-9]\d*)$/.test(value);
-}
-
-function isIdentifier(value) {
-  return /^[0-9A-Za-z-]+$/.test(value) &&
-    !(value.length > 1 && value.startsWith('0') && /^\d+$/.test(value));
-}
-
-function isStrictSemver(value) {
-  return parseSemver(value) !== null;
-}
-
-function parseSemver(value) {
-  const [versionPart, build] = String(value).split('+');
-  if (!versionPart || String(value).split('+').length > 2) return null;
-
-  const hyphen = versionPart.indexOf('-');
-  const core = hyphen === -1 ? versionPart : versionPart.slice(0, hyphen);
-  const prereleaseText = hyphen === -1 ? '' : versionPart.slice(hyphen + 1);
-  const coreParts = core.split('.');
-  if (coreParts.length !== 3 || !coreParts.every(isNumericIdentifier)) return null;
-
-  const prerelease = prereleaseText ? prereleaseText.split('.') : [];
-  if (hyphen !== -1 && (!prerelease.length || prerelease.some((part) => !isIdentifier(part)))) {
-    return null;
-  }
-  if (build !== undefined && (!build || !build.split('.').every((part) => /^[0-9A-Za-z-]+$/.test(part)))) {
-    return null;
-  }
-  return { prerelease };
-}
 
 if (!expected || !isStrictSemver(expected) || !['stable', 'evaluation'].includes(channel)) {
   console.error('Usage: node scripts/verify-release-metadata.cjs <version> [--channel=stable|evaluation]');
@@ -83,19 +56,12 @@ for (const [source, version] of Object.entries(actual)) {
 }
 
 const updaterEndpoints = tauriConfig.plugins?.updater?.endpoints || [];
-const canonicalEndpoint = 'https://github.com/joelst/flint/releases/latest/download/latest.json';
 const latestEndpoint = updaterEndpoints.find((endpoint) => {
-  try {
-    const url = new URL(endpoint);
-    return url.href === canonicalEndpoint;
-  } catch {
-    return false;
-  }
+  return isCanonicalUpdaterEndpoint(endpoint);
 });
-const parsedExpected = parseSemver(expected);
-const isPrerelease = Boolean(parsedExpected?.prerelease.length);
-if (channel === 'stable' && isPrerelease) {
-  console.error(`✗ ${expected} is a prerelease but the release channel is stable`);
+const inputError = validateReleaseInputs(expected, channel);
+if (inputError && inputError !== 'invalid version or release channel') {
+  console.error(`✗ ${inputError}`);
   failed = true;
 } else if (latestEndpoint) {
   console.log(
@@ -104,7 +70,7 @@ if (channel === 'stable' && isPrerelease) {
       : `✓ exact updater endpoint configured for stable release: ${latestEndpoint}`,
   );
 } else {
-  console.error(`✗ updater configuration must use the exact canonical endpoint: ${canonicalEndpoint}`);
+  console.error(`✗ updater configuration must use the exact canonical endpoint: ${CANONICAL_UPDATER_ENDPOINT}`);
   failed = true;
 }
 

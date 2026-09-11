@@ -49,7 +49,7 @@ export default defineConfig(() => ({
     },
   },
   test: {
-    include: ['src/**/*.{test,spec}.{js,ts}', 'sidecar/**/*.{test,spec}.{js,ts}'],
+    include: ['src/**/*.{test,spec}.{js,ts}', 'sidecar/**/*.{test,spec}.{js,ts}', 'scripts/**/*.{test,spec}.{js,ts}'],
     environment: 'jsdom',
     css: false,
     setupFiles: ['./src/test/setup.ts'],
