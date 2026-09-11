@@ -13,6 +13,10 @@ implementation dependencies, and acceptance gates. Fix data loss and runtime
 correctness without waiting for a backend rewrite. Expedite thin native
 lifecycle/process supervision; defer wholesale Foundry runtime replacement.
 
+The 0.7.0 prerelease track is a focused foundation milestone for the Explorer
+team. It adds release and documentation gates around existing work; it does not
+close, delete, or implicitly reprioritize the open items below.
+
 **Linux work is deferred:** preserve existing checks and mappings. Continue
 Linux-specific work only where it is already part of another feature; shared
 Windows/macOS fixes do not establish Linux release support.
@@ -31,8 +35,9 @@ Windows/macOS fixes do not establish Linux release support.
 
 - [ ] **Publishing is manual** — the workflow leaves a draft, and drafts/pre-releases are
       invisible to `releases/latest`. Automate publishing or keep it a checklist step.
-- [ ] **No update-failure surface** — if the updater can't reach the endpoint the user
-      sees nothing. Show last-checked time and last error.
+- [ ] **Updater installation flow** — About exposes an explicit update check,
+      availability, last error, and completed check time. Installation/progress/
+      restart/defer handling remains to be added.
 
 ## Audio
 
@@ -59,6 +64,10 @@ Windows/macOS fixes do not establish Linux release support.
       lifecycle contracts are stable. The versioned transport and readiness
       contracts are now delivered; see
       [PRODUCT_PLAN](./PRODUCT_PLAN.md#workstream-c-thin-native-ownership----expedited).
+- [ ] **0.7.0 Rust foundation gate** — deliver the smallest supervisor slice
+      needed for a shareable Windows/macOS prerelease: one owned sidecar child,
+      exit observation, truthful shutdown, and renderer-independent recovery.
+      This is a release gate for the item above, not a replacement for it.
 - [ ] **Rust runtime replacement** — deferred pending parity and measured benefit.
       Preserve one model-manager authority and separate-process crash isolation;
       do not keep competing JS/Rust runtimes or replay uncertain operations.
@@ -207,8 +216,9 @@ first per [PRODUCT_PLAN.md](./PRODUCT_PLAN.md) — these are not reliability wor
       context length.
 - [ ] **Vision polish** — inline image preview thumbnails inside chat message bubbles
       (multi-image attach already works; bubble display was deferred).
-- [ ] **In-app update UX** — a "Check for updates" action calling the already-wired
-      updater plugin (`check()`, `downloadAndInstall()`), plus a release-notes modal.
+- [ ] **In-app update UX** — installation/progress/restart/defer handling for the
+      already-wired updater plugin (`downloadAndInstall()`), plus a release-notes
+      modal. The explicit availability/error/check-time action is delivered.
 
 ## Control CLI — not planned
 
@@ -222,3 +232,9 @@ cloning Ollama's `pull`/`run` REPL, any CLI before the desktop app is solid.
 ## Docs
 
 - [ ] **Optional** root `CONTRIBUTING.md`; CI markdown link check.
+- [ ] **Extension guide examples** — extend the shipped
+      [EXTENDING.md](./EXTENDING.md) guide with one or two complete,
+      user-facing examples (for example an embedding-backed workflow or a
+      diagnostic panel) after the core command and test seams are stable.
+      Keep the architecture boundaries and safe-extension rules in the guide;
+      target the Foundry Local Explorer team and future contributors.

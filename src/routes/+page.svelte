@@ -98,6 +98,7 @@
 
   import { enable as autostartEnable, disable as autostartDisable, isEnabled as autostartIsEnabled } from '$lib/autostart';
   import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { check as checkForUpdate, type Update } from "@tauri-apps/plugin-updater";
   import { TrayIcon } from "@tauri-apps/api/tray";
   import { Menu, MenuItem } from "@tauri-apps/api/menu";
   import { defaultWindowIcon } from "@tauri-apps/api/app";
@@ -185,6 +186,30 @@
   const appVersion = String((packageJson as { version?: string }).version || "0.0.0");
   let nodeVersionLabel = $state<string>("Checking…");
   let nodeVersionOk = $state<boolean | null>(null);
+  let availableUpdate = $state<Update | null>(null);
+  let updateCheckAt = $state<number | null>(null);
+  let updateCheckError = $state<string | null>(null);
+  let updateCheckState = $state<"idle" | "checking" | "current" | "available" | "error">("idle");
+  let updateCheckBusy = $state(false);
+
+  async function refreshUpdateStatus() {
+    if (updateCheckBusy) return;
+    updateCheckBusy = true;
+    updateCheckState = "checking";
+    updateCheckError = null;
+    try {
+      availableUpdate = await checkForUpdate();
+      updateCheckAt = Date.now();
+      updateCheckState = availableUpdate ? "available" : "current";
+    } catch (error) {
+      availableUpdate = null;
+      updateCheckAt = Date.now();
+      updateCheckError = error instanceof Error ? error.message : String(error);
+      updateCheckState = "error";
+    } finally {
+      updateCheckBusy = false;
+    }
+  }
 
   async function refreshNodeAboutLine() {
     try {
@@ -8322,6 +8347,30 @@ Output only the summary text, no preamble.`;
                   <span class="muted small">listen bind · client URL stays on 127.0.0.1</span>
                 </dd>
               </div>
+              <div class="about-row">
+                <dt>Updates</dt>
+                <dd>
+                  <span aria-live="polite">
+                    {#if updateCheckState === "checking"}
+                      <span class="muted">Checking…</span>
+                    {:else if availableUpdate}
+                      <strong>v{availableUpdate.version} available</strong>
+                    {:else if updateCheckError}
+                      <span class="about-bad">Check failed: {updateCheckError}</span>
+                    {:else if updateCheckState === "current"}
+                      <span class="muted">No update available</span>
+                    {:else}
+                      <span class="muted">Not checked</span>
+                    {/if}
+                    {#if updateCheckAt && updateCheckState !== "checking"}
+                      <span class="muted small"> · checked {new Date(updateCheckAt).toLocaleString()}</span>
+                    {/if}
+                  </span>
+                  <button type="button" class="tiny" onclick={() => refreshUpdateStatus()} disabled={updateCheckBusy}>
+                    {updateCheckBusy ? "Checking…" : "Check"}
+                  </button>
+                </dd>
+              </div>
             </dl>
             <p class="muted small">
               Foundry runtime is bundled. Node for the sidecar is preferably the packaged
@@ -9072,6 +9121,30 @@ Output only the summary text, no preamble.`;
                   {:else}
                     <span class="muted">Not started</span>
                   {/if}
+                </dd>
+              </div>
+              <div class="about-row">
+                <dt>Updates</dt>
+                <dd>
+                  <span aria-live="polite">
+                    {#if updateCheckState === "checking"}
+                      <span class="muted">Checking…</span>
+                    {:else if availableUpdate}
+                      <strong>v{availableUpdate.version} available</strong>
+                    {:else if updateCheckError}
+                      <span class="about-bad">Check failed: {updateCheckError}</span>
+                    {:else if updateCheckState === "current"}
+                      <span class="muted">No update available</span>
+                    {:else}
+                      <span class="muted">Not checked</span>
+                    {/if}
+                    {#if updateCheckAt && updateCheckState !== "checking"}
+                      <span class="muted small"> · checked {new Date(updateCheckAt).toLocaleString()}</span>
+                    {/if}
+                  </span>
+                  <button type="button" class="tiny" onclick={() => refreshUpdateStatus()} disabled={updateCheckBusy}>
+                    {updateCheckBusy ? "Checking…" : "Check"}
+                  </button>
                 </dd>
               </div>
             </dl>

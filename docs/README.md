@@ -18,6 +18,7 @@ to load for a given task.
 | Doc | Purpose |
 |---|---|
 | [DEVELOPMENT.md](./DEVELOPMENT.md) | Dev setup, scripts, sidecar, versioning |
+| [EXTENDING.md](./EXTENDING.md) | Architecture boundaries and safe extension guide for contributors |
 | [FLINT_DESIGN_SPEC.md](../FLINT_DESIGN_SPEC.md) | Architecture and product principles |
 | [`.github/copilot-instructions.md`](../.github/copilot-instructions.md) | Short AI/contributor conventions |
 
@@ -26,6 +27,7 @@ to load for a given task.
 | Doc | Purpose |
 |---|---|
 | [RELEASE.md](./RELEASE.md) | Signing, GitHub secrets, updater keys, test pipeline |
+| [RELEASE_0.7.0.md](./RELEASE_0.7.0.md) | 0.7.0 prerelease gates and Explorer-team handoff checklist |
 | [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) | Current probe-backed plan through 1.0 and the 1.0 release bar (release history: [CHANGELOG.md](../CHANGELOG.md)) |
 
 ## Design / research
