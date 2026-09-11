@@ -98,13 +98,25 @@ fn is_json_whitespace(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
 }
 
-pub fn encode_json_line(value: &Value) -> io::Result<Vec<u8>> {
+pub fn encode_json_line(value: &Value, max_frame_bytes: usize) -> io::Result<Vec<u8>> {
+    if max_frame_bytes == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "maximum frame size must be positive",
+        ));
+    }
     let mut bytes = serde_json::to_vec(value).map_err(|error| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("could not encode JSON frame: {error}"),
         )
     })?;
+    if bytes.len() > max_frame_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "JSON-lines frame exceeds the configured limit",
+        ));
+    }
     bytes.push(b'\n');
     Ok(bytes)
 }
@@ -197,9 +209,14 @@ mod tests {
     #[test]
     fn encodes_one_newline_terminated_frame() {
         assert_eq!(
-            encode_json_line(&json!({"cmd": "getStatus"})).expect("encoded frame"),
+            encode_json_line(&json!({"cmd": "getStatus"}), 128).expect("encoded frame"),
             br#"{"cmd":"getStatus"}
 "#
         );
+    }
+
+    #[test]
+    fn rejects_oversized_encoded_frames() {
+        assert!(encode_json_line(&json!({"cmd": "getStatus"}), 4).is_err());
     }
 }
