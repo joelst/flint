@@ -14,10 +14,40 @@ const path = require('path');
 const root = path.resolve(__dirname, '..');
 const expected = process.argv[2] || process.env.FLINT_RELEASE_VERSION;
 
-const strictSemver =
-  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+function isNumericIdentifier(value) {
+  return /^(0|[1-9]\d*)$/.test(value);
+}
 
-if (!expected || !strictSemver.test(expected)) {
+function isIdentifier(value) {
+  return /^[0-9A-Za-z-]+$/.test(value) &&
+    !(value.length > 1 && value.startsWith('0') && /^\d+$/.test(value));
+}
+
+function isStrictSemver(value) {
+  return parseSemver(value) !== null;
+}
+
+function parseSemver(value) {
+  const [versionPart, build] = String(value).split('+');
+  if (!versionPart || String(value).split('+').length > 2) return null;
+
+  const hyphen = versionPart.indexOf('-');
+  const core = hyphen === -1 ? versionPart : versionPart.slice(0, hyphen);
+  const prereleaseText = hyphen === -1 ? '' : versionPart.slice(hyphen + 1);
+  const coreParts = core.split('.');
+  if (coreParts.length !== 3 || !coreParts.every(isNumericIdentifier)) return null;
+
+  const prerelease = prereleaseText ? prereleaseText.split('.') : [];
+  if (hyphen !== -1 && (!prerelease.length || prerelease.some((part) => !isIdentifier(part)))) {
+    return null;
+  }
+  if (build !== undefined && (!build || !build.split('.').every((part) => /^[0-9A-Za-z-]+$/.test(part)))) {
+    return null;
+  }
+  return { prerelease };
+}
+
+if (!expected || !isStrictSemver(expected)) {
   console.error('Usage: node scripts/verify-release-metadata.cjs <version>');
   process.exit(1);
 }
@@ -33,9 +63,10 @@ function readCargoVersion() {
   return match[1];
 }
 
+const tauriConfig = readJson('src-tauri/tauri.conf.json');
 const actual = {
   package: readJson('package.json').version,
-  tauri: readJson('src-tauri/tauri.conf.json').version,
+  tauri: tauriConfig.version,
   cargo: readCargoVersion(),
 };
 
@@ -49,12 +80,24 @@ for (const [source, version] of Object.entries(actual)) {
   }
 }
 
-const updaterEndpoints = readJson('src-tauri/tauri.conf.json').plugins?.updater?.endpoints || [];
-const latestEndpoint = updaterEndpoints.find((endpoint) => endpoint.includes('/releases/latest/'));
-if (latestEndpoint) {
+const updaterEndpoints = tauriConfig.plugins?.updater?.endpoints || [];
+const canonicalEndpoint = 'https://github.com/joelst/flint/releases/latest/download/latest.json';
+const latestEndpoint = updaterEndpoints.find((endpoint) => {
+  try {
+    const url = new URL(endpoint);
+    return url.href === canonicalEndpoint;
+  } catch {
+    return false;
+  }
+});
+const parsedExpected = parseSemver(expected);
+if (parsedExpected?.prerelease.length && latestEndpoint) {
+  console.error(`✗ ${expected} is a prerelease but uses the stable updater channel: ${latestEndpoint}`);
+  failed = true;
+} else if (latestEndpoint) {
   console.log(`✓ updater endpoint uses published latest release: ${latestEndpoint}`);
 } else {
-  console.error('✗ updater configuration has no canonical /releases/latest/ endpoint');
+  console.error(`✗ updater configuration must use the exact canonical endpoint: ${canonicalEndpoint}`);
   failed = true;
 }
 
