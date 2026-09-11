@@ -47,6 +47,8 @@ delete or reorder deferred backlog items.
    contract, command addition checklist, model/catalog lifecycle, gateway
    behavior, storage rules, packaging commands, and the rule that new features
    must not create a second Foundry manager or runtime owner.
+   Parallel contributor lanes, a PR handoff template, and an executable IPC
+   drift check now provide the collaboration guardrails for this work.
 
 **Explicitly deferred from the 0.7.0 critical path:** broad audio-format
 conversion and timestamp work while the Foundry SDK audio surface is changing;

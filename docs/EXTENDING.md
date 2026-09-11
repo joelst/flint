@@ -49,6 +49,40 @@ Foundry manager or model pool.
 | A new desktop shell action | Keep shell ownership in Tauri/Rust and expose a narrow typed frontend method. |
 | A document or retrieval feature | Validate an embedding-model path first; keep sources, retrieved chunks, and failures visible. |
 
+## Working safely in parallel
+
+Use one work lane per pull request. The lanes are frontend/persistence,
+SDK/IPC contracts, sidecar/runtime, Rust/Tauri shell, packaging/release, and
+documentation. A change may touch another lane when it updates that lane's
+contract, but the pull request must name the owner and the handoff explicitly.
+
+These files are shared hotspots and need extra coordination:
+
+- `src/routes/+page.svelte`
+- `src/lib/sdk.ts`
+- `src/lib/ipc-contracts.ts`
+- `sidecar/foundry-sidecar.js`
+- `package-lock.json`
+
+Keep parallel work safe by:
+
+1. Keeping one behavioral concern per pull request.
+2. Reusing pure modules and typed seams instead of adding logic to a hotspot.
+3. Rebasing before handing off a hotspot change or resolving a conflict.
+4. Re-running the contract checks after resolving conflicts; never choose one
+   side of a command or schema conflict without checking the complete surface.
+5. Recording assumptions, known follow-ups, and ownership in the pull request.
+
+For changes to the SDK/IPC or runtime, run:
+
+```bash
+npm run verify:ipc-contracts
+```
+
+The check compares the typed command list with the sidecar allowlist, command
+schemas, operation-effect classifications, and IPC deadline declarations.
+It is a drift check, not a replacement for focused behavior tests.
+
 ## Adding a sidecar command
 
 1. Define the command name and typed request/response in `src/lib/sdk.ts` and

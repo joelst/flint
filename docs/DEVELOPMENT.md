@@ -84,6 +84,21 @@ Supported Foundry core layouts today: `win32-x64`, `win32-arm64`, `linux-x64`, `
 
 When adding sidecar commands: update **both** `src/lib/sdk.ts` (and IPC contracts if applicable) and `sidecar/foundry-sidecar.js`.
 
+### Parallel contributor handoff
+
+Keep each pull request within one work lane: frontend/persistence, SDK/IPC
+contracts, sidecar/runtime, Rust/Tauri shell, packaging/release, or
+documentation. Name the touched seam, runtime owner, operation effect,
+cancellation behavior, and validation in the pull request. Shared hotspots
+such as `+page.svelte`, `sdk.ts`, `ipc-contracts.ts`, the sidecar, and the lockfile
+require a rebase and a full contract check after conflict resolution.
+
+For SDK/IPC or runtime changes, run:
+
+```bash
+npm run verify:ipc-contracts
+```
+
 ### Local OpenAI-compatible endpoint
 
 - **Bind address** (Settings → Network) controls which interface the service *listens* on (`127.0.0.1`, `0.0.0.0`, or a custom IP).
