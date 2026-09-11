@@ -732,19 +732,24 @@ function invalidateModelIndex () {
   modelIndex = null;
 }
 
+function cacheModelIndexFromCatalog(models) {
+  modelIndex = buildModelIndex((models || []).map(m => ({
+    alias: m.alias,
+    variants: (m.variants || []).map(v => {
+      let cached = false;
+      try { cached = !!v.isCached; } catch { cached = !!v.info?.cached; }
+      return { id: v.id, cached };
+    }),
+  })));
+  return modelIndex;
+}
+
 async function resolveForGateway (requested) {
   if (!modelIndex) {
     if (!manager) return null;
     try {
       const models = await manager.catalog.getModels();
-      modelIndex = buildModelIndex(models.map(m => ({
-        alias: m.alias,
-        variants: (m.variants || []).map(v => {
-          let cached = false;
-          try { cached = !!v.isCached; } catch { cached = !!v.info?.cached; }
-          return { id: v.id, cached };
-        }),
-      })));
+      cacheModelIndexFromCatalog(models);
     } catch (e) {
       log('warn', `Gateway could not read the catalog: ${e?.message ?? e}`);
       return null;
@@ -1193,7 +1198,7 @@ async function directoryBytesAndMarkers(dir, root, budget) {
   return { sizeBytes, partial };
 }
 
-async function cacheInventoryEntries(root) {
+async function cacheInventoryEntries(root, aliases = modelIndex) {
   const found = [];
   const visited = new Set();
   const budget = {
@@ -1251,8 +1256,7 @@ async function cacheInventoryEntries(root) {
       if (hasMetadata('genai_config.json') && hasMetadata('inference_model.json')) {
         const metadata = readJsonIfPresent(child, 'inference_model.json', budget);
         const name = typeof metadata?.Name === 'string' ? metadata.Name : '';
-        const separator = name.lastIndexOf(':');
-        const alias = separator > 0 ? name.slice(0, separator) : name || null;
+        const alias = name && aliases ? resolveModelId(aliases, name)?.alias || null : null;
         const stats = await directoryBytesAndMarkers(child, canonicalRoot, budget);
         found.push({
           path: child,
@@ -1313,29 +1317,7 @@ async function getCacheInventory() {
       message: error?.message || 'Unable to inspect cache root',
     }]);
   }
-  const catalogAliases = new Map();
-  try {
-    for (const model of await manager.catalog.getModels()) {
-      for (const variant of model.variants || []) {
-        const alias = model.alias || model.id || null;
-        for (const identifier of [variant.id, variant.name]) {
-          if (!identifier || !alias) continue;
-          catalogAliases.set(String(identifier), alias);
-          catalogAliases.set(String(identifier).replace(/:\d+$/, ''), alias);
-        }
-      }
-    }
-  } catch (error) {
-    log('warn', `Cache inventory catalog lookup failed: ${error?.message || error}`);
-  }
-  const scanned = await cacheInventoryEntries(root);
-  for (const entry of scanned.entries) {
-    if (entry.variantId && catalogAliases.has(entry.variantId)) entry.alias = catalogAliases.get(entry.variantId);
-    else if (entry.variantId) {
-      const bare = entry.variantId.replace(/:\d+$/, '');
-      if (catalogAliases.has(bare)) entry.alias = catalogAliases.get(bare);
-    }
-  }
+  const scanned = await cacheInventoryEntries(root, modelIndex);
   return summarizeCacheInventory(scanned.entries, scanned.errors);
 }
 
@@ -2282,6 +2264,7 @@ rl.on('line', async (line) => {
       reply({ ok: true, result: 'initialized' });
     } else if (cmd === 'listModels') {
       const models = await manager.catalog.getModels();
+      cacheModelIndexFromCatalog(models);
       reply({
         ok: true, result: models.map(m => {
           // Prefer live isCached getters (query native cache). Catalog snapshot
