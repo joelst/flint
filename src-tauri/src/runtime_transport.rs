@@ -5,6 +5,7 @@ use serde_json::Value;
 pub struct JsonLinesDecoder {
     buffer: Vec<u8>,
     max_frame_bytes: usize,
+    pending_cr: bool,
 }
 
 impl JsonLinesDecoder {
@@ -18,41 +19,26 @@ impl JsonLinesDecoder {
         Ok(Self {
             buffer: Vec::new(),
             max_frame_bytes,
+            pending_cr: false,
         })
     }
 
     pub fn push(&mut self, bytes: &[u8]) -> io::Result<Vec<Value>> {
         let mut frames = Vec::new();
-        for chunk in bytes.split_inclusive(|byte| *byte == b'\n') {
-            let terminated = chunk.last() == Some(&b'\n');
-            let content = if terminated {
-                &chunk[..chunk.len() - 1]
-            } else {
-                chunk
-            };
-            if self.buffer.len().saturating_add(content.len()) > self.max_frame_bytes {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "JSON-lines frame exceeds the configured limit",
-                ));
+        for byte in bytes {
+            if self.pending_cr {
+                self.pending_cr = false;
+                if *byte == b'\n' {
+                    self.decode_buffer(&mut frames)?;
+                    continue;
+                }
+                self.append_byte(b'\r')?;
             }
-            self.buffer.extend_from_slice(content);
-            if !terminated {
-                continue;
+            match *byte {
+                b'\r' => self.pending_cr = true,
+                b'\n' => self.decode_buffer(&mut frames)?,
+                byte => self.append_byte(byte)?,
             }
-            let line = self.buffer.strip_suffix(b"\r").unwrap_or(&self.buffer);
-            if line.iter().all(u8::is_ascii_whitespace) {
-                self.buffer.clear();
-                continue;
-            }
-            let value = serde_json::from_slice(line).map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("invalid JSON frame: {error}"),
-                )
-            })?;
-            frames.push(value);
-            self.buffer.clear();
         }
         if self.buffer.len() > self.max_frame_bytes {
             return Err(io::Error::new(
@@ -61,6 +47,34 @@ impl JsonLinesDecoder {
             ));
         }
         Ok(frames)
+    }
+
+    fn append_byte(&mut self, byte: u8) -> io::Result<()> {
+        if self.buffer.len() >= self.max_frame_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "JSON-lines frame exceeds the configured limit",
+            ));
+        }
+        self.buffer.push(byte);
+        Ok(())
+    }
+
+    fn decode_buffer(&mut self, frames: &mut Vec<Value>) -> io::Result<()> {
+        let line = self.buffer.strip_suffix(b"\r").unwrap_or(&self.buffer);
+        if line.iter().all(u8::is_ascii_whitespace) {
+            self.buffer.clear();
+            return Ok(());
+        }
+        let value = serde_json::from_slice(line).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid JSON frame: {error}"),
+            )
+        })?;
+        frames.push(value);
+        self.buffer.clear();
+        Ok(())
     }
 
     pub fn finish(self) -> io::Result<Vec<Value>> {
@@ -132,6 +146,31 @@ mod tests {
             )
             .expect("coalesced frames");
         assert_eq!(frames, vec![json!({"a": 1}), json!({"b": 2})]);
+    }
+
+    #[test]
+    fn treats_lf_and_crlf_as_the_same_frame_size() {
+        let mut lf = JsonLinesDecoder::new(7).expect("LF decoder");
+        assert_eq!(
+            lf.push(b"{\"a\":1}\n").expect("LF frame"),
+            vec![json!({"a": 1})]
+        );
+
+        let mut crlf = JsonLinesDecoder::new(7).expect("CRLF decoder");
+        assert_eq!(
+            crlf.push(b"{\"a\":1}\r\n").expect("CRLF frame"),
+            vec![json!({"a": 1})]
+        );
+
+        let mut split = JsonLinesDecoder::new(7).expect("split CRLF decoder");
+        assert!(split
+            .push(b"{\"a\":1}\r")
+            .expect("split payload")
+            .is_empty());
+        assert_eq!(
+            split.push(b"\n").expect("split terminator"),
+            vec![json!({"a": 1})]
+        );
     }
 
     #[test]
