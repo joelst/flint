@@ -373,6 +373,12 @@ observation and termination. It owns only the operating-system child process;
 Foundry manager, model, gateway, cache, and inference ownership stay in the
 Node sidecar until the transport cutover is complete.
 
+The native layer now has a small supervisor coordinator that admits one child,
+ties it to the generation state, exposes explicit exit polling, and performs
+generation-checked shutdown. It is not yet connected to the production
+frontend transport; that cutover remains a separate decision at a clean
+startup boundary.
+
 ### Native responsibilities
 
 - Single-instance behavior and ownership of exactly one runtime child.
