@@ -23,12 +23,28 @@ function assertEqual(label, actual, expected) {
   }
 }
 
+/**
+ * Extracts single-quoted string literals from a `new Set([...])` block.
+ *
+ * The block must contain nothing but quoted literals, commas, and whitespace. A spread,
+ * variable reference, or any other non-literal token would let the sidecar recognize a
+ * command that this check silently never compares, so unsupported syntax fails loudly
+ * instead of being ignored.
+ */
 function extractQuotedValues(source, startMarker, endMarker) {
   const start = source.indexOf(startMarker);
   if (start < 0) throw new Error(`Could not find ${startMarker}`);
   const end = source.indexOf(endMarker, start + startMarker.length);
   if (end < 0) throw new Error(`Could not find ${endMarker}`);
-  return [...source.slice(start, end).matchAll(/'([^']+)'/g)].map((match) => match[1]);
+  const body = source.slice(start + startMarker.length, end);
+  const withoutLiterals = body.replace(/'[^']*'/g, '');
+  if (/\S/.test(withoutLiterals.replace(/,/g, ''))) {
+    throw new Error(
+      `Unsupported syntax between ${startMarker} and ${endMarker}: only quoted literals and ` +
+        `commas are allowed, found "${withoutLiterals.trim()}"`,
+    );
+  }
+  return [...body.matchAll(/'([^']+)'/g)].map((match) => match[1]);
 }
 
 function extractObjectKeys(source, marker) {

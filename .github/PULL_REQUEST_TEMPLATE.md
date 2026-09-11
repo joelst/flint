@@ -32,4 +32,5 @@
 
 ## Handoff
 
-<!-- State assumptions, known follow-ups, and anything the next contributor must not infer. -->
+- Lane owner: <!-- who owns this lane going forward -->
+- Next contributor should know: <!-- assumptions, known follow-ups, anything not to infer -->
