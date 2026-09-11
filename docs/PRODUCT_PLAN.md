@@ -446,8 +446,8 @@ registry/model operations, and model/import UI.
   Invalidate cached-model indexes after every relevant mutation.
 - Provide a read-only cache inventory for duplicate aliases, partial downloads, and
   reclaimable byte totals; recommendations must never authorize cross-root deletion. Delivered.
-  Catalog metadata groups variants under friendly aliases when available, and filesystem
-  inspection errors are surfaced as an incomplete scan.
+  Already-cached catalog metadata groups variants under friendly aliases when available; otherwise
+  entries remain variant-scoped. Filesystem inspection errors are surfaced as an incomplete scan.
 - Define safe behavior for editing a loaded model: defer changes or perform an
   explicit lease-aware unload/reload. Do not silently modify active state.
 - Provide distinct **Unlink** and **Delete owned copy** operations. Generic native

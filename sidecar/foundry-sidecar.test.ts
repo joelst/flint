@@ -85,7 +85,7 @@ describe('foundry-sidecar protocol basics', () => {
       expect(response.result.partialBytes).toBe(11);
       expect(response.result.entries).toEqual(expect.arrayContaining([
         expect.objectContaining({ path: join(root, 'Linked'), linked: true, sizeBytes: 0 }),
-        expect.objectContaining({ alias: 'demo', owned: true }),
+        expect.objectContaining({ alias: null, variantId: 'demo:1', owned: true }),
       ]));
       expect(response.result.entries.some((entry: any) => entry.alias === 'foreign')).toBe(false);
     } finally {
