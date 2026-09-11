@@ -18,7 +18,9 @@
 // Foundry validate first means we only ever load in response to a request it accepted.
 
 import http from 'node:http';
-import { pipeline } from 'node:stream';
+import { Transform, pipeline } from 'node:stream';
+import { StringDecoder } from 'node:string_decoder';
+import { normalizeChatResponse } from './chat-response.js';
 import {
   stripHopByHopHeaders,
   isModelNotLoadedError,
@@ -29,6 +31,7 @@ import {
   rewriteStatusEndpoints,
   formatPublicEndpoint,
   isLoopbackAddress,
+  isJsonContentType,
   DEFAULT_BUFFERED_RESPONSE_TIMEOUT_MS,
   DEFAULT_MAX_BUFFERED_BODY,
   DEFAULT_MAX_BUFFERED_RESPONSE,
@@ -309,6 +312,7 @@ export function createGateway (options) {
       // Upstream is addressed by us, never derived from the client's Host header — that
       // would let a request choose its own destination.
       headers.host = `127.0.0.1:${upstreamPort}`;
+      headers['accept-encoding'] = 'identity';
       if (buffered !== null) headers['content-length'] = String(Buffer.byteLength(buffered));
 
       const upstream = http.request({
@@ -351,13 +355,32 @@ export function createGateway (options) {
         const mayRetry = captureNotLoaded && buffered !== null && status === 400;
         const isStatus = isStatusPath(req.url);
 
-        if (!mayRetry && !isStatus) {
+        const isChatJson = isChatCompletionPath(req.url) && isJsonContentType(upRes.headers['content-type']);
+        const isChatStream = isChatCompletionPath(req.url) && isEventStream(upRes.headers['content-type']);
+        if (!mayRetry && !isStatus && !isChatJson) {
+          if (isChatStream) {
+            delete outHeaders['content-length'];
+            delete outHeaders['Content-Length'];
+          }
           res.writeHead(status, outHeaders);
           // Resolve only when the pipeline finishes, not when it is registered. The caller
           // brackets the activity lease around this promise, so resolving early reports the
           // model idle while it is still streaming tokens — long enough for the eviction
           // sweep to unload it mid-generation.
-          pipeline(upRes, res, () => {
+          const done = () => {
+            res.off('close', onClientClose);
+            resolve2(SENT);
+          };
+          if (isChatStream) pipeline(upRes, normalizeChatStream(), res, done);
+          else pipeline(upRes, res, done);
+          return;
+        }
+
+        if (isChatJson && !mayRetry) {
+          delete outHeaders['content-length'];
+          delete outHeaders['Content-Length'];
+          res.writeHead(status, outHeaders);
+          pipeline(upRes, normalizeChatJsonStream(bufferedResponseLimit), res, () => {
             res.off('close', onClientClose);
             resolve2(SENT);
           });
@@ -443,6 +466,77 @@ export function createGateway (options) {
       if (buffered !== null) upstream.end(buffered);
       else pipeline(req, upstream, () => {});
     });
+  }
+
+  function isChatCompletionPath (url) {
+    return String(url || '').split('?')[0].replace(/\/+$/, '') === '/v1/chat/completions';
+  }
+
+  function isEventStream (contentType) {
+    return String(contentType || '').split(';')[0].trim().toLowerCase() === 'text/event-stream';
+  }
+
+  function normalizeChatJsonStream (normalizationLimit) {
+    let chunks = [];
+    let size = 0;
+    let passthrough = normalizationLimit === 0;
+    return new Transform({
+      transform (chunk, _encoding, callback) {
+        if (passthrough) {
+          callback(null, chunk);
+          return;
+        }
+        size += chunk.length;
+        chunks.push(chunk);
+        if (size > normalizationLimit) {
+          passthrough = true;
+          callback(null, Buffer.concat(chunks));
+          chunks = [];
+          return;
+        }
+        callback();
+      },
+      flush (callback) {
+        if (passthrough) {
+          callback();
+          return;
+        }
+        const body = Buffer.concat(chunks).toString('utf8');
+        try {
+          callback(null, JSON.stringify(normalizeChatResponse(JSON.parse(body))));
+        } catch {
+          callback(null, body);
+        }
+      },
+    });
+  }
+
+  function normalizeChatStream () {
+    const decoder = new StringDecoder('utf8');
+    let pending = '';
+    return new Transform({
+      transform (chunk, _encoding, callback) {
+        pending += decoder.write(chunk);
+        const lines = pending.split(/\r?\n/);
+        pending = lines.pop() || '';
+        callback(null, lines.map(normalizeSseLine).join('\n') + (lines.length ? '\n' : ''));
+      },
+      flush (callback) {
+        pending += decoder.end();
+        callback(null, pending ? normalizeSseLine(pending) : null);
+      },
+    });
+  }
+
+  function normalizeSseLine (line) {
+    if (!line.startsWith('data:')) return line;
+    const payload = line.slice(5).trimStart();
+    if (payload === '[DONE]') return line;
+    try {
+      return `data: ${JSON.stringify(normalizeChatResponse(JSON.parse(payload), { stream: true }))}`;
+    } catch {
+      return line;
+    }
   }
 
   let closePromise = null;

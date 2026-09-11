@@ -505,6 +505,89 @@ describe('gateway model-name routing', () => {
 });
 
 describe('gateway streaming', () => {
+  it('normalizes buffered chat responses at the public endpoint', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        id: 'chat-1',
+        IsDelta: false,
+        Successful: true,
+        HttpStatusCode: 200,
+        choices: [{
+          index: 0,
+          message: { role: 'assistant' },
+          delta: { content: 'hello' },
+          finish_reason: 'stop',
+        }],
+      }));
+    });
+    gateway = await startGateway();
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3-0.6b' }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.IsDelta).toBeUndefined();
+    expect(body.Successful).toBeUndefined();
+    expect(body.HttpStatusCode).toBeUndefined();
+    expect(body.choices).toEqual([{
+      index: 0,
+      finish_reason: 'stop',
+      message: { role: 'assistant', content: 'hello' },
+    }]);
+  });
+
+  it('requests identity encoding for responses it may transform', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }));
+    });
+    gateway = await startGateway();
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'accept-encoding': 'gzip' },
+      body: JSON.stringify({ model: 'qwen3-0.6b' }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(upstream.state.hits.at(-1)?.headers['accept-encoding']).toBe('identity');
+  });
+
+  it('passes through oversized JSON inference without applying the control cap', async () => {
+    await new Promise(r => upstream.server.close(r));
+    const content = 'x'.repeat(128);
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        IsDelta: false,
+        Successful: true,
+        HttpStatusCode: 200,
+        choices: [{ message: { content }, delta: { content: 'native' } }],
+      }));
+    });
+    gateway = await startGateway({ maxBufferedResponse: 32 });
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3-0.6b' }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.IsDelta).toBe(false);
+    expect(body.Successful).toBe(true);
+    expect(body.HttpStatusCode).toBe(200);
+    expect(body.choices[0].delta.content).toBe('native');
+  });
+
   it('streams SSE chunks as they are produced rather than buffering', async () => {
     await new Promise(r => upstream.server.close(r));
     upstream = await startUpstream((req, res) => {
@@ -530,6 +613,69 @@ describe('gateway streaming', () => {
     expect(seen.length).toBeGreaterThanOrEqual(2);
     expect(seen[seen.length - 1] - seen[0]).toBeGreaterThan(30);
   });
+
+  it('normalizes streamed chat chunks and preserves the DONE terminator', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('data: {"IsDelta":true,"choices":[{"delta":{"role":"assistant","content":"hi"}}]}\n\n');
+      res.write('data: {"choices":[{"message":{"content":" there"}}]}\n\n');
+      res.end('data: [DONE]\n\n');
+    });
+    gateway = await startGateway();
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3-0.6b', stream: true }),
+    });
+
+    expect(res.status).toBe(200);
+    const events = res.body.trim().split(/\n\n/);
+    expect(JSON.parse(events[0].slice(6))).toEqual({
+      choices: [{
+        index: 0,
+        finish_reason: null,
+        delta: { role: 'assistant', content: 'hi' },
+      }],
+    });
+    expect(JSON.parse(events[1].slice(6))).toEqual({
+      choices: [{
+        index: 0,
+        finish_reason: null,
+        delta: { content: ' there' },
+      }],
+    });
+    expect(events[2]).toBe('data: [DONE]');
+  });
+
+  it('normalizes split UTF-8 SSE payloads and removes stale content length', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      const body = 'data: {"choices":[{"delta":{"content":"café"}}]}\n\ndata: [DONE]\n\n';
+      const bytes = Buffer.from(body);
+      const split = bytes.indexOf(0xc3) + 1;
+      res.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'content-length': bytes.length,
+      });
+      res.write(bytes.subarray(0, split));
+      res.end(bytes.subarray(split));
+    });
+    gateway = await startGateway();
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3-0.6b', stream: true }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers['content-length']).toBeUndefined();
+    expect(res.body).toContain('"content":"café"');
+    expect(res.body).toContain('data: [DONE]');
+  });
+
   it('still streams when the response follows an autoload', async () => {
     await new Promise(r => upstream.server.close(r));
     upstream = await startUpstream((req, res, body, state) => {

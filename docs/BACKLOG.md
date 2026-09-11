@@ -87,9 +87,15 @@ Windows/macOS fixes do not establish Linux release support.
 
 ## Endpoint / agent compatibility (see [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md), "Plan: current → 1.0")
 
-- [ ] **Behavioural conformance self-test** — not route-existence checks.
-- [ ] **Normalise response shape** — service emits non-standard `IsDelta`, `Successful`,
-      `HttpStatusCode`, and both `delta` and `message` in one choice.
+- [ ] **Behavioural conformance self-test** — not route-existence checks. Gateway
+      behavioral coverage now verifies status rewriting, model routing/autoload
+      replay, normalized JSON/SSE chat responses, and `[DONE]`; a user-facing
+      diagnostic self-test remains open.
+- [ ] **Normalise response shape** — gateway chat JSON and SSE responses remove
+      Foundry-only fields and emit one OpenAI-shaped message or delta choice when
+      JSON is within the bounded normalization threshold; larger JSON responses
+      remain byte-preserving pass-through. Broader endpoint capability conformance
+      remains open.
 - [ ] **`/v1/embeddings` end-to-end** — route exists, but the catalog has zero embedding
       models, so this depends on BYOM.
 - [ ] **Surface `supportsToolCalling` / `contextLength`**, labelled catalog-declared vs
