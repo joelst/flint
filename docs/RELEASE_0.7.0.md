@@ -27,8 +27,16 @@ those capabilities are separately validated.
 
 - [ ] Version is `0.7.0` in `package.json`, `src-tauri/tauri.conf.json`, and
   `src-tauri/Cargo.toml`.
-- [ ] `npm run verify:release -- 0.7.0` passes before publishing or sharing the
-  handoff packet.
+- [ ] `npm run verify:release -- 0.7.0 --channel=evaluation` passes before
+  publishing or sharing the handoff packet. The explicit channel flag is
+  required because `0.7.0` is a stable SemVer used for an evaluation handoff;
+  it must not be inferred from the updater endpoint. When using the release
+  workflow, select the `evaluation` channel; this forces GitHub prerelease
+  publication even for an unsuffixed `0.7.0` version.
+- [ ] Do not push `v0.7.0` directly. Run the release workflow manually with
+  `version=0.7.0`, `channel=evaluation`, and the intended handoff ref so an
+  unsuffixed evaluation build cannot become the stable `releases/latest`
+  publication.
 - [ ] Windows installer is built and signed through the normal release path.
 - [ ] macOS Apple Silicon DMG/app is built and its unsigned-install limitation
   is called out in the release notes.

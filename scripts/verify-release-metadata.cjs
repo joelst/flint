@@ -13,6 +13,8 @@ const path = require('path');
 
 const root = path.resolve(__dirname, '..');
 const expected = process.argv[2] || process.env.FLINT_RELEASE_VERSION;
+const channelArgument = process.argv.find((arg) => arg.startsWith('--channel='));
+const channel = channelArgument ? channelArgument.slice('--channel='.length) : 'stable';
 
 function isNumericIdentifier(value) {
   return /^(0|[1-9]\d*)$/.test(value);
@@ -47,8 +49,8 @@ function parseSemver(value) {
   return { prerelease };
 }
 
-if (!expected || !isStrictSemver(expected)) {
-  console.error('Usage: node scripts/verify-release-metadata.cjs <version>');
+if (!expected || !isStrictSemver(expected) || !['stable', 'evaluation'].includes(channel)) {
+  console.error('Usage: node scripts/verify-release-metadata.cjs <version> [--channel=stable|evaluation]');
   process.exit(1);
 }
 
@@ -91,11 +93,16 @@ const latestEndpoint = updaterEndpoints.find((endpoint) => {
   }
 });
 const parsedExpected = parseSemver(expected);
-if (parsedExpected?.prerelease.length && latestEndpoint) {
-  console.error(`✗ ${expected} is a prerelease but uses the stable updater channel: ${latestEndpoint}`);
+const isPrerelease = Boolean(parsedExpected?.prerelease.length);
+if (channel === 'stable' && isPrerelease) {
+  console.error(`✗ ${expected} is a prerelease but the release channel is stable`);
   failed = true;
 } else if (latestEndpoint) {
-  console.log(`✓ updater endpoint uses published latest release: ${latestEndpoint}`);
+  console.log(
+    channel === 'evaluation'
+      ? `✓ exact application updater endpoint remains configured; publication channel is evaluation: ${latestEndpoint}`
+      : `✓ exact updater endpoint configured for stable release: ${latestEndpoint}`,
+  );
 } else {
   console.error(`✗ updater configuration must use the exact canonical endpoint: ${canonicalEndpoint}`);
   failed = true;

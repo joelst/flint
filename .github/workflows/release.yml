@@ -14,6 +14,14 @@ on:
         description: "Git ref to build (e.g. v0.4.1). Leave empty to build the workflow ref."
         required: false
         default: ""
+      channel:
+        description: "Publication channel: stable or evaluation"
+        required: false
+        type: choice
+        options:
+          - stable
+          - evaluation
+        default: stable
 
 permissions:
   contents: write
@@ -122,7 +130,22 @@ jobs:
             PRERELEASE_ID="${PRERELEASE_ID%%+*}"
           fi
 
-          if [ -n "$PRERELEASE_ID" ]; then
+          CHANNEL="${{ github.event.inputs.channel || 'stable' }}"
+          if [ "$CHANNEL" != "stable" ] && [ "$CHANNEL" != "evaluation" ]; then
+            echo "Error: channel must be stable or evaluation."
+            exit 1
+          fi
+          if [ -n "$PRERELEASE_ID" ] && [ "$CHANNEL" = "stable" ]; then
+            CHANNEL="evaluation"
+          fi
+          if [ "$VERSION" = "0.7.0" ] && [ "$CHANNEL" = "stable" ]; then
+            echo "Error: 0.7.0 is an evaluation handoff; dispatch the workflow with channel=evaluation."
+            exit 1
+          fi
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+          node scripts/verify-release-metadata.cjs "$VERSION" "--channel=$CHANNEL"
+
+          if [ "$CHANNEL" = "evaluation" ] || [ -n "$PRERELEASE_ID" ]; then
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
           else
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
