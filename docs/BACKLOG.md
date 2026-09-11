@@ -13,6 +13,10 @@ implementation dependencies, and acceptance gates. Fix data loss and runtime
 correctness without waiting for a backend rewrite. Expedite thin native
 lifecycle/process supervision; defer wholesale Foundry runtime replacement.
 
+The 0.7.0 prerelease track is a focused foundation milestone for the Explorer
+team. It adds release and documentation gates around existing work; it does not
+close, delete, or implicitly reprioritize the open items below.
+
 **Linux work is deferred:** preserve existing checks and mappings. Continue
 Linux-specific work only where it is already part of another feature; shared
 Windows/macOS fixes do not establish Linux release support.
@@ -59,6 +63,10 @@ Windows/macOS fixes do not establish Linux release support.
       lifecycle contracts are stable. The versioned transport and readiness
       contracts are now delivered; see
       [PRODUCT_PLAN](./PRODUCT_PLAN.md#workstream-c-thin-native-ownership----expedited).
+- [ ] **0.7.0 Rust foundation gate** — deliver the smallest supervisor slice
+      needed for a shareable Windows/macOS prerelease: one owned sidecar child,
+      exit observation, truthful shutdown, and renderer-independent recovery.
+      This is a release gate for the item above, not a replacement for it.
 - [ ] **Rust runtime replacement** — deferred pending parity and measured benefit.
       Preserve one model-manager authority and separate-process crash isolation;
       do not keep competing JS/Rust runtimes or replay uncertain operations.
@@ -222,3 +230,9 @@ cloning Ollama's `pull`/`run` REPL, any CLI before the desktop app is solid.
 ## Docs
 
 - [ ] **Optional** root `CONTRIBUTING.md`; CI markdown link check.
+- [ ] **Extension guide examples** — extend the shipped
+      [EXTENDING.md](./EXTENDING.md) guide with one or two complete,
+      user-facing examples (for example an embedding-backed workflow or a
+      diagnostic panel) after the core command and test seams are stable.
+      Keep the architecture boundaries and safe-extension rules in the guide;
+      target the Foundry Local Explorer team and future contributors.

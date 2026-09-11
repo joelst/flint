@@ -4,6 +4,12 @@
 
 Manage models on your machine, chat and transcribe locally, pit models against each other in the Model Arena, and expose an **OpenAI-compatible endpoint** to the coding tools you already use — without sending prompts to a cloud by default.
 
+Flint is the dependable foundation around Foundry Local: it turns the SDK's
+catalog, hardware variants, model lifecycle, local inference, and endpoint into
+one place that developers can use, evaluate, and extend. Build a tool on top of
+the endpoint, add a workflow to the UI, or contribute a capability through the
+typed SDK/sidecar boundary without owning another model manager.
+
 ---
 
 ## Why Flint?
@@ -194,7 +200,9 @@ Architecture principles: [FLINT_DESIGN_SPEC.md](./FLINT_DESIGN_SPEC.md)
 | [docs/README.md](./docs/README.md) | Full doc index |
 | [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) | Forward plan through 1.0 & the 1.0 release bar |
 | [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) | Build, sidecar, versioning |
+| [docs/EXTENDING.md](./docs/EXTENDING.md) | Build new workflows and integrations on the Flint core |
 | [docs/RELEASE.md](./docs/RELEASE.md) | Sign & ship |
+| [docs/RELEASE_0.7.0.md](./docs/RELEASE_0.7.0.md) | 0.7.0 prerelease gates and Explorer-team handoff |
 | [docs/BACKLOG.md](./docs/BACKLOG.md) | Deferred follow-ups |
 | [CHANGELOG.md](./CHANGELOG.md) | Release notes |
 
