@@ -36,6 +36,7 @@ export const COMMAND_EFFECTS: Record<SidecarCommandName, OperationEffect> = {
   getStatus: 'query',
   getEndpoint: 'query',
   getAccessLog: 'query',
+  getCacheInventory: 'query',
   poolStatus: 'query',
   wslStatus: 'query',
   // Catalog reads. These refresh SDK-internal caches, which is not nothing, but it is not state

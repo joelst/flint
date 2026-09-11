@@ -31,6 +31,7 @@
     fetchUrl,
     appendAppLog,
     getAccessLog,
+    getCacheInventory,
     pollPoolStatus,
     ensureNodeRuntime,
     formatNodeVersion,
@@ -57,6 +58,7 @@
     type EpInfo,
     type AcceleratorReadiness,
     type LogEntry,
+    type CacheInventory,
   } from "$lib/sdk";
   import { evaluateStartupPreload } from "$lib/accelerator-readiness";
   import {
@@ -513,6 +515,8 @@
   let recommendedStarters = $state([] as ModelInfo[]);
   let isLoadingRecommendations = $state(false);
   let selectedAccelerationPreference = $state<string>("auto");
+  let cacheInventory = $state<CacheInventory | null>(null);
+  let cacheInventoryLoading = $state(false);
   let hostPlatform = $state<"windows" | "macos" | "linux" | "unknown">("unknown");
   let isMac = $derived(hostPlatform === 'macos');
   const isDev = import.meta.env.DEV;
@@ -4041,6 +4045,19 @@ updateStateFromSdk();
   async function refreshServiceStatus() {
     await refreshModels();
     updateStateFromSdk();
+  }
+
+  async function scanCacheInventory() {
+    cacheInventoryLoading = true;
+    try {
+      cacheInventory = await getCacheInventory();
+      statusMessage = "Cache inventory refreshed";
+    } catch (e: any) {
+      statusMessage = `Cache inventory failed: ${e?.message || e}`;
+      appendAppLog(`Cache inventory failed: ${e?.message || e}`, "error");
+    } finally {
+      cacheInventoryLoading = false;
+    }
   }
 
   async function copyDiagnosticsToClipboard() {
@@ -7625,8 +7642,75 @@ Output only the summary text, no preamble.`;
               <button onclick={copyDiagnosticsToClipboard}>
                 Copy All Diagnostics
               </button>
+              <button onclick={scanCacheInventory} disabled={!state.ready || cacheInventoryLoading}>
+                {cacheInventoryLoading ? "Scanning Cache..." : "Scan Cache"}
+              </button>
             </div>
           </div>
+
+          {#if cacheInventory}
+            <div class="service-panel">
+              <h3>Read-only Cache Inventory</h3>
+              <div class="status-row">
+                <span>Total scanned:</span>
+                <strong>{cacheInventory.entries.length} entries · {(cacheInventory.totalBytes / 1024 / 1024 / 1024).toFixed(2)} GB</strong>
+              </div>
+              <div class="status-row">
+                <span>Partial downloads:</span>
+                <strong>{cacheInventory.partialEntries.length} · {(cacheInventory.partialBytes / 1024 / 1024 / 1024).toFixed(2)} GB</strong>
+              </div>
+              <div class="status-row">
+                <span>Duplicate aliases:</span>
+                <strong>{cacheInventory.duplicateGroups.length} · {(cacheInventory.duplicateBytes / 1024 / 1024 / 1024).toFixed(2)} GB</strong>
+              </div>
+              {#if !cacheInventory.scanComplete}
+                <p class="setting-note" style="color: var(--warning, #fbbf24)">
+                  Inventory incomplete: {cacheInventory.scanErrors.length} cache paths could not be inspected.
+                </p>
+                <ul class="diagnostic-list">
+                  {#each cacheInventory.scanErrors as error}
+                    <li><code>{error.path}</code> · {error.message}</li>
+                  {/each}
+                </ul>
+              {/if}
+              {#if cacheInventory.partialEntries.length || cacheInventory.duplicateGroups.length}
+                <p class="setting-note">
+                  These are recommendations only. Flint does not delete cache files from this view.
+                </p>
+                {#if cacheInventory.partialEntries.length}
+                  <h4>Partial downloads</h4>
+                  <ul class="diagnostic-list">
+                    {#each cacheInventory.partialEntries as entry}
+                      <li><code>{entry.path}</code> · {(entry.bytes / 1024 / 1024).toFixed(1)} MB</li>
+                    {/each}
+                  </ul>
+                {/if}
+                {#if cacheInventory.duplicateGroups.length}
+                  <h4>Duplicate aliases</h4>
+                  <ul class="diagnostic-list">
+                    {#each cacheInventory.duplicateGroups as group}
+                      <li>
+                        <strong>{group.alias}</strong> · {(group.bytes / 1024 / 1024).toFixed(1)} MB reviewable
+                        <ul>
+                          {#each group.entries as entry}<li><code>{entry}</code></li>{/each}
+                        </ul>
+                      </li>
+                    {/each}
+                  </ul>
+                {/if}
+              {:else}
+                <p class="setting-note">No partial downloads or duplicate aliases were found.</p>
+              {/if}
+              {#if cacheInventory.entries.some((entry) => entry.linked)}
+                <h4>Linked entries</h4>
+                <ul class="diagnostic-list">
+                  {#each cacheInventory.entries.filter((entry) => entry.linked) as entry}
+                    <li><code>{entry.path}</code> · foreign target not scanned</li>
+                  {/each}
+                </ul>
+              {/if}
+            </div>
+          {/if}
 
           <div class="log-viewer">
             <div class="log-viewer-header">

@@ -73,9 +73,12 @@ Windows/macOS fixes do not establish Linux release support.
 - [x] **Additional model folders via directory junctions** — `linkModelFolder`. Never
       writes to the foreign folder; delete the link, never the target.
 - [x] **Sort the model list** — name, family, or last updated; persisted.
-- [ ] **Read-only cache inventory** — duplicates, partial downloads, reclaimable bytes.
-      Recommend only; no cross-root deletion. Measured on the maintainer's machine:
+- [x] **Read-only cache inventory** — duplicates, partial downloads, and reclaimable byte totals.
+      Recommendations only; no cross-root deletion. Measured on the maintainer's machine:
       `~/.flint` 107 GB / 35 models vs `~/.foundry` 31.4 GB / 7 models, 15.3 GB duplicated.
+      Duplicate grouping uses already-cached catalog metadata when available; otherwise entries
+      remain variant-scoped. Inaccessible paths are reported as an incomplete scan rather than
+      as zero-byte success.
 - [x] **Auto-load on demand** — Flint's reverse proxy owns the configured port, forwards to
       the native service, and on the exact `400 ... is not loaded` loads the model and
       replays the request once. Cached models only, so a stray id cannot start a download.

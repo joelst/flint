@@ -75,6 +75,7 @@ import {
 import { createAsyncLogWriter } from './async-log-writer.js';
 import { normalizeChatResponse } from './chat-response.js';
 import { buildInferenceMetrics } from './inference-metrics.js';
+import { summarizeCacheInventory } from './cache-inventory.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -96,6 +97,7 @@ const KNOWN_COMMANDS = new Set([
   'chatCompletion', 'cancelChatRequest', 'transcribeAudio',
   'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',
   'poolStatus', 'getAccessLog', 'fetchUrl',
+  'getCacheInventory',
   'inspectModelFolder', 'importModelFolder', 'linkModelFolder',
   'getModelTemplate', 'setModelTemplate',
   'setEvictionConfig', 'setModelPriorities', 'applyMemorySettings',
@@ -161,6 +163,7 @@ const COMMAND_SCHEMA = {
   getSTTModels:       { required: [], optional: [] },
   poolStatus:         { required: [], optional: [] },
   getAccessLog:       { required: [], optional: [] },
+  getCacheInventory:  { required: [], optional: [] },
   fetchUrl:           { required: ['url'], optional: ['maxChars'] },
   inspectModelFolder: { required: ['folderPath'], optional: [] },
   importModelFolder:  { required: ['folderPath', 'name'], optional: ['publisher', 'version', 'promptTemplate'] },
@@ -729,19 +732,24 @@ function invalidateModelIndex () {
   modelIndex = null;
 }
 
+function cacheModelIndexFromCatalog(models) {
+  modelIndex = buildModelIndex((models || []).map(m => ({
+    alias: m.alias,
+    variants: (m.variants || []).map(v => {
+      let cached = false;
+      try { cached = !!v.isCached; } catch { cached = !!v.info?.cached; }
+      return { id: v.id, cached };
+    }),
+  })));
+  return modelIndex;
+}
+
 async function resolveForGateway (requested) {
   if (!modelIndex) {
     if (!manager) return null;
     try {
       const models = await manager.catalog.getModels();
-      modelIndex = buildModelIndex(models.map(m => ({
-        alias: m.alias,
-        variants: (m.variants || []).map(v => {
-          let cached = false;
-          try { cached = !!v.isCached; } catch { cached = !!v.info?.cached; }
-          return { id: v.id, cached };
-        }),
-      })));
+      cacheModelIndexFromCatalog(models);
     } catch (e) {
       log('warn', `Gateway could not read the catalog: ${e?.message ?? e}`);
       return null;
@@ -1153,11 +1161,177 @@ function modelCacheRoot() {
   return path.join(os.homedir(), `.${appName}`, 'cache', 'models');
 }
 
+function isLinkedOrForeign(root, target) {
+  try {
+    if (fs.lstatSync(target).isSymbolicLink()) return true;
+    return !isInsideRoot(root, fs.realpathSync(target));
+  } catch {
+    return false;
+  }
+}
+
+async function directoryBytesAndMarkers(dir, root, budget) {
+  let sizeBytes = 0;
+  let partial = false;
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (error) {
+    budget.errors.push({ path: dir, message: error?.message || 'Unable to read directory' });
+    return { sizeBytes: 0, partial: false };
+  }
+  for (const entry of entries) {
+    await budget.yieldIfNeeded();
+    const child = path.join(dir, entry.name);
+    if (entry.isSymbolicLink() || isLinkedOrForeign(root, child)) continue;
+    if (entry.isFile()) {
+      if (entry.name === 'download.tmp') partial = true;
+      try { sizeBytes += fs.statSync(child).size; } catch (error) {
+        budget.errors.push({ path: child, message: error?.message || 'Unable to stat file' });
+      }
+    } else if (entry.isDirectory()) {
+      const nested = await directoryBytesAndMarkers(child, root, budget);
+      sizeBytes += nested.sizeBytes;
+      partial ||= nested.partial;
+    }
+  }
+  return { sizeBytes, partial };
+}
+
+async function cacheInventoryEntries(root, aliases = modelIndex) {
+  const found = [];
+  const visited = new Set();
+  const budget = {
+    count: 0,
+    errors: [],
+    async yieldIfNeeded() {
+      if (++this.count % 100 === 0) await new Promise(resolve => setImmediate(resolve));
+    },
+  };
+  let canonicalRoot;
+  try { canonicalRoot = fs.realpathSync(root); } catch (error) {
+    return { entries: found, errors: [{ path: root, message: error?.message || 'Unable to resolve cache root' }] };
+  }
+
+  async function walk(dir) {
+    await budget.yieldIfNeeded();
+    let real;
+    try { real = fs.realpathSync(dir); } catch (error) {
+      budget.errors.push({ path: dir, message: error?.message || 'Unable to resolve cache path' });
+      return;
+    }
+    if (visited.has(real)) return;
+    visited.add(real);
+
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (error) {
+      budget.errors.push({ path: dir, message: error?.message || 'Unable to read directory' });
+      return;
+    }
+    for (const entry of entries) {
+      await budget.yieldIfNeeded();
+      const child = path.join(dir, entry.name);
+      if (entry.isSymbolicLink() || isLinkedOrForeign(canonicalRoot, child)) {
+        found.push({
+          path: child,
+          alias: null,
+          variantId: null,
+          sizeBytes: 0,
+          partial: false,
+          linked: true,
+          owned: false,
+        });
+        continue;
+      }
+      if (!entry.isDirectory()) continue;
+
+      const childEntries = (() => {
+        try { return fs.readdirSync(child, { withFileTypes: true }); } catch (error) {
+          budget.errors.push({ path: child, message: error?.message || 'Unable to read directory' });
+          return [];
+        }
+      })();
+      const hasMetadata = name => childEntries.some(e => e.isFile() && e.name === name);
+      const hasDirectPartial = hasMetadata('download.tmp');
+      if (hasMetadata('genai_config.json') && hasMetadata('inference_model.json')) {
+        const metadata = readJsonIfPresent(child, 'inference_model.json', budget);
+        const name = typeof metadata?.Name === 'string' ? metadata.Name : '';
+        const alias = name && aliases ? resolveModelId(aliases, name)?.alias || null : null;
+        const stats = await directoryBytesAndMarkers(child, canonicalRoot, budget);
+        found.push({
+          path: child,
+          alias,
+          variantId: name || null,
+          sizeBytes: stats.sizeBytes,
+          partial: stats.partial,
+          linked: false,
+          owned: hasOwnershipMarker(child, canonicalRoot),
+        });
+        continue;
+      }
+      if (hasDirectPartial) {
+        const stats = await directoryBytesAndMarkers(child, canonicalRoot, budget);
+        found.push({
+          path: child,
+          alias: null,
+          variantId: null,
+          sizeBytes: stats.sizeBytes,
+          partial: true,
+          linked: false,
+          owned: hasOwnershipMarker(child, canonicalRoot),
+        });
+        continue;
+      }
+
+      await walk(child);
+    }
+  }
+
+  await walk(root);
+  return { entries: found, errors: budget.errors };
+}
+
+function hasOwnershipMarker(dir, root) {
+  let current;
+  try { current = fs.realpathSync(dir); } catch { current = path.resolve(dir); }
+  const boundary = path.resolve(root);
+  while (true) {
+    if (fs.existsSync(path.join(current, OWNERSHIP_MARKER))) return true;
+    if (current === boundary) break;
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    if (!isInsideRoot(boundary, parent)) break;
+    current = parent;
+  }
+  return false;
+}
+
+async function getCacheInventory() {
+  const root = modelCacheRoot();
+  try {
+    fs.lstatSync(root);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return summarizeCacheInventory([]);
+    return summarizeCacheInventory([], [{
+      path: root,
+      message: error?.message || 'Unable to inspect cache root',
+    }]);
+  }
+  const scanned = await cacheInventoryEntries(root, modelIndex);
+  return summarizeCacheInventory(scanned.entries, scanned.errors);
+}
+
 /** Files worth reading to classify a candidate folder. */
-function readJsonIfPresent(dir, name) {
+function readJsonIfPresent(dir, name, budget) {
   try {
     return JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
-  } catch {
+  } catch (error) {
+    if (budget) {
+      budget.errors.push({
+        path: path.join(dir, name),
+        message: error?.message || 'Unable to read metadata',
+      });
+    }
     return null;
   }
 }
@@ -2090,6 +2264,7 @@ rl.on('line', async (line) => {
       reply({ ok: true, result: 'initialized' });
     } else if (cmd === 'listModels') {
       const models = await manager.catalog.getModels();
+      cacheModelIndexFromCatalog(models);
       reply({
         ok: true, result: models.map(m => {
           // Prefer live isCached getters (query native cache). Catalog snapshot
@@ -2914,6 +3089,8 @@ rl.on('line', async (line) => {
           } : { active: false, type: null, modelAlias: null, elapsedMs: null, count: 0 },
         }
       });
+    } else if (cmd === 'getCacheInventory') {
+      reply({ ok: true, result: await getCacheInventory() });
     } else if (cmd === 'setEvictionConfig') {
       // Apply immediately: a user who has just lowered the cap expects the pool to shrink
       // now, not at some point in the next half minute.
