@@ -58,6 +58,10 @@ Windows/macOS fixes do not establish Linux release support.
 - [ ] **Rust supervisor coverage** — expand beyond the current runtime-state
       unit tests to cover native child ownership, transport, exit observation,
       shutdown confirmation, and installed-app lifecycle paths.
+      `runtime_supervisor.rs` now also covers a failed spawn not stranding the
+      state machine, a stale-generation shutdown never terminating the live
+      child, and repeated shutdown of the same generation being a no-op.
+      Transport integration and installed-app lifecycle paths remain open.
 
 ## Runtime strategy
 
