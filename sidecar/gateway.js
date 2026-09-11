@@ -19,6 +19,7 @@
 
 import http from 'node:http';
 import { Transform, pipeline } from 'node:stream';
+import { StringDecoder } from 'node:string_decoder';
 import { normalizeChatResponse } from './chat-response.js';
 import {
   stripHopByHopHeaders,
@@ -354,16 +355,31 @@ export function createGateway (options) {
         const isStatus = isStatusPath(req.url);
 
         const isChatJson = isChatCompletionPath(req.url) && isJsonContentType(upRes.headers['content-type']);
+        const isChatStream = isChatCompletionPath(req.url) && isEventStream(upRes.headers['content-type']);
         if (!mayRetry && !isStatus && !isChatJson) {
+          if (isChatStream) {
+            delete outHeaders['content-length'];
+            delete outHeaders['Content-Length'];
+          }
           res.writeHead(status, outHeaders);
           // Resolve only when the pipeline finishes, not when it is registered. The caller
           // brackets the activity lease around this promise, so resolving early reports the
           // model idle while it is still streaming tokens — long enough for the eviction
           // sweep to unload it mid-generation.
-          const stream = isChatCompletionPath(req.url) && isEventStream(upRes.headers['content-type'])
-            ? normalizeChatStream(upRes)
-            : upRes;
-          pipeline(stream, res, () => {
+          const done = () => {
+            res.off('close', onClientClose);
+            resolve2(SENT);
+          };
+          if (isChatStream) pipeline(upRes, normalizeChatStream(), res, done);
+          else pipeline(upRes, res, done);
+          return;
+        }
+
+        if (isChatJson && !mayRetry) {
+          delete outHeaders['content-length'];
+          delete outHeaders['Content-Length'];
+          res.writeHead(status, outHeaders);
+          pipeline(upRes, normalizeChatJsonStream(), res, () => {
             res.off('close', onClientClose);
             resolve2(SENT);
           });
@@ -440,9 +456,7 @@ export function createGateway (options) {
 
           const finalBody = isStatus
             ? rewriteStatusEndpoints(body, formatPublicEndpoint(bindAddress, boundPort ?? publicPort))
-            : isChatCompletionPath(req.url) && isJsonContentType(upRes.headers['content-type'])
-              ? normalizeChatJsonBody(body)
-              : body;
+            : body;
           respondBuffered(res, status, outHeaders, finalBody);
           resolve2(SENT);
         }));
@@ -461,27 +475,40 @@ export function createGateway (options) {
     return String(contentType || '').split(';')[0].trim().toLowerCase() === 'text/event-stream';
   }
 
-  function normalizeChatJsonBody (body) {
-    try {
-      return JSON.stringify(normalizeChatResponse(JSON.parse(body)));
-    } catch {
-      return body;
-    }
+  function normalizeChatJsonStream () {
+    const decoder = new StringDecoder('utf8');
+    let body = '';
+    return new Transform({
+      transform (chunk, _encoding, callback) {
+        body += decoder.write(chunk);
+        callback();
+      },
+      flush (callback) {
+        body += decoder.end();
+        try {
+          callback(null, JSON.stringify(normalizeChatResponse(JSON.parse(body))));
+        } catch {
+          callback(null, body);
+        }
+      },
+    });
   }
 
-  function normalizeChatStream (upstream) {
+  function normalizeChatStream () {
+    const decoder = new StringDecoder('utf8');
     let pending = '';
-    return upstream.pipe(new Transform({
+    return new Transform({
       transform (chunk, _encoding, callback) {
-        pending += chunk.toString('utf8');
+        pending += decoder.write(chunk);
         const lines = pending.split(/\r?\n/);
         pending = lines.pop() || '';
         callback(null, lines.map(normalizeSseLine).join('\n') + (lines.length ? '\n' : ''));
       },
       flush (callback) {
+        pending += decoder.end();
         callback(null, pending ? normalizeSseLine(pending) : null);
       },
-    }));
+    });
   }
 
   function normalizeSseLine (line) {

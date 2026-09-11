@@ -603,6 +603,33 @@ describe('gateway streaming', () => {
     expect(events[2]).toBe('data: [DONE]');
   });
 
+  it('normalizes split UTF-8 SSE payloads and removes stale content length', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      const body = 'data: {"choices":[{"delta":{"content":"café"}}]}\n\ndata: [DONE]\n\n';
+      const bytes = Buffer.from(body);
+      const split = bytes.indexOf(0xc3) + 1;
+      res.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'content-length': bytes.length,
+      });
+      res.write(bytes.subarray(0, split));
+      res.end(bytes.subarray(split));
+    });
+    gateway = await startGateway();
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3-0.6b', stream: true }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers['content-length']).toBeUndefined();
+    expect(res.body).toContain('"content":"café"');
+    expect(res.body).toContain('data: [DONE]');
+  });
+
   it('still streams when the response follows an autoload', async () => {
     await new Promise(r => upstream.server.close(r));
     upstream = await startUpstream((req, res, body, state) => {
