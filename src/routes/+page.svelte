@@ -5435,7 +5435,9 @@ Output only the summary text, no preamble.`;
     rollingOwner = session;
     const snapshotLen = dictationChunks.length;
     try {
-      const windowChunks = dictationChunks.slice(-2); // ~last 4s (timeslice=2000ms)
+      const windowChunks = dictationChunks.length <= 2
+        ? dictationChunks
+        : [dictationChunks[0], ...dictationChunks.slice(-2)]; // retain WebM initialization
       const blob = new Blob(windowChunks, { type: 'audio/webm' });
       const wavBlob = await convertAudioBlobToWav(blob);
       const res = await transcribeAudio(wavBlob, sttAlias, transcriptionLanguage, 'dictation-interim.wav', { temperature: 0 });
