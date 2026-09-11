@@ -10,12 +10,16 @@ document workflows, evaluation tools, integrations, or new views.
 
 ## Architecture boundaries
 
+Current 0.6.x and the 0.7.0 transition use the Tauri shell transport to launch
+the sidecar. The target native-supervisor design is shown below; the ownership
+rules apply now even though the Rust cutover is still a release gate.
+
 ```text
 Svelte frontend
     |
     | typed methods in src/lib/sdk.ts
     v
-Tauri/sidecar transport
+Tauri shell transport (current) / Rust supervisor (target)
     |
     | JSON lines over stdio
     v
@@ -28,8 +32,10 @@ Foundry Local SDK
 
 The browser bundle must not import `foundry-local-sdk` or Node built-ins.
 Frontend behavior belongs behind `src/lib/sdk.ts`. The sidecar remains the
-authority for native runtime state and model operations. Rust supervises the
-sidecar process; it must not create a competing Foundry manager or model pool.
+authority for native runtime state and model operations. During the transition,
+the Tauri shell path is the current process-launch owner; the 0.7.0 Rust work
+makes that ownership native and explicit. Rust must not create a competing
+Foundry manager or model pool.
 
 ## Choosing an extension seam
 
