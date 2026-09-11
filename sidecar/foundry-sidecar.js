@@ -1211,7 +1211,10 @@ async function cacheInventoryEntries(root) {
   async function walk(dir) {
     await budget.yieldIfNeeded();
     let real;
-    try { real = fs.realpathSync(dir); } catch { return; }
+    try { real = fs.realpathSync(dir); } catch (error) {
+      budget.errors.push({ path: dir, message: error?.message || 'Unable to resolve cache path' });
+      return;
+    }
     if (visited.has(real)) return;
     visited.add(real);
 
@@ -1301,7 +1304,15 @@ function hasOwnershipMarker(dir, root) {
 
 async function getCacheInventory() {
   const root = modelCacheRoot();
-  if (!fs.existsSync(root)) return summarizeCacheInventory([]);
+  try {
+    fs.lstatSync(root);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return summarizeCacheInventory([]);
+    return summarizeCacheInventory([], [{
+      path: root,
+      message: error?.message || 'Unable to inspect cache root',
+    }]);
+  }
   const catalogAliases = new Map();
   try {
     for (const model of await manager.catalog.getModels()) {
