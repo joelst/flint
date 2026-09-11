@@ -14,11 +14,13 @@ const {
   CANONICAL_UPDATER_ENDPOINT,
   isCanonicalUpdaterEndpoint,
   isStrictSemver,
+  normalizeVersion,
   validateReleaseInputs,
 } = require('./release-metadata.cjs');
 
 const root = path.resolve(__dirname, '..');
-const expected = process.argv[2] || process.env.FLINT_RELEASE_VERSION;
+const rawExpected = process.argv[2] || process.env.FLINT_RELEASE_VERSION;
+const expected = normalizeVersion(rawExpected);
 const channelArgument = process.argv.find((arg) => arg.startsWith('--channel='));
 const channel = channelArgument ? channelArgument.slice('--channel='.length) : 'stable';
 

@@ -3,6 +3,7 @@ import {
   CANONICAL_UPDATER_ENDPOINT,
   isCanonicalUpdaterEndpoint,
   isStrictSemver,
+  normalizeVersion,
   parseSemver,
   validateReleaseInputs,
 } from './release-metadata.cjs';
@@ -12,6 +13,11 @@ describe('release metadata validation', () => {
     expect(isStrictSemver('0.7.0')).toBe(true);
     expect(isStrictSemver('0.3.0-rc.1')).toBe(true);
     expect(parseSemver('0.3.0-rc.1')).toEqual({ prerelease: ['rc', '1'] });
+  });
+
+  it('normalizes partial release tags like the version sync script', () => {
+    expect(normalizeVersion('0.4-mvp')).toBe('0.4.0-mvp');
+    expect(normalizeVersion('0.7.0')).toBe('0.7.0');
   });
 
   it('rejects versions outside the sync script grammar', () => {

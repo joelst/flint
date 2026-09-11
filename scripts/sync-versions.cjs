@@ -10,6 +10,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { normalizeVersion } = require('./release-metadata.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 
@@ -19,18 +20,6 @@ function readJson (file) {
 
 function writeJson (file, data) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n');
-}
-
-// Release tags aren't always a full `major.minor.patch` (e.g. a tag like
-// `v0.4-mvp` yields the raw version `0.4-mvp`). Tauri/Cargo require strict
-// semver, so default a missing patch component to `0` before validating.
-function normalizeVersion (version) {
-  if (!version) return version;
-  const partial = version.match(/^(\d+\.\d+)(-[a-zA-Z0-9.-]+)?$/);
-  if (partial) {
-    return `${partial[1]}.0${partial[2] || ''}`;
-  }
-  return version;
 }
 
 function main () {

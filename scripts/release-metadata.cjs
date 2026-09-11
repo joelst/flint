@@ -3,6 +3,12 @@
 const CANONICAL_UPDATER_ENDPOINT = 'https://github.com/joelst/flint/releases/latest/download/latest.json';
 const RELEASE_CHANNELS = ['stable', 'evaluation'];
 
+function normalizeVersion(version) {
+  if (!version) return version;
+  const partial = String(version).match(/^(\d+\.\d+)(-[a-zA-Z0-9.-]+)?$/);
+  return partial ? `${partial[1]}.0${partial[2] || ''}` : version;
+}
+
 function isNumericIdentifier(value) {
   return /^(0|[1-9]\d*)$/.test(value);
 }
@@ -56,6 +62,7 @@ module.exports = {
   CANONICAL_UPDATER_ENDPOINT,
   isCanonicalUpdaterEndpoint,
   isStrictSemver,
+  normalizeVersion,
   parseSemver,
   validateReleaseInputs,
 };
