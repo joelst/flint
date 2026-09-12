@@ -1,9 +1,8 @@
 # Flint 0.7.0 foundation release
 
-This release is a shareable Windows/macOS Apple Silicon prerelease for the
-Foundry Local Explorer team. It is intended to establish a dependable Flint
-core and a documented extension surface, not to finish every item in the
-reliability backlog.
+This release is a shareable Windows/macOS Apple Silicon prerelease. It is
+intended to establish a dependable Flint core and a documented extension
+surface, not to finish every item in the reliability backlog.
 
 ## Release promise
 
@@ -118,7 +117,7 @@ Never request credentials, API keys, or unredacted local logs.
 ## What comes next
 
 After the handoff, prioritize the thin Rust supervisor and installed-path
-recovery tests. Then evaluate Explorer-inspired document/RAG and embeddings
-work only after a supported embedding-model path exists. Audio decoder and
-timestamp work remains coordinated with the Foundry SDK rather than being a
-0.7.0 release blocker.
+recovery tests. Then evaluate document/RAG and embeddings work only after a
+supported embedding-model path exists. Audio decoder and timestamp work
+remains coordinated with the Foundry SDK rather than being a 0.7.0 release
+blocker.

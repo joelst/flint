@@ -13,9 +13,9 @@ implementation dependencies, and acceptance gates. Fix data loss and runtime
 correctness without waiting for a backend rewrite. Expedite thin native
 lifecycle/process supervision; defer wholesale Foundry runtime replacement.
 
-The 0.7.0 prerelease track is a focused foundation milestone for the Explorer
-team. It adds release and documentation gates around existing work; it does not
-close, delete, or implicitly reprioritize the open items below.
+The 0.7.0 prerelease track is a focused foundation milestone. It adds release
+and documentation gates around existing work; it does not close, delete, or
+implicitly reprioritize the open items below.
 
 **Linux work is deferred:** preserve existing checks and mappings. Continue
 Linux-specific work only where it is already part of another feature; shared

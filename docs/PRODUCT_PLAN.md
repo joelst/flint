@@ -15,10 +15,10 @@ through 1.0. This document owns implementation sequencing and acceptance gates.
 
 ## 0.7.0 foundation release
 
-**Objective:** produce a shareable Windows/macOS build by Monday that gives the
-Foundry Local Explorer team a dependable Flint core to build on. This is a
-release-candidate track, not a rewrite of the full plan and not a reason to
-delete or reorder deferred backlog items.
+**Objective:** produce a shareable Windows/macOS build that establishes a
+dependable Flint core to build on. This is a release-candidate track, not a
+rewrite of the full plan and not a reason to delete or reorder deferred backlog
+items.
 
 **Release scope, in order:**
 
@@ -39,8 +39,8 @@ delete or reorder deferred backlog items.
    `npm run verify:release -- 0.7.0 --channel=evaluation`.
 4. Share a clearly labelled `0.7.0` evaluation prerelease outside the updater
    channel, with supported platforms, known limitations, clean evaluation
-   expectations, and a short feedback route for the Explorer team. Do not make
-   it the `releases/latest` target while it is a prerelease.
+   expectations, and a direct feedback route. Do not make it the `releases/latest`
+   target while it is a prerelease.
 5. Verify and hand off the stable extension seams already documented in
    [EXTENDING.md](./EXTENDING.md): frontend SDK boundary, sidecar JSON-lines
    contract, command addition checklist, model/catalog lifecycle, gateway
@@ -74,7 +74,7 @@ silently claim 0.7.0 has completed Workstream C.
 | Can the current Node sidecar be called a solid core without Rust supervision? | Not for a shared prerelease. The sidecar lifecycle is already carefully guarded, but the desktop process still needs native ownership of the child and exit/reopen behavior. |
 | Should 0.7.0 move Foundry SDK calls into Rust? | No. That would create a second runtime implementation and expand the risk surface. Rust supervises; the sidecar remains the sole Foundry authority. |
 | Can we finish every backlog item before Monday? | No, and doing so would reduce confidence. The release gate is a reproducible supported flow, not backlog exhaustion. Existing items stay open and retain their owners. |
-| Should audio expansion outrank the supervisor because Explorer has a nicer audio path? | No. Keep the WAV boundary and truthful errors; defer decoder and timestamp work until upstream behavior stabilizes. |
+| Should audio expansion outrank the supervisor? | No. Keep the WAV boundary and truthful errors; defer decoder and timestamp work until upstream behavior stabilizes. |
 | Does a successful build prove the app is shareable? | No. The installer, bundled Node, Foundry resources, first-run model flow, service endpoint, restart, and quit must be exercised from the packaged artifact. |
 | Should the README describe Flint as a general-purpose AI app? | No. Lead with its value as a Foundry Local control plane: model lifecycle, local endpoint, evaluation, and an extensible core for tools and experiments. |
 
