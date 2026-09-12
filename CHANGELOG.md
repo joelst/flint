@@ -25,9 +25,7 @@
 - 85003af: Surface model catalog refresh failures instead of silently keeping stale model state.
 - 66976f7: Reject audio when browser WAV normalization fails instead of sending non-WAV bytes to the strict transcription decoder.
 - 68d9f4c: Prevent queued service starts from reviving the endpoint after a Stop request.
-- 63dd5a9: Remove an unused import of `ARCHIVE_BACKUP_KEY` from the main page component. The backup key is
-  interpolated into the hydration notice by the repository layer, so the component never needed the
-  symbol.
+- 63dd5a9: Remove an unused import of `ARCHIVE_BACKUP_KEY` from the main page component.
 - 0785b70: Normalize gateway chat JSON/SSE responses for OpenAI-compatible clients and cover the behavior with a compatibility harness.
 - 8ce9f7e: Apply saved runtime policy and accelerator setup before starting services or preloading models.
 - fb8e52b: Move sidecar process ownership and JSON-lines transport into the native supervisor.

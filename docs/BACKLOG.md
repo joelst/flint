@@ -70,13 +70,12 @@ Windows/macOS fixes do not establish Linux release support.
       lifecycle contracts are stable. The versioned transport and readiness
       contracts are now delivered; see
       [PRODUCT_PLAN](./PRODUCT_PLAN.md#workstream-c-thin-native-ownership----expedited).
-- [ ] **0.7.0 Rust foundation gate** — deliver the smallest supervisor slice
+- [x] **0.7.0 Rust foundation gate** — deliver the smallest supervisor slice
       needed for a shareable Windows/macOS prerelease: one owned sidecar child,
-      exit observation, truthful shutdown, and renderer-independent recovery.
-      This is a release gate for the item above, not a replacement for it.
-      Native child ownership and the live transport cutover are delivered.
-      Packaged renderer-independent tray/reopen recovery and failed-quit
-      qualification remain open.
+      exit observation, truthful shutdown, and Rust transport bridge cutover.
+      Delivered in 0.7.0 (#86, #88, #90, #92, #95, #97, #106, #107). Remaining
+      packaged renderer-independent tray/reopen recovery and failed-quit
+      qualification follow in subsequent releases.
 - [ ] **Rust runtime replacement** — deferred pending parity and measured benefit.
       Preserve one model-manager authority and separate-process crash isolation;
       do not keep competing JS/Rust runtimes or replay uncertain operations.

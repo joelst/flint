@@ -1,7 +1,7 @@
 # Flint reliability execution plan
 
-**Status:** In progress. Phase 0 and Phase 1A are delivered and Phase 1B is
-underway; see [Delivery status](#delivery-status). Everything else in this
+**Status:** In progress. Phase 0, Phase 1A, Phase 1B, and Phase 2 foundation stages
+are delivered; see [Delivery status](#delivery-status). Everything else in this
 document remains planned and implies no implementation.
 
 **Scope:** Address the project review's data-integrity, lifecycle, inference, model,
