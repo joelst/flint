@@ -2,6 +2,10 @@
 
 ## 0.7.0
 
+Flint 0.7.0 is a foundation release focused on runtime reliability, truthful lifecycle states, and per-conversation data integrity. The native layer introduces a Rust supervisor that owns the single sidecar process, enforces single-instance launches, and bridges communication over generation-checked, frame-bounded stdio JSON lines. Conversations now maintain isolated message histories, retain per-conversation settings (model, persona, context length, and thread view), and support export with storage risk warnings.
+
+Runtime and service operations are now bounded and truthful: read-only IPC queries carry finite deadlines, gateway control responses enforce buffer caps without restricting streamed inference, and service/accelerator readiness states reflect only confirmed outcomes. Model management adds read-only cache inventory and catalog capability metadata, OpenAI-compatible gateway chat responses are normalized, and audio submissions require successful browser WAV normalization before passing to the transcription decoder.
+
 ### Minor Changes
 
 - 80adecf: Export conversations to a file, and warn when stored data is at risk.
