@@ -112,6 +112,10 @@ A stage is recorded here only once the pull request delivering it is merged to
 | 1B | 1B-11e downloads and accelerator setup surface non-cancelling progress-stall notices | #82 |
 | 1B | 1B-11f native error diagnostics and gateway request captures complete bounded operation handling | #83 |
 | 1B | 1B-12 explicit Stop HTTP, Stop-and-Unload, and confirmed Quit Runtime semantics | #84 |
+| 2 | 2-1 Native single-instance enforcement with focus/restore | #95 |
+| 2 | 2-2 Rust runtime generation state, supervisor, and frame transport foundations | #86, #88, #90, #92, #97 |
+| 2 | 2-3 Rust-owned sidecar child, stdio streaming, and event bridge cutover | #106 |
+| 2 | 2-4 Native runtime supervisor manager tests and write queue backpressure | #107 |
 
 Phase 1A closed its acceptance gate for storage, migration, rollback, multipart
 preservation, conversation switching, and export. Phase 1B is in progress:
