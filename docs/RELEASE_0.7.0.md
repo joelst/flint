@@ -25,9 +25,9 @@ those capabilities are separately validated.
 
 ### Build and package
 
-- [ ] Version is `0.7.0` in `package.json`, `src-tauri/tauri.conf.json`, and
+- [x] Version is `0.7.0` in `package.json`, `src-tauri/tauri.conf.json`, and
   `src-tauri/Cargo.toml`.
-- [ ] `npm run verify:release -- 0.7.0 --channel=evaluation` passes before
+- [x] `npm run verify:release -- 0.7.0 --channel=evaluation` passes before
   publishing or sharing the handoff packet. The explicit channel flag is
   required because `0.7.0` is a stable SemVer used for an evaluation handoff;
   it must not be inferred from the updater endpoint. When using the release
