@@ -1,5 +1,7 @@
-use std::io;
-use std::process::{Child, Command};
+use std::io::{self, Write};
+use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
+use std::sync::mpsc::{self, SyncSender};
+use std::thread;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChildExit {
@@ -10,7 +12,40 @@ pub struct ChildExit {
 pub struct RuntimeChild {
     generation: u64,
     child: Child,
+    writer: RuntimeWriter,
     exit: Option<ChildExit>,
+}
+
+pub struct RuntimePipes {
+    pub stdout: ChildStdout,
+    pub stderr: ChildStderr,
+}
+
+struct WriteRequest {
+    bytes: Vec<u8>,
+    completed: mpsc::Sender<io::Result<()>>,
+}
+
+#[derive(Clone)]
+pub struct RuntimeWriter {
+    generation: u64,
+    requests: SyncSender<WriteRequest>,
+}
+
+impl RuntimeWriter {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn write(&self, bytes: Vec<u8>) -> io::Result<()> {
+        let (completed, result) = mpsc::channel();
+        self.requests
+            .send(WriteRequest { bytes, completed })
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "runtime stdin is closed"))?;
+        result
+            .recv()
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "runtime writer stopped"))?
+    }
 }
 
 impl RuntimeChild {
@@ -20,16 +55,70 @@ impl RuntimeChild {
         I: IntoIterator<Item = S>,
         S: AsRef<std::ffi::OsStr>,
     {
-        let child = Command::new(program).args(args).spawn()?;
+        let mut command = Command::new(program);
+        command.args(args);
+        Self::spawn_command(generation, command).map(|(child, _pipes)| child)
+    }
+
+    pub fn spawn_command(
+        generation: u64,
+        mut command: Command,
+    ) -> io::Result<(Self, RuntimePipes)> {
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn()?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("runtime stdin was not piped"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("runtime stdout was not piped"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| io::Error::other("runtime stderr was not piped"))?;
+        let (requests, queued) = mpsc::sync_channel::<WriteRequest>(1);
+        thread::spawn(move || {
+            let mut poisoned: Option<String> = None;
+            while let Ok(request) = queued.recv() {
+                let outcome = if let Some(error) = &poisoned {
+                    Err(io::Error::new(io::ErrorKind::BrokenPipe, error.clone()))
+                } else {
+                    stdin.write_all(&request.bytes).map_err(|error| {
+                        poisoned = Some(format!("runtime stdin write failed: {error}"));
+                        error
+                    })
+                };
+                let _ = request.completed.send(outcome);
+            }
+        });
+        let writer = RuntimeWriter {
+            generation,
+            requests,
+        };
         Ok(Self {
             generation,
             child,
+            writer,
             exit: None,
-        })
+        }
+        .with_pipes(stdout, stderr))
+    }
+
+    fn with_pipes(self, stdout: ChildStdout, stderr: ChildStderr) -> (Self, RuntimePipes) {
+        (self, RuntimePipes { stdout, stderr })
     }
 
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    pub fn writer(&self) -> RuntimeWriter {
+        self.writer.clone()
     }
 
     pub fn try_wait(&mut self) -> io::Result<Option<ChildExit>> {

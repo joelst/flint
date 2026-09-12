@@ -79,7 +79,8 @@ Supported Foundry core layouts today: `win32-x64`, `win32-arm64`, `linux-x64`, `
 
 - **Frontend:** Svelte 5 + SvelteKit SPA (`src/routes/+layout.ts` sets `ssr = false`). Most UI lives in `src/routes/+page.svelte`.
 - **SDK boundary:** `src/lib/sdk.ts` — do not import Foundry Local directly into the web bundle.
-- **Sidecar:** `sidecar/foundry-sidecar.js` speaks JSON-lines over stdio; Rust/Tauri is intentionally thin.
+- **Sidecar:** `sidecar/foundry-sidecar.js` speaks JSON-lines over stdio. Rust owns the
+  single child process and transport; Foundry lifecycle and inference remain in Node.
 - **Vite** externalizes `foundry-local-sdk` and Node builtins so the web bundle stays buildable.
 
 When adding sidecar commands: update **both** `src/lib/sdk.ts` (and IPC contracts if applicable) and `sidecar/foundry-sidecar.js`.
@@ -101,7 +102,11 @@ Direct use of `foundry-local-sdk` from the Svelte frontend hits bundling limits 
 
 **Spike A (in progress):** ship a **bundled Node** binary via Tauri `externalBin` so end users need not install Node. A full Rust Foundry bridge remains the longer-term path to remove the Node *process* entirely (see PRODUCT_PLAN / BACKLOG).
 
-The sidecar emits `{ "ready": true }` after listener setup and lazy-loads the SDK on first `init`. Production resolution uses `resolveResource` + `cwd` + `NODE_PATH`, and spawns `binaries/node` (bundled) or PATH `node`. Stderr is captured; init timeout is 10s.
+The sidecar emits `{ "ready": true }` after listener setup and lazy-loads the SDK
+on first `init`. Rust resolves the trusted packaged resource path, configures
+`cwd`/`NODE_PATH`, and spawns bundled `node` or the explicit development PATH
+fallback. Generation-tagged native events carry complete JSON frames, stderr,
+and observed exit to the frontend.
 
 ---
 

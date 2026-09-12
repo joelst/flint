@@ -82,6 +82,12 @@ npm run verify:bundle -- --target <triple> --require-build
 
 ### Runtime ownership
 
+- [x] Rust owns exactly one sidecar child, generation-checked JSON-lines
+  transport, exit observation, and app-exit cleanup. The renderer has no
+  spawn/stdin/kill permission.
+- [ ] Exercise crash, renderer reload, failed quit, tray restore, and macOS Dock
+  reopen from the packaged Windows and macOS artifacts.
+
 The minimum native-supervisor gate is tracked in
 [PRODUCT_PLAN.md](./PRODUCT_PLAN.md#070-foundation-release) and
 [BACKLOG.md](./BACKLOG.md). Rust must own exactly one sidecar child and observe
@@ -89,9 +95,9 @@ its termination; the Node sidecar remains the sole owner of the Foundry manager,
 catalog, pool, gateway, cache, and inference. No uncertain operation may be
 replayed during recovery.
 
-If the supervisor is not complete for the handoff build, label the artifact an
-evaluation prerelease and state that limitation explicitly. Do not claim the
-Workstream C acceptance gate is complete.
+The process-ownership cutover does not complete the packaged lifecycle gate.
+Until the remaining installed-path scenarios pass, label the artifact an
+evaluation prerelease and state that limitation explicitly.
 
 ## Handoff packet
 

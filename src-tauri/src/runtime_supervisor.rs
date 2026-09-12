@@ -1,11 +1,17 @@
 use std::io;
+use std::process::Command;
 
-use crate::runtime_child::{ChildExit, RuntimeChild};
+use crate::runtime_child::{ChildExit, RuntimeChild, RuntimePipes, RuntimeWriter};
 use crate::runtime_state::{RuntimePhase, RuntimeState};
 
 pub struct RuntimeSupervisor {
     state: RuntimeState,
     child: Option<RuntimeChild>,
+}
+
+pub struct RuntimeStart {
+    pub generation: u64,
+    pub pipes: RuntimePipes,
 }
 
 impl Default for RuntimeSupervisor {
@@ -32,19 +38,33 @@ impl RuntimeSupervisor {
         I: IntoIterator<Item = S>,
         S: AsRef<std::ffi::OsStr>,
     {
+        let mut command = Command::new(program);
+        command.args(args);
+        self.start_command(command)
+            .map(|started| started.generation)
+    }
+
+    pub fn start_command(&mut self, command: Command) -> io::Result<RuntimeStart> {
         let generation = self.state.begin_start().ok_or_else(|| {
             io::Error::new(io::ErrorKind::AlreadyExists, "runtime child already active")
         })?;
-        match RuntimeChild::spawn(generation, program, args) {
-            Ok(child) => {
+        match RuntimeChild::spawn_command(generation, command) {
+            Ok((child, pipes)) => {
                 self.child = Some(child);
-                Ok(generation)
+                Ok(RuntimeStart { generation, pipes })
             }
             Err(error) => {
                 let _ = self.state.observe_exit(generation);
                 Err(error)
             }
         }
+    }
+
+    pub fn writer(&self, generation: u64) -> Option<RuntimeWriter> {
+        self.child
+            .as_ref()
+            .filter(|child| child.generation() == generation)
+            .map(RuntimeChild::writer)
     }
 
     pub fn mark_ready(&mut self, generation: u64) -> bool {
@@ -77,6 +97,18 @@ impl RuntimeSupervisor {
         self.child = None;
         let _ = self.state.observe_exit(exit.generation);
         Ok(Some(exit))
+    }
+
+    pub fn request_shutdown(&mut self, generation: u64) -> io::Result<bool> {
+        if !self.state.begin_shutdown(generation) {
+            return Ok(false);
+        }
+        let Some(child) = self.child.as_mut() else {
+            let _ = self.state.observe_exit(generation);
+            return Ok(false);
+        };
+        child.terminate()?;
+        Ok(true)
     }
 }
 
@@ -160,7 +192,9 @@ mod tests {
     #[test]
     fn a_failed_spawn_does_not_strand_the_supervisor() {
         let mut supervisor = RuntimeSupervisor::default();
-        assert!(supervisor.start(nonexistent_program(), Vec::<&str>::new()).is_err());
+        assert!(supervisor
+            .start(nonexistent_program(), Vec::<&str>::new())
+            .is_err());
         assert_eq!(supervisor.phase(), RuntimePhase::Exited);
         assert!(supervisor.child.is_none());
 
@@ -183,7 +217,10 @@ mod tests {
         let mut supervisor = RuntimeSupervisor::default();
         let stale = supervisor.start(program, args).expect("start child");
         assert!(supervisor.mark_ready(stale));
-        assert!(supervisor.shutdown(stale).expect("shutdown child").is_some());
+        assert!(supervisor
+            .shutdown(stale)
+            .expect("shutdown child")
+            .is_some());
 
         let current = supervisor
             .start(program, long_command().1)
@@ -229,6 +266,45 @@ mod tests {
             None
         );
         assert_eq!(supervisor.phase(), RuntimePhase::Exited);
+    }
+
+    #[test]
+    fn blocked_stdin_does_not_prevent_generation_checked_termination() {
+        let (program, args) = long_command();
+        let mut supervisor = RuntimeSupervisor::default();
+        let generation = supervisor.start(program, args).expect("start child");
+        let writer = supervisor.writer(generation).expect("runtime writer");
+        let writing = std::thread::spawn(move || writer.write(vec![b'x'; 4 * 1024 * 1024]));
+        std::thread::sleep(Duration::from_millis(20));
+
+        let stop_started = Instant::now();
+        assert!(supervisor
+            .request_shutdown(generation)
+            .expect("request shutdown"));
+        assert!(
+            stop_started.elapsed() < Duration::from_secs(1),
+            "termination waited for blocked stdin"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while supervisor.poll_exit().expect("poll child").is_none() {
+            assert!(Instant::now() < deadline, "terminated child did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(writing.join().expect("join writer").is_err());
+    }
+
+    #[test]
+    fn writer_access_is_generation_checked() {
+        let (program, args) = long_command();
+        let mut supervisor = RuntimeSupervisor::default();
+        let generation = supervisor.start(program, args).expect("start child");
+        assert!(supervisor.writer(generation).is_some());
+        assert!(supervisor.writer(generation.saturating_sub(1)).is_none());
+        assert!(supervisor
+            .shutdown(generation)
+            .expect("shutdown child")
+            .is_some());
     }
 
     #[test]

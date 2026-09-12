@@ -58,10 +58,10 @@ Windows/macOS fixes do not establish Linux release support.
 - [ ] **Rust supervisor coverage** — expand beyond the current runtime-state
       unit tests to cover native child ownership, transport, exit observation,
       shutdown confirmation, and installed-app lifecycle paths.
-      `runtime_supervisor.rs` now also covers a failed spawn not stranding the
-      state machine, a stale-generation shutdown never terminating the live
-      child, and repeated shutdown of the same generation being a no-op.
-      Transport integration and installed-app lifecycle paths remain open.
+      Native process ownership, bounded JSON-lines transport, blocked-stdin
+      termination, stale-generation rejection, exit ordering, and frontend
+      settlement contracts are covered. Installed-app lifecycle paths remain
+      open.
 
 ## Runtime strategy
 
@@ -74,11 +74,9 @@ Windows/macOS fixes do not establish Linux release support.
       needed for a shareable Windows/macOS prerelease: one owned sidecar child,
       exit observation, truthful shutdown, and renderer-independent recovery.
       This is a release gate for the item above, not a replacement for it.
-      The tested native generation/phase state model is groundwork only; child
-      ownership and transport cutover remain open; the generation-tagged child
-      handle and one-child supervisor coordinator are delivered groundwork for
-      that work; the bounded native JSON-lines codec is also delivered
-      transport groundwork, while live transport cutover remains open.
+      Native child ownership and the live transport cutover are delivered.
+      Packaged renderer-independent tray/reopen recovery and failed-quit
+      qualification remain open.
 - [ ] **Rust runtime replacement** — deferred pending parity and measured benefit.
       Preserve one model-manager authority and separate-process crash isolation;
       do not keep competing JS/Rust runtimes or replay uncertain operations.

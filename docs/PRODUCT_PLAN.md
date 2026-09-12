@@ -362,29 +362,24 @@ partial EP failure is visible, and uncertain work is not automatically repeated.
 **Primary surfaces:** `src-tauri/src/lib.rs`, capabilities, typed frontend
 transport, and native lifecycle handlers.
 
-### First process-state slice
+### Native runtime transport
 
-The native layer now has a tested generation/phase state model for one runtime
-child. It rejects stale readiness and exit notifications from an older child,
-prevents overlapping starts, and distinguishes starting, ready, shutting down,
-and exited phases. This is groundwork for native child ownership; it does not
-yet move sidecar spawning out of the frontend shell transport.
+Rust owns the production sidecar child, its generation, stdin/stdout/stderr,
+exit observation, and forced termination. The frontend retains operation
+settlement and recovery policy over generation-tagged native events; it cannot
+spawn, write to, or kill the child directly. JSON-lines frames and queued
+writes are bounded, writes do not hold the lifecycle lock, and terminal exit is
+published only after stdout and stderr readers drain.
 
-The native layer also has a generation-tagged child handle with explicit exit
-observation and termination. It owns only the operating-system child process;
-Foundry manager, model, gateway, cache, and inference ownership stay in the
-Node sidecar until the transport cutover is complete.
+The selected Node executable and trusted sidecar/resource paths are resolved
+natively. A renderer reload replaces an existing child only after native exit
+is observed; it never attaches to an unknown manager session or replays an
+abandoned operation. App exit also fences new native starts and terminates the
+owned child without relying on renderer JavaScript.
 
-The native layer now has a small supervisor coordinator that admits one child,
-ties it to the generation state, exposes explicit exit polling, and performs
-generation-checked shutdown. It is not yet connected to the production
-frontend transport; that cutover remains a separate decision at a clean
-startup boundary.
-
-The native transport boundary now has a bounded JSON-lines codec covering
-fragmented input, CRLF framing, blank lines, invalid JSON, incomplete frames,
-and newline-terminated output. It is contract groundwork only; the live
-frontend/Node transport remains the sole runtime owner until cutover.
+Foundry manager, model, gateway, cache, and inference ownership remain in the
+Node sidecar. This is a process-ownership and transport cutover, not a second
+Foundry implementation.
 
 ### Native responsibilities
 
@@ -407,7 +402,8 @@ The supervisor transports operations; it must not create a competing model pool.
 ### Cutover rules
 
 1. Define and exercise the transport contract on the existing implementation.
-2. Implement the supervisor behind a startup/build-time selection.
+2. Rust is the sole production process owner; there is no renderer-spawn
+   fallback.
 3. Select exactly one owner before spawning. Do not run JS and Rust spawn paths
    concurrently or silently fail over a mutation between them.
 4. Confirm the old child has exited before replacement. Configuration restoration
@@ -423,10 +419,12 @@ before `preventDefault()` is not itself the reported race.
 
 ### Acceptance gate
 
-Close, minimize, Dock reopen, tray failure, renderer unavailability, repeated
-launch, child crash, and failed quit remain recoverable. The native manager never
-moves into the UI process as a side effect of supervision. Shared ownership,
-restart loops, duplicate execution, and stale-child events are excluded.
+Process ownership, transport framing, child crash observation, app-exit
+cleanup, and stale-generation exclusion are implemented and covered by native
+and frontend contract tests. Installed-path coverage still must prove close,
+minimize, Dock reopen, tray failure, renderer unavailability, repeated launch,
+and failed quit on the packaged Windows and macOS artifacts. The native manager
+never moves into the UI process as a side effect of supervision.
 
 ## Workstream D: Pool safety and background monitoring
 

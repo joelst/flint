@@ -41,80 +41,86 @@ type Harness = {
 
 let harness: Harness;
 /** The live child's event hooks, replaced on every spawn; the harness delegates to these. */
-let live: {
-  emitStdout: (obj: unknown) => void;
-  emitClose: (data?: unknown) => void;
-  emitError: (err: string) => void;
-} | null = null;
 /** Module-scoped so it survives the child being replaced. */
 let pendingWriteError: string | null = null;
 /** When set, `spawn()` waits on this so a test can act while startup is still in flight. */
 let gateSpawn = false;
 let readyProtocolVersion = 1;
+let nativeGeneration = 0;
+let nativePhase = 'stopped';
+const nativeListeners = new Map<string, Set<(event: { payload: any }) => void>>();
 
 function makeCommand() {
-  const listeners: Record<string, Array<(arg: any) => void>> = {};
-  const stdoutListeners: Array<(line: any) => void> = [];
-
-  const child = {
-    write: (line: string) => {
-      harness.writes.push(line);
-      if (pendingWriteError) {
-        const e = pendingWriteError;
-        pendingWriteError = null;
-        return Promise.reject(new Error(e));
-      }
-      return Promise.resolve();
-    },
-    kill: () => {
-      harness.killCount += 1;
-      if (harness.hangKill) return new Promise(() => {});
-    },
-  };
-
-  live = {
-    emitStdout: (obj: unknown) => {
-      const line = typeof obj === 'string' ? obj : JSON.stringify(obj);
-      for (const fn of stdoutListeners) fn(line);
-    },
-    emitClose: (data: unknown = { code: 1 }) => {
-      for (const fn of listeners.close ?? []) fn(data);
-    },
-    emitError: (err: string) => {
-      for (const fn of listeners.error ?? []) fn(err);
-    },
-  };
-
   return {
-    on(event: string, fn: (arg: any) => void) {
-      (listeners[event] ??= []).push(fn);
-    },
-    stdout: {
-      on(_event: string, fn: (line: any) => void) {
-        stdoutListeners.push(fn);
-      },
-      listenerCount: () => stdoutListeners.length,
-    },
-    stderr: { on() {} },
-    // The Node preflight runs `node --version` through the same Command API.
     async execute() {
       return { code: 0, stdout: 'v22.11.0', stderr: '' };
     },
-    async spawn() {
+  };
+}
+
+function emitNative(event: string, payload: any) {
+  for (const listener of nativeListeners.get(event) ?? []) listener({ payload });
+}
+
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: async (command: string, args: any = {}) => {
+    if (command === 'runtime_status') {
+      return { generation: nativeGeneration, phase: nativePhase };
+    }
+    if (command === 'runtime_start') {
       harness.spawnEntered = true;
       harness.spawnCount += 1;
+      nativeGeneration += 1;
+      nativePhase = 'starting';
+      const generation = nativeGeneration;
       if (gateSpawn) {
         await new Promise<void>((resolve) => {
           harness.releaseSpawn = resolve;
         });
       }
-      // The transport waits for a `{ready:true}` line before it will send anything. Delivered on
-      // a later tick so it lands after `spawn()` resolves, as the real child's would.
-      queueMicrotask(() => live?.emitStdout({ ready: true, protocolVersion: readyProtocolVersion }));
-      return child;
-    },
-  };
-}
+      queueMicrotask(() =>
+        emitNative('flint://runtime-stdout', {
+          generation,
+          message: { ready: true, protocolVersion: readyProtocolVersion },
+        }),
+      );
+      return { generation };
+    }
+    if (command === 'runtime_mark_ready') {
+      if (args.generation !== nativeGeneration || nativePhase !== 'starting') return false;
+      nativePhase = 'ready';
+      return true;
+    }
+    if (command === 'runtime_write') {
+      harness.writes.push(`${JSON.stringify(args.message)}\n`);
+      if (pendingWriteError) {
+        const error = pendingWriteError;
+        pendingWriteError = null;
+        throw new Error(error);
+      }
+      return;
+    }
+    if (command === 'runtime_force_stop') {
+      harness.killCount += 1;
+      if (harness.hangKill) return new Promise(() => {});
+      nativePhase = 'shuttingDown';
+      return true;
+    }
+    throw new Error(`unexpected invoke command: ${command}`);
+  },
+}));
+
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: async (event: string, listener: (event: { payload: any }) => void) => {
+    const listeners = nativeListeners.get(event) ?? new Set();
+    listeners.add(listener);
+    nativeListeners.set(event, listeners);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) nativeListeners.delete(event);
+    };
+  },
+}));
 
 vi.mock('@tauri-apps/plugin-shell', () => ({
   Command: {
@@ -122,14 +128,6 @@ vi.mock('@tauri-apps/plugin-shell', () => ({
     sidecar: () => makeCommand(),
   },
 }));
-vi.mock('@tauri-apps/api/path', () => ({
-  resolveResource: async (k: string) => `/fake/${k}`,
-  resourceDir: async () => '/fake',
-}));
-vi.mock('@tauri-apps/plugin-fs', () => ({
-  exists: async () => true,
-}));
-
 async function loadSdk() {
   vi.resetModules();
   harness = {
@@ -138,16 +136,18 @@ async function loadSdk() {
       pendingWriteError = err;
     },
     emitStdout: (obj) => {
-      if (!live) throw new Error('emitStdout before a child was spawned');
-      live.emitStdout(obj);
+      const message = typeof obj === 'string' ? JSON.parse(obj) : obj;
+      emitNative('flint://runtime-stdout', { generation: nativeGeneration, message });
     },
     emitClose: (data) => {
-      if (!live) throw new Error('emitClose before a child was spawned');
-      live.emitClose(data);
+      nativePhase = 'exited';
+      emitNative('flint://runtime-exit', {
+        generation: nativeGeneration,
+        ...(data as any ?? { code: 1 }),
+      });
     },
     emitError: (err) => {
-      if (!live) throw new Error('emitError before a child was spawned');
-      live.emitError(err);
+      emitNative('flint://runtime-error', { generation: nativeGeneration, text: err });
     },
     spawnEntered: false,
     spawnCount: 0,
@@ -156,8 +156,10 @@ async function loadSdk() {
   };
   gateSpawn = false;
   readyProtocolVersion = 1;
+  nativeGeneration = 0;
+  nativePhase = 'stopped';
   pendingWriteError = null;
-  live = null;
+  nativeListeners.clear();
   return await import('./sdk');
 }
 
@@ -368,6 +370,24 @@ describe('settlement revokes permission to dispatch', () => {
     harness.emitStdout({ id: retryId, result: [] });
     await expect(retry).resolves.toEqual([]);
     expect(harness.spawnCount).toBe(2);
+  });
+
+  it('does not adopt a previous generation event while its replacement starts', async () => {
+    const sdk = await loadSdk();
+    nativeGeneration = 1;
+    nativePhase = 'exited';
+    gateSpawn = true;
+
+    const request = sdk.getEps();
+    await waitFor('the replacement spawn to be pending', () => harness.spawnEntered);
+    emitNative('flint://runtime-exit', { generation: 1, code: 1 });
+    harness.releaseSpawn?.();
+
+    const requestId = await waitForWrite('getEps');
+    harness.emitStdout({ id: requestId, result: [] });
+    await expect(request).resolves.toEqual([]);
+    expect(harness.spawnCount).toBe(1);
+    expect(harness.killCount).toBe(0);
   });
 
   it('reports a drained undispatched request as failed, not unknown', async () => {
