@@ -81,21 +81,6 @@ Windows/macOS fixes do not establish Linux release support.
 
 ## Models and cache (see [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md), "Plan: current → 1.0")
 
-- [x] **BYOM import from a local folder** — inspect, validate, stage, atomically activate,
-      roll back. Prompt template is shown and editable at import and afterwards.
-- [x] **Additional model folders via directory junctions** — `linkModelFolder`. Never
-      writes to the foreign folder; delete the link, never the target.
-- [x] **Sort the model list** — name, family, or last updated; persisted.
-- [x] **Read-only cache inventory** — duplicates, partial downloads, and reclaimable byte totals.
-      Recommendations only; no cross-root deletion. Measured on the maintainer's machine:
-      `~/.flint` 107 GB / 35 models vs `~/.foundry` 31.4 GB / 7 models, 15.3 GB duplicated.
-      Duplicate grouping uses already-cached catalog metadata when available; otherwise entries
-      remain variant-scoped. Inaccessible paths are reported as an incomplete scan rather than
-      as zero-byte success.
-- [x] **Auto-load on demand** — Flint's reverse proxy owns the configured port, forwards to
-      the native service, and on the exact `400 ... is not loaded` loads the model and
-      replays the request once. Cached models only, so a stray id cannot start a download.
-      Also fixed service start, which always failed with `Core is already initialized`.
 - [ ] **Throughput metrics** — load time, TTFT, prompt tok/s, decode tok/s, end-to-end,
       warm/cold, resolved variant + execution provider. Sidecar IPC chat access logs now
       record these fields when observable and use null for buffered/unavailable timing;
@@ -231,8 +216,3 @@ cloning Ollama's `pull`/`run` REPL, any CLI before the desktop app is solid.
 
 - [ ] Revisit only if automation demand proves real, as a thin wrapper mapping 1:1 to
       existing sidecar commands with no CLI-only logic.
-## Docs
-
-- [x] **Extension guide example** — [EXTENDING.md](./EXTENDING.md) includes a
-      complete `getCacheInventory` example that follows the command contract,
-      SDK boundary, UI wiring, and test seams used by Flint.
