@@ -1,5 +1,56 @@
 # Flint Changelog
 
+## 0.7.0
+
+### Minor Changes
+
+- 80adecf: Export conversations to a file, and warn when stored data is at risk.
+- 9584bd5: Conversations now keep their own messages, so switching chats no longer discards history.
+- 321da3d: Enforce one native Flint instance and restore the existing window when a second launch is attempted.
+- d37def1: Each conversation now remembers its own model, persona, context length and thread view, and says so when its model is not installed.
+- ce85e91: Report interrupted local-service and model operations honestly, and never repeat one whose outcome is unknown.
+
+### Patch Changes
+
+- e68d99a: Bound webpage fetch duration and response memory use.
+- f1711a7: Bound gateway control-response buffering without limiting streamed inference.
+- 9f3808e: Prevent read-only runtime queries from waiting indefinitely for a sidecar reply.
+- 8d43a5d: Prevent stalled native readiness probes from exceeding the startup deadline.
+- 4fddec9: Bound runtime HTTP error diagnostics so stalled or oversized bodies cannot block the app.
+- 9b42e3e: Keep sidecar disk logging asynchronous and bounded, with seven-day retention and graceful shutdown flushing.
+- aadd424: Expose independent runtime, service, and model readiness states to improve lifecycle reporting.
+- e08052a: Show catalog-declared context length and tool-calling support in model details.
+- 7db9bda: Record truthful chat inference timing, usage rates, model identity, and warm/cold state in sidecar diagnostics.
+- fe400fd: Preserve catalog state when STT refreshes fail and report runtime log-level changes that require a restart.
+- 85003af: Surface model catalog refresh failures instead of silently keeping stale model state.
+- 66976f7: Reject audio when browser WAV normalization fails instead of sending non-WAV bytes to the strict transcription decoder.
+- 68d9f4c: Prevent queued service starts from reviving the endpoint after a Stop request.
+- 63dd5a9: Remove an unused import of `ARCHIVE_BACKUP_KEY` from the main page component.
+- 0785b70: Normalize gateway chat JSON/SSE responses for OpenAI-compatible clients and cover the behavior with a compatibility harness.
+- 8ce9f7e: Apply saved runtime policy and accelerator setup before starting services or preloading models.
+- fb8e52b: Move sidecar process ownership and JSON-lines transport into the native supervisor.
+- 5915421: Bound write queue backpressure and aggregate payload bytes, prune settled queue items, and add unit tests for native runtime manager.
+- c385607: Normalize Foundry chat responses and make SDK/HTTP transport capabilities explicit.
+- f94f4ee: Fix image requests, which never reached the model.
+- 81127aa: Leave the local service stopped when applying network or accelerator settings fails.
+- b97f536: Patch transitive js-yaml advisories and update Vitest within the 4.1 release line.
+- f24cc38: Show when downloads or accelerator setup stop reporting progress without cancelling the operation.
+- 3de8be2: Keep service status unknown when stopping loses contact with the runtime.
+- c23d46b: Report the configured public bind address in service endpoints and status responses.
+- 3dce9c8: Add a read-only model cache inventory showing partial downloads and duplicate cached aliases.
+- 8553ee3: Separate HTTP stop, drain-and-unload, and confirmed runtime quit behavior.
+- 837178d: Add a generation-tagged native child handle for explicit sidecar exit and termination observation.
+- 3614739: Add a tested native runtime generation state model for safe sidecar lifecycle ownership.
+- 76bbe23: Add a tested native supervisor coordinator for one generation-tagged runtime child.
+- 1fce32e: Add bounded Rust JSON-lines transport framing for the future native supervisor.
+- 2a256ad: Show update availability and updater errors in About instead of hiding failed checks.
+- e89e0e9: Avoid restarting a healthy local service when the app only needs to ensure it is running.
+- dc087ab: Version the sidecar handshake and ignore replies from superseded runtime processes.
+- f9a208b: Keep compatible startup models available when only some hardware accelerators register.
+- fce1ff1: Stop advertising a previous service endpoint after a failed or uncertain lifecycle transition.
+- b4640d0: Add an automated release metadata check for synchronized versions and updater configuration.
+- 86027c4: Keep runtime readiness state available to the main application view.
+
 ## 0.6.0
 
 ### Minor Changes

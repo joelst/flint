@@ -1,7 +1,7 @@
 # Flint reliability execution plan
 
-**Status:** In progress. Phase 0 and Phase 1A are delivered and Phase 1B is
-underway; see [Delivery status](#delivery-status). Everything else in this
+**Status:** In progress. Phase 0, Phase 1A, Phase 1B, and Phase 2 foundation stages
+are delivered; see [Delivery status](#delivery-status). Everything else in this
 document remains planned and implies no implementation.
 
 **Scope:** Address the project review's data-integrity, lifecycle, inference, model,
@@ -112,29 +112,19 @@ A stage is recorded here only once the pull request delivering it is merged to
 | 1B | 1B-11e downloads and accelerator setup surface non-cancelling progress-stall notices | #82 |
 | 1B | 1B-11f native error diagnostics and gateway request captures complete bounded operation handling | #83 |
 | 1B | 1B-12 explicit Stop HTTP, Stop-and-Unload, and confirmed Quit Runtime semantics | #84 |
+| 2 | 2-1 Native single-instance enforcement with focus/restore | #95 |
+| 2 | 2-2 Rust runtime generation state, supervisor, and frame transport foundations | #86, #88, #90, #92, #97 |
+| 2 | 2-3 Rust-owned sidecar child, stdio streaming, and event bridge cutover | #106 |
+| 2 | 2-4 Native runtime supervisor manager tests and write queue backpressure | #107 |
 
-Phase 1A closed its acceptance gate for storage, migration, rollback, multipart
-preservation, conversation switching, and export. Phase 1B is in progress:
-1B-1 through 1B-12 delivered typed outcomes, versioned transport/readiness
-contracts, truthful catalog failures, non-destructive service ensure, and stale
-endpoint invalidation, Stop fencing, reachable public endpoint reporting, and
-failed-restart cleanup, plus startup sequencing from hydrated runtime intent and
-partial accelerator readiness. Webpage fetches now bound total duration and
-response bytes before parsing, and each native readiness probe is bounded by the
-remaining startup deadline. Gateway responses buffered for `/status` rewriting or
-first-pass autoload-error inspection now have a byte cap without limiting streamed
-inference. Finite read-only IPC queries now stop waiting after operation-specific
-deadlines without applying those deadlines to inference or effectful work. Long-running
-downloads and accelerator setup report prolonged progress silence without cancellation,
-native HTTP error diagnostics are bounded by time and bytes, and gateway request capture
-limits reject invalid configuration. Service shutdown now distinguishes endpoint
-withdrawal from bounded drain-and-unload and full runtime termination, with new
-work fenced during draining and process exit confirmed before a clean quit is
-reported. The remaining Workstream B gate covers failure propagation and
-observability.
+Phase 1A and Phase 1B closed their acceptance gates for storage, migration, rollback,
+multipart preservation, conversation switching, export, and bounded lifecycle/error
+semantics. Phase 2 delivered foundation stages 2-1 through 2-4 for native
+single-instance enforcement, Rust runtime generation state, sidecar child ownership,
+stdio JSON-lines transport bridge, and write queue backpressure.
 Work split out of a delivered stage rather than completed is listed in
-[BACKLOG.md](./BACKLOG.md) under *Conversation persistence* and *Operation
-outcomes*, and is not counted against the stage that produced it.
+[BACKLOG.md](./BACKLOG.md) under *Runtime strategy* and *Observability*, and is not
+counted against the stage that produced it.
 
 ## Decisions
 
@@ -184,8 +174,8 @@ with each fix rather than postponing it to a final testing phase.
 |---|---|---|
 | **0: Contain existing failures** *(delivered)* | Hydration/write guards, stale-result guards, truthful errors, immediate Mac metadata and Dock-reopen fixes, local-build profile, idempotent service ensure, startup deduplication, and urgent eviction protections | No runtime rewrite or storage-migration prerequisite. Each corrected failure has a focused regression case; affected packaged paths also have artifact-level evidence. |
 | **1A: Durable conversation state** *(delivered)* | Versioned conversation repository, legacy recovery, multipart storage, supported rollback, export/backup foundation | Hydration protection is already in place. Migration can be interrupted/retried without overwriting either legacy or new data. |
-| **1B: Runtime correctness** *(in progress)* | Runtime/service contracts, admission and leases, inference adapter, cache ownership, audio sessions, and renderer-independent monitoring | Starts on the existing transport. Domain fixes may ship independently; shared contracts must be stable before native transport cutover. |
-| **2: Native ownership cutover** | Thin Rust supervisor, native tray/reopen/quit, single-instance behavior, process-generation transport | May overlap Phase 1 once contracts are fixed. Exactly one child and one manager owner; rollback happens at a clean startup boundary. |
+| **1B: Runtime correctness** *(delivered)* | Runtime/service contracts, admission and leases, inference adapter, cache ownership, audio sessions, and renderer-independent monitoring | Starts on the existing transport. Domain fixes may ship independently; shared contracts must be stable before native transport cutover. |
+| **2: Native ownership cutover** *(foundation delivered)* | Thin Rust supervisor, native tray/reopen/quit, single-instance behavior, process-generation transport | May overlap Phase 1 once contracts are fixed. Exactly one child and one manager owner; rollback happens at a clean startup boundary. |
 | **Every affected release** | Complete resource packaging, installed-app scenarios, updater/install integrity, SDK/core matrix, current documentation | Runs continuously, not just at the end. Windows/macOS only; release signing remains mandatory for signed channels. |
 | **3: Useful options** | Operation queue, conversation controls, device selection, endpoint profiles, diagnostics, updater UI, and richer metrics | Each option depends on working underlying behavior. No automatic cloud fallback or silent model/provider substitution. |
 | **Later decision** | Replace selected runtime implementation with Rust if justified | Requires supported bindings, Windows/macOS parity, measured benefit, and preserved process isolation. Not a committed rewrite. |
