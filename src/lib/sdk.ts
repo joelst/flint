@@ -789,9 +789,11 @@ async function spawnSidecar() {
   if (closeData) {
     throw new Error(formatStartupFailure(stdoutEventFired, stderrLines, closeData, commandError));
   }
+  let queuedBytes = 0;
   const writeQueue: Array<{
     id?: number;
     priority?: boolean;
+    bytes?: number;
     operation: () => Promise<any>;
     resolve: (value: any) => void;
     reject: (error: any) => void;
@@ -801,6 +803,7 @@ async function spawnSidecar() {
     if (writeActive) return;
     const next = writeQueue.shift();
     if (!next) return;
+    queuedBytes = Math.max(0, queuedBytes - (next.bytes ?? 0));
     writeActive = true;
     let result: Promise<any>;
     try {
@@ -819,15 +822,25 @@ async function spawnSidecar() {
       const idx = writeQueue.findIndex((item) => item.id === id);
       if (idx >= 0) {
         const [removed] = writeQueue.splice(idx, 1);
+        queuedBytes = Math.max(0, queuedBytes - (removed.bytes ?? 0));
         removed.resolve(undefined);
       }
     },
-    enqueue<T>(operation: () => Promise<T>, options?: { id?: number; priority?: boolean }) {
-      if (!options?.priority && writeQueue.length >= MAX_QUEUED_WRITES) {
+    enqueue<T>(
+      operation: () => Promise<T>,
+      options?: { id?: number; priority?: boolean; bytes?: number },
+    ) {
+      const requestBytes = options?.bytes ?? 0;
+      if (
+        !options?.priority &&
+        (writeQueue.length >= MAX_QUEUED_WRITES ||
+          queuedBytes + requestBytes > MAX_QUEUED_WRITE_BYTES)
+      ) {
         for (let i = writeQueue.length - 1; i >= 0; i -= 1) {
           const item = writeQueue[i];
           if (item.id !== undefined && !pending.has(item.id)) {
             writeQueue.splice(i, 1);
+            queuedBytes = Math.max(0, queuedBytes - (item.bytes ?? 0));
             item.resolve(undefined);
           }
         }
@@ -837,13 +850,22 @@ async function spawnSidecar() {
           new Error(`The runtime write queue is full (${MAX_QUEUED_WRITES} pending writes).`),
         );
       }
+      if (!options?.priority && queuedBytes + requestBytes > MAX_QUEUED_WRITE_BYTES) {
+        return Promise.reject(
+          new Error(
+            `The runtime write queue is full (${MAX_QUEUED_WRITE_BYTES} bytes queued).`,
+          ),
+        );
+      }
       return new Promise<T>((resolve, reject) => {
+        queuedBytes += requestBytes;
         writeQueue.push({
           operation,
           resolve,
           reject,
           id: options?.id,
           priority: options?.priority,
+          bytes: requestBytes,
         });
         runNextWrite();
       });
@@ -1168,7 +1190,7 @@ function sendInternal(
               ),
             );
           }
-        }, { id, priority: cmd === 'shutdownRuntime' })
+        }, { id, priority: cmd === 'shutdownRuntime', bytes: frameBytes })
         .catch((e: unknown) => {
           settle(() =>
             entry.reject(
@@ -1927,6 +1949,7 @@ export interface RuntimeQuitResult {
 let runtimeQuitPromise: Promise<RuntimeQuitResult> | null = null;
 export const NATIVE_RUNTIME_MAX_FRAME_BYTES = 80 * 1024 * 1024;
 export const MAX_QUEUED_WRITES = 256;
+export const MAX_QUEUED_WRITE_BYTES = 160 * 1024 * 1024;
 
 function normalizeRuntimeTimeout(value: number | undefined, fallback: number, minimum: number): number {
   return Number.isFinite(value) && value! >= 0

@@ -473,20 +473,24 @@ describe('settlement revokes permission to dispatch', () => {
 
   it('rejects an oversized mutation before native dispatch', async () => {
     const sdk = await loadSdk();
-    vi.stubGlobal(
-      'TextEncoder',
-      class {
-        encode() {
-          return { byteLength: sdk.NATIVE_RUNTIME_MAX_FRAME_BYTES + 1 };
-        }
-      },
-    );
+    try {
+      vi.stubGlobal(
+        'TextEncoder',
+        class {
+          encode() {
+            return { byteLength: sdk.NATIVE_RUNTIME_MAX_FRAME_BYTES + 1 };
+          }
+        },
+      );
 
-    const request = capture(sdk.deleteModel({ alias: 'm' } as any));
-    await request.tracked;
-    expect(request.box.err?.certainty).toBe('failed');
-    expect(String(request.box.err?.message)).toContain('transport limit');
-    expect(harness.writes).toHaveLength(0);
+      const request = capture(sdk.deleteModel({ alias: 'm' } as any));
+      await request.tracked;
+      expect(request.box.err?.certainty).toBe('failed');
+      expect(String(request.box.err?.message)).toContain('transport limit');
+      expect(harness.writes).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('rechecks authorization inside the ordered native write queue', async () => {
@@ -620,6 +624,56 @@ describe('settlement revokes permission to dispatch', () => {
     sdk.resetSDK();
     await Promise.all(queued.slice(1).map((q) => q.tracked));
     await next.tracked;
+  });
+
+  it('rejects writes exceeding aggregate queued-byte limit before dispatch', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    gateNativeWrite = true;
+
+    const first = sdk.getEps();
+    first.catch(() => {});
+    await waitFor('the first native write to block', () => nativeWriteStarted);
+
+    let firstLarge!: ReturnType<typeof capture>;
+    let secondLarge!: ReturnType<typeof capture>;
+    try {
+      const simulatedSize = 60 * 1024 * 1024;
+      vi.stubGlobal(
+        'TextEncoder',
+        class {
+          encode() {
+            return { byteLength: simulatedSize };
+          }
+        },
+      );
+
+      firstLarge = capture(
+        sdk.chatCompletionStream('m', [{ role: 'user', content: 'large-1' }], () => {}),
+      );
+      secondLarge = capture(
+        sdk.chatCompletionStream('m', [{ role: 'user', content: 'large-2' }], () => {}),
+      );
+      // Third large write would exceed MAX_QUEUED_WRITE_BYTES (160MB: 60 + 60 + 60 = 180MB > 160MB)
+      const thirdLarge = capture(
+        sdk.chatCompletionStream('m', [{ role: 'user', content: 'large-3' }], () => {}),
+      );
+      await thirdLarge.tracked;
+
+      expect(thirdLarge.box.err?.certainty).toBe('failed');
+      expect(String(thirdLarge.box.err?.message)).toContain('bytes queued');
+      expect(harness.writes.filter((line) => line.includes('large-3'))).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+
+    gateNativeWrite = false;
+    releaseNativeWrite?.();
+    const firstId = JSON.parse(harness.writes.find((line) => line.includes('"getEps"'))!).id;
+    harness.emitStdout({ id: firstId, result: [] });
+    await expect(first).resolves.toEqual([]);
+    sdk.resetSDK();
+    await Promise.all([firstLarge.tracked, secondLarge.tracked]);
   });
 
   it('keeps transport failure sticky even if a ready frame arrives later', async () => {
