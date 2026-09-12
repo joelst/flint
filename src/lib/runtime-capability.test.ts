@@ -32,4 +32,14 @@ describe('runtime process capability', () => {
       ),
     ).toBe(true);
   });
+
+  it('keeps the frontend and native runtime frame limits synchronized', () => {
+    const sdk = readFileSync(join(process.cwd(), 'src', 'lib', 'sdk.ts'), 'utf8');
+    const rust = readFileSync(
+      join(process.cwd(), 'src-tauri', 'src', 'runtime_manager.rs'),
+      'utf8',
+    );
+    expect(sdk).toContain('NATIVE_RUNTIME_MAX_FRAME_BYTES = 80 * 1024 * 1024');
+    expect(rust).toContain('MAX_RUNTIME_FRAME_BYTES: usize = 80 * 1024 * 1024');
+  });
 });

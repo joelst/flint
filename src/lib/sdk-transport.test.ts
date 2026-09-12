@@ -48,6 +48,8 @@ let gateSpawn = false;
 let readyProtocolVersion = 1;
 let nativeGeneration = 0;
 let nativePhase = 'stopped';
+let listenerRegistrationCount = 0;
+let rejectListenerRegistration: number | null = null;
 const nativeListeners = new Map<string, Set<(event: { payload: any }) => void>>();
 
 function makeCommand() {
@@ -60,6 +62,10 @@ function makeCommand() {
 
 function emitNative(event: string, payload: any) {
   for (const listener of nativeListeners.get(event) ?? []) listener({ payload });
+}
+
+function nativeListenerCount() {
+  return [...nativeListeners.values()].reduce((total, listeners) => total + listeners.size, 0);
 }
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -92,7 +98,7 @@ vi.mock('@tauri-apps/api/core', () => ({
       return true;
     }
     if (command === 'runtime_write') {
-      harness.writes.push(`${JSON.stringify(args.message)}\n`);
+      harness.writes.push(`${args.frame}\n`);
       if (pendingWriteError) {
         const error = pendingWriteError;
         pendingWriteError = null;
@@ -112,6 +118,10 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 vi.mock('@tauri-apps/api/event', () => ({
   listen: async (event: string, listener: (event: { payload: any }) => void) => {
+    listenerRegistrationCount += 1;
+    if (listenerRegistrationCount === rejectListenerRegistration) {
+      throw new Error(`listener ${listenerRegistrationCount} failed`);
+    }
     const listeners = nativeListeners.get(event) ?? new Set();
     listeners.add(listener);
     nativeListeners.set(event, listeners);
@@ -158,6 +168,8 @@ async function loadSdk() {
   readyProtocolVersion = 1;
   nativeGeneration = 0;
   nativePhase = 'stopped';
+  listenerRegistrationCount = 0;
+  rejectListenerRegistration = null;
   pendingWriteError = null;
   nativeListeners.clear();
   return await import('./sdk');
@@ -239,6 +251,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -388,6 +401,66 @@ describe('settlement revokes permission to dispatch', () => {
     await expect(request).resolves.toEqual([]);
     expect(harness.spawnCount).toBe(1);
     expect(harness.killCount).toBe(0);
+  });
+
+  it('cleans up each listener acquired before a later registration fails', async () => {
+    const sdk = await loadSdk();
+    rejectListenerRegistration = 3;
+
+    const failed = capture(sdk.getEps());
+    await failed.tracked;
+    expect(String(failed.box.err?.message)).toContain('listener 3 failed');
+    expect(nativeListenerCount()).toBe(0);
+
+    rejectListenerRegistration = null;
+    const retry = sdk.getEps();
+    const requestId = await waitForWrite('getEps');
+    harness.emitStdout({ id: requestId, result: [] });
+    await expect(retry).resolves.toEqual([]);
+    expect(nativeListenerCount()).toBe(4);
+  });
+
+  it('removes a reset generation listener set when its close arrives later', async () => {
+    const sdk = await loadSdk();
+    const request = capture(sdk.getEps());
+    await waitForWrite('getEps');
+    expect(nativeListenerCount()).toBe(4);
+
+    sdk.resetSDK();
+    await request.tracked;
+    expect(nativeListenerCount()).toBe(4);
+    harness.emitClose({ code: 1 });
+    expect(nativeListenerCount()).toBe(0);
+  });
+
+  it('does not remove current listeners for an unrelated stale exit', async () => {
+    const sdk = await loadSdk();
+    const request = sdk.getEps();
+    const requestId = await waitForWrite('getEps');
+    expect(nativeListenerCount()).toBe(4);
+
+    emitNative('flint://runtime-exit', { generation: 0, code: 1 });
+    expect(nativeListenerCount()).toBe(4);
+    harness.emitStdout({ id: requestId, result: [] });
+    await expect(request).resolves.toEqual([]);
+  });
+
+  it('rejects an oversized mutation before native dispatch', async () => {
+    const sdk = await loadSdk();
+    vi.stubGlobal(
+      'TextEncoder',
+      class {
+        encode() {
+          return { byteLength: sdk.NATIVE_RUNTIME_MAX_FRAME_BYTES + 1 };
+        }
+      },
+    );
+
+    const request = capture(sdk.deleteModel({ alias: 'm' } as any));
+    await request.tracked;
+    expect(request.box.err?.certainty).toBe('failed');
+    expect(String(request.box.err?.message)).toContain('transport limit');
+    expect(harness.writes).toHaveLength(0);
   });
 
   it('reports a drained undispatched request as failed, not unknown', async () => {

@@ -11,7 +11,7 @@ pub struct ChildExit {
 
 pub struct RuntimeChild {
     generation: u64,
-    child: Child,
+    child: Option<Child>,
     writer: RuntimeWriter,
     exit: Option<ChildExit>,
 }
@@ -102,7 +102,7 @@ impl RuntimeChild {
         };
         Ok(Self {
             generation,
-            child,
+            child: Some(child),
             writer,
             exit: None,
         }
@@ -125,7 +125,7 @@ impl RuntimeChild {
         if self.exit.is_some() {
             return Ok(self.exit);
         }
-        self.child.try_wait().map(|status| {
+        self.child_mut()?.try_wait().map(|status| {
             status.map(|status| {
                 let exit = ChildExit {
                     generation: self.generation,
@@ -141,7 +141,7 @@ impl RuntimeChild {
         if self.exit.is_some() {
             return Ok(());
         }
-        match self.child.kill() {
+        match self.child_mut()?.kill() {
             Ok(()) => Ok(()),
             Err(error) => match self.try_wait() {
                 Ok(Some(_)) => Ok(()),
@@ -154,7 +154,7 @@ impl RuntimeChild {
         if let Some(exit) = self.exit {
             return Ok(exit);
         }
-        self.child.wait().map(|status| {
+        self.child_mut()?.wait().map(|status| {
             let exit = ChildExit {
                 generation: self.generation,
                 code: status.code(),
@@ -163,13 +163,24 @@ impl RuntimeChild {
             exit
         })
     }
+
+    fn child_mut(&mut self) -> io::Result<&mut Child> {
+        self.child
+            .as_mut()
+            .ok_or_else(|| io::Error::other("runtime child handle is unavailable"))
+    }
 }
 
 impl Drop for RuntimeChild {
     fn drop(&mut self) {
-        if self.exit.is_none() && !matches!(self.child.try_wait(), Ok(Some(_))) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if self.exit.is_none() && !matches!(child.try_wait(), Ok(Some(_))) {
+            let _ = child.kill();
+            thread::spawn(move || {
+                let _ = child.wait();
+            });
         }
     }
 }
@@ -325,7 +336,7 @@ mod tests {
             },
         )
         .expect("spawn long-lived test child");
-        let pid = child.child.id();
+        let pid = child.child.as_ref().expect("child handle").id();
         assert!(process_exists(pid));
         let deadline = Instant::now() + Duration::from_secs(2);
         let drop_started = Instant::now();

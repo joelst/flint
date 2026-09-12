@@ -2,7 +2,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{mpsc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -13,9 +13,9 @@ use tauri_plugin_shell::ShellExt;
 
 use crate::runtime_state::RuntimePhase;
 use crate::runtime_supervisor::{RuntimeStart, RuntimeSupervisor};
-use crate::runtime_transport::{encode_json_line, JsonLinesDecoder};
+use crate::runtime_transport::{validate_json_line, JsonLinesDecoder};
 
-const MAX_RUNTIME_FRAME_BYTES: usize = 80 * 1024 * 1024;
+pub const MAX_RUNTIME_FRAME_BYTES: usize = 80 * 1024 * 1024;
 const READ_CHUNK_BYTES: usize = 64 * 1024;
 
 pub struct NativeRuntime {
@@ -156,7 +156,9 @@ fn start_event_threads(app: AppHandle, started: RuntimeStart) {
     let mut stdout = started.pipes.stdout;
     let mut stderr = started.pipes.stderr;
     let stdout_app = app.clone();
-    let stdout_reader = thread::spawn(move || {
+    let (stdout_done, stdout_completed) = mpsc::channel();
+    thread::spawn(move || {
+        let _completion = CompletionSignal(Some(stdout_done));
         let mut decoder = match JsonLinesDecoder::new(MAX_RUNTIME_FRAME_BYTES) {
             Ok(decoder) => decoder,
             Err(error) => {
@@ -198,7 +200,9 @@ fn start_event_threads(app: AppHandle, started: RuntimeStart) {
         }
     });
     let stderr_app = app.clone();
-    let stderr_reader = thread::spawn(move || {
+    let (stderr_done, stderr_completed) = mpsc::channel();
+    thread::spawn(move || {
+        let _completion = CompletionSignal(Some(stderr_done));
         let mut bytes = vec![0; READ_CHUNK_BYTES];
         loop {
             match stderr.read(&mut bytes) {
@@ -221,38 +225,55 @@ fn start_event_threads(app: AppHandle, started: RuntimeStart) {
     });
 
     let monitor_app = app;
-    thread::spawn(move || loop {
-        let exit = {
-            let state = monitor_app.state::<NativeRuntime>();
-            let mut supervisor = state
-                .supervisor
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if supervisor.generation() != generation {
-                return;
-            }
-            match supervisor.poll_exit() {
-                Ok(exit) => exit,
-                Err(error) => {
-                    emit_error(&monitor_app, generation, error.to_string());
+    thread::spawn(move || {
+        let mut poll_error_reported = false;
+        loop {
+            let exit = {
+                let state = monitor_app.state::<NativeRuntime>();
+                let mut supervisor = state
+                    .supervisor
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if supervisor.generation() != generation {
                     return;
                 }
+                match supervisor.poll_exit() {
+                    Ok(exit) => exit,
+                    Err(error) => {
+                        if !poll_error_reported {
+                            poll_error_reported = true;
+                            emit_error(&monitor_app, generation, error.to_string());
+                            let _ = supervisor.request_shutdown(generation);
+                        }
+                        None
+                    }
+                }
+            };
+            if let Some(exit) = exit {
+                let _ = stdout_completed.recv_timeout(Duration::from_secs(2));
+                let _ = stderr_completed.recv_timeout(Duration::from_secs(2));
+                let _ = monitor_app.emit(
+                    "flint://runtime-exit",
+                    RuntimeExitEvent {
+                        generation,
+                        code: exit.code,
+                    },
+                );
+                return;
             }
-        };
-        if let Some(exit) = exit {
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
-            let _ = monitor_app.emit(
-                "flint://runtime-exit",
-                RuntimeExitEvent {
-                    generation,
-                    code: exit.code,
-                },
-            );
-            return;
+            thread::sleep(Duration::from_millis(25));
         }
-        thread::sleep(Duration::from_millis(25));
     });
+}
+
+struct CompletionSignal(Option<mpsc::Sender<()>>);
+
+impl Drop for CompletionSignal {
+    fn drop(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
+    }
 }
 
 #[tauri::command]
@@ -283,6 +304,9 @@ pub fn runtime_start(
             .supervisor
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        if state.terminal.load(Ordering::Acquire) {
+            return Err("The native runtime supervisor is shutting down".to_string());
+        }
         supervisor
             .start_command(command)
             .map_err(|error| format!("Could not start the runtime: {error}"))?
@@ -302,13 +326,13 @@ pub fn runtime_mark_ready(state: State<'_, NativeRuntime>, generation: u64) -> b
 }
 
 #[tauri::command]
-pub fn runtime_write(
+pub async fn runtime_write(
     state: State<'_, NativeRuntime>,
     generation: u64,
-    message: Value,
+    frame: String,
 ) -> Result<(), String> {
-    let bytes = encode_json_line(&message, MAX_RUNTIME_FRAME_BYTES)
-        .map_err(|error| format!("Could not encode runtime message: {error}"))?;
+    let bytes = validate_json_line(&frame, MAX_RUNTIME_FRAME_BYTES)
+        .map_err(|error| format!("Could not validate runtime message: {error}"))?;
     let writer = {
         let supervisor = state
             .supervisor
@@ -318,8 +342,9 @@ pub fn runtime_write(
             .writer(generation)
             .ok_or_else(|| "The requested runtime generation is not active".to_string())?
     };
-    writer
-        .write(bytes)
+    tauri::async_runtime::spawn_blocking(move || writer.write(bytes))
+        .await
+        .map_err(|error| format!("Runtime writer task failed: {error}"))?
         .map_err(|error| format!("Could not write to the runtime: {error}"))
 }
 
@@ -338,11 +363,13 @@ pub fn runtime_force_stop(
 }
 
 pub fn stop_for_app_exit(state: &NativeRuntime) {
-    state.terminal.store(true, Ordering::Release);
     let mut supervisor = state
         .supervisor
         .lock()
         .unwrap_or_else(|error| error.into_inner());
+    if state.terminal.swap(true, Ordering::AcqRel) {
+        return;
+    }
     let generation = supervisor.generation();
-    let _ = supervisor.shutdown(generation);
+    let _ = supervisor.request_shutdown(generation);
 }

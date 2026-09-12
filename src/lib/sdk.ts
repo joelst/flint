@@ -549,6 +549,9 @@ async function spawnSidecar() {
   let eventGenerationFloor = 1;
   let supersededOutputLogged = false;
   const unlisteners: UnlistenFn[] = [];
+  const cleanupListeners = () => {
+    for (const unlisten of unlisteners.splice(0)) unlisten();
+  };
 
   const processStdoutMessage = (msg: any, generation: number) => {
     stdoutEventFired = true;
@@ -631,6 +634,7 @@ async function spawnSidecar() {
 
   const processClose = (data: any, generation: number) => {
     if (generation !== sidecarGeneration) {
+      if (generation === myGeneration) cleanupListeners();
       console.log('[sdk] Ignoring close from a superseded sidecar child');
       return;
     }
@@ -640,7 +644,7 @@ async function spawnSidecar() {
     const expectedShutdown = expectedShutdownGeneration === closedGeneration;
     sidecarReady = false;
     sidecarProcess = null;
-    for (const unlisten of unlisteners.splice(0)) unlisten();
+    cleanupListeners();
     // The manager lived inside that process. Leaving `managerInstance` set would make
     // initializeSDK() return true immediately on the next Retry, reporting "ready" without
     // ever running init — the app would look healthy against a dead child.
@@ -684,14 +688,20 @@ async function spawnSidecar() {
     if (generation === myGeneration) callback();
   };
 
-  unlisteners.push(
-    await listen<{ generation: number; message: any }>('flint://runtime-stdout', ({ payload }) => {
+  let started: { generation: number };
+  try {
+    unlisteners.push(
+      await listen<{ generation: number; message: any }>('flint://runtime-stdout', ({ payload }) => {
       handleNativeEvent(payload.generation, () => processStdoutMessage(payload.message, payload.generation));
-    }),
-    await listen<{ generation: number; text: string }>('flint://runtime-stderr', ({ payload }) => {
+      }),
+    );
+    unlisteners.push(
+      await listen<{ generation: number; text: string }>('flint://runtime-stderr', ({ payload }) => {
       handleNativeEvent(payload.generation, () => processStderr(payload.text, payload.generation));
-    }),
-    await listen<{ generation: number; text: string }>('flint://runtime-error', ({ payload }) => {
+      }),
+    );
+    unlisteners.push(
+      await listen<{ generation: number; text: string }>('flint://runtime-error', ({ payload }) => {
       handleNativeEvent(payload.generation, () => {
         if (payload.generation !== sidecarGeneration) return;
         commandError = payload.text;
@@ -700,43 +710,42 @@ async function spawnSidecar() {
         drainPending('connection-lost', `The runtime process reported an error: ${payload.text}`);
         void invoke('runtime_force_stop', { generation: payload.generation }).catch(() => {});
       });
-    }),
-    await listen<{ generation: number; code?: number | null }>('flint://runtime-exit', ({ payload }) => {
+      }),
+    );
+    unlisteners.push(
+      await listen<{ generation: number; code?: number | null }>('flint://runtime-exit', ({ payload }) => {
       handleNativeEvent(payload.generation, () => processClose(payload, payload.generation));
-    }),
-  );
+      }),
+    );
 
-  const existing = await invoke<{ generation: number; phase: string }>('runtime_status');
-  eventGenerationFloor = existing.generation + 1;
-  if (['starting', 'ready', 'shuttingDown'].includes(existing.phase)) {
-    await invoke('runtime_force_stop', { generation: existing.generation });
-    const deadline = Date.now() + 2_000;
-    while (Date.now() < deadline) {
+    const existing = await invoke<{ generation: number; phase: string }>('runtime_status');
+    eventGenerationFloor = existing.generation + 1;
+    if (['starting', 'ready', 'shuttingDown'].includes(existing.phase)) {
+      await invoke('runtime_force_stop', { generation: existing.generation });
+      const deadline = Date.now() + 2_000;
+      while (Date.now() < deadline) {
+        const status = await invoke<{ generation: number; phase: string }>('runtime_status');
+        if (status.phase === 'exited' || status.phase === 'stopped') break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
       const status = await invoke<{ generation: number; phase: string }>('runtime_status');
-      if (status.phase === 'exited' || status.phase === 'stopped') break;
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      if (status.phase !== 'exited' && status.phase !== 'stopped') {
+        throw new Error('The previous runtime child did not terminate, so Flint did not replace it.');
+      }
     }
-    const status = await invoke<{ generation: number; phase: string }>('runtime_status');
-    if (status.phase !== 'exited' && status.phase !== 'stopped') {
-      for (const unlisten of unlisteners.splice(0)) unlisten();
-      throw new Error('The previous runtime child did not terminate, so Flint did not replace it.');
-    }
-  }
 
-  console.log(`[sdk] Calling native runtime_start...`);
-  let started: { generation: number };
-  startingNative = true;
-  try {
+    console.log(`[sdk] Calling native runtime_start...`);
+    startingNative = true;
     started = await invoke<{ generation: number }>('runtime_start', { nodeMode });
   } catch (error) {
     startingNative = false;
-    for (const unlisten of unlisteners.splice(0)) unlisten();
+    cleanupListeners();
     throw error;
   }
   startingNative = false;
   if (myGeneration !== null && myGeneration !== started.generation) {
     void invoke('runtime_force_stop', { generation: started.generation }).catch(() => {});
-    for (const unlisten of unlisteners.splice(0)) unlisten();
+    cleanupListeners();
     throw new Error('The native runtime generation changed while it was starting.');
   }
   myGeneration = started.generation;
@@ -747,13 +756,10 @@ async function spawnSidecar() {
   sidecarProcess = {
     generation: started.generation,
     write(line: string) {
-      let message: any;
-      try {
-        message = JSON.parse(line);
-      } catch (error) {
-        return Promise.reject(error);
-      }
-      return invoke('runtime_write', { generation: started.generation, message });
+      return invoke('runtime_write', {
+        generation: started.generation,
+        frame: line.endsWith('\n') ? line.slice(0, -1) : line,
+      });
     },
     kill() {
       return invoke('runtime_force_stop', { generation: started.generation });
@@ -980,6 +986,19 @@ function sendInternal(
         settle(() =>
           entry.reject(
             new SidecarOperationError(cmd, 'failed', 'The request could not be encoded.', e),
+          ),
+        );
+        return;
+      }
+      const frameBytes = new TextEncoder().encode(line.slice(0, -1)).byteLength;
+      if (frameBytes > NATIVE_RUNTIME_MAX_FRAME_BYTES) {
+        settle(() =>
+          entry.reject(
+            new SidecarOperationError(
+              cmd,
+              'failed',
+              `The runtime request exceeds the ${NATIVE_RUNTIME_MAX_FRAME_BYTES}-byte transport limit.`,
+            ),
           ),
         );
         return;
@@ -1774,6 +1793,7 @@ export interface RuntimeQuitResult {
 }
 
 let runtimeQuitPromise: Promise<RuntimeQuitResult> | null = null;
+export const NATIVE_RUNTIME_MAX_FRAME_BYTES = 80 * 1024 * 1024;
 
 function normalizeRuntimeTimeout(value: number | undefined, fallback: number, minimum: number): number {
   return Number.isFinite(value) && value! >= 0
