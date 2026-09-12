@@ -34,12 +34,12 @@ Following the 0.7.0 foundation release, follow-up work (targetable in 0.7.x patc
 
 Each post-0.7.0 workstream must satisfy these concrete acceptance criteria before shipping:
 
-- **Installed-path & lifecycle gate:** Native system tray Open/Quit and macOS Dock reopen restore the main window across packaged Windows and macOS builds; single-instance launch refocuses existing instance; process termination cleanly tears down the sidecar without orphaned processes.
-- **Endpoint conformance gate:** User-facing self-test verifies `/v1/models` envelope, model ID reuse in chat completions, streaming termination with `[DONE]`, disconnect cancellation, and verified `tool_calls` output for tool-capable models.
+- **Installed-path & lifecycle gate:** Native system tray Open/Quit and macOS Dock reopen restore the main window across packaged Windows and macOS builds; single-instance launch refocuses existing instance; process termination cleanly tears down the sidecar without orphaned processes; and recovery controls operate independently if the renderer webview fails.
+- **Endpoint conformance gate:** User-facing self-test verifies `/v1/models` envelope, model ID reuse in chat completions, streaming termination with `[DONE]`, disconnect cancellation, and verified generation of valid `tool_calls` structures on actual tool-definition prompts (distinguishing verified behavior from catalog-declared `supportsToolCalling` metadata).
 - **BYOM embeddings gate:** User-imported ONNX embedding models serve `/v1/embeddings` requests end-to-end with verified vector dimensionality and numeric output.
 - **Audio transcoding gate:** Client-side WebM/Opus and MP3 decoding converts to 16 kHz mono PCM WAV before ingestion without increasing application bundle size.
 - **Updater UX gate:** In-app updater displays download progress, notifies when an update is ready to apply, prompts to restart, and supports user deferral.
-- **Inference telemetry gate:** Diagnostics and UI display accurate TTFT, prompt tokens/sec, decode tokens/sec, and provider tags without ambiguous aggregated rates.
+- **Inference telemetry gate:** Diagnostics and UI display accurate model load time, time to first token (TTFT), prompt tokens/sec, decode tokens/sec, and resolved provider/variant tags without ambiguous aggregated rates.
 
 ## Decisions
 
@@ -75,7 +75,7 @@ Each post-0.7.0 workstream must satisfy these concrete acceptance criteria befor
 | Capability | Target scope | Prerequisites |
 |---|---|---|
 | **Installed-path lifecycle qualification** | Packaged tray/quit, dock reopen, crash recovery, and single-instance verification on Windows/macOS. | Rust supervisor (Phase 2 delivered). |
-| **Endpoint behavioral self-test** | Diagnostic tool in UI testing OpenAI envelope, streaming chunk validity, and cancellation. | Gateway proxy & initial normalization (Phase 1B delivered; broader conformance in progress). |
+| **Endpoint behavioral self-test** | Diagnostic tool in UI testing OpenAI envelope, model-ID reuse, streaming chunk validity, cancellation, and live tool-call generation vs declarations. | Gateway proxy & initial normalization (Phase 1B delivered; broader conformance in progress). |
 | **BYOM embeddings route** | End-to-end `/v1/embeddings` endpoint using user-imported ONNX embedding models. | BYOM import + SDK embedding client. |
 | **Audio transcoding expansion** | Client-side WebM/Opus and MP3 decoding to 16 kHz PCM WAV without heavy bundles. | Web Audio / lightweight WASM decoder. |
 | **Updater UX** | In-app download progress, ready-to-restart prompts, and deferral options. | Rust update events + Settings view. |

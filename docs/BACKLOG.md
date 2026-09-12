@@ -8,8 +8,8 @@ Verify an item against the tree before acting on it.
 
 ## Current execution priorities
 
-The [reliability execution plan](./PRODUCT_PLAN.md) owns the review findings,
-implementation dependencies, and acceptance gates. Fix data loss and runtime
+The [reliability execution plan](./PRODUCT_PLAN.md) owns implementation
+sequencing and acceptance gates for post-0.7.0 work. Fix data loss and runtime
 correctness without waiting for a backend rewrite. Expedite thin native
 lifecycle/process supervision; defer wholesale Foundry runtime replacement.
 
