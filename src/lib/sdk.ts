@@ -958,7 +958,7 @@ async function spawnSidecar() {
  * `async` wrapper would have parked the caller on the preparation instead, and a request already
  * answered as cancelled would have gone on waiting for a start it was no longer part of.
  */
-function sendInternal(
+export function sendInternal(
   cmd: SidecarCommandName,
   payload: any = {},
   onStream?: (delta: string) => void,

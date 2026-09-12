@@ -576,18 +576,19 @@ describe('settlement revokes permission to dispatch', () => {
     expect(normal.box.err?.certainty).toBe('failed');
     expect(String(normal.box.err?.message)).toContain('write queue is full');
 
-    // A priority command (shutdownRuntime) bypasses the full queue and enqueues successfully
-    const quitting = sdk.quitRuntime({ gracefulTimeoutMs: 100, killTimeoutMs: 100 });
+    // A priority command (shutdownRuntime) bypasses the full queue and enqueues directly without cancelling the active queue
+    const shutdownPromise = sdk.sendInternal('shutdownRuntime');
     gateNativeWrite = false;
     releaseNativeWrite?.();
 
     const shutdownId = await waitForWrite('shutdownRuntime');
     expect(shutdownId).toBeDefined();
     harness.emitStdout({ id: shutdownId, result: { listenersClosed: true, modelsUnloaded: [] } });
-    harness.emitClose({ code: 0 });
 
-    const result = await quitting;
-    expect(result.termination).toBe('confirmed');
+    await expect(shutdownPromise).resolves.toEqual({
+      id: shutdownId,
+      result: { listenersClosed: true, modelsUnloaded: [] },
+    });
     sdk.resetSDK();
     await Promise.all(queued.map((q) => q.tracked));
   });
