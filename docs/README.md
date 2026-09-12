@@ -10,7 +10,7 @@ to load for a given task.
 |---|---|
 | [README.md](../README.md) | Why Flint, who it’s for, screenshots, quick start |
 | [USER_GUIDE.md](./USER_GUIDE.md) | First run, common tasks, bind vs client URL, troubleshooting |
-| [PRODUCT_PLAN.md](./PRODUCT_PLAN.md) | Reliability execution plan, finding register, acceptance gates, and Rust supervision decision |
+| [PRODUCT_PLAN.md](./PRODUCT_PLAN.md) | Reliability execution plan, post-0.7.0 workstreams, acceptance gates, and native supervision decision |
 | [CHANGELOG.md](../CHANGELOG.md) | Versioned release notes |
 
 ## Contributors
