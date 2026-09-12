@@ -578,6 +578,50 @@ describe('settlement revokes permission to dispatch', () => {
     expect(result.termination).toBe('confirmed');
   });
 
+  it('prunes cancelled or settled requests from write queue so they do not consume capacity', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    gateNativeWrite = true;
+
+    const first = sdk.getEps();
+    first.catch(() => {});
+    await waitFor('the first native write to block', () => nativeWriteStarted);
+
+    const queuedIds: number[] = [];
+    const queued: Array<ReturnType<typeof capture>> = [];
+    for (let i = 0; i < sdk.MAX_QUEUED_WRITES; i += 1) {
+      let reqId = 0;
+      queued.push(
+        capture(
+          sdk.chatCompletionStream('m', [{ role: 'user', content: `msg-${i}` }], () => {}, undefined, (id) => {
+            reqId = id;
+          }),
+        ),
+      );
+      queuedIds.push(reqId);
+    }
+
+    // Cancel the first queued item while it's still waiting in write queue
+    expect(sdk.cancelBeforeDispatch(queuedIds[0])).toBe(true);
+    await queued[0].tracked;
+    expect(queued[0].box.err?.certainty).toBe('cancelled');
+
+    // Because queuedIds[0] was pruned, enqueuing one more item should now succeed rather than fail
+    const next = capture(sdk.deleteModel({ alias: 'allowed-after-prune' } as any));
+    // It should not immediately fail with "write queue is full"
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(next.box.err).toBeUndefined();
+
+    gateNativeWrite = false;
+    releaseNativeWrite?.();
+    const firstId = JSON.parse(harness.writes.find((line) => line.includes('"getEps"'))!).id;
+    harness.emitStdout({ id: firstId, result: [] });
+    await expect(first).resolves.toEqual([]);
+    sdk.resetSDK();
+    await Promise.all(queued.slice(1).map((q) => q.tracked));
+    await next.tracked;
+  });
+
   it('keeps transport failure sticky even if a ready frame arrives later', async () => {
     const sdk = await loadSdk();
     await completeInitialization(sdk);

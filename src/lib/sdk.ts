@@ -824,6 +824,15 @@ async function spawnSidecar() {
     },
     enqueue<T>(operation: () => Promise<T>, options?: { id?: number; priority?: boolean }) {
       if (!options?.priority && writeQueue.length >= MAX_QUEUED_WRITES) {
+        for (let i = writeQueue.length - 1; i >= 0; i -= 1) {
+          const item = writeQueue[i];
+          if (item.id !== undefined && !pending.has(item.id)) {
+            writeQueue.splice(i, 1);
+            item.resolve(undefined);
+          }
+        }
+      }
+      if (!options?.priority && writeQueue.length >= MAX_QUEUED_WRITES) {
         return Promise.reject(
           new Error(`The runtime write queue is full (${MAX_QUEUED_WRITES} pending writes).`),
         );
@@ -984,6 +993,9 @@ function sendInternal(
     if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer);
     streamHandlers.delete(id);
     deleteProgressHandler(id);
+    if (!entry.dispatched) {
+      sidecarProcess?.removeQueuedWrite?.(id);
+    }
     fn();
   };
 
