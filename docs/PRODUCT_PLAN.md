@@ -368,8 +368,9 @@ Rust owns the production sidecar child, its generation, stdin/stdout/stderr,
 exit observation, and forced termination. The frontend retains operation
 settlement and recovery policy over generation-tagged native events; it cannot
 spawn, write to, or kill the child directly. JSON-lines frames and queued
-writes are bounded, writes do not hold the lifecycle lock, and terminal exit is
-published only after stdout and stderr readers drain.
+writes are bounded, writes do not hold the lifecycle lock, and terminal exit
+publication follows bounded reader-drain waits and output-gate fencing so late
+events cannot publish after exit.
 
 The selected Node executable and trusted sidecar/resource paths are resolved
 natively. A renderer reload replaces an existing child only after native exit

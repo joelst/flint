@@ -172,6 +172,14 @@ impl OutputGate {
             .unwrap_or_else(|error| error.into_inner());
         *fenced = true;
     }
+
+    #[cfg(test)]
+    fn is_fenced(&self) -> bool {
+        *self
+            .fenced
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
 }
 
 fn emit_error(app: &AppHandle, output: &OutputGate, generation: u64, error: impl Into<String>) {
@@ -428,4 +436,48 @@ pub fn stop_for_app_exit(state: &NativeRuntime) {
     }
     let generation = supervisor.generation();
     let _ = supervisor.request_shutdown(generation);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn test_phase_name() {
+        assert_eq!(phase_name(RuntimePhase::Stopped), "stopped");
+        assert_eq!(phase_name(RuntimePhase::Starting), "starting");
+        assert_eq!(phase_name(RuntimePhase::Ready), "ready");
+        assert_eq!(phase_name(RuntimePhase::ShuttingDown), "shuttingDown");
+        assert_eq!(phase_name(RuntimePhase::Exited), "exited");
+    }
+
+    #[test]
+    fn test_output_gate_fencing() {
+        let gate = OutputGate::new();
+        assert!(!gate.is_fenced());
+        gate.fence();
+        assert!(gate.is_fenced());
+    }
+
+    #[test]
+    fn test_completion_signal_sends_on_drop() {
+        let (tx, rx) = mpsc::channel();
+        {
+            let _sig = CompletionSignal(Some(tx));
+        }
+        assert_eq!(rx.recv_timeout(Duration::from_millis(100)), Ok(()));
+    }
+
+    #[test]
+    fn test_native_runtime_default_and_app_exit() {
+        let runtime = NativeRuntime::default();
+        assert!(!runtime.terminal.load(Ordering::Acquire));
+        stop_for_app_exit(&runtime);
+        assert!(runtime.terminal.load(Ordering::Acquire));
+        // Idempotent repeated app exit
+        stop_for_app_exit(&runtime);
+        assert!(runtime.terminal.load(Ordering::Acquire));
+    }
 }

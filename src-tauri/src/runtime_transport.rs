@@ -128,7 +128,7 @@ pub fn validate_json_line(frame: &str, max_frame_bytes: usize) -> io::Result<Vec
             "maximum frame size must be positive",
         ));
     }
-    if frame.as_bytes().len() > max_frame_bytes {
+    if frame.len() > max_frame_bytes {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "JSON-lines frame exceeds the configured limit",

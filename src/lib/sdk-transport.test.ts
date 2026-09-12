@@ -522,6 +522,35 @@ describe('settlement revokes permission to dispatch', () => {
     await expect(first).resolves.toEqual([]);
   });
 
+  it('rejects writes exceeding queue backpressure before dispatch', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    gateNativeWrite = true;
+
+    const first = sdk.getEps();
+    await waitFor('the first native write to block', () => nativeWriteStarted);
+
+    const queued: Array<ReturnType<typeof capture>> = [];
+    for (let i = 0; i < sdk.MAX_QUEUED_WRITES; i += 1) {
+      queued.push(capture(sdk.deleteModel({ alias: `queued-${i}` } as any)));
+    }
+
+    const overflow = capture(sdk.deleteModel({ alias: 'overflow' } as any));
+    await overflow.tracked;
+    expect(overflow.box.err?.cmd).toBe('deleteModel');
+    expect(overflow.box.err?.certainty).toBe('failed');
+    expect(String(overflow.box.err?.message)).toContain('write queue is full');
+    expect(harness.writes.filter((line) => line.includes('overflow'))).toHaveLength(0);
+
+    gateNativeWrite = false;
+    releaseNativeWrite?.();
+    const firstId = JSON.parse(harness.writes.find((line) => line.includes('"getEps"'))!).id;
+    harness.emitStdout({ id: firstId, result: [] });
+    await expect(first).resolves.toEqual([]);
+    sdk.resetSDK();
+    await Promise.all(queued.map((q) => q.tracked));
+  });
+
   it('keeps transport failure sticky even if a ready frame arrives later', async () => {
     const sdk = await loadSdk();
     await completeInitialization(sdk);

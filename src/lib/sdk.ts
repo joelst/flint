@@ -814,6 +814,11 @@ async function spawnSidecar() {
   sidecarProcess = {
     generation: started.generation,
     enqueue<T>(operation: () => Promise<T>) {
+      if (writeQueue.length >= MAX_QUEUED_WRITES) {
+        return Promise.reject(
+          new Error(`The runtime write queue is full (${MAX_QUEUED_WRITES} pending writes).`),
+        );
+      }
       return new Promise<T>((resolve, reject) => {
         writeQueue.push({ operation, resolve, reject });
         runNextWrite();
@@ -1088,54 +1093,64 @@ function sendInternal(
 
       const processToWrite = sidecarProcess;
       const generationToWrite = sidecarGeneration;
-      void processToWrite.enqueue(async () => {
-        if (!active()) return;
-        if (
-          sidecarProcess !== processToWrite ||
-          sidecarGeneration !== generationToWrite ||
-          !sidecarReady
-        ) {
-          settle(() =>
-            entry.reject(
-              new SidecarOperationError(
-                cmd,
-                'failed',
-                'The runtime changed before this request could be sent.',
-              ),
-            ),
-          );
-          return;
-        }
-        if (onDispatch) {
-          try {
-            onDispatch(generationToWrite);
-          } catch (e) {
+      processToWrite
+        .enqueue(async () => {
+          if (!active()) return;
+          if (
+            sidecarProcess !== processToWrite ||
+            sidecarGeneration !== generationToWrite ||
+            !sidecarReady
+          ) {
             settle(() =>
               entry.reject(
                 new SidecarOperationError(
                   cmd,
                   'failed',
-                  'The request was abandoned before it was sent.',
-                  e,
+                  'The runtime changed before this request could be sent.',
                 ),
               ),
             );
             return;
           }
-        }
-        if (!active()) return;
-        entry.dispatched = true;
-        progressHandlers.get(id)?.watchdog?.start();
-        try {
-          await processToWrite.writeNow(line);
-        } catch (e) {
+          if (onDispatch) {
+            try {
+              onDispatch(generationToWrite);
+            } catch (e) {
+              settle(() =>
+                entry.reject(
+                  new SidecarOperationError(
+                    cmd,
+                    'failed',
+                    'The request was abandoned before it was sent.',
+                    e,
+                  ),
+                ),
+              );
+              return;
+            }
+          }
+          if (!active()) return;
+          entry.dispatched = true;
+          progressHandlers.get(id)?.watchdog?.start();
+          try {
+            await processToWrite.writeNow(line);
+          } catch (e) {
+            settle(() =>
+              entry.reject(
+                new SidecarOperationError(cmd, certaintyFor(cmd, 'write-failed'), String(e), e),
+              ),
+            );
+          }
+        })
+        .catch((e: unknown) => {
           settle(() =>
             entry.reject(
-              new SidecarOperationError(cmd, certaintyFor(cmd, 'write-failed'), String(e), e),
+              e instanceof SidecarOperationError
+                ? e
+                : new SidecarOperationError(cmd, 'failed', String((e as any)?.message ?? e), e),
             ),
           );
-        }
-      });
+        });
     } catch (e) {
       // Startup itself failed, so the request was never written.
       settle(() =>
@@ -1883,6 +1898,7 @@ export interface RuntimeQuitResult {
 
 let runtimeQuitPromise: Promise<RuntimeQuitResult> | null = null;
 export const NATIVE_RUNTIME_MAX_FRAME_BYTES = 80 * 1024 * 1024;
+export const MAX_QUEUED_WRITES = 256;
 
 function normalizeRuntimeTimeout(value: number | undefined, fallback: number, minimum: number): number {
   return Number.isFinite(value) && value! >= 0
