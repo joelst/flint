@@ -555,7 +555,7 @@ describe('settlement revokes permission to dispatch', () => {
     await Promise.all(queued.map((q) => q.tracked));
   });
 
-  it('allows graceful shutdownRuntime when write queue is full', async () => {
+  it('allows priority writes to bypass write queue limits when full of active requests', async () => {
     const sdk = await loadSdk();
     await completeInitialization(sdk);
     gateNativeWrite = true;
@@ -564,11 +564,19 @@ describe('settlement revokes permission to dispatch', () => {
     first.catch(() => {});
     await waitFor('the first native write to block', () => nativeWriteStarted);
 
+    // Fill queue to MAX_QUEUED_WRITES with uncancelled active requests
+    const queued: Array<ReturnType<typeof capture>> = [];
     for (let i = 0; i < sdk.MAX_QUEUED_WRITES; i += 1) {
-      sdk.deleteModel({ alias: `queued-${i}` } as any).catch(() => {});
+      queued.push(capture(sdk.deleteModel({ alias: `active-${i}` } as any)));
     }
 
-    // Full queue: quitRuntime should cancel undispatched operations and dispatch shutdownRuntime
+    // A normal non-priority write is rejected
+    const normal = capture(sdk.deleteModel({ alias: 'rejected-normal' } as any));
+    await normal.tracked;
+    expect(normal.box.err?.certainty).toBe('failed');
+    expect(String(normal.box.err?.message)).toContain('write queue is full');
+
+    // A priority command (shutdownRuntime) bypasses the full queue and enqueues successfully
     const quitting = sdk.quitRuntime({ gracefulTimeoutMs: 100, killTimeoutMs: 100 });
     gateNativeWrite = false;
     releaseNativeWrite?.();
@@ -580,6 +588,8 @@ describe('settlement revokes permission to dispatch', () => {
 
     const result = await quitting;
     expect(result.termination).toBe('confirmed');
+    sdk.resetSDK();
+    await Promise.all(queued.map((q) => q.tracked));
   });
 
   it('prunes cancelled or settled requests from write queue so they do not consume capacity', async () => {

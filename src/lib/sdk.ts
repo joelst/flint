@@ -422,6 +422,7 @@ export const sdkState: Writable<FlintSDKState> = writable(initialState);
  * all with one message would tell the user something false about the second kind.
  */
 function drainPending(cause: InterruptionCause, detail: string) {
+  sidecarProcess?.clearQueue?.();
   for (const { reject, cmd, dispatched, deadlineTimer } of pending.values()) {
     if (deadlineTimer) clearTimeout(deadlineTimer);
     const actual: InterruptionCause = dispatched ? cause : 'not-dispatched';
@@ -654,8 +655,10 @@ async function spawnSidecar() {
     console.log(`[sdk] Sidecar process closed (exit code: ${data?.code})`);
     const closedGeneration = generation;
     const expectedShutdown = expectedShutdownGeneration === closedGeneration;
+    const closingProcess = sidecarProcess;
     sidecarReady = false;
     sidecarProcess = null;
+    closingProcess?.clearQueue?.();
     cleanupListeners();
     // The manager lived inside that process. Leaving `managerInstance` set would make
     // initializeSDK() return true immediately on the next Retry, reporting "ready" without
@@ -818,6 +821,13 @@ async function spawnSidecar() {
   };
   sidecarProcess = {
     generation: started.generation,
+    clearQueue() {
+      for (let i = 0; i < writeQueue.length; i += 1) {
+        writeQueue[i].resolve(undefined);
+      }
+      writeQueue.length = 0;
+      queuedBytes = 0;
+    },
     removeQueuedWrite(id: number) {
       const idx = writeQueue.findIndex((item) => item.id === id);
       if (idx >= 0) {
