@@ -790,6 +790,8 @@ async function spawnSidecar() {
     throw new Error(formatStartupFailure(stdoutEventFired, stderrLines, closeData, commandError));
   }
   const writeQueue: Array<{
+    id?: number;
+    priority?: boolean;
     operation: () => Promise<any>;
     resolve: (value: any) => void;
     reject: (error: any) => void;
@@ -813,14 +815,27 @@ async function spawnSidecar() {
   };
   sidecarProcess = {
     generation: started.generation,
-    enqueue<T>(operation: () => Promise<T>) {
-      if (writeQueue.length >= MAX_QUEUED_WRITES) {
+    removeQueuedWrite(id: number) {
+      const idx = writeQueue.findIndex((item) => item.id === id);
+      if (idx >= 0) {
+        const [removed] = writeQueue.splice(idx, 1);
+        removed.resolve(undefined);
+      }
+    },
+    enqueue<T>(operation: () => Promise<T>, options?: { id?: number; priority?: boolean }) {
+      if (!options?.priority && writeQueue.length >= MAX_QUEUED_WRITES) {
         return Promise.reject(
           new Error(`The runtime write queue is full (${MAX_QUEUED_WRITES} pending writes).`),
         );
       }
       return new Promise<T>((resolve, reject) => {
-        writeQueue.push({ operation, resolve, reject });
+        writeQueue.push({
+          operation,
+          resolve,
+          reject,
+          id: options?.id,
+          priority: options?.priority,
+        });
         runNextWrite();
       });
     },
@@ -1141,7 +1156,7 @@ function sendInternal(
               ),
             );
           }
-        })
+        }, { id, priority: cmd === 'shutdownRuntime' })
         .catch((e: unknown) => {
           settle(() =>
             entry.reject(
@@ -1184,6 +1199,7 @@ export function cancelBeforeDispatch(id: number): boolean {
   if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer);
   streamHandlers.delete(id);
   deleteProgressHandler(id);
+  sidecarProcess?.removeQueuedWrite?.(id);
   entry.reject(new SidecarOperationError(entry.cmd, 'cancelled'));
   return true;
 }

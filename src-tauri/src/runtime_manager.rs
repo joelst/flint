@@ -153,7 +153,7 @@ impl OutputGate {
         }
     }
 
-    fn emit<S: Serialize + Clone>(&self, app: &AppHandle, event: &str, payload: S) -> bool {
+    fn try_emit<F: FnOnce()>(&self, emit_fn: F) -> bool {
         let fenced = self
             .fenced
             .lock()
@@ -161,8 +161,14 @@ impl OutputGate {
         if *fenced {
             return false;
         }
-        let _ = app.emit(event, payload);
+        emit_fn();
         true
+    }
+
+    fn emit<S: Serialize + Clone>(&self, app: &AppHandle, event: &str, payload: S) -> bool {
+        self.try_emit(|| {
+            let _ = app.emit(event, payload);
+        })
     }
 
     fn fence(&self) {
@@ -457,8 +463,19 @@ mod tests {
     fn test_output_gate_fencing() {
         let gate = OutputGate::new();
         assert!(!gate.is_fenced());
+        let mut emitted = false;
+        assert!(gate.try_emit(|| {
+            emitted = true;
+        }));
+        assert!(emitted);
+
         gate.fence();
         assert!(gate.is_fenced());
+        let mut late_emitted = false;
+        assert!(!gate.try_emit(|| {
+            late_emitted = true;
+        }));
+        assert!(!late_emitted);
     }
 
     #[test]
@@ -472,12 +489,36 @@ mod tests {
 
     #[test]
     fn test_native_runtime_default_and_app_exit() {
+        let (program, args) = if cfg!(windows) {
+            ("ping", vec!["-n", "30", "127.0.0.1"])
+        } else {
+            ("sleep", vec!["30"])
+        };
         let runtime = NativeRuntime::default();
+        let generation = {
+            let mut supervisor = runtime.supervisor.lock().unwrap();
+            supervisor.start(program, args).expect("start test child")
+        };
         assert!(!runtime.terminal.load(Ordering::Acquire));
+        {
+            let supervisor = runtime.supervisor.lock().unwrap();
+            assert_eq!(supervisor.phase(), RuntimePhase::Starting);
+        }
+
         stop_for_app_exit(&runtime);
         assert!(runtime.terminal.load(Ordering::Acquire));
-        // Idempotent repeated app exit
+        {
+            let supervisor = runtime.supervisor.lock().unwrap();
+            assert_eq!(supervisor.phase(), RuntimePhase::ShuttingDown);
+        }
+
+        // Idempotent repeated app exit does not change state
         stop_for_app_exit(&runtime);
         assert!(runtime.terminal.load(Ordering::Acquire));
+        {
+            let mut supervisor = runtime.supervisor.lock().unwrap();
+            assert_eq!(supervisor.phase(), RuntimePhase::ShuttingDown);
+            let _ = supervisor.shutdown(generation);
+        }
     }
 }

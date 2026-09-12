@@ -551,6 +551,33 @@ describe('settlement revokes permission to dispatch', () => {
     await Promise.all(queued.map((q) => q.tracked));
   });
 
+  it('allows graceful shutdownRuntime when write queue is full', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    gateNativeWrite = true;
+
+    const first = sdk.getEps();
+    first.catch(() => {});
+    await waitFor('the first native write to block', () => nativeWriteStarted);
+
+    for (let i = 0; i < sdk.MAX_QUEUED_WRITES; i += 1) {
+      sdk.deleteModel({ alias: `queued-${i}` } as any).catch(() => {});
+    }
+
+    // Full queue: quitRuntime should cancel undispatched operations and dispatch shutdownRuntime
+    const quitting = sdk.quitRuntime({ gracefulTimeoutMs: 100, killTimeoutMs: 100 });
+    gateNativeWrite = false;
+    releaseNativeWrite?.();
+
+    const shutdownId = await waitForWrite('shutdownRuntime');
+    expect(shutdownId).toBeDefined();
+    harness.emitStdout({ id: shutdownId, result: { listenersClosed: true, modelsUnloaded: [] } });
+    harness.emitClose({ code: 0 });
+
+    const result = await quitting;
+    expect(result.termination).toBe('confirmed');
+  });
+
   it('keeps transport failure sticky even if a ready frame arrives later', async () => {
     const sdk = await loadSdk();
     await completeInitialization(sdk);
