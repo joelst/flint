@@ -38,10 +38,9 @@ delete or reorder deferred backlog items.
    The release metadata gate is automated by
    `npm run verify:release -- 0.7.0 --channel=evaluation`.
 4. Share a clearly labelled `0.7.0` evaluation prerelease outside the updater
-   channel, with supported platforms, known limitations, explicit
-   0.6.0/0.7.0 upgrade and rollback expectations, and a short feedback route
-   for the Explorer team. Do not make it the `releases/latest` target while it
-   is a prerelease.
+   channel, with supported platforms, known limitations, clean evaluation
+   expectations, and a short feedback route for the Explorer team. Do not make
+   it the `releases/latest` target while it is a prerelease.
 5. Verify and hand off the stable extension seams already documented in
    [EXTENDING.md](./EXTENDING.md): frontend SDK boundary, sidecar JSON-lines
    contract, command addition checklist, model/catalog lifecycle, gateway

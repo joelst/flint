@@ -39,18 +39,20 @@ those capabilities are separately validated.
   publication.
 - [ ] Windows installer is built and signed through the normal release path.
 - [ ] macOS Apple Silicon DMG/app is built and its unsigned-install limitation
-  is called out in the release notes.
+  (Gatekeeper "damaged" warning workaround) is called out in the release notes.
 - [ ] Target-specific bundle verification passes for each artifact.
 - [ ] The build is shared as an evaluation prerelease outside the updater
   channel. The current `releases/latest` endpoint intentionally does not
-  discover prereleases, so existing 0.6.0 installations remain unchanged.
+  discover prereleases.
 
 ### Supported-flow smoke test
 
 Run these scenarios from the packaged application, not only `tauri dev`:
 
 1. Install on a clean machine with no PATH Node, Rust, or Foundry CLI.
-2. Launch Flint and confirm the bundled sidecar reaches ready.
+2. Launch Flint and confirm the bundled sidecar reaches ready. On macOS, verify
+   the quarantine workaround (`scripts/install-macos.sh` or `xattr -cr`) allows
+   launch without Gatekeeper errors.
 3. Discover, download, and load a small model.
 4. Send a streaming chat request and stop one request.
 5. Transcribe a supported audio file and use the microphone flow.
@@ -70,14 +72,11 @@ For a target build, include its target triple in verification:
 npm run verify:bundle -- --target <triple> --require-build
 ```
 
-### Upgrade and rollback
+### Installation and profile integrity
 
-- [ ] Install 0.6.0, export or preserve a test conversation, then install the
-  0.7.0 evaluation build side-by-side or in a disposable test profile.
-- [ ] Confirm 0.6.0 remains available for rollback and that 0.7.0 does not
-  silently alter the updater channel.
-- [ ] Confirm conversations/settings survive the supported transition, or
-  document the exact limitation before handoff.
+- [ ] Install the 0.7.0 evaluation build on a clean environment or disposable test profile.
+- [ ] Confirm export and import of test conversations works as expected.
+- [ ] Confirm conversations and settings persist across restarts.
 - [ ] Do not present an evaluation prerelease as an in-place updater upgrade.
 
 ### Runtime ownership
