@@ -113,6 +113,7 @@ export interface ModelContextInfo {
 let sidecarProcess: any = null;
 let sidecarReady = false;
 let runtimeQuitRequested = false;
+let sidecarStartEpoch = 0;
 let expectedShutdownGeneration: number | null = null;
 const closeObservers = new Map<number, Set<() => void>>();
 /** Last successful Node runtime (bundled externalBin vs PATH). */
@@ -524,6 +525,7 @@ async function startSidecar(): Promise<void> {
 }
 
 async function spawnSidecar() {
+  const startEpoch = sidecarStartEpoch;
   if (sidecarProcess) return;
   if (runtimeQuitRequested) {
     throw new Error('The runtime is shutting down.');
@@ -531,6 +533,9 @@ async function spawnSidecar() {
   updateRuntime({ process: 'starting', manager: 'unknown', service: 'unknown', models: 'unknown' });
 
   const nodeCheck = await ensureNodeRuntime();
+  if (startEpoch !== sidecarStartEpoch) {
+    throw new Error('The runtime start was cancelled.');
+  }
   if (!nodeCheck.ok) {
     updateState({ ready: false, error: nodeCheck.message });
     updateRuntime({ process: 'stopped', manager: 'unknown', service: 'unknown', models: 'unknown' });
@@ -544,6 +549,7 @@ async function spawnSidecar() {
   const stderrLines: string[] = [];
   let closeData: any = null;
   let commandError: string | null = null;
+  let transportFailed = false;
   let myGeneration: number | null = null;
   let startingNative = false;
   let eventGenerationFloor = 1;
@@ -551,6 +557,11 @@ async function spawnSidecar() {
   const unlisteners: UnlistenFn[] = [];
   const cleanupListeners = () => {
     for (const unlisten of unlisteners.splice(0)) unlisten();
+  };
+  const ensureStartAuthorized = () => {
+    if (startEpoch === sidecarStartEpoch) return;
+    cleanupListeners();
+    throw new Error('The runtime start was cancelled.');
   };
 
   const processStdoutMessage = (msg: any, generation: number) => {
@@ -606,6 +617,7 @@ async function spawnSidecar() {
       console.log(`[sidecar] ${msg.level}: ${msg.message}`);
       sdkState.update(s => ({ ...s, logs: [...s.logs.slice(-199), { ts: msg.timestamp ?? Date.now(), level: msg.level ?? 'info', message: msg.message, source: 'sidecar' as const }] }));
     } else if (msg.ready) {
+      if (transportFailed) return;
       if (msg.protocolVersion !== SIDECAR_PROTOCOL_VERSION) {
         console.error(`[sdk] Unsupported sidecar protocol version: ${String(msg.protocolVersion)}`);
         commandError = `Unsupported sidecar protocol version: ${String(msg.protocolVersion)}`;
@@ -680,6 +692,7 @@ async function spawnSidecar() {
 
   const handleNativeEvent = (generation: number, callback: () => void) => {
     if (generation < eventGenerationFloor) return;
+    if (startingNative && startEpoch !== sidecarStartEpoch) return;
     if (myGeneration === null) {
       if (!startingNative) return;
       myGeneration = generation;
@@ -695,46 +708,64 @@ async function spawnSidecar() {
       handleNativeEvent(payload.generation, () => processStdoutMessage(payload.message, payload.generation));
       }),
     );
+    ensureStartAuthorized();
     unlisteners.push(
       await listen<{ generation: number; text: string }>('flint://runtime-stderr', ({ payload }) => {
       handleNativeEvent(payload.generation, () => processStderr(payload.text, payload.generation));
       }),
     );
+    ensureStartAuthorized();
     unlisteners.push(
       await listen<{ generation: number; text: string }>('flint://runtime-error', ({ payload }) => {
       handleNativeEvent(payload.generation, () => {
         if (payload.generation !== sidecarGeneration) return;
+        transportFailed = true;
+        sidecarReady = false;
+        managerReady = false;
         commandError = payload.text;
         console.error('[sdk] Native runtime transport error:', payload.text);
-        updateState({ error: `Sidecar error: ${payload.text}` });
+        updateState({ ready: false, error: `Sidecar error: ${payload.text}` });
+        updateRuntime({
+          process: 'stopping',
+          manager: 'unknown',
+          service: 'unknown',
+          models: 'unknown',
+        });
         drainPending('connection-lost', `The runtime process reported an error: ${payload.text}`);
         void invoke('runtime_force_stop', { generation: payload.generation }).catch(() => {});
       });
       }),
     );
+    ensureStartAuthorized();
     unlisteners.push(
       await listen<{ generation: number; code?: number | null }>('flint://runtime-exit', ({ payload }) => {
       handleNativeEvent(payload.generation, () => processClose(payload, payload.generation));
       }),
     );
+    ensureStartAuthorized();
 
     const existing = await invoke<{ generation: number; phase: string }>('runtime_status');
+    ensureStartAuthorized();
     eventGenerationFloor = existing.generation + 1;
     if (['starting', 'ready', 'shuttingDown'].includes(existing.phase)) {
       await invoke('runtime_force_stop', { generation: existing.generation });
+      ensureStartAuthorized();
       const deadline = Date.now() + 2_000;
       while (Date.now() < deadline) {
         const status = await invoke<{ generation: number; phase: string }>('runtime_status');
+        ensureStartAuthorized();
         if (status.phase === 'exited' || status.phase === 'stopped') break;
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
       const status = await invoke<{ generation: number; phase: string }>('runtime_status');
+      ensureStartAuthorized();
       if (status.phase !== 'exited' && status.phase !== 'stopped') {
         throw new Error('The previous runtime child did not terminate, so Flint did not replace it.');
       }
     }
 
     console.log(`[sdk] Calling native runtime_start...`);
+    ensureStartAuthorized();
     startingNative = true;
     started = await invoke<{ generation: number }>('runtime_start', { nodeMode });
   } catch (error) {
@@ -743,6 +774,11 @@ async function spawnSidecar() {
     throw error;
   }
   startingNative = false;
+  if (startEpoch !== sidecarStartEpoch) {
+    void invoke('runtime_force_stop', { generation: started.generation }).catch(() => {});
+    cleanupListeners();
+    throw new Error('The runtime start was cancelled.');
+  }
   if (myGeneration !== null && myGeneration !== started.generation) {
     void invoke('runtime_force_stop', { generation: started.generation }).catch(() => {});
     cleanupListeners();
@@ -753,9 +789,37 @@ async function spawnSidecar() {
   if (closeData) {
     throw new Error(formatStartupFailure(stdoutEventFired, stderrLines, closeData, commandError));
   }
+  const writeQueue: Array<{
+    operation: () => Promise<any>;
+    resolve: (value: any) => void;
+    reject: (error: any) => void;
+  }> = [];
+  let writeActive = false;
+  const runNextWrite = () => {
+    if (writeActive) return;
+    const next = writeQueue.shift();
+    if (!next) return;
+    writeActive = true;
+    let result: Promise<any>;
+    try {
+      result = next.operation();
+    } catch (error) {
+      result = Promise.reject(error);
+    }
+    result.then(next.resolve, next.reject).finally(() => {
+      writeActive = false;
+      runNextWrite();
+    });
+  };
   sidecarProcess = {
     generation: started.generation,
-    write(line: string) {
+    enqueue<T>(operation: () => Promise<T>) {
+      return new Promise<T>((resolve, reject) => {
+        writeQueue.push({ operation, resolve, reject });
+        runNextWrite();
+      });
+    },
+    writeNow(line: string) {
       return invoke('runtime_write', {
         generation: started.generation,
         frame: line.endsWith('\n') ? line.slice(0, -1) : line,
@@ -790,11 +854,17 @@ async function spawnSidecar() {
       }, 20000); // 20s timeout to be extra patient on first startup
 
       const checkReady = () => {
-        if (sidecarReady) {
+        if (startEpoch !== sidecarStartEpoch) {
+          if (readyTimeout) clearTimeout(readyTimeout);
+          reject(new Error('The runtime start was cancelled.'));
+        } else if (transportFailed || commandError) {
+          if (readyTimeout) clearTimeout(readyTimeout);
+          reject(new Error(formatStartupFailure(stdoutEventFired, stderrLines, closeData, commandError)));
+        } else if (sidecarReady) {
           console.log(`[sdk] Init complete: sidecar is ready!`);
           if (readyTimeout) clearTimeout(readyTimeout);
           resolve();
-        } else if (closeData || commandError) {
+        } else if (closeData) {
           if (readyTimeout) clearTimeout(readyTimeout);
           reject(new Error(formatStartupFailure(stdoutEventFired, stderrLines, closeData, commandError)));
         } else {
@@ -1016,36 +1086,55 @@ function sendInternal(
       // no handler can settle the entry in between.
       if (!active()) return;
 
-      if (onDispatch) {
-        try {
-          onDispatch(sidecarGeneration);
-        } catch (e) {
+      const processToWrite = sidecarProcess;
+      const generationToWrite = sidecarGeneration;
+      void processToWrite.enqueue(async () => {
+        if (!active()) return;
+        if (
+          sidecarProcess !== processToWrite ||
+          sidecarGeneration !== generationToWrite ||
+          !sidecarReady
+        ) {
           settle(() =>
             entry.reject(
               new SidecarOperationError(
                 cmd,
                 'failed',
-                'The request was abandoned before it was sent.',
-                e,
+                'The runtime changed before this request could be sent.',
               ),
             ),
           );
           return;
         }
-      }
-
-      // From here the bytes may reach the child, so the outcome stops being provably negative.
-      entry.dispatched = true;
-      progressHandlers.get(id)?.watchdog?.start();
-      sidecarProcess.write(line).catch((e: any) => {
-        // A rejected write does not prove the bytes never arrived — it resolves when they reach
-        // the pipe, and rejecting says nothing about what the child had already read. So this
-        // is classified by what the command would have done, not treated as a clean failure.
-        settle(() =>
-          entry.reject(
-            new SidecarOperationError(cmd, certaintyFor(cmd, 'write-failed'), String(e), e),
-          ),
-        );
+        if (onDispatch) {
+          try {
+            onDispatch(generationToWrite);
+          } catch (e) {
+            settle(() =>
+              entry.reject(
+                new SidecarOperationError(
+                  cmd,
+                  'failed',
+                  'The request was abandoned before it was sent.',
+                  e,
+                ),
+              ),
+            );
+            return;
+          }
+        }
+        if (!active()) return;
+        entry.dispatched = true;
+        progressHandlers.get(id)?.watchdog?.start();
+        try {
+          await processToWrite.writeNow(line);
+        } catch (e) {
+          settle(() =>
+            entry.reject(
+              new SidecarOperationError(cmd, certaintyFor(cmd, 'write-failed'), String(e), e),
+            ),
+          );
+        }
       });
     } catch (e) {
       // Startup itself failed, so the request was never written.
@@ -2175,6 +2264,7 @@ export function getManager(): any {
 
 export function resetSDK() {
   drainPending('connection-lost', 'The runtime was reset before answering.');
+  sidecarStartEpoch += 1;
   sidecarGeneration = 0;
   if (sidecarProcess) {
     try { sidecarProcess.kill(); } catch {}

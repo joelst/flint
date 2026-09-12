@@ -2,7 +2,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -64,6 +64,7 @@ struct RuntimeTextEvent {
 struct RuntimeExitEvent {
     generation: u64,
     code: Option<i32>,
+    signal: Option<i32>,
 }
 
 fn phase_name(phase: RuntimePhase) -> &'static str {
@@ -141,8 +142,41 @@ fn runtime_command(
         .into())
 }
 
-fn emit_error(app: &AppHandle, generation: u64, error: impl Into<String>) {
-    let _ = app.emit(
+struct OutputGate {
+    fenced: Mutex<bool>,
+}
+
+impl OutputGate {
+    fn new() -> Self {
+        Self {
+            fenced: Mutex::new(false),
+        }
+    }
+
+    fn emit<S: Serialize + Clone>(&self, app: &AppHandle, event: &str, payload: S) -> bool {
+        let fenced = self
+            .fenced
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if *fenced {
+            return false;
+        }
+        let _ = app.emit(event, payload);
+        true
+    }
+
+    fn fence(&self) {
+        let mut fenced = self
+            .fenced
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *fenced = true;
+    }
+}
+
+fn emit_error(app: &AppHandle, output: &OutputGate, generation: u64, error: impl Into<String>) {
+    output.emit(
+        app,
         "flint://runtime-error",
         RuntimeTextEvent {
             generation,
@@ -151,18 +185,30 @@ fn emit_error(app: &AppHandle, generation: u64, error: impl Into<String>) {
     );
 }
 
+fn request_shutdown(app: &AppHandle, generation: u64) {
+    let state = app.state::<NativeRuntime>();
+    let mut supervisor = state
+        .supervisor
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _ = supervisor.request_shutdown(generation);
+}
+
 fn start_event_threads(app: AppHandle, started: RuntimeStart) {
     let generation = started.generation;
     let mut stdout = started.pipes.stdout;
     let mut stderr = started.pipes.stderr;
+    let output = Arc::new(OutputGate::new());
     let stdout_app = app.clone();
+    let stdout_output = output.clone();
     let (stdout_done, stdout_completed) = mpsc::channel();
     thread::spawn(move || {
         let _completion = CompletionSignal(Some(stdout_done));
         let mut decoder = match JsonLinesDecoder::new(MAX_RUNTIME_FRAME_BYTES) {
             Ok(decoder) => decoder,
             Err(error) => {
-                emit_error(&stdout_app, generation, error.to_string());
+                emit_error(&stdout_app, &stdout_output, generation, error.to_string());
+                request_shutdown(&stdout_app, generation);
                 return;
             }
         };
@@ -171,14 +217,16 @@ fn start_event_threads(app: AppHandle, started: RuntimeStart) {
             match stdout.read(&mut bytes) {
                 Ok(0) => {
                     if let Err(error) = decoder.finish() {
-                        emit_error(&stdout_app, generation, error.to_string());
+                        emit_error(&stdout_app, &stdout_output, generation, error.to_string());
+                        request_shutdown(&stdout_app, generation);
                     }
                     return;
                 }
                 Ok(count) => match decoder.push(&bytes[..count]) {
                     Ok(messages) => {
                         for message in messages {
-                            let _ = stdout_app.emit(
+                            stdout_output.emit(
+                                &stdout_app,
                                 "flint://runtime-stdout",
                                 RuntimeMessageEvent {
                                     generation,
@@ -188,18 +236,21 @@ fn start_event_threads(app: AppHandle, started: RuntimeStart) {
                         }
                     }
                     Err(error) => {
-                        emit_error(&stdout_app, generation, error.to_string());
+                        emit_error(&stdout_app, &stdout_output, generation, error.to_string());
+                        request_shutdown(&stdout_app, generation);
                         return;
                     }
                 },
                 Err(error) => {
-                    emit_error(&stdout_app, generation, error.to_string());
+                    emit_error(&stdout_app, &stdout_output, generation, error.to_string());
+                    request_shutdown(&stdout_app, generation);
                     return;
                 }
             }
         }
     });
     let stderr_app = app.clone();
+    let stderr_output = output.clone();
     let (stderr_done, stderr_completed) = mpsc::channel();
     thread::spawn(move || {
         let _completion = CompletionSignal(Some(stderr_done));
@@ -208,7 +259,8 @@ fn start_event_threads(app: AppHandle, started: RuntimeStart) {
             match stderr.read(&mut bytes) {
                 Ok(0) => return,
                 Ok(count) => {
-                    let _ = stderr_app.emit(
+                    stderr_output.emit(
+                        &stderr_app,
                         "flint://runtime-stderr",
                         RuntimeTextEvent {
                             generation,
@@ -217,7 +269,8 @@ fn start_event_threads(app: AppHandle, started: RuntimeStart) {
                     );
                 }
                 Err(error) => {
-                    emit_error(&stderr_app, generation, error.to_string());
+                    emit_error(&stderr_app, &stderr_output, generation, error.to_string());
+                    request_shutdown(&stderr_app, generation);
                     return;
                 }
             }
@@ -228,7 +281,7 @@ fn start_event_threads(app: AppHandle, started: RuntimeStart) {
     thread::spawn(move || {
         let mut poll_error_reported = false;
         loop {
-            let exit = {
+            let poll_result = {
                 let state = monitor_app.state::<NativeRuntime>();
                 let mut supervisor = state
                     .supervisor
@@ -237,26 +290,29 @@ fn start_event_threads(app: AppHandle, started: RuntimeStart) {
                 if supervisor.generation() != generation {
                     return;
                 }
-                match supervisor.poll_exit() {
-                    Ok(exit) => exit,
-                    Err(error) => {
-                        if !poll_error_reported {
-                            poll_error_reported = true;
-                            emit_error(&monitor_app, generation, error.to_string());
-                            let _ = supervisor.request_shutdown(generation);
-                        }
-                        None
+                supervisor.poll_exit()
+            };
+            let exit = match poll_result {
+                Ok(exit) => exit,
+                Err(error) => {
+                    if !poll_error_reported {
+                        poll_error_reported = true;
+                        emit_error(&monitor_app, &output, generation, error.to_string());
+                        request_shutdown(&monitor_app, generation);
                     }
+                    None
                 }
             };
             if let Some(exit) = exit {
                 let _ = stdout_completed.recv_timeout(Duration::from_secs(2));
                 let _ = stderr_completed.recv_timeout(Duration::from_secs(2));
+                output.fence();
                 let _ = monitor_app.emit(
                     "flint://runtime-exit",
                     RuntimeExitEvent {
                         generation,
                         code: exit.code,
+                        signal: exit.signal,
                     },
                 );
                 return;

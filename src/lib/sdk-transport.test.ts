@@ -50,6 +50,9 @@ let nativeGeneration = 0;
 let nativePhase = 'stopped';
 let listenerRegistrationCount = 0;
 let rejectListenerRegistration: number | null = null;
+let gateNativeWrite = false;
+let nativeWriteStarted = false;
+let releaseNativeWrite: (() => void) | null = null;
 const nativeListeners = new Map<string, Set<(event: { payload: any }) => void>>();
 
 function makeCommand() {
@@ -99,6 +102,12 @@ vi.mock('@tauri-apps/api/core', () => ({
     }
     if (command === 'runtime_write') {
       harness.writes.push(`${args.frame}\n`);
+      nativeWriteStarted = true;
+      if (gateNativeWrite) {
+        await new Promise<void>((resolve) => {
+          releaseNativeWrite = resolve;
+        });
+      }
       if (pendingWriteError) {
         const error = pendingWriteError;
         pendingWriteError = null;
@@ -170,6 +179,9 @@ async function loadSdk() {
   nativePhase = 'stopped';
   listenerRegistrationCount = 0;
   rejectListenerRegistration = null;
+  gateNativeWrite = false;
+  nativeWriteStarted = false;
+  releaseNativeWrite = null;
   pendingWriteError = null;
   nativeListeners.clear();
   return await import('./sdk');
@@ -403,6 +415,20 @@ describe('settlement revokes permission to dispatch', () => {
     expect(harness.killCount).toBe(0);
   });
 
+  it('does not let reset authorize a native child whose start was already in flight', async () => {
+    const sdk = await loadSdk();
+    gateSpawn = true;
+    const request = capture(sdk.getEps());
+    await waitFor('the native start to be pending', () => harness.spawnEntered);
+
+    sdk.resetSDK();
+    await request.tracked;
+    harness.releaseSpawn?.();
+    await waitFor('the revoked generation to be terminated', () => harness.killCount === 1);
+    await settleStartup();
+    expect(harness.writes).toHaveLength(0);
+  });
+
   it('cleans up each listener acquired before a later registration fails', async () => {
     const sdk = await loadSdk();
     rejectListenerRegistration = 3;
@@ -460,6 +486,52 @@ describe('settlement revokes permission to dispatch', () => {
     await request.tracked;
     expect(request.box.err?.certainty).toBe('failed');
     expect(String(request.box.err?.message)).toContain('transport limit');
+    expect(harness.writes).toHaveLength(0);
+  });
+
+  it('rechecks authorization inside the ordered native write queue', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    gateNativeWrite = true;
+
+    const first = sdk.getEps();
+    await waitFor('the first native write to block', () => nativeWriteStarted);
+    let secondId = -1;
+    const second = capture(
+      sdk.chatCompletionStream(
+        'm',
+        [{ role: 'user', content: 'hi' }],
+        () => {},
+        undefined,
+        (id) => {
+          secondId = id;
+        },
+      ),
+    );
+    await waitFor('the queued request id', () => secondId > 0);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sdk.cancelBeforeDispatch(secondId)).toBe(true);
+    await second.tracked;
+
+    gateNativeWrite = false;
+    releaseNativeWrite?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(harness.writes.filter((line) => line.includes('chatCompletion'))).toHaveLength(0);
+    const firstId = JSON.parse(harness.writes.find((line) => line.includes('"getEps"'))!).id;
+    harness.emitStdout({ id: firstId, result: [] });
+    await expect(first).resolves.toEqual([]);
+  });
+
+  it('keeps transport failure sticky even if a ready frame arrives later', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    harness.writes.length = 0;
+
+    harness.emitError('stdout framing failed');
+    harness.emitStdout({ ready: true, protocolVersion: 1 });
+    const request = capture(sdk.getEps());
+    await request.tracked;
+    expect(request.box.err).toBeDefined();
     expect(harness.writes).toHaveLength(0);
   });
 

@@ -3,10 +3,14 @@ use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, SyncSender};
 use std::thread;
 
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChildExit {
     pub generation: u64,
     pub code: Option<i32>,
+    pub signal: Option<i32>,
 }
 
 pub struct RuntimeChild {
@@ -127,10 +131,7 @@ impl RuntimeChild {
         }
         self.child_mut()?.try_wait().map(|status| {
             status.map(|status| {
-                let exit = ChildExit {
-                    generation: self.generation,
-                    code: status.code(),
-                };
+                let exit = Self::child_exit(self.generation, status);
                 self.exit = Some(exit);
                 exit
             })
@@ -155,13 +156,21 @@ impl RuntimeChild {
             return Ok(exit);
         }
         self.child_mut()?.wait().map(|status| {
-            let exit = ChildExit {
-                generation: self.generation,
-                code: status.code(),
-            };
+            let exit = Self::child_exit(self.generation, status);
             self.exit = Some(exit);
             exit
         })
+    }
+
+    fn child_exit(generation: u64, status: std::process::ExitStatus) -> ChildExit {
+        ChildExit {
+            generation,
+            code: status.code(),
+            #[cfg(unix)]
+            signal: status.signal(),
+            #[cfg(not(unix))]
+            signal: None,
+        }
     }
 
     fn child_mut(&mut self) -> io::Result<&mut Child> {
@@ -253,6 +262,8 @@ mod tests {
         let exit = child.wait().expect("wait for terminated child");
         assert_eq!(exit.generation, 7);
         assert_ne!(exit.code, Some(0));
+        #[cfg(unix)]
+        assert!(exit.signal.is_some());
     }
 
     #[test]
