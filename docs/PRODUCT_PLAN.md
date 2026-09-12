@@ -117,28 +117,14 @@ A stage is recorded here only once the pull request delivering it is merged to
 | 2 | 2-3 Rust-owned sidecar child, stdio streaming, and event bridge cutover | #106 |
 | 2 | 2-4 Native runtime supervisor manager tests and write queue backpressure | #107 |
 
-Phase 1A closed its acceptance gate for storage, migration, rollback, multipart
-preservation, conversation switching, and export. Phase 1B is in progress:
-1B-1 through 1B-12 delivered typed outcomes, versioned transport/readiness
-contracts, truthful catalog failures, non-destructive service ensure, and stale
-endpoint invalidation, Stop fencing, reachable public endpoint reporting, and
-failed-restart cleanup, plus startup sequencing from hydrated runtime intent and
-partial accelerator readiness. Webpage fetches now bound total duration and
-response bytes before parsing, and each native readiness probe is bounded by the
-remaining startup deadline. Gateway responses buffered for `/status` rewriting or
-first-pass autoload-error inspection now have a byte cap without limiting streamed
-inference. Finite read-only IPC queries now stop waiting after operation-specific
-deadlines without applying those deadlines to inference or effectful work. Long-running
-downloads and accelerator setup report prolonged progress silence without cancellation,
-native HTTP error diagnostics are bounded by time and bytes, and gateway request capture
-limits reject invalid configuration. Service shutdown now distinguishes endpoint
-withdrawal from bounded drain-and-unload and full runtime termination, with new
-work fenced during draining and process exit confirmed before a clean quit is
-reported. The remaining Workstream B gate covers failure propagation and
-observability.
+Phase 1A and Phase 1B closed their acceptance gates for storage, migration, rollback,
+multipart preservation, conversation switching, export, and bounded lifecycle/error
+semantics. Phase 2 delivered foundation stages 2-1 through 2-4 for native
+single-instance enforcement, Rust runtime generation state, sidecar child ownership,
+stdio JSON-lines transport bridge, and write queue backpressure.
 Work split out of a delivered stage rather than completed is listed in
-[BACKLOG.md](./BACKLOG.md) under *Conversation persistence* and *Operation
-outcomes*, and is not counted against the stage that produced it.
+[BACKLOG.md](./BACKLOG.md) under *Runtime strategy* and *Observability*, and is not
+counted against the stage that produced it.
 
 ## Decisions
 
