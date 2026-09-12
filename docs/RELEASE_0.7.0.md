@@ -87,7 +87,7 @@ npm run verify:bundle -- --target <triple> --require-build
   reopen from the packaged Windows and macOS artifacts.
 
 The minimum native-supervisor gate is tracked in
-[PRODUCT_PLAN.md](./PRODUCT_PLAN.md#070-foundation-release) and
+[PRODUCT_PLAN.md](./PRODUCT_PLAN.md) and
 [BACKLOG.md](./BACKLOG.md). Rust must own exactly one sidecar child and observe
 its termination; the Node sidecar remains the sole owner of the Foundry manager,
 catalog, pool, gateway, cache, and inference. No uncertain operation may be
