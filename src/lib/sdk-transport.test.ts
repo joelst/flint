@@ -473,20 +473,24 @@ describe('settlement revokes permission to dispatch', () => {
 
   it('rejects an oversized mutation before native dispatch', async () => {
     const sdk = await loadSdk();
-    vi.stubGlobal(
-      'TextEncoder',
-      class {
-        encode() {
-          return { byteLength: sdk.NATIVE_RUNTIME_MAX_FRAME_BYTES + 1 };
-        }
-      },
-    );
+    try {
+      vi.stubGlobal(
+        'TextEncoder',
+        class {
+          encode() {
+            return { byteLength: sdk.NATIVE_RUNTIME_MAX_FRAME_BYTES + 1 };
+          }
+        },
+      );
 
-    const request = capture(sdk.deleteModel({ alias: 'm' } as any));
-    await request.tracked;
-    expect(request.box.err?.certainty).toBe('failed');
-    expect(String(request.box.err?.message)).toContain('transport limit');
-    expect(harness.writes).toHaveLength(0);
+      const request = capture(sdk.deleteModel({ alias: 'm' } as any));
+      await request.tracked;
+      expect(request.box.err?.certainty).toBe('failed');
+      expect(String(request.box.err?.message)).toContain('transport limit');
+      expect(harness.writes).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('rechecks authorization inside the ordered native write queue', async () => {
@@ -520,6 +524,174 @@ describe('settlement revokes permission to dispatch', () => {
     const firstId = JSON.parse(harness.writes.find((line) => line.includes('"getEps"'))!).id;
     harness.emitStdout({ id: firstId, result: [] });
     await expect(first).resolves.toEqual([]);
+  });
+
+  it('rejects writes exceeding queue backpressure before dispatch', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    gateNativeWrite = true;
+
+    const first = sdk.getEps();
+    await waitFor('the first native write to block', () => nativeWriteStarted);
+
+    const queued: Array<ReturnType<typeof capture>> = [];
+    for (let i = 0; i < sdk.MAX_QUEUED_WRITES; i += 1) {
+      queued.push(capture(sdk.deleteModel({ alias: `queued-${i}` } as any)));
+    }
+
+    const overflow = capture(sdk.deleteModel({ alias: 'overflow' } as any));
+    await overflow.tracked;
+    expect(overflow.box.err?.cmd).toBe('deleteModel');
+    expect(overflow.box.err?.certainty).toBe('failed');
+    expect(String(overflow.box.err?.message)).toContain('write queue is full');
+    expect(harness.writes.filter((line) => line.includes('overflow'))).toHaveLength(0);
+
+    gateNativeWrite = false;
+    releaseNativeWrite?.();
+    const firstId = JSON.parse(harness.writes.find((line) => line.includes('"getEps"'))!).id;
+    harness.emitStdout({ id: firstId, result: [] });
+    await expect(first).resolves.toEqual([]);
+    sdk.resetSDK();
+    await Promise.all(queued.map((q) => q.tracked));
+  });
+
+  it('allows priority writes to bypass write queue limits when full of active requests', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    gateNativeWrite = true;
+
+    const first = sdk.getEps();
+    first.catch(() => {});
+    await waitFor('the first native write to block', () => nativeWriteStarted);
+
+    // Fill queue to MAX_QUEUED_WRITES with uncancelled active requests
+    const queued: Array<ReturnType<typeof capture>> = [];
+    for (let i = 0; i < sdk.MAX_QUEUED_WRITES; i += 1) {
+      queued.push(capture(sdk.deleteModel({ alias: `active-${i}` } as any)));
+    }
+
+    // A normal non-priority write is rejected
+    const normal = capture(sdk.deleteModel({ alias: 'rejected-normal' } as any));
+    await normal.tracked;
+    expect(normal.box.err?.certainty).toBe('failed');
+    expect(String(normal.box.err?.message)).toContain('write queue is full');
+
+    // A priority command (shutdownRuntime) bypasses the full queue and enqueues directly without cancelling the active queue
+    const shutdownPromise = sdk.sendInternal('shutdownRuntime');
+
+    // A second priority shutdown command while one is already queued is rejected to keep priority bounded
+    const secondShutdown = capture(sdk.sendInternal('shutdownRuntime'));
+    await secondShutdown.tracked;
+    expect(secondShutdown.box.err?.certainty).toBe('failed');
+    expect(String(secondShutdown.box.err?.message)).toContain('priority lifecycle shutdown is already queued');
+
+    gateNativeWrite = false;
+    releaseNativeWrite?.();
+
+    const shutdownId = await waitForWrite('shutdownRuntime');
+    expect(shutdownId).toBeDefined();
+    harness.emitStdout({ id: shutdownId, result: { listenersClosed: true, modelsUnloaded: [] } });
+
+    await expect(shutdownPromise).resolves.toEqual({
+      id: shutdownId,
+      result: { listenersClosed: true, modelsUnloaded: [] },
+    });
+    sdk.resetSDK();
+    await Promise.all(queued.map((q) => q.tracked));
+  });
+
+  it('prunes cancelled or settled requests from write queue so they do not consume capacity', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    gateNativeWrite = true;
+
+    const first = sdk.getEps();
+    first.catch(() => {});
+    await waitFor('the first native write to block', () => nativeWriteStarted);
+
+    const queuedIds: number[] = [];
+    const queued: Array<ReturnType<typeof capture>> = [];
+    for (let i = 0; i < sdk.MAX_QUEUED_WRITES; i += 1) {
+      let reqId = 0;
+      queued.push(
+        capture(
+          sdk.chatCompletionStream('m', [{ role: 'user', content: `msg-${i}` }], () => {}, undefined, (id) => {
+            reqId = id;
+          }),
+        ),
+      );
+      queuedIds.push(reqId);
+    }
+
+    // Cancel the first queued item while it's still waiting in write queue
+    expect(sdk.cancelBeforeDispatch(queuedIds[0])).toBe(true);
+    await queued[0].tracked;
+    expect(queued[0].box.err?.certainty).toBe('cancelled');
+
+    // Because queuedIds[0] was pruned, enqueuing one more item should now succeed rather than fail
+    const next = capture(sdk.deleteModel({ alias: 'allowed-after-prune' } as any));
+    // It should not immediately fail with "write queue is full"
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(next.box.err).toBeUndefined();
+
+    gateNativeWrite = false;
+    releaseNativeWrite?.();
+    const firstId = JSON.parse(harness.writes.find((line) => line.includes('"getEps"'))!).id;
+    harness.emitStdout({ id: firstId, result: [] });
+    await expect(first).resolves.toEqual([]);
+    sdk.resetSDK();
+    await Promise.all(queued.slice(1).map((q) => q.tracked));
+    await next.tracked;
+  });
+
+  it('rejects writes exceeding aggregate queued-byte limit before dispatch', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    gateNativeWrite = true;
+
+    const first = sdk.getEps();
+    first.catch(() => {});
+    await waitFor('the first native write to block', () => nativeWriteStarted);
+
+    let firstLarge!: ReturnType<typeof capture>;
+    let secondLarge!: ReturnType<typeof capture>;
+    try {
+      const simulatedSize = 60 * 1024 * 1024;
+      vi.stubGlobal(
+        'TextEncoder',
+        class {
+          encode() {
+            return { byteLength: simulatedSize };
+          }
+        },
+      );
+
+      firstLarge = capture(
+        sdk.chatCompletionStream('m', [{ role: 'user', content: 'large-1' }], () => {}),
+      );
+      secondLarge = capture(
+        sdk.chatCompletionStream('m', [{ role: 'user', content: 'large-2' }], () => {}),
+      );
+      // Third large write would exceed MAX_QUEUED_WRITE_BYTES (160MB: 60 + 60 + 60 = 180MB > 160MB)
+      const thirdLarge = capture(
+        sdk.chatCompletionStream('m', [{ role: 'user', content: 'large-3' }], () => {}),
+      );
+      await thirdLarge.tracked;
+
+      expect(thirdLarge.box.err?.certainty).toBe('failed');
+      expect(String(thirdLarge.box.err?.message)).toContain('bytes queued');
+      expect(harness.writes.filter((line) => line.includes('large-3'))).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+
+    gateNativeWrite = false;
+    releaseNativeWrite?.();
+    const firstId = JSON.parse(harness.writes.find((line) => line.includes('"getEps"'))!).id;
+    harness.emitStdout({ id: firstId, result: [] });
+    await expect(first).resolves.toEqual([]);
+    sdk.resetSDK();
+    await Promise.all([firstLarge.tracked, secondLarge.tracked]);
   });
 
   it('keeps transport failure sticky even if a ready frame arrives later', async () => {

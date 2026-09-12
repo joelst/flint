@@ -422,6 +422,7 @@ export const sdkState: Writable<FlintSDKState> = writable(initialState);
  * all with one message would tell the user something false about the second kind.
  */
 function drainPending(cause: InterruptionCause, detail: string) {
+  sidecarProcess?.clearQueue?.();
   for (const { reject, cmd, dispatched, deadlineTimer } of pending.values()) {
     if (deadlineTimer) clearTimeout(deadlineTimer);
     const actual: InterruptionCause = dispatched ? cause : 'not-dispatched';
@@ -654,8 +655,10 @@ async function spawnSidecar() {
     console.log(`[sdk] Sidecar process closed (exit code: ${data?.code})`);
     const closedGeneration = generation;
     const expectedShutdown = expectedShutdownGeneration === closedGeneration;
+    const closingProcess = sidecarProcess;
     sidecarReady = false;
     sidecarProcess = null;
+    closingProcess?.clearQueue?.();
     cleanupListeners();
     // The manager lived inside that process. Leaving `managerInstance` set would make
     // initializeSDK() return true immediately on the next Retry, reporting "ready" without
@@ -789,7 +792,11 @@ async function spawnSidecar() {
   if (closeData) {
     throw new Error(formatStartupFailure(stdoutEventFired, stderrLines, closeData, commandError));
   }
+  let queuedBytes = 0;
   const writeQueue: Array<{
+    id?: number;
+    priority?: boolean;
+    bytes?: number;
     operation: () => Promise<any>;
     resolve: (value: any) => void;
     reject: (error: any) => void;
@@ -799,6 +806,7 @@ async function spawnSidecar() {
     if (writeActive) return;
     const next = writeQueue.shift();
     if (!next) return;
+    queuedBytes = Math.max(0, queuedBytes - (next.bytes ?? 0));
     writeActive = true;
     let result: Promise<any>;
     try {
@@ -813,9 +821,72 @@ async function spawnSidecar() {
   };
   sidecarProcess = {
     generation: started.generation,
-    enqueue<T>(operation: () => Promise<T>) {
+    clearQueue() {
+      for (let i = 0; i < writeQueue.length; i += 1) {
+        writeQueue[i].resolve(undefined);
+      }
+      writeQueue.length = 0;
+      queuedBytes = 0;
+    },
+    removeQueuedWrite(id: number) {
+      const idx = writeQueue.findIndex((item) => item.id === id);
+      if (idx >= 0) {
+        const [removed] = writeQueue.splice(idx, 1);
+        queuedBytes = Math.max(0, queuedBytes - (removed.bytes ?? 0));
+        removed.resolve(undefined);
+      }
+    },
+    enqueue<T>(
+      operation: () => Promise<T>,
+      options?: { id?: number; priority?: boolean; bytes?: number },
+    ) {
+      const requestBytes = options?.bytes ?? 0;
+      const isPriority = !!options?.priority;
+      const maxCount = isPriority ? MAX_QUEUED_WRITES + 1 : MAX_QUEUED_WRITES;
+      const maxBytes = isPriority
+        ? MAX_QUEUED_WRITE_BYTES + NATIVE_RUNTIME_MAX_FRAME_BYTES
+        : MAX_QUEUED_WRITE_BYTES;
+
+      if (
+        writeQueue.length >= maxCount ||
+        queuedBytes + requestBytes > maxBytes
+      ) {
+        for (let i = writeQueue.length - 1; i >= 0; i -= 1) {
+          const item = writeQueue[i];
+          if (item.id !== undefined && !pending.has(item.id)) {
+            writeQueue.splice(i, 1);
+            queuedBytes = Math.max(0, queuedBytes - (item.bytes ?? 0));
+            item.resolve(undefined);
+          }
+        }
+      }
+      if (isPriority && writeQueue.some((item) => item.priority)) {
+        return Promise.reject(
+          new Error('A priority lifecycle shutdown is already queued.'),
+        );
+      }
+      if (writeQueue.length >= maxCount) {
+        return Promise.reject(
+          new Error(`The runtime write queue is full (${MAX_QUEUED_WRITES} pending writes).`),
+        );
+      }
+      if (queuedBytes + requestBytes > maxBytes) {
+        return Promise.reject(
+          new Error(
+            `The runtime write queue is full (${MAX_QUEUED_WRITE_BYTES} bytes queued).`,
+          ),
+        );
+      }
       return new Promise<T>((resolve, reject) => {
-        writeQueue.push({ operation, resolve, reject });
+        queuedBytes += requestBytes;
+        writeQueue.push({
+          operation,
+          resolve,
+          reject,
+          id: options?.id,
+          priority: isPriority,
+          bytes: requestBytes,
+        });
         runNextWrite();
       });
     },
@@ -897,7 +968,7 @@ async function spawnSidecar() {
  * `async` wrapper would have parked the caller on the preparation instead, and a request already
  * answered as cancelled would have gone on waiting for a start it was no longer part of.
  */
-function sendInternal(
+export function sendInternal(
   cmd: SidecarCommandName,
   payload: any = {},
   onStream?: (delta: string) => void,
@@ -964,6 +1035,9 @@ function sendInternal(
     if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer);
     streamHandlers.delete(id);
     deleteProgressHandler(id);
+    if (!entry.dispatched) {
+      sidecarProcess?.removeQueuedWrite?.(id);
+    }
     fn();
   };
 
@@ -1088,54 +1162,64 @@ function sendInternal(
 
       const processToWrite = sidecarProcess;
       const generationToWrite = sidecarGeneration;
-      void processToWrite.enqueue(async () => {
-        if (!active()) return;
-        if (
-          sidecarProcess !== processToWrite ||
-          sidecarGeneration !== generationToWrite ||
-          !sidecarReady
-        ) {
-          settle(() =>
-            entry.reject(
-              new SidecarOperationError(
-                cmd,
-                'failed',
-                'The runtime changed before this request could be sent.',
-              ),
-            ),
-          );
-          return;
-        }
-        if (onDispatch) {
-          try {
-            onDispatch(generationToWrite);
-          } catch (e) {
+      processToWrite
+        .enqueue(async () => {
+          if (!active()) return;
+          if (
+            sidecarProcess !== processToWrite ||
+            sidecarGeneration !== generationToWrite ||
+            !sidecarReady
+          ) {
             settle(() =>
               entry.reject(
                 new SidecarOperationError(
                   cmd,
                   'failed',
-                  'The request was abandoned before it was sent.',
-                  e,
+                  'The runtime changed before this request could be sent.',
                 ),
               ),
             );
             return;
           }
-        }
-        if (!active()) return;
-        entry.dispatched = true;
-        progressHandlers.get(id)?.watchdog?.start();
-        try {
-          await processToWrite.writeNow(line);
-        } catch (e) {
+          if (onDispatch) {
+            try {
+              onDispatch(generationToWrite);
+            } catch (e) {
+              settle(() =>
+                entry.reject(
+                  new SidecarOperationError(
+                    cmd,
+                    'failed',
+                    'The request was abandoned before it was sent.',
+                    e,
+                  ),
+                ),
+              );
+              return;
+            }
+          }
+          if (!active()) return;
+          entry.dispatched = true;
+          progressHandlers.get(id)?.watchdog?.start();
+          try {
+            await processToWrite.writeNow(line);
+          } catch (e) {
+            settle(() =>
+              entry.reject(
+                new SidecarOperationError(cmd, certaintyFor(cmd, 'write-failed'), String(e), e),
+              ),
+            );
+          }
+        }, { id, priority: cmd === 'shutdownRuntime', bytes: frameBytes })
+        .catch((e: unknown) => {
           settle(() =>
             entry.reject(
-              new SidecarOperationError(cmd, certaintyFor(cmd, 'write-failed'), String(e), e),
+              e instanceof SidecarOperationError
+                ? e
+                : new SidecarOperationError(cmd, 'failed', String((e as any)?.message ?? e), e),
             ),
           );
-        }
-      });
+        });
     } catch (e) {
       // Startup itself failed, so the request was never written.
       settle(() =>
@@ -1169,6 +1253,7 @@ export function cancelBeforeDispatch(id: number): boolean {
   if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer);
   streamHandlers.delete(id);
   deleteProgressHandler(id);
+  sidecarProcess?.removeQueuedWrite?.(id);
   entry.reject(new SidecarOperationError(entry.cmd, 'cancelled'));
   return true;
 }
@@ -1883,6 +1968,8 @@ export interface RuntimeQuitResult {
 
 let runtimeQuitPromise: Promise<RuntimeQuitResult> | null = null;
 export const NATIVE_RUNTIME_MAX_FRAME_BYTES = 80 * 1024 * 1024;
+export const MAX_QUEUED_WRITES = 256;
+export const MAX_QUEUED_WRITE_BYTES = 160 * 1024 * 1024;
 
 function normalizeRuntimeTimeout(value: number | undefined, fallback: number, minimum: number): number {
   return Number.isFinite(value) && value! >= 0

@@ -4,6 +4,7 @@ use std::process::Command;
 use crate::runtime_child::{ChildExit, RuntimeChild, RuntimePipes, RuntimeWriter};
 use crate::runtime_state::{RuntimePhase, RuntimeState};
 
+#[derive(Default)]
 pub struct RuntimeSupervisor {
     state: RuntimeState,
     child: Option<RuntimeChild>,
@@ -12,15 +13,6 @@ pub struct RuntimeSupervisor {
 pub struct RuntimeStart {
     pub generation: u64,
     pub pipes: RuntimePipes,
-}
-
-impl Default for RuntimeSupervisor {
-    fn default() -> Self {
-        Self {
-            state: RuntimeState::default(),
-            child: None,
-        }
-    }
 }
 
 impl RuntimeSupervisor {
