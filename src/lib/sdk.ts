@@ -1,7 +1,7 @@
 import { writable, type Writable } from 'svelte/store';
+import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { Command } from '@tauri-apps/plugin-shell';
-import { resolveResource, resourceDir } from '@tauri-apps/api/path';
-import { exists } from '@tauri-apps/plugin-fs';
 import {
   SIDECAR_PROTOCOL_VERSION,
   type LaneName,
@@ -21,13 +21,10 @@ import {
   type NodePreflightResult,
 } from './node-runtime';
 import {
-  SIDECAR_RESOURCE_CANDIDATES,
-  selectSidecarSpawnPaths,
   parseNodeRuntimePreference,
   nodeRuntimeProbeOrder,
   shellProgramForNodeMode,
   type NodeRuntimeMode,
-  type ResolvedSidecarCandidate,
 } from './sidecar-paths';
 import {
   createProgressStallWatchdog,
@@ -116,6 +113,7 @@ export interface ModelContextInfo {
 let sidecarProcess: any = null;
 let sidecarReady = false;
 let runtimeQuitRequested = false;
+let sidecarStartEpoch = 0;
 let expectedShutdownGeneration: number | null = null;
 const closeObservers = new Map<number, Set<() => void>>();
 /** Last successful Node runtime (bundled externalBin vs PATH). */
@@ -218,14 +216,6 @@ function createNodeVersionCommand(mode: NodeRuntimeMode) {
     return Command.sidecar(prog.name, ['-v']);
   }
   return Command.create(prog.name, ['-v']);
-}
-
-function createSidecarSpawnCommand(mode: NodeRuntimeMode, script: string, opts: any) {
-  const prog = shellProgramForNodeMode(mode);
-  if (prog.kind === 'sidecar') {
-    return Command.sidecar(prog.name, [script], opts);
-  }
-  return Command.create(prog.name, [script], opts);
 }
 
 async function probeNodeMode(mode: NodeRuntimeMode): Promise<NodePreflightResult> {
@@ -535,6 +525,7 @@ async function startSidecar(): Promise<void> {
 }
 
 async function spawnSidecar() {
+  const startEpoch = sidecarStartEpoch;
   if (sidecarProcess) return;
   if (runtimeQuitRequested) {
     throw new Error('The runtime is shutting down.');
@@ -542,190 +533,108 @@ async function spawnSidecar() {
   updateRuntime({ process: 'starting', manager: 'unknown', service: 'unknown', models: 'unknown' });
 
   const nodeCheck = await ensureNodeRuntime();
+  if (startEpoch !== sidecarStartEpoch) {
+    throw new Error('The runtime start was cancelled.');
+  }
   if (!nodeCheck.ok) {
     updateState({ ready: false, error: nodeCheck.message });
     updateRuntime({ process: 'stopped', manager: 'unknown', service: 'unknown', models: 'unknown' });
     throw new Error(nodeCheck.message);
   }
 
-  // Resolve resource keys via Tauri, then select layout (flattened / legacy / dev) with pure helpers.
-  // IMPORTANT: resolveResource only joins paths — it does not check the file exists.
-  const candidates: ResolvedSidecarCandidate[] = [];
-  for (const key of SIDECAR_RESOURCE_CANDIDATES) {
-    try {
-      const resolvedPath = await resolveResource(key);
-      let fileExists = false;
-      try {
-        fileExists = await exists(resolvedPath);
-      } catch (e) {
-        // fs scope may block; fall through with a packaged-path heuristic
-        console.log(`[sdk] exists() check failed for ${resolvedPath}: ${e}`);
-        fileExists = /[/\\]sidecar[/\\]foundry-sidecar\.js$/i.test(resolvedPath);
-      }
-      candidates.push({ key, resolvedPath, exists: fileExists });
-      if (!fileExists) {
-        console.log(`[sdk] Sidecar candidate missing (${key}): ${resolvedPath}`);
-      }
-    } catch {
-      // resolveResource unavailable for this key
-    }
-  }
-
-  let resourceDirPath: string | undefined;
-  try {
-    resourceDirPath = await resourceDir();
-    console.log(`[sdk] Resource dir: ${resourceDirPath}`);
-  } catch {
-    console.log(`[sdk] resourceDir unavailable`);
-  }
-
-  const spawnPaths = selectSidecarSpawnPaths({
-    candidates,
-    resourceDir: resourceDirPath,
-  });
-  const { script, baseDir, isDev, nodePath } = spawnPaths;
-  if (isDev) {
-    console.log(`[sdk] Dev/fallback sidecar resolution: script=${script}`);
-  } else {
-    console.log(`[sdk] Production sidecar resolution: script=${script}`);
-  }
-
-  // NODE_PATH only; native Foundry core discovery stays in the sidecar (platform-correct).
-  const env: Record<string, string> = {};
-  if (nodePath) {
-    env.NODE_PATH = nodePath;
-  }
-
-  const opts: any = baseDir
-    ? { cwd: baseDir, env }
-    : Object.keys(env).length
-      ? { env }
-      : undefined;
-
   const nodeMode: NodeRuntimeMode = activeNodeMode ?? 'path';
-  console.log(
-    `[sdk] Spawning sidecar - node=${nodeMode}, isDev=${isDev}, script=${script}, NODE_PATH=${env.NODE_PATH || ''}`,
-  );
+  console.log(`[sdk] Asking native supervisor to spawn sidecar with node=${nodeMode}`);
 
-  const command = createSidecarSpawnCommand(nodeMode, script, opts);
-
-  // Attach stdout listener to the command (works before/after spawn in plugin-shell)
-  let stdoutBuffer = '';
   let stdoutEventFired = false;
   const stderrLines: string[] = [];
   let closeData: any = null;
   let commandError: string | null = null;
-  // Set once spawn() resolves. A child keeps its own event listeners after a replacement is
-  // spawned, so every incoming line must be checked against the live process generation too.
+  let transportFailed = false;
   let myGeneration: number | null = null;
+  let startingNative = false;
+  let eventGenerationFloor = 1;
   let supersededOutputLogged = false;
+  const unlisteners: UnlistenFn[] = [];
+  const cleanupListeners = () => {
+    for (const unlisten of unlisteners.splice(0)) unlisten();
+  };
+  const ensureStartAuthorized = () => {
+    if (startEpoch === sidecarStartEpoch) return;
+    cleanupListeners();
+    throw new Error('The runtime start was cancelled.');
+  };
 
-  const processStdoutLine = (line: string) => {
-    if (!line.trim()) return;
-    if (myGeneration !== null && myGeneration !== sidecarGeneration) {
+  const processStdoutMessage = (msg: any, generation: number) => {
+    stdoutEventFired = true;
+    if (generation !== sidecarGeneration) {
       if (!supersededOutputLogged) {
         console.warn('[sdk] Ignoring stdout from a superseded sidecar child');
         supersededOutputLogged = true;
       }
       return;
     }
-    console.log(`[sidecar stdout] ${line}`);
-    try {
-      const msg = JSON.parse(line);
-      if (msg.id && msg.stream) {
-        const onStream = streamHandlers.get(msg.id);
-        if (onStream) {
-          const delta = String(
-            msg.delta ??
+    console.log(`[sidecar stdout] ${JSON.stringify(msg)}`);
+    if (msg.id && msg.stream) {
+      const onStream = streamHandlers.get(msg.id);
+      if (onStream) {
+        const delta = String(
+          msg.delta ??
             msg.chunk?.choices?.[0]?.delta?.content ??
             msg.chunk?.choices?.[0]?.message?.content ??
             ''
-          );
-          if (delta) onStream(delta);
-        }
+        );
+        if (delta) onStream(delta);
+      }
+      return;
+    }
+    if (msg.id && msg.progress !== undefined) {
+      const handler = progressHandlers.get(msg.id);
+      if (handler) {
+        handler.watchdog?.progress();
+        try { handler.onProgress?.(Number(msg.progress), msg); } catch {}
+      }
+      if (msg.alias) {
+        console.log(`[sdk] download progress ${msg.alias}: ${msg.progress}%`);
+      }
+      return;
+    }
+    if (msg.id && pending.has(msg.id)) {
+      const p = pending.get(msg.id)!;
+      pending.delete(msg.id);
+      if (p.deadlineTimer) clearTimeout(p.deadlineTimer);
+      streamHandlers.delete(msg.id);
+      deleteProgressHandler(msg.id);
+      msg.error
+        ? p.reject(
+            new SidecarOperationError(
+              p.cmd,
+              msg.certainty === 'cancelled' ? 'cancelled' : 'failed',
+              String(msg.error),
+            ),
+          )
+        : p.resolve(msg);
+    } else if (msg.type === 'log') {
+      console.log(`[sidecar] ${msg.level}: ${msg.message}`);
+      sdkState.update(s => ({ ...s, logs: [...s.logs.slice(-199), { ts: msg.timestamp ?? Date.now(), level: msg.level ?? 'info', message: msg.message, source: 'sidecar' as const }] }));
+    } else if (msg.ready) {
+      if (transportFailed) return;
+      if (msg.protocolVersion !== SIDECAR_PROTOCOL_VERSION) {
+        console.error(`[sdk] Unsupported sidecar protocol version: ${String(msg.protocolVersion)}`);
+        commandError = `Unsupported sidecar protocol version: ${String(msg.protocolVersion)}`;
         return;
       }
-      if (msg.id && msg.progress !== undefined) {
-        // Progress messages (e.g. from download) should not resolve the pending promise.
-        // The final reply (with ok or error) will do that.
-        const handler = progressHandlers.get(msg.id);
-        if (handler) {
-          handler.watchdog?.progress();
-          try { handler.onProgress?.(Number(msg.progress), msg); } catch {}
-        }
-        if (msg.alias) {
-          console.log(`[sdk] download progress ${msg.alias}: ${msg.progress}%`);
-        }
-        return;
-      }
-      if (msg.id && pending.has(msg.id)) {
-        const p = pending.get(msg.id)!;
-        // Settled here and nowhere else afterwards: a `close` following a reply, or a write
-        // rejection that lands late, must not overwrite an answer the child actually gave.
-        pending.delete(msg.id);
-        if (p.deadlineTimer) clearTimeout(p.deadlineTimer);
-        streamHandlers.delete(msg.id);
-        deleteProgressHandler(msg.id);
-        // The child answered, so this is not a lost acknowledgement — the operation genuinely
-        // did not complete. It may still have done part of its work, which `describeOutcome`
-        // says rather than implying a rollback that never happens.
-        msg.error
-          ? p.reject(
-              new SidecarOperationError(
-                p.cmd,
-                msg.certainty === 'cancelled' ? 'cancelled' : 'failed',
-                String(msg.error),
-              ),
-            )
-          : p.resolve(msg);
-      } else if (msg.type === 'log') {
-        console.log(`[sidecar] ${msg.level}: ${msg.message}`);
-        sdkState.update(s => ({ ...s, logs: [...s.logs.slice(-199), { ts: msg.timestamp ?? Date.now(), level: msg.level ?? 'info', message: msg.message, source: 'sidecar' as const }] }));
-      } else if (msg.ready) {
-        if (msg.protocolVersion !== SIDECAR_PROTOCOL_VERSION) {
-          console.error(
-            `[sdk] Unsupported sidecar protocol version: ${String(msg.protocolVersion)}`,
-          );
-          commandError = `Unsupported sidecar protocol version: ${String(msg.protocolVersion)}`;
-          return;
-        }
-        console.log(`[sdk] Sidecar ready signal received (protocol ${msg.protocolVersion})!`);
-        sidecarReady = true;
-        updateRuntime({ process: 'ready', manager: 'uninitialized' });
-      }
-    } catch (e) {
-      // Ignore parse errors for non-json lines
+      console.log(`[sdk] Sidecar ready signal received (protocol ${msg.protocolVersion})!`);
+      sidecarReady = true;
+      void invoke('runtime_mark_ready', { generation }).catch((error) => {
+        console.warn('[sdk] Native supervisor did not accept runtime readiness', error);
+      });
+      updateRuntime({ process: 'ready', manager: 'uninitialized' });
     }
   };
 
-  const processStdoutText = (text: string) => {
-    stdoutBuffer += text;
-
-    // The Tauri shell plugin usually emits strings, and depending on platform
-    // those strings may be line-oriented with the newline already stripped.
-    const lines = stdoutBuffer.split(/\r?\n/);
-    stdoutBuffer = lines[lines.length - 1]; // Keep incomplete line
-
-    lines.slice(0, -1).forEach(processStdoutLine);
-
-    const buffered = stdoutBuffer.trim();
-    if (buffered.startsWith('{') && buffered.endsWith('}')) {
-      processStdoutLine(stdoutBuffer);
-      stdoutBuffer = '';
-    }
-  };
-
-  command.stdout.on('data', (data: string | Uint8Array) => {
-    stdoutEventFired = true;
-    const text = decodeShellOutput(data);
-    console.log(`[sdk] stdout.on('data') fired: ${text.length} bytes`);
-    processStdoutText(text);
-  });
-
-  // Add listener event to detect if listener is even attached
-  console.log(`[sdk] stdout listeners count: ${command.stdout.listenerCount('data')}`);
-  command.stderr.on('data', (data: string | Uint8Array) => {
-    const text = decodeShellOutput(data).trim();
+  const processStderr = (text: string, generation: number) => {
+    if (generation !== sidecarGeneration) return;
+    text = text.trim();
     if (!text) return;
     stderrLines.push(text);
     if (stderrLines.length > 10) {
@@ -733,25 +642,21 @@ async function spawnSidecar() {
     }
     console.error(`[sidecar stderr] ${text}`);
     sdkState.update(s => ({ ...s, logs: [...s.logs.slice(-199), { ts: Date.now(), level: 'error' as const, message: text, source: 'sdk' as const }] }));
-  });
+  };
 
-  // Until spawn() resolves this attempt has no generation, but it is still the only attempt in
-  // flight (startSidecar is single-flight), so its close/error events are ours.
-  const ownsGlobalState = () => myGeneration === null || myGeneration === sidecarGeneration;
-
-  command.on('close', (data: any) => {
-    closeData = data;
-    console.log(`[sdk] Sidecar process closed (exit code: ${data?.code})`);
-    // A killed older child can emit `close` after Retry already spawned a replacement. Leaving
-    // this unguarded would invalidate the new child and drain its pending requests.
-    if (!ownsGlobalState()) {
+  const processClose = (data: any, generation: number) => {
+    if (generation !== sidecarGeneration) {
+      if (generation === myGeneration) cleanupListeners();
       console.log('[sdk] Ignoring close from a superseded sidecar child');
       return;
     }
-    const closedGeneration = myGeneration ?? sidecarGeneration;
+    closeData = data;
+    console.log(`[sdk] Sidecar process closed (exit code: ${data?.code})`);
+    const closedGeneration = generation;
     const expectedShutdown = expectedShutdownGeneration === closedGeneration;
     sidecarReady = false;
     sidecarProcess = null;
+    cleanupListeners();
     // The manager lived inside that process. Leaving `managerInstance` set would make
     // initializeSDK() return true immediately on the next Retry, reporting "ready" without
     // ever running init — the app would look healthy against a dead child.
@@ -783,24 +688,147 @@ async function spawnSidecar() {
     drainPending('connection-lost', 'The runtime process stopped.');
     notifySidecarClose(closedGeneration);
     if (expectedShutdown) expectedShutdownGeneration = null;
-  });
+  };
 
-  command.on('error', (error: any) => {
-    commandError = String(error);
-    console.error(`[sdk] Sidecar error event:`, error);
-    if (!ownsGlobalState()) return;
-    updateState({ error: `Sidecar error: ${error}` });
-    drainPending('connection-lost', `The runtime process reported an error: ${error}`);
-  });
+  const handleNativeEvent = (generation: number, callback: () => void) => {
+    if (generation < eventGenerationFloor) return;
+    if (startingNative && startEpoch !== sidecarStartEpoch) return;
+    if (myGeneration === null) {
+      if (!startingNative) return;
+      myGeneration = generation;
+      sidecarGeneration = generation;
+    }
+    if (generation === myGeneration) callback();
+  };
 
-  // spawn() returns the Child process which has .write()
-  console.log(`[sdk] Calling spawn()...`);
-  const spawnedProcess = await command.spawn();
+  let started: { generation: number };
+  try {
+    unlisteners.push(
+      await listen<{ generation: number; message: any }>('flint://runtime-stdout', ({ payload }) => {
+      handleNativeEvent(payload.generation, () => processStdoutMessage(payload.message, payload.generation));
+      }),
+    );
+    ensureStartAuthorized();
+    unlisteners.push(
+      await listen<{ generation: number; text: string }>('flint://runtime-stderr', ({ payload }) => {
+      handleNativeEvent(payload.generation, () => processStderr(payload.text, payload.generation));
+      }),
+    );
+    ensureStartAuthorized();
+    unlisteners.push(
+      await listen<{ generation: number; text: string }>('flint://runtime-error', ({ payload }) => {
+      handleNativeEvent(payload.generation, () => {
+        if (payload.generation !== sidecarGeneration) return;
+        transportFailed = true;
+        sidecarReady = false;
+        managerReady = false;
+        commandError = payload.text;
+        console.error('[sdk] Native runtime transport error:', payload.text);
+        updateState({ ready: false, error: `Sidecar error: ${payload.text}` });
+        updateRuntime({
+          process: 'stopping',
+          manager: 'unknown',
+          service: 'unknown',
+          models: 'unknown',
+        });
+        drainPending('connection-lost', `The runtime process reported an error: ${payload.text}`);
+        void invoke('runtime_force_stop', { generation: payload.generation }).catch(() => {});
+      });
+      }),
+    );
+    ensureStartAuthorized();
+    unlisteners.push(
+      await listen<{ generation: number; code?: number | null }>('flint://runtime-exit', ({ payload }) => {
+      handleNativeEvent(payload.generation, () => processClose(payload, payload.generation));
+      }),
+    );
+    ensureStartAuthorized();
+
+    const existing = await invoke<{ generation: number; phase: string }>('runtime_status');
+    ensureStartAuthorized();
+    eventGenerationFloor = existing.generation + 1;
+    if (['starting', 'ready', 'shuttingDown'].includes(existing.phase)) {
+      await invoke('runtime_force_stop', { generation: existing.generation });
+      ensureStartAuthorized();
+      const deadline = Date.now() + 2_000;
+      while (Date.now() < deadline) {
+        const status = await invoke<{ generation: number; phase: string }>('runtime_status');
+        ensureStartAuthorized();
+        if (status.phase === 'exited' || status.phase === 'stopped') break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      const status = await invoke<{ generation: number; phase: string }>('runtime_status');
+      ensureStartAuthorized();
+      if (status.phase !== 'exited' && status.phase !== 'stopped') {
+        throw new Error('The previous runtime child did not terminate, so Flint did not replace it.');
+      }
+    }
+
+    console.log(`[sdk] Calling native runtime_start...`);
+    ensureStartAuthorized();
+    startingNative = true;
+    started = await invoke<{ generation: number }>('runtime_start', { nodeMode });
+  } catch (error) {
+    startingNative = false;
+    cleanupListeners();
+    throw error;
+  }
+  startingNative = false;
+  if (startEpoch !== sidecarStartEpoch) {
+    void invoke('runtime_force_stop', { generation: started.generation }).catch(() => {});
+    cleanupListeners();
+    throw new Error('The runtime start was cancelled.');
+  }
+  if (myGeneration !== null && myGeneration !== started.generation) {
+    void invoke('runtime_force_stop', { generation: started.generation }).catch(() => {});
+    cleanupListeners();
+    throw new Error('The native runtime generation changed while it was starting.');
+  }
+  myGeneration = started.generation;
+  sidecarGeneration = started.generation;
   if (closeData) {
     throw new Error(formatStartupFailure(stdoutEventFired, stderrLines, closeData, commandError));
   }
-  sidecarProcess = spawnedProcess;
-  myGeneration = ++sidecarGeneration;
+  const writeQueue: Array<{
+    operation: () => Promise<any>;
+    resolve: (value: any) => void;
+    reject: (error: any) => void;
+  }> = [];
+  let writeActive = false;
+  const runNextWrite = () => {
+    if (writeActive) return;
+    const next = writeQueue.shift();
+    if (!next) return;
+    writeActive = true;
+    let result: Promise<any>;
+    try {
+      result = next.operation();
+    } catch (error) {
+      result = Promise.reject(error);
+    }
+    result.then(next.resolve, next.reject).finally(() => {
+      writeActive = false;
+      runNextWrite();
+    });
+  };
+  sidecarProcess = {
+    generation: started.generation,
+    enqueue<T>(operation: () => Promise<T>) {
+      return new Promise<T>((resolve, reject) => {
+        writeQueue.push({ operation, resolve, reject });
+        runNextWrite();
+      });
+    },
+    writeNow(line: string) {
+      return invoke('runtime_write', {
+        generation: started.generation,
+        frame: line.endsWith('\n') ? line.slice(0, -1) : line,
+      });
+    },
+    kill() {
+      return invoke('runtime_force_stop', { generation: started.generation });
+    },
+  };
   if (runtimeQuitRequested) {
     expectedShutdownGeneration = myGeneration;
     updateRuntime({ generation: myGeneration, process: 'stopping' });
@@ -826,11 +854,17 @@ async function spawnSidecar() {
       }, 20000); // 20s timeout to be extra patient on first startup
 
       const checkReady = () => {
-        if (sidecarReady) {
+        if (startEpoch !== sidecarStartEpoch) {
+          if (readyTimeout) clearTimeout(readyTimeout);
+          reject(new Error('The runtime start was cancelled.'));
+        } else if (transportFailed || commandError) {
+          if (readyTimeout) clearTimeout(readyTimeout);
+          reject(new Error(formatStartupFailure(stdoutEventFired, stderrLines, closeData, commandError)));
+        } else if (sidecarReady) {
           console.log(`[sdk] Init complete: sidecar is ready!`);
           if (readyTimeout) clearTimeout(readyTimeout);
           resolve();
-        } else if (closeData || commandError) {
+        } else if (closeData) {
           if (readyTimeout) clearTimeout(readyTimeout);
           reject(new Error(formatStartupFailure(stdoutEventFired, stderrLines, closeData, commandError)));
         } else {
@@ -1026,6 +1060,19 @@ function sendInternal(
         );
         return;
       }
+      const frameBytes = new TextEncoder().encode(line.slice(0, -1)).byteLength;
+      if (frameBytes > NATIVE_RUNTIME_MAX_FRAME_BYTES) {
+        settle(() =>
+          entry.reject(
+            new SidecarOperationError(
+              cmd,
+              'failed',
+              `The runtime request exceeds the ${NATIVE_RUNTIME_MAX_FRAME_BYTES}-byte transport limit.`,
+            ),
+          ),
+        );
+        return;
+      }
       if (!sidecarProcess) {
         settle(() =>
           entry.reject(
@@ -1039,36 +1086,55 @@ function sendInternal(
       // no handler can settle the entry in between.
       if (!active()) return;
 
-      if (onDispatch) {
-        try {
-          onDispatch(sidecarGeneration);
-        } catch (e) {
+      const processToWrite = sidecarProcess;
+      const generationToWrite = sidecarGeneration;
+      void processToWrite.enqueue(async () => {
+        if (!active()) return;
+        if (
+          sidecarProcess !== processToWrite ||
+          sidecarGeneration !== generationToWrite ||
+          !sidecarReady
+        ) {
           settle(() =>
             entry.reject(
               new SidecarOperationError(
                 cmd,
                 'failed',
-                'The request was abandoned before it was sent.',
-                e,
+                'The runtime changed before this request could be sent.',
               ),
             ),
           );
           return;
         }
-      }
-
-      // From here the bytes may reach the child, so the outcome stops being provably negative.
-      entry.dispatched = true;
-      progressHandlers.get(id)?.watchdog?.start();
-      sidecarProcess.write(line).catch((e: any) => {
-        // A rejected write does not prove the bytes never arrived — it resolves when they reach
-        // the pipe, and rejecting says nothing about what the child had already read. So this
-        // is classified by what the command would have done, not treated as a clean failure.
-        settle(() =>
-          entry.reject(
-            new SidecarOperationError(cmd, certaintyFor(cmd, 'write-failed'), String(e), e),
-          ),
-        );
+        if (onDispatch) {
+          try {
+            onDispatch(generationToWrite);
+          } catch (e) {
+            settle(() =>
+              entry.reject(
+                new SidecarOperationError(
+                  cmd,
+                  'failed',
+                  'The request was abandoned before it was sent.',
+                  e,
+                ),
+              ),
+            );
+            return;
+          }
+        }
+        if (!active()) return;
+        entry.dispatched = true;
+        progressHandlers.get(id)?.watchdog?.start();
+        try {
+          await processToWrite.writeNow(line);
+        } catch (e) {
+          settle(() =>
+            entry.reject(
+              new SidecarOperationError(cmd, certaintyFor(cmd, 'write-failed'), String(e), e),
+            ),
+          );
+        }
       });
     } catch (e) {
       // Startup itself failed, so the request was never written.
@@ -1816,6 +1882,7 @@ export interface RuntimeQuitResult {
 }
 
 let runtimeQuitPromise: Promise<RuntimeQuitResult> | null = null;
+export const NATIVE_RUNTIME_MAX_FRAME_BYTES = 80 * 1024 * 1024;
 
 function normalizeRuntimeTimeout(value: number | undefined, fallback: number, minimum: number): number {
   return Number.isFinite(value) && value! >= 0
@@ -2197,7 +2264,8 @@ export function getManager(): any {
 
 export function resetSDK() {
   drainPending('connection-lost', 'The runtime was reset before answering.');
-  sidecarGeneration += 1;
+  sidecarStartEpoch += 1;
+  sidecarGeneration = 0;
   if (sidecarProcess) {
     try { sidecarProcess.kill(); } catch {}
   }

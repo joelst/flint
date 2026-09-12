@@ -121,9 +121,39 @@ pub fn encode_json_line(value: &Value, max_frame_bytes: usize) -> io::Result<Vec
     Ok(bytes)
 }
 
+pub fn validate_json_line(frame: &str, max_frame_bytes: usize) -> io::Result<Vec<u8>> {
+    if max_frame_bytes == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "maximum frame size must be positive",
+        ));
+    }
+    if frame.as_bytes().len() > max_frame_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "JSON-lines frame exceeds the configured limit",
+        ));
+    }
+    if frame.contains('\r') || frame.contains('\n') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "JSON-lines frame contains a line terminator",
+        ));
+    }
+    serde_json::from_str::<Value>(frame).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid JSON frame: {error}"),
+        )
+    })?;
+    let mut bytes = frame.as_bytes().to_vec();
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{encode_json_line, JsonLinesDecoder};
+    use super::{encode_json_line, validate_json_line, JsonLinesDecoder};
     use serde_json::json;
 
     #[test]
@@ -218,5 +248,16 @@ mod tests {
     #[test]
     fn rejects_oversized_encoded_frames() {
         assert!(encode_json_line(&json!({"cmd": "getStatus"}), 4).is_err());
+    }
+
+    #[test]
+    fn validates_the_exact_serialized_frame_before_appending_newline() {
+        assert_eq!(
+            validate_json_line(r#"{"text":"é"}"#, 13).expect("valid frame"),
+            "{\"text\":\"é\"}\n".as_bytes()
+        );
+        assert!(validate_json_line("{\"a\":1}\n{\"b\":2}", 128).is_err());
+        assert!(validate_json_line("{broken}", 128).is_err());
+        assert!(validate_json_line(r#"{"a":1}"#, 6).is_err());
     }
 }
