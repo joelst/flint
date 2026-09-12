@@ -11,7 +11,7 @@ not repeat it.
 |---|---|---|
 | Any code change — invariants, gotchas, protocol details | [`.github/copilot-instructions.md`](./.github/copilot-instructions.md) | — |
 | Build, test, run locally; sidecar/versioning mechanics | [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) | — |
-| What to implement next, in what order, why | [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md) | Its full finding register — only pull the one workstream section you need |
+| What to implement next, in what order, why | [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md) | — |
 | What's still open but not in-flight | [docs/BACKLOG.md](./docs/BACKLOG.md) | — |
 | Forward plan through 1.0, positioning, non-goals | [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) · [FLINT_DESIGN_SPEC.md](./FLINT_DESIGN_SPEC.md) | — |
 | What shipped, when | [CHANGELOG.md](./CHANGELOG.md) | `git log` for anything not in a changeset |

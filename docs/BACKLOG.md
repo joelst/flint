@@ -8,10 +8,11 @@ Verify an item against the tree before acting on it.
 
 ## Current execution priorities
 
-The [reliability execution plan](./PRODUCT_PLAN.md) owns the review findings,
-implementation dependencies, and acceptance gates. Fix data loss and runtime
-correctness without waiting for a backend rewrite. Expedite thin native
-lifecycle/process supervision; defer wholesale Foundry runtime replacement.
+The [reliability execution plan](./PRODUCT_PLAN.md) owns implementation
+sequencing and acceptance gates for post-0.7.0 work. Address open runtime
+hardening and compatibility requirements without waiting for a backend
+rewrite. Expedite thin native lifecycle/process supervision; defer wholesale
+Foundry runtime replacement.
 
 The 0.7.0 prerelease track is a focused foundation milestone. It adds release
 and documentation gates around existing work; it does not close, delete, or

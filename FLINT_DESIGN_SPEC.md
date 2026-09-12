@@ -159,7 +159,7 @@ Azure connections and other future feature work are tracked in
 **Phase 2 – Incremental Rust + polish**
 
 - Move selected hot paths or packaging concerns to Rust when reliability/footprint benefits are clear
-- A native Rust supervisor (see [PRODUCT_PLAN.md Workstream C](./docs/PRODUCT_PLAN.md#workstream-c-thin-native-ownership----expedited)) would remove the Node *process*, not just PATH dependence — bundled Node already removed the PATH requirement
+- A native Rust supervisor (see [PRODUCT_PLAN.md Native ownership and runtime architecture](./docs/PRODUCT_PLAN.md#workstream-c-thin-native-ownership----expedited)) supervises the runtime sidecar child, establishes exclusive stdio transport, and enforces single-instance lifecycle recovery
 - Azure connections and advanced enterprise controls: see [docs/BACKLOG.md](./docs/BACKLOG.md)
 
 ## 9. Prerequisites & first-run

@@ -11,11 +11,12 @@
 Following the 0.7.0 foundation release, follow-up work (targetable in 0.7.x patches or 0.8.0) focuses on:
 
 1. **Installed-path recovery & lifecycle verification**
+   - Implement native system tray Open/Quit and renderer-independent failed-quit recovery in the Rust desktop layer.
    - Packaged-app testing across Windows and macOS: verify single-instance focus/restore, tray Open/Quit, macOS Dock reopen, renderer-independent recovery, and clean exit.
    - Expand Rust supervisor integration tests against actual packaged bundles.
 
 2. **Endpoint & agent compatibility enhancements**
-   - User-facing endpoint behavioral conformance self-test (validating OpenAI API envelope, streaming termination, tool calling declarations).
+   - User-facing endpoint behavioral conformance self-test (validating OpenAI API envelope, streaming termination, live tool-call generation vs catalog declarations).
    - BYOM `/v1/embeddings` pipeline to unlock RAG workflows and external indexing tools.
    - Verified recipes for external coding agents (Continue, Cline, OpenClaw).
 
@@ -29,17 +30,21 @@ Following the 0.7.0 foundation release, follow-up work (targetable in 0.7.x patc
 5. **Throughput metrics & observability**
    - Detailed inference telemetry (TTFT, prompt tok/s, decode tok/s, load time) surfaced truthfully across gateway and UI paths.
 
-## Summary of delivered foundation (0.7.0)
+## Acceptance gates for post-0.7.0 workstreams
 
-Phase 0 through Phase 2 delivered the core architecture for Flint 0.7.0:
+Each post-0.7.0 workstream must satisfy these concrete acceptance criteria before shipping:
 
-- **Data integrity & conversation storage:** Versioned `ConversationRepository` with byte-preservation on `localStorage` (`flint-conversations-v2`), atomic commit points, legacy migration, multipart message support, conversation-specific settings, and structured JSON/Markdown/text export.
-- **Runtime coordination & lifecycle:** Versioned JSON-lines sidecar handshake, process generations, typed operation outcomes, convenience-start authorization under lifecycle locks, non-destructive service ensure, Stop fencing, and stale endpoint invalidation.
-- **Service & gateway:** OpenAI-compatible gateway with transparent on-demand model autoloading, SSE streaming normalisation, byte-bounded control/diagnostics captures, and reachable bind/port publication.
-- **Native supervision (Phase 2):** Rust-owned sidecar child process, exclusive stdio JSON-lines transport bridge, bounded write queues with backpressure, native single-instance enforcement, and output-gate fencing on exit.
-- **Packaging & dependencies:** Pinned Node 22 runtime bundled as an external binary, verified native Foundry core assets, and macOS Gatekeeper installation handling.
+- **Installed-path & lifecycle gate:** Native system tray Open restores the main window and Quit terminates the application across packaged Windows and macOS builds; macOS Dock reopen restores the main window; single-instance launch refocuses the existing instance; process termination cleanly tears down the sidecar child without orphaned processes; and recovery controls operate independently if the renderer webview fails.
+- **Endpoint & agent integration gate:** User-facing self-test verifies `/v1/models` envelope, model ID reuse in chat completions, streaming termination with `[DONE]`, disconnect cancellation, `usage` token count reconciliation with output, verified generation of valid `tool_calls` structures on actual tool-definition prompts (distinguishing verified behavior from catalog-declared `supportsToolCalling` metadata), and verified integration recipes pinned to tested client versions (Continue, Cline, OpenClaw).
+- **BYOM embeddings gate:** User-imported ONNX embedding models serve `/v1/embeddings` requests end-to-end with verified vector dimensionality and numeric output.
+- **Audio transcoding & transcription resilience gate:** Client-side WebM/Opus and MP3 decoding converts to 16 kHz mono PCM WAV before ingestion using Web Audio or lightweight decoders without heavyweight dependencies; word-level timestamps are introduced only after upstream Foundry SDK timing support is available and verified end-to-end.
+- **Updater UX gate:** In-app updater displays download progress, notifies when an update is ready to apply, prompts to restart, and supports user deferral.
+- **Inference telemetry gate:** Diagnostics and UI display accurate model load time, time to first token (TTFT), prompt tokens/sec, decode tokens/sec, and resolved provider/variant tags without ambiguous aggregated rates.
 
 ## Decisions
+
+<a id="workstream-c-thin-native-ownership----expedited"></a>
+### Native ownership and runtime architecture
 
 1. **Expedite a thin Rust lifecycle and process-supervision layer.** Native code owns single-instance behavior, tray Open/Quit, macOS Reopen, and exactly one runtime child. A failed renderer must not remove recovery controls.
 2. **Do not expedite a wholesale Foundry-to-Rust rewrite.** Keep the existing sidecar as the sole owner of the native Foundry manager, catalog, pool, and execution providers while correcting its behavior. Preserve native crash isolation from the desktop process.
@@ -70,7 +75,7 @@ Phase 0 through Phase 2 delivered the core architecture for Flint 0.7.0:
 | Capability | Target scope | Prerequisites |
 |---|---|---|
 | **Installed-path lifecycle qualification** | Packaged tray/quit, dock reopen, crash recovery, and single-instance verification on Windows/macOS. | Rust supervisor (Phase 2 delivered). |
-| **Endpoint behavioral self-test** | Diagnostic tool in UI testing OpenAI envelope, streaming chunk validity, and cancellation. | Gateway normalization (Phase 1B delivered). |
+| **Endpoint behavioral self-test** | Diagnostic tool in UI testing OpenAI envelope, model-ID reuse, streaming chunk validity, cancellation, and live tool-call generation vs declarations. | Gateway proxy & initial normalization (Phase 1B delivered; broader conformance in progress). |
 | **BYOM embeddings route** | End-to-end `/v1/embeddings` endpoint using user-imported ONNX embedding models. | BYOM import + SDK embedding client. |
 | **Audio transcoding expansion** | Client-side WebM/Opus and MP3 decoding to 16 kHz PCM WAV without heavy bundles. | Web Audio / lightweight WASM decoder. |
 | **Updater UX** | In-app download progress, ready-to-restart prompts, and deferral options. | Rust update events + Settings view. |
