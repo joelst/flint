@@ -133,7 +133,7 @@ This lets `tauri-action` create releases and upload installers + updater metadat
 
 ### Optional environment hardening
 
-**Settings → Environments → `release`**: required reviewers / protected branches, then set `environment: release` on the release job. Not required for dogfood 0.3.
+**Settings → Environments → `release`**: required reviewers / protected branches, then set `environment: release` on the release job.
 
 ---
 
@@ -167,9 +167,7 @@ cosmetic one.
 
 > **Do not** use `releases/download/v{{current_version}}/latest.json`. That resolves
 > to the manifest attached to the version the user is *already running*, so it always
-> reports the current version and the updater can never discover a newer one. Flint
-> shipped this bug through v0.4.4; those builds cannot self-update, but none were
-> distributed, so no rescue was needed.
+> reports the current version and the updater can never discover a newer one.
 
 ---
 
@@ -178,26 +176,26 @@ cosmetic one.
 ### Dry run (no tag)
 
 1. **Actions → Release → Run workflow**
-2. Enter a version such as `0.3.0-rc1`
+2. Enter a version such as `0.7.0-rc1`
 3. Confirm draft release + artifacts when secrets are present
 
 ### Full path with throwaway tag
 
 ```bash
-git tag v0.3.0-test
-git push origin v0.3.0-test
+git tag v0.7.0-test
+git push origin v0.7.0-test
 ```
 
 ### Rebuild an existing tag after workflow fixes
 
-GitHub runs tag-triggered workflows from the workflow file stored at the tagged commit. If a tag was created before the `release` environment OIDC fix, rerunning that tag's workflow will keep requesting a tag-scoped OIDC subject such as `repo:joelst/flint:ref:refs/tags/v0.4.1`.
+GitHub runs tag-triggered workflows from the workflow file stored at the tagged commit. If a tag was created before the `release` environment OIDC fix, rerunning that tag's workflow will keep requesting a tag-scoped OIDC subject such as `repo:joelst/flint:ref:refs/tags/v0.7.0`.
 
 To rebuild that existing source without retagging:
 
 1. Open **Actions → Release → Run workflow**.
 2. Select the default branch that contains the fixed workflow, not the old tag.
-3. Set `version` to the release version, for example `0.4.1`.
-4. Set `checkout_ref` to the tag to build, for example `v0.4.1`.
+3. Set `version` to the release version, for example `0.7.0`.
+4. Set `checkout_ref` to the tag to build, for example `v0.7.0`.
 
 This runs the fixed workflow under the `release` environment while checking out the tagged source for the build.
 

@@ -8,6 +8,7 @@ Short path from install to chat and external tools. For **why** Flint exists, se
 
 - **Windows** (primary) or **macOS on Apple silicon**  
   Intel Mac is not supported until Foundry publishes `darwin-x64` native cores.
+  *macOS Installation note:* Unsigned prerelease builds may prompt macOS Gatekeeper to report *"Flint is damaged and can't be opened."* To install without quarantine or fix an existing drag-and-drop install, see [macOS Gatekeeper Installation](#macos-gatekeeper-installation-prerelease-builds).
 - **Node for the JS sidecar:** release builds ship a **bundled Node 22** binary; PATH Node is only a fallback (dev or incomplete install).  
 - Foundry Local **runtime is bundled** — you do not need a separate Foundry CLI for normal use.
 
@@ -49,6 +50,22 @@ Flint prefers the packaged Node on launch (About shows `bundled` vs `PATH`) and 
 - Conversations live in the sidebar; new chat via UI or shortcut (see **?**).  
 - Streaming responses; stop/cancel when supported.  
 - Vision: attach up to four images when the loaded model supports it.
+- **Export conversations**: Export any chat thread as structured JSON, formatted Markdown, or plain text for documentation or archive.
+
+### Bring Your Own Model (BYOM) and External Linking
+
+- **Import local ONNX models**: Add custom ONNX models (containing `genai_config.json` and `inference_model.json`) into Flint's local cache directly from the Models tab.
+- **Link external model folders**: Connect existing models stored elsewhere on your drive using directory junctions without duplicating weights across folders.
+- **Prompt template authoring**: Validate and customize Jinja/chat prompt templates using the `{Content}` placeholder to ensure proper message formatting.
+
+### Model Cache Inventory
+
+- View comprehensive disk space breakdowns across cached models, catalog families, and custom variants.
+- Inspect and manage model footprint between Flint (`~/.flint`) and Foundry CLI (`~/.foundry`) storage roots.
+
+### Automatic Model Loading (On-Demand Gateway)
+
+- When external integrations (IDE extensions, agent frameworks, CLI tools) send requests to `http://127.0.0.1:<port>/v1/chat/completions` for a model that is cached but not resident, Flint's gateway automatically loads the optimal variant into memory and completes the request seamlessly without failing with `400 Model is not loaded`.
 
 ### Audio transcription
 
@@ -94,6 +111,7 @@ Press **`?`** in the app for the full list (views, new chat, send, push-to-talk,
 
 | Symptom | What to try |
 |---|---|
+| macOS: "Flint is damaged and can't be opened" | Unsigned prerelease build quarantine. Run `xattr -cr /Applications/Flint.app` in Terminal or use the install script. |
 | Could not start Foundry / sidecar | Install Node 22+, confirm `node -v` in a terminal, restart Flint. |
 | No models | **Models** → download a starter; wait for catalog. |
 | Chat disabled | Load a **chat** model (not STT-only); check Help → Troubleshooting. |
@@ -102,6 +120,24 @@ Press **`?`** in the app for the full list (views, new chat, send, push-to-talk,
 | SmartScreen / unidentified developer | Expected with self-signed builds until release certs. |
 
 In-app: **Help** tab and the first-run coach (Help → “Show the getting-started coach” if dismissed).
+
+---
+
+## macOS Gatekeeper Installation (Prerelease Builds)
+
+Because prerelease builds are not signed with an Apple Developer ID certificate, downloading the `.dmg` in a web browser attaches the `com.apple.quarantine` attribute. macOS Gatekeeper will then report that the app is *"damaged and can't be opened."*
+
+### Recommended: Install via CLI (bypasses quarantine)
+```bash
+curl -fsSL https://raw.githubusercontent.com/joelst/flint/main/scripts/install-macos.sh | bash
+```
+
+### Manual DMG installation:
+If you manually downloaded the DMG and dragged Flint to `/Applications`:
+```bash
+xattr -cr /Applications/Flint.app
+```
+Then launch Flint normally from Finder or Spotlight.
 
 ---
 
