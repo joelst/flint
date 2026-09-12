@@ -32,7 +32,7 @@ Foundry Local SDK
 The browser bundle must not import `foundry-local-sdk` or Node built-ins.
 Frontend behavior belongs behind `src/lib/sdk.ts`. The sidecar remains the
 authority for native runtime state and model operations. The native Rust
-supervisor is the single process-launch and child-lifecycle owner; Rust does
+supervisor is the single runtime sidecar process-lifecycle owner; Rust does
 not create a competing Foundry manager or model pool.
 
 ## Choosing an extension seam
