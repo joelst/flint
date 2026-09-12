@@ -578,6 +578,13 @@ describe('settlement revokes permission to dispatch', () => {
 
     // A priority command (shutdownRuntime) bypasses the full queue and enqueues directly without cancelling the active queue
     const shutdownPromise = sdk.sendInternal('shutdownRuntime');
+
+    // A second priority shutdown command while one is already queued is rejected to keep priority bounded
+    const secondShutdown = capture(sdk.sendInternal('shutdownRuntime'));
+    await secondShutdown.tracked;
+    expect(secondShutdown.box.err?.certainty).toBe('failed');
+    expect(String(secondShutdown.box.err?.message)).toContain('priority lifecycle shutdown is already queued');
+
     gateNativeWrite = false;
     releaseNativeWrite?.();
 

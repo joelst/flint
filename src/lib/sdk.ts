@@ -841,10 +841,15 @@ async function spawnSidecar() {
       options?: { id?: number; priority?: boolean; bytes?: number },
     ) {
       const requestBytes = options?.bytes ?? 0;
+      const isPriority = !!options?.priority;
+      const maxCount = isPriority ? MAX_QUEUED_WRITES + 1 : MAX_QUEUED_WRITES;
+      const maxBytes = isPriority
+        ? MAX_QUEUED_WRITE_BYTES + NATIVE_RUNTIME_MAX_FRAME_BYTES
+        : MAX_QUEUED_WRITE_BYTES;
+
       if (
-        !options?.priority &&
-        (writeQueue.length >= MAX_QUEUED_WRITES ||
-          queuedBytes + requestBytes > MAX_QUEUED_WRITE_BYTES)
+        writeQueue.length >= maxCount ||
+        queuedBytes + requestBytes > maxBytes
       ) {
         for (let i = writeQueue.length - 1; i >= 0; i -= 1) {
           const item = writeQueue[i];
@@ -855,12 +860,17 @@ async function spawnSidecar() {
           }
         }
       }
-      if (!options?.priority && writeQueue.length >= MAX_QUEUED_WRITES) {
+      if (isPriority && writeQueue.some((item) => item.priority)) {
+        return Promise.reject(
+          new Error('A priority lifecycle shutdown is already queued.'),
+        );
+      }
+      if (writeQueue.length >= maxCount) {
         return Promise.reject(
           new Error(`The runtime write queue is full (${MAX_QUEUED_WRITES} pending writes).`),
         );
       }
-      if (!options?.priority && queuedBytes + requestBytes > MAX_QUEUED_WRITE_BYTES) {
+      if (queuedBytes + requestBytes > maxBytes) {
         return Promise.reject(
           new Error(
             `The runtime write queue is full (${MAX_QUEUED_WRITE_BYTES} bytes queued).`,
@@ -874,7 +884,7 @@ async function spawnSidecar() {
           resolve,
           reject,
           id: options?.id,
-          priority: options?.priority,
+          priority: isPriority,
           bytes: requestBytes,
         });
         runNextWrite();
