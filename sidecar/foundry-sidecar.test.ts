@@ -3,6 +3,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { pathToFileURL } from 'url';
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 
 function waitForLine(
@@ -219,8 +220,10 @@ describe('foundry-sidecar protocol basics', () => {
         return nextLoad(url, context);
       }
     `);
+    // Node requires a file:// URL here; a bare Windows path is rejected with
+    // ERR_UNSUPPORTED_ESM_URL_SCHEME on Node 23+.
     const proc = spawn(process.execPath, [
-      '--experimental-loader', loaderPath, 'sidecar/foundry-sidecar.js'
+      '--experimental-loader', pathToFileURL(loaderPath).href, 'sidecar/foundry-sidecar.js'
     ], {
       cwd: process.cwd(),
       stdio: ['pipe', 'pipe', 'pipe'],
