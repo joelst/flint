@@ -38,7 +38,7 @@ fi
 
 if [ -z "$URL" ]; then
   # Fallback for evaluation / prerelease channels where releases/latest does not resolve:
-  RELEASES_JSON="$(curl -fsSL -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$REPO/releases" 2>/dev/null || true)"
+  RELEASES_JSON="$(curl -fsSL -H "User-Agent: flint-install-macos" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$REPO/releases" 2>/dev/null || true)"
   URL="$(printf '%s' "$RELEASES_JSON" | grep -oE "https://github\.com/$REPO/releases/download/[^\"]+/Flint[^\"]*aarch64\.app\.tar\.gz" | head -n 1 || true)"
 fi
 
