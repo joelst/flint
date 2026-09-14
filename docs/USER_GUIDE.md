@@ -87,8 +87,8 @@ Flint prefers the packaged Node on launch (About shows `bundled` vs `PATH`) and 
 | Setting | Meaning |
 |---|---|
 | **Bind address** (Settings → Network) | Interface the service **listens** on (`127.0.0.1`, `0.0.0.0`, or a custom IP). |
-| **Client / Integrations URL** | Always **`http://127.0.0.1:<port>/v1`** so local tools connect over loopback. |
-| **WSL clients** (Settings → Network) | One-click **mirrored networking** for tools running inside WSL2. Required before a WSL client can reach Flint — see below. |
+| **Client / Integrations URL** | Usually **`http://127.0.0.1:<port>/v1`**; WSL NAT clients use the Windows host address from the manual setup below. |
+| **WSL clients** (Settings → Network) | One-click **mirrored networking** lets tools running inside WSL2 use the usual loopback URL; NAT users can follow the manual setup below. |
 
 After changing port or bind: **Apply & restart** (or Apply if the service is stopped, then Start in Diagnostics). Non-loopback bind asks for confirmation — it can expose the service on your network.
 
