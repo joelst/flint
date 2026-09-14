@@ -87,9 +87,16 @@ Flint prefers the packaged Node on launch (About shows `bundled` vs `PATH`) and 
 | Setting | Meaning |
 |---|---|
 | **Bind address** (Settings → Network) | Interface the service **listens** on (`127.0.0.1`, `0.0.0.0`, or a custom IP). |
-| **Client / Integrations URL** | Always **`http://127.0.0.1:<port>/v1`** so local tools connect over loopback. |
+| **Client / Integrations URL** | Usually **`http://127.0.0.1:<port>/v1`**; WSL NAT clients use the Windows host address from the manual setup below. |
+| **WSL clients** (Settings → Network) | One-click **mirrored networking** lets tools running inside WSL2 use the usual loopback URL; NAT users can follow the manual setup below. |
 
 After changing port or bind: **Apply & restart** (or Apply if the service is stopped, then Start in Diagnostics). Non-loopback bind asks for confirmation — it can expose the service on your network.
+
+#### Tools running inside WSL2
+
+WSL2's default NAT mode gives the VM its own loopback, so a client inside WSL — OpenClaw, OpenCode, Codex CLI — **cannot reach Flint on `127.0.0.1`**, even though the same URL works fine from Windows. This is the most common reason a copied Integrations snippet fails with a connection error.
+
+Fix it in **Settings → Network → WSL clients**: it reports whether WSL is in NAT or mirrored mode and offers **Enable mirrored networking** in one click. Mirrored mode shares the host's interfaces including loopback, so Flint stays bound to `127.0.0.1` and WSL clients use the ordinary client URL with no change to the snippet. WSL must restart to apply; the panel offers that too. If you would rather stay on NAT, the same panel lists the manual steps for connecting to the Windows host address instead.
 
 ### Keyboard shortcuts
 
@@ -117,7 +124,8 @@ Press **`?`** in the app for the full list (views, new chat, send, push-to-talk,
 | Chat disabled | Load a **chat** model (not STT-only); check Help → Troubleshooting. |
 | Integrations “not started” | **Diagnostics → Start service**. |
 | Bind/port ignored | Settings → **Apply & restart**. |
-| SmartScreen / unidentified developer | Expected with self-signed builds until release certs. |
+| WSL client cannot connect (works from Windows) | WSL2 NAT mode cannot reach `127.0.0.1` on the host. **Settings → Network → WSL clients → Enable mirrored networking**, then restart WSL. |
+| Windows SmartScreen warning | Installers are signed with a public-trust certificate, but a new publisher identity can still show a SmartScreen prompt until it accumulates reputation. Before bypassing the warning, confirm the installer came from Flint's official GitHub release and that its Authenticode signature is valid and names the expected publisher; only then choose **More info → Run anyway**. |
 
 In-app: **Help** tab and the first-run coach (Help → “Show the getting-started coach” if dismissed).
 
