@@ -1,5 +1,10 @@
 # Flint
 
+[![CI](https://github.com/joelst/flint/actions/workflows/ci.yml/badge.svg)](https://github.com/joelst/flint/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/joelst/flint?include_prereleases&label=release)](https://github.com/joelst/flint/releases)
+[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20Apple%20silicon-blue)](#requirements)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
+
 **The desktop control plane for [Microsoft Foundry Local](https://github.com/microsoft/Foundry-Local).**
 
 Manage models on your machine, chat and transcribe locally, pit models against each other in the Model Arena, and expose an **OpenAI-compatible endpoint** to the coding tools you already use — without sending prompts to a cloud by default.
@@ -58,11 +63,11 @@ No system Node install is required: release builds bundle their own Node 22 runt
 
 ## Status
 
-Pre-1.0: expect breaking changes. [Signed installers and release notes](https://github.com/joelst/flint/releases/latest).
+Pre-1.0: expect breaking changes. **0.7.0 is Flint's first public release** — a foundation evaluation prerelease. [Installers and release notes](https://github.com/joelst/flint/releases).
 
-- Windows installers are Authenticode-signed (Azure Trusted Signing); bundles ship the Foundry native cores and a pinned Node 22 runtime, verified in CI.
-- In-app updater tracks the latest GitHub release.
+- Windows installers carry a **public-trust Authenticode signature** issued through Azure Trusted Signing, so they validate against the Microsoft-managed root on any machine — no certificate to install and no "unknown publisher" prompt. Bundles ship the Foundry native cores and a pinned Node 22 runtime, verified in CI.
 - macOS builds are **unsigned** (no Apple Developer account) — install with the one-liner below, not the DMG, or Gatekeeper will call the app "damaged".
+- The in-app updater is configured and its artifacts (`latest.json`, `.sig`) ship with every release, but it **will not offer 0.7.0**: GitHub's `releases/latest` pointer skips prereleases by design. Install this build manually; the updater takes over once a stable release is published.
 
 Next: [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) · [docs/BACKLOG.md](./docs/BACKLOG.md) · Release notes: [CHANGELOG.md](./CHANGELOG.md)
 
@@ -133,7 +138,7 @@ Living reliability plan: **[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md)** · E
 
 ### Use a release build
 
-1. Install a build from [GitHub Releases](https://github.com/joelst/flint/releases) when available (or build below).
+1. Install a build from [GitHub Releases](https://github.com/joelst/flint/releases) (or build from source below). 0.7.0 is published as a prerelease, so it appears in the releases list rather than under "Latest".
    - **macOS**: builds are unsigned, so a browser-downloaded DMG is blocked by Gatekeeper as "damaged". Install with:
 
      ```bash
@@ -173,8 +178,8 @@ Signing and release pipeline: [docs/RELEASE.md](./docs/RELEASE.md)
 ## Known limitations
 
 - **Node:** release builds prefer a **bundled** Node binary; PATH Node remains a dev/fallback. Long-term 1.0 goal is no end-user Node install at all (bundled or Rust).  
-- **Code signing / updater keys** may still be operator-configured for public releases.  
-- **Self-signed** installers can trigger SmartScreen / Gatekeeper warnings.  
+- **macOS is unsigned** and triggers a Gatekeeper "damaged" warning on browser-downloaded DMGs; use the install one-liner or `xattr -cr`. Windows installers are publicly trusted and do not carry this caveat. A new Windows publisher identity may still accumulate SmartScreen reputation over the first downloads.  
+- **The updater does not discover prereleases.** 0.7.0 must be installed manually; see [Status](#status).  
 - **Audio** quality depends on the STT model and runtime.  
 - **Tool calling:** models may emit `tool_calls`; Flint’s chat UI does **not** execute tools — use an agent client against the local endpoint.  
 - Unit/contract tests are strong; full UI E2E is still light.
