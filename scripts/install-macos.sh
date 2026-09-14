@@ -29,14 +29,21 @@ if [ "$DARWIN_MAJOR" -lt 23 ]; then
 fi
 
 echo "Looking up the latest Flint release..."
-LATEST_JSON="$(curl -fsSL "https://github.com/$REPO/releases/latest/download/latest.json")"
-# latest.json is the Tauri updater manifest; the darwin entry's url is the
-# .app.tar.gz updater archive, which is also a perfectly good install source.
-# `|| true` because grep exits 1 on no match, which `set -euo pipefail` would turn into a
-# silent early exit before the friendly error below.
-URL="$(printf '%s' "$LATEST_JSON" | grep -oE 'https://[^"]+\.app\.tar\.gz' | head -n 1 || true)"
+# First try the canonical updater manifest (available once a stable release lands).
+# If that 404s (e.g. during prereleases), fall back to the GitHub Releases API.
+URL=""
+if LATEST_JSON="$(curl -fsSL "https://github.com/$REPO/releases/latest/download/latest.json" 2>/dev/null)"; then
+  URL="$(printf '%s' "$LATEST_JSON" | grep -oE 'https://[^"]+\.app\.tar\.gz' | head -n 1 || true)"
+fi
+
 if [ -z "$URL" ]; then
-  echo "Could not find a macOS .app.tar.gz asset in the latest release manifest." >&2
+  # Fallback for evaluation / prerelease channels where releases/latest does not resolve:
+  RELEASES_JSON="$(curl -fsSL -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$REPO/releases" 2>/dev/null || true)"
+  URL="$(printf '%s' "$RELEASES_JSON" | grep -oE "https://github\.com/$REPO/releases/download/[^\"]+/Flint[^\"]*aarch64\.app\.tar\.gz" | head -n 1 || true)"
+fi
+
+if [ -z "$URL" ]; then
+  echo "Could not find a macOS .app.tar.gz asset in the release catalog." >&2
   exit 1
 fi
 
