@@ -125,7 +125,7 @@ Press **`?`** in the app for the full list (views, new chat, send, push-to-talk,
 | Integrations “not started” | **Diagnostics → Start service**. |
 | Bind/port ignored | Settings → **Apply & restart**. |
 | WSL client cannot connect (works from Windows) | WSL2 NAT mode cannot reach `127.0.0.1` on the host. **Settings → Network → WSL clients → Enable mirrored networking**, then restart WSL. |
-| Windows SmartScreen warning | Installers are signed with a public-trust certificate, but a new publisher identity can still show a SmartScreen prompt until it accumulates reputation. Choose **More info → Run anyway**. |
+| Windows SmartScreen warning | Installers are signed with a public-trust certificate, but a new publisher identity can still show a SmartScreen prompt until it accumulates reputation. Before bypassing the warning, confirm the installer came from Flint's official GitHub release and that its Authenticode signature is valid and names the expected publisher; only then choose **More info → Run anyway**. |
 
 In-app: **Help** tab and the first-run coach (Help → “Show the getting-started coach” if dismissed).
 
