@@ -407,7 +407,7 @@ export OPENAI_API_KEY="not-needed-for-local"
     category: 'agent',
     status: 'community',
     description:
-      'Agentic coding tool. OpenClaw natively supports OpenAI-compatible local endpoints — point it at Flint directly per its "local models" gateway docs. No translation proxy required for the standard path. Running OpenClaw inside WSL2? Turn on mirrored networking first — Settings → Network → WSL clients does it in one click. WSL\'s default NAT mode gives the VM its own loopback, so the snippet below cannot reach Flint on 127.0.0.1 until you do.',
+      'Agentic coding tool. OpenClaw natively supports OpenAI-compatible local endpoints — point it at Flint directly per its "local models" gateway docs. No translation proxy required for the standard path. Running OpenClaw inside WSL2? On Windows 11 22H2+ with WSL 2.0+, enable mirrored networking in Settings → Network → WSL clients, then restart WSL. Otherwise, use the manual NAT setup there. In default NAT mode, the snippet below cannot reach Flint on 127.0.0.1.',
     snippets: {
       windows: [
         {
