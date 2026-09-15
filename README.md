@@ -152,7 +152,7 @@ Living reliability plan: **[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md)** · E
 
 If the app cannot start the sidecar, install **Node.js 22+** LTS as a fallback or reinstall Flint.
 
-Client URL for tools is always **`http://127.0.0.1:<port>/v1`** (loopback). The **bind address** in Settings controls what the service *listens* on and may differ (e.g. `0.0.0.0` for LAN). Use **Apply & restart** after changing bind/port.
+Client URL for tools is usually **`http://127.0.0.1:<port>/v1`** (loopback); tools running inside WSL2 in its default NAT mode cannot reach that address and need **Settings → Network → WSL clients**. The **bind address** in Settings controls what the service *listens* on and may differ (e.g. `0.0.0.0` for LAN). Use **Apply & restart** after changing bind/port.
 
 ### Develop from source
 
