@@ -65,8 +65,10 @@ export interface Integration {
 
 /**
  * Substitute `{ENDPOINT}` and `{MODEL}` placeholders in a snippet body.
- * The endpoint is the client-facing loopback URL (always `http://127.0.0.1:<port>/v1`);
- * bind address may be broader for LAN access — snippets still use the loopback connect URL.
+ * The endpoint is the client-facing connect URL, usually loopback
+ * (`http://127.0.0.1:<port>/v1`); WSL2 clients in NAT mode reach Flint on the Windows host
+ * address instead. Bind address may be broader for LAN access — snippets still use the
+ * client-facing connect URL rather than the bind address.
  * The model placeholder is a generic alias hint shown in code.
  */
 export function renderSnippet(
