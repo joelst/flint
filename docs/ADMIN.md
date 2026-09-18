@@ -43,7 +43,7 @@ Delete those directories only if you intend to drop local models and chat histor
 
 ## Updater
 
-The in-app updater follows GitHub `releases/latest`. **Prereleases are skipped** — 0.7.0 evaluation builds must be installed by hand. The first **stable** 1.0.0 publish is what makes `latest.json` resolve.
+The in-app updater follows GitHub `releases/latest`. **Prereleases are skipped** — 0.7.0 evaluation builds must be installed by hand. **0.9.0** is the first stable publish (skip 0.8.0) so `latest.json` resolves; that is the upgrade test from 0.7.0. **1.0.0** is a later stable after that upgrade is proven.
 
 If an update misbehaves: install the previous MSI/NSIS from GitHub Releases and do not take the in-app updater offer. See [RELEASE.md](./RELEASE.md).
 
@@ -68,7 +68,7 @@ npm run smoke:runtime
 
 The app starts, waits until the sidecar is ready, then exits 0. It does not download a model. CI runs this on Windows only.
 
-## Embeddings (1.0.1 path)
+## Embeddings (0.9.0 path)
 
 `POST /v1/embeddings` is proxied and autoloaded like chat. Import an onnxruntime-genai
 **embedding** ONNX folder via Models → Add model folder (no chat template). There is

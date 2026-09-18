@@ -1,5 +1,23 @@
 # Flint Changelog
 
+## 0.9.0
+
+First **stable** channel release after the 0.7.0 evaluation prerelease. 0.8.0 is unused. Publish this version as a full GitHub release (not a prerelease) so `releases/latest` resolves and installed 0.7.0 builds can exercise the in-app updater. **1.0.0** is a later stable, after that upgrade is proven.
+
+### Highlights
+
+- **Native tray, quit, and conversations:** Tray Open/Quit from app start, quit waits for a conversation flush (or 2s), and streaming updates follow the originating conversation.
+- **Honest Stop:** Chat Stop settles the caller; Foundry has no abort API, so the UI does not claim native inference stopped. Compare and audio say they cannot be cancelled once started.
+- **Diagnostics:** Gateway access log is metadata only. A bounded health ring is included in diagnostics export. **Test local endpoint** checks envelope, chat, stream `[DONE]`, usage, disconnect, tools, and embeddings (blocked when no embedding model is present).
+- **Embeddings path:** `POST /v1/embeddings` autoloads like chat. BYOM import of an embedding ONNX folder does not require a chat prompt template. Sidecar `embedTexts` is available. There is still no Flint-tested embedding recipe; Continue's indexer is not verified. Full RAG is not in this release.
+- **Packaging and updater:** Windows CI launches the packaged exe until the sidecar is ready. About can Install / show progress / Restart to update / Later. This release is the first `channel=stable` publish.
+
+### Installing and upgrading
+
+- **From 0.7.0 evaluation:** keep that build installed; after 0.9.0 is published as the latest full release, About should offer the update. Do not install 0.9.0 as a GitHub prerelease or the updater will not see it.
+- **Fresh install:** Windows `.msi` or `-setup.exe` from [GitHub Releases](https://github.com/joelst/flint/releases). macOS remains unsigned evaluation-only (`scripts/install-macos.sh` or `xattr -cr`).
+- **Rollback:** install the previous Windows MSI/NSIS from GitHub Releases; the updater does not downgrade.
+
 ## 0.7.0
 
 Flint 0.7.0 is a foundation evaluation prerelease of the desktop control plane for Microsoft Foundry Local. This release establishes a dependable desktop runtime, truthful service and accelerator lifecycle states, isolated per-conversation data integrity, and a documented extension boundary for tools and experiments.

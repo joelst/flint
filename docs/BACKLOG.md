@@ -12,10 +12,11 @@ Do not add 1.0 work here; that duplicates the plan and the two will drift.
 
 ## Current execution priorities
 
-Follow the 1.0 waves in [PRODUCT_PLAN.md](./PRODUCT_PLAN.md). Tray, quit-flush, and
-conversation-scoped streams are in the tree. Remaining 1.0 process: packaged
-Windows dogfood, integration version pins from recorded runs, and the first
-stable 1.0.0 publish. Defer wholesale Foundry runtime replacement.
+Follow the 1.0 waves in [PRODUCT_PLAN.md](./PRODUCT_PLAN.md). Waves 1–9 land as
+**0.9.0**, the first stable, so the updater can be proven from 0.7.0 evaluation.
+Remaining process after that: 0.9.0 upgrade dogfood, bugfixes, packaged Windows
+dogfood, integration version pins, then **1.0.0**. Defer wholesale Foundry
+runtime replacement.
 
 **Linux work is deferred:** preserve existing checks and mappings. Continue
 Linux-specific work only where it is already part of another feature; shared
@@ -71,8 +72,8 @@ contract + sidecar E2E + packaged Windows smoke in PRODUCT_PLAN Wave 7).
       when JSON is within the bounded normalization threshold; larger JSON responses
       remain byte-preserving pass-through. Broader endpoint capability conformance
       remains open.
-- [ ] **Recorded BYOM embedding recipe** — gateway autoload and `embedTexts` are in
-      the tree (PRODUCT_PLAN Wave 9). Catalog still has zero embedding models. A
+- [ ] **Recorded BYOM embedding recipe** — gateway autoload and `embedTexts` ship
+      in 0.9.0 (PRODUCT_PLAN Wave 9). Catalog still has zero embedding models. A
       Flint-tested onnxruntime-genai embedding folder (repo, revision, dimension,
       core pin) is still required before Continue's indexer can be marked verified.
 

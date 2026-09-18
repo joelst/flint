@@ -55,10 +55,16 @@ Chat JSON/SSE normalisation (Foundry extras stripped, one OpenAI-shaped choice,
   OpenClaw accepts any non-empty placeholder API key on loopback and health-checks
   `GET /v1/models`.
 
-### 1.0.1 companion — embeddings path
+### 0.9.0 — first stable (upgrade test)
 
-Not a 1.0.0 ship gate. Gateway autoload and BYOM import for embedding models, plus
-sidecar `embedTexts`. Full RAG (index + retrieve + show sources) stays after 1.0.
+Skip 0.8.0. Publish **0.9.0** as `channel=stable` (not a prerelease) so
+`releases/latest` resolves. That is the in-app updater test from 0.7.0
+evaluation. Waves 1–9 land in this release, including the embeddings path
+(gateway autoload, BYOM without a chat template, sidecar `embedTexts`).
+Full RAG (index + retrieve + show sources) stays after 1.0.
+
+**1.0.0** is the next stable, after that upgrade is proven and 0.9.0
+bugfixes land. Do not cut 1.0.0 as the first `releases/latest` pointer.
 
 ### After 1.0
 - **Curated model acquisition** — a Flint-validated ONNX catalog (pinned repo and
@@ -83,8 +89,9 @@ not a multi-provider control plane and not "every backlog item closed."
 
 **1.0 production is Windows.** macOS Apple Silicon remains evaluation-only
 (unsigned builds; `scripts/install-macos.sh` or `xattr -cr`). Linux is deferred.
-Do not date 1.0 until the sequenced work in
-[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md) is in flight against this bar.
+Do not date 1.0 until **0.9.0** is published stable and the upgrade from 0.7.0
+evaluation is proven. Sequenced work lives in
+[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md).
 
 ### 1.0 release criteria
 
@@ -127,12 +134,14 @@ Do not date 1.0 until the sequenced work in
 
 ### 1.0 ship gate (process)
 
+- **0.9.0** published as the first stable GitHub release so
+  `https://github.com/joelst/flint/releases/latest/download/latest.json`
+  resolves, with a recorded 0.7.0-evaluation → 0.9.0 in-app updater install.
+  Rollback note in [docs/RELEASE.md](./docs/RELEASE.md).
 - Signed Windows MSI/NSIS on a clean machine (no PATH Node, Rust, or Foundry)
   downloads and loads a model.
-- First **stable** GitHub release (not a prerelease) is what makes
-  `https://github.com/joelst/flint/releases/latest/download/latest.json`
-  resolve; that publish is the updater acceptance test, with a rollback
-  note in [docs/RELEASE.md](./docs/RELEASE.md).
+- **1.0.0** is a later stable, after that upgrade is proven and 0.9.0 bugfixes
+  land.
 - macOS: one recorded `install-macos.sh` boot as evaluation evidence, not a
   production claim.
 
@@ -140,7 +149,7 @@ Do not date 1.0 until the sequenced work in
 
 **1.0 is "operationally trustworthy" for the local product that exists.** The
 remaining bar is the seven criteria above holding under real-world Windows use,
-not new features (multi-endpoint routing, embeddings/RAG, Azure, Linux, a
-Flint-native tool executor).
+not new features (multi-endpoint routing, RAG, Azure, Linux, a
+Flint-native tool executor). The embeddings **path** ships in 0.9.0.
 
 ---
