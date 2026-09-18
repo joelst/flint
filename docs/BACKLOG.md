@@ -101,11 +101,10 @@ the ones with no item anywhere else in this file and no workstream in
       `@ts-nocheck`). Keep extracting pure logic into `src/lib/*.ts` with tests rather than
       testing the component. The line count is the progress measure for that extraction —
       keep it current.
-- [ ] **No E2E or component layer** — the 1.0 testing criterion names unit + component +
-      contract + E2E. Unit and contract exist and are strong; the other two do not exist at
-      all (`tests/` holds one PowerShell file for Azure signing). One smoke E2E driving a
-      packaged build through launch → load model → chat → stop, running in CI on Windows,
-      closes more of the criterion than any amount of component testing of the monolith.
+- [ ] **No component or packaged-app E2E layer** — the 1.0 testing criterion names unit +
+      component + contract + E2E. Unit and contract exist, and `sidecar/byom-import.e2e.test.ts`
+      provides a sidecar/native E2E path; component tests and packaged-build smoke coverage are
+      still absent (launch → load model → chat → stop in CI on Windows).
 - [ ] **Coverage allowlist blind spots** — `vite.config.js` measures an allowlist of 43 files
       at 97/94/84/95, deliberately set just under actual so regressions fail. Outside the
       allowlist: `src/lib/sdk.ts` and `sidecar/foundry-sidecar.js`, both core paths. The gate
