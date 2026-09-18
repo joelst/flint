@@ -97,7 +97,7 @@ the ones with no item anywhere else in this file and no workstream in
 
 ## Test coverage
 
-- [ ] **`+page.svelte` is untested** and holds most of the app (472 KB, 11,221 lines,
+- [ ] **`+page.svelte` is untested** and holds most of the app (472 KB, 12,108 lines,
       `@ts-nocheck`). Keep extracting pure logic into `src/lib/*.ts` with tests rather than
       testing the component. The line count is the progress measure for that extraction —
       keep it current.
