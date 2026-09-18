@@ -32,9 +32,9 @@ the ones with no item anywhere else in this file and no workstream in
 - [ ] **Least-privilege capability model** (criterion 1) — `src-tauri/capabilities/default.json`
       has never been audited against what the app actually invokes. Enumerate the permissions
       the renderer genuinely needs, remove the rest, and record why each survivor is required.
-- [ ] **Renderer/sidecar boundary security suite** (criterion 1) — no tests assert what the
-      renderer may ask the sidecar to do. Cover command allowlisting, argument validation,
-      path containment for BYOM/import/export, and rejection of unknown IPC commands.
+- [ ] **Renderer/sidecar boundary security suite** (criterion 1) — existing tests cover command
+      allowlisting, unknown commands, IPC schema drift, and BYOM path containment; add a dedicated
+      suite that exercises the renderer-facing transport and keeps those cases together.
 - [ ] **Deterministic cancellation and timeout** (criterion 2) — the decision that a Stop
       acknowledgement is not proof inference stopped is recorded in PRODUCT_PLAN's rubber-duck
       table, but no item tracks making it true across every request type (chat, streaming,
