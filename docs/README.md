@@ -10,7 +10,7 @@ to load for a given task.
 |---|---|
 | [README.md](../README.md) | Why Flint, who it’s for, screenshots, quick start |
 | [USER_GUIDE.md](./USER_GUIDE.md) | First run, common tasks, bind vs client URL, troubleshooting |
-| [PRODUCT_PLAN.md](./PRODUCT_PLAN.md) | Reliability execution plan, post-0.7.0 workstreams, acceptance gates, and native supervision decision |
+| [PRODUCT_PLAN.md](./PRODUCT_PLAN.md) | 1.0 implementation sequencing, acceptance gates, and native supervision decisions |
 | [CHANGELOG.md](../CHANGELOG.md) | Versioned release notes |
 
 ## Contributors
@@ -28,6 +28,7 @@ to load for a given task.
 | Doc | Purpose |
 |---|---|
 | [RELEASE.md](./RELEASE.md) | Signing, GitHub secrets, updater keys, test pipeline |
+| [ADMIN.md](./ADMIN.md) | Operator runbook for an installed app (logs, lifecycle, updater, uninstall) |
 | [RELEASE_0.7.0.md](./RELEASE_0.7.0.md) | 0.7.0 prerelease gates and evaluation checklist |
 | [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) | Current probe-backed plan through 1.0 and the 1.0 release bar (release history: [CHANGELOG.md](../CHANGELOG.md)) |
 
@@ -49,9 +50,13 @@ or deferred plans kept for the analysis they contain, not measured data
 
 ## Planning process
 
+- **Operator runbook for an installed app:** [ADMIN.md](./ADMIN.md).
 - **Implementation sequencing and acceptance gates:** [PRODUCT_PLAN.md](./PRODUCT_PLAN.md).
 - **Forward plan through 1.0 and the 1.0 release bar:** [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md).
+  1.0 production is Windows; macOS Apple Silicon is evaluation-only.
 - **Release history:** [CHANGELOG.md](../CHANGELOG.md).
 - Do **not** maintain a separate sprint plan or remaining-implementation-plan file for
   work already covered by one of the two docs above.
-- Deferred follow-ups: [BACKLOG.md](./BACKLOG.md) — open items only; completed work lives in `git log` and [CHANGELOG.md](../CHANGELOG.md).
+- Deferred and post-1.0 follow-ups: [BACKLOG.md](./BACKLOG.md) — open items only;
+  completed work lives in `git log` and [CHANGELOG.md](../CHANGELOG.md). 1.0 work
+  belongs in PRODUCT_PLAN, not here.

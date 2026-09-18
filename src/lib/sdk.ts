@@ -1653,6 +1653,11 @@ export async function getAccessLog(): Promise<any[]> {
   return res?.result ?? [];
 }
 
+export async function getHealthRing(): Promise<any[]> {
+  const res = await send('getHealthRing');
+  return res?.result ?? [];
+}
+
 export async function getCacheInventory(): Promise<CacheInventory> {
   const res = await send('getCacheInventory');
   if (!res?.result) throw new Error('getCacheInventory returned no result');
@@ -2018,6 +2023,38 @@ export async function stopAndUnload(options: {
       },
     }));
     return result;
+  });
+}
+
+/**
+ * Exit the desktop process. A persistent native tray means destroying the last
+ * window no longer ends the app, so callers that mean "quit" must go through here.
+ */
+export async function quitDesktopApp(): Promise<void> {
+  await invoke('quit_app');
+}
+
+/** Restart after an updater install. Native restart skips the quit-flush prevent (RESTART_EXIT_CODE). */
+export async function relaunchApp(): Promise<void> {
+  await invoke('relaunch_app');
+}
+
+/** Native `ExitRequested` asks the frontend to flush, then waits for `ack_quit_flush`. */
+export const QUIT_FLUSH_EVENT = 'flint-quit-flush';
+
+/**
+ * Listen for a native quit-flush request. Always acks, even if `onFlush` throws,
+ * so a failed write cannot hang the process past the native timeout.
+ */
+export async function subscribeQuitFlush(
+  onFlush: () => void | Promise<void>,
+): Promise<UnlistenFn> {
+  return listen(QUIT_FLUSH_EVENT, async () => {
+    try {
+      await onFlush();
+    } finally {
+      await invoke('ack_quit_flush');
+    }
   });
 }
 

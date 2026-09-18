@@ -16,9 +16,11 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri",
+    "preinstall": "node scripts/hydrate-foundry-native.cjs --restore",
     "ensure:foundry": "node scripts/ensure-foundry-native.cjs",
     "ensure:node": "node scripts/ensure-bundled-node.cjs",
     "smoke:node": "node scripts/smoke-bundled-node.cjs",
+    "smoke:runtime": "node scripts/smoke-packaged-runtime.cjs",
     "tauri:build": "tauri build",
     "tauri:build:local": "tauri build --no-sign",
     "verify:bundle": "node scripts/verify-bundle.cjs",
@@ -37,10 +39,9 @@
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-fs": "^2.5.1",
     "@tauri-apps/plugin-notification": "^2.4.0",
-    "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-shell": "^2.3.5",
     "@tauri-apps/plugin-updater": "^2",
-    "foundry-local-sdk": "^1.2.3",
+    "foundry-local-sdk": "1.2.4",
     "marked": "^18.0.5"
   },
   "devDependencies": {

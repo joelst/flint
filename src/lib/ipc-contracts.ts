@@ -26,6 +26,7 @@ export type SidecarCommand =
   | { cmd: 'getSTTModels' }
   | { cmd: 'poolStatus' }
   | { cmd: 'getAccessLog' }
+  | { cmd: 'getHealthRing' }
   | { cmd: 'getCacheInventory' }
   | { cmd: 'fetchUrl'; url: string; maxChars?: number }
   | { cmd: 'inspectModelFolder'; folderPath: string }
@@ -88,7 +89,7 @@ export const KNOWN_COMMANDS = new Set<SidecarCommandName>([
   'listModels', 'download', 'load', 'unload', 'deleteModel', 'getEndpoint',
   'chatCompletion', 'cancelChatRequest', 'transcribeAudio',
   'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',
-  'poolStatus', 'getAccessLog', 'fetchUrl',
+  'poolStatus', 'getAccessLog', 'getHealthRing', 'fetchUrl',
   'getCacheInventory',
   'inspectModelFolder', 'importModelFolder', 'linkModelFolder',
   'getModelTemplate', 'setModelTemplate',

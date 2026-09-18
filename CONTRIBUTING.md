@@ -6,9 +6,9 @@ is an entry point, not a duplicate of the real guides:
 - **Building, testing, and running locally:** [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md).
 - **Architecture, extension seams, and working safely in parallel:**
   [docs/EXTENDING.md](./docs/EXTENDING.md).
-- **What's open but not yet in flight:** [docs/BACKLOG.md](./docs/BACKLOG.md).
-- **Forward plan and release sequencing:** [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md)
-  and [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md).
+- **What to implement next for 1.0:** [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md)
+  against the bar in [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md).
+- **Deferred and post-1.0 work:** [docs/BACKLOG.md](./docs/BACKLOG.md).
 - **Full documentation index:** [docs/README.md](./docs/README.md).
 
 ## Before opening a pull request

@@ -32,6 +32,16 @@ impl Default for NativeRuntime {
     }
 }
 
+impl NativeRuntime {
+    pub fn phase(&self) -> RuntimePhase {
+        let supervisor = self
+            .supervisor
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        supervisor.phase()
+    }
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeStatus {

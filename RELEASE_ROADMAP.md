@@ -2,7 +2,7 @@
 
 **Scope:** The current probe-backed plan through 1.0, and the 1.0 release bar.
 Day-to-day implementation sequencing and acceptance gates live in
-[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md). Open follow-up items live in
+[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md). Deferred and post-1.0 items live in
 [docs/BACKLOG.md](./docs/BACKLOG.md). Per-release detail lives in
 [CHANGELOG.md](./CHANGELOG.md); project positioning and non-goals live in
 [FLINT_DESIGN_SPEC.md](./FLINT_DESIGN_SPEC.md).
@@ -35,72 +35,112 @@ the port: the gateway forwards to the native service and, on that exact rejectio
 replays once. Measured end to end: cold request 200 in 15 s, warm 707 ms with no reload,
 unknown model a clean 400 with no download.
 
-### Next: compatibility gateway
+### Remaining gateway work for 1.0
 
 Gateway work only. The tool-execution layer does **not** share this milestone.
+Chat JSON/SSE normalisation (Foundry extras stripped, one OpenAI-shaped choice,
+`[DONE]`) and autoload-on-demand are already in the tree; sequencing lives in
+[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md).
 
-- Conformance self-test that checks *behavior*, not route existence: does `/v1/models`
-  return the OpenAI envelope; can a returned ID be passed straight back to chat; does
-  streaming deliver a first token and terminate; does disconnect cancel generation; does
-  `usage` reconcile with output; does a tool-capable model emit valid `tool_calls`.
-- Stable model IDs across restarts; surface both alias and resolved variant.
-- Response-shape normalisation. The service returns non-standard extras (`IsDelta`,
-  `Successful`, `HttpStatusCode`, and both `delta` and `message` in the same choice) that
-  strict clients may reject.
-- `/v1/embeddings` served end-to-end — requires a BYOM embedding model, because the
-  Foundry catalog ships **zero** (97 chat, 21 vision, 10 ASR of 128). `createEmbeddingClient()`
-  exists in 1.2.4; only the model is missing. This is what unlocks RAG and Continue's indexer.
-- Verified integration recipes for OpenClaw, Cline, and Continue, pinned to tested client
-  versions. OpenClaw accepts any non-empty placeholder API key on loopback and
-  health-checks `GET /v1/models`.
-- Surface `supportsToolCalling` (75 of 128) and `contextLength`, labelled
-  **catalog-declared** vs **Flint-verified**. A catalog flag is not a guarantee.
+- User-facing conformance self-test that checks *behavior*, not route existence:
+  `/v1/models` OpenAI envelope; a returned ID round-trips into chat; streaming
+  delivers a first token and `[DONE]`; disconnect cancels upstream; `usage` is
+  present when the model emits it; a tool-capable model either emits valid
+  `tool_calls` or is labelled not-verified.
+- Surface `supportsToolCalling` and `contextLength`, labelled **catalog-declared**
+  vs **Flint-verified**. A catalog flag is not a guarantee. Catalog fields already
+  appear in the model-details modal; the verified label is what remains.
+- Verified integration recipes for OpenClaw, Cline, and Continue, pinned to tested
+  client versions. 1.0 recipes are **chat completions** against the local gateway.
+  OpenClaw accepts any non-empty placeholder API key on loopback and health-checks
+  `GET /v1/models`.
 
-### Then: curated model acquisition
+### After 1.0
 
-A **Flint-validated ONNX catalog**, not a generic HuggingFace browser: pinned repo and
-revision, tested execution provider, required files, disk/memory footprint, chat-template
-source, tool-calling status, last-tested core version. Arbitrary repo import stays behind
-an "unverified" advanced option.
-
-Survey data (HF API, top 1000 onnx + text-generation by downloads): **166 ship
-`genai_config.json`**; 81% modified within a year, so the ecosystem is active, not fallow.
-But only **29 exceed 100 downloads/month** and **2 exceed 1000** — a live but thin niche
-dominated by AMD Ryzen AI builds (193 of 301 in a recency-sorted sample), with
-`onnx-community` and `microsoft` next. Critically, only **2 of 301 ship
-`inference_model.json`**, so Flint must synthesise it for essentially every import.
-A curated 20 that reliably work beats a browser exposing 300 that mostly do not.
+- **`/v1/embeddings` end-to-end** — the route exists (GET returns 405); the Foundry
+  catalog ships **zero** embedding models (97 chat, 21 vision, 10 ASR of 128).
+  `createEmbeddingClient()` exists in SDK 1.2.4. This unlocks RAG and Continue's
+  indexer and is not a 1.0 blocker.
+- **Curated model acquisition** — a Flint-validated ONNX catalog (pinned repo and
+  revision, tested execution provider, required files, disk/memory footprint,
+  chat-template source, tool-calling status, last-tested core version), not a
+  generic HuggingFace browser. Arbitrary repo import stays behind an "unverified"
+  advanced option. Survey data (HF API, top 1000 onnx + text-generation by
+  downloads): **166 ship `genai_config.json`**; only **29 exceed 100
+  downloads/month** and **2 exceed 1000**; only **2 of 301 ship
+  `inference_model.json`**, so Flint must synthesise it for essentially every
+  import. A curated 20 that reliably work beats a browser exposing 300 that
+  mostly do not.
+- **Multi-endpoint scheduler**, Azure connections, and related routing — unscheduled
+  in [docs/BACKLOG.md](./docs/BACKLOG.md). Not part of the 1.0 bar.
 
 ---
 
 ## What release 1.0 should look like
 
-Release 1.0 should represent **production-grade local AI operations**, not just "working features."
+Release 1.0 is **production-grade local AI operations** on one Foundry endpoint,
+not a multi-provider control plane and not "every backlog item closed."
+
+**1.0 production is Windows.** macOS Apple Silicon remains evaluation-only
+(unsigned builds; `scripts/install-macos.sh` or `xattr -cr`). Linux is deferred.
+Do not date 1.0 until the sequenced work in
+[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md) is in flight against this bar.
 
 ### 1.0 release criteria
 
 1. **Security**
-   - Principle-of-least-privilege shell/capability model in place.
-   - Security test suite for renderer/sidecar boundaries.
+   - Audited Tauri capability model: each survivor in
+     `src-tauri/capabilities/default.json` is named and justified.
+   - Dedicated renderer/sidecar boundary suite covering command allowlisting,
+     unknown commands, IPC schema drift, and BYOM path containment.
 2. **Reliability**
-   - Multi-endpoint manager with robust recovery and health checks.
-   - Deterministic cancellation and timeout behavior across all request types.
+   - One local endpoint with recovery and health checks.
+   - Deterministic cancellation and timeout *certainty* across chat, streaming,
+     gateway, audio, and compare: Stop acknowledgement is not proof inference
+     stopped; caller completion is separate from native completion; resource
+     protection holds until native completion or the child is gone.
+   - Native tray Open/Quit (renderer-independent), quit→frontend-flush handshake,
+     and stream updates routed by originating conversation id.
 3. **Testing**
-   - Mature pyramid: unit + component + contract + E2E smoke/regression.
-   - CI quality gates with meaningful coverage and stability thresholds.
+   - Unit + contract + sidecar/native E2E + one packaged Windows smoke
+     (launch → sidecar ready → quit in CI; load/chat/stop on a recorded
+     clean-machine dogfood).
+   - CI coverage gate over the existing allowlist; add files only when they
+     have tests. Component tests of `src/routes/+page.svelte` are not the bar.
 4. **Observability**
-   - Rich diagnostics export, operational metrics, endpoint health history.
+   - Diagnostics export includes a bounded endpoint health ring plus IPC and
+     gateway inference metrics (load time, TTFT, prompt tok/s, decode tok/s,
+     variant + execution provider). No single ambiguous "tokens/sec".
 5. **UX maturity**
-   - Clear endpoint routing controls, memory/capacity UX, polished onboarding.
+   - Qualify the surfaces that already exist: first-run coach, Settings →
+     Network (bind/port/WSL), Monitor memory/capacity. Fix holes. Not a new
+     routing UI and not cloud endpoint profiles.
 6. **Integrations**
-   - Stable OpenClaw/other tooling integration docs and verified recipes.
+   - In-app behavioral self-test of the local OpenAI-compatible gateway.
+   - Continue, Cline, and OpenClaw recipes pinned to tested versions with
+     honest status badges. Chat completions only.
 7. **Documentation**
-   - Deployment/admin guide, troubleshooting runbook, versioned release notes.
+   - Operator runbook (log locations, service lifecycle, bind vs client URL,
+     offline/uninstall, updater stable-vs-prerelease) plus versioned release
+     notes in [CHANGELOG.md](./CHANGELOG.md). The user-facing table in
+     [docs/USER_GUIDE.md](./docs/USER_GUIDE.md) is not that runbook.
+
+### 1.0 ship gate (process)
+
+- Signed Windows MSI/NSIS on a clean machine (no PATH Node, Rust, or Foundry)
+  downloads and loads a model.
+- First **stable** GitHub release (not a prerelease) is what makes
+  `https://github.com/joelst/flint/releases/latest/download/latest.json`
+  resolve; that publish is the updater acceptance test, with a rollback
+  note in [docs/RELEASE.md](./docs/RELEASE.md).
+- macOS: one recorded `install-macos.sh` boot as evaluation evidence, not a
+  production claim.
 
 ### 1.0 statement
 
-**1.0 is "operationally trustworthy."** Early releases proved the app usable, then hardened
-its architecture; the remaining bar for 1.0 is the seven criteria above holding under
-real-world use, not new features.
+**1.0 is "operationally trustworthy" for the local product that exists.** The
+remaining bar is the seven criteria above holding under real-world Windows use,
+not new features (multi-endpoint routing, embeddings/RAG, Azure, Linux, a
+Flint-native tool executor).
 
 ---

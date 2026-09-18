@@ -53,8 +53,19 @@ jobs:
             librsvg2-dev \
             patchelf
 
+      - name: Cache Foundry native payload
+        uses: actions/cache@v4
+        with:
+          path: runtime/foundry-native-cache
+          key: foundry-native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            foundry-native-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Install dependencies
         run: npm ci
+
+      - name: Save Foundry native payload
+        run: node scripts/hydrate-foundry-native.cjs --save
 
       # Tauri externalBin (binaries/node) is required even for cargo check.
       - name: Cache bundled Node binary
@@ -135,8 +146,19 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
+      - name: Cache Foundry native payload
+        uses: actions/cache@v4
+        with:
+          path: runtime/foundry-native-cache
+          key: foundry-native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            foundry-native-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Install dependencies
         run: npm ci
+
+      - name: Save Foundry native payload
+        run: node scripts/hydrate-foundry-native.cjs --save
 
       - name: Run tests with coverage
         run: npm run test:coverage
@@ -171,8 +193,19 @@ jobs:
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
+      - name: Cache Foundry native payload
+        uses: actions/cache@v4
+        with:
+          path: runtime/foundry-native-cache
+          key: foundry-native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            foundry-native-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Install dependencies
         run: npm ci
+
+      - name: Save Foundry native payload
+        run: node scripts/hydrate-foundry-native.cjs --save
 
       - name: Cache bundled Node binary
         uses: actions/cache@v4
@@ -202,6 +235,10 @@ jobs:
         with:
           # Build debug to keep CI fast; release on tags
           args: --debug --no-sign
+
+      - name: Runtime smoke (Windows debug exe)
+        if: matrix.os == 'windows-latest'
+        run: npm run smoke:runtime
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

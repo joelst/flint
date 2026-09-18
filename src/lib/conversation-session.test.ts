@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   captureThread,
+  applyMessagePatch,
   ensureMessageIds,
   snapshotMessages,
   createConversation,
@@ -333,6 +334,33 @@ describe('captureThread and settings', () => {
     });
     const stored = findConversation(result.archive, 'a')!;
     expect('settings' in stored).toBe(false);
+  });
+});
+
+describe('applyMessagePatch', () => {
+  it('updates a message in a conversation that is not loaded', () => {
+    const archive = archiveOf(
+      conv('a', [msg('u1', 'hello'), msg('a1', '')]),
+      conv('b', [msg('b1', 'other')]),
+    );
+    const result = applyMessagePatch(archive, 'a', 'a1', { content: 'partial' }, NOW);
+    expect(result.changed).toBe(true);
+    expect(findConversation(result.archive, 'a')!.messages[1].content).toBe('partial');
+    expect(findConversation(result.archive, 'b')!.messages[0].content).toBe('other');
+    expect(findConversation(archive, 'a')!.messages[1].content).toBe('');
+  });
+
+  it('refuses to create a conversation or message that is not there', () => {
+    const archive = archiveOf(conv('a', [msg('a1', 'hi')]));
+    expect(applyMessagePatch(archive, 'missing', 'a1', { content: 'x' }, NOW).changed).toBe(false);
+    expect(applyMessagePatch(archive, 'a', 'missing', { content: 'x' }, NOW).changed).toBe(false);
+  });
+
+  it('does not rewrite when the patch is a no-op', () => {
+    const archive = archiveOf(conv('a', [msg('a1', 'hi')]));
+    const result = applyMessagePatch(archive, 'a', 'a1', { content: 'hi' }, NOW);
+    expect(result.changed).toBe(false);
+    expect(result.archive).toBe(archive);
   });
 });
 

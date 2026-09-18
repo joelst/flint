@@ -61,6 +61,11 @@ export interface Integration {
   limitations?: string[];
   /** Upstream docs URL for verification. */
   docsUrl?: string;
+  /**
+   * Client version the snippet was actually exercised against.
+   * Omit or leave unset when the status is not `verified` with a pinned version.
+   */
+  testedWith?: string;
 }
 
 /**
@@ -180,6 +185,8 @@ res = client.chat.completions.create(
     ]),
     limitations: [
       'Restart the Continue extension after editing config.json for changes to take effect.',
+      'Indexer / embeddings are not a 1.0 Flint path — chat completions only.',
+      'Verified for chat completions; client version is not pinned until a recorded dogfood.',
     ],
     docsUrl: 'https://docs.continue.dev/customize/model-providers/openai',
   },
@@ -281,6 +288,7 @@ codex --model {MODEL}`,
     ]),
     limitations: [
       'Setting keys have changed across Cline versions — check the extension settings UI for the exact key names in your install.',
+      'Not yet exercised against a pinned Cline version — remains Unverified until a recorded dogfood.',
     ],
     docsUrl: 'https://github.com/cline/cline',
   },
@@ -441,6 +449,7 @@ openclaw  # then select {MODEL} in the model picker
       ],
     },
     limitations: [
+      'Community-reported; not pinned to a Flint-tested OpenClaw version.',
       'Prefer to leave WSL in NAT mode? Settings → Network → WSL clients also lists the manual steps — WSL clients then connect to the Windows host address instead of 127.0.0.1.',
       'Tool-calling and streaming features depend on the loaded Flint model exposing OpenAI-style `tool_calls` / streaming.',
       'Optional advanced setup — a LiteLLM proxy in front of Flint provides cross-backend routing (e.g. fallback between local Flint and Azure AI Foundry) and uniform API-key handling, but is not required for direct OpenClaw → Flint use.',

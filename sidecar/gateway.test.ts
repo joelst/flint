@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import http from 'node:http';
 import net from 'node:net';
-import { createGateway, respondBuffered } from './gateway.js';
+import { createGateway, classifyGatewayRoute, respondBuffered } from './gateway.js';
 
 /** @type {{ server: http.Server, port: number, loaded: Set<string>, hits: any[] }} */
 let upstream;
@@ -1116,5 +1116,13 @@ describe('gateway activity hook', () => {
       await new Promise(r => setTimeout(r, 1));
     }
     expect(socket.destroyed).toBe(true);
+  });
+});
+
+describe('classifyGatewayRoute', () => {
+  it('labels chat, models, and other without reading bodies', () => {
+    expect(classifyGatewayRoute('/v1/chat/completions')).toBe('chat');
+    expect(classifyGatewayRoute('/v1/models?foo=1')).toBe('models');
+    expect(classifyGatewayRoute('/v1/embeddings')).toBe('other');
   });
 });

@@ -119,7 +119,7 @@ Press **`?`** in the app for the full list (views, new chat, send, push-to-talk,
 | Symptom | What to try |
 |---|---|
 | macOS: "Flint is damaged and can't be opened" | Unsigned prerelease build quarantine. Run `xattr -cr /Applications/Flint.app` in Terminal or use the install script. |
-| Could not start Foundry / sidecar | Install Node 22+, confirm `node -v` in a terminal, restart Flint. |
+| Could not start Foundry / sidecar | Release builds ship a bundled Node 22 (About shows `bundled`). Restart Flint. PATH Node is only a fallback for `tauri dev` or an incomplete install. |
 | No models | **Models** → download a starter; wait for catalog. |
 | Chat disabled | Load a **chat** model (not STT-only); check Help → Troubleshooting. |
 | Integrations “not started” | **Diagnostics → Start service**. |
