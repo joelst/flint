@@ -77,6 +77,18 @@ Living reliability plan: **[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md)** · E
 
 ## Screenshots
 
+### macOS Apple silicon
+
+Flint uses Apple GPU acceleration where supported and presents Apple silicon's unified memory without double-counting separate VRAM.
+
+![Flint model catalog on macOS showing Apple GPU acceleration](./images/flint-macos-model-catalog.png)
+
+![Flint monitor on macOS showing Apple silicon unified memory](./images/flint-macos-monitor.png)
+
+Startup settings integrate with macOS LaunchAgents and can keep the local service available in the background.
+
+![Flint settings on macOS showing startup and service options](./images/flint-macos-settings.png)
+
 ### Main window
 
 ![Flint main window](./images/flint-main-window.png)
