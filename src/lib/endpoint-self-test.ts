@@ -17,19 +17,24 @@ export interface SelfTestReport {
   ranAt: string;
   endpoint: string | null;
   modelId: string | null;
+  embeddingModelId: string | null;
   checks: SelfTestCheck[];
 }
 
 export interface FlintVerified {
   modelId: string;
+  embeddingModelId: string | null;
   ranAt: string;
   chat: boolean;
   stream: boolean;
   usage: boolean;
   disconnect: boolean;
+  embeddings: boolean;
   tools: 'verified' | 'not-verified';
 }
 
+const REQUEST_TIMEOUT_MS = 8_000;
+const DISCONNECT_START_MS = 2_000;
 const ABORT_SETTLE_TIMEOUT_MS = 1_000;
 
 function check(
@@ -50,15 +55,21 @@ function passed(report: SelfTestReport, id: string): boolean {
 }
 
 export function flintVerifiedFromReport(report: SelfTestReport): FlintVerified | null {
-  if (!report.modelId) return null;
+  // A failed /v1/models envelope is not a verified endpoint. Chat/stream can still
+  // have run against a UI alias; do not mint a badge from that.
+  if (!passed(report, 'models')) return null;
+  const id = report.modelId || report.embeddingModelId;
+  if (!id) return null;
   const toolsCheck = report.checks.find((item) => item.id === 'tools');
   return {
-    modelId: report.modelId,
+    modelId: id,
+    embeddingModelId: report.embeddingModelId,
     ranAt: report.ranAt,
     chat: passed(report, 'chat'),
     stream: passed(report, 'stream'),
     usage: passed(report, 'usage'),
     disconnect: passed(report, 'disconnect'),
+    embeddings: passed(report, 'embeddings'),
     tools: toolsCheck?.status === 'pass' ? 'verified' : 'not-verified',
   };
 }
@@ -70,31 +81,111 @@ export function matchesVerifiedModel(modelId: string, alias: string | null | und
   return id === name || id.startsWith(`${name}-`);
 }
 
-async function observeAbortSettlement(pending: Promise<unknown>): Promise<{ status: 'resolved' | 'aborted' | 'rejected' | 'timeout'; detail: string }> {
-  let timeout: ReturnType<typeof setTimeout> | null = null;
+function listedIds(body: { data?: Array<{ id?: string }> } | null): string[] {
+  return (body?.data ?? [])
+    .map((row) => row.id)
+    .filter((id): id is string => typeof id === 'string' && id.length > 0);
+}
+
+function isEmbeddingModelId(id: string): boolean {
+  return /embed/i.test(id);
+}
+
+function isChatModelId(id: string): boolean {
+  const name = id.toLowerCase();
+  if (isEmbeddingModelId(name)) return false;
+  if (/(whisper|-stt(?:-|$)|(?:^|-)stt-|parakeet|nemotron-speech)/i.test(name)) return false;
+  return true;
+}
+
+function pickListedId(listed: string[], requested: string | null): string | null {
+  if (requested) {
+    const match = listed.find((id) => matchesVerifiedModel(id, requested));
+    if (match) return match;
+  }
+  return listed[0] ?? null;
+}
+
+function modelsEnvelopeData(json: unknown): unknown[] | null {
+  if (!json || typeof json !== 'object') return null;
+  const data = (json as { data?: unknown }).data;
+  return Array.isArray(data) ? data : null;
+}
+
+function isNumericVector(value: unknown): value is number[] {
+  return Array.isArray(value)
+    && value.length > 0
+    && value.every((item) => typeof item === 'number' && Number.isFinite(item));
+}
+
+function streamHasToken(text: string): boolean {
+  for (const line of text.split(/\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('data:')) continue;
+    const payload = trimmed.slice(5).trim();
+    if (!payload || payload === '[DONE]') continue;
+    try {
+      const json = JSON.parse(payload) as {
+        choices?: Array<{ delta?: { content?: unknown }; message?: { content?: unknown } }>;
+      };
+      const content = json?.choices?.[0]?.delta?.content ?? json?.choices?.[0]?.message?.content;
+      if (typeof content === 'string' && content.length > 0) return true;
+    } catch {
+      // Non-JSON data lines are not a token.
+    }
+  }
+  return false;
+}
+
+function mergeSignals(a: AbortSignal | undefined, b: AbortSignal): AbortSignal {
+  return a ? AbortSignal.any([a, b]) : b;
+}
+
+function whenAborted(signal: AbortSignal, error: Error): Promise<never> {
+  return new Promise((_, reject) => {
+    const fail = () => reject(error);
+    if (signal.aborted) {
+      fail();
+      return;
+    }
+    signal.addEventListener('abort', fail, { once: true });
+  });
+}
+
+async function fetchAndRead(
+  fetchFn: typeof fetch,
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+  read: 'json' | 'text',
+): Promise<{ res: Response; json: unknown; text: string }> {
+  const timeout = new AbortController();
+  const timedOut = new Error(`Timed out after ${timeoutMs} ms`);
+  const timer = setTimeout(() => timeout.abort(), timeoutMs);
   try {
-    return await Promise.race([
-      pending.then(
-        () => ({ status: 'resolved' as const, detail: 'Caller resolved after abort. Native generation may still finish.' }),
-        (error) => {
-          const message = error instanceof Error ? error.message : String(error);
-          if (error instanceof DOMException && error.name === 'AbortError') {
-            return { status: 'aborted' as const, detail: 'Caller rejected with AbortError after abort.' };
-          }
-          return { status: 'rejected' as const, detail: `Caller rejected after abort: ${message}` };
-        },
-      ),
-      new Promise<{ status: 'timeout'; detail: string }>((resolve) => {
-        timeout = setTimeout(() => {
-          resolve({
-            status: 'timeout',
-            detail: `Abort did not settle the request within ${ABORT_SETTLE_TIMEOUT_MS} ms.`,
-          });
-        }, ABORT_SETTLE_TIMEOUT_MS);
-      }),
+    const res = await Promise.race([
+      fetchFn(url, { ...init, signal: mergeSignals(init.signal ?? undefined, timeout.signal) }),
+      whenAborted(timeout.signal, timedOut),
     ]);
+    const abortBody = () => {
+      try {
+        const cancel = res.body && !res.body.locked ? res.body.cancel() : null;
+        if (cancel && typeof cancel.catch === 'function') void cancel.catch(() => {});
+      } catch { /* already closed or locked */ }
+    };
+    timeout.signal.addEventListener('abort', abortBody, { once: true });
+    if (timeout.signal.aborted) abortBody();
+    if (read === 'text') {
+      const text = await Promise.race([res.text(), whenAborted(timeout.signal, timedOut)]);
+      return { res, json: null, text };
+    }
+    const json = await Promise.race([res.json().catch(() => null), whenAborted(timeout.signal, timedOut)]);
+    return { res, json, text: '' };
+  } catch (error) {
+    if (timeout.signal.aborted) throw timedOut;
+    throw error;
   } finally {
-    if (timeout) clearTimeout(timeout);
+    clearTimeout(timer);
   }
 }
 
@@ -103,16 +194,22 @@ export async function runEndpointSelfTest(options: {
   endpoint: string | null;
   modelId?: string | null;
   catalogSupportsToolCalling?: boolean | null;
+  embeddingModelId?: string | null;
+  requestTimeoutMs?: number;
+  disconnectStartMs?: number;
 }): Promise<SelfTestReport> {
   const ranAt = new Date().toISOString();
   const endpoint = options.endpoint?.trim() || null;
   const requestedModel = options.modelId?.trim() || null;
+  const requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
+  const disconnectStartMs = options.disconnectStartMs ?? DISCONNECT_START_MS;
 
   if (!endpoint) {
     return {
       ranAt,
       endpoint: null,
       modelId: requestedModel,
+      embeddingModelId: null,
       checks: [
         check('endpoint', 'Local gateway reachable', 'blocked', 'Start the local service first.'),
       ],
@@ -123,12 +220,14 @@ export async function runEndpointSelfTest(options: {
   let modelsBody: { data?: Array<{ id?: string }> } | null = null;
 
   try {
-    const res = await options.fetch(joinUrl(endpoint, '/models'), {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
-    });
-    const json = await res.json().catch(() => null);
-    const data = Array.isArray(json?.data) ? json.data : null;
+    const { res, json } = await fetchAndRead(
+      options.fetch,
+      joinUrl(endpoint, '/models'),
+      { method: 'GET', headers: { Accept: 'application/json' } },
+      requestTimeoutMs,
+      'json',
+    );
+    const data = modelsEnvelopeData(json);
     if (!res.ok || !data) {
       checks.push(check(
         'models',
@@ -137,7 +236,7 @@ export async function runEndpointSelfTest(options: {
         `HTTP ${res.status}; expected { data: [...] }.`,
       ));
     } else {
-      modelsBody = json;
+      modelsBody = json as { data?: Array<{ id?: string }> };
       checks.push(check(
         'models',
         'GET /v1/models returns an OpenAI envelope',
@@ -154,9 +253,78 @@ export async function runEndpointSelfTest(options: {
     ));
   }
 
-  const modelId = requestedModel
-    || modelsBody?.data?.find((row) => typeof row.id === 'string' && row.id)?.id
-    || null;
+  const modelsOk = checks.some((item) => item.id === 'models' && item.status === 'pass');
+  const ids = modelsOk ? listedIds(modelsBody) : [];
+  const requestedEmbed = options.embeddingModelId?.trim() || null;
+  // A BYOM embedding imported as `my-model` has no `embed` substring. Prefer the
+  // UI-supplied embedding alias against the full listed set, then drop it from chat.
+  const embeddingModelId = (
+    requestedEmbed
+      ? ids.find((id) => matchesVerifiedModel(id, requestedEmbed))
+      : undefined
+  ) ?? ids.find(isEmbeddingModelId) ?? null;
+  const chatIds = ids.filter((id) => isChatModelId(id) && id !== embeddingModelId);
+  const modelId = pickListedId(chatIds, requestedModel);
+
+  if (!modelsOk) {
+    const blocked = 'GET /v1/models did not return an OpenAI envelope.';
+    checks.push(check('embeddings', 'POST /v1/embeddings returns a vector', 'blocked', blocked));
+    checks.push(check('chat', 'Returned model id round-trips into chat', 'blocked', blocked));
+    checks.push(check('stream', 'Streaming delivers a token and [DONE]', 'blocked', blocked));
+    checks.push(check('usage', 'usage is present when the model emits it', 'blocked', blocked));
+    checks.push(check('disconnect', 'Aborting a stream settles the caller', 'blocked', blocked));
+    checks.push(check('tools', 'tool_calls when prompted', 'blocked', blocked));
+    return { ranAt, endpoint, modelId: null, embeddingModelId: null, checks };
+  }
+
+  if (!embeddingModelId) {
+    checks.push(check(
+      'embeddings',
+      'POST /v1/embeddings returns a vector',
+      'blocked',
+      'Import a BYOM embedding model, then run the test again.',
+    ));
+  } else {
+    try {
+      const { res, json } = await fetchAndRead(
+        options.fetch,
+        joinUrl(endpoint, '/embeddings'),
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: embeddingModelId, input: 'ping' }),
+        },
+        requestTimeoutMs,
+        'json',
+      );
+      const embeddingJson = json && typeof json === 'object'
+        ? json as { data?: Array<{ embedding?: unknown }> }
+        : null;
+      const vector = embeddingJson?.data?.[0]?.embedding;
+      if (!res.ok || !isNumericVector(vector)) {
+        checks.push(check(
+          'embeddings',
+          'POST /v1/embeddings returns a vector',
+          'fail',
+          `HTTP ${res.status}; expected data[0].embedding number[].`,
+        ));
+      } else {
+        checks.push(check(
+          'embeddings',
+          'POST /v1/embeddings returns a vector',
+          'pass',
+          `${vector.length}-d vector from ${embeddingModelId}.`,
+        ));
+      }
+    } catch (error) {
+      checks.push(check(
+        'embeddings',
+        'POST /v1/embeddings returns a vector',
+        'fail',
+        error instanceof Error ? error.message : String(error),
+      ));
+    }
+  }
 
   if (!modelId) {
     checks.push(check('chat', 'Returned model id round-trips into chat', 'blocked', 'Download a chat model, then run the test again.'));
@@ -164,29 +332,35 @@ export async function runEndpointSelfTest(options: {
     checks.push(check('usage', 'usage is present when the model emits it', 'blocked', 'Needs a cached chat model.'));
     checks.push(check('disconnect', 'Aborting a stream settles the caller', 'blocked', 'Needs a cached chat model.'));
     checks.push(check('tools', 'tool_calls when prompted', 'blocked', 'Needs a cached chat model.'));
-    return { ranAt, endpoint, modelId: null, checks };
+    return { ranAt, endpoint, modelId: null, embeddingModelId, checks };
   }
 
   let usageSeen = false;
   try {
-    const res = await options.fetch(joinUrl(endpoint, '/chat/completions'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: modelId,
-        messages: [{ role: 'user', content: 'Reply with the single word ping.' }],
-        stream: false,
-        max_tokens: 8,
-      }),
-    });
-    const json = await res.json().catch(() => null);
-    const content = json?.choices?.[0]?.message?.content;
-    const usage = json?.usage;
-    usageSeen = !!(usage && (usage.prompt_tokens != null || usage.completion_tokens != null
-      || usage.input_tokens != null || usage.output_tokens != null));
-    if (!res.ok || typeof content !== 'string') {
+    const { res, json } = await fetchAndRead(
+      options.fetch,
+      joinUrl(endpoint, '/chat/completions'),
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: modelId,
+          messages: [{ role: 'user', content: 'Reply with the single word ping.' }],
+          stream: false,
+          max_tokens: 8,
+        }),
+      },
+      requestTimeoutMs,
+      'json',
+    );
+    const payload = json as { choices?: Array<{ message?: { content?: unknown } }>; usage?: Record<string, unknown> } | null;
+    const content = payload?.choices?.[0]?.message?.content;
+    const usage = payload?.usage;
+    if (!res.ok || typeof content !== 'string' || !content.trim()) {
       checks.push(check('chat', 'Returned model id round-trips into chat', 'fail', `HTTP ${res.status}; no assistant message.`));
     } else {
+      usageSeen = !!(usage && (usage.prompt_tokens != null || usage.completion_tokens != null
+        || usage.input_tokens != null || usage.output_tokens != null));
       checks.push(check('chat', 'Returned model id round-trips into chat', 'pass', `id ${modelId} produced a completion.`));
     }
   } catch (error) {
@@ -210,21 +384,26 @@ export async function runEndpointSelfTest(options: {
   }
 
   try {
-    const res = await options.fetch(joinUrl(endpoint, '/chat/completions'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: modelId,
-        messages: [{ role: 'user', content: 'Reply with the single word ping.' }],
-        stream: true,
-        max_tokens: 8,
-      }),
-    });
-    const text = await res.text();
+    const { res, text } = await fetchAndRead(
+      options.fetch,
+      joinUrl(endpoint, '/chat/completions'),
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: modelId,
+          messages: [{ role: 'user', content: 'Reply with the single word ping.' }],
+          stream: true,
+          max_tokens: 8,
+        }),
+      },
+      requestTimeoutMs,
+      'text',
+    );
     const hasDone = text.includes('[DONE]');
-    const hasDelta = /data:\s*\{/.test(text);
-    if (!res.ok || !hasDone || !hasDelta) {
-      checks.push(check('stream', 'Streaming delivers a token and [DONE]', 'fail', `HTTP ${res.status}; done=${hasDone} delta=${hasDelta}.`));
+    const hasToken = streamHasToken(text);
+    if (!res.ok || !hasDone || !hasToken) {
+      checks.push(check('stream', 'Streaming delivers a token and [DONE]', 'fail', `HTTP ${res.status}; done=${hasDone} token=${hasToken}.`));
     } else {
       checks.push(check('stream', 'Streaming delivers a token and [DONE]', 'pass', 'SSE stream terminated with [DONE].'));
     }
@@ -250,14 +429,62 @@ export async function runEndpointSelfTest(options: {
       }),
       signal: abort.signal,
     });
-    abort.abort();
-    const outcome = await observeAbortSettlement(pending);
-    checks.push(check(
-      'disconnect',
-      'Aborting a stream settles the caller',
-      outcome.status === 'timeout' ? 'fail' : 'pass',
-      outcome.detail,
-    ));
+    // Wait until headers (and a first body chunk, if any) so this is a disconnect of
+    // an in-flight stream, not a cancel of a request that never left the client.
+    const started = await Promise.race([
+      pending.then((res) => ({ kind: 'headers' as const, res })).catch((error) => ({ kind: 'error' as const, error })),
+      new Promise<{ kind: 'slow' }>((resolve) => {
+        setTimeout(() => resolve({ kind: 'slow' }), disconnectStartMs);
+      }),
+    ]);
+    if (started.kind !== 'headers') {
+      abort.abort();
+      checks.push(check(
+        'disconnect',
+        'Aborting a stream settles the caller',
+        'fail',
+        started.kind === 'error'
+          ? (started.error instanceof Error ? started.error.message : String(started.error))
+          : `Streaming response did not start within ${disconnectStartMs} ms; disconnect was not exercised.`,
+      ));
+    } else {
+      const reader = started.res.body?.getReader() ?? null;
+      const pendingRead = reader
+        ? reader.read().then(() => 'read' as const, () => 'rejected' as const)
+        : null;
+      if (pendingRead) {
+        await Promise.race([
+          pendingRead,
+          new Promise<void>((resolve) => {
+            setTimeout(resolve, disconnectStartMs);
+          }),
+        ]);
+      }
+      abort.abort();
+      if (pendingRead) {
+        const settled = await Promise.race([
+          pendingRead.then(() => 'settled' as const),
+          new Promise<'timeout'>((resolve) => {
+            setTimeout(() => resolve('timeout'), ABORT_SETTLE_TIMEOUT_MS);
+          }),
+        ]);
+        checks.push(check(
+          'disconnect',
+          'Aborting a stream settles the caller',
+          settled === 'timeout' ? 'fail' : 'pass',
+          settled === 'timeout'
+            ? `Abort did not settle the stream body within ${ABORT_SETTLE_TIMEOUT_MS} ms.`
+            : 'Stream started and abort settled the body reader. Native generation may still finish.',
+        ));
+      } else {
+        checks.push(check(
+          'disconnect',
+          'Aborting a stream settles the caller',
+          'pass',
+          'Stream started and abort was issued. Native generation may still finish.',
+        ));
+      }
+    }
   } catch (error) {
     checks.push(check(
       'disconnect',
@@ -276,38 +503,48 @@ export async function runEndpointSelfTest(options: {
     ));
   } else {
     try {
-      const res = await options.fetch(joinUrl(endpoint, '/chat/completions'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: modelId,
-          messages: [{ role: 'user', content: 'Call the echo tool with text ping.' }],
-          tools: [{
-            type: 'function',
-            function: {
-              name: 'echo',
-              description: 'Echo text',
-              parameters: {
-                type: 'object',
-                properties: { text: { type: 'string' } },
-                required: ['text'],
+      const { res, json } = await fetchAndRead(
+        options.fetch,
+        joinUrl(endpoint, '/chat/completions'),
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: modelId,
+            messages: [{ role: 'user', content: 'Call the echo tool with text ping.' }],
+            tools: [{
+              type: 'function',
+              function: {
+                name: 'echo',
+                description: 'Echo text',
+                parameters: {
+                  type: 'object',
+                  properties: { text: { type: 'string' } },
+                  required: ['text'],
+                },
               },
-            },
-          }],
-          max_tokens: 32,
-        }),
-      });
-      const json = await res.json().catch(() => null);
-      const toolCalls = json?.choices?.[0]?.message?.tool_calls
-        ?? json?.choices?.[0]?.delta?.tool_calls;
-      if (Array.isArray(toolCalls) && toolCalls.length > 0) {
+            }],
+            max_tokens: 32,
+          }),
+        },
+        requestTimeoutMs,
+        'json',
+      );
+      const payload = json as {
+        choices?: Array<{ message?: { tool_calls?: unknown }; delta?: { tool_calls?: unknown } }>;
+      } | null;
+      const toolCalls = payload?.choices?.[0]?.message?.tool_calls
+        ?? payload?.choices?.[0]?.delta?.tool_calls;
+      if (res.ok && Array.isArray(toolCalls) && toolCalls.length > 0) {
         checks.push(check('tools', 'tool_calls when prompted', 'pass', 'Model emitted OpenAI-style tool_calls.'));
       } else {
         checks.push(check(
           'tools',
           'tool_calls when prompted',
           'blocked',
-          'No tool_calls in the response; labeled not-verified rather than failed.',
+          res.ok
+            ? 'No tool_calls in the response; labeled not-verified rather than failed.'
+            : `HTTP ${res.status}; labeled not-verified rather than failed.`,
         ));
       }
     } catch (error) {
@@ -320,5 +557,5 @@ export async function runEndpointSelfTest(options: {
     }
   }
 
-  return { ranAt, endpoint, modelId, checks };
+  return { ranAt, endpoint, modelId, embeddingModelId, checks };
 }

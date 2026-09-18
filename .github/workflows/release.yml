@@ -98,7 +98,7 @@ jobs:
             foundry-native-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install dependencies
-        run: npm ci
+        run: npm run ci:deps
 
       - name: Save Foundry native payload
         run: node scripts/hydrate-foundry-native.cjs --save

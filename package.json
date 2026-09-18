@@ -1,6 +1,6 @@
 {
   "name": "flint",
-  "version": "0.7.0",
+  "version": "0.9.0",
   "description": "Flint — Foundry Local Interface (desktop GUI for Microsoft Foundry Local)",
   "type": "module",
   "engines": {
@@ -16,7 +16,7 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri",
-    "preinstall": "node scripts/hydrate-foundry-native.cjs --restore",
+    "ci:deps": "node scripts/ci-npm-ci.cjs",
     "ensure:foundry": "node scripts/ensure-foundry-native.cjs",
     "ensure:node": "node scripts/ensure-bundled-node.cjs",
     "smoke:node": "node scripts/smoke-bundled-node.cjs",

@@ -83,6 +83,7 @@ export const COMMAND_EFFECTS: Record<SidecarCommandName, OperationEffect> = {
   // Consume a model and produce output.
   chatCompletion: 'effectful',
   transcribeAudio: 'effectful',
+  embedTexts: 'effectful',
 
   // Records an intent to stop. It does not itself confirm that anything stopped.
   cancelChatRequest: 'effectful',

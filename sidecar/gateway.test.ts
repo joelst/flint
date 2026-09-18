@@ -43,12 +43,21 @@ function defaultHandler (req, res, body, state) {
     res.end(JSON.stringify({ endpoints: [`http://127.0.0.1:${req.socket.localPort}`], pipeName: 'p' }));
     return;
   }
-  if (req.url === '/v1/chat/completions') {
+  if (req.url === '/v1/chat/completions' || req.url === '/v1/embeddings') {
     let model = null;
     try { model = JSON.parse(body).model; } catch { /* streamed body */ }
     if (model && !state.loaded.has(model)) {
       res.writeHead(400, { 'content-type': 'application/json' });
       res.end(NOT_LOADED(model));
+      return;
+    }
+    if (req.url === '/v1/embeddings') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        object: 'list',
+        data: [{ object: 'embedding', index: 0, embedding: [0.1, 0.2] }],
+        model,
+      }));
       return;
     }
     res.writeHead(200, { 'content-type': 'application/json' });
@@ -1120,11 +1129,75 @@ describe('gateway activity hook', () => {
 });
 
 describe('classifyGatewayRoute', () => {
-  it('labels chat, models, and other without reading bodies', () => {
+  it('labels chat, embeddings, models, and other without reading bodies', () => {
     expect(classifyGatewayRoute('/v1/chat/completions')).toBe('chat');
     expect(classifyGatewayRoute('/v1/models?foo=1')).toBe('models');
     expect(classifyGatewayRoute('/v1/models/tiny-cpu')).toBe('models');
     expect(classifyGatewayRoute('/v1/not-models')).toBe('other');
-    expect(classifyGatewayRoute('/v1/embeddings')).toBe('other');
+    expect(classifyGatewayRoute('/v1/embeddings')).toBe('embeddings');
+    expect(classifyGatewayRoute('/v1/embeddings?foo=1')).toBe('embeddings');
+    expect(classifyGatewayRoute('/v1/chat/completions-evil')).toBe('other');
+    expect(classifyGatewayRoute('/v1/embeddings-preview')).toBe('other');
+    expect(classifyGatewayRoute('/health')).toBe('other');
+  });
+});
+
+describe('gateway embeddings autoload', () => {
+  it('loads the model and replays POST /v1/embeddings once', async () => {
+    const loads = [];
+    const access = [];
+    gateway = await startGateway({
+      load: async (alias) => { loads.push(alias); upstream.state.loaded.add(alias); },
+      onAccess: (entry) => access.push(entry),
+    });
+    const res = await request(gateway.publicPort, '/v1/embeddings', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3-embedding', input: 'ping' }),
+    });
+    expect(res.status).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.data[0].embedding).toEqual([0.1, 0.2]);
+    expect(body.model).toBe('qwen3-embedding');
+    expect(loads).toEqual(['qwen3-embedding']);
+    expect(upstream.state.hits).toHaveLength(2);
+    expect(access[0].routeClass).toBe('embeddings');
+    expect(access[0].type).toBe('gateway');
+  });
+
+  it('rewrites an embeddings alias to the loaded variant on replay', async () => {
+    const ALIAS = 'qwen3-embedding';
+    const VARIANT = 'qwen3-embedding-generic-cpu';
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((req, res, body, state) => {
+      if (req.url === '/status') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ endpoints: [`http://127.0.0.1:${req.socket.localPort}`] }));
+        return;
+      }
+      let model = null;
+      try { model = JSON.parse(body).model; } catch { /* ignore */ }
+      if (!model || !state.loaded.has(model)) {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(NOT_LOADED(model));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [{ embedding: [1], index: 0 }], model }));
+    });
+    gateway = await startGateway({
+      resolve: async id => (id === ALIAS ? { alias: ALIAS, variantId: null } : null),
+      load: async () => { upstream.state.loaded.add(VARIANT); return VARIANT; },
+    });
+    const res = await request(gateway.publicPort, '/v1/embeddings', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: ALIAS, input: 'hello world' }),
+    });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body).model).toBe(VARIANT);
+    const replay = JSON.parse(upstream.state.hits[1].body);
+    expect(replay.model).toBe(VARIANT);
+    expect(replay.input).toBe('hello world');
   });
 });

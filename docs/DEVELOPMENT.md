@@ -40,7 +40,7 @@ npm run verify:bundle
 
 Spike A (2026-08-10): MSI ~**54 MB** / NSIS ~**38 MB** with bundled Node (~+30 / +20 MB vs pre-spike 0.3.1 artifacts). Details: [spikes/node-bundle-spike.md](./spikes/node-bundle-spike.md).
 
-**CI:** `cargo check` and Tauri builds require `src-tauri/binaries/node-<triple>` to exist (`externalBin`). Workflows run `npm run ensure:node` after `npm ci` (see `.github/workflows/ci.yml` and `release.yml`).
+**CI:** `cargo check` and Tauri builds require `src-tauri/binaries/node-<triple>` to exist (`externalBin`). Workflows run `npm run ci:deps` (not plain `npm ci`) so the Foundry native cache is restored after package extract, then `npm run ensure:node` (see `.github/workflows/ci.yml` and `release.yml`).
 
 `ensure:foundry` prefers the **build target**, not the host:
 
@@ -69,7 +69,7 @@ Supported Foundry core layouts today: `win32-x64`, `win32-arm64`, `linux-x64`, `
 | `npm run tauri:build` | Package installers (msi/nsis/dmg); runs ensure:node + ensure:foundry first |
 | `npm run tauri:build:local` | Local package via `--no-sign`: skips **all** code signing (updater signatures, Windows Authenticode, macOS bundle signing), so no `TAURI_SIGNING_PRIVATE_KEY` is needed. Never use for a release. |
 | `npm run verify:bundle` | Post-build bundle resource check |
-| `npm run verify:release -- 0.7.0 --channel=evaluation` | Verify package/Tauri/Cargo versions and explicit evaluation-channel metadata |
+| `npm run verify:release -- 0.9.0 --channel=stable` | Verify package/Tauri/Cargo versions and stable-channel metadata |
 | `npm run run:built` | Launch a release build without installing MSI |
 | `cd src-tauri && cargo check` | Rust/Tauri compile check |
 

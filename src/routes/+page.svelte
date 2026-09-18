@@ -246,10 +246,16 @@
     endpointSelfTestBusy = true;
     try {
       const catalogModel = state.models.find((m: ModelInfo) => m.alias === selectedModelAlias);
+      const embeddingCatalog = state.models.find((m: ModelInfo) => {
+        const blob = [m.alias, (m as any).task, (m as any).info?.task].filter(Boolean).join(' ');
+        return /embed/i.test(blob);
+      });
+      const chatAlias = selectedModelAlias && !/embed/i.test(selectedModelAlias) ? selectedModelAlias : null;
       endpointSelfTestReport = await runEndpointSelfTest({
         fetch,
         endpoint: state.endpoint || null,
-        modelId: selectedModelAlias || null,
+        modelId: chatAlias,
+        embeddingModelId: embeddingCatalog?.alias || null,
         catalogSupportsToolCalling: catalogModel?.supportsToolCalling ?? null,
       });
       lastFlintVerified = flintVerifiedFromReport(endpointSelfTestReport);
@@ -258,6 +264,7 @@
         ranAt: new Date().toISOString(),
         endpoint: state.endpoint || null,
         modelId: selectedModelAlias || null,
+        embeddingModelId: null,
         checks: [{
           id: "run",
           title: "Self-test runner",
@@ -1673,6 +1680,25 @@
    * which makes it refuse the whole archive. Without this, saving would stop working silently the
    * first time anyone sent a message.
    */
+  let backgroundArchiveSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  const BACKGROUND_ARCHIVE_SAVE_MS = 400;
+
+  function scheduleBackgroundArchiveSave() {
+    if (mountDisposed || backgroundArchiveSaveTimer) return;
+    backgroundArchiveSaveTimer = setTimeout(() => {
+      backgroundArchiveSaveTimer = null;
+      saveConversations();
+    }, BACKGROUND_ARCHIVE_SAVE_MS);
+  }
+
+  function flushBackgroundArchiveSave() {
+    if (backgroundArchiveSaveTimer) {
+      clearTimeout(backgroundArchiveSaveTimer);
+      backgroundArchiveSaveTimer = null;
+    }
+    saveConversations();
+  }
+
   function saveConversations() {
     // Disabled when the stored archive could not be read or preserved, so a fresh archive can
     // never replace conversations we were unable to parse.
@@ -2196,10 +2222,9 @@
       const report = await inspectModelFolder(byomFolder);
       byomReport = report;
       byomName = report.suggestedName || "";
-      byomTemplate = { ...report.detected.promptTemplate };
+      byomTemplate = report.detected.promptTemplate ? { ...report.detected.promptTemplate } : null;
       byomPreset = "";
-      // A guess is worth showing up front; a confident detection can stay collapsed.
-      byomTemplateOpen = !report.detected.templateConfident;
+      byomTemplateOpen = report.detected.task === 'embeddings' ? false : !report.detected.templateConfident;
     } catch (e: any) {
       byomError = e?.message || String(e);
     } finally {
@@ -4532,6 +4557,10 @@ updateStateFromSdk();
 
     return () => {
       mountDisposed = true;
+      if (backgroundArchiveSaveTimer) {
+        clearTimeout(backgroundArchiveSaveTimer);
+        backgroundArchiveSaveTimer = null;
+      }
       if (unsubscribe) unsubscribe();
       document.removeEventListener('keydown', handleGlobalKeydown);
       unlistenCloseRequested?.();
@@ -4967,7 +4996,7 @@ updateStateFromSdk();
       if (!patched.changed) return false;
       conversationArchive = patched.archive;
       conversationsDirty = true;
-      saveConversations();
+      scheduleBackgroundArchiveSave();
       return true;
     }
 
@@ -5043,6 +5072,7 @@ updateStateFromSdk();
         abortController = null;
         activeStreamRequestId = null;
       }
+      flushBackgroundArchiveSave();
       syncVisibleStreaming();
     }
   }
@@ -6746,7 +6776,7 @@ Output only the summary text, no preamble.`;
                         Load on startup{#if startupModels[model.alias]}&nbsp;<span class="startup-variant-hint">({startupModels[model.alias]?.split(':')[0]?.split('-').slice(-2).join('-')})</span>{/if}
                       </label>
 
-                      {#if isLocalModel(model)}
+                      {#if isLocalModel(model) && modelSupportsChat(model)}
                         <button
                           class="secondary"
                           onclick={() => openTemplateEditor(model)}
@@ -6839,6 +6869,9 @@ Output only the summary text, no preamble.`;
                             <input id="byom-name" type="text" bind:value={byomName} placeholder="my-model" />
                           </div>
 
+                          {#if byomReport.detected.task === "embeddings"}
+                            <p class="small muted">Embedding model — no chat prompt template is required.</p>
+                          {:else}
                           <div class="byom-template">
                             <button
                               type="button"
@@ -6890,6 +6923,7 @@ Output only the summary text, no preamble.`;
                                 {#each byomTemplateCheck.warnings as w}<li>{w}</li>{/each}
                               </ul>
                             {/if}
+                          {/if}
                           {/if}
                         {/if}
                       {/if}
@@ -7037,11 +7071,25 @@ Output only the summary text, no preamble.`;
                         </div>
                         <div>
                           <strong>Flint-verified:</strong>
-                          {#if lastFlintVerified && matchesVerifiedModel(lastFlintVerified.modelId, detailModel.alias)}
-                            chat {lastFlintVerified.chat ? "yes" : "no"} ·
-                            stream {lastFlintVerified.stream ? "yes" : "no"} ·
-                            tools {lastFlintVerified.tools}
-                            <span class="muted small"> · {new Date(lastFlintVerified.ranAt).toLocaleString()}</span>
+                          {#if lastFlintVerified}
+                            {@const chatMatch = matchesVerifiedModel(lastFlintVerified.modelId, detailModel.alias)
+                              && lastFlintVerified.modelId !== lastFlintVerified.embeddingModelId}
+                            {@const embedMatch = !!(lastFlintVerified.embeddingModelId
+                              && matchesVerifiedModel(lastFlintVerified.embeddingModelId, detailModel.alias))}
+                            {#if chatMatch || embedMatch}
+                              {#if chatMatch}
+                                chat {lastFlintVerified.chat ? "yes" : "no"} ·
+                                stream {lastFlintVerified.stream ? "yes" : "no"} ·
+                                tools {lastFlintVerified.tools}
+                              {/if}
+                              {#if chatMatch && embedMatch} · {/if}
+                              {#if embedMatch}
+                                embeddings {lastFlintVerified.embeddings ? "yes" : "no"}
+                              {/if}
+                              <span class="muted small"> · {new Date(lastFlintVerified.ranAt).toLocaleString()}</span>
+                            {:else}
+                              Not verified in this session — Diagnostics → Test local endpoint
+                            {/if}
                           {:else}
                             Not verified in this session — Diagnostics → Test local endpoint
                           {/if}
@@ -7761,6 +7809,9 @@ Output only the summary text, no preamble.`;
                   {/if}
                   {#if endpointSelfTestReport.modelId}
                     · {endpointSelfTestReport.modelId}
+                  {/if}
+                  {#if endpointSelfTestReport.embeddingModelId}
+                    · embed {endpointSelfTestReport.embeddingModelId}
                   {/if}
                 </p>
                 <ul class="diagnostic-list">

@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -12,6 +12,7 @@ pub const QUIT_FLUSH_TIMEOUT: Duration = Duration::from_millis(2_000);
 pub struct QuitFlushState {
     allow_exit: AtomicBool,
     started: AtomicBool,
+    exit_code: AtomicI32,
 }
 
 impl Default for QuitFlushState {
@@ -19,8 +20,13 @@ impl Default for QuitFlushState {
         Self {
             allow_exit: AtomicBool::new(false),
             started: AtomicBool::new(false),
+            exit_code: AtomicI32::new(0),
         }
     }
+}
+
+fn is_runtime_smoke() -> bool {
+    std::env::var("FLINT_RUNTIME_SMOKE").ok().as_deref() == Some("1")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,7 +49,17 @@ pub fn decide_exit_flush(allow_exit: bool, started: bool, is_restart: bool) -> E
     ExitFlushDecision::PreventStartFlush
 }
 
-pub fn on_exit_requested(app: &AppHandle, api: &tauri::ExitRequestApi, is_restart: bool) {
+pub fn on_exit_requested(
+    app: &AppHandle,
+    api: &tauri::ExitRequestApi,
+    is_restart: bool,
+    code: Option<i32>,
+) {
+    // Packaged smoke exits 0/1 to report ready vs failure. A flush handshake that
+    // always finishes with exit(0) would make those failures look successful.
+    if is_runtime_smoke() {
+        return;
+    }
     let state = app.state::<QuitFlushState>();
     let allow = state.allow_exit.load(Ordering::SeqCst);
     let started = state.started.load(Ordering::SeqCst);
@@ -54,6 +70,9 @@ pub fn on_exit_requested(app: &AppHandle, api: &tauri::ExitRequestApi, is_restar
         }
         ExitFlushDecision::PreventStartFlush => {
             api.prevent_exit();
+            if let Some(code) = code {
+                state.exit_code.store(code, Ordering::SeqCst);
+            }
             state.started.store(true, Ordering::SeqCst);
             let _ = app.emit(QUIT_FLUSH_EVENT, ());
             let handle = app.clone();
@@ -61,7 +80,8 @@ pub fn on_exit_requested(app: &AppHandle, api: &tauri::ExitRequestApi, is_restar
                 thread::sleep(QUIT_FLUSH_TIMEOUT);
                 let state = handle.state::<QuitFlushState>();
                 if !state.allow_exit.swap(true, Ordering::SeqCst) {
-                    handle.exit(0);
+                    let code = state.exit_code.load(Ordering::SeqCst);
+                    handle.exit(code);
                 }
             });
         }
@@ -70,8 +90,9 @@ pub fn on_exit_requested(app: &AppHandle, api: &tauri::ExitRequestApi, is_restar
 
 #[tauri::command]
 pub fn ack_quit_flush(app: AppHandle, state: tauri::State<QuitFlushState>) {
+    let code = state.exit_code.load(Ordering::SeqCst);
     state.allow_exit.store(true, Ordering::SeqCst);
-    app.exit(0);
+    app.exit(code);
 }
 
 #[cfg(test)]

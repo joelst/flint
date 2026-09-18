@@ -55,8 +55,9 @@ Flint prefers the packaged Node on launch (About shows `bundled` vs `PATH`) and 
 ### Bring Your Own Model (BYOM) and External Linking
 
 - **Import local ONNX models**: Add custom ONNX models (containing `genai_config.json` and `inference_model.json`) into Flint's local cache directly from the Models tab.
+- **Embedding models**: folders whose architecture or name contains `embed` import without a chat prompt template. The Foundry catalog currently has no embedding models, so this is the path for `/v1/embeddings`.
 - **Link external model folders**: Connect existing models stored elsewhere on your drive using directory junctions without duplicating weights across folders.
-- **Prompt template authoring**: Validate and customize Jinja/chat prompt templates using the `{Content}` placeholder to ensure proper message formatting.
+- **Prompt template authoring**: Validate and customize Jinja/chat prompt templates using the `{Content}` placeholder to ensure proper message formatting. Embedding imports skip this.
 
 ### Model Cache Inventory
 
@@ -65,7 +66,7 @@ Flint prefers the packaged Node on launch (About shows `bundled` vs `PATH`) and 
 
 ### Automatic Model Loading (On-Demand Gateway)
 
-- When external integrations (IDE extensions, agent frameworks, CLI tools) send requests to `http://127.0.0.1:<port>/v1/chat/completions` for a model that is cached but not resident, Flint's gateway automatically loads the optimal variant into memory and completes the request seamlessly without failing with `400 Model is not loaded`.
+- When external integrations (IDE extensions, agent frameworks, CLI tools) send requests to `http://127.0.0.1:<port>/v1/chat/completions` or `POST /v1/embeddings` for a model that is cached but not resident, Flint's gateway automatically loads the optimal variant into memory and completes the request seamlessly without failing with `400 Model is not loaded`.
 
 ### Audio transcription
 

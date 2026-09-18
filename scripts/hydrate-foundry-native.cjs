@@ -14,8 +14,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const root = path.resolve(__dirname, '..');
-const CACHE_DIR = path.join(root, 'runtime', 'foundry-native-cache');
-const DEST_DIR = path.join(root, 'node_modules', 'foundry-local-sdk', 'foundry-local-core');
+const CACHE_DIR = process.env.FLINT_FOUNDRY_CACHE_DIR
+  || path.join(root, 'runtime', 'foundry-native-cache');
+const DEST_DIR = process.env.FLINT_FOUNDRY_DEST_DIR
+  || path.join(root, 'node_modules', 'foundry-local-sdk', 'foundry-local-core');
 
 function copyDir(from, to) {
   if (!fs.existsSync(from)) return false;
@@ -39,7 +41,9 @@ function dirHasFiles(dir) {
 
 function restore() {
   if (!dirHasFiles(CACHE_DIR)) return;
-  if (!fs.existsSync(path.dirname(DEST_DIR))) return;
+  // Creating dest is not enough for a plain `npm ci`: the SDK installer runs as
+  // the package is extracted. CI must restore after extract (see ci-npm-ci.cjs).
+  fs.mkdirSync(DEST_DIR, { recursive: true });
   copyDir(CACHE_DIR, DEST_DIR);
   console.log(`[hydrate-foundry-native] restored cache into ${path.relative(root, DEST_DIR)}`);
 }

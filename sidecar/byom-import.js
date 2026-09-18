@@ -54,12 +54,27 @@ export function sanitizeModelName (raw) {
 }
 
 /**
+ * Embedding folders are onnxruntime-genai too, but they are not chat models.
+ * A guessed PromptTemplate would make the catalog look chat-capable.
+ *
+ * Detection is the substring `embed` in architecture, folder name, or task —
+ * the catalog has no embedding models, so that is the BYOM signal.
+ *
+ * @param {{ architecture?: string|null, dirName?: string|null, task?: string|null }} [options]
+ */
+export function isEmbeddingModel (options) {
+  const blob = [options?.architecture, options?.dirName, options?.task].filter(Boolean).join(' ').toLowerCase();
+  return blob.includes('embed');
+}
+
+/**
  * Build the `inference_model.json` payload the native scanner requires.
  *
  * A caller-supplied `promptTemplate` always wins over detection, so a user can correct
- * a wrong guess without editing files by hand.
+ * a wrong guess without editing files by hand. Embedding models omit PromptTemplate
+ * unless the caller supplied one.
  *
- * @param {{ name: string, version?: number, chatTemplate?: string|null, architecture?: string|null, promptTemplate?: object|null }} options
+ * @param {{ name: string, version?: number, chatTemplate?: string|null, architecture?: string|null, dirName?: string|null, task?: string|null, promptTemplate?: object|null }} options
  * @returns {{ content: object, templateSource: string, confident: boolean }}
  */
 export function buildInferenceModel (options) {
@@ -70,6 +85,14 @@ export function buildInferenceModel (options) {
   const version = typeof requestedVersion === 'number' && Number.isInteger(requestedVersion) && requestedVersion > 0
     ? requestedVersion
     : 1;
+
+  if (isEmbeddingModel(options) && !options?.promptTemplate) {
+    return {
+      content: { Name: `${name}:${version}` },
+      templateSource: 'not-applicable',
+      confident: true,
+    };
+  }
 
   if (options?.promptTemplate) {
     const check = validatePromptTemplate(options.promptTemplate);
@@ -168,15 +191,24 @@ export function validateModelFolder (input) {
     warnings.push('The folder already has inference_model.json; Flint will keep the existing file.');
   }
 
-  const { template, templateSource, confident } = selectPromptTemplate({
-    chatTemplate: input?.chatTemplate,
-    architecture,
-  });
-  if (!confident) {
-    warnings.push(
-      `Prompt template guessed from ${templateSource}. Review it before importing — a wrong ` +
-        'template is the usual cause of malformed replies.',
-    );
+  const embedding = isEmbeddingModel({ architecture, dirName: input?.dirName });
+  let template = null;
+  let templateSource = 'not-applicable';
+  let confident = true;
+  if (!embedding) {
+    const selected = selectPromptTemplate({
+      chatTemplate: input?.chatTemplate,
+      architecture,
+    });
+    template = selected.template;
+    templateSource = selected.templateSource;
+    confident = selected.confident;
+    if (!confident) {
+      warnings.push(
+        `Prompt template guessed from ${templateSource}. Review it before importing — a wrong ` +
+          'template is the usual cause of malformed replies.',
+      );
+    }
   }
 
   return {
@@ -192,9 +224,8 @@ export function validateModelFolder (input) {
       hasInferenceModel: base.has('inference_model.json'),
       templateSource,
       templateConfident: confident,
-      // The resolved template travels with the report so the UI can show and edit it
-      // before anything is written.
-      promptTemplate: { ...template },
+      promptTemplate: template ? { ...template } : null,
+      task: embedding ? 'embeddings' : null,
       fileCount: files.length,
     },
   };

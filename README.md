@@ -67,7 +67,7 @@ Pre-1.0: expect breaking changes. **0.7.0 is Flint's first public release** — 
 
 - Windows installers carry a **public-trust Authenticode signature** issued through Azure Trusted Signing, so they validate against the Microsoft-managed root on any machine — no certificate to install and no "unknown publisher" prompt. Bundles ship the Foundry native cores and a pinned Node 22 runtime, verified in CI.
 - macOS builds are **unsigned** (no Apple Developer account) — install with the one-liner below, not the DMG, or Gatekeeper will call the app "damaged".
-- The in-app updater is configured and its artifacts (`latest.json`, `.sig`) ship with every release, but it **will not offer 0.7.0**: GitHub's `releases/latest` pointer skips prereleases by design. Install this build manually; the updater takes over once a stable release is published.
+- The in-app updater is configured and its artifacts (`latest.json`, `.sig`) ship with every release, but it **will not offer 0.7.0**: GitHub's `releases/latest` pointer skips prereleases by design. Install this build manually. The first stable publish is **0.9.0** (skip 0.8.0), which is the upgrade test before 1.0.0.
 
 Next: [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) · [docs/BACKLOG.md](./docs/BACKLOG.md) · Release notes: [CHANGELOG.md](./CHANGELOG.md)
 

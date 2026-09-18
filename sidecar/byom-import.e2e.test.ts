@@ -54,6 +54,20 @@ function makeSourceRepo(options: { nested?: boolean; chatTemplate?: string | nul
   return root;
 }
 
+/** Nested ONNX folder whose architecture names it as embeddings, with no chat template. */
+function makeEmbeddingSourceRepo() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'byom-embed-'));
+  const dir = path.join(root, 'onnx');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, 'genai_config.json'),
+    JSON.stringify({ model: { type: 'qwen3-embedding', context_length: 8192, decoder: { filename: 'model.onnx' } } }),
+  );
+  fs.writeFileSync(path.join(dir, 'model.onnx'), Buffer.alloc(1024, 7));
+  fs.writeFileSync(path.join(dir, 'tokenizer.json'), '{"version":"1.0"}');
+  return root;
+}
+
 const tempDirs: string[] = [];
 function track(dir: string) { tempDirs.push(dir); return dir; }
 
@@ -183,6 +197,22 @@ describe('BYOM import', () => {
     expect(res.ok).toBeFalsy();
     expect(String(res.error)).toMatch(/positive integer/i);
   });
+
+  it('imports an embedding folder without authoring PromptTemplate', async () => {
+    const src = track(makeEmbeddingSourceRepo());
+    const inspected = await send('inspectModelFolder', { folderPath: src });
+    expect(inspected.ok, JSON.stringify(inspected)).toBe(true);
+    expect(inspected.result.detected.task).toBe('embeddings');
+    expect(inspected.result.detected.promptTemplate).toBeNull();
+
+    const res = await send('importModelFolder', { folderPath: src, name: 'embed-import' });
+    expect(res.ok, JSON.stringify(res)).toBe(true);
+    expect(res.result.templateSource).toBe('not-applicable');
+
+    const inf = JSON.parse(fs.readFileSync(path.join(res.result.path, 'v1', 'inference_model.json'), 'utf8'));
+    expect(inf.Name).toBe('embed-import:1');
+    expect(inf.PromptTemplate).toBeUndefined();
+  });
 });
 
 describe('BYOM link', () => {
@@ -218,6 +248,10 @@ describe('BYOM discovery by the Foundry SDK', () => {
     const imported = await send('importModelFolder', { folderPath: src, name: 'discoverable-model' });
     expect(imported.ok, JSON.stringify(imported)).toBe(true);
 
+    const embedSrc = track(makeEmbeddingSourceRepo());
+    const embedImported = await send('importModelFolder', { folderPath: embedSrc, name: 'discoverable-embed' });
+    expect(embedImported.ok, JSON.stringify(embedImported)).toBe(true);
+
     const { FoundryLocalManager } = await import('foundry-local-sdk');
     const mgr = (FoundryLocalManager as any).create({ appName: APP, logLevel: 'error', libraryPath });
     const cached = await mgr.catalog.getCachedModels();
@@ -226,6 +260,11 @@ describe('BYOM discovery by the Foundry SDK', () => {
     expect(found, `cached: ${cached.map((m: any) => m.id).join(', ')}`).toBeTruthy();
     expect(found.info.providerType).toBe('Local');
     expect(found.info.uri).toBe('local://discoverable-model');
+
+    const foundEmbed = cached.find((m: any) => String(m.id).startsWith('discoverable-embed'));
+    expect(foundEmbed, `cached: ${cached.map((m: any) => m.id).join(', ')}`).toBeTruthy();
+    expect(foundEmbed.info.providerType).toBe('Local');
+    expect(foundEmbed.info.uri).toBe('local://discoverable-embed');
 
     const byAlias = await mgr.catalog.getModel('discoverable-model');
     expect(byAlias.id).toBe('discoverable-model:1');
