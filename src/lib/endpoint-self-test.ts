@@ -17,16 +17,19 @@ export interface SelfTestReport {
   ranAt: string;
   endpoint: string | null;
   modelId: string | null;
+  embeddingModelId: string | null;
   checks: SelfTestCheck[];
 }
 
 export interface FlintVerified {
   modelId: string;
+  embeddingModelId: string | null;
   ranAt: string;
   chat: boolean;
   stream: boolean;
   usage: boolean;
   disconnect: boolean;
+  embeddings: boolean;
   tools: 'verified' | 'not-verified';
 }
 
@@ -50,15 +53,18 @@ function passed(report: SelfTestReport, id: string): boolean {
 }
 
 export function flintVerifiedFromReport(report: SelfTestReport): FlintVerified | null {
-  if (!report.modelId) return null;
+  const id = report.modelId || report.embeddingModelId;
+  if (!id) return null;
   const toolsCheck = report.checks.find((item) => item.id === 'tools');
   return {
-    modelId: report.modelId,
+    modelId: id,
+    embeddingModelId: report.embeddingModelId,
     ranAt: report.ranAt,
     chat: passed(report, 'chat'),
     stream: passed(report, 'stream'),
     usage: passed(report, 'usage'),
     disconnect: passed(report, 'disconnect'),
+    embeddings: passed(report, 'embeddings'),
     tools: toolsCheck?.status === 'pass' ? 'verified' : 'not-verified',
   };
 }
@@ -103,6 +109,7 @@ export async function runEndpointSelfTest(options: {
   endpoint: string | null;
   modelId?: string | null;
   catalogSupportsToolCalling?: boolean | null;
+  embeddingModelId?: string | null;
 }): Promise<SelfTestReport> {
   const ranAt = new Date().toISOString();
   const endpoint = options.endpoint?.trim() || null;
@@ -113,6 +120,7 @@ export async function runEndpointSelfTest(options: {
       ranAt,
       endpoint: null,
       modelId: requestedModel,
+      embeddingModelId: null,
       checks: [
         check('endpoint', 'Local gateway reachable', 'blocked', 'Start the local service first.'),
       ],
@@ -155,8 +163,52 @@ export async function runEndpointSelfTest(options: {
   }
 
   const modelId = requestedModel
-    || modelsBody?.data?.find((row) => typeof row.id === 'string' && row.id)?.id
+    || modelsBody?.data?.find((row) => typeof row.id === 'string' && row.id && !/embed/i.test(row.id))?.id
     || null;
+  const embeddingModelId = options.embeddingModelId?.trim()
+    || modelsBody?.data?.find((row) => typeof row.id === 'string' && /embed/i.test(row.id))?.id
+    || null;
+
+  if (!embeddingModelId) {
+    checks.push(check(
+      'embeddings',
+      'POST /v1/embeddings returns a vector',
+      'blocked',
+      'Import a BYOM embedding model, then run the test again.',
+    ));
+  } else {
+    try {
+      const res = await options.fetch(joinUrl(endpoint, '/embeddings'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: embeddingModelId, input: 'ping' }),
+      });
+      const json = await res.json().catch(() => null);
+      const vector = json?.data?.[0]?.embedding;
+      if (!res.ok || !Array.isArray(vector) || vector.length === 0 || typeof vector[0] !== 'number') {
+        checks.push(check(
+          'embeddings',
+          'POST /v1/embeddings returns a vector',
+          'fail',
+          `HTTP ${res.status}; expected data[0].embedding number[].`,
+        ));
+      } else {
+        checks.push(check(
+          'embeddings',
+          'POST /v1/embeddings returns a vector',
+          'pass',
+          `${vector.length}-d vector from ${embeddingModelId}.`,
+        ));
+      }
+    } catch (error) {
+      checks.push(check(
+        'embeddings',
+        'POST /v1/embeddings returns a vector',
+        'fail',
+        error instanceof Error ? error.message : String(error),
+      ));
+    }
+  }
 
   if (!modelId) {
     checks.push(check('chat', 'Returned model id round-trips into chat', 'blocked', 'Download a chat model, then run the test again.'));
@@ -164,7 +216,7 @@ export async function runEndpointSelfTest(options: {
     checks.push(check('usage', 'usage is present when the model emits it', 'blocked', 'Needs a cached chat model.'));
     checks.push(check('disconnect', 'Aborting a stream settles the caller', 'blocked', 'Needs a cached chat model.'));
     checks.push(check('tools', 'tool_calls when prompted', 'blocked', 'Needs a cached chat model.'));
-    return { ranAt, endpoint, modelId: null, checks };
+    return { ranAt, endpoint, modelId: null, embeddingModelId, checks };
   }
 
   let usageSeen = false;
@@ -320,5 +372,5 @@ export async function runEndpointSelfTest(options: {
     }
   }
 
-  return { ranAt, endpoint, modelId, checks };
+  return { ranAt, endpoint, modelId, embeddingModelId, checks };
 }

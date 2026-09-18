@@ -2291,6 +2291,11 @@ export async function transcribeAudio(
   return res.result;
 }
 
+export async function embedTexts(model: string, inputs: string[]): Promise<any> {
+  const res = await send('embedTexts', { model, inputs });
+  return res.result;
+}
+
 /** The four turn wrappers Foundry substitutes `{Content}` into when building a prompt. */
 export interface PromptTemplate {
   system: string;
@@ -2322,7 +2327,8 @@ export interface InspectFolderResult {
     hasInferenceModel: boolean;
     templateSource: string;
     templateConfident: boolean;
-    promptTemplate: PromptTemplate;
+    promptTemplate: PromptTemplate | null;
+    task: 'embeddings' | null;
   };
   modelDir: string;
   nested: boolean;

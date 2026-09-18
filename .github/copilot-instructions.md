@@ -118,11 +118,13 @@ Facts only — no history. Record what is true now; `git log` and `CHANGELOG.md`
 - Responses carry **non-standard** fields (`IsDelta`, `Successful`, `HttpStatusCode`, and both `delta` and `message` in one choice). Strict OpenAI clients may reject them.
 - A model must be **loaded first** — otherwise requests fail `400 Model is not loaded`. Load via `catModel.load()` (there is no `manager.loadModel()`).
 - The catalog has **zero embedding models** (97 chat / 21 vision / 10 ASR of 128), so hiding them in the UI is a no-op; `/v1/embeddings` exists but needs a BYOM model. 75 of 128 declare `supportsToolCalling` — treat that as catalog-declared, not verified.
+- Gateway autoload/replay for `POST /v1/embeddings` is the same path as chat. Access-log `routeClass` is `'embeddings'`. Chat JSON/SSE normalization stays chat-only (`isChatCompletionPath`).
+- Sidecar `embedTexts` is effectful, unbounded, and bounded to 32 non-empty strings of at most 8192 characters. It uses `createEmbeddingClient().generateEmbeddings()` with the same `noteActivity` inFlight fencing as chat.
 
 ## Model cache / BYOM
 - Cache root comes from `appName`: Flint uses `~/.flint`, the Foundry CLI uses `~/.foundry`. They do **not** share models, and duplication is real (15.3 GB measured).
 - `modelCacheDir` selects a **single** root — it is a cache *switcher*, not an additive search path. Setting it to a custom dir hides the normal catalog.
-- **BYOM works today**: a directory holding `genai_config.json` + `inference_model.json` (`{"Name":"<name>:<ver>", "PromptTemplate":{…}}`) and no `download.tmp` is discovered by `getCachedModels()` as `providerType: "Local"`, `uri: local://<name>`, resolvable by alias. The native scanner is recursive.
+- **BYOM works today**: a directory holding `genai_config.json` + `inference_model.json` (`{"Name":"<name>:<ver>"}`, chat models also carry `PromptTemplate`) and no `download.tmp` is discovered by `getCachedModels()` as `providerType: "Local"`, `uri: local://<name>`, resolvable by alias. The native scanner is recursive. Embedding folders (architecture, dir name, or task containing `embed`) omit `PromptTemplate` unless the caller supplied one; a Name-only file is still discovered.
 - **Directory junctions inside the cache root are traversed**, surfacing models stored elsewhere with alias/provider/version intact — no copying and no writes to the foreign directory. Delete the link, never the target.
 - `addCatalog` / `registerModel` (the HuggingFace catalog API) exist in **neither** JS SDK 1.2.4 nor 2.0.0 — they appear to be C#-only. Flint must own import logic.
 - Foundry Local is **ONNX-only (onnxruntime-genai)**; it does not run GGUF.

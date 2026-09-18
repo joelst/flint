@@ -4,6 +4,7 @@ import {
   validateModelFolder,
   selectPromptTemplate,
   buildInferenceModel,
+  isEmbeddingModel,
   sanitizeModelName,
   isInsideRoot,
   validatePromptTemplate,
@@ -166,6 +167,72 @@ describe('selectPromptTemplate', () => {
     const r = selectPromptTemplate({});
     expect(r.confident).toBe(false);
     expect(r.templateSource).toMatch(/default/);
+  });
+});
+
+describe('isEmbeddingModel', () => {
+  it('detects embedding from architecture, folder name, or task', () => {
+    expect(isEmbeddingModel({ architecture: 'qwen3-embedding' })).toBe(true);
+    expect(isEmbeddingModel({ dirName: 'bge-small-en-embed' })).toBe(true);
+    expect(isEmbeddingModel({ task: 'embeddings' })).toBe(true);
+    expect(isEmbeddingModel({ architecture: 'qwen3', dirName: 'qwen3-0.6b' })).toBe(false);
+    expect(isEmbeddingModel()).toBe(false);
+  });
+});
+
+describe('validateModelFolder embeddings', () => {
+  it('imports an embedding folder without a chat template', () => {
+    const r = validateModelFolder({
+      files: ['genai_config.json', 'model.onnx', 'tokenizer.json'],
+      dirName: 'qwen3-embedding-0.6b',
+      genaiConfig: { model: { type: 'qwen3-embedding', decoder: { filename: 'model.onnx' } } },
+    });
+    expect(r.ok).toBe(true);
+    expect(r.detected.task).toBe('embeddings');
+    expect(r.detected.promptTemplate).toBeNull();
+    expect(r.detected.templateSource).toBe('not-applicable');
+    expect(r.warnings.join(' ')).not.toMatch(/Prompt template guessed/);
+  });
+
+  it('detects embeddings from the folder name when architecture does not say embed', () => {
+    const r = validateModelFolder({
+      files: ['genai_config.json', 'model.onnx', 'tokenizer.json'],
+      dirName: 'bge-small-en-embed',
+      genaiConfig: { model: { type: 'bert', decoder: { filename: 'model.onnx' } } },
+    });
+    expect(r.ok).toBe(true);
+    expect(r.detected.task).toBe('embeddings');
+    expect(r.detected.promptTemplate).toBeNull();
+  });
+});
+
+describe('buildInferenceModel embeddings', () => {
+  it('omits PromptTemplate for embedding models', () => {
+    const { content, templateSource, confident } = buildInferenceModel({
+      name: 'qwen3-embedding',
+      version: 1,
+      architecture: 'qwen3-embedding',
+    });
+    expect(content).toEqual({ Name: 'qwen3-embedding:1' });
+    expect(content.PromptTemplate).toBeUndefined();
+    expect(templateSource).toBe('not-applicable');
+    expect(confident).toBe(true);
+  });
+
+  it('still writes a caller-supplied PromptTemplate onto an embedding model', () => {
+    const custom = {
+      system: 's{Content}',
+      user: 'u{Content}',
+      assistant: 'a{Content}',
+      prompt: 'p{Content}',
+    };
+    const { content, templateSource } = buildInferenceModel({
+      name: 'qwen3-embedding',
+      architecture: 'qwen3-embedding',
+      promptTemplate: custom,
+    });
+    expect(content.PromptTemplate).toEqual(custom);
+    expect(templateSource).toBe('user-supplied');
   });
 });
 

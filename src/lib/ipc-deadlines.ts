@@ -45,6 +45,7 @@ export const IPC_COMMAND_DEADLINES_MS: Record<SidecarCommandName, number | null>
   wslShutdown: null,
   chatCompletion: null,
   transcribeAudio: null,
+  embedTexts: null,
   cancelChatRequest: null,
 };
 

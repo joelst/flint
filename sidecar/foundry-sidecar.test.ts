@@ -355,6 +355,29 @@ describe('foundry-sidecar command schema validation', () => {
     expect(String(res.error)).toContain('missing required field');
   });
 
+  it('rejects embedTexts with empty or oversized inputs before init', async () => {
+    proc.stdin.write(`${JSON.stringify({ id: 41, cmd: 'embedTexts', model: 'm', inputs: [] })}\n`);
+    const empty = await waitForLine(proc, (msg) => msg.id === 41);
+    expect(String(empty.error)).toMatch(/non-empty inputs array/);
+
+    proc.stdin.write(`${JSON.stringify({ id: 42, cmd: 'embedTexts', model: 'm', inputs: ['', 'ok'] })}\n`);
+    const blank = await waitForLine(proc, (msg) => msg.id === 42);
+    expect(String(blank.error)).toMatch(/non-empty strings/);
+
+    proc.stdin.write(`${JSON.stringify({ id: 43, cmd: 'embedTexts', model: 'm', inputs: ['x'.repeat(8193)] })}\n`);
+    const tooLong = await waitForLine(proc, (msg) => msg.id === 43);
+    expect(String(tooLong.error)).toMatch(/8192/);
+
+    proc.stdin.write(`${JSON.stringify({ id: 44, cmd: 'embedTexts', model: 'm', inputs: Array(33).fill('x') })}\n`);
+    const tooMany = await waitForLine(proc, (msg) => msg.id === 44);
+    expect(String(tooMany.error)).toMatch(/at most 32/);
+
+    proc.stdin.write(`${JSON.stringify({ id: 45, cmd: 'embedTexts', model: 'm', inputs: ['ping'] })}\n`);
+    const uninit = await waitForLine(proc, (msg) => msg.id === 45);
+    expect(String(uninit.error)).toMatch(/not initialized/);
+    expect(String(uninit.error)).not.toContain('Unknown command');
+  });
+
   it('rejects cancelChatRequest with non-numeric requestId', async () => {
     proc.stdin.write(`${JSON.stringify({ id: 14, cmd: 'cancelChatRequest', requestId: 'not-a-number' })}\n`);
     const res = await waitForLine(proc, (msg) => msg.id === 14);

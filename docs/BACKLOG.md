@@ -71,9 +71,10 @@ contract + sidecar E2E + packaged Windows smoke in PRODUCT_PLAN Wave 7).
       when JSON is within the bounded normalization threshold; larger JSON responses
       remain byte-preserving pass-through. Broader endpoint capability conformance
       remains open.
-- [ ] **`/v1/embeddings` end-to-end** — route exists, but the catalog has zero
-      embedding models, so this depends on BYOM. Unlocks RAG and Continue's indexer.
-      Not a 1.0 blocker.
+- [ ] **Recorded BYOM embedding recipe** — gateway autoload and `embedTexts` are in
+      the tree (PRODUCT_PLAN Wave 9). Catalog still has zero embedding models. A
+      Flint-tested onnxruntime-genai embedding folder (repo, revision, dimension,
+      core pin) is still required before Continue's indexer can be marked verified.
 
 ## Dependencies
 

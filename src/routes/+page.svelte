@@ -246,10 +246,15 @@
     endpointSelfTestBusy = true;
     try {
       const catalogModel = state.models.find((m: ModelInfo) => m.alias === selectedModelAlias);
+      const embeddingCatalog = state.models.find((m: ModelInfo) =>
+        /embed/i.test(m.alias || '') || /embed/i.test(String((m as any).task || '')),
+      );
+      const chatAlias = selectedModelAlias && !/embed/i.test(selectedModelAlias) ? selectedModelAlias : null;
       endpointSelfTestReport = await runEndpointSelfTest({
         fetch,
         endpoint: state.endpoint || null,
-        modelId: selectedModelAlias || null,
+        modelId: chatAlias,
+        embeddingModelId: embeddingCatalog?.alias || null,
         catalogSupportsToolCalling: catalogModel?.supportsToolCalling ?? null,
       });
       lastFlintVerified = flintVerifiedFromReport(endpointSelfTestReport);
@@ -258,6 +263,7 @@
         ranAt: new Date().toISOString(),
         endpoint: state.endpoint || null,
         modelId: selectedModelAlias || null,
+        embeddingModelId: null,
         checks: [{
           id: "run",
           title: "Self-test runner",
@@ -2196,10 +2202,9 @@
       const report = await inspectModelFolder(byomFolder);
       byomReport = report;
       byomName = report.suggestedName || "";
-      byomTemplate = { ...report.detected.promptTemplate };
+      byomTemplate = report.detected.promptTemplate ? { ...report.detected.promptTemplate } : null;
       byomPreset = "";
-      // A guess is worth showing up front; a confident detection can stay collapsed.
-      byomTemplateOpen = !report.detected.templateConfident;
+      byomTemplateOpen = report.detected.task === 'embeddings' ? false : !report.detected.templateConfident;
     } catch (e: any) {
       byomError = e?.message || String(e);
     } finally {
@@ -6746,7 +6751,7 @@ Output only the summary text, no preamble.`;
                         Load on startup{#if startupModels[model.alias]}&nbsp;<span class="startup-variant-hint">({startupModels[model.alias]?.split(':')[0]?.split('-').slice(-2).join('-')})</span>{/if}
                       </label>
 
-                      {#if isLocalModel(model)}
+                      {#if isLocalModel(model) && modelSupportsChat(model)}
                         <button
                           class="secondary"
                           onclick={() => openTemplateEditor(model)}
@@ -6839,6 +6844,9 @@ Output only the summary text, no preamble.`;
                             <input id="byom-name" type="text" bind:value={byomName} placeholder="my-model" />
                           </div>
 
+                          {#if byomReport.detected.task === "embeddings"}
+                            <p class="small muted">Embedding model — no chat prompt template is required.</p>
+                          {:else}
                           <div class="byom-template">
                             <button
                               type="button"
@@ -6890,6 +6898,7 @@ Output only the summary text, no preamble.`;
                                 {#each byomTemplateCheck.warnings as w}<li>{w}</li>{/each}
                               </ul>
                             {/if}
+                          {/if}
                           {/if}
                         {/if}
                       {/if}
@@ -7037,9 +7046,13 @@ Output only the summary text, no preamble.`;
                         </div>
                         <div>
                           <strong>Flint-verified:</strong>
-                          {#if lastFlintVerified && matchesVerifiedModel(lastFlintVerified.modelId, detailModel.alias)}
+                          {#if lastFlintVerified && (
+                            matchesVerifiedModel(lastFlintVerified.modelId, detailModel.alias)
+                            || (lastFlintVerified.embeddingModelId && matchesVerifiedModel(lastFlintVerified.embeddingModelId, detailModel.alias))
+                          )}
                             chat {lastFlintVerified.chat ? "yes" : "no"} ·
                             stream {lastFlintVerified.stream ? "yes" : "no"} ·
+                            embeddings {lastFlintVerified.embeddings ? "yes" : "no"} ·
                             tools {lastFlintVerified.tools}
                             <span class="muted small"> · {new Date(lastFlintVerified.ranAt).toLocaleString()}</span>
                           {:else}
@@ -7761,6 +7774,9 @@ Output only the summary text, no preamble.`;
                   {/if}
                   {#if endpointSelfTestReport.modelId}
                     · {endpointSelfTestReport.modelId}
+                  {/if}
+                  {#if endpointSelfTestReport.embeddingModelId}
+                    · embed {endpointSelfTestReport.embeddingModelId}
                   {/if}
                 </p>
                 <ul class="diagnostic-list">

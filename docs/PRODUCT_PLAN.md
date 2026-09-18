@@ -34,7 +34,7 @@ Foundry has no abort API. 1.0 closes honesty and fencing, not a fake Stop.
 - Chat streaming: Stop settles the caller; native loop keeps consuming until stream end or child exit; UI already says the background may finish.
 - Compare: no Stop control. The running state says the run cannot be cancelled — wait for slots.
 - Audio: transcription cannot be stopped once started; the Transcribe button says so while in flight.
-- Gateway disconnect already destroys upstream. Embeddings stay out of 1.0.
+- Gateway disconnect already destroys upstream. Embeddings stay out of 1.0.0 (Wave 9 is the 1.0.1 companion).
 
 ### Wave 4 — Observability
 
@@ -68,6 +68,16 @@ Foundry has no abort API. 1.0 closes honesty and fencing, not a fake Stop.
 
 - About: Install / progress / Restart to update / Later against the wired updater plugin. Discovery against `releases/latest` is still the first stable 1.0.0 publish.
 - Publish 1.0.0 as `channel=stable` (draft still reviewed by a human). Rollback: previous installer, documented in [RELEASE.md](./RELEASE.md).
+
+### Wave 9 — Embeddings path (1.0.1 companion)
+
+Not a 1.0.0 ship gate. Embedding-model path, not RAG.
+
+- Gateway classifies `/v1/embeddings` and autoloads like chat (proven in tests). Chat JSON/SSE normalization stays chat-only.
+- BYOM import detects embedding folders and does not require a chat prompt template.
+- Sidecar `embedTexts` uses `createEmbeddingClient()` with the same pool inFlight fencing as chat. Batches are bounded (32 strings, 8k chars each).
+- Diagnostics self-test **blocks** embeddings when no embedding model is present; **passes** when `POST /v1/embeddings` returns a numeric vector.
+- One recorded BYOM recipe is still a spike: do not fake a Continue indexer verification.
 
 ## Acceptance gates for 1.0 workstreams
 
@@ -119,7 +129,7 @@ Each 1.0 wave must satisfy its gate before that slice ships. Embeddings and extr
 | Must 1.0 ship a time-series health store? | No. Bounded in-process health ring plus diagnostics export. |
 | Is UX maturity missing? | No. It was unscoped. Coach, Network/WSL, and Monitor memory UX exist; 1.0 qualifies them. |
 | Must we component-test `+page.svelte`? | No. Keep extracting into `src/lib/*.ts`. 1.0 testing is unit + contract + sidecar E2E + one packaged Windows smoke. |
-| Is BYOM `/v1/embeddings` a 1.0 blocker? | No. Catalog has zero embedding models. 1.0 recipes are chat completions. Embeddings unlock RAG and stay post-1.0. |
+| Is BYOM `/v1/embeddings` a 1.0 blocker? | No. Catalog has zero embedding models. 1.0.0 recipes are chat completions. The embeddings **path** is Wave 9 / 1.0.1 companion. Full RAG stays after 1.0. |
 | Broader WebM/Opus/MP3 decoder for 1.0? | No. Browser `decodeAudioData` → 16 kHz WAV already ships. Document supported formats. Word-level timestamps stay upstream-blocked. |
 | Must CI install the MSI to ship 1.0? | No, if clean-machine dogfood is recorded. Staged-layout smoke in CI; msiexec automation is later. |
 | Is the updater broken? | Unexercised, not unwired. `releases/latest` 404s because 0.7.0 is a prerelease. The first stable publish is the acceptance test. |
@@ -144,7 +154,7 @@ Each 1.0 wave must satisfy its gate before that slice ships. Embeddings and extr
 | **Packaged Windows smoke and dogfood** | Staged-exe ready-check in CI; recorded clean-machine install. | 7 |
 | **Updater install UX and stable publish** | Progress/restart/defer; 1.0.0 on `releases/latest`. | 8 |
 
-Post-1.0 (not in the table): BYOM embeddings, extra audio decoders, word-level timestamps, multi-endpoint scheduler, Azure connections, curated ONNX catalog, Apple notarization, Linux.
+Post-1.0 (not in the table): extra audio decoders, word-level timestamps, multi-endpoint scheduler, Azure connections, curated ONNX catalog, Apple notarization, Linux. Embeddings path is Wave 9 (1.0.1); full RAG stays after that.
 
 ### Source anchors
 

@@ -185,7 +185,7 @@ res = client.chat.completions.create(
     ]),
     limitations: [
       'Restart the Continue extension after editing config.json for changes to take effect.',
-      'Indexer / embeddings are not a 1.0 Flint path — chat completions only.',
+      'Indexer is not verified until a recorded BYOM embedding recipe exists — 1.0.0 recipes are chat completions only.',
       'Verified for chat completions; client version is not pinned until a recorded dogfood.',
     ],
     docsUrl: 'https://docs.continue.dev/customize/model-providers/openai',

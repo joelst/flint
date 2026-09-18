@@ -19,7 +19,13 @@ function cooperatingFetch(): typeof fetch {
     }
     const url = String(input);
     if (url.endsWith('/models')) {
-      return jsonResponse(200, { data: [{ id: 'phi-4-mini-instruct-generic-cpu' }] });
+      return jsonResponse(200, { data: [
+        { id: 'phi-4-mini-instruct-generic-cpu' },
+        { id: 'qwen3-embedding-generic-cpu' },
+      ] });
+    }
+    if (url.endsWith('/embeddings')) {
+      return jsonResponse(200, { data: [{ embedding: [0.1, 0.2, 0.3], index: 0 }] });
     }
     const body = JSON.parse(String(init?.body || '{}'));
     if (body.tools) {
@@ -54,7 +60,7 @@ describe('runEndpointSelfTest', () => {
     });
     expect(report.checks[0].status).toBe('pass');
     expect(report.checks.filter((c) => c.status === 'blocked').map((c) => c.id))
-      .toEqual(['chat', 'stream', 'usage', 'disconnect', 'tools']);
+      .toEqual(['embeddings', 'chat', 'stream', 'usage', 'disconnect', 'tools']);
   });
 
   it('passes envelope, round-trip, stream, usage, disconnect, and tools when the gateway cooperates', async () => {
@@ -70,6 +76,7 @@ describe('runEndpointSelfTest', () => {
       stream: true,
       usage: true,
       disconnect: true,
+      embeddings: true,
       tools: 'verified',
     });
   });
@@ -184,6 +191,77 @@ describe('runEndpointSelfTest', () => {
     });
     expect(report.checks.find((c) => c.id === 'tools')?.status).toBe('blocked');
     expect(report.checks.find((c) => c.id === 'tools')?.detail).toMatch(/tools route missing/);
+  });
+
+  it('fails embeddings when POST /v1/embeddings is not a vector', async () => {
+    const fetchMock: typeof fetch = async (input, init) => {
+      if (init?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      if (String(input).endsWith('/models')) {
+        return jsonResponse(200, { data: [{ id: 'qwen3-embedding-generic-cpu' }] });
+      }
+      if (String(input).endsWith('/embeddings')) {
+        return jsonResponse(500, { error: { message: 'nope' } });
+      }
+      return jsonResponse(200, {
+        choices: [{ message: { role: 'assistant', content: 'x' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      });
+    };
+    const report = await runEndpointSelfTest({
+      fetch: fetchMock,
+      endpoint: 'http://127.0.0.1:5272/v1',
+    });
+    expect(report.embeddingModelId).toBe('qwen3-embedding-generic-cpu');
+    expect(report.checks.find((c) => c.id === 'embeddings')?.status).toBe('fail');
+    expect(report.checks.find((c) => c.id === 'chat')?.status).toBe('blocked');
+  });
+
+  it('passes embeddings and blocks chat when only an embedding model is listed', async () => {
+    const fetchMock: typeof fetch = async (input, init) => {
+      if (init?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      if (String(input).endsWith('/models')) {
+        return jsonResponse(200, { data: [{ id: 'qwen3-embedding-generic-cpu' }] });
+      }
+      if (String(input).endsWith('/embeddings')) {
+        return jsonResponse(200, { data: [{ embedding: [0.4, 0.5], index: 0 }] });
+      }
+      throw new Error(`unexpected ${input}`);
+    };
+    const report = await runEndpointSelfTest({
+      fetch: fetchMock,
+      endpoint: 'http://127.0.0.1:5272/v1',
+    });
+    expect(report.modelId).toBeNull();
+    expect(report.embeddingModelId).toBe('qwen3-embedding-generic-cpu');
+    expect(report.checks.find((c) => c.id === 'embeddings')?.status).toBe('pass');
+    expect(report.checks.filter((c) => c.status === 'blocked').map((c) => c.id))
+      .toEqual(['chat', 'stream', 'usage', 'disconnect', 'tools']);
+    expect(flintVerifiedFromReport(report)).toMatchObject({
+      modelId: 'qwen3-embedding-generic-cpu',
+      embeddingModelId: 'qwen3-embedding-generic-cpu',
+      embeddings: true,
+      chat: false,
+    });
+  });
+
+  it('fails embeddings when the embeddings request throws', async () => {
+    const fetchMock: typeof fetch = async (input) => {
+      if (String(input).endsWith('/models')) {
+        return jsonResponse(200, { data: [{ id: 'tiny-cpu' }, { id: 'bge-embed-cpu' }] });
+      }
+      if (String(input).endsWith('/embeddings')) throw new Error('embed down');
+      return jsonResponse(200, {
+        choices: [{ message: { role: 'assistant', content: 'x' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      });
+    };
+    const report = await runEndpointSelfTest({
+      fetch: fetchMock,
+      endpoint: 'http://127.0.0.1:5272/v1',
+      embeddingModelId: 'bge-embed-cpu',
+    });
+    expect(report.checks.find((c) => c.id === 'embeddings')?.status).toBe('fail');
+    expect(report.checks.find((c) => c.id === 'embeddings')?.detail).toMatch(/embed down/);
   });
 
   it('fails /v1/models on a non-OK envelope and stream when [DONE] is missing', async () => {

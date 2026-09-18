@@ -96,7 +96,7 @@ let activeLogLevel = 'info';
 const KNOWN_COMMANDS = new Set([
   'init', 'setLogLevel', 'startService', 'stopService', 'stopAndUnload', 'shutdownRuntime', 'getStatus',
   'listModels', 'download', 'load', 'unload', 'deleteModel', 'getEndpoint',
-  'chatCompletion', 'cancelChatRequest', 'transcribeAudio',
+  'chatCompletion', 'cancelChatRequest', 'transcribeAudio', 'embedTexts',
   'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',
   'poolStatus', 'getAccessLog', 'getHealthRing', 'fetchUrl',
   'getCacheInventory',
@@ -121,6 +121,7 @@ const FIELD_TYPES = {
   chatCompletion:    { model: 'non-empty-string', messages: 'array' },
   cancelChatRequest: { requestId: 'number' },
   transcribeAudio:   { audioBase64: 'string', mimeType: 'non-empty-string', fileName: 'non-empty-string', model: 'non-empty-string', language: 'non-empty-string' },
+  embedTexts:        { model: 'non-empty-string', inputs: 'array' },
   fetchUrl:          { url: 'non-empty-string' },
   inspectModelFolder: { folderPath: 'non-empty-string' },
   importModelFolder: { folderPath: 'non-empty-string', name: 'non-empty-string' },
@@ -159,6 +160,7 @@ const COMMAND_SCHEMA = {
   chatCompletion:     { required: ['model', 'messages'], optional: ['maxTokens', 'temperature', 'preferredEp', 'stream'] },
   cancelChatRequest:  { required: ['requestId'], optional: [] },
   transcribeAudio:    { required: ['audioBase64', 'mimeType', 'fileName', 'model', 'language'], optional: ['temperature', 'preferredEp'] },
+  embedTexts:         { required: ['model', 'inputs'], optional: [] },
   getEps:             { required: [], optional: [] },
   ensureAccelerators: { required: [], optional: [] },
   getVisionModels:    { required: [], optional: [] },
@@ -187,13 +189,15 @@ const COMMAND_SCHEMA = {
 // ("Cannot read properties of null (reading 'catalog')").
 const NEEDS_INIT = new Set([
   'listModels', 'download', 'load', 'unload', 'deleteModel', 'chatCompletion',
-  'transcribeAudio', 'getVisionModels', 'getSTTModels', 'startService',
+  'transcribeAudio', 'embedTexts', 'getVisionModels', 'getSTTModels', 'startService',
   'getEps', 'ensureAccelerators', 'inspectModelFolder', 'importModelFolder',
   'linkModelFolder', 'getModelTemplate', 'setModelTemplate',
 ]);
 
 // Base64 character limit for transcribeAudio. 50 MB decoded audio is ~67 MB of base64.
 const AUDIO_BASE64_MAX_CHARS = Math.ceil(50 * 1024 * 1024 * 4 / 3);
+const EMBED_MAX_INPUTS = 32;
+const EMBED_MAX_CHARS = 8192;
 
 /**
  * Validates a command name and its payload fields.
@@ -302,6 +306,23 @@ function validateCommand(cmd, payload) {
     if (typeof payload.promptTemplate !== 'object' || payload.promptTemplate === null
         || Array.isArray(payload.promptTemplate)) {
       return `Command "${cmd}" field "promptTemplate" must be an object`;
+    }
+  }
+  if (cmd === 'embedTexts') {
+    const inputs = payload.inputs;
+    if (!Array.isArray(inputs) || inputs.length === 0) {
+      return 'Command "embedTexts" requires a non-empty inputs array';
+    }
+    if (inputs.length > EMBED_MAX_INPUTS) {
+      return `Command "embedTexts" accepts at most ${EMBED_MAX_INPUTS} strings per call`;
+    }
+    for (const item of inputs) {
+      if (typeof item !== 'string' || !item.trim()) {
+        return 'Command "embedTexts" inputs must be non-empty strings';
+      }
+      if (item.length > EMBED_MAX_CHARS) {
+        return `Command "embedTexts" rejects strings longer than ${EMBED_MAX_CHARS} characters`;
+      }
     }
   }
   return null;
@@ -1397,7 +1418,7 @@ function inspectFolder(folderPath) {
 
   const report = validateModelFolder({
     files: names,
-    dirName: path.basename(resolved),
+    dirName: [path.basename(resolved), path.basename(scanDir)].filter((v, i, a) => a.indexOf(v) === i).join(' '),
     genaiConfig,
     chatTemplate: typeof chatTemplate === 'string' ? chatTemplate : null,
   });
@@ -1428,6 +1449,27 @@ function copyDirContents(srcDir, destDir) {
     if (!entry.isFile() || entry.isSymbolicLink()) continue;
     fs.copyFileSync(path.join(srcDir, entry.name), path.join(destDir, entry.name));
   }
+}
+
+/**
+ * Windows AV/indexer can hold a lock on files just written into staging, so the
+ * final rename fails with EPERM. Retry a few times rather than treating that as
+ * a permanent import failure.
+ */
+function renameSyncRetry (from, to) {
+  const delaysMs = [0, 25, 50, 100, 200, 400];
+  let last = null;
+  for (const delay of delaysMs) {
+    if (delay) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+    try {
+      fs.renameSync(from, to);
+      return;
+    } catch (e) {
+      last = e;
+      if (!e || (e.code !== 'EPERM' && e.code !== 'EACCES' && e.code !== 'EBUSY')) throw e;
+    }
+  }
+  throw last;
 }
 
 /**
@@ -1476,6 +1518,8 @@ function importModelFolder(payload) {
         version,
         chatTemplate: readTextIfPresent(versionDir, 'chat_template.jinja'),
         architecture: inspection.detected.architecture,
+        dirName: name,
+        task: inspection.detected.task,
         promptTemplate: payload.promptTemplate || null,
       });
       fs.writeFileSync(infPath, `${JSON.stringify(built.content, null, 2)}\n`, 'utf8');
@@ -1498,7 +1542,7 @@ function importModelFolder(payload) {
     );
 
     fs.mkdirSync(path.dirname(finalDir), { recursive: true });
-    fs.renameSync(stagingDir, finalDir); // atomic within the same volume
+    renameSyncRetry(stagingDir, finalDir); // atomic within the same volume
   } catch (e) {
     try { fs.rmSync(stagingDir, { recursive: true, force: true }); } catch {}
     throw e;
@@ -3283,6 +3327,36 @@ rl.on('line', async (line) => {
           url: parsedUrl?.hostname || rawUrl,
         });
         throw err;
+      }
+    } else if (cmd === 'embedTexts') {
+      const inputs = payload.inputs;
+      const modelAlias = payload.model;
+      const embedTs = Date.now();
+      let embedOk = false;
+      noteActivity(modelAlias, 'start');
+      try {
+        const poolEntry = await ensureModel(modelAlias);
+        const embedModel = poolEntry.catModel;
+        if (typeof embedModel?.createEmbeddingClient !== 'function') {
+          throw new Error(`Model ${modelAlias} does not expose createEmbeddingClient`);
+        }
+        const client = embedModel.createEmbeddingClient();
+        const result = await client.generateEmbeddings(inputs);
+        embedOk = true;
+        audit('embedTexts', { alias: modelAlias, count: inputs.length });
+        reply({ ok: true, result });
+      } finally {
+        noteActivity(modelAlias, 'end');
+        appendAccessLog({
+          ts: embedTs,
+          type: 'embeddings',
+          modelAlias,
+          durationMs: Date.now() - embedTs,
+          tokensIn: null,
+          tokensOut: null,
+          source: 'ipc',
+          ok: embedOk,
+        });
       }
     } else if (cmd === 'getEps') {
       const eps = typeof manager.discoverEps === 'function' ? manager.discoverEps() : [];

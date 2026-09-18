@@ -55,12 +55,12 @@ Chat JSON/SSE normalisation (Foundry extras stripped, one OpenAI-shaped choice,
   OpenClaw accepts any non-empty placeholder API key on loopback and health-checks
   `GET /v1/models`.
 
-### After 1.0
+### 1.0.1 companion — embeddings path
 
-- **`/v1/embeddings` end-to-end** — the route exists (GET returns 405); the Foundry
-  catalog ships **zero** embedding models (97 chat, 21 vision, 10 ASR of 128).
-  `createEmbeddingClient()` exists in SDK 1.2.4. This unlocks RAG and Continue's
-  indexer and is not a 1.0 blocker.
+Not a 1.0.0 ship gate. Gateway autoload and BYOM import for embedding models, plus
+sidecar `embedTexts`. Full RAG (index + retrieve + show sources) stays after 1.0.
+
+### After 1.0
 - **Curated model acquisition** — a Flint-validated ONNX catalog (pinned repo and
   revision, tested execution provider, required files, disk/memory footprint,
   chat-template source, tool-calling status, last-tested core version), not a

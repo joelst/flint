@@ -20,6 +20,7 @@ export type SidecarCommand =
   | { cmd: 'chatCompletion'; model: string; messages: unknown[]; maxTokens?: number; temperature?: number; preferredEp?: string; stream?: boolean }
   | { cmd: 'cancelChatRequest'; requestId: number }
   | { cmd: 'transcribeAudio'; audioBase64: string; mimeType: string; fileName: string; model: string; language: string; temperature?: number; preferredEp?: string }
+  | { cmd: 'embedTexts'; model: string; inputs: string[] }
   | { cmd: 'getEps' }
   | { cmd: 'ensureAccelerators' }
   | { cmd: 'getVisionModels' }
@@ -87,7 +88,7 @@ export type SidecarCommandName = SidecarCommand['cmd'];
 export const KNOWN_COMMANDS = new Set<SidecarCommandName>([
   'init', 'setLogLevel', 'startService', 'stopService', 'stopAndUnload', 'shutdownRuntime', 'getStatus',
   'listModels', 'download', 'load', 'unload', 'deleteModel', 'getEndpoint',
-  'chatCompletion', 'cancelChatRequest', 'transcribeAudio',
+  'chatCompletion', 'cancelChatRequest', 'transcribeAudio', 'embedTexts',
   'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',
   'poolStatus', 'getAccessLog', 'getHealthRing', 'fetchUrl',
   'getCacheInventory',

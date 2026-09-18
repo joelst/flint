@@ -68,6 +68,16 @@ npm run smoke:runtime
 
 The app starts, waits until the sidecar is ready, then exits 0. It does not download a model. CI runs this on Windows only.
 
+## Embeddings (1.0.1 path)
+
+`POST /v1/embeddings` is proxied and autoloaded like chat. Import an onnxruntime-genai
+**embedding** ONNX folder via Models → Add model folder (no chat template). There is
+no Flint-tested embedding recipe on SDK 1.2.4 yet — do not treat Continue's indexer
+as verified until that recipe exists. Diagnostics → Test local endpoint **blocks**
+the embeddings check when no embedding model is loaded.
+
+Full RAG (local file index, retrieval chips) is not in this release.
+
 ## Supported audio
 
 The sidecar accepts 16 kHz mono PCM WAV. The browser transcodes whatever Web Audio can decode; conversion failures are rejected before bytes are sent. Broader container coverage is not a 1.0 promise.

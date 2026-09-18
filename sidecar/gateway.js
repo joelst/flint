@@ -49,6 +49,7 @@ const UPSTREAM_TIMEOUT_MS = 0; // no timeout: generation can legitimately run fo
 export function classifyGatewayRoute (urlPath) {
   const path = String(urlPath || '').split('?')[0];
   if (path.includes('/chat/completions')) return 'chat';
+  if (path.includes('/embeddings')) return 'embeddings';
   if (/(^|\/)models(\/|$)/.test(path)) return 'models';
   return 'other';
 }
