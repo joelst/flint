@@ -132,7 +132,7 @@ describe('runEndpointSelfTest', () => {
     expect(flintVerifiedFromReport(report)?.tools).toBe('not-verified');
   });
 
-  it('passes disconnect after headers even when the body never yields a chunk', async () => {
+  it('fails disconnect when the body reader does not settle after abort', async () => {
     const fetchMock: typeof fetch = async (input, init) => {
       if (init?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
       if (String(input).endsWith('/models')) {
@@ -156,7 +156,8 @@ describe('runEndpointSelfTest', () => {
       catalogSupportsToolCalling: false,
       disconnectStartMs: 20,
     });
-    expect(report.checks.find((c) => c.id === 'disconnect')?.status).toBe('pass');
+    expect(report.checks.find((c) => c.id === 'disconnect')?.status).toBe('fail');
+    expect(report.checks.find((c) => c.id === 'disconnect')?.detail).toMatch(/did not settle/);
   });
 
   it('fails disconnect when the streaming response never starts', async () => {
@@ -378,6 +379,60 @@ describe('runEndpointSelfTest', () => {
     expect(report.modelId).toBe('phi-4-mini-instruct-generic-cpu');
     expect(seen.every((id) => id === 'phi-4-mini-instruct-generic-cpu')).toBe(true);
     expect(report.checks.find((c) => c.id === 'chat')?.status).toBe('pass');
+  });
+
+  it('uses a requested embedding alias even when the listed id does not contain embed', async () => {
+    const seen: string[] = [];
+    const fetchMock: typeof fetch = async (input, init) => {
+      if (init?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      if (String(input).endsWith('/models')) {
+        return jsonResponse(200, { data: [{ id: 'my-model' }, { id: 'tiny-cpu' }] });
+      }
+      if (String(input).endsWith('/embeddings')) {
+        const body = JSON.parse(String(init?.body || '{}'));
+        seen.push(`embed:${body.model}`);
+        return jsonResponse(200, { data: [{ embedding: [0.2, 0.3], index: 0 }] });
+      }
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (body.model) seen.push(`chat:${body.model}`);
+      if (body.stream) {
+        return new Response('data: {"choices":[{"delta":{"content":"ping"}}]}\n\ndata: [DONE]\n\n', { status: 200 });
+      }
+      return jsonResponse(200, {
+        choices: [{ message: { role: 'assistant', content: 'ping' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      });
+    };
+    const report = await runEndpointSelfTest({
+      fetch: fetchMock,
+      endpoint: 'http://127.0.0.1:5272/v1',
+      embeddingModelId: 'my-model',
+      catalogSupportsToolCalling: false,
+    });
+    expect(report.embeddingModelId).toBe('my-model');
+    expect(report.modelId).toBe('tiny-cpu');
+    expect(seen).toContain('embed:my-model');
+    expect(seen.some((item) => item === 'chat:my-model')).toBe(false);
+    expect(report.checks.find((c) => c.id === 'embeddings')?.status).toBe('pass');
+    expect(report.checks.find((c) => c.id === 'chat')?.status).toBe('pass');
+  });
+
+  it('fails embeddings when a later vector element is not finite', async () => {
+    const fetchMock: typeof fetch = async (input, init) => {
+      if (init?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      if (String(input).endsWith('/models')) {
+        return jsonResponse(200, { data: [{ id: 'qwen3-embedding-cpu' }] });
+      }
+      if (String(input).endsWith('/embeddings')) {
+        return jsonResponse(200, { data: [{ embedding: [0.1, Number.NaN], index: 0 }] });
+      }
+      throw new Error(`chat should not run: ${input}`);
+    };
+    const report = await runEndpointSelfTest({
+      fetch: fetchMock,
+      endpoint: 'http://127.0.0.1:5272/v1',
+    });
+    expect(report.checks.find((c) => c.id === 'embeddings')?.status).toBe('fail');
   });
 
   it('blocks chat when the envelope only lists STT or embedding models', async () => {

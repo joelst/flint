@@ -35,6 +35,7 @@ export interface FlintVerified {
 
 const REQUEST_TIMEOUT_MS = 8_000;
 const DISCONNECT_START_MS = 2_000;
+const ABORT_SETTLE_TIMEOUT_MS = 1_000;
 
 function check(
   id: string,
@@ -103,6 +104,18 @@ function pickListedId(listed: string[], requested: string | null): string | null
     if (match) return match;
   }
   return listed[0] ?? null;
+}
+
+function modelsEnvelopeData(json: unknown): unknown[] | null {
+  if (!json || typeof json !== 'object') return null;
+  const data = (json as { data?: unknown }).data;
+  return Array.isArray(data) ? data : null;
+}
+
+function isNumericVector(value: unknown): value is number[] {
+  return Array.isArray(value)
+    && value.length > 0
+    && value.every((item) => typeof item === 'number' && Number.isFinite(item));
 }
 
 function streamHasToken(text: string): boolean {
@@ -214,7 +227,7 @@ export async function runEndpointSelfTest(options: {
       requestTimeoutMs,
       'json',
     );
-    const data = Array.isArray(json?.data) ? json.data : null;
+    const data = modelsEnvelopeData(json);
     if (!res.ok || !data) {
       checks.push(check(
         'models',
@@ -242,11 +255,16 @@ export async function runEndpointSelfTest(options: {
 
   const modelsOk = checks.some((item) => item.id === 'models' && item.status === 'pass');
   const ids = modelsOk ? listedIds(modelsBody) : [];
-  const chatIds = ids.filter(isChatModelId);
-  const embedIds = ids.filter(isEmbeddingModelId);
-  // The check is "a returned ID round-trips into chat". Never send an unlisted UI alias.
+  const requestedEmbed = options.embeddingModelId?.trim() || null;
+  // A BYOM embedding imported as `my-model` has no `embed` substring. Prefer the
+  // UI-supplied embedding alias against the full listed set, then drop it from chat.
+  const embeddingModelId = (
+    requestedEmbed
+      ? ids.find((id) => matchesVerifiedModel(id, requestedEmbed))
+      : undefined
+  ) ?? ids.find(isEmbeddingModelId) ?? null;
+  const chatIds = ids.filter((id) => isChatModelId(id) && id !== embeddingModelId);
   const modelId = pickListedId(chatIds, requestedModel);
-  const embeddingModelId = pickListedId(embedIds, options.embeddingModelId?.trim() || null);
 
   if (!modelsOk) {
     const blocked = 'GET /v1/models did not return an OpenAI envelope.';
@@ -279,14 +297,11 @@ export async function runEndpointSelfTest(options: {
         requestTimeoutMs,
         'json',
       );
-      const vector = (json as { data?: Array<{ embedding?: unknown }> } | null)?.data?.[0]?.embedding;
-      if (
-        !res.ok
-        || !Array.isArray(vector)
-        || vector.length === 0
-        || typeof vector[0] !== 'number'
-        || !Number.isFinite(vector[0])
-      ) {
+      const embeddingJson = json && typeof json === 'object'
+        ? json as { data?: Array<{ embedding?: unknown }> }
+        : null;
+      const vector = embeddingJson?.data?.[0]?.embedding;
+      if (!res.ok || !isNumericVector(vector)) {
         checks.push(check(
           'embeddings',
           'POST /v1/embeddings returns a vector',
@@ -433,24 +448,42 @@ export async function runEndpointSelfTest(options: {
           : `Streaming response did not start within ${disconnectStartMs} ms; disconnect was not exercised.`,
       ));
     } else {
-      if (started.res.body) {
-        const reader = started.res.body.getReader();
+      const reader = started.res.body?.getReader() ?? null;
+      const pendingRead = reader
+        ? reader.read().then(() => 'read' as const, () => 'rejected' as const)
+        : null;
+      if (pendingRead) {
         await Promise.race([
-          reader.read().catch(() => undefined),
+          pendingRead,
           new Promise<void>((resolve) => {
             setTimeout(resolve, disconnectStartMs);
           }),
         ]);
       }
       abort.abort();
-      // fetch() settles at headers. Waiting for headers is what proves the request
-      // left the client; abort then tells the gateway to drop the body.
-      checks.push(check(
-        'disconnect',
-        'Aborting a stream settles the caller',
-        'pass',
-        'Stream started and abort was issued. Native generation may still finish.',
-      ));
+      if (pendingRead) {
+        const settled = await Promise.race([
+          pendingRead.then(() => 'settled' as const),
+          new Promise<'timeout'>((resolve) => {
+            setTimeout(() => resolve('timeout'), ABORT_SETTLE_TIMEOUT_MS);
+          }),
+        ]);
+        checks.push(check(
+          'disconnect',
+          'Aborting a stream settles the caller',
+          settled === 'timeout' ? 'fail' : 'pass',
+          settled === 'timeout'
+            ? `Abort did not settle the stream body within ${ABORT_SETTLE_TIMEOUT_MS} ms.`
+            : 'Stream started and abort settled the body reader. Native generation may still finish.',
+        ));
+      } else {
+        checks.push(check(
+          'disconnect',
+          'Aborting a stream settles the caller',
+          'pass',
+          'Stream started and abort was issued. Native generation may still finish.',
+        ));
+      }
     }
   } catch (error) {
     checks.push(check(

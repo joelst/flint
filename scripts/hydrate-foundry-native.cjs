@@ -41,9 +41,8 @@ function dirHasFiles(dir) {
 
 function restore() {
   if (!dirHasFiles(CACHE_DIR)) return;
-  // Parent may be missing during a clean install. Creating it is not enough for
-  // `npm ci`: that extracts foundry-local-sdk *after* root preinstall and would
-  // replace this directory. CI must restore after extract (see ci-npm-ci.cjs).
+  // Creating dest is not enough for a plain `npm ci`: the SDK installer runs as
+  // the package is extracted. CI must restore after extract (see ci-npm-ci.cjs).
   fs.mkdirSync(DEST_DIR, { recursive: true });
   copyDir(CACHE_DIR, DEST_DIR);
   console.log(`[hydrate-foundry-native] restored cache into ${path.relative(root, DEST_DIR)}`);

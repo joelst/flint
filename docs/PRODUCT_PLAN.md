@@ -12,11 +12,11 @@ Waves 1 and 2 may overlap. Wave 4 may overlap with 2/3. Wave 8 is the ship, not 
 
 ### Wave 1 — Security and CI
 
-Rubber-duck: this is not a security product. The boundary already exists; 1.0 requires it audited, named, and gated. `npm ci` deletes `node_modules` then extracts packages *after* root `preinstall`, so a restore in `preinstall` is wiped. CI uses `npm run ci:deps` to restore `runtime/foundry-native-cache` after extract and before the SDK `skipIfPresent` installer. `updater:allow-download-and-install` stays because Wave 8 is in the same 0.9.0. PATH `node -v` stays (post-1.0 spawn-surface). CLI version checks are out — packaged users have no CLI.
+Rubber-duck: this is not a security product. The boundary already exists; 1.0 requires it audited, named, and gated. `npm ci` extracts packages and runs the SDK installer before a root `preinstall` restore can stick, so CI uses `npm run ci:deps` (extract with `--ignore-scripts`, restore `runtime/foundry-native-cache`, `npm rebuild`) before `skipIfPresent`. `updater:allow-download-and-install` stays because Wave 8 is in the same 0.9.0. PATH `node -v` stays (post-1.0 spawn-surface). CLI version checks are out — packaged users have no CLI.
 
 - Prune unused grants: opener plugin (renderer never imported it); `$RESOURCE` read scope (sidecar paths are native `trusted_runtime_paths`); redundant `core:tray:default` / `core:menu:default` (already in `core:default`). Keep `$RESOURCE` write deny. Comment each survivor.
 - Dedicated `src/lib/security-boundary.test.ts` that fails CI if opener/spawn/kill return, `$RESOURCE` reads return, shell execute is more than `node -v`, IPC allowlists drift, or BYOM `isInsideRoot` accepts a traversal.
-- Cache `runtime/foundry-native-cache` in CI/release. CI runs `npm run ci:deps` (extract packages, restore cache, `npm rebuild`) so the SDK `skipIfPresent` installer sees the cores. Root `preinstall` restore cannot survive `npm ci`'s extract-after-preinstall order.
+- Cache `runtime/foundry-native-cache` in CI/release. CI runs `npm run ci:deps` (extract packages, restore cache, `npm rebuild`) so the SDK `skipIfPresent` installer sees the cores. There is no root `preinstall` restore; that hook cannot run before the SDK installer.
 - Pin `foundry-local-sdk` to `1.2.4`. Warn (do not fail) at sidecar `init` when loaded SDK/core versions differ from that pin.
 
 ### Wave 2 — Native lifecycle and conversation integrity

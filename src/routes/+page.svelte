@@ -246,9 +246,10 @@
     endpointSelfTestBusy = true;
     try {
       const catalogModel = state.models.find((m: ModelInfo) => m.alias === selectedModelAlias);
-      const embeddingCatalog = state.models.find((m: ModelInfo) =>
-        /embed/i.test(m.alias || '') || /embed/i.test(String((m as any).task || '')),
-      );
+      const embeddingCatalog = state.models.find((m: ModelInfo) => {
+        const blob = [m.alias, (m as any).task, (m as any).info?.task].filter(Boolean).join(' ');
+        return /embed/i.test(blob);
+      });
       const chatAlias = selectedModelAlias && !/embed/i.test(selectedModelAlias) ? selectedModelAlias : null;
       endpointSelfTestReport = await runEndpointSelfTest({
         fetch,
@@ -7070,15 +7071,25 @@ Output only the summary text, no preamble.`;
                         </div>
                         <div>
                           <strong>Flint-verified:</strong>
-                          {#if lastFlintVerified && (
-                            matchesVerifiedModel(lastFlintVerified.modelId, detailModel.alias)
-                            || (lastFlintVerified.embeddingModelId && matchesVerifiedModel(lastFlintVerified.embeddingModelId, detailModel.alias))
-                          )}
-                            chat {lastFlintVerified.chat ? "yes" : "no"} ·
-                            stream {lastFlintVerified.stream ? "yes" : "no"} ·
-                            embeddings {lastFlintVerified.embeddings ? "yes" : "no"} ·
-                            tools {lastFlintVerified.tools}
-                            <span class="muted small"> · {new Date(lastFlintVerified.ranAt).toLocaleString()}</span>
+                          {#if lastFlintVerified}
+                            {@const chatMatch = matchesVerifiedModel(lastFlintVerified.modelId, detailModel.alias)
+                              && lastFlintVerified.modelId !== lastFlintVerified.embeddingModelId}
+                            {@const embedMatch = !!(lastFlintVerified.embeddingModelId
+                              && matchesVerifiedModel(lastFlintVerified.embeddingModelId, detailModel.alias))}
+                            {#if chatMatch || embedMatch}
+                              {#if chatMatch}
+                                chat {lastFlintVerified.chat ? "yes" : "no"} ·
+                                stream {lastFlintVerified.stream ? "yes" : "no"} ·
+                                tools {lastFlintVerified.tools}
+                              {/if}
+                              {#if chatMatch && embedMatch} · {/if}
+                              {#if embedMatch}
+                                embeddings {lastFlintVerified.embeddings ? "yes" : "no"}
+                              {/if}
+                              <span class="muted small"> · {new Date(lastFlintVerified.ranAt).toLocaleString()}</span>
+                            {:else}
+                              Not verified in this session — Diagnostics → Test local endpoint
+                            {/if}
                           {:else}
                             Not verified in this session — Diagnostics → Test local endpoint
                           {/if}

@@ -90,7 +90,7 @@ pub fn run() {
         match event {
             tauri::RunEvent::ExitRequested { api, code, .. } => {
                 let is_restart = code == Some(tauri::RESTART_EXIT_CODE);
-                quit_flush::on_exit_requested(app_handle, &api, is_restart);
+                quit_flush::on_exit_requested(app_handle, &api, is_restart, code);
             }
             tauri::RunEvent::Exit => {
                 runtime_manager::stop_for_app_exit(

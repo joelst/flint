@@ -1136,6 +1136,8 @@ describe('classifyGatewayRoute', () => {
     expect(classifyGatewayRoute('/v1/not-models')).toBe('other');
     expect(classifyGatewayRoute('/v1/embeddings')).toBe('embeddings');
     expect(classifyGatewayRoute('/v1/embeddings?foo=1')).toBe('embeddings');
+    expect(classifyGatewayRoute('/v1/chat/completions-evil')).toBe('other');
+    expect(classifyGatewayRoute('/v1/embeddings-preview')).toBe('other');
     expect(classifyGatewayRoute('/health')).toBe('other');
   });
 });

@@ -74,7 +74,7 @@ The app starts, waits until the sidecar is ready, then exits 0. It does not down
 **embedding** ONNX folder via Models → Add model folder (no chat template). There is
 no Flint-tested embedding recipe on SDK 1.2.4 yet — do not treat Continue's indexer
 as verified until that recipe exists. Diagnostics → Test local endpoint **blocks**
-the embeddings check when no embedding model is loaded.
+the embeddings check when no embedding model is in the local cache (`GET /v1/models`).
 
 Full RAG (local file index, retrieval chips) is not in this release.
 

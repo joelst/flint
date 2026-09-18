@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
  * Install deps in CI so the Foundry native cache is in place *before* the SDK
- * install script runs. Root `preinstall` is too early: `npm ci` deletes
- * node_modules, runs preinstall, then extracts foundry-local-sdk (wiping any
- * restore) and only then runs the SDK's skipIfPresent installer.
+ * install script runs. A root `preinstall` cannot do that: dependency install
+ * scripts run as packages are extracted, before any restore into
+ * `node_modules/foundry-local-sdk` can survive.
  *
  * Sequence: extract packages without scripts → restore cache → run install
  * scripts (SDK skipIfPresent hits).
@@ -36,7 +36,11 @@ function run (command, args) {
     shell: process.platform === 'win32',
     env: process.env,
   });
-  if (result.status) process.exit(result.status ?? 1);
+  if (result.error) {
+    console.error(result.error);
+    process.exit(1);
+  }
+  if (result.status !== 0) process.exit(result.status ?? 1);
 }
 
 run('npm', ['ci', '--ignore-scripts']);
