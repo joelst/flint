@@ -1679,6 +1679,25 @@
    * which makes it refuse the whole archive. Without this, saving would stop working silently the
    * first time anyone sent a message.
    */
+  let backgroundArchiveSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  const BACKGROUND_ARCHIVE_SAVE_MS = 400;
+
+  function scheduleBackgroundArchiveSave() {
+    if (backgroundArchiveSaveTimer) return;
+    backgroundArchiveSaveTimer = setTimeout(() => {
+      backgroundArchiveSaveTimer = null;
+      saveConversations();
+    }, BACKGROUND_ARCHIVE_SAVE_MS);
+  }
+
+  function flushBackgroundArchiveSave() {
+    if (backgroundArchiveSaveTimer) {
+      clearTimeout(backgroundArchiveSaveTimer);
+      backgroundArchiveSaveTimer = null;
+    }
+    saveConversations();
+  }
+
   function saveConversations() {
     // Disabled when the stored archive could not be read or preserved, so a fresh archive can
     // never replace conversations we were unable to parse.
@@ -4972,7 +4991,7 @@ updateStateFromSdk();
       if (!patched.changed) return false;
       conversationArchive = patched.archive;
       conversationsDirty = true;
-      saveConversations();
+      scheduleBackgroundArchiveSave();
       return true;
     }
 
@@ -5048,6 +5067,7 @@ updateStateFromSdk();
         abortController = null;
         activeStreamRequestId = null;
       }
+      flushBackgroundArchiveSave();
       syncVisibleStreaming();
     }
   }

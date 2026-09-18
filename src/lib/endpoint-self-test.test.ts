@@ -81,6 +81,30 @@ describe('runEndpointSelfTest', () => {
     });
   });
 
+  it('accepts usage from input_tokens fields and SSE data lines that are not JSON', async () => {
+    const fetchMock: typeof fetch = async (input, init) => {
+      if (init?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      if (String(input).endsWith('/models')) {
+        return jsonResponse(200, { data: [{ id: 'tiny-cpu' }] });
+      }
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (body.stream) {
+        return new Response('data: not-json\n\ndata: {"choices":[{"delta":{"content":"x"}}]}\n\ndata: [DONE]\n\n', { status: 200 });
+      }
+      return jsonResponse(200, {
+        choices: [{ message: { role: 'assistant', content: 'x' } }],
+        usage: { input_tokens: 4, output_tokens: 1 },
+      });
+    };
+    const report = await runEndpointSelfTest({
+      fetch: fetchMock,
+      endpoint: 'http://127.0.0.1:5272/v1',
+      catalogSupportsToolCalling: false,
+    });
+    expect(report.checks.find((c) => c.id === 'usage')?.status).toBe('pass');
+    expect(report.checks.find((c) => c.id === 'stream')?.status).toBe('pass');
+  });
+
   it('labels missing usage and missing tool_calls as not-verified rather than failed', async () => {
     const fetchMock: typeof fetch = async (input, init) => {
       if (init?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -129,6 +153,7 @@ describe('runEndpointSelfTest', () => {
       fetch: fetchMock,
       endpoint: 'http://127.0.0.1:5272/v1',
       catalogSupportsToolCalling: false,
+      disconnectStartMs: 20,
     });
     expect(report.checks.find((c) => c.id === 'disconnect')?.status).toBe('fail');
     expect(report.checks.find((c) => c.id === 'disconnect')?.detail).toMatch(/within 1000 ms/);
@@ -144,13 +169,19 @@ describe('runEndpointSelfTest', () => {
     expect(flintVerifiedFromReport(report)?.tools).toBe('not-verified');
   });
 
-  it('fails models/chat/stream when fetch throws or returns a bad envelope', async () => {
+  it('does not mint Flint-verified when /v1/models failed even if a UI alias is selected', async () => {
     const reportModels = await runEndpointSelfTest({
       fetch: async () => { throw new Error('offline'); },
       endpoint: 'http://127.0.0.1:5272/v1',
       modelId: 'tiny-cpu',
     });
     expect(reportModels.checks.find((c) => c.id === 'models')?.status).toBe('fail');
+    expect(reportModels.checks.filter((c) => c.status === 'blocked').map((c) => c.id))
+      .toEqual(['embeddings', 'chat', 'stream', 'usage', 'disconnect', 'tools']);
+    expect(flintVerifiedFromReport(reportModels)).toBeNull();
+  });
+
+  it('fails models/chat/stream when fetch throws or returns a bad envelope', async () => {
 
     const reportChat: typeof fetch = async (input, init) => {
       if (String(input).endsWith('/models')) {
@@ -292,6 +323,162 @@ describe('runEndpointSelfTest', () => {
       catalogSupportsToolCalling: false,
     });
     expect(report.checks.find((c) => c.id === 'stream')?.status).toBe('fail');
+  });
+
+  it('round-trips a listed model id even when the UI selected an unlisted alias', async () => {
+    const seen: string[] = [];
+    const fetchMock: typeof fetch = async (input, init) => {
+      if (init?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      if (String(input).endsWith('/models')) {
+        return jsonResponse(200, { data: [{ id: 'phi-4-mini-instruct-generic-cpu' }] });
+      }
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (body.model) seen.push(body.model);
+      if (body.stream) {
+        return new Response('data: {"choices":[{"delta":{"content":"ping"}}]}\n\ndata: [DONE]\n\n', { status: 200 });
+      }
+      return jsonResponse(200, {
+        choices: [{ message: { role: 'assistant', content: 'ping' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      });
+    };
+    const report = await runEndpointSelfTest({
+      fetch: fetchMock,
+      endpoint: 'http://127.0.0.1:5272/v1',
+      modelId: 'not-in-the-envelope',
+      catalogSupportsToolCalling: false,
+    });
+    expect(report.modelId).toBe('phi-4-mini-instruct-generic-cpu');
+    expect(seen.every((id) => id === 'phi-4-mini-instruct-generic-cpu')).toBe(true);
+    expect(report.checks.find((c) => c.id === 'chat')?.status).toBe('pass');
+  });
+
+  it('blocks chat when the envelope only lists STT or embedding models', async () => {
+    const report = await runEndpointSelfTest({
+      fetch: async (input) => {
+        if (String(input).endsWith('/models')) {
+          return jsonResponse(200, { data: [{ id: 'whisper-tiny' }, { id: 'qwen3-embedding-cpu' }] });
+        }
+        if (String(input).endsWith('/embeddings')) {
+          return jsonResponse(200, { data: [{ embedding: [0.1], index: 0 }] });
+        }
+        throw new Error(`chat should not run: ${input}`);
+      },
+      endpoint: 'http://127.0.0.1:5272/v1',
+    });
+    expect(report.modelId).toBeNull();
+    expect(report.checks.find((c) => c.id === 'chat')?.status).toBe('blocked');
+    expect(report.checks.find((c) => c.id === 'embeddings')?.status).toBe('pass');
+  });
+
+  it('does not treat HTTP-error usage or tool_calls as verified', async () => {
+    const fetchMock: typeof fetch = async (input, init) => {
+      if (init?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      if (String(input).endsWith('/models')) {
+        return jsonResponse(200, { data: [{ id: 'tiny-cpu' }] });
+      }
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (body.tools) {
+        return jsonResponse(500, {
+          choices: [{ message: { tool_calls: [{ id: 'c1' }] } }],
+        });
+      }
+      if (body.stream) {
+        return new Response('data: {"choices":[{"delta":{"content":"x"}}]}\n\ndata: [DONE]\n\n', { status: 200 });
+      }
+      return jsonResponse(500, {
+        usage: { prompt_tokens: 4, completion_tokens: 1 },
+        error: { message: 'nope' },
+      });
+    };
+    const report = await runEndpointSelfTest({
+      fetch: fetchMock,
+      endpoint: 'http://127.0.0.1:5272/v1',
+      catalogSupportsToolCalling: true,
+    });
+    expect(report.checks.find((c) => c.id === 'usage')?.status).toBe('blocked');
+    expect(report.checks.find((c) => c.id === 'tools')?.status).toBe('blocked');
+    expect(flintVerifiedFromReport(report)?.usage).toBe(false);
+    expect(flintVerifiedFromReport(report)?.tools).toBe('not-verified');
+  });
+
+  it('fails stream when SSE has [DONE] but no content token', async () => {
+    const fetchMock: typeof fetch = async (input, init) => {
+      if (init?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      if (String(input).endsWith('/models')) {
+        return jsonResponse(200, { data: [{ id: 'tiny-cpu' }] });
+      }
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (body.stream) {
+        return new Response('data: {"choices":[{"delta":{"role":"assistant"}}]}\n\ndata: [DONE]\n\n', { status: 200 });
+      }
+      return jsonResponse(200, {
+        choices: [{ message: { role: 'assistant', content: 'x' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      });
+    };
+    const report = await runEndpointSelfTest({
+      fetch: fetchMock,
+      endpoint: 'http://127.0.0.1:5272/v1',
+      catalogSupportsToolCalling: false,
+    });
+    expect(report.checks.find((c) => c.id === 'stream')?.status).toBe('fail');
+    expect(report.checks.find((c) => c.id === 'stream')?.detail).toMatch(/token=false/);
+  });
+
+  it('fails models when the envelope request never settles', async () => {
+    const report = await runEndpointSelfTest({
+      fetch: () => new Promise<Response>(() => {}),
+      endpoint: 'http://127.0.0.1:5272/v1',
+      requestTimeoutMs: 30,
+    });
+    expect(report.checks.find((c) => c.id === 'models')?.status).toBe('fail');
+    expect(report.checks.find((c) => c.id === 'models')?.detail).toMatch(/Timed out after 30 ms/);
+    expect(flintVerifiedFromReport(report)).toBeNull();
+  });
+
+  it('fails chat when the completions request throws', async () => {
+    const fetchMock: typeof fetch = async (input, init) => {
+      if (init?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      if (String(input).endsWith('/models')) {
+        return jsonResponse(200, { data: [{ id: 'tiny-cpu' }] });
+      }
+      throw new Error('chat down');
+    };
+    const report = await runEndpointSelfTest({
+      fetch: fetchMock,
+      endpoint: 'http://127.0.0.1:5272/v1',
+      catalogSupportsToolCalling: false,
+    });
+    expect(report.checks.find((c) => c.id === 'chat')?.status).toBe('fail');
+    expect(report.checks.find((c) => c.id === 'chat')?.detail).toMatch(/chat down/);
+  });
+
+  it('fails disconnect when starting the abort request throws', async () => {
+    const fetchMock: typeof fetch = ((input, init) => {
+      if (init?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      if (String(input).endsWith('/models')) {
+        return Promise.resolve(jsonResponse(200, { data: [{ id: 'tiny-cpu' }] }));
+      }
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (body.stream && String(body.messages?.[0]?.content || '').includes('Keep writing')) {
+        throw new Error('disconnect setup failed');
+      }
+      if (body.stream) {
+        return Promise.resolve(new Response('data: {"choices":[{"delta":{"content":"x"}}]}\n\ndata: [DONE]\n\n', { status: 200 }));
+      }
+      return Promise.resolve(jsonResponse(200, {
+        choices: [{ message: { role: 'assistant', content: 'x' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      }));
+    }) as typeof fetch;
+    const report = await runEndpointSelfTest({
+      fetch: fetchMock,
+      endpoint: 'http://127.0.0.1:5272/v1',
+      catalogSupportsToolCalling: false,
+    });
+    expect(report.checks.find((c) => c.id === 'disconnect')?.status).toBe('fail');
+    expect(report.checks.find((c) => c.id === 'disconnect')?.detail).toMatch(/disconnect setup failed/);
   });
 });
 
