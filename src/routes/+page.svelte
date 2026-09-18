@@ -731,6 +731,10 @@
       void cancelChatRequest(stream.requestId).catch(() => {});
     }
     streamsByConversation.delete(conversationId);
+    if (abortController === stream.controller) {
+      abortController = null;
+      activeStreamRequestId = null;
+    }
     syncVisibleStreaming();
   }
   let systemPrompt = $state("You are a helpful assistant.");

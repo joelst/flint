@@ -11,7 +11,7 @@ export function createHealthRing(max = HEALTH_RING_MAX) {
   const events = [];
 
   function record(event) {
-    const entry = { ts: Date.now(), ...event };
+    const entry = { ...event, ts: Date.now() };
     events.push(entry);
     if (events.length > max) events.splice(0, events.length - max);
     return entry;

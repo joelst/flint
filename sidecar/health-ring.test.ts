@@ -13,6 +13,13 @@ describe('createHealthRing', () => {
     expect(ring.snapshot()).toHaveLength(1);
   });
 
+  it('owns recorded timestamps even when callers provide one', () => {
+    const ring = createHealthRing(10);
+    const before = Date.now();
+    const entry = ring.record({ kind: 'init', ts: 1 });
+    expect(entry.ts).toBeGreaterThanOrEqual(before);
+  });
+
   it('drops the oldest events when full', () => {
     const ring = createHealthRing(3);
     ring.record({ kind: 'a' });

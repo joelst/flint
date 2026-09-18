@@ -30,6 +30,8 @@ export interface FlintVerified {
   tools: 'verified' | 'not-verified';
 }
 
+const ABORT_SETTLE_TIMEOUT_MS = 1_000;
+
 function check(
   id: string,
   title: string,
@@ -66,6 +68,34 @@ export function matchesVerifiedModel(modelId: string, alias: string | null | und
   const id = modelId.toLowerCase();
   const name = alias.toLowerCase();
   return id === name || id.startsWith(`${name}-`);
+}
+
+async function observeAbortSettlement(pending: Promise<unknown>): Promise<{ status: 'resolved' | 'aborted' | 'rejected' | 'timeout'; detail: string }> {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      pending.then(
+        () => ({ status: 'resolved' as const, detail: 'Caller resolved after abort. Native generation may still finish.' }),
+        (error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          if (error instanceof DOMException && error.name === 'AbortError') {
+            return { status: 'aborted' as const, detail: 'Caller rejected with AbortError after abort.' };
+          }
+          return { status: 'rejected' as const, detail: `Caller rejected after abort: ${message}` };
+        },
+      ),
+      new Promise<{ status: 'timeout'; detail: string }>((resolve) => {
+        timeout = setTimeout(() => {
+          resolve({
+            status: 'timeout',
+            detail: `Abort did not settle the request within ${ABORT_SETTLE_TIMEOUT_MS} ms.`,
+          });
+        }, ABORT_SETTLE_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 export async function runEndpointSelfTest(options: {
@@ -221,20 +251,12 @@ export async function runEndpointSelfTest(options: {
       signal: abort.signal,
     });
     abort.abort();
-    let settled = false;
-    try {
-      await pending;
-      settled = true;
-    } catch {
-      settled = true;
-    }
+    const outcome = await observeAbortSettlement(pending);
     checks.push(check(
       'disconnect',
       'Aborting a stream settles the caller',
-      settled ? 'pass' : 'fail',
-      settled
-        ? 'Caller completed after abort. Native generation may still finish.'
-        : 'Abort did not settle the request.',
+      outcome.status === 'timeout' ? 'fail' : 'pass',
+      outcome.detail,
     ));
   } catch (error) {
     checks.push(check(

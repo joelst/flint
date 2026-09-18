@@ -1123,6 +1123,8 @@ describe('classifyGatewayRoute', () => {
   it('labels chat, models, and other without reading bodies', () => {
     expect(classifyGatewayRoute('/v1/chat/completions')).toBe('chat');
     expect(classifyGatewayRoute('/v1/models?foo=1')).toBe('models');
+    expect(classifyGatewayRoute('/v1/models/tiny-cpu')).toBe('models');
+    expect(classifyGatewayRoute('/v1/not-models')).toBe('other');
     expect(classifyGatewayRoute('/v1/embeddings')).toBe('other');
   });
 });

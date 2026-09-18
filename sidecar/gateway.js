@@ -41,6 +41,19 @@ import {
 const UPSTREAM_TIMEOUT_MS = 0; // no timeout: generation can legitimately run for minutes
 
 /**
+ * Classify OpenAI-compatible routes for metadata-only access logging.
+ *
+ * Treat `/models` as a path segment so `/v1/models` and `/v1/models/<id>` are
+ * grouped together without matching unrelated names that merely contain it.
+ */
+export function classifyGatewayRoute (urlPath) {
+  const path = String(urlPath || '').split('?')[0];
+  if (path.includes('/chat/completions')) return 'chat';
+  if (/(^|\/)models(\/|$)/.test(path)) return 'models';
+  return 'other';
+}
+
+/**
  * @param {object} options
  * @param {number} options.publicPort        port clients connect to
  * @param {string} options.bindAddress       interface to listen on
@@ -62,13 +75,6 @@ const UPSTREAM_TIMEOUT_MS = 0; // no timeout: generation can legitimately run fo
  * @param {number} [options.maxBufferedResponse]
  * @param {number} [options.bufferedResponseTimeoutMs]
  */
-export function classifyGatewayRoute (urlPath) {
-  const path = String(urlPath || '').split('?')[0];
-  if (path.includes('/chat/completions')) return 'chat';
-  if (/(^|\/)models\/?$/.test(path) || path.includes('/models')) return 'models';
-  return 'other';
-}
-
 export function createGateway (options) {
   const {
     publicPort,

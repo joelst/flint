@@ -101,6 +101,32 @@ describe('runEndpointSelfTest', () => {
     expect(flintVerifiedFromReport(report)?.tools).toBe('not-verified');
   });
 
+  it('fails disconnect when an aborted stream does not settle', async () => {
+    const fetchMock: typeof fetch = async (input, init) => {
+      if (String(input).endsWith('/models')) {
+        return jsonResponse(200, { data: [{ id: 'tiny-cpu' }] });
+      }
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (body.stream && String(body.messages?.[0]?.content || '').includes('Keep writing')) {
+        return new Promise<Response>(() => {});
+      }
+      if (body.stream) {
+        return new Response('data: {"choices":[{"delta":{"content":"x"}}]}\n\ndata: [DONE]\n\n', { status: 200 });
+      }
+      return jsonResponse(200, {
+        choices: [{ message: { role: 'assistant', content: 'x' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      });
+    };
+    const report = await runEndpointSelfTest({
+      fetch: fetchMock,
+      endpoint: 'http://127.0.0.1:5272/v1',
+      catalogSupportsToolCalling: false,
+    });
+    expect(report.checks.find((c) => c.id === 'disconnect')?.status).toBe('fail');
+    expect(report.checks.find((c) => c.id === 'disconnect')?.detail).toMatch(/within 1000 ms/);
+  });
+
   it('does not attempt tools when the catalog declares them unsupported', async () => {
     const report = await runEndpointSelfTest({
       fetch: cooperatingFetch(),
