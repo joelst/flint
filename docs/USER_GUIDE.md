@@ -33,7 +33,7 @@ Flint prefers the packaged Node on launch (About shows `bundled` vs `PATH`) and 
 4. **Optional — service for other apps**  
    - **Diagnostics → Start service**.  
    - **Integrations** — pick OS, copy snippets.  
-   - Client URL is always **`http://127.0.0.1:<port>/v1`** (loopback).
+   - Client URL is usually **`http://127.0.0.1:<port>/v1`** (loopback) — clients inside WSL2 are the exception, see [Network bind vs client URL](#network-bind-vs-client-url).
 
 ---
 

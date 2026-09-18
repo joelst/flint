@@ -22,6 +22,39 @@ implicitly reprioritize the open items below.
 Linux-specific work only where it is already part of another feature; shared
 Windows/macOS fixes do not establish Linux release support.
 
+## 1.0 release criteria — unowned work
+
+[RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) states the seven criteria for 1.0. These are
+the ones with no item anywhere else in this file and no workstream in
+[PRODUCT_PLAN.md](./PRODUCT_PLAN.md). They are unscoped: size them before committing to a
+1.0 date. Criterion 3 (testing) is covered under [Test coverage](#test-coverage).
+
+- [ ] **Least-privilege capability model** (criterion 1) — `src-tauri/capabilities/default.json`
+      has never been audited against what the app actually invokes. Enumerate the permissions
+      the renderer genuinely needs, remove the rest, and record why each survivor is required.
+- [ ] **Renderer/sidecar boundary security suite** (criterion 1) — existing tests cover command
+      allowlisting, unknown commands, IPC schema drift, and BYOM path containment; add a dedicated
+      suite that exercises the renderer-facing transport and keeps those cases together.
+- [ ] **Deterministic cancellation and timeout** (criterion 2) — the decision that a Stop
+      acknowledgement is not proof inference stopped is recorded in PRODUCT_PLAN's rubber-duck
+      table, but no item tracks making it true across every request type (chat, streaming,
+      gateway, audio, compare, embeddings). Separate caller completion from native completion
+      uniformly rather than per-path.
+- [ ] **Multi-endpoint manager is filed as unscheduled** (criterion 2) — the roadmap makes it a
+      1.0 requirement; **Full endpoint scheduler** under *Future features* says "not yet started,
+      no version assigned." One of the two is wrong. Resolve it deliberately: either schedule the
+      manager or drop it from the 1.0 bar.
+- [ ] **Endpoint health history** (criterion 4) — Monitor shows current state and an access log.
+      Nothing retains health over time, so "robust recovery and health checks" cannot be
+      evidenced. Diagnostics export completeness should be assessed at the same time; throughput
+      metrics are tracked separately below.
+- [ ] **UX maturity has no items** (criterion 5) — endpoint routing controls, memory/capacity UX,
+      and polished onboarding are named in the roadmap and nowhere else. Give the criterion
+      concrete items or cut it from the bar; as written it cannot be called done or not done.
+- [ ] **Deployment/admin guide and troubleshooting runbook** (criterion 7) — neither exists.
+      USER_GUIDE has a user-facing troubleshooting table, which is not an operator runbook
+      (log locations, service lifecycle, port/bind policy, offline install, uninstall/cleanup).
+
 ## Shipping integrity
 
 - [ ] **Clean-machine dogfood** — install the signed build where no Node, Rust, or prior
@@ -31,6 +64,17 @@ Windows/macOS fixes do not establish Linux release support.
       the cheaper staged-layout test.
 - [ ] **macOS unverified** — DMG/app build and upload; nobody has confirmed an installed
       macOS build boots. Dogfood it or declare macOS unsupported.
+- [ ] **The updater has never resolved a manifest** — with 0.7.0 published as a prerelease,
+      both `releases/latest` and `releases/latest/download/latest.json` return 404, so
+      discovery → signature check → download has never executed against a real release. The
+      path is wired and its artifacts ship, but "it works" is an assumption. Shipping a stable
+      release is what exercises it; treat that release as the acceptance test, with a rollback
+      plan. Distinct from the two updater items below, which are about automation and UI.
+- [ ] **Decide the Apple Developer ID question** — unsigned macOS builds mean permanent
+      Gatekeeper friction and a load-bearing `scripts/install-macos.sh`. Either budget an Apple
+      Developer account and notarize, or declare macOS permanently evaluation-only and make the
+      1.0 promise a Windows promise. Separate from the SDK dylib quarantine under
+      *Dependencies*, which is upstream and not fixable by signing Flint.
 
 ## Updater
 
@@ -53,9 +97,19 @@ Windows/macOS fixes do not establish Linux release support.
 
 ## Test coverage
 
-- [ ] **`+page.svelte` is untested** and holds most of the app (~444 KB, `@ts-nocheck`).
-      Keep extracting pure logic into `src/lib/*.ts` with tests rather than testing the
-      component.
+- [ ] **`+page.svelte` is untested** and holds most of the app (472 KB, 12,108 lines,
+      `@ts-nocheck`). Keep extracting pure logic into `src/lib/*.ts` with tests rather than
+      testing the component. The line count is the progress measure for that extraction —
+      keep it current.
+- [ ] **No component or packaged-app E2E layer** — the 1.0 testing criterion names unit +
+      component + contract + E2E. Unit and contract exist, and `sidecar/byom-import.e2e.test.ts`
+      provides a sidecar/native E2E path; component tests and packaged-build smoke coverage are
+      still absent (launch → load model → chat → stop in CI on Windows).
+- [ ] **Coverage allowlist blind spots** — `vite.config.js` measures an allowlist of 43 files
+      at 97/94/84/95, deliberately set just under actual so regressions fail. Outside the
+      allowlist: `src/lib/sdk.ts` and `sidecar/foundry-sidecar.js`, both core paths. The gate
+      reads stronger than its reach. Add them as they gain tests rather than widening the
+      allowlist and dropping the thresholds to accommodate them.
 - [ ] **Rust supervisor coverage** — expand beyond the current runtime-state
       unit tests to cover native child ownership, transport, exit observation,
       shutdown confirmation, and installed-app lifecycle paths.

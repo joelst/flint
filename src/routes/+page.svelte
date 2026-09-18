@@ -6200,7 +6200,7 @@ Output only the summary text, no preamble.`;
             </li>
             <li class:done={firstRunServiceOn}>
               <strong>Optional: endpoint for other tools</strong>
-              <span class="muted">Start the service (Diagnostics), then copy snippets from Integrations. Client URL is always loopback.</span>
+              <span class="muted">Start the service (Diagnostics), then copy snippets from Integrations. Client URL is usually loopback; WSL2 NAT clients use Settings → Network → WSL clients.</span>
               <button type="button" class="small" onclick={() => (currentView = "diagnostics")}>Diagnostics</button>
               <button type="button" class="small secondary" onclick={() => (currentView = "integrations")}>Integrations</button>
             </li>
@@ -7634,8 +7634,8 @@ Output only the summary text, no preamble.`;
                 >
               </div>
               <p class="setting-note">
-                Client URL (always loopback). Bind address is configured under Settings → Network
-                and may differ from this host.
+                Client URL is usually loopback. WSL2 NAT clients use Settings → Network → WSL clients;
+                bind address is configured under Settings → Network and may differ from this host.
               </p>
             {/if}
 
@@ -8199,8 +8199,8 @@ Output only the summary text, no preamble.`;
               <li><strong>Fuller catalog than the CLI alone</strong> — Foundry Local CLI covers common flows; Flint uses the
                 <strong>official SDK</strong> so you get a broader model surface (chat, vision, STT, acceleration variants)
                 without maintaining your own service wrapper.</li>
-              <li><strong>One local endpoint</strong> — start the service and point IDEs/agents at
-                <code>http://127.0.0.1:&lt;port&gt;/v1</code>.</li>
+              <li><strong>One local endpoint</strong> — start the service and point IDEs/agents at the loopback URL, or use
+                Settings → Network → WSL clients for WSL2 NAT.</li>
               <li><strong>Ops visibility</strong> — pool, resources, access and audit logs in Monitor.</li>
             </ul>
             <p class="muted">
@@ -8255,8 +8255,10 @@ Output only the summary text, no preamble.`;
           <section class="help-section">
             <h3>Local endpoint for other tools</h3>
             <p>
-              <strong>Client URL</strong> (what Integrations and this app use) is always loopback:
+              <strong>Client URL</strong> (what Integrations and this app use) is usually loopback:
               <code>http://127.0.0.1:&lt;port&gt;/v1</code>.
+              WSL2 clients in default NAT mode use the Windows host address from
+              <strong>Settings → Network → WSL clients</strong> instead.
               <strong>Bind address</strong> in Settings is what the service <em>listens</em> on and may be
               <code>0.0.0.0</code> or a LAN IP — use <strong>Apply &amp; restart</strong> after changing it.
             </p>
@@ -8289,7 +8291,7 @@ Output only the summary text, no preamble.`;
               <li><strong>No models</strong> — Open Models and download a starter; first run may show hardware-aware recommendations.</li>
               <li><strong>Chat disabled</strong> — Load a chat-capable model (not STT-only). Unload audio-only models if they block the lane.</li>
               <li><strong>Integrations show “not started”</strong> — Diagnostics → Start service.</li>
-              <li><strong>Bind / port changes</strong> — Settings → Network → Apply &amp; restart. Client URL stays on 127.0.0.1.</li>
+              <li><strong>Bind / port changes</strong> — Settings → Network → Apply &amp; restart. Client URL usually uses 127.0.0.1; WSL2 NAT clients use the WSL clients panel.</li>
               <li><strong>SmartScreen / unidentified developer</strong> — Expected with self-signed installers until release certs are used.</li>
             </ul>
           </section>
@@ -8344,7 +8346,7 @@ Output only the summary text, no preamble.`;
                 <dt>Network (applied)</dt>
                 <dd>
                   <code class="about-code">{appliedNetworkBindAddress}:{appliedNetworkPort}</code>
-                  <span class="muted small">listen bind · client URL stays on 127.0.0.1</span>
+                  <span class="muted small">listen bind · client URL usually 127.0.0.1; WSL2 NAT differs</span>
                 </dd>
               </div>
               <div class="about-row">
@@ -8855,9 +8857,10 @@ Output only the summary text, no preamble.`;
             <p class="setting-note">
               Edit port or bind address below, then use <strong>Apply &amp; restart</strong> so the
               service rebinds. Draft changes are saved for the next start even if you do not apply yet.
-              The URL shown in Diagnostics / Integrations stays on
-              <code>http://127.0.0.1:&lt;port&gt;/v1</code> (loopback clients) even if the service
-              listens on <code>0.0.0.0</code> or a LAN address.
+              The URL shown in Diagnostics / Integrations is usually
+              <code>http://127.0.0.1:&lt;port&gt;/v1</code> for loopback clients even if the service
+              listens on <code>0.0.0.0</code> or a LAN address. WSL2 clients in default NAT mode
+              use the Windows host address from <strong>WSL clients</strong> instead.
             </p>
 
             <div class="setting-row">
