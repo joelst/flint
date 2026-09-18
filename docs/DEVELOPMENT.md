@@ -93,7 +93,7 @@ shared hotspots, and the `npm run verify:ipc-contracts` check.
 ### Local OpenAI-compatible endpoint
 
 - **Bind address** (Settings → Network) controls which interface the service *listens* on (`127.0.0.1`, `0.0.0.0`, or a custom IP).
-- **Client / Integrations URL** (`sharedEndpoint`) is always `http://127.0.0.1:<port>/v1` so this app and local tools connect over loopback even when the service is bound to all interfaces.
+- **Client / Integrations URL** (`sharedEndpoint`) is usually `http://127.0.0.1:<port>/v1` so this app and local tools connect over loopback even when the service is bound to all interfaces. WSL2 clients in default NAT mode use the Windows host address from **Settings → Network → WSL clients** instead.
 - Use **Apply & restart** after changing port or bind so the sidecar re-creates the Foundry manager with the new `webServiceUrls`.
 
 ### Why a sidecar?
