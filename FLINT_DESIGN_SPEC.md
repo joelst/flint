@@ -189,8 +189,8 @@ Azure connections and other future feature work are tracked in
   to breaking change. Flint deliberately pins to SDK 1.2.4 (2.0.0 drops
   `responsesClient.d.ts` and refactors `AudioSession` for no BYOM benefit). A CLI or core
   update can silently break cache, gateway, or BYOM assumptions with no Flint change; see
-  [docs/BACKLOG.md](./docs/BACKLOG.md) for the startup version-check action item that
-  guards against this.
+  [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md) Wave 1 for the startup version-check
+  that guards against this.
 
 ## 11. Security & Privacy (expanded)
 

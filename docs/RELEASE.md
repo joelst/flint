@@ -238,6 +238,18 @@ Versioning details: [DEVELOPMENT.md](./DEVELOPMENT.md#versioning--changesets).
 
 ---
 
+## 7. Updater rollback
+
+There is no automatic downgrade. If a stable update misbehaves:
+
+1. Do not take a further in-app updater offer.
+2. Install the previous Windows MSI or NSIS from [GitHub Releases](https://github.com/joelst/flint/releases).
+3. Confirm About still reports the intended version.
+
+Prereleases never appear on `releases/latest`; only a published stable release does.
+
+---
+
 ## Related
 
 - [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) — forward plan through 1.0

@@ -41,6 +41,19 @@ import {
 const UPSTREAM_TIMEOUT_MS = 0; // no timeout: generation can legitimately run for minutes
 
 /**
+ * Classify OpenAI-compatible routes for metadata-only access logging.
+ *
+ * Treat `/models` as a path segment so `/v1/models` and `/v1/models/<id>` are
+ * grouped together without matching unrelated names that merely contain it.
+ */
+export function classifyGatewayRoute (urlPath) {
+  const path = String(urlPath || '').split('?')[0];
+  if (path.includes('/chat/completions')) return 'chat';
+  if (/(^|\/)models(\/|$)/.test(path)) return 'models';
+  return 'other';
+}
+
+/**
  * @param {object} options
  * @param {number} options.publicPort        port clients connect to
  * @param {string} options.bindAddress       interface to listen on
@@ -52,6 +65,8 @@ const UPSTREAM_TIMEOUT_MS = 0; // no timeout: generation can legitimately run fo
  * @param {(model: string, phase: 'start'|'end') => void} [options.onActivity]
  *        called around every request that names a model, so the owner can keep a model
  *        alive while it is being served and record when it was last used
+ * @param {(entry: object) => void} [options.onAccess]
+ *        metadata-only access log (no bodies, no headers) after each request finishes
  * @param {() => (() => void)|null} [options.admitRequest]
  *        atomically admits a request and returns its completion callback; null rejects it
  * @param {boolean} [options.autoload]       default true
@@ -69,6 +84,7 @@ export function createGateway (options) {
     load,
     log = () => {},
     onActivity = () => {},
+    onAccess = () => {},
     admitRequest,
     autoload = true,
     loopbackOnlyAutoload = true,
@@ -157,6 +173,14 @@ export function createGateway (options) {
     }
   }
 
+  function notifyAccess (entry) {
+    try {
+      onAccess(entry);
+    } catch (err) {
+      log('warn', `Gateway access hook failed: ${err?.message ?? err}`);
+    }
+  }
+
   async function handleRequest (req, res) {
     const completeAdmission = admitRequest?.();
     if (admitRequest && !completeAdmission) {
@@ -172,21 +196,42 @@ export function createGateway (options) {
   }
 
   async function handleAdmittedRequest (req, res) {
+    const startedAt = Date.now();
     const buffered = await maybeBufferBody(req, res);
     if (buffered === ABORTED) return;
 
     const requested = buffered === null ? null : extractModelName(buffered);
-    if (!requested) return route(req, res, buffered, requested);
-
-    // Mark the model busy for the whole life of the request, not just the load. Gateway
-    // traffic is proxied straight to Foundry, so the sidecar has no other way to tell a
-    // model generating a long completion apart from one sitting idle — and unloading the
-    // former would kill a live request.
-    notifyActivity(requested, 'start');
     try {
-      return await route(req, res, buffered, requested);
+      if (!requested) return await route(req, res, buffered, requested);
+
+      // Mark the model busy for the whole life of the request, not just the load. Gateway
+      // traffic is proxied straight to Foundry, so the sidecar has no other way to tell a
+      // model generating a long completion apart from one sitting idle — and unloading the
+      // former would kill a live request.
+      notifyActivity(requested, 'start');
+      try {
+        return await route(req, res, buffered, requested);
+      } finally {
+        notifyActivity(requested, 'end');
+      }
     } finally {
-      notifyActivity(requested, 'end');
+      const completedAt = Date.now();
+      notifyAccess({
+        ts: startedAt,
+        type: 'gateway',
+        method: req.method || null,
+        routeClass: classifyGatewayRoute(req.url),
+        modelAlias: requested,
+        status: res.statusCode || null,
+        source: 'gateway',
+        ok: typeof res.statusCode === 'number' ? res.statusCode < 400 : null,
+        durationMs: completedAt >= startedAt ? completedAt - startedAt : null,
+        ttftMs: null,
+        promptTokensPerSecond: null,
+        decodeTokensPerSecond: null,
+        tokensIn: null,
+        tokensOut: null,
+      });
     }
   }
 

@@ -12,11 +12,12 @@ not repeat it.
 | Any code change — invariants, gotchas, protocol details | [`.github/copilot-instructions.md`](./.github/copilot-instructions.md) | — |
 | Build, test, run locally; sidecar/versioning mechanics | [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) | — |
 | What to implement next, in what order, why | [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md) | — |
-| What's still open but not in-flight | [docs/BACKLOG.md](./docs/BACKLOG.md) | — |
+| Deferred and post-1.0 work | [docs/BACKLOG.md](./docs/BACKLOG.md) | — |
 | Forward plan through 1.0, positioning, non-goals | [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) · [FLINT_DESIGN_SPEC.md](./FLINT_DESIGN_SPEC.md) | — |
 | What shipped, when | [CHANGELOG.md](./CHANGELOG.md) | `git log` for anything not in a changeset |
 | Cutting a signed release | [docs/RELEASE.md](./docs/RELEASE.md) | — |
 | End-user behavior / how a feature is supposed to work | [docs/USER_GUIDE.md](./docs/USER_GUIDE.md) | — |
+| Installed-app operator runbook | [docs/ADMIN.md](./docs/ADMIN.md) | — |
 | Full doc index, ownership of each file | [docs/README.md](./docs/README.md) | — |
 
 ## Optional deep-dive docs (load only if directly relevant)

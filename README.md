@@ -177,10 +177,10 @@ Signing and release pipeline: [docs/RELEASE.md](./docs/RELEASE.md)
 
 ## Known limitations
 
-- **Node:** release builds prefer a **bundled** Node binary; PATH Node remains a dev/fallback. Long-term 1.0 goal is no end-user Node install at all (bundled or Rust).  
-- **macOS is unsigned** and triggers a Gatekeeper "damaged" warning on browser-downloaded DMGs; use the install one-liner or `xattr -cr`. Windows installers are publicly trusted and do not carry this caveat. A new Windows publisher identity may still accumulate SmartScreen reputation over the first downloads.  
-- **The updater does not discover prereleases.** 0.7.0 must be installed manually; see [Status](#status).  
-- **Audio** quality depends on the STT model and runtime.  
+- **Node:** release builds prefer a **bundled** Node binary; PATH Node remains a dev/fallback. Packaged builds already remove the end-user Node install; shrinking the spawn surface further is post-1.0.
+- **macOS is unsigned** and evaluation-only for 1.0. Browser-downloaded DMGs trigger a Gatekeeper "damaged" warning; use the install one-liner or `xattr -cr`. 1.0 production is Windows. Windows installers are publicly trusted and do not carry this caveat. A new Windows publisher identity may still accumulate SmartScreen reputation over the first downloads.
+- **The updater does not discover prereleases.** 0.7.0 must be installed manually; see [Status](#status).
+- **Audio** quality depends on the STT model and runtime.
 - **Tool calling:** models may emit `tool_calls`; Flint’s chat UI does **not** execute tools — use an agent client against the local endpoint.  
 - Unit/contract tests are strong; full UI E2E is still light.
 
@@ -201,14 +201,15 @@ Architecture principles: [FLINT_DESIGN_SPEC.md](./FLINT_DESIGN_SPEC.md)
 | Doc | Audience |
 |---|---|
 | [AGENTS.md](./AGENTS.md) | AI agents — token-saving map of which doc to load |
-| [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md) | Reliability execution plan and current phase status |
+| [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md) | 1.0 implementation sequencing and acceptance gates |
 | [docs/README.md](./docs/README.md) | Full doc index |
 | [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) | Forward plan through 1.0 & the 1.0 release bar |
 | [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) | Build, sidecar, versioning |
 | [docs/EXTENDING.md](./docs/EXTENDING.md) | Build new workflows and integrations on the Flint core |
 | [docs/RELEASE.md](./docs/RELEASE.md) | Sign & ship |
+| [docs/ADMIN.md](./docs/ADMIN.md) | Operator runbook for an installed app |
 | [docs/RELEASE_0.7.0.md](./docs/RELEASE_0.7.0.md) | 0.7.0 prerelease gates and release checklist |
-| [docs/BACKLOG.md](./docs/BACKLOG.md) | Deferred follow-ups |
+| [docs/BACKLOG.md](./docs/BACKLOG.md) | Deferred and post-1.0 follow-ups |
 | [CHANGELOG.md](./CHANGELOG.md) | Release notes |
 
 ---

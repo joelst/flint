@@ -1,4 +1,4 @@
 ---
 ---
 
-Document the unowned 1.0 release criteria in the backlog and correct the "always loopback" client URL claim.
+Tighten the 1.0 bar to one local Windows endpoint, sequence remaining work in the product plan, and keep the backlog for deferred items only.

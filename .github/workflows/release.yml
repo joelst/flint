@@ -89,8 +89,19 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Cache Foundry native payload
+        uses: actions/cache@v4
+        with:
+          path: runtime/foundry-native-cache
+          key: foundry-native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            foundry-native-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Install dependencies
         run: npm ci
+
+      - name: Save Foundry native payload
+        run: node scripts/hydrate-foundry-native.cjs --save
 
       - name: Cache bundled Node binary
         uses: actions/cache@v4

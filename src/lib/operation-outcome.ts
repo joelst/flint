@@ -36,6 +36,7 @@ export const COMMAND_EFFECTS: Record<SidecarCommandName, OperationEffect> = {
   getStatus: 'query',
   getEndpoint: 'query',
   getAccessLog: 'query',
+  getHealthRing: 'query',
   getCacheInventory: 'query',
   poolStatus: 'query',
   wslStatus: 'query',

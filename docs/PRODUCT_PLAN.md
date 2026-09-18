@@ -1,57 +1,101 @@
 # Flint reliability execution plan
 
-**Status:** Phase 0, Phase 1A, Phase 1B, and Phase 2 foundation stages are delivered in Flint 0.7.0. Post-0.7.0 execution focuses on outstanding runtime hardening, post-0.7.0 patch/minor capabilities, and long-term milestones.
+**Status:** Phase 0, Phase 1A, Phase 1B, and Phase 2 foundation stages are delivered in Flint 0.7.0. Post-0.7.0 execution is the 1.0 bar in [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md), sequenced below. No 1.0 date until this sequencing is the document of record (it is).
 
-**Scope:** Post-0.7.0 reliability and capability roadmap across supported platforms (Windows and macOS Apple Silicon).
+**Scope:** 1.0 production is Windows. macOS Apple Silicon remains evaluation-only (unsigned). Linux is deferred.
 
-**Release ownership:** [CHANGELOG.md](../CHANGELOG.md) owns version assignments and release history. [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) owns the forward plan through 1.0. This document owns post-0.7.0 implementation sequencing and acceptance gates. [BACKLOG.md](./BACKLOG.md) holds deferred work.
+**Release ownership:** [CHANGELOG.md](../CHANGELOG.md) owns version assignments and release history. [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) owns the forward plan through 1.0 and the 1.0 release bar. This document owns 1.0 implementation sequencing and acceptance gates. [BACKLOG.md](./BACKLOG.md) holds deferred and post-1.0 work.
 
-## Post-0.7.0 execution priorities
+## 1.0 execution waves
 
-Following the 0.7.0 foundation release, follow-up work (targetable in 0.7.x patches or 0.8.0) focuses on:
+Waves 1 and 2 may overlap. Wave 4 may overlap with 2/3. Wave 8 is the ship, not a development dump. If Wave 2 slips, do not compensate with embeddings, RAG, or a scheduler.
 
-1. **Installed-path recovery & lifecycle verification**
-   - Implement native system tray Open/Quit and renderer-independent failed-quit recovery in the Rust desktop layer.
-   - Packaged-app testing across Windows and macOS: verify single-instance focus/restore, tray Open/Quit, macOS Dock reopen, renderer-independent recovery, and clean exit.
-   - Expand Rust supervisor integration tests against actual packaged bundles.
+### Wave 1 — Security and CI
 
-2. **Endpoint & agent compatibility enhancements**
-   - User-facing endpoint behavioral conformance self-test (validating OpenAI API envelope, streaming termination, live tool-call generation vs catalog declarations).
-   - BYOM `/v1/embeddings` pipeline to unlock RAG workflows and external indexing tools.
-   - Verified recipes for external coding agents (Continue, Cline, OpenClaw).
+Rubber-duck: this is not a security product. The boundary already exists; 1.0 requires it audited, named, and gated. `npm ci` deletes `node_modules`, so the Foundry core cache lives outside it and is restored in `preinstall` before the SDK install script runs (`skipIfPresent`). `updater:allow-download-and-install` stays because Wave 8 is in the same 1.0. PATH `node -v` stays (post-1.0 spawn-surface). CLI version checks are out — packaged users have no CLI.
 
-3. **Audio format decoding & transcription resilience**
-   - Transcode broader container formats (WebM/Opus, MP3) in-browser to 16 kHz mono PCM WAV without bundle bloat.
-   - Revisit word-level timestamps when upstream Foundry SDK timing capabilities land.
+- Prune unused grants: opener plugin (renderer never imported it); `$RESOURCE` read scope (sidecar paths are native `trusted_runtime_paths`); redundant `core:tray:default` / `core:menu:default` (already in `core:default`). Keep `$RESOURCE` write deny. Comment each survivor.
+- Dedicated `src/lib/security-boundary.test.ts` that fails CI if opener/spawn/kill return, `$RESOURCE` reads return, shell execute is more than `node -v`, IPC allowlists drift, or BYOM `isInsideRoot` accepts a traversal.
+- Cache `runtime/foundry-native-cache` in CI/release; `scripts/hydrate-foundry-native.cjs` restores it in `preinstall`.
+- Pin `foundry-local-sdk` to `1.2.4`. Warn (do not fail) at sidecar `init` when loaded SDK/core versions differ from that pin.
 
-4. **Updater UI & installation lifecycle**
-   - In-app download, progress tracking, restart-to-update, and defer flows in the About/Settings views.
+### Wave 2 — Native lifecycle and conversation integrity
 
-5. **Throughput metrics & observability**
-   - Detailed inference telemetry (TTFT, prompt tok/s, decode tok/s, load time) surfaced truthfully across gateway and UI paths.
+Rubber-duck: a Svelte tray created on first close is not renderer-independent. Native tray must exist from **app start**. Close-to-hide stays a frontend setting. Native Quit currently does not flush conversations — that is the handshake PR, not the tray PR. Stream-by-conversation-id does not touch Rust and is a third PR.
 
-## Acceptance gates for post-0.7.0 workstreams
+- Native tray Open/Quit installed at startup (`src-tauri/src/tray.rs`). Frontend no longer creates a `TrayIcon`.
+- `ExitRequested` prevents exit, emits `flint-quit-flush`, waits for `ack_quit_flush` or 2s, then exits. Renderer death cannot hang quit. Hide/blur/pagehide stays a best-effort extra.
+- Stream updates follow the originating conversation id (`applyMessagePatch` when that chat is not visible). Stop applies to the visible conversation only.
 
-Each post-0.7.0 workstream must satisfy these concrete acceptance criteria before shipping:
+### Wave 3 — Cancellation and timeout certainty
 
-- **Installed-path & lifecycle gate:** Native system tray Open restores the main window and Quit terminates the application across packaged Windows and macOS builds; macOS Dock reopen restores the main window; single-instance launch refocuses the existing instance; process termination cleanly tears down the sidecar child without orphaned processes; and recovery controls operate independently if the renderer webview fails.
-- **Endpoint & agent integration gate:** User-facing self-test verifies `/v1/models` envelope, model ID reuse in chat completions, streaming termination with `[DONE]`, disconnect cancellation, `usage` token count reconciliation with output, verified generation of valid `tool_calls` structures on actual tool-definition prompts (distinguishing verified behavior from catalog-declared `supportsToolCalling` metadata), and verified integration recipes pinned to tested client versions (Continue, Cline, OpenClaw).
-- **BYOM embeddings gate:** User-imported ONNX embedding models serve `/v1/embeddings` requests end-to-end with verified vector dimensionality and numeric output.
-- **Audio transcoding & transcription resilience gate:** Client-side WebM/Opus and MP3 decoding converts to 16 kHz mono PCM WAV before ingestion using Web Audio or lightweight decoders without heavyweight dependencies; word-level timestamps are introduced only after upstream Foundry SDK timing support is available and verified end-to-end.
-- **Updater UX gate:** In-app updater displays download progress, notifies when an update is ready to apply, prompts to restart, and supports user deferral.
-- **Inference telemetry gate:** Diagnostics and UI display accurate model load time, time to first token (TTFT), prompt tokens/sec, decode tokens/sec, and resolved provider/variant tags without ambiguous aggregated rates.
+Foundry has no abort API. 1.0 closes honesty and fencing, not a fake Stop.
+
+- Chat streaming: Stop settles the caller; native loop keeps consuming until stream end or child exit; UI already says the background may finish.
+- Compare: no Stop control. The running state says the run cannot be cancelled — wait for slots.
+- Audio: transcription cannot be stopped once started; the Transcribe button says so while in flight.
+- Gateway disconnect already destroys upstream. Embeddings stay out of 1.0.
+
+### Wave 4 — Observability
+
+- Gateway access log is metadata only (`source: 'gateway'`, no bodies). TTFT/tok/s are null when unobservable. Monitor table and CSV show TTFT / prompt tok/s / decode tok/s.
+- Bounded health ring (`getHealthRing`) records init and service start/stop. Diagnostics export includes it.
+
+### Wave 5 — Endpoint trust
+
+- Diagnostics **Test local endpoint** checks envelope, chat round-trip, stream `[DONE]`, usage (blocked if absent), disconnect abort, and tool_calls (pass or explicit not-verified). Catalog `supportsToolCalling: false` skips the tools prompt.
+- Model details show **Flint-verified** from the last self-test in this session, distinct from catalog declarations.
+- Continue/Cline/OpenClaw: do not invent version pins. Continue stays `verified` with “version not pinned”; Cline remains Unverified; OpenClaw remains community until a recorded dogfood.
+
+### Wave 6 — Operator docs and UX qualification
+
+- Operator runbook: [ADMIN.md](./ADMIN.md). USER_GUIDE sidecar troubleshooting matches bundled Node.
+- Empty/error copy: catalog empty on Models and first-run; Chat shows “No chat model loaded.” Packaged Windows walk of the checklist is still a Wave 7 dogfood tick.
+
+**1.0 UX checklist**
+
+- First-run coach covers runtime → model → chat → optional endpoint and is recoverable from Help.
+- Settings → Network bind/port apply-and-restart and WSL mirrored-vs-NAT copy are truthful.
+- Monitor exposes RAM/VRAM gauges, eviction/pin controls, and access-log export.
+- Catalog failure, sidecar failure, and "no chat model loaded" are visible empty/error states rather than success-shaped UI.
+
+### Wave 7 — Packaged smoke and dogfood
+
+- CI (Windows): after the debug Tauri build, `FLINT_RUNTIME_SMOKE=1` launches `Flint.exe` and exits 0 when the sidecar phase is `ready` (`npm run smoke:runtime`). Does not load a model.
+- Process still required: signed clean-machine install, download/load/chat/stop/quit/relaunch. macOS: recorded `install-macos.sh` boot as evaluation evidence.
+
+### Wave 8 — Updater and stable publish
+
+- About: Install / progress / Restart to update / Later against the wired updater plugin. Discovery against `releases/latest` is still the first stable 1.0.0 publish.
+- Publish 1.0.0 as `channel=stable` (draft still reviewed by a human). Rollback: previous installer, documented in [RELEASE.md](./RELEASE.md).
+
+## Acceptance gates for 1.0 workstreams
+
+Each 1.0 wave must satisfy its gate before that slice ships. Embeddings and extra audio-decoder work have no 1.0 gate.
+
+- **Security gate:** Capability JSON is pruned and commented; the boundary suite fails if unused dangerous grants return or sidecar allowlisting/IPC/BYOM containment regress.
+- **Installed-path and lifecycle gate:** Native tray Open restores the main window and Quit terminates the app on packaged Windows; macOS Dock reopen restores the main window (already native); single-instance launch refocuses the existing instance; process termination tears down the sidecar child without orphans; recovery controls operate if the renderer webview fails; quit waits for a conversation-flush ack or a bounded timeout.
+- **Cancellation gate:** Every in-bar request type has an honest certainty (cancelled / unknown / complete). Stop never claims native quiescence. Resource protection holds until native completion or the child is gone.
+- **Observability gate:** Diagnostics and Monitor display load time, TTFT, prompt tok/s, decode tok/s, and resolved provider/variant without an aggregated "tokens/sec"; gateway samples appear in the access log when observable; diagnostics export includes the health ring.
+- **Endpoint and agent integration gate:** User-facing self-test verifies `/v1/models` envelope, model ID reuse in chat completions, streaming termination with `[DONE]`, disconnect cancellation, `usage` when the model emits it, and either valid `tool_calls` or an explicit not-verified label. Continue, Cline, and OpenClaw recipes are pinned to tested client versions.
+- **UX gate:** The checklist in Wave 6 holds on a packaged Windows build.
+- **Docs gate:** Operator runbook exists and is indexed; USER_GUIDE sidecar troubleshooting matches bundled Node.
+- **Updater UX gate:** In-app updater displays download progress, notifies when an update is ready, prompts to restart, and supports deferral.
+- **Ship gate:** Signed Windows clean-machine dogfood recorded; 1.0.0 published stable so `releases/latest` resolves; rollback note in RELEASE.md.
 
 ## Decisions
 
 <a id="workstream-c-thin-native-ownership----expedited"></a>
 ### Native ownership and runtime architecture
 
-1. **Expedite a thin Rust lifecycle and process-supervision layer.** Native code owns single-instance behavior, tray Open/Quit, macOS Reopen, and exactly one runtime child. A failed renderer must not remove recovery controls.
+1. **Expedite a thin Rust lifecycle and process-supervision layer.** Native code owns single-instance behavior, macOS Reopen, tray Open/Quit from startup, the quit-flush handshake, and exactly one runtime child.
 2. **Do not expedite a wholesale Foundry-to-Rust rewrite.** Keep the existing sidecar as the sole owner of the native Foundry manager, catalog, pool, and execution providers while correcting its behavior. Preserve native crash isolation from the desktop process.
 3. **Do not wait for Rust to fix data loss or runtime correctness.** Hydration, request ownership, service transitions, streaming leases, pins, and honest failure reporting are independently shippable fixes on the existing transport.
-4. **Linux-only work is deferred.** Preserve existing Ubuntu checks and platform mappings. Continue Linux-specific work only if it is already part of another feature; do not open a new Linux workstream until Windows/macOS release bars are complete.
+4. **Linux-only work is deferred.** Preserve existing Ubuntu checks and platform mappings. Continue Linux-specific work only if it is already part of another feature; do not open a new Linux workstream until the Windows 1.0 production bar is complete.
 5. **Separate corrections from new features.** Make existing controls effective and truthful first. Richer options follow the correctness gates they depend on.
 6. **Use small, reversible changes.** Do not combine a data-format migration, transport cutover, SDK upgrade, and model-policy change in one release.
+7. **1.0 is one local endpoint.** Drop the multi-endpoint manager from the 1.0 bar. Sticky routing, failover, and cloud escalate stay unscheduled in BACKLOG. Azure connections stay post-1.0.
+8. **1.0 production is Windows.** macOS Apple Silicon stays evaluation-only (unsigned + install script). Apple Developer ID notarization is a post-1.0 calendar item, not a 1.0 code workstream. Signing Flint.app does not un-quarantine the SDK's ad-hoc dylib.
 
 ## Rubber-duck decisions
 
@@ -60,7 +104,7 @@ Each post-0.7.0 workstream must satisfy these concrete acceptance criteria befor
 | Would rewriting the backend fix conversation loss? | No. Correct hydration, storage identity, and asynchronous ownership in the frontend first. |
 | Should the emergency fix introduce a new database? | No. Stop destructive writes immediately; give the subsequent storage migration its own compatibility gate. |
 | Does keeping old storage make every downgrade safe? | No. Define a supported rollback version that understands the new format, including conversations created after migration. |
-| Does a timeout or Stop acknowledgement mean inference stopped? | No. Separate caller completion from native-operation completion. Retain resource protection until completion is established or the owning process is gone. |
+| Does a timeout or Stop acknowledgement mean inference stopped? | No. Separate caller completion from native-operation completion. Retain resource protection until completion is established or the owning process is gone. Foundry has no abort API; 1.0 closes honesty and fencing, not a fake Stop. |
 | Can a missing heartbeat prove the sidecar crashed? | Not while synchronous native work can block its event loop. Distinguish unresponsive from exited; avoid restart loops and duplicate work. |
 | Would moving inference into Tauri prevent all windows disappearing? | It can do the opposite: a native fault would enter the desktop process. Keep inference in a supervised process even if its implementation later becomes Rust. |
 | Can a worker thread initialize another Foundry manager? | Not safely as a workaround for the process-global native core. Keep one manager owner; do not duplicate ownership across Node workers. |
@@ -69,27 +113,49 @@ Each post-0.7.0 workstream must satisfy these concrete acceptance criteria befor
 | Is fixing hidden-tab polling sufficient for background protection? | No. Sampling/evaluation must survive a failed renderer; native notification delivery must not depend on the hidden webview. |
 | Do signing credentials block correctness fixes? | They block the relevant signed distribution, not implementation or approved local testing. Do not weaken release signing or bypass managed-device policy. |
 | Can shared packaging work become a Linux release project? | No. Fix host-versus-target selection for existing targets; defer Linux formats, matrices, distro qualification, and release claims. |
+| Does 1.0 require the seven roadmap criteria as originally written? | No. The bar is operationally trustworthy **local** operations. Keep the seven headings; the content must be doable or not-done. |
+| Is the multi-endpoint manager a 1.0 requirement? | No. `EndpointProfile` CRUD is unused. Scheduler/failover/cloud escalate stay Future features. Criterion 2 is one local endpoint with honest cancellation, recovery, and health. |
+| Is unsigned macOS part of the 1.0 production promise? | No. Evaluation-only. 1.0 production is Windows. |
+| Must 1.0 ship a time-series health store? | No. Bounded in-process health ring plus diagnostics export. |
+| Is UX maturity missing? | No. It was unscoped. Coach, Network/WSL, and Monitor memory UX exist; 1.0 qualifies them. |
+| Must we component-test `+page.svelte`? | No. Keep extracting into `src/lib/*.ts`. 1.0 testing is unit + contract + sidecar E2E + one packaged Windows smoke. |
+| Is BYOM `/v1/embeddings` a 1.0 blocker? | No. Catalog has zero embedding models. 1.0 recipes are chat completions. Embeddings unlock RAG and stay post-1.0. |
+| Broader WebM/Opus/MP3 decoder for 1.0? | No. Browser `decodeAudioData` → 16 kHz WAV already ships. Document supported formats. Word-level timestamps stay upstream-blocked. |
+| Must CI install the MSI to ship 1.0? | No, if clean-machine dogfood is recorded. Staged-layout smoke in CI; msiexec automation is later. |
+| Is the updater broken? | Unexercised, not unwired. `releases/latest` 404s because 0.7.0 is a prerelease. The first stable publish is the acceptance test. |
+| Native tray vs frontend tray? | Native tray from app start, not a Svelte tray created on first close. Dock Reopen is already native. Quit-flush handshake is separate. |
+| Conversation data loss on quit? | 1.0. Native `ExitRequested` → flush → ack. |
+| In-flight generation dropped on conversation switch? | 1.0. Route by originating conversation id. |
+| Settings baseline editor, export path proof, inventory re-take, Compare without HTTP? | Post-1.0. |
+| "No end-user Node"? | Already true for packaged builds. Further spawn-surface shrinkage is post-1.0. |
 
-## Post-0.7.0 workstreams & capabilities
+## 1.0 workstreams
 
-| Capability | Target scope | Prerequisites |
+| Capability | Target scope | Wave |
 |---|---|---|
-| **Installed-path lifecycle qualification** | Packaged tray/quit, dock reopen, crash recovery, and single-instance verification on Windows/macOS. | Rust supervisor (Phase 2 delivered). |
-| **Endpoint behavioral self-test** | Diagnostic tool in UI testing OpenAI envelope, model-ID reuse, streaming chunk validity, cancellation, and live tool-call generation vs declarations. | Gateway proxy & initial normalization (Phase 1B delivered; broader conformance in progress). |
-| **BYOM embeddings route** | End-to-end `/v1/embeddings` endpoint using user-imported ONNX embedding models. | BYOM import + SDK embedding client. |
-| **Audio transcoding expansion** | Client-side WebM/Opus and MP3 decoding to 16 kHz PCM WAV without heavy bundles. | Web Audio / lightweight WASM decoder. |
-| **Updater UX** | In-app download progress, ready-to-restart prompts, and deferral options. | Rust update events + Settings view. |
-| **Inference telemetry** | Accurate TTFT, prompt/decode tokens per second, and provider tags in UI and logs. | Sidecar metrics reporting. |
+| **Capability audit and boundary suite** | Pruned `default.json` plus a dedicated security suite. | 1 |
+| **CI Foundry native cache and SDK pin** | Cache nuget payload; exact SDK pin; startup warning. | 1 |
+| **Native tray and quit flush** | Renderer-independent Open/Quit; `ExitRequested` handshake. | 2 |
+| **Conversation-id stream routing** | Background generation finishes in its archive. | 2 |
+| **Cancel/timeout certainty** | Honest certainty on chat, gateway, audio, compare. | 3 |
+| **Gateway metrics and health ring** | TTFT/tok/s in UI and logs; bounded health history in diagnostics. | 4 |
+| **Behavioral self-test and verified recipes** | In-app runner; catalog vs verified labels; pinned Continue/Cline/OpenClaw. | 5 |
+| **Operator runbook and UX qualification** | Admin doc + checklist holes only. | 6 |
+| **Packaged Windows smoke and dogfood** | Staged-exe ready-check in CI; recorded clean-machine install. | 7 |
+| **Updater install UX and stable publish** | Progress/restart/defer; 1.0.0 on `releases/latest`. | 8 |
+
+Post-1.0 (not in the table): BYOM embeddings, extra audio decoders, word-level timestamps, multi-endpoint scheduler, Azure connections, curated ONNX catalog, Apple notarization, Linux.
 
 ### Source anchors
 
 - Data/requests: `src/routes/+page.svelte`, `src/lib/conversation-repository.ts`, `src/lib/conversation-store.ts`, `src/lib/conversation-session.ts`, `src/lib/conversation-settings.ts`, `src/lib/conversation-export.ts`, `src/lib/chat-request.ts`.
-- Runtime transport: `src/lib/sdk.ts`, `src/lib/operation-outcome.ts`, `src/lib/sdk-transport.ts`.
+- Runtime transport: `src/lib/sdk.ts`, `src/lib/operation-outcome.ts` (transport tests: `src/lib/sdk-transport.test.ts`).
 - Service/inference: `sidecar/foundry-sidecar.js`.
-- Pool/gateway: `sidecar/gateway.js`, `sidecar/pool-eviction.js`.
+- Pool/gateway: `sidecar/gateway.js`, `sidecar/pool-eviction.js`, `sidecar/inference-metrics.js`.
 - Models/import: `sidecar/byom-import.js`, `sidecar/prompt-template.js`, `sidecar/model-registry.js`.
 - Audio/memory: `sidecar/audio-format.js`, `src/lib/memory-watchdog.ts`, and `transcribeLongAudio` in `src/routes/+page.svelte`.
 - Desktop/packaging: `src-tauri/src/lib.rs`, `src-tauri/tauri.conf.json`, `src-tauri/capabilities/default.json`, `scripts/verify-bundle.cjs`, `scripts/smoke-bundled-node.cjs`, `vite.config.js`.
+- Integrations: `src/lib/integrations.ts`.
 
 Follow symbols rather than line numbers; the review-baseline line ranges these anchors originally carried no longer track the tree.
 

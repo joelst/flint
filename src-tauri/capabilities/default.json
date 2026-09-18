@@ -1,19 +1,16 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
+  "description": "Main-window ACL. Survivors and why: core:default (path/event/window/app/menu/tray); core:app:allow-default-window-icon (tray icon); core:window allow-hide/show/unminimize/set-focus/destroy (close-to-tray and quit); fs:default plus exists/stat/lstat/write-text-file (conversation export; writes denied under $RESOURCE so the renderer cannot rewrite the sidecar Node then executes); dialog:default (export save, BYOM open); autostart enable/disable/is-enabled (Settings); updater check and download-and-install (About check today; install UX in 1.0 Wave 8); notification:default (memory watchdog and tray-hide); shell:allow-execute only for bundled/PATH node -v/--version (About runtime probe). Sidecar spawn is native, not this ACL.",
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "core:tray:default",
-    "core:menu:default",
     "core:app:allow-default-window-icon",
     "core:window:allow-hide",
     "core:window:allow-show",
     "core:window:allow-unminimize",
     "core:window:allow-set-focus",
     "core:window:allow-destroy",
-    "opener:default",
     "fs:default",
     "fs:allow-exists",
     {
@@ -22,14 +19,6 @@
     },
     "fs:allow-stat",
     "fs:allow-lstat",
-    {
-      "_comment": "Read-only reach into packaged resources, for locating the sidecar and SDK. Writes are denied there on the write command above: the frontend must never be able to rewrite foundry-sidecar.js, which Node is then spawned to execute. The export's own destination needs no entry here, because the save dialog grants the chosen file at runtime.",
-      "identifier": "fs:scope",
-      "allow": [
-        { "path": "$RESOURCE/sidecar/**" },
-        { "path": "$RESOURCE/foundry-local-sdk/**" }
-      ]
-    },
     "dialog:default",
     "autostart:allow-enable",
     "autostart:allow-disable",

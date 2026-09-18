@@ -180,6 +180,37 @@ export function snapshotMessages(messages: StoredMessage[]): StoredMessage[] {
 }
 
 /**
+ * Patch one message in a conversation that is not the live thread.
+ *
+ * Used when a generation started in conversation A continues after the user switched to B:
+ * the live `chatMessages` array is no longer A, so the delta has to land in the archive.
+ * Refuses when the conversation or message is gone (deleted mid-stream) rather than creating
+ * a new record.
+ */
+export function applyMessagePatch(
+  archive: ConversationArchive,
+  conversationId: string,
+  messageId: string,
+  patch: Partial<StoredMessage>,
+  now: number,
+): { archive: ConversationArchive; changed: boolean } {
+  const index = archive.conversations.findIndex((c) => c.id === conversationId);
+  if (index < 0) return { archive, changed: false };
+  const conversation = archive.conversations[index];
+  const messageIndex = conversation.messages.findIndex((m) => m.id === messageId);
+  if (messageIndex < 0) return { archive, changed: false };
+
+  const current = conversation.messages[messageIndex];
+  const next: StoredMessage = { ...current, ...patch, id: current.id };
+  if (sameMessage(current, next)) return { archive, changed: false };
+
+  const messages = conversation.messages.map((m, i) => (i === messageIndex ? next : m));
+  const updated = applyConversationTitle({ ...conversation, messages, updatedAt: now });
+  const conversations = archive.conversations.map((c, i) => (i === index ? updated : c));
+  return { archive: { ...archive, conversations }, changed: true };
+}
+
+/**
  * Give every turn a stable id.
  *
  * The UI creates several kinds of message without one — the user turn, the injected web-context

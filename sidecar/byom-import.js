@@ -32,6 +32,12 @@ export const OWNERSHIP_MARKER = '.flint-import.json';
 const TOKENIZER_FILES = ['tokenizer.json', 'tokenizer_config.json', 'tokenizer.model'];
 
 /**
+ * @typedef {{ filename?: unknown }} GenaiDecoderConfig
+ * @typedef {{ type?: unknown, context_length?: unknown, decoder?: GenaiDecoderConfig|null }} GenaiModelConfig
+ * @typedef {{ model?: GenaiModelConfig|null }} GenaiConfig
+ */
+
+/**
  * Foundry model names appear in URLs and on disk, so keep them conservative.
  *
  * @param {string} raw
@@ -60,7 +66,10 @@ export function buildInferenceModel (options) {
   const name = sanitizeModelName(options?.name);
   if (!name) throw new Error('A model name is required to build inference_model.json.');
 
-  const version = Number.isInteger(options?.version) && options.version > 0 ? options.version : 1;
+  const requestedVersion = options?.version;
+  const version = typeof requestedVersion === 'number' && Number.isInteger(requestedVersion) && requestedVersion > 0
+    ? requestedVersion
+    : 1;
 
   if (options?.promptTemplate) {
     const check = validatePromptTemplate(options.promptTemplate);
@@ -104,7 +113,7 @@ export function isInsideRoot (cacheRoot, candidate) {
  *
  * Takes a plain listing rather than touching disk so the rules stay testable.
  *
- * @param {{ files: string[], dirName?: string, genaiConfig?: object|null, chatTemplate?: string|null }} input
+ * @param {{ files: string[], dirName?: string, genaiConfig?: GenaiConfig|null, chatTemplate?: string|null }} input
  * @returns {{ ok: boolean, reasons: string[], warnings: string[], detected: object }}
  */
 export function validateModelFolder (input) {
@@ -138,7 +147,10 @@ export function validateModelFolder (input) {
 
   const genai = input?.genaiConfig ?? null;
   const architecture = genai?.model?.type ? String(genai.model.type) : null;
-  const contextLength = Number.isFinite(genai?.model?.context_length) ? genai.model.context_length : null;
+  const declaredContextLength = genai?.model?.context_length;
+  const contextLength = typeof declaredContextLength === 'number' && Number.isFinite(declaredContextLength)
+    ? declaredContextLength
+    : null;
 
   // The scanner reads weights via genai_config's decoder.filename; a mismatch loads nothing.
   const declaredWeights = genai?.model?.decoder?.filename ? String(genai.model.decoder.filename) : null;

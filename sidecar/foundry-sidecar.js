@@ -76,6 +76,8 @@ import { createAsyncLogWriter } from './async-log-writer.js';
 import { normalizeChatResponse } from './chat-response.js';
 import { buildInferenceMetrics } from './inference-metrics.js';
 import { summarizeCacheInventory } from './cache-inventory.js';
+import { createHealthRing } from './health-ring.js';
+import { foundryRuntimePinWarning } from './foundry-runtime-pin.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -96,7 +98,7 @@ const KNOWN_COMMANDS = new Set([
   'listModels', 'download', 'load', 'unload', 'deleteModel', 'getEndpoint',
   'chatCompletion', 'cancelChatRequest', 'transcribeAudio',
   'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',
-  'poolStatus', 'getAccessLog', 'fetchUrl',
+  'poolStatus', 'getAccessLog', 'getHealthRing', 'fetchUrl',
   'getCacheInventory',
   'inspectModelFolder', 'importModelFolder', 'linkModelFolder',
   'getModelTemplate', 'setModelTemplate',
@@ -163,6 +165,7 @@ const COMMAND_SCHEMA = {
   getSTTModels:       { required: [], optional: [] },
   poolStatus:         { required: [], optional: [] },
   getAccessLog:       { required: [], optional: [] },
+  getHealthRing:      { required: [], optional: [] },
   getCacheInventory:  { required: [], optional: [] },
   fetchUrl:           { required: ['url'], optional: ['maxChars'] },
   inspectModelFolder: { required: ['folderPath'], optional: [] },
@@ -810,14 +813,15 @@ async function waitForUpstream (port, deadlineMs = 20000) {
   return result.ready;
 }
 
-// Per-request access log. Covers IPC-originated requests only: traffic proxied through the
-// Gateway traffic is deliberately not logged here because request bodies and external traffic
-// would add volume and privacy risk beyond this IPC-oriented diagnostic log.
+// Per-request access log. IPC chat plus gateway *metadata* (no bodies, no headers).
+// Gateway volume is bounded by the same 500-entry ring and the async disk writer.
 const ACCESS_LOG_MAX = 500;
 const accessLog = [];
 const tokenAccumulator = new Map(); // alias → { tokensIn: number, tokensOut: number }; reset on stopService
 let activeStreamCount = 0;           // incremented on stream start, decremented in finally; handles concurrent streams
 let activeStreamOldest = null;       // { type, modelAlias, startedAt } — the longest-running stream for badge display
+
+const healthRing = createHealthRing();
 
 function appendAccessLog(entry) {
   accessLog.push(entry);
@@ -2134,6 +2138,32 @@ function resolveFoundryCoreLibraryPath () {
   return null;
 }
 
+function readFoundryRuntimeVersions (libraryPath) {
+  let dir = path.dirname(libraryPath);
+  for (let i = 0; i < 5; i++) {
+    const pkgFile = path.join(dir, 'package.json');
+    const depsFile = path.join(dir, 'deps_versions.json');
+    if (fs.existsSync(pkgFile) && fs.existsSync(depsFile)) {
+      try {
+        const pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8'));
+        const deps = JSON.parse(fs.readFileSync(depsFile, 'utf8'));
+        return {
+          sdkVersion: typeof pkg.version === 'string' ? pkg.version : null,
+          coreVersion: typeof deps['foundry-local-core']?.nuget === 'string'
+            ? deps['foundry-local-core'].nuget
+            : null,
+        };
+      } catch {
+        return { sdkVersion: null, coreVersion: null };
+      }
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return { sdkVersion: null, coreVersion: null };
+}
+
 function toFileUrl (filePath) {
   return pathToFileURL(path.resolve(filePath)).href;
 }
@@ -2260,6 +2290,9 @@ rl.on('line', async (line) => {
       log('info', `Using Foundry core library: ${libraryPath}`);
       manager = FManager.create(initConfig);
       log('info', `SDK initialized for ${appName}`);
+      const pinWarning = foundryRuntimePinWarning(readFoundryRuntimeVersions(libraryPath));
+      if (pinWarning) log('warn', pinWarning);
+      healthRing.record({ kind: 'init', libraryPath });
       audit('init', { appName, libraryPath });
       reply({ ok: true, result: 'initialized' });
     } else if (cmd === 'listModels') {
@@ -2521,6 +2554,7 @@ rl.on('line', async (line) => {
             // Proxied traffic never reaches this process, so without this hook a model
             // serving a long completion would look idle and could be evicted underneath it.
             onActivity: noteActivity,
+            onAccess: (entry) => appendAccessLog(entry),
             admitRequest: () => {
               const operationId = `gateway:${++gatewayOperationId}`;
               if (!operationAdmission.admit(operationId, 'gatewayRequest')) return null;
@@ -2546,6 +2580,13 @@ rl.on('line', async (line) => {
           : `${nativeUrl}/v1`;
         log('info', `Service started; bind=${bindAddr}:${payload.port} `
           + `${useGateway ? `via gateway → 127.0.0.1:${nativePort} ` : ''}connect=${sharedEndpoint}`);
+        healthRing.record({
+          kind: 'service-start',
+          bind: bindAddr,
+          port: payload.port,
+          endpoint: sharedEndpoint,
+          ok: true,
+        });
         audit('startService', {
           port: payload.port, bindAddress: bindAddr, endpoint: sharedEndpoint, gateway: useGateway,
         });
@@ -2567,6 +2608,13 @@ rl.on('line', async (line) => {
           }
         });
       } catch (e) {
+        healthRing.record({
+          kind: 'service-start',
+          bind: bindAddr,
+          port: payload.port,
+          ok: false,
+          error: String(e?.message ?? e),
+        });
         await rollbackPartialServiceStart();
         throw e;
       }
@@ -2580,6 +2628,7 @@ rl.on('line', async (line) => {
       clearPublishedService();
       tokenAccumulator.clear();
       log('info', 'Service stopped');
+      healthRing.record({ kind: 'service-stop', ok: true });
       audit('stopService', {});
       reply({ ok: true });
     } else if (cmd === 'stopAndUnload') {
@@ -3124,6 +3173,8 @@ rl.on('line', async (line) => {
       });
     } else if (cmd === 'getAccessLog') {
       reply({ ok: true, result: accessLog });
+    } else if (cmd === 'getHealthRing') {
+      reply({ ok: true, result: healthRing.snapshot() });
     } else if (cmd === 'fetchUrl') {
       const fetchTs = Date.now();
       const rawUrl = String(payload.url).trim();

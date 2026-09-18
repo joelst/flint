@@ -6,231 +6,144 @@ hold the history. Durable facts belong in
 
 Verify an item against the tree before acting on it.
 
+**1.0 sequenced work lives in [PRODUCT_PLAN.md](./PRODUCT_PLAN.md)** against the bar in
+[RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md). This file is deferred and post-1.0 only.
+Do not add 1.0 work here; that duplicates the plan and the two will drift.
+
 ## Current execution priorities
 
-The [reliability execution plan](./PRODUCT_PLAN.md) owns implementation
-sequencing and acceptance gates for post-0.7.0 work. Address open runtime
-hardening and compatibility requirements without waiting for a backend
-rewrite. Expedite thin native lifecycle/process supervision; defer wholesale
-Foundry runtime replacement.
-
-The 0.7.0 prerelease track is a focused foundation milestone. It adds release
-and documentation gates around existing work; it does not close, delete, or
-implicitly reprioritize the open items below.
+Follow the 1.0 waves in [PRODUCT_PLAN.md](./PRODUCT_PLAN.md). Tray, quit-flush, and
+conversation-scoped streams are in the tree. Remaining 1.0 process: packaged
+Windows dogfood, integration version pins from recorded runs, and the first
+stable 1.0.0 publish. Defer wholesale Foundry runtime replacement.
 
 **Linux work is deferred:** preserve existing checks and mappings. Continue
 Linux-specific work only where it is already part of another feature; shared
-Windows/macOS fixes do not establish Linux release support.
-
-## 1.0 release criteria — unowned work
-
-[RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) states the seven criteria for 1.0. These are
-the ones with no item anywhere else in this file and no workstream in
-[PRODUCT_PLAN.md](./PRODUCT_PLAN.md). They are unscoped: size them before committing to a
-1.0 date. Criterion 3 (testing) is covered under [Test coverage](#test-coverage).
-
-- [ ] **Least-privilege capability model** (criterion 1) — `src-tauri/capabilities/default.json`
-      has never been audited against what the app actually invokes. Enumerate the permissions
-      the renderer genuinely needs, remove the rest, and record why each survivor is required.
-- [ ] **Renderer/sidecar boundary security suite** (criterion 1) — existing tests cover command
-      allowlisting, unknown commands, IPC schema drift, and BYOM path containment; add a dedicated
-      suite that exercises the renderer-facing transport and keeps those cases together.
-- [ ] **Deterministic cancellation and timeout** (criterion 2) — the decision that a Stop
-      acknowledgement is not proof inference stopped is recorded in PRODUCT_PLAN's rubber-duck
-      table, but no item tracks making it true across every request type (chat, streaming,
-      gateway, audio, compare, embeddings). Separate caller completion from native completion
-      uniformly rather than per-path.
-- [ ] **Multi-endpoint manager is filed as unscheduled** (criterion 2) — the roadmap makes it a
-      1.0 requirement; **Full endpoint scheduler** under *Future features* says "not yet started,
-      no version assigned." One of the two is wrong. Resolve it deliberately: either schedule the
-      manager or drop it from the 1.0 bar.
-- [ ] **Endpoint health history** (criterion 4) — Monitor shows current state and an access log.
-      Nothing retains health over time, so "robust recovery and health checks" cannot be
-      evidenced. Diagnostics export completeness should be assessed at the same time; throughput
-      metrics are tracked separately below.
-- [ ] **UX maturity has no items** (criterion 5) — endpoint routing controls, memory/capacity UX,
-      and polished onboarding are named in the roadmap and nowhere else. Give the criterion
-      concrete items or cut it from the bar; as written it cannot be called done or not done.
-- [ ] **Deployment/admin guide and troubleshooting runbook** (criterion 7) — neither exists.
-      USER_GUIDE has a user-facing troubleshooting table, which is not an operator runbook
-      (log locations, service lifecycle, port/bind policy, offline install, uninstall/cleanup).
-
-## Shipping integrity
-
-- [ ] **Clean-machine dogfood** — install the signed build where no Node, Rust, or prior
-      Foundry exists; confirm first run downloads and loads a model.
-- [ ] **Boot smoke on the real installer** — CI checks bundle contents but never installs
-      the MSI/NSIS and launches. Decide: drive the installer on a Windows runner, or keep
-      the cheaper staged-layout test.
-- [ ] **macOS unverified** — DMG/app build and upload; nobody has confirmed an installed
-      macOS build boots. Dogfood it or declare macOS unsupported.
-- [ ] **The updater has never resolved a manifest** — with 0.7.0 published as a prerelease,
-      both `releases/latest` and `releases/latest/download/latest.json` return 404, so
-      discovery → signature check → download has never executed against a real release. The
-      path is wired and its artifacts ship, but "it works" is an assumption. Shipping a stable
-      release is what exercises it; treat that release as the acceptance test, with a rollback
-      plan. Distinct from the two updater items below, which are about automation and UI.
-- [ ] **Decide the Apple Developer ID question** — unsigned macOS builds mean permanent
-      Gatekeeper friction and a load-bearing `scripts/install-macos.sh`. Either budget an Apple
-      Developer account and notarize, or declare macOS permanently evaluation-only and make the
-      1.0 promise a Windows promise. Separate from the SDK dylib quarantine under
-      *Dependencies*, which is upstream and not fixable by signing Flint.
-
-## Updater
-
-- [ ] **Publishing is manual** — the workflow leaves a draft, and drafts/pre-releases are
-      invisible to `releases/latest`. Automate publishing or keep it a checklist step.
-- [ ] **Updater installation flow** — About exposes an explicit update check,
-      availability, last error, and completed check time. Installation/progress/
-      restart/defer handling remains to be added.
+Windows/macOS fixes do not establish Linux release support. 1.0 production is
+Windows; macOS Apple Silicon is evaluation-only.
 
 ## Audio
 
 - [ ] **Convert instead of rejecting** — the browser now transcodes formats its audio
       decoder supports to 16 kHz mono PCM WAV and rejects conversion failures without
       sending invalid bytes; broader WebM/Opus and MP3 coverage still needs a decoder
-      that doesn't bloat the bundle.
+      that doesn't bloat the bundle. Not a 1.0 blocker; document supported formats
+      in the operator runbook / USER_GUIDE as part of 1.0 docs.
 - [ ] **Word-level timestamps** — blocked upstream
       ([microsoft/Foundry-Local#392](https://github.com/microsoft/Foundry-Local/issues/392),
       open). Revisit when granularity lands; `parakeet-tdt-0.6b-v2` is already in the
       catalog and produces word timings natively.
 
-## Test coverage
+## Test coverage (ongoing)
 
-- [ ] **`+page.svelte` is untested** and holds most of the app (472 KB, 12,108 lines,
-      `@ts-nocheck`). Keep extracting pure logic into `src/lib/*.ts` with tests rather than
-      testing the component. The line count is the progress measure for that extraction —
-      keep it current.
-- [ ] **No component or packaged-app E2E layer** — the 1.0 testing criterion names unit +
-      component + contract + E2E. Unit and contract exist, and `sidecar/byom-import.e2e.test.ts`
-      provides a sidecar/native E2E path; component tests and packaged-build smoke coverage are
-      still absent (launch → load model → chat → stop in CI on Windows).
-- [ ] **Coverage allowlist blind spots** — `vite.config.js` measures an allowlist of 43 files
-      at 97/94/84/95, deliberately set just under actual so regressions fail. Outside the
-      allowlist: `src/lib/sdk.ts` and `sidecar/foundry-sidecar.js`, both core paths. The gate
-      reads stronger than its reach. Add them as they gain tests rather than widening the
-      allowlist and dropping the thresholds to accommodate them.
-- [ ] **Rust supervisor coverage** — expand beyond the current runtime-state
-      unit tests to cover native child ownership, transport, exit observation,
-      shutdown confirmation, and installed-app lifecycle paths.
-      Native process ownership, bounded JSON-lines transport, blocked-stdin
-      termination, stale-generation rejection, exit ordering, and frontend
-      settlement contracts are covered. Installed-app lifecycle paths remain
-      open.
+These are engineering hygiene, not the 1.0 testing criterion (that bar is unit +
+contract + sidecar E2E + packaged Windows smoke in PRODUCT_PLAN Wave 7).
+
+- [ ] **`+page.svelte` is untested** and holds most of the app (`@ts-nocheck`). Keep
+      extracting pure logic into `src/lib/*.ts` with tests rather than testing the
+      component. The line count is the progress measure for that extraction — keep
+      it current.
+- [ ] **No component-test layer** — `@testing-library/svelte` is a dependency; no
+      `*.svelte` tests exercise UI. Out of the 1.0 bar.
+- [ ] **Coverage allowlist blind spots** — `vite.config.js` measures an allowlist of
+      43 files at 97/94/84/95, deliberately set just under actual so regressions fail.
+      Outside the allowlist: `src/lib/sdk.ts` and `sidecar/foundry-sidecar.js`, both
+      core paths. Add them as they gain tests rather than widening the allowlist and
+      dropping the thresholds to accommodate them.
 
 ## Runtime strategy
 
-- [ ] **Thin Rust supervisor** — expedite native tray/reopen/quit, single-instance
-      behavior, and exclusive runtime-child ownership after the remaining service
-      lifecycle contracts are stable. Native single-instance enforcement, child
-      ownership, and stdio transport bridge cutover are delivered; packaged
-      renderer-independent tray/reopen recovery and failed-quit qualification
-      remain open.
 - [ ] **Rust runtime replacement** — deferred pending parity and measured benefit.
       Preserve one model-manager authority and separate-process crash isolation;
-      do not keep competing JS/Rust runtimes or replay uncertain operations.
-- [ ] **1.0: no end-user Node** — bundled Node 22 already removes the user-visible
-      requirement; this is about shrinking the spawn/attack surface.
-- [ ] **Pin the SDK/core/CLI matrix** — Flint is on SDK 1.2.4; Foundry's REST API is
-      preview. Warn at startup on untested combinations instead of failing obscurely.
+      do not keep competing JS/Rust runtimes or replay uncertain operations. Gate:
+      [PRODUCT_PLAN.md](./PRODUCT_PLAN.md)#gate-for-reconsidering-a-rust-runtime-replacement.
+- [ ] **Shrink the bundled-Node spawn surface** — packaged builds already ship Node
+      22, so end users do not install Node. Remaining work is attack-surface
+      reduction, not restoring a user-visible Node requirement.
 
-## Models and cache (see [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md), "Plan: current → 1.0")
+## Endpoint / agent compatibility (post-1.0)
 
-- [ ] **Throughput metrics** — load time, TTFT, prompt tok/s, decode tok/s, end-to-end,
-      warm/cold, resolved variant + execution provider. Sidecar IPC chat access logs now
-      record these fields when observable and use null for buffered/unavailable timing;
-      gateway and other inference paths remain open. No single ambiguous "tokens/sec".
+1.0 integrations are chat-completion recipes plus the behavioral self-test
+(PRODUCT_PLAN Wave 5). The items below stay open after that.
 
-## Endpoint / agent compatibility (see [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md), "Plan: current → 1.0")
-
-- [ ] **Behavioural conformance self-test** — not route-existence checks. Gateway
-      behavioral coverage now verifies status rewriting, model routing/autoload
-      replay, normalized JSON/SSE chat responses, and `[DONE]`; a user-facing
-      diagnostic self-test remains open.
-- [ ] **Normalise response shape** — gateway chat JSON and SSE responses remove
-      Foundry-only fields and emit one OpenAI-shaped message or delta choice when
-      JSON is within the bounded normalization threshold; larger JSON responses
+- [ ] **Broader response-shape conformance** — gateway chat JSON and SSE already
+      remove Foundry-only fields and emit one OpenAI-shaped message or delta choice
+      when JSON is within the bounded normalization threshold; larger JSON responses
       remain byte-preserving pass-through. Broader endpoint capability conformance
       remains open.
-- [ ] **`/v1/embeddings` end-to-end** — route exists, but the catalog has zero embedding
-      models, so this depends on BYOM.
-- [ ] **Surface `supportsToolCalling` / `contextLength`**, labelled catalog-declared vs
-      Flint-verified.
-- [ ] **Verified recipes** for OpenClaw, Cline, Continue, pinned to tested versions.
+- [ ] **`/v1/embeddings` end-to-end** — route exists, but the catalog has zero
+      embedding models, so this depends on BYOM. Unlocks RAG and Continue's indexer.
+      Not a 1.0 blocker.
 
 ## Dependencies
 
-- [ ] **`foundry-local-sdk` postinstall downloads a native binary at install time** — every
-      `npm ci`, including every CI job, fetches `Microsoft.AI.Foundry.Local.Core` from
-      `api.nuget.org` and falls back to an Azure DevOps feed that returns **401**. So there is
-      no working fallback: a hiccup at nuget.org fails the whole matrix. Observed on
-      joelst/flint#38, where the same commit passed and then failed minutes later. Consider
-      caching `node_modules`/the native payload in CI, or vendoring the binary.
-- [ ] **macOS quarantines the SDK's ad-hoc-signed dylib** — see docs/DEVELOPMENT.md. Not
-      fixable here (Microsoft would need to notarize it); revisit when the SDK pin moves.
-- [ ] **`adm-zip` advisory is transitive via `foundry-local-sdk`** — not fixable without
-      an SDK bump. `glib` is Linux/GTK-only and Flint ships Windows + macOS; `cookie` is
-      already patched. Re-check when the SDK pin moves.
+- [ ] **macOS quarantines the SDK's ad-hoc-signed dylib** — see docs/DEVELOPMENT.md.
+      Not fixable here (Microsoft would need to notarize it); revisit when the SDK
+      pin moves. Separate from Flint.app signing, which is a post-1.0 calendar item.
+- [ ] **`adm-zip` advisory is transitive via `foundry-local-sdk`** — not fixable
+      without an SDK bump. `glib` is Linux/GTK-only and Flint ships Windows + macOS;
+      `cookie` is already patched. Re-check when the SDK pin moves.
+
+CI caching of the Foundry native payload (nuget.org; Azure DevOps fallback 401) is
+PRODUCT_PLAN Wave 1, not deferred.
 
 ## Operation outcomes
 
-- [ ] **Text Compare aborts on an ordinary service-start failure, which is a policy choice
-      rather than a technical requirement.** The sidecar can serve text Compare through direct
-      SDK inference with no HTTP endpoint, so a run could in principle proceed without the web
-      service. Compare currently requires the endpoint for every slot because that is the path
-      it shares with the rest of the app; relaxing it would mean a second inference path to keep
-      correct. Revisit if endpoint startup proves to be a common failure in practice.
+- [ ] **Text Compare aborts on an ordinary service-start failure, which is a policy
+      choice rather than a technical requirement.** The sidecar can serve text Compare
+      through direct SDK inference with no HTTP endpoint, so a run could in principle
+      proceed without the web service. Compare currently requires the endpoint for
+      every slot because that is the path it shares with the rest of the app;
+      relaxing it would mean a second inference path to keep correct. Revisit if
+      endpoint startup proves to be a common failure in practice.
 
-## Conversation persistence
+## Conversation persistence (post-1.0)
 
-- [ ] **Native quit does not reach the frontend flush.** Conversation saves are retried on a
-      backoff that never gives up, and flushed on hide/blur/pagehide and on the close-requested
-      handler, so a recovered storage failure is retried without waiting for the next edit. Those
-      hooks are best-effort opportunities rather than guaranteed delivery. What is still missing is
-      a deterministic handshake: on macOS neither Cmd+Q nor Dock → Quit reliably invokes the
-      frontend (tauri-apps/tauri#9198), so a quit in the window between storage recovering and
-      the next retry can still drop the outstanding turns. Closing it needs a native
-      `ExitRequested` → frontend flush → acknowledgement round trip, which is Rust work rather
-      than a frontend fix.
-- [ ] **The settings baseline cannot be edited.** Per-conversation settings now apply, resolved
-      against an application baseline held in `appSettingDefaults`. That baseline is deliberately
-      stable — an in-chat change belongs to the chat, and moving the baseline underneath every
-      conversation that inherits from it is a different operation — but there is no control that
-      performs that different operation. Persona, context length and thread view are therefore
-      frozen at whatever was persisted before the upgrade: the projection that writes the
+Quit-flush and conversation-id stream routing are PRODUCT_PLAN Wave 2.
+
+- [ ] **The settings baseline cannot be edited.** Per-conversation settings now apply,
+      resolved against an application baseline held in `appSettingDefaults`. That
+      baseline is deliberately stable — an in-chat change belongs to the chat, and
+      moving the baseline underneath every conversation that inherits from it is a
+      different operation — but there is no control that performs that different
+      operation. Persona, context length and thread view are therefore frozen at
+      whatever was persisted before the upgrade: the projection that writes the
       settings blob deliberately does not emit them from the live chat.
 
       The model alias is the exception, and intentionally so. It is read back from
-      `selectedModelAlias`, the application's pre-existing "last model used" value, which drives
-      startup prewarming and is what a rolled-back build would chat with. The component still
-      writes it on every model switch, so the alias part of the baseline does move between
-      sessions. That is the right trade: an inheriting conversation should open with a model that
-      works, and unlike a persona an alias does not carry the previous chat's character. Only
-      conversations created before this feature inherit at all, since new ones are stamped
-      explicitly. Closing this means a "defaults for new chats" control in Settings.
-- [ ] **Switching conversations discards the rest of an in-flight generation.** The epoch guard
-      rejects deltas after the thread is replaced, so the archive keeps the partial answer.
-      Pre-existing behaviour, not introduced by the archive work. Fixing it means routing
-      streamed updates by originating conversation id rather than by "is this still the visible
-      thread".
-- [ ] **The export cannot always prove where it landed.** `classifyDestination` refuses an
-      application-data destination by comparing filesystem identity, and detects a symlinked
-      ancestor by disagreement between `stat` and `lstat`. It cannot see aliasing that leaves no
-      link — a bind mount, or a hard-linked directory — and Windows reports no `dev`/`ino` through
-      the pinned `plugin-fs`, so the whole check degrades to "unverified" there. The Save dialog
-      also grants the chosen file rather than its ancestors, so an ordinary Downloads export is
-      expected to report unverified. The file is written either way and the uncertainty is stated
-      rather than hidden. Closing this means a native resolver that canonicalises the path.
-- [ ] **Storage inventory is assessed once per launch.** `storageInventoryUnknown` is computed
-      when conversations load and stays set for the session, so a warning survives storage
-      recovering underneath it. Closing this means re-taking the inventory after a later
-      successful enumeration.
+      `selectedModelAlias`, the application's pre-existing "last model used" value,
+      which drives startup prewarming and is what a rolled-back build would chat
+      with. The component still writes it on every model switch, so the alias part
+      of the baseline does move between sessions. That is the right trade: an
+      inheriting conversation should open with a model that works, and unlike a
+      persona an alias does not carry the previous chat's character. Only
+      conversations created before this feature inherit at all, since new ones are
+      stamped explicitly. Closing this means a "defaults for new chats" control in
+      Settings.
+- [ ] **The export cannot always prove where it landed.** `classifyDestination`
+      refuses an application-data destination by comparing filesystem identity, and
+      detects a symlinked ancestor by disagreement between `stat` and `lstat`. It
+      cannot see aliasing that leaves no link — a bind mount, or a hard-linked
+      directory — and Windows reports no `dev`/`ino` through the pinned `plugin-fs`,
+      so the whole check degrades to "unverified" there. The Save dialog also grants
+      the chosen file rather than its ancestors, so an ordinary Downloads export is
+      expected to report unverified. The file is written either way and the
+      uncertainty is stated rather than hidden. Closing this means a native resolver
+      that canonicalises the path.
+- [ ] **Storage inventory is assessed once per launch.** `storageInventoryUnknown` is
+      computed when conversations load and stays set for the session, so a warning
+      survives storage recovering underneath it. Closing this means re-taking the
+      inventory after a later successful enumeration.
 
 ## Future features (unscheduled)
 
-Not yet started; no version assigned. Depend on Phase 1B/2 reliability work landing
-first per [PRODUCT_PLAN.md](./PRODUCT_PLAN.md) — these are not reliability work.
+Not yet started; no version assigned. Depend on the 1.0 reliability bar landing
+first per [PRODUCT_PLAN.md](./PRODUCT_PLAN.md) — these are not 1.0 work.
 
+- [ ] **Apple Developer ID + notarization** — 1.0 macOS stays evaluation-only.
+      Signing Flint.app does not un-quarantine the SDK dylib. Budget the paid
+      Developer ID and dogfood Gatekeeper-clean installs only as a post-1.0
+      calendar item.
 - [ ] **Tool-calling execution layer** — opt-in, user-confirmed execution of a limited
       tool allowlist inside Flint (shell/file/HTTP), with a visible audit trail and a
       prompt-injection heuristic scan before execution. **Decision: delegate autonomous
@@ -256,12 +169,15 @@ first per [PRODUCT_PLAN.md](./PRODUCT_PLAN.md) — these are not reliability wor
       SDK implementation (design memo already done: [PURVIEW_GOVERNANCE.md](./PURVIEW_GOVERNANCE.md)).
 - [ ] **Full endpoint scheduler** — sticky routing, fallback, and health-check-based
       failover; escalate chat from local to a cloud endpoint when a prompt exceeds local
-      context length.
+      context length. Explicitly **not** a 1.0 requirement (the 1.0 bar is one local
+      endpoint).
 - [ ] **Vision polish** — inline image preview thumbnails inside chat message bubbles
       (multi-image attach already works; bubble display was deferred).
-- [ ] **In-app update UX** — installation/progress/restart/defer handling for the
-      already-wired updater plugin (`downloadAndInstall()`), plus a release-notes
-      modal. The explicit availability/error/check-time action is delivered.
+- [ ] **Curated ONNX catalog** — Flint-validated imports (pinned repo/revision, tested
+      EP, required files). See [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) "After 1.0".
+
+In-app updater **install** UX (progress/restart/defer) is PRODUCT_PLAN Wave 8, not
+unscheduled. The availability/error/check-time action is already delivered.
 
 ## Control CLI — not planned
 

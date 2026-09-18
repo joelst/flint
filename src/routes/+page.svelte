@@ -19,6 +19,9 @@
     stopService,
     stopAndUnload,
     quitRuntime,
+    quitDesktopApp,
+    relaunchApp,
+    subscribeQuitFlush,
     withServiceTransition,
     downloadModel,
     loadModel as sdkLoadModel,
@@ -31,6 +34,7 @@
     fetchUrl,
     appendAppLog,
     getAccessLog,
+    getHealthRing,
     getCacheInventory,
     pollPoolStatus,
     ensureNodeRuntime,
@@ -99,9 +103,6 @@
   import { enable as autostartEnable, disable as autostartDisable, isEnabled as autostartIsEnabled } from '$lib/autostart';
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { check as checkForUpdate, type Update } from "@tauri-apps/plugin-updater";
-  import { TrayIcon } from "@tauri-apps/api/tray";
-  import { Menu, MenuItem } from "@tauri-apps/api/menu";
-  import { defaultWindowIcon } from "@tauri-apps/api/app";
   import { sortModels, isModelSortMode, type ModelSortMode } from '$lib/model-sort';
   import {
     buildFlintAwareSystemPrompt,
@@ -127,6 +128,7 @@
     exportFileName,
   } from "$lib/conversation-export";
   import {
+    applyMessagePatch,
     captureThread,
     createConversation as createSessionConversation,
     deleteConversation as deleteSessionConversation,
@@ -154,6 +156,13 @@
     normalizeForAlternatingChat,
     isEmptyAssistantPlaceholder,
   } from "$lib/chat-request";
+  import {
+    flintVerifiedFromReport,
+    matchesVerifiedModel,
+    runEndpointSelfTest,
+    type FlintVerified,
+    type SelfTestReport,
+  } from "$lib/endpoint-self-test";
 
   // Integrations tab state
   let integrationsOS = $state<'windows' | 'unix'>(detectPlatform());
@@ -191,6 +200,75 @@
   let updateCheckError = $state<string | null>(null);
   let updateCheckState = $state<"idle" | "checking" | "current" | "available" | "error">("idle");
   let updateCheckBusy = $state(false);
+  let updateInstallState = $state<"idle" | "downloading" | "ready" | "deferred" | "error">("idle");
+  let updateInstallError = $state<string | null>(null);
+  let updateDownloadPercent = $state<number | null>(null);
+  let endpointSelfTestBusy = $state(false);
+  let endpointSelfTestReport = $state<SelfTestReport | null>(null);
+  let lastFlintVerified = $state<FlintVerified | null>(null);
+
+  async function installAvailableUpdate() {
+    if (!availableUpdate || updateInstallState === "downloading") return;
+    updateInstallState = "downloading";
+    updateInstallError = null;
+    updateDownloadPercent = 0;
+    let received = 0;
+    let total = 0;
+    try {
+      await availableUpdate.downloadAndInstall((event) => {
+        if (event.event === "Started") {
+          total = event.data.contentLength ?? 0;
+        } else if (event.event === "Progress") {
+          received += event.data.chunkLength;
+          updateDownloadPercent = total > 0 ? Math.min(100, Math.round((received / total) * 100)) : null;
+        } else if (event.event === "Finished") {
+          updateDownloadPercent = 100;
+        }
+      });
+      updateInstallState = "ready";
+    } catch (error) {
+      updateInstallState = "error";
+      updateInstallError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function restartToApplyUpdate() {
+    flushConversations();
+    await relaunchApp();
+  }
+
+  function deferAvailableUpdate() {
+    updateInstallState = "deferred";
+  }
+
+  async function runGatewaySelfTest() {
+    if (endpointSelfTestBusy) return;
+    endpointSelfTestBusy = true;
+    try {
+      const catalogModel = state.models.find((m: ModelInfo) => m.alias === selectedModelAlias);
+      endpointSelfTestReport = await runEndpointSelfTest({
+        fetch,
+        endpoint: state.endpoint || null,
+        modelId: selectedModelAlias || null,
+        catalogSupportsToolCalling: catalogModel?.supportsToolCalling ?? null,
+      });
+      lastFlintVerified = flintVerifiedFromReport(endpointSelfTestReport);
+    } catch (error) {
+      endpointSelfTestReport = {
+        ranAt: new Date().toISOString(),
+        endpoint: state.endpoint || null,
+        modelId: selectedModelAlias || null,
+        checks: [{
+          id: "run",
+          title: "Self-test runner",
+          status: "fail",
+          detail: error instanceof Error ? error.message : String(error),
+        }],
+      };
+    } finally {
+      endpointSelfTestBusy = false;
+    }
+  }
 
   async function refreshUpdateStatus() {
     if (updateCheckBusy) return;
@@ -625,7 +703,6 @@
   // running, closing the window hides Flint to the system tray instead of quitting (the
   // sidecar is a child process, so quitting the app would kill the endpoint).
   let keepServiceInBackground = $state(true);
-  let trayIcon: TrayIcon | null = null;
   let trayHideNotified = false;
 
   // UI: keyboard shortcut help modal
@@ -638,6 +715,28 @@
   let chatMessages = $state<any[]>([]);
   let chatInput = $state("");
   let isStreaming = $state(false);
+  /** In-flight generations keyed by the conversation they belong to, not the visible thread. */
+  const streamsByConversation = new Map();
+
+  function syncVisibleStreaming() {
+    isStreaming = !!(threadLoadedFor && streamsByConversation.has(threadLoadedFor));
+  }
+
+  function abortStreamFor(conversationId: string | null) {
+    if (!conversationId) return;
+    const stream = streamsByConversation.get(conversationId);
+    if (!stream) return;
+    stream.controller.abort();
+    if (stream.requestId != null) {
+      void cancelChatRequest(stream.requestId).catch(() => {});
+    }
+    streamsByConversation.delete(conversationId);
+    if (abortController === stream.controller) {
+      abortController = null;
+      activeStreamRequestId = null;
+    }
+    syncVisibleStreaming();
+  }
   let systemPrompt = $state("You are a helpful assistant.");
 
   // Context management (important for local models - controls token usage)
@@ -1120,6 +1219,7 @@
     lastAutoSummaryCount = 0;
     chatMessages = snapshotMessages(messages as any) as any;
     threadLoadedFor = id;
+    syncVisibleStreaming();
   }
 
   // Guards the async "load this model, then open chat with it" flows. Each captures a token
@@ -1341,6 +1441,7 @@
   }
 
   function deleteConversation(id: string) {
+    abortStreamFor(id);
     const result = deleteSessionConversation(sessionState(), id, { now: Date.now() });
     if (!result.removed) return;
     conversationArchive = result.archive;
@@ -3687,9 +3788,20 @@ updateStateFromSdk();
       mime = 'application/json';
       ext = 'json';
     } else {
-      const headers = 'time,type,model,durationMs,tokensIn,tokensOut,ok';
+      const headers = 'time,type,model,durationMs,ttftMs,promptTokPerSec,decodeTokPerSec,tokensIn,tokensOut,ok';
       const rows = entries.map(e =>
-        [new Date(e.ts).toISOString(), e.type, e.modelAlias ?? '', e.durationMs ?? '', e.tokensIn ?? '', e.tokensOut ?? '', e.ok].join(',')
+        [
+          new Date(e.ts).toISOString(),
+          e.type,
+          e.modelAlias ?? '',
+          e.durationMs ?? '',
+          e.ttftMs ?? '',
+          e.promptTokensPerSecond ?? '',
+          e.decodeTokensPerSecond ?? '',
+          e.tokensIn ?? '',
+          e.tokensOut ?? '',
+          e.ok,
+        ].join(',')
       );
       content = [headers, ...rows].join('\n');
       mime = 'text/csv';
@@ -4086,6 +4198,7 @@ updateStateFromSdk();
   }
 
   async function copyDiagnosticsToClipboard() {
+    const healthRing = await getHealthRing().catch(() => []);
     const diagnosticsSnapshot = {
       generatedAt: new Date().toISOString(),
       app: {
@@ -4121,6 +4234,7 @@ updateStateFromSdk();
         platform: navigator.platform || "unknown",
         language: navigator.language,
       },
+      healthRing,
     };
 
     const payload =
@@ -4299,20 +4413,9 @@ updateStateFromSdk();
     }
   }
 
-  // --- Close-to-tray: keep the local service alive when the window is closed ---
-
-  async function showMainWindow() {
-    try {
-      const win = getCurrentWindow();
-      await win.show();
-      await win.unminimize();
-      await win.setFocus();
-    } catch (e) {
-      console.warn("[flint] could not restore window from tray", e);
-    }
-  }
-
-  async function quitFromTray() {
+  // Native code owns the tray from startup (Open / Quit). Closing the window only hides when
+  // the user asked to keep the service in the background; otherwise this path quits.
+  async function quitFromWindowClose() {
     // destroy() below bypasses every other shutdown path, so this is the only chance to write.
     flushConversations();
     try {
@@ -4328,34 +4431,10 @@ updateStateFromSdk();
     } catch (e: any) {
       appendAppLog(`Runtime shutdown failed before exit: ${e?.message || e}`, "warn");
     }
-    try { await trayIcon?.close(); } catch {}
-    trayIcon = null;
     // Again, after the awaits. A streaming callback can land while the service is stopping, so
     // the flush above is not necessarily the last state worth writing.
     flushConversations();
-    // destroy() bypasses onCloseRequested, so this actually exits.
-    await getCurrentWindow().destroy();
-  }
-
-  async function ensureTray(): Promise<void> {
-    if (trayIcon) return;
-    const menu = await Menu.new({
-      items: [
-        await MenuItem.new({ id: "flint-open", text: "Open Flint", action: showMainWindow }),
-        await MenuItem.new({ id: "flint-quit", text: "Stop service and quit", action: quitFromTray }),
-      ],
-    });
-    trayIcon = await TrayIcon.new({
-      icon: (await defaultWindowIcon()) ?? undefined,
-      menu,
-      tooltip: "Flint — local inference service",
-      showMenuOnLeftClick: false,
-      action: (event: any) => {
-        if (event?.type === "Click" && event.button === "Left" && event.buttonState === "Up") {
-          showMainWindow();
-        }
-      },
-    });
+    await quitDesktopApp();
   }
 
   async function handleCloseRequested(event: { preventDefault: () => void }) {
@@ -4365,15 +4444,7 @@ updateStateFromSdk();
     flushConversations();
     if (!keepServiceInBackground || !state.serviceRunning) {
       event.preventDefault();
-      await quitFromTray();
-      return;
-    }
-    // Create the tray BEFORE preventing the close: if the tray cannot be created, fall
-    // through to a normal quit rather than stranding a hidden window nothing can reopen.
-    try {
-      await ensureTray();
-    } catch (e: any) {
-      appendAppLog(`Tray unavailable (${e?.message || e}) — closing quits Flint`, 'warn');
+      await quitFromWindowClose();
       return;
     }
     event.preventDefault();
@@ -4394,6 +4465,7 @@ updateStateFromSdk();
   }
 
   let unlistenCloseRequested: (() => void) | null = null;
+  let unlistenQuitFlush: (() => void) | null = null;
   let mountDisposed = false;
 
   onMount(() => {
@@ -4409,6 +4481,14 @@ updateStateFromSdk();
     document.addEventListener('visibilitychange', flushOnHide);
     window.addEventListener('pagehide', flushOnHide);
     window.addEventListener('blur', flushOnHide);
+    // Native Cmd+Q / Dock Quit / tray Quit never reach onCloseRequested (tauri#9198).
+    // The supervisor emits flint-quit-flush; we write, then ack so exit can proceed.
+    void subscribeQuitFlush(() => {
+      flushConversations();
+    }).then((un) => {
+      if (mountDisposed) un();
+      else unlistenQuitFlush = un;
+    }).catch((e) => console.warn("[flint] quit-flush listener unavailable", e));
     getCurrentWindow()
       .onCloseRequested(handleCloseRequested)
       .then((un) => {
@@ -4455,6 +4535,7 @@ updateStateFromSdk();
       if (unsubscribe) unsubscribe();
       document.removeEventListener('keydown', handleGlobalKeydown);
       unlistenCloseRequested?.();
+      unlistenQuitFlush?.();
       document.removeEventListener('visibilitychange', flushOnHide);
       window.removeEventListener('pagehide', flushOnHide);
       window.removeEventListener('blur', flushOnHide);
@@ -4828,7 +4909,8 @@ updateStateFromSdk();
       statusMessage = "Current model does not support chat completions.";
       return;
     }
-    if (!chatInput.trim() || (!state.endpoint && !chatClient) || isStreaming) return;
+    if (!chatInput.trim() || (!state.endpoint && !chatClient)) return;
+    if (!threadLoadedFor || streamsByConversation.has(threadLoadedFor)) return;
 
     const text = chatInput.trim();
 
@@ -4856,24 +4938,36 @@ updateStateFromSdk();
     chatMessages = [...chatMessages, { role: "user", content: userContent }];
     chatInput = "";
     clearImages(); // clear after queuing for send
-    isStreaming = true;
+    const originId = threadLoadedFor;
     const requestController = new AbortController();
+    const assistantId = `asst-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    streamsByConversation.set(originId, { controller: requestController, requestId: null, assistantId });
     abortController = requestController;
     activeStreamRequestId = null;
+    syncVisibleStreaming();
 
-    // Ownership: if the thread is replaced mid-flight (new chat, conversation switch, Load &
-    // Chat) the deltas below must not land in whatever thread is on screen now. Index-based
-    // writes to `chatMessages.length - 1` would silently corrupt the new conversation.
-    const epoch = chatThreadEpoch;
-    const assistantId = `asst-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-    const ownsThread = () => chatThreadEpoch === epoch;
-    /** Patch this request's assistant message by identity. Returns false if it is gone. */
+    // Deltas follow originId, not the visible thread. Switching conversations captures the
+    // partial assistant turn into the archive; later tokens patch that record instead of the
+    // chat now on screen.
     function updateAssistantMessage(patch: Record<string, any>): boolean {
-      if (!ownsThread()) return false;
-      const i = chatMessages.findIndex((m: any) => m.id === assistantId);
-      if (i < 0) return false;
-      chatMessages[i] = { ...chatMessages[i], ...patch };
-      chatMessages = [...chatMessages];
+      if (threadLoadedFor === originId) {
+        const i = chatMessages.findIndex((m: any) => m.id === assistantId);
+        if (i < 0) return false;
+        chatMessages[i] = { ...chatMessages[i], ...patch };
+        chatMessages = [...chatMessages];
+        return true;
+      }
+      const patched = applyMessagePatch(
+        conversationArchive,
+        originId,
+        assistantId,
+        patch,
+        Date.now(),
+      );
+      if (!patched.changed) return false;
+      conversationArchive = patched.archive;
+      conversationsDirty = true;
+      saveConversations();
       return true;
     }
 
@@ -4883,8 +4977,8 @@ updateStateFromSdk();
         messagesContainer.scrollTop = messagesContainer.scrollHeight;
     }, 0);
 
+    let assistantContent = "";
     try {
-      let assistantContent = "";
       chatMessages = [...chatMessages, { role: "assistant", content: "", id: assistantId }];
 
       // Prefer HTTP endpoint from sidecar when available (clean architecture)
@@ -4903,12 +4997,12 @@ updateStateFromSdk();
             preferredEp: selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
           },
           (requestId: number) => {
-            // Only the current request owns the cancellation token; a superseded stream
-            // assigning here would make Stop cancel the wrong generation.
-            if (abortController === requestController) activeStreamRequestId = requestId;
+            const stream = streamsByConversation.get(originId);
+            if (stream && stream.controller === requestController) stream.requestId = requestId;
+            if (threadLoadedFor === originId) activeStreamRequestId = requestId;
           },
         );
-        if (requestController.signal.aborted || !ownsThread()) {
+        if (requestController.signal.aborted) {
           return;
         }
         const endpointAcceleration = String(data?.acceleration?.active || "").trim();
@@ -4925,7 +5019,7 @@ updateStateFromSdk();
         // Fallback to direct client (dev only)
         const inferenceMessages = getMessagesForInference();
         for await (const chunk of chatClient.completeStreamingChat(inferenceMessages)) {
-          if (requestController.signal.aborted || !ownsThread()) break;
+          if (requestController.signal.aborted) break;
           const delta = chunk.choices?.[0]?.delta?.content || "";
           if (delta) {
             assistantContent += delta;
@@ -4937,17 +5031,19 @@ updateStateFromSdk();
       if (!requestController.signal.aborted) {
         updateAssistantMessage({
           isError: true,
-          content: `${assistantContentSoFar(assistantId)}\n\n[Error: ${err?.message || err}]`,
+          content: `${assistantContent || assistantContentSoFar(assistantId)}\n\n[Error: ${err?.message || err}]`,
         });
       }
     } finally {
-      // A superseded request must not clear the control state of the one that replaced it,
-      // which would hide the Stop button and strand the new stream uncancellable.
-      if (abortController === requestController) {
-        isStreaming = false;
-        activeStreamRequestId = null;
-        abortController = null;
+      const stream = streamsByConversation.get(originId);
+      if (stream && stream.controller === requestController) {
+        streamsByConversation.delete(originId);
       }
+      if (abortController === requestController) {
+        abortController = null;
+        activeStreamRequestId = null;
+      }
+      syncVisibleStreaming();
     }
   }
 
@@ -4958,17 +5054,19 @@ updateStateFromSdk();
   }
 
   async function stopGeneration() {
-    // Take ownership of the control state up front: the aborted request's `finally` may not run
-    // until after the user has started another one, and it must not clobber that one.
-    const controller = abortController;
-    if (!controller) return;
-    const requestId = activeStreamRequestId;
-    controller.abort();
-    if (abortController === controller) {
+    // Stop the visible conversation's stream only. A generation still running in another
+    // conversation keeps going in its archive until that chat is opened and Stopped, or deleted.
+    const originId = threadLoadedFor;
+    const stream = originId ? streamsByConversation.get(originId) : null;
+    if (!stream) return;
+    const requestId = stream.requestId;
+    stream.controller.abort();
+    streamsByConversation.delete(originId);
+    if (abortController === stream.controller) {
       abortController = null;
       activeStreamRequestId = null;
-      isStreaming = false;
     }
+    syncVisibleStreaming();
     if (requestId != null) {
       // Provable only before the request is written. After that the sidecar is asked to stop,
       // which streaming honours at the next chunk and a non-streamed completion cannot honour
@@ -6190,7 +6288,11 @@ Output only the summary text, no preamble.`;
             </li>
             <li class:done={firstRunHasModel}>
               <strong>Get a model</strong>
-              <span class="muted">Download a small starter from Models (hardware-aware picks appear when available).</span>
+              {#if state.ready && state.models.length === 0}
+                <span class="first-run-bad">Catalog is empty — check the network, then Models → Retry.</span>
+              {:else}
+                <span class="muted">Download a small starter from Models (hardware-aware picks appear when available).</span>
+              {/if}
               <button type="button" class="small" onclick={() => (currentView = "models")}>Open Models</button>
             </li>
             <li class:done={firstRunHasChatReady}>
@@ -6261,6 +6363,13 @@ Output only the summary text, no preamble.`;
                 <option value="updated">Last updated</option>
               </select>
               <span class="count">{filteredModels.length} models</span>
+              {#if state.models.length === 0}
+                <p class="notice" style="flex-basis:100%;">
+                  <strong>Catalog is empty.</strong> The sidecar is ready but returned no models — check the network and Retry, or add a local ONNX folder.
+                </p>
+              {:else if filteredModels.length === 0}
+                <p class="muted" style="flex-basis:100%;">No models match this search.</p>
+              {/if}
               <button
                 class="secondary"
                 onclick={() => { byomOpen = true; }}
@@ -6926,6 +7035,17 @@ Output only the summary text, no preamble.`;
                               ? "Declared unsupported"
                               : "Unknown"}
                         </div>
+                        <div>
+                          <strong>Flint-verified:</strong>
+                          {#if lastFlintVerified && matchesVerifiedModel(lastFlintVerified.modelId, detailModel.alias)}
+                            chat {lastFlintVerified.chat ? "yes" : "no"} ·
+                            stream {lastFlintVerified.stream ? "yes" : "no"} ·
+                            tools {lastFlintVerified.tools}
+                            <span class="muted small"> · {new Date(lastFlintVerified.ranAt).toLocaleString()}</span>
+                          {:else}
+                            Not verified in this session — Diagnostics → Test local endpoint
+                          {/if}
+                        </div>
                         <div><strong>Downloaded artifact:</strong> {detailModel.isCached ? "Model weights" : "Not downloaded"}</div>
                         <div><strong>Downloaded at:</strong> {formatMetaTimestamp(modelRuntimeMeta[detailModel.alias]?.downloadedAt)}</div>
                         <div><strong>Last used acceleration:</strong> {modelRuntimeMeta[detailModel.alias]?.lastUsedAcceleration || "Unknown"}</div>
@@ -7369,6 +7489,13 @@ Output only the summary text, no preamble.`;
                 {/if}
               </div>
 
+              {#if !selectedModelAlias && !chatBlockedByLoadedSTT}
+                <div class="notice" style="margin-bottom: 8px;">
+                  <p><strong>No chat model loaded.</strong> Open Models, download a chat-capable model, then Load &amp; Chat.</p>
+                  <button type="button" class="small" onclick={() => (currentView = "models")}>Open Models</button>
+                </div>
+              {/if}
+
               {#if isDictating || dictationInterim}
                 <div class="dictation-preview">
                   <span class="dictation-indicator" class:pulsing={isDictating}><Icon name="mic" size={14} /></span>
@@ -7578,7 +7705,7 @@ Output only the summary text, no preamble.`;
               {isTranscribing
                 ? (transcriptionProgress
                     ? `Transcribing ${transcriptionProgress.current}/${transcriptionProgress.total}...`
-                    : "Transcribing...")
+                    : "Transcribing… cannot be stopped once started")
                 : "Transcribe"}
             </button>
           </div>
@@ -7624,6 +7751,28 @@ Output only the summary text, no preamble.`;
                 {state.serviceRunning ? "RUNNING" : "STOPPED"}
               </span>
             </div>
+            {#if endpointSelfTestReport}
+              <div class="service-panel">
+                <h3>Endpoint self-test</h3>
+                <p class="setting-note">
+                  {new Date(endpointSelfTestReport.ranAt).toLocaleString()}
+                  {#if endpointSelfTestReport.endpoint}
+                    · {endpointSelfTestReport.endpoint}
+                  {/if}
+                  {#if endpointSelfTestReport.modelId}
+                    · {endpointSelfTestReport.modelId}
+                  {/if}
+                </p>
+                <ul class="diagnostic-list">
+                  {#each endpointSelfTestReport.checks as item}
+                    <li>
+                      {item.status === "pass" ? "✓" : item.status === "blocked" ? "•" : "✗"}
+                      {item.title}: {item.detail}
+                    </li>
+                  {/each}
+                </ul>
+              </div>
+            {/if}
             {#if state.endpoint}
               <div class="endpoint-display">
                 <code>{state.endpoint}</code>
@@ -7663,6 +7812,9 @@ Output only the summary text, no preamble.`;
               </button>
               <button onclick={copyDiagnosticsToClipboard}>
                 Copy All Diagnostics
+              </button>
+              <button onclick={runGatewaySelfTest} disabled={endpointSelfTestBusy}>
+                {endpointSelfTestBusy ? "Testing endpoint…" : "Test local endpoint"}
               </button>
               <button onclick={scanCacheInventory} disabled={!state.ready || cacheInventoryLoading}>
                 {cacheInventoryLoading ? "Scanning Cache..." : "Scan Cache"}
@@ -8062,6 +8214,9 @@ Output only the summary text, no preamble.`;
                       <th>Type</th>
                       <th>Model</th>
                       <th>Duration</th>
+                      <th>TTFT</th>
+                      <th>Prompt tok/s</th>
+                      <th>Decode tok/s</th>
                       <th>↑ In</th>
                       <th>↓ Out</th>
                       <th>OK</th>
@@ -8074,6 +8229,9 @@ Output only the summary text, no preamble.`;
                         <td><span class="log-type-badge log-type-{entry.type}">{entry.type}</span></td>
                         <td class="log-model">{entry.modelAlias ?? '—'}</td>
                         <td class="log-dur">{entry.durationMs != null ? `${entry.durationMs}ms` : '—'}</td>
+                        <td class="log-dur">{entry.ttftMs != null ? `${entry.ttftMs}ms` : '—'}</td>
+                        <td class="log-tok">{entry.promptTokensPerSecond != null ? Number(entry.promptTokensPerSecond).toFixed(1) : '—'}</td>
+                        <td class="log-tok">{entry.decodeTokensPerSecond != null ? Number(entry.decodeTokensPerSecond).toFixed(1) : '—'}</td>
                         <td class="log-tok">{entry.tokensIn ?? '—'}</td>
                         <td class="log-tok">{entry.tokensOut ?? '—'}</td>
                         <td class="log-ok">{entry.ok ? '✓' : '✗'}</td>
@@ -8131,6 +8289,11 @@ Output only the summary text, no preamble.`;
                   </div>
                   <span class="status-badge status-{integration.status}">
                     {statusBadgeLabel(integration.status)}
+                    {#if integration.testedWith}
+                      · {integration.testedWith}
+                    {:else if integration.status === 'verified'}
+                      · version not pinned
+                    {/if}
                   </span>
                 </header>
                 <p class="integration-desc">{integration.description}</p>
@@ -8357,6 +8520,15 @@ Output only the summary text, no preamble.`;
                       <span class="muted">Checking…</span>
                     {:else if availableUpdate}
                       <strong>v{availableUpdate.version} available</strong>
+                      {#if updateInstallState === "downloading"}
+                        <span class="muted small"> · downloading{updateDownloadPercent != null ? ` ${updateDownloadPercent}%` : ""}</span>
+                      {:else if updateInstallState === "ready"}
+                        <span class="muted small"> · ready to restart</span>
+                      {:else if updateInstallState === "deferred"}
+                        <span class="muted small"> · deferred</span>
+                      {:else if updateInstallError}
+                        <span class="about-bad"> · {updateInstallError}</span>
+                      {/if}
                     {:else if updateCheckError}
                       <span class="about-bad">Check failed: {updateCheckError}</span>
                     {:else if updateCheckState === "current"}
@@ -8371,6 +8543,14 @@ Output only the summary text, no preamble.`;
                   <button type="button" class="tiny" onclick={() => refreshUpdateStatus()} disabled={updateCheckBusy}>
                     {updateCheckBusy ? "Checking…" : "Check"}
                   </button>
+                  {#if availableUpdate && updateInstallState !== "ready" && updateInstallState !== "downloading"}
+                    <button type="button" class="tiny" onclick={() => installAvailableUpdate()}>Install</button>
+                    <button type="button" class="tiny" onclick={() => deferAvailableUpdate()}>Later</button>
+                  {/if}
+                  {#if updateInstallState === "ready"}
+                    <button type="button" class="tiny" onclick={() => restartToApplyUpdate()}>Restart to update</button>
+                    <button type="button" class="tiny" onclick={() => deferAvailableUpdate()}>Later</button>
+                  {/if}
                 </dd>
               </div>
             </dl>
@@ -8712,6 +8892,7 @@ Output only the summary text, no preamble.`;
                   {#if isComparing || comparePreparing}
                     <Icon name="loader" size={15} class="spin" />
                     <span>{comparePreparing ? "Preparing…" : "Running…"}</span>
+                    <span class="compare-uncancellable">Stop is not available for Compare — wait for every slot to finish.</span>
                   {:else}
                     <Icon name="send" size={15} />
                     <span>Send</span>
@@ -9134,6 +9315,15 @@ Output only the summary text, no preamble.`;
                       <span class="muted">Checking…</span>
                     {:else if availableUpdate}
                       <strong>v{availableUpdate.version} available</strong>
+                      {#if updateInstallState === "downloading"}
+                        <span class="muted small"> · downloading{updateDownloadPercent != null ? ` ${updateDownloadPercent}%` : ""}</span>
+                      {:else if updateInstallState === "ready"}
+                        <span class="muted small"> · ready to restart</span>
+                      {:else if updateInstallState === "deferred"}
+                        <span class="muted small"> · deferred</span>
+                      {:else if updateInstallError}
+                        <span class="about-bad"> · {updateInstallError}</span>
+                      {/if}
                     {:else if updateCheckError}
                       <span class="about-bad">Check failed: {updateCheckError}</span>
                     {:else if updateCheckState === "current"}
@@ -9148,6 +9338,14 @@ Output only the summary text, no preamble.`;
                   <button type="button" class="tiny" onclick={() => refreshUpdateStatus()} disabled={updateCheckBusy}>
                     {updateCheckBusy ? "Checking…" : "Check"}
                   </button>
+                  {#if availableUpdate && updateInstallState !== "ready" && updateInstallState !== "downloading"}
+                    <button type="button" class="tiny" onclick={() => installAvailableUpdate()}>Install</button>
+                    <button type="button" class="tiny" onclick={() => deferAvailableUpdate()}>Later</button>
+                  {/if}
+                  {#if updateInstallState === "ready"}
+                    <button type="button" class="tiny" onclick={() => restartToApplyUpdate()}>Restart to update</button>
+                    <button type="button" class="tiny" onclick={() => deferAvailableUpdate()}>Later</button>
+                  {/if}
                 </dd>
               </div>
             </dl>
