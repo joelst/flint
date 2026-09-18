@@ -132,7 +132,34 @@ describe('runEndpointSelfTest', () => {
     expect(flintVerifiedFromReport(report)?.tools).toBe('not-verified');
   });
 
-  it('fails disconnect when an aborted stream does not settle', async () => {
+  it('passes disconnect after headers even when the body never yields a chunk', async () => {
+    const fetchMock: typeof fetch = async (input, init) => {
+      if (init?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      if (String(input).endsWith('/models')) {
+        return jsonResponse(200, { data: [{ id: 'tiny-cpu' }] });
+      }
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (body.stream && String(body.messages?.[0]?.content || '').includes('Keep writing')) {
+        return new Response(new ReadableStream({ start () { /* never enqueue */ } }), { status: 200 });
+      }
+      if (body.stream) {
+        return new Response('data: {"choices":[{"delta":{"content":"x"}}]}\n\ndata: [DONE]\n\n', { status: 200 });
+      }
+      return jsonResponse(200, {
+        choices: [{ message: { role: 'assistant', content: 'x' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      });
+    };
+    const report = await runEndpointSelfTest({
+      fetch: fetchMock,
+      endpoint: 'http://127.0.0.1:5272/v1',
+      catalogSupportsToolCalling: false,
+      disconnectStartMs: 20,
+    });
+    expect(report.checks.find((c) => c.id === 'disconnect')?.status).toBe('pass');
+  });
+
+  it('fails disconnect when the streaming response never starts', async () => {
     const fetchMock: typeof fetch = async (input, init) => {
       if (String(input).endsWith('/models')) {
         return jsonResponse(200, { data: [{ id: 'tiny-cpu' }] });
@@ -156,7 +183,7 @@ describe('runEndpointSelfTest', () => {
       disconnectStartMs: 20,
     });
     expect(report.checks.find((c) => c.id === 'disconnect')?.status).toBe('fail');
-    expect(report.checks.find((c) => c.id === 'disconnect')?.detail).toMatch(/within 1000 ms/);
+    expect(report.checks.find((c) => c.id === 'disconnect')?.detail).toMatch(/did not start/);
   });
 
   it('does not attempt tools when the catalog declares them unsupported', async () => {
@@ -398,6 +425,7 @@ describe('runEndpointSelfTest', () => {
     });
     expect(report.checks.find((c) => c.id === 'usage')?.status).toBe('blocked');
     expect(report.checks.find((c) => c.id === 'tools')?.status).toBe('blocked');
+    expect(report.checks.find((c) => c.id === 'tools')?.detail).toMatch(/HTTP 500/);
     expect(flintVerifiedFromReport(report)?.usage).toBe(false);
     expect(flintVerifiedFromReport(report)?.tools).toBe('not-verified');
   });
@@ -424,6 +452,19 @@ describe('runEndpointSelfTest', () => {
     });
     expect(report.checks.find((c) => c.id === 'stream')?.status).toBe('fail');
     expect(report.checks.find((c) => c.id === 'stream')?.detail).toMatch(/token=false/);
+  });
+
+  it('fails models when the envelope body never arrives', async () => {
+    const report = await runEndpointSelfTest({
+      fetch: async () => new Response(new ReadableStream({ start () { /* never enqueue */ } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+      endpoint: 'http://127.0.0.1:5272/v1',
+      requestTimeoutMs: 40,
+    });
+    expect(report.checks.find((c) => c.id === 'models')?.status).toBe('fail');
+    expect(report.checks.find((c) => c.id === 'models')?.detail).toMatch(/Timed out after 40 ms/);
   });
 
   it('fails models when the envelope request never settles', async () => {

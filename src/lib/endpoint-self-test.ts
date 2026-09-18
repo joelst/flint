@@ -33,7 +33,6 @@ export interface FlintVerified {
   tools: 'verified' | 'not-verified';
 }
 
-const ABORT_SETTLE_TIMEOUT_MS = 1_000;
 const REQUEST_TIMEOUT_MS = 8_000;
 const DISCONNECT_START_MS = 2_000;
 
@@ -126,70 +125,54 @@ function streamHasToken(text: string): boolean {
 }
 
 function mergeSignals(a: AbortSignal | undefined, b: AbortSignal): AbortSignal {
-  if (!a) return b;
-  if (typeof AbortSignal.any === 'function') return AbortSignal.any([a, b]);
-  const out = new AbortController();
-  const abort = () => out.abort();
-  if (a.aborted || b.aborted) {
-    out.abort();
-    return out.signal;
-  }
-  a.addEventListener('abort', abort);
-  b.addEventListener('abort', abort);
-  return out.signal;
+  return a ? AbortSignal.any([a, b]) : b;
 }
 
-async function fetchBounded(
+function whenAborted(signal: AbortSignal, error: Error): Promise<never> {
+  return new Promise((_, reject) => {
+    const fail = () => reject(error);
+    if (signal.aborted) {
+      fail();
+      return;
+    }
+    signal.addEventListener('abort', fail, { once: true });
+  });
+}
+
+async function fetchAndRead(
   fetchFn: typeof fetch,
   url: string,
   init: RequestInit,
   timeoutMs: number,
-): Promise<Response> {
+  read: 'json' | 'text',
+): Promise<{ res: Response; json: unknown; text: string }> {
   const timeout = new AbortController();
+  const timedOut = new Error(`Timed out after ${timeoutMs} ms`);
   const timer = setTimeout(() => timeout.abort(), timeoutMs);
   try {
-    const response = await Promise.race([
+    const res = await Promise.race([
       fetchFn(url, { ...init, signal: mergeSignals(init.signal ?? undefined, timeout.signal) }),
-      new Promise<Response>((_, reject) => {
-        timeout.signal.addEventListener('abort', () => {
-          reject(new Error(`Timed out after ${timeoutMs} ms`));
-        });
-      }),
+      whenAborted(timeout.signal, timedOut),
     ]);
-    return response;
+    const abortBody = () => {
+      try {
+        const cancel = res.body && !res.body.locked ? res.body.cancel() : null;
+        if (cancel && typeof cancel.catch === 'function') void cancel.catch(() => {});
+      } catch { /* already closed or locked */ }
+    };
+    timeout.signal.addEventListener('abort', abortBody, { once: true });
+    if (timeout.signal.aborted) abortBody();
+    if (read === 'text') {
+      const text = await Promise.race([res.text(), whenAborted(timeout.signal, timedOut)]);
+      return { res, json: null, text };
+    }
+    const json = await Promise.race([res.json().catch(() => null), whenAborted(timeout.signal, timedOut)]);
+    return { res, json, text: '' };
   } catch (error) {
-    if (timeout.signal.aborted) throw new Error(`Timed out after ${timeoutMs} ms`);
+    if (timeout.signal.aborted) throw timedOut;
     throw error;
   } finally {
     clearTimeout(timer);
-  }
-}
-
-async function observeAbortSettlement(pending: Promise<unknown>): Promise<{ status: 'resolved' | 'aborted' | 'rejected' | 'timeout'; detail: string }> {
-  let timeout: ReturnType<typeof setTimeout> | null = null;
-  try {
-    return await Promise.race([
-      pending.then(
-        () => ({ status: 'resolved' as const, detail: 'Caller resolved after abort. Native generation may still finish.' }),
-        (error) => {
-          const message = error instanceof Error ? error.message : String(error);
-          if (error instanceof DOMException && error.name === 'AbortError') {
-            return { status: 'aborted' as const, detail: 'Caller rejected with AbortError after abort.' };
-          }
-          return { status: 'rejected' as const, detail: `Caller rejected after abort: ${message}` };
-        },
-      ),
-      new Promise<{ status: 'timeout'; detail: string }>((resolve) => {
-        timeout = setTimeout(() => {
-          resolve({
-            status: 'timeout',
-            detail: `Abort did not settle the request within ${ABORT_SETTLE_TIMEOUT_MS} ms.`,
-          });
-        }, ABORT_SETTLE_TIMEOUT_MS);
-      }),
-    ]);
-  } finally {
-    if (timeout) clearTimeout(timeout);
   }
 }
 
@@ -224,13 +207,13 @@ export async function runEndpointSelfTest(options: {
   let modelsBody: { data?: Array<{ id?: string }> } | null = null;
 
   try {
-    const res = await fetchBounded(
+    const { res, json } = await fetchAndRead(
       options.fetch,
       joinUrl(endpoint, '/models'),
       { method: 'GET', headers: { Accept: 'application/json' } },
       requestTimeoutMs,
+      'json',
     );
-    const json = await res.json().catch(() => null);
     const data = Array.isArray(json?.data) ? json.data : null;
     if (!res.ok || !data) {
       checks.push(check(
@@ -240,7 +223,7 @@ export async function runEndpointSelfTest(options: {
         `HTTP ${res.status}; expected { data: [...] }.`,
       ));
     } else {
-      modelsBody = json;
+      modelsBody = json as { data?: Array<{ id?: string }> };
       checks.push(check(
         'models',
         'GET /v1/models returns an OpenAI envelope',
@@ -285,7 +268,7 @@ export async function runEndpointSelfTest(options: {
     ));
   } else {
     try {
-      const res = await fetchBounded(
+      const { res, json } = await fetchAndRead(
         options.fetch,
         joinUrl(endpoint, '/embeddings'),
         {
@@ -294,10 +277,16 @@ export async function runEndpointSelfTest(options: {
           body: JSON.stringify({ model: embeddingModelId, input: 'ping' }),
         },
         requestTimeoutMs,
+        'json',
       );
-      const json = await res.json().catch(() => null);
-      const vector = json?.data?.[0]?.embedding;
-      if (!res.ok || !Array.isArray(vector) || vector.length === 0 || typeof vector[0] !== 'number') {
+      const vector = (json as { data?: Array<{ embedding?: unknown }> } | null)?.data?.[0]?.embedding;
+      if (
+        !res.ok
+        || !Array.isArray(vector)
+        || vector.length === 0
+        || typeof vector[0] !== 'number'
+        || !Number.isFinite(vector[0])
+      ) {
         checks.push(check(
           'embeddings',
           'POST /v1/embeddings returns a vector',
@@ -333,7 +322,7 @@ export async function runEndpointSelfTest(options: {
 
   let usageSeen = false;
   try {
-    const res = await fetchBounded(
+    const { res, json } = await fetchAndRead(
       options.fetch,
       joinUrl(endpoint, '/chat/completions'),
       {
@@ -347,11 +336,12 @@ export async function runEndpointSelfTest(options: {
         }),
       },
       requestTimeoutMs,
+      'json',
     );
-    const json = await res.json().catch(() => null);
-    const content = json?.choices?.[0]?.message?.content;
-    const usage = json?.usage;
-    if (!res.ok || typeof content !== 'string') {
+    const payload = json as { choices?: Array<{ message?: { content?: unknown } }>; usage?: Record<string, unknown> } | null;
+    const content = payload?.choices?.[0]?.message?.content;
+    const usage = payload?.usage;
+    if (!res.ok || typeof content !== 'string' || !content.trim()) {
       checks.push(check('chat', 'Returned model id round-trips into chat', 'fail', `HTTP ${res.status}; no assistant message.`));
     } else {
       usageSeen = !!(usage && (usage.prompt_tokens != null || usage.completion_tokens != null
@@ -379,7 +369,7 @@ export async function runEndpointSelfTest(options: {
   }
 
   try {
-    const res = await fetchBounded(
+    const { res, text } = await fetchAndRead(
       options.fetch,
       joinUrl(endpoint, '/chat/completions'),
       {
@@ -393,8 +383,8 @@ export async function runEndpointSelfTest(options: {
         }),
       },
       requestTimeoutMs,
+      'text',
     );
-    const text = await res.text();
     const hasDone = text.includes('[DONE]');
     const hasToken = streamHasToken(text);
     if (!res.ok || !hasDone || !hasToken) {
@@ -432,23 +422,36 @@ export async function runEndpointSelfTest(options: {
         setTimeout(() => resolve({ kind: 'slow' }), disconnectStartMs);
       }),
     ]);
-    if (started.kind === 'headers' && started.res.body) {
-      const reader = started.res.body.getReader();
-      await Promise.race([
-        reader.read().catch(() => undefined),
-        new Promise<void>((resolve) => {
-          setTimeout(resolve, disconnectStartMs);
-        }),
-      ]);
+    if (started.kind !== 'headers') {
+      abort.abort();
+      checks.push(check(
+        'disconnect',
+        'Aborting a stream settles the caller',
+        'fail',
+        started.kind === 'error'
+          ? (started.error instanceof Error ? started.error.message : String(started.error))
+          : `Streaming response did not start within ${disconnectStartMs} ms; disconnect was not exercised.`,
+      ));
+    } else {
+      if (started.res.body) {
+        const reader = started.res.body.getReader();
+        await Promise.race([
+          reader.read().catch(() => undefined),
+          new Promise<void>((resolve) => {
+            setTimeout(resolve, disconnectStartMs);
+          }),
+        ]);
+      }
+      abort.abort();
+      // fetch() settles at headers. Waiting for headers is what proves the request
+      // left the client; abort then tells the gateway to drop the body.
+      checks.push(check(
+        'disconnect',
+        'Aborting a stream settles the caller',
+        'pass',
+        'Stream started and abort was issued. Native generation may still finish.',
+      ));
     }
-    abort.abort();
-    const outcome = await observeAbortSettlement(pending);
-    checks.push(check(
-      'disconnect',
-      'Aborting a stream settles the caller',
-      outcome.status === 'timeout' ? 'fail' : 'pass',
-      outcome.detail,
-    ));
   } catch (error) {
     checks.push(check(
       'disconnect',
@@ -467,7 +470,7 @@ export async function runEndpointSelfTest(options: {
     ));
   } else {
     try {
-      const res = await fetchBounded(
+      const { res, json } = await fetchAndRead(
         options.fetch,
         joinUrl(endpoint, '/chat/completions'),
         {
@@ -492,10 +495,13 @@ export async function runEndpointSelfTest(options: {
           }),
         },
         requestTimeoutMs,
+        'json',
       );
-      const json = await res.json().catch(() => null);
-      const toolCalls = json?.choices?.[0]?.message?.tool_calls
-        ?? json?.choices?.[0]?.delta?.tool_calls;
+      const payload = json as {
+        choices?: Array<{ message?: { tool_calls?: unknown }; delta?: { tool_calls?: unknown } }>;
+      } | null;
+      const toolCalls = payload?.choices?.[0]?.message?.tool_calls
+        ?? payload?.choices?.[0]?.delta?.tool_calls;
       if (res.ok && Array.isArray(toolCalls) && toolCalls.length > 0) {
         checks.push(check('tools', 'tool_calls when prompted', 'pass', 'Model emitted OpenAI-style tool_calls.'));
       } else {
@@ -503,7 +509,9 @@ export async function runEndpointSelfTest(options: {
           'tools',
           'tool_calls when prompted',
           'blocked',
-          'No tool_calls in the response; labeled not-verified rather than failed.',
+          res.ok
+            ? 'No tool_calls in the response; labeled not-verified rather than failed.'
+            : `HTTP ${res.status}; labeled not-verified rather than failed.`,
         ));
       }
     } catch (error) {

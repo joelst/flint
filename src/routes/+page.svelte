@@ -1683,7 +1683,7 @@
   const BACKGROUND_ARCHIVE_SAVE_MS = 400;
 
   function scheduleBackgroundArchiveSave() {
-    if (backgroundArchiveSaveTimer) return;
+    if (mountDisposed || backgroundArchiveSaveTimer) return;
     backgroundArchiveSaveTimer = setTimeout(() => {
       backgroundArchiveSaveTimer = null;
       saveConversations();
@@ -4556,6 +4556,10 @@ updateStateFromSdk();
 
     return () => {
       mountDisposed = true;
+      if (backgroundArchiveSaveTimer) {
+        clearTimeout(backgroundArchiveSaveTimer);
+        backgroundArchiveSaveTimer = null;
+      }
       if (unsubscribe) unsubscribe();
       document.removeEventListener('keydown', handleGlobalKeydown);
       unlistenCloseRequested?.();
