@@ -8199,8 +8199,8 @@ Output only the summary text, no preamble.`;
               <li><strong>Fuller catalog than the CLI alone</strong> — Foundry Local CLI covers common flows; Flint uses the
                 <strong>official SDK</strong> so you get a broader model surface (chat, vision, STT, acceleration variants)
                 without maintaining your own service wrapper.</li>
-              <li><strong>One local endpoint</strong> — start the service and point IDEs/agents at
-                <code>http://127.0.0.1:&lt;port&gt;/v1</code>.</li>
+              <li><strong>One local endpoint</strong> — start the service and point IDEs/agents at the loopback URL, or use
+                Settings → Network → WSL clients for WSL2 NAT.</li>
               <li><strong>Ops visibility</strong> — pool, resources, access and audit logs in Monitor.</li>
             </ul>
             <p class="muted">
