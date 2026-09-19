@@ -344,6 +344,7 @@ describe('foundry-sidecar protocol basics', () => {
       expect(nonJsonStdout.lines).toEqual([]);
       expect(stderrText).toContain('FLINT_DIAG info fake model load console noise');
       expect(stderrText).toContain('FLINT_DIAG info fake model load stdout noise');
+      expect(stderrText).not.toContain('[foundry-sidecar] Ready:');
     } finally {
       nonJsonStdout.stop();
       proc.stderr.off('data', onStderr);

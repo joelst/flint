@@ -3446,6 +3446,3 @@ const readyMsg = {
 };
 send(readyMsg);
 log('info', `Sidecar process started (pid ${process.pid}) and listening`);
-
-// Also write to stderr for better visibility in dev mode
-console.error(`[foundry-sidecar] Ready: ${JSON.stringify(readyMsg)}`);
