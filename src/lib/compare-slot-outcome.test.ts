@@ -104,4 +104,18 @@ describe('compare slot result builders', () => {
     expect(stopped.tokensOut).toBe(1);
     expect(stopped.ttftMs).toBe(80);
   });
+
+  it('omits null sidecar usage fields instead of persisting null tokens', () => {
+    const result = buildSettledCompareResult({
+      content: 'hello',
+      stopRequested: false,
+      inferenceStarted: 1000,
+      now: 1100,
+      nativeStreaming: true,
+      firstDeltaAt: 1010,
+      usage: { prompt_tokens: null, completion_tokens: null },
+    });
+    expect(result.tokensIn).toBeUndefined();
+    expect(result.tokensOut).toBeUndefined();
+  });
 });

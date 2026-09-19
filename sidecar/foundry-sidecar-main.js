@@ -2800,10 +2800,14 @@ rl.on('line', async (line) => {
               result: {
                 ...normalizeChatResponse({
                   choices: [{ message: { role: 'assistant', content } }],
-                  usage: {
-                    prompt_tokens: chatTokensIn,
-                    completion_tokens: chatTokensOut,
-                  },
+                  ...(typeof chatTokensIn === 'number' || typeof chatTokensOut === 'number'
+                    ? {
+                        usage: {
+                          ...(typeof chatTokensIn === 'number' ? { prompt_tokens: chatTokensIn } : {}),
+                          ...(typeof chatTokensOut === 'number' ? { completion_tokens: chatTokensOut } : {}),
+                        },
+                      }
+                    : {}),
                 }),
                 acceleration: {
                   requested: preferred?.requested ?? null,
@@ -2872,10 +2876,14 @@ rl.on('line', async (line) => {
               result: {
                 ...normalizeChatResponse({
                   choices: [{ message: { role: 'assistant', content } }],
-                  usage: {
-                    prompt_tokens: chatTokensIn,
-                    completion_tokens: chatTokensOut,
-                  },
+                  ...(typeof chatTokensIn === 'number' || typeof chatTokensOut === 'number'
+                    ? {
+                        usage: {
+                          ...(typeof chatTokensIn === 'number' ? { prompt_tokens: chatTokensIn } : {}),
+                          ...(typeof chatTokensOut === 'number' ? { completion_tokens: chatTokensOut } : {}),
+                        },
+                      }
+                    : {}),
                 }),
                 acceleration: {
                   requested: preferred?.requested ?? null,

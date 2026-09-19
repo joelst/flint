@@ -685,6 +685,7 @@
    */
   let compareActiveStream: { controller: AbortController; requestId: number | null } | null = null;
   let compareRunGeneration = 0;
+  let compareStopAckError: string | null = null;
 
   // Settings: startup behaviour
   let autoStartService = $state(true);
@@ -3554,6 +3555,7 @@ updateStateFromSdk();
     const prompt = comparePrompt.trim();
     comparePickerOpen = false;
     compareStopRequested = false;
+    compareStopAckError = null;
     ++compareRunGeneration;
     isComparing = true;
     comparePreparing = true;
@@ -3596,6 +3598,13 @@ updateStateFromSdk();
       };
 
       let failCount = 0;
+      const unloadIfThisRunLoaded = async (target: CompareSlot) => {
+        if (!oneAtATime) return;
+        if (!unloadCtx.loadedByCompare.has(target.alias)) return;
+        try {
+          await safeUnloadCompareSlot(target, unloadCtx);
+        } catch {}
+      };
 
       for (const slot of compareSlots) {
         // Stop was requested between slots (or during memory/load prep for this one): the
@@ -3613,6 +3622,7 @@ updateStateFromSdk();
           if (oneAtATime) {
             for (const other of compareSlots) {
               if (other.key === slot.key) continue;
+              if (compareStopRequested) break;
               await safeUnloadCompareSlot(other, unloadCtx);
             }
           }
@@ -3623,11 +3633,7 @@ updateStateFromSdk();
           comparePrepStatus = `Checking memory for ${slot.label}…`;
           const slotMemErr = await verifySlotMemoryBeforeLoad(slot);
           if (compareStopRequested) {
-            if (oneAtATime) {
-              try {
-                await safeUnloadCompareSlot(slot, unloadCtx);
-              } catch {}
-            }
+            await unloadIfThisRunLoaded(slot);
             break;
           }
           if (slotMemErr) {
@@ -3656,21 +3662,13 @@ updateStateFromSdk();
             }
           }
           if (compareStopRequested) {
-            if (oneAtATime) {
-              try {
-                await safeUnloadCompareSlot(slot, unloadCtx);
-              } catch {}
-            }
+            await unloadIfThisRunLoaded(slot);
             break;
           }
 
           await ensureServiceForCompare(slot.alias);
           if (compareStopRequested) {
-            if (oneAtATime) {
-              try {
-                await safeUnloadCompareSlot(slot, unloadCtx);
-              } catch {}
-            }
+            await unloadIfThisRunLoaded(slot);
             break;
           }
 
@@ -3691,11 +3689,7 @@ updateStateFromSdk();
           if (compareStopRequested) {
             // Stop landed while this slot was still downloading/loading — it never reached
             // inference, so it gets no result at all (same as a slot never iterated to).
-            if (oneAtATime) {
-              try {
-                await safeUnloadCompareSlot(slot, unloadCtx);
-              } catch {}
-            }
+            await unloadIfThisRunLoaded(slot);
             break;
           }
 
@@ -3716,11 +3710,7 @@ updateStateFromSdk();
           if (compareStopRequested) {
             // Stop landed while warm-up was in flight — warm-up is not itself cancellable (it is
             // discarded anyway), but it must not be followed by the real, expensive timed call.
-            if (oneAtATime) {
-              try {
-                await safeUnloadCompareSlot(slot, unloadCtx);
-              } catch {}
-            }
+            await unloadIfThisRunLoaded(slot);
             break;
           }
 
@@ -3764,7 +3754,9 @@ updateStateFromSdk();
             }
           }
           const nativeStreaming = !!res?.nativeStreaming;
-          const content = res?.choices?.[0]?.message?.content || streamedContent;
+          const content = requestController.signal.aborted
+            ? streamedContent
+            : (res?.choices?.[0]?.message?.content || streamedContent);
           const usage = res?.usage || {};
           const activeEp = String(res?.acceleration?.active || "").trim();
           compareResults[slot.key] = buildSettledCompareResult({
@@ -3795,19 +3787,11 @@ updateStateFromSdk();
           });
           if (classified === "pre-dispatch-stop") {
             compareResults[slot.key] = buildStoppedPreDispatchResult();
-            if (oneAtATime) {
-              try {
-                await safeUnloadCompareSlot(slot, unloadCtx);
-              } catch {}
-            }
+            await unloadIfThisRunLoaded(slot);
             break;
           }
           if (classified === "prep-stop") {
-            if (oneAtATime) {
-              try {
-                await safeUnloadCompareSlot(slot, unloadCtx);
-              } catch {}
-            }
+            await unloadIfThisRunLoaded(slot);
             break;
           }
           failCount++;
@@ -3832,7 +3816,8 @@ updateStateFromSdk();
       if (compareStopRequested) {
         statusMessage = `Arena run stopped` +
           (failCount > 0 ? ` with ${failCount} failure(s)` : "") +
-          (oneAtATime ? " (one-at-a-time)" : "");
+          (oneAtATime ? " (one-at-a-time)" : "") +
+          (compareStopAckError ? ` (${compareStopAckError})` : "");
       } else {
         statusMessage =
           failCount > 0
@@ -3881,10 +3866,14 @@ updateStateFromSdk();
       await cancelChatRequest(requestId);
     } catch (e: any) {
       if (compareRunGeneration !== runId) return;
-      statusMessage = `Stop warning: ${e?.message || e}`;
+      compareStopAckError = e?.message || String(e);
+      if (compareActiveStream === stream) {
+        statusMessage = `Stop warning: ${compareStopAckError}`;
+      }
       return;
     }
     if (compareRunGeneration !== runId) return;
+    if (compareActiveStream !== stream) return;
     statusMessage = "Stopping — the current model may still finish generating in the background.";
   }
 
@@ -9210,7 +9199,7 @@ Output only the summary text, no preamble.`;
                       <div class="result-content">
                         <MessageRenderer content={r.content || ""} />
                       </div>
-                      {#if r.status === "stopped"}
+                      {#if r.status === "stopped" && typeof r.nativeStreaming === "boolean"}
                         <p class="muted small">
                           Stop was requested during this slot. Native generation may still have
                           continued; the text above is what Flint received before Stop took effect.

@@ -50,6 +50,10 @@ export function buildFailedCompareResult(
   };
 }
 
+function finiteToken(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
 export function buildSettledCompareResult(opts: {
   content: string;
   stopRequested: boolean;
@@ -58,10 +62,10 @@ export function buildSettledCompareResult(opts: {
   nativeStreaming: boolean;
   firstDeltaAt: number | null;
   usage: {
-    prompt_tokens?: number;
-    input_tokens?: number;
-    completion_tokens?: number;
-    output_tokens?: number;
+    prompt_tokens?: number | null;
+    input_tokens?: number | null;
+    completion_tokens?: number | null;
+    output_tokens?: number | null;
   };
   servedVariantId?: string | null;
   activeExecutionProvider?: string | null;
@@ -72,8 +76,8 @@ export function buildSettledCompareResult(opts: {
       opts.stopRequested || opts.inferenceStarted == null
         ? undefined
         : opts.now - opts.inferenceStarted,
-    tokensIn: opts.usage.prompt_tokens ?? opts.usage.input_tokens,
-    tokensOut: opts.usage.completion_tokens ?? opts.usage.output_tokens,
+    tokensIn: finiteToken(opts.usage.prompt_tokens) ?? finiteToken(opts.usage.input_tokens),
+    tokensOut: finiteToken(opts.usage.completion_tokens) ?? finiteToken(opts.usage.output_tokens),
     rating: null,
     status: opts.stopRequested ? 'stopped' : 'completed',
     ttftMs:
