@@ -367,12 +367,12 @@ describe('renderComparisonMarkdown', () => {
     const nativeMd = renderComparisonMarkdown('Say hi', [slot()], {
       'model-a::default': result({ nativeStreaming: true, ttftMs: 88 }),
     });
-    expect(nativeMd).toContain('- Time to first token: 88 ms');
+    expect(nativeMd).toContain('- Time to first streamed text: 88 ms');
 
     const emulatedMd = renderComparisonMarkdown('Say hi', [slot()], {
       'model-a::default': result({ nativeStreaming: false, ttftMs: 88 }),
     });
-    expect(emulatedMd).not.toContain('Time to first token');
+    expect(emulatedMd).not.toContain('Time to first streamed text');
   });
 
   it('shows the execution provider when reported', () => {

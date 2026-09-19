@@ -34,7 +34,7 @@ export type CompareResult = {
    */
   status?: CompareResultStatus;
   /**
-   * Time to the first rendered token. Only meaningful when `nativeStreaming` is true — an
+   * Time to the first rendered text. Only meaningful when `nativeStreaming` is true — an
    * emulated stream reports the whole response as a single delta, so this would otherwise
    * measure total latency, not time-to-first-token.
    */
@@ -256,7 +256,7 @@ export function renderComparisonMarkdown(
     md += `- Status: ${r.status ?? (r.error ? 'failed' : 'completed')}\n`;
     md += `- Latency: ${r.latencyMs ?? '?'} ms\n`;
     if (r.nativeStreaming && typeof r.ttftMs === 'number') {
-      md += `- Time to first token: ${r.ttftMs} ms\n`;
+      md += `- Time to first streamed text: ${r.ttftMs} ms\n`;
     }
     md += `- Tokens: in ${r.tokensIn ?? '?'} / out ${r.tokensOut ?? '?'}\n`;
     md += `- Rating: ${r.rating || 'none'}\n\n`;

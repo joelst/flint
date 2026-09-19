@@ -57,6 +57,7 @@
     isUncertainOutcome,
     cancelBeforeDispatch,
     isServiceStartUncertain,
+    SidecarOperationError,
     type WslStatusInfo,
     type ModelInfo,
     type EpInfo,
@@ -175,6 +176,12 @@
     type CompareResult,
     type SavedComparison,
   } from "$lib/comparison-history";
+  import {
+    buildFailedCompareResult,
+    buildSettledCompareResult,
+    buildStoppedPreDispatchResult,
+    classifyCompareSlotError,
+  } from "$lib/compare-slot-outcome";
 
   // Integrations tab state
   let integrationsOS = $state<'windows' | 'unix'>(detectPlatform());
@@ -670,6 +677,14 @@
   let compareReviewId: string | null = $state(null);
   /** true = load → run → unload each slot (peak RAM ≈ largest model). false = try to keep all loaded. */
   let compareOneAtATime = $state(true);
+  /** True once Stop has been requested for the run in progress; UI-only, cleared at run start. */
+  let compareStopRequested = $state(false);
+  /**
+   * The in-flight slot's stream handle, if any. Not reactive: read/written only from
+   * runComparison/stopComparison, never bound directly in the template.
+   */
+  let compareActiveStream: { controller: AbortController; requestId: number | null } | null = null;
+  let compareRunGeneration = 0;
 
   // Settings: startup behaviour
   let autoStartService = $state(true);
@@ -3538,12 +3553,18 @@ updateStateFromSdk();
     compareReviewId = null;
     const prompt = comparePrompt.trim();
     comparePickerOpen = false;
+    compareStopRequested = false;
+    ++compareRunGeneration;
     isComparing = true;
     comparePreparing = true;
     compareResults = {};
 
     try {
       const memErr = await verifyCompareMemory(compareSlots);
+      if (compareStopRequested) {
+        statusMessage = "Arena run stopped";
+        return;
+      }
       if (memErr) {
         statusMessage = memErr;
         for (const slot of compareSlots) {
@@ -3551,6 +3572,7 @@ updateStateFromSdk();
             content: `[Memory check] ${memErr}`,
             error: memErr,
             rating: null,
+            status: "failed",
           };
         }
         compareResults = { ...compareResults };
@@ -3576,10 +3598,16 @@ updateStateFromSdk();
       let failCount = 0;
 
       for (const slot of compareSlots) {
+        // Stop was requested between slots (or during memory/load prep for this one): the
+        // remaining slots stay absent from compareResults, matching "never reached" semantics.
+        if (compareStopRequested) break;
+
         // latencyMs = chatCompletion only (after download/load/service prep)
         let inferenceStarted: number | null = null;
         try {
           await ensureCompareSlotDownloaded(slot);
+
+          if (compareStopRequested) break;
 
           // One-at-a-time: free other compare slots before loading this one (with consent rules).
           if (oneAtATime) {
@@ -3589,9 +3617,19 @@ updateStateFromSdk();
             }
           }
 
+          if (compareStopRequested) break;
+
           // Re-check free RAM/VRAM right before this load (stats change after prior loads/unloads).
           comparePrepStatus = `Checking memory for ${slot.label}…`;
           const slotMemErr = await verifySlotMemoryBeforeLoad(slot);
+          if (compareStopRequested) {
+            if (oneAtATime) {
+              try {
+                await safeUnloadCompareSlot(slot, unloadCtx);
+              } catch {}
+            }
+            break;
+          }
           if (slotMemErr) {
             failCount++;
             compareResults[slot.key] = {
@@ -3599,6 +3637,7 @@ updateStateFromSdk();
               latencyMs: undefined,
               error: slotMemErr,
               rating: null,
+              status: "failed",
             };
             compareResults = { ...compareResults };
             statusMessage = slotMemErr;
@@ -3616,8 +3655,24 @@ updateStateFromSdk();
               unloadCtx.loadedByCompare.add(slot.alias);
             }
           }
+          if (compareStopRequested) {
+            if (oneAtATime) {
+              try {
+                await safeUnloadCompareSlot(slot, unloadCtx);
+              } catch {}
+            }
+            break;
+          }
 
           await ensureServiceForCompare(slot.alias);
+          if (compareStopRequested) {
+            if (oneAtATime) {
+              try {
+                await safeUnloadCompareSlot(slot, unloadCtx);
+              } catch {}
+            }
+            break;
+          }
 
           // Re-select variant in case pool had another variant for same alias
           if (!isSlotInPool(slot)) {
@@ -3633,6 +3688,17 @@ updateStateFromSdk();
                 : selectedAccelerationPreference,
           };
 
+          if (compareStopRequested) {
+            // Stop landed while this slot was still downloading/loading — it never reached
+            // inference, so it gets no result at all (same as a slot never iterated to).
+            if (oneAtATime) {
+              try {
+                await safeUnloadCompareSlot(slot, unloadCtx);
+              } catch {}
+            }
+            break;
+          }
+
           // Discarded warm-up so timed run is not cold-start / first-token init.
           comparePrepStatus = `Warming up ${slot.label}…`;
           statusMessage = comparePrepStatus;
@@ -3647,38 +3713,111 @@ updateStateFromSdk();
             console.warn(`Compare warm-up failed for ${slot.alias}:`, warmErr?.message || warmErr);
           }
 
+          if (compareStopRequested) {
+            // Stop landed while warm-up was in flight — warm-up is not itself cancellable (it is
+            // discarded anyway), but it must not be followed by the real, expensive timed call.
+            if (oneAtATime) {
+              try {
+                await safeUnloadCompareSlot(slot, unloadCtx);
+              } catch {}
+            }
+            break;
+          }
+
           comparePrepStatus = `Running ${slot.label}…`;
           statusMessage = comparePrepStatus;
           // Latency = measured prompt only (after load + discarded warm-up).
           inferenceStarted = Date.now();
-          const res = await chatCompletion(
-            slot.alias,
-            [{ role: "user", content: prompt }],
-            { ...completionOpts, maxTokens: 512 },
-          );
-          const latency = Date.now() - inferenceStarted;
-          const content = res?.choices?.[0]?.message?.content || "";
+          let streamedContent = "";
+          let firstDeltaAt: number | null = null;
+          const requestController = new AbortController();
+          compareActiveStream = { controller: requestController, requestId: null };
+          let res: any;
+          try {
+            res = await chatCompletionStream(
+              slot.alias,
+              [{ role: "user", content: prompt }],
+              (delta: string) => {
+                if (requestController.signal.aborted) return;
+                if (firstDeltaAt == null) firstDeltaAt = Date.now();
+                streamedContent += delta;
+                compareResults[slot.key] = { ...(compareResults[slot.key] || {}), content: streamedContent };
+                compareResults = { ...compareResults };
+              },
+              { ...completionOpts, maxTokens: 512 },
+              (requestId: number) => {
+                if (compareActiveStream && compareActiveStream.controller === requestController) {
+                  compareActiveStream.requestId = requestId;
+                }
+                if (requestController.signal.aborted) {
+                  // Stop was requested before this request had an id to cancel by (a race with
+                  // onAssignedId); cancel now that one exists instead of leaving it undispatched.
+                  if (!cancelBeforeDispatch(requestId)) {
+                    void cancelChatRequest(requestId).catch(() => {});
+                  }
+                }
+              },
+            );
+          } finally {
+            if (compareActiveStream && compareActiveStream.controller === requestController) {
+              compareActiveStream = null;
+            }
+          }
+          const nativeStreaming = !!res?.nativeStreaming;
+          const content = res?.choices?.[0]?.message?.content || streamedContent;
           const usage = res?.usage || {};
-          compareResults[slot.key] = {
+          const activeEp = String(res?.acceleration?.active || "").trim();
+          compareResults[slot.key] = buildSettledCompareResult({
             content,
-            latencyMs: latency,
-            tokensIn: usage.prompt_tokens ?? usage.input_tokens,
-            tokensOut: usage.completion_tokens ?? usage.output_tokens,
-            rating: null,
-          };
+            stopRequested: compareStopRequested,
+            inferenceStarted,
+            now: Date.now(),
+            nativeStreaming,
+            firstDeltaAt,
+            usage,
+            servedVariantId: res?.servedVariantId ?? null,
+            activeExecutionProvider: activeEp || null,
+          });
 
           if (oneAtATime) {
             await safeUnloadCompareSlot(slot, unloadCtx);
           }
+
+          if (compareStopRequested) break;
         } catch (err: any) {
+          const classified = classifyCompareSlotError({
+            stopRequested: compareStopRequested,
+            error:
+              err instanceof SidecarOperationError
+                ? { certainty: err.certainty, cmd: err.cmd, message: err.message }
+                : { message: err?.message || String(err) },
+            inferenceStarted,
+          });
+          if (classified === "pre-dispatch-stop") {
+            compareResults[slot.key] = buildStoppedPreDispatchResult();
+            if (oneAtATime) {
+              try {
+                await safeUnloadCompareSlot(slot, unloadCtx);
+              } catch {}
+            }
+            break;
+          }
+          if (classified === "prep-stop") {
+            if (oneAtATime) {
+              try {
+                await safeUnloadCompareSlot(slot, unloadCtx);
+              } catch {}
+            }
+            break;
+          }
           failCount++;
-          compareResults[slot.key] = {
-            content: `[Error] ${err?.message || err}`,
-            // Only report inference latency if we reached chatCompletion
-            latencyMs: inferenceStarted != null ? Date.now() - inferenceStarted : undefined,
-            error: err?.message || String(err),
-            rating: null,
-          };
+          compareResults[slot.key] = buildFailedCompareResult(
+            err instanceof SidecarOperationError
+              ? { message: err.message }
+              : { message: err?.message || String(err) },
+            inferenceStarted,
+            Date.now(),
+          );
           // Only unload what we are allowed to (never silent-evict preloaded without consent)
           if (oneAtATime) {
             try {
@@ -3690,16 +3829,63 @@ updateStateFromSdk();
       }
 
       comparePrepStatus = "";
-      statusMessage =
-        failCount > 0
-          ? `Arena run finished with ${failCount} failure(s)` +
-            (oneAtATime ? " (one-at-a-time)" : "")
-          : `Arena run complete` + (oneAtATime ? " (one-at-a-time)" : "");
+      if (compareStopRequested) {
+        statusMessage = `Arena run stopped` +
+          (failCount > 0 ? ` with ${failCount} failure(s)` : "") +
+          (oneAtATime ? " (one-at-a-time)" : "");
+      } else {
+        statusMessage =
+          failCount > 0
+            ? `Arena run finished with ${failCount} failure(s)` +
+              (oneAtATime ? " (one-at-a-time)" : "")
+            : `Arena run complete` + (oneAtATime ? " (one-at-a-time)" : "");
+      }
     } finally {
       comparePreparing = false;
       comparePrepStatus = "";
       isComparing = false;
+      compareActiveStream = null;
+      compareStopRequested = false;
     }
+  }
+
+  /**
+   * Asks the current run to stop after the in-flight slot settles. The sidecar keeps draining
+   * the native iterator, so the slot's await does not resolve early; later slots are skipped.
+   */
+  async function stopComparison() {
+    if (!isComparing || compareStopRequested) return;
+    compareStopRequested = true;
+    const runId = compareRunGeneration;
+    const stream = compareActiveStream;
+    if (!stream) {
+      statusMessage = "Stopping after the current step…";
+      return;
+    }
+    const requestId = stream.requestId;
+    stream.controller.abort();
+    if (requestId == null) {
+      // Assigned asynchronously; abort stops this slot's delta rendering and the flag
+      // prevents any further slot.
+      statusMessage = "Stopping after the current step…";
+      return;
+    }
+    // Provable only before the request is written. After that the sidecar suppresses
+    // further deltas; native generation may continue without being shown.
+    const abandoned = cancelBeforeDispatch(requestId);
+    if (abandoned) {
+      statusMessage = "Slot cancelled before it started; no further slots will run.";
+      return;
+    }
+    try {
+      await cancelChatRequest(requestId);
+    } catch (e: any) {
+      if (compareRunGeneration !== runId) return;
+      statusMessage = `Stop warning: ${e?.message || e}`;
+      return;
+    }
+    if (compareRunGeneration !== runId) return;
+    statusMessage = "Stopping — the current model may still finish generating in the background.";
   }
 
   function setCompareRating(key: string, rating: "up" | "down") {
@@ -8960,16 +9146,26 @@ Output only the summary text, no preamble.`;
                   {#if isComparing || comparePreparing}
                     <Icon name="loader" size={15} class="spin" />
                     <span>{comparePreparing ? "Preparing…" : "Running…"}</span>
-                    <span class="compare-uncancellable">Stop is not available for Compare — wait for every slot to finish.</span>
                   {:else}
                     <Icon name="send" size={15} />
                     <span>Send</span>
                   {/if}
                 </button>
+                {#if isComparing}
+                  <button
+                    type="button"
+                    class="secondary small"
+                    onclick={stopComparison}
+                    disabled={compareStopRequested}
+                    title="Stop after the slot currently generating finishes; it may already be done in the background."
+                  >
+                    {compareStopRequested ? "Stopping…" : "Stop"}
+                  </button>
+                {/if}
                 {#if comparePrepStatus}
                   <span class="compare-prep-status">{comparePrepStatus}</span>
                 {/if}
-                {#if Object.keys(compareResults).length}
+                {#if Object.keys(compareResults).length && !isComparing && !comparePreparing}
                   <button
                     type="button"
                     class="secondary small"
@@ -9000,14 +9196,26 @@ Output only the summary text, no preamble.`;
                 <div class="compare-card" class:has-error={!!r.error}>
                   <div class="card-header">
                     <strong title={slot.variantId || slot.alias}>{slot.label}</strong>
+                    {#if r.status === "stopped"}<span class="badge">stopped</span>{/if}
                     {#if r.latencyMs != null}<span class="badge">{r.latencyMs}ms</span>{/if}
+                    {#if r.nativeStreaming && r.ttftMs != null}<span class="badge" title="Time from request to first streamed text">{r.ttftMs}ms to first text</span>{/if}
                     {#if r.tokensOut != null}<span class="badge">{r.tokensOut} tok out</span>{/if}
+                    {#if r.servedVariantId && r.servedVariantId !== slot.variantId}
+                      <span class="badge" title="Actually-served variant">{r.servedVariantId}</span>
+                    {/if}
+                    {#if r.activeExecutionProvider}<span class="badge">{r.activeExecutionProvider}</span>{/if}
                   </div>
                   <div class="result-body">
                     {#if r.content}
                       <div class="result-content">
                         <MessageRenderer content={r.content || ""} />
                       </div>
+                      {#if r.status === "stopped"}
+                        <p class="muted small">
+                          Stop was requested during this slot. Native generation may still have
+                          continued; the text above is what Flint received before Stop took effect.
+                        </p>
+                      {/if}
                     {:else if isComparing}
                       <em>Waiting…</em>
                     {:else}
@@ -9015,8 +9223,8 @@ Output only the summary text, no preamble.`;
                     {/if}
                   </div>
                   <div class="rating">
-                    <button type="button" class:selected={r.rating === "up"} onclick={() => setCompareRating(slot.key, "up")}>👍</button>
-                    <button type="button" class:selected={r.rating === "down"} onclick={() => setCompareRating(slot.key, "down")}>👎</button>
+                    <button type="button" class:selected={r.rating === "up"} disabled={isComparing || comparePreparing} onclick={() => setCompareRating(slot.key, "up")}>👍</button>
+                    <button type="button" class:selected={r.rating === "down"} disabled={isComparing || comparePreparing} onclick={() => setCompareRating(slot.key, "down")}>👎</button>
                   </div>
                 </div>
               {/each}
