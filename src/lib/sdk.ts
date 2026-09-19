@@ -60,6 +60,7 @@ import {
   type AcceleratorReadiness,
 } from './accelerator-readiness';
 import { deadlineForCommand } from './ipc-deadlines';
+import { classifySidecarStderrLine } from './sidecar-stderr';
 export {
   SidecarOperationError,
   isUncertainOutcome,
@@ -341,6 +342,8 @@ export interface RuntimeState {
   service: RuntimeServiceState;
   models: RuntimeModelState;
   generation: number;
+  /** True while a start/stop/restart is queued or running. */
+  transitioning: boolean;
 }
 
 export interface FlintSDKState {
@@ -395,6 +398,7 @@ const initialState: FlintSDKState = {
     service: 'unknown',
     models: 'unknown',
     generation: 0,
+    transitioning: false,
   },
   ready: false,
   error: null,
@@ -635,14 +639,29 @@ async function spawnSidecar() {
 
   const processStderr = (text: string, generation: number) => {
     if (generation !== sidecarGeneration) return;
-    text = text.trim();
-    if (!text) return;
-    stderrLines.push(text);
-    if (stderrLines.length > 10) {
-      stderrLines.shift();
+    for (const raw of text.split(/\r?\n/)) {
+      const trimmed = raw.trim();
+      if (!trimmed) continue;
+      const classified = classifySidecarStderrLine(trimmed);
+      if (classified.level === 'error') {
+        stderrLines.push(classified.message);
+        if (stderrLines.length > 10) stderrLines.shift();
+        console.error(`[sidecar stderr] ${classified.message}`);
+      } else if (classified.level === 'warn') {
+        console.warn(`[sidecar stderr] ${classified.message}`);
+      } else {
+        console.log(`[sidecar stderr] ${classified.message}`);
+      }
+      sdkState.update((s) => ({
+        ...s,
+        logs: [...s.logs.slice(-199), {
+          ts: Date.now(),
+          level: classified.level,
+          message: classified.message,
+          source: 'sdk' as const,
+        }],
+      }));
     }
-    console.error(`[sidecar stderr] ${text}`);
-    sdkState.update(s => ({ ...s, logs: [...s.logs.slice(-199), { ts: Date.now(), level: 'error' as const, message: text, source: 'sdk' as const }] }));
   };
 
   const processClose = (data: any, generation: number) => {
@@ -1726,21 +1745,27 @@ export async function getLocalEndpoint(): Promise<string | undefined> {
  * them queue here rather than each caller guarding itself.
  */
 let serviceTransition: Promise<unknown> = Promise.resolve();
+let serviceTransitionDepth = 0;
 
 function queueServiceTransition<T>(fn: () => Promise<T>): Promise<T> {
+  serviceTransitionDepth += 1;
+  updateRuntime({ transitioning: true });
   const next = serviceTransition.then(fn, fn);
   // Keep the chain alive even when a transition fails; a rejected tail would reject every
-  // subsequent transition.
-  serviceTransition = next.catch(() => {});
+  // subsequent transition. Count queued work, not only the currently running callback, so
+  // the UI latch cannot drop while another start/stop is still waiting.
+  const settled = next.finally(() => {
+    serviceTransitionDepth -= 1;
+    updateRuntime({ transitioning: serviceTransitionDepth > 0 });
+  });
+  serviceTransition = settled.catch(() => {});
   return next;
 }
 
-/** True while a start/stop/restart is in progress, for disabling UI that would overlap it. */
+/** True while a start/stop/restart is queued or running, for disabling UI that would overlap it. */
 export function isServiceTransitioning(): boolean {
   return serviceTransitionDepth > 0;
 }
-
-let serviceTransitionDepth = 0;
 /** Invalidates starts that were queued before the most recent Stop request. */
 let serviceStopFence = 0;
 
@@ -2192,7 +2217,6 @@ export async function withServiceTransition<T>(
   fn: (handle: ServiceTransitionHandle) => Promise<T>
 ): Promise<T> {
   return queueServiceTransition(async () => {
-    serviceTransitionDepth += 1;
     const transitionFence = serviceStopFence;
     // The handle is only valid for the duration of the callback. Retaining it and calling
     // startNow() later would run a destructive restart with no lock held.
@@ -2210,7 +2234,6 @@ export async function withServiceTransition<T>(
       });
     } finally {
       handleActive = false;
-      serviceTransitionDepth -= 1;
     }
   });
 }

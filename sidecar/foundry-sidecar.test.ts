@@ -281,6 +281,11 @@ describe('foundry-sidecar protocol basics', () => {
       },
     });
     const nonJsonStdout = collectNonJsonStdout(proc);
+    let stderrText = '';
+    const onStderr = (chunk: Buffer | string) => {
+      stderrText += chunk.toString();
+    };
+    proc.stderr.on('data', onStderr);
 
     try {
       await waitForLine(proc, (msg) => msg.ready === true);
@@ -337,8 +342,11 @@ describe('foundry-sidecar protocol basics', () => {
       });
       nonJsonStdout.stop();
       expect(nonJsonStdout.lines).toEqual([]);
+      expect(stderrText).toContain('FLINT_DIAG info fake model load console noise');
+      expect(stderrText).toContain('FLINT_DIAG info fake model load stdout noise');
     } finally {
       nonJsonStdout.stop();
+      proc.stderr.off('data', onStderr);
       if (!proc.killed) proc.kill();
       rmSync(homeDir, { recursive: true, force: true });
     }

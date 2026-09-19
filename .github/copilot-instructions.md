@@ -8,7 +8,7 @@ Facts only — no history. Record what is true now; `git log` and `CHANGELOG.md`
 - Flint is a Tauri 2 desktop app with a Svelte 5 + TypeScript frontend.
 - The frontend runs as a SPA (`src/routes/+layout.ts` sets `ssr = false`) because Tauri has no Node SSR runtime.
 - Most app behavior lives in `src/routes/+page.svelte`; `src/lib/sdk.ts` is the main abstraction boundary for Foundry Local actions.
-- Production model/service work goes through `sidecar/foundry-sidecar.js` over stdio JSON lines; the Rust layer is intentionally thin.
+- Production model/service work goes through `sidecar/foundry-sidecar.js` (bootstrap) → `sidecar/foundry-sidecar-main.js` over stdio JSON lines; the Rust layer is intentionally thin.
 - Vite externalizes `foundry-local-sdk`, `foundry-local-sdk-winml`, and Node builtins so the web bundle stays buildable.
 
 ## Commands (short)
@@ -18,7 +18,7 @@ Facts only — no history. Record what is true now; `git log` and `CHANGELOG.md`
 
 ## Working style
 - Prefer the SDK/sidecar path in `src/lib/sdk.ts`; do not import Foundry Local into the web bundle.
-- Sidecar protocol is JSON-lines; new commands update `src/lib/sdk.ts` (and IPC contracts if needed) **and** `sidecar/foundry-sidecar.js`. In the sidecar a command must be added in **three** places — `KNOWN_COMMANDS`, `FIELD_TYPES`, `COMMAND_SCHEMA` — plus any extra checks at the end of `validateCommand`.
+- Sidecar protocol is JSON-lines; new commands update `src/lib/sdk.ts` (and IPC contracts if needed) **and** `sidecar/foundry-sidecar-main.js`. In the sidecar a command must be added in **three** places — `KNOWN_COMMANDS`, `FIELD_TYPES`, `COMMAND_SCHEMA` — plus any extra checks at the end of `validateCommand`.
 - SPA/client-only only — no SSR assumptions.
 - Keep Tauri resources in sync (`src-tauri/tauri.conf.json` + `scripts/verify-bundle.cjs`).
 - On Windows prefer `foundry-local-sdk-winml`.

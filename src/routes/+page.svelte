@@ -2645,9 +2645,8 @@ updateStateFromSdk();
     });
   }
 
-  // Drives UI disable only. Real serialization lives in sdk.ts, where every startService /
-  // stopService transition queues on one lock — this flag cannot cover the paths inside the SDK.
-  let serviceTransitionBusy = $state(false);
+  // Mirrors the SDK lock, including queued work. Real serialization lives in sdk.ts.
+  const serviceTransitionBusy = $derived(!!state.runtime?.transitioning);
   const serviceStarting = $derived(serviceTransitionBusy && !state.serviceRunning);
 
   /**
@@ -2729,29 +2728,24 @@ updateStateFromSdk();
     preferredEp?: string,
     opts?: { convenience?: boolean },
   ): Promise<string | undefined> {
-    serviceTransitionBusy = true;
-    try {
-      const ensured = await sdkEnsureServiceRunning(
-        networkPort,
-        alias,
-        preferredEp,
-        networkBindAddress || undefined,
-        opts,
-      );
-      if (ensured.started) markNetworkSettingsApplied();
-      if (alias) {
-        const resident = (state.pool || []).some((e: any) => e.alias === alias);
-        if (!resident) await sdkLoadModel({ alias }, "audio");
-        if (preferredEp && !ensured.started) {
-          appendAppLog(
-            `Ensure service: ${alias} loaded into the running service (left up to preserve other loaded models); acceleration preference "${preferredEp}" is applied per transcription request.`,
-          );
-        }
+    const ensured = await sdkEnsureServiceRunning(
+      networkPort,
+      alias,
+      preferredEp,
+      networkBindAddress || undefined,
+      opts,
+    );
+    if (ensured.started) markNetworkSettingsApplied();
+    if (alias) {
+      const resident = (state.pool || []).some((e: any) => e.alias === alias);
+      if (!resident) await sdkLoadModel({ alias }, "audio");
+      if (preferredEp && !ensured.started) {
+        appendAppLog(
+          `Ensure service: ${alias} loaded into the running service (left up to preserve other loaded models); acceleration preference "${preferredEp}" is applied per transcription request.`,
+        );
       }
-      return ensured.endpoint;
-    } finally {
-      serviceTransitionBusy = false;
     }
+    return ensured.endpoint;
   }
 
   async function refreshWslStatus() {
@@ -3923,24 +3917,19 @@ updateStateFromSdk();
               !startupAuthorization.isCurrent(startupAuthorizationToken)
             ) return;
             statusMessage = "Starting local service...";
-            serviceTransitionBusy = true;
-            try {
-              const ensured = await sdkEnsureServiceRunning(
-                networkPort,
-                undefined,
-                selectedAccelerationPreference === "auto"
-                  ? undefined
-                  : selectedAccelerationPreference,
-                networkBindAddress || undefined,
-                {
-                  convenience: true,
-                  expectedGeneration: readiness.generation,
-                },
-              );
-              if (ensured.started) markNetworkSettingsApplied();
-            } finally {
-              serviceTransitionBusy = false;
-            }
+            const ensured = await sdkEnsureServiceRunning(
+              networkPort,
+              undefined,
+              selectedAccelerationPreference === "auto"
+                ? undefined
+                : selectedAccelerationPreference,
+              networkBindAddress || undefined,
+              {
+                convenience: true,
+                expectedGeneration: readiness.generation,
+              },
+            );
+            if (ensured.started) markNetworkSettingsApplied();
           },
         });
         if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
@@ -4154,7 +4143,6 @@ updateStateFromSdk();
   }
 
   async function startLocalService() {
-    serviceTransitionBusy = true;
     try {
       // An explicit start bypasses the stand-down guard on its own (it passes no `convenience`
       // flag), so nothing is cleared here. The latch is retired only by this attempt succeeding.
@@ -4172,8 +4160,6 @@ updateStateFromSdk();
       serviceStartUncertain = isServiceStartUncertain();
       statusMessage = `Failed to start service: ${e?.message || e}`;
       appendAppLog(`Service start failed: ${e?.message || e}`, 'error');
-    } finally {
-      serviceTransitionBusy = false;
     }
   }
 

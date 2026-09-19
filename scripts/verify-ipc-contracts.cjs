@@ -240,7 +240,7 @@ function extractSchemaRequiredOptional(source, marker) {
 
 function verifyIpcContracts(root, log = console) {
   const contractsPath = path.join(root, 'src', 'lib', 'ipc-contracts.ts');
-  const sidecarPath = path.join(root, 'sidecar', 'foundry-sidecar.js');
+  const sidecarPath = path.join(root, 'sidecar', 'foundry-sidecar-main.js');
   const outcomesPath = path.join(root, 'src', 'lib', 'operation-outcome.ts');
   const deadlinesPath = path.join(root, 'src', 'lib', 'ipc-deadlines.ts');
 

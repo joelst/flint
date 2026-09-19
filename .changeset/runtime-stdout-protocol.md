@@ -3,4 +3,4 @@
 ---
 
 Protect the runtime protocol from dependency/native stdout noise so operations do not fail with invalid JSON frames.
-Clarify startup progress UI by hiding premature retry/start actions and showing starting indicators.
+Keep redirected sidecar diagnostics out of the error log, and show Starting… for every queued service start or restart.
