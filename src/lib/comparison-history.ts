@@ -82,7 +82,7 @@ function isCompareResult(value: unknown): value is CompareResult {
 
 function isSavedComparison(value: unknown): value is SavedComparison {
   if (!isPlainObject(value)) return false;
-  if (typeof value.id !== 'string' || typeof value.createdAt !== 'number' || typeof value.prompt !== 'string') {
+  if (typeof value.id !== 'string' || !Number.isFinite(value.createdAt) || typeof value.prompt !== 'string') {
     return false;
   }
   if (!Array.isArray(value.slots) || !value.slots.every(isCompareSlot)) return false;

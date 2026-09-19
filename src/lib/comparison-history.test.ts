@@ -143,6 +143,16 @@ describe('loadComparisonHistory', () => {
     }
   });
 
+  it('backs up an overflow createdAt timestamp as corrupt', () => {
+    const run = savedRun();
+    const raw = JSON.stringify([run]).replace(`"createdAt":${run.createdAt}`, '"createdAt":1e400');
+    expect(JSON.parse(raw)[0].createdAt).toBe(Infinity);
+    const loaded = loadComparisonHistory(new MemoryStorage({ [COMPARE_HISTORY_KEY]: raw }));
+    expect(loaded.history).toEqual([]);
+    expect(loaded.writable).toBe(true);
+    expect(loaded.backedUp).toBe(true);
+  });
+
   it('rejects an entry whose results field is missing', () => {
     const run = savedRun();
     const raw = JSON.stringify([{ ...run, results: undefined }]);
