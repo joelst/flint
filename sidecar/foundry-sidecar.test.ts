@@ -352,6 +352,151 @@ describe('foundry-sidecar protocol basics', () => {
       rmSync(homeDir, { recursive: true, force: true });
     }
   });
+
+  it('applies requested temperature/maxTokens to the SDK chat client before completion', async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-chat-settings-home-'));
+    const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
+    const corePath = join(homeDir, 'fake-core.dylib');
+    writeFileSync(corePath, '');
+    // Echo client.settings at call time so we can see whether the sidecar wrote them
+    // before completeChat / completeStreamingChat. Non-undefined sentinels make an
+    // accidental undefined clobber visible (JSON.stringify drops undefined).
+    writeFileSync(loaderPath, `
+      const sdk = \`
+        class FakeChatClientSettings {
+          constructor() { this.temperature = 0.11; this.maxTokens = 7; }
+        }
+        class FakeChatClient {
+          constructor() { this.settings = new FakeChatClientSettings(); }
+          async completeChat() {
+            return {
+              choices: [{ message: {
+                role: 'assistant',
+                content: JSON.stringify({ temperature: this.settings.temperature, maxTokens: this.settings.maxTokens }),
+              } }],
+            };
+          }
+          async *completeStreamingChat() {
+            yield { choices: [{ delta: {
+              content: JSON.stringify({ temperature: this.settings.temperature, maxTokens: this.settings.maxTokens }),
+            } }] };
+          }
+        }
+        class FakeModel {
+          constructor() { this.id = 'fake-variant'; this.loaded = false; }
+          async load() { this.loaded = true; }
+          isLoaded() { return this.loaded; }
+          getExecutionProvider() { return 'CPUExecutionProvider'; }
+          createChatClient() { return new FakeChatClient(); }
+        }
+        class FakeManager {
+          constructor() {
+            this.catalog = {
+              getModel: async () => new FakeModel(),
+              getModels: async () => [],
+            };
+          }
+          static create() { return new FakeManager(); }
+        }
+        export { FakeManager as FoundryLocalManager };
+      \`;
+      export async function resolve(specifier, context, nextResolve) {
+        if (specifier === 'foundry-local-sdk') {
+          return { url: 'data:text/javascript,' + encodeURIComponent(sdk), shortCircuit: true };
+        }
+        return nextResolve(specifier, context);
+      }
+      export async function load(url, context, nextLoad) {
+        if (url.startsWith('data:text/javascript,')) {
+          return { format: 'module', source: decodeURIComponent(url.slice('data:text/javascript,'.length)), shortCircuit: true };
+        }
+        return nextLoad(url, context);
+      }
+    `);
+    const proc = spawn(process.execPath, [
+      '--experimental-loader', pathToFileURL(loaderPath).href, 'sidecar/foundry-sidecar.js'
+    ], {
+      cwd: process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        HOME: homeDir,
+        USERPROFILE: homeDir,
+        FLINT_FOUNDRY_CORE_PATH: corePath,
+      },
+    });
+
+    try {
+      await waitForLine(proc, (msg) => msg.ready === true);
+      proc.stdin.write(`${JSON.stringify({
+        id: 50, cmd: 'init', appName: 'flint-test', logLevel: 'info'
+      })}\n`);
+      expect((await waitForLine(proc, (msg) => msg.id === 50)).ok).toBe(true);
+
+      // Buffered (non-streaming) SDK branch.
+      proc.stdin.write(`${JSON.stringify({
+        id: 51,
+        cmd: 'chatCompletion',
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'hello' }],
+        stream: false,
+        temperature: 0.42,
+        maxTokens: 123,
+      })}\n`);
+      const buffered = await waitForLine(proc, (msg) => msg.id === 51);
+      expect(buffered.ok).toBe(true);
+      expect(JSON.parse(buffered.result.choices[0].message.content)).toEqual({
+        temperature: 0.42,
+        maxTokens: 123,
+      });
+
+      // Streaming SDK branch.
+      proc.stdin.write(`${JSON.stringify({
+        id: 52,
+        cmd: 'chatCompletion',
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'hello' }],
+        stream: true,
+        temperature: 0.77,
+        maxTokens: 55,
+      })}\n`);
+      const streamedDelta = await waitForLine(proc, (msg) => msg.id === 52 && msg.stream === true);
+      expect(JSON.parse(streamedDelta.delta)).toEqual({ temperature: 0.77, maxTokens: 55 });
+      expect((await waitForLine(proc, (msg) => msg.id === 52 && msg.ok === true)).ok).toBe(true);
+
+      // Omitted fields must not clobber the client's own defaults with undefined/NaN.
+      proc.stdin.write(`${JSON.stringify({
+        id: 53,
+        cmd: 'chatCompletion',
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'hello' }],
+        stream: false,
+      })}\n`);
+      const defaulted = await waitForLine(proc, (msg) => msg.id === 53);
+      expect(JSON.parse(defaulted.result.choices[0].message.content)).toEqual({
+        temperature: 0.11,
+        maxTokens: 7,
+      });
+
+      // Setting only one field must leave the other at the client default.
+      proc.stdin.write(`${JSON.stringify({
+        id: 54,
+        cmd: 'chatCompletion',
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'hello' }],
+        stream: false,
+        temperature: 0.5,
+      })}\n`);
+      const partial = await waitForLine(proc, (msg) => msg.id === 54);
+      expect(JSON.parse(partial.result.choices[0].message.content)).toEqual({
+        temperature: 0.5,
+        maxTokens: 7,
+      });
+    } finally {
+      if (!proc.killed) proc.kill();
+      rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('foundry-sidecar command schema validation', () => {
