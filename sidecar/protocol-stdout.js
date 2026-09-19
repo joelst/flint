@@ -4,9 +4,9 @@ export const DIAGNOSTIC_PREFIX = 'FLINT_DIAG';
 
 function chunkToText(chunk, encoding) {
   if (typeof chunk === 'string') return chunk;
-  if (Buffer.isBuffer(chunk)) {
-    return chunk.toString(typeof encoding === 'string' ? encoding : 'utf8');
-  }
+  const enc = typeof encoding === 'string' ? encoding : 'utf8';
+  if (Buffer.isBuffer(chunk)) return chunk.toString(enc);
+  if (chunk instanceof Uint8Array) return Buffer.from(chunk).toString(enc);
   return String(chunk);
 }
 
