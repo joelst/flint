@@ -2648,6 +2648,7 @@ updateStateFromSdk();
   // Drives UI disable only. Real serialization lives in sdk.ts, where every startService /
   // stopService transition queues on one lock — this flag cannot cover the paths inside the SDK.
   let serviceTransitionBusy = $state(false);
+  const serviceStarting = $derived(serviceTransitionBusy && !state.serviceRunning);
 
   /**
    * Mirrors the SDK's stand-down state for display only.
@@ -3922,19 +3923,24 @@ updateStateFromSdk();
               !startupAuthorization.isCurrent(startupAuthorizationToken)
             ) return;
             statusMessage = "Starting local service...";
-            const ensured = await sdkEnsureServiceRunning(
-              networkPort,
-              undefined,
-              selectedAccelerationPreference === "auto"
-                ? undefined
-                : selectedAccelerationPreference,
-              networkBindAddress || undefined,
-              {
-                convenience: true,
-                expectedGeneration: readiness.generation,
-              },
-            );
-            if (ensured.started) markNetworkSettingsApplied();
+            serviceTransitionBusy = true;
+            try {
+              const ensured = await sdkEnsureServiceRunning(
+                networkPort,
+                undefined,
+                selectedAccelerationPreference === "auto"
+                  ? undefined
+                  : selectedAccelerationPreference,
+                networkBindAddress || undefined,
+                {
+                  convenience: true,
+                  expectedGeneration: readiness.generation,
+                },
+              );
+              if (ensured.started) markNetworkSettingsApplied();
+            } finally {
+              serviceTransitionBusy = false;
+            }
           },
         });
         if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
@@ -4148,6 +4154,7 @@ updateStateFromSdk();
   }
 
   async function startLocalService() {
+    serviceTransitionBusy = true;
     try {
       // An explicit start bypasses the stand-down guard on its own (it passes no `convenience`
       // flag), so nothing is cleared here. The latch is retired only by this attempt succeeding.
@@ -4165,6 +4172,8 @@ updateStateFromSdk();
       serviceStartUncertain = isServiceStartUncertain();
       statusMessage = `Failed to start service: ${e?.message || e}`;
       appendAppLog(`Service start failed: ${e?.message || e}`, 'error');
+    } finally {
+      serviceTransitionBusy = false;
     }
   }
 
@@ -6034,8 +6043,13 @@ Output only the summary text, no preamble.`;
 
       {#if state.serviceRunning}
         <span class="service-badge running">● Service ON</span>
+      {:else if state.ready && serviceStarting}
+        <button class="tiny" disabled>
+          <span class="inline-spinner" aria-hidden="true"></span>
+          Starting…
+        </button>
       {:else if state.ready}
-        <button class="tiny" onclick={startLocalService}>Start Service</button>
+        <button class="tiny" onclick={startLocalService} disabled={serviceTransitionBusy}>Start Service</button>
       {/if}
 
       <span class="status-msg">{statusMessage}</span>
@@ -6182,8 +6196,9 @@ Output only the summary text, no preamble.`;
       >
         <span class="nav-icon" aria-hidden="true">
           <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="3" y="4" width="7" height="16" rx="1" stroke="currentColor" stroke-width="1.6"/>
-            <rect x="14" y="4" width="7" height="16" rx="1" stroke="currentColor" stroke-width="1.6"/>
+            <path d="M6 4.5h4.5v4H6zM6 15.5h4.5v4H6zM15 10h4.5v4H15z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+            <path d="M10.5 6.5h2.2c1.2 0 2.3.8 2.7 2l.5 1.5M10.5 17.5h2.2c1.2 0 2.3-.8 2.7-2l.5-1.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+            <path d="M18 8.1l1.5 1.9-2.2.8M18 15.9l1.5-1.9-2.2-.8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </span>
         <span class="nav-label">Model Arena</span>
@@ -6362,18 +6377,17 @@ Output only the summary text, no preamble.`;
                   <strong>bundled Node</strong> binary for the JS sidecar; PATH Node is a
                   fallback (dev / incomplete install). See Help → Troubleshooting.
                 </p>
+                <button onclick={init}>Retry</button>
               {:else}
-                <p>
-                  <strong
-                    >Starting sidecar + bundled Foundry Local runtime...</strong
-                  >
-                </p>
+                <div class="startup-status" role="status" aria-live="polite">
+                  <span class="startup-spinner" aria-hidden="true"></span>
+                  <strong>Starting sidecar + bundled Foundry Local runtime...</strong>
+                </div>
                 <p>
                   Checking Node.js, then starting the sidecar for model management
                   and the local service.
                 </p>
               {/if}
-              <button onclick={init}>Retry</button>
             </div>
           {:else}
             <div class="toolbar">
@@ -7842,9 +7856,9 @@ Output only the summary text, no preamble.`;
             <div class="service-actions">
               <button
                 onclick={startLocalService}
-                disabled={state.serviceRunning || !state.ready}
+                disabled={state.serviceRunning || !state.ready || serviceTransitionBusy}
               >
-                Start Service
+                {serviceStarting ? "Starting…" : "Start Service"}
               </button>
               <button
                 onclick={stopLocalService}
@@ -9636,6 +9650,24 @@ Output only the summary text, no preamble.`;
     padding: 1px 6px;
     background: var(--panel-bg);
     border: 1px solid var(--border);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .inline-spinner,
+  .startup-spinner {
+    display: inline-block;
+    border-radius: 999px;
+    border: 2px solid color-mix(in srgb, var(--accent) 25%, var(--border));
+    border-top-color: var(--accent);
+    animation: spin 0.8s linear infinite;
+    flex: 0 0 auto;
+  }
+
+  .inline-spinner {
+    width: 0.75rem;
+    height: 0.75rem;
   }
 
   .theme-toggle {
@@ -10541,6 +10573,18 @@ Output only the summary text, no preamble.`;
   .notice .small.muted {
     opacity: 0.85;
     font-size: 0.85rem;
+  }
+
+  .startup-status {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 0.75rem;
+  }
+
+  .startup-spinner {
+    width: 1.15rem;
+    height: 1.15rem;
   }
 
   .placeholder {

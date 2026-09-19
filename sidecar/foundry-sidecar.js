@@ -78,13 +78,15 @@ import { buildInferenceMetrics } from './inference-metrics.js';
 import { summarizeCacheInventory } from './cache-inventory.js';
 import { createHealthRing } from './health-ring.js';
 import { foundryRuntimePinWarning } from './foundry-runtime-pin.js';
+import { protectProtocolStdout } from './protocol-stdout.js';
 
 const execFileAsync = promisify(execFile);
+const writeProtocolLine = protectProtocolStdout();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+const rl = readline.createInterface({ input: process.stdin, terminal: false });
 const SIDECAR_PROTOCOL_VERSION = 1;
 const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS = 5_000;
 const operationAdmission = createOperationAdmission();
@@ -2121,7 +2123,7 @@ function audit(cmd, detail) {
 }
 
 function send (msg, callback) {
-  process.stdout.write(JSON.stringify(msg) + '\n', callback);
+  writeProtocolLine(JSON.stringify(msg), callback);
 }
 
 function log (level, message) {
