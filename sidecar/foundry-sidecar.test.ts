@@ -54,6 +54,40 @@ function waitForLine(
   });
 }
 
+function collectNonJsonStdout(proc: ChildProcessWithoutNullStreams) {
+  const lines: string[] = [];
+  let buffer = '';
+  let stopped = false;
+  const onData = (chunk: Buffer | string) => {
+    buffer += chunk.toString();
+    const parts = buffer.split(/\r?\n/);
+    buffer = parts.pop() || '';
+    for (const line of parts) {
+      if (!line.trim()) continue;
+      try {
+        JSON.parse(line);
+      } catch {
+        lines.push(line);
+      }
+    }
+  };
+  proc.stdout.on('data', onData);
+  return {
+    lines,
+    stop() {
+      if (stopped) return;
+      stopped = true;
+      proc.stdout.off('data', onData);
+      if (!buffer.trim()) return;
+      try {
+        JSON.parse(buffer);
+      } catch {
+        lines.push(buffer);
+      }
+    },
+  };
+}
+
 describe('foundry-sidecar protocol basics', () => {
   it('scans the cache inventory through IPC without traversing linked targets', async () => {
     const home = mkdtempSync(join(tmpdir(), 'flint-inventory-home-'));
@@ -168,7 +202,7 @@ describe('foundry-sidecar protocol basics', () => {
     rmSync(homeDir, { recursive: true, force: true });
   });
 
-  it('records streaming and buffered chat metrics through the sidecar handler', async () => {
+  it('keeps the IPC pipe JSON-only while exercising init, load, streaming chat, and buffered chat', async () => {
     const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-chat-home-'));
     const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
     const corePath = join(homeDir, 'fake-core.dylib');
@@ -177,17 +211,23 @@ describe('foundry-sidecar protocol basics', () => {
       const sdk = \`
         class FakeModel {
           constructor() { this.id = 'fake-variant'; this.loaded = false; }
-          async load() { this.loaded = true; }
+          async load() {
+            process.stdout.write('fake model load stdout noise\\\\n');
+            console.log('fake model load console noise');
+            this.loaded = true;
+          }
           isLoaded() { return this.loaded; }
           getExecutionProvider() { return 'CPUExecutionProvider'; }
           createChatClient() {
             return {
               async *completeStreamingChat() {
+                process.stdout.write('fake streaming chat stdout noise\\\\n');
                 yield { choices: [{ delta: { content: 'hello' } }] };
                 await new Promise((resolve) => setTimeout(resolve, 20));
                 yield { usage: { input_tokens: 3, output_tokens: 2 } };
               },
               async completeChat() {
+                process.stdout.write('fake buffered chat stdout noise\\\\n');
                 return {
                   choices: [{ message: { role: 'assistant', content: 'buffered' } }],
                   usage: { prompt_tokens: 4, completion_tokens: 3 },
@@ -199,11 +239,17 @@ describe('foundry-sidecar protocol basics', () => {
         class FakeManager {
           constructor() {
             this.catalog = {
-              getModel: async () => new FakeModel(),
+              getModel: async () => {
+                process.stdout.write('fake catalog getModel stdout noise\\\\n');
+                return new FakeModel();
+              },
               getModels: async () => [],
             };
           }
-          static create() { return new FakeManager(); }
+          static create() {
+            process.stdout.write('fake manager create stdout noise\\\\n');
+            return new FakeManager();
+          }
         }
         export { FakeManager as FoundryLocalManager };
       \`;
@@ -234,6 +280,12 @@ describe('foundry-sidecar protocol basics', () => {
         FLINT_FOUNDRY_CORE_PATH: corePath,
       },
     });
+    const nonJsonStdout = collectNonJsonStdout(proc);
+    let stderrText = '';
+    const onStderr = (chunk: Buffer | string) => {
+      stderrText += chunk.toString();
+    };
+    proc.stderr.on('data', onStderr);
 
     try {
       await waitForLine(proc, (msg) => msg.ready === true);
@@ -288,7 +340,13 @@ describe('foundry-sidecar protocol basics', () => {
         tokensOut: 3,
         executionProvider: 'CPUExecutionProvider',
       });
+      nonJsonStdout.stop();
+      expect(nonJsonStdout.lines).toEqual([]);
+      expect(stderrText).toContain('FLINT_DIAG info fake model load console noise');
+      expect(stderrText).toContain('FLINT_DIAG info fake model load stdout noise');
     } finally {
+      nonJsonStdout.stop();
+      proc.stderr.off('data', onStderr);
       if (!proc.killed) proc.kill();
       rmSync(homeDir, { recursive: true, force: true });
     }

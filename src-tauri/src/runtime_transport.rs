@@ -66,6 +66,15 @@ impl JsonLinesDecoder {
             self.buffer.clear();
             return Ok(());
         }
+        let payload = line
+            .iter()
+            .position(|byte| !is_json_whitespace(*byte))
+            .map(|index| &line[index..])
+            .unwrap_or(line);
+        if !matches!(payload.first(), Some(b'{')) {
+            self.buffer.clear();
+            return Ok(());
+        }
         let value = serde_json::from_slice(line).map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -85,6 +94,15 @@ impl JsonLinesDecoder {
             ));
         }
         if self.buffer.iter().copied().all(is_json_whitespace) {
+            return Ok(Vec::new());
+        }
+        let payload = self
+            .buffer
+            .iter()
+            .position(|byte| !is_json_whitespace(*byte))
+            .map(|index| &self.buffer[index..])
+            .unwrap_or(&self.buffer);
+        if !matches!(payload.first(), Some(b'{')) {
             return Ok(Vec::new());
         }
         Err(io::Error::new(
@@ -174,17 +192,10 @@ mod tests {
     fn rejects_invalid_and_incomplete_frames() {
         let mut invalid = JsonLinesDecoder::new(128).expect("decoder");
         assert!(invalid.push(b"{broken}\n").is_err());
-        let mut invalid_whitespace = JsonLinesDecoder::new(128).expect("decoder");
-        assert!(invalid_whitespace.push(b"\x0b\n").is_err());
 
         let mut incomplete = JsonLinesDecoder::new(128).expect("decoder");
         incomplete.push(b"{\"id\": 1}").expect("partial frame");
         assert!(incomplete.finish().is_err());
-        let mut invalid_trailing = JsonLinesDecoder::new(128).expect("decoder");
-        invalid_trailing
-            .push(b"\x0c")
-            .expect("partial invalid frame");
-        assert!(invalid_trailing.finish().is_err());
 
         let mut incomplete_crlf = JsonLinesDecoder::new(128).expect("decoder");
         incomplete_crlf.push(b"\r").expect("partial CRLF");
@@ -192,9 +203,25 @@ mod tests {
     }
 
     #[test]
+    fn ignores_non_json_stdout_noise_between_protocol_frames() {
+        let mut decoder = JsonLinesDecoder::new(128).expect("decoder");
+        let frames = decoder
+            .push(b"native runtime diagnostic\n{\"id\":1}\n  another diagnostic\n{\"id\":2}\n")
+            .expect("noise plus frames");
+        assert_eq!(frames, vec![json!({"id": 1}), json!({"id": 2})]);
+        assert!(decoder.finish().expect("complete stream").is_empty());
+
+        let mut trailing_noise = JsonLinesDecoder::new(128).expect("decoder");
+        trailing_noise
+            .push(b"unterminated native runtime diagnostic")
+            .expect("trailing noise");
+        assert!(trailing_noise.finish().expect("ignored trailing noise").is_empty());
+    }
+
+    #[test]
     fn bounds_unterminated_frames() {
         let mut decoder = JsonLinesDecoder::new(4).expect("decoder");
-        assert!(decoder.push(b"12345").is_err());
+        assert!(decoder.push(b"{1234").is_err());
     }
 
     #[test]

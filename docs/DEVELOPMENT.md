@@ -79,11 +79,12 @@ Supported Foundry core layouts today: `win32-x64`, `win32-arm64`, `linux-x64`, `
 
 - **Frontend:** Svelte 5 + SvelteKit SPA (`src/routes/+layout.ts` sets `ssr = false`). Most UI lives in `src/routes/+page.svelte`.
 - **SDK boundary:** `src/lib/sdk.ts` — do not import Foundry Local directly into the web bundle.
-- **Sidecar:** `sidecar/foundry-sidecar.js` speaks JSON-lines over stdio. Rust owns the
-  single child process and transport; Foundry lifecycle and inference remain in Node.
+- **Sidecar:** `sidecar/foundry-sidecar.js` is the process entry (stdout guard, then
+  `foundry-sidecar-main.js`). Rust owns the single child process and transport;
+  Foundry lifecycle and inference remain in Node.
 - **Vite** externalizes `foundry-local-sdk` and Node builtins so the web bundle stays buildable.
 
-When adding sidecar commands: update **both** `src/lib/sdk.ts` (and IPC contracts if applicable) and `sidecar/foundry-sidecar.js`.
+When adding sidecar commands: update **both** `src/lib/sdk.ts` (and IPC contracts if applicable) and `sidecar/foundry-sidecar-main.js`.
 
 ### Parallel contributor handoff
 

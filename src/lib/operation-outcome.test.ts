@@ -25,7 +25,7 @@ describe('command classification', () => {
     // imported. Without this, a command could be added to one side only and the mismatch would
     // not appear until a user hit it: the sidecar would reject a command the frontend sends, or
     // the frontend would classify one that does not exist.
-    const source = readFileSync(join(process.cwd(), 'sidecar', 'foundry-sidecar.js'), 'utf8');
+    const source = readFileSync(join(process.cwd(), 'sidecar', 'foundry-sidecar-main.js'), 'utf8');
     const marker = 'const KNOWN_COMMANDS = new Set([';
     const start = source.indexOf(marker);
     expect(start, 'sidecar KNOWN_COMMANDS declaration not found').toBeGreaterThan(-1);

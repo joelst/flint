@@ -22,7 +22,7 @@ Rust supervisor & stdio transport bridge
     |
     | JSON lines over stdio
     v
-sidecar/foundry-sidecar.js
+sidecar/foundry-sidecar.js → foundry-sidecar-main.js
     |
     | the only Foundry manager, catalog, pool, gateway, and inference owner
     v
@@ -59,7 +59,7 @@ These files are shared hotspots and need extra coordination:
 - `src/routes/+page.svelte`
 - `src/lib/sdk.ts`
 - `src/lib/ipc-contracts.ts`
-- `sidecar/foundry-sidecar.js`
+- `sidecar/foundry-sidecar.js` / `sidecar/foundry-sidecar-main.js`
 - `package-lock.json`
 
 Keep parallel work safe by:
@@ -111,7 +111,7 @@ checklist in the abstract:
 1. **Typed contract** — `src/lib/ipc-contracts.ts` lists `getCacheInventory` in
    `KNOWN_COMMANDS`/`SidecarCommand` with no request fields (it takes no
    arguments).
-2. **Sidecar validation** — `sidecar/foundry-sidecar.js` declares it in
+2. **Sidecar validation** — `sidecar/foundry-sidecar-main.js` declares it in
    `KNOWN_COMMANDS`, `COMMAND_SCHEMA` (`{ required: [], optional: [] }`), and
    dispatches it in the command switch to the `getCacheInventory()` handler.
 3. **Effect classification** — `src/lib/operation-outcome.ts` marks it

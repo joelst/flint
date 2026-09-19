@@ -30,6 +30,8 @@ type Harness = {
   emitClose: (data?: unknown) => void;
   /** Fire the child's `error` event. */
   emitError: (err: string) => void;
+  /** Feed a chunk to the transport's stderr classifier. */
+  emitStderr: (text: string) => void;
   /** Resolve the pending `spawn()` call. Only set when spawning is gated. */
   releaseSpawn?: () => void;
   /** True once `spawn()` has been entered, so a test can act during a gated startup. */
@@ -168,6 +170,9 @@ async function loadSdk() {
     emitError: (err) => {
       emitNative('flint://runtime-error', { generation: nativeGeneration, text: err });
     },
+    emitStderr: (text) => {
+      emitNative('flint://runtime-stderr', { generation: nativeGeneration, text });
+    },
     spawnEntered: false,
     spawnCount: 0,
     killCount: 0,
@@ -255,6 +260,15 @@ function capture<T>(p: Promise<T>) {
   return { box, tracked };
 }
 
+function sdkSnapshot(sdk: { getSDKState: () => { subscribe: (fn: (state: any) => void) => () => void } }) {
+  let snapshot: any;
+  const unsubscribe = sdk.getSDKState().subscribe((state) => {
+    snapshot = state;
+  });
+  unsubscribe();
+  return snapshot;
+}
+
 beforeEach(() => {
   vi.spyOn(console, 'log').mockImplementation(() => {});
   vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -265,6 +279,37 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+describe('sidecar stderr classification', () => {
+  it('records tagged diagnostics at the declared level instead of as errors', async () => {
+    const sdk = await loadSdk();
+    const request = capture(sdk.getEps());
+    const id = await waitForWrite('getEps');
+    harness.emitStderr('FLINT_DIAG info dependency log message\nnative boom\n');
+    const snapshot = sdkSnapshot(sdk);
+    expect(snapshot.logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ level: 'info', message: 'dependency log message', source: 'sdk' }),
+      expect.objectContaining({ level: 'error', message: 'native boom', source: 'sdk' }),
+    ]));
+    harness.emitStdout({ id, result: [] });
+    await request.tracked;
+  });
+
+  it('classifies a tagged diagnostic split across stderr chunks as one info line', async () => {
+    const sdk = await loadSdk();
+    const request = capture(sdk.getEps());
+    const id = await waitForWrite('getEps');
+    harness.emitStderr('FLINT_DIAG in');
+    harness.emitStderr('fo dependency log message\n');
+    const snapshot = sdkSnapshot(sdk);
+    expect(snapshot.logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ level: 'info', message: 'dependency log message', source: 'sdk' }),
+    ]));
+    expect(snapshot.logs.some((entry: { message: string }) => entry.message.includes('FLINT_DIAG'))).toBe(false);
+    harness.emitStdout({ id, result: [] });
+    await request.tracked;
+  });
 });
 
 describe('catalog queries', () => {
@@ -1455,6 +1500,31 @@ describe('service start uncertainty', () => {
     const stopId = await waitForWrite('stopService');
     harness.emitStdout({ id: stopId, result: {} });
     await stop.tracked;
+  });
+
+  it('publishes runtime.transitioning for queued as well as running transitions', async () => {
+    const sdk = await loadSdk();
+    let release!: () => void;
+    const hold = sdk.withServiceTransition(
+      () => new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    );
+    await waitFor('the transition lock to be held', () => typeof release === 'function');
+    expect(sdk.isServiceTransitioning()).toBe(true);
+    expect(sdkSnapshot(sdk).runtime.transitioning).toBe(true);
+
+    const start = capture(sdk.startService(5272));
+    expect(sdk.isServiceTransitioning()).toBe(true);
+
+    release();
+    await hold;
+    const startId = await waitForWrite('startService');
+    expect(sdkSnapshot(sdk).runtime.transitioning).toBe(true);
+    harness.emitStdout({ id: startId, endpoint: 'http://127.0.0.1:5272' });
+    await start.tracked;
+    expect(sdk.isServiceTransitioning()).toBe(false);
+    expect(sdkSnapshot(sdk).runtime.transitioning).toBe(false);
   });
 
   function getLastSdkSnapshot(sdk: { getSDKState: () => { subscribe: (fn: (state: any) => void) => () => void } }) {
