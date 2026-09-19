@@ -3198,7 +3198,6 @@ updateStateFromSdk();
   function loadCompareHistory() {
     const storage = arenaStorage();
     if (!storage) {
-      compareHistory = [];
       compareHistoryWritable = false;
       appendAppLog(
         'Saved arena runs could not be read on this device, so new runs will not be saved this session.',
@@ -3207,8 +3206,9 @@ updateStateFromSdk();
       return;
     }
     const loaded = loadComparisonHistory(storage);
-    compareHistory = loaded.history;
     compareHistoryWritable = loaded.writable;
+    // Non-writable loads return empty history even when storage was not rewritten.
+    if (loaded.writable) compareHistory = loaded.history;
     if (loaded.notice) appendAppLog(loaded.notice, loaded.writable ? 'warn' : 'error');
   }
 
@@ -3220,6 +3220,7 @@ updateStateFromSdk();
     }
     const storage = arenaStorage();
     if (!storage) {
+      compareHistoryWritable = false;
       appendAppLog('Arena run history is not writable this session; not saved.', 'error');
       return false;
     }
