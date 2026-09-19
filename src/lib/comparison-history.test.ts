@@ -213,6 +213,41 @@ describe('loadComparisonHistory', () => {
     expect(loaded.backedUp).toBe(true);
   });
 
+  it('accepts a result carrying the new PR2 fields', () => {
+    const run = savedRun({
+      results: {
+        'model-a::default': result({
+          status: 'stopped',
+          ttftMs: 42,
+          nativeStreaming: true,
+          servedVariantId: 'model-a-cuda:4',
+          activeExecutionProvider: 'CUDAExecutionProvider',
+        }),
+      },
+    });
+    const storage = new MemoryStorage({ [COMPARE_HISTORY_KEY]: JSON.stringify([run]) });
+    const loaded = loadComparisonHistory(storage);
+    expect(loaded.history).toEqual([run]);
+    expect(loaded.backedUp).toBe(false);
+  });
+
+  it.each([
+    ['status', { status: 'winning' }],
+    ['ttftMs (negative)', { ttftMs: -1 }],
+    ['ttftMs (non-finite)', { ttftMs: Number.POSITIVE_INFINITY }],
+    ['nativeStreaming', { nativeStreaming: 'yes' }],
+    ['servedVariantId', { servedVariantId: 42 }],
+    ['activeExecutionProvider', { activeExecutionProvider: 42 }],
+  ])('rejects an invalid %s on a result', (_label, override) => {
+    const run = savedRun({
+      results: { 'model-a::default': { ...result(), ...override } as unknown as CompareResult },
+    });
+    const storage = new MemoryStorage({ [COMPARE_HISTORY_KEY]: JSON.stringify([run]) });
+    const loaded = loadComparisonHistory(storage);
+    expect(loaded.history).toEqual([]);
+    expect(loaded.backedUp).toBe(true);
+  });
+
   it('does not allow writes at all when even the backup write fails', () => {
     const raw = '{not json';
     const storage = new MemoryStorage({ [COMPARE_HISTORY_KEY]: raw });
@@ -302,5 +337,48 @@ describe('renderComparisonMarkdown', () => {
     });
     expect(md).toContain('- Latency: ? ms');
     expect(md).toContain('- Tokens: in ? / out ?');
+  });
+
+  it('defaults status to completed/failed from the legacy error field when absent', () => {
+    const completedMd = renderComparisonMarkdown('Say hi', [slot()], {
+      'model-a::default': result(),
+    });
+    expect(completedMd).toContain('- Status: completed');
+
+    const failedMd = renderComparisonMarkdown('Say hi', [slot()], {
+      'model-a::default': result({ error: 'boom' }),
+    });
+    expect(failedMd).toContain('- Status: failed');
+  });
+
+  it('shows the served variant only when it differs from the requested one', () => {
+    const requestedOnly = renderComparisonMarkdown('Say hi', [slot({ variantId: 'v1' })], {
+      'model-a::default': result({ servedVariantId: 'v1' }),
+    });
+    expect(requestedOnly).not.toContain('- Served variant:');
+
+    const differed = renderComparisonMarkdown('Say hi', [slot({ variantId: 'v1' })], {
+      'model-a::default': result({ servedVariantId: 'v2' }),
+    });
+    expect(differed).toContain('- Served variant: `v2`');
+  });
+
+  it('renders time-to-first-token only for native streaming results', () => {
+    const nativeMd = renderComparisonMarkdown('Say hi', [slot()], {
+      'model-a::default': result({ nativeStreaming: true, ttftMs: 88 }),
+    });
+    expect(nativeMd).toContain('- Time to first token: 88 ms');
+
+    const emulatedMd = renderComparisonMarkdown('Say hi', [slot()], {
+      'model-a::default': result({ nativeStreaming: false, ttftMs: 88 }),
+    });
+    expect(emulatedMd).not.toContain('Time to first token');
+  });
+
+  it('shows the execution provider when reported', () => {
+    const md = renderComparisonMarkdown('Say hi', [slot()], {
+      'model-a::default': result({ activeExecutionProvider: 'CUDAExecutionProvider' }),
+    });
+    expect(md).toContain('- Execution provider: CUDAExecutionProvider');
   });
 });
