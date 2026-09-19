@@ -1,13 +1,6 @@
 /**
- * Model Arena "Quick Compare" — types, identity, storage, and export.
- *
- * Extracted from `+page.svelte` as a pure, testable module. This is intentionally a
- * behavior-preserving extraction: the on-disk shape (`flint-comparisons-v1`), slot identity,
- * and Markdown export format are unchanged. The one real change is that storage failures are no
- * longer swallowed — reading unreadable/corrupt bytes blocks further writes until the caller
- * preserves them, matching the rule already established for the conversation archive in
- * `conversation-repository.ts`: **a read we did not fully understand must never become a
- * write.**
+ * Arena Quick Compare identity and storage. Slot keys and the on-disk shape are stable;
+ * unread or corrupt bytes are parked before any later save can replace them.
  */
 
 import { preserveBytes, type StorageAdapter } from './conversation-repository';
@@ -48,29 +41,30 @@ export function compareSlotKey(alias: string, variantId: string | null): string 
   return variantId ? `${alias}::${variantId}` : `${alias}::default`;
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
 function isCompareSlot(value: unknown): value is CompareSlot {
-  if (!value || typeof value !== 'object') return false;
-  const v = value as Record<string, unknown>;
-  return typeof v.key === 'string' && typeof v.alias === 'string'
-    && (v.variantId === null || typeof v.variantId === 'string')
-    && typeof v.label === 'string';
+  if (!isPlainObject(value)) return false;
+  return typeof value.key === 'string' && typeof value.alias === 'string'
+    && (value.variantId === null || typeof value.variantId === 'string')
+    && typeof value.label === 'string';
 }
 
 function isCompareResult(value: unknown): value is CompareResult {
-  if (!value || typeof value !== 'object') return false;
-  const v = value as Record<string, unknown>;
-  return typeof v.content === 'string';
+  if (!isPlainObject(value)) return false;
+  return typeof value.content === 'string';
 }
 
 function isSavedComparison(value: unknown): value is SavedComparison {
-  if (!value || typeof value !== 'object') return false;
-  const v = value as Record<string, unknown>;
-  if (typeof v.id !== 'string' || typeof v.createdAt !== 'number' || typeof v.prompt !== 'string') {
+  if (!isPlainObject(value)) return false;
+  if (typeof value.id !== 'string' || typeof value.createdAt !== 'number' || typeof value.prompt !== 'string') {
     return false;
   }
-  if (!Array.isArray(v.slots) || !v.slots.every(isCompareSlot)) return false;
-  if (!v.results || typeof v.results !== 'object') return false;
-  return Object.values(v.results as Record<string, unknown>).every(isCompareResult);
+  if (!Array.isArray(value.slots) || !value.slots.every(isCompareSlot)) return false;
+  if (!isPlainObject(value.results)) return false;
+  return Object.values(value.results).every(isCompareResult);
 }
 
 /**
@@ -93,7 +87,10 @@ function parseComparisonHistory(raw: string): { history: SavedComparison[] } | {
 
 export interface LoadHistoryResult {
   history: SavedComparison[];
-  /** False when a subsequent save must not be attempted without first resolving `notice`. */
+  /**
+   * False only when a later save would destroy bytes we could not park (unreadable storage
+   * or a failed backup). Missing key and corrupt-but-backed-up loads stay writable.
+   */
   writable: boolean;
   /** True when unreadable/corrupt bytes were parked under `COMPARE_HISTORY_BACKUP_KEY`. */
   backedUp: boolean;
@@ -102,9 +99,10 @@ export interface LoadHistoryResult {
 }
 
 /**
- * Loads saved comparison history. Never throws: storage access failures and malformed bytes
- * both come back as an empty, non-writable result with a `notice` rather than an exception, so
- * a damaged key cannot crash the Arena tab and cannot be silently replaced by an empty array.
+ * Loads saved comparison history. Never throws.
+ *
+ * Missing key → empty, writable. Unreadable storage or failed backup → empty, not writable.
+ * Corrupt bytes that were parked → empty, writable, original data under the backup key.
  */
 export function loadComparisonHistory(storage: StorageAdapter): LoadHistoryResult {
   let raw: string | null;

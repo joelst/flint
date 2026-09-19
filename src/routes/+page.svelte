@@ -663,7 +663,7 @@
   let comparePickerSearch = $state("");
   let compareExpandedAliases: Record<string, boolean> = $state({});
   let compareHistory: SavedComparison[] = $state([]);
-  /** False after a load/save failure, until the underlying storage issue is resolved. */
+  /** False when unread/unparked bytes must not be overwritten this session. */
   let compareHistoryWritable = $state(true);
   let compareHistoryOpen = $state(false);
   let compareReviewId: string | null = $state(null);
@@ -3186,8 +3186,27 @@ updateStateFromSdk();
     compareResults = next;
   }
 
+  function arenaStorage(): Storage | null {
+    // Reaching the property can itself throw when site data is blocked.
+    try {
+      return localStorage;
+    } catch {
+      return null;
+    }
+  }
+
   function loadCompareHistory() {
-    const loaded = loadComparisonHistory(localStorage);
+    const storage = arenaStorage();
+    if (!storage) {
+      compareHistory = [];
+      compareHistoryWritable = false;
+      appendAppLog(
+        'Saved arena runs could not be read on this device, so new runs will not be saved this session.',
+        'error',
+      );
+      return;
+    }
+    const loaded = loadComparisonHistory(storage);
     compareHistory = loaded.history;
     compareHistoryWritable = loaded.writable;
     if (loaded.notice) appendAppLog(loaded.notice, loaded.writable ? 'warn' : 'error');
@@ -3199,7 +3218,12 @@ updateStateFromSdk();
       appendAppLog('Arena run history is not writable this session; not saved.', 'error');
       return false;
     }
-    const saved = saveComparisonHistory(localStorage, compareHistory);
+    const storage = arenaStorage();
+    if (!storage) {
+      appendAppLog('Arena run history is not writable this session; not saved.', 'error');
+      return false;
+    }
+    const saved = saveComparisonHistory(storage, compareHistory);
     if (!saved.ok) {
       appendAppLog(`Arena run history save failed: ${saved.error}`, 'error');
     }
@@ -3678,14 +3702,20 @@ updateStateFromSdk();
 
   function setCompareRating(key: string, rating: "up" | "down") {
     if (!compareResults[key]) return;
+    const previousRating = compareResults[key].rating;
+    const previousHistory = compareHistory;
     compareResults[key].rating = compareResults[key].rating === rating ? null : rating;
     compareResults = { ...compareResults };
-    // Update open saved review if applicable
     if (compareReviewId) {
       compareHistory = compareHistory.map((h) =>
         h.id === compareReviewId ? { ...h, results: { ...compareResults } } : h,
       );
-      persistCompareHistory();
+      if (!persistCompareHistory()) {
+        compareHistory = previousHistory;
+        compareResults[key].rating = previousRating;
+        compareResults = { ...compareResults };
+        statusMessage = "Arena run could not be saved — see App Log.";
+      }
     }
   }
 

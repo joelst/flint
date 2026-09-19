@@ -93,7 +93,7 @@ describe('loadComparisonHistory', () => {
     expect(loaded.notice).toMatch(/could not be read/i);
   });
 
-  it('backs up and blocks a fresh save when the array itself does not parse as JSON', () => {
+  it('backs up corrupt bytes and allows a fresh history when the array itself does not parse as JSON', () => {
     const storage = new MemoryStorage({ [COMPARE_HISTORY_KEY]: '{not json' });
     const loaded = loadComparisonHistory(storage);
     expect(loaded.history).toEqual([]);
@@ -103,11 +103,23 @@ describe('loadComparisonHistory', () => {
     expect(loaded.notice).toMatch(/not in the expected format/i);
   });
 
-  it('backs up and blocks a fresh save when an entry is missing required fields', () => {
+  it('backs up corrupt bytes and allows a fresh history when an entry is missing required fields', () => {
     const raw = JSON.stringify([{ id: 'cmp-1' }]);
     const storage = new MemoryStorage({ [COMPARE_HISTORY_KEY]: raw });
     const loaded = loadComparisonHistory(storage);
     expect(loaded.history).toEqual([]);
+    expect(loaded.writable).toBe(true);
+    expect(loaded.backedUp).toBe(true);
+    expect(storage.getItem(COMPARE_HISTORY_BACKUP_KEY)).toBe(raw);
+  });
+
+  it('backs up an entry whose results field is an array rather than a record', () => {
+    const run = savedRun();
+    const raw = JSON.stringify([{ ...run, results: [] }]);
+    const storage = new MemoryStorage({ [COMPARE_HISTORY_KEY]: raw });
+    const loaded = loadComparisonHistory(storage);
+    expect(loaded.history).toEqual([]);
+    expect(loaded.writable).toBe(true);
     expect(loaded.backedUp).toBe(true);
     expect(storage.getItem(COMPARE_HISTORY_BACKUP_KEY)).toBe(raw);
   });
