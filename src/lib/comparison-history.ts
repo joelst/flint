@@ -45,16 +45,39 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
+function isOptionalString(value: unknown): boolean {
+  return value === undefined || typeof value === 'string';
+}
+
+function isOptionalStringOrNull(value: unknown): boolean {
+  return value === undefined || value === null || typeof value === 'string';
+}
+
+function isOptionalFiniteNumber(value: unknown): boolean {
+  return value === undefined || (typeof value === 'number' && Number.isFinite(value));
+}
+
+function isOptionalRating(value: unknown): boolean {
+  return value === undefined || value === null || value === 'up' || value === 'down';
+}
+
 function isCompareSlot(value: unknown): value is CompareSlot {
   if (!isPlainObject(value)) return false;
   return typeof value.key === 'string' && typeof value.alias === 'string'
     && (value.variantId === null || typeof value.variantId === 'string')
-    && typeof value.label === 'string';
+    && typeof value.label === 'string'
+    && isOptionalStringOrNull(value.deviceType)
+    && isOptionalStringOrNull(value.executionProvider);
 }
 
 function isCompareResult(value: unknown): value is CompareResult {
   if (!isPlainObject(value)) return false;
-  return typeof value.content === 'string';
+  return typeof value.content === 'string'
+    && isOptionalFiniteNumber(value.latencyMs)
+    && isOptionalFiniteNumber(value.tokensIn)
+    && isOptionalFiniteNumber(value.tokensOut)
+    && isOptionalRating(value.rating)
+    && isOptionalString(value.error);
 }
 
 function isSavedComparison(value: unknown): value is SavedComparison {

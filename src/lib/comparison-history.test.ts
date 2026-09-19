@@ -124,6 +124,25 @@ describe('loadComparisonHistory', () => {
     expect(storage.getItem(COMPARE_HISTORY_BACKUP_KEY)).toBe(raw);
   });
 
+  it('backs up slots and results whose optional fields have the wrong type', () => {
+    const badSlot = savedRun({
+      slots: [{ ...slot(), deviceType: {} as unknown as string }],
+    });
+    const badLatency = savedRun({
+      results: { 'model-a::default': { ...result(), latencyMs: 'unknown' as unknown as number } },
+    });
+    const badRating = savedRun({
+      results: { 'model-a::default': { ...result(), rating: 'other' as unknown as 'up' } },
+    });
+    for (const run of [badSlot, badLatency, badRating]) {
+      const raw = JSON.stringify([run]);
+      const loaded = loadComparisonHistory(new MemoryStorage({ [COMPARE_HISTORY_KEY]: raw }));
+      expect(loaded.history).toEqual([]);
+      expect(loaded.writable).toBe(true);
+      expect(loaded.backedUp).toBe(true);
+    }
+  });
+
   it('rejects an entry whose results field is missing', () => {
     const run = savedRun();
     const raw = JSON.stringify([{ ...run, results: undefined }]);
