@@ -182,9 +182,13 @@ export function rewriteStatusEndpoints (body, publicEndpoint) {
 
 export function formatPublicEndpoint (bindAddress, port) {
   const configured = String(bindAddress || '127.0.0.1').trim();
+  // ::1 is IPv6 loopback. WebView2 CSP cannot name an IPv6 literal, but
+  // localhost is already in connect-src and typically resolves to ::1.
   const host = configured === '0.0.0.0' || configured === '::'
     ? '127.0.0.1'
-    : configured || '127.0.0.1';
+    : configured === '::1'
+      ? 'localhost'
+      : configured || '127.0.0.1';
   const urlHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
   return `http://${urlHost}:${port}`;
 }

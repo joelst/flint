@@ -49,6 +49,15 @@ describe('protocol stdout protection', () => {
     );
   });
 
+  it('decodes Uint8Array stdout chunks as text, not comma-separated bytes', () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const consoleObject = { log: vi.fn(), info: vi.fn(), debug: vi.fn() };
+    protectProtocolStdout({ stdout, stderr, consoleObject });
+    stdout.write(new Uint8Array(Buffer.from('uint8 noise\n')));
+    expect(stderr.output()).toBe(`${DIAGNOSTIC_PREFIX} info uint8 noise\n`);
+  });
+
   it('does not emit a tagged diagnostic for blank lines in console output', () => {
     const stdout = captureStream();
     const stderr = captureStream();

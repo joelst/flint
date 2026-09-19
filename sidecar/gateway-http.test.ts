@@ -200,7 +200,7 @@ describe('formatPublicEndpoint', () => {
 
   it('publishes a specific interface address', () => {
     expect(formatPublicEndpoint(' 192.168.1.20 ', 5273)).toBe('http://192.168.1.20:5273');
-    expect(formatPublicEndpoint('::1', 5273)).toBe('http://[::1]:5273');
+    expect(formatPublicEndpoint('::1', 5273)).toBe('http://localhost:5273');
   });
 });
 
