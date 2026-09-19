@@ -308,6 +308,12 @@ describe('foundry-sidecar protocol basics', () => {
       expect((await waitForLine(proc, (msg) => msg.id === 44)).ok).toBe(true);
       const streamed = await waitForLine(proc, (msg) => msg.id === 41 && msg.ok === true);
       expect(streamed.ok).toBe(true);
+      expect(streamed.result.nativeStreaming).toBe(true);
+      expect(streamed.result.servedVariantId).toBe('fake-variant');
+      expect(streamed.result.usage).toMatchObject({
+        prompt_tokens: 3,
+        completion_tokens: 2,
+      });
 
       proc.stdin.write(`${JSON.stringify({
         id: 42,
@@ -316,7 +322,10 @@ describe('foundry-sidecar protocol basics', () => {
         messages: [{ role: 'user', content: 'hello' }],
         stream: false,
       })}\n`);
-      expect((await waitForLine(proc, (msg) => msg.id === 42)).ok).toBe(true);
+      const buffered = await waitForLine(proc, (msg) => msg.id === 42);
+      expect(buffered.ok).toBe(true);
+      expect(buffered.result.nativeStreaming).toBe(false);
+      expect(buffered.result.servedVariantId).toBe('fake-variant');
 
       proc.stdin.write(`${JSON.stringify({ id: 43, cmd: 'getAccessLog' })}\n`);
       const accessLog = (await waitForLine(proc, (msg) => msg.id === 43)).result;
