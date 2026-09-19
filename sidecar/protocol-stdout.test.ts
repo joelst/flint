@@ -49,6 +49,21 @@ describe('protocol stdout protection', () => {
     );
   });
 
+  it('does not emit a tagged diagnostic for blank lines in console output', () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const consoleObject = {
+      log: vi.fn(),
+      info: vi.fn(),
+      debug: vi.fn(),
+    };
+    protectProtocolStdout({ stdout, stderr, consoleObject });
+    consoleObject.log('before\n\nafter');
+    expect(stderr.output()).toBe(
+      `${DIAGNOSTIC_PREFIX} info before\n${DIAGNOSTIC_PREFIX} info after\n`,
+    );
+  });
+
   it('is the process entry and loads the command loop only after the guard', () => {
     const src = readFileSync(new URL('./foundry-sidecar.js', import.meta.url), 'utf8');
     expect(src).toContain('protectProtocolStdout()');
@@ -61,7 +76,7 @@ describe('protocol stdout protection', () => {
     const dir = mkdtempSync(join(tmpdir(), 'flint-stdout-boot-'));
     const protocolUrl = pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), 'protocol-stdout.js')).href;
     const noisyPath = join(dir, 'noisy.js');
-    const bootPath = join(dir, 'boot.js');
+    const bootPath = join(dir, 'boot.mjs');
     writeFileSync(noisyPath, 'process.stdout.write("import noise\\n");\n');
     writeFileSync(
       bootPath,

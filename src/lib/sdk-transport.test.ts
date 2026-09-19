@@ -295,6 +295,21 @@ describe('sidecar stderr classification', () => {
     harness.emitStdout({ id, result: [] });
     await request.tracked;
   });
+
+  it('classifies a tagged diagnostic split across stderr chunks as one info line', async () => {
+    const sdk = await loadSdk();
+    const request = capture(sdk.getEps());
+    const id = await waitForWrite('getEps');
+    harness.emitStderr('FLINT_DIAG in');
+    harness.emitStderr('fo dependency log message\n');
+    const snapshot = sdkSnapshot(sdk);
+    expect(snapshot.logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ level: 'info', message: 'dependency log message', source: 'sdk' }),
+    ]));
+    expect(snapshot.logs.some((entry: { message: string }) => entry.message.includes('FLINT_DIAG'))).toBe(false);
+    harness.emitStdout({ id, result: [] });
+    await request.tracked;
+  });
 });
 
 describe('catalog queries', () => {

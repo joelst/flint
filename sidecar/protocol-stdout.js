@@ -13,8 +13,10 @@ function chunkToText(chunk, encoding) {
 function prefixDiagnosticText(level, text) {
   const lines = String(text).split(/\r?\n/);
   if (lines.length && lines[lines.length - 1] === '') lines.pop();
-  if (lines.length === 0) return '';
-  return lines.map((line) => `${DIAGNOSTIC_PREFIX} ${level} ${line}\n`).join('');
+  return lines
+    .filter((line) => line.length > 0)
+    .map((line) => `${DIAGNOSTIC_PREFIX} ${level} ${line}\n`)
+    .join('');
 }
 
 let installedProtocolWrite = null;

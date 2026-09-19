@@ -552,6 +552,7 @@ async function spawnSidecar() {
 
   let stdoutEventFired = false;
   const stderrLines: string[] = [];
+  let stderrRemainder = '';
   let closeData: any = null;
   let commandError: string | null = null;
   let transportFailed = false;
@@ -637,9 +638,13 @@ async function spawnSidecar() {
     }
   };
 
-  const processStderr = (text: string, generation: number) => {
+  const processStderr = (text: string, generation: number, { flush = false } = {}) => {
     if (generation !== sidecarGeneration) return;
-    for (const raw of text.split(/\r?\n/)) {
+    const combined = stderrRemainder + text;
+    const lines = combined.split(/\r?\n/);
+    stderrRemainder = flush ? '' : (lines.pop() ?? '');
+    if (flush && lines.length === 0 && combined.trim()) lines.push(combined);
+    for (const raw of lines) {
       const trimmed = raw.trim();
       if (!trimmed) continue;
       const classified = classifySidecarStderrLine(trimmed);
@@ -671,6 +676,7 @@ async function spawnSidecar() {
       return;
     }
     closeData = data;
+    processStderr('', generation, { flush: true });
     console.log(`[sdk] Sidecar process closed (exit code: ${data?.code})`);
     const closedGeneration = generation;
     const expectedShutdown = expectedShutdownGeneration === closedGeneration;

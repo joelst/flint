@@ -2647,7 +2647,10 @@ updateStateFromSdk();
 
   // Mirrors the SDK lock, including queued work. Real serialization lives in sdk.ts.
   const serviceTransitionBusy = $derived(!!state.runtime?.transitioning);
-  const serviceStarting = $derived(serviceTransitionBusy && !state.serviceRunning);
+  // Label from the SDK start phase, not "busy and not running" — stop/unload also
+  // clear serviceRunning while transitioning, and a restart keeps it true until the
+  // new endpoint is confirmed.
+  const serviceStarting = $derived(state.runtime?.service === 'starting');
 
   /**
    * Mirrors the SDK's stand-down state for display only.
