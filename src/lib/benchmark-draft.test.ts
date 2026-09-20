@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyTargetAlias, buildSuiteFromDraft, draftFromSuite, type SuiteDraft } from './benchmark-draft';
+import { applyTargetAlias, buildSuiteFromDraft, cachedVariantIds, draftFromSuite, type SuiteDraft } from './benchmark-draft';
 import { BENCHMARK_MAX_ATTEMPTS } from './benchmark-suite';
 import type { BenchmarkSuite } from './benchmark-suite';
 
@@ -56,6 +56,17 @@ describe('buildSuiteFromDraft', () => {
   it('rejects a draft with no targets, matching validateBenchmarkSuite\'s own target-count rule', () => {
     const result = buildSuiteFromDraft(baseDraft({ targets: [] }));
     expect(result.ok).toBe(false);
+  });
+});
+
+describe('cachedVariantIds', () => {
+  it('keeps only variants that are already on disk', () => {
+    expect(cachedVariantIds([
+      { id: 'cuda', cached: true },
+      { id: 'cpu', cached: false },
+      { id: 'npu', cached: true },
+    ])).toEqual(['cuda', 'npu']);
+    expect(cachedVariantIds(undefined)).toEqual([]);
   });
 });
 

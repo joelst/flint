@@ -49,11 +49,15 @@ export function upgradeBenchmarkDatabase(db: IDBDatabase, tx: IDBTransaction | n
     const summaries = db.createObjectStore(ATTEMPT_SUMMARIES_STORE, { keyPath: 'id' });
     summaries.createIndex(ATTEMPT_SUMMARIES_BY_RUN_INDEX, 'runId');
     if (tx && db.objectStoreNames.contains(ATTEMPTS_STORE)) {
-      const getAll = tx.objectStore(ATTEMPTS_STORE).getAll() as IDBRequest<BenchmarkAttempt[]>;
-      getAll.onsuccess = () => {
-        for (const row of getAll.result ?? []) {
-          if (isBenchmarkAttempt(row)) summaries.put(summarizeAttempt(row));
-        }
+      // Cursor, not getAll(): a v2 store can hold every historical response body, and
+      // materializing them all at once during upgrade can stall or exhaust memory.
+      const cursorReq = tx.objectStore(ATTEMPTS_STORE).openCursor();
+      cursorReq.onsuccess = () => {
+        const cursor = cursorReq.result;
+        if (!cursor) return;
+        const row = cursor.value;
+        if (isBenchmarkAttempt(row)) summaries.put(summarizeAttempt(row));
+        cursor.continue();
       };
     }
   }

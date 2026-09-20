@@ -39,6 +39,13 @@ export interface SuiteDraft {
  * chosen from — keeping `model-a`'s `v1` after switching to `model-b` would load the wrong
  * build or fail. Preserve the id only when the new alias actually exposes it.
  */
+/** Variant ids that are already on disk — Start loads, it does not download. */
+export function cachedVariantIds(
+  variants: readonly { id: string; cached: boolean }[] | undefined,
+): string[] {
+  return (variants ?? []).filter((v) => v.cached).map((v) => v.id);
+}
+
 export function applyTargetAlias(
   target: BenchmarkTarget,
   alias: string,

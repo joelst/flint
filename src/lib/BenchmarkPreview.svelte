@@ -18,7 +18,7 @@
     type BenchmarkSuite,
     type BenchmarkTarget,
   } from "./benchmark-suite";
-  import { applyTargetAlias, draftFromSuite, buildSuiteFromDraft, type SuiteDraft } from "./benchmark-draft";
+  import { applyTargetAlias, cachedVariantIds, draftFromSuite, buildSuiteFromDraft, type SuiteDraft } from "./benchmark-draft";
   import { buildProgressMatrix, isRunInterrupted, isRunResumable, type AttemptSummary } from "./benchmark-progress";
   import { buildBenchmarkExport } from "./benchmark-export";
   import type { BenchmarkRun } from "./benchmark-run";
@@ -86,6 +86,9 @@
    * this flag directly before installing its interval so no post-teardown caller, however it got
    * there, can start one that `onDestroy`'s single `stopPolling()` call never sees. */
   let destroyed = false;
+  /** One lock for suite CRUD and start/resume: a save must not commit while pin/load is
+   * awaiting, and Start must not snapshot a draft that a pending save is about to replace. */
+  $: mutating = suiteBusy || editingBusy || lifecycleBusy || runInFlight;
 
   async function refreshSuites() {
     const generation = ++suitesGeneration;
@@ -129,6 +132,8 @@
     selectedSuiteId = id;
     selectedRunId = null;
     selectedRun = null;
+    selectedRunAttempts = [];
+    runsForSelectedSuite = [];
     lifecycleError = "";
     pollError = "";
     stopPolling();
@@ -151,13 +156,13 @@
   // user opened in the meantime. The template also disables their buttons while `editingBusy`;
   // these are a defense-in-depth guard against any other call path.
   function startCreateSuite() {
-    if (editingBusy || suiteBusy) return;
+    if (mutating) return;
     editingDraft = newSuiteDraft();
     editingErrors = [];
   }
 
   async function startEditSuite(suite: BenchmarkSuite) {
-    if (editingBusy || suiteBusy) return;
+    if (mutating) return;
     // Editing is restricted to suites with no runs yet — a suite with runs already has attempts
     // recorded against its frozen snapshot, and silently changing the live suite underneath
     // that history would be misleading even though runs themselves are immutable.
@@ -166,11 +171,16 @@
       return;
     }
     editingDraft = draftFromSuite(suite);
+    editingDraft.targets = editingDraft.targets.map((t) => {
+      const ids = variantsForAlias(t.alias);
+      if (t.variantId && !ids.includes(t.variantId)) return { ...t, variantId: null };
+      return t;
+    });
     editingErrors = [];
   }
 
   function cancelEditSuite() {
-    if (editingBusy || suiteBusy) return;
+    if (mutating) return;
     editingDraft = null;
     editingErrors = [];
   }
@@ -187,14 +197,13 @@
   }
 
   function variantsForAlias(alias: string) {
-    return availableModels.find((m) => m.alias === alias)?.variants ?? [];
+    return cachedVariantIds(availableModels.find((m) => m.alias === alias)?.variants);
   }
 
   function updateTargetAlias(index: number, alias: string) {
     if (!editingDraft) return;
     const targets: BenchmarkTarget[] = [...editingDraft.targets];
-    const variantIds = variantsForAlias(alias).map((v) => v.id);
-    targets[index] = applyTargetAlias(targets[index], alias, variantIds);
+    targets[index] = applyTargetAlias(targets[index], alias, variantsForAlias(alias));
     editingDraft.targets = targets;
   }
 
@@ -222,7 +231,7 @@
     : null;
 
   async function saveSuite() {
-    if (!editingDraft || suiteBusy) return;
+    if (!editingDraft || mutating) return;
     editingBusy = true;
     suiteBusy = true;
     editingErrors = [];
@@ -247,7 +256,7 @@
   }
 
   async function removeSuite(suite: BenchmarkSuite) {
-    if (suiteBusy || editingBusy) return;
+    if (mutating) return;
     suiteBusy = true;
     // `runCountsBySuite` is only a UI hint (last refresh) — the actual guard against deleting a
     // suite that has gained a run since then lives inside `deleteBenchmarkSuiteIfNoRuns`, which
@@ -299,10 +308,13 @@
     } else {
       pollError = `Could not refresh run attempts: ${summariesRes.error}`;
     }
-    if (!selectedRun || selectedRun.id !== activeRunId || selectedRun.status !== "running") {
-      // Refresh the suite's run list whenever the open detail is not the live running run —
-      // including the first openRun() after a fast start that already finished, when no
-      // interval was ever installed (`wasPolling` would miss that).
+    // A failed read is not a confirmed terminal state — stopping here would leave a stale
+    // "running" snapshot and pollError with no next tick to recover. Only stop after both
+    // reads succeeded and the row is not the live running run (including the first open of a
+    // run that already finished, when no interval was ever installed).
+    const confirmed = runRes.ok && summariesRes.ok;
+    const live = !!selectedRun && selectedRun.id === activeRunId && selectedRun.status === "running";
+    if (confirmed && !live) {
       stopPolling();
       if (selectedSuiteId) await refreshRunsForSelectedSuite(selectedSuiteId);
     }
@@ -327,6 +339,7 @@
   $: selectedRunIsActive = !!selectedRun && selectedRun.id === activeRunId;
 
   async function handleStart(suite: BenchmarkSuite) {
+    if (mutating) return;
     lifecycleBusy = true;
     lifecycleError = "";
     try {
@@ -349,6 +362,7 @@
   }
 
   async function handleResume(runId: string) {
+    if (mutating) return;
     lifecycleBusy = true;
     lifecycleError = "";
     try {
@@ -400,6 +414,7 @@
     openRunToken++;
     refreshGeneration++;
     suitesGeneration++;
+    runsRefreshGeneration++;
   });
 </script>
 
@@ -412,7 +427,7 @@
         Early preview.
       </p>
     </div>
-    <button type="button" class="secondary small" onclick={startCreateSuite} disabled={editingBusy || suiteBusy}>New suite</button>
+    <button type="button" class="secondary small" onclick={startCreateSuite} disabled={mutating}>New suite</button>
   </div>
 
   {#if loadError}
@@ -459,8 +474,8 @@
               onchange={(e) => updateTargetVariant(i, e.currentTarget.value || null)}
             >
               <option value="">Default variant</option>
-              {#each variantsForAlias(target.alias) as v (v.id)}
-                <option value={v.id}>{v.id}</option>
+              {#each variantsForAlias(target.alias) as id (id)}
+                <option value={id}>{id}</option>
               {/each}
             </select>
             <button
@@ -503,10 +518,10 @@
       {/if}
 
       <div class="benchmark-editor-actions">
-        <button type="button" class="primary" disabled={editingBusy || suiteBusy} onclick={saveSuite}>
+        <button type="button" class="primary" disabled={mutating} onclick={saveSuite}>
           {editingBusy ? "Saving…" : "Save suite"}
         </button>
-        <button type="button" class="secondary" disabled={editingBusy || suiteBusy} onclick={cancelEditSuite}>Cancel</button>
+        <button type="button" class="secondary" disabled={mutating} onclick={cancelEditSuite}>Cancel</button>
       </div>
     </div>
   {/if}
@@ -523,8 +538,8 @@
             <strong>{suite.name}</strong>
             <span class="muted small">{suite.targets.length} target(s) · {suite.cases.length} case(s) · {runCountsBySuite[suite.id] ?? 0} run(s)</span>
           </button>
-          <button type="button" class="tiny" disabled={editingBusy || suiteBusy} onclick={() => startEditSuite(suite)}>Edit</button>
-          <button type="button" class="tiny danger-btn" disabled={lifecycleBusy || runInFlight || editingBusy || suiteBusy} onclick={() => removeSuite(suite)}>Delete</button>
+          <button type="button" class="tiny" disabled={mutating} onclick={() => startEditSuite(suite)}>Edit</button>
+          <button type="button" class="tiny danger-btn" disabled={mutating} onclick={() => removeSuite(suite)}>Delete</button>
         </div>
       {/each}
     </div>
@@ -538,7 +553,7 @@
             <button
               type="button"
               class="primary small"
-              disabled={lifecycleBusy || !!activeRunId || runInFlight || !isBenchmarkSuite(suite)}
+              disabled={mutating || !!activeRunId || !isBenchmarkSuite(suite)}
               onclick={() => handleStart(suite)}
             >
               {lifecycleBusy ? "Starting…" : "Start run"}
@@ -580,7 +595,7 @@
                     finish. Flint only records a result if it durably receives and saves one.
                   </p>
                 {:else if isRunResumable(currentRun, activeRunId)}
-                  <button type="button" class="primary small" disabled={lifecycleBusy || !!activeRunId || runInFlight} onclick={() => handleResume(currentRun.id)}>
+                  <button type="button" class="primary small" disabled={mutating || !!activeRunId} onclick={() => handleResume(currentRun.id)}>
                     {lifecycleBusy ? "Resuming…" : "Resume"}
                   </button>
                 {/if}

@@ -574,6 +574,15 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
         tx.objectStore('suites').put(testSuite);
         tx.objectStore('runs').put(testRun());
         tx.objectStore('attempts').put(seeded);
+        tx.objectStore('attempts').put(testAttempt({
+          id: 'exec-2',
+          logicalAttemptId: 't0:c0:r1',
+          repeatIndex: 1,
+          sequence: 1,
+          status: 'succeeded',
+          responseText: 'a second full response that must also not appear on the summary',
+          settledAt: 1700000003000,
+        }));
         tx.oncomplete = () => { db.close(); resolve(); };
         tx.onerror = () => { db.close(); reject(tx.error); };
       };
@@ -582,18 +591,32 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
 
     const summaries = await listAttemptSummariesForRun('run-1');
     expect(summaries.ok).toBe(true);
-    expect(summaries.value).toEqual([{
-      id: 'exec-1',
-      runId: 'run-1',
-      logicalAttemptId: 't0:c0:r0',
-      targetIndex: 0,
-      phase: 'measured',
-      caseIndex: 0,
-      repeatIndex: 0,
-      sequence: 0,
-      status: 'succeeded',
-    }]);
-    expect(summaries.value![0]).not.toHaveProperty('responseText');
+    expect(summaries.value).toHaveLength(2);
+    expect(summaries.value).toEqual(expect.arrayContaining([
+      {
+        id: 'exec-1',
+        runId: 'run-1',
+        logicalAttemptId: 't0:c0:r0',
+        targetIndex: 0,
+        phase: 'measured',
+        caseIndex: 0,
+        repeatIndex: 0,
+        sequence: 0,
+        status: 'succeeded',
+      },
+      {
+        id: 'exec-2',
+        runId: 'run-1',
+        logicalAttemptId: 't0:c0:r1',
+        targetIndex: 0,
+        phase: 'measured',
+        caseIndex: 0,
+        repeatIndex: 1,
+        sequence: 1,
+        status: 'succeeded',
+      },
+    ]));
+    expect(summaries.value!.every((row) => !('responseText' in row))).toBe(true);
   });
 
   it('refuses to create a run whose suite row no longer exists', async () => {
