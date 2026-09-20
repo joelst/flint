@@ -111,7 +111,7 @@ export function validateBenchmarkMessage(raw: unknown, where: string): Validatio
   if (!isNonEmptyTrimmedString(raw.content, BENCHMARK_MAX_TEXT_LENGTH)) {
     return fail(`${where}: content must be a non-empty string of at most ${BENCHMARK_MAX_TEXT_LENGTH} characters`);
   }
-  return ok({ role: raw.role as BenchmarkMessageRole, content: raw.content });
+  return ok({ role: raw.role as BenchmarkMessageRole, content: (raw.content as string).trim() });
 }
 
 function validateTags(raw: unknown, where: string): ValidationResult<string[] | undefined> {
@@ -175,10 +175,12 @@ function validateTarget(raw: unknown, where: string): ValidationResult<Benchmark
   if (!isNonEmptyTrimmedString(raw.alias, BENCHMARK_MAX_NAME_LENGTH)) {
     return fail(`${where}: alias must be a non-empty string`);
   }
-  if (raw.variantId !== null && raw.variantId !== undefined && typeof raw.variantId !== 'string') {
-    return fail(`${where}: variantId must be a string or null`);
+  if (raw.variantId !== null && raw.variantId !== undefined
+    && !isNonEmptyTrimmedString(raw.variantId, BENCHMARK_MAX_NAME_LENGTH)) {
+    return fail(`${where}: variantId must be a non-empty string or null`);
   }
-  return ok({ alias: (raw.alias as string).trim(), variantId: (raw.variantId as string | null | undefined) ?? null });
+  const variantId = raw.variantId === null || raw.variantId === undefined ? null : (raw.variantId as string).trim();
+  return ok({ alias: (raw.alias as string).trim(), variantId });
 }
 
 /**
@@ -192,9 +194,8 @@ export function validateBenchmarkSuite(raw: unknown): ValidationResult<Benchmark
 
   if (!isNonEmptyTrimmedString(raw.id, BENCHMARK_MAX_NAME_LENGTH)) errors.push('id must be a non-empty string');
   if (!isNonEmptyTrimmedString(raw.name, BENCHMARK_MAX_NAME_LENGTH)) errors.push('name must be a non-empty string');
-  if (raw.description !== undefined
-    && !(typeof raw.description === 'string' && raw.description.length <= BENCHMARK_MAX_DESCRIPTION_LENGTH)) {
-    errors.push(`description must be a string of at most ${BENCHMARK_MAX_DESCRIPTION_LENGTH} characters`);
+  if (raw.description !== undefined && !isNonEmptyTrimmedString(raw.description, BENCHMARK_MAX_DESCRIPTION_LENGTH)) {
+    errors.push(`description must be a non-empty string of at most ${BENCHMARK_MAX_DESCRIPTION_LENGTH} characters when present`);
   }
   if (!isFiniteInteger(raw.createdAt) || (raw.createdAt as number) < 0) errors.push('createdAt must be a non-negative integer');
 
@@ -206,7 +207,7 @@ export function validateBenchmarkSuite(raw: unknown): ValidationResult<Benchmark
     for (let i = 0; i < raw.targets.length; i++) {
       const r = validateTarget(raw.targets[i], `targets[${i}]`);
       if (!r.ok) { errors.push(...r.errors); continue; }
-      const key = `${r.value!.alias}::${r.value!.variantId ?? ''}`;
+      const key = JSON.stringify([r.value!.alias, r.value!.variantId]);
       if (seenTargets.has(key)) { errors.push(`targets[${i}]: duplicate target (same alias and variant)`); continue; }
       seenTargets.add(key);
       targets.push(r.value!);
@@ -257,7 +258,7 @@ export function validateBenchmarkSuite(raw: unknown): ValidationResult<Benchmark
     warmupCount: raw.warmupCount as number,
     repeatCount: raw.repeatCount as number,
   };
-  if (raw.description !== undefined) suite.description = raw.description as string;
+  if (raw.description !== undefined) suite.description = (raw.description as string).trim();
   if (raw.temperature !== undefined) suite.temperature = raw.temperature as number;
   if (raw.maxTokens !== undefined) suite.maxTokens = raw.maxTokens as number;
 
@@ -285,10 +286,11 @@ export interface JsonlImportResult {
  * (matching `BenchmarkCase`). Atomic — any malformed, duplicate-id, or over-limit row rejects
  * the whole import with a line-numbered message; nothing is silently dropped or repaired.
  *
- * A row without an explicit `id` gets one derived from its 1-based line number
- * (`case-line-<n>`). Explicit ids are collected first so a generated id can never silently
- * collide with one the file itself supplied — that would reject the import instead, like any
- * other duplicate id.
+ * A row with no `id` key at all gets one derived from its 1-based line number
+ * (`case-line-<n>`); a row with a present-but-blank `id` is rejected as malformed, not treated
+ * as absent. Explicit ids are collected first so a generated id can never silently collide with
+ * one the file itself supplied — that would reject the import instead, like any other
+ * duplicate id.
  */
 export function parseBenchmarkCasesJsonl(text: string): JsonlImportResult {
   const lines = text.split(/\r?\n/);
@@ -321,8 +323,13 @@ export function parseBenchmarkCasesJsonl(text: string): JsonlImportResult {
   const seenIds = new Set<string>();
   for (const { lineNumber, raw } of rawRows) {
     let row = raw;
-    if (isPlainObject(raw) && (raw.id === undefined || (typeof raw.id === 'string' && !raw.id.trim()))) {
-      let generatedId = `case-line-${lineNumber}`;
+    // A present-but-blank id is malformed input, not "missing" — only a genuinely absent `id`
+    // key is eligible for a generated id.
+    if (isPlainObject(raw) && typeof raw.id === 'string' && !raw.id.trim()) {
+      return { ok: false, error: `line ${lineNumber}: id must be a non-empty string when present` };
+    }
+    if (isPlainObject(raw) && raw.id === undefined) {
+      const generatedId = `case-line-${lineNumber}`;
       if (explicitIds.has(generatedId) || seenIds.has(generatedId)) {
         return { ok: false, error: `line ${lineNumber}: generated id "${generatedId}" collides with another case's id` };
       }

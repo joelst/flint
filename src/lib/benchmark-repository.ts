@@ -45,6 +45,7 @@ function describeDomException(e: unknown, fallback: string): string {
  */
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
+    let settled = false;
     let request: IDBOpenDBRequest;
     try {
       request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
@@ -56,19 +57,33 @@ function openDatabase(): Promise<IDBDatabase> {
       const db = request.result;
       db.createObjectStore(SUITES_STORE, { keyPath: 'id' });
     };
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      if (settled) {
+        // A rejected (e.g. blocked) open whose request later succeeds anyway must not leak
+        // this now-unwanted connection.
+        request.result.close();
+        return;
+      }
+      settled = true;
+      resolve(request.result);
+    };
     request.onerror = () => {
+      if (settled) return;
+      settled = true;
       reject(new Error(describeDomException(request.error, 'Could not open the benchmark database')));
     };
     request.onblocked = () => {
+      if (settled) return;
+      settled = true;
       reject(new Error('The benchmark database is blocked by another open connection'));
     };
   });
 }
 
 /** Runs `body` against a store inside a transaction, resolving only when the transaction
- * itself completes (not merely when the request inside it succeeds) — a request can succeed
- * and the surrounding transaction can still fail or be aborted afterward. */
+ * itself reaches a terminal state (`complete` or `abort`) — a request can succeed while the
+ * surrounding transaction still fails or is aborted afterward, so a request's own `onsuccess`/
+ * `onerror` is never itself the settling event; only the transaction's terminal event is. */
 async function withStore<T>(
   mode: IDBTransactionMode,
   body: (store: IDBObjectStore) => IDBRequest<T> | void,
@@ -82,53 +97,73 @@ async function withStore<T>(
   try {
     return await new Promise((resolve) => {
       let settled = false;
-      let requestResult: T | undefined;
-      const tx = db.transaction(SUITES_STORE, mode);
-      const store = tx.objectStore(SUITES_STORE);
-      let request: IDBRequest<T> | void;
+      let requestErrorMessage: string | undefined;
+      const requestResultBox: { value?: T } = {};
+      let tx: IDBTransaction;
+      let store: IDBObjectStore;
       try {
-        request = body(store);
+        tx = db.transaction(SUITES_STORE, mode);
+        store = tx.objectStore(SUITES_STORE);
       } catch (e) {
-        settled = true;
-        resolve(failResult(describeDomException(e, 'Benchmark database request failed')));
+        resolve(failResult(describeDomException(e, 'Could not start a benchmark database transaction')));
         return;
-      }
-      if (request) {
-        request.onsuccess = () => { requestResult = request!.result; };
-        request.onerror = () => {
-          if (settled) return;
-          settled = true;
-          resolve(failResult(describeDomException(request!.error, 'Benchmark database request failed')));
-        };
       }
       tx.oncomplete = () => {
         if (settled) return;
         settled = true;
-        resolve(okResult(requestResult));
+        resolve(okResult(requestResultBox.value));
       };
       tx.onerror = () => {
         if (settled) return;
         settled = true;
-        resolve(failResult(describeDomException(tx.error, 'Benchmark database transaction failed')));
+        resolve(failResult(requestErrorMessage ?? describeDomException(tx.error, 'Benchmark database transaction failed')));
       };
       tx.onabort = () => {
         if (settled) return;
         settled = true;
-        resolve(failResult(describeDomException(tx.error, 'Benchmark database transaction was aborted')));
+        resolve(failResult(
+          requestErrorMessage ?? describeDomException(tx.error, 'Benchmark database transaction was aborted'),
+        ));
       };
+      let request: IDBRequest<T> | void;
+      try {
+        request = body(store);
+      } catch (e) {
+        // The synchronous throw itself does not abort the transaction, so record it and
+        // explicitly abort — the handlers above (already attached) then report it.
+        requestErrorMessage = describeDomException(e, 'Benchmark database request failed');
+        tx.abort();
+        return;
+      }
+      if (request) {
+        request.onsuccess = () => { requestResultBox.value = request!.result; };
+        request.onerror = () => {
+          // Do not settle here: an unhandled request error always aborts the transaction, and
+          // `onabort` above is the true terminal signal — settling here would report success
+          // or failure before the transaction's own outcome is actually known.
+          requestErrorMessage = describeDomException(request!.error, 'Benchmark database request failed');
+        };
+      }
     });
   } finally {
     db.close();
   }
 }
 
-/** Suites that fail shape validation are silently excluded rather than surfaced as an error —
- * they are defense against future schema drift, not something this session wrote, so there is
- * nothing actionable for a caller to do about one bad row among otherwise-valid suites. */
+/** Suites that fail shape validation are treated as a repository-level error, not silently
+ * dropped — matching `comparison-history.ts`'s stance that one corrupt entry invalidates the
+ * whole read rather than quietly returning a partial (and therefore misleading) result. Because
+ * `putBenchmarkSuite` validates before writing, a corrupt row here can only come from a future
+ * incompatible schema version or data written outside this module, and callers need to know
+ * that happened rather than be told nothing exists. */
 export async function listBenchmarkSuites(): Promise<RepositoryResult<BenchmarkSuite[]>> {
   const result = await withStore<BenchmarkSuite[]>('readonly', (store) => store.getAll() as IDBRequest<BenchmarkSuite[]>);
   if (!result.ok) return failResult(result.error!);
-  const rows = (result.value ?? []).filter(isBenchmarkSuite);
+  const rows = result.value ?? [];
+  const invalidIndex = rows.findIndex((row) => !isBenchmarkSuite(row));
+  if (invalidIndex !== -1) {
+    return failResult(`stored benchmark suite at index ${invalidIndex} failed validation`);
+  }
   return okResult(rows);
 }
 
@@ -136,13 +171,16 @@ export async function getBenchmarkSuite(id: string): Promise<RepositoryResult<Be
   const result = await withStore<BenchmarkSuite>('readonly', (store) => store.get(id) as IDBRequest<BenchmarkSuite>);
   if (!result.ok) return failResult(result.error!);
   if (result.value === undefined) return okResult(null);
-  if (!isBenchmarkSuite(result.value)) return okResult(null);
+  if (!isBenchmarkSuite(result.value)) return failResult(`stored benchmark suite "${id}" failed validation`);
   return okResult(result.value);
 }
 
-/** Upserts a suite, keyed by `suite.id`. Resolves only once the write transaction has
+/** Upserts a suite, keyed by `suite.id`. Validates and normalizes before writing — this is the
+ * only write path, so a corrupt stored row can only come from a future incompatible schema
+ * version or data written outside this module. Resolves only once the write transaction has
  * genuinely committed — never merely queued. */
 export async function putBenchmarkSuite(suite: BenchmarkSuite): Promise<RepositoryResult<void>> {
+  if (!isBenchmarkSuite(suite)) return failResult('suite failed validation and was not saved');
   const result = await withStore<IDBValidKey>('readwrite', (store) => store.put(suite));
   if (!result.ok) return failResult(result.error!);
   return okResult(undefined);

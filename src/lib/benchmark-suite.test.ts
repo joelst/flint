@@ -68,6 +68,15 @@ describe('validateBenchmarkCase', () => {
     expect(r.value?.messages).toEqual([{ role: 'user', content: 'hi' }]);
   });
 
+  it('trims message content', () => {
+    const r = validateBenchmarkCase(
+      { id: 'case-1', messages: [{ role: 'user', content: '  hi  ' }] },
+      'case',
+    );
+    expect(r.ok).toBe(true);
+    expect(r.value?.messages).toEqual([{ role: 'user', content: 'hi' }]);
+  });
+
   it.each([
     ['neither prompt nor messages', { id: 'c' }],
     ['both prompt and messages', { id: 'c', prompt: 'x', messages: [{ role: 'user', content: 'x' }] }],
@@ -237,7 +246,39 @@ describe('validateBenchmarkSuite', () => {
       targets: [{ alias: 'model-a', variantId: 123 as unknown as string }],
     }));
     expect(r.ok).toBe(false);
-    expect(r.errors.join(' ')).toMatch(/variantId must be a string or null/);
+    expect(r.errors.join(' ')).toMatch(/variantId must be a non-empty string or null/);
+  });
+
+  it('rejects a target whose variantId is a blank string (must be null, not empty)', () => {
+    const r = validateBenchmarkSuite(validSuite({
+      targets: [{ alias: 'model-a', variantId: '   ' }],
+    }));
+    expect(r.ok).toBe(false);
+    expect(r.errors.join(' ')).toMatch(/variantId must be a non-empty string or null/);
+  });
+
+  it('does not conflate distinct alias/variantId pairs that share characters across the boundary', () => {
+    // ('a', 'b::c') and ('a::b', 'c') must not collide just because a naive delimiter-joined
+    // key would look the same for both.
+    const r = validateBenchmarkSuite(validSuite({
+      targets: [
+        { alias: 'a', variantId: 'b::c' },
+        { alias: 'a::b', variantId: 'c' },
+      ],
+    }));
+    expect(r.ok).toBe(true);
+  });
+
+  it('rejects a suite description that is present but blank', () => {
+    const r = validateBenchmarkSuite(validSuite({ description: '   ' }));
+    expect(r.ok).toBe(false);
+    expect(r.errors.join(' ')).toMatch(/description must be a non-empty string/);
+  });
+
+  it('trims a valid description', () => {
+    const r = validateBenchmarkSuite(validSuite({ description: '  hello  ' }));
+    expect(r.ok).toBe(true);
+    expect(r.value?.description).toBe('hello');
   });
 
   it('propagates a per-case validation error (not just duplicate-id) up to the suite result', () => {
@@ -299,6 +340,12 @@ describe('parseBenchmarkCasesJsonl', () => {
     const r = parseBenchmarkCasesJsonl('{"prompt":"a"}\n{"prompt":"b"}');
     expect(r.ok).toBe(true);
     expect(r.cases?.map((c) => c.id)).toEqual(['case-line-1', 'case-line-2']);
+  });
+
+  it('rejects a row with a present-but-blank id rather than treating it as absent', () => {
+    const r = parseBenchmarkCasesJsonl('{"id":"  ","prompt":"a"}');
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/line 1.*id must be a non-empty string/);
   });
 
   it('rejects the whole file when any line is invalid JSON', () => {

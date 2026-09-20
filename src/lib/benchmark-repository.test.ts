@@ -84,9 +84,10 @@ describe('benchmark-repository', () => {
     expect(del.ok).toBe(true);
   });
 
-  it('excludes a row that fails shape validation from list, rather than erroring the whole read', async () => {
+  it('reports a stored corrupt row as an error, rather than silently excluding it', async () => {
     // Reach past the module's own validation to simulate corrupt/foreign data already in the
-    // store (e.g. written by a future incompatible schema version).
+    // store (e.g. written by a future incompatible schema version) — putBenchmarkSuite itself
+    // now validates before writing, so this can only happen from outside this module.
     await new Promise<void>((resolve, reject) => {
       const req = indexedDB.open('flint-benchmarks', 1);
       req.onupgradeneeded = () => {
@@ -101,16 +102,23 @@ describe('benchmark-repository', () => {
       };
       req.onerror = () => reject(req.error);
     });
-    await putBenchmarkSuite(suite());
 
     const listed = await listBenchmarkSuites();
-    expect(listed.ok).toBe(true);
-    expect(listed.value).toHaveLength(1);
-    expect(listed.value?.[0].id).toBe('suite-1');
+    expect(listed.ok).toBe(false);
+    expect(listed.error).toMatch(/failed validation/);
 
-    // The one row that failed validation is excluded from list, but get() still says it isn't
-    // a usable suite too, rather than returning the raw corrupt object.
     const got = await getBenchmarkSuite('corrupt');
+    expect(got.ok).toBe(false);
+    expect(got.error).toMatch(/failed validation/);
+  });
+
+  it('rejects an invalid suite without writing anything', async () => {
+    const invalid = { ...suite(), name: '' };
+    const put = await putBenchmarkSuite(invalid);
+    expect(put.ok).toBe(false);
+    expect(put.error).toMatch(/failed validation/);
+
+    const got = await getBenchmarkSuite('suite-1');
     expect(got).toEqual({ ok: true, value: null });
   });
 
@@ -118,8 +126,8 @@ describe('benchmark-repository', () => {
     await putBenchmarkSuite(suite({ name: 'Original' }));
 
     // Proof gate: this exercises IndexedDB's own transactional guarantee directly (not this
-    // module's wrapper, which never deliberately aborts) — the property a future runner's
-    // checkpoint writes will depend on.
+    // module's wrapper, which never deliberately aborts on a normal write) — the property a
+    // future runner's checkpoint writes will depend on.
     await new Promise<void>((resolve, reject) => {
       const req = indexedDB.open('flint-benchmarks', 1);
       req.onsuccess = () => {
@@ -198,10 +206,43 @@ describe('benchmark-repository', () => {
     }
   });
 
+  it('closes a connection whose open succeeds after already having been rejected as blocked', async () => {
+    const originalIndexedDB = globalThis.indexedDB;
+    let closed = false;
+    vi.stubGlobal('indexedDB', {
+      open: () => {
+        let onblockedFn: (() => void) | undefined;
+        let onsuccessFn: (() => void) | undefined;
+        const fakeRequest: Record<string, unknown> = {
+          result: { close: () => { closed = true; } },
+          set onupgradeneeded(_fn: unknown) { /* not invoked */ },
+          set onsuccess(fn: () => void) { onsuccessFn = fn; },
+          set onerror(_fn: unknown) { /* not invoked */ },
+          set onblocked(fn: () => void) {
+            onblockedFn = fn;
+            // Real IndexedDB can fire `blocked` and later `success` for the same request once
+            // the blocking connection closes; simulate that ordering here.
+            onblockedFn?.();
+            onsuccessFn?.();
+          },
+        };
+        return fakeRequest;
+      },
+    });
+    try {
+      const result = await listBenchmarkSuites();
+      expect(result.ok).toBe(false);
+      expect(closed).toBe(true);
+    } finally {
+      vi.stubGlobal('indexedDB', originalIndexedDB);
+    }
+  });
+
   /** A minimal fake `indexedDB` whose `open()` succeeds immediately and whose `transaction()`
-   * returns a fully test-controlled transaction/store pair, so the withStore wrapper's own
-   * event-handling logic (settle-once, oncomplete-not-onsuccess, error vs. abort) can be driven
-   * directly without depending on which real IndexedDB operations happen to fail. */
+   * returns a fully test-controlled transaction/store pair, so withStore's own event-handling
+   * logic (settle-once, terminal-event-only, request-error-does-not-itself-settle) can be
+   * driven directly. `abort()` synchronously fires `onabort`, matching how this module always
+   * uses it: to react to a request that already threw before any request event could fire. */
   function stubOpenSuccess(makeStore: () => { get: () => unknown; getAll: () => unknown; put: () => unknown; delete: () => unknown }) {
     const txListeners: Record<string, (() => void) | undefined> = {};
     const fakeTx = {
@@ -209,6 +250,7 @@ describe('benchmark-repository', () => {
       set onerror(fn: () => void) { txListeners.onerror = fn; },
       set onabort(fn: () => void) { txListeners.onabort = fn; },
       objectStore: () => makeStore(),
+      abort: () => txListeners.onabort?.(),
     };
     vi.stubGlobal('indexedDB', {
       open: () => {
@@ -229,7 +271,7 @@ describe('benchmark-repository', () => {
     vi.unstubAllGlobals();
   });
 
-  it('reports failure when the store method itself throws synchronously', async () => {
+  it('reports failure when the store method itself throws synchronously (and aborts the transaction)', async () => {
     stubOpenSuccess(() => ({
       get: () => { throw new Error('store method threw'); },
       getAll: () => { throw new Error('store method threw'); },
@@ -262,23 +304,22 @@ describe('benchmark-repository', () => {
     expect(result).toEqual({ ok: false, error: 'delete failed' });
   });
 
-  it('ignores a request error that arrives after the transaction already settled', async () => {
+  it('reports failure using the request error once the transaction aborts after an unhandled request error', async () => {
     let request: { onsuccess?: () => void; onerror?: () => void; error?: Error } = {};
     const txListeners = stubOpenSuccess(() => ({
-      get: () => { request = { error: new Error('too late') }; return request; },
+      get: () => { request = { error: new Error('request failed') }; return request; },
       getAll: () => request,
       put: () => request,
       delete: () => request,
     }));
     const resultPromise = getBenchmarkSuite('x');
     await Promise.resolve();
-    // The transaction completes first (e.g. the request itself already succeeded)...
-    txListeners.oncomplete?.();
-    // ...so a subsequently (redundantly) firing request error must be a no-op, not overwrite
-    // the already-settled result.
+    // A real transaction always aborts after an unhandled request error; the request's own
+    // onerror only records the message, it must not settle the promise by itself.
     request.onerror?.();
+    txListeners.onabort?.();
     const result = await resultPromise;
-    expect(result).toEqual({ ok: true, value: null });
+    expect(result).toEqual({ ok: false, error: 'request failed' });
   });
 
   it('ignores a duplicate transaction-complete event that arrives after settling', async () => {
@@ -309,29 +350,6 @@ describe('benchmark-repository', () => {
     txListeners.onerror?.();
     const result = await resultPromise;
     expect(result).toEqual({ ok: true, value: null });
-  });
-
-  it('reports failure when the request itself errors, before the transaction settles', async () => {
-    let request: { onsuccess?: () => void; onerror?: () => void; error?: Error } = {};
-    const txListeners = stubOpenSuccess(() => ({
-      get: () => {
-        request = { error: new Error('request failed') };
-        // Simulate the request erroring on a later microtask, the same as a real IndexedDB.
-        queueMicrotask(() => request.onerror?.());
-        return request;
-      },
-      getAll: () => request,
-      put: () => request,
-      delete: () => request,
-    }));
-    const resultPromise = getBenchmarkSuite('x');
-    await Promise.resolve();
-    await Promise.resolve();
-    // A real transaction always aborts after an unhandled request error; withStore must have
-    // already settled from the request's own onerror, so this later onabort must be a no-op.
-    txListeners.onabort?.();
-    const result = await resultPromise;
-    expect(result).toEqual({ ok: false, error: 'request failed' });
   });
 
   it('reports failure when the transaction itself errors with no request in flight', async () => {
