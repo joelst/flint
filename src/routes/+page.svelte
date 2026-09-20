@@ -692,7 +692,10 @@
   let compareActiveStream: { controller: AbortController; requestId: number | null } | null = null;
   /** Slot key currently receiving deltas, for MessageRenderer's streaming-reasoning buffer. */
   let compareStreamingSlotKey = $state<string | null>(null);
-  let compareRunGeneration = 0;
+  /** Incremented once per run; also used (with slot.key) as MessageRenderer's messageKey so a
+   * re-run reusing the same slots is treated as a new logical message, not an update to the
+   * previous run's. Must be $state — the template reads it to build that key. */
+  let compareRunGeneration = $state(0);
   let compareStopAckError: string | null = null;
   let compareStopAckWaits: Promise<void>[] = [];
   let comparePreDispatchCancelled = false;
@@ -3290,6 +3293,11 @@ updateStateFromSdk();
     compareSlots = entry.slots.map((s) => ({ ...s }));
     comparePrompt = entry.prompt;
     compareResults = cloneCompareResults(entry.results);
+    // A saved run's results are a new logical message for any reused slot/MessageRenderer
+    // instance, exactly like a fresh "Run comparison" — bump the same generation counter so
+    // per-message state (thinking toggle, cached render) doesn't leak from whatever was
+    // previously showing in that slot.
+    compareRunGeneration++;
     compareHistoryOpen = false;
     statusMessage = `Reviewing arena run from ${new Date(entry.createdAt).toLocaleString()}`;
   }
@@ -7554,6 +7562,7 @@ Output only the summary text, no preamble.`;
                             role={msg.role}
                             isStreaming={isStreaming && msg.id === activeStreamAssistantId}
                             assumeReasoning={currentModelTags.includes("reasoning")}
+                            messageKey={`${threadLoadedFor}:${msg.id ?? i}`}
                           />
                         </div>
                       </div>
@@ -9246,7 +9255,8 @@ Output only the summary text, no preamble.`;
                         <MessageRenderer
                           content={r.content || ""}
                           isStreaming={compareStreamingSlotKey === slot.key}
-                          assumeReasoning={getModelTags(slot.alias).includes("reasoning")}
+                          assumeReasoning={getModelTags(slot.alias, state.models.find((m) => m.alias === slot.alias)?.info).includes("reasoning")}
+                          messageKey={`${compareRunGeneration}:${slot.key}`}
                         />
                       </div>
                       {#if r.status === "stopped" && typeof r.nativeStreaming === "boolean"}

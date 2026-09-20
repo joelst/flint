@@ -16,6 +16,17 @@
    * on completion if no tag ever appeared.
    */
   export let assumeReasoning: boolean = false;
+  /**
+   * Identifies which logical message this instance is rendering (e.g. `${conversationId}:
+   * ${messageId}`). `MessageRenderer` instances are created in an unkeyed `{#each}` (Chat) or
+   * reused across runs for the same Arena slot, so Svelte can reuse one component instance for
+   * what is, logically, a completely different message. Without this, `userToggledThinking`/
+   * `showThinking` (component-local state) would silently bleed from one message to the next
+   * that happens to land in the same position/slot. Defaults to a constant so callers that
+   * never render more than one logical message through the same instance (there are none today)
+   * are unaffected.
+   */
+  export let messageKey: string | number = 0;
 
   let renderedHtml = "";
   let thinkingBlocks: string[] = [];
@@ -25,8 +36,23 @@
     null;
   let renderVersion = 0;
   let pendingRenderTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastMessageKey: string | number | undefined = undefined;
 
-  $: void queueRender(role, content, isStreaming, assumeReasoning);
+  $: {
+    if (messageKey !== lastMessageKey) {
+      lastMessageKey = messageKey;
+      // A new logical message: never let the previous message's manual toggle or auto-expand
+      // state, or its rendered output, leak into this one, even if it happens to render in the
+      // same component instance. Cleared synchronously (not left to the debounced re-render) so
+      // a brand-new message never visibly flashes the previous message's content first.
+      userToggledThinking = false;
+      showThinking = false;
+      thinkingBlocks = [];
+      renderedHtml = "";
+    }
+  }
+
+  $: void queueRender(role, content, isStreaming, assumeReasoning, messageKey);
 
   function escapeHtml(text: string): string {
     const map: Record<string, string> = {
@@ -106,11 +132,20 @@
     navigator.clipboard.writeText(content);
   }
 
+  /**
+   * `_key` (messageKey) is intentionally unused in the body: its only purpose is as a reactive
+   * dependency, so a message-identity change always re-renders even when `role`/`content`/
+   * `isStreaming`/`assumeReasoning` are all otherwise identical to the previous message that
+   * happened to render through this same instance (e.g. two conversations sharing an identical
+   * reply). Without it, the synchronous reset above would leave the view blank until one of the
+   * other props next changed.
+   */
   function queueRender(
     currentRole: "user" | "assistant",
     currentContent: string,
     streaming: boolean,
     reasoning: boolean,
+    _key: string | number,
   ): void {
     const currentVersion = ++renderVersion;
     if (pendingRenderTimer) {
