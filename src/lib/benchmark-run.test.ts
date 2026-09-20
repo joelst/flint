@@ -225,4 +225,13 @@ describe('isBenchmarkAttempt', () => {
     expect(isBenchmarkAttempt(attempt({ repeatIndex: 0.5 }))).toBe(false);
     expect(isBenchmarkAttempt(attempt({ sequence: -1 }))).toBe(false);
   });
+
+  it('rejects an attempt missing requestedVariantId entirely (not just null)', () => {
+    // `undefined !== null` is true in JS, so the existing null-vs-non-empty-string check
+    // already rejects a wholly-missing property; this pins that behavior down explicitly
+    // rather than relying on it as an accidental side effect of the null check.
+    const { requestedVariantId, ...withoutField } = attempt();
+    expect(requestedVariantId).toBeDefined(); // sanity: the field really was present before we dropped it
+    expect(isBenchmarkAttempt(withoutField)).toBe(false);
+  });
 });

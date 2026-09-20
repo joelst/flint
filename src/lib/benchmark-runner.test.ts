@@ -7,7 +7,7 @@ import {
   type AttemptTransport,
   type AttemptTransportResult,
 } from './benchmark-runner';
-import { listAttemptsForRun, listBenchmarkRunsForSuite } from './benchmark-repository';
+import { getBenchmarkRun, listAttemptsForRun, listBenchmarkRunsForSuite } from './benchmark-repository';
 import type { BenchmarkSuite } from './benchmark-suite';
 
 function suite(over: Partial<BenchmarkSuite> = {}): BenchmarkSuite {
@@ -73,6 +73,32 @@ describe('startBenchmarkRun', () => {
     // 1 warm-up + 2 cases * 1 repeat = 3 attempts for the single target.
     expect(attempts.value).toHaveLength(3);
     expect(attempts.value!.every((a) => a.status === 'succeeded')).toBe(true);
+  });
+
+  it('returns a run snapshot reflecting the status executePositions actually committed, not the stale pre-execution one', async () => {
+    const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
+    const outcome = await startBenchmarkRun(s, succeedingTransport());
+    expect(outcome.result).toEqual({ status: 'completed' });
+    // The returned run must agree with what's durably persisted -- not silently still read
+    // 'running', which is what the caller passed into executePositions before it settled.
+    expect(outcome.run!.status).toBe('completed');
+    expect(outcome.run!.finalizedAt).toEqual(expect.any(Number));
+
+    const stored = await getBenchmarkRun(outcome.run!.id);
+    expect(stored.value!.status).toBe('completed');
+    expect(outcome.run).toEqual(stored.value);
+  });
+
+  it('returns a stopped run snapshot when Stop halts execution mid-schedule', async () => {
+    const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }, { id: 'c2', prompt: 'y' }] });
+    const stopController = createStopController();
+    const transport: AttemptTransport = async () => {
+      stopController.stop();
+      return { ok: true, responseText: 'ok' };
+    };
+    const outcome = await startBenchmarkRun(s, transport, stopController);
+    expect(outcome.result?.status).toBe('stopped');
+    expect(outcome.run!.status).toBe('stopped');
   });
 
   it('freezes a snapshot of the suite at call time, immune to later mutation of the caller\'s object', async () => {
@@ -245,6 +271,13 @@ describe('startBenchmarkRun', () => {
     // IndexedDB never actually recorded.
     expect(outcome.result?.status).toBe('recovery_required');
     expect(outcome.result?.haltedError).toMatch(/store closed/);
+    // The returned run must reflect what storage actually has -- still 'running', since the
+    // status write itself never landed -- not a claimed 'completed'/'recovery_required' the
+    // repository never committed. Verify against storage directly, not just the returned value.
+    expect(outcome.run!.status).toBe('running');
+    const stored = await getBenchmarkRun(outcome.run!.id);
+    expect(stored.value!.status).toBe('running');
+    expect(outcome.run).toEqual(stored.value);
   });
 
   // --- Stop semantics -----------------------------------------------------------------------
@@ -332,6 +365,9 @@ describe('resumeBenchmarkRun', () => {
 
     const resumed = await resumeBenchmarkRun(started.run!.id, succeedingTransport());
     expect(resumed.result).toEqual({ status: 'completed' });
+    // Resume's returned run snapshot must also reflect the committed terminal status, not the
+    // stale 'stopped' one the run had going into this resume call.
+    expect(resumed.run!.status).toBe('completed');
 
     const attempts = await listAttemptsForRun(started.run!.id);
     expect(attempts.value).toHaveLength(2);
@@ -348,7 +384,31 @@ describe('resumeBenchmarkRun', () => {
     let called = false;
     const resumed = await resumeBenchmarkRun(started.run!.id, async () => { called = true; return { ok: true, responseText: 'x' }; });
     expect(resumed.result).toEqual({ status: 'completed' });
+    expect(resumed.run!.status).toBe('completed');
     expect(called).toBe(false);
+  });
+
+  it('resuming a run with no recorded startedAt uses a single timestamp for both the persisted patch and the returned snapshot', async () => {
+    const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
+    const repo = await import('./benchmark-repository');
+    const runId = 'run-no-started-at';
+    // Simulate a run row that was created without startedAt (e.g. an older schema or a
+    // never-actually-started row) to exercise the `run.startedAt ?? Date.now()` fallback.
+    await repo.createBenchmarkRun({
+      id: runId,
+      suiteId: s.id,
+      suite: s,
+      createdAt: Date.now(),
+      status: 'stopped',
+    });
+
+    const resumed = await resumeBenchmarkRun(runId, succeedingTransport());
+    expect(resumed.ok).toBe(true);
+    expect(resumed.run!.startedAt).toBeDefined();
+    const stored = await getBenchmarkRun(runId);
+    // The timestamp written to storage and the one in the returned snapshot must be the exact
+    // same value -- not two separate Date.now() calls that could disagree by a few ms.
+    expect(resumed.run!.startedAt).toBe(stored.value!.startedAt);
   });
 
   it('fails cleanly when resuming a run id that does not exist', async () => {

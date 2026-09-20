@@ -139,33 +139,42 @@ function messagesForPosition(suite: BenchmarkSuite, position: LogicalAttempt): B
   return [{ role: 'user', content: caseEntry.prompt! }];
 }
 
-/** Persists the run's terminal status and returns the result the caller should report. A
- * status write failure is never silently absorbed: this refuses to let the caller claim a
- * status ('stopped'/'completed'/`recovery_required`) that was never durably committed. Instead
- * it downgrades to `recovery_required` — the most conservative signal Flint can give — and
- * folds the persistence failure into `haltedError` alongside whatever the caller already
- * wanted to report. */
+/** Persists the run's terminal status and returns both the result the caller should report and
+ * the run object that actually reflects it. A status write failure is never silently absorbed:
+ * this refuses to let the caller claim a status ('stopped'/'completed'/`recovery_required`) that
+ * was never durably committed. Instead it downgrades to `recovery_required` — the most
+ * conservative signal Flint can give — folds the persistence failure into `haltedError`
+ * alongside whatever the caller already wanted to report, and returns `run` **unchanged**,
+ * since a failed write means storage still holds whatever status it had before this call. Only
+ * on a successful write does the returned `run` reflect `intended` and `patch` — built from the
+ * exact same values just persisted, so it can never disagree with storage. */
 async function haltWith(
-  runId: string,
+  run: BenchmarkRun,
   intended: RunHaltReason,
   patch: Partial<BenchmarkRun> | undefined,
   haltedError?: string,
-): Promise<RunExecutionResult> {
-  const write = await updateBenchmarkRunStatus(runId, intended, patch);
+): Promise<{ result: RunExecutionResult; run: BenchmarkRun }> {
+  const write = await updateBenchmarkRunStatus(run.id, intended, patch);
   if (write.ok) {
-    return haltedError ? { status: intended, haltedError } : { status: intended };
+    const updatedRun: BenchmarkRun = { ...run, ...patch, status: intended };
+    return { result: haltedError ? { status: intended, haltedError } : { status: intended }, run: updatedRun };
   }
   const persistenceError = `failed to persist run status "${intended}": ${write.error}`;
   return {
-    status: 'recovery_required',
-    haltedError: haltedError ? `${haltedError}; additionally, ${persistenceError}` : persistenceError,
+    result: {
+      status: 'recovery_required',
+      haltedError: haltedError ? `${haltedError}; additionally, ${persistenceError}` : persistenceError,
+    },
+    run,
   };
 }
 
 /**
  * Executes `positions` in order against `run`, using and extending `attemptsSoFar` (so
  * `nextSequenceFor` sees every execution written so far in this call, not just ones already in
- * storage before it started) to pick each new execution's sequence number.
+ * storage before it started) to pick each new execution's sequence number. Returns the run
+ * object reflecting whatever terminal status actually got persisted (see `haltWith`), never the
+ * stale pre-execution snapshot the caller passed in.
  */
 async function executePositions(
   run: BenchmarkRun,
@@ -173,10 +182,10 @@ async function executePositions(
   attemptsSoFar: BenchmarkAttempt[],
   transport: AttemptTransport,
   stopController: StopController,
-): Promise<RunExecutionResult> {
+): Promise<{ result: RunExecutionResult; run: BenchmarkRun }> {
   for (const position of positions) {
     if (stopController.isStopped()) {
-      return haltWith(run.id, 'stopped', undefined);
+      return haltWith(run, 'stopped', undefined);
     }
 
     const target = run.suite.targets[position.targetIndex];
@@ -199,7 +208,7 @@ async function executePositions(
     if (!dispatchWrite.ok) {
       // The chat call must never be made for a position whose intent was not durably recorded.
       return haltWith(
-        run.id,
+        run,
         'recovery_required',
         { finalizedAt: Date.now() },
         `failed to record dispatch intent: ${dispatchWrite.error}`,
@@ -210,7 +219,7 @@ async function executePositions(
     if (stopController.isStopped()) {
       // The intent already committed — this position stays `dispatched` (uncertain), exactly
       // as an actual crash would leave it. Never call the transport once Stop has landed.
-      return haltWith(run.id, 'stopped', undefined);
+      return haltWith(run, 'stopped', undefined);
     }
 
     let transportResult: AttemptTransportResult;
@@ -247,7 +256,7 @@ async function executePositions(
       // runner refuses to paper over. A result Flint cannot durably record is not a result
       // Flint can honestly claim to have gotten, whether the chat call itself succeeded or not.
       return haltWith(
-        run.id,
+        run,
         'recovery_required',
         { finalizedAt: Date.now() },
         `failed to record terminal result: ${terminalWrite.error}`,
@@ -261,7 +270,7 @@ async function executePositions(
     };
   }
 
-  return haltWith(run.id, 'completed', { finalizedAt: Date.now() });
+  return haltWith(run, 'completed', { finalizedAt: Date.now() });
 }
 
 export interface StartRunOutcome {
@@ -307,8 +316,8 @@ export async function startBenchmarkRun(
     if (!created.ok) return { ok: false, error: created.error };
 
     const schedule = buildAttemptSchedule(frozenSuite);
-    const result = await executePositions(run, schedule, [], transport, stopController);
-    return { ok: true, run, result };
+    const { result, run: finalRun } = await executePositions(run, schedule, [], transport, stopController);
+    return { ok: true, run: finalRun, result };
   } finally {
     activeRunIds.delete(runId);
   }
@@ -316,6 +325,7 @@ export async function startBenchmarkRun(
 
 export interface ResumeRunOutcome {
   ok: boolean;
+  run?: BenchmarkRun;
   result?: RunExecutionResult;
   error?: string;
 }
@@ -353,15 +363,20 @@ export async function resumeBenchmarkRun(
     const schedule = buildAttemptSchedule(run.suite);
     const pending = pendingLogicalAttempts(schedule, attempts);
     if (pending.length === 0) {
-      const result = await haltWith(runId, 'completed', { finalizedAt: Date.now() });
-      return { ok: true, result };
+      const { result, run: finalRun } = await haltWith(run, 'completed', { finalizedAt: Date.now() });
+      return { ok: true, result, run: finalRun };
     }
 
-    const resumedStart = await updateBenchmarkRunStatus(runId, 'running', { startedAt: run.startedAt ?? Date.now() });
+    // Capture the timestamp once: calling Date.now() separately for the write and for the
+    // returned snapshot could let the two disagree by a few ms, breaking the invariant that
+    // the returned run always matches what was just persisted.
+    const resumedStartedAt = run.startedAt ?? Date.now();
+    const resumedStart = await updateBenchmarkRunStatus(runId, 'running', { startedAt: resumedStartedAt });
     if (!resumedStart.ok) return { ok: false, error: resumedStart.error };
+    const resumingRun: BenchmarkRun = { ...run, status: 'running', startedAt: resumedStartedAt };
 
-    const result = await executePositions(run, pending, [...attempts], transport, stopController);
-    return { ok: true, result };
+    const { result, run: finalRun } = await executePositions(resumingRun, pending, [...attempts], transport, stopController);
+    return { ok: true, result, run: finalRun };
   } finally {
     activeRunIds.delete(runId);
   }
