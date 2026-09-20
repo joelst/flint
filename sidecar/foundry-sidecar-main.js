@@ -2754,6 +2754,14 @@ rl.on('line', async (line) => {
         if (!transport) throw new Error(transportReason);
         if (transport === 'sdk') {
           const client = chatModel.createChatClient();
+          // SDK reads generation params from client.settings, not completeChat args.
+          // Omit unset fields so the model's own defaults are not overwritten.
+          if (client?.settings && Number.isFinite(payload.temperature)) {
+            client.settings.temperature = payload.temperature;
+          }
+          if (client?.settings && Number.isFinite(payload.maxTokens)) {
+            client.settings.maxTokens = payload.maxTokens;
+          }
           if (shouldStream && typeof client?.completeStreamingChat === 'function') {
             let content = '';
             for await (const chunk of client.completeStreamingChat(sdkMessages)) {
