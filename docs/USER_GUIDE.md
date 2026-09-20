@@ -26,8 +26,8 @@ Flint prefers the packaged Node on launch (About shows `bundled` vs `PATH`) and 
    - Download a **small** starter if recommended, then **Load** a chat-capable model.  
    - Avoid loading only an STT (audio) model if you want Chat.
 
-3. **Chat**  
-   - Open **Chat**, send a message.  
+3. **Playground**  
+   - Open **Playground**, send a message. A **Chat / Voice** toggle inside switches modes.  
    - Optional: personas, system prompt, image attach (vision models), URL → context chips.
 
 4. **Optional — service for other apps**  
@@ -70,7 +70,7 @@ Flint prefers the packaged Node on launch (About shows `bundled` vs `PATH`) and 
 
 ### Audio transcription
 
-- **Audio** tab: pick an STT model, use mic or file.  
+- **Playground → Voice**: pick an STT model, use mic or file.  
 - Chat and audio share the local service — only one “active” path at a time for some flows; load the right model for the task.
 
 ### Model Arena
