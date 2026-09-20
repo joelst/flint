@@ -15,7 +15,7 @@
  * No UI reads any of this yet.
  */
 
-import { isStoredBenchmarkSuite, validateBenchmarkSuite, type BenchmarkSuite } from './benchmark-suite';
+import { isStoredBenchmarkSuite, suiteSnapshotMatchesStored, validateBenchmarkSuite, type BenchmarkSuite } from './benchmark-suite';
 import { isBenchmarkAttempt, isBenchmarkRun, type BenchmarkAttempt, type BenchmarkRun, type RunStatus } from './benchmark-run';
 import { isAttemptSummary, summarizeAttempt, type AttemptSummary } from './benchmark-progress';
 
@@ -373,6 +373,9 @@ export async function createBenchmarkRun(run: BenchmarkRun): Promise<RepositoryR
     return chainFromSuccess(getSuite, trackRequest, (suite) => {
       if (suite === undefined) {
         throw new Error(`suite "${run.suiteId}" does not exist; refusing to create an orphaned run`);
+      }
+      if (!suiteSnapshotMatchesStored(suite, run.suite)) {
+        throw new Error(`suite "${run.suiteId}" changed after this run was prepared; refusing to insert a stale snapshot`);
       }
       return tx.objectStore(RUNS_STORE).add(run) as IDBRequest<IDBValidKey>;
     }).then(() => undefined);

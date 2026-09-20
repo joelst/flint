@@ -100,6 +100,20 @@ export function benchmarkAttemptCount(suite: {
   return suite.targets.length * (suite.warmupCount + suite.cases.length * suite.repeatCount);
 }
 
+/** Execution-relevant fields of a suite. Name/description may change without changing what a
+ * run would measure; targets, cases, and generation params may not. */
+export function suiteSnapshotMatchesStored(stored: BenchmarkSuite, snapshot: BenchmarkSuite): boolean {
+  const shape = (s: BenchmarkSuite) => JSON.stringify({
+    targets: s.targets,
+    cases: s.cases,
+    warmupCount: s.warmupCount,
+    repeatCount: s.repeatCount,
+    temperature: s.temperature ?? null,
+    maxTokens: s.maxTokens ?? null,
+  });
+  return shape(stored) === shape(snapshot);
+}
+
 export interface ValidationResult<T> {
   ok: boolean;
   value?: T;

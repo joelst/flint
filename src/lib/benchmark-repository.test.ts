@@ -621,6 +621,17 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
     expect(summaries.value!.every((row) => !('responseText' in row))).toBe(true);
   });
 
+  it('refuses to create a run whose frozen snapshot no longer matches the stored suite', async () => {
+    await putBenchmarkSuite(testSuite);
+    const stale = testRun({
+      suite: { ...testSuite, cases: [{ id: 'c-edited', prompt: 'changed' }] },
+    });
+    const result = await createBenchmarkRun(stale);
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/stale snapshot/);
+    expect(await getBenchmarkRun('run-1')).toEqual({ ok: true, value: null });
+  });
+
   it('refuses to create a run whose suite row no longer exists', async () => {
     await deleteBenchmarkSuite(testSuite.id);
     const result = await createBenchmarkRun(testRun());

@@ -31,6 +31,18 @@ function succeedingTransport(): AttemptTransport {
   return async () => ({ ok: true, responseText: 'four' });
 }
 
+/** Persist the suite under test before starting: createBenchmarkRun refuses a snapshot that
+ * no longer matches the stored row (the same check that rejects a concurrent editor save). */
+async function startStored(
+  s: BenchmarkSuite,
+  transport: AttemptTransport,
+  stopController?: ReturnType<typeof createStopController>,
+) {
+  const put = await putBenchmarkSuite(s);
+  expect(put.ok).toBe(true);
+  return startBenchmarkRun(s, transport, stopController);
+}
+
 /** A transport whose per-call outcome is driven by a queue, so tests can script exact
  * success/failure sequences (e.g. "the second call fails, everything else succeeds"). */
 function scriptedTransport(results: AttemptTransportResult[]): { transport: AttemptTransport; calls: number } {
@@ -65,7 +77,7 @@ afterEach(async () => {
 describe('startBenchmarkRun', () => {
   it('dispatches every logical position in order and records a completed run', async () => {
     const s = suite();
-    const outcome = await startBenchmarkRun(s, succeedingTransport());
+    const outcome = await startStored(s, succeedingTransport());
     expect(outcome.ok).toBe(true);
     expect(outcome.result).toEqual({ status: 'completed' });
 
@@ -78,7 +90,7 @@ describe('startBenchmarkRun', () => {
 
   it('returns a run snapshot reflecting the status executePositions actually committed, not the stale pre-execution one', async () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
-    const outcome = await startBenchmarkRun(s, succeedingTransport());
+    const outcome = await startStored(s, succeedingTransport());
     expect(outcome.result).toEqual({ status: 'completed' });
     // The returned run must agree with what's durably persisted -- not silently still read
     // 'running', which is what the caller passed into executePositions before it settled.
@@ -97,7 +109,7 @@ describe('startBenchmarkRun', () => {
       stopController.stop();
       return { ok: true, responseText: 'ok' };
     };
-    const outcome = await startBenchmarkRun(s, transport, stopController);
+    const outcome = await startStored(s, transport, stopController);
     expect(outcome.result?.status).toBe('stopped');
     expect(outcome.run!.status).toBe('stopped');
   });
@@ -109,7 +121,7 @@ describe('startBenchmarkRun', () => {
       errorMessage: 'Runtime is draining',
       haltRun: 'stopped',
     });
-    const outcome = await startBenchmarkRun(s, transport);
+    const outcome = await startStored(s, transport);
     expect(outcome.result?.status).toBe('stopped');
     const attempts = await listAttemptsForRun(outcome.run!.id);
     expect(attempts.value).toHaveLength(1);
@@ -118,7 +130,7 @@ describe('startBenchmarkRun', () => {
 
   it('freezes a snapshot of the suite at call time, immune to later mutation of the caller\'s object', async () => {
     const s = suite();
-    const outcome = await startBenchmarkRun(s, succeedingTransport());
+    const outcome = await startStored(s, succeedingTransport());
     // Mutate the caller's own suite object after the call returns (but the schedule/persistence
     // already used a snapshot taken before the first await) — this must never be reflected.
     s.cases[0].prompt = 'MUTATED';
@@ -133,7 +145,7 @@ describe('startBenchmarkRun', () => {
   it('records a failed attempt without halting the run when the transport reports failure', async () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
     const { transport } = scriptedTransport([{ ok: false, errorMessage: 'model unavailable' }]);
-    const outcome = await startBenchmarkRun(s, transport);
+    const outcome = await startStored(s, transport);
     expect(outcome.result).toEqual({ status: 'completed' });
     const attempts = await listAttemptsForRun(outcome.run!.id);
     expect(attempts.value).toEqual([
@@ -147,7 +159,7 @@ describe('startBenchmarkRun', () => {
       { ok: false, errorMessage: 'warmup failed' },
       { ok: true, responseText: 'measured ok' },
     ]);
-    const outcome = await startBenchmarkRun(s, transport);
+    const outcome = await startStored(s, transport);
     expect(outcome.result).toEqual({ status: 'completed' });
     const attempts = await listAttemptsForRun(outcome.run!.id);
     expect(attempts.value!.find((a) => a.phase === 'warmup')?.status).toBe('failed');
@@ -157,7 +169,7 @@ describe('startBenchmarkRun', () => {
   it('a transport that throws is recorded as a failed attempt, not an unhandled rejection', async () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
     const transport: AttemptTransport = async () => { throw new Error('network exploded'); };
-    const outcome = await startBenchmarkRun(s, transport);
+    const outcome = await startStored(s, transport);
     expect(outcome.result).toEqual({ status: 'completed' });
     const attempts = await listAttemptsForRun(outcome.run!.id);
     expect(attempts.value).toEqual([
@@ -169,7 +181,7 @@ describe('startBenchmarkRun', () => {
   it('proof gate: the dispatch intent is durably recorded before the transport is ever called', async () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
     let checkedInsideTransport = false;
-    await startBenchmarkRun(s, async () => {
+    await startStored(s, async () => {
       // The run row (and thus its id) is only knowable from inside the transport call itself —
       // look it up by suite id rather than depending on `startBenchmarkRun`'s return value,
       // which does not exist yet at this point in the call.
@@ -191,7 +203,7 @@ describe('startBenchmarkRun', () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }, { id: 'c2', prompt: 'y' }] });
     const repo = await import('./benchmark-repository');
     const spy = vi.spyOn(repo, 'recordAttemptTerminal').mockResolvedValueOnce({ ok: false, error: 'disk full' });
-    const outcome = await startBenchmarkRun(s, succeedingTransport());
+    const outcome = await startStored(s, succeedingTransport());
     spy.mockRestore();
 
     expect(outcome.result?.status).toBe('recovery_required');
@@ -211,7 +223,7 @@ describe('startBenchmarkRun', () => {
     const repo = await import('./benchmark-repository');
     const spy = vi.spyOn(repo, 'recordAttemptDispatched').mockResolvedValueOnce({ ok: false, error: 'quota exceeded' });
     let transportCalled = false;
-    const outcome = await startBenchmarkRun(s, async () => { transportCalled = true; return { ok: true, responseText: 'x' }; });
+    const outcome = await startStored(s, async () => { transportCalled = true; return { ok: true, responseText: 'x' }; });
     spy.mockRestore();
 
     expect(transportCalled).toBe(false);
@@ -232,7 +244,7 @@ describe('startBenchmarkRun', () => {
       return result;
     });
     let transportCalled = false;
-    const outcome = await startBenchmarkRun(s, async () => { transportCalled = true; return { ok: true, responseText: 'x' }; }, stopController);
+    const outcome = await startStored(s, async () => { transportCalled = true; return { ok: true, responseText: 'x' }; }, stopController);
     spy.mockRestore();
 
     expect(transportCalled).toBe(false);
@@ -245,7 +257,7 @@ describe('startBenchmarkRun', () => {
   it('records the transport\'s own message when it throws a non-Error value', async () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
     const transport: AttemptTransport = async () => { throw 'a bare string throw'; };
-    const outcome = await startBenchmarkRun(s, transport);
+    const outcome = await startStored(s, transport);
     const attempts = await listAttemptsForRun(outcome.run!.id);
     expect(attempts.value![0]).toEqual(expect.objectContaining({ status: 'failed', errorMessage: 'Benchmark transport failed' }));
   });
@@ -253,7 +265,7 @@ describe('startBenchmarkRun', () => {
   it('an empty successful response text is recorded as a genuine success, not a recovery failure', async () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
     const transport: AttemptTransport = async () => ({ ok: true, responseText: '' });
-    const outcome = await startBenchmarkRun(s, transport);
+    const outcome = await startStored(s, transport);
     expect(outcome.result).toEqual({ status: 'completed' });
     const attempts = await listAttemptsForRun(outcome.run!.id);
     expect(attempts.value![0]).toEqual(expect.objectContaining({ status: 'succeeded', responseText: '' }));
@@ -264,7 +276,7 @@ describe('startBenchmarkRun', () => {
     vi.stubGlobal('crypto', undefined);
     try {
       const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
-      const outcome = await startBenchmarkRun(s, succeedingTransport());
+      const outcome = await startStored(s, succeedingTransport());
       expect(outcome.ok).toBe(true);
       expect(outcome.run!.id).toMatch(/^run_/);
       const attempts = await listAttemptsForRun(outcome.run!.id);
@@ -278,7 +290,7 @@ describe('startBenchmarkRun', () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
     const repo = await import('./benchmark-repository');
     const spy = vi.spyOn(repo, 'updateBenchmarkRunStatus').mockResolvedValueOnce({ ok: false, error: 'store closed' });
-    const outcome = await startBenchmarkRun(s, succeedingTransport());
+    const outcome = await startStored(s, succeedingTransport());
     spy.mockRestore();
 
     // The runner wanted to report 'completed', but since that status write itself failed, it
@@ -305,7 +317,7 @@ describe('startBenchmarkRun', () => {
       stopController.stop(); // simulate a Stop request arriving mid-run
       return { ok: true, responseText: 'ok' };
     };
-    const outcome = await startBenchmarkRun(s, transport, stopController);
+    const outcome = await startStored(s, transport, stopController);
     expect(outcome.result?.status).toBe('stopped');
     expect(calls).toBe(1); // second position never dispatched
     const attempts = await listAttemptsForRun(outcome.run!.id);
@@ -321,7 +333,7 @@ describe('startBenchmarkRun', () => {
     const stopController = createStopController();
     stopController.stop(); // already stopped before the run starts
     let transportCalled = false;
-    const outcome = await startBenchmarkRun(s, async () => { transportCalled = true; return { ok: true, responseText: 'x' }; }, stopController);
+    const outcome = await startStored(s, async () => { transportCalled = true; return { ok: true, responseText: 'x' }; }, stopController);
     expect(outcome.result?.status).toBe('stopped');
     expect(transportCalled).toBe(false);
     const attempts = await listAttemptsForRun(outcome.run!.id);
@@ -339,7 +351,7 @@ describe('resumeBenchmarkRun', () => {
       stopController.stop();
       return { ok: true, responseText: 'first succeeded' };
     };
-    const started = await startBenchmarkRun(s, transport, stopController);
+    const started = await startStored(s, transport, stopController);
     expect(started.result?.status).toBe('stopped');
     const afterFirstRun = await listAttemptsForRun(started.run!.id);
     expect(afterFirstRun.value).toHaveLength(1);
@@ -359,7 +371,7 @@ describe('resumeBenchmarkRun', () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
     const stopController = createStopController();
     stopController.stop();
-    const started = await startBenchmarkRun(s, succeedingTransport(), stopController);
+    const started = await startStored(s, succeedingTransport(), stopController);
     // Nothing dispatched yet since Stop was already set before the run started; simulate an
     // uncertain attempt directly to exercise the "was dispatched, crash before terminal" case.
     const repo = await import('./benchmark-repository');
@@ -395,7 +407,7 @@ describe('resumeBenchmarkRun', () => {
 
   it('resuming a run with nothing pending marks it completed without calling the transport', async () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
-    const started = await startBenchmarkRun(s, succeedingTransport());
+    const started = await startStored(s, succeedingTransport());
     let called = false;
     const resumed = await resumeBenchmarkRun(started.run!.id, async () => { called = true; return { ok: true, responseText: 'x' }; });
     expect(resumed.result).toEqual({ status: 'completed' });
@@ -407,6 +419,7 @@ describe('resumeBenchmarkRun', () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
     const repo = await import('./benchmark-repository');
     const runId = 'run-no-started-at';
+    expect((await repo.putBenchmarkSuite(s)).ok).toBe(true);
     // Simulate a run row that was created without startedAt (e.g. an older schema or a
     // never-actually-started row) to exercise the `run.startedAt ?? Date.now()` fallback.
     await repo.createBenchmarkRun({
@@ -471,7 +484,7 @@ describe('resumeBenchmarkRun', () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
     const stopController = createStopController();
     stopController.stop();
-    const started = await startBenchmarkRun(s, succeedingTransport(), stopController);
+    const started = await startStored(s, succeedingTransport(), stopController);
     expect(started.result?.status).toBe('stopped');
 
     let releaseFirstCall: () => void = () => {};

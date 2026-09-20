@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyTargetAlias, buildSuiteFromDraft, cachedVariantIds, draftEditsSuite, draftFromSuite, estimateDraftAttempts, variantChoicesForTarget, type SuiteDraft } from './benchmark-draft';
+import { aliasChoicesForTarget, applyTargetAlias, buildSuiteFromDraft, cachedVariantIds, draftEditsSuite, draftFromSuite, estimateDraftAttempts, variantChoicesForTarget, type SuiteDraft } from './benchmark-draft';
 import { BENCHMARK_MAX_ATTEMPTS, BENCHMARK_MAX_JSONL_CHARS } from './benchmark-suite';
 import type { BenchmarkSuite } from './benchmark-suite';
 
@@ -76,6 +76,15 @@ describe('cachedVariantIds', () => {
       { id: 'npu', cached: true },
     ])).toEqual(['cuda', 'npu']);
     expect(cachedVariantIds(undefined)).toEqual([]);
+  });
+});
+
+describe('aliasChoicesForTarget', () => {
+  it('keeps a stored alias that is no longer in the cached picker, marked unavailable', () => {
+    expect(aliasChoicesForTarget(['phi'], 'old-model')).toEqual([
+      { alias: 'old-model', available: false },
+      { alias: 'phi', available: true },
+    ]);
   });
 });
 

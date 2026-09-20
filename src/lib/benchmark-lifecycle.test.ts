@@ -9,7 +9,7 @@ import {
   type BenchmarkLifecycleHost,
 } from './benchmark-lifecycle';
 import { createStopController, startBenchmarkRun } from './benchmark-runner';
-import { openBenchmarkDatabase, putBenchmarkSuite } from './benchmark-repository';
+import { getBenchmarkRun, listBenchmarkRunsForSuite, openBenchmarkDatabase, putBenchmarkSuite } from './benchmark-repository';
 import type { BenchmarkSuite } from './benchmark-suite';
 
 function suite(over: Partial<BenchmarkSuite> = {}): BenchmarkSuite {
@@ -131,14 +131,28 @@ describe('loadBenchmarkTargets / pinThenLoad order', () => {
     expect(host.order).toEqual([]);
   });
 
-  it('unpins if the run row cannot be created after a successful pin and load', async () => {
+  it('does not pin or load when the run row cannot be created', async () => {
     await resetDatabase();
     const host = fakeHost();
     const result = await startBenchmarkSession(suite(), host);
     expect(result.ok).toBe(false);
-    expect(host.order[0]).toBe('pin:model-a');
-    expect(host.order).toContain('load:model-a');
-    expect(host.order.at(-1)).toBe('unpin');
+    expect(host.order).toEqual([]);
+  });
+
+  it('stops a prepared run when pin fails for explicit variants', async () => {
+    const host = fakeHost({
+      pinAliases: async () => { throw new Error('pin failed'); },
+    });
+    const s = suite({ targets: [{ alias: 'model-a', variantId: 'v1' }] });
+    await putBenchmarkSuite(s);
+    const result = await startBenchmarkSession(s, host);
+    expect(result.ok).toBe(false);
+    const runs = await listBenchmarkRunsForSuite(s.id);
+    expect(runs.ok).toBe(true);
+    expect(runs.value).toHaveLength(1);
+    expect(runs.value![0].status).toBe('stopped');
+    const stored = await getBenchmarkRun(runs.value![0].id);
+    expect(stored.value?.status).toBe('stopped');
   });
 });
 

@@ -58,6 +58,23 @@ export type VariantChoice = { id: string; available: boolean };
 
 /** Cached builds plus the currently stored id, even if it is no longer downloaded.
  * Opening Edit must not silently rewrite a stored explicit variant. */
+export type AliasChoice = { alias: string; available: boolean };
+
+/** Cached/loaded aliases plus the currently stored alias, even if it is no longer in the picker. */
+export function aliasChoicesForTarget(
+  availableAliases: readonly string[],
+  currentAlias: string,
+): AliasChoice[] {
+  const choices: AliasChoice[] = [];
+  if (currentAlias && !availableAliases.includes(currentAlias)) {
+    choices.push({ alias: currentAlias, available: false });
+  }
+  for (const alias of availableAliases) {
+    choices.push({ alias, available: true });
+  }
+  return choices;
+}
+
 export function variantChoicesForTarget(
   cachedIds: readonly string[],
   currentId: string | null,

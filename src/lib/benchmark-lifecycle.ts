@@ -16,7 +16,7 @@ import {
   type StartRunOutcome,
   type StopController,
 } from './benchmark-runner';
-import { getBenchmarkRun } from './benchmark-repository';
+import { getBenchmarkRun, updateBenchmarkRunStatus } from './benchmark-repository';
 import { isBenchmarkSuite, type BenchmarkSuite } from './benchmark-suite';
 
 export type LifecycleOutcome = { ok: true; runId: string } | { ok: false; error: string };
@@ -144,13 +144,15 @@ export async function startBenchmarkSession(
   const inexecutable = inexecutableSuiteError(suite, 'start');
   if (inexecutable) return { ok: false, error: inexecutable };
 
-  const preparedPin = await pinThenLoad(suite, host);
-  if (!preparedPin.ok) return preparedPin;
-
+  // Insert the run row before pin/load so putBenchmarkSuiteIfNoRuns / Edit see history for
+  // this suite during the long prepare window (a remount resets local lifecycleBusy).
   const prepared = await prepareBenchmarkRun(suite);
-  if (!prepared.ok) {
-    await host.unpin().catch(() => {});
-    return { ok: false, error: prepared.error };
+  if (!prepared.ok) return { ok: false, error: prepared.error };
+
+  const preparedPin = await pinThenLoad(suite, host);
+  if (!preparedPin.ok) {
+    await updateBenchmarkRunStatus(prepared.run.id, 'stopped', { finalizedAt: Date.now() }).catch(() => {});
+    return preparedPin;
   }
 
   const stopController = createStopController();

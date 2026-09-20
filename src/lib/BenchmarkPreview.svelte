@@ -18,7 +18,7 @@
     type BenchmarkSuite,
     type BenchmarkTarget,
   } from "./benchmark-suite";
-  import { applyTargetAlias, cachedVariantIds, draftEditsSuite, draftFromSuite, buildSuiteFromDraft, estimateDraftAttempts, variantChoicesForTarget, type SuiteDraft } from "./benchmark-draft";
+  import { aliasChoicesForTarget, applyTargetAlias, cachedVariantIds, draftEditsSuite, draftFromSuite, buildSuiteFromDraft, estimateDraftAttempts, variantChoicesForTarget, type SuiteDraft } from "./benchmark-draft";
   import { buildProgressMatrix, isRunInterrupted, isRunResumable, type AttemptSummary } from "./benchmark-progress";
   import { buildBenchmarkExport } from "./benchmark-export";
   import type { BenchmarkRun } from "./benchmark-run";
@@ -473,8 +473,8 @@
               aria-label={`Target ${i + 1} model`}
               onchange={(e) => updateTargetAlias(i, e.currentTarget.value)}
             >
-              {#each availableModels as m (m.alias)}
-                <option value={m.alias}>{m.alias}</option>
+              {#each aliasChoicesForTarget(availableModels.map((m) => m.alias), target.alias) as choice (choice.alias)}
+                <option value={choice.alias}>{choice.alias}{choice.available ? "" : " (not available)"}</option>
               {/each}
             </select>
             <select
@@ -502,10 +502,13 @@
             + Add target
           </button>
         {/if}
-        {#if editingDraft.targets.some((t) => variantChoicesForTarget(variantsForAlias(t.alias), t.variantId).some((c) => !c.available))}
+        {#if editingDraft.targets.some((t) =>
+          aliasChoicesForTarget(availableModels.map((m) => m.alias), t.alias).some((c) => !c.available)
+          || variantChoicesForTarget(variantsForAlias(t.alias), t.variantId).some((c) => !c.available)
+        )}
           <p class="muted small">
-            A stored variant is not downloaded. Saving keeps it; Start will try to load that
-            build. Pick a downloaded variant to measure something already on disk.
+            A stored model or variant is not available locally. Saving keeps it; Start will try
+            to load that build. Pick a downloaded model to measure something already on disk.
           </p>
         {/if}
       </div>
