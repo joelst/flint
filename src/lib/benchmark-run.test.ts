@@ -194,6 +194,10 @@ describe('isBenchmarkAttempt', () => {
     expect(isBenchmarkAttempt(attempt({ status: 'succeeded', settledAt: 2 }))).toBe(false);
   });
 
+  it('accepts a succeeded attempt with a legitimately empty responseText', () => {
+    expect(isBenchmarkAttempt(attempt({ status: 'succeeded', responseText: '', settledAt: 2 }))).toBe(true);
+  });
+
   it('rejects a failed attempt with no errorMessage', () => {
     expect(isBenchmarkAttempt(attempt({ status: 'failed', settledAt: 2 }))).toBe(false);
   });

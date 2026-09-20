@@ -206,6 +206,37 @@ function requestAsPromise<T>(
   });
 }
 
+/** Issues `getRequest`, and — synchronously from within its own `onsuccess` handler, with no
+ * intervening `await`/microtask hop — hands the result to `next` to build and issue a follow-up
+ * request in the *same* transaction. `await`ing a get and only then calling `store.put(...)`
+ * would insert a microtask gap between the two requests; some IndexedDB implementations treat a
+ * transaction as inactive by the time that continuation runs, throwing `TransactionInactiveError`
+ * even though nothing else touched the transaction in between. Chaining inside the success
+ * handler itself keeps both requests unambiguously within the transaction's active window on
+ * every implementation, not just ones that special-case microtask continuations. `next` may
+ * throw (e.g. validation failure) or return `undefined` to reject without issuing a follow-up
+ * request at all. */
+function chainFromSuccess<TGet, TNext>(
+  getRequest: IDBRequest<TGet>,
+  trackRequest: (request: IDBRequest) => void,
+  next: (result: TGet) => IDBRequest<TNext> | never,
+): Promise<TNext> {
+  trackRequest(getRequest);
+  return new Promise((resolve, reject) => {
+    getRequest.onsuccess = () => {
+      let nextRequest: IDBRequest<TNext>;
+      try {
+        nextRequest = next(getRequest.result);
+      } catch (e) {
+        reject(e);
+        return;
+      }
+      trackRequest(nextRequest);
+      nextRequest.onsuccess = () => resolve(nextRequest.result);
+    };
+  });
+}
+
 /** Back-compat single-store single-request helper used by the original suite CRUD below. */
 async function withStore<T>(
   mode: IDBTransactionMode,
@@ -317,13 +348,15 @@ export async function updateBenchmarkRunStatus(
   status: RunStatus,
   patch: Partial<Pick<BenchmarkRun, 'startedAt' | 'finalizedAt'>> = {},
 ): Promise<RepositoryResult<void>> {
-  const result = await withStores<void>(RUNS_STORE, 'readwrite', async (tx, trackRequest) => {
+  const result = await withStores<void>(RUNS_STORE, 'readwrite', (tx, trackRequest) => {
     const store = tx.objectStore(RUNS_STORE);
-    const existing = await requestAsPromise(store.get(id) as IDBRequest<BenchmarkRun | undefined>, trackRequest);
-    if (existing === undefined) throw new Error(`no benchmark run "${id}" to update`);
-    if (!isBenchmarkRun(existing)) throw new Error(`stored benchmark run "${id}" failed validation`);
-    const updated: BenchmarkRun = { ...existing, ...patch, status };
-    await requestAsPromise(store.put(updated) as IDBRequest<IDBValidKey>, trackRequest);
+    const getRequest = store.get(id) as IDBRequest<BenchmarkRun | undefined>;
+    return chainFromSuccess(getRequest, trackRequest, (existing) => {
+      if (existing === undefined) throw new Error(`no benchmark run "${id}" to update`);
+      if (!isBenchmarkRun(existing)) throw new Error(`stored benchmark run "${id}" failed validation`);
+      const updated: BenchmarkRun = { ...existing, ...patch, status };
+      return store.put(updated) as IDBRequest<IDBValidKey>;
+    }).then(() => undefined);
   });
   if (!result.ok) return failResult(result.error!);
   return okResult(undefined);
@@ -356,16 +389,18 @@ export async function recordAttemptTerminal(
     settledAt: number;
   },
 ): Promise<RepositoryResult<void>> {
-  const result = await withStores<void>(ATTEMPTS_STORE, 'readwrite', async (tx, trackRequest) => {
+  const result = await withStores<void>(ATTEMPTS_STORE, 'readwrite', (tx, trackRequest) => {
     const store = tx.objectStore(ATTEMPTS_STORE);
-    const existing = await requestAsPromise(store.get(id) as IDBRequest<BenchmarkAttempt | undefined>, trackRequest);
-    if (existing === undefined) throw new Error(`no benchmark attempt "${id}" to update`);
-    if (existing.status !== 'dispatched') {
-      throw new Error(`benchmark attempt "${id}" is already terminal (status "${existing.status}"); refusing to overwrite`);
-    }
-    const updated: BenchmarkAttempt = { ...existing, ...patch };
-    if (!isBenchmarkAttempt(updated)) throw new Error(`updated benchmark attempt "${id}" failed validation`);
-    await requestAsPromise(store.put(updated) as IDBRequest<IDBValidKey>, trackRequest);
+    const getRequest = store.get(id) as IDBRequest<BenchmarkAttempt | undefined>;
+    return chainFromSuccess(getRequest, trackRequest, (existing) => {
+      if (existing === undefined) throw new Error(`no benchmark attempt "${id}" to update`);
+      if (existing.status !== 'dispatched') {
+        throw new Error(`benchmark attempt "${id}" is already terminal (status "${existing.status}"); refusing to overwrite`);
+      }
+      const updated: BenchmarkAttempt = { ...existing, ...patch };
+      if (!isBenchmarkAttempt(updated)) throw new Error(`updated benchmark attempt "${id}" failed validation`);
+      return store.put(updated) as IDBRequest<IDBValidKey>;
+    }).then(() => undefined);
   });
   if (!result.ok) return failResult(result.error!);
   return okResult(undefined);

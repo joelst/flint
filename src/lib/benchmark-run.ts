@@ -251,7 +251,7 @@ export function isBenchmarkAttempt(value: unknown): value is BenchmarkAttempt {
   if (!isNonEmptyString(v.alias)) return false;
   if (v.requestedVariantId !== null && !isNonEmptyString(v.requestedVariantId)) return false;
   if (!isFiniteNumber(v.intentCommittedAt)) return false;
-  if (v.status === 'succeeded' && !isNonEmptyString(v.responseText)) return false;
+  if (v.status === 'succeeded' && typeof v.responseText !== 'string') return false;
   if (v.status === 'failed' && !isNonEmptyString(v.errorMessage)) return false;
   if ((v.status === 'succeeded' || v.status === 'failed') && !isFiniteNumber(v.settledAt)) return false;
   return true;

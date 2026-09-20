@@ -209,6 +209,15 @@ describe('startBenchmarkRun', () => {
     expect(attempts.value![0]).toEqual(expect.objectContaining({ status: 'failed', errorMessage: 'Benchmark transport failed' }));
   });
 
+  it('an empty successful response text is recorded as a genuine success, not a recovery failure', async () => {
+    const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
+    const transport: AttemptTransport = async () => ({ ok: true, responseText: '' });
+    const outcome = await startBenchmarkRun(s, transport);
+    expect(outcome.result).toEqual({ status: 'completed' });
+    const attempts = await listAttemptsForRun(outcome.run!.id);
+    expect(attempts.value![0]).toEqual(expect.objectContaining({ status: 'succeeded', responseText: '' }));
+  });
+
   it('falls back to a non-crypto id generator when crypto.randomUUID is unavailable', async () => {
     const originalCrypto = globalThis.crypto;
     vi.stubGlobal('crypto', undefined);
