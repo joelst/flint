@@ -74,6 +74,8 @@ export default defineConfig(() => ({
         'src/lib/compare-slot-outcome.ts',
         'src/lib/benchmark-suite.ts',
         'src/lib/benchmark-repository.ts',
+        'src/lib/benchmark-run.ts',
+        'src/lib/benchmark-runner.ts',
         'src/lib/conversation-title.ts',
         'src/lib/conversation-session.ts',
         'src/lib/conversation-settings.ts',
