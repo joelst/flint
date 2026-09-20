@@ -167,6 +167,7 @@
     COMPARE_HISTORY_MAX,
     COMPARE_MAX_SLOTS,
     compareSlotKey,
+    cloneCompareResults,
     loadComparisonHistory,
     saveComparisonHistory,
     renderComparisonMarkdown,
@@ -3241,7 +3242,7 @@ updateStateFromSdk();
       createdAt: Date.now(),
       prompt: comparePrompt.trim(),
       slots: compareSlots.map((s) => ({ ...s })),
-      results: { ...compareResults },
+      results: cloneCompareResults(compareResults),
     };
     const nextHistory = [entry, ...compareHistory].slice(0, COMPARE_HISTORY_MAX);
     const previousHistory = compareHistory;
@@ -3258,7 +3259,7 @@ updateStateFromSdk();
     compareReviewId = entry.id;
     compareSlots = entry.slots.map((s) => ({ ...s }));
     comparePrompt = entry.prompt;
-    compareResults = { ...entry.results };
+    compareResults = cloneCompareResults(entry.results);
     compareHistoryOpen = false;
     statusMessage = `Reviewing arena run from ${new Date(entry.createdAt).toLocaleString()}`;
   }
@@ -3703,18 +3704,17 @@ updateStateFromSdk();
 
   function setCompareRating(key: string, rating: "up" | "down") {
     if (!compareResults[key]) return;
-    const previousRating = compareResults[key].rating;
+    const nextRating = compareResults[key].rating === rating ? null : rating;
     const previousHistory = compareHistory;
-    compareResults[key].rating = compareResults[key].rating === rating ? null : rating;
-    compareResults = { ...compareResults };
+    const previousResults = compareResults;
+    compareResults = { ...compareResults, [key]: { ...compareResults[key], rating: nextRating } };
     if (compareReviewId) {
       compareHistory = compareHistory.map((h) =>
-        h.id === compareReviewId ? { ...h, results: { ...compareResults } } : h,
+        h.id === compareReviewId ? { ...h, results: cloneCompareResults(compareResults) } : h,
       );
       if (!persistCompareHistory()) {
         compareHistory = previousHistory;
-        compareResults[key].rating = previousRating;
-        compareResults = { ...compareResults };
+        compareResults = previousResults;
         statusMessage = "Arena run could not be saved — see App Log.";
       }
     }

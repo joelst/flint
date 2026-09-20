@@ -41,6 +41,15 @@ export function compareSlotKey(alias: string, variantId: string | null): string 
   return variantId ? `${alias}::${variantId}` : `${alias}::default`;
 }
 
+/** Copies the results map and each result so a later in-place edit cannot mutate saved history. */
+export function cloneCompareResults(
+  results: Record<string, CompareResult>,
+): Record<string, CompareResult> {
+  return Object.fromEntries(
+    Object.entries(results).map(([key, value]) => [key, { ...value }]),
+  );
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }

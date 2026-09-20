@@ -4,6 +4,7 @@ import {
   COMPARE_HISTORY_BACKUP_KEY,
   COMPARE_HISTORY_MAX,
   compareSlotKey,
+  cloneCompareResults,
   loadComparisonHistory,
   saveComparisonHistory,
   renderComparisonMarkdown,
@@ -65,6 +66,17 @@ describe('compareSlotKey', () => {
     expect(compareSlotKey('model-a', null)).toBe('model-a::default');
     expect(compareSlotKey('model-a', 'v2')).toBe('model-a::v2');
     expect(compareSlotKey('model-a', 'v2')).not.toBe(compareSlotKey('model-a', null));
+  });
+});
+
+describe('cloneCompareResults', () => {
+  it('copies result objects so a later rating change does not mutate the original', () => {
+    const original = { 'model-a::default': result({ rating: null }) };
+    const cloned = cloneCompareResults(original);
+    expect(cloned).toEqual(original);
+    expect(cloned['model-a::default']).not.toBe(original['model-a::default']);
+    cloned['model-a::default'].rating = 'up';
+    expect(original['model-a::default'].rating).toBe(null);
   });
 });
 
