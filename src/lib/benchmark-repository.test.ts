@@ -548,6 +548,20 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
     expect(await listAttemptsForRun('run-1')).toEqual({ ok: true, value: [] });
   });
 
+  it('recordAttemptTerminal refuses to overwrite an attempt that is already terminal', async () => {
+    await recordAttemptDispatched(testAttempt());
+    const first = await recordAttemptTerminal('exec-1', { status: 'succeeded', responseText: 'four', settledAt: 2 });
+    expect(first.ok).toBe(true);
+
+    const second = await recordAttemptTerminal('exec-1', { status: 'failed', errorMessage: 'retried', settledAt: 3 });
+    expect(second.ok).toBe(false);
+    expect(second.error).toMatch(/already terminal/);
+
+    // The original terminal outcome must be untouched by the rejected second write.
+    const listed = await listAttemptsForRun('run-1');
+    expect(listed.value).toEqual([testAttempt({ status: 'succeeded', responseText: 'four', settledAt: 2 })]);
+  });
+
   it('listDispatchedAttemptsForRun finds only still-uncertain attempts via the byRunStatus index', async () => {
     await recordAttemptDispatched(testAttempt({ id: 'exec-1', logicalAttemptId: 't0:c0:r0' }));
     await recordAttemptDispatched(testAttempt({ id: 'exec-2', logicalAttemptId: 't0:c0:r1' }));

@@ -360,6 +360,9 @@ export async function recordAttemptTerminal(
     const store = tx.objectStore(ATTEMPTS_STORE);
     const existing = await requestAsPromise(store.get(id) as IDBRequest<BenchmarkAttempt | undefined>, trackRequest);
     if (existing === undefined) throw new Error(`no benchmark attempt "${id}" to update`);
+    if (existing.status !== 'dispatched') {
+      throw new Error(`benchmark attempt "${id}" is already terminal (status "${existing.status}"); refusing to overwrite`);
+    }
     const updated: BenchmarkAttempt = { ...existing, ...patch };
     if (!isBenchmarkAttempt(updated)) throw new Error(`updated benchmark attempt "${id}" failed validation`);
     await requestAsPromise(store.put(updated) as IDBRequest<IDBValidKey>, trackRequest);

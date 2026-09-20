@@ -114,6 +114,23 @@ function describeTransportThrow(e: unknown): string {
   return 'Benchmark transport failed';
 }
 
+/** Deep-clones a suite so a caller mutating their own object after `startBenchmarkRun`/
+ * `resumeBenchmarkRun` returns can never retroactively change the run's frozen snapshot or the
+ * schedule built from it. `structuredClone` is preferred; environments without it (some older
+ * test/JS runtimes) fall back to a JSON round-trip, which is sufficient since `BenchmarkSuite`
+ * is plain JSON-shaped data with no functions, dates, or cycles. */
+function freezeSuiteSnapshot(suite: BenchmarkSuite): BenchmarkSuite {
+  if (typeof structuredClone === 'function') return structuredClone(suite);
+  return JSON.parse(JSON.stringify(suite));
+}
+
+/** Tracks run ids with an execution currently in flight in this process, so a second concurrent
+ * `resumeBenchmarkRun` (or a resume racing a still-running start) call for the same run can be
+ * rejected instead of silently duplicating dispatches. This is a process-local guard only — it
+ * is not a durable cross-tab/cross-process lease, and does not need to be: Flint runs as a
+ * single desktop process per instance. */
+const activeRunIds = new Set<string>();
+
 /** Builds the message list for one logical position. Warm-ups reuse the target's first case
  * (there is nothing else to prime with); measured positions use their own case verbatim. */
 function messagesForPosition(suite: BenchmarkSuite, position: LogicalAttempt): BenchmarkMessage[] {
@@ -122,11 +139,27 @@ function messagesForPosition(suite: BenchmarkSuite, position: LogicalAttempt): B
   return [{ role: 'user', content: caseEntry.prompt! }];
 }
 
-/** Best-effort: a failure to record `recovery_required` itself does not change what already
- * happened to the attempt journal, so it is not treated as a second durability failure — the
- * caller's returned `RunExecutionResult` is the authoritative signal either way. */
-async function markRecoveryRequired(runId: string): Promise<void> {
-  await updateBenchmarkRunStatus(runId, 'recovery_required', { finalizedAt: Date.now() });
+/** Persists the run's terminal status and returns the result the caller should report. A
+ * status write failure is never silently absorbed: this refuses to let the caller claim a
+ * status ('stopped'/'completed'/`recovery_required`) that was never durably committed. Instead
+ * it downgrades to `recovery_required` — the most conservative signal Flint can give — and
+ * folds the persistence failure into `haltedError` alongside whatever the caller already
+ * wanted to report. */
+async function haltWith(
+  runId: string,
+  intended: RunHaltReason,
+  patch: Partial<BenchmarkRun> | undefined,
+  haltedError?: string,
+): Promise<RunExecutionResult> {
+  const write = await updateBenchmarkRunStatus(runId, intended, patch);
+  if (write.ok) {
+    return haltedError ? { status: intended, haltedError } : { status: intended };
+  }
+  const persistenceError = `failed to persist run status "${intended}": ${write.error}`;
+  return {
+    status: 'recovery_required',
+    haltedError: haltedError ? `${haltedError}; additionally, ${persistenceError}` : persistenceError,
+  };
 }
 
 /**
@@ -143,8 +176,7 @@ async function executePositions(
 ): Promise<RunExecutionResult> {
   for (const position of positions) {
     if (stopController.isStopped()) {
-      await updateBenchmarkRunStatus(run.id, 'stopped');
-      return { status: 'stopped' };
+      return haltWith(run.id, 'stopped', undefined);
     }
 
     const target = run.suite.targets[position.targetIndex];
@@ -166,16 +198,19 @@ async function executePositions(
     const dispatchWrite = await recordAttemptDispatched(intent);
     if (!dispatchWrite.ok) {
       // The chat call must never be made for a position whose intent was not durably recorded.
-      await markRecoveryRequired(run.id);
-      return { status: 'recovery_required', haltedError: `failed to record dispatch intent: ${dispatchWrite.error}` };
+      return haltWith(
+        run.id,
+        'recovery_required',
+        { finalizedAt: Date.now() },
+        `failed to record dispatch intent: ${dispatchWrite.error}`,
+      );
     }
     attemptsSoFar.push(intent);
 
     if (stopController.isStopped()) {
       // The intent already committed — this position stays `dispatched` (uncertain), exactly
       // as an actual crash would leave it. Never call the transport once Stop has landed.
-      await updateBenchmarkRunStatus(run.id, 'stopped');
-      return { status: 'stopped' };
+      return haltWith(run.id, 'stopped', undefined);
     }
 
     let transportResult: AttemptTransportResult;
@@ -211,8 +246,12 @@ async function executePositions(
       // The attempt stays `dispatched` (uncertain) in storage — this is the one outcome this
       // runner refuses to paper over. A result Flint cannot durably record is not a result
       // Flint can honestly claim to have gotten, whether the chat call itself succeeded or not.
-      await markRecoveryRequired(run.id);
-      return { status: 'recovery_required', haltedError: `failed to record terminal result: ${terminalWrite.error}` };
+      return haltWith(
+        run.id,
+        'recovery_required',
+        { finalizedAt: Date.now() },
+        `failed to record terminal result: ${terminalWrite.error}`,
+      );
     }
     attemptsSoFar[attemptsSoFar.length - 1] = {
       ...intent,
@@ -222,8 +261,7 @@ async function executePositions(
     };
   }
 
-  await updateBenchmarkRunStatus(run.id, 'completed', { finalizedAt: Date.now() });
-  return { status: 'completed' };
+  return haltWith(run.id, 'completed', { finalizedAt: Date.now() });
 }
 
 export interface StartRunOutcome {
@@ -244,20 +282,36 @@ export async function startBenchmarkRun(
   transport: AttemptTransport,
   stopController: StopController = createStopController(),
 ): Promise<StartRunOutcome> {
+  // Snapshot (deep-clone) before any await: the caller's `suite` object must never be able to
+  // retroactively change what this run recorded or scheduled, even if it's mutated the instant
+  // after this call returns control to the event loop.
+  const frozenSuite = freezeSuiteSnapshot(suite);
+  const runId = generateRunId();
   const run: BenchmarkRun = {
-    id: generateRunId(),
-    suiteId: suite.id,
-    suite,
+    id: runId,
+    suiteId: frozenSuite.id,
+    suite: frozenSuite,
     createdAt: Date.now(),
     status: 'running',
     startedAt: Date.now(),
   };
-  const created = await createBenchmarkRun(run);
-  if (!created.ok) return { ok: false, error: created.error };
 
-  const schedule = buildAttemptSchedule(suite);
-  const result = await executePositions(run, schedule, [], transport, stopController);
-  return { ok: true, run, result };
+  if (activeRunIds.has(runId)) {
+    // Vanishingly unlikely (a fresh id colliding with one already in flight), but a run must
+    // never be executed twice concurrently under the same id.
+    return { ok: false, error: `benchmark run "${runId}" is already active` };
+  }
+  activeRunIds.add(runId);
+  try {
+    const created = await createBenchmarkRun(run);
+    if (!created.ok) return { ok: false, error: created.error };
+
+    const schedule = buildAttemptSchedule(frozenSuite);
+    const result = await executePositions(run, schedule, [], transport, stopController);
+    return { ok: true, run, result };
+  } finally {
+    activeRunIds.delete(runId);
+  }
 }
 
 export interface ResumeRunOutcome {
@@ -271,31 +325,44 @@ export interface ResumeRunOutcome {
  * positions left `dispatched` (uncertain, from a crash or a prior Stop) and positions never
  * attempted at all. Every position with a genuine terminal success/failure is left completely
  * untouched, and no existing attempt row is edited: each retry is a new execution.
+ *
+ * Guarded (per-process only, see `activeRunIds`) against a second concurrent resume of the same
+ * run id: without this, two overlapping calls could both classify the same logical position as
+ * pending, both pick the same next `sequence`, and both dispatch — duplicating the model call
+ * and violating the one-new-execution-per-retry identity contract.
  */
 export async function resumeBenchmarkRun(
   runId: string,
   transport: AttemptTransport,
   stopController: StopController = createStopController(),
 ): Promise<ResumeRunOutcome> {
-  const runResult = await getBenchmarkRun(runId);
-  if (!runResult.ok) return { ok: false, error: runResult.error };
-  if (!runResult.value) return { ok: false, error: `no benchmark run "${runId}"` };
-  const run = runResult.value;
-
-  const attemptsResult = await listAttemptsForRun(runId);
-  if (!attemptsResult.ok) return { ok: false, error: attemptsResult.error };
-  const attempts = attemptsResult.value ?? [];
-
-  const schedule = buildAttemptSchedule(run.suite);
-  const pending = pendingLogicalAttempts(schedule, attempts);
-  if (pending.length === 0) {
-    await updateBenchmarkRunStatus(runId, 'completed', { finalizedAt: Date.now() });
-    return { ok: true, result: { status: 'completed' } };
+  if (activeRunIds.has(runId)) {
+    return { ok: false, error: `benchmark run "${runId}" already has an execution in progress` };
   }
+  activeRunIds.add(runId);
+  try {
+    const runResult = await getBenchmarkRun(runId);
+    if (!runResult.ok) return { ok: false, error: runResult.error };
+    if (!runResult.value) return { ok: false, error: `no benchmark run "${runId}"` };
+    const run = runResult.value;
 
-  const resumedStart = await updateBenchmarkRunStatus(runId, 'running', { startedAt: run.startedAt ?? Date.now() });
-  if (!resumedStart.ok) return { ok: false, error: resumedStart.error };
+    const attemptsResult = await listAttemptsForRun(runId);
+    if (!attemptsResult.ok) return { ok: false, error: attemptsResult.error };
+    const attempts = attemptsResult.value ?? [];
 
-  const result = await executePositions(run, pending, [...attempts], transport, stopController);
-  return { ok: true, result };
+    const schedule = buildAttemptSchedule(run.suite);
+    const pending = pendingLogicalAttempts(schedule, attempts);
+    if (pending.length === 0) {
+      const result = await haltWith(runId, 'completed', { finalizedAt: Date.now() });
+      return { ok: true, result };
+    }
+
+    const resumedStart = await updateBenchmarkRunStatus(runId, 'running', { startedAt: run.startedAt ?? Date.now() });
+    if (!resumedStart.ok) return { ok: false, error: resumedStart.error };
+
+    const result = await executePositions(run, pending, [...attempts], transport, stopController);
+    return { ok: true, result };
+  } finally {
+    activeRunIds.delete(runId);
+  }
 }

@@ -223,6 +223,7 @@ export function isBenchmarkRun(value: unknown): value is BenchmarkRun {
   const v = value as Record<string, unknown>;
   if (!isNonEmptyString(v.id) || !isNonEmptyString(v.suiteId)) return false;
   if (!isBenchmarkSuite(v.suite)) return false;
+  if ((v.suite as { id: string }).id !== v.suiteId) return false;
   if (!isFiniteNumber(v.createdAt)) return false;
   if (typeof v.status !== 'string' || !RUN_STATUSES.has(v.status as RunStatus)) return false;
   if (v.startedAt !== undefined && !isFiniteNumber(v.startedAt)) return false;
@@ -237,11 +238,15 @@ export function isBenchmarkAttempt(value: unknown): value is BenchmarkAttempt {
   if (!value || typeof value !== 'object') return false;
   const v = value as Record<string, unknown>;
   if (!isNonEmptyString(v.id) || !isNonEmptyString(v.runId) || !isNonEmptyString(v.logicalAttemptId)) return false;
-  if (!isFiniteNumber(v.targetIndex) || v.targetIndex < 0) return false;
+  if (!isFiniteNumber(v.targetIndex) || !Number.isInteger(v.targetIndex) || v.targetIndex < 0) return false;
   if (typeof v.phase !== 'string' || !ATTEMPT_PHASES.has(v.phase as AttemptPhase)) return false;
-  if (v.caseIndex !== null && !isFiniteNumber(v.caseIndex)) return false;
-  if (v.repeatIndex !== null && !isFiniteNumber(v.repeatIndex)) return false;
-  if (!isFiniteNumber(v.sequence) || v.sequence < 0) return false;
+  if (v.phase === 'warmup') {
+    if (v.caseIndex !== null || v.repeatIndex !== null) return false;
+  } else {
+    if (!isFiniteNumber(v.caseIndex) || !Number.isInteger(v.caseIndex) || (v.caseIndex as number) < 0) return false;
+    if (!isFiniteNumber(v.repeatIndex) || !Number.isInteger(v.repeatIndex) || (v.repeatIndex as number) < 0) return false;
+  }
+  if (!isFiniteNumber(v.sequence) || !Number.isInteger(v.sequence) || v.sequence < 0) return false;
   if (typeof v.status !== 'string' || !ATTEMPT_STATUSES.has(v.status as AttemptStatus)) return false;
   if (!isNonEmptyString(v.alias)) return false;
   if (v.requestedVariantId !== null && !isNonEmptyString(v.requestedVariantId)) return false;

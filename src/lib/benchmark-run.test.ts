@@ -165,6 +165,10 @@ describe('isBenchmarkRun', () => {
   it('rejects an unknown status', () => {
     expect(isBenchmarkRun({ ...run(), status: 'bogus' })).toBe(false);
   });
+
+  it('rejects a run whose suiteId does not match its embedded suite snapshot id', () => {
+    expect(isBenchmarkRun(run({ suiteId: 'mismatched-suite-id' }))).toBe(false);
+  });
 });
 
 describe('buildAttemptSchedule cross-check', () => {
@@ -200,5 +204,21 @@ describe('isBenchmarkAttempt', () => {
 
   it('accepts a well-formed succeeded attempt', () => {
     expect(isBenchmarkAttempt(attempt({ status: 'succeeded', responseText: 'ok', settledAt: 2 }))).toBe(true);
+  });
+
+  it('rejects a warmup attempt carrying non-null caseIndex/repeatIndex', () => {
+    expect(isBenchmarkAttempt(attempt({ phase: 'warmup', caseIndex: 0, repeatIndex: 0 }))).toBe(false);
+  });
+
+  it('rejects a measured attempt with a null caseIndex or repeatIndex', () => {
+    expect(isBenchmarkAttempt(attempt({ phase: 'measured', caseIndex: null }))).toBe(false);
+    expect(isBenchmarkAttempt(attempt({ phase: 'measured', repeatIndex: null }))).toBe(false);
+  });
+
+  it('rejects fractional or negative index/sequence values', () => {
+    expect(isBenchmarkAttempt(attempt({ targetIndex: 1.5 }))).toBe(false);
+    expect(isBenchmarkAttempt(attempt({ caseIndex: -1 }))).toBe(false);
+    expect(isBenchmarkAttempt(attempt({ repeatIndex: 0.5 }))).toBe(false);
+    expect(isBenchmarkAttempt(attempt({ sequence: -1 }))).toBe(false);
   });
 });

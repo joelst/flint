@@ -75,13 +75,18 @@ describe('startBenchmarkRun', () => {
     expect(attempts.value!.every((a) => a.status === 'succeeded')).toBe(true);
   });
 
-  it('creates an immutable suite snapshot on the run, independent of the live suite object', async () => {
+  it('freezes a snapshot of the suite at call time, immune to later mutation of the caller\'s object', async () => {
     const s = suite();
     const outcome = await startBenchmarkRun(s, succeedingTransport());
+    // Mutate the caller's own suite object after the call returns (but the schedule/persistence
+    // already used a snapshot taken before the first await) — this must never be reflected.
+    s.cases[0].prompt = 'MUTATED';
+    s.targets[0].alias = 'mutated-model';
     const runs = await listBenchmarkRunsForSuite(s.id);
     expect(runs.value).toHaveLength(1);
-    expect(runs.value![0].suite).toEqual(s);
-    expect(runs.value![0].id).toBe(outcome.run!.id);
+    expect(runs.value![0].suite.cases[0].prompt).toBe('What is 2+2?');
+    expect(runs.value![0].suite.targets[0].alias).toBe('model-a');
+    expect(outcome.run!.suite.cases[0].prompt).toBe('What is 2+2?');
   });
 
   it('records a failed attempt without halting the run when the transport reports failure', async () => {
@@ -219,6 +224,20 @@ describe('startBenchmarkRun', () => {
     }
   });
 
+  it('proof gate: a failed status write never lets the run report a status that was not durably committed', async () => {
+    const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
+    const repo = await import('./benchmark-repository');
+    const spy = vi.spyOn(repo, 'updateBenchmarkRunStatus').mockResolvedValueOnce({ ok: false, error: 'store closed' });
+    const outcome = await startBenchmarkRun(s, succeedingTransport());
+    spy.mockRestore();
+
+    // The runner wanted to report 'completed', but since that status write itself failed, it
+    // must downgrade to the more conservative 'recovery_required' rather than claim a status
+    // IndexedDB never actually recorded.
+    expect(outcome.result?.status).toBe('recovery_required');
+    expect(outcome.result?.haltedError).toMatch(/store closed/);
+  });
+
   // --- Stop semantics -----------------------------------------------------------------------
   it('Stop checked before dispatch prevents any further attempts from starting', async () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }, { id: 'c2', prompt: 'y' }] });
@@ -326,5 +345,39 @@ describe('resumeBenchmarkRun', () => {
   it('fails cleanly when resuming a run id that does not exist', async () => {
     const resumed = await resumeBenchmarkRun('missing', succeedingTransport());
     expect(resumed.ok).toBe(false);
+  });
+
+  it('proof gate: rejects a second concurrent resume of the same run id instead of duplicating dispatches', async () => {
+    const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
+    const stopController = createStopController();
+    stopController.stop();
+    const started = await startBenchmarkRun(s, succeedingTransport(), stopController);
+    expect(started.result?.status).toBe('stopped');
+
+    let releaseFirstCall: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { releaseFirstCall = resolve; });
+    let firstCallCount = 0;
+    const firstTransport: AttemptTransport = async () => {
+      firstCallCount++;
+      await gate; // hold the first resume's execution open so the second can race it
+      return { ok: true, responseText: 'first' };
+    };
+
+    const firstResume = resumeBenchmarkRun(started.run!.id, firstTransport);
+    // Give the first resume's synchronous guard-acquisition a turn to run before racing it.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const secondResume = await resumeBenchmarkRun(started.run!.id, succeedingTransport());
+
+    expect(secondResume.ok).toBe(false);
+    expect(secondResume.error).toMatch(/already has an execution in progress/);
+
+    releaseFirstCall();
+    const firstResult = await firstResume;
+    expect(firstResult.result).toEqual({ status: 'completed' });
+    expect(firstCallCount).toBe(1);
+
+    // Exactly one execution was ever recorded for the logical position — no duplicate dispatch.
+    const attempts = await listAttemptsForRun(started.run!.id);
+    expect(attempts.value).toHaveLength(1);
   });
 });
