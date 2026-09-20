@@ -1,5 +1,7 @@
 // @vitest-environment node
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
+import { createServer } from 'http';
+import type { AddressInfo } from 'net';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -308,6 +310,12 @@ describe('foundry-sidecar protocol basics', () => {
       expect((await waitForLine(proc, (msg) => msg.id === 44)).ok).toBe(true);
       const streamed = await waitForLine(proc, (msg) => msg.id === 41 && msg.ok === true);
       expect(streamed.ok).toBe(true);
+      expect(streamed.result.nativeStreaming).toBe(true);
+      expect(streamed.result.servedVariantId).toBe('fake-variant');
+      expect(streamed.result.usage).toMatchObject({
+        prompt_tokens: 3,
+        completion_tokens: 2,
+      });
 
       proc.stdin.write(`${JSON.stringify({
         id: 42,
@@ -316,7 +324,10 @@ describe('foundry-sidecar protocol basics', () => {
         messages: [{ role: 'user', content: 'hello' }],
         stream: false,
       })}\n`);
-      expect((await waitForLine(proc, (msg) => msg.id === 42)).ok).toBe(true);
+      const buffered = await waitForLine(proc, (msg) => msg.id === 42);
+      expect(buffered.ok).toBe(true);
+      expect(buffered.result.nativeStreaming).toBe(false);
+      expect(buffered.result.servedVariantId).toBe('fake-variant');
 
       proc.stdin.write(`${JSON.stringify({ id: 43, cmd: 'getAccessLog' })}\n`);
       const accessLog = (await waitForLine(proc, (msg) => msg.id === 43)).result;
@@ -349,6 +360,157 @@ describe('foundry-sidecar protocol basics', () => {
       nonJsonStdout.stop();
       proc.stderr.off('data', onStderr);
       if (!proc.killed) proc.kill();
+      rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports nativeStreaming false when completeStreamingChat is the only method and the caller asks for a buffered reply', async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-stream-only-home-'));
+    const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
+    const corePath = join(homeDir, 'fake-core.dylib');
+    writeFileSync(corePath, '');
+    writeFileSync(loaderPath, `
+      const sdk = \`
+        class FakeModel {
+          constructor() { this.id = 'fake-variant'; this.loaded = false; }
+          async load() { this.loaded = true; }
+          isLoaded() { return this.loaded; }
+          getExecutionProvider() { return 'CPUExecutionProvider'; }
+          createChatClient() {
+            return {
+              async *completeStreamingChat() {
+                yield { choices: [{ delta: { content: 'stream-only' } }] };
+              },
+            };
+          }
+        }
+        class FakeManager {
+          constructor() {
+            this.catalog = {
+              getModel: async () => new FakeModel(),
+              getModels: async () => [],
+            };
+          }
+          static create() { return new FakeManager(); }
+        }
+        export { FakeManager as FoundryLocalManager };
+      \`;
+      export async function resolve(specifier, context, nextResolve) {
+        if (specifier === 'foundry-local-sdk') {
+          return { url: 'data:text/javascript,' + encodeURIComponent(sdk), shortCircuit: true };
+        }
+        return nextResolve(specifier, context);
+      }
+      export async function load(url, context, nextLoad) {
+        if (url.startsWith('data:text/javascript,')) {
+          return { format: 'module', source: decodeURIComponent(url.slice('data:text/javascript,'.length)), shortCircuit: true };
+        }
+        return nextLoad(url, context);
+      }
+    `);
+    const proc = spawn(process.execPath, [
+      '--experimental-loader', pathToFileURL(loaderPath).href, 'sidecar/foundry-sidecar.js'
+    ], {
+      cwd: process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, HOME: homeDir, USERPROFILE: homeDir, FLINT_FOUNDRY_CORE_PATH: corePath },
+    });
+    try {
+      await waitForLine(proc, (msg) => msg.ready === true);
+      proc.stdin.write(`${JSON.stringify({ id: 40, cmd: 'init', appName: 'flint-test', logLevel: 'info' })}\n`);
+      expect((await waitForLine(proc, (msg) => msg.id === 40)).ok).toBe(true);
+      proc.stdin.write(`${JSON.stringify({
+        id: 41, cmd: 'chatCompletion', model: 'fake-model',
+        messages: [{ role: 'user', content: 'hello' }], stream: false,
+      })}\n`);
+      const buffered = await waitForLine(proc, (msg) => msg.id === 41);
+      expect(buffered.ok).toBe(true);
+      expect(buffered.result.nativeStreaming).toBe(false);
+      expect(buffered.result.servedVariantId).toBe('fake-variant');
+    } finally {
+      if (!proc.killed) proc.kill();
+      rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports nativeStreaming false and servedVariantId on the HTTP fallback', async () => {
+    const server = createServer((req, res) => {
+      if (req.url === '/status') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      if (req.url === '/v1/chat/completions') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          choices: [{ message: { role: 'assistant', content: 'http-hello' } }],
+        }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+    const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-http-chat-home-'));
+    const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
+    const corePath = join(homeDir, 'fake-core.dylib');
+    writeFileSync(corePath, '');
+    writeFileSync(loaderPath, `
+      const sdk = \`
+        class FakeModel {
+          constructor() { this.id = 'fake-variant'; this.loaded = false; }
+          async load() { this.loaded = true; }
+          isLoaded() { return this.loaded; }
+          getExecutionProvider() { return 'CPUExecutionProvider'; }
+        }
+        class FakeManager {
+          constructor() { this.urls = []; this.catalog = { getModel: async () => new FakeModel(), getModels: async () => [] }; }
+          startWebService() { this.urls = ['http://127.0.0.1:${port}']; }
+          stopWebService() {}
+          static create() { return new FakeManager(); }
+        }
+        export { FakeManager as FoundryLocalManager };
+      \`;
+      export async function resolve(specifier, context, nextResolve) {
+        if (specifier === 'foundry-local-sdk') {
+          return { url: 'data:text/javascript,' + encodeURIComponent(sdk), shortCircuit: true };
+        }
+        return nextResolve(specifier, context);
+      }
+      export async function load(url, context, nextLoad) {
+        if (url.startsWith('data:text/javascript,')) {
+          return { format: 'module', source: decodeURIComponent(url.slice('data:text/javascript,'.length)), shortCircuit: true };
+        }
+        return nextLoad(url, context);
+      }
+    `);
+    const proc = spawn(process.execPath, [
+      '--experimental-loader', pathToFileURL(loaderPath).href, 'sidecar/foundry-sidecar.js'
+    ], {
+      cwd: process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, HOME: homeDir, USERPROFILE: homeDir, FLINT_FOUNDRY_CORE_PATH: corePath },
+    });
+    try {
+      await waitForLine(proc, (msg) => msg.ready === true);
+      proc.stdin.write(`${JSON.stringify({ id: 40, cmd: 'init', appName: 'flint-test', logLevel: 'info' })}\n`);
+      expect((await waitForLine(proc, (msg) => msg.id === 40)).ok).toBe(true);
+      proc.stdin.write(`${JSON.stringify({
+        id: 45, cmd: 'startService', port: 18765, bindAddress: '127.0.0.1', gateway: false,
+      })}\n`);
+      expect((await waitForLine(proc, (msg) => msg.id === 45, 15000)).ok).toBe(true);
+      proc.stdin.write(`${JSON.stringify({
+        id: 41, cmd: 'chatCompletion', model: 'fake-model',
+        messages: [{ role: 'user', content: 'hello' }], stream: false,
+      })}\n`);
+      const httpChat = await waitForLine(proc, (msg) => msg.id === 41, 15000);
+      expect(httpChat.ok).toBe(true);
+      expect(httpChat.result.nativeStreaming).toBe(false);
+      expect(httpChat.result.servedVariantId).toBe('fake-variant');
+    } finally {
+      if (!proc.killed) proc.kill();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
       rmSync(homeDir, { recursive: true, force: true });
     }
   });

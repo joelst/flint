@@ -1834,6 +1834,21 @@ describe('accelerator readiness ownership', () => {
 
     await expect(load).rejects.toThrow('replaced while confirming the loaded model');
   }, 15000);
+
+  it('notifies onAcknowledged after load ack even if refresh later fails', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    const acked: string[] = [];
+    const load = sdk.loadModel({ alias: 'example' }, undefined, undefined, () => {
+      acked.push('yes');
+    });
+    const loadId = await waitForWrite('load');
+    harness.emitStdout({ id: loadId, result: { alias: 'example', variantId: 'example-qnn-npu:1' } });
+    await waitForWrite('listModels', 1);
+    expect(acked).toEqual(['yes']);
+    harness.emitClose({ code: 1 });
+    await expect(load).rejects.toThrow();
+  }, 15000);
 });
 
 describe('cancellation from inside onAssignedId', () => {

@@ -2800,12 +2800,24 @@ rl.on('line', async (line) => {
               result: {
                 ...normalizeChatResponse({
                   choices: [{ message: { role: 'assistant', content } }],
+                  ...(typeof chatTokensIn === 'number' || typeof chatTokensOut === 'number'
+                    ? {
+                        usage: {
+                          ...(typeof chatTokensIn === 'number' ? { prompt_tokens: chatTokensIn } : {}),
+                          ...(typeof chatTokensOut === 'number' ? { completion_tokens: chatTokensOut } : {}),
+                        },
+                      }
+                    : {}),
                 }),
                 acceleration: {
                   requested: preferred?.requested ?? null,
                   preferredApplied: preferred?.applied ?? null,
                   active: chatExecutionProvider
-                }
+                },
+                // True per-token delivery; emulated single-delta branches below must not
+                // be treated as time-to-first-token.
+                nativeStreaming: shouldStream,
+                servedVariantId: chatVariantId
               }
             });
           } else if (typeof client?.completeChat === 'function') {
@@ -2815,7 +2827,7 @@ rl.on('line', async (line) => {
               ?? normalizedResult?.usage?.input_tokens ?? null;
             chatTokensOut = normalizedResult?.usage?.completion_tokens
               ?? normalizedResult?.usage?.output_tokens ?? null;
-            if (shouldStream) {
+            if (shouldStream && !canceledRequests.has(id)) {
               const content = normalizedResult?.choices?.[0]?.message?.content || '';
               if (content) {
                 send({
@@ -2838,7 +2850,10 @@ rl.on('line', async (line) => {
                   requested: preferred?.requested ?? null,
                   preferredApplied: preferred?.applied ?? null,
                   active: chatExecutionProvider
-                }
+                },
+                // Emulated: the whole response was buffered, then one synthetic delta.
+                nativeStreaming: false,
+                servedVariantId: chatVariantId
               }
             });
           } else if (typeof client?.completeStreamingChat === 'function') {
@@ -2861,12 +2876,23 @@ rl.on('line', async (line) => {
               result: {
                 ...normalizeChatResponse({
                   choices: [{ message: { role: 'assistant', content } }],
+                  ...(typeof chatTokensIn === 'number' || typeof chatTokensOut === 'number'
+                    ? {
+                        usage: {
+                          ...(typeof chatTokensIn === 'number' ? { prompt_tokens: chatTokensIn } : {}),
+                          ...(typeof chatTokensOut === 'number' ? { completion_tokens: chatTokensOut } : {}),
+                        },
+                      }
+                    : {}),
                 }),
                 acceleration: {
                   requested: preferred?.requested ?? null,
                   preferredApplied: preferred?.applied ?? null,
                   active: chatExecutionProvider
-                }
+                },
+                // Buffered here regardless of what the caller asked for.
+                nativeStreaming: false,
+                servedVariantId: chatVariantId
               }
             });
           } else {
@@ -2918,7 +2944,10 @@ rl.on('line', async (line) => {
                 requested: preferred?.requested ?? null,
                 preferredApplied: preferred?.applied ?? null,
                 active: chatExecutionProvider
-              }
+              },
+              // HTTP always requests stream:false; any delta above is one emulated chunk.
+              nativeStreaming: false,
+              servedVariantId: chatVariantId
             }
           });
         }

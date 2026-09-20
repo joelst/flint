@@ -19,6 +19,8 @@ export type CompareSlot = {
   executionProvider?: string | null;
 };
 
+export type CompareResultStatus = 'completed' | 'stopped' | 'failed';
+
 export type CompareResult = {
   content: string;
   latencyMs?: number;
@@ -26,6 +28,23 @@ export type CompareResult = {
   tokensOut?: number;
   rating?: 'up' | 'down' | null;
   error?: string;
+  /**
+   * Absent on runs saved before this field existed. Treat absence as `'failed'` when `error` is
+   * set and `'completed'` otherwise, matching what those older runs actually recorded.
+   */
+  status?: CompareResultStatus;
+  /**
+   * Time to the first rendered text. Only meaningful when `nativeStreaming` is true — an
+   * emulated stream reports the whole response as a single delta, so this would otherwise
+   * measure total latency, not time-to-first-token.
+   */
+  ttftMs?: number;
+  /** True only when the backend delivered genuine per-token streaming for this result. */
+  nativeStreaming?: boolean;
+  /** The variant actually loaded and used; can differ from the slot's requested variant. */
+  servedVariantId?: string | null;
+  /** Best-effort probe of the active execution provider, not a per-token guarantee. */
+  activeExecutionProvider?: string | null;
 };
 
 export type SavedComparison = {
@@ -88,14 +107,30 @@ function isCompareSlot(value: unknown): value is CompareSlot {
   return value.key === compareSlotKey(value.alias, value.variantId);
 }
 
+const COMPARE_RESULT_STATUSES: CompareResultStatus[] = ['completed', 'stopped', 'failed'];
+
 function isCompareResult(value: unknown): value is CompareResult {
   if (!isPlainObject(value)) return false;
-  return typeof value.content === 'string'
-    && isOptionalFiniteNumber(value.latencyMs)
-    && isOptionalFiniteNumber(value.tokensIn)
-    && isOptionalFiniteNumber(value.tokensOut)
-    && isOptionalRating(value.rating)
-    && isOptionalString(value.error);
+  if (typeof value.content !== 'string') return false;
+  if (!isOptionalFiniteNumber(value.latencyMs)
+    || !isOptionalFiniteNumber(value.tokensIn)
+    || !isOptionalFiniteNumber(value.tokensOut)
+    || !isOptionalRating(value.rating)
+    || !isOptionalString(value.error)) {
+    return false;
+  }
+  if (value.status !== undefined
+    && !COMPARE_RESULT_STATUSES.includes(value.status as CompareResultStatus)) {
+    return false;
+  }
+  if (value.ttftMs !== undefined
+    && !(typeof value.ttftMs === 'number' && Number.isFinite(value.ttftMs) && value.ttftMs >= 0)) {
+    return false;
+  }
+  if (value.nativeStreaming !== undefined && typeof value.nativeStreaming !== 'boolean') return false;
+  if (!isOptionalStringOrNull(value.servedVariantId)) return false;
+  if (!isOptionalStringOrNull(value.activeExecutionProvider)) return false;
+  return true;
 }
 
 function isSavedComparison(value: unknown): value is SavedComparison {
@@ -214,7 +249,15 @@ export function renderComparisonMarkdown(
     md += `## ${slot.label}\n`;
     md += `- Alias: \`${slot.alias}\`\n`;
     if (slot.variantId) md += `- Variant: \`${slot.variantId}\`\n`;
+    if (r.servedVariantId && r.servedVariantId !== slot.variantId) {
+      md += `- Served variant: \`${r.servedVariantId}\`\n`;
+    }
+    if (r.activeExecutionProvider) md += `- Execution provider: ${r.activeExecutionProvider}\n`;
+    md += `- Status: ${r.status ?? (r.error ? 'failed' : 'completed')}\n`;
     md += `- Latency: ${r.latencyMs ?? '?'} ms\n`;
+    if (r.nativeStreaming && typeof r.ttftMs === 'number') {
+      md += `- Time to first streamed text: ${r.ttftMs} ms\n`;
+    }
     md += `- Tokens: in ${r.tokensIn ?? '?'} / out ${r.tokensOut ?? '?'}\n`;
     md += `- Rating: ${r.rating || 'none'}\n\n`;
     md += `${r.content}\n\n---\n\n`;
