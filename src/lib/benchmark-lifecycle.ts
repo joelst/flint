@@ -17,13 +17,14 @@ import {
   type StopController,
 } from './benchmark-runner';
 import { getBenchmarkRun, listAttemptsForRun, updateBenchmarkRunStatus } from './benchmark-repository';
-import { pendingTargetIndexes } from './benchmark-run';
+import { pendingTargetIndexes, type BenchmarkAttempt } from './benchmark-run';
 import { isBenchmarkSuite, type BenchmarkSuite } from './benchmark-suite';
 
 export type LifecycleOutcome = { ok: true; runId: string } | { ok: false; error: string };
 
 export interface BenchmarkLifecycleHost {
-  loadModel(alias: string, variantId: string | null): Promise<void>;
+  /** Returns the variant the runtime actually loaded, when the load reply reports one. */
+  loadModel(alias: string, variantId: string | null): Promise<string | null | void>;
   pinAliases(aliases: string[]): Promise<void>;
   unpin(): Promise<void>;
   chatCompletion(
@@ -50,23 +51,73 @@ function targetsToPrepare(suite: BenchmarkSuite, onlyTargetIndexes?: ReadonlySet
 
 export type PrepareResult = { ok: true } | { ok: false; error: string; stopped?: boolean };
 
+/** Explicit suite variant, else the first served variant already recorded for this target. */
+export function boundVariantIdForTarget(
+  target: { variantId: string | null },
+  targetIndex: number,
+  attempts: readonly Pick<BenchmarkAttempt, 'targetIndex' | 'servedVariantId'>[],
+): string | null {
+  if (target.variantId) return target.variantId;
+  for (const attempt of attempts) {
+    if (attempt.targetIndex === targetIndex && typeof attempt.servedVariantId === 'string' && attempt.servedVariantId.length > 0) {
+      return attempt.servedVariantId;
+    }
+  }
+  return null;
+}
+
+export function assertServedVariant(
+  alias: string,
+  expected: string | null,
+  served: string | null,
+): { ok: true } | { ok: false; errorMessage: string } {
+  if (!expected) return { ok: true };
+  if (!served) {
+    return {
+      ok: false,
+      errorMessage: `Response for ${alias} did not report a served variant; expected "${expected}"`,
+    };
+  }
+  if (served !== expected) {
+    return {
+      ok: false,
+      errorMessage:
+        `Served variant "${served}" did not match the bound variant "${expected}" for ${alias}`
+        + ` — another load likely replaced the pinned variant mid-run`,
+    };
+  }
+  return { ok: true };
+}
+
 export async function loadBenchmarkTargets(
   suite: BenchmarkSuite,
   loadModel: BenchmarkLifecycleHost['loadModel'],
   stopController?: StopController,
   onlyTargetIndexes?: ReadonlySet<number>,
+  expectedByAlias?: Map<string, string>,
 ): Promise<PrepareResult> {
   for (const target of targetsToPrepare(suite, onlyTargetIndexes)) {
     if (stopController?.isStopped()) {
       return { ok: false, error: 'Stopped before every target was loaded', stopped: true };
     }
+    const bound = expectedByAlias?.get(target.alias) ?? target.variantId;
     try {
-      await loadModel(target.alias, target.variantId);
+      const resolved = await loadModel(target.alias, bound);
+      if (typeof resolved === 'string' && resolved.length > 0) {
+        const prior = expectedByAlias?.get(target.alias);
+        if (prior && prior !== resolved) {
+          return {
+            ok: false,
+            error: `Loaded variant "${resolved}" for ${target.alias} did not match the bound variant "${prior}"`,
+          };
+        }
+        expectedByAlias?.set(target.alias, resolved);
+      }
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
       return {
         ok: false,
-        error: `Could not load ${target.alias}${target.variantId ? ` (${target.variantId})` : ''}: ${message}`,
+        error: `Could not load ${target.alias}${bound ? ` (${bound})` : ''}: ${message}`,
       };
     }
   }
@@ -75,6 +126,7 @@ export async function loadBenchmarkTargets(
 
 export function createSidecarBenchmarkTransport(
   chatCompletion: BenchmarkLifecycleHost['chatCompletion'],
+  expectedByAlias: Map<string, string> = new Map(),
 ): AttemptTransport {
   return async (request: AttemptTransportRequest): Promise<AttemptTransportResult> => {
     try {
@@ -87,14 +139,10 @@ export function createSidecarBenchmarkTransport(
         return { ok: false, errorMessage: 'Response had no message content' };
       }
       const servedVariantId = res?.servedVariantId ?? null;
-      if (request.requestedVariantId && servedVariantId && servedVariantId !== request.requestedVariantId) {
-        return {
-          ok: false,
-          errorMessage:
-            `Served variant "${servedVariantId}" did not match the requested variant "${request.requestedVariantId}"`
-            + ` for ${request.alias} — another load likely replaced the pinned variant mid-run`,
-        };
-      }
+      const expected = request.requestedVariantId ?? expectedByAlias.get(request.alias) ?? null;
+      const checked = assertServedVariant(request.alias, expected, servedVariantId);
+      if (!checked.ok) return { ok: false, errorMessage: checked.errorMessage };
+      if (servedVariantId) expectedByAlias.set(request.alias, servedVariantId);
       return {
         ok: true,
         responseText: content,
@@ -128,6 +176,7 @@ async function pinThenLoad(
   host: BenchmarkLifecycleHost,
   stopController?: StopController,
   onlyTargetIndexes?: ReadonlySet<number>,
+  expectedByAlias?: Map<string, string>,
 ): Promise<PrepareResult> {
   if (stopController?.isStopped()) {
     return { ok: false, error: 'Stopped before targets were pinned', stopped: true };
@@ -149,7 +198,7 @@ async function pinThenLoad(
     await host.unpin().catch(() => {});
     return { ok: false, error: 'Stopped before every target was loaded', stopped: true };
   }
-  const loaded = await loadBenchmarkTargets(suite, host.loadModel, stopController, onlyTargetIndexes);
+  const loaded = await loadBenchmarkTargets(suite, host.loadModel, stopController, onlyTargetIndexes, expectedByAlias);
   if (!loaded.ok) {
     await host.unpin().catch(() => {});
     return loaded;
@@ -210,7 +259,8 @@ export async function startBenchmarkSession(
   if (!prepared.ok) return { ok: false, error: prepared.error };
 
   const stopController = createStopController();
-  const transport = createSidecarBenchmarkTransport(host.chatCompletion);
+  const expectedByAlias = new Map<string, string>();
+  const transport = createSidecarBenchmarkTransport(host.chatCompletion, expectedByAlias);
   const runId = prepared.run.id;
   // Pin/load/execute the frozen snapshot, not the caller's object — mutating `suite` while
   // pinAliases is awaiting would otherwise load a different alias set than the run will execute.
@@ -219,7 +269,7 @@ export async function startBenchmarkSession(
   // and execution run on `done`; loadModel has no cancel-in-flight API, so Stop is honored
   // between operations (same admission contract as the runner).
   const done = (async (): Promise<StartRunOutcome> => {
-    const preparedPin = await pinThenLoad(frozen, host, stopController);
+    const preparedPin = await pinThenLoad(frozen, host, stopController, undefined, expectedByAlias);
     if (!preparedPin.ok) {
       return finishPreparedHalt(runId, host, preparedPin.stopped ? 'stopped' : 'failed', preparedPin.error);
     }
@@ -245,16 +295,22 @@ export async function resumeBenchmarkSession(
   if (inexecutable) return { ok: false, error: inexecutable };
 
   const stopController = createStopController();
-  const transport = createSidecarBenchmarkTransport(host.chatCompletion);
+  const expectedByAlias = new Map<string, string>();
+  const transport = createSidecarBenchmarkTransport(host.chatCompletion, expectedByAlias);
   const liveAfter = Date.now();
   const done = (async (): Promise<StartRunOutcome> => {
     // Same attempt list resumeBenchmarkRun will use. Pin/load only unsettled targets so a
     // deleted completed model cannot fail this prepare and block the remaining retries.
     const attempts = await listAttemptsForRun(runId);
     if (!attempts.ok) return { ok: false, error: attempts.error };
-    const only = new Set(pendingTargetIndexes(suite, attempts.value ?? []));
+    const rows = attempts.value ?? [];
+    for (const [i, target] of suite.targets.entries()) {
+      const bound = boundVariantIdForTarget(target, i, rows);
+      if (bound) expectedByAlias.set(target.alias, bound);
+    }
+    const only = new Set(pendingTargetIndexes(suite, rows));
     if (only.size > 0) {
-      const preparedPin = await pinThenLoad(suite, host, stopController, only);
+      const preparedPin = await pinThenLoad(suite, host, stopController, only, expectedByAlias);
       if (!preparedPin.ok) {
         return finishPreparedHalt(runId, host, preparedPin.stopped ? 'stopped' : 'failed', preparedPin.error);
       }

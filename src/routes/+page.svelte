@@ -823,7 +823,11 @@
 
   function benchmarkHost(): BenchmarkLifecycleHost {
     return {
-      loadModel: (alias, variantId) => sdkLoadModel({ alias }, undefined, variantId ?? undefined),
+      loadModel: async (alias, variantId) => {
+        const result = await sdkLoadModel({ alias }, undefined, variantId ?? undefined);
+        const loaded = result && typeof result === 'object' ? (result as { variantId?: unknown }).variantId : null;
+        return typeof loaded === 'string' && loaded.length > 0 ? loaded : null;
+      },
       pinAliases: async (aliases) => {
         const pinned = await pinBenchmarkTargets(aliases);
         if (!pinned.ok) throw new Error(pinned.error);

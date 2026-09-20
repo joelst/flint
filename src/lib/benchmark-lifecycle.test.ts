@@ -2,6 +2,8 @@ import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { SidecarOperationError } from './operation-outcome';
 import {
+  assertServedVariant,
+  boundVariantIdForTarget,
   createSidecarBenchmarkTransport,
   haltPreparedRun,
   loadBenchmarkTargets,
@@ -10,7 +12,7 @@ import {
   type BenchmarkLifecycleHost,
 } from './benchmark-lifecycle';
 import { createStopController, startBenchmarkRun } from './benchmark-runner';
-import { getBenchmarkRun, listBenchmarkRunsForSuite, openBenchmarkDatabase, putBenchmarkSuite } from './benchmark-repository';
+import { getBenchmarkRun, listAttemptsForRun, listBenchmarkRunsForSuite, openBenchmarkDatabase, putBenchmarkSuite } from './benchmark-repository';
 import type { BenchmarkSuite } from './benchmark-suite';
 
 function suite(over: Partial<BenchmarkSuite> = {}): BenchmarkSuite {
@@ -251,6 +253,56 @@ describe('createSidecarBenchmarkTransport', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.haltRun).toBe('stopped');
   });
+
+  it('locks an alias-only target to the first served variant and rejects a later switch', async () => {
+    let calls = 0;
+    const transport = createSidecarBenchmarkTransport(async () => {
+      calls += 1;
+      return {
+        choices: [{ message: { content: 'ok' } }],
+        servedVariantId: calls === 1 ? 'v1' : 'v2',
+      };
+    });
+    const req = { alias: 'model-a', requestedVariantId: null, messages: [{ role: 'user' as const, content: 'x' }] };
+    const first = await transport(req);
+    expect(first.ok).toBe(true);
+    const second = await transport(req);
+    expect(second.ok).toBe(false);
+    if (!second.ok) expect(second.errorMessage).toMatch(/bound variant "v1"/);
+  });
+
+  it('fails closed when a bound variant is expected but the response omits servedVariantId', async () => {
+    const transport = createSidecarBenchmarkTransport(async () => ({
+      choices: [{ message: { content: 'ok' } }],
+    }), new Map([['model-a', 'v1']]));
+    const result = await transport({
+      alias: 'model-a',
+      requestedVariantId: null,
+      messages: [{ role: 'user', content: 'x' }],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errorMessage).toMatch(/did not report a served variant/);
+  });
+});
+
+describe('boundVariantIdForTarget / assertServedVariant', () => {
+  it('prefers the suite variant, else the first served variant already recorded for that target', () => {
+    expect(boundVariantIdForTarget({ variantId: 'explicit' }, 0, [
+      { targetIndex: 0, servedVariantId: 'hist' },
+    ])).toBe('explicit');
+    expect(boundVariantIdForTarget({ variantId: null }, 1, [
+      { targetIndex: 0, servedVariantId: 'other' },
+      { targetIndex: 1, servedVariantId: 'hist-v' },
+    ])).toBe('hist-v');
+    expect(boundVariantIdForTarget({ variantId: null }, 0, [])).toBe(null);
+  });
+
+  it('rejects a missing or swapped served variant when one is bound', () => {
+    expect(assertServedVariant('model-a', null, 'v2')).toEqual({ ok: true });
+    expect(assertServedVariant('model-a', 'v1', 'v1')).toEqual({ ok: true });
+    expect(assertServedVariant('model-a', 'v1', null).ok).toBe(false);
+    expect(assertServedVariant('model-a', 'v1', 'v2').ok).toBe(false);
+  });
 });
 
 describe('loadBenchmarkTargets', () => {
@@ -420,5 +472,63 @@ describe('resumeBenchmarkSession', () => {
     const done = await resumed.execution.done;
     expect(done.ok).toBe(true);
     expect(done.result?.status).toBe('stopped');
+  });
+
+  it('records a failed attempt when load bound a variant and chat served a different one', async () => {
+    const host = fakeHost({
+      loadModel: async (alias) => {
+        host.order.push(`load:${alias}`);
+        return 'bound-v1';
+      },
+      chatCompletion: async () => ({
+        choices: [{ message: { content: 'ok' } }],
+        servedVariantId: 'other-v2',
+      }),
+    });
+    const result = await startBenchmarkSession(suite(), host);
+    expect(result.ok).toBe(true);
+    const done = result.ok ? await result.execution.done : null;
+    expect(done?.ok).toBe(true);
+    const attempts = await listAttemptsForRun(result.ok ? result.execution.runId : '');
+    expect(attempts.ok).toBe(true);
+    expect(attempts.value?.some((a) => a.status === 'failed' && /bound variant "bound-v1"/.test(a.errorMessage || ''))).toBe(true);
+  });
+
+  it('resume loads an alias-only target as the variant previously served', async () => {
+    const s = suite({
+      warmupCount: 0,
+      repeatCount: 1,
+      cases: [{ id: 'c1', prompt: 'x' }, { id: 'c2', prompt: 'y' }],
+    });
+    await putBenchmarkSuite(s);
+    const stopController = createStopController();
+    let n = 0;
+    const started = await startBenchmarkRun(s, async () => {
+      n += 1;
+      if (n === 1) {
+        stopController.stop();
+        return { ok: true, responseText: 'ok', servedVariantId: 'hist-v' };
+      }
+      return { ok: true, responseText: 'ok', servedVariantId: 'hist-v' };
+    }, stopController);
+    expect(started.ok).toBe(true);
+
+    const loaded: Array<[string, string | null]> = [];
+    const host = fakeHost({
+      loadModel: async (alias, variantId) => {
+        loaded.push([alias, variantId]);
+        host.order.push(`load:${alias}:${variantId}`);
+        return variantId;
+      },
+      chatCompletion: async () => ({
+        choices: [{ message: { content: 'ok' } }],
+        servedVariantId: 'hist-v',
+      }),
+    });
+    const resumed = await resumeBenchmarkSession(started.run!.id, host);
+    expect(resumed.ok).toBe(true);
+    const done = resumed.ok ? await resumed.execution.done : null;
+    expect(done?.ok).toBe(true);
+    expect(loaded).toEqual([['model-a', 'hist-v']]);
   });
 });

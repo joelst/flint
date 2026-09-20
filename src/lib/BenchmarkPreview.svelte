@@ -92,6 +92,9 @@
   $: editorBusy = editingBusy || suiteBusy;
   /** Start/resume handshake or live run. Does not freeze Save/Cancel of an unrelated draft. */
   $: runBusy = lifecycleBusy || runInFlight;
+  function suiteHasStoredRuns(suiteId: string): boolean {
+    return (runCountsBySuite[suiteId] ?? 0) > 0;
+  }
 
   async function refreshSuites() {
     const generation = ++suitesGeneration;
@@ -424,7 +427,11 @@
       // A slow export racing the user navigating to a different run/suite must not attribute
       // its failure to whatever is now selected — only surface the error while this export's
       // run is still the one on screen; a successful export still downloads regardless.
-      if (selectedRunId === runId) lifecycleError = "Could not build export";
+      if (selectedRunId === runId) {
+        lifecycleError = !res.ok
+          ? (res.error || "Could not build export")
+          : `Could not build export: run "${runId}" was not found`;
+      }
       return;
     }
     const payload = buildBenchmarkExport(res.value.run, res.value.attempts);
@@ -585,11 +592,11 @@
             <strong>{suite.name}</strong>
             <span class="muted small">{suite.targets.length} target(s) · {suite.cases.length} case(s) · {runCountsBySuite[suite.id] ?? 0} run(s)</span>
           </button>
-          <button type="button" class="tiny" disabled={editorBusy || lifecycleBusy} onclick={() => startEditSuite(suite)}>Edit</button>
+          <button type="button" class="tiny" disabled={editorBusy || lifecycleBusy || suiteHasStoredRuns(suite.id)} onclick={() => startEditSuite(suite)}>Edit</button>
           <button
             type="button"
             class="tiny danger-btn"
-            disabled={editorBusy || lifecycleBusy || runInFlight || draftEditsSuite(editingDraft, suite.id)}
+            disabled={editorBusy || lifecycleBusy || runInFlight || suiteHasStoredRuns(suite.id) || draftEditsSuite(editingDraft, suite.id)}
             onclick={() => removeSuite(suite)}
           >Delete</button>
         </div>
