@@ -188,6 +188,11 @@
     resumeBenchmarkSession,
     type BenchmarkLifecycleHost,
   } from "$lib/benchmark-lifecycle";
+  import {
+    acquirePriorityLease,
+    releasePriorityLease,
+    overlayPinnedPriorities,
+  } from "$lib/benchmark-priority-lease";
   import type { BenchmarkSuite } from "$lib/benchmark-suite";
 
   // Integrations tab state
@@ -772,52 +777,40 @@
    * *actual* configured priorities (`modelPriorities`, the source of truth `pushMemorySettings`
    * already sends) rather than `state.models[*].priority`, which does not exist on `ModelInfo` —
    * reading it would silently treat every model as 'normal' and could clobber a user's real
-   * 'low'/'pinned' choices for models outside the benchmark. */
+   * 'low'/'pinned' choices for models outside the benchmark.
+   *
+   * The lease mechanics (record-before-ack, retry-once restore) live in the pure, tested
+   * `benchmark-priority-lease` module; this function only wires it to `pushMemorySettings`. */
   async function pinBenchmarkTargets(aliases: string[]): Promise<{ ok: true } | { ok: false; error: string }> {
-    // Record before the sidecar ack: setModelPriorities is effectful, so a rejected promise
-    // does not prove the overlay was not installed. Cleanup must still restore. Once recorded,
-    // every future pushMemorySettings call (from here, or from an unrelated Settings/Monitor
-    // edit made while the run is active) re-applies this same overlay — see pushMemorySettings.
-    benchmarkPinnedAliases = aliases;
-    try {
-      await pushMemorySettings({ throwOnError: true });
-      return { ok: true };
-    } catch (e: any) {
-      const error = e?.message || String(e);
-      appendAppLog(`Benchmark: could not pin target priorities: ${error}`, 'warn');
-      return { ok: false, error };
+    const lease = acquirePriorityLease(aliases, (pinnedAliases) =>
+      pushMemorySettings({ throwOnError: true, pinnedAliasesOverride: pinnedAliases }),
+    );
+    // Adopted synchronously (not after awaiting `lease.ack`) so any *other* concurrent
+    // pushMemorySettings call — from here or from an unrelated Settings/Monitor edit made while
+    // the run is active — already overlays this pin. See pushMemorySettings' pinnedAliasesOverride.
+    benchmarkPinnedAliases = lease.pinnedAliases;
+    const result = await lease.ack;
+    if (!result.ok) {
+      appendAppLog(`Benchmark: could not pin target priorities: ${result.error}`, 'warn');
     }
+    return result;
   }
 
-  /** Restores the sidecar's priority map to exactly what the user has configured. Clears the
-   * pin lease *before* pushing, so this specific push sends the plain `modelPriorities` map
-   * with no benchmark overlay — `pushMemorySettings` would otherwise re-apply the very overlay
-   * this call exists to remove. */
+  /** Restores the sidecar's priority map to exactly what the user has configured, once the
+   * lease's retry-once restore also fails to settle within acceptable certainty. See
+   * `pinBenchmarkTargets` for why the lease mechanics themselves live in a separate module. */
   async function unpinBenchmarkTargets(): Promise<void> {
-    if (benchmarkPinnedAliases.length === 0) return;
-    benchmarkPinnedAliases = [];
-    try {
-      // `pushMemorySettings()` with no options swallows its own failure into a console.warn
-      // that no user ever sees — passing throwOnError here is what actually lets this catch
-      // fire at all; without it, a real restore failure would look identical to success and
-      // the sidecar could keep enforcing the benchmark's forced 'pinned' priority indefinitely.
-      await pushMemorySettings({ throwOnError: true });
-    } catch (e: any) {
-      // The write is idempotent — it always sends the full current priority map, which is
-      // unchanged between this call and the retry — so replaying it is safe. The sidecar does
-      // run one eviction sweep per push (applyMemorySettings), same as it already does for
-      // every other pushMemorySettings() call site in this file; a retried sweep over the same
-      // priorities evicts nothing further than the first one already would have, so this isn't
-      // a new failure mode, just the existing one happening twice.
-      try {
-        await pushMemorySettings({ throwOnError: true });
-      } catch (retryError: any) {
-        const error = retryError?.message || retryError || e?.message || e;
-        appendAppLog(
-          `Benchmark: could not restore model priorities after the run finished (${error}). A benchmark target may still be pinned — check Settings.`,
-          'warn',
-        );
-      }
+    const lease = releasePriorityLease(benchmarkPinnedAliases, (pinnedAliases) =>
+      pushMemorySettings({ throwOnError: true, pinnedAliasesOverride: pinnedAliases }),
+    );
+    if (!lease) return;
+    benchmarkPinnedAliases = lease.pinnedAliases;
+    const result = await lease.ack;
+    if (!result.ok) {
+      appendAppLog(
+        `Benchmark: could not restore model priorities after the run finished (${result.error}). A benchmark target may still be pinned — check Settings.`,
+        'warn',
+      );
     }
   }
 
@@ -2255,20 +2248,29 @@
 
   /** Sends the priority map and the eviction rules to the sidecar, which runs the sweep.
    *
-   * Overlays `benchmarkPinnedAliases` (forced to 'pinned') onto every call, not just the one
-   * `pinBenchmarkTargets` itself makes — `setModelPriorities`/`applyMemorySettings` both replace
-   * the whole map, so a user priority change or eviction-settings edit made from Settings/Monitor
-   * *during* a benchmark run would otherwise resend `modelPriorities` with no pin at all,
-   * dropping the overlay and re-exposing a running benchmark's targets to eviction. Folding the
-   * overlay in here (rather than only where pinning is first installed) makes it a standing
-   * invariant of every push for as long as a benchmark holds the lease, not a one-time snapshot.
+   * Overlays `benchmarkPinnedAliases` (forced to 'pinned', via `overlayPinnedPriorities`) onto
+   * every call, not just the one `pinBenchmarkTargets` itself makes — `setModelPriorities`/
+   * `applyMemorySettings` both replace the whole map, so a user priority change or
+   * eviction-settings edit made from Settings/Monitor *during* a benchmark run would otherwise
+   * resend `modelPriorities` with no pin at all, dropping the overlay and re-exposing a running
+   * benchmark's targets to eviction. Folding the overlay in here (rather than only where pinning
+   * is first installed) makes it a standing invariant of every push for as long as a benchmark
+   * holds the lease, not a one-time snapshot.
+   *
+   * `pinnedAliasesOverride` lets `pinBenchmarkTargets`/`unpinBenchmarkTargets` (in
+   * `benchmark-priority-lease.ts`) force the exact alias list for *this* push, independent of
+   * whatever `benchmarkPinnedAliases` currently holds — those two calls need the new lease's
+   * aliases reflected in the very first push they make, before the caller has had a chance to
+   * assign `benchmarkPinnedAliases` from the lease's return value.
    */
   let pushMemorySeq = 0;
-  async function pushMemorySettings(options?: { throwOnError?: boolean }) {
+  async function pushMemorySettings(options?: { throwOnError?: boolean; pinnedAliasesOverride?: readonly string[] }) {
     const seq = ++pushMemorySeq;
     const currentEviction = { ...evictionConfig };
-    const currentPriorities = { ...modelPriorities };
-    for (const alias of benchmarkPinnedAliases) currentPriorities[alias] = "pinned";
+    const currentPriorities = overlayPinnedPriorities(
+      { ...modelPriorities },
+      options?.pinnedAliasesOverride ?? benchmarkPinnedAliases,
+    );
     try {
       // One command, one sweep. Sent as two commands, the first sweeps under half-updated
       // settings — enough to evict the very model the user just chose to keep loaded.

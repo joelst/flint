@@ -81,6 +81,7 @@ export default defineConfig(() => ({
         'src/lib/benchmark-draft.ts',
         'src/lib/benchmark-export.ts',
         'src/lib/benchmark-lifecycle.ts',
+        'src/lib/benchmark-priority-lease.ts',
         'src/lib/conversation-title.ts',
         'src/lib/conversation-session.ts',
         'src/lib/conversation-settings.ts',
