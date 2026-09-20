@@ -808,7 +808,7 @@
     const result = await lease.ack;
     if (!result.ok) {
       appendAppLog(
-        `Benchmark: could not restore model priorities after the run finished (${result.error}). A benchmark target may still be pinned — check Settings.`,
+        `Benchmark: could not restore model priorities after the run finished (${result.error}). A benchmark target may still be pinned — check Monitor.`,
         'warn',
       );
     }

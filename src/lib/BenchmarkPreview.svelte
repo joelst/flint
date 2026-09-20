@@ -365,6 +365,20 @@
     : [];
   $: selectedRunIsActive = !!selectedRun && selectedRun.id === activeRunId;
 
+  /** `openRun` only starts `pollHandle` for whichever run is *selected* at the time. Selecting a
+   * different (e.g. historical) run while a run stays active elsewhere stops that poll, so if
+   * the active run then finishes with no run selected here, nothing would ever refresh
+   * `runsForSelectedSuite` and its row would sit relabeled "interrupted" forever even though it
+   * completed normally. Tracking the previous `activeRunId` lets us catch exactly that release
+   * and refresh the currently-viewed suite's run list regardless of what's selected. */
+  let lastActiveRunId: string | null = null;
+  $: {
+    if (lastActiveRunId && !activeRunId && selectedSuiteId) {
+      void refreshRunsForSelectedSuite(selectedSuiteId);
+    }
+    lastActiveRunId = activeRunId;
+  }
+
   async function handleStart(suite: BenchmarkSuite) {
     if (runBusy) return;
     if (draftEditsSuite(editingDraft, suite.id)) {

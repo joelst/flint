@@ -107,21 +107,121 @@ describe('startBenchmarkRun', () => {
     expect(outcome.result).toEqual({ status: 'completed' });
   });
 
-  it('rejects an explicitly-passed preparedRun whose suite snapshot fails validation, instead of scheduling it unchecked', async () => {
+  it('rejects an explicitly-passed preparedRun whose in-memory suite was tampered after prepare, instead of scheduling it unchecked', async () => {
     // `startBenchmarkRun` is exported and callable directly, not only via `startBenchmarkSession`
     // (which always builds `preparedRun` through `prepareBenchmarkRun`) -- a directly-supplied
-    // `preparedRun` must not bypass validation just because it looks pre-validated.
+    // `preparedRun` must not bypass validation just because it looks pre-validated. The run is
+    // re-read from storage and this tampered copy disagrees with what was actually reserved.
     const s = suite();
     const prepared = await prepareBenchmarkRun(s);
     expect(prepared.ok).toBe(true);
     if (!prepared.ok) throw new Error('unreachable');
     const tamperedRun = {
       ...prepared.run,
-      suite: { ...prepared.run.suite, targets: [{ alias: 'model-a', variantId: null }, { alias: 'model-a', variantId: 'v2' }] },
+      suite: { ...prepared.run.suite, targets: [{ alias: 'model-b', variantId: null }] },
     };
     const outcome = await startBenchmarkRun(s, succeedingTransport(), undefined, tamperedRun);
     expect(outcome.ok).toBe(false);
+    expect(outcome.error).toMatch(/does not match/);
+  });
+
+  it('rejects an explicitly-passed preparedRun whose id has no reservation in storage', async () => {
+    const s = suite();
+    const prepared = await prepareBenchmarkRun(s);
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) throw new Error('unreachable');
+    const unpersistedRun = { ...prepared.run, id: 'never-persisted' };
+    let called = false;
+    const outcome = await startBenchmarkRun(s, async () => {
+      called = true;
+      return { ok: true, responseText: 'x' };
+    }, undefined, unpersistedRun);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error).toMatch(/no reservation found in storage/);
+    expect(called).toBe(false);
+  });
+
+  it('rejects an explicitly-passed preparedRun whose stored reservation is a legacy duplicate-alias run', async () => {
+    // A tampered/forged `preparedRun.id` could point at a real, pre-1.0 stored row this rule
+    // would reject if it were ever (re-)created — execution must still refuse it, not just
+    // shape-check the caller's in-memory object and let a legacy row's alias-order transport
+    // dispatch run.
+    const legacySuite = suite({
+      targets: [
+        { alias: 'model-a', variantId: 'v1' },
+        { alias: 'model-a', variantId: 'v2' },
+      ],
+    });
+    const db = await openBenchmarkDatabase();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction('runs', 'readwrite');
+        tx.oncomplete = () => resolve();
+        tx.onabort = () => reject(tx.error);
+        tx.onerror = () => reject(tx.error);
+        tx.objectStore('runs').put({
+          id: 'legacy-dup-alias-start',
+          suiteId: 'suite-1',
+          suite: legacySuite,
+          createdAt: Date.now(),
+          status: 'running',
+        });
+      });
+    } finally {
+      db.close();
+    }
+    let called = false;
+    const outcome = await startBenchmarkRun(
+      legacySuite,
+      async () => { called = true; return { ok: true, responseText: 'x' }; },
+      undefined,
+      { id: 'legacy-dup-alias-start', suiteId: 'suite-1', suite: legacySuite, createdAt: Date.now(), status: 'running' },
+    );
+    expect(outcome.ok).toBe(false);
     expect(outcome.error).toMatch(/duplicate target aliases/);
+    expect(called).toBe(false);
+  });
+
+  it('rejects an explicitly-passed preparedRun whose stored reservation already has recorded attempts', async () => {
+    // This branch always executes with an empty prior-attempts list. A reservation that already
+    // has attempt rows (already started, resumed, or completed by someone else) must not be
+    // re-dispatched from scratch through this path -- that would duplicate real inference calls
+    // against positions that already have a terminal outcome recorded.
+    const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
+    const putSuite = await putBenchmarkSuite(s);
+    expect(putSuite.ok).toBe(true);
+    const prepared = await prepareBenchmarkRun(s);
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) throw new Error('unreachable');
+    // Run it to completion once, recording a real attempt against this same reservation.
+    const first = await startBenchmarkRun(s, succeedingTransport(), undefined, prepared.run);
+    expect(first.ok).toBe(true);
+    let called = false;
+    const outcome = await startBenchmarkRun(s, async () => {
+      called = true;
+      return { ok: true, responseText: 'x' };
+    }, undefined, prepared.run);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error).toMatch(/already has recorded attempts/);
+    expect(called).toBe(false);
+  });
+
+  it('rejects an explicitly-passed preparedRun with a structurally invalid suite without throwing', async () => {
+    const s = suite();
+    const putSuite = await putBenchmarkSuite(s);
+    expect(putSuite.ok).toBe(true);
+    const prepared = await prepareBenchmarkRun(s);
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) throw new Error('unreachable');
+    const malformedRun = { ...prepared.run, suite: null as unknown as BenchmarkSuite };
+    let called = false;
+    const outcome = await startBenchmarkRun(s, async () => {
+      called = true;
+      return { ok: true, responseText: 'x' };
+    }, undefined, malformedRun);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error).toMatch(/duplicate target aliases/);
+    expect(called).toBe(false);
   });
 
   it('returns a run snapshot reflecting the status executePositions actually committed, not the stale pre-execution one', async () => {

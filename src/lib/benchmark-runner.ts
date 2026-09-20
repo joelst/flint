@@ -27,6 +27,7 @@
 
 import {
   buildAttemptSchedule,
+  isBenchmarkRun,
   nextSequenceFor,
   pendingLogicalAttempts,
   type AttemptUsage,
@@ -34,7 +35,13 @@ import {
   type BenchmarkRun,
   type LogicalAttempt,
 } from './benchmark-run';
-import { isBenchmarkSuite, validateBenchmarkSuite, type BenchmarkMessage, type BenchmarkSuite } from './benchmark-suite';
+import {
+  isBenchmarkSuite,
+  suiteSnapshotMatchesStored,
+  validateBenchmarkSuite,
+  type BenchmarkMessage,
+  type BenchmarkSuite,
+} from './benchmark-suite';
 import {
   createBenchmarkRun,
   getBenchmarkRun,
@@ -331,17 +338,57 @@ export async function startBenchmarkRun(
   // after this call returns control to the event loop.
   let run: BenchmarkRun;
   if (preparedRun) {
-    // Defense-in-depth: `startBenchmarkRun` is exported and can be called directly (not only
-    // via `startBenchmarkSession`), so a caller-supplied `preparedRun` is not trusted blindly.
-    // It was already normalized by `prepareBenchmarkRun`, so a boolean check is enough here --
-    // no need to re-freeze or re-derive a normalized value.
+    // Defense-in-depth: `startBenchmarkRun` is exported and callable directly (not only via
+    // `startBenchmarkSession`), so a caller-supplied `preparedRun` must not be trusted on shape
+    // alone — a well-formed but unpersisted (or tampered) run would otherwise skip
+    // `createBenchmarkRun`, write orphan attempt rows, and dispatch real inference, only
+    // discovering the problem once the terminal status write finds no row to update. Re-read
+    // the reservation from storage — the same pattern `resumeBenchmarkRun` already uses — and
+    // execute exactly what storage holds for this id, not the caller's in-memory object.
+    //
+    // Checked before the storage read (and before `suiteSnapshotMatchesStored`, which assumes a
+    // well-formed suite and would throw on a malformed one) so a caller passing a structurally
+    // invalid suite gets the same clean validation error it always has, not a rejected promise.
     if (!isBenchmarkSuite(preparedRun.suite)) {
       return {
         ok: false,
         error: 'cannot start: suite snapshot has duplicate target aliases from before that shape was rejected',
       };
     }
-    run = preparedRun;
+    const reservation = await getBenchmarkRun(preparedRun.id);
+    if (!reservation.ok) return { ok: false, error: reservation.error };
+    if (!reservation.value) {
+      return { ok: false, error: `cannot start: no reservation found in storage for run "${preparedRun.id}"` };
+    }
+    if (!isBenchmarkRun(reservation.value)) {
+      return {
+        ok: false,
+        error: 'cannot start: suite snapshot has duplicate target aliases from before that shape was rejected',
+      };
+    }
+    // The reservation exists and is well-formed, but may not be the run the caller intended to
+    // execute (e.g. a stale `preparedRun` reused after a retry created a fresh row for the same
+    // suite). Fail loud rather than silently execute storage's content in place of the caller's.
+    if (!suiteSnapshotMatchesStored(reservation.value.suite, preparedRun.suite)) {
+      return {
+        ok: false,
+        error: `cannot start: run "${preparedRun.id}"'s stored reservation does not match the suite snapshot being executed`,
+      };
+    }
+    // A valid, matching reservation is still not necessarily *fresh*: this branch always passes
+    // an empty prior-attempts list to `executePositions` below, so a reservation that already
+    // has recorded attempts (already started, resumed, or completed elsewhere) would have its
+    // finished positions dispatched all over again instead of being resumed. Only a reservation
+    // with zero attempts on record is safe to execute via this from-scratch path.
+    const existingAttempts = await listAttemptsForRun(preparedRun.id);
+    if (!existingAttempts.ok) return { ok: false, error: existingAttempts.error };
+    if ((existingAttempts.value ?? []).length > 0) {
+      return {
+        ok: false,
+        error: `cannot start: run "${preparedRun.id}" already has recorded attempts — resume it instead of starting it again`,
+      };
+    }
+    run = reservation.value;
   } else {
     // Same normalize-then-freeze reasoning as `prepareBenchmarkRun` above: freezing the
     // caller's raw suite here would risk the same false "stale snapshot" rejection inside
