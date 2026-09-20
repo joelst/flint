@@ -9,18 +9,21 @@ export type CompareSlotError = {
 export type CompareSlotErrorKind = 'pre-dispatch-stop' | 'prep-stop' | 'failed';
 
 /**
- * Stop of the timed chatCompletion before write() is a known-never-sent slot.
+ * Only `cancelBeforeDispatch()` proves the timed request was never written.
+ * Sidecar `certainty: 'cancelled'` also covers drain of an already-dispatched call.
  * Stop during download/load is "never reached inference". Any other cancel is a failure.
  */
 export function classifyCompareSlotError(opts: {
   stopRequested: boolean;
   error: CompareSlotError;
   inferenceStarted: number | null;
+  preDispatchCancelled?: boolean;
 }): CompareSlotErrorKind {
+  if (opts.preDispatchCancelled) return 'pre-dispatch-stop';
   const cancelled = opts.error.certainty === 'cancelled';
   if (cancelled && opts.stopRequested) {
     if (opts.error.cmd === 'chatCompletion' && opts.inferenceStarted != null) {
-      return 'pre-dispatch-stop';
+      return 'failed';
     }
     return 'prep-stop';
   }
@@ -39,10 +42,13 @@ export function buildFailedCompareResult(
   error: CompareSlotError,
   inferenceStarted: number | null,
   now: number,
+  partialContent?: string,
 ): CompareResult {
   const message = error.message || String(error);
+  const prefix = `[Error] ${message}`;
+  const content = partialContent ? `${partialContent}\n\n${prefix}` : prefix;
   return {
-    content: `[Error] ${message}`,
+    content,
     latencyMs: inferenceStarted != null ? now - inferenceStarted : undefined,
     error: message,
     rating: null,

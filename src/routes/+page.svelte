@@ -686,6 +686,7 @@
   let compareActiveStream: { controller: AbortController; requestId: number | null } | null = null;
   let compareRunGeneration = 0;
   let compareStopAckError: string | null = null;
+  let comparePreDispatchCancelled = false;
 
   // Settings: startup behaviour
   let autoStartService = $state(true);
@@ -3556,7 +3557,8 @@ updateStateFromSdk();
     comparePickerOpen = false;
     compareStopRequested = false;
     compareStopAckError = null;
-    ++compareRunGeneration;
+    comparePreDispatchCancelled = false;
+    const runId = ++compareRunGeneration;
     isComparing = true;
     comparePreparing = true;
     compareResults = {};
@@ -3613,6 +3615,7 @@ updateStateFromSdk();
 
         // latencyMs = chatCompletion only (after download/load/service prep)
         let inferenceStarted: number | null = null;
+        let streamedContent = "";
         try {
           await ensureCompareSlotDownloaded(slot);
 
@@ -3718,7 +3721,7 @@ updateStateFromSdk();
           statusMessage = comparePrepStatus;
           // Latency = measured prompt only (after load + discarded warm-up).
           inferenceStarted = Date.now();
-          let streamedContent = "";
+          streamedContent = "";
           let firstDeltaAt: number | null = null;
           const requestController = new AbortController();
           compareActiveStream = { controller: requestController, requestId: null };
@@ -3742,8 +3745,13 @@ updateStateFromSdk();
                 if (requestController.signal.aborted) {
                   // Stop was requested before this request had an id to cancel by (a race with
                   // onAssignedId); cancel now that one exists instead of leaving it undispatched.
-                  if (!cancelBeforeDispatch(requestId)) {
-                    void cancelChatRequest(requestId).catch(() => {});
+                  if (cancelBeforeDispatch(requestId)) {
+                    comparePreDispatchCancelled = true;
+                  } else {
+                    void cancelChatRequest(requestId).catch((e: any) => {
+                      if (compareRunGeneration !== runId) return;
+                      compareStopAckError = e?.message || String(e);
+                    });
                   }
                 }
               },
@@ -3784,6 +3792,7 @@ updateStateFromSdk();
                 ? { certainty: err.certainty, cmd: err.cmd, message: err.message }
                 : { message: err?.message || String(err) },
             inferenceStarted,
+            preDispatchCancelled: comparePreDispatchCancelled,
           });
           if (classified === "pre-dispatch-stop") {
             compareResults[slot.key] = buildStoppedPreDispatchResult();
@@ -3801,6 +3810,7 @@ updateStateFromSdk();
               : { message: err?.message || String(err) },
             inferenceStarted,
             Date.now(),
+            streamedContent,
           );
           // Only unload what we are allowed to (never silent-evict preloaded without consent)
           if (oneAtATime) {
@@ -3859,6 +3869,7 @@ updateStateFromSdk();
     // further deltas; native generation may continue without being shown.
     const abandoned = cancelBeforeDispatch(requestId);
     if (abandoned) {
+      comparePreDispatchCancelled = true;
       statusMessage = "Slot cancelled before it started; no further slots will run.";
       return;
     }

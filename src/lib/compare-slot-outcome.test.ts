@@ -13,8 +13,20 @@ describe('classifyCompareSlotError', () => {
         stopRequested: true,
         error: { certainty: 'cancelled', cmd: 'chatCompletion', message: 'cancelled' },
         inferenceStarted: 1000,
+        preDispatchCancelled: true,
       }),
     ).toBe('pre-dispatch-stop');
+  });
+
+  it('does not treat a dispatched cancelled chatCompletion as pre-dispatch-stop', () => {
+    expect(
+      classifyCompareSlotError({
+        stopRequested: true,
+        error: { certainty: 'cancelled', cmd: 'chatCompletion', message: 'Runtime is draining' },
+        inferenceStarted: 1000,
+        preDispatchCancelled: false,
+      }),
+    ).toBe('failed');
   });
 
   it('treats a Stop during download/load as prep-stop, not a user-visible failure', () => {
@@ -60,6 +72,13 @@ describe('compare slot result builders', () => {
   it('records inference wait as latency only on a real failure after dispatch', () => {
     expect(buildFailedCompareResult({ message: 'boom' }, 1000, 1250)).toEqual({
       content: '[Error] boom',
+      latencyMs: 250,
+      error: 'boom',
+      rating: null,
+      status: 'failed',
+    });
+    expect(buildFailedCompareResult({ message: 'boom' }, 1000, 1250, 'partial')).toEqual({
+      content: 'partial\n\n[Error] boom',
       latencyMs: 250,
       error: 'boom',
       rating: null,
