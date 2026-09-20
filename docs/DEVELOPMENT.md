@@ -188,6 +188,41 @@ pwsh .\scripts\flint-icon-generator.ps1 -SourceImage .\static\flint-master-1024.
 
 Updates `static\` and `src-tauri\icons\` (including `.ico`). SVG generation is intentionally excluded (was producing raster-wrapped output).
 
+`icon.icns` needs `png2icns`, which is macOS-only; the script skips it with a warning on
+other platforms. On Windows/Linux, regenerate it with Pillow instead:
+
+```powershell
+python -c "from PIL import Image; Image.open('static/flint-master-1024.png').convert('RGBA').save('src-tauri/icons/icon.icns')"
+```
+
+---
+
+## Screenshots
+
+README and docs screenshots go stale after UI changes (nav labels, theme, branding). To
+refresh them:
+
+1. Launch the dev build with WebView2's remote debugging port enabled, so its content can
+   be driven over the Chrome DevTools Protocol (CDP):
+   ```powershell
+   $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9222"
+   .\build-local.ps1 -Command "npm run tauri dev"
+   ```
+2. Once the window is visible and connected, in another terminal run:
+   ```powershell
+   node scripts/capture-screenshots.mjs
+   ```
+   This clicks through each sidebar section (and the Chat/Voice sub-tabs) and saves a
+   fixed-size (1600x1000) PNG per section to `images/`, overwriting the existing files.
+3. Review the diffs — the app's live state (loaded models, conversation history, sample
+   data) ends up in the screenshot, so put the app into a presentable state first (a
+   clean/representative conversation, a model loaded, no error banners) before capturing.
+4. Update `SHOTS` in `scripts/capture-screenshots.mjs` if sidebar labels change, and update
+   `README.md`'s Screenshots section if sections are added, renamed, or removed.
+
+The script only uses Node built-ins (global `fetch`/`WebSocket`), so it needs no new
+dependency.
+
 ---
 
 ## Model pool spike (optional)
