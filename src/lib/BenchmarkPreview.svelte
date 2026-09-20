@@ -281,6 +281,24 @@
     }
   }
 
+  /** Run row and attempt summaries are one snapshot. Partial success must not update either
+   * field or clear pollError — that would stop as completed with a stale matrix and no banner. */
+  function applyPollPair(
+    runRes: { ok: boolean; value?: BenchmarkRun | null; error?: string },
+    summariesRes: { ok: boolean; value?: AttemptSummary[] | null; error?: string },
+  ): boolean {
+    if (runRes.ok && summariesRes.ok) {
+      selectedRun = runRes.value ?? null;
+      selectedRunAttempts = summariesRes.value ?? [];
+      pollError = "";
+      return true;
+    }
+    pollError = !runRes.ok
+      ? `Could not refresh run status: ${runRes.error}`
+      : `Could not refresh run attempts: ${summariesRes.error}`;
+    return false;
+  }
+
   async function refreshSelectedRun() {
     const runId = selectedRunId;
     if (!runId) return;
@@ -288,50 +306,30 @@
     const ownedAtStart = runId === activeRunId;
     const runRes = await getBenchmarkRun(runId);
     if (generation !== refreshGeneration || selectedRunId !== runId) return;
-    if (runRes.ok) {
-      selectedRun = runRes.value ?? null;
-      pollError = "";
-    } else {
-      // A transient storage read failure must never be treated as "nothing changed" — the run
-      // could have finished, stopped, or crashed in the same window, and silently keeping the
-      // last-known snapshot would show a stale "running" status (and Stop button) forever with
-      // no indication anything is wrong. Surface it; the next poll tick will clear it on success.
-      pollError = `Could not refresh run status: ${runRes.error}`;
-    }
     const summariesRes = await listAttemptSummariesForRun(runId);
     if (generation !== refreshGeneration || selectedRunId !== runId) return;
-    if (summariesRes.ok) {
-      selectedRunAttempts = summariesRes.value ?? [];
-    } else {
-      pollError = `Could not refresh run attempts: ${summariesRes.error}`;
-    }
-    // A failed read is not a confirmed terminal state — stopping here would leave a stale
-    // "running" snapshot and pollError with no next tick to recover. Only stop after both
-    // reads succeeded and the row is not the live running run (including the first open of a
-    // run that already finished, when no interval was ever installed).
-    const confirmed = runRes.ok && summariesRes.ok;
+    // Apply run + summaries as one snapshot. A completed row with a failed summaries read
+    // must not paint as done with the previous attempt list (last result missing, no error).
+    const confirmed = applyPollPair(runRes, summariesRes);
     const ownedNow = runId === activeRunId;
     const poll = nextRunPollAction({
       confirmed,
       ownedNow,
       ownedAtStart,
-      status: selectedRun?.status,
+      status: confirmed ? selectedRun?.status : undefined,
     });
     if (poll === 'keep') return;
     if (poll === 'reread') {
       const finalRun = await getBenchmarkRun(runId);
       if (generation !== refreshGeneration || selectedRunId !== runId) return;
-      if (finalRun.ok) {
-        selectedRun = finalRun.value ?? null;
-        pollError = "";
-      }
       const finalSummaries = await listAttemptSummariesForRun(runId);
       if (generation !== refreshGeneration || selectedRunId !== runId) return;
-      if (finalSummaries.ok) selectedRunAttempts = finalSummaries.value ?? [];
+      const rereadConfirmed = applyPollPair(finalRun, finalSummaries);
       const after = nextRunPollActionAfterReread({
+        confirmed: rereadConfirmed,
         ownedNow: runId === activeRunId,
         ownedAtStart,
-        status: selectedRun?.status,
+        status: rereadConfirmed ? selectedRun?.status : undefined,
       });
       if (after === 'keep') return;
     }

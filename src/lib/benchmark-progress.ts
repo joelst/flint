@@ -211,12 +211,16 @@ export function nextRunPollAction(opts: {
 
 /** After the confirmation read: keep one extra tick if this session just released a
  * still-`running` row (status write may still be in flight). Follow-up ticks are not
- * owned-at-start and stop even if storage is still `running` (crash leftover). */
+ * owned-at-start and stop even if storage is still `running` (crash leftover).
+ * An unconfirmed pair (run or summaries failed) must not stop — that would freeze the
+ * previous attempt list with no next tick to recover. */
 export function nextRunPollActionAfterReread(opts: {
+  confirmed: boolean;
   ownedNow: boolean;
   ownedAtStart: boolean;
   status: BenchmarkRun['status'] | null | undefined;
 }): 'keep' | 'stop' {
+  if (!opts.confirmed) return 'keep';
   if (opts.ownedNow) return 'keep';
   if (opts.ownedAtStart && opts.status === 'running') return 'keep';
   return 'stop';

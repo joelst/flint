@@ -242,10 +242,25 @@ describe('nextRunPollAction', () => {
   });
 
   it('after a confirmation read, keeps one extra tick only if this session just released a still-running row', () => {
-    expect(nextRunPollActionAfterReread({ ownedNow: false, ownedAtStart: true, status: 'running' })).toBe('keep');
-    expect(nextRunPollActionAfterReread({ ownedNow: false, ownedAtStart: true, status: 'completed' })).toBe('stop');
-    expect(nextRunPollActionAfterReread({ ownedNow: false, ownedAtStart: false, status: 'running' })).toBe('stop');
-    expect(nextRunPollActionAfterReread({ ownedNow: true, ownedAtStart: true, status: 'running' })).toBe('keep');
+    expect(nextRunPollActionAfterReread({ confirmed: true, ownedNow: false, ownedAtStart: true, status: 'running' })).toBe('keep');
+    expect(nextRunPollActionAfterReread({ confirmed: true, ownedNow: false, ownedAtStart: true, status: 'completed' })).toBe('stop');
+    expect(nextRunPollActionAfterReread({ confirmed: true, ownedNow: false, ownedAtStart: false, status: 'running' })).toBe('stop');
+    expect(nextRunPollActionAfterReread({ confirmed: true, ownedNow: true, ownedAtStart: true, status: 'running' })).toBe('keep');
+  });
+
+  it('keeps polling when the confirmation pair is not both successful', () => {
+    expect(nextRunPollActionAfterReread({
+      confirmed: false,
+      ownedNow: false,
+      ownedAtStart: true,
+      status: 'completed',
+    })).toBe('keep');
+    expect(nextRunPollActionAfterReread({
+      confirmed: false,
+      ownedNow: false,
+      ownedAtStart: false,
+      status: 'stopped',
+    })).toBe('keep');
   });
 });
 

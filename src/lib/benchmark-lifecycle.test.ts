@@ -102,7 +102,8 @@ describe('loadBenchmarkTargets / pinThenLoad order', () => {
     const done = result.ok ? await result.execution.done : null;
     expect(done?.ok).toBe(false);
     expect(done && 'error' in done && done.error).toMatch(/explicit variants/);
-    expect(host.order).toEqual(['unpin']);
+    expect(host.order.filter((x) => x.startsWith('load:'))).toEqual([]);
+    expect(host.order.filter((x) => x === 'unpin').length).toBeGreaterThanOrEqual(1);
   });
 
   it('still loads when pin fails and no target has an explicit variant', async () => {
@@ -183,8 +184,11 @@ describe('loadBenchmarkTargets / pinThenLoad order', () => {
     result.execution.stopController.stop();
     release();
     const done = await result.execution.done;
-    expect(done.ok).toBe(false);
+    expect(done.ok).toBe(true);
+    expect(done.result?.status).toBe('stopped');
     expect(host.order.filter((x) => x.startsWith('load:'))).toEqual(['load:model-a']);
+    const stored = await getBenchmarkRun(result.execution.runId);
+    expect(stored.value?.status).toBe('stopped');
   });
 
   it('pin/load uses the frozen snapshot even if the caller mutates the suite during pin', async () => {
@@ -385,5 +389,36 @@ describe('resumeBenchmarkSession', () => {
     expect(host.order[0]).toBe('pin:model-pending');
     expect(host.order).toContain('load:model-pending');
     expect(host.order).not.toContain('load:model-done');
+  });
+
+  it('treats a user Stop during resume pin/load as a stopped outcome, not a failed run', async () => {
+    const stopController = createStopController();
+    stopController.stop();
+    const started = await startBenchmarkRun(
+      suite(),
+      async () => ({ ok: true, responseText: 'x' }),
+      stopController,
+    );
+    expect(started.ok).toBe(true);
+
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const host = fakeHost({
+      loadModel: async (alias) => {
+        host.order.push(`load:${alias}`);
+        await gate;
+      },
+    });
+    const resumed = await resumeBenchmarkSession(started.run!.id, host);
+    expect(resumed.ok).toBe(true);
+    if (!resumed.ok) return;
+    while (!host.order.includes('load:model-a')) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    resumed.execution.stopController.stop();
+    release();
+    const done = await resumed.execution.done;
+    expect(done.ok).toBe(true);
+    expect(done.result?.status).toBe('stopped');
   });
 });

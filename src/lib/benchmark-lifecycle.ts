@@ -48,15 +48,17 @@ function targetsToPrepare(suite: BenchmarkSuite, onlyTargetIndexes?: ReadonlySet
   return suite.targets.filter((_, i) => onlyTargetIndexes == null || onlyTargetIndexes.has(i));
 }
 
+export type PrepareResult = { ok: true } | { ok: false; error: string; stopped?: boolean };
+
 export async function loadBenchmarkTargets(
   suite: BenchmarkSuite,
   loadModel: BenchmarkLifecycleHost['loadModel'],
   stopController?: StopController,
   onlyTargetIndexes?: ReadonlySet<number>,
-): Promise<{ ok: true } | { ok: false; error: string }> {
+): Promise<PrepareResult> {
   for (const target of targetsToPrepare(suite, onlyTargetIndexes)) {
     if (stopController?.isStopped()) {
-      return { ok: false, error: 'Stopped before every target was loaded' };
+      return { ok: false, error: 'Stopped before every target was loaded', stopped: true };
     }
     try {
       await loadModel(target.alias, target.variantId);
@@ -126,9 +128,9 @@ async function pinThenLoad(
   host: BenchmarkLifecycleHost,
   stopController?: StopController,
   onlyTargetIndexes?: ReadonlySet<number>,
-): Promise<{ ok: true } | { ok: false; error: string }> {
+): Promise<PrepareResult> {
   if (stopController?.isStopped()) {
-    return { ok: false, error: 'Stopped before targets were pinned' };
+    return { ok: false, error: 'Stopped before targets were pinned', stopped: true };
   }
   const targets = targetsToPrepare(suite, onlyTargetIndexes);
   if (targets.length === 0) return { ok: true };
@@ -145,7 +147,7 @@ async function pinThenLoad(
   }
   if (stopController?.isStopped()) {
     await host.unpin().catch(() => {});
-    return { ok: false, error: 'Stopped before every target was loaded' };
+    return { ok: false, error: 'Stopped before every target was loaded', stopped: true };
   }
   const loaded = await loadBenchmarkTargets(suite, host.loadModel, stopController, onlyTargetIndexes);
   if (!loaded.ok) {
@@ -163,6 +165,28 @@ export async function haltPreparedRun(runId: string, preparationError: string): 
     return `${preparationError}; also could not mark the run stopped: ${halted.error}`;
   }
   return preparationError;
+}
+
+/** User Stop during pin/load is a successful halt (same shape as the runner), not a failed start.
+ * A failed status write is `recovery_required`, matching `haltWith`. */
+async function finishPreparedHalt(
+  runId: string,
+  host: BenchmarkLifecycleHost,
+  kind: 'stopped' | 'failed',
+  error: string,
+): Promise<StartRunOutcome> {
+  await host.unpin().catch(() => {});
+  if (kind === 'stopped') {
+    const halted = await updateBenchmarkRunStatus(runId, 'stopped', { finalizedAt: Date.now() });
+    if (!halted.ok) {
+      return {
+        ok: true,
+        result: { status: 'recovery_required', haltedError: `failed to persist run status "stopped": ${halted.error}` },
+      };
+    }
+    return { ok: true, result: { status: 'stopped' } };
+  }
+  return { ok: false, error: await haltPreparedRun(runId, error) };
 }
 
 function inexecutableSuiteError(suite: BenchmarkSuite, action: 'start' | 'resume', runId?: string): string | null {
@@ -197,11 +221,10 @@ export async function startBenchmarkSession(
   const done = (async (): Promise<StartRunOutcome> => {
     const preparedPin = await pinThenLoad(frozen, host, stopController);
     if (!preparedPin.ok) {
-      return { ok: false, error: await haltPreparedRun(runId, preparedPin.error) };
+      return finishPreparedHalt(runId, host, preparedPin.stopped ? 'stopped' : 'failed', preparedPin.error);
     }
     if (stopController.isStopped()) {
-      await host.unpin().catch(() => {});
-      return { ok: false, error: await haltPreparedRun(runId, 'Stopped during preparation') };
+      return finishPreparedHalt(runId, host, 'stopped', 'Stopped during preparation');
     }
     return startBenchmarkRun(frozen, transport, stopController, prepared.run);
   })();
@@ -232,11 +255,12 @@ export async function resumeBenchmarkSession(
     const only = new Set(pendingTargetIndexes(suite, attempts.value ?? []));
     if (only.size > 0) {
       const preparedPin = await pinThenLoad(suite, host, stopController, only);
-      if (!preparedPin.ok) return { ok: false, error: preparedPin.error };
+      if (!preparedPin.ok) {
+        return finishPreparedHalt(runId, host, preparedPin.stopped ? 'stopped' : 'failed', preparedPin.error);
+      }
     }
     if (stopController.isStopped()) {
-      await host.unpin().catch(() => {});
-      return { ok: false, error: 'Stopped during preparation' };
+      return finishPreparedHalt(runId, host, 'stopped', 'Stopped during preparation');
     }
     return resumeBenchmarkRun(runId, transport, stopController);
   })();
