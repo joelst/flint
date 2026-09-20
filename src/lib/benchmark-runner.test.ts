@@ -2,6 +2,7 @@ import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createStopController,
+  prepareBenchmarkRun,
   resumeBenchmarkRun,
   startBenchmarkRun,
   type AttemptTransport,
@@ -86,6 +87,41 @@ describe('startBenchmarkRun', () => {
     // 1 warm-up + 2 cases * 1 repeat = 3 attempts for the single target.
     expect(attempts.value).toHaveLength(3);
     expect(attempts.value!.every((a) => a.status === 'succeeded')).toBe(true);
+  });
+
+  it('accepts a semantically-identical but differently-formatted suite instead of rejecting it as a stale snapshot', async () => {
+    // The stored row (via putBenchmarkSuite) is normalized: trimmed strings, deduped tags.
+    // A caller's own in-memory suite object need not be byte-identical to what was normalized
+    // on write -- e.g. surrounding whitespace on an alias/prompt -- to be the same suite.
+    const s = suite();
+    const put = await putBenchmarkSuite(s);
+    expect(put.ok).toBe(true);
+    const padded: BenchmarkSuite = {
+      ...s,
+      name: `  ${s.name}  `,
+      targets: s.targets.map((t) => ({ ...t, alias: `  ${t.alias}  ` })),
+      cases: s.cases.map((c) => ({ ...c, prompt: c.prompt ? `  ${c.prompt}  ` : c.prompt })),
+    };
+    const outcome = await startBenchmarkRun(padded, succeedingTransport());
+    expect(outcome.ok).toBe(true);
+    expect(outcome.result).toEqual({ status: 'completed' });
+  });
+
+  it('rejects an explicitly-passed preparedRun whose suite snapshot fails validation, instead of scheduling it unchecked', async () => {
+    // `startBenchmarkRun` is exported and callable directly, not only via `startBenchmarkSession`
+    // (which always builds `preparedRun` through `prepareBenchmarkRun`) -- a directly-supplied
+    // `preparedRun` must not bypass validation just because it looks pre-validated.
+    const s = suite();
+    const prepared = await prepareBenchmarkRun(s);
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) throw new Error('unreachable');
+    const tamperedRun = {
+      ...prepared.run,
+      suite: { ...prepared.run.suite, targets: [{ alias: 'model-a', variantId: null }, { alias: 'model-a', variantId: 'v2' }] },
+    };
+    const outcome = await startBenchmarkRun(s, succeedingTransport(), undefined, tamperedRun);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error).toMatch(/duplicate target aliases/);
   });
 
   it('returns a run snapshot reflecting the status executePositions actually committed, not the stale pre-execution one', async () => {

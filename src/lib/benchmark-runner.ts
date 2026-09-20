@@ -34,7 +34,7 @@ import {
   type BenchmarkRun,
   type LogicalAttempt,
 } from './benchmark-run';
-import { isBenchmarkSuite, type BenchmarkMessage, type BenchmarkSuite } from './benchmark-suite';
+import { isBenchmarkSuite, validateBenchmarkSuite, type BenchmarkMessage, type BenchmarkSuite } from './benchmark-suite';
 import {
   createBenchmarkRun,
   getBenchmarkRun,
@@ -297,13 +297,16 @@ export interface StartRunOutcome {
 export async function prepareBenchmarkRun(
   suite: BenchmarkSuite,
 ): Promise<{ ok: true; run: BenchmarkRun } | { ok: false; error: string }> {
-  if (!isBenchmarkSuite(suite)) {
-    return {
-      ok: false,
-      error: 'cannot start: suite snapshot has duplicate target aliases from before that shape was rejected',
-    };
+  // Validate and use the *normalized* suite (trimmed strings, deduplicated tags), not the
+  // caller's raw object — freezing the raw object would let a semantically-identical but
+  // differently-formatted suite (e.g. untrimmed whitespace) disagree with what
+  // `createBenchmarkRun` re-reads from storage (which was normalized on write), falsely
+  // rejecting the run as a stale snapshot even though nothing actually changed.
+  const validated = validateBenchmarkSuite(suite);
+  if (!validated.ok) {
+    return { ok: false, error: `cannot start: ${validated.errors.join('; ')}` };
   }
-  const frozenSuite = freezeSuiteSnapshot(suite);
+  const frozenSuite = freezeSuiteSnapshot(validated.value!);
   const run: BenchmarkRun = {
     id: generateRunId(),
     suiteId: frozenSuite.id,
@@ -323,24 +326,40 @@ export async function startBenchmarkRun(
   stopController: StopController = createStopController(),
   preparedRun?: BenchmarkRun,
 ): Promise<StartRunOutcome> {
-  const snapshot = preparedRun?.suite ?? suite;
-  if (!isBenchmarkSuite(snapshot)) {
-    return {
-      ok: false,
-      error: 'cannot start: suite snapshot has duplicate target aliases from before that shape was rejected',
-    };
-  }
   // Snapshot (deep-clone) before any await: the caller's `suite` object must never be able to
   // retroactively change what this run recorded or scheduled, even if it's mutated the instant
   // after this call returns control to the event loop.
-  const run = preparedRun ?? {
-    id: generateRunId(),
-    suiteId: suite.id,
-    suite: freezeSuiteSnapshot(suite),
-    createdAt: Date.now(),
-    status: 'running' as const,
-    startedAt: Date.now(),
-  };
+  let run: BenchmarkRun;
+  if (preparedRun) {
+    // Defense-in-depth: `startBenchmarkRun` is exported and can be called directly (not only
+    // via `startBenchmarkSession`), so a caller-supplied `preparedRun` is not trusted blindly.
+    // It was already normalized by `prepareBenchmarkRun`, so a boolean check is enough here --
+    // no need to re-freeze or re-derive a normalized value.
+    if (!isBenchmarkSuite(preparedRun.suite)) {
+      return {
+        ok: false,
+        error: 'cannot start: suite snapshot has duplicate target aliases from before that shape was rejected',
+      };
+    }
+    run = preparedRun;
+  } else {
+    // Same normalize-then-freeze reasoning as `prepareBenchmarkRun` above: freezing the
+    // caller's raw suite here would risk the same false "stale snapshot" rejection inside
+    // `createBenchmarkRun`.
+    const validated = validateBenchmarkSuite(suite);
+    if (!validated.ok) {
+      return { ok: false, error: `cannot start: ${validated.errors.join('; ')}` };
+    }
+    const frozenSuite = freezeSuiteSnapshot(validated.value!);
+    run = {
+      id: generateRunId(),
+      suiteId: frozenSuite.id,
+      suite: frozenSuite,
+      createdAt: Date.now(),
+      status: 'running' as const,
+      startedAt: Date.now(),
+    };
+  }
   const frozenSuite = run.suite;
   const runId = run.id;
 

@@ -1,6 +1,11 @@
 /**
- * JSON export payload for a completed/interrupted benchmark run — used by the "Export JSON"
- * action on the run-detail view.
+ * JSON export payload for a benchmark run — used by the "Export JSON" action on the run-detail
+ * view. Export is available for any run regardless of status, including one still `running`:
+ * the caller (`BenchmarkPreview.svelte`'s `exportRun`) reads the run row and its full attempt
+ * history in a single IndexedDB transaction, so an in-progress export always reflects one
+ * internally-consistent point in time — never a run snapshot paired with a later or earlier set
+ * of attempts. Consumers of an export must not assume every run inside it is finalized; check
+ * `run.status` before treating attempt counts/results as final.
  *
  * Pure and deliberately trivial: the only reason this exists as its own module (rather than an
  * inline `JSON.stringify` in `+page.svelte`) is `formatVersion`, so a future PR can change the
