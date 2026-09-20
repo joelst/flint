@@ -13,12 +13,11 @@
   import {
     BENCHMARK_MAX_TARGETS,
     BENCHMARK_MAX_ATTEMPTS,
-    benchmarkAttemptCount,
     isBenchmarkSuite,
     type BenchmarkSuite,
     type BenchmarkTarget,
   } from "./benchmark-suite";
-  import { applyTargetAlias, cachedVariantIds, draftFromSuite, buildSuiteFromDraft, type SuiteDraft } from "./benchmark-draft";
+  import { applyTargetAlias, cachedVariantIds, draftFromSuite, buildSuiteFromDraft, estimateDraftAttempts, variantChoicesForTarget, type SuiteDraft } from "./benchmark-draft";
   import { buildProgressMatrix, isRunInterrupted, isRunResumable, type AttemptSummary } from "./benchmark-progress";
   import { buildBenchmarkExport } from "./benchmark-export";
   import type { BenchmarkRun } from "./benchmark-run";
@@ -129,6 +128,7 @@
   }
 
   async function selectSuite(id: string) {
+    if (lifecycleBusy) return;
     selectedSuiteId = id;
     selectedRunId = null;
     selectedRun = null;
@@ -171,11 +171,6 @@
       return;
     }
     editingDraft = draftFromSuite(suite);
-    editingDraft.targets = editingDraft.targets.map((t) => {
-      const ids = variantsForAlias(t.alias);
-      if (t.variantId && !ids.includes(t.variantId)) return { ...t, variantId: null };
-      return t;
-    });
     editingErrors = [];
   }
 
@@ -214,21 +209,7 @@
     editingDraft.targets = targets;
   }
 
-  $: draftAttemptEstimate = editingDraft
-    ? (() => {
-        try {
-          const jsonl = editingDraft.casesJsonl.split(/\r?\n/).filter((l) => l.trim()).length;
-          return benchmarkAttemptCount({
-            targets: editingDraft.targets,
-            cases: new Array(jsonl).fill(0),
-            warmupCount: editingDraft.warmupCount,
-            repeatCount: editingDraft.repeatCount,
-          });
-        } catch {
-          return null;
-        }
-      })()
-    : null;
+  $: draftAttemptEstimate = editingDraft ? estimateDraftAttempts(editingDraft) : null;
 
   async function saveSuite() {
     if (!editingDraft || mutating) return;
@@ -335,22 +316,26 @@
     }
   }
 
-  $: progressMatrix = selectedRun ? buildProgressMatrix(selectedRun.suite, selectedRunAttempts) : [];
+  $: progressMatrix = selectedRun
+    ? buildProgressMatrix(selectedRun.suite, selectedRunAttempts, { live: selectedRun.id === activeRunId })
+    : [];
   $: selectedRunIsActive = !!selectedRun && selectedRun.id === activeRunId;
 
   async function handleStart(suite: BenchmarkSuite) {
     if (mutating) return;
+    const suiteId = suite.id;
     lifecycleBusy = true;
     lifecycleError = "";
     try {
       const outcome = await onStart(suite);
       if (destroyed) return;
+      if (selectedSuiteId !== suiteId) return;
       if (!outcome.ok) {
         lifecycleError = outcome.error;
         return;
       }
-      await selectSuite(suite.id);
-      if (destroyed) return;
+      await refreshRunsForSelectedSuite(suiteId);
+      if (destroyed || selectedSuiteId !== suiteId) return;
       await openRun(outcome.runId);
     } finally {
       lifecycleBusy = false;
@@ -363,11 +348,13 @@
 
   async function handleResume(runId: string) {
     if (mutating) return;
+    const suiteId = selectedSuiteId;
     lifecycleBusy = true;
     lifecycleError = "";
     try {
       const outcome = await onResume(runId);
       if (destroyed) return;
+      if (selectedSuiteId !== suiteId) return;
       if (!outcome.ok) {
         lifecycleError = outcome.error;
         return;
@@ -474,8 +461,8 @@
               onchange={(e) => updateTargetVariant(i, e.currentTarget.value || null)}
             >
               <option value="">Default variant</option>
-              {#each variantsForAlias(target.alias) as id (id)}
-                <option value={id}>{id}</option>
+              {#each variantChoicesForTarget(variantsForAlias(target.alias), target.variantId) as choice (choice.id)}
+                <option value={choice.id}>{choice.id}{choice.available ? "" : " (not downloaded)"}</option>
               {/each}
             </select>
             <button
@@ -492,6 +479,12 @@
           <button type="button" class="tiny" onclick={addTarget} disabled={availableModels.length === 0}>
             + Add target
           </button>
+        {/if}
+        {#if editingDraft.targets.some((t) => variantChoicesForTarget(variantsForAlias(t.alias), t.variantId).some((c) => !c.available))}
+          <p class="muted small">
+            A stored variant is not downloaded. Saving keeps it; Start will try to load that
+            build. Pick a downloaded variant to measure something already on disk.
+          </p>
         {/if}
       </div>
 
@@ -534,7 +527,7 @@
       {/if}
       {#each suites as suite (suite.id)}
         <div class="benchmark-suite-row" class:active={selectedSuiteId === suite.id}>
-          <button type="button" class="benchmark-suite-select" onclick={() => selectSuite(suite.id)}>
+          <button type="button" class="benchmark-suite-select" disabled={lifecycleBusy} onclick={() => selectSuite(suite.id)}>
             <strong>{suite.name}</strong>
             <span class="muted small">{suite.targets.length} target(s) · {suite.cases.length} case(s) · {runCountsBySuite[suite.id] ?? 0} run(s)</span>
           </button>
@@ -574,7 +567,7 @@
           <ul class="benchmark-run-list">
             {#each runsForSelectedSuite as run (run.id)}
               <li class:active={selectedRunId === run.id}>
-                <button type="button" class="benchmark-run-select" onclick={() => openRun(run.id)}>
+                <button type="button" class="benchmark-run-select" disabled={lifecycleBusy} onclick={() => openRun(run.id)}>
                   <span>{new Date(run.createdAt).toLocaleString()}</span>
                   <span class="badge">{isRunInterrupted(run, activeRunId) ? "interrupted" : run.status}</span>
                   {#if run.id === activeRunId}<span class="badge">active</span>{/if}
@@ -607,7 +600,8 @@
                   <strong>{currentRun.suite.targets[target.targetIndex]?.alias}</strong>
                   <span class="muted small">
                     {target.counts.succeeded} succeeded · {target.counts.failed} failed ·
-                    {target.counts.uncertain} uncertain · {target.counts.pending} pending
+                    {target.counts.running} running · {target.counts.uncertain} uncertain ·
+                    {target.counts.pending} pending
                     ({target.counts.total} total)
                   </span>
                   <div class="benchmark-progress-cells">
@@ -730,6 +724,7 @@
   }
   .benchmark-cell.succeeded { background: var(--success, #2ecc71); }
   .benchmark-cell.failed { background: var(--danger, #e74c3c); }
+  .benchmark-cell.running { background: var(--accent, #3b82f6); }
   .benchmark-cell.uncertain { background: var(--warning, #f39c12); }
   .benchmark-cell.pending { background: var(--muted, #ccc); }
 </style>

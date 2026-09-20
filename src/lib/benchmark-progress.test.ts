@@ -62,7 +62,7 @@ describe('buildProgressMatrix', () => {
     for (const target of matrix) {
       expect(target.positions).toHaveLength(1);
       expect(target.positions[0].state).toBe('pending');
-      expect(target.counts).toEqual({ total: 1, pending: 1, uncertain: 0, succeeded: 0, failed: 0 });
+      expect(target.counts).toEqual({ total: 1, pending: 1, running: 0, uncertain: 0, succeeded: 0, failed: 0 });
     }
   });
 
@@ -74,6 +74,17 @@ describe('buildProgressMatrix', () => {
     expect(target0.positions[0].state).toBe('uncertain');
     expect(target0.positions[0].latestAttemptId).toBe('exec-1');
     expect(target0.counts.uncertain).toBe(1);
+    expect(target0.counts.running).toBe(0);
+  });
+
+  it('classifies a dispatched position as running while the run is live, not uncertain', () => {
+    const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
+    const summaries: AttemptSummary[] = [summarizeAttempt(attempt({ logicalAttemptId: 't0:c0:r0', status: 'dispatched' }))];
+    const matrix = buildProgressMatrix(s, summaries, { live: true });
+    const target0 = matrix.find((t) => t.targetIndex === 0)!;
+    expect(target0.positions[0].state).toBe('running');
+    expect(target0.counts.running).toBe(1);
+    expect(target0.counts.uncertain).toBe(0);
   });
 
   it('classifies a succeeded terminal execution as succeeded, and a failed one as failed', () => {
@@ -109,8 +120,8 @@ describe('buildProgressMatrix', () => {
     const matrix = buildProgressMatrix(s, summaries);
     const target0 = matrix.find((t) => t.targetIndex === 0)!;
     const target1 = matrix.find((t) => t.targetIndex === 1)!;
-    expect(target0.counts).toEqual({ total: 1, pending: 1, uncertain: 0, succeeded: 0, failed: 0 });
-    expect(target1.counts).toEqual({ total: 1, pending: 0, uncertain: 0, succeeded: 1, failed: 0 });
+    expect(target0.counts).toEqual({ total: 1, pending: 1, running: 0, uncertain: 0, succeeded: 0, failed: 0 });
+    expect(target1.counts).toEqual({ total: 1, pending: 0, running: 0, uncertain: 0, succeeded: 1, failed: 0 });
   });
 });
 

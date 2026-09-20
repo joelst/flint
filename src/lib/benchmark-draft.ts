@@ -10,6 +10,10 @@
  */
 
 import {
+  BENCHMARK_MAX_CASES,
+  BENCHMARK_MAX_JSONL_CHARS,
+  BENCHMARK_MAX_JSONL_LINE_CHARS,
+  benchmarkAttemptCount,
   parseBenchmarkCasesJsonl,
   validateBenchmarkSuite,
   type BenchmarkSuite,
@@ -34,17 +38,73 @@ export interface SuiteDraft {
   repeatCount: number;
 }
 
-/**
- * Rebind a draft target to a new alias. A variant id is only meaningful on the model it was
- * chosen from — keeping `model-a`'s `v1` after switching to `model-b` would load the wrong
- * build or fail. Preserve the id only when the new alias actually exposes it.
- */
 /** Variant ids that are already on disk — Start loads, it does not download. */
 export function cachedVariantIds(
   variants: readonly { id: string; cached: boolean }[] | undefined,
 ): string[] {
   return (variants ?? []).filter((v) => v.cached).map((v) => v.id);
 }
+
+export type VariantChoice = { id: string; available: boolean };
+
+/** Cached builds plus the currently stored id, even if it is no longer downloaded.
+ * Opening Edit must not silently rewrite a stored explicit variant. */
+export function variantChoicesForTarget(
+  cachedIds: readonly string[],
+  currentId: string | null,
+): VariantChoice[] {
+  const choices: VariantChoice[] = [];
+  if (currentId && !cachedIds.includes(currentId)) {
+    choices.push({ id: currentId, available: false });
+  }
+  for (const id of cachedIds) {
+    choices.push({ id, available: true });
+  }
+  return choices;
+}
+
+/** Live preview of attempt count. Shares the JSONL size/case caps with the parser so a huge
+ * paste cannot split-allocate on every reactive tick; Save still does the real parse. */
+export function estimateDraftAttempts(
+  draft: Pick<SuiteDraft, 'targets' | 'casesJsonl' | 'warmupCount' | 'repeatCount'>,
+): number | null {
+  const text = draft.casesJsonl;
+  if (text.length > BENCHMARK_MAX_JSONL_CHARS) return null;
+  let caseCount = 0;
+  let lineLen = 0;
+  let sawContent = false;
+  for (let i = 0; i <= text.length; i++) {
+    const c = i < text.length ? text.charCodeAt(i) : 10;
+    if (c === 10) {
+      if (lineLen > BENCHMARK_MAX_JSONL_LINE_CHARS) return null;
+      if (sawContent) {
+        caseCount++;
+        if (caseCount > BENCHMARK_MAX_CASES) return null;
+      }
+      lineLen = 0;
+      sawContent = false;
+    } else if (c !== 13) {
+      lineLen++;
+      if (c !== 32 && c !== 9) sawContent = true;
+    }
+  }
+  try {
+    return benchmarkAttemptCount({
+      targets: draft.targets,
+      cases: { length: caseCount },
+      warmupCount: draft.warmupCount,
+      repeatCount: draft.repeatCount,
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Rebind a draft target to a new alias. A variant id is only meaningful on the model it was
+ * chosen from — keeping `model-a`'s `v1` after switching to `model-b` would load the wrong
+ * build or fail. Preserve the id only when the new alias actually exposes it.
+ */
 
 export function applyTargetAlias(
   target: BenchmarkTarget,

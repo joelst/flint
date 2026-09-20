@@ -90,7 +90,12 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 /** Attempts a suite's run would take: one run per target, discarded warm-ups plus measured
  * repeats across every case. Exported so validation and any future scheduler agree on the same
  * definition instead of silently drifting apart. */
-export function benchmarkAttemptCount(suite: Pick<BenchmarkSuite, 'targets' | 'cases' | 'warmupCount' | 'repeatCount'>): number {
+export function benchmarkAttemptCount(suite: {
+  targets: { length: number };
+  cases: { length: number };
+  warmupCount: number;
+  repeatCount: number;
+}): number {
   return suite.targets.length * (suite.warmupCount + suite.cases.length * suite.repeatCount);
 }
 

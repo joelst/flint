@@ -43,12 +43,13 @@ export function summarizeAttempt(attempt: BenchmarkAttempt): AttemptSummary {
 
 /**
  * `pending`: no execution has been dispatched for this position yet.
- * `uncertain`: an execution was dispatched but nothing terminal was ever recorded for it (a
- *   Stop or a crash left it that way) — must always be shown as uncertain, never silently
- *   folded into `succeeded`/`failed`/`pending`.
+ * `running`: a `dispatched` execution while this run is the live in-flight run — the chat
+ *   call is outstanding, not a crash.
+ * `uncertain`: a `dispatched` execution after the process is gone (Stop/crash) with no
+ *   terminal row — must never be folded into `succeeded`/`failed`/`pending`.
  * `succeeded` / `failed`: a terminal execution was durably recorded for this position.
  */
-export type PositionState = 'pending' | 'uncertain' | 'succeeded' | 'failed';
+export type PositionState = 'pending' | 'running' | 'uncertain' | 'succeeded' | 'failed';
 
 export interface ProgressPosition extends LogicalAttempt {
   state: PositionState;
@@ -59,6 +60,7 @@ export interface ProgressPosition extends LogicalAttempt {
 export interface ProgressCounts {
   total: number;
   pending: number;
+  running: number;
   uncertain: number;
   succeeded: number;
   failed: number;
@@ -71,7 +73,7 @@ export interface TargetProgress {
 }
 
 function emptyCounts(): ProgressCounts {
-  return { total: 0, pending: 0, uncertain: 0, succeeded: 0, failed: 0 };
+  return { total: 0, pending: 0, running: 0, uncertain: 0, succeeded: 0, failed: 0 };
 }
 
 /**
@@ -86,6 +88,7 @@ function emptyCounts(): ProgressCounts {
 export function buildProgressMatrix(
   suite: Pick<BenchmarkSuite, 'targets' | 'cases' | 'warmupCount' | 'repeatCount'>,
   attempts: readonly AttemptSummary[],
+  opts: { live?: boolean } = {},
 ): TargetProgress[] {
   const schedule = buildAttemptSchedule(suite as BenchmarkSuite);
 
@@ -104,7 +107,7 @@ export function buildProgressMatrix(
     if (latest) {
       if (latest.status === 'succeeded') state = 'succeeded';
       else if (latest.status === 'failed') state = 'failed';
-      else state = 'uncertain';
+      else state = opts.live ? 'running' : 'uncertain';
     }
     const entry: ProgressPosition = { ...position, state, latestAttemptId: latest?.id ?? null };
     const forTarget = byTarget.get(position.targetIndex) ?? [];

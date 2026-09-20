@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { applyTargetAlias, buildSuiteFromDraft, cachedVariantIds, draftFromSuite, type SuiteDraft } from './benchmark-draft';
-import { BENCHMARK_MAX_ATTEMPTS } from './benchmark-suite';
+import { applyTargetAlias, buildSuiteFromDraft, cachedVariantIds, draftFromSuite, estimateDraftAttempts, variantChoicesForTarget, type SuiteDraft } from './benchmark-draft';
+import { BENCHMARK_MAX_ATTEMPTS, BENCHMARK_MAX_JSONL_CHARS } from './benchmark-suite';
 import type { BenchmarkSuite } from './benchmark-suite';
 
 const baseDraft = (over: Partial<SuiteDraft> = {}): SuiteDraft => ({
@@ -67,6 +67,37 @@ describe('cachedVariantIds', () => {
       { id: 'npu', cached: true },
     ])).toEqual(['cuda', 'npu']);
     expect(cachedVariantIds(undefined)).toEqual([]);
+  });
+});
+
+describe('variantChoicesForTarget', () => {
+  it('keeps a stored explicit variant that is no longer cached, marked unavailable', () => {
+    expect(variantChoicesForTarget(['cuda'], 'cpu')).toEqual([
+      { id: 'cpu', available: false },
+      { id: 'cuda', available: true },
+    ]);
+  });
+
+  it('does not duplicate a stored id that is still cached', () => {
+    expect(variantChoicesForTarget(['cuda', 'cpu'], 'cuda')).toEqual([
+      { id: 'cuda', available: true },
+      { id: 'cpu', available: true },
+    ]);
+  });
+});
+
+describe('estimateDraftAttempts', () => {
+  it('counts non-blank JSONL lines without requiring a parse', () => {
+    expect(estimateDraftAttempts(baseDraft({
+      casesJsonl: '{"id":"c1","prompt":"x"}\n\n{"id":"c2","prompt":"y"}\n',
+      warmupCount: 0,
+      repeatCount: 1,
+    }))).toBe(2);
+  });
+
+  it('returns null without splitting when the paste exceeds the JSONL character cap', () => {
+    const huge = 'x'.repeat(BENCHMARK_MAX_JSONL_CHARS + 1);
+    expect(estimateDraftAttempts(baseDraft({ casesJsonl: huge }))).toBeNull();
   });
 });
 
