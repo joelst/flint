@@ -200,10 +200,7 @@
   type View = "models" | "chat" | "audio" | "monitor" | "diagnostics" | "integrations" | "help" | "settings" | "compare";
   let currentView = $state<View>("models");
 
-  // "Chat" and "Audio" are presented in the nav as one merged "Playground" entry (matching the
-  // Build > Playground grouping used by Azure AI Foundry / Anthropic's console). Remembering
-  // whichever of the two sub-views was last active lets the single nav button return you to
-  // where you left off, rather than always resetting to Chat.
+  // Keep last Chat/Voice view in sync with every currentView assignment (shortcuts, model-load, CTAs), not only the toggle.
   let playgroundLastView = $state<"chat" | "audio">("chat");
   $effect(() => {
     if (currentView === "chat" || currentView === "audio") playgroundLastView = currentView;
@@ -4417,7 +4414,7 @@ updateStateFromSdk();
 
   async function loadAndSelect(model: any) {
     if (!modelSupportsChat(model)) {
-      statusMessage = `${model.alias} is an STT/audio model. Switching to Audio tab.`;
+      statusMessage = `${model.alias} is an STT/audio model. Switching to Playground → Voice.`;
       await useSTTModelForAudio(model);
       currentView = 'audio';
       return;
@@ -7170,9 +7167,9 @@ Output only the summary text, no preamble.`;
         </div>
       {:else if currentView === "chat"}
         <div class="view chat-view">
-          <div class="playground-subnav" role="tablist" aria-label="Playground mode">
-            <button type="button" class="active" role="tab" aria-selected="true">Chat</button>
-            <button type="button" role="tab" aria-selected="false" onclick={() => (currentView = "audio")}>Voice</button>
+          <div class="playground-subnav" role="group" aria-label="Playground mode">
+            <button type="button" class="active" aria-pressed="true">Chat</button>
+            <button type="button" aria-pressed="false" onclick={() => (currentView = "audio")}>Voice</button>
           </div>
           <div class="chat-container">
             <ConversationSidebar
@@ -7200,7 +7197,7 @@ Output only the summary text, no preamble.`;
               {:else if !selectedModelSupportsChat}
                 <div class="notice" style="margin: 12px; padding: 12px;">
                   <strong>{selectedModelAlias}</strong> is an STT/audio-only model and does not support chat completions.
-                  Use the Audio tab or select a chat model from the Models view.
+                  Use Playground → Voice or select a chat model from the Models view.
                 </div>
               {/if}
               <div class="chat-header">
@@ -7301,7 +7298,7 @@ Output only the summary text, no preamble.`;
                       <button type="button" onclick={() => (currentView = "models")}>Open Models</button>
                     {:else if chatBlockedByLoadedSTT || !selectedModelSupportsChat}
                       <h3>Chat isn’t available with the current model</h3>
-                      <p>Switch to a chat-capable model from the catalog (STT-only models stay on Audio).</p>
+                      <p>Switch to a chat-capable model from the catalog (STT-only models stay on Playground → Voice).</p>
                       <button type="button" onclick={() => (currentView = "models")}>Open Models</button>
                     {:else}
                       <h3>Start a conversation</h3>
@@ -7701,9 +7698,9 @@ Output only the summary text, no preamble.`;
         </div>
       {:else if currentView === "audio"}
         <div class="view audio-view">
-          <div class="playground-subnav" role="tablist" aria-label="Playground mode">
-            <button type="button" role="tab" aria-selected="false" onclick={() => (currentView = "chat")}>Chat</button>
-            <button type="button" class="active" role="tab" aria-selected="true">Voice</button>
+          <div class="playground-subnav" role="group" aria-label="Playground mode">
+            <button type="button" aria-pressed="false" onclick={() => (currentView = "chat")}>Chat</button>
+            <button type="button" class="active" aria-pressed="true">Voice</button>
           </div>
           <h2>Audio Transcription</h2>
 
@@ -8284,7 +8281,7 @@ Output only the summary text, no preamble.`;
                 <h3>No access log entries yet</h3>
                 <p>Chat, transcribe, or call the local endpoint — requests show up here and under <code>~/.flint/logs/</code>.</p>
                 <div class="empty-state-actions">
-                  <button type="button" onclick={() => (currentView = "chat")}>Open Playground</button>
+                  <button type="button" onclick={() => (currentView = playgroundLastView)}>Open Playground</button>
                 </div>
               </div>
             {:else}
@@ -9463,7 +9460,7 @@ Output only the summary text, no preamble.`;
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+Shift+N</td><td>New conversation</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+1</td><td>Chat</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+2</td><td>Models</td></tr>
-            <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+3</td><td>Audio</td></tr>
+            <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+3</td><td>Voice</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+4</td><td>Monitor</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+5</td><td>Integrations</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+6</td><td>Model Arena</td></tr>
