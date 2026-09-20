@@ -64,6 +64,8 @@ export interface AttemptTransportSuccess {
 export interface AttemptTransportFailure {
   ok: false;
   errorMessage: string;
+  /** When set, the runner stops without recording this attempt as failed (it stays dispatched). */
+  haltRun?: 'stopped';
 }
 
 export type AttemptTransportResult = AttemptTransportSuccess | AttemptTransportFailure;
@@ -235,6 +237,11 @@ async function executePositions(
       transportResult = { ok: false, errorMessage: describeTransportThrow(e) };
     }
 
+    if (!transportResult.ok && transportResult.haltRun === 'stopped') {
+      stopController.stop();
+      return haltWith(run, 'stopped', undefined);
+    }
+
     const settledAt = Date.now();
     const terminalWrite = transportResult.ok
       ? await recordAttemptTerminal(intent.id, {
@@ -286,24 +293,43 @@ export interface StartRunOutcome {
  * failures do not block a target's measured attempts: warm-ups exist only to prime the model,
  * never to gate whether Flint bothers measuring it.
  */
-export async function startBenchmarkRun(
+/** Creates the run row (frozen suite snapshot) before execution so the UI can own the id. */
+export async function prepareBenchmarkRun(
   suite: BenchmarkSuite,
-  transport: AttemptTransport,
-  stopController: StopController = createStopController(),
-): Promise<StartRunOutcome> {
-  // Snapshot (deep-clone) before any await: the caller's `suite` object must never be able to
-  // retroactively change what this run recorded or scheduled, even if it's mutated the instant
-  // after this call returns control to the event loop.
+): Promise<{ ok: true; run: BenchmarkRun } | { ok: false; error: string }> {
   const frozenSuite = freezeSuiteSnapshot(suite);
-  const runId = generateRunId();
   const run: BenchmarkRun = {
-    id: runId,
+    id: generateRunId(),
     suiteId: frozenSuite.id,
     suite: frozenSuite,
     createdAt: Date.now(),
     status: 'running',
     startedAt: Date.now(),
   };
+  const created = await createBenchmarkRun(run);
+  if (!created.ok) return { ok: false, error: created.error! };
+  return { ok: true, run };
+}
+
+export async function startBenchmarkRun(
+  suite: BenchmarkSuite,
+  transport: AttemptTransport,
+  stopController: StopController = createStopController(),
+  preparedRun?: BenchmarkRun,
+): Promise<StartRunOutcome> {
+  // Snapshot (deep-clone) before any await: the caller's `suite` object must never be able to
+  // retroactively change what this run recorded or scheduled, even if it's mutated the instant
+  // after this call returns control to the event loop.
+  const run = preparedRun ?? {
+    id: generateRunId(),
+    suiteId: suite.id,
+    suite: freezeSuiteSnapshot(suite),
+    createdAt: Date.now(),
+    status: 'running' as const,
+    startedAt: Date.now(),
+  };
+  const frozenSuite = run.suite;
+  const runId = run.id;
 
   if (activeRunIds.has(runId)) {
     // Vanishingly unlikely (a fresh id colliding with one already in flight), but a run must
@@ -312,8 +338,10 @@ export async function startBenchmarkRun(
   }
   activeRunIds.add(runId);
   try {
-    const created = await createBenchmarkRun(run);
-    if (!created.ok) return { ok: false, error: created.error };
+    if (!preparedRun) {
+      const created = await createBenchmarkRun(run);
+      if (!created.ok) return { ok: false, error: created.error };
+    }
 
     const schedule = buildAttemptSchedule(frozenSuite);
     const { result, run: finalRun } = await executePositions(run, schedule, [], transport, stopController);

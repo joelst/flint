@@ -136,3 +136,12 @@ export function isRunInterrupted(
 ): boolean {
   return run.status === 'running' && run.id !== activeRunId;
 }
+
+/** Positions remain to retry: interrupted running, user Stop, or a durability halt. */
+export function isRunResumable(
+  run: Pick<BenchmarkRun, 'id' | 'status'>,
+  activeRunId?: string | null,
+): boolean {
+  if (run.id === activeRunId) return false;
+  return run.status === 'running' || run.status === 'stopped' || run.status === 'recovery_required';
+}

@@ -17,7 +17,7 @@
     BENCHMARK_MAX_ATTEMPTS,
   } from "./benchmark-suite";
   import { draftFromSuite, buildSuiteFromDraft, type SuiteDraft } from "./benchmark-draft";
-  import { buildProgressMatrix, isRunInterrupted, type AttemptSummary } from "./benchmark-progress";
+  import { buildProgressMatrix, isRunInterrupted, isRunResumable, type AttemptSummary } from "./benchmark-progress";
   import { buildBenchmarkExport } from "./benchmark-export";
   import type { BenchmarkRun } from "./benchmark-run";
 
@@ -54,6 +54,7 @@
   let lifecycleBusy = false;
   let lifecycleError = "";
   let pollHandle: ReturnType<typeof setInterval> | null = null;
+  let refreshGeneration = 0;
 
   async function refreshSuites() {
     const res = await listBenchmarkSuites();
@@ -75,6 +76,7 @@
     const res = await listBenchmarkRunsForSuite(id);
     if (selectedSuiteId !== id) return;
     runsForSelectedSuite = res.ok ? (res.value ?? []).sort((a, b) => b.createdAt - a.createdAt) : [];
+    runCountsBySuite = { ...runCountsBySuite, [id]: runsForSelectedSuite.length };
   }
 
   async function selectSuite(id: string) {
@@ -207,11 +209,12 @@
   async function refreshSelectedRun() {
     const runId = selectedRunId;
     if (!runId) return;
+    const generation = ++refreshGeneration;
     const runRes = await getBenchmarkRun(runId);
-    if (selectedRunId !== runId) return;
+    if (generation !== refreshGeneration || selectedRunId !== runId) return;
     if (runRes.ok) selectedRun = runRes.value ?? null;
     const summariesRes = await listAttemptSummariesForRun(runId);
-    if (selectedRunId !== runId) return;
+    if (generation !== refreshGeneration || selectedRunId !== runId) return;
     if (summariesRes.ok) selectedRunAttempts = summariesRes.value ?? [];
     if (!selectedRun || selectedRun.id !== activeRunId || selectedRun.status !== "running") {
       // This run just left the live/active state (finished, was stopped, or crashed) while we
@@ -459,7 +462,7 @@
                     Stop prevents further dispatches; a model already asked to respond may still
                     finish. Flint only records a result if it durably receives and saves one.
                   </p>
-                {:else if isRunInterrupted(currentRun, activeRunId)}
+                {:else if isRunResumable(currentRun, activeRunId)}
                   <button type="button" class="primary small" disabled={lifecycleBusy || !!activeRunId} onclick={() => handleResume(currentRun.id)}>
                     {lifecycleBusy ? "Resuming…" : "Resume"}
                   </button>
@@ -479,7 +482,9 @@
                     {#each target.positions as pos}
                       <span
                         class="benchmark-cell {pos.state}"
+                        role="img"
                         title="{pos.phase} {pos.caseIndex ?? ''} state={pos.state}"
+                        aria-label="{pos.phase}{pos.caseIndex != null ? ` case ${pos.caseIndex + 1}` : ''} {pos.state}"
                       ></span>
                     {/each}
                   </div>

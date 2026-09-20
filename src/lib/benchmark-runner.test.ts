@@ -102,6 +102,20 @@ describe('startBenchmarkRun', () => {
     expect(outcome.run!.status).toBe('stopped');
   });
 
+  it('halts as stopped without recording a failed attempt when the transport reports haltRun', async () => {
+    const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }, { id: 'c2', prompt: 'y' }] });
+    const transport: AttemptTransport = async () => ({
+      ok: false,
+      errorMessage: 'Runtime is draining',
+      haltRun: 'stopped',
+    });
+    const outcome = await startBenchmarkRun(s, transport);
+    expect(outcome.result?.status).toBe('stopped');
+    const attempts = await listAttemptsForRun(outcome.run!.id);
+    expect(attempts.value).toHaveLength(1);
+    expect(attempts.value![0].status).toBe('dispatched');
+  });
+
   it('freezes a snapshot of the suite at call time, immune to later mutation of the caller\'s object', async () => {
     const s = suite();
     const outcome = await startBenchmarkRun(s, succeedingTransport());

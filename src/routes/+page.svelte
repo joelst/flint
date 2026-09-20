@@ -184,6 +184,7 @@
   import BenchmarkPreview from "$lib/BenchmarkPreview.svelte";
   import {
     startBenchmarkRun,
+    prepareBenchmarkRun,
     resumeBenchmarkRun,
     createStopController,
     type AttemptTransport,
@@ -191,7 +192,7 @@
     type AttemptTransportResult,
     type StopController,
   } from "$lib/benchmark-runner";
-  import { getBenchmarkRun, listBenchmarkRunsForSuite } from "$lib/benchmark-repository";
+  import { getBenchmarkRun } from "$lib/benchmark-repository";
   import type { BenchmarkSuite } from "$lib/benchmark-suite";
 
   // Integrations tab state
@@ -756,8 +757,7 @@
    * distinct from the runner's own per-run-id `activeRunIds` guard, which cannot prevent a
    * second *different* run from starting. */
   let benchmarkRunInFlight = $state(false);
-  /** The run currently executing, once its id is known — see `discoverBenchmarkRunId` below for
-   * why this lags slightly behind `benchmarkRunInFlight` becoming true. */
+  /** The run currently executing, set as soon as `prepareBenchmarkRun` commits the row. */
   let benchmarkActiveRunId = $state<string | null>(null);
   let benchmarkStopController: StopController | null = null;
   /** Aliases pinned for the duration of the active run; restored to 'normal' in a finally once
@@ -771,27 +771,6 @@
    * confirmed under way, before the run itself has finished. Cleared at the start of the next
    * start/resume attempt so a stale error doesn't linger across an unrelated later run. */
   let benchmarkRunError = $state<string | null>(null);
-
-  /**
-   * `startBenchmarkRun`/`resumeBenchmarkRun` do not resolve until the whole run halts, and they
-   * generate the run id internally — so the only way to learn it early enough for the progress
-   * UI to poll during execution is to read it back. `createBenchmarkRun` commits before any
-   * attempt is dispatched (the runner's own write-ahead contract), so polling briefly for a
-   * run row newer than `notBefore` is reliable in practice, not a race with the first dispatch.
-   */
-  async function discoverBenchmarkRunId(suiteId: string, notBefore: number): Promise<string | null> {
-    for (let attempt = 0; attempt < 40; attempt++) {
-      const res = await listBenchmarkRunsForSuite(suiteId);
-      if (res.ok) {
-        const found = (res.value ?? [])
-          .filter((r) => r.createdAt >= notBefore)
-          .sort((a, b) => b.createdAt - a.createdAt)[0];
-        if (found) return found.id;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    return null;
-  }
 
   /** Pins each target alias so pool eviction cannot unload it mid-run. Overlays onto the user's
    * *actual* configured priorities (`modelPriorities`, the source of truth `pushMemorySettings`
@@ -889,6 +868,13 @@
             : undefined,
         };
       } catch (e: any) {
+        if (e instanceof SidecarOperationError && e.certainty === 'cancelled') {
+          return {
+            ok: false,
+            errorMessage: e.message || 'Runtime is draining',
+            haltRun: 'stopped',
+          };
+        }
         return { ok: false, errorMessage: e?.message || String(e) };
       }
     };
@@ -927,12 +913,9 @@
   type BenchmarkLifecycleOutcome = { ok: true; runId: string } | { ok: false; error: string };
 
   /**
-   * Returns as soon as the run is known to have started (its id discovered) rather than waiting
-   * for the entire run to finish — `startBenchmarkRun` itself does not resolve until the whole
-   * schedule halts, and blocking the caller on that would leave the progress UI with nothing to
-   * poll and no way to reach the Stop button until the run was already over. The run keeps
-   * executing in a detached promise; `benchmarkRunInFlight` (the single-active-run guard) stays
-   * true until that promise settles, in `finishBenchmarkExecution`.
+   * Prepares the run row (so the id is known and Stop is live) then executes in a detached
+   * promise. `startBenchmarkRun` does not resolve until the schedule halts; blocking the
+   * caller on that would leave the progress UI with no Stop button until the run was over.
    */
   async function startBenchmarkPreviewRun(suite: BenchmarkSuite): Promise<BenchmarkLifecycleOutcome> {
     if (benchmarkRunInFlight) return { ok: false, error: 'A benchmark run is already active.' };
@@ -951,23 +934,20 @@
         return loaded;
       }
 
+      const prepared = await prepareBenchmarkRun(suite);
+      if (!prepared.ok) {
+        await finishBenchmarkExecution();
+        return { ok: false, error: prepared.error };
+      }
       const stopController = createStopController();
       benchmarkStopController = stopController;
-      const notBefore = Date.now();
-      startBenchmarkRun(suite, createBenchmarkTransport(), stopController)
+      if (benchmarkStopController === stopController) benchmarkActiveRunId = prepared.run.id;
+      startBenchmarkRun(suite, createBenchmarkTransport(), stopController, prepared.run)
         .then(recordBenchmarkOutcome)
         .catch((e: any) => recordBenchmarkOutcome({ ok: false, error: e?.message || String(e) }))
         .finally(() => { void finishBenchmarkExecution(); });
 
-      const runId = await discoverBenchmarkRunId(suite.id, notBefore);
-      if (!runId) {
-        // The run is genuinely executing (or already finished) — `finishBenchmarkExecution`
-        // above will still clean up when it settles — but this caller cannot hand back a run id
-        // to open a detail view yet.
-        return { ok: false, error: 'Benchmark run started, but its id could not be confirmed yet. Check the run list shortly.' };
-      }
-      if (benchmarkStopController === stopController) benchmarkActiveRunId = runId;
-      return { ok: true, runId };
+      return { ok: true, runId: prepared.run.id };
     } catch (e: any) {
       await finishBenchmarkExecution();
       return { ok: false, error: e?.message || String(e) };

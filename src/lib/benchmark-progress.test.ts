@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildProgressMatrix, isRunInterrupted, summarizeAttempt, type AttemptSummary } from './benchmark-progress';
+import { buildProgressMatrix, isRunInterrupted, isRunResumable, summarizeAttempt, type AttemptSummary } from './benchmark-progress';
 import type { BenchmarkAttempt } from './benchmark-run';
 import type { BenchmarkSuite } from './benchmark-suite';
 
@@ -125,5 +125,15 @@ describe('isRunInterrupted', () => {
     expect(isRunInterrupted({ id: 'run-1', status: 'completed' })).toBe(false);
     expect(isRunInterrupted({ id: 'run-1', status: 'stopped' })).toBe(false);
     expect(isRunInterrupted({ id: 'run-1', status: 'recovery_required' })).toBe(false);
+  });
+});
+
+describe('isRunResumable', () => {
+  it('allows resume for interrupted, stopped, and recovery_required rows that are not live', () => {
+    expect(isRunResumable({ id: 'run-1', status: 'running' })).toBe(true);
+    expect(isRunResumable({ id: 'run-1', status: 'stopped' })).toBe(true);
+    expect(isRunResumable({ id: 'run-1', status: 'recovery_required' })).toBe(true);
+    expect(isRunResumable({ id: 'run-1', status: 'completed' })).toBe(false);
+    expect(isRunResumable({ id: 'run-1', status: 'running' }, 'run-1')).toBe(false);
   });
 });
