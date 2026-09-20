@@ -35,6 +35,7 @@ import {
   type LogicalAttempt,
 } from './benchmark-run';
 import type { BenchmarkMessage, BenchmarkSuite } from './benchmark-suite';
+import { isBenchmarkSuite } from './benchmark-suite';
 import {
   createBenchmarkRun,
   getBenchmarkRun,
@@ -383,6 +384,18 @@ export async function resumeBenchmarkRun(
     if (!runResult.ok) return { ok: false, error: runResult.error };
     if (!runResult.value) return { ok: false, error: `no benchmark run "${runId}"` };
     const run = runResult.value;
+
+    // `getBenchmarkRun` tolerates the pre-1.0 duplicate-alias suite shape so a legacy run stays
+    // readable for display/export, but resuming one is a different operation entirely: it
+    // proceeds straight to `buildAttemptSchedule` and re-dispatches through the alias-only
+    // transport, which is exactly the sequential-load-then-alias-dispatch pattern the stricter
+    // rule exists to prevent. A legacy snapshot must not be allowed to resume.
+    if (!isBenchmarkSuite(run.suite)) {
+      return {
+        ok: false,
+        error: `benchmark run "${runId}" cannot be resumed: its suite snapshot has duplicate target aliases from before that shape was rejected`,
+      };
+    }
 
     const attemptsResult = await listAttemptsForRun(runId);
     if (!attemptsResult.ok) return { ok: false, error: attemptsResult.error };

@@ -868,10 +868,15 @@
             : undefined,
         };
       } catch (e: any) {
-        if (e instanceof SidecarOperationError && e.certainty === 'cancelled') {
+        // 'cancelled' means the sidecar deliberately drained the request. 'unknown' means the
+        // connection was lost with the request outstanding — the chat call may already have
+        // happened. Both must halt rather than record a terminal failure: recording 'unknown' as
+        // failed would let the remaining schedule run and could finalize a crashed benchmark as
+        // 'completed', when the dispatched intent should stay uncertain and offer Resume instead.
+        if (e instanceof SidecarOperationError && (e.certainty === 'cancelled' || e.certainty === 'unknown')) {
           return {
             ok: false,
-            errorMessage: e.message || 'Runtime is draining',
+            errorMessage: e.message || (e.certainty === 'cancelled' ? 'Runtime is draining' : 'Lost contact with the runtime'),
             haltRun: 'stopped',
           };
         }
@@ -9885,10 +9890,18 @@ Output only the summary text, no preamble.`;
                   Adds a "Benchmark" entry under Build for measured, repeatable multi-model runs
                   (distinct from Model Arena's one-shot side-by-side compare). Early preview —
                   off by default.
+                  {#if benchmarkRunInFlight}
+                    <br /><strong>Disabled while a benchmark run is active</strong> — stop the run first.
+                  {/if}
                 </span>
               </div>
               <label class="toggle-switch">
-                <input type="checkbox" bind:checked={benchmarkPreviewEnabled} onchange={persistChat} />
+                <input
+                  type="checkbox"
+                  bind:checked={benchmarkPreviewEnabled}
+                  onchange={persistChat}
+                  disabled={benchmarkRunInFlight}
+                />
                 <span class="toggle-track"></span>
               </label>
             </div>

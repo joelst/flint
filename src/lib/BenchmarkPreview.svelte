@@ -467,7 +467,7 @@
             <button
               type="button"
               class="primary small"
-              disabled={lifecycleBusy || !!activeRunId}
+              disabled={lifecycleBusy || !!activeRunId || runInFlight}
               onclick={() => handleStart(suite)}
             >
               {lifecycleBusy ? "Starting…" : "Start run"}
@@ -502,7 +502,7 @@
                     finish. Flint only records a result if it durably receives and saves one.
                   </p>
                 {:else if isRunResumable(currentRun, activeRunId)}
-                  <button type="button" class="primary small" disabled={lifecycleBusy || !!activeRunId} onclick={() => handleResume(currentRun.id)}>
+                  <button type="button" class="primary small" disabled={lifecycleBusy || !!activeRunId || runInFlight} onclick={() => handleResume(currentRun.id)}>
                     {lifecycleBusy ? "Resuming…" : "Resume"}
                   </button>
                 {/if}
