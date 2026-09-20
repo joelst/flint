@@ -163,6 +163,18 @@
     type FlintVerified,
     type SelfTestReport,
   } from "$lib/endpoint-self-test";
+  import {
+    COMPARE_HISTORY_MAX,
+    COMPARE_MAX_SLOTS,
+    compareSlotKey,
+    cloneCompareResults,
+    loadComparisonHistory,
+    saveComparisonHistory,
+    renderComparisonMarkdown,
+    type CompareSlot,
+    type CompareResult,
+    type SavedComparison,
+  } from "$lib/comparison-history";
 
   // Integrations tab state
   let integrationsOS = $state<'windows' | 'unix'>(detectPlatform());
@@ -639,33 +651,8 @@
   let monitorLog = $state<any[]>([]);
   let monitorLogPaused = $state(false);
 
-  // Compare (bake-off): pick models/variants, prepare (download+load), run, save
-  type CompareSlot = {
-    key: string;
-    alias: string;
-    variantId: string | null;
-    label: string;
-    deviceType?: string | null;
-    executionProvider?: string | null;
-  };
-  type CompareResult = {
-    content: string;
-    latencyMs?: number;
-    tokensIn?: number;
-    tokensOut?: number;
-    rating?: "up" | "down" | null;
-    error?: string;
-  };
-  type SavedComparison = {
-    id: string;
-    createdAt: number;
-    prompt: string;
-    slots: CompareSlot[];
-    results: Record<string, CompareResult>;
-  };
-  const COMPARE_HISTORY_KEY = "flint-comparisons-v1";
-  const COMPARE_MAX_SLOTS = 3;
-  const COMPARE_HISTORY_MAX = 30;
+  // Compare (bake-off): pick models/variants, prepare (download+load), run, save.
+  // Types, slot identity, storage, and export live in $lib/comparison-history.ts.
 
   let compareSlots: CompareSlot[] = $state([]);
   let comparePrompt = $state("");
@@ -677,6 +664,8 @@
   let comparePickerSearch = $state("");
   let compareExpandedAliases: Record<string, boolean> = $state({});
   let compareHistory: SavedComparison[] = $state([]);
+  /** False when unread/unparked bytes must not be overwritten this session. */
+  let compareHistoryWritable = $state(true);
   let compareHistoryOpen = $state(false);
   let compareReviewId: string | null = $state(null);
   /** true = load → run → unload each slot (peak RAM ≈ largest model). false = try to keep all loaded. */
@@ -2905,10 +2894,6 @@ updateStateFromSdk();
     await pollPoolStatus().catch(() => {});
   }
 
-  function compareSlotKey(alias: string, variantId: string | null): string {
-    return variantId ? `${alias}::${variantId}` : `${alias}::default`;
-  }
-
   function makeCompareSlot(
     model: any,
     variant?: { id: string; deviceType?: string | null; executionProvider?: string | null } | null,
@@ -3202,24 +3187,49 @@ updateStateFromSdk();
     compareResults = next;
   }
 
-  function loadCompareHistory() {
+  function arenaStorage(): Storage | null {
+    // Reaching the property can itself throw when site data is blocked.
     try {
-      const raw = localStorage.getItem(COMPARE_HISTORY_KEY);
-      if (!raw) {
-        compareHistory = [];
-        return;
-      }
-      const parsed = JSON.parse(raw);
-      compareHistory = Array.isArray(parsed) ? parsed : [];
+      return localStorage;
     } catch {
-      compareHistory = [];
+      return null;
     }
   }
 
-  function persistCompareHistory() {
-    try {
-      localStorage.setItem(COMPARE_HISTORY_KEY, JSON.stringify(compareHistory.slice(0, COMPARE_HISTORY_MAX)));
-    } catch {}
+  function loadCompareHistory() {
+    const storage = arenaStorage();
+    if (!storage) {
+      compareHistoryWritable = false;
+      appendAppLog(
+        'Saved arena runs could not be read on this device, so new runs will not be saved this session.',
+        'error',
+      );
+      return;
+    }
+    const loaded = loadComparisonHistory(storage);
+    compareHistoryWritable = loaded.writable;
+    // Non-writable loads return empty history even when storage was not rewritten.
+    if (loaded.writable) compareHistory = loaded.history;
+    if (loaded.notice) appendAppLog(loaded.notice, loaded.writable ? 'warn' : 'error');
+  }
+
+  /** Returns false (and surfaces why) instead of silently reporting a save as if it succeeded. */
+  function persistCompareHistory(): boolean {
+    if (!compareHistoryWritable) {
+      appendAppLog('Arena run history is not writable this session; not saved.', 'error');
+      return false;
+    }
+    const storage = arenaStorage();
+    if (!storage) {
+      compareHistoryWritable = false;
+      appendAppLog('Arena run history is not writable this session; not saved.', 'error');
+      return false;
+    }
+    const saved = saveComparisonHistory(storage, compareHistory);
+    if (!saved.ok) {
+      appendAppLog(`Arena run history save failed: ${saved.error}`, 'error');
+    }
+    return saved.ok;
   }
 
   function saveCurrentComparison() {
@@ -3232,26 +3242,36 @@ updateStateFromSdk();
       createdAt: Date.now(),
       prompt: comparePrompt.trim(),
       slots: compareSlots.map((s) => ({ ...s })),
-      results: { ...compareResults },
+      results: cloneCompareResults(compareResults),
     };
-    compareHistory = [entry, ...compareHistory].slice(0, COMPARE_HISTORY_MAX);
-    persistCompareHistory();
-    statusMessage = "Arena run saved for review";
+    const nextHistory = [entry, ...compareHistory].slice(0, COMPARE_HISTORY_MAX);
+    const previousHistory = compareHistory;
+    compareHistory = nextHistory;
+    if (persistCompareHistory()) {
+      statusMessage = "Arena run saved for review";
+    } else {
+      compareHistory = previousHistory;
+      statusMessage = "Arena run could not be saved — see App Log.";
+    }
   }
 
   function openSavedComparison(entry: SavedComparison) {
     compareReviewId = entry.id;
     compareSlots = entry.slots.map((s) => ({ ...s }));
     comparePrompt = entry.prompt;
-    compareResults = { ...entry.results };
+    compareResults = cloneCompareResults(entry.results);
     compareHistoryOpen = false;
     statusMessage = `Reviewing arena run from ${new Date(entry.createdAt).toLocaleString()}`;
   }
 
   function deleteSavedComparison(id: string) {
+    const previousHistory = compareHistory;
     compareHistory = compareHistory.filter((h) => h.id !== id);
+    if (!persistCompareHistory()) {
+      compareHistory = previousHistory;
+      return;
+    }
     if (compareReviewId === id) compareReviewId = null;
-    persistCompareHistory();
   }
 
   /** Download slot weights if missing. Does not load into memory. */
@@ -3684,31 +3704,25 @@ updateStateFromSdk();
 
   function setCompareRating(key: string, rating: "up" | "down") {
     if (!compareResults[key]) return;
-    compareResults[key].rating = compareResults[key].rating === rating ? null : rating;
-    compareResults = { ...compareResults };
-    // Update open saved review if applicable
+    const nextRating = compareResults[key].rating === rating ? null : rating;
+    const previousHistory = compareHistory;
+    const previousResults = compareResults;
+    compareResults = { ...compareResults, [key]: { ...compareResults[key], rating: nextRating } };
     if (compareReviewId) {
       compareHistory = compareHistory.map((h) =>
-        h.id === compareReviewId ? { ...h, results: { ...compareResults } } : h,
+        h.id === compareReviewId ? { ...h, results: cloneCompareResults(compareResults) } : h,
       );
-      persistCompareHistory();
+      if (!persistCompareHistory()) {
+        compareHistory = previousHistory;
+        compareResults = previousResults;
+        statusMessage = "Arena run could not be saved — see App Log.";
+      }
     }
   }
 
   function exportComparison() {
     if (!comparePrompt.trim() || Object.keys(compareResults).length === 0) return;
-    let md = `# Model Arena\n\n**Date:** ${new Date().toISOString()}\n\n**Prompt:** ${comparePrompt}\n\n`;
-    for (const slot of compareSlots) {
-      const r = compareResults[slot.key];
-      if (!r) continue;
-      md += `## ${slot.label}\n`;
-      md += `- Alias: \`${slot.alias}\`\n`;
-      if (slot.variantId) md += `- Variant: \`${slot.variantId}\`\n`;
-      md += `- Latency: ${r.latencyMs ?? "?"} ms\n`;
-      md += `- Tokens: in ${r.tokensIn ?? "?"} / out ${r.tokensOut ?? "?"}\n`;
-      md += `- Rating: ${r.rating || "none"}\n\n`;
-      md += `${r.content}\n\n---\n\n`;
-    }
+    const md = renderComparisonMarkdown(comparePrompt, compareSlots, compareResults);
     const blob = new Blob([md], { type: "text/markdown" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -8956,7 +8970,12 @@ Output only the summary text, no preamble.`;
                   <span class="compare-prep-status">{comparePrepStatus}</span>
                 {/if}
                 {#if Object.keys(compareResults).length}
-                  <button type="button" class="secondary small" onclick={saveCurrentComparison}>Save</button>
+                  <button
+                    type="button"
+                    class="secondary small"
+                    onclick={saveCurrentComparison}
+                    title={compareHistoryWritable ? undefined : "Saved arena run history could not be read; check App Log."}
+                  >Save</button>
                   <button type="button" class="secondary small" onclick={exportComparison}>Export MD</button>
                   <button
                     type="button"
