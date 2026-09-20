@@ -77,42 +77,63 @@ Living reliability plan: **[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md)** · E
 
 ## Screenshots
 
-### Main window
-
-![Flint main window](./images/flint-main-window.png)
-
-### Model selection
-
-![Flint model selection](./images/flint-model-selection.png)
+Each section shows dark mode (Flint's default) and light mode side by side.
+Regenerate these with `node scripts/capture-screenshots.mjs` — see
+[docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md#screenshots).
 
 ### Chat
 
-![Flint chat window](./images/flint-chat-window.png)
+| Dark | Light |
+|---|---|
+| ![Flint chat window (dark)](images/flint-chat-window-dark.png) | ![Flint chat window (light)](images/flint-chat-window-light.png) |
+
+### Voice
+
+| Dark | Light |
+|---|---|
+| ![Flint audio page (dark)](images/flint-audio-page-dark.png) | ![Flint audio page (light)](images/flint-audio-page-light.png) |
 
 ### Model Arena
 
-![Model Arena selections](images/flint-model-compare-page-1.png)
-![Model Arena results](images/flint-model-compare-page-2.png)
+| Dark | Light |
+|---|---|
+| ![Model Arena (dark)](images/flint-model-compare-page-1-dark.png) | ![Model Arena (light)](images/flint-model-compare-page-1-light.png) |
 
-### Integrations
+### Models
 
-![integrations](images/flint-integrations-page.png)
-
-### Settings
-
-![settings](images/flint-settings-page.png)
-
-### Diagnostics
-
-![diagnostics](images/flint-diagnostics-page.png)
-
-### Audio
-
-![audio](images/flint-audio-page.png)
+| Dark | Light |
+|---|---|
+| ![Flint model selection (dark)](images/flint-model-selection-dark.png) | ![Flint model selection (light)](images/flint-model-selection-light.png) |
 
 ### Monitor
 
-![monitor resources](images/flint-monitor-page.png)
+| Dark | Light |
+|---|---|
+| ![Monitor resources (dark)](images/flint-monitor-page-dark.png) | ![Monitor resources (light)](images/flint-monitor-page-light.png) |
+
+### Diagnostics
+
+| Dark | Light |
+|---|---|
+| ![Diagnostics (dark)](images/flint-diagnostics-page-dark.png) | ![Diagnostics (light)](images/flint-diagnostics-page-light.png) |
+
+### Integrations
+
+| Dark | Light |
+|---|---|
+| ![Integrations (dark)](images/flint-integrations-page-dark.png) | ![Integrations (light)](images/flint-integrations-page-light.png) |
+
+### Settings
+
+| Dark | Light |
+|---|---|
+| ![Settings (dark)](images/flint-settings-page-dark.png) | ![Settings (light)](images/flint-settings-page-light.png) |
+
+### Help
+
+| Dark | Light |
+|---|---|
+| ![Help (dark)](images/flint-help-window-dark.png) | ![Help (light)](images/flint-help-window-light.png) |
 
 ---
 
