@@ -4,18 +4,33 @@ export function extractThinkingTrace(text: string): {
 } {
   const sections: string[] = [];
   let visible = text;
-  const tagPairs: Array<[RegExp, RegExp]> = [
-    [/<think>([\s\S]*?)<\/think>/gi, /<think>([\s\S]*)$/i],
-    [/<thinking>([\s\S]*?)<\/thinking>/gi, /<thinking>([\s\S]*)$/i]
+  // Each tag: [closed pair, open-with-no-close (still streaming), bare open tag, bare close tag].
+  // Some chat templates (e.g. Qwen3-family) inject the opening tag as part of the prompt
+  // prefix fed to the model rather than the generated text, so only the closing tag ever
+  // comes back in `content` — a plain open/close pair match alone misses that case entirely.
+  const tagPairs: Array<[RegExp, RegExp, RegExp, RegExp]> = [
+    [/<think>([\s\S]*?)<\/think>/gi, /<think>([\s\S]*)$/i, /<think>/i, /<\/think>/i],
+    [/<thinking>([\s\S]*?)<\/thinking>/gi, /<thinking>([\s\S]*)$/i, /<thinking>/i, /<\/thinking>/i]
   ];
 
-  for (const [closedPattern, openPattern] of tagPairs) {
+  for (const [closedPattern, openPattern, openTag, closeTag] of tagPairs) {
     const closedMatches = Array.from(visible.matchAll(closedPattern));
     for (const match of closedMatches) {
       const body = String(match[1] ?? '').trim();
       if (body) sections.push(body);
     }
     visible = visible.replace(closedPattern, '');
+
+    const openIdx = visible.search(openTag);
+    const closeIdx = visible.search(closeTag);
+    if (closeIdx !== -1 && (openIdx === -1 || openIdx > closeIdx)) {
+      const closeMatch = visible.match(closeTag);
+      const tagLen = closeMatch ? closeMatch[0].length : 0;
+      const body = visible.slice(0, closeIdx).trim();
+      if (body) sections.push(body);
+      visible = visible.slice(closeIdx + tagLen);
+      continue;
+    }
 
     const openMatch = visible.match(openPattern);
     if (openMatch) {
