@@ -7168,8 +7168,8 @@ Output only the summary text, no preamble.`;
       {:else if currentView === "chat"}
         <div class="view chat-view">
           <div class="playground-subnav" role="group" aria-label="Playground mode">
-            <button type="button" class="active" aria-pressed="true">Chat</button>
-            <button type="button" aria-pressed="false" onclick={() => (currentView = "audio")}>Voice</button>
+            <button type="button" class:active={currentView === "chat"} aria-pressed={currentView === "chat"} onclick={() => (currentView = "chat")}>Chat</button>
+            <button type="button" class:active={currentView === "audio"} aria-pressed={currentView === "audio"} onclick={() => (currentView = "audio")}>Voice</button>
           </div>
           <div class="chat-container">
             <ConversationSidebar
@@ -7699,8 +7699,8 @@ Output only the summary text, no preamble.`;
       {:else if currentView === "audio"}
         <div class="view audio-view">
           <div class="playground-subnav" role="group" aria-label="Playground mode">
-            <button type="button" aria-pressed="false" onclick={() => (currentView = "chat")}>Chat</button>
-            <button type="button" class="active" aria-pressed="true">Voice</button>
+            <button type="button" class:active={currentView === "chat"} aria-pressed={currentView === "chat"} onclick={() => (currentView = "chat")}>Chat</button>
+            <button type="button" class:active={currentView === "audio"} aria-pressed={currentView === "audio"} onclick={() => (currentView = "audio")}>Voice</button>
           </div>
           <h2>Audio Transcription</h2>
 
