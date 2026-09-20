@@ -24,6 +24,8 @@ export const BENCHMARK_MAX_TOKENS_LIMIT = 4096;
 export const BENCHMARK_MAX_NAME_LENGTH = 200;
 export const BENCHMARK_MAX_DESCRIPTION_LENGTH = 2000;
 export const BENCHMARK_MAX_TEXT_LENGTH = 8000;
+/** Per-case cap so a messages array cannot bypass the other size limits. */
+export const BENCHMARK_MAX_MESSAGES_PER_CASE = 32;
 export const BENCHMARK_MAX_TAGS = 10;
 export const BENCHMARK_MAX_TAG_LENGTH = 40;
 
@@ -152,6 +154,9 @@ export function validateBenchmarkCase(raw: unknown, where: string): ValidationRe
     if (!Array.isArray(raw.messages) || raw.messages.length === 0) {
       return fail(`${where}: messages must be a non-empty array when present`);
     }
+    if (raw.messages.length > BENCHMARK_MAX_MESSAGES_PER_CASE) {
+      return fail(`${where}: at most ${BENCHMARK_MAX_MESSAGES_PER_CASE} messages per case`);
+    }
     messages = [];
     for (let i = 0; i < raw.messages.length; i++) {
       const r = validateBenchmarkMessage(raw.messages[i], `${where}: messages[${i}]`);
@@ -202,7 +207,10 @@ export function validateBenchmarkSuite(raw: unknown): ValidationResult<Benchmark
   if (raw.description !== undefined && !isNonEmptyTrimmedString(raw.description, BENCHMARK_MAX_DESCRIPTION_LENGTH)) {
     errors.push(`description must be a non-empty string of at most ${BENCHMARK_MAX_DESCRIPTION_LENGTH} characters when present`);
   }
-  if (!isFiniteInteger(raw.createdAt) || (raw.createdAt as number) < 0) errors.push('createdAt must be a non-negative integer');
+  if (!isFiniteInteger(raw.createdAt) || (raw.createdAt as number) < 0
+    || !Number.isFinite(new Date(raw.createdAt as number).getTime())) {
+    errors.push('createdAt must be a valid Date timestamp');
+  }
 
   const targets: BenchmarkTarget[] = [];
   if (!Array.isArray(raw.targets) || raw.targets.length < 1 || raw.targets.length > BENCHMARK_MAX_TARGETS) {
@@ -304,6 +312,9 @@ export function parseBenchmarkCasesJsonl(text: string): JsonlImportResult {
     const line = lines[i].trim();
     if (!line) continue;
     const lineNumber = i + 1;
+    if (rawRows.length >= BENCHMARK_MAX_CASES) {
+      return { ok: false, error: `file has more than ${BENCHMARK_MAX_CASES} cases, exceeding the ${BENCHMARK_MAX_CASES}-case limit` };
+    }
     let parsed: unknown;
     try {
       parsed = JSON.parse(line);
@@ -313,9 +324,6 @@ export function parseBenchmarkCasesJsonl(text: string): JsonlImportResult {
     rawRows.push({ lineNumber, raw: parsed });
   }
   if (rawRows.length === 0) return { ok: false, error: 'no cases found in the file' };
-  if (rawRows.length > BENCHMARK_MAX_CASES) {
-    return { ok: false, error: `file has ${rawRows.length} cases, exceeding the ${BENCHMARK_MAX_CASES}-case limit` };
-  }
 
   const explicitIds = new Set<string>();
   for (const { raw } of rawRows) {

@@ -167,8 +167,12 @@ export async function listBenchmarkSuites(): Promise<RepositoryResult<BenchmarkS
   return okResult(rows);
 }
 
+function suiteIdKey(id: string): string {
+  return id.trim();
+}
+
 export async function getBenchmarkSuite(id: string): Promise<RepositoryResult<BenchmarkSuite | null>> {
-  const result = await withStore<BenchmarkSuite>('readonly', (store) => store.get(id) as IDBRequest<BenchmarkSuite>);
+  const result = await withStore<BenchmarkSuite>('readonly', (store) => store.get(suiteIdKey(id)) as IDBRequest<BenchmarkSuite>);
   if (!result.ok) return failResult(result.error!);
   if (result.value === undefined) return okResult(null);
   if (!isBenchmarkSuite(result.value)) return failResult(`stored benchmark suite "${id}" failed validation`);
@@ -188,7 +192,7 @@ export async function putBenchmarkSuite(suite: BenchmarkSuite): Promise<Reposito
 }
 
 export async function deleteBenchmarkSuite(id: string): Promise<RepositoryResult<void>> {
-  const result = await withStore<undefined>('readwrite', (store) => store.delete(id));
+  const result = await withStore<undefined>('readwrite', (store) => store.delete(suiteIdKey(id)));
   if (!result.ok) return failResult(result.error!);
   return okResult(undefined);
 }

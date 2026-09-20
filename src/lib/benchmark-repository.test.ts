@@ -113,11 +113,21 @@ describe('benchmark-repository', () => {
   });
 
   it('stores the normalized suite so a padded id is retrievable without padding', async () => {
-    const put = await putBenchmarkSuite(suite({ id: ' suite-1 ' }));
+    const padded = suite({ id: ' suite-1 ' });
+    const put = await putBenchmarkSuite(padded);
     expect(put.ok).toBe(true);
-    const got = await getBenchmarkSuite('suite-1');
+    const got = await getBenchmarkSuite(padded.id);
     expect(got.ok).toBe(true);
     expect(got.value?.id).toBe('suite-1');
+  });
+
+  it('deletes a suite using the original padded id', async () => {
+    const padded = suite({ id: ' suite-1 ' });
+    expect((await putBenchmarkSuite(padded)).ok).toBe(true);
+    const del = await deleteBenchmarkSuite(padded.id);
+    expect(del.ok).toBe(true);
+    const got = await getBenchmarkSuite('suite-1');
+    expect(got).toEqual({ ok: true, value: null });
   });
 
   it('rejects an invalid suite without writing anything', async () => {

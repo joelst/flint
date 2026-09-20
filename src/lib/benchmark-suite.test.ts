@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   BENCHMARK_MAX_ATTEMPTS,
   BENCHMARK_MAX_CASES,
+  BENCHMARK_MAX_MESSAGES_PER_CASE,
   BENCHMARK_MAX_TARGETS,
   BENCHMARK_MAX_TOKENS_LIMIT,
   benchmarkAttemptCount,
@@ -153,6 +154,15 @@ describe('validateBenchmarkCase', () => {
     const tags = Array.from({ length: 11 }, (_, i) => `t${i}`);
     expect(validateBenchmarkCase({ id: 'c', prompt: 'x', tags }, 'case').ok).toBe(false);
   });
+
+  it('accepts the per-case message-count limit and rejects one over', () => {
+    const atLimit = Array.from({ length: BENCHMARK_MAX_MESSAGES_PER_CASE }, () => ({ role: 'user', content: 'x' }));
+    expect(validateBenchmarkCase({ id: 'c', messages: atLimit }, 'case').ok).toBe(true);
+    expect(validateBenchmarkCase({
+      id: 'c',
+      messages: [...atLimit, { role: 'user', content: 'x' }],
+    }, 'case').ok).toBe(false);
+  });
 });
 
 describe('validateBenchmarkSuite', () => {
@@ -195,6 +205,7 @@ describe('validateBenchmarkSuite', () => {
     ['blank name', { name: '' }],
     ['negative createdAt', { createdAt: -1 }],
     ['non-integer createdAt', { createdAt: 1.5 }],
+    ['createdAt outside the Date range', { createdAt: 8.65e15 }],
     ['description too long', { description: 'x'.repeat(2001) }],
     ['description of the wrong type', { description: 123 as unknown as string }],
   ])('rejects %s', (_label, over) => {
