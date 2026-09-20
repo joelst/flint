@@ -43,8 +43,12 @@ export function suiteHasExplicitVariants(suite: BenchmarkSuite): boolean {
 export async function loadBenchmarkTargets(
   suite: BenchmarkSuite,
   loadModel: BenchmarkLifecycleHost['loadModel'],
+  stopController?: StopController,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   for (const target of suite.targets) {
+    if (stopController?.isStopped()) {
+      return { ok: false, error: 'Stopped before every target was loaded' };
+    }
     try {
       await loadModel(target.alias, target.variantId);
     } catch (e: unknown) {
@@ -109,7 +113,11 @@ export interface PreparedExecution {
 async function pinThenLoad(
   suite: BenchmarkSuite,
   host: BenchmarkLifecycleHost,
+  stopController?: StopController,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (stopController?.isStopped()) {
+    return { ok: false, error: 'Stopped before targets were pinned' };
+  }
   const aliases = Array.from(new Set(suite.targets.map((t) => t.alias)));
   let pinError: string | null = null;
   try {
@@ -121,12 +129,26 @@ async function pinThenLoad(
       return { ok: false, error: `Could not pin targets with explicit variants: ${pinError}` };
     }
   }
-  const loaded = await loadBenchmarkTargets(suite, host.loadModel);
+  if (stopController?.isStopped()) {
+    await host.unpin().catch(() => {});
+    return { ok: false, error: 'Stopped before every target was loaded' };
+  }
+  const loaded = await loadBenchmarkTargets(suite, host.loadModel, stopController);
   if (!loaded.ok) {
     await host.unpin().catch(() => {});
     return loaded;
   }
   return { ok: true };
+}
+
+/** Marks a reserved run stopped after preparation fails. IndexedDB `{ ok: false }` is a
+ * normal result, not a throw — callers must not `.catch()` it away. */
+export async function haltPreparedRun(runId: string, preparationError: string): Promise<string> {
+  const halted = await updateBenchmarkRunStatus(runId, 'stopped', { finalizedAt: Date.now() });
+  if (!halted.ok) {
+    return `${preparationError}; also could not mark the run stopped: ${halted.error}`;
+  }
+  return preparationError;
 }
 
 function inexecutableSuiteError(suite: BenchmarkSuite, action: 'start' | 'resume', runId?: string): string | null {
@@ -149,16 +171,24 @@ export async function startBenchmarkSession(
   const prepared = await prepareBenchmarkRun(suite);
   if (!prepared.ok) return { ok: false, error: prepared.error };
 
-  const preparedPin = await pinThenLoad(suite, host);
-  if (!preparedPin.ok) {
-    await updateBenchmarkRunStatus(prepared.run.id, 'stopped', { finalizedAt: Date.now() }).catch(() => {});
-    return preparedPin;
-  }
-
   const stopController = createStopController();
   const transport = createSidecarBenchmarkTransport(host.chatCompletion);
-  const done = startBenchmarkRun(suite, transport, stopController, prepared.run);
-  return { ok: true, execution: { runId: prepared.run.id, stopController, done } };
+  const runId = prepared.run.id;
+  // Return the controller immediately so Stop is live during unbounded model loads. Pin/load
+  // and execution run on `done`; loadModel has no cancel-in-flight API, so Stop is honored
+  // between operations (same admission contract as the runner).
+  const done = (async (): Promise<StartRunOutcome> => {
+    const preparedPin = await pinThenLoad(suite, host, stopController);
+    if (!preparedPin.ok) {
+      return { ok: false, error: await haltPreparedRun(runId, preparedPin.error) };
+    }
+    if (stopController.isStopped()) {
+      await host.unpin().catch(() => {});
+      return { ok: false, error: await haltPreparedRun(runId, 'Stopped during preparation') };
+    }
+    return startBenchmarkRun(suite, transport, stopController, prepared.run);
+  })();
+  return { ok: true, execution: { runId, stopController, done } };
 }
 
 export async function resumeBenchmarkSession(
@@ -173,11 +203,16 @@ export async function resumeBenchmarkSession(
   const inexecutable = inexecutableSuiteError(suite, 'resume', runId);
   if (inexecutable) return { ok: false, error: inexecutable };
 
-  const preparedPin = await pinThenLoad(suite, host);
-  if (!preparedPin.ok) return preparedPin;
-
   const stopController = createStopController();
   const transport = createSidecarBenchmarkTransport(host.chatCompletion);
-  const done = resumeBenchmarkRun(runId, transport, stopController);
+  const done = (async (): Promise<StartRunOutcome> => {
+    const preparedPin = await pinThenLoad(suite, host, stopController);
+    if (!preparedPin.ok) return { ok: false, error: preparedPin.error };
+    if (stopController.isStopped()) {
+      await host.unpin().catch(() => {});
+      return { ok: false, error: 'Stopped during preparation' };
+    }
+    return resumeBenchmarkRun(runId, transport, stopController);
+  })();
   return { ok: true, execution: { runId, stopController, done } };
 }

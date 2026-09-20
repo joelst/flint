@@ -347,14 +347,15 @@
       const outcome = await onStart(suite);
       if (destroyed) return;
       if (selectedSuiteId !== suiteId) return;
+      // Preparation inserts the run row before pin/load; a failed Start can still have left a
+      // stopped row, so Edit/Delete must refresh even on failure or they stay enabled at 0.
+      await refreshRunsForSelectedSuite(suiteId);
+      if (destroyed || selectedSuiteId !== suiteId) return;
       if (!outcome.ok) {
         lifecycleError = outcome.error;
         return;
       }
-      // The suite now has a run, so this draft can never pass putBenchmarkSuiteIfNoRuns.
       if (draftEditsSuite(editingDraft, suiteId)) discardDraft();
-      await refreshRunsForSelectedSuite(suiteId);
-      if (destroyed || selectedSuiteId !== suiteId) return;
       await openRun(outcome.runId);
     } finally {
       lifecycleBusy = false;

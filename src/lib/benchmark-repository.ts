@@ -12,7 +12,8 @@
  * v2 adds `runs` and `attempts`. v3 adds `attemptSummaries` so live polling can read progress
  * without structured-cloning full response bodies.
  *
- * No UI reads any of this yet.
+ * Benchmark Preview (`BenchmarkPreview.svelte`) is the UI reader: suite CRUD, run lists,
+ * attempt-summary polling, and JSON export all go through this module.
  */
 
 import { isStoredBenchmarkSuite, suiteSnapshotMatchesStored, validateBenchmarkSuite, type BenchmarkSuite } from './benchmark-suite';

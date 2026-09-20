@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { SidecarOperationError } from './operation-outcome';
 import {
   createSidecarBenchmarkTransport,
+  haltPreparedRun,
   loadBenchmarkTargets,
   resumeBenchmarkSession,
   startBenchmarkSession,
@@ -82,7 +83,9 @@ describe('loadBenchmarkTargets / pinThenLoad order', () => {
     });
     await putBenchmarkSuite(s);
     const result = await startBenchmarkSession(s, host);
-    expect(result.ok).toBe(false);
+    expect(result.ok).toBe(true);
+    const done = result.ok ? await result.execution.done : null;
+    expect(done?.ok).toBe(false);
     expect(host.order[0]).toBe('pin:model-a,model-b');
     expect(host.order).toContain('load:model-a');
     expect(host.order).toContain('unpin');
@@ -95,8 +98,10 @@ describe('loadBenchmarkTargets / pinThenLoad order', () => {
     const s = suite({ targets: [{ alias: 'model-a', variantId: 'v1' }] });
     await putBenchmarkSuite(s);
     const result = await startBenchmarkSession(s, host);
-    expect(result.ok).toBe(false);
-    expect(result.ok === false && result.error).toMatch(/explicit variants/);
+    expect(result.ok).toBe(true);
+    const done = result.ok ? await result.execution.done : null;
+    expect(done?.ok).toBe(false);
+    expect(done && 'error' in done && done.error).toMatch(/explicit variants/);
     expect(host.order).toEqual(['unpin']);
   });
 
@@ -109,12 +114,10 @@ describe('loadBenchmarkTargets / pinThenLoad order', () => {
     });
     const result = await startBenchmarkSession(suite(), host);
     expect(result.ok).toBe(true);
+    const done = result.ok ? await result.execution.done : null;
+    expect(done?.ok).toBe(true);
     expect(host.order[0]).toBe('pin:model-a');
     expect(host.order).toContain('load:model-a');
-    if (result.ok) {
-      result.execution.stopController.stop();
-      await result.execution.done;
-    }
   });
 
   it('does not pin or load a live suite with duplicate target aliases', async () => {
@@ -146,13 +149,48 @@ describe('loadBenchmarkTargets / pinThenLoad order', () => {
     const s = suite({ targets: [{ alias: 'model-a', variantId: 'v1' }] });
     await putBenchmarkSuite(s);
     const result = await startBenchmarkSession(s, host);
-    expect(result.ok).toBe(false);
+    expect(result.ok).toBe(true);
+    const done = result.ok ? await result.execution.done : null;
+    expect(done?.ok).toBe(false);
     const runs = await listBenchmarkRunsForSuite(s.id);
     expect(runs.ok).toBe(true);
     expect(runs.value).toHaveLength(1);
     expect(runs.value![0].status).toBe('stopped');
     const stored = await getBenchmarkRun(runs.value![0].id);
     expect(stored.value?.status).toBe('stopped');
+  });
+
+  it('returns a Stop controller before model loads finish', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const host = fakeHost({
+      loadModel: async (alias) => {
+        host.order.push(`load:${alias}`);
+        await gate;
+      },
+    });
+    const s = suite({
+      targets: [{ alias: 'model-a', variantId: null }, { alias: 'model-b', variantId: null }],
+    });
+    await putBenchmarkSuite(s);
+    const result = await startBenchmarkSession(s, host);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.execution.runId).toBeTruthy();
+    while (!host.order.includes('load:model-a')) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    result.execution.stopController.stop();
+    release();
+    const done = await result.execution.done;
+    expect(done.ok).toBe(false);
+    expect(host.order.filter((x) => x.startsWith('load:'))).toEqual(['load:model-a']);
+  });
+
+  it('includes a durability failure when a prepared run cannot be marked stopped', async () => {
+    const msg = await haltPreparedRun('missing-run', 'Could not pin targets');
+    expect(msg).toMatch(/Could not pin targets/);
+    expect(msg).toMatch(/could not mark the run stopped/);
   });
 });
 
@@ -232,11 +270,9 @@ describe('resumeBenchmarkSession', () => {
     const host = fakeHost();
     const resumed = await resumeBenchmarkSession(started.run!.id, host);
     expect(resumed.ok).toBe(true);
+    const done = resumed.ok ? await resumed.execution.done : null;
+    expect(done?.ok).toBe(true);
     expect(host.order[0]).toBe('pin:model-a');
     expect(host.order).toContain('load:model-a');
-    if (resumed.ok) {
-      resumed.execution.stopController.stop();
-      await resumed.execution.done;
-    }
   });
 });
