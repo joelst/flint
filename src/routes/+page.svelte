@@ -9756,6 +9756,11 @@ Output only the summary text, no preamble.`;
 
   :global(html) {
     height: 100%;
+    color-scheme: dark;
+  }
+
+  :global(html[data-theme="light"]) {
+    color-scheme: light;
   }
 
   :global(body) {
@@ -10090,6 +10095,15 @@ Output only the summary text, no preamble.`;
     margin-bottom: 16px;
   }
 
+  .toolbar select {
+    flex: 0 0 auto;
+    padding: 8px 12px;
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    border-radius: 6px;
+  }
+
   .accel-panel {
     margin: 0 0 14px;
     padding: 10px 12px;
@@ -10143,6 +10157,15 @@ Output only the summary text, no preamble.`;
   input {
     flex: 1;
     padding: 8px 12px;
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    border-radius: 6px;
+  }
+
+  /* Native <select> closed boxes otherwise keep the OS light combobox look. Specific
+     pickers override padding/min-width; color-scheme on html themes the open list. */
+  select {
     background: var(--input-bg);
     border: 1px solid var(--border);
     color: var(--fg);
@@ -12581,7 +12604,7 @@ Output only the summary text, no preamble.`;
   .setting-name { font-size: 0.9rem; font-weight: 500; }
   .setting-desc { font-size: 0.77rem; color: var(--muted); line-height: 1.4; }
   .setting-loading { color: var(--muted); font-size: 0.85rem; flex-shrink: 0; }
-  .settings-view select { padding: 5px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 0.85rem; cursor: pointer; min-width: 140px; flex-shrink: 0; }
+  .settings-view select { padding: 5px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); font-size: 0.85rem; cursor: pointer; min-width: 140px; flex-shrink: 0; }
 
   /* Toggle switch */
   .toggle-switch { position: relative; display: inline-flex; align-items: center; cursor: pointer; flex-shrink: 0; }
