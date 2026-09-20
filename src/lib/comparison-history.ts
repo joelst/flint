@@ -78,11 +78,14 @@ function isOptionalRating(value: unknown): boolean {
 
 function isCompareSlot(value: unknown): value is CompareSlot {
   if (!isPlainObject(value)) return false;
-  return typeof value.key === 'string' && typeof value.alias === 'string'
-    && (value.variantId === null || typeof value.variantId === 'string')
-    && typeof value.label === 'string'
-    && isOptionalStringOrNull(value.deviceType)
-    && isOptionalStringOrNull(value.executionProvider);
+  if (typeof value.key !== 'string' || typeof value.alias !== 'string'
+    || (value.variantId !== null && typeof value.variantId !== 'string')
+    || typeof value.label !== 'string'
+    || !isOptionalStringOrNull(value.deviceType)
+    || !isOptionalStringOrNull(value.executionProvider)) {
+    return false;
+  }
+  return value.key === compareSlotKey(value.alias, value.variantId);
 }
 
 function isCompareResult(value: unknown): value is CompareResult {
