@@ -55,20 +55,44 @@
   let lifecycleError = "";
   let pollHandle: ReturnType<typeof setInterval> | null = null;
   let refreshGeneration = 0;
+  /** Guards `refreshSuites()` the same way `refreshGeneration` guards a run refresh: a slower,
+   * now-stale call (e.g. the initial `onMount` load racing a create/edit/delete) must not
+   * overwrite the newer suite list/run counts once it finally resolves. */
+  let suitesGeneration = 0;
+  /** `openRun()` only checks `selectedRunId` after its await, which is not enough when the
+   * *same* run is opened twice in quick succession (e.g. a double-click): `selectedRunId` never
+   * changes between the two calls, so both would otherwise pass that check and each install its
+   * own polling interval — only the last-assigned `pollHandle` stays reachable, leaking the
+   * other to poll forever. This monotonic token makes only the most recently started `openRun`
+   * call install its interval, regardless of which one's await resolves first. */
+  let openRunToken = 0;
+  /** Set once by `onDestroy`. The generation/token counters above only catch a call that was
+   * already inside its own async body when the component unmounted — they do nothing about a
+   * caller (`handleStart`/`handleResume`) that is still awaiting an *earlier*, outer promise
+   * (`onStart`/`onResume`) at that moment and only reaches `openRun()` afterward, with a
+   * freshly-captured token that would otherwise satisfy every staleness check. `openRun` checks
+   * this flag directly before installing its interval so no post-teardown caller, however it got
+   * there, can start one that `onDestroy`'s single `stopPolling()` call never sees. */
+  let destroyed = false;
 
   async function refreshSuites() {
+    const generation = ++suitesGeneration;
     const res = await listBenchmarkSuites();
+    if (generation !== suitesGeneration) return;
     if (!res.ok) {
       loadError = res.error || "Could not load benchmark suites";
       return;
     }
-    suites = (res.value ?? []).sort((a, b) => b.createdAt - a.createdAt);
-    loadError = "";
+    const nextSuites = (res.value ?? []).sort((a, b) => b.createdAt - a.createdAt);
     const counts: Record<string, number> = {};
-    for (const suite of suites) {
+    for (const suite of nextSuites) {
       const runsRes = await listBenchmarkRunsForSuite(suite.id);
+      if (generation !== suitesGeneration) return;
       counts[suite.id] = runsRes.ok ? (runsRes.value ?? []).length : 0;
     }
+    if (generation !== suitesGeneration) return;
+    suites = nextSuites;
+    loadError = "";
     runCountsBySuite = counts;
   }
 
@@ -172,6 +196,7 @@
         return;
       }
       const saved = await putBenchmarkSuiteIfNoRuns(result.value);
+      if (destroyed) return;
       if (!saved.ok) {
         editingErrors = [saved.error || "Could not save suite"];
         return;
@@ -188,6 +213,7 @@
     // suite that has gained a run since then lives inside `deleteBenchmarkSuiteIfNoRuns`, which
     // rechecks atomically in the same transaction as the delete.
     const res = await deleteBenchmarkSuiteIfNoRuns(suite.id);
+    if (destroyed) return;
     if (!res.ok) {
       loadError = res.error || "Could not delete suite";
       return;
@@ -232,8 +258,9 @@
     selectedRunId = runId;
     lifecycleError = "";
     stopPolling();
+    const token = ++openRunToken;
     await refreshSelectedRun();
-    if (selectedRunId !== runId) return;
+    if (token !== openRunToken || selectedRunId !== runId || destroyed) return;
     if (runId === activeRunId) {
       pollHandle = setInterval(() => { void refreshSelectedRun(); }, 1500);
     }
@@ -247,11 +274,13 @@
     lifecycleError = "";
     try {
       const outcome = await onStart(suite);
+      if (destroyed) return;
       if (!outcome.ok) {
         lifecycleError = outcome.error;
         return;
       }
       await selectSuite(suite.id);
+      if (destroyed) return;
       await openRun(outcome.runId);
     } finally {
       lifecycleBusy = false;
@@ -267,6 +296,7 @@
     lifecycleError = "";
     try {
       const outcome = await onResume(runId);
+      if (destroyed) return;
       if (!outcome.ok) {
         lifecycleError = outcome.error;
         return;
@@ -299,7 +329,16 @@
   });
 
   onDestroy(() => {
+    destroyed = true;
     stopPolling();
+    // Also invalidate any in-flight openRun()/refreshSelectedRun()/refreshSuites() calls: none
+    // of them checks for component teardown, only staleness relative to a later call of the
+    // same kind. Without this, an `openRun()` awaiting `refreshSelectedRun()` at the moment of
+    // unmount could still resolve afterward with a matching token and install a `setInterval`
+    // that nothing left running would ever clear.
+    openRunToken++;
+    refreshGeneration++;
+    suitesGeneration++;
   });
 </script>
 
