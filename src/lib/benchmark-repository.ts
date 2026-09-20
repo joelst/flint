@@ -13,7 +13,7 @@
  * one key type, four operations. No UI reads this module yet.
  */
 
-import { isBenchmarkSuite, type BenchmarkSuite } from './benchmark-suite';
+import { isBenchmarkSuite, validateBenchmarkSuite, type BenchmarkSuite } from './benchmark-suite';
 
 const DATABASE_NAME = 'flint-benchmarks';
 const DATABASE_VERSION = 1;
@@ -114,9 +114,9 @@ async function withStore<T>(
         resolve(okResult(requestResultBox.value));
       };
       tx.onerror = () => {
-        if (settled) return;
-        settled = true;
-        resolve(failResult(requestErrorMessage ?? describeDomException(tx.error, 'Benchmark database transaction failed')));
+        // Not terminal: an unhandled request error bubbles here before the transaction aborts.
+        requestErrorMessage = requestErrorMessage
+          ?? describeDomException(tx.error, 'Benchmark database transaction failed');
       };
       tx.onabort = () => {
         if (settled) return;
@@ -180,8 +180,9 @@ export async function getBenchmarkSuite(id: string): Promise<RepositoryResult<Be
  * version or data written outside this module. Resolves only once the write transaction has
  * genuinely committed — never merely queued. */
 export async function putBenchmarkSuite(suite: BenchmarkSuite): Promise<RepositoryResult<void>> {
-  if (!isBenchmarkSuite(suite)) return failResult('suite failed validation and was not saved');
-  const result = await withStore<IDBValidKey>('readwrite', (store) => store.put(suite));
+  const validated = validateBenchmarkSuite(suite);
+  if (!validated.ok) return failResult(validated.errors.join('; '));
+  const result = await withStore<IDBValidKey>('readwrite', (store) => store.put(validated.value));
   if (!result.ok) return failResult(result.error!);
   return okResult(undefined);
 }

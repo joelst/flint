@@ -139,19 +139,22 @@ export function validateBenchmarkCase(raw: unknown, where: string): ValidationRe
   if (!isNonEmptyTrimmedString(raw.id, BENCHMARK_MAX_NAME_LENGTH)) {
     return fail(`${where}: id must be a non-empty string`);
   }
-  const hasPrompt = typeof raw.prompt === 'string' && raw.prompt.trim().length > 0;
-  const hasMessages = Array.isArray(raw.messages) && raw.messages.length > 0;
-  if (hasPrompt === hasMessages) {
+  const promptPresent = Object.prototype.hasOwnProperty.call(raw, 'prompt');
+  const messagesPresent = Object.prototype.hasOwnProperty.call(raw, 'messages');
+  if (promptPresent === messagesPresent) {
     return fail(`${where}: exactly one of prompt/messages must be present`);
   }
-  if (hasPrompt && !isNonEmptyTrimmedString(raw.prompt, BENCHMARK_MAX_TEXT_LENGTH)) {
-    return fail(`${where}: prompt must be at most ${BENCHMARK_MAX_TEXT_LENGTH} characters`);
+  if (promptPresent && !isNonEmptyTrimmedString(raw.prompt, BENCHMARK_MAX_TEXT_LENGTH)) {
+    return fail(`${where}: prompt must be a non-empty string of at most ${BENCHMARK_MAX_TEXT_LENGTH} characters`);
   }
   let messages: BenchmarkMessage[] | undefined;
-  if (hasMessages) {
+  if (messagesPresent) {
+    if (!Array.isArray(raw.messages) || raw.messages.length === 0) {
+      return fail(`${where}: messages must be a non-empty array when present`);
+    }
     messages = [];
-    for (let i = 0; i < (raw.messages as unknown[]).length; i++) {
-      const r = validateBenchmarkMessage((raw.messages as unknown[])[i], `${where}: messages[${i}]`);
+    for (let i = 0; i < raw.messages.length; i++) {
+      const r = validateBenchmarkMessage(raw.messages[i], `${where}: messages[${i}]`);
       if (!r.ok) return fail(...r.errors);
       messages.push(r.value!);
     }
@@ -163,7 +166,7 @@ export function validateBenchmarkCase(raw: unknown, where: string): ValidationRe
   if (!tagsResult.ok) return fail(...tagsResult.errors);
 
   const result: BenchmarkCase = { id: (raw.id as string).trim() };
-  if (hasPrompt) result.prompt = (raw.prompt as string).trim();
+  if (promptPresent) result.prompt = (raw.prompt as string).trim();
   if (messages) result.messages = messages;
   if (raw.expected !== undefined) result.expected = (raw.expected as string).trim();
   if (tagsResult.value !== undefined) result.tags = tagsResult.value;
@@ -175,11 +178,13 @@ function validateTarget(raw: unknown, where: string): ValidationResult<Benchmark
   if (!isNonEmptyTrimmedString(raw.alias, BENCHMARK_MAX_NAME_LENGTH)) {
     return fail(`${where}: alias must be a non-empty string`);
   }
-  if (raw.variantId !== null && raw.variantId !== undefined
-    && !isNonEmptyTrimmedString(raw.variantId, BENCHMARK_MAX_NAME_LENGTH)) {
+  if (!Object.prototype.hasOwnProperty.call(raw, 'variantId')) {
     return fail(`${where}: variantId must be a non-empty string or null`);
   }
-  const variantId = raw.variantId === null || raw.variantId === undefined ? null : (raw.variantId as string).trim();
+  if (raw.variantId !== null && !isNonEmptyTrimmedString(raw.variantId, BENCHMARK_MAX_NAME_LENGTH)) {
+    return fail(`${where}: variantId must be a non-empty string or null`);
+  }
+  const variantId = raw.variantId === null ? null : (raw.variantId as string).trim();
   return ok({ alias: (raw.alias as string).trim(), variantId });
 }
 

@@ -112,11 +112,19 @@ describe('benchmark-repository', () => {
     expect(got.error).toMatch(/failed validation/);
   });
 
+  it('stores the normalized suite so a padded id is retrievable without padding', async () => {
+    const put = await putBenchmarkSuite(suite({ id: ' suite-1 ' }));
+    expect(put.ok).toBe(true);
+    const got = await getBenchmarkSuite('suite-1');
+    expect(got.ok).toBe(true);
+    expect(got.value?.id).toBe('suite-1');
+  });
+
   it('rejects an invalid suite without writing anything', async () => {
     const invalid = { ...suite(), name: '' };
     const put = await putBenchmarkSuite(invalid);
     expect(put.ok).toBe(false);
-    expect(put.error).toMatch(/failed validation/);
+    expect(put.error).toMatch(/name must be a non-empty string/);
 
     const got = await getBenchmarkSuite('suite-1');
     expect(got).toEqual({ ok: true, value: null });
@@ -362,6 +370,7 @@ describe('benchmark-repository', () => {
     const resultPromise = getBenchmarkSuite('x');
     await Promise.resolve();
     txListeners.onerror?.();
+    txListeners.onabort?.();
     const result = await resultPromise;
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/transaction failed/);

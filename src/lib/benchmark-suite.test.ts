@@ -82,6 +82,8 @@ describe('validateBenchmarkCase', () => {
     ['both prompt and messages', { id: 'c', prompt: 'x', messages: [{ role: 'user', content: 'x' }] }],
     ['empty prompt', { id: 'c', prompt: '   ' }],
     ['empty messages array', { id: 'c', messages: [] }],
+    ['prompt and empty messages both present', { id: 'c', prompt: 'x', messages: [] }],
+    ['malformed prompt alongside messages', { id: 'c', prompt: 123, messages: [{ role: 'user', content: 'x' }] }],
   ])('rejects %s', (_label, raw) => {
     const r = validateBenchmarkCase(raw, 'case');
     expect(r.ok).toBe(false);
@@ -112,7 +114,7 @@ describe('validateBenchmarkCase', () => {
   it('rejects a prompt longer than the max text length', () => {
     const r = validateBenchmarkCase({ id: 'c', prompt: 'x'.repeat(8001) }, 'case');
     expect(r.ok).toBe(false);
-    expect(r.errors[0]).toMatch(/prompt must be at most/);
+    expect(r.errors[0]).toMatch(/prompt must be a non-empty string of at most/);
   });
 
   it('rejects an expected value longer than the max text length', () => {
@@ -244,6 +246,14 @@ describe('validateBenchmarkSuite', () => {
   it('rejects a target whose variantId is neither a string nor null', () => {
     const r = validateBenchmarkSuite(validSuite({
       targets: [{ alias: 'model-a', variantId: 123 as unknown as string }],
+    }));
+    expect(r.ok).toBe(false);
+    expect(r.errors.join(' ')).toMatch(/variantId must be a non-empty string or null/);
+  });
+
+  it('rejects a target that omits variantId entirely', () => {
+    const r = validateBenchmarkSuite(validSuite({
+      targets: [{ alias: 'model-a' } as unknown as { alias: string; variantId: string | null }],
     }));
     expect(r.ok).toBe(false);
     expect(r.errors.join(' ')).toMatch(/variantId must be a non-empty string or null/);
