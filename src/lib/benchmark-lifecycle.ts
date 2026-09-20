@@ -265,20 +265,24 @@ async function finishPreparedHalt(
   return { ok: false, error: await haltPreparedRun(runId, error) };
 }
 
-function inexecutableSuiteError(suite: BenchmarkSuite, action: 'start' | 'resume', runId?: string): string | null {
+/** Resume-only guard: immediately before this runs, `getBenchmarkRun` already re-validated the
+ * stored run with `isBenchmarkRun(..., { allowDuplicateAliases: true })` against every *current*
+ * suite constraint (targets/cases counts, attempt limits, etc.) tolerating only the pre-1.0
+ * duplicate-target-alias shape. So the only way `suite` can still fail this stricter
+ * `isBenchmarkSuite` check is that one tolerated legacy shape, and the message naming it is
+ * accurate here. (Start does not use this: a *fresh* suite has never been validated at all yet,
+ * so attributing every possible validation failure to duplicate aliases would be misleading —
+ * `prepareBenchmarkRun` runs `validateBenchmarkSuite` immediately after and reports the suite's
+ * actual errors instead.) */
+function resumeInexecutableSuiteError(suite: BenchmarkSuite, runId: string): string | null {
   if (isBenchmarkSuite(suite)) return null;
-  if (action === 'resume') {
-    return `benchmark run "${runId}" cannot be resumed: its suite snapshot has duplicate target aliases from before that shape was rejected`;
-  }
-  return 'cannot start: suite snapshot has duplicate target aliases from before that shape was rejected';
+  return `benchmark run "${runId}" cannot be resumed: its suite snapshot has duplicate target aliases from before that shape was rejected`;
 }
 
 export async function startBenchmarkSession(
   suite: BenchmarkSuite,
   host: BenchmarkLifecycleHost,
 ): Promise<{ ok: true; execution: PreparedExecution } | { ok: false; error: string }> {
-  const inexecutable = inexecutableSuiteError(suite, 'start');
-  if (inexecutable) return { ok: false, error: inexecutable };
 
   // Insert the run row before pin/load so putBenchmarkSuiteIfNoRuns / Edit see history for
   // this suite during the long prepare window (a remount resets local lifecycleBusy).
@@ -318,7 +322,7 @@ export async function resumeBenchmarkSession(
     return { ok: false, error: existing.error || 'Run not found' };
   }
   const suite = existing.value.suite;
-  const inexecutable = inexecutableSuiteError(suite, 'resume', runId);
+  const inexecutable = resumeInexecutableSuiteError(suite, runId);
   if (inexecutable) return { ok: false, error: inexecutable };
 
   const stopController = createStopController();

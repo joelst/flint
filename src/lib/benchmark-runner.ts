@@ -356,10 +356,15 @@ export async function startBenchmarkRun(
     // Checked before the storage read (and before `suiteSnapshotMatchesStored`, which assumes a
     // well-formed suite and would throw on a malformed one) so a caller passing a structurally
     // invalid suite gets the same clean validation error it always has, not a rejected promise.
-    if (!isBenchmarkSuite(preparedRun.suite)) {
+    // Surface the validator's actual errors rather than assuming duplicate aliases: this branch
+    // accepts any caller-supplied `preparedRun` (the test suite even passes `null`), so a great
+    // many unrelated shapes can fail here, and blaming all of them on duplicate aliases would be
+    // an incorrect diagnosis for anyone debugging a real caller bug.
+    const suiteValidation = validateBenchmarkSuite(preparedRun.suite);
+    if (!suiteValidation.ok) {
       return {
         ok: false,
-        error: 'cannot start: suite snapshot has duplicate target aliases from before that shape was rejected',
+        error: `cannot start: prepared run's suite snapshot failed validation: ${suiteValidation.errors.join('; ')}`,
       };
     }
     const reservation = await getBenchmarkRun(preparedRun.id);
@@ -367,10 +372,15 @@ export async function startBenchmarkRun(
     if (!reservation.value) {
       return { ok: false, error: `cannot start: no reservation found in storage for run "${preparedRun.id}"` };
     }
+    // `getBenchmarkRun` above already validated `reservation.value` with `allowDuplicateAliases:
+    // true` (tolerating the legacy shape for readability), so the *only* way it can still fail
+    // this stricter check is that tolerated legacy duplicate-alias shape -- everything else about
+    // the row (id, suiteId, status, timestamps, every other suite constraint) was already
+    // confirmed valid. The message can therefore name the actual cause precisely.
     if (!isBenchmarkRun(reservation.value)) {
       return {
         ok: false,
-        error: 'cannot start: suite snapshot has duplicate target aliases from before that shape was rejected',
+        error: `cannot start: run "${preparedRun.id}"'s stored reservation has duplicate target aliases from before that shape was rejected`,
       };
     }
     // The reservation exists and is well-formed, but may not be the run the caller intended to

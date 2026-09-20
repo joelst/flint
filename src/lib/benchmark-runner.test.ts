@@ -178,7 +178,51 @@ describe('startBenchmarkRun', () => {
       { id: 'legacy-dup-alias-start', suiteId: 'suite-1', suite: legacySuite, createdAt: Date.now(), status: 'running' },
     );
     expect(outcome.ok).toBe(false);
-    expect(outcome.error).toMatch(/duplicate target aliases/);
+    expect(outcome.error).toMatch(/prepared run's suite snapshot failed validation.*duplicate target alias/);
+    expect(called).toBe(false);
+  });
+
+  it('rejects an explicitly-passed preparedRun whose caller-side suite is valid but the STORED reservation is a legacy duplicate-alias row, naming the actual cause', async () => {
+    // Exercises the second (post-storage-read) shape check specifically: unlike the test above,
+    // the caller-supplied `preparedRun.suite` here is itself strictly valid, so it passes the
+    // first check and this only fails once the row re-read from storage is checked. Because
+    // `getBenchmarkRun` already re-validated that row tolerating only the legacy duplicate-alias
+    // shape, this failure can only mean that shape, and the message should say so precisely
+    // rather than falling back to a vague "failed shape validation".
+    const validSuite = suite();
+    const legacySuite = suite({
+      targets: [
+        { alias: 'model-a', variantId: 'v1' },
+        { alias: 'model-a', variantId: 'v2' },
+      ],
+    });
+    const db = await openBenchmarkDatabase();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction('runs', 'readwrite');
+        tx.oncomplete = () => resolve();
+        tx.onabort = () => reject(tx.error);
+        tx.onerror = () => reject(tx.error);
+        tx.objectStore('runs').put({
+          id: 'legacy-dup-alias-stored-only',
+          suiteId: 'suite-1',
+          suite: legacySuite,
+          createdAt: Date.now(),
+          status: 'running',
+        });
+      });
+    } finally {
+      db.close();
+    }
+    let called = false;
+    const outcome = await startBenchmarkRun(
+      validSuite,
+      async () => { called = true; return { ok: true, responseText: 'x' }; },
+      undefined,
+      { id: 'legacy-dup-alias-stored-only', suiteId: 'suite-1', suite: validSuite, createdAt: Date.now(), status: 'running' },
+    );
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error).toMatch(/stored reservation has duplicate target aliases/);
     expect(called).toBe(false);
   });
 
@@ -244,7 +288,7 @@ describe('startBenchmarkRun', () => {
     expect(secondCalled).toBe(false);
   });
 
-  it('rejects an explicitly-passed preparedRun with a structurally invalid suite without throwing', async () => {
+  it('rejects an explicitly-passed preparedRun with a structurally invalid (null) suite without throwing, reporting the actual validation failure rather than a misdiagnosed duplicate-alias error', async () => {
     const s = suite();
     const putSuite = await putBenchmarkSuite(s);
     expect(putSuite.ok).toBe(true);
@@ -258,7 +302,8 @@ describe('startBenchmarkRun', () => {
       return { ok: true, responseText: 'x' };
     }, undefined, malformedRun);
     expect(outcome.ok).toBe(false);
-    expect(outcome.error).toMatch(/duplicate target aliases/);
+    expect(outcome.error).toMatch(/prepared run's suite snapshot failed validation.*suite must be an object/);
+    expect(outcome.error).not.toMatch(/duplicate target aliases/);
     expect(called).toBe(false);
   });
 

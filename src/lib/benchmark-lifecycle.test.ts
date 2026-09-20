@@ -131,7 +131,7 @@ describe('loadBenchmarkTargets / pinThenLoad order', () => {
     expect(host.order.filter((x) => x === 'unpin').length).toBeGreaterThanOrEqual(1);
   });
 
-  it('does not pin or load a live suite with duplicate target aliases', async () => {
+  it('does not pin or load a live suite with duplicate target aliases, reporting the validator\'s actual error', async () => {
     const host = fakeHost();
     const s = suite({
       targets: [
@@ -141,7 +141,20 @@ describe('loadBenchmarkTargets / pinThenLoad order', () => {
     });
     const result = await startBenchmarkSession(s, host);
     expect(result.ok).toBe(false);
-    expect(result.ok === false && result.error).toMatch(/duplicate target aliases/);
+    // Now surfaced by prepareBenchmarkRun's validateBenchmarkSuite call (not a pre-check that
+    // assumes duplicate aliases for every validation failure), so the message names the specific
+    // offending target rather than a generic/possibly-wrong diagnosis.
+    expect(result.ok === false && result.error).toMatch(/duplicate target alias "model-a"/);
+    expect(host.order).toEqual([]);
+  });
+
+  it('reports the suite validator\'s actual error for a malformed (non-duplicate-alias) suite, instead of a misleading duplicate-alias diagnosis', async () => {
+    const host = fakeHost();
+    const s = suite({ cases: [] });
+    const result = await startBenchmarkSession(s, host);
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toMatch(/cases must be an array/);
+    expect(result.ok === false && result.error).not.toMatch(/duplicate target alias/);
     expect(host.order).toEqual([]);
   });
 
