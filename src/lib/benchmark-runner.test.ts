@@ -206,6 +206,44 @@ describe('startBenchmarkRun', () => {
     expect(called).toBe(false);
   });
 
+  it('rejects an explicitly-passed preparedRun whose reservation was stopped before its first dispatch', async () => {
+    // A run stopped before its very first dispatch has zero attempt rows -- the same as a
+    // never-touched reservation -- but its persisted status is `stopped`, not `running`. The
+    // "zero attempts" check alone would let this path re-execute it from scratch, dispatching
+    // real inference while the stored row stays `stopped` until finalization, and bypassing the
+    // required Resume path entirely. Only a reservation still recorded as `running` may go
+    // through this from-scratch path.
+    const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
+    const putSuite = await putBenchmarkSuite(s);
+    expect(putSuite.ok).toBe(true);
+    const prepared = await prepareBenchmarkRun(s);
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) throw new Error('unreachable');
+    const preStoppedController = createStopController();
+    preStoppedController.stop();
+    let firstCalled = false;
+    const first = await startBenchmarkRun(s, async () => {
+      firstCalled = true;
+      return { ok: true, responseText: 'x' };
+    }, preStoppedController, prepared.run);
+    expect(first.ok).toBe(true);
+    expect(first.result?.status).toBe('stopped');
+    expect(firstCalled).toBe(false);
+    const attempts = await listAttemptsForRun(prepared.run.id);
+    expect(attempts.value).toHaveLength(0);
+    const stored = await getBenchmarkRun(prepared.run.id);
+    expect(stored.value!.status).toBe('stopped');
+
+    let secondCalled = false;
+    const outcome = await startBenchmarkRun(s, async () => {
+      secondCalled = true;
+      return { ok: true, responseText: 'x' };
+    }, undefined, prepared.run);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error).toMatch(/not in a fresh running state/);
+    expect(secondCalled).toBe(false);
+  });
+
   it('rejects an explicitly-passed preparedRun with a structurally invalid suite without throwing', async () => {
     const s = suite();
     const putSuite = await putBenchmarkSuite(s);

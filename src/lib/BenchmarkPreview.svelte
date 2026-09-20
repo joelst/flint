@@ -505,6 +505,12 @@
           {#each editingErrors as err}<li>{err}</li>{/each}
         </ul>
       {/if}
+      <!-- A save in flight must not let any control here keep mutating `editingDraft` --
+           a successful save clears the draft, and any edit made during that window would be
+           silently discarded rather than saved or visibly rejected. A native `fieldset` disables
+           every input/select/button inside it in one place, so a future control added here is
+           covered automatically instead of needing its own `disabled={editorBusy}` wiring. -->
+      <fieldset class="benchmark-editor-fieldset" disabled={editorBusy}>
       <label>
         Name
         <input type="text" bind:value={editingDraft.name} />
@@ -584,6 +590,7 @@
           Estimated attempts: {draftAttemptEstimate} / {BENCHMARK_MAX_ATTEMPTS}
         </p>
       {/if}
+      </fieldset>
 
       <div class="benchmark-editor-actions">
         <button type="button" class="primary" disabled={editorBusy} onclick={saveSuite}>
@@ -768,6 +775,12 @@
     display: flex;
     gap: 0.5rem;
     margin-top: 0.5rem;
+  }
+  .benchmark-editor-fieldset {
+    border: none;
+    margin: 0;
+    padding: 0;
+    min-width: 0;
   }
   .benchmark-errors {
     color: var(--danger, #c0392b);

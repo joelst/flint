@@ -38,13 +38,6 @@ export interface BenchmarkLifecycleHost {
   }>;
 }
 
-export function suiteHasExplicitVariants(
-  suite: BenchmarkSuite,
-  onlyTargetIndexes?: ReadonlySet<number>,
-): boolean {
-  return suite.targets.some((t, i) => (onlyTargetIndexes == null || onlyTargetIndexes.has(i)) && t.variantId != null);
-}
-
 function targetsToPrepare(suite: BenchmarkSuite, onlyTargetIndexes?: ReadonlySet<number>) {
   return suite.targets.filter((_, i) => onlyTargetIndexes == null || onlyTargetIndexes.has(i));
 }
@@ -184,15 +177,19 @@ async function pinThenLoad(
   const targets = targetsToPrepare(suite, onlyTargetIndexes);
   if (targets.length === 0) return { ok: true };
   const aliases = Array.from(new Set(targets.map((t) => t.alias)));
-  let pinError: string | null = null;
+  // Any pin failure -- not just for suites with explicit variants -- must abort preparation.
+  // Proceeding to load anyway would run the benchmark with no eviction protection at all: under
+  // an enabled idle/cap policy, loading a later target or merely pausing between attempts could
+  // unload an earlier target mid-run, contradicting the "pinned for the run's duration"
+  // invariant and making results depend on eviction/reload timing instead of being measured
+  // consistently. Still unpin during cleanup: a failed pin acknowledgement is uncertain, not
+  // proven absent, so the priority lease may need releasing regardless.
   try {
     await host.pinAliases(aliases);
   } catch (e: unknown) {
-    pinError = e instanceof Error ? e.message : String(e);
-    if (suiteHasExplicitVariants(suite, onlyTargetIndexes)) {
-      await host.unpin().catch(() => {});
-      return { ok: false, error: `Could not pin targets with explicit variants: ${pinError}` };
-    }
+    const pinError = e instanceof Error ? e.message : String(e);
+    await host.unpin().catch(() => {});
+    return { ok: false, error: `Could not pin targets: ${pinError}` };
   }
   if (stopController?.isStopped()) {
     await host.unpin().catch(() => {});

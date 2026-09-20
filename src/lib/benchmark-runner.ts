@@ -388,6 +388,19 @@ export async function startBenchmarkRun(
         error: `cannot start: run "${preparedRun.id}" already has recorded attempts — resume it instead of starting it again`,
       };
     }
+    // Zero attempts alone is not enough: a run stopped before its first dispatch also has zero
+    // attempt rows, but its persisted status is `stopped` (or `recovery_required`/`completed`),
+    // not `running`. Starting it here would dispatch real inference while the stored row stays
+    // in that non-running status until finalization, and would bypass the required Resume path
+    // entirely (Resume is what re-opens a stopped run for further attempts). Only a reservation
+    // still recorded as `running` -- i.e. truly never touched since `prepareBenchmarkRun`
+    // created it -- may be executed from scratch via this path.
+    if (reservation.value.status !== 'running') {
+      return {
+        ok: false,
+        error: `cannot start: run "${preparedRun.id}" is not in a fresh running state (status "${reservation.value.status}") — resume it instead of starting it again`,
+      };
+    }
     run = reservation.value;
   } else {
     // Same normalize-then-freeze reasoning as `prepareBenchmarkRun` above: freezing the

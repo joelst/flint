@@ -93,7 +93,7 @@ describe('loadBenchmarkTargets / pinThenLoad order', () => {
     expect(host.order).toContain('unpin');
   });
 
-  it('does not load when pin fails and the suite has explicit variants', async () => {
+  it('aborts preparation when pin fails, regardless of whether any target has an explicit variant', async () => {
     const host = fakeHost({
       pinAliases: async () => { throw new Error('pin failed'); },
     });
@@ -103,24 +103,32 @@ describe('loadBenchmarkTargets / pinThenLoad order', () => {
     expect(result.ok).toBe(true);
     const done = result.ok ? await result.execution.done : null;
     expect(done?.ok).toBe(false);
-    expect(done && 'error' in done && done.error).toMatch(/explicit variants/);
+    expect(done && 'error' in done && done.error).toMatch(/Could not pin targets/);
     expect(host.order.filter((x) => x.startsWith('load:'))).toEqual([]);
     expect(host.order.filter((x) => x === 'unpin').length).toBeGreaterThanOrEqual(1);
   });
 
-  it('still loads when pin fails and no target has an explicit variant', async () => {
+  it('aborts preparation when pin fails even though no target has an explicit variant', async () => {
+    // Pin failure means the run would have no eviction protection at all -- proceeding to load
+    // anyway makes results depend on eviction/reload timing instead of being measured
+    // consistently, contradicting the "pinned for the run's duration" invariant regardless of
+    // whether any target happens to have an explicit variant.
     const host = fakeHost({
       pinAliases: async (aliases) => {
         host.order.push(`pin:${aliases.join(',')}`);
         throw new Error('pin failed');
       },
     });
-    const result = await startBenchmarkSession(suite(), host);
+    const s = suite();
+    await putBenchmarkSuite(s);
+    const result = await startBenchmarkSession(s, host);
     expect(result.ok).toBe(true);
     const done = result.ok ? await result.execution.done : null;
-    expect(done?.ok).toBe(true);
+    expect(done?.ok).toBe(false);
+    expect(done && 'error' in done && done.error).toMatch(/Could not pin targets/);
     expect(host.order[0]).toBe('pin:model-a');
-    expect(host.order).toContain('load:model-a');
+    expect(host.order.filter((x) => x.startsWith('load:'))).toEqual([]);
+    expect(host.order.filter((x) => x === 'unpin').length).toBeGreaterThanOrEqual(1);
   });
 
   it('does not pin or load a live suite with duplicate target aliases', async () => {
@@ -407,7 +415,7 @@ describe('resumeBenchmarkSession', () => {
     expect(host.order.filter((x) => x.startsWith('load:'))).toEqual(['load:model-pending']);
   });
 
-  it('resume pin failure is fatal only when a still-pending target has an explicit variant', async () => {
+  it('resume pin failure is fatal regardless of whether a still-pending target has an explicit variant', async () => {
     const s = suite({
       targets: [
         { alias: 'model-done', variantId: 'v1' },
@@ -437,10 +445,9 @@ describe('resumeBenchmarkSession', () => {
     const resumed = await resumeBenchmarkSession(started.run!.id, host);
     expect(resumed.ok).toBe(true);
     const done = resumed.ok ? await resumed.execution.done : null;
-    expect(done?.ok).toBe(true);
+    expect(done?.ok).toBe(false);
     expect(host.order[0]).toBe('pin:model-pending');
-    expect(host.order).toContain('load:model-pending');
-    expect(host.order).not.toContain('load:model-done');
+    expect(host.order.filter((x) => x.startsWith('load:'))).toEqual([]);
   });
 
   it('treats a user Stop during resume pin/load as a stopped outcome, not a failed run', async () => {
