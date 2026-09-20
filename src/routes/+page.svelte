@@ -9756,6 +9756,11 @@ Output only the summary text, no preamble.`;
 
   :global(html) {
     height: 100%;
+    color-scheme: dark;
+  }
+
+  :global(html[data-theme="light"]) {
+    color-scheme: light;
   }
 
   :global(body) {
@@ -10088,6 +10093,15 @@ Output only the summary text, no preamble.`;
     display: flex;
     gap: 12px;
     margin-bottom: 16px;
+  }
+
+  .toolbar select {
+    flex: 0 0 auto;
+    padding: 8px 12px;
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    border-radius: 6px;
   }
 
   .accel-panel {
