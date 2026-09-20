@@ -65,6 +65,7 @@
     type LogEntry,
     type CacheInventory,
   } from "$lib/sdk";
+  import type { ModelPriorityEntry, ModelPriority } from "$lib/ipc-contracts";
   import { evaluateStartupPreload } from "$lib/accelerator-readiness";
   import {
     evaluate as evaluateWatch,
@@ -182,6 +183,18 @@
     buildStoppedPreDispatchResult,
     classifyCompareSlotError,
   } from "$lib/compare-slot-outcome";
+  import BenchmarkPreview from "$lib/BenchmarkPreview.svelte";
+  import {
+    startBenchmarkRun,
+    resumeBenchmarkRun,
+    createStopController,
+    type AttemptTransport,
+    type AttemptTransportRequest,
+    type AttemptTransportResult,
+    type StopController,
+  } from "$lib/benchmark-runner";
+  import { getBenchmarkRun, listBenchmarkRunsForSuite } from "$lib/benchmark-repository";
+  import type { BenchmarkSuite } from "$lib/benchmark-suite";
 
   // Integrations tab state
   let integrationsOS = $state<'windows' | 'unix'>(detectPlatform());
@@ -204,13 +217,19 @@
   }
 
   // Simple client-side navigation
-  type View = "models" | "chat" | "audio" | "monitor" | "diagnostics" | "integrations" | "help" | "settings" | "compare";
+  type View = "models" | "chat" | "audio" | "monitor" | "diagnostics" | "integrations" | "help" | "settings" | "compare" | "benchmark";
   let currentView = $state<View>("models");
 
   // Keep last Chat/Voice view in sync with every currentView assignment (shortcuts, model-load, CTAs), not only the toggle.
   let playgroundLastView = $state<"chat" | "audio">("chat");
   $effect(() => {
     if (currentView === "chat" || currentView === "audio") playgroundLastView = currentView;
+  });
+
+  // Disabling the preview flag while the Benchmark view is open must navigate away immediately
+  // — an ungated route must never stay reachable just because it was already open.
+  $effect(() => {
+    if (currentView === "benchmark" && !benchmarkPreviewEnabled) currentView = "models";
   });
 
   const FIRST_RUN_KEY = "flint-first-run-dismissed-v1";
@@ -724,6 +743,226 @@
   // sidecar is a child process, so quitting the app would kill the endpoint).
   let keepServiceInBackground = $state(true);
   let trayHideNotified = false;
+
+  // Settings: preview features, disabled by default. Benchmark Preview is a headless-tested
+  // feature (Arena PR4A) getting its first UI surface here — gated so it never appears for
+  // users who haven't opted in.
+  let benchmarkPreviewEnabled = $state(false);
+
+  // Benchmark Preview: run lifecycle state, kept at this top level (not inside
+  // BenchmarkPreview.svelte) so an in-progress run keeps executing if the user navigates to
+  // another view — mirrors how Quick Compare's isComparing/compareSlots state already survives
+  // view switches by living here rather than in a child component.
+  /** Set synchronously (before any await) at the top of start/resume, so a second click cannot
+   * race past the check — this is the global single-active-run guard the plan requires; it is
+   * distinct from the runner's own per-run-id `activeRunIds` guard, which cannot prevent a
+   * second *different* run from starting. */
+  let benchmarkRunInFlight = $state(false);
+  /** The run currently executing, once its id is known — see `discoverBenchmarkRunId` below for
+   * why this lags slightly behind `benchmarkRunInFlight` becoming true. */
+  let benchmarkActiveRunId = $state<string | null>(null);
+  let benchmarkStopController: StopController | null = null;
+  /** Aliases pinned for the duration of the active run; restored to 'normal' in a finally once
+   * the run halts, so a benchmark never permanently changes a model's eviction priority. */
+  let benchmarkPinnedAliases: string[] = [];
+
+  /**
+   * `startBenchmarkRun`/`resumeBenchmarkRun` do not resolve until the whole run halts, and they
+   * generate the run id internally — so the only way to learn it early enough for the progress
+   * UI to poll during execution is to read it back. `createBenchmarkRun` commits before any
+   * attempt is dispatched (the runner's own write-ahead contract), so polling briefly for a
+   * run row newer than `notBefore` is reliable in practice, not a race with the first dispatch.
+   */
+  async function discoverBenchmarkRunId(suiteId: string, notBefore: number): Promise<string | null> {
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const res = await listBenchmarkRunsForSuite(suiteId);
+      if (res.ok) {
+        const found = (res.value ?? []).find((r) => r.createdAt >= notBefore && r.status === 'running');
+        if (found) return found.id;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return null;
+  }
+
+  /** Pins each target alias so pool eviction cannot unload it mid-run. Overlays onto the user's
+   * *actual* configured priorities (`modelPriorities`, the source of truth `pushMemorySettings`
+   * already sends) rather than `state.models[*].priority`, which does not exist on `ModelInfo` —
+   * reading it would silently treat every model as 'normal' and could clobber a user's real
+   * 'low'/'pinned' choices for models outside the benchmark. */
+  async function pinBenchmarkTargets(aliases: string[]): Promise<void> {
+    try {
+      const overlay: ModelPriorityEntry[] = Object.entries(modelPriorities)
+        .filter(([alias]) => !aliases.includes(alias))
+        .map(([alias, priority]) => ({ alias, priority: priority as ModelPriority }));
+      const pinned: ModelPriorityEntry[] = aliases.map((alias) => ({ alias, priority: 'pinned' as ModelPriority }));
+      await sdkSetModelPriorities([...overlay, ...pinned], { refresh: false });
+      benchmarkPinnedAliases = aliases;
+    } catch (e: any) {
+      // Pinning is a correctness improvement, not a hard requirement — continuing without it
+      // just re-exposes targets to ordinary idle-unload/max-resident eviction during the run.
+      appendAppLog(`Benchmark: could not pin target priorities: ${e?.message || e}`, 'warn');
+    }
+  }
+
+  /** Restores the sidecar's priority map to exactly what the user has configured, by resending
+   * `modelPriorities` (never mutated by pinning above) rather than reconstructing a snapshot —
+   * this cannot drift even if the user changed a priority elsewhere while the benchmark ran. */
+  async function unpinBenchmarkTargets(): Promise<void> {
+    if (benchmarkPinnedAliases.length === 0) return;
+    benchmarkPinnedAliases = [];
+    try {
+      await pushMemorySettings();
+    } catch (e: any) {
+      appendAppLog(`Benchmark: could not restore target priorities: ${e?.message || e}`, 'warn');
+    }
+  }
+
+  /** Loads every target sequentially with its explicit variantId before a run starts — variant
+   * pinning needs a real prior load, since `chatCompletion` only accepts an alias. Sequential,
+   * not parallel, to match Quick Compare's existing one-at-a-time load pattern and avoid
+   * spiking memory with concurrent downloads of large models. */
+  async function loadBenchmarkTargets(suite: BenchmarkSuite): Promise<{ ok: true } | { ok: false; error: string }> {
+    for (const target of suite.targets) {
+      try {
+        await sdkLoadModel({ alias: target.alias }, undefined, target.variantId ?? undefined);
+      } catch (e: any) {
+        return {
+          ok: false,
+          error: `Could not load ${target.alias}${target.variantId ? ` (${target.variantId})` : ''}: ${e?.message || e}`,
+        };
+      }
+    }
+    return { ok: true };
+  }
+
+  /** Maps a benchmark attempt request onto the real `chatCompletion` SDK call. The only impure
+   * boundary `startBenchmarkRun`/`resumeBenchmarkRun` depend on — everything else in the runner
+   * stays pure and unit-tested against a fake transport. */
+  function createBenchmarkTransport(): AttemptTransport {
+    return async (request: AttemptTransportRequest): Promise<AttemptTransportResult> => {
+      try {
+        const res = await chatCompletion(request.alias, request.messages, {
+          maxTokens: request.maxTokens,
+          temperature: request.temperature,
+        });
+        const content = res?.choices?.[0]?.message?.content;
+        if (typeof content !== 'string') {
+          return { ok: false, errorMessage: 'Response had no message content' };
+        }
+        return {
+          ok: true,
+          responseText: content,
+          servedVariantId: res?.servedVariantId ?? null,
+          usage: res?.usage
+            ? { promptTokens: res.usage.prompt_tokens, completionTokens: res.usage.completion_tokens }
+            : undefined,
+        };
+      } catch (e: any) {
+        return { ok: false, errorMessage: e?.message || String(e) };
+      }
+    };
+  }
+
+  /** Common cleanup once a run's execution has fully halted (completed/stopped/recovery), shared
+   * by both start and resume so neither path can forget a step the other remembers. */
+  async function finishBenchmarkExecution(): Promise<void> {
+    benchmarkStopController = null;
+    benchmarkActiveRunId = null;
+    benchmarkRunInFlight = false;
+    await unpinBenchmarkTargets();
+  }
+
+  type BenchmarkLifecycleOutcome = { ok: true; runId: string } | { ok: false; error: string };
+
+  /**
+   * Returns as soon as the run is known to have started (its id discovered) rather than waiting
+   * for the entire run to finish — `startBenchmarkRun` itself does not resolve until the whole
+   * schedule halts, and blocking the caller on that would leave the progress UI with nothing to
+   * poll and no way to reach the Stop button until the run was already over. The run keeps
+   * executing in a detached promise; `benchmarkRunInFlight` (the single-active-run guard) stays
+   * true until that promise settles, in `finishBenchmarkExecution`.
+   */
+  async function startBenchmarkPreviewRun(suite: BenchmarkSuite): Promise<BenchmarkLifecycleOutcome> {
+    if (benchmarkRunInFlight) return { ok: false, error: 'A benchmark run is already active.' };
+    benchmarkRunInFlight = true;
+    try {
+      const loaded = await loadBenchmarkTargets(suite);
+      if (!loaded.ok) {
+        benchmarkRunInFlight = false;
+        return loaded;
+      }
+      await pinBenchmarkTargets(Array.from(new Set(suite.targets.map((t) => t.alias))));
+
+      const stopController = createStopController();
+      benchmarkStopController = stopController;
+      const notBefore = Date.now();
+      startBenchmarkRun(suite, createBenchmarkTransport(), stopController)
+        .then((outcome) => {
+          if (!outcome.ok) appendAppLog(`Benchmark run failed: ${outcome.error}`, 'error');
+        })
+        .catch((e: any) => appendAppLog(`Benchmark run crashed: ${e?.message || e}`, 'error'))
+        .finally(() => { void finishBenchmarkExecution(); });
+
+      const runId = await discoverBenchmarkRunId(suite.id, notBefore);
+      if (!runId) {
+        // The run is genuinely executing (or already finished) — `finishBenchmarkExecution`
+        // above will still clean up when it settles — but this caller cannot hand back a run id
+        // to open a detail view yet.
+        return { ok: false, error: 'Benchmark run started, but its id could not be confirmed yet. Check the run list shortly.' };
+      }
+      benchmarkActiveRunId = runId;
+      return { ok: true, runId };
+    } catch (e: any) {
+      await finishBenchmarkExecution();
+      return { ok: false, error: e?.message || String(e) };
+    }
+  }
+
+  /** Resume already knows its run id up front (the caller supplies it), so — unlike start —
+   * there is no id-discovery step; it can return as soon as the run is confirmed under way. */
+  async function resumeBenchmarkPreviewRun(runId: string): Promise<BenchmarkLifecycleOutcome> {
+    if (benchmarkRunInFlight) return { ok: false, error: 'A benchmark run is already active.' };
+    benchmarkRunInFlight = true;
+    try {
+      const existing = await getBenchmarkRun(runId);
+      if (!existing.ok || !existing.value) {
+        benchmarkRunInFlight = false;
+        return { ok: false, error: existing.error || 'Run not found' };
+      }
+      const suite = existing.value.suite;
+
+      const loaded = await loadBenchmarkTargets(suite);
+      if (!loaded.ok) {
+        benchmarkRunInFlight = false;
+        return loaded;
+      }
+      await pinBenchmarkTargets(Array.from(new Set(suite.targets.map((t) => t.alias))));
+
+      const stopController = createStopController();
+      benchmarkStopController = stopController;
+      benchmarkActiveRunId = runId;
+
+      resumeBenchmarkRun(runId, createBenchmarkTransport(), stopController)
+        .then((outcome) => {
+          if (!outcome.ok) appendAppLog(`Benchmark resume failed: ${outcome.error}`, 'error');
+        })
+        .catch((e: any) => appendAppLog(`Benchmark run crashed: ${e?.message || e}`, 'error'))
+        .finally(() => { void finishBenchmarkExecution(); });
+
+      return { ok: true, runId };
+    } catch (e: any) {
+      await finishBenchmarkExecution();
+      return { ok: false, error: e?.message || String(e) };
+    }
+  }
+
+  /** Stop is admission-only (see `createStopController`'s contract): it prevents the *next*
+   * dispatch, not an in-flight one. Any attempt already dispatched when this is called may still
+   * complete and be recorded — Flint never claims otherwise. */
+  function stopBenchmarkPreviewRun(): void {
+    benchmarkStopController?.stop();
+  }
 
   // UI: keyboard shortcut help modal
   let showShortcutsHelp = $state(false);
@@ -2408,6 +2647,7 @@
           networkPort,
           networkBindAddress,
           keepServiceInBackground,
+          benchmarkPreviewEnabled,
         }),
       );
       // Persist immediately so a failure is not sticky. Assigning the same value is a no-op in
@@ -2508,6 +2748,7 @@
         }
         if (typeof data.autoStartService === 'boolean') autoStartService = data.autoStartService;
         if (typeof data.keepServiceInBackground === 'boolean') keepServiceInBackground = data.keepServiceInBackground;
+        if (typeof data.benchmarkPreviewEnabled === 'boolean') benchmarkPreviewEnabled = data.benchmarkPreviewEnabled;
         if (typeof data.defaultChatAlias === 'string') defaultChatAlias = data.defaultChatAlias;
         if (typeof data.defaultAudioAlias === 'string') defaultAudioAlias = data.defaultAudioAlias;
         if (typeof data.networkPort === 'number' && data.networkPort >= 1024 && data.networkPort <= 65535) {
@@ -6348,6 +6589,21 @@ Output only the summary text, no preamble.`;
           </span>
           <span class="nav-label">Model Arena</span>
         </button>
+        {#if benchmarkPreviewEnabled}
+          <button
+            class="nav-item"
+            class:active={currentView === "benchmark"}
+            onclick={() => (currentView = "benchmark")}
+            title="Benchmark Preview — measured, repeatable multi-model runs"
+          >
+            <span class="nav-icon" aria-hidden="true">
+              <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M5 19V11M12 19V5M19 19V14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </span>
+            <span class="nav-label">Benchmark</span>
+          </button>
+        {/if}
       </div>
 
       <div class="nav-section">
@@ -9255,6 +9511,17 @@ Output only the summary text, no preamble.`;
           {/if}
         </div>
 
+      {:else if currentView === "benchmark"}
+        <div class="view benchmark-view">
+          <BenchmarkPreview
+            availableModels={chatPickerModels}
+            activeRunId={benchmarkActiveRunId}
+            onStart={startBenchmarkPreviewRun}
+            onStop={stopBenchmarkPreviewRun}
+            onResume={resumeBenchmarkPreviewRun}
+          />
+        </div>
+
       {:else if currentView === "settings"}
         <div class="view settings-view">
           <h2>Settings</h2>
@@ -9557,6 +9824,24 @@ Output only the summary text, no preamble.`;
               </div>
             </div>
           {/if}
+
+          <div class="settings-section">
+            <h3>Preview features</h3>
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-name">Benchmark Preview</span>
+                <span class="setting-desc">
+                  Adds a "Benchmark" entry under Build for measured, repeatable multi-model runs
+                  (distinct from Model Arena's one-shot side-by-side compare). Early preview —
+                  off by default.
+                </span>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" bind:checked={benchmarkPreviewEnabled} onchange={persistChat} />
+                <span class="toggle-track"></span>
+              </label>
+            </div>
+          </div>
 
           <div class="settings-section">
             <h3>Appearance</h3>

@@ -303,6 +303,44 @@ export async function deleteBenchmarkSuite(id: string): Promise<RepositoryResult
   return okResult(undefined);
 }
 
+/**
+ * Guarded upsert: rejects (inside the same transaction as the count check, so a concurrently
+ * created run cannot race past it) if the suite already has any runs. Editing a suite with run
+ * history would silently change what an already-frozen run snapshot appears to represent, so
+ * this is the only path the UI's suite editor should use once it stops treating "zero runs" as
+ * a merely advisory, staleness-prone check.
+ */
+export async function putBenchmarkSuiteIfNoRuns(suite: BenchmarkSuite): Promise<RepositoryResult<void>> {
+  const validated = validateBenchmarkSuite(suite);
+  if (!validated.ok) return failResult(validated.errors.join('; '));
+  const suiteId = validated.value!.id;
+  const result = await withStores<void>([SUITES_STORE, RUNS_STORE], 'readwrite', (tx, trackRequest) => {
+    const runsIndex = tx.objectStore(RUNS_STORE).index(RUNS_BY_SUITE_INDEX);
+    const countRequest = runsIndex.count(suiteId) as IDBRequest<number>;
+    return chainFromSuccess(countRequest, trackRequest, (count) => {
+      if (count > 0) throw new Error(`suite "${suiteId}" has ${count} run(s) and can no longer be edited`);
+      return tx.objectStore(SUITES_STORE).put(validated.value) as IDBRequest<IDBValidKey>;
+    }).then(() => undefined);
+  });
+  if (!result.ok) return failResult(result.error!);
+  return okResult(undefined);
+}
+
+/** Guarded delete counterpart to `putBenchmarkSuiteIfNoRuns` — see its docstring. */
+export async function deleteBenchmarkSuiteIfNoRuns(id: string): Promise<RepositoryResult<void>> {
+  const key = suiteIdKey(id);
+  const result = await withStores<void>([SUITES_STORE, RUNS_STORE], 'readwrite', (tx, trackRequest) => {
+    const runsIndex = tx.objectStore(RUNS_STORE).index(RUNS_BY_SUITE_INDEX);
+    const countRequest = runsIndex.count(key) as IDBRequest<number>;
+    return chainFromSuccess(countRequest, trackRequest, (count) => {
+      if (count > 0) throw new Error(`suite "${key}" has ${count} run(s) and cannot be deleted`);
+      return tx.objectStore(SUITES_STORE).delete(key) as IDBRequest<undefined>;
+    }).then(() => undefined);
+  });
+  if (!result.ok) return failResult(result.error!);
+  return okResult(undefined);
+}
+
 // --- Runs and attempts -------------------------------------------------------------------
 //
 // A run's suite snapshot is frozen at creation and never re-validated against the live

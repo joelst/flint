@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createBenchmarkRun,
   deleteBenchmarkSuite,
+  deleteBenchmarkSuiteIfNoRuns,
   getBenchmarkRun,
   getBenchmarkSuite,
   listAttemptsForRun,
@@ -12,6 +13,7 @@ import {
   listDispatchedAttemptsForRun,
   openBenchmarkDatabase,
   putBenchmarkSuite,
+  putBenchmarkSuiteIfNoRuns,
   recordAttemptDispatched,
   recordAttemptTerminal,
   updateBenchmarkRunStatus,
@@ -27,6 +29,15 @@ const suite = (over: Partial<BenchmarkSuite> = {}): BenchmarkSuite => ({
   cases: [{ id: 'c1', prompt: 'What is 2+2?' }],
   warmupCount: 1,
   repeatCount: 1,
+  ...over,
+});
+
+const run = (over: Partial<BenchmarkRun> = {}): BenchmarkRun => ({
+  id: 'run-1',
+  suiteId: 'suite-1',
+  suite: suite(),
+  createdAt: 1700000000000,
+  status: 'running',
   ...over,
 });
 
@@ -103,6 +114,43 @@ describe('benchmark-repository', () => {
   it('deleting a suite that does not exist is not an error', async () => {
     const del = await deleteBenchmarkSuite('does-not-exist');
     expect(del.ok).toBe(true);
+  });
+
+  it('putBenchmarkSuiteIfNoRuns saves a suite with zero runs', async () => {
+    const result = await putBenchmarkSuiteIfNoRuns(suite());
+    expect(result).toEqual({ ok: true, value: undefined });
+    const got = await getBenchmarkSuite('suite-1');
+    expect(got.value).toEqual(suite());
+  });
+
+  it('putBenchmarkSuiteIfNoRuns rejects once the suite has any runs, atomically with the write', async () => {
+    await putBenchmarkSuite(suite());
+    await createBenchmarkRun(run());
+    const result = await putBenchmarkSuiteIfNoRuns(suite({ name: 'Renamed' }));
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/run\(s\) and can no longer be edited/);
+    // The rejected write must not have landed — this is what makes it a real invariant rather
+    // than an advisory check the caller could race past.
+    const got = await getBenchmarkSuite('suite-1');
+    expect(got.value?.name).toBe('Arithmetic');
+  });
+
+  it('deleteBenchmarkSuiteIfNoRuns deletes a suite with zero runs', async () => {
+    await putBenchmarkSuite(suite());
+    const result = await deleteBenchmarkSuiteIfNoRuns('suite-1');
+    expect(result).toEqual({ ok: true, value: undefined });
+    const got = await getBenchmarkSuite('suite-1');
+    expect(got.value).toBeNull();
+  });
+
+  it('deleteBenchmarkSuiteIfNoRuns refuses to delete once the suite has any runs', async () => {
+    await putBenchmarkSuite(suite());
+    await createBenchmarkRun(run());
+    const result = await deleteBenchmarkSuiteIfNoRuns('suite-1');
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/run\(s\) and cannot be deleted/);
+    const got = await getBenchmarkSuite('suite-1');
+    expect(got.value).not.toBeNull();
   });
 
   it('reports a stored corrupt row as an error, rather than silently excluding it', async () => {
