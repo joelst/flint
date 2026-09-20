@@ -690,6 +690,8 @@
    * runComparison/stopComparison, never bound directly in the template.
    */
   let compareActiveStream: { controller: AbortController; requestId: number | null } | null = null;
+  /** Slot key currently receiving deltas, for MessageRenderer's streaming-reasoning buffer. */
+  let compareStreamingSlotKey = $state<string | null>(null);
   let compareRunGeneration = 0;
   let compareStopAckError: string | null = null;
   let compareStopAckWaits: Promise<void>[] = [];
@@ -735,11 +737,15 @@
   let chatMessages = $state<any[]>([]);
   let chatInput = $state("");
   let isStreaming = $state(false);
+  /** id of the assistant message currently receiving deltas for the visible thread, if any. */
+  let activeStreamAssistantId = $state<string | null>(null);
   /** In-flight generations keyed by the conversation they belong to, not the visible thread. */
   const streamsByConversation = new Map();
 
   function syncVisibleStreaming() {
-    isStreaming = !!(threadLoadedFor && streamsByConversation.has(threadLoadedFor));
+    const stream = threadLoadedFor ? streamsByConversation.get(threadLoadedFor) : undefined;
+    isStreaming = !!stream;
+    activeStreamAssistantId = stream?.assistantId ?? null;
   }
 
   function abortStreamFor(conversationId: string | null) {
@@ -3726,6 +3732,7 @@ updateStateFromSdk();
           let firstDeltaAt: number | null = null;
           const requestController = new AbortController();
           compareActiveStream = { controller: requestController, requestId: null };
+          compareStreamingSlotKey = slot.key;
           let res: any;
           try {
             res = await chatCompletionStream(
@@ -3766,6 +3773,9 @@ updateStateFromSdk();
           } finally {
             if (compareActiveStream && compareActiveStream.controller === requestController) {
               compareActiveStream = null;
+            }
+            if (compareStreamingSlotKey === slot.key) {
+              compareStreamingSlotKey = null;
             }
           }
           const nativeStreaming = !!res?.nativeStreaming;
@@ -7542,6 +7552,8 @@ Output only the summary text, no preamble.`;
                           <MessageRenderer
                             content={msg.content}
                             role={msg.role}
+                            isStreaming={isStreaming && msg.id === activeStreamAssistantId}
+                            assumeReasoning={currentModelTags.includes("reasoning")}
                           />
                         </div>
                       </div>
@@ -9231,7 +9243,11 @@ Output only the summary text, no preamble.`;
                   <div class="result-body">
                     {#if r.content}
                       <div class="result-content">
-                        <MessageRenderer content={r.content || ""} />
+                        <MessageRenderer
+                          content={r.content || ""}
+                          isStreaming={compareStreamingSlotKey === slot.key}
+                          assumeReasoning={getModelTags(slot.alias).includes("reasoning")}
+                        />
                       </div>
                       {#if r.status === "stopped" && typeof r.nativeStreaming === "boolean"}
                         <p class="muted small">
@@ -10986,6 +11002,7 @@ Output only the summary text, no preamble.`;
     display: flex;
     flex-direction: column;
     min-width: 0;
+    min-height: 0;
   }
 
   .chat-header {
