@@ -53,6 +53,11 @@
   let selectedRunAttempts: AttemptSummary[] = [];
   let lifecycleBusy = false;
   let lifecycleError = "";
+  /** Separate from `lifecycleError`: a poll tick's storage-read failure must never clobber (or
+   * be clobbered by) a user-initiated Start/Resume/Stop/Export error sharing the same variable —
+   * they can be in flight at the same moment (e.g. a poll tick landing right after a failed
+   * Resume sets its own message) and each must remain visible until its own next resolution. */
+  let pollError = "";
   let pollHandle: ReturnType<typeof setInterval> | null = null;
   let refreshGeneration = 0;
   /** Guards `refreshSuites()` the same way `refreshGeneration` guards a run refresh: a slower,
@@ -111,6 +116,8 @@
     selectedSuiteId = id;
     selectedRunId = null;
     selectedRun = null;
+    lifecycleError = "";
+    pollError = "";
     stopPolling();
     await refreshRunsForSelectedSuite(id);
   }
@@ -254,10 +261,23 @@
     const generation = ++refreshGeneration;
     const runRes = await getBenchmarkRun(runId);
     if (generation !== refreshGeneration || selectedRunId !== runId) return;
-    if (runRes.ok) selectedRun = runRes.value ?? null;
+    if (runRes.ok) {
+      selectedRun = runRes.value ?? null;
+      pollError = "";
+    } else {
+      // A transient storage read failure must never be treated as "nothing changed" — the run
+      // could have finished, stopped, or crashed in the same window, and silently keeping the
+      // last-known snapshot would show a stale "running" status (and Stop button) forever with
+      // no indication anything is wrong. Surface it; the next poll tick will clear it on success.
+      pollError = `Could not refresh run status: ${runRes.error}`;
+    }
     const summariesRes = await listAttemptSummariesForRun(runId);
     if (generation !== refreshGeneration || selectedRunId !== runId) return;
-    if (summariesRes.ok) selectedRunAttempts = summariesRes.value ?? [];
+    if (summariesRes.ok) {
+      selectedRunAttempts = summariesRes.value ?? [];
+    } else {
+      pollError = `Could not refresh run attempts: ${summariesRes.error}`;
+    }
     if (!selectedRun || selectedRun.id !== activeRunId || selectedRun.status !== "running") {
       // This run just left the live/active state (finished, was stopped, or crashed) while we
       // were polling it — the run-list row (`runsForSelectedSuite`) was fetched once when the
@@ -273,6 +293,7 @@
   async function openRun(runId: string) {
     selectedRunId = runId;
     lifecycleError = "";
+    pollError = "";
     stopPolling();
     const token = ++openRunToken;
     await refreshSelectedRun();
@@ -326,8 +347,12 @@
   async function exportRun(runId: string) {
     const runRes = await getBenchmarkRun(runId);
     const attemptsRes = await listAttemptsForRun(runId);
+    if (destroyed) return;
     if (!runRes.ok || !runRes.value || !attemptsRes.ok) {
-      lifecycleError = "Could not build export";
+      // A slow export racing the user navigating to a different run/suite must not attribute
+      // its failure to whatever is now selected — only surface the error while this export's
+      // run is still the one on screen; a successful export still downloads regardless.
+      if (selectedRunId === runId) lifecycleError = "Could not build export";
       return;
     }
     const payload = buildBenchmarkExport(runRes.value, attemptsRes.value ?? []);
@@ -520,6 +545,7 @@
           {#if selectedRun}
             {@const currentRun = selectedRun}
             <div class="benchmark-run-detail">
+              {#if pollError}<div class="warning-banner">{pollError}</div>{/if}
               <div class="benchmark-run-actions">
                 {#if selectedRunIsActive}
                   <button type="button" class="secondary small" onclick={handleStop}>Stop</button>
