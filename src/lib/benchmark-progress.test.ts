@@ -42,6 +42,7 @@ describe('summarizeAttempt', () => {
     const summary = summarizeAttempt(full);
     expect(summary).toEqual({
       id: 'exec-1',
+      runId: 'run-1',
       logicalAttemptId: 't0:c0:r0',
       targetIndex: 0,
       phase: 'measured',
@@ -114,13 +115,15 @@ describe('buildProgressMatrix', () => {
 });
 
 describe('isRunInterrupted', () => {
-  it('treats a persisted "running" status as interrupted, since no process is actually executing it after reload', () => {
-    expect(isRunInterrupted({ status: 'running' })).toBe(true);
+  it('treats a persisted "running" status as interrupted unless it is the live active run', () => {
+    expect(isRunInterrupted({ id: 'run-1', status: 'running' })).toBe(true);
+    expect(isRunInterrupted({ id: 'run-1', status: 'running' }, 'run-1')).toBe(false);
+    expect(isRunInterrupted({ id: 'run-1', status: 'running' }, 'run-other')).toBe(true);
   });
 
   it('treats every terminal status as not interrupted', () => {
-    expect(isRunInterrupted({ status: 'completed' })).toBe(false);
-    expect(isRunInterrupted({ status: 'stopped' })).toBe(false);
-    expect(isRunInterrupted({ status: 'recovery_required' })).toBe(false);
+    expect(isRunInterrupted({ id: 'run-1', status: 'completed' })).toBe(false);
+    expect(isRunInterrupted({ id: 'run-1', status: 'stopped' })).toBe(false);
+    expect(isRunInterrupted({ id: 'run-1', status: 'recovery_required' })).toBe(false);
   });
 });

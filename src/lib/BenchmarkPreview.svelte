@@ -26,6 +26,8 @@
    * status here — lifecycle state (start/stop/resume) itself lives in the parent so a run
    * survives navigating away from this view. */
   export let activeRunId: string | null = null;
+  /** True from the moment start/resume is requested until pin restore finishes. */
+  export let runInFlight: boolean = false;
   export let onStart: (suite: BenchmarkSuite) => Promise<{ ok: true; runId: string } | { ok: false; error: string }>;
   export let onStop: () => void;
   export let onResume: (runId: string) => Promise<{ ok: true; runId: string } | { ok: false; error: string }>;
@@ -184,11 +186,17 @@
   }
 
   async function refreshSelectedRun() {
-    if (!selectedRunId) return;
-    const runRes = await getBenchmarkRun(selectedRunId);
+    const runId = selectedRunId;
+    if (!runId) return;
+    const runRes = await getBenchmarkRun(runId);
+    if (selectedRunId !== runId) return;
     if (runRes.ok) selectedRun = runRes.value ?? null;
-    const summariesRes = await listAttemptSummariesForRun(selectedRunId);
+    const summariesRes = await listAttemptSummariesForRun(runId);
+    if (selectedRunId !== runId) return;
     if (summariesRes.ok) selectedRunAttempts = summariesRes.value ?? [];
+    if (!selectedRun || selectedRun.id !== activeRunId || selectedRun.status !== "running") {
+      stopPolling();
+    }
   }
 
   async function openRun(runId: string) {
@@ -196,10 +204,10 @@
     lifecycleError = "";
     stopPolling();
     await refreshSelectedRun();
-    // Throttled polling, not per-keystroke/per-render: a live progress matrix reads a lightweight
-    // projection (`listAttemptSummariesForRun`), but polling it on every tick would still be
-    // wasteful for a run with hundreds of attempts.
-    pollHandle = setInterval(refreshSelectedRun, 1500);
+    if (selectedRunId !== runId) return;
+    if (runId === activeRunId) {
+      pollHandle = setInterval(() => { void refreshSelectedRun(); }, 1500);
+    }
   }
 
   $: progressMatrix = selectedRun ? buildProgressMatrix(selectedRun.suite, selectedRunAttempts) : [];
@@ -362,7 +370,7 @@
             <span class="muted small">{suite.targets.length} target(s) · {suite.cases.length} case(s) · {runCountsBySuite[suite.id] ?? 0} run(s)</span>
           </button>
           <button type="button" class="tiny" onclick={() => startEditSuite(suite)}>Edit</button>
-          <button type="button" class="tiny danger-btn" onclick={() => removeSuite(suite)}>Delete</button>
+          <button type="button" class="tiny danger-btn" disabled={lifecycleBusy || runInFlight} onclick={() => removeSuite(suite)}>Delete</button>
         </div>
       {/each}
     </div>
@@ -393,7 +401,7 @@
               <li class:active={selectedRunId === run.id}>
                 <button type="button" class="benchmark-run-select" onclick={() => openRun(run.id)}>
                   <span>{new Date(run.createdAt).toLocaleString()}</span>
-                  <span class="badge">{isRunInterrupted(run) ? "interrupted" : run.status}</span>
+                  <span class="badge">{isRunInterrupted(run, activeRunId) ? "interrupted" : run.status}</span>
                   {#if run.id === activeRunId}<span class="badge">active</span>{/if}
                 </button>
               </li>
@@ -410,7 +418,7 @@
                     Stop prevents further dispatches; a model already asked to respond may still
                     finish. Flint only records a result if it durably receives and saves one.
                   </p>
-                {:else if isRunInterrupted(currentRun)}
+                {:else if isRunInterrupted(currentRun, activeRunId)}
                   <button type="button" class="primary small" disabled={lifecycleBusy || !!activeRunId} onclick={() => handleResume(currentRun.id)}>
                     {lifecycleBusy ? "Resuming…" : "Resume"}
                   </button>

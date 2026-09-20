@@ -63,7 +63,7 @@ afterEach(async () => {
 describe('benchmark-repository', () => {
   it('can rerun suites-store setup when the database version increases', async () => {
     expect((await putBenchmarkSuite(suite())).ok).toBe(true);
-    const db = await openBenchmarkDatabase(2);
+    const db = await openBenchmarkDatabase();
     try {
       expect(Array.from(db.objectStoreNames)).toContain('suites');
     } finally {
@@ -216,7 +216,7 @@ describe('benchmark-repository', () => {
     // module's wrapper, which never deliberately aborts on a normal write) — the property a
     // future runner's checkpoint writes will depend on.
     await new Promise<void>((resolve, reject) => {
-      const req = indexedDB.open('flint-benchmarks', 2);
+      const req = indexedDB.open('flint-benchmarks');
       req.onsuccess = () => {
         const db = req.result;
         const tx = db.transaction('suites', 'readwrite');
@@ -492,6 +492,9 @@ describe('benchmark-repository', () => {
 
 describe('benchmark-repository: runs and attempts (v2)', () => {
   const testSuite = suite();
+  beforeEach(async () => {
+    await putBenchmarkSuite(testSuite);
+  });
   const testRun = (over: Partial<BenchmarkRun> = {}): BenchmarkRun => ({
     id: 'run-1',
     suiteId: testSuite.id,
@@ -519,7 +522,8 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
   it('migrating a database that already has suites (v1) preserves them once upgraded to v2', async () => {
     // Simulates an existing v1 install: create only the `suites` store and one row, exactly as
     // the original PR3 schema would have left on disk, before this module ever runs its own v2
-    // upgrade path.
+    // upgrade path. Nested beforeEach already opened v3, so wipe first.
+    await resetDatabase();
     await new Promise<void>((resolve, reject) => {
       const req = indexedDB.open('flint-benchmarks', 1);
       req.onupgradeneeded = () => {
@@ -540,10 +544,18 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
 
     const db = await openBenchmarkDatabase();
     try {
-      expect(Array.from(db.objectStoreNames).sort()).toEqual(['attempts', 'runs', 'suites']);
+      expect(Array.from(db.objectStoreNames).sort()).toEqual(['attemptSummaries', 'attempts', 'runs', 'suites']);
     } finally {
       db.close();
     }
+  });
+
+  it('refuses to create a run whose suite row no longer exists', async () => {
+    await deleteBenchmarkSuite(testSuite.id);
+    const result = await createBenchmarkRun(testRun());
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/does not exist/);
+    expect(await getBenchmarkRun('run-1')).toEqual({ ok: true, value: null });
   });
 
   it('round-trips a run through create/get, and lists it by suite', async () => {
@@ -580,6 +592,23 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
     expect(result).toEqual({ ok: true, value: undefined });
     const listed = await listAttemptsForRun('run-1');
     expect(listed).toEqual({ ok: true, value: [testAttempt()] });
+  });
+
+  it('reads attempt summaries from the projection store, not full attempt bodies', async () => {
+    await recordAttemptDispatched(testAttempt());
+    const summaries = await listAttemptSummariesForRun('run-1');
+    expect(summaries.ok).toBe(true);
+    expect(summaries.value).toEqual([{
+      id: 'exec-1',
+      runId: 'run-1',
+      logicalAttemptId: 't0:c0:r0',
+      targetIndex: 0,
+      phase: 'measured',
+      caseIndex: 0,
+      repeatIndex: 0,
+      sequence: 0,
+      status: 'dispatched',
+    }]);
   });
 
   it('rejects recordAttemptDispatched for a non-dispatched status, matching the write-ahead-only contract', async () => {
@@ -653,6 +682,7 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
       ok: true,
       value: [{
         id: 'exec-1',
+        runId: 'run-1',
         logicalAttemptId: 't0:c0:r0',
         targetIndex: 0,
         phase: 'measured',

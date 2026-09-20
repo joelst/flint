@@ -16,6 +16,7 @@ import type { BenchmarkSuite } from './benchmark-suite';
 
 export interface AttemptSummary {
   id: string;
+  runId: string;
   logicalAttemptId: string;
   targetIndex: number;
   phase: LogicalAttempt['phase'];
@@ -29,6 +30,7 @@ export interface AttemptSummary {
 export function summarizeAttempt(attempt: BenchmarkAttempt): AttemptSummary {
   return {
     id: attempt.id,
+    runId: attempt.runId,
     logicalAttemptId: attempt.logicalAttemptId,
     targetIndex: attempt.targetIndex,
     phase: attempt.phase,
@@ -128,6 +130,9 @@ export function buildProgressMatrix(
  * flight." The UI must always label it as interrupted and offer Resume, never silently treat
  * a persisted `'running'` row as a live, in-progress run.
  */
-export function isRunInterrupted(run: Pick<BenchmarkRun, 'status'>): boolean {
-  return run.status === 'running';
+export function isRunInterrupted(
+  run: Pick<BenchmarkRun, 'id' | 'status'>,
+  activeRunId?: string | null,
+): boolean {
+  return run.status === 'running' && run.id !== activeRunId;
 }

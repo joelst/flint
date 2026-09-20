@@ -7,7 +7,7 @@ import {
   type AttemptTransport,
   type AttemptTransportResult,
 } from './benchmark-runner';
-import { getBenchmarkRun, listAttemptsForRun, listBenchmarkRunsForSuite } from './benchmark-repository';
+import { getBenchmarkRun, listAttemptsForRun, listBenchmarkRunsForSuite, putBenchmarkSuite } from './benchmark-repository';
 import type { BenchmarkSuite } from './benchmark-suite';
 
 function suite(over: Partial<BenchmarkSuite> = {}): BenchmarkSuite {
@@ -54,6 +54,7 @@ async function resetDatabase() {
 
 beforeEach(async () => {
   await resetDatabase();
+  await putBenchmarkSuite(suite());
 });
 
 afterEach(async () => {

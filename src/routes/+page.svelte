@@ -777,7 +777,9 @@
     for (let attempt = 0; attempt < 40; attempt++) {
       const res = await listBenchmarkRunsForSuite(suiteId);
       if (res.ok) {
-        const found = (res.value ?? []).find((r) => r.createdAt >= notBefore && r.status === 'running');
+        const found = (res.value ?? [])
+          .filter((r) => r.createdAt >= notBefore)
+          .sort((a, b) => b.createdAt - a.createdAt)[0];
         if (found) return found.id;
       }
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -790,18 +792,21 @@
    * already sends) rather than `state.models[*].priority`, which does not exist on `ModelInfo` —
    * reading it would silently treat every model as 'normal' and could clobber a user's real
    * 'low'/'pinned' choices for models outside the benchmark. */
-  async function pinBenchmarkTargets(aliases: string[]): Promise<void> {
+  async function pinBenchmarkTargets(aliases: string[]): Promise<{ ok: true } | { ok: false; error: string }> {
+    // Record before the sidecar ack: setModelPriorities is effectful, so a rejected promise
+    // does not prove the overlay was not installed. Cleanup must still restore.
+    benchmarkPinnedAliases = aliases;
     try {
       const overlay: ModelPriorityEntry[] = Object.entries(modelPriorities)
         .filter(([alias]) => !aliases.includes(alias))
         .map(([alias, priority]) => ({ alias, priority: priority as ModelPriority }));
       const pinned: ModelPriorityEntry[] = aliases.map((alias) => ({ alias, priority: 'pinned' as ModelPriority }));
       await sdkSetModelPriorities([...overlay, ...pinned], { refresh: false });
-      benchmarkPinnedAliases = aliases;
+      return { ok: true };
     } catch (e: any) {
-      // Pinning is a correctness improvement, not a hard requirement — continuing without it
-      // just re-exposes targets to ordinary idle-unload/max-resident eviction during the run.
-      appendAppLog(`Benchmark: could not pin target priorities: ${e?.message || e}`, 'warn');
+      const error = e?.message || String(e);
+      appendAppLog(`Benchmark: could not pin target priorities: ${error}`, 'warn');
+      return { ok: false, error };
     }
   }
 
@@ -810,11 +815,12 @@
    * this cannot drift even if the user changed a priority elsewhere while the benchmark ran. */
   async function unpinBenchmarkTargets(): Promise<void> {
     if (benchmarkPinnedAliases.length === 0) return;
-    benchmarkPinnedAliases = [];
     try {
       await pushMemorySettings();
     } catch (e: any) {
       appendAppLog(`Benchmark: could not restore target priorities: ${e?.message || e}`, 'warn');
+    } finally {
+      benchmarkPinnedAliases = [];
     }
   }
 
@@ -867,10 +873,17 @@
   /** Common cleanup once a run's execution has fully halted (completed/stopped/recovery), shared
    * by both start and resume so neither path can forget a step the other remembers. */
   async function finishBenchmarkExecution(): Promise<void> {
-    benchmarkStopController = null;
-    benchmarkActiveRunId = null;
-    benchmarkRunInFlight = false;
-    await unpinBenchmarkTargets();
+    try {
+      benchmarkStopController = null;
+      benchmarkActiveRunId = null;
+      await unpinBenchmarkTargets();
+    } finally {
+      benchmarkRunInFlight = false;
+    }
+  }
+
+  function suiteHasExplicitVariants(suite: BenchmarkSuite): boolean {
+    return suite.targets.some((t) => t.variantId != null);
   }
 
   type BenchmarkLifecycleOutcome = { ok: true; runId: string } | { ok: false; error: string };
@@ -887,12 +900,17 @@
     if (benchmarkRunInFlight) return { ok: false, error: 'A benchmark run is already active.' };
     benchmarkRunInFlight = true;
     try {
+      const aliases = Array.from(new Set(suite.targets.map((t) => t.alias)));
+      const pinned = await pinBenchmarkTargets(aliases);
+      if (!pinned.ok && suiteHasExplicitVariants(suite)) {
+        await finishBenchmarkExecution();
+        return { ok: false, error: `Could not pin targets with explicit variants: ${pinned.error}` };
+      }
       const loaded = await loadBenchmarkTargets(suite);
       if (!loaded.ok) {
-        benchmarkRunInFlight = false;
+        await finishBenchmarkExecution();
         return loaded;
       }
-      await pinBenchmarkTargets(Array.from(new Set(suite.targets.map((t) => t.alias))));
 
       const stopController = createStopController();
       benchmarkStopController = stopController;
@@ -911,7 +929,7 @@
         // to open a detail view yet.
         return { ok: false, error: 'Benchmark run started, but its id could not be confirmed yet. Check the run list shortly.' };
       }
-      benchmarkActiveRunId = runId;
+      if (benchmarkStopController === stopController) benchmarkActiveRunId = runId;
       return { ok: true, runId };
     } catch (e: any) {
       await finishBenchmarkExecution();
@@ -932,16 +950,21 @@
       }
       const suite = existing.value.suite;
 
+      const aliases = Array.from(new Set(suite.targets.map((t) => t.alias)));
+      const pinned = await pinBenchmarkTargets(aliases);
+      if (!pinned.ok && suiteHasExplicitVariants(suite)) {
+        await finishBenchmarkExecution();
+        return { ok: false, error: `Could not pin targets with explicit variants: ${pinned.error}` };
+      }
       const loaded = await loadBenchmarkTargets(suite);
       if (!loaded.ok) {
-        benchmarkRunInFlight = false;
+        await finishBenchmarkExecution();
         return loaded;
       }
-      await pinBenchmarkTargets(Array.from(new Set(suite.targets.map((t) => t.alias))));
 
       const stopController = createStopController();
       benchmarkStopController = stopController;
-      benchmarkActiveRunId = runId;
+      if (benchmarkStopController === stopController) benchmarkActiveRunId = runId;
 
       resumeBenchmarkRun(runId, createBenchmarkTransport(), stopController)
         .then((outcome) => {
@@ -9516,6 +9539,7 @@ Output only the summary text, no preamble.`;
           <BenchmarkPreview
             availableModels={chatPickerModels}
             activeRunId={benchmarkActiveRunId}
+            runInFlight={benchmarkRunInFlight}
             onStart={startBenchmarkPreviewRun}
             onStop={stopBenchmarkPreviewRun}
             onResume={resumeBenchmarkPreviewRun}

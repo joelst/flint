@@ -9,11 +9,8 @@
  * migration adds object stores to an already-proven transactional database rather than
  * migrating storage backends mid-feature.
  *
- * v2 adds two stores alongside the existing `suites` store:
- *  - `runs`: one immutable suite snapshot + run bookkeeping row per benchmark run.
- *  - `attempts`: one row per *execution* (see `benchmark-run.ts` for the logical-position vs.
- *    execution distinction). Indexed by run, and by (run, status) so "everything still
- *    `dispatched`" — the uncertain set — can be found without scanning a whole run's attempts.
+ * v2 adds `runs` and `attempts`. v3 adds `attemptSummaries` so live polling can read progress
+ * without structured-cloning full response bodies.
  *
  * No UI reads any of this yet.
  */
@@ -23,17 +20,19 @@ import { isBenchmarkAttempt, isBenchmarkRun, type BenchmarkAttempt, type Benchma
 import { summarizeAttempt, type AttemptSummary } from './benchmark-progress';
 
 const DATABASE_NAME = 'flint-benchmarks';
-const DATABASE_VERSION = 2;
+const DATABASE_VERSION = 3;
 const SUITES_STORE = 'suites';
 const RUNS_STORE = 'runs';
 const ATTEMPTS_STORE = 'attempts';
+const ATTEMPT_SUMMARIES_STORE = 'attemptSummaries';
 const RUNS_BY_SUITE_INDEX = 'bySuiteId';
 const ATTEMPTS_BY_RUN_INDEX = 'byRunId';
 const ATTEMPTS_BY_RUN_STATUS_INDEX = 'byRunStatus';
+const ATTEMPT_SUMMARIES_BY_RUN_INDEX = 'byRunId';
 
 /** Idempotent schema setup: each version bump only adds what is missing, so upgrading from any
  * earlier version (including a fresh v1 database) never drops existing stores or data. */
-export function upgradeBenchmarkDatabase(db: IDBDatabase): void {
+export function upgradeBenchmarkDatabase(db: IDBDatabase, tx: IDBTransaction | null = null): void {
   if (!db.objectStoreNames.contains(SUITES_STORE)) {
     db.createObjectStore(SUITES_STORE, { keyPath: 'id' });
   }
@@ -45,6 +44,18 @@ export function upgradeBenchmarkDatabase(db: IDBDatabase): void {
     const attempts = db.createObjectStore(ATTEMPTS_STORE, { keyPath: 'id' });
     attempts.createIndex(ATTEMPTS_BY_RUN_INDEX, 'runId');
     attempts.createIndex(ATTEMPTS_BY_RUN_STATUS_INDEX, ['runId', 'status']);
+  }
+  if (!db.objectStoreNames.contains(ATTEMPT_SUMMARIES_STORE)) {
+    const summaries = db.createObjectStore(ATTEMPT_SUMMARIES_STORE, { keyPath: 'id' });
+    summaries.createIndex(ATTEMPT_SUMMARIES_BY_RUN_INDEX, 'runId');
+    if (tx && db.objectStoreNames.contains(ATTEMPTS_STORE)) {
+      const getAll = tx.objectStore(ATTEMPTS_STORE).getAll() as IDBRequest<BenchmarkAttempt[]>;
+      getAll.onsuccess = () => {
+        for (const row of getAll.result ?? []) {
+          if (isBenchmarkAttempt(row)) summaries.put(summarizeAttempt(row));
+        }
+      };
+    }
   }
 }
 
@@ -88,7 +99,7 @@ export function openBenchmarkDatabase(version = DATABASE_VERSION): Promise<IDBDa
       return;
     }
     request.onupgradeneeded = () => {
-      upgradeBenchmarkDatabase(request.result);
+      upgradeBenchmarkDatabase(request.result, request.transaction);
     };
     request.onsuccess = () => {
       if (settled) {
@@ -353,9 +364,14 @@ export async function deleteBenchmarkSuiteIfNoRuns(id: string): Promise<Reposito
  * before calling this — this function does not re-fetch or re-validate against `suites`. */
 export async function createBenchmarkRun(run: BenchmarkRun): Promise<RepositoryResult<void>> {
   if (!isBenchmarkRun(run)) return failResult('run failed shape validation');
-  const result = await withStores<void>(RUNS_STORE, 'readwrite', (tx, trackRequest) => {
-    const store = tx.objectStore(RUNS_STORE);
-    return requestAsPromise(store.add(run) as IDBRequest<IDBValidKey>, trackRequest).then(() => undefined);
+  const result = await withStores<void>([RUNS_STORE, SUITES_STORE], 'readwrite', (tx, trackRequest) => {
+    const getSuite = tx.objectStore(SUITES_STORE).get(run.suiteId) as IDBRequest<BenchmarkSuite | undefined>;
+    return chainFromSuccess(getSuite, trackRequest, (suite) => {
+      if (suite === undefined) {
+        throw new Error(`suite "${run.suiteId}" does not exist; refusing to create an orphaned run`);
+      }
+      return tx.objectStore(RUNS_STORE).add(run) as IDBRequest<IDBValidKey>;
+    }).then(() => undefined);
   });
   if (!result.ok) return failResult(result.error!);
   return okResult(undefined);
@@ -413,9 +429,11 @@ export async function updateBenchmarkRunStatus(
 export async function recordAttemptDispatched(attempt: BenchmarkAttempt): Promise<RepositoryResult<void>> {
   if (attempt.status !== 'dispatched') return failResult('recordAttemptDispatched requires status "dispatched"');
   if (!isBenchmarkAttempt(attempt)) return failResult('attempt failed shape validation');
-  const result = await withStores<void>(ATTEMPTS_STORE, 'readwrite', (tx, trackRequest) => {
-    const store = tx.objectStore(ATTEMPTS_STORE);
-    return requestAsPromise(store.add(attempt) as IDBRequest<IDBValidKey>, trackRequest).then(() => undefined);
+  const result = await withStores<void>([ATTEMPTS_STORE, ATTEMPT_SUMMARIES_STORE], 'readwrite', (tx, trackRequest) => {
+    const addAttempt = tx.objectStore(ATTEMPTS_STORE).add(attempt) as IDBRequest<IDBValidKey>;
+    return chainFromSuccess(addAttempt, trackRequest, () => (
+      tx.objectStore(ATTEMPT_SUMMARIES_STORE).put(summarizeAttempt(attempt)) as IDBRequest<IDBValidKey>
+    )).then(() => undefined);
   });
   if (!result.ok) return failResult(result.error!);
   return okResult(undefined);
@@ -433,18 +451,32 @@ export async function recordAttemptTerminal(
     settledAt: number;
   },
 ): Promise<RepositoryResult<void>> {
-  const result = await withStores<void>(ATTEMPTS_STORE, 'readwrite', (tx, trackRequest) => {
+  const result = await withStores<void>([ATTEMPTS_STORE, ATTEMPT_SUMMARIES_STORE], 'readwrite', (tx, trackRequest) => {
     const store = tx.objectStore(ATTEMPTS_STORE);
     const getRequest = store.get(id) as IDBRequest<BenchmarkAttempt | undefined>;
-    return chainFromSuccess(getRequest, trackRequest, (existing) => {
-      if (existing === undefined) throw new Error(`no benchmark attempt "${id}" to update`);
-      if (existing.status !== 'dispatched') {
-        throw new Error(`benchmark attempt "${id}" is already terminal (status "${existing.status}"); refusing to overwrite`);
-      }
-      const updated: BenchmarkAttempt = { ...existing, ...patch };
-      if (!isBenchmarkAttempt(updated)) throw new Error(`updated benchmark attempt "${id}" failed validation`);
-      return store.put(updated) as IDBRequest<IDBValidKey>;
-    }).then(() => undefined);
+    trackRequest(getRequest);
+    return new Promise<void>((resolve, reject) => {
+      getRequest.onsuccess = () => {
+        try {
+          const existing = getRequest.result;
+          if (existing === undefined) throw new Error(`no benchmark attempt "${id}" to update`);
+          if (existing.status !== 'dispatched') {
+            throw new Error(`benchmark attempt "${id}" is already terminal (status "${existing.status}"); refusing to overwrite`);
+          }
+          const updated: BenchmarkAttempt = { ...existing, ...patch };
+          if (!isBenchmarkAttempt(updated)) throw new Error(`updated benchmark attempt "${id}" failed validation`);
+          const putAttempt = store.put(updated) as IDBRequest<IDBValidKey>;
+          trackRequest(putAttempt);
+          putAttempt.onsuccess = () => {
+            const putSummary = tx.objectStore(ATTEMPT_SUMMARIES_STORE).put(summarizeAttempt(updated)) as IDBRequest<IDBValidKey>;
+            trackRequest(putSummary);
+            putSummary.onsuccess = () => resolve();
+          };
+        } catch (e) {
+          reject(e);
+        }
+      };
+    });
   });
   if (!result.ok) return failResult(result.error!);
   return okResult(undefined);
@@ -464,14 +496,16 @@ export async function listAttemptsForRun(runId: string): Promise<RepositoryResul
 
 /**
  * Lightweight projection of a run's attempts (no `responseText`/`usage`/`errorMessage`) for a
- * live-polling progress view. Still reads full rows out of IndexedDB (there is no covering
- * index for a partial projection), but the summaries returned here are what get cloned/diffed
- * by Svelte reactivity on every poll — not up to 900 full response bodies.
+ * live-polling progress view. Reads the dedicated `attemptSummaries` store so a 1.5s poll never
+ * structured-clones full response bodies.
  */
 export async function listAttemptSummariesForRun(runId: string): Promise<RepositoryResult<AttemptSummary[]>> {
-  const result = await listAttemptsForRun(runId);
+  const result = await withStores<AttemptSummary[]>(ATTEMPT_SUMMARIES_STORE, 'readonly', (tx, trackRequest) => {
+    const index = tx.objectStore(ATTEMPT_SUMMARIES_STORE).index(ATTEMPT_SUMMARIES_BY_RUN_INDEX);
+    return requestAsPromise(index.getAll(runId) as IDBRequest<AttemptSummary[]>, trackRequest);
+  });
   if (!result.ok) return failResult(result.error!);
-  return okResult((result.value ?? []).map(summarizeAttempt));
+  return okResult(result.value ?? []);
 }
 
 /** The uncertain set for a run: attempts still `dispatched` (no terminal row exists for that
