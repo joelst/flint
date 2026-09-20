@@ -8469,7 +8469,7 @@ Output only the summary text, no preamble.`;
                 download a small starter, then <strong>Load</strong>.
               </li>
               <li>
-                Open <button type="button" class="link-like" onclick={() => (currentView = "chat")}>Playground</button> and send a message.
+                Open <button type="button" class="link-like" onclick={() => (currentView = playgroundLastView)}>Playground</button> and send a message.
               </li>
               <li>
                 Optional: <button type="button" class="link-like" onclick={() => (currentView = "diagnostics")}>Diagnostics</button>
