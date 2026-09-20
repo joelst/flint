@@ -20,6 +20,7 @@
 
 import { isBenchmarkSuite, validateBenchmarkSuite, type BenchmarkSuite } from './benchmark-suite';
 import { isBenchmarkAttempt, isBenchmarkRun, type BenchmarkAttempt, type BenchmarkRun, type RunStatus } from './benchmark-run';
+import { summarizeAttempt, type AttemptSummary } from './benchmark-progress';
 
 const DATABASE_NAME = 'flint-benchmarks';
 const DATABASE_VERSION = 2;
@@ -421,6 +422,18 @@ export async function listAttemptsForRun(runId: string): Promise<RepositoryResul
   const invalidIndex = rows.findIndex((row) => !isBenchmarkAttempt(row));
   if (invalidIndex !== -1) return failResult(`stored benchmark attempt at index ${invalidIndex} failed validation`);
   return okResult(rows);
+}
+
+/**
+ * Lightweight projection of a run's attempts (no `responseText`/`usage`/`errorMessage`) for a
+ * live-polling progress view. Still reads full rows out of IndexedDB (there is no covering
+ * index for a partial projection), but the summaries returned here are what get cloned/diffed
+ * by Svelte reactivity on every poll — not up to 900 full response bodies.
+ */
+export async function listAttemptSummariesForRun(runId: string): Promise<RepositoryResult<AttemptSummary[]>> {
+  const result = await listAttemptsForRun(runId);
+  if (!result.ok) return failResult(result.error!);
+  return okResult((result.value ?? []).map(summarizeAttempt));
 }
 
 /** The uncertain set for a run: attempts still `dispatched` (no terminal row exists for that

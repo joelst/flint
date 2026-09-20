@@ -6,6 +6,7 @@ import {
   getBenchmarkRun,
   getBenchmarkSuite,
   listAttemptsForRun,
+  listAttemptSummariesForRun,
   listBenchmarkRunsForSuite,
   listBenchmarkSuites,
   listDispatchedAttemptsForRun,
@@ -593,6 +594,30 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
     await recordAttemptDispatched(testAttempt({ id: 'exec-2', runId: 'run-2', logicalAttemptId: 't0:c0:r0' }));
     const forRun1 = await listDispatchedAttemptsForRun('run-1');
     expect(forRun1.value?.map((a) => a.id)).toEqual(['exec-1']);
+  });
+
+  it('listAttemptSummariesForRun projects out response/usage/error fields, keeping only what progress polling needs', async () => {
+    await recordAttemptDispatched(testAttempt({ id: 'exec-1', logicalAttemptId: 't0:c0:r0' }));
+    await recordAttemptTerminal('exec-1', { status: 'succeeded', responseText: 'a long response body', settledAt: 2 });
+
+    const summaries = await listAttemptSummariesForRun('run-1');
+    expect(summaries).toEqual({
+      ok: true,
+      value: [{
+        id: 'exec-1',
+        logicalAttemptId: 't0:c0:r0',
+        targetIndex: 0,
+        phase: 'measured',
+        caseIndex: 0,
+        repeatIndex: 0,
+        sequence: 0,
+        status: 'succeeded',
+      }],
+    });
+    // No response text, usage, or timestamps leak through into the lightweight projection.
+    expect(summaries.value![0]).not.toHaveProperty('responseText');
+    expect(summaries.value![0]).not.toHaveProperty('usage');
+    expect(summaries.value![0]).not.toHaveProperty('errorMessage');
   });
 
   it('reports a stored corrupt attempt row as an error rather than silently excluding it', async () => {
