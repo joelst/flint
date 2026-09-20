@@ -219,13 +219,17 @@ export function validateBenchmarkSuite(raw: unknown): ValidationResult<Benchmark
   if (!Array.isArray(raw.targets) || raw.targets.length < 1 || raw.targets.length > BENCHMARK_MAX_TARGETS) {
     errors.push(`targets must be an array of 1 to ${BENCHMARK_MAX_TARGETS} entries`);
   } else {
-    const seenTargets = new Set<string>();
+    // Keyed by alias alone, not alias+variant: the sidecar's model pool (and the load step
+    // before a run) is keyed by alias, so a second target sharing an alias would silently
+    // replace the first target's loaded variant before execution — the runner's alias-only
+    // `chatCompletion` transport could then record an earlier target's attempts against
+    // whichever variant happened to load last, not the one actually requested for that target.
+    const seenAliases = new Set<string>();
     for (let i = 0; i < raw.targets.length; i++) {
       const r = validateTarget(raw.targets[i], `targets[${i}]`);
       if (!r.ok) { errors.push(...r.errors); continue; }
-      const key = JSON.stringify([r.value!.alias, r.value!.variantId]);
-      if (seenTargets.has(key)) { errors.push(`targets[${i}]: duplicate target (same alias and variant)`); continue; }
-      seenTargets.add(key);
+      if (seenAliases.has(r.value!.alias)) { errors.push(`targets[${i}]: duplicate target alias "${r.value!.alias}" (targets are keyed by alias, not alias+variant)`); continue; }
+      seenAliases.add(r.value!.alias);
       targets.push(r.value!);
     }
   }

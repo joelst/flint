@@ -49,7 +49,6 @@
     TEMPLATE_ROLES,
     TEMPLATE_PRESETS,
     setEvictionConfig as sdkSetEvictionConfig,
-    setModelPriorities as sdkSetModelPriorities,
     applyMemorySettings as sdkApplyMemorySettings,
     getWslStatus,
     enableWslMirroredNetworking,
@@ -65,7 +64,6 @@
     type LogEntry,
     type CacheInventory,
   } from "$lib/sdk";
-  import type { ModelPriorityEntry, ModelPriority } from "$lib/ipc-contracts";
   import { evaluateStartupPreload } from "$lib/accelerator-readiness";
   import {
     evaluate as evaluateWatch,
@@ -765,6 +763,14 @@
   /** Aliases pinned for the duration of the active run; restored to 'normal' in a finally once
    * the run halts, so a benchmark never permanently changes a model's eviction priority. */
   let benchmarkPinnedAliases: string[] = [];
+  /** Set when a detached run/resume execution settles with anything the UI needs to surface:
+   * a hard `!outcome.ok` failure, or an `ok: true` outcome whose `result.status ===
+   * 'recovery_required'` — a durability write failed mid-run and the run is now stuck needing a
+   * manual Resume. Neither case is visible from `startBenchmarkPreviewRun`/
+   * `resumeBenchmarkPreviewRun`'s own return value, since both return as soon as the run is
+   * confirmed under way, before the run itself has finished. Cleared at the start of the next
+   * start/resume attempt so a stale error doesn't linger across an unrelated later run. */
+  let benchmarkRunError = $state<string | null>(null);
 
   /**
    * `startBenchmarkRun`/`resumeBenchmarkRun` do not resolve until the whole run halts, and they
@@ -794,14 +800,12 @@
    * 'low'/'pinned' choices for models outside the benchmark. */
   async function pinBenchmarkTargets(aliases: string[]): Promise<{ ok: true } | { ok: false; error: string }> {
     // Record before the sidecar ack: setModelPriorities is effectful, so a rejected promise
-    // does not prove the overlay was not installed. Cleanup must still restore.
+    // does not prove the overlay was not installed. Cleanup must still restore. Once recorded,
+    // every future pushMemorySettings call (from here, or from an unrelated Settings/Monitor
+    // edit made while the run is active) re-applies this same overlay — see pushMemorySettings.
     benchmarkPinnedAliases = aliases;
     try {
-      const overlay: ModelPriorityEntry[] = Object.entries(modelPriorities)
-        .filter(([alias]) => !aliases.includes(alias))
-        .map(([alias, priority]) => ({ alias, priority: priority as ModelPriority }));
-      const pinned: ModelPriorityEntry[] = aliases.map((alias) => ({ alias, priority: 'pinned' as ModelPriority }));
-      await sdkSetModelPriorities([...overlay, ...pinned], { refresh: false });
+      await pushMemorySettings({ throwOnError: true });
       return { ok: true };
     } catch (e: any) {
       const error = e?.message || String(e);
@@ -810,17 +814,17 @@
     }
   }
 
-  /** Restores the sidecar's priority map to exactly what the user has configured, by resending
-   * `modelPriorities` (never mutated by pinning above) rather than reconstructing a snapshot —
-   * this cannot drift even if the user changed a priority elsewhere while the benchmark ran. */
+  /** Restores the sidecar's priority map to exactly what the user has configured. Clears the
+   * pin lease *before* pushing, so this specific push sends the plain `modelPriorities` map
+   * with no benchmark overlay — `pushMemorySettings` would otherwise re-apply the very overlay
+   * this call exists to remove. */
   async function unpinBenchmarkTargets(): Promise<void> {
     if (benchmarkPinnedAliases.length === 0) return;
+    benchmarkPinnedAliases = [];
     try {
       await pushMemorySettings();
     } catch (e: any) {
       appendAppLog(`Benchmark: could not restore target priorities: ${e?.message || e}`, 'warn');
-    } finally {
-      benchmarkPinnedAliases = [];
     }
   }
 
@@ -886,6 +890,20 @@
     return suite.targets.some((t) => t.variantId != null);
   }
 
+  /** Shared classifier for a settled `startBenchmarkRun`/`resumeBenchmarkRun` outcome: surfaces
+   * both a hard failure and a soft `recovery_required` halt (a durability write failed, but the
+   * runner itself returned normally) to `benchmarkRunError` so the UI isn't limited to the app
+   * log for either case. */
+  function recordBenchmarkOutcome(outcome: { ok: boolean; error?: string; result?: { status: string; haltedError?: string } }): void {
+    if (!outcome.ok) {
+      benchmarkRunError = outcome.error || 'Benchmark run failed';
+      appendAppLog(`Benchmark run failed: ${outcome.error}`, 'error');
+    } else if (outcome.result?.status === 'recovery_required') {
+      benchmarkRunError = `Benchmark run needs recovery: ${outcome.result.haltedError || 'a durability write failed'}`;
+      appendAppLog(`Benchmark run needs recovery: ${outcome.result.haltedError}`, 'error');
+    }
+  }
+
   type BenchmarkLifecycleOutcome = { ok: true; runId: string } | { ok: false; error: string };
 
   /**
@@ -899,6 +917,7 @@
   async function startBenchmarkPreviewRun(suite: BenchmarkSuite): Promise<BenchmarkLifecycleOutcome> {
     if (benchmarkRunInFlight) return { ok: false, error: 'A benchmark run is already active.' };
     benchmarkRunInFlight = true;
+    benchmarkRunError = null;
     try {
       const aliases = Array.from(new Set(suite.targets.map((t) => t.alias)));
       const pinned = await pinBenchmarkTargets(aliases);
@@ -916,10 +935,8 @@
       benchmarkStopController = stopController;
       const notBefore = Date.now();
       startBenchmarkRun(suite, createBenchmarkTransport(), stopController)
-        .then((outcome) => {
-          if (!outcome.ok) appendAppLog(`Benchmark run failed: ${outcome.error}`, 'error');
-        })
-        .catch((e: any) => appendAppLog(`Benchmark run crashed: ${e?.message || e}`, 'error'))
+        .then(recordBenchmarkOutcome)
+        .catch((e: any) => recordBenchmarkOutcome({ ok: false, error: e?.message || String(e) }))
         .finally(() => { void finishBenchmarkExecution(); });
 
       const runId = await discoverBenchmarkRunId(suite.id, notBefore);
@@ -942,6 +959,7 @@
   async function resumeBenchmarkPreviewRun(runId: string): Promise<BenchmarkLifecycleOutcome> {
     if (benchmarkRunInFlight) return { ok: false, error: 'A benchmark run is already active.' };
     benchmarkRunInFlight = true;
+    benchmarkRunError = null;
     try {
       const existing = await getBenchmarkRun(runId);
       if (!existing.ok || !existing.value) {
@@ -967,10 +985,8 @@
       if (benchmarkStopController === stopController) benchmarkActiveRunId = runId;
 
       resumeBenchmarkRun(runId, createBenchmarkTransport(), stopController)
-        .then((outcome) => {
-          if (!outcome.ok) appendAppLog(`Benchmark resume failed: ${outcome.error}`, 'error');
-        })
-        .catch((e: any) => appendAppLog(`Benchmark run crashed: ${e?.message || e}`, 'error'))
+        .then(recordBenchmarkOutcome)
+        .catch((e: any) => recordBenchmarkOutcome({ ok: false, error: e?.message || String(e) }))
         .finally(() => { void finishBenchmarkExecution(); });
 
       return { ok: true, runId };
@@ -2312,12 +2328,22 @@
     );
   }
 
-  /** Sends the priority map and the eviction rules to the sidecar, which runs the sweep. */
+  /** Sends the priority map and the eviction rules to the sidecar, which runs the sweep.
+   *
+   * Overlays `benchmarkPinnedAliases` (forced to 'pinned') onto every call, not just the one
+   * `pinBenchmarkTargets` itself makes — `setModelPriorities`/`applyMemorySettings` both replace
+   * the whole map, so a user priority change or eviction-settings edit made from Settings/Monitor
+   * *during* a benchmark run would otherwise resend `modelPriorities` with no pin at all,
+   * dropping the overlay and re-exposing a running benchmark's targets to eviction. Folding the
+   * overlay in here (rather than only where pinning is first installed) makes it a standing
+   * invariant of every push for as long as a benchmark holds the lease, not a one-time snapshot.
+   */
   let pushMemorySeq = 0;
   async function pushMemorySettings(options?: { throwOnError?: boolean }) {
     const seq = ++pushMemorySeq;
     const currentEviction = { ...evictionConfig };
     const currentPriorities = { ...modelPriorities };
+    for (const alias of benchmarkPinnedAliases) currentPriorities[alias] = "pinned";
     try {
       // One command, one sweep. Sent as two commands, the first sweeps under half-updated
       // settings — enough to evict the very model the user just chose to keep loaded.
@@ -9540,6 +9566,7 @@ Output only the summary text, no preamble.`;
             availableModels={chatPickerModels}
             activeRunId={benchmarkActiveRunId}
             runInFlight={benchmarkRunInFlight}
+            runError={benchmarkRunError}
             onStart={startBenchmarkPreviewRun}
             onStop={stopBenchmarkPreviewRun}
             onResume={resumeBenchmarkPreviewRun}

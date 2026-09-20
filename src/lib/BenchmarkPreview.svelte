@@ -28,6 +28,12 @@
   export let activeRunId: string | null = null;
   /** True from the moment start/resume is requested until pin restore finishes. */
   export let runInFlight: boolean = false;
+  /** Set by the parent when a detached run/resume execution settles with a failure or a
+   * `recovery_required` halt — neither is visible from `onStart`/`onResume`'s own resolved
+   * value, since both return as soon as the run is confirmed under way, well before the run
+   * itself finishes. Shown as a standing banner (not tied to whichever run is selected) because
+   * it can arrive after the user has navigated away from the run that failed. */
+  export let runError: string | null = null;
   export let onStart: (suite: BenchmarkSuite) => Promise<{ ok: true; runId: string } | { ok: false; error: string }>;
   export let onStop: () => void;
   export let onResume: (runId: string) => Promise<{ ok: true; runId: string } | { ok: false; error: string }>;
@@ -65,13 +71,18 @@
     runCountsBySuite = counts;
   }
 
+  async function refreshRunsForSelectedSuite(id: string) {
+    const res = await listBenchmarkRunsForSuite(id);
+    if (selectedSuiteId !== id) return;
+    runsForSelectedSuite = res.ok ? (res.value ?? []).sort((a, b) => b.createdAt - a.createdAt) : [];
+  }
+
   async function selectSuite(id: string) {
     selectedSuiteId = id;
     selectedRunId = null;
     selectedRun = null;
     stopPolling();
-    const res = await listBenchmarkRunsForSuite(id);
-    runsForSelectedSuite = res.ok ? (res.value ?? []).sort((a, b) => b.createdAt - a.createdAt) : [];
+    await refreshRunsForSelectedSuite(id);
   }
 
   function newSuiteDraft(): SuiteDraft {
@@ -84,12 +95,19 @@
     };
   }
 
+  // These three all replace or clear `editingDraft` — while `saveSuite` is awaiting IndexedDB
+  // (`editingBusy`), letting any of them run would either discard the draft that save is about
+  // to report success/failure against, or let the save's completion silently clobber a draft the
+  // user opened in the meantime. The template also disables their buttons while `editingBusy`;
+  // these are a defense-in-depth guard against any other call path.
   function startCreateSuite() {
+    if (editingBusy) return;
     editingDraft = newSuiteDraft();
     editingErrors = [];
   }
 
   async function startEditSuite(suite: BenchmarkSuite) {
+    if (editingBusy) return;
     // Editing is restricted to suites with no runs yet — a suite with runs already has attempts
     // recorded against its frozen snapshot, and silently changing the live suite underneath
     // that history would be misleading even though runs themselves are immutable.
@@ -102,6 +120,7 @@
   }
 
   function cancelEditSuite() {
+    if (editingBusy) return;
     editingDraft = null;
     editingErrors = [];
   }
@@ -195,7 +214,14 @@
     if (selectedRunId !== runId) return;
     if (summariesRes.ok) selectedRunAttempts = summariesRes.value ?? [];
     if (!selectedRun || selectedRun.id !== activeRunId || selectedRun.status !== "running") {
+      // This run just left the live/active state (finished, was stopped, or crashed) while we
+      // were polling it — the run-list row (`runsForSelectedSuite`) was fetched once when the
+      // suite was selected and still shows the old "running" snapshot, which `isRunInterrupted`
+      // would then misreport as "interrupted" now that `activeRunId` has moved on. Refresh the
+      // list alongside the detail view so the badge reflects the real terminal status.
+      const wasPolling = pollHandle !== null;
       stopPolling();
+      if (wasPolling && selectedSuiteId) await refreshRunsForSelectedSuite(selectedSuiteId);
     }
   }
 
@@ -283,11 +309,15 @@
         Early preview.
       </p>
     </div>
-    <button type="button" class="secondary small" onclick={startCreateSuite}>New suite</button>
+    <button type="button" class="secondary small" onclick={startCreateSuite} disabled={editingBusy}>New suite</button>
   </div>
 
   {#if loadError}
     <div class="warning-banner">{loadError}</div>
+  {/if}
+
+  {#if runError}
+    <div class="warning-banner">{runError}</div>
   {/if}
 
   {#if editingDraft}
@@ -311,12 +341,23 @@
         <strong>Targets ({editingDraft.targets.length}/{BENCHMARK_MAX_TARGETS})</strong>
         {#each editingDraft.targets as target, i}
           <div class="benchmark-target-row">
-            <select value={target.alias} onchange={(e) => updateTargetAlias(i, e.currentTarget.value)}>
+            <select
+              value={target.alias}
+              aria-label={`Target ${i + 1} model`}
+              onchange={(e) => updateTargetAlias(i, e.currentTarget.value)}
+            >
               {#each availableModels as m (m.alias)}
                 <option value={m.alias}>{m.alias}</option>
               {/each}
             </select>
-            <button type="button" class="tiny danger-btn" onclick={() => removeTarget(i)}>Remove</button>
+            <button
+              type="button"
+              class="tiny danger-btn"
+              aria-label={`Remove target ${i + 1}${target.alias ? ` (${target.alias})` : ""}`}
+              onclick={() => removeTarget(i)}
+            >
+              Remove
+            </button>
           </div>
         {/each}
         {#if editingDraft.targets.length < BENCHMARK_MAX_TARGETS}
@@ -352,7 +393,7 @@
         <button type="button" class="primary" disabled={editingBusy} onclick={saveSuite}>
           {editingBusy ? "Saving…" : "Save suite"}
         </button>
-        <button type="button" class="secondary" onclick={cancelEditSuite}>Cancel</button>
+        <button type="button" class="secondary" disabled={editingBusy} onclick={cancelEditSuite}>Cancel</button>
       </div>
     </div>
   {/if}
@@ -369,8 +410,8 @@
             <strong>{suite.name}</strong>
             <span class="muted small">{suite.targets.length} target(s) · {suite.cases.length} case(s) · {runCountsBySuite[suite.id] ?? 0} run(s)</span>
           </button>
-          <button type="button" class="tiny" onclick={() => startEditSuite(suite)}>Edit</button>
-          <button type="button" class="tiny danger-btn" disabled={lifecycleBusy || runInFlight} onclick={() => removeSuite(suite)}>Delete</button>
+          <button type="button" class="tiny" disabled={editingBusy} onclick={() => startEditSuite(suite)}>Edit</button>
+          <button type="button" class="tiny danger-btn" disabled={lifecycleBusy || runInFlight || editingBusy} onclick={() => removeSuite(suite)}>Delete</button>
         </div>
       {/each}
     </div>

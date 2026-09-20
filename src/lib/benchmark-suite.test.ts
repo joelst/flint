@@ -226,14 +226,18 @@ describe('validateBenchmarkSuite', () => {
     expect(r.errors.join(' ')).toMatch(/duplicate target/);
   });
 
-  it('allows the same alias with different variants as distinct targets', () => {
+  it('rejects the same alias with different variants as distinct targets (pool is keyed by alias)', () => {
+    // The sidecar model pool and the alias-only chat transport are both keyed by alias, not
+    // alias+variant — loading a second target with the same alias silently replaces the first
+    // target's resident variant before execution, so this must be rejected, not allowed.
     const r = validateBenchmarkSuite(validSuite({
       targets: [
         { alias: 'model-a', variantId: 'v1' },
         { alias: 'model-a', variantId: 'v2' },
       ],
     }));
-    expect(r.ok).toBe(true);
+    expect(r.ok).toBe(false);
+    expect(r.errors.join(' ')).toMatch(/duplicate target alias/);
   });
 
   it('rejects duplicate case ids', () => {
