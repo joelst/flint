@@ -3332,7 +3332,7 @@ updateStateFromSdk();
     }
   }
 
-  async function loadCompareSlot(slot: CompareSlot): Promise<void> {
+  async function loadCompareSlot(slot: CompareSlot, onLoaded?: () => void): Promise<void> {
     const model = state.models.find((m: ModelInfo) => m.alias === slot.alias);
     if (!model) throw new Error("Not found in catalog");
     if (isSlotInPool(slot)) {
@@ -3342,6 +3342,8 @@ updateStateFromSdk();
     comparePrepStatus = `Loading ${slot.label}…`;
     statusMessage = comparePrepStatus;
     await sdkLoadModel(model, "chat", slot.variantId ?? undefined);
+    // Record ownership before refreshModels, which can reject after a successful load.
+    onLoaded?.();
     await refreshModels();
   }
 
@@ -3653,17 +3655,9 @@ updateStateFromSdk();
             continue;
           }
 
-          const alreadyInPool = isSlotInPool(slot);
-          const hadAlias = state.pool.some((e: any) => e.alias === slot.alias);
-          await loadCompareSlot(slot);
-          if (!alreadyInPool) {
-            // We caused a load (new alias or variant replace)
+          await loadCompareSlot(slot, () => {
             unloadCtx.loadedByCompare.add(slot.alias);
-            // Variant replace of a preloaded alias still counts as "we changed pool"
-            if (hadAlias && unloadCtx.preloadedAliases.has(slot.alias)) {
-              unloadCtx.loadedByCompare.add(slot.alias);
-            }
-          }
+          });
           if (compareStopRequested) {
             await unloadIfThisRunLoaded(slot);
             break;
