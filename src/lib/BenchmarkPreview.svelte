@@ -16,7 +16,7 @@
     benchmarkAttemptCount,
     BENCHMARK_MAX_ATTEMPTS,
   } from "./benchmark-suite";
-  import { draftFromSuite, buildSuiteFromDraft, type SuiteDraft } from "./benchmark-draft";
+  import { applyTargetAlias, draftFromSuite, buildSuiteFromDraft, type SuiteDraft } from "./benchmark-draft";
   import { buildProgressMatrix, isRunInterrupted, isRunResumable, type AttemptSummary } from "./benchmark-progress";
   import { buildBenchmarkExport } from "./benchmark-export";
   import type { BenchmarkRun } from "./benchmark-run";
@@ -59,6 +59,9 @@
    * now-stale call (e.g. the initial `onMount` load racing a create/edit/delete) must not
    * overwrite the newer suite list/run counts once it finally resolves. */
   let suitesGeneration = 0;
+  /** Same overlapping-read hole as suite-list refresh: two `refreshRunsForSelectedSuite(id)`
+   * calls for the same suite (start completing, then an older poll) can land out of order. */
+  let runsRefreshGeneration = 0;
   /** `openRun()` only checks `selectedRunId` after its await, which is not enough when the
    * *same* run is opened twice in quick succession (e.g. a double-click): `selectedRunId` never
    * changes between the two calls, so both would otherwise pass that check and each install its
@@ -97,8 +100,9 @@
   }
 
   async function refreshRunsForSelectedSuite(id: string) {
+    const generation = ++runsRefreshGeneration;
     const res = await listBenchmarkRunsForSuite(id);
-    if (selectedSuiteId !== id) return;
+    if (destroyed || generation !== runsRefreshGeneration || selectedSuiteId !== id) return;
     runsForSelectedSuite = res.ok ? (res.value ?? []).sort((a, b) => b.createdAt - a.createdAt) : [];
     runCountsBySuite = { ...runCountsBySuite, [id]: runsForSelectedSuite.length };
   }
@@ -162,10 +166,22 @@
     editingDraft.targets = editingDraft.targets.filter((_, i) => i !== index);
   }
 
+  function variantsForAlias(alias: string) {
+    return availableModels.find((m) => m.alias === alias)?.variants ?? [];
+  }
+
   function updateTargetAlias(index: number, alias: string) {
     if (!editingDraft) return;
     const targets: BenchmarkTarget[] = [...editingDraft.targets];
-    targets[index] = { ...targets[index], alias };
+    const variantIds = variantsForAlias(alias).map((v) => v.id);
+    targets[index] = applyTargetAlias(targets[index], alias, variantIds);
+    editingDraft.targets = targets;
+  }
+
+  function updateTargetVariant(index: number, variantId: string | null) {
+    if (!editingDraft) return;
+    const targets: BenchmarkTarget[] = [...editingDraft.targets];
+    targets[index] = { ...targets[index], variantId };
     editingDraft.targets = targets;
   }
 
@@ -390,6 +406,16 @@
             >
               {#each availableModels as m (m.alias)}
                 <option value={m.alias}>{m.alias}</option>
+              {/each}
+            </select>
+            <select
+              value={target.variantId ?? ""}
+              aria-label={`Target ${i + 1} variant`}
+              onchange={(e) => updateTargetVariant(i, e.currentTarget.value || null)}
+            >
+              <option value="">Default variant</option>
+              {#each variantsForAlias(target.alias) as v (v.id)}
+                <option value={v.id}>{v.id}</option>
               {/each}
             </select>
             <button

@@ -550,6 +550,52 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
     }
   });
 
+  it('backfills attemptSummaries from existing v2 attempt rows on upgrade to v3', async () => {
+    await resetDatabase();
+    const seeded = testAttempt({
+      status: 'succeeded',
+      responseText: 'a full response that must not appear on the summary',
+      settledAt: 1700000002000,
+    });
+    await new Promise<void>((resolve, reject) => {
+      const req = indexedDB.open('flint-benchmarks', 2);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        db.createObjectStore('suites', { keyPath: 'id' });
+        const runs = db.createObjectStore('runs', { keyPath: 'id' });
+        runs.createIndex('bySuiteId', 'suiteId');
+        const attempts = db.createObjectStore('attempts', { keyPath: 'id' });
+        attempts.createIndex('byRunId', 'runId');
+        attempts.createIndex('byRunStatus', ['runId', 'status']);
+      };
+      req.onsuccess = () => {
+        const db = req.result;
+        const tx = db.transaction(['suites', 'runs', 'attempts'], 'readwrite');
+        tx.objectStore('suites').put(testSuite);
+        tx.objectStore('runs').put(testRun());
+        tx.objectStore('attempts').put(seeded);
+        tx.oncomplete = () => { db.close(); resolve(); };
+        tx.onerror = () => { db.close(); reject(tx.error); };
+      };
+      req.onerror = () => reject(req.error);
+    });
+
+    const summaries = await listAttemptSummariesForRun('run-1');
+    expect(summaries.ok).toBe(true);
+    expect(summaries.value).toEqual([{
+      id: 'exec-1',
+      runId: 'run-1',
+      logicalAttemptId: 't0:c0:r0',
+      targetIndex: 0,
+      phase: 'measured',
+      caseIndex: 0,
+      repeatIndex: 0,
+      sequence: 0,
+      status: 'succeeded',
+    }]);
+    expect(summaries.value![0]).not.toHaveProperty('responseText');
+  });
+
   it('refuses to create a run whose suite row no longer exists', async () => {
     await deleteBenchmarkSuite(testSuite.id);
     const result = await createBenchmarkRun(testRun());

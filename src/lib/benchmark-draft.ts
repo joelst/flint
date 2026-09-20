@@ -34,6 +34,21 @@ export interface SuiteDraft {
   repeatCount: number;
 }
 
+/**
+ * Rebind a draft target to a new alias. A variant id is only meaningful on the model it was
+ * chosen from — keeping `model-a`'s `v1` after switching to `model-b` would load the wrong
+ * build or fail. Preserve the id only when the new alias actually exposes it.
+ */
+export function applyTargetAlias(
+  target: BenchmarkTarget,
+  alias: string,
+  variantIdsOnNewAlias: readonly string[],
+): BenchmarkTarget {
+  if (target.alias === alias) return { ...target, alias };
+  const keep = target.variantId != null && variantIdsOnNewAlias.includes(target.variantId);
+  return { alias, variantId: keep ? target.variantId : null };
+}
+
 function generateSuiteId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return `suite_${crypto.randomUUID()}`;

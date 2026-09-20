@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildSuiteFromDraft, draftFromSuite, type SuiteDraft } from './benchmark-draft';
+import { applyTargetAlias, buildSuiteFromDraft, draftFromSuite, type SuiteDraft } from './benchmark-draft';
 import { BENCHMARK_MAX_ATTEMPTS } from './benchmark-suite';
 import type { BenchmarkSuite } from './benchmark-suite';
 
@@ -56,6 +56,29 @@ describe('buildSuiteFromDraft', () => {
   it('rejects a draft with no targets, matching validateBenchmarkSuite\'s own target-count rule', () => {
     const result = buildSuiteFromDraft(baseDraft({ targets: [] }));
     expect(result.ok).toBe(false);
+  });
+});
+
+describe('applyTargetAlias', () => {
+  it('clears a variant that does not exist on the new alias', () => {
+    expect(applyTargetAlias({ alias: 'model-a', variantId: 'v1' }, 'model-b', ['other'])).toEqual({
+      alias: 'model-b',
+      variantId: null,
+    });
+  });
+
+  it('keeps a variant id that the new alias also exposes', () => {
+    expect(applyTargetAlias({ alias: 'model-a', variantId: 'shared' }, 'model-b', ['shared', 'v2'])).toEqual({
+      alias: 'model-b',
+      variantId: 'shared',
+    });
+  });
+
+  it('does not clear the variant when the alias is unchanged', () => {
+    expect(applyTargetAlias({ alias: 'model-a', variantId: 'v1' }, 'model-a', [])).toEqual({
+      alias: 'model-a',
+      variantId: 'v1',
+    });
   });
 });
 
