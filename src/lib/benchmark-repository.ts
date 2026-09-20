@@ -55,7 +55,9 @@ function openDatabase(): Promise<IDBDatabase> {
     }
     request.onupgradeneeded = () => {
       const db = request.result;
-      db.createObjectStore(SUITES_STORE, { keyPath: 'id' });
+      if (!db.objectStoreNames.contains(SUITES_STORE)) {
+        db.createObjectStore(SUITES_STORE, { keyPath: 'id' });
+      }
     };
     request.onsuccess = () => {
       if (settled) {

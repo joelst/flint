@@ -39,6 +39,25 @@ afterEach(async () => {
 });
 
 describe('benchmark-repository', () => {
+  it('can rerun suites-store setup when the database version increases', async () => {
+    expect((await putBenchmarkSuite(suite())).ok).toBe(true);
+    await new Promise<void>((resolve, reject) => {
+      const req = indexedDB.open('flint-benchmarks', 2);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains('suites')) {
+          db.createObjectStore('suites', { keyPath: 'id' });
+        }
+      };
+      req.onsuccess = () => {
+        expect(Array.from(req.result.objectStoreNames)).toContain('suites');
+        req.result.close();
+        resolve();
+      };
+      req.onerror = () => reject(req.error);
+    });
+  });
+
   it('round-trips a suite through put/get/list', async () => {
     const put = await putBenchmarkSuite(suite());
     expect(put).toEqual({ ok: true, value: undefined });
