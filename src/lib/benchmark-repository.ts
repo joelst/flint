@@ -1,28 +1,49 @@
 /**
- * Benchmark Preview suite storage: IndexedDB, not `localStorage`.
+ * Benchmark Preview storage: IndexedDB, not `localStorage`.
  *
  * Quick Compare's history (`comparison-history.ts`) fits comfortably in a single localStorage
- * key because it is a small, atomically-replaced blob. A benchmark run's attempt journal will
- * not: a runner needs to checkpoint potentially hundreds of independently-completing attempts,
- * and re-serializing the whole run on every single checkpoint is the wrong write primitive for
- * that. This module commits to IndexedDB now — even though this PR only ever stores suite
- * definitions, never attempts — so a later runner PR adds object stores to an already-proven
- * transactional database rather than migrating storage backends mid-feature.
+ * key because it is a small, atomically-replaced blob. A benchmark run's attempt journal does
+ * not: a runner checkpoints potentially hundreds of independently-completing attempts, and
+ * re-serializing the whole run on every single checkpoint is the wrong write primitive for that.
+ * This module committed to IndexedDB from the first PR for exactly this reason — so this v2
+ * migration adds object stores to an already-proven transactional database rather than
+ * migrating storage backends mid-feature.
  *
- * This is intentionally the smallest possible slice of that commitment: one object store,
- * one key type, four operations. No UI reads this module yet.
+ * v2 adds two stores alongside the existing `suites` store:
+ *  - `runs`: one immutable suite snapshot + run bookkeeping row per benchmark run.
+ *  - `attempts`: one row per *execution* (see `benchmark-run.ts` for the logical-position vs.
+ *    execution distinction). Indexed by run, and by (run, status) so "everything still
+ *    `dispatched`" — the uncertain set — can be found without scanning a whole run's attempts.
+ *
+ * No UI reads any of this yet.
  */
 
 import { isBenchmarkSuite, validateBenchmarkSuite, type BenchmarkSuite } from './benchmark-suite';
+import { isBenchmarkAttempt, isBenchmarkRun, type BenchmarkAttempt, type BenchmarkRun, type RunStatus } from './benchmark-run';
 
 const DATABASE_NAME = 'flint-benchmarks';
-const DATABASE_VERSION = 1;
+const DATABASE_VERSION = 2;
 const SUITES_STORE = 'suites';
+const RUNS_STORE = 'runs';
+const ATTEMPTS_STORE = 'attempts';
+const RUNS_BY_SUITE_INDEX = 'bySuiteId';
+const ATTEMPTS_BY_RUN_INDEX = 'byRunId';
+const ATTEMPTS_BY_RUN_STATUS_INDEX = 'byRunStatus';
 
-/** Idempotent schema setup so a later DATABASE_VERSION bump can add stores without dropping suites. */
+/** Idempotent schema setup: each version bump only adds what is missing, so upgrading from any
+ * earlier version (including a fresh v1 database) never drops existing stores or data. */
 export function upgradeBenchmarkDatabase(db: IDBDatabase): void {
   if (!db.objectStoreNames.contains(SUITES_STORE)) {
     db.createObjectStore(SUITES_STORE, { keyPath: 'id' });
+  }
+  if (!db.objectStoreNames.contains(RUNS_STORE)) {
+    const runs = db.createObjectStore(RUNS_STORE, { keyPath: 'id' });
+    runs.createIndex(RUNS_BY_SUITE_INDEX, 'suiteId');
+  }
+  if (!db.objectStoreNames.contains(ATTEMPTS_STORE)) {
+    const attempts = db.createObjectStore(ATTEMPTS_STORE, { keyPath: 'id' });
+    attempts.createIndex(ATTEMPTS_BY_RUN_INDEX, 'runId');
+    attempts.createIndex(ATTEMPTS_BY_RUN_STATUS_INDEX, ['runId', 'status']);
   }
 }
 
@@ -86,14 +107,21 @@ export function openBenchmarkDatabase(version = DATABASE_VERSION): Promise<IDBDa
   });
 }
 
-/** Runs `body` against a store inside a transaction, resolving only when the transaction
- * itself reaches a terminal state (`complete` or `abort`) — a request can succeed while the
- * surrounding transaction still fails or is aborted afterward, so a request's own `onsuccess`/
- * `onerror` is never itself the settling event; only the transaction's terminal event is. */
-async function withStore<T>(
+/** Runs `body` against one or more stores inside a single transaction, resolving only when the
+ * transaction itself reaches a terminal state (`complete` or `abort`) — a request can succeed
+ * while the surrounding transaction still fails or is aborted afterward, so a request's own
+ * `onsuccess`/`onerror` is never itself the settling event; only the transaction's terminal
+ * event is. `body` may issue more than one request (e.g. a read-then-write) and returns the
+ * value to resolve with directly, rather than relying on a single request's result — this is
+ * what lets attempt updates (get existing row, then put the merged one) share one transaction. */
+async function withStores<T>(
+  storeNames: string | string[],
   mode: IDBTransactionMode,
-  body: (store: IDBObjectStore) => IDBRequest<T> | void,
-): Promise<RepositoryResult<T | undefined>> {
+  body: (
+    tx: IDBTransaction,
+    trackRequest: (request: IDBRequest) => void,
+  ) => T | Promise<T>,
+): Promise<RepositoryResult<T>> {
   let db: IDBDatabase;
   try {
     db = await openBenchmarkDatabase();
@@ -104,12 +132,10 @@ async function withStore<T>(
     return await new Promise((resolve) => {
       let settled = false;
       let requestErrorMessage: string | undefined;
-      const requestResultBox: { value?: T } = {};
+      const resultBox: { value?: T } = {};
       let tx: IDBTransaction;
-      let store: IDBObjectStore;
       try {
-        tx = db.transaction(SUITES_STORE, mode);
-        store = tx.objectStore(SUITES_STORE);
+        tx = db.transaction(storeNames, mode);
       } catch (e) {
         resolve(failResult(describeDomException(e, 'Could not start a benchmark database transaction')));
         return;
@@ -117,7 +143,7 @@ async function withStore<T>(
       tx.oncomplete = () => {
         if (settled) return;
         settled = true;
-        resolve(okResult(requestResultBox.value));
+        resolve(okResult(resultBox.value as T));
       };
       tx.onerror = () => {
         // Not terminal: an unhandled request error bubbles here before the transaction aborts.
@@ -131,29 +157,66 @@ async function withStore<T>(
           requestErrorMessage ?? describeDomException(tx.error, 'Benchmark database transaction was aborted'),
         ));
       };
-      let request: IDBRequest<T> | void;
-      try {
-        request = body(store);
-      } catch (e) {
-        // The synchronous throw itself does not abort the transaction, so record it and
-        // explicitly abort — the handlers above (already attached) then report it.
-        requestErrorMessage = describeDomException(e, 'Benchmark database request failed');
-        tx.abort();
-        return;
-      }
-      if (request) {
-        request.onsuccess = () => { requestResultBox.value = request!.result; };
+      const trackRequest = (request: IDBRequest) => {
         request.onerror = () => {
           // Do not settle here: an unhandled request error always aborts the transaction, and
           // `onabort` above is the true terminal signal — settling here would report success
           // or failure before the transaction's own outcome is actually known.
-          requestErrorMessage = describeDomException(request!.error, 'Benchmark database request failed');
+          requestErrorMessage = describeDomException(request.error, 'Benchmark database request failed');
         };
+      };
+      // Invoked synchronously (not after an extra microtask hop) so `body`'s first IDBRequest
+      // is made in the same task that created the transaction — required for the transaction
+      // to still be active when that request is issued.
+      let bodyResult: T | Promise<T>;
+      try {
+        bodyResult = body(tx, trackRequest);
+      } catch (e) {
+        requestErrorMessage = describeDomException(e, 'Benchmark database request failed');
+        try { tx.abort(); } catch { /* already inactive/aborted */ }
+        return;
       }
+      Promise.resolve(bodyResult)
+        .then((value) => { resultBox.value = value; })
+        .catch((e) => {
+          // A rejected `body` (e.g. a chained request's own error) does not itself abort the
+          // transaction, so record it and explicitly abort — the handlers above (already
+          // attached) then report it.
+          requestErrorMessage = describeDomException(e, 'Benchmark database request failed');
+          try { tx.abort(); } catch { /* already inactive/aborted */ }
+        });
     });
   } finally {
     db.close();
   }
+}
+
+/** Wraps a single IDBRequest as a promise, tracking it so its error (if any) is attributed
+ * correctly by `withStores` while still leaving the transaction's own terminal event as the
+ * only thing that settles the outer promise. */
+function requestAsPromise<T>(
+  request: IDBRequest<T>,
+  trackRequest: (request: IDBRequest) => void,
+): Promise<T> {
+  trackRequest(request);
+  return new Promise((resolve) => {
+    request.onsuccess = () => resolve(request.result);
+    // No separate onerror settling here: a request error aborts the transaction, and
+    // `withStores` resolves the outer promise from that abort, never from this request alone.
+  });
+}
+
+/** Back-compat single-store single-request helper used by the original suite CRUD below. */
+async function withStore<T>(
+  mode: IDBTransactionMode,
+  body: (store: IDBObjectStore) => IDBRequest<T> | void,
+): Promise<RepositoryResult<T | undefined>> {
+  return withStores<T | undefined>(SUITES_STORE, mode, (tx, trackRequest) => {
+    const store = tx.objectStore(SUITES_STORE);
+    const request = body(store);
+    if (!request) return undefined;
+    return requestAsPromise(request, trackRequest);
+  });
 }
 
 /** Suites that fail shape validation are treated as a repository-level error, not silently
@@ -201,4 +264,134 @@ export async function deleteBenchmarkSuite(id: string): Promise<RepositoryResult
   const result = await withStore<undefined>('readwrite', (store) => store.delete(suiteIdKey(id)));
   if (!result.ok) return failResult(result.error!);
   return okResult(undefined);
+}
+
+// --- Runs and attempts -------------------------------------------------------------------
+//
+// A run's suite snapshot is frozen at creation and never re-validated against the live
+// `suites` store — editing or deleting a suite must never affect a run already created from
+// it. Attempts are journaled one row per execution; recovery/resume logic (which execution to
+// treat as uncertain, which logical position to retry) lives in `benchmark-run.ts`, not here —
+// this module only durably persists whatever it is asked to write and reads it back honestly.
+
+/** Creates a run, keyed by `run.id`. The caller is responsible for freezing the suite snapshot
+ * before calling this — this function does not re-fetch or re-validate against `suites`. */
+export async function createBenchmarkRun(run: BenchmarkRun): Promise<RepositoryResult<void>> {
+  if (!isBenchmarkRun(run)) return failResult('run failed shape validation');
+  const result = await withStores<void>(RUNS_STORE, 'readwrite', (tx, trackRequest) => {
+    const store = tx.objectStore(RUNS_STORE);
+    return requestAsPromise(store.add(run) as IDBRequest<IDBValidKey>, trackRequest).then(() => undefined);
+  });
+  if (!result.ok) return failResult(result.error!);
+  return okResult(undefined);
+}
+
+export async function getBenchmarkRun(id: string): Promise<RepositoryResult<BenchmarkRun | null>> {
+  const result = await withStores<BenchmarkRun | undefined>(RUNS_STORE, 'readonly', (tx, trackRequest) => {
+    const store = tx.objectStore(RUNS_STORE);
+    return requestAsPromise(store.get(id) as IDBRequest<BenchmarkRun | undefined>, trackRequest);
+  });
+  if (!result.ok) return failResult(result.error!);
+  if (result.value === undefined) return okResult(null);
+  if (!isBenchmarkRun(result.value)) return failResult(`stored benchmark run "${id}" failed validation`);
+  return okResult(result.value);
+}
+
+export async function listBenchmarkRunsForSuite(suiteId: string): Promise<RepositoryResult<BenchmarkRun[]>> {
+  const result = await withStores<BenchmarkRun[]>(RUNS_STORE, 'readonly', (tx, trackRequest) => {
+    const index = tx.objectStore(RUNS_STORE).index(RUNS_BY_SUITE_INDEX);
+    return requestAsPromise(index.getAll(suiteId) as IDBRequest<BenchmarkRun[]>, trackRequest);
+  });
+  if (!result.ok) return failResult(result.error!);
+  const rows = result.value ?? [];
+  const invalidIndex = rows.findIndex((row) => !isBenchmarkRun(row));
+  if (invalidIndex !== -1) return failResult(`stored benchmark run at index ${invalidIndex} failed validation`);
+  return okResult(rows);
+}
+
+/** Updates only a run's status/timestamps — never its embedded suite snapshot, which is
+ * write-once at creation. `patch` fields are merged onto the existing stored row so a caller
+ * setting `status` does not have to re-supply fields it did not change. */
+export async function updateBenchmarkRunStatus(
+  id: string,
+  status: RunStatus,
+  patch: Partial<Pick<BenchmarkRun, 'startedAt' | 'finalizedAt'>> = {},
+): Promise<RepositoryResult<void>> {
+  const result = await withStores<void>(RUNS_STORE, 'readwrite', async (tx, trackRequest) => {
+    const store = tx.objectStore(RUNS_STORE);
+    const existing = await requestAsPromise(store.get(id) as IDBRequest<BenchmarkRun | undefined>, trackRequest);
+    if (existing === undefined) throw new Error(`no benchmark run "${id}" to update`);
+    if (!isBenchmarkRun(existing)) throw new Error(`stored benchmark run "${id}" failed validation`);
+    const updated: BenchmarkRun = { ...existing, ...patch, status };
+    await requestAsPromise(store.put(updated) as IDBRequest<IDBValidKey>, trackRequest);
+  });
+  if (!result.ok) return failResult(result.error!);
+  return okResult(undefined);
+}
+
+/** Write-ahead intent: durably records that `attempt` (status `'dispatched'`) is about to be
+ * sent, *before* the chat call is made. If this write itself fails, the caller must not make
+ * the chat call at all — an intent that was never recorded cannot later be told apart from one
+ * that succeeded silently. */
+export async function recordAttemptDispatched(attempt: BenchmarkAttempt): Promise<RepositoryResult<void>> {
+  if (attempt.status !== 'dispatched') return failResult('recordAttemptDispatched requires status "dispatched"');
+  if (!isBenchmarkAttempt(attempt)) return failResult('attempt failed shape validation');
+  const result = await withStores<void>(ATTEMPTS_STORE, 'readwrite', (tx, trackRequest) => {
+    const store = tx.objectStore(ATTEMPTS_STORE);
+    return requestAsPromise(store.add(attempt) as IDBRequest<IDBValidKey>, trackRequest).then(() => undefined);
+  });
+  if (!result.ok) return failResult(result.error!);
+  return okResult(undefined);
+}
+
+/** Terminal commit: merges a success/failure outcome onto an already-dispatched attempt row.
+ * Reads the existing row and writes the merged one in the same transaction so a concurrent
+ * read never observes a half-updated attempt. If this write fails, the attempt stays
+ * `dispatched` (uncertain) forever — by design; the caller (the runner) must treat that as
+ * fatal to the run rather than retrying silently or misreporting the outcome. */
+export async function recordAttemptTerminal(
+  id: string,
+  patch: Omit<Partial<BenchmarkAttempt>, 'id' | 'runId' | 'logicalAttemptId' | 'sequence'> & {
+    status: 'succeeded' | 'failed';
+    settledAt: number;
+  },
+): Promise<RepositoryResult<void>> {
+  const result = await withStores<void>(ATTEMPTS_STORE, 'readwrite', async (tx, trackRequest) => {
+    const store = tx.objectStore(ATTEMPTS_STORE);
+    const existing = await requestAsPromise(store.get(id) as IDBRequest<BenchmarkAttempt | undefined>, trackRequest);
+    if (existing === undefined) throw new Error(`no benchmark attempt "${id}" to update`);
+    const updated: BenchmarkAttempt = { ...existing, ...patch };
+    if (!isBenchmarkAttempt(updated)) throw new Error(`updated benchmark attempt "${id}" failed validation`);
+    await requestAsPromise(store.put(updated) as IDBRequest<IDBValidKey>, trackRequest);
+  });
+  if (!result.ok) return failResult(result.error!);
+  return okResult(undefined);
+}
+
+export async function listAttemptsForRun(runId: string): Promise<RepositoryResult<BenchmarkAttempt[]>> {
+  const result = await withStores<BenchmarkAttempt[]>(ATTEMPTS_STORE, 'readonly', (tx, trackRequest) => {
+    const index = tx.objectStore(ATTEMPTS_STORE).index(ATTEMPTS_BY_RUN_INDEX);
+    return requestAsPromise(index.getAll(runId) as IDBRequest<BenchmarkAttempt[]>, trackRequest);
+  });
+  if (!result.ok) return failResult(result.error!);
+  const rows = result.value ?? [];
+  const invalidIndex = rows.findIndex((row) => !isBenchmarkAttempt(row));
+  if (invalidIndex !== -1) return failResult(`stored benchmark attempt at index ${invalidIndex} failed validation`);
+  return okResult(rows);
+}
+
+/** The uncertain set for a run: attempts still `dispatched` (no terminal row exists for that
+ * execution). Uses the compound `byRunStatus` index so this never scans a whole run's history
+ * just to find what still needs attention. */
+export async function listDispatchedAttemptsForRun(runId: string): Promise<RepositoryResult<BenchmarkAttempt[]>> {
+  const result = await withStores<BenchmarkAttempt[]>(ATTEMPTS_STORE, 'readonly', (tx, trackRequest) => {
+    const index = tx.objectStore(ATTEMPTS_STORE).index(ATTEMPTS_BY_RUN_STATUS_INDEX);
+    const range = IDBKeyRange.only([runId, 'dispatched']);
+    return requestAsPromise(index.getAll(range) as IDBRequest<BenchmarkAttempt[]>, trackRequest);
+  });
+  if (!result.ok) return failResult(result.error!);
+  const rows = result.value ?? [];
+  const invalidIndex = rows.findIndex((row) => !isBenchmarkAttempt(row));
+  if (invalidIndex !== -1) return failResult(`stored benchmark attempt at index ${invalidIndex} failed validation`);
+  return okResult(rows);
 }
