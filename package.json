@@ -53,6 +53,7 @@
     "@testing-library/svelte": "^5.2.8",
     "@types/node": "^26.1.2",
     "@vitest/coverage-v8": "^4.1.11",
+    "fake-indexeddb": "^6.2.5",
     "jsdom": "^25.0.1",
     "svelte": "^5.0.0",
     "svelte-check": "^4.0.0",
