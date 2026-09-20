@@ -198,7 +198,7 @@ describe('benchmark-repository', () => {
     }
   });
 
-  it('reports failure with a fallback message when indexedDB.open throws a non-Error value synchronously', async () => {
+  it('preserves a non-Error diagnostic when indexedDB.open throws a string synchronously', async () => {
     const originalIndexedDB = globalThis.indexedDB;
     vi.stubGlobal('indexedDB', {
       open: () => {
@@ -208,7 +208,22 @@ describe('benchmark-repository', () => {
     });
     try {
       const result = await listBenchmarkSuites();
-      expect(result).toEqual({ ok: false, error: 'Could not open the benchmark database' });
+      expect(result).toEqual({ ok: false, error: 'boom' });
+    } finally {
+      vi.stubGlobal('indexedDB', originalIndexedDB);
+    }
+  });
+
+  it('preserves a message property when indexedDB.open throws a plain object', async () => {
+    const originalIndexedDB = globalThis.indexedDB;
+    vi.stubGlobal('indexedDB', {
+      open: () => {
+        throw { message: 'quota exceeded' };
+      },
+    });
+    try {
+      const result = await listBenchmarkSuites();
+      expect(result).toEqual({ ok: false, error: 'quota exceeded' });
     } finally {
       vi.stubGlobal('indexedDB', originalIndexedDB);
     }

@@ -28,6 +28,9 @@ export const BENCHMARK_MAX_TEXT_LENGTH = 8000;
 export const BENCHMARK_MAX_MESSAGES_PER_CASE = 32;
 export const BENCHMARK_MAX_TAGS = 10;
 export const BENCHMARK_MAX_TAG_LENGTH = 40;
+/** Reject the import before splitting/parsing so a huge paste cannot exhaust memory. */
+export const BENCHMARK_MAX_JSONL_CHARS = 1_048_576;
+export const BENCHMARK_MAX_JSONL_LINE_CHARS = 64_000;
 
 export const BENCHMARK_MESSAGE_ROLES = ['system', 'user', 'assistant'] as const;
 export type BenchmarkMessageRole = (typeof BENCHMARK_MESSAGE_ROLES)[number];
@@ -306,6 +309,9 @@ export interface JsonlImportResult {
  * duplicate id.
  */
 export function parseBenchmarkCasesJsonl(text: string): JsonlImportResult {
+  if (text.length > BENCHMARK_MAX_JSONL_CHARS) {
+    return { ok: false, error: `file is larger than ${BENCHMARK_MAX_JSONL_CHARS} characters` };
+  }
   const lines = text.split(/\r?\n/);
   const rawRows: Array<{ lineNumber: number; raw: unknown }> = [];
   for (let i = 0; i < lines.length; i++) {
@@ -314,6 +320,9 @@ export function parseBenchmarkCasesJsonl(text: string): JsonlImportResult {
     const lineNumber = i + 1;
     if (rawRows.length >= BENCHMARK_MAX_CASES) {
       return { ok: false, error: `file has more than ${BENCHMARK_MAX_CASES} cases, exceeding the ${BENCHMARK_MAX_CASES}-case limit` };
+    }
+    if (line.length > BENCHMARK_MAX_JSONL_LINE_CHARS) {
+      return { ok: false, error: `line ${lineNumber}: exceeds ${BENCHMARK_MAX_JSONL_LINE_CHARS} characters` };
     }
     let parsed: unknown;
     try {

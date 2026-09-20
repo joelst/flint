@@ -41,7 +41,12 @@ function failResult<T>(error: string): RepositoryResult<T> {
 }
 
 function describeDomException(e: unknown, fallback: string): string {
+  if (typeof e === 'string' && e.trim()) return e;
   if (e instanceof Error && e.message) return e.message;
+  if (e && typeof e === 'object' && typeof (e as { message?: unknown }).message === 'string') {
+    const message = (e as { message: string }).message.trim();
+    if (message) return message;
+  }
   return fallback;
 }
 

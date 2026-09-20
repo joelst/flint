@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   BENCHMARK_MAX_ATTEMPTS,
   BENCHMARK_MAX_CASES,
+  BENCHMARK_MAX_JSONL_CHARS,
+  BENCHMARK_MAX_JSONL_LINE_CHARS,
   BENCHMARK_MAX_MESSAGES_PER_CASE,
   BENCHMARK_MAX_TARGETS,
   BENCHMARK_MAX_TOKENS_LIMIT,
@@ -393,6 +395,19 @@ describe('parseBenchmarkCasesJsonl', () => {
   it('rejects an empty file', () => {
     expect(parseBenchmarkCasesJsonl('').ok).toBe(false);
     expect(parseBenchmarkCasesJsonl('   \n  \n').ok).toBe(false);
+  });
+
+  it('rejects a file larger than the character cap before parsing', () => {
+    const r = parseBenchmarkCasesJsonl('x'.repeat(BENCHMARK_MAX_JSONL_CHARS + 1));
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/larger than/);
+  });
+
+  it('rejects a line longer than the per-line cap before JSON.parse', () => {
+    const r = parseBenchmarkCasesJsonl('{"id":"c1","prompt":"' + 'x'.repeat(BENCHMARK_MAX_JSONL_LINE_CHARS) + '"}');
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/line 1/);
+    expect(r.error).toMatch(/exceeds/);
   });
 
   it('rejects more cases than the case limit', () => {
