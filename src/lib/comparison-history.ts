@@ -57,6 +57,12 @@ function isOptionalFiniteNumber(value: unknown): boolean {
   return value === undefined || (typeof value === 'number' && Number.isFinite(value));
 }
 
+function isValidCreatedAt(value: unknown): value is number {
+  return typeof value === 'number'
+    && Number.isFinite(value)
+    && Number.isFinite(new Date(value).getTime());
+}
+
 function isOptionalRating(value: unknown): boolean {
   return value === undefined || value === null || value === 'up' || value === 'down';
 }
@@ -82,7 +88,7 @@ function isCompareResult(value: unknown): value is CompareResult {
 
 function isSavedComparison(value: unknown): value is SavedComparison {
   if (!isPlainObject(value)) return false;
-  if (typeof value.id !== 'string' || !Number.isFinite(value.createdAt) || typeof value.prompt !== 'string') {
+  if (typeof value.id !== 'string' || !isValidCreatedAt(value.createdAt) || typeof value.prompt !== 'string') {
     return false;
   }
   if (!Array.isArray(value.slots) || !value.slots.every(isCompareSlot)) return false;

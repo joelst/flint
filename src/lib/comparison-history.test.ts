@@ -153,6 +153,16 @@ describe('loadComparisonHistory', () => {
     expect(loaded.backedUp).toBe(true);
   });
 
+  it('backs up a finite createdAt outside the Date range as corrupt', () => {
+    const run = savedRun({ createdAt: 8.65e15 });
+    expect(Number.isFinite(run.createdAt)).toBe(true);
+    expect(Number.isFinite(new Date(run.createdAt).getTime())).toBe(false);
+    const loaded = loadComparisonHistory(new MemoryStorage({ [COMPARE_HISTORY_KEY]: JSON.stringify([run]) }));
+    expect(loaded.history).toEqual([]);
+    expect(loaded.writable).toBe(true);
+    expect(loaded.backedUp).toBe(true);
+  });
+
   it('rejects an entry whose results field is missing', () => {
     const run = savedRun();
     const raw = JSON.stringify([{ ...run, results: undefined }]);
