@@ -12,7 +12,7 @@ import {
   type BenchmarkLifecycleHost,
 } from './benchmark-lifecycle';
 import { createStopController, startBenchmarkRun } from './benchmark-runner';
-import { getBenchmarkRun, listAttemptsForRun, listBenchmarkRunsForSuite, openBenchmarkDatabase, putBenchmarkSuite } from './benchmark-repository';
+import { getBenchmarkRun, listAttemptsForRun, listBenchmarkRunsForSuite, openBenchmarkDatabase, putBenchmarkSuite, recordAttemptDispatched } from './benchmark-repository';
 import type { BenchmarkSuite } from './benchmark-suite';
 
 function suite(over: Partial<BenchmarkSuite> = {}): BenchmarkSuite {
@@ -297,12 +297,41 @@ describe('boundVariantIdForTarget / assertServedVariant', () => {
   it('prefers the suite variant, else the first served variant already recorded for that target', () => {
     expect(boundVariantIdForTarget({ variantId: 'explicit' }, 0, [
       { targetIndex: 0, servedVariantId: 'hist' },
-    ])).toBe('explicit');
+    ])).toEqual({ ok: true, variantId: 'explicit' });
     expect(boundVariantIdForTarget({ variantId: null }, 1, [
       { targetIndex: 0, servedVariantId: 'other' },
       { targetIndex: 1, servedVariantId: 'hist-v' },
-    ])).toBe('hist-v');
-    expect(boundVariantIdForTarget({ variantId: null }, 0, [])).toBe(null);
+    ])).toEqual({ ok: true, variantId: 'hist-v' });
+    expect(boundVariantIdForTarget({ variantId: null }, 0, [])).toEqual({ ok: true, variantId: null });
+  });
+
+  it('prefers a durable boundVariantId over servedVariantId, recovering an uncertain (dispatched-only) attempt that never reached servedVariantId', () => {
+    // A position left `dispatched` by Stop/crash has no servedVariantId (only ever written on a
+    // terminal success), but its boundVariantId was committed before dispatch. Resume must
+    // recover that durable binding, not fall back to null (which would let it load a different
+    // default variant than the one this run actually used).
+    expect(boundVariantIdForTarget({ variantId: null }, 0, [
+      { targetIndex: 0, boundVariantId: 'bound-v1', servedVariantId: undefined },
+    ])).toEqual({ ok: true, variantId: 'bound-v1' });
+  });
+
+  it('falls back to servedVariantId for legacy attempt rows written before boundVariantId existed', () => {
+    expect(boundVariantIdForTarget({ variantId: null }, 0, [
+      { targetIndex: 0, servedVariantId: 'legacy-served' },
+    ])).toEqual({ ok: true, variantId: 'legacy-served' });
+  });
+
+  it('reports a conflict instead of silently picking one, when persisted attempts for a target disagree', () => {
+    // Under correct operation every attempt for one target records the same binding (a mismatch
+    // aborts preparation before it can be persisted); if two rows disagree anyway, that can only
+    // mean corruption or a bug elsewhere, so this must fail loudly rather than resume against an
+    // arbitrarily chosen variant.
+    const result = boundVariantIdForTarget({ variantId: null }, 0, [
+      { targetIndex: 0, boundVariantId: 'v1' },
+      { targetIndex: 0, boundVariantId: 'v2' },
+    ]);
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.error).toMatch(/Conflicting recorded variants/);
   });
 
   it('rejects a missing or swapped served variant when one is bound', () => {
@@ -338,6 +367,24 @@ describe('loadBenchmarkTargets', () => {
     expect(result).toEqual({ ok: true });
     expect(loaded).toEqual(['model-b']);
   });
+
+  it('rejects a fresh explicit-variant target whose load resolves to a different variant, instead of executing against the mismatched build', async () => {
+    // `expectedByAlias` starts empty for a fresh run, so comparing the loader's result only
+    // against a *prior* map entry would miss this case entirely (there is no prior entry to
+    // disagree with) and silently accept whatever the loader resolved -- execution would then
+    // dispatch every case against a build the suite never asked for.
+    const result = await loadBenchmarkTargets(
+      suite({ targets: [{ alias: 'phi', variantId: 'cuda:1' }] }),
+      async () => 'cuda:2',
+      undefined,
+      undefined,
+      new Map(),
+    );
+    expect(result).toEqual({
+      ok: false,
+      error: 'Loaded variant "cuda:2" for phi did not match the bound variant "cuda:1"',
+    });
+  });
 });
 
 describe('resumeBenchmarkSession', () => {
@@ -359,6 +406,43 @@ describe('resumeBenchmarkSession', () => {
     expect(result.ok).toBe(false);
     expect(result.ok === false && result.error).toMatch(/cannot be resumed/);
     expect(host.order).toEqual([]);
+  });
+
+  it('halts resume instead of dispatching, when persisted attempts for a target carry conflicting boundVariantId', async () => {
+    // Proves the wiring end to end: boundVariantIdForTarget's conflict result actually reaches
+    // resumeBenchmarkSession and prevents both pin/load and dispatch, not just the unit-level
+    // helper return value.
+    await putRawRun({
+      id: 'conflicted-run',
+      suiteId: 'suite-1',
+      suite: suite({ targets: [{ alias: 'model-a', variantId: null }] }),
+      createdAt: Date.now(),
+      status: 'stopped',
+    });
+    const baseAttempt = {
+      runId: 'conflicted-run',
+      logicalAttemptId: 'measured:0:0:0',
+      targetIndex: 0,
+      phase: 'measured' as const,
+      caseIndex: 0,
+      repeatIndex: 0,
+      status: 'dispatched' as const,
+      alias: 'model-a',
+      requestedVariantId: null,
+      intentCommittedAt: Date.now(),
+    };
+    await recordAttemptDispatched({ ...baseAttempt, id: 'attempt-1', sequence: 0, boundVariantId: 'v1' });
+    await recordAttemptDispatched({ ...baseAttempt, id: 'attempt-2', sequence: 1, boundVariantId: 'v2' });
+
+    const host = fakeHost();
+    const result = await resumeBenchmarkSession('conflicted-run', host);
+    expect(result.ok).toBe(true);
+    const outcome = result.ok && await result.execution.done;
+    expect(outcome && outcome.ok).toBe(false);
+    expect(outcome && !outcome.ok && outcome.error).toMatch(/Conflicting recorded variants/);
+    // finishPreparedHalt best-effort unpins on the way out; neither loadModel nor pinAliases
+    // (the load/pin path) ran, since the conflict is caught before pin/load begins.
+    expect(host.order).toEqual(['unpin']);
   });
 
   it('pins before loading when resuming a valid stopped run', async () => {

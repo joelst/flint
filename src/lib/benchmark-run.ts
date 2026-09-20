@@ -78,6 +78,12 @@ export interface BenchmarkAttempt {
   status: AttemptStatus;
   alias: string;
   requestedVariantId: string | null;
+  /** The variant actually bound for this alias when the intent was committed — the suite's
+   * explicit variant, or whatever an earlier load in this same run resolved an alias-only target
+   * to. Written before dispatch (write-ahead, like `requestedVariantId`) specifically so Resume
+   * can recover the true bound variant for a position left `dispatched` (uncertain) by Stop or a
+   * crash, which never reaches `servedVariantId` (only ever written on a terminal success). */
+  boundVariantId?: string | null;
   /** Filled in once the SDK reports which variant actually served the request, if it differs. */
   servedVariantId?: string | null;
   /** Committed before the chat call is dispatched — the write-ahead part of the contract. */
@@ -272,6 +278,7 @@ export function isBenchmarkAttempt(value: unknown): value is BenchmarkAttempt {
   if (typeof v.status !== 'string' || !ATTEMPT_STATUSES.has(v.status as AttemptStatus)) return false;
   if (!isNonEmptyString(v.alias)) return false;
   if (v.requestedVariantId !== null && !isNonEmptyString(v.requestedVariantId)) return false;
+  if (v.boundVariantId !== undefined && v.boundVariantId !== null && !isNonEmptyString(v.boundVariantId)) return false;
   if (!isFiniteNumber(v.intentCommittedAt)) return false;
   if (v.status === 'succeeded' && typeof v.responseText !== 'string') return false;
   if (v.status === 'failed' && !isNonEmptyString(v.errorMessage)) return false;

@@ -191,6 +191,7 @@ async function executePositions(
   attemptsSoFar: BenchmarkAttempt[],
   transport: AttemptTransport,
   stopController: StopController,
+  boundVariantByAlias?: ReadonlyMap<string, string>,
 ): Promise<{ result: RunExecutionResult; run: BenchmarkRun }> {
   for (const position of positions) {
     if (stopController.isStopped()) {
@@ -210,6 +211,11 @@ async function executePositions(
       status: 'dispatched',
       alias: target.alias,
       requestedVariantId: target.variantId,
+      // Written before dispatch (same write-ahead guarantee as `requestedVariantId`) so a
+      // position left `dispatched` by Stop/crash still durably records which variant was
+      // actually bound for this alias -- `servedVariantId` alone is only ever set on a terminal
+      // success and would otherwise leave Resume unable to recover the true bound variant.
+      boundVariantId: target.variantId ?? boundVariantByAlias?.get(target.alias) ?? null,
       intentCommittedAt: Date.now(),
     };
 
@@ -332,6 +338,7 @@ export async function startBenchmarkRun(
   transport: AttemptTransport,
   stopController: StopController = createStopController(),
   preparedRun?: BenchmarkRun,
+  boundVariantByAlias?: ReadonlyMap<string, string>,
 ): Promise<StartRunOutcome> {
   // Snapshot (deep-clone) before any await: the caller's `suite` object must never be able to
   // retroactively change what this run recorded or scheduled, even if it's mutated the instant
@@ -436,7 +443,7 @@ export async function startBenchmarkRun(
     }
 
     const schedule = buildAttemptSchedule(frozenSuite);
-    const { result, run: finalRun } = await executePositions(run, schedule, [], transport, stopController);
+    const { result, run: finalRun } = await executePositions(run, schedule, [], transport, stopController, boundVariantByAlias);
     return { ok: true, run: finalRun, result };
   } finally {
     activeRunIds.delete(runId);
@@ -465,6 +472,7 @@ export async function resumeBenchmarkRun(
   runId: string,
   transport: AttemptTransport,
   stopController: StopController = createStopController(),
+  boundVariantByAlias?: ReadonlyMap<string, string>,
 ): Promise<ResumeRunOutcome> {
   if (activeRunIds.has(runId)) {
     return { ok: false, error: `benchmark run "${runId}" already has an execution in progress` };
@@ -507,7 +515,7 @@ export async function resumeBenchmarkRun(
     if (!resumedStart.ok) return { ok: false, error: resumedStart.error };
     const resumingRun: BenchmarkRun = { ...run, status: 'running', startedAt: resumedStartedAt };
 
-    const { result, run: finalRun } = await executePositions(resumingRun, pending, [...attempts], transport, stopController);
+    const { result, run: finalRun } = await executePositions(resumingRun, pending, [...attempts], transport, stopController, boundVariantByAlias);
     return { ok: true, result, run: finalRun };
   } finally {
     activeRunIds.delete(runId);

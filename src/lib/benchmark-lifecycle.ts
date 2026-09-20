@@ -44,19 +44,39 @@ function targetsToPrepare(suite: BenchmarkSuite, onlyTargetIndexes?: ReadonlySet
 
 export type PrepareResult = { ok: true } | { ok: false; error: string; stopped?: boolean };
 
-/** Explicit suite variant, else the first served variant already recorded for this target. */
+/** Explicit suite variant; else the durable bound variant recorded when an earlier attempt's
+ * intent was committed, which survives even a position left `dispatched` (uncertain) by Stop or
+ * a crash; else (for attempt rows written before `boundVariantId` existed) the served variant
+ * from a completed attempt, as a backward-compatible fallback.
+ *
+ * All attempts for one target within a run are expected to record the same binding — pinThenLoad
+ * aborts preparation the moment a load resolves to something else, so no attempt should ever
+ * disagree with an earlier one. If persisted rows disagree anyway (only reachable through data
+ * corruption or a bug elsewhere), refuse to pick one arbitrarily: report the conflict so resume
+ * fails loudly instead of silently binding to a value that may not match what the original run
+ * actually executed against. */
 export function boundVariantIdForTarget(
   target: { variantId: string | null },
   targetIndex: number,
-  attempts: readonly Pick<BenchmarkAttempt, 'targetIndex' | 'servedVariantId'>[],
-): string | null {
-  if (target.variantId) return target.variantId;
+  attempts: readonly Pick<BenchmarkAttempt, 'targetIndex' | 'boundVariantId' | 'servedVariantId'>[],
+): { ok: true; variantId: string | null } | { ok: false; error: string } {
+  if (target.variantId) return { ok: true, variantId: target.variantId };
+  const recorded = new Set<string>();
   for (const attempt of attempts) {
-    if (attempt.targetIndex === targetIndex && typeof attempt.servedVariantId === 'string' && attempt.servedVariantId.length > 0) {
-      return attempt.servedVariantId;
+    if (attempt.targetIndex !== targetIndex) continue;
+    if (typeof attempt.boundVariantId === 'string' && attempt.boundVariantId.length > 0) {
+      recorded.add(attempt.boundVariantId);
+    } else if (typeof attempt.servedVariantId === 'string' && attempt.servedVariantId.length > 0) {
+      recorded.add(attempt.servedVariantId);
     }
   }
-  return null;
+  if (recorded.size > 1) {
+    return {
+      ok: false,
+      error: `Conflicting recorded variants for target ${targetIndex} (${target.variantId ?? 'alias-only'}): ${[...recorded].join(', ')}`,
+    };
+  }
+  return { ok: true, variantId: recorded.size === 1 ? [...recorded][0] : null };
 }
 
 export function assertServedVariant(
@@ -96,12 +116,22 @@ export async function loadBenchmarkTargets(
     const bound = expectedByAlias?.get(target.alias) ?? target.variantId;
     try {
       const resolved = await loadModel(target.alias, bound);
-      if (typeof resolved === 'string' && resolved.length > 0) {
-        const prior = expectedByAlias?.get(target.alias);
-        if (prior && prior !== resolved) {
+      // Reject whitespace-only "resolved" values rather than trusting them as a real variant id
+      // — an identifier consisting only of whitespace can never legitimately equal `bound` or a
+      // suite variant id, so treating it as informative would only ever produce a false mismatch
+      // (or worse, get durably persisted as a bogus binding).
+      if (typeof resolved === 'string' && resolved.trim().length > 0) {
+        // `bound` is either an explicit suite variant (fresh run, `expectedByAlias` still empty)
+        // or a variant already recorded earlier in this same prepare pass -- either way, once a
+        // variant is bound for this alias, a load reporting a different one must abort rather
+        // than silently rebind: comparing only against a *prior* map entry missed the fresh
+        // explicit-variant case entirely (an empty map has no prior entry to disagree with), so
+        // execution would proceed against whatever the loader actually resolved instead of the
+        // variant the suite asked for.
+        if (bound && bound !== resolved) {
           return {
             ok: false,
-            error: `Loaded variant "${resolved}" for ${target.alias} did not match the bound variant "${prior}"`,
+            error: `Loaded variant "${resolved}" for ${target.alias} did not match the bound variant "${bound}"`,
           };
         }
         expectedByAlias?.set(target.alias, resolved);
@@ -273,7 +303,7 @@ export async function startBenchmarkSession(
     if (stopController.isStopped()) {
       return finishPreparedHalt(runId, host, 'stopped', 'Stopped during preparation');
     }
-    return startBenchmarkRun(frozen, transport, stopController, prepared.run);
+    return startBenchmarkRun(frozen, transport, stopController, prepared.run, expectedByAlias);
   })();
   // A new run has no leftover dispatched rows; 0 means every intent is this session.
   return { ok: true, execution: { runId, stopController, done, liveAfter: 0 } };
@@ -303,7 +333,10 @@ export async function resumeBenchmarkSession(
     const rows = attempts.value ?? [];
     for (const [i, target] of suite.targets.entries()) {
       const bound = boundVariantIdForTarget(target, i, rows);
-      if (bound) expectedByAlias.set(target.alias, bound);
+      if (!bound.ok) {
+        return finishPreparedHalt(runId, host, 'failed', bound.error);
+      }
+      if (bound.variantId) expectedByAlias.set(target.alias, bound.variantId);
     }
     const only = new Set(pendingTargetIndexes(suite, rows));
     if (only.size > 0) {
@@ -315,7 +348,7 @@ export async function resumeBenchmarkSession(
     if (stopController.isStopped()) {
       return finishPreparedHalt(runId, host, 'stopped', 'Stopped during preparation');
     }
-    return resumeBenchmarkRun(runId, transport, stopController);
+    return resumeBenchmarkRun(runId, transport, stopController, expectedByAlias);
   })();
   return { ok: true, execution: { runId, stopController, done, liveAfter } };
 }
