@@ -257,6 +257,17 @@ describe('validateBenchmarkSuite', () => {
     expect(r.value?.targets).toHaveLength(2);
   });
 
+  it('still rejects an exact alias+variant duplicate even on tolerant stored-suite reads', () => {
+    const corrupt = validSuite({
+      targets: [
+        { alias: 'model-a', variantId: 'v1' },
+        { alias: 'model-a', variantId: 'v1' },
+      ],
+    });
+    expect(validateBenchmarkSuite(corrupt, { allowDuplicateAliases: true }).ok).toBe(false);
+    expect(isStoredBenchmarkSuite(corrupt)).toBe(false);
+  });
+
   it('rejects duplicate case ids', () => {
     const r = validateBenchmarkSuite(validSuite({
       cases: [validCase({ id: 'dup' }), validCase({ id: 'dup' })],

@@ -34,8 +34,7 @@ import {
   type BenchmarkRun,
   type LogicalAttempt,
 } from './benchmark-run';
-import type { BenchmarkMessage, BenchmarkSuite } from './benchmark-suite';
-import { isBenchmarkSuite } from './benchmark-suite';
+import { isBenchmarkSuite, type BenchmarkMessage, type BenchmarkSuite } from './benchmark-suite';
 import {
   createBenchmarkRun,
   getBenchmarkRun,
@@ -298,6 +297,12 @@ export interface StartRunOutcome {
 export async function prepareBenchmarkRun(
   suite: BenchmarkSuite,
 ): Promise<{ ok: true; run: BenchmarkRun } | { ok: false; error: string }> {
+  if (!isBenchmarkSuite(suite)) {
+    return {
+      ok: false,
+      error: 'cannot start: suite snapshot has duplicate target aliases from before that shape was rejected',
+    };
+  }
   const frozenSuite = freezeSuiteSnapshot(suite);
   const run: BenchmarkRun = {
     id: generateRunId(),
@@ -318,6 +323,13 @@ export async function startBenchmarkRun(
   stopController: StopController = createStopController(),
   preparedRun?: BenchmarkRun,
 ): Promise<StartRunOutcome> {
+  const snapshot = preparedRun?.suite ?? suite;
+  if (!isBenchmarkSuite(snapshot)) {
+    return {
+      ok: false,
+      error: 'cannot start: suite snapshot has duplicate target aliases from before that shape was rejected',
+    };
+  }
   // Snapshot (deep-clone) before any await: the caller's `suite` object must never be able to
   // retroactively change what this run recorded or scheduled, even if it's mutated the instant
   // after this call returns control to the event loop.

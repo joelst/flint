@@ -10,11 +10,13 @@
     listAttemptsForRun,
     listAttemptSummariesForRun,
   } from "./benchmark-repository";
-  import type { BenchmarkSuite, BenchmarkTarget } from "./benchmark-suite";
   import {
     BENCHMARK_MAX_TARGETS,
-    benchmarkAttemptCount,
     BENCHMARK_MAX_ATTEMPTS,
+    benchmarkAttemptCount,
+    isBenchmarkSuite,
+    type BenchmarkSuite,
+    type BenchmarkTarget,
   } from "./benchmark-suite";
   import { applyTargetAlias, draftFromSuite, buildSuiteFromDraft, type SuiteDraft } from "./benchmark-draft";
   import { buildProgressMatrix, isRunInterrupted, isRunResumable, type AttemptSummary } from "./benchmark-progress";
@@ -47,6 +49,8 @@
   let editingDraft: SuiteDraft | null = null;
   let editingErrors: string[] = [];
   let editingBusy = false;
+  /** Held across create/edit/save/delete so Delete cannot race a Save that recreates the suite. */
+  let suiteBusy = false;
 
   let selectedRunId: string | null = null;
   let selectedRun: BenchmarkRun | null = null;
@@ -96,7 +100,11 @@
     for (const suite of nextSuites) {
       const runsRes = await listBenchmarkRunsForSuite(suite.id);
       if (generation !== suitesGeneration) return;
-      counts[suite.id] = runsRes.ok ? (runsRes.value ?? []).length : 0;
+      if (!runsRes.ok) {
+        loadError = runsRes.error || `Could not read runs for suite "${suite.id}"`;
+        return;
+      }
+      counts[suite.id] = (runsRes.value ?? []).length;
     }
     if (generation !== suitesGeneration) return;
     suites = nextSuites;
@@ -108,8 +116,13 @@
     const generation = ++runsRefreshGeneration;
     const res = await listBenchmarkRunsForSuite(id);
     if (destroyed || generation !== runsRefreshGeneration || selectedSuiteId !== id) return;
-    runsForSelectedSuite = res.ok ? (res.value ?? []).sort((a, b) => b.createdAt - a.createdAt) : [];
+    if (!res.ok) {
+      loadError = res.error || `Could not read runs for suite "${id}"`;
+      return;
+    }
+    runsForSelectedSuite = (res.value ?? []).sort((a, b) => b.createdAt - a.createdAt);
     runCountsBySuite = { ...runCountsBySuite, [id]: runsForSelectedSuite.length };
+    loadError = "";
   }
 
   async function selectSuite(id: string) {
@@ -138,13 +151,13 @@
   // user opened in the meantime. The template also disables their buttons while `editingBusy`;
   // these are a defense-in-depth guard against any other call path.
   function startCreateSuite() {
-    if (editingBusy) return;
+    if (editingBusy || suiteBusy) return;
     editingDraft = newSuiteDraft();
     editingErrors = [];
   }
 
   async function startEditSuite(suite: BenchmarkSuite) {
-    if (editingBusy) return;
+    if (editingBusy || suiteBusy) return;
     // Editing is restricted to suites with no runs yet — a suite with runs already has attempts
     // recorded against its frozen snapshot, and silently changing the live suite underneath
     // that history would be misleading even though runs themselves are immutable.
@@ -157,7 +170,7 @@
   }
 
   function cancelEditSuite() {
-    if (editingBusy) return;
+    if (editingBusy || suiteBusy) return;
     editingDraft = null;
     editingErrors = [];
   }
@@ -209,8 +222,9 @@
     : null;
 
   async function saveSuite() {
-    if (!editingDraft) return;
+    if (!editingDraft || suiteBusy) return;
     editingBusy = true;
+    suiteBusy = true;
     editingErrors = [];
     try {
       const result = buildSuiteFromDraft(editingDraft);
@@ -228,24 +242,31 @@
       await refreshSuites();
     } finally {
       editingBusy = false;
+      suiteBusy = false;
     }
   }
 
   async function removeSuite(suite: BenchmarkSuite) {
+    if (suiteBusy || editingBusy) return;
+    suiteBusy = true;
     // `runCountsBySuite` is only a UI hint (last refresh) — the actual guard against deleting a
     // suite that has gained a run since then lives inside `deleteBenchmarkSuiteIfNoRuns`, which
     // rechecks atomically in the same transaction as the delete.
-    const res = await deleteBenchmarkSuiteIfNoRuns(suite.id);
-    if (destroyed) return;
-    if (!res.ok) {
-      loadError = res.error || "Could not delete suite";
-      return;
+    try {
+      const res = await deleteBenchmarkSuiteIfNoRuns(suite.id);
+      if (destroyed) return;
+      if (!res.ok) {
+        loadError = res.error || "Could not delete suite";
+        return;
+      }
+      if (selectedSuiteId === suite.id) {
+        selectedSuiteId = null;
+        runsForSelectedSuite = [];
+      }
+      await refreshSuites();
+    } finally {
+      suiteBusy = false;
     }
-    if (selectedSuiteId === suite.id) {
-      selectedSuiteId = null;
-      runsForSelectedSuite = [];
-    }
-    await refreshSuites();
   }
 
   function stopPolling() {
@@ -279,19 +300,18 @@
       pollError = `Could not refresh run attempts: ${summariesRes.error}`;
     }
     if (!selectedRun || selectedRun.id !== activeRunId || selectedRun.status !== "running") {
-      // This run just left the live/active state (finished, was stopped, or crashed) while we
-      // were polling it — the run-list row (`runsForSelectedSuite`) was fetched once when the
-      // suite was selected and still shows the old "running" snapshot, which `isRunInterrupted`
-      // would then misreport as "interrupted" now that `activeRunId` has moved on. Refresh the
-      // list alongside the detail view so the badge reflects the real terminal status.
-      const wasPolling = pollHandle !== null;
+      // Refresh the suite's run list whenever the open detail is not the live running run —
+      // including the first openRun() after a fast start that already finished, when no
+      // interval was ever installed (`wasPolling` would miss that).
       stopPolling();
-      if (wasPolling && selectedSuiteId) await refreshRunsForSelectedSuite(selectedSuiteId);
+      if (selectedSuiteId) await refreshRunsForSelectedSuite(selectedSuiteId);
     }
   }
 
   async function openRun(runId: string) {
     selectedRunId = runId;
+    selectedRun = null;
+    selectedRunAttempts = [];
     lifecycleError = "";
     pollError = "";
     stopPolling();
@@ -392,7 +412,7 @@
         Early preview.
       </p>
     </div>
-    <button type="button" class="secondary small" onclick={startCreateSuite} disabled={editingBusy}>New suite</button>
+    <button type="button" class="secondary small" onclick={startCreateSuite} disabled={editingBusy || suiteBusy}>New suite</button>
   </div>
 
   {#if loadError}
@@ -483,10 +503,10 @@
       {/if}
 
       <div class="benchmark-editor-actions">
-        <button type="button" class="primary" disabled={editingBusy} onclick={saveSuite}>
+        <button type="button" class="primary" disabled={editingBusy || suiteBusy} onclick={saveSuite}>
           {editingBusy ? "Saving…" : "Save suite"}
         </button>
-        <button type="button" class="secondary" disabled={editingBusy} onclick={cancelEditSuite}>Cancel</button>
+        <button type="button" class="secondary" disabled={editingBusy || suiteBusy} onclick={cancelEditSuite}>Cancel</button>
       </div>
     </div>
   {/if}
@@ -503,8 +523,8 @@
             <strong>{suite.name}</strong>
             <span class="muted small">{suite.targets.length} target(s) · {suite.cases.length} case(s) · {runCountsBySuite[suite.id] ?? 0} run(s)</span>
           </button>
-          <button type="button" class="tiny" disabled={editingBusy} onclick={() => startEditSuite(suite)}>Edit</button>
-          <button type="button" class="tiny danger-btn" disabled={lifecycleBusy || runInFlight || editingBusy} onclick={() => removeSuite(suite)}>Delete</button>
+          <button type="button" class="tiny" disabled={editingBusy || suiteBusy} onclick={() => startEditSuite(suite)}>Edit</button>
+          <button type="button" class="tiny danger-btn" disabled={lifecycleBusy || runInFlight || editingBusy || suiteBusy} onclick={() => removeSuite(suite)}>Delete</button>
         </div>
       {/each}
     </div>
@@ -518,12 +538,18 @@
             <button
               type="button"
               class="primary small"
-              disabled={lifecycleBusy || !!activeRunId || runInFlight}
+              disabled={lifecycleBusy || !!activeRunId || runInFlight || !isBenchmarkSuite(suite)}
               onclick={() => handleStart(suite)}
             >
               {lifecycleBusy ? "Starting…" : "Start run"}
             </button>
           </div>
+          {#if !isBenchmarkSuite(suite)}
+            <p class="muted small">
+              This suite lists the same model alias twice; the runtime can only keep one variant
+              loaded, so a new run would not measure both.
+            </p>
+          {/if}
           {#if lifecycleError}<div class="warning-banner">{lifecycleError}</div>{/if}
 
           <h4>Runs</h4>

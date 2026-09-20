@@ -7,7 +7,7 @@ import {
   type AttemptTransport,
   type AttemptTransportResult,
 } from './benchmark-runner';
-import { getBenchmarkRun, listAttemptsForRun, listBenchmarkRunsForSuite, putBenchmarkSuite } from './benchmark-repository';
+import { getBenchmarkRun, listAttemptsForRun, listBenchmarkRunsForSuite, openBenchmarkDatabase, putBenchmarkSuite } from './benchmark-repository';
 import type { BenchmarkSuite } from './benchmark-suite';
 
 function suite(over: Partial<BenchmarkSuite> = {}): BenchmarkSuite {
@@ -429,6 +429,42 @@ describe('resumeBenchmarkRun', () => {
   it('fails cleanly when resuming a run id that does not exist', async () => {
     const resumed = await resumeBenchmarkRun('missing', succeedingTransport());
     expect(resumed.ok).toBe(false);
+  });
+
+  it('rejects resume of a legacy same-alias/different-variant run and never calls the transport', async () => {
+    const legacySuite = suite({
+      targets: [
+        { alias: 'model-a', variantId: 'v1' },
+        { alias: 'model-a', variantId: 'v2' },
+      ],
+    });
+    const db = await openBenchmarkDatabase();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction('runs', 'readwrite');
+        tx.oncomplete = () => resolve();
+        tx.onabort = () => reject(tx.error);
+        tx.onerror = () => reject(tx.error);
+        tx.objectStore('runs').put({
+          id: 'legacy-dup-alias',
+          suiteId: 'suite-1',
+          suite: legacySuite,
+          createdAt: Date.now(),
+          status: 'stopped',
+        });
+      });
+    } finally {
+      db.close();
+    }
+
+    let called = false;
+    const resumed = await resumeBenchmarkRun('legacy-dup-alias', async () => {
+      called = true;
+      return { ok: true, responseText: 'x' };
+    });
+    expect(resumed.ok).toBe(false);
+    expect(resumed.error).toMatch(/cannot be resumed: its suite snapshot has duplicate target aliases/);
+    expect(called).toBe(false);
   });
 
   it('proof gate: rejects a second concurrent resume of the same run id instead of duplicating dispatches', async () => {

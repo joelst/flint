@@ -182,17 +182,12 @@
     classifyCompareSlotError,
   } from "$lib/compare-slot-outcome";
   import BenchmarkPreview from "$lib/BenchmarkPreview.svelte";
+  import { type StopController } from "$lib/benchmark-runner";
   import {
-    startBenchmarkRun,
-    prepareBenchmarkRun,
-    resumeBenchmarkRun,
-    createStopController,
-    type AttemptTransport,
-    type AttemptTransportRequest,
-    type AttemptTransportResult,
-    type StopController,
-  } from "$lib/benchmark-runner";
-  import { getBenchmarkRun } from "$lib/benchmark-repository";
+    startBenchmarkSession,
+    resumeBenchmarkSession,
+    type BenchmarkLifecycleHost,
+  } from "$lib/benchmark-lifecycle";
   import type { BenchmarkSuite } from "$lib/benchmark-suite";
 
   // Integrations tab state
@@ -807,81 +802,15 @@
     }
   }
 
-  /** Loads every target sequentially with its explicit variantId before a run starts — variant
-   * pinning needs a real prior load, since `chatCompletion` only accepts an alias. Sequential,
-   * not parallel, to match Quick Compare's existing one-at-a-time load pattern and avoid
-   * spiking memory with concurrent downloads of large models. */
-  async function loadBenchmarkTargets(suite: BenchmarkSuite): Promise<{ ok: true } | { ok: false; error: string }> {
-    for (const target of suite.targets) {
-      try {
-        await sdkLoadModel({ alias: target.alias }, undefined, target.variantId ?? undefined);
-      } catch (e: any) {
-        return {
-          ok: false,
-          error: `Could not load ${target.alias}${target.variantId ? ` (${target.variantId})` : ''}: ${e?.message || e}`,
-        };
-      }
-    }
-    return { ok: true };
-  }
-
-  /** Maps a benchmark attempt request onto the real `chatCompletion` SDK call. The only impure
-   * boundary `startBenchmarkRun`/`resumeBenchmarkRun` depend on — everything else in the runner
-   * stays pure and unit-tested against a fake transport.
-   *
-   * `chatCompletion` dispatches by alias only; it has no way to demand a specific variant per
-   * call. A target with an explicit `requestedVariantId` is loaded once up front
-   * (`loadBenchmarkTargets`), but nothing stops a user from loading a different variant under
-   * the same alias — via Monitor, another Quick Compare tab, or autoload for an unrelated
-   * request — while the run is still executing. If that happens mid-run, the response this call
-   * gets back was produced by the wrong build, and recording it as a successful attempt for the
-   * requested variant would silently corrupt that target's measurements. So when the SDK reports
-   * which variant actually served the request, an explicit request whose reported variant
-   * disagrees is failed instead of recorded — the runner's retry/'stopped' handling already
-   * copes with attempt failures, but has no way to un-record a falsely-attributed success. */
-  function createBenchmarkTransport(): AttemptTransport {
-    return async (request: AttemptTransportRequest): Promise<AttemptTransportResult> => {
-      try {
-        const res = await chatCompletion(request.alias, request.messages, {
-          maxTokens: request.maxTokens,
-          temperature: request.temperature,
-        });
-        const content = res?.choices?.[0]?.message?.content;
-        if (typeof content !== 'string') {
-          return { ok: false, errorMessage: 'Response had no message content' };
-        }
-        const servedVariantId = res?.servedVariantId ?? null;
-        if (request.requestedVariantId && servedVariantId && servedVariantId !== request.requestedVariantId) {
-          return {
-            ok: false,
-            errorMessage:
-              `Served variant "${servedVariantId}" did not match the requested variant "${request.requestedVariantId}"`
-              + ` for ${request.alias} — another load likely replaced the pinned variant mid-run`,
-          };
-        }
-        return {
-          ok: true,
-          responseText: content,
-          servedVariantId,
-          usage: res?.usage
-            ? { promptTokens: res.usage.prompt_tokens, completionTokens: res.usage.completion_tokens }
-            : undefined,
-        };
-      } catch (e: any) {
-        // 'cancelled' means the sidecar deliberately drained the request. 'unknown' means the
-        // connection was lost with the request outstanding — the chat call may already have
-        // happened. Both must halt rather than record a terminal failure: recording 'unknown' as
-        // failed would let the remaining schedule run and could finalize a crashed benchmark as
-        // 'completed', when the dispatched intent should stay uncertain and offer Resume instead.
-        if (e instanceof SidecarOperationError && (e.certainty === 'cancelled' || e.certainty === 'unknown')) {
-          return {
-            ok: false,
-            errorMessage: e.message || (e.certainty === 'cancelled' ? 'Runtime is draining' : 'Lost contact with the runtime'),
-            haltRun: 'stopped',
-          };
-        }
-        return { ok: false, errorMessage: e?.message || String(e) };
-      }
+  function benchmarkHost(): BenchmarkLifecycleHost {
+    return {
+      loadModel: (alias, variantId) => sdkLoadModel({ alias }, undefined, variantId ?? undefined),
+      pinAliases: async (aliases) => {
+        const pinned = await pinBenchmarkTargets(aliases);
+        if (!pinned.ok) throw new Error(pinned.error);
+      },
+      unpin: unpinBenchmarkTargets,
+      chatCompletion,
     };
   }
 
@@ -895,10 +824,6 @@
     } finally {
       benchmarkRunInFlight = false;
     }
-  }
-
-  function suiteHasExplicitVariants(suite: BenchmarkSuite): boolean {
-    return suite.targets.some((t) => t.variantId != null);
   }
 
   /** Shared classifier for a settled `startBenchmarkRun`/`resumeBenchmarkRun` outcome: surfaces
@@ -927,32 +852,18 @@
     benchmarkRunInFlight = true;
     benchmarkRunError = null;
     try {
-      const aliases = Array.from(new Set(suite.targets.map((t) => t.alias)));
-      const pinned = await pinBenchmarkTargets(aliases);
-      if (!pinned.ok && suiteHasExplicitVariants(suite)) {
+      const started = await startBenchmarkSession(suite, benchmarkHost());
+      if (!started.ok) {
         await finishBenchmarkExecution();
-        return { ok: false, error: `Could not pin targets with explicit variants: ${pinned.error}` };
+        return started;
       }
-      const loaded = await loadBenchmarkTargets(suite);
-      if (!loaded.ok) {
-        await finishBenchmarkExecution();
-        return loaded;
-      }
-
-      const prepared = await prepareBenchmarkRun(suite);
-      if (!prepared.ok) {
-        await finishBenchmarkExecution();
-        return { ok: false, error: prepared.error };
-      }
-      const stopController = createStopController();
-      benchmarkStopController = stopController;
-      if (benchmarkStopController === stopController) benchmarkActiveRunId = prepared.run.id;
-      startBenchmarkRun(suite, createBenchmarkTransport(), stopController, prepared.run)
+      benchmarkStopController = started.execution.stopController;
+      benchmarkActiveRunId = started.execution.runId;
+      started.execution.done
         .then(recordBenchmarkOutcome)
         .catch((e: any) => recordBenchmarkOutcome({ ok: false, error: e?.message || String(e) }))
         .finally(() => { void finishBenchmarkExecution(); });
-
-      return { ok: true, runId: prepared.run.id };
+      return { ok: true, runId: started.execution.runId };
     } catch (e: any) {
       await finishBenchmarkExecution();
       return { ok: false, error: e?.message || String(e) };
@@ -966,35 +877,18 @@
     benchmarkRunInFlight = true;
     benchmarkRunError = null;
     try {
-      const existing = await getBenchmarkRun(runId);
-      if (!existing.ok || !existing.value) {
-        benchmarkRunInFlight = false;
-        return { ok: false, error: existing.error || 'Run not found' };
-      }
-      const suite = existing.value.suite;
-
-      const aliases = Array.from(new Set(suite.targets.map((t) => t.alias)));
-      const pinned = await pinBenchmarkTargets(aliases);
-      if (!pinned.ok && suiteHasExplicitVariants(suite)) {
+      const started = await resumeBenchmarkSession(runId, benchmarkHost());
+      if (!started.ok) {
         await finishBenchmarkExecution();
-        return { ok: false, error: `Could not pin targets with explicit variants: ${pinned.error}` };
+        return started;
       }
-      const loaded = await loadBenchmarkTargets(suite);
-      if (!loaded.ok) {
-        await finishBenchmarkExecution();
-        return loaded;
-      }
-
-      const stopController = createStopController();
-      benchmarkStopController = stopController;
-      if (benchmarkStopController === stopController) benchmarkActiveRunId = runId;
-
-      resumeBenchmarkRun(runId, createBenchmarkTransport(), stopController)
+      benchmarkStopController = started.execution.stopController;
+      benchmarkActiveRunId = started.execution.runId;
+      started.execution.done
         .then(recordBenchmarkOutcome)
         .catch((e: any) => recordBenchmarkOutcome({ ok: false, error: e?.message || String(e) }))
         .finally(() => { void finishBenchmarkExecution(); });
-
-      return { ok: true, runId };
+      return { ok: true, runId: started.execution.runId };
     } catch (e: any) {
       await finishBenchmarkExecution();
       return { ok: false, error: e?.message || String(e) };
@@ -9587,7 +9481,7 @@ Output only the summary text, no preamble.`;
             {#if !isDev}
               <div class="setting-row">
                 <div class="setting-info">
-                  <span class="setting-name">Launch Flint when the OS starts</span>
+                  <span class="setting-name" id="os-autostart-label">Launch Flint when the OS starts</span>
                   <span class="setting-desc">Registers Flint as a login item (Windows) or LaunchAgent (macOS).</span>
                 </div>
                 {#if osAutoStartEnabled === null}
@@ -9598,6 +9492,7 @@ Output only the summary text, no preamble.`;
                       type="checkbox"
                       checked={osAutoStartEnabled === true}
                       onchange={handleOsAutoStartToggle}
+                      aria-labelledby="os-autostart-label"
                     />
                     <span class="toggle-track"></span>
                   </label>
@@ -9606,14 +9501,14 @@ Output only the summary text, no preamble.`;
             {/if}
             <div class="setting-row">
               <div class="setting-info">
-                <span class="setting-name">Keep service running in background</span>
+                <span class="setting-name" id="keep-service-background-label">Keep service running in background</span>
                 <span class="setting-desc">
                   While the local service is running, closing the window hides Flint to the system
                   tray instead of quitting. Reopen or quit from the tray icon.
                 </span>
               </div>
               <label class="toggle-switch">
-                <input type="checkbox" bind:checked={keepServiceInBackground} onchange={persistChat} />
+                <input type="checkbox" bind:checked={keepServiceInBackground} onchange={persistChat} aria-labelledby="keep-service-background-label" />
                 <span class="toggle-track"></span>
               </label>
             </div>
@@ -9623,11 +9518,11 @@ Output only the summary text, no preamble.`;
             <h3>Startup</h3>
             <div class="setting-row">
               <div class="setting-info">
-                <span class="setting-name">Start local service automatically</span>
+                <span class="setting-name" id="auto-start-service-label">Start local service automatically</span>
                 <span class="setting-desc">Load the default model and start the inference service when Flint opens</span>
               </div>
               <label class="toggle-switch">
-                <input type="checkbox" bind:checked={autoStartService} onchange={persistChat} />
+                <input type="checkbox" bind:checked={autoStartService} onchange={persistChat} aria-labelledby="auto-start-service-label" />
                 <span class="toggle-track"></span>
               </label>
             </div>
@@ -9885,7 +9780,7 @@ Output only the summary text, no preamble.`;
             <h3>Preview features</h3>
             <div class="setting-row">
               <div class="setting-info">
-                <span class="setting-name">Benchmark Preview</span>
+                <span class="setting-name" id="benchmark-preview-label">Benchmark Preview</span>
                 <span class="setting-desc">
                   Adds a "Benchmark" entry under Build for measured, repeatable multi-model runs
                   (distinct from Model Arena's one-shot side-by-side compare). Early preview —
@@ -9901,6 +9796,7 @@ Output only the summary text, no preamble.`;
                   bind:checked={benchmarkPreviewEnabled}
                   onchange={persistChat}
                   disabled={benchmarkRunInFlight}
+                  aria-labelledby="benchmark-preview-label"
                 />
                 <span class="toggle-track"></span>
               </label>

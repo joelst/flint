@@ -12,7 +12,7 @@
  */
 
 import { buildAttemptSchedule, type BenchmarkAttempt, type BenchmarkRun, type LogicalAttempt } from './benchmark-run';
-import type { BenchmarkSuite } from './benchmark-suite';
+import { isBenchmarkSuite, type BenchmarkSuite } from './benchmark-suite';
 
 export interface AttemptSummary {
   id: string;
@@ -137,11 +137,14 @@ export function isRunInterrupted(
   return run.status === 'running' && run.id !== activeRunId;
 }
 
-/** Positions remain to retry: interrupted running, user Stop, or a durability halt. */
+/** Positions remain to retry: interrupted running, user Stop, or a durability halt.
+ * A legacy same-alias/different-variant snapshot is readable but not executable — Resume
+ * would re-dispatch through the alias-only transport and attribute the last-loaded variant. */
 export function isRunResumable(
-  run: Pick<BenchmarkRun, 'id' | 'status'>,
+  run: Pick<BenchmarkRun, 'id' | 'status' | 'suite'>,
   activeRunId?: string | null,
 ): boolean {
   if (run.id === activeRunId) return false;
+  if (!isBenchmarkSuite(run.suite)) return false;
   return run.status === 'running' || run.status === 'stopped' || run.status === 'recovery_required';
 }

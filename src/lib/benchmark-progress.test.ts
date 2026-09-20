@@ -129,11 +129,28 @@ describe('isRunInterrupted', () => {
 });
 
 describe('isRunResumable', () => {
+  const run = (over: { id?: string; status?: 'running' | 'stopped' | 'completed' | 'recovery_required'; suite?: BenchmarkSuite } = {}) => ({
+    id: 'run-1',
+    status: 'running' as const,
+    suite: suite(),
+    ...over,
+  });
+
   it('allows resume for interrupted, stopped, and recovery_required rows that are not live', () => {
-    expect(isRunResumable({ id: 'run-1', status: 'running' })).toBe(true);
-    expect(isRunResumable({ id: 'run-1', status: 'stopped' })).toBe(true);
-    expect(isRunResumable({ id: 'run-1', status: 'recovery_required' })).toBe(true);
-    expect(isRunResumable({ id: 'run-1', status: 'completed' })).toBe(false);
-    expect(isRunResumable({ id: 'run-1', status: 'running' }, 'run-1')).toBe(false);
+    expect(isRunResumable(run({ status: 'running' }))).toBe(true);
+    expect(isRunResumable(run({ status: 'stopped' }))).toBe(true);
+    expect(isRunResumable(run({ status: 'recovery_required' }))).toBe(true);
+    expect(isRunResumable(run({ status: 'completed' }))).toBe(false);
+    expect(isRunResumable(run({ status: 'running' }), 'run-1')).toBe(false);
+  });
+
+  it('does not offer Resume for a legacy same-alias/different-variant snapshot', () => {
+    const legacy = suite({
+      targets: [
+        { alias: 'model-a', variantId: 'v1' },
+        { alias: 'model-a', variantId: 'v2' },
+      ],
+    });
+    expect(isRunResumable(run({ status: 'stopped', suite: legacy }))).toBe(false);
   });
 });

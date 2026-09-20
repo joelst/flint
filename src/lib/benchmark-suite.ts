@@ -239,9 +239,16 @@ export function validateBenchmarkSuite(
     // `chatCompletion` transport could then record an earlier target's attempts against
     // whichever variant happened to load last, not the one actually requested for that target.
     const seenAliases = new Set<string>();
+    const seenExact = new Set<string>();
     for (let i = 0; i < raw.targets.length; i++) {
       const r = validateTarget(raw.targets[i], `targets[${i}]`);
       if (!r.ok) { errors.push(...r.errors); continue; }
+      const exactKey = `${r.value!.alias}\0${r.value!.variantId ?? ''}`;
+      if (seenExact.has(exactKey)) {
+        errors.push(`targets[${i}]: duplicate target "${r.value!.alias}" / ${r.value!.variantId ?? 'default'}`);
+        continue;
+      }
+      seenExact.add(exactKey);
       if (seenAliases.has(r.value!.alias) && !options.allowDuplicateAliases) {
         errors.push(`targets[${i}]: duplicate target alias "${r.value!.alias}" (targets are keyed by alias, not alias+variant)`);
         continue;
