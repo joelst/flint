@@ -3,16 +3,56 @@
 
   export let content: string = "";
   export let role: "user" | "assistant" = "assistant";
+  /** True while this specific message is actively receiving stream deltas. */
+  export let isStreaming: boolean = false;
+  /**
+   * True when the active model is tagged as a reasoning model. Some chat templates (e.g.
+   * Qwen3-family) inject the opening <think> tag into the prompt prefix rather than the
+   * generated text, so only the closing tag ever appears in `content` — meaning nothing is
+   * detected as "thinking" until that closing tag streams in. Without this flag, the raw
+   * chain-of-thought would render as a normal answer for the whole time it's in flight, then
+   * abruptly vanish into the Thinking toggle. When set, content with no thinking tags yet is
+   * tentatively treated as reasoning while still streaming, and released as a normal answer
+   * on completion if no tag ever appeared.
+   */
+  export let assumeReasoning: boolean = false;
+  /**
+   * Identifies which logical message this instance is rendering (e.g. `${conversationId}:
+   * ${messageId}`). `MessageRenderer` instances are created in an unkeyed `{#each}` (Chat) or
+   * reused across runs for the same Arena slot, so Svelte can reuse one component instance for
+   * what is, logically, a completely different message. Without this, `userToggledThinking`/
+   * `showThinking` (component-local state) would silently bleed from one message to the next
+   * that happens to land in the same position/slot. Defaults to a constant so callers that
+   * never render more than one logical message through the same instance (there are none today)
+   * are unaffected.
+   */
+  export let messageKey: string | number = 0;
 
   let renderedHtml = "";
   let thinkingBlocks: string[] = [];
   let showThinking = false;
+  let userToggledThinking = false;
   let markedParser: ((src: string, options?: any) => string | Promise<string>) | null =
     null;
   let renderVersion = 0;
   let pendingRenderTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastMessageKey: string | number | undefined = undefined;
 
-  $: void queueRender(role, content);
+  $: {
+    if (messageKey !== lastMessageKey) {
+      lastMessageKey = messageKey;
+      // A new logical message: never let the previous message's manual toggle or auto-expand
+      // state, or its rendered output, leak into this one, even if it happens to render in the
+      // same component instance. Cleared synchronously (not left to the debounced re-render) so
+      // a brand-new message never visibly flashes the previous message's content first.
+      userToggledThinking = false;
+      showThinking = false;
+      thinkingBlocks = [];
+      renderedHtml = "";
+    }
+  }
+
+  $: void queueRender(role, content, isStreaming, assumeReasoning, messageKey);
 
   function escapeHtml(text: string): string {
     const map: Record<string, string> = {
@@ -29,18 +69,36 @@
     currentVersion: number,
     currentRole: "user" | "assistant",
     safeContent: string,
+    streaming: boolean,
+    reasoning: boolean,
   ): Promise<void> {
     if (currentRole !== "assistant") {
       if (currentVersion === renderVersion) {
         renderedHtml = `<p>${escapeHtml(safeContent)}</p>`;
         thinkingBlocks = [];
         showThinking = false;
+        userToggledThinking = false;
       }
       return;
     }
 
-    const { visibleContent, thinkingContent } = extractThinkingTrace(safeContent);
+    const extracted = extractThinkingTrace(safeContent);
+    let { visibleContent } = extracted;
+    let { thinkingContent } = extracted;
+    // No tag detected yet: if this model is known to reason and the stream is still going,
+    // hold the raw text as tentative "thinking" rather than showing it as the final answer.
+    // A settled message (isStreaming false) always falls through here untouched, so a model
+    // that never actually emits a closing tag still shows its answer normally once done.
+    if (streaming && reasoning && thinkingContent.length === 0 && visibleContent) {
+      thinkingContent = [visibleContent];
+      visibleContent = "";
+    }
     thinkingBlocks = thinkingContent;
+    if (!userToggledThinking) {
+      // Auto-expand while there is reasoning but no answer yet; auto-collapse once the
+      // answer starts arriving. The user's own toggle always wins after that.
+      showThinking = thinkingBlocks.length > 0 && !visibleContent;
+    }
     if (!visibleContent) {
       if (currentVersion === renderVersion) {
         renderedHtml = "";
@@ -74,7 +132,21 @@
     navigator.clipboard.writeText(content);
   }
 
-  function queueRender(currentRole: "user" | "assistant", currentContent: string): void {
+  /**
+   * `_key` (messageKey) is intentionally unused in the body: its only purpose is as a reactive
+   * dependency, so a message-identity change always re-renders even when `role`/`content`/
+   * `isStreaming`/`assumeReasoning` are all otherwise identical to the previous message that
+   * happened to render through this same instance (e.g. two conversations sharing an identical
+   * reply). Without it, the synchronous reset above would leave the view blank until one of the
+   * other props next changed.
+   */
+  function queueRender(
+    currentRole: "user" | "assistant",
+    currentContent: string,
+    streaming: boolean,
+    reasoning: boolean,
+    _key: string | number,
+  ): void {
     const currentVersion = ++renderVersion;
     if (pendingRenderTimer) {
       clearTimeout(pendingRenderTimer);
@@ -84,7 +156,7 @@
     const scheduleDelayMs = currentRole === "assistant" ? 40 : 0;
     pendingRenderTimer = setTimeout(() => {
       pendingRenderTimer = null;
-      void renderContent(currentVersion, currentRole, String(currentContent || ""));
+      void renderContent(currentVersion, currentRole, String(currentContent || ""), streaming, reasoning);
     }, scheduleDelayMs);
   }
 
@@ -99,10 +171,11 @@
           type="button"
           onclick={() => {
             showThinking = !showThinking;
+            userToggledThinking = true;
           }}
           title={showThinking ? "Hide model reasoning" : "Show model reasoning"}
         >
-          {showThinking ? "▼" : "▶"} Thinking ({thinkingBlocks.length})
+          {showThinking ? "▼" : "▶"} Thinking ({thinkingBlocks.length}){isStreaming && !renderedHtml ? "…" : ""}
         </button>
         {#if showThinking}
           <div class="thinking-content">

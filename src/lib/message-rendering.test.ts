@@ -18,6 +18,29 @@ describe("extractThinkingTrace", () => {
     expect(result.visibleContent).toBe("");
     expect(result.thinkingContent).toEqual(["partial reasoning"]);
   });
+
+  it("extracts a closing think tag with no matching opening tag", () => {
+    // Some chat templates (e.g. Qwen3-family) inject the opening <think> as part of the
+    // prompt prefix fed to the model, so only the closing tag comes back in the response.
+    const input = "reasoning steps here\n</think>\n\nFinal answer";
+    const result = extractThinkingTrace(input);
+    expect(result.visibleContent).toBe("Final answer");
+    expect(result.thinkingContent).toEqual(["reasoning steps here"]);
+  });
+
+  it("extracts a closing thinking tag with no matching opening tag", () => {
+    const input = "some thoughts\n</thinking>\nFinal answer";
+    const result = extractThinkingTrace(input);
+    expect(result.visibleContent).toBe("Final answer");
+    expect(result.thinkingContent).toEqual(["some thoughts"]);
+  });
+
+  it("leaves ordinary content untouched when no think tags appear at all", () => {
+    const input = "Just a normal answer with no reasoning markers.";
+    const result = extractThinkingTrace(input);
+    expect(result.visibleContent).toBe(input);
+    expect(result.thinkingContent).toEqual([]);
+  });
 });
 
 describe("sanitizeAssistantHtml", () => {
