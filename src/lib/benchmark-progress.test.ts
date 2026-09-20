@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildProgressMatrix, isRunInterrupted, isRunResumable, summarizeAttempt, type AttemptSummary } from './benchmark-progress';
+import { buildProgressMatrix, isAttemptSummary, isRunInterrupted, isRunResumable, summarizeAttempt, type AttemptSummary } from './benchmark-progress';
 import type { BenchmarkAttempt } from './benchmark-run';
 import type { BenchmarkSuite } from './benchmark-suite';
 
@@ -51,6 +51,58 @@ describe('summarizeAttempt', () => {
       sequence: 0,
       status: 'succeeded',
     });
+  });
+});
+
+describe('isAttemptSummary', () => {
+  const valid: AttemptSummary = {
+    id: 'exec-1',
+    runId: 'run-1',
+    logicalAttemptId: 't0:c0:r0',
+    targetIndex: 0,
+    phase: 'measured',
+    caseIndex: 0,
+    repeatIndex: 0,
+    sequence: 0,
+    status: 'succeeded',
+  };
+
+  it('accepts a well-formed measured summary and a well-formed warmup summary', () => {
+    expect(isAttemptSummary(valid)).toBe(true);
+    expect(isAttemptSummary({ ...valid, phase: 'warmup', caseIndex: null, repeatIndex: null })).toBe(true);
+  });
+
+  it('rejects a measured summary with null case/repeat indices, and a warmup with numeric ones', () => {
+    // Mirrors isBenchmarkAttempt's invariant: a warmup position has no case/repeat coordinate
+    // (both null); a measured position must have both, non-negative. Mixing these is corrupt.
+    expect(isAttemptSummary({ ...valid, caseIndex: null, repeatIndex: null })).toBe(false);
+    expect(isAttemptSummary({ ...valid, phase: 'warmup', caseIndex: 0, repeatIndex: null })).toBe(false);
+    expect(isAttemptSummary({ ...valid, phase: 'warmup', caseIndex: null, repeatIndex: 0 })).toBe(false);
+  });
+
+  it('rejects negative case/repeat indices on a measured summary', () => {
+    expect(isAttemptSummary({ ...valid, caseIndex: -1 })).toBe(false);
+    expect(isAttemptSummary({ ...valid, repeatIndex: -1 })).toBe(false);
+  });
+
+  it('rejects non-objects and missing/empty required fields', () => {
+    expect(isAttemptSummary(null)).toBe(false);
+    expect(isAttemptSummary(undefined)).toBe(false);
+    expect(isAttemptSummary('not an object')).toBe(false);
+    expect(isAttemptSummary({ ...valid, id: '' })).toBe(false);
+    expect(isAttemptSummary({ ...valid, runId: undefined })).toBe(false);
+  });
+
+  it('rejects an unrecognized phase or status (e.g. a future-format row)', () => {
+    expect(isAttemptSummary({ ...valid, phase: 'cooldown' })).toBe(false);
+    expect(isAttemptSummary({ ...valid, status: 'retrying' })).toBe(false);
+  });
+
+  it('rejects non-integer or negative numeric fields', () => {
+    expect(isAttemptSummary({ ...valid, targetIndex: 1.5 })).toBe(false);
+    expect(isAttemptSummary({ ...valid, targetIndex: -1 })).toBe(false);
+    expect(isAttemptSummary({ ...valid, sequence: NaN })).toBe(false);
+    expect(isAttemptSummary({ ...valid, caseIndex: 1.5 })).toBe(false);
   });
 });
 

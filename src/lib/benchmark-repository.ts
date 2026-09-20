@@ -17,7 +17,7 @@
 
 import { isStoredBenchmarkSuite, validateBenchmarkSuite, type BenchmarkSuite } from './benchmark-suite';
 import { isBenchmarkAttempt, isBenchmarkRun, type BenchmarkAttempt, type BenchmarkRun, type RunStatus } from './benchmark-run';
-import { summarizeAttempt, type AttemptSummary } from './benchmark-progress';
+import { isAttemptSummary, summarizeAttempt, type AttemptSummary } from './benchmark-progress';
 
 const DATABASE_NAME = 'flint-benchmarks';
 const DATABASE_VERSION = 3;
@@ -404,6 +404,26 @@ export async function listBenchmarkRunsForSuite(suiteId: string): Promise<Reposi
   return okResult(rows);
 }
 
+/** Count-only variant of `listBenchmarkRunsForSuite`, for UI that only needs "how many runs does
+ * this suite have" (e.g. to decide whether Edit/Delete should be enabled). Uses the index's
+ * `count()` request instead of `getAll()` so it never deserializes every run row — including
+ * each run's embedded suite snapshot, which can itself hold up to 100 cases — just to answer a
+ * question that only needs a number. Deliberately skips row validation: a count is a count
+ * regardless of whether a given row happens to be a legacy/tolerated shape, and — unlike
+ * `listBenchmarkRunsForSuite` — a single corrupt run here can never fail this call (or, via
+ * `refreshSuites`, block every *other* suite in the list from loading over one bad row in an
+ * unrelated suite). Corruption is not silently lost: opening that suite still goes through
+ * `refreshRunsForSelectedSuite`/`listBenchmarkRunsForSuite`, which does validate and surfaces
+ * the error at that point. */
+export async function countBenchmarkRunsForSuite(suiteId: string): Promise<RepositoryResult<number>> {
+  const result = await withStores<number>(RUNS_STORE, 'readonly', (tx, trackRequest) => {
+    const index = tx.objectStore(RUNS_STORE).index(RUNS_BY_SUITE_INDEX);
+    return requestAsPromise(index.count(suiteId) as IDBRequest<number>, trackRequest);
+  });
+  if (!result.ok) return failResult(result.error!);
+  return okResult(result.value ?? 0);
+}
+
 /** Updates only a run's status/timestamps — never its embedded suite snapshot, which is
  * write-once at creation. `patch` fields are merged onto the existing stored row so a caller
  * setting `status` does not have to re-supply fields it did not change. */
@@ -501,6 +521,43 @@ export async function listAttemptsForRun(runId: string): Promise<RepositoryResul
 }
 
 /**
+ * Reads a run and its full attempt history together, in one `readonly` transaction over both
+ * stores, so a caller building a point-in-time snapshot (export is the only one today) can never
+ * observe the run row and its attempts at two different moments — e.g. a `running` run snapshot
+ * paired with an attempt set from after it actually finished. `getBenchmarkRun` +
+ * `listAttemptsForRun` called separately cannot give this guarantee: IndexedDB only serializes
+ * access within a single transaction, not across two independently-opened ones.
+ */
+export async function getBenchmarkRunWithAttempts(
+  runId: string,
+): Promise<RepositoryResult<{ run: BenchmarkRun; attempts: BenchmarkAttempt[] } | null>> {
+  const result = await withStores<{ run: BenchmarkRun | undefined; attempts: BenchmarkAttempt[] }>(
+    [RUNS_STORE, ATTEMPTS_STORE],
+    'readonly',
+    (tx, trackRequest) => {
+      const runRequest = tx.objectStore(RUNS_STORE).get(runId) as IDBRequest<BenchmarkRun | undefined>;
+      const index = tx.objectStore(ATTEMPTS_STORE).index(ATTEMPTS_BY_RUN_INDEX);
+      const attemptsRequest = index.getAll(runId) as IDBRequest<BenchmarkAttempt[]>;
+      // Both requests are issued synchronously here (before either's onsuccess fires), so both
+      // are unambiguously part of this same transaction regardless of which settles first.
+      return Promise.all([
+        requestAsPromise(runRequest, trackRequest),
+        requestAsPromise(attemptsRequest, trackRequest),
+      ]).then(([run, attempts]) => ({ run, attempts }));
+    },
+  );
+  if (!result.ok) return failResult(result.error!);
+  const value = result.value!;
+  if (value.run === undefined) return okResult(null);
+  if (!isBenchmarkRun(value.run, { allowDuplicateAliases: true })) {
+    return failResult(`stored benchmark run "${runId}" failed validation`);
+  }
+  const invalidIndex = value.attempts.findIndex((row) => !isBenchmarkAttempt(row));
+  if (invalidIndex !== -1) return failResult(`stored benchmark attempt at index ${invalidIndex} failed validation`);
+  return okResult({ run: value.run, attempts: value.attempts });
+}
+
+/**
  * Lightweight projection of a run's attempts (no `responseText`/`usage`/`errorMessage`) for a
  * live-polling progress view. Reads the dedicated `attemptSummaries` store so a 1.5s poll never
  * structured-clones full response bodies.
@@ -511,7 +568,10 @@ export async function listAttemptSummariesForRun(runId: string): Promise<Reposit
     return requestAsPromise(index.getAll(runId) as IDBRequest<AttemptSummary[]>, trackRequest);
   });
   if (!result.ok) return failResult(result.error!);
-  return okResult(result.value ?? []);
+  const rows = result.value ?? [];
+  const invalidIndex = rows.findIndex((row) => !isAttemptSummary(row));
+  if (invalidIndex !== -1) return failResult(`stored attempt summary at index ${invalidIndex} failed validation`);
+  return okResult(rows);
 }
 
 /** The uncertain set for a run: attempts still `dispatched` (no terminal row exists for that

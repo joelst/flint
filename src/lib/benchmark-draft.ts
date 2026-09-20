@@ -14,6 +14,7 @@ import {
   BENCHMARK_MAX_JSONL_CHARS,
   BENCHMARK_MAX_JSONL_LINE_CHARS,
   benchmarkAttemptCount,
+  isFiniteInteger,
   parseBenchmarkCasesJsonl,
   validateBenchmarkSuite,
   type BenchmarkSuite,
@@ -89,6 +90,12 @@ export function estimateDraftAttempts(
     }
   }
   try {
+    // `warmupCount`/`repeatCount` are typed as `number` but Svelte's bind:value on a number
+    // input yields `undefined`/a partial string coercion while the field is empty or mid-edit;
+    // arithmetic with a non-finite/non-integer value returns NaN silently rather than throwing,
+    // so `try/catch` alone cannot catch this. Validate up front — the same check Save's real
+    // validation applies — so a live preview shows nothing rather than "Estimated attempts: NaN".
+    if (!isFiniteInteger(draft.warmupCount) || !isFiniteInteger(draft.repeatCount)) return null;
     return benchmarkAttemptCount({
       targets: draft.targets,
       cases: { length: caseCount },

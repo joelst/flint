@@ -41,6 +41,42 @@ export function summarizeAttempt(attempt: BenchmarkAttempt): AttemptSummary {
   };
 }
 
+const ATTEMPT_PHASES: ReadonlySet<AttemptSummary['phase']> = new Set(['warmup', 'measured']);
+const ATTEMPT_STATUSES: ReadonlySet<AttemptSummary['status']> = new Set(['dispatched', 'succeeded', 'failed']);
+
+/**
+ * Shape guard for rows read back from the dedicated `attemptSummaries` store, mirroring
+ * `isBenchmarkAttempt`'s validation for the full-attempt store. Unlike a full attempt row, a
+ * summary is written and read by the same schema version together (never carried forward from
+ * an older format the way a suite/run snapshot can be), but it is still a value coming out of
+ * IndexedDB rather than one just constructed in memory — a future format change, direct DB
+ * inspection/edit, or partial write must be caught here rather than silently misplacing a
+ * position/status in the progress matrix.
+ */
+export function isAttemptSummary(value: unknown): value is AttemptSummary {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  if (typeof v.id !== 'string' || v.id.length === 0) return false;
+  if (typeof v.runId !== 'string' || v.runId.length === 0) return false;
+  if (typeof v.logicalAttemptId !== 'string' || v.logicalAttemptId.length === 0) return false;
+  if (typeof v.targetIndex !== 'number' || !Number.isInteger(v.targetIndex) || v.targetIndex < 0) return false;
+  if (typeof v.phase !== 'string' || !ATTEMPT_PHASES.has(v.phase as AttemptSummary['phase'])) return false;
+  // Mirrors isBenchmarkAttempt's invariant exactly, not just each field in isolation: a warmup
+  // position has no case/repeat coordinate at all (both null), while a measured position must
+  // have both, non-negative. A summary that mixes these — e.g. a negative index, or a numeric
+  // index on a warmup row — is exactly as corrupt as it would be on a full attempt row, and
+  // must fail the same way rather than passing because each field looked fine on its own.
+  if (v.phase === 'warmup') {
+    if (v.caseIndex !== null || v.repeatIndex !== null) return false;
+  } else {
+    if (typeof v.caseIndex !== 'number' || !Number.isInteger(v.caseIndex) || v.caseIndex < 0) return false;
+    if (typeof v.repeatIndex !== 'number' || !Number.isInteger(v.repeatIndex) || v.repeatIndex < 0) return false;
+  }
+  if (typeof v.sequence !== 'number' || !Number.isInteger(v.sequence) || v.sequence < 0) return false;
+  if (typeof v.status !== 'string' || !ATTEMPT_STATUSES.has(v.status as AttemptSummary['status'])) return false;
+  return true;
+}
+
 /**
  * `pending`: no execution has been dispatched for this position yet.
  * `running`: a `dispatched` execution while this run is the live in-flight run — the chat

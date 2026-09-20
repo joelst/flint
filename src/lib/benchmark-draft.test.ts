@@ -99,6 +99,20 @@ describe('estimateDraftAttempts', () => {
     const huge = 'x'.repeat(BENCHMARK_MAX_JSONL_CHARS + 1);
     expect(estimateDraftAttempts(baseDraft({ casesJsonl: huge }))).toBeNull();
   });
+
+  it('returns null instead of NaN when warmupCount/repeatCount are empty form fields (bound as undefined)', () => {
+    // Svelte's bind:value on a number input yields `undefined` while the field is blank
+    // mid-edit; SuiteDraft types these as `number`, so an empty field is a real runtime value
+    // this function must tolerate, not just a type-level impossibility.
+    expect(estimateDraftAttempts(baseDraft({ warmupCount: undefined as unknown as number }))).toBeNull();
+    expect(estimateDraftAttempts(baseDraft({ repeatCount: undefined as unknown as number }))).toBeNull();
+  });
+
+  it('returns null for a non-integer or otherwise non-finite count rather than a fractional/NaN estimate', () => {
+    expect(estimateDraftAttempts(baseDraft({ warmupCount: 1.5 }))).toBeNull();
+    expect(estimateDraftAttempts(baseDraft({ repeatCount: Number.POSITIVE_INFINITY }))).toBeNull();
+    expect(estimateDraftAttempts(baseDraft({ repeatCount: NaN }))).toBeNull();
+  });
 });
 
 describe('applyTargetAlias', () => {

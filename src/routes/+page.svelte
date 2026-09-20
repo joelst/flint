@@ -796,9 +796,27 @@
     if (benchmarkPinnedAliases.length === 0) return;
     benchmarkPinnedAliases = [];
     try {
-      await pushMemorySettings();
+      // `pushMemorySettings()` with no options swallows its own failure into a console.warn
+      // that no user ever sees — passing throwOnError here is what actually lets this catch
+      // fire at all; without it, a real restore failure would look identical to success and
+      // the sidecar could keep enforcing the benchmark's forced 'pinned' priority indefinitely.
+      await pushMemorySettings({ throwOnError: true });
     } catch (e: any) {
-      appendAppLog(`Benchmark: could not restore target priorities: ${e?.message || e}`, 'warn');
+      // The write is idempotent — it always sends the full current priority map, which is
+      // unchanged between this call and the retry — so replaying it is safe. The sidecar does
+      // run one eviction sweep per push (applyMemorySettings), same as it already does for
+      // every other pushMemorySettings() call site in this file; a retried sweep over the same
+      // priorities evicts nothing further than the first one already would have, so this isn't
+      // a new failure mode, just the existing one happening twice.
+      try {
+        await pushMemorySettings({ throwOnError: true });
+      } catch (retryError: any) {
+        const error = retryError?.message || retryError || e?.message || e;
+        appendAppLog(
+          `Benchmark: could not restore model priorities after the run finished (${error}). A benchmark target may still be pinned — check Settings.`,
+          'warn',
+        );
+      }
     }
   }
 

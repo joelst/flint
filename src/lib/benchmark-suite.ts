@@ -82,6 +82,7 @@ function isNonEmptyTrimmedString(value: unknown, maxLength: number): value is st
 function isFiniteInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value);
 }
+export { isFiniteInteger };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);

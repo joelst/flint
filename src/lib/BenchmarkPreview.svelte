@@ -6,8 +6,9 @@
     putBenchmarkSuiteIfNoRuns,
     deleteBenchmarkSuiteIfNoRuns,
     listBenchmarkRunsForSuite,
+    countBenchmarkRunsForSuite,
     getBenchmarkRun,
-    listAttemptsForRun,
+    getBenchmarkRunWithAttempts,
     listAttemptSummariesForRun,
   } from "./benchmark-repository";
   import {
@@ -100,13 +101,17 @@
     const nextSuites = (res.value ?? []).sort((a, b) => b.createdAt - a.createdAt);
     const counts: Record<string, number> = {};
     for (const suite of nextSuites) {
-      const runsRes = await listBenchmarkRunsForSuite(suite.id);
+      // `countBenchmarkRunsForSuite` uses the index's count() request instead of getAll(): this
+      // list only needs "how many runs" (to gate Edit/Delete), and getAll() would deserialize
+      // every run row — including each one's embedded suite snapshot, up to 100 cases apiece —
+      // just to throw the rows away and keep a length.
+      const countRes = await countBenchmarkRunsForSuite(suite.id);
       if (generation !== suitesGeneration) return;
-      if (!runsRes.ok) {
-        loadError = runsRes.error || `Could not read runs for suite "${suite.id}"`;
+      if (!countRes.ok) {
+        loadError = countRes.error || `Could not read run count for suite "${suite.id}"`;
         return;
       }
-      counts[suite.id] = (runsRes.value ?? []).length;
+      counts[suite.id] = countRes.value ?? 0;
     }
     if (generation !== suitesGeneration) return;
     suites = nextSuites;
@@ -366,17 +371,20 @@
   }
 
   async function exportRun(runId: string) {
-    const runRes = await getBenchmarkRun(runId);
-    const attemptsRes = await listAttemptsForRun(runId);
+    // Read the run and its full attempt history in one transaction: two separate reads could
+    // observe the run row and its attempts at different moments (e.g. a `running` run snapshot
+    // paired with an attempt set from after it actually finished), producing an export that is
+    // internally inconsistent with what `benchmark-export.ts` documents.
+    const res = await getBenchmarkRunWithAttempts(runId);
     if (destroyed) return;
-    if (!runRes.ok || !runRes.value || !attemptsRes.ok) {
+    if (!res.ok || !res.value) {
       // A slow export racing the user navigating to a different run/suite must not attribute
       // its failure to whatever is now selected — only surface the error while this export's
       // run is still the one on screen; a successful export still downloads regardless.
       if (selectedRunId === runId) lifecycleError = "Could not build export";
       return;
     }
-    const payload = buildBenchmarkExport(runRes.value, attemptsRes.value ?? []);
+    const payload = buildBenchmarkExport(res.value.run, res.value.attempts);
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");

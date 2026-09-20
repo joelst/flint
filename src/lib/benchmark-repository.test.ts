@@ -4,7 +4,9 @@ import {
   createBenchmarkRun,
   deleteBenchmarkSuite,
   deleteBenchmarkSuiteIfNoRuns,
+  countBenchmarkRunsForSuite,
   getBenchmarkRun,
+  getBenchmarkRunWithAttempts,
   getBenchmarkSuite,
   listAttemptsForRun,
   listAttemptSummariesForRun,
@@ -633,6 +635,29 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
     expect(await listBenchmarkRunsForSuite(testSuite.id)).toEqual({ ok: true, value: [testRun()] });
   });
 
+  it('countBenchmarkRunsForSuite matches listBenchmarkRunsForSuite length without reading full rows', async () => {
+    expect(await countBenchmarkRunsForSuite(testSuite.id)).toEqual({ ok: true, value: 0 });
+    await createBenchmarkRun(testRun());
+    await createBenchmarkRun(testRun({ id: 'run-2' }));
+    expect(await countBenchmarkRunsForSuite(testSuite.id)).toEqual({ ok: true, value: 2 });
+    expect(await countBenchmarkRunsForSuite('no-such-suite')).toEqual({ ok: true, value: 0 });
+  });
+
+  it('getBenchmarkRunWithAttempts returns null for a run id that does not exist', async () => {
+    expect(await getBenchmarkRunWithAttempts('missing')).toEqual({ ok: true, value: null });
+  });
+
+  it('getBenchmarkRunWithAttempts reads the run and its full attempt history together', async () => {
+    await createBenchmarkRun(testRun());
+    await recordAttemptDispatched(testAttempt());
+    await recordAttemptTerminal('exec-1', { status: 'succeeded', responseText: 'hi', settledAt: 42 });
+    const result = await getBenchmarkRunWithAttempts('run-1');
+    expect(result.ok).toBe(true);
+    expect(result.value!.run).toEqual(testRun());
+    expect(result.value!.attempts).toHaveLength(1);
+    expect(result.value!.attempts[0]).toMatchObject({ id: 'exec-1', status: 'succeeded', responseText: 'hi' });
+  });
+
   it('returns null (not an error) for a run id that does not exist', async () => {
     expect(await getBenchmarkRun('missing')).toEqual({ ok: true, value: null });
   });
@@ -778,6 +803,21 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
     db.close();
 
     const listed = await listAttemptsForRun('run-1');
+    expect(listed.ok).toBe(false);
+    expect(listed.error).toMatch(/failed validation/);
+  });
+
+  it('reports a stored corrupt attempt summary row as an error rather than silently misplacing it', async () => {
+    const db = await openBenchmarkDatabase();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction('attemptSummaries', 'readwrite');
+      tx.objectStore('attemptSummaries').put({ id: 'corrupt', runId: 'run-1', not: 'valid' });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+
+    const listed = await listAttemptSummariesForRun('run-1');
     expect(listed.ok).toBe(false);
     expect(listed.error).toMatch(/failed validation/);
   });
