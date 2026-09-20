@@ -605,6 +605,7 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
         repeatIndex: 0,
         sequence: 0,
         status: 'succeeded',
+        intentCommittedAt: 1700000001000,
       },
       {
         id: 'exec-2',
@@ -616,6 +617,7 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
         repeatIndex: 1,
         sequence: 1,
         status: 'succeeded',
+        intentCommittedAt: 1700000001000,
       },
     ]));
     expect(summaries.value!.every((row) => !('responseText' in row))).toBe(true);
@@ -739,6 +741,7 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
       repeatIndex: 0,
       sequence: 0,
       status: 'dispatched',
+      intentCommittedAt: 1700000001000,
     }]);
   });
 
@@ -821,9 +824,11 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
         repeatIndex: 0,
         sequence: 0,
         status: 'succeeded',
+        intentCommittedAt: 1700000001000,
       }],
     });
-    // No response text, usage, or timestamps leak through into the lightweight projection.
+    // Response text, usage, and error stay off the lightweight projection; intentCommittedAt
+    // is kept so live progress can tell this session's in-flight work from leftover dispatched.
     expect(summaries.value![0]).not.toHaveProperty('responseText');
     expect(summaries.value![0]).not.toHaveProperty('usage');
     expect(summaries.value![0]).not.toHaveProperty('errorMessage');

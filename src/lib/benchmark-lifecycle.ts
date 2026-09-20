@@ -16,7 +16,8 @@ import {
   type StartRunOutcome,
   type StopController,
 } from './benchmark-runner';
-import { getBenchmarkRun, updateBenchmarkRunStatus } from './benchmark-repository';
+import { getBenchmarkRun, listAttemptsForRun, updateBenchmarkRunStatus } from './benchmark-repository';
+import { pendingTargetIndexes } from './benchmark-run';
 import { isBenchmarkSuite, type BenchmarkSuite } from './benchmark-suite';
 
 export type LifecycleOutcome = { ok: true; runId: string } | { ok: false; error: string };
@@ -36,16 +37,24 @@ export interface BenchmarkLifecycleHost {
   }>;
 }
 
-export function suiteHasExplicitVariants(suite: BenchmarkSuite): boolean {
-  return suite.targets.some((t) => t.variantId != null);
+export function suiteHasExplicitVariants(
+  suite: BenchmarkSuite,
+  onlyTargetIndexes?: ReadonlySet<number>,
+): boolean {
+  return suite.targets.some((t, i) => (onlyTargetIndexes == null || onlyTargetIndexes.has(i)) && t.variantId != null);
+}
+
+function targetsToPrepare(suite: BenchmarkSuite, onlyTargetIndexes?: ReadonlySet<number>) {
+  return suite.targets.filter((_, i) => onlyTargetIndexes == null || onlyTargetIndexes.has(i));
 }
 
 export async function loadBenchmarkTargets(
   suite: BenchmarkSuite,
   loadModel: BenchmarkLifecycleHost['loadModel'],
   stopController?: StopController,
+  onlyTargetIndexes?: ReadonlySet<number>,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  for (const target of suite.targets) {
+  for (const target of targetsToPrepare(suite, onlyTargetIndexes)) {
     if (stopController?.isStopped()) {
       return { ok: false, error: 'Stopped before every target was loaded' };
     }
@@ -108,23 +117,28 @@ export interface PreparedExecution {
   runId: string;
   stopController: StopController;
   done: Promise<StartRunOutcome>;
+  /** Dispatches at or after this timestamp are this session's in-flight work. */
+  liveAfter: number;
 }
 
 async function pinThenLoad(
   suite: BenchmarkSuite,
   host: BenchmarkLifecycleHost,
   stopController?: StopController,
+  onlyTargetIndexes?: ReadonlySet<number>,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   if (stopController?.isStopped()) {
     return { ok: false, error: 'Stopped before targets were pinned' };
   }
-  const aliases = Array.from(new Set(suite.targets.map((t) => t.alias)));
+  const targets = targetsToPrepare(suite, onlyTargetIndexes);
+  if (targets.length === 0) return { ok: true };
+  const aliases = Array.from(new Set(targets.map((t) => t.alias)));
   let pinError: string | null = null;
   try {
     await host.pinAliases(aliases);
   } catch (e: unknown) {
     pinError = e instanceof Error ? e.message : String(e);
-    if (suiteHasExplicitVariants(suite)) {
+    if (suiteHasExplicitVariants(suite, onlyTargetIndexes)) {
       await host.unpin().catch(() => {});
       return { ok: false, error: `Could not pin targets with explicit variants: ${pinError}` };
     }
@@ -133,7 +147,7 @@ async function pinThenLoad(
     await host.unpin().catch(() => {});
     return { ok: false, error: 'Stopped before every target was loaded' };
   }
-  const loaded = await loadBenchmarkTargets(suite, host.loadModel, stopController);
+  const loaded = await loadBenchmarkTargets(suite, host.loadModel, stopController, onlyTargetIndexes);
   if (!loaded.ok) {
     await host.unpin().catch(() => {});
     return loaded;
@@ -191,7 +205,8 @@ export async function startBenchmarkSession(
     }
     return startBenchmarkRun(frozen, transport, stopController, prepared.run);
   })();
-  return { ok: true, execution: { runId, stopController, done } };
+  // A new run has no leftover dispatched rows; 0 means every intent is this session.
+  return { ok: true, execution: { runId, stopController, done, liveAfter: 0 } };
 }
 
 export async function resumeBenchmarkSession(
@@ -208,14 +223,22 @@ export async function resumeBenchmarkSession(
 
   const stopController = createStopController();
   const transport = createSidecarBenchmarkTransport(host.chatCompletion);
+  const liveAfter = Date.now();
   const done = (async (): Promise<StartRunOutcome> => {
-    const preparedPin = await pinThenLoad(suite, host, stopController);
-    if (!preparedPin.ok) return { ok: false, error: preparedPin.error };
+    // Same attempt list resumeBenchmarkRun will use. Pin/load only unsettled targets so a
+    // deleted completed model cannot fail this prepare and block the remaining retries.
+    const attempts = await listAttemptsForRun(runId);
+    if (!attempts.ok) return { ok: false, error: attempts.error };
+    const only = new Set(pendingTargetIndexes(suite, attempts.value ?? []));
+    if (only.size > 0) {
+      const preparedPin = await pinThenLoad(suite, host, stopController, only);
+      if (!preparedPin.ok) return { ok: false, error: preparedPin.error };
+    }
     if (stopController.isStopped()) {
       await host.unpin().catch(() => {});
       return { ok: false, error: 'Stopped during preparation' };
     }
     return resumeBenchmarkRun(runId, transport, stopController);
   })();
-  return { ok: true, execution: { runId, stopController, done } };
+  return { ok: true, execution: { runId, stopController, done, liveAfter } };
 }

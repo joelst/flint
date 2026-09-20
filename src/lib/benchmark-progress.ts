@@ -24,6 +24,9 @@ export interface AttemptSummary {
   repeatIndex: number | null;
   sequence: number;
   status: BenchmarkAttempt['status'];
+  /** When this execution was write-ahead dispatched. Used to tell this session's in-flight
+   * work from leftover `dispatched` rows of a previous Stop/crash. */
+  intentCommittedAt?: number;
 }
 
 /** Projects a full attempt row down to the fields the progress matrix (and polling) need. */
@@ -38,6 +41,7 @@ export function summarizeAttempt(attempt: BenchmarkAttempt): AttemptSummary {
     repeatIndex: attempt.repeatIndex,
     sequence: attempt.sequence,
     status: attempt.status,
+    intentCommittedAt: attempt.intentCommittedAt,
   };
 }
 
@@ -74,13 +78,17 @@ export function isAttemptSummary(value: unknown): value is AttemptSummary {
   }
   if (typeof v.sequence !== 'number' || !Number.isInteger(v.sequence) || v.sequence < 0) return false;
   if (typeof v.status !== 'string' || !ATTEMPT_STATUSES.has(v.status as AttemptSummary['status'])) return false;
+  if (v.intentCommittedAt !== undefined
+    && (typeof v.intentCommittedAt !== 'number' || !Number.isFinite(v.intentCommittedAt) || v.intentCommittedAt < 0)) {
+    return false;
+  }
   return true;
 }
 
 /**
  * `pending`: no execution has been dispatched for this position yet.
- * `running`: a `dispatched` execution while this run is the live in-flight run — the chat
- *   call is outstanding, not a crash.
+ * `running`: a `dispatched` execution from *this* live session (intent after `liveAfter`) —
+ *   the chat call is outstanding, not a leftover Stop/crash row.
  * `uncertain`: a `dispatched` execution after the process is gone (Stop/crash) with no
  *   terminal row — must never be folded into `succeeded`/`failed`/`pending`.
  * `succeeded` / `failed`: a terminal execution was durably recorded for this position.
@@ -124,7 +132,7 @@ function emptyCounts(): ProgressCounts {
 export function buildProgressMatrix(
   suite: Pick<BenchmarkSuite, 'targets' | 'cases' | 'warmupCount' | 'repeatCount'>,
   attempts: readonly AttemptSummary[],
-  opts: { live?: boolean } = {},
+  opts: { live?: boolean; liveAfter?: number | null } = {},
 ): TargetProgress[] {
   const schedule = buildAttemptSchedule(suite as BenchmarkSuite);
 
@@ -143,7 +151,15 @@ export function buildProgressMatrix(
     if (latest) {
       if (latest.status === 'succeeded') state = 'succeeded';
       else if (latest.status === 'failed') state = 'failed';
-      else state = opts.live ? 'running' : 'uncertain';
+      else {
+        // `live` alone is the whole historical run. Resume pin/load still owns the run while
+        // leftover dispatched rows from the previous Stop/crash sit in storage — only intents
+        // committed at/after this session's liveAfter are actually in flight.
+        const fromThisSession = opts.liveAfter == null
+          ? !!opts.live
+          : (latest.intentCommittedAt ?? 0) >= opts.liveAfter;
+        state = opts.live && fromThisSession ? 'running' : 'uncertain';
+      }
     }
     const entry: ProgressPosition = { ...position, state, latestAttemptId: latest?.id ?? null };
     const forTarget = byTarget.get(position.targetIndex) ?? [];
@@ -174,6 +190,36 @@ export function isRunInterrupted(
   activeRunId?: string | null,
 ): boolean {
   return run.status === 'running' && run.id !== activeRunId;
+}
+
+/**
+ * Live polling is parent ownership, not persisted `running`. A tick that started while we
+ * owned the run can still hold the pre-final `running` snapshot after the parent has
+ * cleared activeRunId — re-read before stopping so Resume is not offered on a completed run.
+ */
+export function nextRunPollAction(opts: {
+  confirmed: boolean;
+  ownedNow: boolean;
+  ownedAtStart: boolean;
+  status: BenchmarkRun['status'] | null | undefined;
+}): 'keep' | 'reread' | 'stop' {
+  if (!opts.confirmed) return 'keep';
+  if (opts.ownedNow) return 'keep';
+  if (opts.ownedAtStart || opts.status === 'running') return 'reread';
+  return 'stop';
+}
+
+/** After the confirmation read: keep one extra tick if this session just released a
+ * still-`running` row (status write may still be in flight). Follow-up ticks are not
+ * owned-at-start and stop even if storage is still `running` (crash leftover). */
+export function nextRunPollActionAfterReread(opts: {
+  ownedNow: boolean;
+  ownedAtStart: boolean;
+  status: BenchmarkRun['status'] | null | undefined;
+}): 'keep' | 'stop' {
+  if (opts.ownedNow) return 'keep';
+  if (opts.ownedAtStart && opts.status === 'running') return 'keep';
+  return 'stop';
 }
 
 /** Positions remain to retry: interrupted running, user Stop, or a durability halt.

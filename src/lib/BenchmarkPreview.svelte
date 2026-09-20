@@ -19,7 +19,7 @@
     type BenchmarkTarget,
   } from "./benchmark-suite";
   import { aliasChoicesForTarget, applyTargetAlias, cachedVariantIds, draftEditsSuite, draftFromSuite, buildSuiteFromDraft, estimateDraftAttempts, variantChoicesForTarget, type SuiteDraft } from "./benchmark-draft";
-  import { buildProgressMatrix, isRunInterrupted, isRunResumable, type AttemptSummary } from "./benchmark-progress";
+  import { buildProgressMatrix, isRunInterrupted, isRunResumable, nextRunPollAction, nextRunPollActionAfterReread, type AttemptSummary } from "./benchmark-progress";
   import { buildBenchmarkExport } from "./benchmark-export";
   import type { BenchmarkRun } from "./benchmark-run";
 
@@ -28,6 +28,8 @@
    * status here — lifecycle state (start/stop/resume) itself lives in the parent so a run
    * survives navigating away from this view. */
   export let activeRunId: string | null = null;
+  /** Dispatches at or after this timestamp are this live session's in-flight work. */
+  export let liveAfter: number | null = null;
   /** True from the moment start/resume is requested until pin restore finishes. */
   export let runInFlight: boolean = false;
   /** Set by the parent when a detached run/resume execution settles with a failure or a
@@ -283,6 +285,7 @@
     const runId = selectedRunId;
     if (!runId) return;
     const generation = ++refreshGeneration;
+    const ownedAtStart = runId === activeRunId;
     const runRes = await getBenchmarkRun(runId);
     if (generation !== refreshGeneration || selectedRunId !== runId) return;
     if (runRes.ok) {
@@ -307,10 +310,32 @@
     // reads succeeded and the row is not the live running run (including the first open of a
     // run that already finished, when no interval was ever installed).
     const confirmed = runRes.ok && summariesRes.ok;
-    // Parent ownership is the live signal, not the persisted status: during Resume pin/load
-    // the row stays stopped/recovery_required until resumeBenchmarkRun flips it to running.
-    const live = !!selectedRun && selectedRun.id === activeRunId;
-    if (confirmed && !live) {
+    const ownedNow = runId === activeRunId;
+    const poll = nextRunPollAction({
+      confirmed,
+      ownedNow,
+      ownedAtStart,
+      status: selectedRun?.status,
+    });
+    if (poll === 'keep') return;
+    if (poll === 'reread') {
+      const finalRun = await getBenchmarkRun(runId);
+      if (generation !== refreshGeneration || selectedRunId !== runId) return;
+      if (finalRun.ok) {
+        selectedRun = finalRun.value ?? null;
+        pollError = "";
+      }
+      const finalSummaries = await listAttemptSummariesForRun(runId);
+      if (generation !== refreshGeneration || selectedRunId !== runId) return;
+      if (finalSummaries.ok) selectedRunAttempts = finalSummaries.value ?? [];
+      const after = nextRunPollActionAfterReread({
+        ownedNow: runId === activeRunId,
+        ownedAtStart,
+        status: selectedRun?.status,
+      });
+      if (after === 'keep') return;
+    }
+    if (runId !== activeRunId) {
       stopPolling();
       if (selectedSuiteId) await refreshRunsForSelectedSuite(selectedSuiteId);
     }
@@ -332,7 +357,10 @@
   }
 
   $: progressMatrix = selectedRun
-    ? buildProgressMatrix(selectedRun.suite, selectedRunAttempts, { live: selectedRun.id === activeRunId })
+    ? buildProgressMatrix(selectedRun.suite, selectedRunAttempts, {
+        live: selectedRun.id === activeRunId,
+        liveAfter: selectedRun.id === activeRunId ? liveAfter : null,
+      })
     : [];
   $: selectedRunIsActive = !!selectedRun && selectedRun.id === activeRunId;
 

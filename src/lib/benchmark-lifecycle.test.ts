@@ -257,6 +257,23 @@ describe('loadBenchmarkTargets', () => {
     );
     expect(result).toEqual({ ok: false, error: 'Could not load phi (cuda:1): not found' });
   });
+
+  it('loads only the requested target indexes', async () => {
+    const loaded: string[] = [];
+    const result = await loadBenchmarkTargets(
+      suite({
+        targets: [
+          { alias: 'model-a', variantId: null },
+          { alias: 'model-b', variantId: null },
+        ],
+      }),
+      async (alias) => { loaded.push(alias); },
+      undefined,
+      new Set([1]),
+    );
+    expect(result).toEqual({ ok: true });
+    expect(loaded).toEqual(['model-b']);
+  });
 });
 
 describe('resumeBenchmarkSession', () => {
@@ -296,5 +313,77 @@ describe('resumeBenchmarkSession', () => {
     expect(done?.ok).toBe(true);
     expect(host.order[0]).toBe('pin:model-a');
     expect(host.order).toContain('load:model-a');
+  });
+
+  it('resume pin/load skips a fully-settled target so a gone completed model cannot block pending retries', async () => {
+    const s = suite({
+      targets: [
+        { alias: 'model-done', variantId: null },
+        { alias: 'model-pending', variantId: null },
+      ],
+      warmupCount: 0,
+      repeatCount: 1,
+      cases: [{ id: 'c1', prompt: 'x' }],
+    });
+    await putBenchmarkSuite(s);
+    const stopController = createStopController();
+    const started = await startBenchmarkRun(s, async (req) => {
+      if (req.alias === 'model-done') {
+        stopController.stop();
+        return { ok: true, responseText: 'ok' };
+      }
+      return { ok: true, responseText: 'should not run' };
+    }, stopController);
+    expect(started.ok).toBe(true);
+    expect(started.result?.status).toBe('stopped');
+
+    const host = fakeHost({
+      loadModel: async (alias) => {
+        host.order.push(`load:${alias}`);
+        if (alias === 'model-done') throw new Error('no longer downloaded');
+      },
+    });
+    const resumed = await resumeBenchmarkSession(started.run!.id, host);
+    expect(resumed.ok).toBe(true);
+    const done = resumed.ok ? await resumed.execution.done : null;
+    expect(done?.ok).toBe(true);
+    expect(host.order.filter((x) => x.startsWith('pin:'))).toEqual(['pin:model-pending']);
+    expect(host.order.filter((x) => x.startsWith('load:'))).toEqual(['load:model-pending']);
+  });
+
+  it('resume pin failure is fatal only when a still-pending target has an explicit variant', async () => {
+    const s = suite({
+      targets: [
+        { alias: 'model-done', variantId: 'v1' },
+        { alias: 'model-pending', variantId: null },
+      ],
+      warmupCount: 0,
+      repeatCount: 1,
+      cases: [{ id: 'c1', prompt: 'x' }],
+    });
+    await putBenchmarkSuite(s);
+    const stopController = createStopController();
+    const started = await startBenchmarkRun(s, async (req) => {
+      if (req.alias === 'model-done') {
+        stopController.stop();
+        return { ok: true, responseText: 'ok' };
+      }
+      return { ok: true, responseText: 'should not run' };
+    }, stopController);
+    expect(started.ok).toBe(true);
+
+    const host = fakeHost({
+      pinAliases: async (aliases) => {
+        host.order.push(`pin:${aliases.join(',')}`);
+        throw new Error('pin failed');
+      },
+    });
+    const resumed = await resumeBenchmarkSession(started.run!.id, host);
+    expect(resumed.ok).toBe(true);
+    const done = resumed.ok ? await resumed.execution.done : null;
+    expect(done?.ok).toBe(true);
+    expect(host.order[0]).toBe('pin:model-pending');
+    expect(host.order).toContain('load:model-pending');
+    expect(host.order).not.toContain('load:model-done');
   });
 });

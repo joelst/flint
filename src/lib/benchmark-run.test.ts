@@ -5,6 +5,7 @@ import {
   isBenchmarkRun,
   nextSequenceFor,
   pendingLogicalAttempts,
+  pendingTargetIndexes,
   settledLogicalAttemptIds,
   uncertainLogicalAttemptIds,
   type BenchmarkAttempt,
@@ -134,6 +135,41 @@ describe('settledLogicalAttemptIds / pendingLogicalAttempts / uncertainLogicalAt
     ];
     expect(uncertainLogicalAttemptIds(attempts)).toEqual(new Set());
     expect(settledLogicalAttemptIds(attempts)).toEqual(new Set([target.logicalAttemptId]));
+  });
+
+  it('pendingTargetIndexes omits a target whose every position is terminal', () => {
+    const s = suite({
+      targets: [{ alias: 'model-a', variantId: null }, { alias: 'model-b', variantId: null }],
+      warmupCount: 0,
+      repeatCount: 1,
+      cases: [{ id: 'c1', prompt: 'x' }],
+    });
+    const t0 = buildAttemptSchedule(s).filter((e) => e.targetIndex === 0);
+    const attempts = t0.map((e, i) => attempt({
+      id: `exec-t0-${i}`,
+      logicalAttemptId: e.logicalAttemptId,
+      targetIndex: 0,
+      status: 'succeeded',
+      responseText: 'ok',
+      settledAt: 2,
+    }));
+    expect(pendingTargetIndexes(s, attempts)).toEqual([1]);
+  });
+
+  it('pendingTargetIndexes still includes a target whose only executions are dispatched', () => {
+    const s = suite({
+      targets: [{ alias: 'model-a', variantId: null }, { alias: 'model-b', variantId: null }],
+      warmupCount: 0,
+      repeatCount: 1,
+      cases: [{ id: 'c1', prompt: 'x' }],
+    });
+    const t0 = buildAttemptSchedule(s).find((e) => e.targetIndex === 0)!;
+    const attempts = [attempt({
+      logicalAttemptId: t0.logicalAttemptId,
+      targetIndex: 0,
+      status: 'dispatched',
+    })];
+    expect(pendingTargetIndexes(s, attempts)).toEqual([0, 1]);
   });
 });
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildProgressMatrix, isAttemptSummary, isRunInterrupted, isRunResumable, summarizeAttempt, type AttemptSummary } from './benchmark-progress';
+import { buildProgressMatrix, isAttemptSummary, isRunInterrupted, isRunResumable, nextRunPollAction, nextRunPollActionAfterReread, summarizeAttempt, type AttemptSummary } from './benchmark-progress';
 import type { BenchmarkAttempt } from './benchmark-run';
 import type { BenchmarkSuite } from './benchmark-suite';
 
@@ -50,6 +50,7 @@ describe('summarizeAttempt', () => {
       repeatIndex: 0,
       sequence: 0,
       status: 'succeeded',
+      intentCommittedAt: 1,
     });
   });
 });
@@ -104,6 +105,15 @@ describe('isAttemptSummary', () => {
     expect(isAttemptSummary({ ...valid, sequence: NaN })).toBe(false);
     expect(isAttemptSummary({ ...valid, caseIndex: 1.5 })).toBe(false);
   });
+
+  it('accepts a finite non-negative intentCommittedAt and rejects a malformed one', () => {
+    expect(isAttemptSummary({ ...valid, intentCommittedAt: 0 })).toBe(true);
+    expect(isAttemptSummary({ ...valid, intentCommittedAt: 1700000001000 })).toBe(true);
+    expect(isAttemptSummary({ ...valid, intentCommittedAt: -1 })).toBe(false);
+    expect(isAttemptSummary({ ...valid, intentCommittedAt: NaN })).toBe(false);
+    expect(isAttemptSummary({ ...valid, intentCommittedAt: Infinity })).toBe(false);
+    expect(isAttemptSummary({ ...valid, intentCommittedAt: '1' })).toBe(false);
+  });
 });
 
 describe('buildProgressMatrix', () => {
@@ -137,6 +147,48 @@ describe('buildProgressMatrix', () => {
     expect(target0.positions[0].state).toBe('running');
     expect(target0.counts.running).toBe(1);
     expect(target0.counts.uncertain).toBe(0);
+  });
+
+  it('keeps pre-session dispatched rows uncertain during a live Resume', () => {
+    const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
+    const old = summarizeAttempt(attempt({ logicalAttemptId: 't0:c0:r0', status: 'dispatched', intentCommittedAt: 10 }));
+    const matrix = buildProgressMatrix(s, [old], { live: true, liveAfter: 100 });
+    const target0 = matrix.find((t) => t.targetIndex === 0)!;
+    expect(target0.positions[0].state).toBe('uncertain');
+    expect(target0.counts.uncertain).toBe(1);
+    expect(target0.counts.running).toBe(0);
+  });
+
+  it('marks only this-session dispatched rows as running when liveAfter is set', () => {
+    const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
+    const leftover = summarizeAttempt(attempt({
+      id: 'old',
+      logicalAttemptId: 't0:c0:r0',
+      status: 'dispatched',
+      intentCommittedAt: 10,
+    }));
+    const current = summarizeAttempt(attempt({
+      id: 'new',
+      logicalAttemptId: 't1:c0:r0',
+      targetIndex: 1,
+      alias: 'model-b',
+      status: 'dispatched',
+      intentCommittedAt: 150,
+    }));
+    const matrix = buildProgressMatrix(s, [leftover, current], { live: true, liveAfter: 100 });
+    expect(matrix.find((t) => t.targetIndex === 0)!.positions[0].state).toBe('uncertain');
+    expect(matrix.find((t) => t.targetIndex === 1)!.positions[0].state).toBe('running');
+  });
+
+  it('treats a dispatched row with no intentCommittedAt as leftover when liveAfter is set', () => {
+    const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
+    const legacy = summarizeAttempt(attempt({
+      logicalAttemptId: 't0:c0:r0',
+      status: 'dispatched',
+    }));
+    delete legacy.intentCommittedAt;
+    const matrix = buildProgressMatrix(s, [legacy], { live: true, liveAfter: 100 });
+    expect(matrix.find((t) => t.targetIndex === 0)!.positions[0].state).toBe('uncertain');
   });
 
   it('classifies a succeeded terminal execution as succeeded, and a failed one as failed', () => {
@@ -174,6 +226,26 @@ describe('buildProgressMatrix', () => {
     const target1 = matrix.find((t) => t.targetIndex === 1)!;
     expect(target0.counts).toEqual({ total: 1, pending: 1, running: 0, uncertain: 0, succeeded: 0, failed: 0 });
     expect(target1.counts).toEqual({ total: 1, pending: 0, running: 0, uncertain: 0, succeeded: 1, failed: 0 });
+  });
+});
+
+describe('nextRunPollAction', () => {
+  it('keeps polling while the parent still owns the run, even if the row is already terminal', () => {
+    expect(nextRunPollAction({ confirmed: true, ownedNow: true, ownedAtStart: true, status: 'completed' })).toBe('keep');
+    expect(nextRunPollAction({ confirmed: false, ownedNow: true, ownedAtStart: true, status: 'running' })).toBe('keep');
+  });
+
+  it('re-reads when ownership drops during the tick or the snapshot is still running', () => {
+    expect(nextRunPollAction({ confirmed: true, ownedNow: false, ownedAtStart: true, status: 'running' })).toBe('reread');
+    expect(nextRunPollAction({ confirmed: true, ownedNow: false, ownedAtStart: false, status: 'running' })).toBe('reread');
+    expect(nextRunPollAction({ confirmed: true, ownedNow: false, ownedAtStart: false, status: 'stopped' })).toBe('stop');
+  });
+
+  it('after a confirmation read, keeps one extra tick only if this session just released a still-running row', () => {
+    expect(nextRunPollActionAfterReread({ ownedNow: false, ownedAtStart: true, status: 'running' })).toBe('keep');
+    expect(nextRunPollActionAfterReread({ ownedNow: false, ownedAtStart: true, status: 'completed' })).toBe('stop');
+    expect(nextRunPollActionAfterReread({ ownedNow: false, ownedAtStart: false, status: 'running' })).toBe('stop');
+    expect(nextRunPollActionAfterReread({ ownedNow: true, ownedAtStart: true, status: 'running' })).toBe('keep');
   });
 });
 

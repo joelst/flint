@@ -152,7 +152,9 @@ export function isTerminalAttemptStatus(status: AttemptStatus): boolean {
  * whose earlier execution was left `dispatched` (uncertain) by a crash or a Stop — the earlier,
  * uncertain execution is never deleted or overwritten, only superseded.
  */
-export function settledLogicalAttemptIds(attempts: readonly BenchmarkAttempt[]): Set<string> {
+export function settledLogicalAttemptIds(
+  attempts: readonly Pick<BenchmarkAttempt, 'logicalAttemptId' | 'status'>[],
+): Set<string> {
   const settled = new Set<string>();
   for (const attempt of attempts) {
     if (isTerminalAttemptStatus(attempt.status)) settled.add(attempt.logicalAttemptId);
@@ -167,10 +169,20 @@ export function settledLogicalAttemptIds(attempts: readonly BenchmarkAttempt[]):
  */
 export function pendingLogicalAttempts(
   schedule: readonly LogicalAttempt[],
-  attempts: readonly BenchmarkAttempt[],
+  attempts: readonly Pick<BenchmarkAttempt, 'logicalAttemptId' | 'status'>[],
 ): LogicalAttempt[] {
   const settled = settledLogicalAttemptIds(attempts);
   return schedule.filter((entry) => !settled.has(entry.logicalAttemptId));
+}
+
+/** Target indexes that still have at least one unsettled position — Resume should pin/load
+ * only these, so a removed completed target cannot block retries of the others. */
+export function pendingTargetIndexes(
+  suite: Pick<BenchmarkSuite, 'targets' | 'cases' | 'warmupCount' | 'repeatCount'>,
+  attempts: readonly Pick<BenchmarkAttempt, 'logicalAttemptId' | 'status'>[],
+): number[] {
+  const pending = pendingLogicalAttempts(buildAttemptSchedule(suite as BenchmarkSuite), attempts);
+  return [...new Set(pending.map((entry) => entry.targetIndex))].sort((a, b) => a - b);
 }
 
 /**
