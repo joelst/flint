@@ -200,6 +200,15 @@
   type View = "models" | "chat" | "audio" | "monitor" | "diagnostics" | "integrations" | "help" | "settings" | "compare";
   let currentView = $state<View>("models");
 
+  // "Chat" and "Audio" are presented in the nav as one merged "Playground" entry (matching the
+  // Build > Playground grouping used by Azure AI Foundry / Anthropic's console). Remembering
+  // whichever of the two sub-views was last active lets the single nav button return you to
+  // where you left off, rather than always resetting to Chat.
+  let playgroundLastView = $state<"chat" | "audio">("chat");
+  $effect(() => {
+    if (currentView === "chat" || currentView === "audio") playgroundLastView = currentView;
+  });
+
   const FIRST_RUN_KEY = "flint-first-run-dismissed-v1";
   let showFirstRunCoach = $state(false);
 
@@ -6112,141 +6121,139 @@ Output only the summary text, no preamble.`;
         </svg>
       </button>
 
-      <button
-        class="nav-item"
-        class:active={currentView === "models"}
-        onclick={() => (currentView = "models")}
-        title="Models"
-      >
-        <span class="nav-icon" aria-hidden="true">
-          <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M12 3.5L19 7.5L12 11.5L5 7.5L12 3.5Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
-            <path d="M5 7.5V16.5L12 20.5L19 16.5V7.5" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
-            <path d="M12 11.5V20.5" stroke="currentColor" stroke-width="1.8" />
-          </svg>
-        </span>
-        <span class="nav-label">Models</span>
-      </button>
-      <button
-        class="nav-item"
-        class:active={currentView === "chat"}
-        onclick={() => (currentView = "chat")}
-        title="Chat"
-      >
-        <span class="nav-icon" aria-hidden="true">
-          <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="4" y="5" width="16" height="11" rx="3" stroke="currentColor" stroke-width="1.8" />
-            <path d="M9 16L7.5 19.5L12.5 16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
-            <path d="M8 10.5H16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-          </svg>
-        </span>
-        <span class="nav-label">Chat</span>
-      </button>
-      <button
-        class="nav-item"
-        class:active={currentView === "audio"}
-        onclick={() => (currentView = "audio")}
-        title="Audio"
-      >
-        <span class="nav-icon" aria-hidden="true">
-          <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="9" y="4" width="6" height="10" rx="3" stroke="currentColor" stroke-width="1.8" />
-            <path d="M6.5 11.5C6.5 14.5 8.8 17 12 17C15.2 17 17.5 14.5 17.5 11.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-            <path d="M12 17V20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-            <path d="M9.5 20H14.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-          </svg>
-        </span>
-        <span class="nav-label">Audio</span>
-      </button>
-      <button
-        class="nav-item"
-        class:active={currentView === "diagnostics"}
-        onclick={() => (currentView = "diagnostics")}
-        title="Diagnostics"
-      >
-        <span class="nav-icon" aria-hidden="true">
-          <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M5 17L9 13L12 15L16.5 9.5L19 12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
-            <path d="M4.5 19.5H19.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-            <circle cx="7.5" cy="8" r="1" fill="currentColor" />
-            <circle cx="12" cy="10.5" r="1" fill="currentColor" />
-            <circle cx="16.5" cy="6.5" r="1" fill="currentColor" />
-          </svg>
-        </span>
-        <span class="nav-label">Diagnostics</span>
-      </button>
-      <button
-        class="nav-item"
-        class:active={currentView === "monitor"}
-        onclick={() => { currentView = "monitor"; refreshMonitorNow(); }}
-        title="Monitor"
-      >
-        <span class="nav-icon" aria-hidden="true">
-          <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="3" y="4" width="18" height="13" rx="2" stroke="currentColor" stroke-width="1.8" />
-            <path d="M8 20H16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-            <path d="M12 17V20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-            <path d="M7 12.5L9.5 10L12 12L15 8.5L17 10.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
-          </svg>
-        </span>
-        <span class="nav-label">Monitor</span>
-      </button>
-      <button
-        class="nav-item"
-        class:active={currentView === "compare"}
-        onclick={() => (currentView = "compare")}
-        title="Model Arena — run models side-by-side"
-      >
-        <span class="nav-icon" aria-hidden="true">
-          <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M6 4.5h4.5v4H6zM6 15.5h4.5v4H6zM15 10h4.5v4H15z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
-            <path d="M10.5 6.5h2.2c1.2 0 2.3.8 2.7 2l.5 1.5M10.5 17.5h2.2c1.2 0 2.3-.8 2.7-2l.5-1.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
-            <path d="M18 8.1l1.5 1.9-2.2.8M18 15.9l1.5-1.9-2.2-.8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        </span>
-        <span class="nav-label">Model Arena</span>
-      </button>
-      <button
-        class="nav-item"
-        class:active={currentView === "integrations"}
-        onclick={() => (currentView = "integrations")}
-        title="Integrations"
-      >
-        <span class="nav-icon" aria-hidden="true">
-          <Icon name="zap" size={20} />
-        </span>
-        <span class="nav-label">Integrations</span>
-      </button>
-      <button
-        class="nav-item"
-        class:active={currentView === "help"}
-        onclick={() => (currentView = "help")}
-        title="Help"
-      >
-        <span class="nav-icon" aria-hidden="true">
-          <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8" />
-            <path d="M9.5 9.5a2.5 2.5 0 1 1 3.6 2.2c-.8.4-1.1.8-1.1 1.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-            <circle cx="12" cy="16.5" r="0.9" fill="currentColor" stroke="none" />
-          </svg>
-        </span>
-        <span class="nav-label">Help</span>
-      </button>
+      <div class="nav-section">
+        <span class="nav-section-label">Build</span>
+        <button
+          class="nav-item"
+          class:active={currentView === "chat" || currentView === "audio"}
+          onclick={() => (currentView = playgroundLastView)}
+          title="Playground — Chat and Voice"
+        >
+          <span class="nav-icon" aria-hidden="true">
+            <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect x="4" y="5" width="16" height="11" rx="3" stroke="currentColor" stroke-width="1.8" />
+              <path d="M9 16L7.5 19.5L12.5 16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+              <path d="M8 10.5H16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+            </svg>
+          </span>
+          <span class="nav-label">Playground</span>
+        </button>
+        <button
+          class="nav-item"
+          class:active={currentView === "compare"}
+          onclick={() => (currentView = "compare")}
+          title="Model Arena — run models side-by-side"
+        >
+          <span class="nav-icon" aria-hidden="true">
+            <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M6 4.5h4.5v4H6zM6 15.5h4.5v4H6zM15 10h4.5v4H15z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+              <path d="M10.5 6.5h2.2c1.2 0 2.3.8 2.7 2l.5 1.5M10.5 17.5h2.2c1.2 0 2.3-.8 2.7-2l.5-1.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+              <path d="M18 8.1l1.5 1.9-2.2.8M18 15.9l1.5-1.9-2.2-.8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </span>
+          <span class="nav-label">Model Arena</span>
+        </button>
+      </div>
 
-      <button
-        class="nav-item"
-        class:active={currentView === "settings"}
-        onclick={() => (currentView = "settings")}
-        title="Settings"
-      >
-        <span class="nav-icon" aria-hidden="true">
-          <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="12" cy="12" r="2.8" stroke="currentColor" stroke-width="1.8"/>
-            <path d="M10.29 3.86 8.64 4.86l.26 1.5A6.8 6.8 0 0 0 7.4 7.4L5.9 7.14l-1 1.72 1.07 1.08A6.7 6.7 0 0 0 5.86 12a6.7 6.7 0 0 0 .11 1.06L4.9 14.14l1 1.72 1.5-.26c.36.37.77.7 1.22.98l-.26 1.5 1.72 1L10.86 18c.37.09.75.14 1.14.14.39 0 .77-.05 1.14-.14l.68.98 1.72-1-.26-1.5c.45-.28.86-.61 1.22-.98l1.5.26 1-1.72-1.07-1.08c.07-.35.11-.7.11-1.06 0-.36-.04-.71-.11-1.06l1.07-1.08-1-1.72-1.5.26A6.8 6.8 0 0 0 16.1 7.4l.26-1.5-1.72-1-.68.98A6.8 6.8 0 0 0 12 5.86c-.39 0-.77.05-1.14.14l-.57-.14Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
-          </svg>
-        </span>
-        <span class="nav-label">Settings</span>
-      </button>
+      <div class="nav-section">
+        <span class="nav-section-label">Discover</span>
+        <button
+          class="nav-item"
+          class:active={currentView === "models"}
+          onclick={() => (currentView = "models")}
+          title="Models"
+        >
+          <span class="nav-icon" aria-hidden="true">
+            <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M12 3.5L19 7.5L12 11.5L5 7.5L12 3.5Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
+              <path d="M5 7.5V16.5L12 20.5L19 16.5V7.5" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
+              <path d="M12 11.5V20.5" stroke="currentColor" stroke-width="1.8" />
+            </svg>
+          </span>
+          <span class="nav-label">Models</span>
+        </button>
+      </div>
+
+      <div class="nav-section">
+        <span class="nav-section-label">Operate</span>
+        <button
+          class="nav-item"
+          class:active={currentView === "monitor"}
+          onclick={() => { currentView = "monitor"; refreshMonitorNow(); }}
+          title="Monitor"
+        >
+          <span class="nav-icon" aria-hidden="true">
+            <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect x="3" y="4" width="18" height="13" rx="2" stroke="currentColor" stroke-width="1.8" />
+              <path d="M8 20H16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+              <path d="M12 17V20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+              <path d="M7 12.5L9.5 10L12 12L15 8.5L17 10.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </span>
+          <span class="nav-label">Monitor</span>
+        </button>
+        <button
+          class="nav-item"
+          class:active={currentView === "diagnostics"}
+          onclick={() => (currentView = "diagnostics")}
+          title="Diagnostics"
+        >
+          <span class="nav-icon" aria-hidden="true">
+            <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M5 17L9 13L12 15L16.5 9.5L19 12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+              <path d="M4.5 19.5H19.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+              <circle cx="7.5" cy="8" r="1" fill="currentColor" />
+              <circle cx="12" cy="10.5" r="1" fill="currentColor" />
+              <circle cx="16.5" cy="6.5" r="1" fill="currentColor" />
+            </svg>
+          </span>
+          <span class="nav-label">Diagnostics</span>
+        </button>
+        <button
+          class="nav-item"
+          class:active={currentView === "integrations"}
+          onclick={() => (currentView = "integrations")}
+          title="Integrations"
+        >
+          <span class="nav-icon" aria-hidden="true">
+            <Icon name="zap" size={20} />
+          </span>
+          <span class="nav-label">Integrations</span>
+        </button>
+      </div>
+
+      <div class="nav-section">
+        <span class="nav-section-label">Manage</span>
+        <button
+          class="nav-item"
+          class:active={currentView === "settings"}
+          onclick={() => (currentView = "settings")}
+          title="Settings"
+        >
+          <span class="nav-icon" aria-hidden="true">
+            <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="12" cy="12" r="2.8" stroke="currentColor" stroke-width="1.8"/>
+              <path d="M10.29 3.86 8.64 4.86l.26 1.5A6.8 6.8 0 0 0 7.4 7.4L5.9 7.14l-1 1.72 1.07 1.08A6.7 6.7 0 0 0 5.86 12a6.7 6.7 0 0 0 .11 1.06L4.9 14.14l1 1.72 1.5-.26c.36.37.77.7 1.22.98l-.26 1.5 1.72 1L10.86 18c.37.09.75.14 1.14.14.39 0 .77-.05 1.14-.14l.68.98 1.72-1-.26-1.5c.45-.28.86-.61 1.22-.98l1.5.26 1-1.72-1.07-1.08c.07-.35.11-.7.11-1.06 0-.36-.04-.71-.11-1.06l1.07-1.08-1-1.72-1.5.26A6.8 6.8 0 0 0 16.1 7.4l.26-1.5-1.72-1-.68.98A6.8 6.8 0 0 0 12 5.86c-.39 0-.77.05-1.14.14l-.57-.14Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+            </svg>
+          </span>
+          <span class="nav-label">Settings</span>
+        </button>
+        <button
+          class="nav-item"
+          class:active={currentView === "help"}
+          onclick={() => (currentView = "help")}
+          title="Help"
+        >
+          <span class="nav-icon" aria-hidden="true">
+            <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8" />
+              <path d="M9.5 9.5a2.5 2.5 0 1 1 3.6 2.2c-.8.4-1.1.8-1.1 1.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+              <circle cx="12" cy="16.5" r="0.9" fill="currentColor" stroke="none" />
+            </svg>
+          </span>
+          <span class="nav-label">Help</span>
+        </button>
+      </div>
 
       <div class="sidebar-footer">
         <div class="privacy">On-device inference</div>
@@ -7163,6 +7170,10 @@ Output only the summary text, no preamble.`;
         </div>
       {:else if currentView === "chat"}
         <div class="view chat-view">
+          <div class="playground-subnav" role="tablist" aria-label="Playground mode">
+            <button type="button" class="active" role="tab" aria-selected="true">Chat</button>
+            <button type="button" role="tab" aria-selected="false" onclick={() => (currentView = "audio")}>Voice</button>
+          </div>
           <div class="chat-container">
             <ConversationSidebar
               {conversations}
@@ -7690,6 +7701,10 @@ Output only the summary text, no preamble.`;
         </div>
       {:else if currentView === "audio"}
         <div class="view audio-view">
+          <div class="playground-subnav" role="tablist" aria-label="Playground mode">
+            <button type="button" role="tab" aria-selected="false" onclick={() => (currentView = "chat")}>Chat</button>
+            <button type="button" class="active" role="tab" aria-selected="true">Voice</button>
+          </div>
           <h2>Audio Transcription</h2>
 
           <p class="notice">
@@ -8269,8 +8284,7 @@ Output only the summary text, no preamble.`;
                 <h3>No access log entries yet</h3>
                 <p>Chat, transcribe, or call the local endpoint — requests show up here and under <code>~/.flint/logs/</code>.</p>
                 <div class="empty-state-actions">
-                  <button type="button" onclick={() => (currentView = "chat")}>Open Chat</button>
-                  <button type="button" class="secondary" onclick={() => (currentView = "audio")}>Open Audio</button>
+                  <button type="button" onclick={() => (currentView = "chat")}>Open Playground</button>
                 </div>
               </div>
             {:else}
@@ -8458,7 +8472,7 @@ Output only the summary text, no preamble.`;
                 download a small starter, then <strong>Load</strong>.
               </li>
               <li>
-                Open <button type="button" class="link-like" onclick={() => (currentView = "chat")}>Chat</button> and send a message.
+                Open <button type="button" class="link-like" onclick={() => (currentView = "chat")}>Playground</button> and send a message.
               </li>
               <li>
                 Optional: <button type="button" class="link-like" onclick={() => (currentView = "diagnostics")}>Diagnostics</button>
@@ -8476,7 +8490,7 @@ Output only the summary text, no preamble.`;
             <h3>Around the app</h3>
             <ul>
               <li><strong>Models</strong> — catalog, multi-model pool, download/load/unload, update notifications</li>
-              <li><strong>Chat / Audio / Model Arena</strong> — inference, STT, side-by-side bake-off</li>
+              <li><strong>Playground / Model Arena</strong> — chat and voice inference, side-by-side bake-off</li>
               <li><strong>Monitor</strong> — pool, resources, access and audit logs</li>
               <li><strong>Integrations</strong> — snippets for external OpenAI-compatible tools</li>
               <li><strong>Diagnostics / Settings</strong> — service, bind/port (Apply &amp; restart), autostart, shortcuts (<kbd>?</kbd>)</li>
@@ -9707,6 +9721,30 @@ Output only the summary text, no preamble.`;
     flex-direction: column;
   }
 
+  .nav-section + .nav-section {
+    margin-top: 10px;
+  }
+
+  .nav-section-label {
+    display: block;
+    padding: 8px 20px 4px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .sidebar.collapsed .nav-section-label {
+    display: none;
+  }
+
+  .sidebar.collapsed .nav-section + .nav-section {
+    margin-top: 2px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+  }
+
   .nav-item {
     display: block;
     width: 100%;
@@ -10664,6 +10702,36 @@ Output only the summary text, no preamble.`;
     display: flex;
     flex-direction: column;
     height: 100%;
+  }
+
+  .playground-subnav {
+    display: inline-flex;
+    gap: 2px;
+    padding: 3px;
+    margin-bottom: 10px;
+    background: var(--sidebar-bg);
+    border-radius: 8px;
+    width: fit-content;
+  }
+
+  .playground-subnav button {
+    border: none;
+    background: none;
+    padding: 5px 14px;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    color: var(--muted);
+    cursor: pointer;
+  }
+
+  .playground-subnav button:hover {
+    color: var(--fg);
+  }
+
+  .playground-subnav button.active {
+    background: var(--panel-bg);
+    color: var(--fg);
+    font-weight: 600;
   }
 
   .chat-container {
