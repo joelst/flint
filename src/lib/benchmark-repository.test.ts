@@ -580,4 +580,29 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
     expect(listed.ok).toBe(false);
     expect(listed.error).toMatch(/failed validation/);
   });
+
+  it('reports failure when starting a multi-store transaction itself throws synchronously', async () => {
+    const originalIndexedDB = globalThis.indexedDB;
+    vi.stubGlobal('indexedDB', {
+      open: () => {
+        const fakeRequest: Record<string, unknown> = {
+          result: {
+            transaction: () => { throw new Error('transaction() threw'); },
+            close: () => {},
+          },
+          set onupgradeneeded(_fn: unknown) { /* not invoked */ },
+          set onsuccess(fn: () => void) { fn(); },
+          set onerror(_fn: unknown) { /* not invoked */ },
+          set onblocked(_fn: unknown) { /* not invoked */ },
+        };
+        return fakeRequest;
+      },
+    });
+    try {
+      const result = await getBenchmarkRun('x');
+      expect(result).toEqual({ ok: false, error: 'transaction() threw' });
+    } finally {
+      vi.stubGlobal('indexedDB', originalIndexedDB);
+    }
+  });
 });

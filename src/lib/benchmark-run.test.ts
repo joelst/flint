@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   buildAttemptSchedule,
   isBenchmarkAttempt,
@@ -164,6 +164,20 @@ describe('isBenchmarkRun', () => {
 
   it('rejects an unknown status', () => {
     expect(isBenchmarkRun({ ...run(), status: 'bogus' })).toBe(false);
+  });
+});
+
+describe('buildAttemptSchedule cross-check', () => {
+  it('proof gate: throws if the schedule length ever diverges from benchmarkAttemptCount', async () => {
+    vi.doMock('./benchmark-suite', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('./benchmark-suite')>();
+      return { ...actual, benchmarkAttemptCount: () => 999 };
+    });
+    vi.resetModules();
+    const { buildAttemptSchedule: buildWithMockedCount } = await import('./benchmark-run');
+    expect(() => buildWithMockedCount(suite())).toThrow(/does not match benchmarkAttemptCount/);
+    vi.doUnmock('./benchmark-suite');
+    vi.resetModules();
   });
 });
 
