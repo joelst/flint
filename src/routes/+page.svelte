@@ -686,6 +686,7 @@
   let compareActiveStream: { controller: AbortController; requestId: number | null } | null = null;
   let compareRunGeneration = 0;
   let compareStopAckError: string | null = null;
+  let compareStopAckWaits: Promise<void>[] = [];
   let comparePreDispatchCancelled = false;
 
   // Settings: startup behaviour
@@ -3341,14 +3342,11 @@ updateStateFromSdk();
     }
     comparePrepStatus = `Loading ${slot.label}…`;
     statusMessage = comparePrepStatus;
-    await sdkLoadModel(model, "chat", slot.variantId ?? undefined);
-    // Record ownership before refreshModels, which can reject after a successful load.
-    onLoaded?.();
-    await refreshModels();
+    await sdkLoadModel(model, "chat", slot.variantId ?? undefined, onLoaded);
   }
 
-  async function unloadCompareSlot(slot: CompareSlot): Promise<void> {
-    if (!state.pool.some((e: any) => e.alias === slot.alias)) return;
+  async function unloadCompareSlot(slot: CompareSlot, force = false): Promise<void> {
+    if (!force && !state.pool.some((e: any) => e.alias === slot.alias)) return;
     try {
       comparePrepStatus = `Unloading ${slot.label}…`;
       await sdkUnloadModel({ alias: slot.alias });
@@ -3368,13 +3366,14 @@ updateStateFromSdk();
     slot: CompareSlot,
     ctx: { preloadedAliases: Set<string>; loadedByCompare: Set<string>; allowUnloadPreloaded: boolean },
   ): Promise<boolean> {
-    if (!state.pool.some((e: any) => e.alias === slot.alias)) return false;
-    const wasPreloaded = ctx.preloadedAliases.has(slot.alias);
     const weLoaded = ctx.loadedByCompare.has(slot.alias);
+    const inPool = state.pool.some((e: any) => e.alias === slot.alias);
+    if (!inPool && !weLoaded) return false;
+    const wasPreloaded = ctx.preloadedAliases.has(slot.alias);
     if (wasPreloaded && !ctx.allowUnloadPreloaded && !weLoaded) {
       return false;
     }
-    await unloadCompareSlot(slot);
+    await unloadCompareSlot(slot, weLoaded && !inPool);
     ctx.loadedByCompare.delete(slot.alias);
     return true;
   }
@@ -3559,6 +3558,7 @@ updateStateFromSdk();
     comparePickerOpen = false;
     compareStopRequested = false;
     compareStopAckError = null;
+    compareStopAckWaits = [];
     comparePreDispatchCancelled = false;
     const runId = ++compareRunGeneration;
     isComparing = true;
@@ -3671,8 +3671,9 @@ updateStateFromSdk();
 
           // Re-select variant in case pool had another variant for same alias
           if (!isSlotInPool(slot)) {
-            await sdkLoadModel({ alias: slot.alias }, "chat", slot.variantId ?? undefined);
-            unloadCtx.loadedByCompare.add(slot.alias);
+            await sdkLoadModel({ alias: slot.alias }, "chat", slot.variantId ?? undefined, () => {
+              unloadCtx.loadedByCompare.add(slot.alias);
+            });
           }
 
           const completionOpts = {
@@ -3742,10 +3743,16 @@ updateStateFromSdk();
                   if (cancelBeforeDispatch(requestId)) {
                     comparePreDispatchCancelled = true;
                   } else {
-                    void cancelChatRequest(requestId).catch((e: any) => {
-                      if (compareRunGeneration !== runId) return;
-                      compareStopAckError = e?.message || String(e);
-                    });
+                    const ack = cancelChatRequest(requestId);
+                    compareStopAckWaits.push(
+                      ack.then(
+                        () => undefined,
+                        (e: any) => {
+                          if (compareRunGeneration !== runId) return;
+                          compareStopAckError = e?.message || String(e);
+                        },
+                      ),
+                    );
                   }
                 }
               },
@@ -3817,6 +3824,7 @@ updateStateFromSdk();
       }
 
       comparePrepStatus = "";
+      if (compareStopAckWaits.length) await Promise.all(compareStopAckWaits);
       if (compareStopRequested) {
         statusMessage = `Arena run stopped` +
           (failCount > 0 ? ` with ${failCount} failure(s)` : "") +
@@ -3868,7 +3876,17 @@ updateStateFromSdk();
       return;
     }
     try {
-      await cancelChatRequest(requestId);
+      const ack = cancelChatRequest(requestId);
+      compareStopAckWaits.push(
+        ack.then(
+          () => undefined,
+          (e: any) => {
+            if (compareRunGeneration !== runId) return;
+            compareStopAckError = e?.message || String(e);
+          },
+        ),
+      );
+      await ack;
     } catch (e: any) {
       if (compareRunGeneration !== runId) return;
       compareStopAckError = e?.message || String(e);

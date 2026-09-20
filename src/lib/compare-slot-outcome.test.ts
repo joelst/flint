@@ -124,6 +124,21 @@ describe('compare slot result builders', () => {
     expect(stopped.ttftMs).toBe(80);
   });
 
+  it('clamps negative TTFT and latency when the clock steps backward', () => {
+    const result = buildSettledCompareResult({
+      content: 'hello',
+      stopRequested: false,
+      inferenceStarted: 2000,
+      now: 1500,
+      nativeStreaming: true,
+      firstDeltaAt: 1000,
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    });
+    expect(result.latencyMs).toBe(0);
+    expect(result.ttftMs).toBe(0);
+    expect(buildFailedCompareResult({ message: 'boom' }, 2000, 1500).latencyMs).toBe(0);
+  });
+
   it('omits null sidecar usage fields instead of persisting null tokens', () => {
     const result = buildSettledCompareResult({
       content: 'hello',

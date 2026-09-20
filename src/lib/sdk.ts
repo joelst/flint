@@ -1578,7 +1578,12 @@ export async function downloadModel(
   await refreshModels();
 }
 
-export async function loadModel(model: any, lane?: LaneName, variantId?: string) {
+export async function loadModel(
+  model: any,
+  lane?: LaneName,
+  variantId?: string,
+  onAcknowledged?: () => void,
+) {
   const payload: any = { alias: model.alias };
   if (lane) payload.lane = lane;
   if (variantId) payload.variantId = variantId;
@@ -1595,6 +1600,7 @@ export async function loadModel(model: any, lane?: LaneName, variantId?: string)
   if (!sidecarProcess || !sidecarReady) {
     throw new Error('Sidecar was lost after loading the model');
   }
+  onAcknowledged?.();
   await refreshModels();
   if (
     generation === null ||

@@ -49,7 +49,7 @@ export function buildFailedCompareResult(
   const content = partialContent ? `${partialContent}\n\n${prefix}` : prefix;
   return {
     content,
-    latencyMs: inferenceStarted != null ? now - inferenceStarted : undefined,
+    latencyMs: elapsedMs(inferenceStarted, now),
     error: message,
     rating: null,
     status: 'failed',
@@ -58,6 +58,14 @@ export function buildFailedCompareResult(
 
 function finiteToken(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+/** Wall-clock deltas can go negative if the system clock steps backward. */
+function elapsedMs(started: number | null, ended: number): number | undefined {
+  if (started == null) return undefined;
+  const delta = ended - started;
+  if (!Number.isFinite(delta)) return undefined;
+  return delta < 0 ? 0 : delta;
 }
 
 export function buildSettledCompareResult(opts: {
@@ -78,17 +86,14 @@ export function buildSettledCompareResult(opts: {
 }): CompareResult {
   return {
     content: opts.content,
-    latencyMs:
-      opts.stopRequested || opts.inferenceStarted == null
-        ? undefined
-        : opts.now - opts.inferenceStarted,
+    latencyMs: opts.stopRequested ? undefined : elapsedMs(opts.inferenceStarted, opts.now),
     tokensIn: finiteToken(opts.usage.prompt_tokens) ?? finiteToken(opts.usage.input_tokens),
     tokensOut: finiteToken(opts.usage.completion_tokens) ?? finiteToken(opts.usage.output_tokens),
     rating: null,
     status: opts.stopRequested ? 'stopped' : 'completed',
     ttftMs:
-      opts.nativeStreaming && opts.firstDeltaAt != null && opts.inferenceStarted != null
-        ? opts.firstDeltaAt - opts.inferenceStarted
+      opts.nativeStreaming && opts.firstDeltaAt != null
+        ? elapsedMs(opts.inferenceStarted, opts.firstDeltaAt)
         : undefined,
     nativeStreaming: opts.nativeStreaming,
     servedVariantId: opts.servedVariantId ?? null,
