@@ -2,4 +2,4 @@
 "flint": patch
 ---
 
-Theme the Models catalog sort dropdown in dark mode so it matches the search field and other selects.
+Theme native selects (including the Models catalog sort dropdown) in dark mode so closed boxes and open lists follow the app theme.
