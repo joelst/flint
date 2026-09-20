@@ -22,6 +22,14 @@ import {
   type ValidationResult,
 } from './benchmark-suite';
 
+/** True when this draft is a pending edit of a stored suite (create-new drafts have no `id`). */
+export function draftEditsSuite(
+  draft: Pick<SuiteDraft, 'id'> | null | undefined,
+  suiteId: string,
+): boolean {
+  return typeof draft?.id === 'string' && draft.id === suiteId;
+}
+
 export interface SuiteDraft {
   /** Present when editing an existing suite; absent when creating a new one. */
   id?: string;

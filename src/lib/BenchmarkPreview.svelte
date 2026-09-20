@@ -18,7 +18,7 @@
     type BenchmarkSuite,
     type BenchmarkTarget,
   } from "./benchmark-suite";
-  import { applyTargetAlias, cachedVariantIds, draftFromSuite, buildSuiteFromDraft, estimateDraftAttempts, variantChoicesForTarget, type SuiteDraft } from "./benchmark-draft";
+  import { applyTargetAlias, cachedVariantIds, draftEditsSuite, draftFromSuite, buildSuiteFromDraft, estimateDraftAttempts, variantChoicesForTarget, type SuiteDraft } from "./benchmark-draft";
   import { buildProgressMatrix, isRunInterrupted, isRunResumable, type AttemptSummary } from "./benchmark-progress";
   import { buildBenchmarkExport } from "./benchmark-export";
   import type { BenchmarkRun } from "./benchmark-run";
@@ -86,9 +86,10 @@
    * this flag directly before installing its interval so no post-teardown caller, however it got
    * there, can start one that `onDestroy`'s single `stopPolling()` call never sees. */
   let destroyed = false;
-  /** One lock for suite CRUD and start/resume: a save must not commit while pin/load is
-   * awaiting, and Start must not snapshot a draft that a pending save is about to replace. */
-  $: mutating = suiteBusy || editingBusy || lifecycleBusy || runInFlight;
+  /** Editor write in flight — Save/Cancel/New/Edit serialize on this, not on an unrelated run. */
+  $: editorBusy = editingBusy || suiteBusy;
+  /** Start/resume handshake or live run. Does not freeze Save/Cancel of an unrelated draft. */
+  $: runBusy = lifecycleBusy || runInFlight;
 
   async function refreshSuites() {
     const generation = ++suitesGeneration;
@@ -160,14 +161,19 @@
   // to report success/failure against, or let the save's completion silently clobber a draft the
   // user opened in the meantime. The template also disables their buttons while `editingBusy`;
   // these are a defense-in-depth guard against any other call path.
+  function discardDraft() {
+    editingDraft = null;
+    editingErrors = [];
+  }
+
   function startCreateSuite() {
-    if (mutating) return;
+    if (editorBusy || lifecycleBusy) return;
     editingDraft = newSuiteDraft();
     editingErrors = [];
   }
 
   async function startEditSuite(suite: BenchmarkSuite) {
-    if (mutating) return;
+    if (editorBusy || lifecycleBusy) return;
     // Editing is restricted to suites with no runs yet — a suite with runs already has attempts
     // recorded against its frozen snapshot, and silently changing the live suite underneath
     // that history would be misleading even though runs themselves are immutable.
@@ -180,9 +186,8 @@
   }
 
   function cancelEditSuite() {
-    if (mutating) return;
-    editingDraft = null;
-    editingErrors = [];
+    if (editorBusy) return;
+    discardDraft();
   }
 
   function addTarget() {
@@ -217,7 +222,7 @@
   $: draftAttemptEstimate = editingDraft ? estimateDraftAttempts(editingDraft) : null;
 
   async function saveSuite() {
-    if (!editingDraft || mutating) return;
+    if (!editingDraft || editorBusy) return;
     editingBusy = true;
     suiteBusy = true;
     editingErrors = [];
@@ -242,7 +247,8 @@
   }
 
   async function removeSuite(suite: BenchmarkSuite) {
-    if (mutating) return;
+    if (editorBusy || lifecycleBusy || runInFlight) return;
+    if (draftEditsSuite(editingDraft, suite.id)) return;
     suiteBusy = true;
     // `runCountsBySuite` is only a UI hint (last refresh) — the actual guard against deleting a
     // suite that has gained a run since then lives inside `deleteBenchmarkSuiteIfNoRuns`, which
@@ -254,6 +260,8 @@
         loadError = res.error || "Could not delete suite";
         return;
       }
+      // Defense: a stale editor for this id would recreate the suite on Save.
+      if (draftEditsSuite(editingDraft, suite.id)) discardDraft();
       if (selectedSuiteId === suite.id) {
         selectedSuiteId = null;
         runsForSelectedSuite = [];
@@ -327,7 +335,11 @@
   $: selectedRunIsActive = !!selectedRun && selectedRun.id === activeRunId;
 
   async function handleStart(suite: BenchmarkSuite) {
-    if (mutating) return;
+    if (runBusy) return;
+    if (draftEditsSuite(editingDraft, suite.id)) {
+      lifecycleError = "Save or cancel your edits before starting a run.";
+      return;
+    }
     const suiteId = suite.id;
     lifecycleBusy = true;
     lifecycleError = "";
@@ -339,6 +351,8 @@
         lifecycleError = outcome.error;
         return;
       }
+      // The suite now has a run, so this draft can never pass putBenchmarkSuiteIfNoRuns.
+      if (draftEditsSuite(editingDraft, suiteId)) discardDraft();
       await refreshRunsForSelectedSuite(suiteId);
       if (destroyed || selectedSuiteId !== suiteId) return;
       await openRun(outcome.runId);
@@ -352,7 +366,7 @@
   }
 
   async function handleResume(runId: string) {
-    if (mutating) return;
+    if (runBusy) return;
     const suiteId = selectedSuiteId;
     lifecycleBusy = true;
     lifecycleError = "";
@@ -422,7 +436,7 @@
         Early preview.
       </p>
     </div>
-    <button type="button" class="secondary small" onclick={startCreateSuite} disabled={mutating}>New suite</button>
+    <button type="button" class="secondary small" onclick={startCreateSuite} disabled={editorBusy || lifecycleBusy}>New suite</button>
   </div>
 
   {#if loadError}
@@ -519,10 +533,10 @@
       {/if}
 
       <div class="benchmark-editor-actions">
-        <button type="button" class="primary" disabled={mutating} onclick={saveSuite}>
+        <button type="button" class="primary" disabled={editorBusy} onclick={saveSuite}>
           {editingBusy ? "Saving…" : "Save suite"}
         </button>
-        <button type="button" class="secondary" disabled={mutating} onclick={cancelEditSuite}>Cancel</button>
+        <button type="button" class="secondary" disabled={editorBusy} onclick={cancelEditSuite}>Cancel</button>
       </div>
     </div>
   {/if}
@@ -539,8 +553,13 @@
             <strong>{suite.name}</strong>
             <span class="muted small">{suite.targets.length} target(s) · {suite.cases.length} case(s) · {runCountsBySuite[suite.id] ?? 0} run(s)</span>
           </button>
-          <button type="button" class="tiny" disabled={mutating} onclick={() => startEditSuite(suite)}>Edit</button>
-          <button type="button" class="tiny danger-btn" disabled={mutating} onclick={() => removeSuite(suite)}>Delete</button>
+          <button type="button" class="tiny" disabled={editorBusy || lifecycleBusy} onclick={() => startEditSuite(suite)}>Edit</button>
+          <button
+            type="button"
+            class="tiny danger-btn"
+            disabled={editorBusy || lifecycleBusy || runInFlight || draftEditsSuite(editingDraft, suite.id)}
+            onclick={() => removeSuite(suite)}
+          >Delete</button>
         </div>
       {/each}
     </div>
@@ -554,12 +573,15 @@
             <button
               type="button"
               class="primary small"
-              disabled={mutating || !!activeRunId || !isBenchmarkSuite(suite)}
+              disabled={runBusy || !!activeRunId || !isBenchmarkSuite(suite) || draftEditsSuite(editingDraft, suite.id)}
               onclick={() => handleStart(suite)}
             >
               {lifecycleBusy ? "Starting…" : "Start run"}
             </button>
           </div>
+          {#if draftEditsSuite(editingDraft, suite.id)}
+            <p class="muted small">Save or cancel your edits before starting a run.</p>
+          {/if}
           {#if !isBenchmarkSuite(suite)}
             <p class="muted small">
               This suite lists the same model alias twice; the runtime can only keep one variant
@@ -596,7 +618,7 @@
                     finish. Flint only records a result if it durably receives and saves one.
                   </p>
                 {:else if isRunResumable(currentRun, activeRunId)}
-                  <button type="button" class="primary small" disabled={mutating || !!activeRunId} onclick={() => handleResume(currentRun.id)}>
+                  <button type="button" class="primary small" disabled={runBusy || !!activeRunId} onclick={() => handleResume(currentRun.id)}>
                     {lifecycleBusy ? "Resuming…" : "Resume"}
                   </button>
                 {/if}

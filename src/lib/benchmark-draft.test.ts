@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyTargetAlias, buildSuiteFromDraft, cachedVariantIds, draftFromSuite, estimateDraftAttempts, variantChoicesForTarget, type SuiteDraft } from './benchmark-draft';
+import { applyTargetAlias, buildSuiteFromDraft, cachedVariantIds, draftEditsSuite, draftFromSuite, estimateDraftAttempts, variantChoicesForTarget, type SuiteDraft } from './benchmark-draft';
 import { BENCHMARK_MAX_ATTEMPTS, BENCHMARK_MAX_JSONL_CHARS } from './benchmark-suite';
 import type { BenchmarkSuite } from './benchmark-suite';
 
@@ -56,6 +56,15 @@ describe('buildSuiteFromDraft', () => {
   it('rejects a draft with no targets, matching validateBenchmarkSuite\'s own target-count rule', () => {
     const result = buildSuiteFromDraft(baseDraft({ targets: [] }));
     expect(result.ok).toBe(false);
+  });
+});
+
+describe('draftEditsSuite', () => {
+  it('is true only for a draft that names that stored suite', () => {
+    expect(draftEditsSuite({ id: 'suite-1' }, 'suite-1')).toBe(true);
+    expect(draftEditsSuite({ id: 'suite-1' }, 'suite-2')).toBe(false);
+    expect(draftEditsSuite({ id: undefined }, 'suite-1')).toBe(false);
+    expect(draftEditsSuite(null, 'suite-1')).toBe(false);
   });
 });
 
