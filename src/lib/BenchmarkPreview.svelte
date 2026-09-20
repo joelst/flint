@@ -307,7 +307,9 @@
     // reads succeeded and the row is not the live running run (including the first open of a
     // run that already finished, when no interval was ever installed).
     const confirmed = runRes.ok && summariesRes.ok;
-    const live = !!selectedRun && selectedRun.id === activeRunId && selectedRun.status === "running";
+    // Parent ownership is the live signal, not the persisted status: during Resume pin/load
+    // the row stays stopped/recovery_required until resumeBenchmarkRun flips it to running.
+    const live = !!selectedRun && selectedRun.id === activeRunId;
     if (confirmed && !live) {
       stopPolling();
       if (selectedSuiteId) await refreshRunsForSelectedSuite(selectedSuiteId);

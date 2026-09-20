@@ -187,6 +187,28 @@ describe('loadBenchmarkTargets / pinThenLoad order', () => {
     expect(host.order.filter((x) => x.startsWith('load:'))).toEqual(['load:model-a']);
   });
 
+  it('pin/load uses the frozen snapshot even if the caller mutates the suite during pin', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const host = fakeHost({
+      pinAliases: async (aliases) => {
+        host.order.push(`pin:${aliases.join(',')}`);
+        await gate;
+      },
+    });
+    const s = suite({ targets: [{ alias: 'model-a', variantId: null }] });
+    await putBenchmarkSuite(s);
+    const result = await startBenchmarkSession(s, host);
+    expect(result.ok).toBe(true);
+    s.targets.push({ alias: 'model-b', variantId: null });
+    release();
+    const done = result.ok ? await result.execution.done : null;
+    expect(done?.ok).toBe(true);
+    expect(host.order[0]).toBe('pin:model-a');
+    expect(host.order).not.toContain('load:model-b');
+    expect(host.order.filter((x) => x.startsWith('load:'))).toEqual(['load:model-a']);
+  });
+
   it('includes a durability failure when a prepared run cannot be marked stopped', async () => {
     const msg = await haltPreparedRun('missing-run', 'Could not pin targets');
     expect(msg).toMatch(/Could not pin targets/);

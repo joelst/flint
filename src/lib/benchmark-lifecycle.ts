@@ -174,11 +174,14 @@ export async function startBenchmarkSession(
   const stopController = createStopController();
   const transport = createSidecarBenchmarkTransport(host.chatCompletion);
   const runId = prepared.run.id;
+  // Pin/load/execute the frozen snapshot, not the caller's object — mutating `suite` while
+  // pinAliases is awaiting would otherwise load a different alias set than the run will execute.
+  const frozen = prepared.run.suite;
   // Return the controller immediately so Stop is live during unbounded model loads. Pin/load
   // and execution run on `done`; loadModel has no cancel-in-flight API, so Stop is honored
   // between operations (same admission contract as the runner).
   const done = (async (): Promise<StartRunOutcome> => {
-    const preparedPin = await pinThenLoad(suite, host, stopController);
+    const preparedPin = await pinThenLoad(frozen, host, stopController);
     if (!preparedPin.ok) {
       return { ok: false, error: await haltPreparedRun(runId, preparedPin.error) };
     }
@@ -186,7 +189,7 @@ export async function startBenchmarkSession(
       await host.unpin().catch(() => {});
       return { ok: false, error: await haltPreparedRun(runId, 'Stopped during preparation') };
     }
-    return startBenchmarkRun(suite, transport, stopController, prepared.run);
+    return startBenchmarkRun(frozen, transport, stopController, prepared.run);
   })();
   return { ok: true, execution: { runId, stopController, done } };
 }

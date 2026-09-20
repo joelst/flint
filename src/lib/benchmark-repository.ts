@@ -57,7 +57,10 @@ export function upgradeBenchmarkDatabase(db: IDBDatabase, tx: IDBTransaction | n
         const cursor = cursorReq.result;
         if (!cursor) return;
         const row = cursor.value;
-        if (isBenchmarkAttempt(row)) summaries.put(summarizeAttempt(row));
+        if (!isBenchmarkAttempt(row)) {
+          throw new Error('v3 backfill: a stored attempt failed validation; refusing a partial summary projection');
+        }
+        summaries.put(summarizeAttempt(row));
         cursor.continue();
       };
     }
@@ -365,8 +368,11 @@ export async function deleteBenchmarkSuiteIfNoRuns(id: string): Promise<Reposito
 // treat as uncertain, which logical position to retry) lives in `benchmark-run.ts`, not here —
 // this module only durably persists whatever it is asked to write and reads it back honestly.
 
-/** Creates a run, keyed by `run.id`. The caller is responsible for freezing the suite snapshot
- * before calling this — this function does not re-fetch or re-validate against `suites`. */
+/** Creates a run, keyed by `run.id`. The caller freezes the suite snapshot before calling.
+ * In the same transaction this re-reads the live `suites` row and refuses to insert if it is
+ * missing or its execution shape (targets, cases, warmup/repeat, generation params) no longer
+ * matches `run.suite` — so a concurrent editor save cannot attach history to a different
+ * definition. */
 export async function createBenchmarkRun(run: BenchmarkRun): Promise<RepositoryResult<void>> {
   if (!isBenchmarkRun(run)) return failResult('run failed shape validation');
   const result = await withStores<void>([RUNS_STORE, SUITES_STORE], 'readwrite', (tx, trackRequest) => {

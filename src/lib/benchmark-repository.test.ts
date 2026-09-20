@@ -621,6 +621,32 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
     expect(summaries.value!.every((row) => !('responseText' in row))).toBe(true);
   });
 
+  it('aborts v3 upgrade when a v2 attempt row fails validation', async () => {
+    await resetDatabase();
+    await new Promise<void>((resolve, reject) => {
+      const req = indexedDB.open('flint-benchmarks', 2);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        db.createObjectStore('suites', { keyPath: 'id' });
+        const runs = db.createObjectStore('runs', { keyPath: 'id' });
+        runs.createIndex('bySuiteId', 'suiteId');
+        const attempts = db.createObjectStore('attempts', { keyPath: 'id' });
+        attempts.createIndex('byRunId', 'runId');
+        attempts.createIndex('byRunStatus', ['runId', 'status']);
+      };
+      req.onsuccess = () => {
+        const db = req.result;
+        const tx = db.transaction('attempts', 'readwrite');
+        tx.objectStore('attempts').put({ id: 'corrupt', runId: 'run-1', not: 'valid' });
+        tx.oncomplete = () => { db.close(); resolve(); };
+        tx.onerror = () => { db.close(); reject(tx.error); };
+      };
+      req.onerror = () => reject(req.error);
+    });
+
+    await expect(openBenchmarkDatabase()).rejects.toThrow(/backfill|Could not open|abort|fail/i);
+  });
+
   it('refuses to create a run whose frozen snapshot no longer matches the stored suite', async () => {
     await putBenchmarkSuite(testSuite);
     const stale = testRun({

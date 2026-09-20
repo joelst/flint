@@ -2580,6 +2580,15 @@
     if (storedTheme) theme = storedTheme;
   } catch {}
 
+  /** `bind:checked` applies after an existing `change` listener, so persistChat() alone would
+   * serialize the previous value. Read the event first, then persist. */
+  function persistChatCheckbox(assign: (checked: boolean) => void) {
+    return (e: Event) => {
+      assign((e.currentTarget as HTMLInputElement).checked);
+      persistChat();
+    };
+  }
+
   function persistChat() {
     // Every writer must honour this, not just the autosave effect: several call sites invoke
     // persistChat() directly, and any of them could otherwise replace a blob we failed to read
@@ -9526,7 +9535,7 @@ Output only the summary text, no preamble.`;
                 </span>
               </div>
               <label class="toggle-switch">
-                <input type="checkbox" bind:checked={keepServiceInBackground} onchange={persistChat} aria-labelledby="keep-service-background-label" />
+                <input type="checkbox" bind:checked={keepServiceInBackground} onchange={persistChatCheckbox((v) => { keepServiceInBackground = v; })} aria-labelledby="keep-service-background-label" />
                 <span class="toggle-track"></span>
               </label>
             </div>
@@ -9540,7 +9549,7 @@ Output only the summary text, no preamble.`;
                 <span class="setting-desc">Load the default model and start the inference service when Flint opens</span>
               </div>
               <label class="toggle-switch">
-                <input type="checkbox" bind:checked={autoStartService} onchange={persistChat} aria-labelledby="auto-start-service-label" />
+                <input type="checkbox" bind:checked={autoStartService} onchange={persistChatCheckbox((v) => { autoStartService = v; })} aria-labelledby="auto-start-service-label" />
                 <span class="toggle-track"></span>
               </label>
             </div>
@@ -9812,7 +9821,7 @@ Output only the summary text, no preamble.`;
                 <input
                   type="checkbox"
                   bind:checked={benchmarkPreviewEnabled}
-                  onchange={persistChat}
+                  onchange={persistChatCheckbox((v) => { benchmarkPreviewEnabled = v; })}
                   disabled={benchmarkRunInFlight}
                   aria-labelledby="benchmark-preview-label"
                 />
