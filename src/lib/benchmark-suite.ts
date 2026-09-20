@@ -196,12 +196,26 @@ function validateTarget(raw: unknown, where: string): ValidationResult<Benchmark
   return ok({ alias: (raw.alias as string).trim(), variantId });
 }
 
+export interface ValidateBenchmarkSuiteOptions {
+  /**
+   * A pre-1.0 release accepted suites with two targets sharing an alias but different
+   * `variantId`s. Tightening that rule (see the loop below) must not turn every already-stored
+   * suite/run with that shape into an unreadable row — `isStoredBenchmarkSuite` sets this to
+   * tolerate the legacy shape on read, while every write path (create/edit/import) keeps the
+   * strict default so no new suite can be saved with the now-forbidden shape.
+   */
+  allowDuplicateAliases?: boolean;
+}
+
 /**
  * Validates a complete suite. All-or-nothing: any single invalid field, duplicate id, duplicate
  * target, or attempt-count/size overage rejects the whole suite with a full error list, rather
  * than silently dropping or repairing the offending part.
  */
-export function validateBenchmarkSuite(raw: unknown): ValidationResult<BenchmarkSuite> {
+export function validateBenchmarkSuite(
+  raw: unknown,
+  options: ValidateBenchmarkSuiteOptions = {},
+): ValidationResult<BenchmarkSuite> {
   if (!isPlainObject(raw)) return fail('suite must be an object');
   const errors: string[] = [];
 
@@ -228,7 +242,10 @@ export function validateBenchmarkSuite(raw: unknown): ValidationResult<Benchmark
     for (let i = 0; i < raw.targets.length; i++) {
       const r = validateTarget(raw.targets[i], `targets[${i}]`);
       if (!r.ok) { errors.push(...r.errors); continue; }
-      if (seenAliases.has(r.value!.alias)) { errors.push(`targets[${i}]: duplicate target alias "${r.value!.alias}" (targets are keyed by alias, not alias+variant)`); continue; }
+      if (seenAliases.has(r.value!.alias) && !options.allowDuplicateAliases) {
+        errors.push(`targets[${i}]: duplicate target alias "${r.value!.alias}" (targets are keyed by alias, not alias+variant)`);
+        continue;
+      }
       seenAliases.add(r.value!.alias);
       targets.push(r.value!);
     }
@@ -290,9 +307,19 @@ export function validateBenchmarkSuite(raw: unknown): ValidationResult<Benchmark
   return ok(suite);
 }
 
-/** Type guard for defense-in-depth checks on data read back from storage. */
+/** Type guard for defense-in-depth checks on data read back from storage. Strict: matches the
+ * rules a create/edit write must satisfy. Use `isStoredBenchmarkSuite` instead when checking a
+ * row that predates a validation tightening, so an old shape does not become unreadable. */
 export function isBenchmarkSuite(value: unknown): value is BenchmarkSuite {
   return validateBenchmarkSuite(value).ok;
+}
+
+/** Defense-in-depth shape check for a suite (or a run's embedded suite snapshot) read back from
+ * storage, tolerant of the pre-1.0 shape that allowed two targets to share an alias with
+ * different `variantId`s. Never use this for a create/edit write — only for reading rows that
+ * may already be persisted under the older, looser rule. */
+export function isStoredBenchmarkSuite(value: unknown): value is BenchmarkSuite {
+  return validateBenchmarkSuite(value, { allowDuplicateAliases: true }).ok;
 }
 
 export interface JsonlImportResult {

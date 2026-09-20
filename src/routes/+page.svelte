@@ -848,7 +848,18 @@
 
   /** Maps a benchmark attempt request onto the real `chatCompletion` SDK call. The only impure
    * boundary `startBenchmarkRun`/`resumeBenchmarkRun` depend on — everything else in the runner
-   * stays pure and unit-tested against a fake transport. */
+   * stays pure and unit-tested against a fake transport.
+   *
+   * `chatCompletion` dispatches by alias only; it has no way to demand a specific variant per
+   * call. A target with an explicit `requestedVariantId` is loaded once up front
+   * (`loadBenchmarkTargets`), but nothing stops a user from loading a different variant under
+   * the same alias — via Monitor, another Quick Compare tab, or autoload for an unrelated
+   * request — while the run is still executing. If that happens mid-run, the response this call
+   * gets back was produced by the wrong build, and recording it as a successful attempt for the
+   * requested variant would silently corrupt that target's measurements. So when the SDK reports
+   * which variant actually served the request, an explicit request whose reported variant
+   * disagrees is failed instead of recorded — the runner's retry/'stopped' handling already
+   * copes with attempt failures, but has no way to un-record a falsely-attributed success. */
   function createBenchmarkTransport(): AttemptTransport {
     return async (request: AttemptTransportRequest): Promise<AttemptTransportResult> => {
       try {
@@ -860,10 +871,19 @@
         if (typeof content !== 'string') {
           return { ok: false, errorMessage: 'Response had no message content' };
         }
+        const servedVariantId = res?.servedVariantId ?? null;
+        if (request.requestedVariantId && servedVariantId && servedVariantId !== request.requestedVariantId) {
+          return {
+            ok: false,
+            errorMessage:
+              `Served variant "${servedVariantId}" did not match the requested variant "${request.requestedVariantId}"`
+              + ` for ${request.alias} — another load likely replaced the pinned variant mid-run`,
+          };
+        }
         return {
           ok: true,
           responseText: content,
-          servedVariantId: res?.servedVariantId ?? null,
+          servedVariantId,
           usage: res?.usage
             ? { promptTokens: res.usage.prompt_tokens, completionTokens: res.usage.completion_tokens }
             : undefined,

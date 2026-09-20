@@ -169,6 +169,28 @@ describe('isBenchmarkRun', () => {
   it('rejects a run whose suiteId does not match its embedded suite snapshot id', () => {
     expect(isBenchmarkRun(run({ suiteId: 'mismatched-suite-id' }))).toBe(false);
   });
+
+  it('rejects a run whose embedded suite has the legacy duplicate-alias shape by default', () => {
+    const legacySuite = suite({
+      targets: [
+        { alias: 'model-a', variantId: 'v1' },
+        { alias: 'model-a', variantId: 'v2' },
+      ],
+    });
+    expect(isBenchmarkRun(run({ suite: legacySuite }))).toBe(false);
+  });
+
+  it('accepts a legacy duplicate-alias run only when read with allowDuplicateAliases', () => {
+    const legacySuite = suite({
+      targets: [
+        { alias: 'model-a', variantId: 'v1' },
+        { alias: 'model-a', variantId: 'v2' },
+      ],
+    });
+    const legacyRun = run({ suite: legacySuite });
+    expect(isBenchmarkRun(legacyRun)).toBe(false);
+    expect(isBenchmarkRun(legacyRun, { allowDuplicateAliases: true })).toBe(true);
+  });
 });
 
 describe('buildAttemptSchedule cross-check', () => {

@@ -15,7 +15,7 @@
  * No UI reads any of this yet.
  */
 
-import { isBenchmarkSuite, validateBenchmarkSuite, type BenchmarkSuite } from './benchmark-suite';
+import { isStoredBenchmarkSuite, validateBenchmarkSuite, type BenchmarkSuite } from './benchmark-suite';
 import { isBenchmarkAttempt, isBenchmarkRun, type BenchmarkAttempt, type BenchmarkRun, type RunStatus } from './benchmark-run';
 import { summarizeAttempt, type AttemptSummary } from './benchmark-progress';
 
@@ -277,7 +277,7 @@ export async function listBenchmarkSuites(): Promise<RepositoryResult<BenchmarkS
   const result = await withStore<BenchmarkSuite[]>('readonly', (store) => store.getAll() as IDBRequest<BenchmarkSuite[]>);
   if (!result.ok) return failResult(result.error!);
   const rows = result.value ?? [];
-  const invalidIndex = rows.findIndex((row) => !isBenchmarkSuite(row));
+  const invalidIndex = rows.findIndex((row) => !isStoredBenchmarkSuite(row));
   if (invalidIndex !== -1) {
     return failResult(`stored benchmark suite at index ${invalidIndex} failed validation`);
   }
@@ -292,7 +292,7 @@ export async function getBenchmarkSuite(id: string): Promise<RepositoryResult<Be
   const result = await withStore<BenchmarkSuite>('readonly', (store) => store.get(suiteIdKey(id)) as IDBRequest<BenchmarkSuite>);
   if (!result.ok) return failResult(result.error!);
   if (result.value === undefined) return okResult(null);
-  if (!isBenchmarkSuite(result.value)) return failResult(`stored benchmark suite "${id}" failed validation`);
+  if (!isStoredBenchmarkSuite(result.value)) return failResult(`stored benchmark suite "${id}" failed validation`);
   return okResult(result.value);
 }
 
@@ -384,7 +384,7 @@ export async function getBenchmarkRun(id: string): Promise<RepositoryResult<Benc
   });
   if (!result.ok) return failResult(result.error!);
   if (result.value === undefined) return okResult(null);
-  if (!isBenchmarkRun(result.value)) return failResult(`stored benchmark run "${id}" failed validation`);
+  if (!isBenchmarkRun(result.value, { allowDuplicateAliases: true })) return failResult(`stored benchmark run "${id}" failed validation`);
   return okResult(result.value);
 }
 
@@ -395,7 +395,7 @@ export async function listBenchmarkRunsForSuite(suiteId: string): Promise<Reposi
   });
   if (!result.ok) return failResult(result.error!);
   const rows = result.value ?? [];
-  const invalidIndex = rows.findIndex((row) => !isBenchmarkRun(row));
+  const invalidIndex = rows.findIndex((row) => !isBenchmarkRun(row, { allowDuplicateAliases: true }));
   if (invalidIndex !== -1) return failResult(`stored benchmark run at index ${invalidIndex} failed validation`);
   return okResult(rows);
 }
@@ -413,7 +413,9 @@ export async function updateBenchmarkRunStatus(
     const getRequest = store.get(id) as IDBRequest<BenchmarkRun | undefined>;
     return chainFromSuccess(getRequest, trackRequest, (existing) => {
       if (existing === undefined) throw new Error(`no benchmark run "${id}" to update`);
-      if (!isBenchmarkRun(existing)) throw new Error(`stored benchmark run "${id}" failed validation`);
+      // This re-persists the existing (write-once) suite snapshot unchanged, so a legacy
+      // duplicate-alias shape here is being carried forward, not newly authored — tolerate it.
+      if (!isBenchmarkRun(existing, { allowDuplicateAliases: true })) throw new Error(`stored benchmark run "${id}" failed validation`);
       const updated: BenchmarkRun = { ...existing, ...patch, status };
       return store.put(updated) as IDBRequest<IDBValidKey>;
     }).then(() => undefined);

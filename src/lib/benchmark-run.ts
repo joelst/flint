@@ -17,7 +17,7 @@
  *    the history of an interrupted execution that might still be uncertain.
  */
 
-import { benchmarkAttemptCount, isBenchmarkSuite, type BenchmarkSuite } from './benchmark-suite';
+import { benchmarkAttemptCount, isBenchmarkSuite, isStoredBenchmarkSuite, type BenchmarkSuite } from './benchmark-suite';
 
 export type AttemptPhase = 'warmup' | 'measured';
 
@@ -217,12 +217,22 @@ function isNonEmptyString(value: unknown): value is string {
 
 /** Defense-in-depth shape check for a run read back from storage — deliberately shallower than
  * `validateBenchmarkSuite` on the embedded snapshot's own fields (that snapshot is re-validated
- * with the real suite validator), but strict about the run-level bookkeeping fields. */
-export function isBenchmarkRun(value: unknown): value is BenchmarkRun {
+ * with the real suite validator), but strict about the run-level bookkeeping fields.
+ *
+ * Strict by default: a run whose embedded suite snapshot has the pre-1.0 duplicate-alias shape
+ * fails, because *creating* a new run from that shape is exactly the scenario the alias rule
+ * exists to prevent (loading duplicate-alias targets sequentially by alias corrupts attribution
+ * before a single attempt runs). Pass `{ allowDuplicateAliases: true }` only when reading a run
+ * that may already be persisted from before the rule was tightened — never when creating one. */
+export function isBenchmarkRun(
+  value: unknown,
+  options: { allowDuplicateAliases?: boolean } = {},
+): value is BenchmarkRun {
   if (!value || typeof value !== 'object') return false;
   const v = value as Record<string, unknown>;
   if (!isNonEmptyString(v.id) || !isNonEmptyString(v.suiteId)) return false;
-  if (!isBenchmarkSuite(v.suite)) return false;
+  const suiteIsValid = options.allowDuplicateAliases ? isStoredBenchmarkSuite(v.suite) : isBenchmarkSuite(v.suite);
+  if (!suiteIsValid) return false;
   if ((v.suite as { id: string }).id !== v.suiteId) return false;
   if (!isFiniteNumber(v.createdAt)) return false;
   if (typeof v.status !== 'string' || !RUN_STATUSES.has(v.status as RunStatus)) return false;

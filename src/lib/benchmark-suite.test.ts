@@ -9,6 +9,7 @@ import {
   BENCHMARK_MAX_TOKENS_LIMIT,
   benchmarkAttemptCount,
   isBenchmarkSuite,
+  isStoredBenchmarkSuite,
   parseBenchmarkCasesJsonl,
   validateBenchmarkCase,
   validateBenchmarkSuite,
@@ -238,6 +239,22 @@ describe('validateBenchmarkSuite', () => {
     }));
     expect(r.ok).toBe(false);
     expect(r.errors.join(' ')).toMatch(/duplicate target alias/);
+  });
+
+  it('allows the legacy same-alias-different-variant shape only when read as a stored suite', () => {
+    // A pre-1.0 release accepted this shape; a run/suite already persisted with it must stay
+    // readable even though a create/edit write now rejects it (isBenchmarkSuite, strict).
+    const legacySuite = validSuite({
+      targets: [
+        { alias: 'model-a', variantId: 'v1' },
+        { alias: 'model-a', variantId: 'v2' },
+      ],
+    });
+    expect(isBenchmarkSuite(legacySuite)).toBe(false);
+    expect(isStoredBenchmarkSuite(legacySuite)).toBe(true);
+    const r = validateBenchmarkSuite(legacySuite, { allowDuplicateAliases: true });
+    expect(r.ok).toBe(true);
+    expect(r.value?.targets).toHaveLength(2);
   });
 
   it('rejects duplicate case ids', () => {
