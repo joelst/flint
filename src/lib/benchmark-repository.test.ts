@@ -4,6 +4,7 @@ import {
   deleteBenchmarkSuite,
   getBenchmarkSuite,
   listBenchmarkSuites,
+  openBenchmarkDatabase,
   putBenchmarkSuite,
 } from './benchmark-repository';
 import type { BenchmarkSuite } from './benchmark-suite';
@@ -41,21 +42,12 @@ afterEach(async () => {
 describe('benchmark-repository', () => {
   it('can rerun suites-store setup when the database version increases', async () => {
     expect((await putBenchmarkSuite(suite())).ok).toBe(true);
-    await new Promise<void>((resolve, reject) => {
-      const req = indexedDB.open('flint-benchmarks', 2);
-      req.onupgradeneeded = () => {
-        const db = req.result;
-        if (!db.objectStoreNames.contains('suites')) {
-          db.createObjectStore('suites', { keyPath: 'id' });
-        }
-      };
-      req.onsuccess = () => {
-        expect(Array.from(req.result.objectStoreNames)).toContain('suites');
-        req.result.close();
-        resolve();
-      };
-      req.onerror = () => reject(req.error);
-    });
+    const db = await openBenchmarkDatabase(2);
+    try {
+      expect(Array.from(db.objectStoreNames)).toContain('suites');
+    } finally {
+      db.close();
+    }
   });
 
   it('round-trips a suite through put/get/list', async () => {
@@ -351,9 +343,13 @@ describe('benchmark-repository', () => {
     }));
     const resultPromise = getBenchmarkSuite('x');
     await Promise.resolve();
+    let settled = false;
+    void resultPromise.then(() => { settled = true; });
     // A real transaction always aborts after an unhandled request error; the request's own
     // onerror only records the message, it must not settle the promise by itself.
     request.onerror?.();
+    await Promise.resolve();
+    expect(settled).toBe(false);
     txListeners.onabort?.();
     const result = await resultPromise;
     expect(result).toEqual({ ok: false, error: 'request failed' });

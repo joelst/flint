@@ -19,6 +19,13 @@ const DATABASE_NAME = 'flint-benchmarks';
 const DATABASE_VERSION = 1;
 const SUITES_STORE = 'suites';
 
+/** Idempotent schema setup so a later DATABASE_VERSION bump can add stores without dropping suites. */
+export function upgradeBenchmarkDatabase(db: IDBDatabase): void {
+  if (!db.objectStoreNames.contains(SUITES_STORE)) {
+    db.createObjectStore(SUITES_STORE, { keyPath: 'id' });
+  }
+}
+
 export interface RepositoryResult<T> {
   ok: boolean;
   value?: T;
@@ -43,21 +50,18 @@ function describeDomException(e: unknown, fallback: string): string {
  * any other storage — a caller that cannot open this database has no suite persistence this
  * session, and must be told that plainly rather than silently losing durability guarantees.
  */
-function openDatabase(): Promise<IDBDatabase> {
+export function openBenchmarkDatabase(version = DATABASE_VERSION): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     let settled = false;
     let request: IDBOpenDBRequest;
     try {
-      request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
+      request = indexedDB.open(DATABASE_NAME, version);
     } catch (e) {
       reject(new Error(describeDomException(e, 'Could not open the benchmark database')));
       return;
     }
     request.onupgradeneeded = () => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains(SUITES_STORE)) {
-        db.createObjectStore(SUITES_STORE, { keyPath: 'id' });
-      }
+      upgradeBenchmarkDatabase(request.result);
     };
     request.onsuccess = () => {
       if (settled) {
@@ -92,7 +96,7 @@ async function withStore<T>(
 ): Promise<RepositoryResult<T | undefined>> {
   let db: IDBDatabase;
   try {
-    db = await openDatabase();
+    db = await openBenchmarkDatabase();
   } catch (e) {
     return failResult((e as Error).message);
   }
