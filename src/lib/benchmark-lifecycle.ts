@@ -254,20 +254,32 @@ async function pinThenLoad(
   // invariant and making results depend on eviction/reload timing instead of being measured
   // consistently. Still unpin during cleanup: a failed pin acknowledgement is uncertain, not
   // proven absent, so the priority lease may need releasing regardless.
+  //
+  // Fire-and-forget, not awaited: `host.unpin()` ultimately sends `applyMemorySettings`, which
+  // has no IPC deadline (see ipc-deadlines.ts) by design -- effectful operations are never
+  // client-side timed out. Awaiting it here would make this function's returned promise (and
+  // therefore `done` in `startBenchmarkSession`/`resumeBenchmarkSession`, and the exclusive
+  // gateway release the caller's `.finally()` performs once `done` settles) hang for as long as
+  // the sidecar takes to answer -- indefinitely, if it has stopped answering at all. The same
+  // reasoning that made `finishBenchmarkExecution` in +page.svelte background its own restore
+  // call (`void unpinBenchmarkTargets()`) applies identically here; `pendingPriorityRestore`
+  // (tracked inside `unpinBenchmarkTargets` itself) still makes a later `pinAliases` call join
+  // this restore before sending its own pin, so backgrounding it does not reopen the
+  // stale-write race that tracker exists to close.
   try {
     await host.pinAliases(aliases);
   } catch (e: unknown) {
     const pinError = e instanceof Error ? e.message : String(e);
-    await host.unpin().catch(() => {});
+    void host.unpin().catch(() => {});
     return { ok: false, error: `Could not pin targets: ${pinError}` };
   }
   if (stopController?.isStopped()) {
-    await host.unpin().catch(() => {});
+    void host.unpin().catch(() => {});
     return { ok: false, error: 'Stopped before every target was loaded', stopped: true };
   }
   const loaded = await loadBenchmarkTargets(suite, host.loadModel, stopController, onlyTargetIndexes, expectedByAlias);
   if (!loaded.ok) {
-    await host.unpin().catch(() => {});
+    void host.unpin().catch(() => {});
     return loaded;
   }
   return { ok: true };
@@ -291,7 +303,12 @@ async function finishPreparedHalt(
   kind: 'stopped' | 'failed',
   error: string,
 ): Promise<StartRunOutcome> {
-  await host.unpin().catch(() => {});
+  // Fire-and-forget for the same reason as `pinThenLoad`'s own unpin calls above: awaiting an
+  // unbounded `applyMemorySettings` restore here would hang this function's returned promise --
+  // and therefore `done` and the exclusive-gateway release gated on it -- if the sidecar never
+  // answers. `benchmarkPinnedAliases` is already cleared (and `pendingPriorityRestore` already
+  // tracking this call) synchronously inside `unpin()` before this line returns.
+  void host.unpin().catch(() => {});
   if (kind === 'stopped') {
     const halted = await updateBenchmarkRunStatus(runId, 'stopped', { finalizedAt: Date.now() });
     if (!halted.ok) {

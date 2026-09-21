@@ -86,7 +86,14 @@ export function overlayPinnedPriorities(
   pinnedAliases: readonly string[],
 ): Record<string, string> {
   if (pinnedAliases.length === 0) return priorities;
-  const next = { ...priorities };
+  // Null-prototype copy, not `{ ...priorities }`: a model alias literally named `__proto__` is
+  // a valid catalog/BYOM alias, and assigning `next['__proto__'] = 'pinned'` on an ordinary
+  // object invokes the inherited `Object.prototype.__proto__` accessor instead of creating an
+  // own enumerable property -- the assignment silently no-ops (the assigned value isn't an
+  // object/null) rather than throwing, so that alias would never actually appear pinned in the
+  // map this function returns, and the later `Object.entries()` read of it downstream would
+  // silently drop the benchmark target from eviction protection.
+  const next: Record<string, string> = Object.assign(Object.create(null) as Record<string, string>, priorities);
   for (const alias of pinnedAliases) next[alias] = 'pinned';
   return next;
 }

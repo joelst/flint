@@ -93,6 +93,29 @@ describe('overlayPinnedPriorities', () => {
     const userEdited = { 'model-a': 'low' };
     expect(overlayPinnedPriorities(userEdited, ['model-a'])).toEqual({ 'model-a': 'pinned' });
   });
+
+  it('pins an alias literally named "__proto__" as a real own enumerable property', () => {
+    // A regular `{ ...priorities }` copy plus `next['__proto__'] = 'pinned'` silently no-ops:
+    // the string value isn't an object/null, so the inherited __proto__ accessor ignores the
+    // assignment instead of creating an own property, and `Object.entries()` would then omit
+    // this target entirely -- exposing it to eviction despite believing it is pinned.
+    const overlaid = overlayPinnedPriorities({}, ['__proto__']);
+    expect(Object.entries(overlaid)).toEqual([['__proto__', 'pinned']]);
+    expect(Object.getPrototypeOf(overlaid)).toBeNull();
+    expect(overlaid.__proto__).toBe('pinned');
+  });
+
+  it('copies an existing priorities map without adopting a poisoned prototype', () => {
+    const priorities = { 'model-a': 'low' };
+    const overlaid = overlayPinnedPriorities(priorities, ['__proto__']);
+    expect(overlaid).toEqual({ 'model-a': 'low', ['__proto__']: 'pinned' });
+    expect(Object.entries(overlaid)).toEqual(
+      expect.arrayContaining([
+        ['model-a', 'low'],
+        ['__proto__', 'pinned'],
+      ]),
+    );
+  });
 });
 
 describe('acquirePriorityLease', () => {

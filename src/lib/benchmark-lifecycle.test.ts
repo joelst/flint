@@ -93,6 +93,28 @@ describe('loadBenchmarkTargets / pinThenLoad order', () => {
     expect(host.order).toContain('unpin');
   });
 
+  it('resolves `done` even when the restore never settles, so the run does not hang there (pin failure path)', async () => {
+    // Regression for a hang: `host.unpin()` ultimately sends `applyMemorySettings`, which has no
+    // IPC deadline. If `pinThenLoad`/`finishPreparedHalt` awaited it directly, a sidecar that
+    // stops answering would leave `done` -- and therefore the caller's exclusive-gateway
+    // release gated on it -- unsettled forever. `unpin` here never resolves; `done` must still
+    // settle promptly because the restore is fired-and-forgotten, not awaited.
+    const host = fakeHost({
+      pinAliases: async () => { throw new Error('pin failed'); },
+      unpin: () => new Promise<void>(() => {}),
+    });
+    const s = suite({ targets: [{ alias: 'model-a', variantId: null }] });
+    await putBenchmarkSuite(s);
+    const result = await startBenchmarkSession(s, host);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const outcome = await Promise.race([
+      result.execution.done,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('done did not settle in time')), 500)),
+    ]);
+    expect(outcome.ok).toBe(false);
+  });
+
   it('aborts preparation when pin fails, regardless of whether any target has an explicit variant', async () => {
     const host = fakeHost({
       pinAliases: async () => { throw new Error('pin failed'); },
@@ -456,6 +478,55 @@ describe('resumeBenchmarkSession', () => {
     expect(result.ok).toBe(false);
     expect(result.ok === false && result.error).toMatch(/cannot be resumed/);
     expect(host.order).toEqual([]);
+  });
+
+  it('resolves `done` even when the restore never settles, so a resume halt does not hang there (finishPreparedHalt path)', async () => {
+    await putRawRun({
+      id: 'hanging-unpin-run',
+      suiteId: 'suite-1',
+      suite: suite({ targets: [{ alias: 'model-a', variantId: null }] }),
+      createdAt: Date.now(),
+      status: 'stopped',
+    });
+    await recordAttemptDispatched({
+      id: 'attempt-1',
+      runId: 'hanging-unpin-run',
+      logicalAttemptId: 'measured:0:0:0',
+      targetIndex: 0,
+      phase: 'measured',
+      caseIndex: 0,
+      repeatIndex: 0,
+      sequence: 0,
+      status: 'dispatched',
+      alias: 'model-a',
+      requestedVariantId: null,
+      boundVariantId: 'v1',
+      intentCommittedAt: Date.now(),
+    });
+    await recordAttemptDispatched({
+      id: 'attempt-2',
+      runId: 'hanging-unpin-run',
+      logicalAttemptId: 'measured:0:0:0',
+      targetIndex: 0,
+      phase: 'measured',
+      caseIndex: 0,
+      repeatIndex: 0,
+      sequence: 1,
+      status: 'dispatched',
+      alias: 'model-a',
+      requestedVariantId: null,
+      boundVariantId: 'v2',
+      intentCommittedAt: Date.now(),
+    });
+    const host = fakeHost({ unpin: () => new Promise<void>(() => {}) });
+    const result = await resumeBenchmarkSession('hanging-unpin-run', host);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const outcome = await Promise.race([
+      result.execution.done,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('done did not settle in time')), 500)),
+    ]);
+    expect(outcome.ok).toBe(false);
   });
 
   it('halts resume instead of dispatching, when persisted attempts for a target carry conflicting boundVariantId', async () => {
