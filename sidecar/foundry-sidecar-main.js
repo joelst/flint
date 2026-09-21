@@ -109,6 +109,20 @@ async function waitForGatewayIdle(timeoutMs) {
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
 }
+
+// Each incoming stdin line is dispatched as its own concurrent async handler (see the `rl.on
+// ('line', ...)` loop below), so two `setBenchmarkExclusive` commands can otherwise interleave:
+// an acquire can set the flag and suspend in `waitForGatewayIdle` while a concurrently-running
+// release (or a second acquire that then times out) clears it, after which the suspended
+// acquire resumes and reports `{ exclusive: true }` even though admission is open again. Chain
+// every transition through this queue so only one body (including its drain wait) ever runs at
+// a time; a rejected link must not break the chain for whoever queues after it.
+let benchmarkExclusiveTransitionChain = Promise.resolve();
+function serializeBenchmarkExclusiveTransition(fn) {
+  const result = benchmarkExclusiveTransitionChain.then(fn, fn);
+  benchmarkExclusiveTransitionChain = result.then(() => {}, () => {});
+  return result;
+}
 let explicitShutdownInProgress = false;
 const LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'fatal'];
 let activeLogLevel = 'info';
@@ -3262,19 +3276,23 @@ rl.on('line', async (line) => {
     } else if (cmd === 'setBenchmarkExclusive') {
       // Page-local busy flags cannot see OpenAI-gateway clients. Exclusive admission lives here:
       // new gateway work is rejected, already-admitted requests drain, IPC chat/load still run.
-      if (payload.exclusive === true) {
-        benchmarkExclusive = true;
-        const drained = await waitForGatewayIdle(BENCHMARK_EXCLUSIVE_DRAIN_MS);
-        if (!drained) {
+      // Serialized (see serializeBenchmarkExclusiveTransition) so a concurrently-dispatched
+      // release cannot clear the flag out from under an in-progress acquire's drain wait.
+      await serializeBenchmarkExclusiveTransition(async () => {
+        if (payload.exclusive === true) {
+          benchmarkExclusive = true;
+          const drained = await waitForGatewayIdle(BENCHMARK_EXCLUSIVE_DRAIN_MS);
+          if (!drained) {
+            benchmarkExclusive = false;
+            reply({ error: 'Could not drain in-flight gateway requests before taking exclusive admission' });
+            return;
+          }
+          reply({ ok: true, result: { exclusive: true, drained: true } });
+        } else {
           benchmarkExclusive = false;
-          reply({ error: 'Could not drain in-flight gateway requests before taking exclusive admission' });
-          return;
+          reply({ ok: true, result: { exclusive: false } });
         }
-        reply({ ok: true, result: { exclusive: true, drained: true } });
-      } else {
-        benchmarkExclusive = false;
-        reply({ ok: true, result: { exclusive: false } });
-      }
+      });
     } else if (cmd === 'setEvictionConfig') {
       // Apply immediately: a user who has just lowered the cap expects the pool to shrink
       // now, not at some point in the next half minute.

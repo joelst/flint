@@ -930,6 +930,79 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
     }
   }, 20000);
 
+  it('serializes a concurrently-dispatched release behind an in-progress acquire, so it cannot clear the flag mid-drain', async () => {
+    // Same "held" streaming upstream as the previous test — this keeps the acquire's
+    // `waitForGatewayIdle` genuinely waiting (not resolving immediately) so there is a real
+    // window in which a concurrently-dispatched command could interleave.
+    let releaseUpstream: (() => void) | null = null;
+    const upstreamHeld = new Promise<void>((resolve) => { releaseUpstream = resolve; });
+    const upstream = createServer((req, res) => {
+      if (req.url !== '/v1/chat/completions') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n');
+      void upstreamHeld.then(() => {
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+    });
+    let proc: ChildProcessWithoutNullStreams | undefined;
+    let homeDir: string | undefined;
+    try {
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+      const { port: upstreamPort } = upstream.address() as AddressInfo;
+      const started = await startedGateway(upstreamPort, 10_000);
+      proc = started.proc;
+      homeDir = started.homeDir;
+      const gatewayPort = started.gatewayPort;
+      const inFlightStream = postToGatewayStream(gatewayPort, JSON.stringify({
+        model: 'fake-model', messages: [], stream: true,
+      }));
+      await inFlightStream.firstChunk;
+
+      // Dispatch acquire, then — without waiting for it to settle — dispatch a release right
+      // behind it, exactly like two stdin lines arriving back-to-back. Each is its own
+      // concurrently-running `rl.on('line', ...)` handler in the sidecar; only the serialization
+      // queue is what should keep the release from running while the acquire is still waiting.
+      let acquireSettledAt = 0;
+      const acquirePromise = (async () => {
+        proc!.stdin.write(`${JSON.stringify({ id: 50, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
+        const res = await waitForLine(proc!, (msg) => msg.id === 50, 15000);
+        acquireSettledAt = Date.now();
+        return res;
+      })();
+      let releaseSettledAt = 0;
+      const releasePromise = (async () => {
+        proc!.stdin.write(`${JSON.stringify({ id: 51, cmd: 'setBenchmarkExclusive', exclusive: false })}\n`);
+        const res = await waitForLine(proc!, (msg) => msg.id === 51, 15000);
+        releaseSettledAt = Date.now();
+        return res;
+      })();
+
+      // A beat to let the release command reach and, if unserialized, run ahead of the still-
+      // waiting acquire — proving this isn't just a lucky ordering of two near-instant replies.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(acquireSettledAt).toBe(0);
+      expect(releaseSettledAt).toBe(0);
+
+      releaseUpstream?.();
+      const [acquireResult, releaseResult] = await Promise.all([acquirePromise, releasePromise]);
+
+      expect(acquireResult).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
+      expect(releaseResult).toMatchObject({ ok: true, result: { exclusive: false } });
+      // The release must not have been able to run — and thus settle — until the acquire's
+      // whole transition (including its drain wait) had already finished.
+      expect(releaseSettledAt).toBeGreaterThanOrEqual(acquireSettledAt);
+    } finally {
+      if (proc) await killAndWait(proc);
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      if (homeDir) rmSync(homeDir, { recursive: true, force: true });
+    }
+  }, 20000);
+
   it('clears the fence and reports failure when in-flight gateway work does not drain in time, without leaving the endpoint blocked', async () => {
     const upstream = createServer((req, res) => {
       if (req.headers['x-test-stuck']) {
