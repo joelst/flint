@@ -822,8 +822,20 @@
   async function pinBenchmarkTargets(aliases: string[]): Promise<{ ok: true } | { ok: false; error: string }> {
     // Must not overlap a still-in-flight restore from a prior run's unpin (fire-and-forget from
     // `finishBenchmarkExecution`) -- see `pendingPriorityRestore`'s docstring for why a stale
-    // restore landing after this push would silently clear this run's own pins.
-    await pendingPriorityRestore.join();
+    // restore landing after this push would silently clear this run's own pins. Bounded, not
+    // `join()`: that restore's own `applyMemorySettings` call has no IPC deadline (timing out
+    // after dispatch would not stop the native work), so an unconditional wait here could hang
+    // forever -- and by the time this runs, `benchmarkExclusive` is already held and this run's
+    // slot already reserved, leaving Stop/recovery fenced and every external gateway client
+    // 503ing with no way out. Giving up and failing this attempt (which releases what it already
+    // took, via the normal `!ok` cleanup path below) is far better than hanging alongside it.
+    const restored = await pendingPriorityRestore.joinWithTimeout(BENCHMARK_PRIORITY_RESTORE_JOIN_TIMEOUT_MS);
+    if (!restored) {
+      return {
+        ok: false,
+        error: 'A previous run\'s priority restore has not confirmed yet; refusing to start a new run until it settles.',
+      };
+    }
     // Set before acquiring the lease: `acquirePriorityLease` invokes `push` (and therefore
     // `pushMemorySettings`) synchronously, so the floor must already be in place for that very
     // first push, not only for later ones. Sized to the exact headroom this run needs: the
@@ -959,14 +971,38 @@
    * whatever is currently pinned. This is the same race Round 26 closed for the exclusive-gateway
    * lease, applied here to the priority-lease side. */
   const pendingPriorityRestore = createPendingCallTracker();
+  /** Bound for `pendingPriorityRestore.joinWithTimeout` in `pinBenchmarkTargets`. Generous enough
+   * that a merely slow (but completing) sidecar reply never trips it, but finite so a genuinely
+   * stuck restore fails this attempt instead of hanging it -- see that call site's comment. */
+  const BENCHMARK_PRIORITY_RESTORE_JOIN_TIMEOUT_MS = 20_000;
+  /** Bound for `pendingExclusiveRelease.joinWithTimeout` in `attemptReleaseBenchmarkExclusive`.
+   * Kept above `BENCHMARK_EXCLUSIVE_DRAIN_MS` (the sidecar's own 10s drain deadline for this same
+   * command), so a release that is merely waiting out that normal server-side drain never trips
+   * this client-side giveup. */
+  const BENCHMARK_EXCLUSIVE_RELEASE_TIMEOUT_MS = 20_000;
 
   /** Single attempt to release exclusive gateway admission. Returns whether it is now confirmed
    * released; a rejected call (transport dispatch/timeout, not a sidecar-side failure — the
    * release direction has no failure branch once it reaches the sidecar) leaves the prior state
-   * unconfirmed, so callers must not assume it succeeded. */
+   * unconfirmed, so callers must not assume it succeeded. Bounded, not a plain `await releaseCall`:
+   * `setBenchmarkExclusive` has no IPC deadline (see `ipc-deadlines.ts`), so an unconditional wait
+   * here could hang `finishBenchmarkExecution`'s whole cleanup forever if the sidecar never
+   * replies -- stranding `benchmarkRunInFlight` (and every recovery control gated on it) exactly
+   * like the priority-restore join above. Giving up early does not abandon the call: it stays
+   * tracked in `pendingExclusiveRelease` (a still-pending release is exactly what that tracker
+   * exists to let a *later* run's own acquire wait for), and a `false` return here already drives
+   * the existing stuck-release retrier/banner below, the same path used for an outright rejection. */
   async function attemptReleaseBenchmarkExclusive(): Promise<boolean> {
     const releaseCall = sdkSetBenchmarkExclusive(false);
     pendingExclusiveRelease.track(releaseCall);
+    const settled = await pendingExclusiveRelease.joinWithTimeout(BENCHMARK_EXCLUSIVE_RELEASE_TIMEOUT_MS);
+    if (!settled) {
+      appendAppLog(
+        'Benchmark: exclusive gateway release has not confirmed yet; continuing without waiting further. External clients may still be blocked until it confirms.',
+        'warn',
+      );
+      return false;
+    }
     try {
       await releaseCall;
       return true;
