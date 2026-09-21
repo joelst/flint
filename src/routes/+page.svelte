@@ -194,6 +194,7 @@
     releasePriorityLease,
     overlayPinnedPriorities,
     overlayResidentCapFloor,
+    computeResidentCapFloor,
   } from "$lib/benchmark-priority-lease";
   import { createExclusiveReleaseRetrier, type ExclusiveReleaseRetrier } from "$lib/benchmark-exclusive-retry";
   import type { BenchmarkSuite } from "$lib/benchmark-suite";
@@ -771,16 +772,6 @@
   /** Aliases pinned for the duration of the active run; restored to 'normal' in a finally once
    * the run halts, so a benchmark never permanently changes a model's eviction priority. */
   let benchmarkPinnedAliases: string[] = [];
-  /** Non-zero for the duration a run's priority lease is held: the exact headroom (own targets
-   * plus any other already-pinned resident, computed in `pinBenchmarkTargets`) the run's own
-   * pinned aliases need to all fit under the resident cap at once. Earlier targets stay pinned
-   * once loaded (not eviction candidates), so a cap smaller than this would make the sidecar
-   * reject loading a later target even though the schedule only ever runs one target at a time —
-   * see `overlayResidentCapFloor`, which *raises* (never disables) the cap to this exact value,
-   * so it stays enforced against anything else (e.g. a gateway autoload) for the run's duration.
-   * Reset to 0 once the lease is released so a benchmark never permanently raises the user's
-   * configured cap. */
-  let benchmarkResidentCapFloor = $state(0);
   /** True once a `setBenchmarkExclusive(false)` release has failed and every automatic retry so
    * far has also failed. The sidecar's `benchmarkExclusive` flag has no failure branch of its
    * own for the release direction (it is a synchronous, unconditional assignment) — a rejected
@@ -808,6 +799,13 @@
    * confirmed under way, before the run itself has finished. Cleared at the start of the next
    * start/resume attempt so a stale error doesn't linger across an unrelated later run. */
   let benchmarkRunError = $state<string | null>(null);
+
+  /** Thin wrapper around the pure `computeResidentCapFloor`, supplying this page's live
+   * `state.pool`/`modelPriorities`. See that function's docstring for why it must be called
+   * fresh on every push rather than cached. */
+  function residentCapFloorFor(ownAliases: readonly string[]): number {
+    return computeResidentCapFloor(state.pool, modelPriorities, ownAliases);
+  }
 
   /** Pins each target alias so pool eviction cannot unload it mid-run. Overlays onto the user's
    * *actual* configured priorities (`modelPriorities`, the source of truth `pushMemorySettings`
@@ -838,22 +836,22 @@
     } catch (e) {
       appendAppLog(`Benchmark: could not refresh pool state before pinning (${(e as any)?.message || e})`, 'warn');
     }
-    const otherPinnedResidentCount = state.pool.filter(
-      (entry: any) => !aliases.includes(entry.alias) && modelPriorities[entry.alias] === 'pinned',
-    ).length;
-    const floor = otherPinnedResidentCount + aliases.length;
+    const floor = residentCapFloorFor(aliases);
     // The sidecar clamps `maxResident` to 1-32 (see `normalizeEvictionConfig` in
     // sidecar/pool-eviction.js). Pushing a floor above that would silently get clamped back down
     // server-side, so the cap would end up smaller than this run actually needs — surfacing much
     // later as an opaque "model limit reached" admission failure instead of here, where the real
-    // cause (too many pinned-resident aliases for this run to fit) is known.
+    // cause (too many pinned-resident aliases for this run to fit) is known. This is only an
+    // up-front sanity check against the floor as it stands right now; `pushMemorySettings`
+    // recomputes it fresh on every later push, so a priority change made after this point that
+    // pushes the *live* floor above 32 will still resolve, however it resolves, in the sidecar's
+    // own clamped-cap behavior rather than here.
     if (floor > 32) {
       return {
         ok: false,
-        error: `This run needs ${floor} resident models pinned at once (its own ${aliases.length} target${aliases.length === 1 ? '' : 's'} plus ${otherPinnedResidentCount} already pinned elsewhere), which exceeds the 32-model limit the service supports.`,
+        error: `This run needs ${floor} resident models pinned at once (its own ${aliases.length} target${aliases.length === 1 ? '' : 's'} plus ${floor - aliases.length} already pinned elsewhere), which exceeds the 32-model limit the service supports.`,
       };
     }
-    benchmarkResidentCapFloor = floor;
     const lease = acquirePriorityLease(aliases, (pinnedAliases) =>
       pushMemorySettings({ throwOnError: true, pinnedAliasesOverride: pinnedAliases }),
     );
@@ -872,9 +870,9 @@
    * lease's retry-once restore also fails to settle within acceptable certainty. See
    * `pinBenchmarkTargets` for why the lease mechanics themselves live in a separate module. */
   async function unpinBenchmarkTargets(): Promise<void> {
-    // Cleared first, mirroring the pin side: the restore push this triggers must carry the
-    // user's real configured cap, not the floor this run needed.
-    benchmarkResidentCapFloor = 0;
+    // Nothing to clear explicitly here: `releasePriorityLease` pushes `pinnedAliases: []`, and
+    // `pushMemorySettings` (via `residentCapFloorFor([])`) resolves that to a floor of 0 for this
+    // very push, mirroring the pin side's own restore-the-real-cap behavior.
     const lease = releasePriorityLease(benchmarkPinnedAliases, (pinnedAliases) =>
       pushMemorySettings({ throwOnError: true, pinnedAliasesOverride: pinnedAliases }),
     );
@@ -2494,9 +2492,13 @@
    * resend `modelPriorities` with no pin at all, dropping the overlay and re-exposing a running
    * benchmark's targets to eviction. Folding the overlay in here (rather than only where pinning
    * is first installed) makes it a standing invariant of every push for as long as a benchmark
-   * holds the lease, not a one-time snapshot. `benchmarkResidentCapFloor` (via
-   * `overlayResidentCapFloor`) gets the same treatment and for the same reason: a Settings edit
-   * mid-run must not silently drop the cap back below the floor either.
+   * holds the lease, not a one-time snapshot. The resident cap floor (via `residentCapFloorFor`/
+   * `overlayResidentCapFloor`) gets the same treatment and for the same reason, and goes further:
+   * it is *recomputed fresh from live `state.pool`/`modelPriorities` on every push* rather than
+   * cached from whenever the lease was installed, so a priority edit made mid-run — e.g. the user
+   * pinning another already-resident alias from Monitor/Settings while a later target is still
+   * loading — raises the floor in time for the very next push instead of leaving a stale,
+   * too-low one in place that would make a later target's load look like it exceeds the cap.
    *
    * `pinnedAliasesOverride` lets `pinBenchmarkTargets`/`unpinBenchmarkTargets` (in
    * `benchmark-priority-lease.ts`) force the exact alias list for *this* push, independent of
@@ -2507,11 +2509,10 @@
   let pushMemorySeq = 0;
   async function pushMemorySettings(options?: { throwOnError?: boolean; pinnedAliasesOverride?: readonly string[] }) {
     const seq = ++pushMemorySeq;
-    const currentEviction = overlayResidentCapFloor({ ...evictionConfig }, benchmarkResidentCapFloor);
-    const currentPriorities = overlayPinnedPriorities(
-      { ...modelPriorities },
-      options?.pinnedAliasesOverride ?? benchmarkPinnedAliases,
-    );
+    const ownAliases = options?.pinnedAliasesOverride ?? benchmarkPinnedAliases;
+    const floor = residentCapFloorFor(ownAliases);
+    const currentEviction = overlayResidentCapFloor({ ...evictionConfig }, floor);
+    const currentPriorities = overlayPinnedPriorities({ ...modelPriorities }, ownAliases);
     try {
       // One command, one sweep. Sent as two commands, the first sweeps under half-updated
       // settings — enough to evict the very model the user just chose to keep loaded.
@@ -2534,7 +2535,7 @@
       // both enabled and actually too low for the floor did that overlay touch `maxResident`, so
       // only then does `applied.maxResident` reflect the temporary raise rather than the user's
       // real setting.
-      const displayApplied = evictionConfig.maxResidentEnabled && benchmarkResidentCapFloor > evictionConfig.maxResident && applied
+      const displayApplied = evictionConfig.maxResidentEnabled && floor > evictionConfig.maxResident && applied
         ? { ...applied, maxResident: evictionConfig.maxResident }
         : applied;
       if (seq === pushMemorySeq && displayApplied && !evictionConfigsEqual(displayApplied, evictionConfig)) {

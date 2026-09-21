@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   acquirePriorityLease,
+  computeResidentCapFloor,
   overlayPinnedPriorities,
   overlayResidentCapFloor,
   releasePriorityLease,
@@ -29,6 +30,49 @@ describe('overlayResidentCapFloor', () => {
     expect(config).toEqual({ maxResidentEnabled: true, maxResident: 1 });
   });
 });
+
+describe('computeResidentCapFloor', () => {
+  it('returns 0 when no lease is held (ownAliases is empty), regardless of pool/priorities', () => {
+    const pool = [{ alias: 'other-model' }];
+    const priorities = { 'other-model': 'pinned' };
+    expect(computeResidentCapFloor(pool, priorities, [])).toBe(0);
+  });
+
+  it("counts only this run's own aliases when nothing else resident is pinned", () => {
+    const pool = [{ alias: 'model-a' }, { alias: 'model-b' }];
+    const priorities = {};
+    expect(computeResidentCapFloor(pool, priorities, ['model-a', 'model-b'])).toBe(2);
+  });
+
+  it('adds any other resident alias the user has separately pinned', () => {
+    const pool = [{ alias: 'model-a' }, { alias: 'user-pinned' }];
+    const priorities = { 'user-pinned': 'pinned', 'not-resident-elsewhere': 'pinned' };
+    // 'not-resident-elsewhere' is pinned but not present in `pool`, so it does not count — only
+    // resident entries can occupy a slot against the cap.
+    expect(computeResidentCapFloor(pool, priorities, ['model-a'])).toBe(2);
+  });
+
+  it("does not double-count this run's own aliases even if they are separately marked pinned in priorities", () => {
+    const pool = [{ alias: 'model-a' }];
+    const priorities = { 'model-a': 'pinned' };
+    expect(computeResidentCapFloor(pool, priorities, ['model-a'])).toBe(1);
+  });
+
+  it('reflects a priority pinned *after* the lease was installed — the identity-based fix for stale floors', () => {
+    // Regression for "Recompute cap floor when priorities change during preparation": a run's own
+    // aliases never change mid-run, but the *other* resident/pinned set can grow while a later
+    // target is still loading, and the floor must grow with it on the very next computation
+    // rather than staying frozen at whatever it was when the lease was first installed.
+    const pool = [{ alias: 'run-target-1' }, { alias: 'run-target-2' }, { alias: 'newly-pinned' }];
+    const ownAliases = ['run-target-1', 'run-target-2'];
+    const beforeUserPin = { 'newly-pinned': 'normal' };
+    const afterUserPin = { 'newly-pinned': 'pinned' };
+    expect(computeResidentCapFloor(pool, beforeUserPin, ownAliases)).toBe(2);
+    expect(computeResidentCapFloor(pool, afterUserPin, ownAliases)).toBe(3);
+  });
+});
+
+
 
 describe('overlayPinnedPriorities', () => {
   it('returns the map unchanged (no copy) when nothing is pinned', () => {

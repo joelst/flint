@@ -48,6 +48,33 @@ export function overlayResidentCapFloor<T extends { maxResidentEnabled: boolean;
 }
 
 /**
+ * Computes the resident-cap floor `ownAliases` (a benchmark run's own target aliases, or `[]`
+ * when no lease is held) need to all fit under the cap at once: `ownAliases.length` (earlier
+ * targets stay pinned once loaded — not eviction candidates — so the *whole* set must fit, not
+ * just whichever target is currently loading) plus however many *other* entries in `pool` are
+ * both currently resident and separately pinned by the user to a priority other than this run's
+ * own.
+ *
+ * Pure and intended to be called fresh on every priority/eviction push made while a lease is
+ * held (mirroring `overlayResidentCapFloor`'s own docstring), not cached from whenever the lease
+ * was installed: a priority edit made mid-run — e.g. the user pinning another already-resident
+ * alias from Monitor/Settings while a later target is still loading — must raise the floor in
+ * time for the very next push, or a stale, too-low floor makes that later target's load look
+ * like it exceeds the cap even though the schedule only ever runs one target at a time.
+ */
+export function computeResidentCapFloor(
+  pool: readonly { alias: string }[],
+  priorities: Readonly<Record<string, string>>,
+  ownAliases: readonly string[],
+): number {
+  if (ownAliases.length === 0) return 0;
+  const otherPinnedResidentCount = pool.filter(
+    (entry) => !ownAliases.includes(entry.alias) && priorities[entry.alias] === 'pinned',
+  ).length;
+  return otherPinnedResidentCount + ownAliases.length;
+}
+
+/**
  * Overlays `pinnedAliases` (forced to `'pinned'`) onto `priorities`. Pure, and safe to call from
  * every priority push made while a lease is held, not only the call that installs it — a
  * priority/eviction edit made elsewhere (e.g. Settings) during a benchmark run would otherwise
