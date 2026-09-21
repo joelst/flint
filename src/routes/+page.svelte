@@ -765,13 +765,15 @@
   /** Aliases pinned for the duration of the active run; restored to 'normal' in a finally once
    * the run halts, so a benchmark never permanently changes a model's eviction priority. */
   let benchmarkPinnedAliases: string[] = [];
-  /** Non-zero for the duration a run's priority lease is held (the count is otherwise unused —
-   * only "is a lease held" matters). Earlier targets stay pinned once loaded (not eviction
-   * candidates), so *any* configured resident cap can make the sidecar reject loading a later
-   * target, or reject it outright if unrelated pinned models are also resident — see
-   * `overlayResidentCapFloor`, which suspends the cap entirely for the duration rather than
-   * merely raising it. Reset to 0 once the lease is released so a benchmark never permanently
-   * disables the user's configured cap. */
+  /** Non-zero for the duration a run's priority lease is held: the exact headroom (own targets
+   * plus any other already-pinned resident, computed in `pinBenchmarkTargets`) the run's own
+   * pinned aliases need to all fit under the resident cap at once. Earlier targets stay pinned
+   * once loaded (not eviction candidates), so a cap smaller than this would make the sidecar
+   * reject loading a later target even though the schedule only ever runs one target at a time —
+   * see `overlayResidentCapFloor`, which *raises* (never disables) the cap to this exact value,
+   * so it stays enforced against anything else (e.g. a gateway autoload) for the run's duration.
+   * Reset to 0 once the lease is released so a benchmark never permanently raises the user's
+   * configured cap. */
   let benchmarkResidentCapFloor = $state(0);
   /** Set when a detached run/resume execution settles with anything the UI needs to surface:
    * a hard `!outcome.ok` failure, or an `ok: true` outcome whose `result.status ===
@@ -793,8 +795,40 @@
   async function pinBenchmarkTargets(aliases: string[]): Promise<{ ok: true } | { ok: false; error: string }> {
     // Set before acquiring the lease: `acquirePriorityLease` invokes `push` (and therefore
     // `pushMemorySettings`) synchronously, so the floor must already be in place for that very
-    // first push, not only for later ones.
-    benchmarkResidentCapFloor = aliases.length;
+    // first push, not only for later ones. Sized to the exact headroom this run needs: the
+    // suite's own distinct target aliases (which we are about to pin) *plus* any other alias
+    // already resident and pinned to a priority other than this run's own — a model the user
+    // separately chose to keep loaded via Monitor/Settings. Both sets are un-evictable once this
+    // pin takes effect, so both must fit under the cap; anything else already resident is a
+    // 'normal'/'low' entry the sweep can still reclaim to make room, so it is deliberately not
+    // counted here. See `overlayResidentCapFloor`'s docstring for why merely covering the
+    // suite's own count is not enough.
+    // A fresh read, not the last poll's cache: `state.pool` can lag a gateway autoload that
+    // pinned/loaded some other alias moments ago, which would otherwise undercount the floor
+    // below and reproduce the very rejection this exists to prevent. This narrows, but cannot
+    // close, that window — the sidecar's own admission check is still the last line of defense
+    // for anything pinned between this read and the push below.
+    try {
+      await refreshModels();
+    } catch (e) {
+      appendAppLog(`Benchmark: could not refresh pool state before pinning (${(e as any)?.message || e})`, 'warn');
+    }
+    const otherPinnedResidentCount = state.pool.filter(
+      (entry: any) => !aliases.includes(entry.alias) && modelPriorities[entry.alias] === 'pinned',
+    ).length;
+    const floor = otherPinnedResidentCount + aliases.length;
+    // The sidecar clamps `maxResident` to 1-32 (see `normalizeEvictionConfig` in
+    // sidecar/pool-eviction.js). Pushing a floor above that would silently get clamped back down
+    // server-side, so the cap would end up smaller than this run actually needs — surfacing much
+    // later as an opaque "model limit reached" admission failure instead of here, where the real
+    // cause (too many pinned-resident aliases for this run to fit) is known.
+    if (floor > 32) {
+      return {
+        ok: false,
+        error: `This run needs ${floor} resident models pinned at once (its own ${aliases.length} target${aliases.length === 1 ? '' : 's'} plus ${otherPinnedResidentCount} already pinned elsewhere), which exceeds the 32-model limit the service supports.`,
+      };
+    }
+    benchmarkResidentCapFloor = floor;
     const lease = acquirePriorityLease(aliases, (pinnedAliases) =>
       pushMemorySettings({ throwOnError: true, pinnedAliasesOverride: pinnedAliases }),
     );
@@ -880,22 +914,50 @@
 
   type BenchmarkLifecycleOutcome = { ok: true; runId: string } | { ok: false; error: string };
 
-  /** True while chat (any conversation, including ones navigated away from), dictation,
-   * transcription, or summarization is actually dispatching inference against the shared
-   * alias-keyed pool. Benchmark Start/Resume must check this — not just Arena — or a benchmark
-   * can begin admission while other inference is still in flight and contend for the same pool
-   * mid-run. Checked once at admission time (mirrors the existing Arena check below); the
-   * composer/editor controls also disable proactively via the `otherInferenceActive` prop, but
-   * this function call is the actual enforcement. */
-  function otherInferenceInFlight(): boolean {
-    return streamsByConversation.size > 0 || isDictating || dictationTranscribing || isTranscribing || isSummarizing;
-  }
-
   /** Best-effort reactive approximation of `otherInferenceInFlight()` for disabling the
    * Start/Resume controls proactively. Omits other-conversation streams (`streamsByConversation`
    * isn't a reactive rune) since this is UI feedback only — `otherInferenceInFlight()` at
    * admission time is the actual enforcement and does cover that case. */
   const otherInferenceActiveForUi = $derived(isStreaming || isDictating || dictationTranscribing || isTranscribing || isSummarizing);
+
+  /** Counts explicit model-mutating operations (load/unload/delete/variant-switch/STT-load) in
+   * flight from Models/Monitor/chat-model-switch. `blockedByActiveBenchmark()` only blocks a
+   * *new* mutation from starting once `benchmarkRunInFlight` is already true; it does nothing
+   * about a mutation that started the instant before — e.g. the user clicks "Load" (admission
+   * check passes, nothing is running yet), the load's IPC round-trip is still pending, and only
+   * then does the user click Start. Benchmark admission checks this counter too, so a run that
+   * would otherwise begin pinning/loading its own targets concurrently with that in-flight
+   * mutation is rejected instead. Incremented synchronously (no `$state`, since every reader is
+   * either this same synchronous admission check or another synchronous increment/decrement —
+   * no rune-driven re-render needs to observe it). */
+  let poolMutationsInFlight = 0;
+
+  /** Wraps a model-mutating operation with the fence above: call at the top of every
+   * Models/Monitor/chat-model-switch function that directly loads, unloads, deletes, or
+   * variant-switches a pool entry, immediately after its own `blockedByActiveBenchmark()` check
+   * (that check keeps a *new* mutation from starting once a benchmark is already running; this
+   * fence is what a benchmark's own admission check reads to catch one already in flight). */
+  function beginPoolMutation(): () => void {
+    poolMutationsInFlight += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      poolMutationsInFlight -= 1;
+    };
+  }
+
+  /** True while chat (any conversation, including ones navigated away from), dictation,
+   * transcription, summarization, or an explicit model-mutating operation (see
+   * `poolMutationsInFlight`) is actually dispatching against, or mutating, the shared
+   * alias-keyed pool. Benchmark Start/Resume must check this — not just Arena — or a benchmark
+   * can begin admission while other inference or a pool mutation is still in flight and contend
+   * for the same pool mid-run. Checked once at admission time (mirrors the existing Arena check
+   * below); the composer/editor controls also disable proactively via the `otherInferenceActive`
+   * prop, but this function call is the actual enforcement. */
+  function otherInferenceInFlight(): boolean {
+    return streamsByConversation.size > 0 || isDictating || dictationTranscribing || isTranscribing || isSummarizing || poolMutationsInFlight > 0;
+  }
 
   /**
    * Prepares the run row (so the id is known and Stop is live) then executes in a detached
@@ -2322,7 +2384,7 @@
    * is first installed) makes it a standing invariant of every push for as long as a benchmark
    * holds the lease, not a one-time snapshot. `benchmarkResidentCapFloor` (via
    * `overlayResidentCapFloor`) gets the same treatment and for the same reason: a Settings edit
-   * mid-run must not silently re-enable the cap either.
+   * mid-run must not silently drop the cap back below the floor either.
    *
    * `pinnedAliasesOverride` lets `pinBenchmarkTargets`/`unpinBenchmarkTargets` (in
    * `benchmark-priority-lease.ts`) force the exact alias list for *this* push, independent of
@@ -2350,14 +2412,18 @@
       // Adopt the sidecar's normalized config, but only on real change and only when no newer
       // push is in flight — an unconditional assignment re-triggers every effect that reads
       // evictionConfig (the serviceRunning re-apply effect looped on exactly that). While the
-      // lease has suspended the cap, `applied` reflects that suspension (maxResidentEnabled:
-      // false), not the user's real setting — adopting it verbatim would leak the suspension
-      // into `evictionConfig` and make it stick around (re-sent by every later push) even after
-      // the run releases the lease. Restore the real maxResidentEnabled before comparing/
-      // adopting; every other normalized field (e.g. a clamped idle timeout, or maxResident
-      // itself, which this overlay never changes) still adopts normally.
-      const displayApplied = benchmarkResidentCapFloor > 0 && applied
-        ? { ...applied, maxResidentEnabled: evictionConfig.maxResidentEnabled }
+      // floor is raising the cap we sent, `applied` reflects that raised value, not the user's
+      // real setting — adopting it verbatim would leak the temporary raise into `evictionConfig`
+      // and make it stick around (re-sent by every later push) even after the run releases the
+      // lease. Restore the real maxResident before comparing/adopting; every other normalized
+      // field (e.g. a clamped idle timeout, or maxResidentEnabled, which this overlay never
+      // changes) still adopts normally.
+      // Mirrors `overlayResidentCapFloor`'s own raise condition exactly: only when the cap was
+      // both enabled and actually too low for the floor did that overlay touch `maxResident`, so
+      // only then does `applied.maxResident` reflect the temporary raise rather than the user's
+      // real setting.
+      const displayApplied = evictionConfig.maxResidentEnabled && benchmarkResidentCapFloor > evictionConfig.maxResident && applied
+        ? { ...applied, maxResident: evictionConfig.maxResident }
         : applied;
       if (seq === pushMemorySeq && displayApplied && !evictionConfigsEqual(displayApplied, evictionConfig)) {
         evictionConfig = displayApplied;
@@ -2875,6 +2941,11 @@ function selectBindAddress(next: string) {
   }
 
   async function applyNetworkSettings() {
+    const blocked = blockedByActiveBenchmark();
+    if (blocked) {
+      statusMessage = blocked;
+      return;
+    }
     const port = Number(networkPort);
     if (!Number.isFinite(port) || port < 1024 || port > 65535) {
       statusMessage = 'Port must be between 1024 and 65535';
@@ -2907,6 +2978,7 @@ function selectBindAddress(next: string) {
     }
 
     networkApplyBusy = true;
+    const release = beginPoolMutation();
     try {
       networkPort = port;
       networkBindAddress = bind;
@@ -2943,6 +3015,7 @@ updateStateFromSdk();
       appendAppLog(`Network settings apply failed: ${e?.message || e}`, 'error');
       updateStateFromSdk();
     } finally {
+      release();
       networkApplyBusy = false;
     }
   }
@@ -3008,6 +3081,16 @@ updateStateFromSdk();
 
   async function startServiceForModel(alias: string): Promise<ServiceStartAttempt> {
     if (state.serviceRunning) return { result: "already-running" };
+    // A service that is not already running has to be (re)started, and the sidecar's start
+    // path clears its whole in-memory pool before the new listener comes up. That would wipe
+    // out a benchmark run's pinned/loaded targets, so this is a pool mutation in its own right
+    // — not just a convenience for the caller's own model.
+    const blocked = blockedByActiveBenchmark();
+    if (blocked) {
+      statusMessage = blocked;
+      return { result: "failed", error: new Error(blocked) };
+    }
+    const release = beginPoolMutation();
     try {
       await startSvc(
         alias,
@@ -3027,6 +3110,8 @@ updateStateFromSdk();
       }
       serviceStartUncertain = isServiceStartUncertain();
       return { result: serviceStartUncertain ? "blocked" : "failed", error: e };
+    } finally {
+      release();
     }
   }
 
@@ -3046,24 +3131,37 @@ updateStateFromSdk();
     preferredEp?: string,
     opts?: { convenience?: boolean },
   ): Promise<string | undefined> {
-    const ensured = await sdkEnsureServiceRunning(
-      networkPort,
-      alias,
-      preferredEp,
-      networkBindAddress || undefined,
-      opts,
-    );
-    if (ensured.started) markNetworkSettingsApplied();
-    if (alias) {
-      const resident = (state.pool || []).some((e: any) => e.alias === alias);
-      if (!resident) await sdkLoadModel({ alias }, "audio");
-      if (preferredEp && !ensured.started) {
-        appendAppLog(
-          `Ensure service: ${alias} loaded into the running service (left up to preserve other loaded models); acceleration preference "${preferredEp}" is applied per transcription request.`,
-        );
-      }
+    // Both branches below can mutate the pool: a not-yet-running service is (re)started (which
+    // clears the sidecar's resident set), and an already-running one may still get a fresh
+    // `alias` loaded into it. Either must be fenced against an active benchmark run.
+    const blocked = blockedByActiveBenchmark();
+    if (blocked) {
+      statusMessage = blocked;
+      throw new Error(blocked);
     }
-    return ensured.endpoint;
+    const release = beginPoolMutation();
+    try {
+      const ensured = await sdkEnsureServiceRunning(
+        networkPort,
+        alias,
+        preferredEp,
+        networkBindAddress || undefined,
+        opts,
+      );
+      if (ensured.started) markNetworkSettingsApplied();
+      if (alias) {
+        const resident = (state.pool || []).some((e: any) => e.alias === alias);
+        if (!resident) await sdkLoadModel({ alias }, "audio");
+        if (preferredEp && !ensured.started) {
+          appendAppLog(
+            `Ensure service: ${alias} loaded into the running service (left up to preserve other loaded models); acceleration preference "${preferredEp}" is applied per transcription request.`,
+          );
+        }
+      }
+      return ensured.endpoint;
+    } finally {
+      release();
+    }
   }
 
   async function refreshWslStatus() {
@@ -3228,7 +3326,12 @@ updateStateFromSdk();
       statusMessage = blocked;
       return;
     }
-    await sdkUnloadModel({ alias }).then(refreshMonitorNow);
+    const release = beginPoolMutation();
+    try {
+      await sdkUnloadModel({ alias }).then(refreshMonitorNow);
+    } finally {
+      release();
+    }
   }
 
   function makeCompareSlot(
@@ -4408,6 +4511,14 @@ updateStateFromSdk();
     void refreshNodeAboutLine();
 
     if (ok) {
+      // Startup does real pool mutation below (auto-load, multi-model pre-warm, and a
+      // possible service (re)start via the `startService` callback below) with no user action
+      // to gate it on. Benchmark admission must see this as in-flight pool work — same as any
+      // other load/unload — or a run started the instant the UI goes ready (`state.ready` is
+      // set well before this function finishes) could race a startup load/service-start that
+      // clears or mutates the pool out from under the benchmark's own targets.
+      const release = beginPoolMutation();
+      try {
       statusMessage = "Connected to Foundry Local";
       await loadModels();
       await loadRecommendations();
@@ -4638,6 +4749,9 @@ updateStateFromSdk();
             `${startupBlocked} startup model${startupBlocked !== 1 ? "s" : ""} skipped for unavailable acceleration`;
         }
       }
+      } finally {
+        release();
+      }
     } else {
       statusMessage = state.error || "Could not connect to Foundry Local";
     }
@@ -4684,6 +4798,12 @@ updateStateFromSdk();
   }
 
   async function startLocalService() {
+    const blocked = blockedByActiveBenchmark();
+    if (blocked) {
+      statusMessage = blocked;
+      return;
+    }
+    const release = beginPoolMutation();
     try {
       // An explicit start bypasses the stand-down guard on its own (it passes no `convenience`
       // flag), so nothing is cleared here. The latch is retired only by this attempt succeeding.
@@ -4701,6 +4821,8 @@ updateStateFromSdk();
       serviceStartUncertain = isServiceStartUncertain();
       statusMessage = `Failed to start service: ${e?.message || e}`;
       appendAppLog(`Service start failed: ${e?.message || e}`, 'error');
+    } finally {
+      release();
     }
   }
 
@@ -4958,6 +5080,12 @@ updateStateFromSdk();
   // Dedicated path for audio/STT: loads the model in the audio lane without
   // affecting the chat lane or the running chat service endpoint.
   async function useSTTModelForAudio(model: any) {
+    const blocked = blockedByActiveBenchmark();
+    if (blocked) {
+      statusMessage = blocked;
+      return;
+    }
+    const release = beginPoolMutation();
     try {
       const alias = model.alias;
 
@@ -4976,6 +5104,8 @@ updateStateFromSdk();
       await loadSTTModels();
     } catch (e: any) {
       statusMessage = `Failed to prepare STT model: ${e?.message || e}`;
+    } finally {
+      release();
     }
   }
 
@@ -5187,6 +5317,7 @@ updateStateFromSdk();
       throw new Error(blocked);
     }
     let loadResult: any;
+    const release = beginPoolMutation();
     try {
       statusMessage = `Loading ${model.alias}...`;
       appendAppLog(`Loading model ${model.alias} (chat lane)`);
@@ -5194,6 +5325,8 @@ updateStateFromSdk();
     } catch (e: any) {
       statusMessage = `Load failed: ${e?.message || e}`;
       throw e;
+    } finally {
+      release();
     }
 
     const loadAccel = String(loadResult?.acceleration?.active || "").trim();
@@ -5301,6 +5434,7 @@ updateStateFromSdk();
       statusMessage = blocked;
       return;
     }
+    const release = beginPoolMutation();
     try {
       statusMessage = `Unloading ${model.alias}...`;
       await sdkUnloadModel(model);
@@ -5308,6 +5442,8 @@ updateStateFromSdk();
       await refreshModels();
     } catch (e: any) {
       statusMessage = `Unload failed: ${e?.message || e}`;
+    } finally {
+      release();
     }
   }
 
@@ -5323,6 +5459,7 @@ updateStateFromSdk();
       statusMessage = blocked;
       return;
     }
+    const release = beginPoolMutation();
     try {
       statusMessage = `Loading ${model.alias} (${shortVariantLabel(variantId)})...`;
       appendAppLog(`Loading model ${model.alias} variant ${variantId}`);
@@ -5332,6 +5469,8 @@ updateStateFromSdk();
       await refreshModels();
     } catch (e: any) {
       statusMessage = `Load failed: ${e?.message || e}`;
+    } finally {
+      release();
     }
   }
 
@@ -5346,6 +5485,7 @@ updateStateFromSdk();
       statusMessage = blocked;
       return;
     }
+    const release = beginPoolMutation();
     try {
       const nav = beginChatNavigation();
       const alreadyThis =
@@ -5373,6 +5513,8 @@ updateStateFromSdk();
       persistChat();
     } catch (e: any) {
       statusMessage = `Load & Chat failed: ${e?.message || e}`;
+    } finally {
+      release();
     }
   }
 
@@ -5417,30 +5559,35 @@ updateStateFromSdk();
         statusMessage = `Delete cancelled for ${label}`;
         return;
       }
-      statusMessage = `Deleting ${model.alias} (${label})...`;
-      const isLoadedVariant = state.pool.some(
-        (e: any) => e.alias === model.alias && e.variantId === variantId,
-      );
-      if (isLoadedVariant) {
-        await sdkUnloadModel(model);
-      }
-      await sdkDeleteModel(model, variantId);
-      // If no other variants remain cached, clear selection/meta like full delete
-      await refreshModels();
-      const refreshed = state.models.find((m: ModelInfo) => m.alias === model.alias);
-      const anyCached =
-        refreshed?.isCached ||
-        ((refreshed as any)?.variants || []).some((v: any) => v.cached);
-      if (!anyCached) {
-        if (selectedModelAlias === model.alias) selectedModelAlias = "";
-        if (modelRuntimeMeta[model.alias]) {
-          const nextMeta = { ...modelRuntimeMeta };
-          delete nextMeta[model.alias];
-          modelRuntimeMeta = nextMeta;
-          persistChat();
+      const release = beginPoolMutation();
+      try {
+        statusMessage = `Deleting ${model.alias} (${label})...`;
+        const isLoadedVariant = state.pool.some(
+          (e: any) => e.alias === model.alias && e.variantId === variantId,
+        );
+        if (isLoadedVariant) {
+          await sdkUnloadModel(model);
         }
+        await sdkDeleteModel(model, variantId);
+        // If no other variants remain cached, clear selection/meta like full delete
+        await refreshModels();
+        const refreshed = state.models.find((m: ModelInfo) => m.alias === model.alias);
+        const anyCached =
+          refreshed?.isCached ||
+          ((refreshed as any)?.variants || []).some((v: any) => v.cached);
+        if (!anyCached) {
+          if (selectedModelAlias === model.alias) selectedModelAlias = "";
+          if (modelRuntimeMeta[model.alias]) {
+            const nextMeta = { ...modelRuntimeMeta };
+            delete nextMeta[model.alias];
+            modelRuntimeMeta = nextMeta;
+            persistChat();
+          }
+        }
+        statusMessage = `${model.alias} variant deleted (${label})`;
+      } finally {
+        release();
       }
-      statusMessage = `${model.alias} variant deleted (${label})`;
     } catch (e: any) {
       statusMessage = `Delete variant failed: ${e?.message || e}`;
     }
@@ -5492,22 +5639,27 @@ updateStateFromSdk();
         statusMessage = `Delete cancelled for ${model.alias}`;
         return;
       }
-      statusMessage = `Deleting ${model.alias}...`;
-      if (model.isLoaded) {
-        await sdkUnloadModel(model);
+      const release = beginPoolMutation();
+      try {
+        statusMessage = `Deleting ${model.alias}...`;
+        if (model.isLoaded) {
+          await sdkUnloadModel(model);
+        }
+        await sdkDeleteModel(model);
+        if (selectedModelAlias === model.alias) {
+          selectedModelAlias = "";
+        }
+        if (modelRuntimeMeta[model.alias]) {
+          const nextMeta = { ...modelRuntimeMeta };
+          delete nextMeta[model.alias];
+          modelRuntimeMeta = nextMeta;
+          persistChat();
+        }
+        statusMessage = `${model.alias} deleted`;
+        await refreshModels();
+      } finally {
+        release();
       }
-      await sdkDeleteModel(model);
-      if (selectedModelAlias === model.alias) {
-        selectedModelAlias = "";
-      }
-      if (modelRuntimeMeta[model.alias]) {
-        const nextMeta = { ...modelRuntimeMeta };
-        delete nextMeta[model.alias];
-        modelRuntimeMeta = nextMeta;
-        persistChat();
-      }
-      statusMessage = `${model.alias} deleted`;
-      await refreshModels();
     } catch (e: any) {
       // "Delete failed: it may have completed" is a contradiction, so an uncertain outcome
       // states itself rather than being introduced as a failure.
@@ -6682,7 +6834,7 @@ Output only the summary text, no preamble.`;
           Starting…
         </button>
       {:else if state.ready}
-        <button class="tiny" onclick={startLocalService} disabled={serviceTransitionBusy}>Start Service</button>
+        <button class="tiny" onclick={startLocalService} disabled={serviceTransitionBusy || benchmarkRunInFlight}>Start Service</button>
       {/if}
 
       <span class="status-msg">{statusMessage}</span>
@@ -8520,7 +8672,7 @@ Output only the summary text, no preamble.`;
             <div class="service-actions">
               <button
                 onclick={startLocalService}
-                disabled={state.serviceRunning || !state.ready || serviceTransitionBusy}
+                disabled={state.serviceRunning || !state.ready || serviceTransitionBusy || benchmarkRunInFlight}
               >
                 {serviceStarting ? "Starting…" : "Start Service"}
               </button>
@@ -9492,6 +9644,7 @@ Output only the summary text, no preamble.`;
                                 statusMessage = blocked;
                                 return;
                               }
+                              const release = beginPoolMutation();
                               try {
                                 statusMessage = `Loading ${slot.label}…`;
                                 await sdkLoadModel(
@@ -9503,6 +9656,8 @@ Output only the summary text, no preamble.`;
                                 statusMessage = `Loaded ${slot.label}`;
                               } catch (err: any) {
                                 statusMessage = `Load failed: ${err?.message || err}`;
+                              } finally {
+                                release();
                               }
                             }}
                           >Load</button>
@@ -9908,7 +10063,7 @@ Output only the summary text, no preamble.`;
                   type="button"
                   class="btn-primary"
                   onclick={applyNetworkSettings}
-                  disabled={networkApplyBusy || !networkSettingsDirty}
+                  disabled={networkApplyBusy || !networkSettingsDirty || benchmarkRunInFlight}
                   title={networkSettingsDirty
                     ? (state.serviceRunning ? 'Stop and restart the service with these settings' : 'Save for the next service start')
                     : 'No network changes to apply'}

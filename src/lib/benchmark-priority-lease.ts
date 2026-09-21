@@ -23,28 +23,28 @@ export interface PriorityLeaseAck {
 }
 
 /**
- * Suspends the resident-model cap entirely for the duration a benchmark priority lease is held
- * (`floor > 0`), rather than merely raising `maxResident` to the suite's target count: earlier
- * targets are pinned (see `overlayPinnedPriorities`) and therefore not eviction candidates, so
- * *any* other resident/pinned entry outside the suite (a user-pinned model left loaded from
- * Monitor, or the previous target still draining) also counts against the cap once the sidecar
- * re-checks admission (`resident + pendingAdmissions > maxResident`, gated only on
- * `maxResidentEnabled` — see `foundry-sidecar-main.js`'s `admitModel`). A numeric floor sized to
- * only the suite's own alias count does not account for that headroom, so it can still reject a
- * load. Disabling the cap outright removes the failure mode entirely rather than sizing around
- * it, and is safe because the run's own priority lease already keeps its targets protected from
- * eviction independent of this cap. Pure and safe to call from every eviction/priority push made
- * while the lease is held (see `overlayPinnedPriorities`'s docstring for why a per-push overlay,
- * not a one-time snapshot, is required). Returns `config` unchanged (no copy) when there is no
- * floor or the cap is already disabled, so `evictionConfigsEqual`-style identity checks upstream
- * still see "no change" in the common case.
+ * Raises `config.maxResident` to `floor` when the configured cap is smaller, while leaving
+ * `maxResidentEnabled` untouched — the cap stays enforced, sized to accommodate exactly the
+ * headroom a benchmark run needs, rather than turned off. The eviction sweep can still reclaim
+ * non-pinned entries to make room for a load, so the actual floor a caller must compute is not
+ * simply the suite's target count: it is that count *plus* however many entries are already
+ * resident and pinned outside the suite (a user-pinned model left loaded from Monitor), because
+ * neither set is an eviction candidate once the run's own targets are pinned too (see
+ * `overlayPinnedPriorities`). Leaving the cap enforced (merely resized) means an unrelated load
+ * that would push residency past that computed headroom — e.g. a gateway autoload — is still
+ * rejected during the run, which is the whole point of the setting; only what the run itself
+ * needs is exempted. Pure and safe to call from every eviction/priority push made while the
+ * lease is held (see `overlayPinnedPriorities`'s docstring for why a per-push overlay, not a
+ * one-time snapshot, is required). Returns `config` unchanged (no copy) when there is no floor,
+ * the cap is disabled, or it is already large enough, so `evictionConfigsEqual`-style identity
+ * checks upstream still see "no change" in the common case.
  */
-export function overlayResidentCapFloor<T extends { maxResidentEnabled: boolean }>(
+export function overlayResidentCapFloor<T extends { maxResidentEnabled: boolean; maxResident: number }>(
   config: T,
   floor: number,
 ): T {
-  if (floor <= 0 || !config.maxResidentEnabled) return config;
-  return { ...config, maxResidentEnabled: false };
+  if (floor <= 0 || !config.maxResidentEnabled || config.maxResident >= floor) return config;
+  return { ...config, maxResident: floor };
 }
 
 /**

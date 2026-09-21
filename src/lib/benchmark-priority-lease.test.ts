@@ -12,24 +12,21 @@ describe('overlayResidentCapFloor', () => {
     expect(overlayResidentCapFloor(config, 0)).toBe(config);
   });
 
-  it('returns the config unchanged when the cap is already disabled — nothing to suspend', () => {
+  it('returns the config unchanged when the cap is disabled — a disabled cap cannot block loading', () => {
     const config = { maxResidentEnabled: false, maxResident: 1 };
     expect(overlayResidentCapFloor(config, 2)).toBe(config);
   });
 
-  it('suspends an enabled cap outright (not merely raised) without mutating the input', () => {
-    // Raising maxResident to only the suite's target count would still reject a load if an
-    // unrelated pinned model is also resident — see the function's docstring. Disabling the
-    // check entirely removes that failure mode instead of sizing around it.
-    const config = { maxResidentEnabled: true, maxResident: 1 };
-    const overlaid = overlayResidentCapFloor(config, 2);
-    expect(overlaid).toEqual({ maxResidentEnabled: false, maxResident: 1 });
-    expect(config).toEqual({ maxResidentEnabled: true, maxResident: 1 });
+  it('returns the config unchanged when the configured cap already meets the floor', () => {
+    const config = { maxResidentEnabled: true, maxResident: 3 };
+    expect(overlayResidentCapFloor(config, 2)).toBe(config);
   });
 
-  it('suspends the cap even when it is already large enough for the floor — headroom outside the suite may still not be', () => {
-    const config = { maxResidentEnabled: true, maxResident: 5 };
-    expect(overlayResidentCapFloor(config, 2)).toEqual({ maxResidentEnabled: false, maxResident: 5 });
+  it('raises maxResident to the floor without mutating the input, when the cap is too low', () => {
+    const config = { maxResidentEnabled: true, maxResident: 1 };
+    const overlaid = overlayResidentCapFloor(config, 2);
+    expect(overlaid).toEqual({ maxResidentEnabled: true, maxResident: 2 });
+    expect(config).toEqual({ maxResidentEnabled: true, maxResident: 1 });
   });
 });
 
