@@ -1675,10 +1675,16 @@ export async function setBenchmarkExclusive(exclusive: boolean): Promise<{ exclu
 export async function applyMemorySettings(
   priorities: ModelPriorityEntry[],
   eviction?: Partial<EvictionConfig>,
+  seq?: number,
 ): Promise<EvictionConfig | null> {
+  // `seq` (the caller's own monotonic push counter) lets the sidecar refuse to install this
+  // call's full-replace payload if a call with a higher `seq` already landed first -- otherwise
+  // a call delayed behind this transport's respawn/re-init wait could apply after, and silently
+  // overwrite, one issued later. See `lastAppliedMemorySettingsSeq` in foundry-sidecar-main.js.
   const res = await send('applyMemorySettings', {
     priorities,
     ...(eviction ? { eviction } : {}),
+    ...(typeof seq === 'number' ? { seq } : {}),
   });
   await refreshModels();
   return res.result?.config ?? null;

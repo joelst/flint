@@ -169,7 +169,7 @@ const FIELD_TYPES = {
     maxResidentEnabled: 'boolean', maxResident: 'number',
   },
   setModelPriorities: { priorities: 'array' },
-  applyMemorySettings: { priorities: 'array' },
+  applyMemorySettings: { priorities: 'array', seq: 'number' },
   setBenchmarkExclusive: { exclusive: 'boolean' },
 };
 
@@ -214,7 +214,7 @@ const COMMAND_SCHEMA = {
   setModelTemplate:   { required: ['name', 'promptTemplate'], optional: [] },
   setEvictionConfig:  { required: [], optional: ['idleUnloadEnabled', 'idleTimeoutMs', 'maxResidentEnabled', 'maxResident'] },
   setModelPriorities: { required: ['priorities'], optional: [] },
-  applyMemorySettings: { required: ['priorities'], optional: ['eviction'] },
+  applyMemorySettings: { required: ['priorities'], optional: ['eviction', 'seq'] },
   setBenchmarkExclusive: { required: ['exclusive'], optional: [] },
   wslStatus:          { required: [], optional: [] },
   wslEnableMirrored:  { required: [], optional: [] },
@@ -389,6 +389,24 @@ const usage = new Map();
 const modelPriorities = new Map();
 let evictionConfig = { ...DEFAULT_EVICTION_CONFIG };
 let evictionTimer = null;
+/**
+ * Highest `applyMemorySettings` client sequence number actually installed so far, or -1 before
+ * any sequenced call has landed.
+ *
+ * The IPC transport (`sendInternal` in src/lib/sdk.ts) writes each command to the wire only once
+ * it reaches the front of a per-process write queue, and a command issued *before* another can
+ * still be delayed behind a sidecar respawn/re-init wait that the other call never hits — so two
+ * `applyMemorySettings` calls can arrive here in the opposite order from how the client issued
+ * them. Because this command fully replaces the priority map (not a merge), an older call
+ * arriving after a newer one would otherwise silently wipe out whatever the newer call just
+ * pinned/restored. The client echoes its own local monotonic `pushMemorySeq` counter in `seq`;
+ * this guard, held for the same lock as the actual install (see the `applyMemorySettings`
+ * handler), refuses to apply any call whose `seq` is not strictly newer than the last one
+ * actually installed, so a stale write can never overwrite a fresher one regardless of arrival
+ * order. `seq` is optional so older/other callers without it get no ordering guarantee, matching
+ * this field's absence before it existed.
+ */
+let lastAppliedMemorySettingsSeq = -1;
 
 /** How often the pool is checked. Fine-grained timing does not matter for a minutes-scale idle rule. */
 const EVICTION_SWEEP_MS = 30_000;
@@ -3312,9 +3330,20 @@ rl.on('line', async (line) => {
       // Both settings, then exactly one sweep. Sending them as two commands means the first
       // sweep runs under half-old settings — enough to evict a model the user just pinned, or
       // to evict under a cap they were in the process of raising.
-      const evicted = await installAndSweep(() => {
+      //
+      // The seq check and the install must share one lock acquisition: checking, then installing
+      // in a second, separately-queued `withSweepLock` call would let two calls both pass the
+      // check before either updates `lastAppliedMemorySettingsSeq`, defeating the guard exactly
+      // when it matters (two nearly-simultaneous, out-of-order arrivals).
+      const seq = typeof payload.seq === 'number' ? payload.seq : null;
+      const { evicted, stale } = await withSweepLock(async () => {
+        if (seq !== null && seq <= lastAppliedMemorySettingsSeq) {
+          return { evicted: [], stale: true };
+        }
+        if (seq !== null) lastAppliedMemorySettingsSeq = seq;
         installModelPriorities(payload.priorities);
         if (payload.eviction !== undefined) installEvictionConfig(payload.eviction);
+        return { evicted: await runEvictionSweepLocked(), stale: false };
       });
       reply({
         ok: true,
@@ -3322,6 +3351,7 @@ rl.on('line', async (line) => {
           config: { ...evictionConfig },
           priorities: [...modelPriorities.entries()].map(([alias, priority]) => ({ alias, priority })),
           evicted,
+          stale,
         },
       });
     } else if (cmd === 'getAccessLog') {

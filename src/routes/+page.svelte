@@ -2594,11 +2594,21 @@
     try {
       // One command, one sweep. Sent as two commands, the first sweeps under half-updated
       // settings — enough to evict the very model the user just chose to keep loaded.
+      //
+      // `seq` is this call's own position in `pushMemorySettings`'s call order, not merely a
+      // dedupe token for *this* function's replies (that's `pushMemorySeq`'s other job, below) --
+      // it also lets the sidecar refuse to install this payload if a call issued later already
+      // landed first. Two calls can arrive out of issue-order whenever one is delayed behind a
+      // sidecar respawn/re-init wait the other doesn't hit (see sendInternal in sdk.ts), which is
+      // exactly the scenario a benchmark run's pin/unpin and a concurrent Settings/Monitor edit
+      // can hit. Because this command fully replaces the priority map, an old call landing after
+      // a new one would otherwise silently wipe out whatever the new one just pinned/restored.
       const applied = await sdkApplyMemorySettings(
         Object.entries(currentPriorities)
           .filter(([, priority]) => priority === "pinned" || priority === "low")
           .map(([alias, priority]) => ({ alias, priority })),
         currentEviction,
+        seq,
       );
       // Adopt the sidecar's normalized config, but only on real change and only when no newer
       // push is in flight — an unconditional assignment re-triggers every effect that reads

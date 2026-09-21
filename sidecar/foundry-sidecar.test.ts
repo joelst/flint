@@ -1141,6 +1141,83 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
   }, 20000);
 });
 
+describe('foundry-sidecar applyMemorySettings ordering guard', () => {
+  let proc: ChildProcessWithoutNullStreams;
+
+  beforeEach(async () => {
+    proc = spawn(process.execPath, ['sidecar/foundry-sidecar.js'], {
+      cwd: process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    await waitForLine(proc, (msg) => msg.ready === true);
+  });
+
+  afterEach(async () => {
+    if (proc && !proc.killed) await killAndWait(proc);
+  });
+
+  it('refuses to install a lower seq once a higher seq has already landed', async () => {
+    // Simulates the actual respawn/re-init hazard from sdk.ts's sendInternal: two
+    // applyMemorySettings calls dispatched in one order (seq 1, then seq 2) can still arrive at
+    // the sidecar in the opposite order. The stale call (seq 1) must not be allowed to overwrite
+    // what the fresher call (seq 2) already installed, since this command fully replaces the
+    // priority map rather than merging into it.
+    proc.stdin.write(`${JSON.stringify({
+      id: 1, cmd: 'applyMemorySettings', seq: 2,
+      priorities: [{ alias: 'newer-run-target', priority: 'pinned' }],
+    })}\n`);
+    const newer = await waitForLine(proc, (msg) => msg.id === 1);
+    expect(newer.ok).toBe(true);
+    expect(newer.result.stale).toBe(false);
+    expect(newer.result.priorities).toEqual(
+      expect.arrayContaining([{ alias: 'newer-run-target', priority: 'pinned' }]),
+    );
+
+    // Arrives "late" (lower seq, after a higher seq already installed).
+    proc.stdin.write(`${JSON.stringify({
+      id: 2, cmd: 'applyMemorySettings', seq: 1,
+      priorities: [],
+    })}\n`);
+    const stale = await waitForLine(proc, (msg) => msg.id === 2);
+    expect(stale.ok).toBe(true);
+    expect(stale.result.stale).toBe(true);
+    // The newer call's pin must still be in effect -- the stale call's empty priority list must
+    // not have been installed.
+    expect(stale.result.priorities).toEqual(
+      expect.arrayContaining([{ alias: 'newer-run-target', priority: 'pinned' }]),
+    );
+  });
+
+  it('applies calls without a seq exactly as before (no ordering guarantee, but never rejected)', async () => {
+    proc.stdin.write(`${JSON.stringify({
+      id: 1, cmd: 'applyMemorySettings',
+      priorities: [{ alias: 'legacy-caller', priority: 'pinned' }],
+    })}\n`);
+    const res = await waitForLine(proc, (msg) => msg.id === 1);
+    expect(res.ok).toBe(true);
+    expect(res.result.stale).toBe(false);
+    expect(res.result.priorities).toEqual(
+      expect.arrayContaining([{ alias: 'legacy-caller', priority: 'pinned' }]),
+    );
+  });
+
+  it('treats an equal seq as stale (idempotent replay, not a fresh write)', async () => {
+    proc.stdin.write(`${JSON.stringify({
+      id: 1, cmd: 'applyMemorySettings', seq: 5,
+      priorities: [{ alias: 'first', priority: 'pinned' }],
+    })}\n`);
+    await waitForLine(proc, (msg) => msg.id === 1);
+
+    proc.stdin.write(`${JSON.stringify({
+      id: 2, cmd: 'applyMemorySettings', seq: 5,
+      priorities: [{ alias: 'second', priority: 'pinned' }],
+    })}\n`);
+    const res = await waitForLine(proc, (msg) => msg.id === 2);
+    expect(res.result.stale).toBe(true);
+    expect(res.result.priorities).toEqual([{ alias: 'first', priority: 'pinned' }]);
+  });
+});
+
 describe('foundry-sidecar command schema validation', () => {
   let proc: ChildProcessWithoutNullStreams;
 
