@@ -7212,9 +7212,26 @@ Output only the summary text, no preamble.`;
       <button
         class="theme-toggle"
         onclick={() => theme = theme === 'dark' ? 'light' : 'dark'}
-        title="Toggle light/dark mode"
+        title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+        aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
       >
-        {#if theme === 'dark'}<Icon name="sun" size={16} />{:else}<Icon name="moon" size={16} />{/if}
+        <svg
+          class="theme-toggle-icon"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="var(--fg)"
+          stroke-width="1.75"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          {#if theme === 'dark'}
+            <circle cx="12" cy="12" r="4"/>
+            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
+          {:else}
+            <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
+          {/if}
+        </svg>
       </button>
     </div>
   </header>
@@ -10953,13 +10970,24 @@ Output only the summary text, no preamble.`;
   }
 
   .theme-toggle {
-    font-size: 1rem;
     background: none;
     color: var(--fg);
     border: 1px solid var(--border);
-    padding: 2px 6px;
+    width: 30px;
+    height: 30px;
+    padding: 0;
     border-radius: 4px;
     cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .theme-toggle-icon {
+    display: block;
+    width: 16px;
+    height: 16px;
+    flex: 0 0 auto;
   }
 
   .status-msg {
