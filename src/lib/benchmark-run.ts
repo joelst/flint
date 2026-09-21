@@ -17,7 +17,7 @@
  *    the history of an interrupted execution that might still be uncertain.
  */
 
-import { benchmarkAttemptCount, isBenchmarkSuite, type BenchmarkSuite } from './benchmark-suite';
+import { benchmarkAttemptCount, isBenchmarkSuite, isStoredBenchmarkSuite, type BenchmarkSuite } from './benchmark-suite';
 
 export type AttemptPhase = 'warmup' | 'measured';
 
@@ -59,6 +59,30 @@ export interface BenchmarkRun {
   finalizedAt?: number;
 }
 
+/** List/header projection of a run: status and timestamps without the embedded suite snapshot. */
+export interface BenchmarkRunHeader {
+  id: string;
+  suiteId: string;
+  createdAt: number;
+  status: RunStatus;
+  startedAt?: number;
+  finalizedAt?: number;
+}
+
+export function summarizeRun(
+  run: Pick<BenchmarkRun, 'id' | 'suiteId' | 'createdAt' | 'status' | 'startedAt' | 'finalizedAt'>,
+): BenchmarkRunHeader {
+  const header: BenchmarkRunHeader = {
+    id: run.id,
+    suiteId: run.suiteId,
+    createdAt: run.createdAt,
+    status: run.status,
+  };
+  if (run.startedAt !== undefined) header.startedAt = run.startedAt;
+  if (run.finalizedAt !== undefined) header.finalizedAt = run.finalizedAt;
+  return header;
+}
+
 export interface AttemptUsage {
   promptTokens?: number;
   completionTokens?: number;
@@ -78,6 +102,12 @@ export interface BenchmarkAttempt {
   status: AttemptStatus;
   alias: string;
   requestedVariantId: string | null;
+  /** The variant actually bound for this alias when the intent was committed — the suite's
+   * explicit variant, or whatever an earlier load in this same run resolved an alias-only target
+   * to. Written before dispatch (write-ahead, like `requestedVariantId`) specifically so Resume
+   * can recover the true bound variant for a position left `dispatched` (uncertain) by Stop or a
+   * crash, which never reaches `servedVariantId` (only ever written on a terminal success). */
+  boundVariantId?: string | null;
   /** Filled in once the SDK reports which variant actually served the request, if it differs. */
   servedVariantId?: string | null;
   /** Committed before the chat call is dispatched — the write-ahead part of the contract. */
@@ -152,7 +182,9 @@ export function isTerminalAttemptStatus(status: AttemptStatus): boolean {
  * whose earlier execution was left `dispatched` (uncertain) by a crash or a Stop — the earlier,
  * uncertain execution is never deleted or overwritten, only superseded.
  */
-export function settledLogicalAttemptIds(attempts: readonly BenchmarkAttempt[]): Set<string> {
+export function settledLogicalAttemptIds(
+  attempts: readonly Pick<BenchmarkAttempt, 'logicalAttemptId' | 'status'>[],
+): Set<string> {
   const settled = new Set<string>();
   for (const attempt of attempts) {
     if (isTerminalAttemptStatus(attempt.status)) settled.add(attempt.logicalAttemptId);
@@ -167,10 +199,20 @@ export function settledLogicalAttemptIds(attempts: readonly BenchmarkAttempt[]):
  */
 export function pendingLogicalAttempts(
   schedule: readonly LogicalAttempt[],
-  attempts: readonly BenchmarkAttempt[],
+  attempts: readonly Pick<BenchmarkAttempt, 'logicalAttemptId' | 'status'>[],
 ): LogicalAttempt[] {
   const settled = settledLogicalAttemptIds(attempts);
   return schedule.filter((entry) => !settled.has(entry.logicalAttemptId));
+}
+
+/** Target indexes that still have at least one unsettled position — Resume should pin/load
+ * only these, so a removed completed target cannot block retries of the others. */
+export function pendingTargetIndexes(
+  suite: Pick<BenchmarkSuite, 'targets' | 'cases' | 'warmupCount' | 'repeatCount'>,
+  attempts: readonly Pick<BenchmarkAttempt, 'logicalAttemptId' | 'status'>[],
+): number[] {
+  const pending = pendingLogicalAttempts(buildAttemptSchedule(suite as BenchmarkSuite), attempts);
+  return [...new Set(pending.map((entry) => entry.targetIndex))].sort((a, b) => a - b);
 }
 
 /**
@@ -217,17 +259,39 @@ function isNonEmptyString(value: unknown): value is string {
 
 /** Defense-in-depth shape check for a run read back from storage — deliberately shallower than
  * `validateBenchmarkSuite` on the embedded snapshot's own fields (that snapshot is re-validated
- * with the real suite validator), but strict about the run-level bookkeeping fields. */
-export function isBenchmarkRun(value: unknown): value is BenchmarkRun {
+ * with the real suite validator), but strict about the run-level bookkeeping fields.
+ *
+ * Strict by default: a run whose embedded suite snapshot has the pre-1.0 duplicate-alias shape
+ * fails, because *creating* a new run from that shape is exactly the scenario the alias rule
+ * exists to prevent (loading duplicate-alias targets sequentially by alias corrupts attribution
+ * before a single attempt runs). Pass `{ allowDuplicateAliases: true }` only when reading a run
+ * that may already be persisted from before the rule was tightened — never when creating one. */
+export function isBenchmarkRun(
+  value: unknown,
+  options: { allowDuplicateAliases?: boolean } = {},
+): value is BenchmarkRun {
   if (!value || typeof value !== 'object') return false;
   const v = value as Record<string, unknown>;
   if (!isNonEmptyString(v.id) || !isNonEmptyString(v.suiteId)) return false;
-  if (!isBenchmarkSuite(v.suite)) return false;
+  const suiteIsValid = options.allowDuplicateAliases ? isStoredBenchmarkSuite(v.suite) : isBenchmarkSuite(v.suite);
+  if (!suiteIsValid) return false;
   if ((v.suite as { id: string }).id !== v.suiteId) return false;
   if (!isFiniteNumber(v.createdAt)) return false;
   if (typeof v.status !== 'string' || !RUN_STATUSES.has(v.status as RunStatus)) return false;
   if (v.startedAt !== undefined && !isFiniteNumber(v.startedAt)) return false;
   if (v.finalizedAt !== undefined && !isFiniteNumber(v.finalizedAt)) return false;
+  return true;
+}
+
+export function isBenchmarkRunHeader(value: unknown): value is BenchmarkRunHeader {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  if (!isNonEmptyString(v.id) || !isNonEmptyString(v.suiteId)) return false;
+  if (!isFiniteNumber(v.createdAt)) return false;
+  if (typeof v.status !== 'string' || !RUN_STATUSES.has(v.status as RunStatus)) return false;
+  if (v.startedAt !== undefined && !isFiniteNumber(v.startedAt)) return false;
+  if (v.finalizedAt !== undefined && !isFiniteNumber(v.finalizedAt)) return false;
+  if ('suite' in v) return false;
   return true;
 }
 
@@ -250,6 +314,7 @@ export function isBenchmarkAttempt(value: unknown): value is BenchmarkAttempt {
   if (typeof v.status !== 'string' || !ATTEMPT_STATUSES.has(v.status as AttemptStatus)) return false;
   if (!isNonEmptyString(v.alias)) return false;
   if (v.requestedVariantId !== null && !isNonEmptyString(v.requestedVariantId)) return false;
+  if (v.boundVariantId !== undefined && v.boundVariantId !== null && !isNonEmptyString(v.boundVariantId)) return false;
   if (!isFiniteNumber(v.intentCommittedAt)) return false;
   if (v.status === 'succeeded' && typeof v.responseText !== 'string') return false;
   if (v.status === 'failed' && !isNonEmptyString(v.errorMessage)) return false;

@@ -27,6 +27,7 @@
 
 import {
   buildAttemptSchedule,
+  isBenchmarkRun,
   nextSequenceFor,
   pendingLogicalAttempts,
   type AttemptUsage,
@@ -34,7 +35,13 @@ import {
   type BenchmarkRun,
   type LogicalAttempt,
 } from './benchmark-run';
-import type { BenchmarkMessage, BenchmarkSuite } from './benchmark-suite';
+import {
+  isBenchmarkSuite,
+  suiteSnapshotMatchesStored,
+  validateBenchmarkSuite,
+  type BenchmarkMessage,
+  type BenchmarkSuite,
+} from './benchmark-suite';
 import {
   createBenchmarkRun,
   getBenchmarkRun,
@@ -64,6 +71,8 @@ export interface AttemptTransportSuccess {
 export interface AttemptTransportFailure {
   ok: false;
   errorMessage: string;
+  /** When set, the runner stops without recording this attempt as failed (it stays dispatched). */
+  haltRun?: 'stopped';
 }
 
 export type AttemptTransportResult = AttemptTransportSuccess | AttemptTransportFailure;
@@ -182,6 +191,7 @@ async function executePositions(
   attemptsSoFar: BenchmarkAttempt[],
   transport: AttemptTransport,
   stopController: StopController,
+  boundVariantByAlias?: ReadonlyMap<string, string>,
 ): Promise<{ result: RunExecutionResult; run: BenchmarkRun }> {
   for (const position of positions) {
     if (stopController.isStopped()) {
@@ -201,6 +211,11 @@ async function executePositions(
       status: 'dispatched',
       alias: target.alias,
       requestedVariantId: target.variantId,
+      // Written before dispatch (same write-ahead guarantee as `requestedVariantId`) so a
+      // position left `dispatched` by Stop/crash still durably records which variant was
+      // actually bound for this alias -- `servedVariantId` alone is only ever set on a terminal
+      // success and would otherwise leave Resume unable to recover the true bound variant.
+      boundVariantId: target.variantId ?? boundVariantByAlias?.get(target.alias) ?? null,
       intentCommittedAt: Date.now(),
     };
 
@@ -233,6 +248,16 @@ async function executePositions(
       });
     } catch (e) {
       transportResult = { ok: false, errorMessage: describeTransportThrow(e) };
+    }
+
+    if (!transportResult.ok && transportResult.haltRun === 'stopped') {
+      stopController.stop();
+      // This halt was triggered by the transport reporting a cancelled/lost-contact runtime, not
+      // by the user's Stop button (that path is the `stopController.isStopped()` check above,
+      // which halts with no message so a deliberate Stop stays silent). Preserving the message
+      // here lets the caller tell "runtime interruption" apart from an ordinary user stop instead
+      // of both looking identical.
+      return haltWith(run, 'stopped', undefined, transportResult.errorMessage);
     }
 
     const settledAt = Date.now();
@@ -286,37 +311,158 @@ export interface StartRunOutcome {
  * failures do not block a target's measured attempts: warm-ups exist only to prime the model,
  * never to gate whether Flint bothers measuring it.
  */
-export async function startBenchmarkRun(
+/** Creates the run row (frozen suite snapshot) before execution so the UI can own the id. */
+export async function prepareBenchmarkRun(
   suite: BenchmarkSuite,
-  transport: AttemptTransport,
-  stopController: StopController = createStopController(),
-): Promise<StartRunOutcome> {
-  // Snapshot (deep-clone) before any await: the caller's `suite` object must never be able to
-  // retroactively change what this run recorded or scheduled, even if it's mutated the instant
-  // after this call returns control to the event loop.
-  const frozenSuite = freezeSuiteSnapshot(suite);
-  const runId = generateRunId();
+): Promise<{ ok: true; run: BenchmarkRun } | { ok: false; error: string }> {
+  // Validate and use the *normalized* suite (trimmed strings, deduplicated tags), not the
+  // caller's raw object — freezing the raw object would let a semantically-identical but
+  // differently-formatted suite (e.g. untrimmed whitespace) disagree with what
+  // `createBenchmarkRun` re-reads from storage (which was normalized on write), falsely
+  // rejecting the run as a stale snapshot even though nothing actually changed.
+  const validated = validateBenchmarkSuite(suite);
+  if (!validated.ok) {
+    return { ok: false, error: `cannot start: ${validated.errors.join('; ')}` };
+  }
+  const frozenSuite = freezeSuiteSnapshot(validated.value!);
   const run: BenchmarkRun = {
-    id: runId,
+    id: generateRunId(),
     suiteId: frozenSuite.id,
     suite: frozenSuite,
     createdAt: Date.now(),
     status: 'running',
     startedAt: Date.now(),
   };
+  const created = await createBenchmarkRun(run);
+  if (!created.ok) return { ok: false, error: created.error! };
+  return { ok: true, run };
+}
 
+export async function startBenchmarkRun(
+  suite: BenchmarkSuite,
+  transport: AttemptTransport,
+  stopController: StopController = createStopController(),
+  preparedRun?: BenchmarkRun,
+  boundVariantByAlias?: ReadonlyMap<string, string>,
+): Promise<StartRunOutcome> {
+  // The run id is known synchronously in both branches (the caller's preparedRun.id, or a freshly
+  // generated id) -- claim it in `activeRunIds` before any `await`, so a concurrent start/resume
+  // racing this same run id cannot both pass their own reservation checks (each observing the
+  // other's pre-claim "running + zero attempts" snapshot as still valid) and then both dispatch
+  // the full schedule. Everything below, including the reservation re-read and validation awaits,
+  // now runs only while this run id is exclusively held.
+  const runId = preparedRun ? preparedRun.id : generateRunId();
   if (activeRunIds.has(runId)) {
-    // Vanishingly unlikely (a fresh id colliding with one already in flight), but a run must
-    // never be executed twice concurrently under the same id.
     return { ok: false, error: `benchmark run "${runId}" is already active` };
   }
   activeRunIds.add(runId);
   try {
-    const created = await createBenchmarkRun(run);
-    if (!created.ok) return { ok: false, error: created.error };
+    // Snapshot (deep-clone) before any await: the caller's `suite` object must never be able to
+    // retroactively change what this run recorded or scheduled, even if it's mutated the instant
+    // after this call returns control to the event loop.
+    let run: BenchmarkRun;
+    if (preparedRun) {
+      // Defense-in-depth: `startBenchmarkRun` is exported and callable directly (not only via
+      // `startBenchmarkSession`), so a caller-supplied `preparedRun` must not be trusted on shape
+      // alone — a well-formed but unpersisted (or tampered) run would otherwise skip
+      // `createBenchmarkRun`, write orphan attempt rows, and dispatch real inference, only
+      // discovering the problem once the terminal status write finds no row to update. Re-read
+      // the reservation from storage — the same pattern `resumeBenchmarkRun` already uses — and
+      // execute exactly what storage holds for this id, not the caller's in-memory object.
+      //
+      // Checked before the storage read (and before `suiteSnapshotMatchesStored`, which assumes a
+      // well-formed suite and would throw on a malformed one) so a caller passing a structurally
+      // invalid suite gets the same clean validation error it always has, not a rejected promise.
+      // Surface the validator's actual errors rather than assuming duplicate aliases: this branch
+      // accepts any caller-supplied `preparedRun` (the test suite even passes `null`), so a great
+      // many unrelated shapes can fail here, and blaming all of them on duplicate aliases would be
+      // an incorrect diagnosis for anyone debugging a real caller bug.
+      const suiteValidation = validateBenchmarkSuite(preparedRun.suite);
+      if (!suiteValidation.ok) {
+        return {
+          ok: false,
+          error: `cannot start: prepared run's suite snapshot failed validation: ${suiteValidation.errors.join('; ')}`,
+        };
+      }
+      const reservation = await getBenchmarkRun(preparedRun.id);
+      if (!reservation.ok) return { ok: false, error: reservation.error };
+      if (!reservation.value) {
+        return { ok: false, error: `cannot start: no reservation found in storage for run "${preparedRun.id}"` };
+      }
+      // `getBenchmarkRun` above already validated `reservation.value` with `allowDuplicateAliases:
+      // true` (tolerating the legacy shape for readability), so the *only* way it can still fail
+      // this stricter check is that tolerated legacy duplicate-alias shape -- everything else about
+      // the row (id, suiteId, status, timestamps, every other suite constraint) was already
+      // confirmed valid. The message can therefore name the actual cause precisely.
+      if (!isBenchmarkRun(reservation.value)) {
+        return {
+          ok: false,
+          error: `cannot start: run "${preparedRun.id}"'s stored reservation has duplicate target aliases from before that shape was rejected`,
+        };
+      }
+      // The reservation exists and is well-formed, but may not be the run the caller intended to
+      // execute (e.g. a stale `preparedRun` reused after a retry created a fresh row for the same
+      // suite). Fail loud rather than silently execute storage's content in place of the caller's.
+      if (!suiteSnapshotMatchesStored(reservation.value.suite, preparedRun.suite)) {
+        return {
+          ok: false,
+          error: `cannot start: run "${preparedRun.id}"'s stored reservation does not match the suite snapshot being executed`,
+        };
+      }
+      // A valid, matching reservation is still not necessarily *fresh*: this branch always passes
+      // an empty prior-attempts list to `executePositions` below, so a reservation that already
+      // has recorded attempts (already started, resumed, or completed elsewhere) would have its
+      // finished positions dispatched all over again instead of being resumed. Only a reservation
+      // with zero attempts on record is safe to execute via this from-scratch path.
+      const existingAttempts = await listAttemptsForRun(preparedRun.id);
+      if (!existingAttempts.ok) return { ok: false, error: existingAttempts.error };
+      if ((existingAttempts.value ?? []).length > 0) {
+        return {
+          ok: false,
+          error: `cannot start: run "${preparedRun.id}" already has recorded attempts — resume it instead of starting it again`,
+        };
+      }
+      // Zero attempts alone is not enough: a run stopped before its first dispatch also has zero
+      // attempt rows, but its persisted status is `stopped` (or `recovery_required`/`completed`),
+      // not `running`. Starting it here would dispatch real inference while the stored row stays
+      // in that non-running status until finalization, and would bypass the required Resume path
+      // entirely (Resume is what re-opens a stopped run for further attempts). Only a reservation
+      // still recorded as `running` -- i.e. truly never touched since `prepareBenchmarkRun`
+      // created it -- may be executed from scratch via this path.
+      if (reservation.value.status !== 'running') {
+        return {
+          ok: false,
+          error: `cannot start: run "${preparedRun.id}" is not in a fresh running state (status "${reservation.value.status}") — resume it instead of starting it again`,
+        };
+      }
+      run = reservation.value;
+    } else {
+      // Same normalize-then-freeze reasoning as `prepareBenchmarkRun` above: freezing the
+      // caller's raw suite here would risk the same false "stale snapshot" rejection inside
+      // `createBenchmarkRun`.
+      const validated = validateBenchmarkSuite(suite);
+      if (!validated.ok) {
+        return { ok: false, error: `cannot start: ${validated.errors.join('; ')}` };
+      }
+      const frozenSuite = freezeSuiteSnapshot(validated.value!);
+      run = {
+        id: runId,
+        suiteId: frozenSuite.id,
+        suite: frozenSuite,
+        createdAt: Date.now(),
+        status: 'running' as const,
+        startedAt: Date.now(),
+      };
+    }
+    const frozenSuite = run.suite;
+
+    if (!preparedRun) {
+      const created = await createBenchmarkRun(run);
+      if (!created.ok) return { ok: false, error: created.error };
+    }
 
     const schedule = buildAttemptSchedule(frozenSuite);
-    const { result, run: finalRun } = await executePositions(run, schedule, [], transport, stopController);
+    const { result, run: finalRun } = await executePositions(run, schedule, [], transport, stopController, boundVariantByAlias);
     return { ok: true, run: finalRun, result };
   } finally {
     activeRunIds.delete(runId);
@@ -345,6 +491,7 @@ export async function resumeBenchmarkRun(
   runId: string,
   transport: AttemptTransport,
   stopController: StopController = createStopController(),
+  boundVariantByAlias?: ReadonlyMap<string, string>,
 ): Promise<ResumeRunOutcome> {
   if (activeRunIds.has(runId)) {
     return { ok: false, error: `benchmark run "${runId}" already has an execution in progress` };
@@ -355,6 +502,18 @@ export async function resumeBenchmarkRun(
     if (!runResult.ok) return { ok: false, error: runResult.error };
     if (!runResult.value) return { ok: false, error: `no benchmark run "${runId}"` };
     const run = runResult.value;
+
+    // `getBenchmarkRun` tolerates the pre-1.0 duplicate-alias suite shape so a legacy run stays
+    // readable for display/export, but resuming one is a different operation entirely: it
+    // proceeds straight to `buildAttemptSchedule` and re-dispatches through the alias-only
+    // transport, which is exactly the sequential-load-then-alias-dispatch pattern the stricter
+    // rule exists to prevent. A legacy snapshot must not be allowed to resume.
+    if (!isBenchmarkSuite(run.suite)) {
+      return {
+        ok: false,
+        error: `benchmark run "${runId}" cannot be resumed: its suite snapshot has duplicate target aliases from before that shape was rejected`,
+      };
+    }
 
     const attemptsResult = await listAttemptsForRun(runId);
     if (!attemptsResult.ok) return { ok: false, error: attemptsResult.error };
@@ -371,11 +530,18 @@ export async function resumeBenchmarkRun(
     // returned snapshot could let the two disagree by a few ms, breaking the invariant that
     // the returned run always matches what was just persisted.
     const resumedStartedAt = run.startedAt ?? Date.now();
-    const resumedStart = await updateBenchmarkRunStatus(runId, 'running', { startedAt: resumedStartedAt });
+    // A previously finalized run (stopped/recovery_required) carries a stale `finalizedAt`
+    // from that terminal state. `updateBenchmarkRunStatus` merges its patch onto the existing
+    // row, so this must be cleared explicitly here or storage/exports would report a live
+    // "running" run alongside a finalization timestamp from before it was resumed.
+    const resumedStart = await updateBenchmarkRunStatus(runId, 'running', {
+      startedAt: resumedStartedAt,
+      finalizedAt: undefined,
+    });
     if (!resumedStart.ok) return { ok: false, error: resumedStart.error };
-    const resumingRun: BenchmarkRun = { ...run, status: 'running', startedAt: resumedStartedAt };
+    const resumingRun: BenchmarkRun = { ...run, status: 'running', startedAt: resumedStartedAt, finalizedAt: undefined };
 
-    const { result, run: finalRun } = await executePositions(resumingRun, pending, [...attempts], transport, stopController);
+    const { result, run: finalRun } = await executePositions(resumingRun, pending, [...attempts], transport, stopController, boundVariantByAlias);
     return { ok: true, result, run: finalRun };
   } finally {
     activeRunIds.delete(runId);

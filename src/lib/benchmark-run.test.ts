@@ -3,8 +3,11 @@ import {
   buildAttemptSchedule,
   isBenchmarkAttempt,
   isBenchmarkRun,
+  isBenchmarkRunHeader,
+  summarizeRun,
   nextSequenceFor,
   pendingLogicalAttempts,
+  pendingTargetIndexes,
   settledLogicalAttemptIds,
   uncertainLogicalAttemptIds,
   type BenchmarkAttempt,
@@ -135,6 +138,41 @@ describe('settledLogicalAttemptIds / pendingLogicalAttempts / uncertainLogicalAt
     expect(uncertainLogicalAttemptIds(attempts)).toEqual(new Set());
     expect(settledLogicalAttemptIds(attempts)).toEqual(new Set([target.logicalAttemptId]));
   });
+
+  it('pendingTargetIndexes omits a target whose every position is terminal', () => {
+    const s = suite({
+      targets: [{ alias: 'model-a', variantId: null }, { alias: 'model-b', variantId: null }],
+      warmupCount: 0,
+      repeatCount: 1,
+      cases: [{ id: 'c1', prompt: 'x' }],
+    });
+    const t0 = buildAttemptSchedule(s).filter((e) => e.targetIndex === 0);
+    const attempts = t0.map((e, i) => attempt({
+      id: `exec-t0-${i}`,
+      logicalAttemptId: e.logicalAttemptId,
+      targetIndex: 0,
+      status: 'succeeded',
+      responseText: 'ok',
+      settledAt: 2,
+    }));
+    expect(pendingTargetIndexes(s, attempts)).toEqual([1]);
+  });
+
+  it('pendingTargetIndexes still includes a target whose only executions are dispatched', () => {
+    const s = suite({
+      targets: [{ alias: 'model-a', variantId: null }, { alias: 'model-b', variantId: null }],
+      warmupCount: 0,
+      repeatCount: 1,
+      cases: [{ id: 'c1', prompt: 'x' }],
+    });
+    const t0 = buildAttemptSchedule(s).find((e) => e.targetIndex === 0)!;
+    const attempts = [attempt({
+      logicalAttemptId: t0.logicalAttemptId,
+      targetIndex: 0,
+      status: 'dispatched',
+    })];
+    expect(pendingTargetIndexes(s, attempts)).toEqual([0, 1]);
+  });
 });
 
 describe('nextSequenceFor', () => {
@@ -153,6 +191,31 @@ describe('nextSequenceFor', () => {
   });
 });
 
+describe('summarizeRun / isBenchmarkRunHeader', () => {
+  it('drops the embedded suite snapshot and rejects a header that still has one', () => {
+    const run: BenchmarkRun = {
+      id: 'run-1',
+      suiteId: 'suite-1',
+      suite: suite(),
+      createdAt: 1,
+      status: 'stopped',
+      startedAt: 2,
+      finalizedAt: 3,
+    };
+    const header = summarizeRun(run);
+    expect(header).toEqual({
+      id: 'run-1',
+      suiteId: 'suite-1',
+      createdAt: 1,
+      status: 'stopped',
+      startedAt: 2,
+      finalizedAt: 3,
+    });
+    expect(isBenchmarkRunHeader(header)).toBe(true);
+    expect(isBenchmarkRunHeader({ ...header, suite: suite() })).toBe(false);
+  });
+});
+
 describe('isBenchmarkRun', () => {
   it('accepts a well-formed run', () => {
     expect(isBenchmarkRun(run())).toBe(true);
@@ -168,6 +231,28 @@ describe('isBenchmarkRun', () => {
 
   it('rejects a run whose suiteId does not match its embedded suite snapshot id', () => {
     expect(isBenchmarkRun(run({ suiteId: 'mismatched-suite-id' }))).toBe(false);
+  });
+
+  it('rejects a run whose embedded suite has the legacy duplicate-alias shape by default', () => {
+    const legacySuite = suite({
+      targets: [
+        { alias: 'model-a', variantId: 'v1' },
+        { alias: 'model-a', variantId: 'v2' },
+      ],
+    });
+    expect(isBenchmarkRun(run({ suite: legacySuite }))).toBe(false);
+  });
+
+  it('accepts a legacy duplicate-alias run only when read with allowDuplicateAliases', () => {
+    const legacySuite = suite({
+      targets: [
+        { alias: 'model-a', variantId: 'v1' },
+        { alias: 'model-a', variantId: 'v2' },
+      ],
+    });
+    const legacyRun = run({ suite: legacySuite });
+    expect(isBenchmarkRun(legacyRun)).toBe(false);
+    expect(isBenchmarkRun(legacyRun, { allowDuplicateAliases: true })).toBe(true);
   });
 });
 

@@ -2,12 +2,14 @@ import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createStopController,
+  prepareBenchmarkRun,
   resumeBenchmarkRun,
   startBenchmarkRun,
   type AttemptTransport,
   type AttemptTransportResult,
 } from './benchmark-runner';
-import { getBenchmarkRun, listAttemptsForRun, listBenchmarkRunsForSuite } from './benchmark-repository';
+import * as benchmarkRepository from './benchmark-repository';
+import { getBenchmarkRun, listAttemptsForRun, listBenchmarkRunsForSuite, openBenchmarkDatabase, putBenchmarkSuite } from './benchmark-repository';
 import type { BenchmarkSuite } from './benchmark-suite';
 
 function suite(over: Partial<BenchmarkSuite> = {}): BenchmarkSuite {
@@ -29,6 +31,18 @@ function suite(over: Partial<BenchmarkSuite> = {}): BenchmarkSuite {
 /** A transport that always succeeds, echoing a fixed response. */
 function succeedingTransport(): AttemptTransport {
   return async () => ({ ok: true, responseText: 'four' });
+}
+
+/** Persist the suite under test before starting: createBenchmarkRun refuses a snapshot that
+ * no longer matches the stored row (the same check that rejects a concurrent editor save). */
+async function startStored(
+  s: BenchmarkSuite,
+  transport: AttemptTransport,
+  stopController?: ReturnType<typeof createStopController>,
+) {
+  const put = await putBenchmarkSuite(s);
+  expect(put.ok).toBe(true);
+  return startBenchmarkRun(s, transport, stopController);
 }
 
 /** A transport whose per-call outcome is driven by a queue, so tests can script exact
@@ -54,6 +68,7 @@ async function resetDatabase() {
 
 beforeEach(async () => {
   await resetDatabase();
+  await putBenchmarkSuite(suite());
 });
 
 afterEach(async () => {
@@ -64,7 +79,7 @@ afterEach(async () => {
 describe('startBenchmarkRun', () => {
   it('dispatches every logical position in order and records a completed run', async () => {
     const s = suite();
-    const outcome = await startBenchmarkRun(s, succeedingTransport());
+    const outcome = await startStored(s, succeedingTransport());
     expect(outcome.ok).toBe(true);
     expect(outcome.result).toEqual({ status: 'completed' });
 
@@ -75,9 +90,227 @@ describe('startBenchmarkRun', () => {
     expect(attempts.value!.every((a) => a.status === 'succeeded')).toBe(true);
   });
 
+  it('accepts a semantically-identical but differently-formatted suite instead of rejecting it as a stale snapshot', async () => {
+    // The stored row (via putBenchmarkSuite) is normalized: trimmed strings, deduped tags.
+    // A caller's own in-memory suite object need not be byte-identical to what was normalized
+    // on write -- e.g. surrounding whitespace on an alias/prompt -- to be the same suite.
+    const s = suite();
+    const put = await putBenchmarkSuite(s);
+    expect(put.ok).toBe(true);
+    const padded: BenchmarkSuite = {
+      ...s,
+      name: `  ${s.name}  `,
+      targets: s.targets.map((t) => ({ ...t, alias: `  ${t.alias}  ` })),
+      cases: s.cases.map((c) => ({ ...c, prompt: c.prompt ? `  ${c.prompt}  ` : c.prompt })),
+    };
+    const outcome = await startBenchmarkRun(padded, succeedingTransport());
+    expect(outcome.ok).toBe(true);
+    expect(outcome.result).toEqual({ status: 'completed' });
+  });
+
+  it('rejects an explicitly-passed preparedRun whose in-memory suite was tampered after prepare, instead of scheduling it unchecked', async () => {
+    // `startBenchmarkRun` is exported and callable directly, not only via `startBenchmarkSession`
+    // (which always builds `preparedRun` through `prepareBenchmarkRun`) -- a directly-supplied
+    // `preparedRun` must not bypass validation just because it looks pre-validated. The run is
+    // re-read from storage and this tampered copy disagrees with what was actually reserved.
+    const s = suite();
+    const prepared = await prepareBenchmarkRun(s);
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) throw new Error('unreachable');
+    const tamperedRun = {
+      ...prepared.run,
+      suite: { ...prepared.run.suite, targets: [{ alias: 'model-b', variantId: null }] },
+    };
+    const outcome = await startBenchmarkRun(s, succeedingTransport(), undefined, tamperedRun);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error).toMatch(/does not match/);
+  });
+
+  it('rejects an explicitly-passed preparedRun whose id has no reservation in storage', async () => {
+    const s = suite();
+    const prepared = await prepareBenchmarkRun(s);
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) throw new Error('unreachable');
+    const unpersistedRun = { ...prepared.run, id: 'never-persisted' };
+    let called = false;
+    const outcome = await startBenchmarkRun(s, async () => {
+      called = true;
+      return { ok: true, responseText: 'x' };
+    }, undefined, unpersistedRun);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error).toMatch(/no reservation found in storage/);
+    expect(called).toBe(false);
+  });
+
+  it('rejects an explicitly-passed preparedRun whose stored reservation is a legacy duplicate-alias run', async () => {
+    // A tampered/forged `preparedRun.id` could point at a real, pre-1.0 stored row this rule
+    // would reject if it were ever (re-)created — execution must still refuse it, not just
+    // shape-check the caller's in-memory object and let a legacy row's alias-order transport
+    // dispatch run.
+    const legacySuite = suite({
+      targets: [
+        { alias: 'model-a', variantId: 'v1' },
+        { alias: 'model-a', variantId: 'v2' },
+      ],
+    });
+    const db = await openBenchmarkDatabase();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction('runs', 'readwrite');
+        tx.oncomplete = () => resolve();
+        tx.onabort = () => reject(tx.error);
+        tx.onerror = () => reject(tx.error);
+        tx.objectStore('runs').put({
+          id: 'legacy-dup-alias-start',
+          suiteId: 'suite-1',
+          suite: legacySuite,
+          createdAt: Date.now(),
+          status: 'running',
+        });
+      });
+    } finally {
+      db.close();
+    }
+    let called = false;
+    const outcome = await startBenchmarkRun(
+      legacySuite,
+      async () => { called = true; return { ok: true, responseText: 'x' }; },
+      undefined,
+      { id: 'legacy-dup-alias-start', suiteId: 'suite-1', suite: legacySuite, createdAt: Date.now(), status: 'running' },
+    );
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error).toMatch(/prepared run's suite snapshot failed validation.*duplicate target alias/);
+    expect(called).toBe(false);
+  });
+
+  it('rejects an explicitly-passed preparedRun whose caller-side suite is valid but the STORED reservation is a legacy duplicate-alias row, naming the actual cause', async () => {
+    // Exercises the second (post-storage-read) shape check specifically: unlike the test above,
+    // the caller-supplied `preparedRun.suite` here is itself strictly valid, so it passes the
+    // first check and this only fails once the row re-read from storage is checked. Because
+    // `getBenchmarkRun` already re-validated that row tolerating only the legacy duplicate-alias
+    // shape, this failure can only mean that shape, and the message should say so precisely
+    // rather than falling back to a vague "failed shape validation".
+    const validSuite = suite();
+    const legacySuite = suite({
+      targets: [
+        { alias: 'model-a', variantId: 'v1' },
+        { alias: 'model-a', variantId: 'v2' },
+      ],
+    });
+    const db = await openBenchmarkDatabase();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction('runs', 'readwrite');
+        tx.oncomplete = () => resolve();
+        tx.onabort = () => reject(tx.error);
+        tx.onerror = () => reject(tx.error);
+        tx.objectStore('runs').put({
+          id: 'legacy-dup-alias-stored-only',
+          suiteId: 'suite-1',
+          suite: legacySuite,
+          createdAt: Date.now(),
+          status: 'running',
+        });
+      });
+    } finally {
+      db.close();
+    }
+    let called = false;
+    const outcome = await startBenchmarkRun(
+      validSuite,
+      async () => { called = true; return { ok: true, responseText: 'x' }; },
+      undefined,
+      { id: 'legacy-dup-alias-stored-only', suiteId: 'suite-1', suite: validSuite, createdAt: Date.now(), status: 'running' },
+    );
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error).toMatch(/stored reservation has duplicate target aliases/);
+    expect(called).toBe(false);
+  });
+
+  it('rejects an explicitly-passed preparedRun whose stored reservation already has recorded attempts', async () => {
+    // This branch always executes with an empty prior-attempts list. A reservation that already
+    // has attempt rows (already started, resumed, or completed by someone else) must not be
+    // re-dispatched from scratch through this path -- that would duplicate real inference calls
+    // against positions that already have a terminal outcome recorded.
+    const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
+    const putSuite = await putBenchmarkSuite(s);
+    expect(putSuite.ok).toBe(true);
+    const prepared = await prepareBenchmarkRun(s);
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) throw new Error('unreachable');
+    // Run it to completion once, recording a real attempt against this same reservation.
+    const first = await startBenchmarkRun(s, succeedingTransport(), undefined, prepared.run);
+    expect(first.ok).toBe(true);
+    let called = false;
+    const outcome = await startBenchmarkRun(s, async () => {
+      called = true;
+      return { ok: true, responseText: 'x' };
+    }, undefined, prepared.run);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error).toMatch(/already has recorded attempts/);
+    expect(called).toBe(false);
+  });
+
+  it('rejects an explicitly-passed preparedRun whose reservation was stopped before its first dispatch', async () => {
+    // A run stopped before its very first dispatch has zero attempt rows -- the same as a
+    // never-touched reservation -- but its persisted status is `stopped`, not `running`. The
+    // "zero attempts" check alone would let this path re-execute it from scratch, dispatching
+    // real inference while the stored row stays `stopped` until finalization, and bypassing the
+    // required Resume path entirely. Only a reservation still recorded as `running` may go
+    // through this from-scratch path.
+    const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
+    const putSuite = await putBenchmarkSuite(s);
+    expect(putSuite.ok).toBe(true);
+    const prepared = await prepareBenchmarkRun(s);
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) throw new Error('unreachable');
+    const preStoppedController = createStopController();
+    preStoppedController.stop();
+    let firstCalled = false;
+    const first = await startBenchmarkRun(s, async () => {
+      firstCalled = true;
+      return { ok: true, responseText: 'x' };
+    }, preStoppedController, prepared.run);
+    expect(first.ok).toBe(true);
+    expect(first.result?.status).toBe('stopped');
+    expect(firstCalled).toBe(false);
+    const attempts = await listAttemptsForRun(prepared.run.id);
+    expect(attempts.value).toHaveLength(0);
+    const stored = await getBenchmarkRun(prepared.run.id);
+    expect(stored.value!.status).toBe('stopped');
+
+    let secondCalled = false;
+    const outcome = await startBenchmarkRun(s, async () => {
+      secondCalled = true;
+      return { ok: true, responseText: 'x' };
+    }, undefined, prepared.run);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error).toMatch(/not in a fresh running state/);
+    expect(secondCalled).toBe(false);
+  });
+
+  it('rejects an explicitly-passed preparedRun with a structurally invalid (null) suite without throwing, reporting the actual validation failure rather than a misdiagnosed duplicate-alias error', async () => {
+    const s = suite();
+    const putSuite = await putBenchmarkSuite(s);
+    expect(putSuite.ok).toBe(true);
+    const prepared = await prepareBenchmarkRun(s);
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) throw new Error('unreachable');
+    const malformedRun = { ...prepared.run, suite: null as unknown as BenchmarkSuite };
+    let called = false;
+    const outcome = await startBenchmarkRun(s, async () => {
+      called = true;
+      return { ok: true, responseText: 'x' };
+    }, undefined, malformedRun);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error).toMatch(/prepared run's suite snapshot failed validation.*suite must be an object/);
+    expect(outcome.error).not.toMatch(/duplicate target aliases/);
+    expect(called).toBe(false);
+  });
+
   it('returns a run snapshot reflecting the status executePositions actually committed, not the stale pre-execution one', async () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
-    const outcome = await startBenchmarkRun(s, succeedingTransport());
+    const outcome = await startStored(s, succeedingTransport());
     expect(outcome.result).toEqual({ status: 'completed' });
     // The returned run must agree with what's durably persisted -- not silently still read
     // 'running', which is what the caller passed into executePositions before it settled.
@@ -96,14 +329,34 @@ describe('startBenchmarkRun', () => {
       stopController.stop();
       return { ok: true, responseText: 'ok' };
     };
-    const outcome = await startBenchmarkRun(s, transport, stopController);
+    const outcome = await startStored(s, transport, stopController);
     expect(outcome.result?.status).toBe('stopped');
     expect(outcome.run!.status).toBe('stopped');
+    // A user-requested Stop must stay silent — it must never carry a message that would make it
+    // look like the runtime-triggered halt covered below.
+    expect(outcome.result?.haltedError).toBeUndefined();
+  });
+
+  it('halts as stopped without recording a failed attempt when the transport reports haltRun', async () => {
+    const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }, { id: 'c2', prompt: 'y' }] });
+    const transport: AttemptTransport = async () => ({
+      ok: false,
+      errorMessage: 'Runtime is draining',
+      haltRun: 'stopped',
+    });
+    const outcome = await startStored(s, transport);
+    expect(outcome.result?.status).toBe('stopped');
+    // The transport's message must survive so callers can tell a runtime-triggered halt apart
+    // from an ordinary user-requested Stop, which halts with no message.
+    expect(outcome.result?.haltedError).toBe('Runtime is draining');
+    const attempts = await listAttemptsForRun(outcome.run!.id);
+    expect(attempts.value).toHaveLength(1);
+    expect(attempts.value![0].status).toBe('dispatched');
   });
 
   it('freezes a snapshot of the suite at call time, immune to later mutation of the caller\'s object', async () => {
     const s = suite();
-    const outcome = await startBenchmarkRun(s, succeedingTransport());
+    const outcome = await startStored(s, succeedingTransport());
     // Mutate the caller's own suite object after the call returns (but the schedule/persistence
     // already used a snapshot taken before the first await) — this must never be reflected.
     s.cases[0].prompt = 'MUTATED';
@@ -118,7 +371,7 @@ describe('startBenchmarkRun', () => {
   it('records a failed attempt without halting the run when the transport reports failure', async () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
     const { transport } = scriptedTransport([{ ok: false, errorMessage: 'model unavailable' }]);
-    const outcome = await startBenchmarkRun(s, transport);
+    const outcome = await startStored(s, transport);
     expect(outcome.result).toEqual({ status: 'completed' });
     const attempts = await listAttemptsForRun(outcome.run!.id);
     expect(attempts.value).toEqual([
@@ -132,7 +385,7 @@ describe('startBenchmarkRun', () => {
       { ok: false, errorMessage: 'warmup failed' },
       { ok: true, responseText: 'measured ok' },
     ]);
-    const outcome = await startBenchmarkRun(s, transport);
+    const outcome = await startStored(s, transport);
     expect(outcome.result).toEqual({ status: 'completed' });
     const attempts = await listAttemptsForRun(outcome.run!.id);
     expect(attempts.value!.find((a) => a.phase === 'warmup')?.status).toBe('failed');
@@ -142,7 +395,7 @@ describe('startBenchmarkRun', () => {
   it('a transport that throws is recorded as a failed attempt, not an unhandled rejection', async () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
     const transport: AttemptTransport = async () => { throw new Error('network exploded'); };
-    const outcome = await startBenchmarkRun(s, transport);
+    const outcome = await startStored(s, transport);
     expect(outcome.result).toEqual({ status: 'completed' });
     const attempts = await listAttemptsForRun(outcome.run!.id);
     expect(attempts.value).toEqual([
@@ -154,7 +407,7 @@ describe('startBenchmarkRun', () => {
   it('proof gate: the dispatch intent is durably recorded before the transport is ever called', async () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
     let checkedInsideTransport = false;
-    await startBenchmarkRun(s, async () => {
+    await startStored(s, async () => {
       // The run row (and thus its id) is only knowable from inside the transport call itself —
       // look it up by suite id rather than depending on `startBenchmarkRun`'s return value,
       // which does not exist yet at this point in the call.
@@ -176,7 +429,7 @@ describe('startBenchmarkRun', () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }, { id: 'c2', prompt: 'y' }] });
     const repo = await import('./benchmark-repository');
     const spy = vi.spyOn(repo, 'recordAttemptTerminal').mockResolvedValueOnce({ ok: false, error: 'disk full' });
-    const outcome = await startBenchmarkRun(s, succeedingTransport());
+    const outcome = await startStored(s, succeedingTransport());
     spy.mockRestore();
 
     expect(outcome.result?.status).toBe('recovery_required');
@@ -196,7 +449,7 @@ describe('startBenchmarkRun', () => {
     const repo = await import('./benchmark-repository');
     const spy = vi.spyOn(repo, 'recordAttemptDispatched').mockResolvedValueOnce({ ok: false, error: 'quota exceeded' });
     let transportCalled = false;
-    const outcome = await startBenchmarkRun(s, async () => { transportCalled = true; return { ok: true, responseText: 'x' }; });
+    const outcome = await startStored(s, async () => { transportCalled = true; return { ok: true, responseText: 'x' }; });
     spy.mockRestore();
 
     expect(transportCalled).toBe(false);
@@ -217,7 +470,7 @@ describe('startBenchmarkRun', () => {
       return result;
     });
     let transportCalled = false;
-    const outcome = await startBenchmarkRun(s, async () => { transportCalled = true; return { ok: true, responseText: 'x' }; }, stopController);
+    const outcome = await startStored(s, async () => { transportCalled = true; return { ok: true, responseText: 'x' }; }, stopController);
     spy.mockRestore();
 
     expect(transportCalled).toBe(false);
@@ -230,7 +483,7 @@ describe('startBenchmarkRun', () => {
   it('records the transport\'s own message when it throws a non-Error value', async () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
     const transport: AttemptTransport = async () => { throw 'a bare string throw'; };
-    const outcome = await startBenchmarkRun(s, transport);
+    const outcome = await startStored(s, transport);
     const attempts = await listAttemptsForRun(outcome.run!.id);
     expect(attempts.value![0]).toEqual(expect.objectContaining({ status: 'failed', errorMessage: 'Benchmark transport failed' }));
   });
@@ -238,7 +491,7 @@ describe('startBenchmarkRun', () => {
   it('an empty successful response text is recorded as a genuine success, not a recovery failure', async () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
     const transport: AttemptTransport = async () => ({ ok: true, responseText: '' });
-    const outcome = await startBenchmarkRun(s, transport);
+    const outcome = await startStored(s, transport);
     expect(outcome.result).toEqual({ status: 'completed' });
     const attempts = await listAttemptsForRun(outcome.run!.id);
     expect(attempts.value![0]).toEqual(expect.objectContaining({ status: 'succeeded', responseText: '' }));
@@ -249,7 +502,7 @@ describe('startBenchmarkRun', () => {
     vi.stubGlobal('crypto', undefined);
     try {
       const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
-      const outcome = await startBenchmarkRun(s, succeedingTransport());
+      const outcome = await startStored(s, succeedingTransport());
       expect(outcome.ok).toBe(true);
       expect(outcome.run!.id).toMatch(/^run_/);
       const attempts = await listAttemptsForRun(outcome.run!.id);
@@ -263,7 +516,7 @@ describe('startBenchmarkRun', () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
     const repo = await import('./benchmark-repository');
     const spy = vi.spyOn(repo, 'updateBenchmarkRunStatus').mockResolvedValueOnce({ ok: false, error: 'store closed' });
-    const outcome = await startBenchmarkRun(s, succeedingTransport());
+    const outcome = await startStored(s, succeedingTransport());
     spy.mockRestore();
 
     // The runner wanted to report 'completed', but since that status write itself failed, it
@@ -290,7 +543,7 @@ describe('startBenchmarkRun', () => {
       stopController.stop(); // simulate a Stop request arriving mid-run
       return { ok: true, responseText: 'ok' };
     };
-    const outcome = await startBenchmarkRun(s, transport, stopController);
+    const outcome = await startStored(s, transport, stopController);
     expect(outcome.result?.status).toBe('stopped');
     expect(calls).toBe(1); // second position never dispatched
     const attempts = await listAttemptsForRun(outcome.run!.id);
@@ -306,7 +559,7 @@ describe('startBenchmarkRun', () => {
     const stopController = createStopController();
     stopController.stop(); // already stopped before the run starts
     let transportCalled = false;
-    const outcome = await startBenchmarkRun(s, async () => { transportCalled = true; return { ok: true, responseText: 'x' }; }, stopController);
+    const outcome = await startStored(s, async () => { transportCalled = true; return { ok: true, responseText: 'x' }; }, stopController);
     expect(outcome.result?.status).toBe('stopped');
     expect(transportCalled).toBe(false);
     const attempts = await listAttemptsForRun(outcome.run!.id);
@@ -324,7 +577,7 @@ describe('resumeBenchmarkRun', () => {
       stopController.stop();
       return { ok: true, responseText: 'first succeeded' };
     };
-    const started = await startBenchmarkRun(s, transport, stopController);
+    const started = await startStored(s, transport, stopController);
     expect(started.result?.status).toBe('stopped');
     const afterFirstRun = await listAttemptsForRun(started.run!.id);
     expect(afterFirstRun.value).toHaveLength(1);
@@ -344,7 +597,7 @@ describe('resumeBenchmarkRun', () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
     const stopController = createStopController();
     stopController.stop();
-    const started = await startBenchmarkRun(s, succeedingTransport(), stopController);
+    const started = await startStored(s, succeedingTransport(), stopController);
     // Nothing dispatched yet since Stop was already set before the run started; simulate an
     // uncertain attempt directly to exercise the "was dispatched, crash before terminal" case.
     const repo = await import('./benchmark-repository');
@@ -380,7 +633,7 @@ describe('resumeBenchmarkRun', () => {
 
   it('resuming a run with nothing pending marks it completed without calling the transport', async () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
-    const started = await startBenchmarkRun(s, succeedingTransport());
+    const started = await startStored(s, succeedingTransport());
     let called = false;
     const resumed = await resumeBenchmarkRun(started.run!.id, async () => { called = true; return { ok: true, responseText: 'x' }; });
     expect(resumed.result).toEqual({ status: 'completed' });
@@ -392,6 +645,7 @@ describe('resumeBenchmarkRun', () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
     const repo = await import('./benchmark-repository');
     const runId = 'run-no-started-at';
+    expect((await repo.putBenchmarkSuite(s)).ok).toBe(true);
     // Simulate a run row that was created without startedAt (e.g. an older schema or a
     // never-actually-started row) to exercise the `run.startedAt ?? Date.now()` fallback.
     await repo.createBenchmarkRun({
@@ -411,16 +665,102 @@ describe('resumeBenchmarkRun', () => {
     expect(resumed.run!.startedAt).toBe(stored.value!.startedAt);
   });
 
+  it('clears a stale finalizedAt when resuming a previously finalized (stopped) run', async () => {
+    const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
+    const stopController = createStopController();
+    stopController.stop();
+    const started = await startStored(s, succeedingTransport(), stopController);
+    expect(started.result?.status).toBe('stopped');
+    // Simulate the halt path having stamped finalizedAt on the stopped row (as
+    // updateBenchmarkRunStatus/haltWith do for every terminal transition).
+    const repo = await import('./benchmark-repository');
+    const stoppedPatch = await repo.updateBenchmarkRunStatus(started.run!.id, 'stopped', { finalizedAt: 12345 });
+    expect(stoppedPatch.ok).toBe(true);
+    const beforeResume = await getBenchmarkRun(started.run!.id);
+    expect(beforeResume.value!.finalizedAt).toBe(12345);
+
+    let releaseTransport: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { releaseTransport = resolve; });
+    let signalEnteredTransport: () => void = () => {};
+    const enteredTransport = new Promise<void>((resolve) => { signalEnteredTransport = resolve; });
+    const gatedTransport: AttemptTransport = async () => {
+      // Signal *before* awaiting the gate: by the time the attempt transport runs, resume has
+      // already completed its status-update await, so this is a deterministic proxy for
+      // "resume's transition to 'running' has landed in storage" -- no polling/fixed-tick guess
+      // about how many IndexedDB macrotasks the fake-indexeddb backend needs.
+      signalEnteredTransport();
+      await gate;
+      return { ok: true, responseText: 'ok' };
+    };
+    const resumePromise = resumeBenchmarkRun(started.run!.id, gatedTransport);
+    try {
+      await enteredTransport;
+      const whileRunning = await getBenchmarkRun(started.run!.id);
+
+      // While the resumed run is genuinely live ('running'), storage must not still report the
+      // finalization timestamp from before it was resumed.
+      expect(whileRunning.value!.status).toBe('running');
+      expect(whileRunning.value!.finalizedAt).toBeUndefined();
+    } finally {
+      // Always release the transport so the pending resume settles, even if an assertion above
+      // throws -- otherwise a failing run of this test leaves a dangling promise.
+      releaseTransport();
+    }
+    const resumed = await resumePromise;
+    expect(resumed.result).toEqual({ status: 'completed' });
+    // Completion legitimately re-stamps its own fresh finalizedAt — the bug was specifically
+    // the stale value being visible while resumed and running, not the absence of one at
+    // eventual completion.
+    expect(resumed.run!.finalizedAt).toEqual(expect.any(Number));
+    expect(resumed.run!.finalizedAt).not.toBe(12345);
+  });
+
   it('fails cleanly when resuming a run id that does not exist', async () => {
     const resumed = await resumeBenchmarkRun('missing', succeedingTransport());
     expect(resumed.ok).toBe(false);
+  });
+
+  it('rejects resume of a legacy same-alias/different-variant run and never calls the transport', async () => {
+    const legacySuite = suite({
+      targets: [
+        { alias: 'model-a', variantId: 'v1' },
+        { alias: 'model-a', variantId: 'v2' },
+      ],
+    });
+    const db = await openBenchmarkDatabase();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction('runs', 'readwrite');
+        tx.oncomplete = () => resolve();
+        tx.onabort = () => reject(tx.error);
+        tx.onerror = () => reject(tx.error);
+        tx.objectStore('runs').put({
+          id: 'legacy-dup-alias',
+          suiteId: 'suite-1',
+          suite: legacySuite,
+          createdAt: Date.now(),
+          status: 'stopped',
+        });
+      });
+    } finally {
+      db.close();
+    }
+
+    let called = false;
+    const resumed = await resumeBenchmarkRun('legacy-dup-alias', async () => {
+      called = true;
+      return { ok: true, responseText: 'x' };
+    });
+    expect(resumed.ok).toBe(false);
+    expect(resumed.error).toMatch(/cannot be resumed: its suite snapshot has duplicate target aliases/);
+    expect(called).toBe(false);
   });
 
   it('proof gate: rejects a second concurrent resume of the same run id instead of duplicating dispatches', async () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
     const stopController = createStopController();
     stopController.stop();
-    const started = await startBenchmarkRun(s, succeedingTransport(), stopController);
+    const started = await startStored(s, succeedingTransport(), stopController);
     expect(started.result?.status).toBe('stopped');
 
     let releaseFirstCall: () => void = () => {};
@@ -448,5 +788,66 @@ describe('resumeBenchmarkRun', () => {
     // Exactly one execution was ever recorded for the logical position — no duplicate dispatch.
     const attempts = await listAttemptsForRun(started.run!.id);
     expect(attempts.value).toHaveLength(1);
+  });
+
+  it('proof gate: claims the run id before any reservation-check await, so a call whose reservation reads are already in flight cannot let a second concurrent start slip through and double-dispatch', async () => {
+    // Reproduces the exact race the review comment described: call 1 reads a fresh "running +
+    // zero attempts" reservation, but is suspended (by this test) right after capturing that
+    // snapshot and before it can act on it. While call 1 is suspended, call 2 runs to completion
+    // for the same run id, dispatches the schedule, and releases `activeRunIds`. Call 1 then
+    // resumes holding its now-stale zero-attempts snapshot. Before this fix, call 1 would pass
+    // every remaining check against that stale snapshot and dispatch the schedule a second time.
+    // Reverting the `startBenchmarkRun` fix and running only this test proves it goes red: two
+    // attempt rows get recorded for the same logical position and both calls report success.
+    const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
+    const put = await putBenchmarkSuite(s);
+    expect(put.ok).toBe(true);
+    const prepared = await prepareBenchmarkRun(s);
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) throw new Error('unreachable');
+
+    let releaseFirst: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let firstCaptured: () => void = () => {};
+    const captured = new Promise<void>((resolve) => { firstCaptured = resolve; });
+    let listCalls = 0;
+    const originalListAttemptsForRun = benchmarkRepository.listAttemptsForRun;
+    const listSpy = vi.spyOn(benchmarkRepository, 'listAttemptsForRun').mockImplementation(async (id) => {
+      listCalls += 1;
+      const isFirstCall = listCalls === 1;
+      const result = await originalListAttemptsForRun(id); // real read, captured now (correctly zero at this point)
+      if (isFirstCall) {
+        firstCaptured(); // tell the test call 1 has its (soon-to-be-stale) snapshot in hand
+        await gate; // ...but hold it from acting on that snapshot until call 2 has finished
+      }
+      return result;
+    });
+
+    try {
+      let calls = 0;
+      const transport: AttemptTransport = async () => { calls++; return { ok: true, responseText: 'x' }; };
+      const first = startBenchmarkRun(s, transport, undefined, prepared.run);
+      // Wait until call 1 has captured its own reservation snapshot before starting call 2, so
+      // call 2's read of "zero attempts" is guaranteed to happen (and this whole race to be
+      // possible) before either call has written anything.
+      await captured;
+      const second = await startBenchmarkRun(s, transport, undefined, prepared.run);
+      releaseFirst();
+      const firstOutcome = await first;
+
+      const outcomes = [firstOutcome, second];
+      const succeeded = outcomes.filter((o) => o.ok);
+      const rejected = outcomes.filter((o) => !o.ok);
+      expect(succeeded).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0].ok === false && rejected[0].error).toMatch(/is already active/);
+      expect(calls).toBe(1);
+
+      // Exactly one execution was ever recorded for the logical position — no duplicate dispatch.
+      const attempts = await listAttemptsForRun(prepared.run.id);
+      expect(attempts.value).toHaveLength(1);
+    } finally {
+      listSpy.mockRestore();
+    }
   });
 });

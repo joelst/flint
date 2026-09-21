@@ -41,6 +41,7 @@ export const IPC_COMMAND_DEADLINES_MS: Record<SidecarCommandName, number | null>
   setEvictionConfig: null,
   setModelPriorities: null,
   applyMemorySettings: null,
+  setBenchmarkExclusive: null,
   wslEnableMirrored: null,
   wslShutdown: null,
   chatCompletion: null,

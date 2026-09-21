@@ -3,14 +3,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createBenchmarkRun,
   deleteBenchmarkSuite,
+  deleteBenchmarkSuiteIfNoRuns,
+  countBenchmarkRunsBySuite,
+  countBenchmarkRunsForSuite,
   getBenchmarkRun,
+  getBenchmarkRunWithAttempts,
   getBenchmarkSuite,
   listAttemptsForRun,
+  listAttemptSummariesForRun,
+  listBenchmarkRunHeadersForSuite,
   listBenchmarkRunsForSuite,
   listBenchmarkSuites,
   listDispatchedAttemptsForRun,
   openBenchmarkDatabase,
   putBenchmarkSuite,
+  putBenchmarkSuiteIfNoRuns,
   recordAttemptDispatched,
   recordAttemptTerminal,
   updateBenchmarkRunStatus,
@@ -26,6 +33,15 @@ const suite = (over: Partial<BenchmarkSuite> = {}): BenchmarkSuite => ({
   cases: [{ id: 'c1', prompt: 'What is 2+2?' }],
   warmupCount: 1,
   repeatCount: 1,
+  ...over,
+});
+
+const run = (over: Partial<BenchmarkRun> = {}): BenchmarkRun => ({
+  id: 'run-1',
+  suiteId: 'suite-1',
+  suite: suite(),
+  createdAt: 1700000000000,
+  status: 'running',
   ...over,
 });
 
@@ -51,7 +67,7 @@ afterEach(async () => {
 describe('benchmark-repository', () => {
   it('can rerun suites-store setup when the database version increases', async () => {
     expect((await putBenchmarkSuite(suite())).ok).toBe(true);
-    const db = await openBenchmarkDatabase(2);
+    const db = await openBenchmarkDatabase();
     try {
       expect(Array.from(db.objectStoreNames)).toContain('suites');
     } finally {
@@ -102,6 +118,43 @@ describe('benchmark-repository', () => {
   it('deleting a suite that does not exist is not an error', async () => {
     const del = await deleteBenchmarkSuite('does-not-exist');
     expect(del.ok).toBe(true);
+  });
+
+  it('putBenchmarkSuiteIfNoRuns saves a suite with zero runs', async () => {
+    const result = await putBenchmarkSuiteIfNoRuns(suite());
+    expect(result).toEqual({ ok: true, value: undefined });
+    const got = await getBenchmarkSuite('suite-1');
+    expect(got.value).toEqual(suite());
+  });
+
+  it('putBenchmarkSuiteIfNoRuns rejects once the suite has any runs, atomically with the write', async () => {
+    await putBenchmarkSuite(suite());
+    await createBenchmarkRun(run());
+    const result = await putBenchmarkSuiteIfNoRuns(suite({ name: 'Renamed' }));
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/run\(s\) and can no longer be edited/);
+    // The rejected write must not have landed — this is what makes it a real invariant rather
+    // than an advisory check the caller could race past.
+    const got = await getBenchmarkSuite('suite-1');
+    expect(got.value?.name).toBe('Arithmetic');
+  });
+
+  it('deleteBenchmarkSuiteIfNoRuns deletes a suite with zero runs', async () => {
+    await putBenchmarkSuite(suite());
+    const result = await deleteBenchmarkSuiteIfNoRuns('suite-1');
+    expect(result).toEqual({ ok: true, value: undefined });
+    const got = await getBenchmarkSuite('suite-1');
+    expect(got.value).toBeNull();
+  });
+
+  it('deleteBenchmarkSuiteIfNoRuns refuses to delete once the suite has any runs', async () => {
+    await putBenchmarkSuite(suite());
+    await createBenchmarkRun(run());
+    const result = await deleteBenchmarkSuiteIfNoRuns('suite-1');
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/run\(s\) and cannot be deleted/);
+    const got = await getBenchmarkSuite('suite-1');
+    expect(got.value).not.toBeNull();
   });
 
   it('reports a stored corrupt row as an error, rather than silently excluding it', async () => {
@@ -167,7 +220,7 @@ describe('benchmark-repository', () => {
     // module's wrapper, which never deliberately aborts on a normal write) — the property a
     // future runner's checkpoint writes will depend on.
     await new Promise<void>((resolve, reject) => {
-      const req = indexedDB.open('flint-benchmarks', 2);
+      const req = indexedDB.open('flint-benchmarks');
       req.onsuccess = () => {
         const db = req.result;
         const tx = db.transaction('suites', 'readwrite');
@@ -443,6 +496,9 @@ describe('benchmark-repository', () => {
 
 describe('benchmark-repository: runs and attempts (v2)', () => {
   const testSuite = suite();
+  beforeEach(async () => {
+    await putBenchmarkSuite(testSuite);
+  });
   const testRun = (over: Partial<BenchmarkRun> = {}): BenchmarkRun => ({
     id: 'run-1',
     suiteId: testSuite.id,
@@ -470,7 +526,8 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
   it('migrating a database that already has suites (v1) preserves them once upgraded to v2', async () => {
     // Simulates an existing v1 install: create only the `suites` store and one row, exactly as
     // the original PR3 schema would have left on disk, before this module ever runs its own v2
-    // upgrade path.
+    // upgrade path. Nested beforeEach already opened v3, so wipe first.
+    await resetDatabase();
     await new Promise<void>((resolve, reject) => {
       const req = indexedDB.open('flint-benchmarks', 1);
       req.onupgradeneeded = () => {
@@ -491,16 +548,222 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
 
     const db = await openBenchmarkDatabase();
     try {
-      expect(Array.from(db.objectStoreNames).sort()).toEqual(['attempts', 'runs', 'suites']);
+      expect(Array.from(db.objectStoreNames).sort()).toEqual(['attemptSummaries', 'attempts', 'runHeaders', 'runs', 'suites']);
     } finally {
       db.close();
     }
+  });
+
+  it('backfills attemptSummaries from existing v2 attempt rows on upgrade to v3', async () => {
+    await resetDatabase();
+    const seeded = testAttempt({
+      status: 'succeeded',
+      responseText: 'a full response that must not appear on the summary',
+      settledAt: 1700000002000,
+    });
+    await new Promise<void>((resolve, reject) => {
+      const req = indexedDB.open('flint-benchmarks', 2);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        db.createObjectStore('suites', { keyPath: 'id' });
+        const runs = db.createObjectStore('runs', { keyPath: 'id' });
+        runs.createIndex('bySuiteId', 'suiteId');
+        const attempts = db.createObjectStore('attempts', { keyPath: 'id' });
+        attempts.createIndex('byRunId', 'runId');
+        attempts.createIndex('byRunStatus', ['runId', 'status']);
+      };
+      req.onsuccess = () => {
+        const db = req.result;
+        const tx = db.transaction(['suites', 'runs', 'attempts'], 'readwrite');
+        tx.objectStore('suites').put(testSuite);
+        tx.objectStore('runs').put(testRun());
+        tx.objectStore('attempts').put(seeded);
+        tx.objectStore('attempts').put(testAttempt({
+          id: 'exec-2',
+          logicalAttemptId: 't0:c0:r1',
+          repeatIndex: 1,
+          sequence: 1,
+          status: 'succeeded',
+          responseText: 'a second full response that must also not appear on the summary',
+          settledAt: 1700000003000,
+        }));
+        tx.oncomplete = () => { db.close(); resolve(); };
+        tx.onerror = () => { db.close(); reject(tx.error); };
+      };
+      req.onerror = () => reject(req.error);
+    });
+
+    const summaries = await listAttemptSummariesForRun('run-1');
+    expect(summaries.ok).toBe(true);
+    expect(summaries.value).toHaveLength(2);
+    expect(summaries.value).toEqual(expect.arrayContaining([
+      {
+        id: 'exec-1',
+        runId: 'run-1',
+        logicalAttemptId: 't0:c0:r0',
+        targetIndex: 0,
+        phase: 'measured',
+        caseIndex: 0,
+        repeatIndex: 0,
+        sequence: 0,
+        status: 'succeeded',
+        intentCommittedAt: 1700000001000,
+      },
+      {
+        id: 'exec-2',
+        runId: 'run-1',
+        logicalAttemptId: 't0:c0:r1',
+        targetIndex: 0,
+        phase: 'measured',
+        caseIndex: 0,
+        repeatIndex: 1,
+        sequence: 1,
+        status: 'succeeded',
+        intentCommittedAt: 1700000001000,
+      },
+    ]));
+    expect(summaries.value!.every((row) => !('responseText' in row))).toBe(true);
+  });
+
+  it('aborts v3 upgrade when a v2 attempt row fails validation', async () => {
+    await resetDatabase();
+    await new Promise<void>((resolve, reject) => {
+      const req = indexedDB.open('flint-benchmarks', 2);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        db.createObjectStore('suites', { keyPath: 'id' });
+        const runs = db.createObjectStore('runs', { keyPath: 'id' });
+        runs.createIndex('bySuiteId', 'suiteId');
+        const attempts = db.createObjectStore('attempts', { keyPath: 'id' });
+        attempts.createIndex('byRunId', 'runId');
+        attempts.createIndex('byRunStatus', ['runId', 'status']);
+      };
+      req.onsuccess = () => {
+        const db = req.result;
+        const tx = db.transaction('attempts', 'readwrite');
+        tx.objectStore('attempts').put({ id: 'corrupt', runId: 'run-1', not: 'valid' });
+        tx.oncomplete = () => { db.close(); resolve(); };
+        tx.onerror = () => { db.close(); reject(tx.error); };
+      };
+      req.onerror = () => reject(req.error);
+    });
+
+    await expect(openBenchmarkDatabase()).rejects.toThrow(/backfill|Could not open|abort|fail/i);
+  });
+
+  it('backfills runHeaders from existing v3 run rows on upgrade to v4', async () => {
+    await resetDatabase();
+    await new Promise<void>((resolve, reject) => {
+      const req = indexedDB.open('flint-benchmarks', 3);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        db.createObjectStore('suites', { keyPath: 'id' });
+        const runs = db.createObjectStore('runs', { keyPath: 'id' });
+        runs.createIndex('bySuiteId', 'suiteId');
+        const attempts = db.createObjectStore('attempts', { keyPath: 'id' });
+        attempts.createIndex('byRunId', 'runId');
+        attempts.createIndex('byRunStatus', ['runId', 'status']);
+        const summaries = db.createObjectStore('attemptSummaries', { keyPath: 'id' });
+        summaries.createIndex('byRunId', 'runId');
+      };
+      req.onsuccess = () => {
+        const db = req.result;
+        const tx = db.transaction(['suites', 'runs'], 'readwrite');
+        tx.objectStore('suites').put(testSuite);
+        tx.objectStore('runs').put(testRun());
+        tx.oncomplete = () => { db.close(); resolve(); };
+        tx.onerror = () => { db.close(); reject(tx.error); };
+      };
+      req.onerror = () => reject(req.error);
+    });
+
+    const headers = await listBenchmarkRunHeadersForSuite(testSuite.id);
+    expect(headers.ok).toBe(true);
+    expect(headers.value).toHaveLength(1);
+    expect(headers.value![0]).toMatchObject({ id: 'run-1', suiteId: testSuite.id, status: 'running' });
+    expect(headers.value![0]).not.toHaveProperty('suite');
+  });
+
+  it('refuses to create a run whose frozen snapshot no longer matches the stored suite', async () => {
+    await putBenchmarkSuite(testSuite);
+    const stale = testRun({
+      suite: { ...testSuite, cases: [{ id: 'c-edited', prompt: 'changed' }] },
+    });
+    const result = await createBenchmarkRun(stale);
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/stale snapshot/);
+    expect(await getBenchmarkRun('run-1')).toEqual({ ok: true, value: null });
+  });
+
+  it('refuses to create a run whose suite row no longer exists', async () => {
+    await deleteBenchmarkSuite(testSuite.id);
+    const result = await createBenchmarkRun(testRun());
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/does not exist/);
+    expect(await getBenchmarkRun('run-1')).toEqual({ ok: true, value: null });
   });
 
   it('round-trips a run through create/get, and lists it by suite', async () => {
     expect(await createBenchmarkRun(testRun())).toEqual({ ok: true, value: undefined });
     expect(await getBenchmarkRun('run-1')).toEqual({ ok: true, value: testRun() });
     expect(await listBenchmarkRunsForSuite(testSuite.id)).toEqual({ ok: true, value: [testRun()] });
+    const headers = await listBenchmarkRunHeadersForSuite(testSuite.id);
+    expect(headers.ok).toBe(true);
+    expect(headers.value).toEqual([{
+      id: 'run-1',
+      suiteId: testSuite.id,
+      createdAt: testRun().createdAt,
+      status: 'running',
+      ...(testRun().startedAt !== undefined ? { startedAt: testRun().startedAt } : {}),
+    }]);
+    expect(headers.value![0]).not.toHaveProperty('suite');
+  });
+
+  it('countBenchmarkRunsForSuite matches listBenchmarkRunsForSuite length without reading full rows', async () => {
+    expect(await countBenchmarkRunsForSuite(testSuite.id)).toEqual({ ok: true, value: 0 });
+    await createBenchmarkRun(testRun());
+    await createBenchmarkRun(testRun({ id: 'run-2' }));
+    expect(await countBenchmarkRunsForSuite(testSuite.id)).toEqual({ ok: true, value: 2 });
+    expect(await countBenchmarkRunsForSuite('no-such-suite')).toEqual({ ok: true, value: 0 });
+  });
+
+  it('countBenchmarkRunsBySuite aggregates every suite in one transaction', async () => {
+    await putBenchmarkSuite(testSuite);
+    await putBenchmarkSuite({ ...testSuite, id: 'suite-2', name: 'Other' });
+    await createBenchmarkRun(testRun());
+    await createBenchmarkRun(testRun({ id: 'run-2' }));
+    await createBenchmarkRun(testRun({ id: 'run-3', suiteId: 'suite-2', suite: { ...testSuite, id: 'suite-2', name: 'Other' } }));
+    expect(await countBenchmarkRunsBySuite()).toEqual({
+      ok: true,
+      value: { [testSuite.id]: 2, 'suite-2': 1 },
+    });
+  });
+
+  it('countBenchmarkRunsBySuite does not lose a count for a suite id shadowing Object.prototype', async () => {
+    // A suite id like `__proto__` is a valid string and must not collide with the aggregation
+    // dictionary's own prototype chain — that would silently drop/misreport its count.
+    const protoSuite = { ...testSuite, id: '__proto__', name: 'Proto' };
+    await putBenchmarkSuite(protoSuite);
+    await createBenchmarkRun(testRun({ suiteId: '__proto__', suite: protoSuite }));
+    const result = await countBenchmarkRunsBySuite();
+    expect(result.ok).toBe(true);
+    expect((result as any).value.__proto__).toBe(1);
+    expect(Object.prototype.hasOwnProperty.call((result as any).value, '__proto__')).toBe(true);
+  });
+
+  it('getBenchmarkRunWithAttempts returns null for a run id that does not exist', async () => {
+    expect(await getBenchmarkRunWithAttempts('missing')).toEqual({ ok: true, value: null });
+  });
+
+  it('getBenchmarkRunWithAttempts reads the run and its full attempt history together', async () => {
+    await createBenchmarkRun(testRun());
+    await recordAttemptDispatched(testAttempt());
+    await recordAttemptTerminal('exec-1', { status: 'succeeded', responseText: 'hi', settledAt: 42 });
+    const result = await getBenchmarkRunWithAttempts('run-1');
+    expect(result.ok).toBe(true);
+    expect(result.value!.run).toEqual(testRun());
+    expect(result.value!.attempts).toHaveLength(1);
+    expect(result.value!.attempts[0]).toMatchObject({ id: 'exec-1', status: 'succeeded', responseText: 'hi' });
   });
 
   it('returns null (not an error) for a run id that does not exist', async () => {
@@ -519,6 +782,17 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
     expect(update).toEqual({ ok: true, value: undefined });
     const got = await getBenchmarkRun('run-1');
     expect(got.value).toEqual(testRun({ status: 'completed', startedAt: 5, finalizedAt: 9 }));
+    expect(await listBenchmarkRunHeadersForSuite(testSuite.id)).toEqual({
+      ok: true,
+      value: [{
+        id: 'run-1',
+        suiteId: testSuite.id,
+        createdAt: testRun().createdAt,
+        status: 'completed',
+        startedAt: 5,
+        finalizedAt: 9,
+      }],
+    });
   });
 
   it('updateBenchmarkRunStatus fails when the run does not exist', async () => {
@@ -531,6 +805,24 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
     expect(result).toEqual({ ok: true, value: undefined });
     const listed = await listAttemptsForRun('run-1');
     expect(listed).toEqual({ ok: true, value: [testAttempt()] });
+  });
+
+  it('reads attempt summaries from the projection store, not full attempt bodies', async () => {
+    await recordAttemptDispatched(testAttempt());
+    const summaries = await listAttemptSummariesForRun('run-1');
+    expect(summaries.ok).toBe(true);
+    expect(summaries.value).toEqual([{
+      id: 'exec-1',
+      runId: 'run-1',
+      logicalAttemptId: 't0:c0:r0',
+      targetIndex: 0,
+      phase: 'measured',
+      caseIndex: 0,
+      repeatIndex: 0,
+      sequence: 0,
+      status: 'dispatched',
+      intentCommittedAt: 1700000001000,
+    }]);
   });
 
   it('rejects recordAttemptDispatched for a non-dispatched status, matching the write-ahead-only contract', async () => {
@@ -595,6 +887,33 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
     expect(forRun1.value?.map((a) => a.id)).toEqual(['exec-1']);
   });
 
+  it('listAttemptSummariesForRun projects out response/usage/error fields, keeping only what progress polling needs', async () => {
+    await recordAttemptDispatched(testAttempt({ id: 'exec-1', logicalAttemptId: 't0:c0:r0' }));
+    await recordAttemptTerminal('exec-1', { status: 'succeeded', responseText: 'a long response body', settledAt: 2 });
+
+    const summaries = await listAttemptSummariesForRun('run-1');
+    expect(summaries).toEqual({
+      ok: true,
+      value: [{
+        id: 'exec-1',
+        runId: 'run-1',
+        logicalAttemptId: 't0:c0:r0',
+        targetIndex: 0,
+        phase: 'measured',
+        caseIndex: 0,
+        repeatIndex: 0,
+        sequence: 0,
+        status: 'succeeded',
+        intentCommittedAt: 1700000001000,
+      }],
+    });
+    // Response text, usage, and error stay off the lightweight projection; intentCommittedAt
+    // is kept so live progress can tell this session's in-flight work from leftover dispatched.
+    expect(summaries.value![0]).not.toHaveProperty('responseText');
+    expect(summaries.value![0]).not.toHaveProperty('usage');
+    expect(summaries.value![0]).not.toHaveProperty('errorMessage');
+  });
+
   it('reports a stored corrupt attempt row as an error rather than silently excluding it', async () => {
     const db = await openBenchmarkDatabase();
     await new Promise<void>((resolve, reject) => {
@@ -606,6 +925,21 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
     db.close();
 
     const listed = await listAttemptsForRun('run-1');
+    expect(listed.ok).toBe(false);
+    expect(listed.error).toMatch(/failed validation/);
+  });
+
+  it('reports a stored corrupt attempt summary row as an error rather than silently misplacing it', async () => {
+    const db = await openBenchmarkDatabase();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction('attemptSummaries', 'readwrite');
+      tx.objectStore('attemptSummaries').put({ id: 'corrupt', runId: 'run-1', not: 'valid' });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+
+    const listed = await listAttemptSummariesForRun('run-1');
     expect(listed.ok).toBe(false);
     expect(listed.error).toMatch(/failed validation/);
   });

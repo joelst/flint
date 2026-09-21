@@ -1,4 +1,5 @@
 import type { CompareResult } from './comparison-history';
+import { usageFromChatCompletion } from './chat-usage';
 
 export type CompareSlotError = {
   certainty?: string;
@@ -56,10 +57,6 @@ export function buildFailedCompareResult(
   };
 }
 
-function finiteToken(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
-}
-
 /** Wall-clock deltas can go negative if the system clock steps backward. */
 function elapsedMs(started: number | null, ended: number): number | undefined {
   if (started == null) return undefined;
@@ -84,11 +81,12 @@ export function buildSettledCompareResult(opts: {
   servedVariantId?: string | null;
   activeExecutionProvider?: string | null;
 }): CompareResult {
+  const usage = usageFromChatCompletion(opts.usage);
   return {
     content: opts.content,
     latencyMs: opts.stopRequested ? undefined : elapsedMs(opts.inferenceStarted, opts.now),
-    tokensIn: finiteToken(opts.usage.prompt_tokens) ?? finiteToken(opts.usage.input_tokens),
-    tokensOut: finiteToken(opts.usage.completion_tokens) ?? finiteToken(opts.usage.output_tokens),
+    tokensIn: usage?.promptTokens,
+    tokensOut: usage?.completionTokens,
     rating: null,
     status: opts.stopRequested ? 'stopped' : 'completed',
     ttftMs:

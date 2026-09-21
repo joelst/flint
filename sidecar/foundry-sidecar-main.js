@@ -25,6 +25,7 @@ import { assertWavBuffer } from './audio-format.js';
 import { createGateway } from './gateway.js';
 import { formatPublicEndpoint } from './gateway-http.js';
 import { buildModelIndex, resolveModelId } from './model-registry.js';
+import { waitUntilIdle } from './monotonic-wait.js';
 import {
   createOperationAdmission,
   createServiceTransitionLock,
@@ -85,6 +86,67 @@ const rl = readline.createInterface({ input: process.stdin, terminal: false });
 const SIDECAR_PROTOCOL_VERSION = 1;
 const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS = 5_000;
 const operationAdmission = createOperationAdmission();
+/** Gateway-only exclusive lease for a measured benchmark. IPC chat/load still run (the
+ * Preview uses those). Pinning does not stop a gateway autoload from switching variants. */
+let benchmarkExclusive = false;
+// Overridable only for integration tests, which need a drain deadline far shorter than 10s to
+// exercise the "could not drain in time" path without a correspondingly slow test. Must stay
+// finite: an unbounded value (e.g. "Infinity") would let a stuck gateway request block the
+// endpoint forever instead of failing after the intended drain deadline.
+const parsedBenchmarkExclusiveDrainMs = Number(process.env.FLINT_BENCHMARK_EXCLUSIVE_DRAIN_MS);
+const BENCHMARK_EXCLUSIVE_DRAIN_MS = Number.isFinite(parsedBenchmarkExclusiveDrainMs) && parsedBenchmarkExclusiveDrainMs > 0
+  ? parsedBenchmarkExclusiveDrainMs
+  : 10_000;
+
+// Commands that either run real inference against the shared pool, or mutate/populate what the
+// pool holds. Draining only `gatewayRequest` missed IPC `chatCompletion` (and the other inference
+// commands) entirely, and inference-only draining still missed `load`/`unload`/`deleteModel`:
+// this sidecar process -- and any operation it already admitted -- survives a frontend reload, so
+// an old page's still-running command from a *previous*, now-gone benchmark (or Models/Monitor)
+// session is invisible to the new page's own busy-state checks (those only see this page's
+// in-memory state). Without this, exclusive admission could be granted while:
+//   - an orphaned `chatCompletion`/`transcribeAudio`/`embedTexts` is still generating tokens
+//     against the same models the new run is about to benchmark, corrupting its latency numbers;
+//   - an orphaned `load`/`unload`/`deleteModel` is still mutating pool residency, so the new run
+//     could measure against a model that is still being unloaded, or race a stale load that
+//     hasn't finished consuming its resources yet.
+// Deliberately excludes `download`: unlike the above, a download can legitimately run for minutes
+// (multi-GB model files) and is unrelated to what a benchmark is about to measure, while the
+// drain deadline below is a fixed ~10s in production -- draining it would turn "someone is
+// downloading an unrelated model" into a routine, confusing "could not drain" benchmark-start
+// failure. The client-side admission check (`otherInferenceInFlight` in +page.svelte) still sees
+// a same-page download via `poolMutationsInFlight` and rejects it promptly; only the
+// reload-survives-it case is intentionally left unfenced here, as a scope tradeoff.
+const BENCHMARK_DRAIN_COMMANDS = new Set([
+  'gatewayRequest', 'chatCompletion', 'transcribeAudio', 'embedTexts',
+  'load', 'unload', 'deleteModel',
+]);
+
+function benchmarkDrainOperationsOutstanding() {
+  return operationAdmission.snapshot().some((op) => BENCHMARK_DRAIN_COMMANDS.has(op.command));
+}
+
+// Delegates the actual poll/deadline loop to `waitUntilIdle` (monotonic-wait.js), which measures
+// elapsed time via `performance.now()` rather than `Date.now()` — see that module's docstring for
+// why a wall-clock deadline here would let a clock rollback keep exclusivity, and therefore every
+// external gateway client, blocked well beyond this 10s limit.
+async function waitForBenchmarkDrainIdle(timeoutMs) {
+  return waitUntilIdle(() => !benchmarkDrainOperationsOutstanding(), timeoutMs);
+}
+
+// Each incoming stdin line is dispatched as its own concurrent async handler (see the `rl.on
+// ('line', ...)` loop below), so two `setBenchmarkExclusive` commands can otherwise interleave:
+// an acquire can set the flag and suspend in `waitForBenchmarkDrainIdle` while a concurrently-running
+// release (or a second acquire that then times out) clears it, after which the suspended
+// acquire resumes and reports `{ exclusive: true }` even though admission is open again. Chain
+// every transition through this queue so only one body (including its drain wait) ever runs at
+// a time; a rejected link must not break the chain for whoever queues after it.
+let benchmarkExclusiveTransitionChain = Promise.resolve();
+function serializeBenchmarkExclusiveTransition(fn) {
+  const result = benchmarkExclusiveTransitionChain.then(fn, fn);
+  benchmarkExclusiveTransitionChain = result.then(() => {}, () => {});
+  return result;
+}
 let explicitShutdownInProgress = false;
 const LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'fatal'];
 let activeLogLevel = 'info';
@@ -100,6 +162,7 @@ const KNOWN_COMMANDS = new Set([
   'inspectModelFolder', 'importModelFolder', 'linkModelFolder',
   'getModelTemplate', 'setModelTemplate',
   'setEvictionConfig', 'setModelPriorities', 'applyMemorySettings',
+  'setBenchmarkExclusive',
   'wslStatus', 'wslEnableMirrored', 'wslShutdown',
 ]);
 
@@ -130,7 +193,8 @@ const FIELD_TYPES = {
     maxResidentEnabled: 'boolean', maxResident: 'number',
   },
   setModelPriorities: { priorities: 'array' },
-  applyMemorySettings: { priorities: 'array' },
+  applyMemorySettings: { priorities: 'array', seq: 'number' },
+  setBenchmarkExclusive: { exclusive: 'boolean' },
 };
 
 // Commands that accept a lane field; validated to 'chat' | 'audio'.
@@ -174,7 +238,8 @@ const COMMAND_SCHEMA = {
   setModelTemplate:   { required: ['name', 'promptTemplate'], optional: [] },
   setEvictionConfig:  { required: [], optional: ['idleUnloadEnabled', 'idleTimeoutMs', 'maxResidentEnabled', 'maxResident'] },
   setModelPriorities: { required: ['priorities'], optional: [] },
-  applyMemorySettings: { required: ['priorities'], optional: ['eviction'] },
+  applyMemorySettings: { required: ['priorities'], optional: ['eviction', 'seq'] },
+  setBenchmarkExclusive: { required: ['exclusive'], optional: [] },
   wslStatus:          { required: [], optional: [] },
   wslEnableMirrored:  { required: [], optional: [] },
   wslShutdown:        { required: [], optional: [] },
@@ -348,6 +413,24 @@ const usage = new Map();
 const modelPriorities = new Map();
 let evictionConfig = { ...DEFAULT_EVICTION_CONFIG };
 let evictionTimer = null;
+/**
+ * Highest `applyMemorySettings` client sequence number actually installed so far, or -1 before
+ * any sequenced call has landed.
+ *
+ * The IPC transport (`sendInternal` in src/lib/sdk.ts) writes each command to the wire only once
+ * it reaches the front of a per-process write queue, and a command issued *before* another can
+ * still be delayed behind a sidecar respawn/re-init wait that the other call never hits — so two
+ * `applyMemorySettings` calls can arrive here in the opposite order from how the client issued
+ * them. Because this command fully replaces the priority map (not a merge), an older call
+ * arriving after a newer one would otherwise silently wipe out whatever the newer call just
+ * pinned/restored. The client echoes its own local monotonic `pushMemorySeq` counter in `seq`;
+ * this guard, held for the same lock as the actual install (see the `applyMemorySettings`
+ * handler), refuses to apply any call whose `seq` is not strictly newer than the last one
+ * actually installed, so a stale write can never overwrite a fresher one regardless of arrival
+ * order. `seq` is optional so older/other callers without it get no ordering guarantee, matching
+ * this field's absence before it existed.
+ */
+let lastAppliedMemorySettingsSeq = -1;
 
 /** How often the pool is checked. Fine-grained timing does not matter for a minutes-scale idle rule. */
 const EVICTION_SWEEP_MS = 30_000;
@@ -2591,16 +2674,30 @@ rl.on('line', async (line) => {
             resolve: resolveForGateway,
             // The loaded variant id is what the replayed request must name: Foundry rejects
             // the friendly alias even once the model is resident.
-            load: async (alias, variantId) => (await ensureModel(alias, variantId))?.variantId ?? null,
+            //
+            // Deliberately does not re-check `benchmarkExclusive` here: `admitRequest` is the
+            // sole fence for *new* gateway work, and by the time a request reaches `load` it has
+            // already been admitted. `setBenchmarkExclusive(true)`'s acquisition explicitly
+            // waits for admitted work to drain before it settles, so an admitted request that
+            // still needs to autoload its model must be allowed to finish -- rejecting it here
+            // would abort work the fence is supposed to let complete, not the new work it exists
+            // to block.
+            load: async (alias, variantId) => {
+              return (await ensureModel(alias, variantId))?.variantId ?? null;
+            },
             // Proxied traffic never reaches this process, so without this hook a model
             // serving a long completion would look idle and could be evicted underneath it.
             onActivity: noteActivity,
             onAccess: (entry) => appendAccessLog(entry),
             admitRequest: () => {
+              if (benchmarkExclusive) return null;
               const operationId = `gateway:${++gatewayOperationId}`;
               if (!operationAdmission.admit(operationId, 'gatewayRequest')) return null;
               return () => operationAdmission.complete(operationId);
             },
+            admissionDeniedMessage: () => benchmarkExclusive
+              ? 'A benchmark run is in progress; the local gateway is not accepting other work.'
+              : 'The local runtime is draining and is not accepting new work.',
             log,
           });
           try {
@@ -2708,6 +2805,20 @@ rl.on('line', async (line) => {
           // Legacy lane fields for frontend compatibility
           chatLane: { model: poolSnapshot[0]?.alias ?? null, endpoint: sharedEndpoint || null },
           audioLane: { model: poolSnapshot[1]?.alias ?? null, endpoint: sharedEndpoint || null },
+          // True while the gateway is refusing new admission for a benchmark run. Surfaced here
+          // (not only readable via the setBenchmarkExclusive reply) so a freshly-loaded frontend
+          // -- whose in-memory generation/retrier state always starts unset, since it has no
+          // persistence of its own -- can detect and reconcile a flag left set by a page instance
+          // that reloaded/crashed before releasing it; this sidecar process outlives that reload.
+          benchmarkExclusive,
+          // Highest `applyMemorySettings` client `seq` installed so far (see its declaration).
+          // A freshly-loaded frontend's own `pushMemorySeq` counter always restarts at 0, but
+          // this sidecar process (and this watermark) survive a reload -- without seeding the
+          // new page's counter from this value, its first several pushes would carry a `seq`
+          // at or below this watermark and be silently accepted-but-skipped (`stale: true`) by
+          // the guard below, with the page having no indication that its pin/eviction-settings
+          // push did not actually take effect.
+          lastAppliedMemorySettingsSeq,
         }
       });
     } else if (cmd === 'chatCompletion') {
@@ -3218,6 +3329,31 @@ rl.on('line', async (line) => {
       });
     } else if (cmd === 'getCacheInventory') {
       reply({ ok: true, result: await getCacheInventory() });
+    } else if (cmd === 'setBenchmarkExclusive') {
+      // Page-local busy flags cannot see OpenAI-gateway clients, and cannot see IPC calls left
+      // running by a *previous*, now-gone page instance either (this sidecar outlives a reload).
+      // Exclusive admission lives here: new gateway work is rejected, and already-admitted
+      // gateway requests, inference (chatCompletion/transcribeAudio/embedTexts), and resident-
+      // pool mutations (load/unload/deleteModel) all drain before this resolves -- see
+      // `BENCHMARK_DRAIN_COMMANDS`'s docstring for the full set and why `download` is excluded.
+      // New IPC chat/load calls (i.e. the benchmark's own) still run once granted.
+      // Serialized (see serializeBenchmarkExclusiveTransition) so a concurrently-dispatched
+      // release cannot clear the flag out from under an in-progress acquire's drain wait.
+      await serializeBenchmarkExclusiveTransition(async () => {
+        if (payload.exclusive === true) {
+          benchmarkExclusive = true;
+          const drained = await waitForBenchmarkDrainIdle(BENCHMARK_EXCLUSIVE_DRAIN_MS);
+          if (!drained) {
+            benchmarkExclusive = false;
+            reply({ error: 'Could not drain in-flight gateway/inference/pool-mutation operations before taking exclusive admission' });
+            return;
+          }
+          reply({ ok: true, result: { exclusive: true, drained: true } });
+        } else {
+          benchmarkExclusive = false;
+          reply({ ok: true, result: { exclusive: false } });
+        }
+      });
     } else if (cmd === 'setEvictionConfig') {
       // Apply immediately: a user who has just lowered the cap expects the pool to shrink
       // now, not at some point in the next half minute.
@@ -3237,9 +3373,20 @@ rl.on('line', async (line) => {
       // Both settings, then exactly one sweep. Sending them as two commands means the first
       // sweep runs under half-old settings — enough to evict a model the user just pinned, or
       // to evict under a cap they were in the process of raising.
-      const evicted = await installAndSweep(() => {
+      //
+      // The seq check and the install must share one lock acquisition: checking, then installing
+      // in a second, separately-queued `withSweepLock` call would let two calls both pass the
+      // check before either updates `lastAppliedMemorySettingsSeq`, defeating the guard exactly
+      // when it matters (two nearly-simultaneous, out-of-order arrivals).
+      const seq = typeof payload.seq === 'number' ? payload.seq : null;
+      const { evicted, stale } = await withSweepLock(async () => {
+        if (seq !== null && seq <= lastAppliedMemorySettingsSeq) {
+          return { evicted: [], stale: true };
+        }
+        if (seq !== null) lastAppliedMemorySettingsSeq = seq;
         installModelPriorities(payload.priorities);
         if (payload.eviction !== undefined) installEvictionConfig(payload.eviction);
+        return { evicted: await runEvictionSweepLocked(), stale: false };
       });
       reply({
         ok: true,
@@ -3247,6 +3394,7 @@ rl.on('line', async (line) => {
           config: { ...evictionConfig },
           priorities: [...modelPriorities.entries()].map(([alias, priority]) => ({ alias, priority })),
           evicted,
+          stale,
         },
       });
     } else if (cmd === 'getAccessLog') {

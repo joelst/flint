@@ -82,6 +82,7 @@ function isNonEmptyTrimmedString(value: unknown, maxLength: number): value is st
 function isFiniteInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value);
 }
+export { isFiniteInteger };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -90,8 +91,27 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 /** Attempts a suite's run would take: one run per target, discarded warm-ups plus measured
  * repeats across every case. Exported so validation and any future scheduler agree on the same
  * definition instead of silently drifting apart. */
-export function benchmarkAttemptCount(suite: Pick<BenchmarkSuite, 'targets' | 'cases' | 'warmupCount' | 'repeatCount'>): number {
+export function benchmarkAttemptCount(suite: {
+  targets: { length: number };
+  cases: { length: number };
+  warmupCount: number;
+  repeatCount: number;
+}): number {
   return suite.targets.length * (suite.warmupCount + suite.cases.length * suite.repeatCount);
+}
+
+/** Execution-relevant fields of a suite. Name/description may change without changing what a
+ * run would measure; targets, cases, and generation params may not. */
+export function suiteSnapshotMatchesStored(stored: BenchmarkSuite, snapshot: BenchmarkSuite): boolean {
+  const shape = (s: BenchmarkSuite) => JSON.stringify({
+    targets: s.targets,
+    cases: s.cases,
+    warmupCount: s.warmupCount,
+    repeatCount: s.repeatCount,
+    temperature: s.temperature ?? null,
+    maxTokens: s.maxTokens ?? null,
+  });
+  return shape(stored) === shape(snapshot);
 }
 
 export interface ValidationResult<T> {
@@ -196,12 +216,26 @@ function validateTarget(raw: unknown, where: string): ValidationResult<Benchmark
   return ok({ alias: (raw.alias as string).trim(), variantId });
 }
 
+export interface ValidateBenchmarkSuiteOptions {
+  /**
+   * A pre-1.0 release accepted suites with two targets sharing an alias but different
+   * `variantId`s. Tightening that rule (see the loop below) must not turn every already-stored
+   * suite/run with that shape into an unreadable row — `isStoredBenchmarkSuite` sets this to
+   * tolerate the legacy shape on read, while every write path (create/edit/import) keeps the
+   * strict default so no new suite can be saved with the now-forbidden shape.
+   */
+  allowDuplicateAliases?: boolean;
+}
+
 /**
  * Validates a complete suite. All-or-nothing: any single invalid field, duplicate id, duplicate
  * target, or attempt-count/size overage rejects the whole suite with a full error list, rather
  * than silently dropping or repairing the offending part.
  */
-export function validateBenchmarkSuite(raw: unknown): ValidationResult<BenchmarkSuite> {
+export function validateBenchmarkSuite(
+  raw: unknown,
+  options: ValidateBenchmarkSuiteOptions = {},
+): ValidationResult<BenchmarkSuite> {
   if (!isPlainObject(raw)) return fail('suite must be an object');
   const errors: string[] = [];
 
@@ -219,13 +253,27 @@ export function validateBenchmarkSuite(raw: unknown): ValidationResult<Benchmark
   if (!Array.isArray(raw.targets) || raw.targets.length < 1 || raw.targets.length > BENCHMARK_MAX_TARGETS) {
     errors.push(`targets must be an array of 1 to ${BENCHMARK_MAX_TARGETS} entries`);
   } else {
-    const seenTargets = new Set<string>();
+    // Keyed by alias alone, not alias+variant: the sidecar's model pool (and the load step
+    // before a run) is keyed by alias, so a second target sharing an alias would silently
+    // replace the first target's loaded variant before execution — the runner's alias-only
+    // `chatCompletion` transport could then record an earlier target's attempts against
+    // whichever variant happened to load last, not the one actually requested for that target.
+    const seenAliases = new Set<string>();
+    const seenExact = new Set<string>();
     for (let i = 0; i < raw.targets.length; i++) {
       const r = validateTarget(raw.targets[i], `targets[${i}]`);
       if (!r.ok) { errors.push(...r.errors); continue; }
-      const key = JSON.stringify([r.value!.alias, r.value!.variantId]);
-      if (seenTargets.has(key)) { errors.push(`targets[${i}]: duplicate target (same alias and variant)`); continue; }
-      seenTargets.add(key);
+      const exactKey = `${r.value!.alias}\0${r.value!.variantId ?? ''}`;
+      if (seenExact.has(exactKey)) {
+        errors.push(`targets[${i}]: duplicate target "${r.value!.alias}" / ${r.value!.variantId ?? 'default'}`);
+        continue;
+      }
+      seenExact.add(exactKey);
+      if (seenAliases.has(r.value!.alias) && !options.allowDuplicateAliases) {
+        errors.push(`targets[${i}]: duplicate target alias "${r.value!.alias}" (targets are keyed by alias, not alias+variant)`);
+        continue;
+      }
+      seenAliases.add(r.value!.alias);
       targets.push(r.value!);
     }
   }
@@ -286,9 +334,19 @@ export function validateBenchmarkSuite(raw: unknown): ValidationResult<Benchmark
   return ok(suite);
 }
 
-/** Type guard for defense-in-depth checks on data read back from storage. */
+/** Type guard for defense-in-depth checks on data read back from storage. Strict: matches the
+ * rules a create/edit write must satisfy. Use `isStoredBenchmarkSuite` instead when checking a
+ * row that predates a validation tightening, so an old shape does not become unreadable. */
 export function isBenchmarkSuite(value: unknown): value is BenchmarkSuite {
   return validateBenchmarkSuite(value).ok;
+}
+
+/** Defense-in-depth shape check for a suite (or a run's embedded suite snapshot) read back from
+ * storage, tolerant of the pre-1.0 shape that allowed two targets to share an alias with
+ * different `variantId`s. Never use this for a create/edit write — only for reading rows that
+ * may already be persisted under the older, looser rule. */
+export function isStoredBenchmarkSuite(value: unknown): value is BenchmarkSuite {
+  return validateBenchmarkSuite(value, { allowDuplicateAliases: true }).ok;
 }
 
 export interface JsonlImportResult {

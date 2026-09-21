@@ -148,6 +148,16 @@ let managerInstance: any = null;
 let managerReady = false;
 /** Bumped for every sidecar child, so async work can tell whether its child is still the live one. */
 let sidecarGeneration = 0;
+
+/** Current sidecar generation, for callers that must bind a whole multi-call sequence (not just
+ * one call) to "this same live child process" -- e.g. a benchmark run that acquires exclusivity
+ * and priority pins once, then depends on them holding across many later loads/dispatches. Every
+ * individual `sdk.ts` call already guards itself against a respawn happening *during* that one
+ * call, but that says nothing about a respawn that already happened *before* it started; capture
+ * this value once and compare it before/after each later call to detect that case too. */
+export function getSidecarGeneration(): number {
+  return sidecarGeneration;
+}
 let currentEndpoint: string | undefined = undefined;
 /** Init payload of the last successful init, so a crash-respawned sidecar can be re-inited. */
 let lastInitPayload: { appName: string; logLevel: string } | null = null;
@@ -1649,6 +1659,94 @@ export async function setModelPriorities(
   if (opts.refresh !== false) await refreshModels();
 }
 
+/** Gateway-only exclusive lease for a measured benchmark. IPC chat/load still run. */
+export async function setBenchmarkExclusive(exclusive: boolean): Promise<{ exclusive: boolean; drained?: boolean }> {
+  const res = await send('setBenchmarkExclusive', { exclusive });
+  return res.result ?? { exclusive };
+}
+
+/**
+ * Releases a `benchmarkExclusive` lease left set by a *previous* page instance, if the sidecar
+ * still reports one. The sidecar process outlives a frontend reload/crash-recovery (it is a
+ * long-lived child process independent of the webview), but `benchmarkExclusive` is the only
+ * state that governs gateway admission, and a fresh page load's in-memory
+ * `benchmarkExclusiveGeneration`/retrier always start unset -- they have no persistence of their
+ * own and cannot know whether an earlier, now-gone page instance ever acquired it. Left
+ * unreconciled, every external OpenAI-shaped gateway client would keep getting 503s indefinitely
+ * with no local state left to drive a retry.
+ *
+ * Callers must call this once, early at startup, before this session has ever itself acquired
+ * exclusivity (a page that later legitimately acquires it does not need or want this called
+ * again). Best-effort: a failed probe or release is reported as `false` rather than thrown, so a
+ * transient IPC hiccup during startup does not block the rest of initialization -- worst case,
+ * the existing manual/automatic release-retry banner path still recovers once a benchmark run is
+ * next started or resumed (that acquire's own release path is unaffected by this reconciliation
+ * having skipped a turn).
+ *
+ * `isSafeToRelease`, if given, is re-checked immediately before the release is sent, not only at
+ * entry: `getStatus` is a separate round trip from `setBenchmarkExclusive`, and the UI is already
+ * interactive by the time this runs (readiness is published as part of the same init this
+ * follows), so a legitimate acquire from *this* page can land in between. The caller should pass
+ * a check that is only true while this page has never itself claimed exclusivity (e.g. its own
+ * claim generation still being at its initial, never-claimed value) so a concurrent legitimate
+ * acquire aborts the release instead of being torn down by it.
+ *
+ * `onReleaseDispatched`, if given, is invoked with the release call's promise the instant it is
+ * dispatched (before it is awaited here) -- not this function's own returned promise, which does
+ * not resolve until the release settles. The caller must register it with the same
+ * `pendingExclusiveRelease` tracker every other release path already goes through: like any other
+ * release, `send('setBenchmarkExclusive', ...)` can itself wait out a sidecar respawn/re-init
+ * (see `sdk.ts`'s `sendInternal`) and lose an ordering race against a newer run's own acquire
+ * dispatched moments later, clearing that new lease out from under it. Without this hook, this
+ * reconciliation release was invisible to `pendingExclusiveRelease.join()` (awaited by Start/
+ * Resume before every acquire) -- exactly the race that join exists to close for every other
+ * release path.
+ */
+export async function reconcileBenchmarkExclusive(
+  isSafeToRelease?: () => boolean,
+  onReleaseDispatched?: (releaseCall: Promise<{ exclusive: boolean; drained?: boolean }>) => void,
+): Promise<boolean> {
+  try {
+    const status = await send('getStatus');
+    if (!status.result?.benchmarkExclusive) return false;
+    if (isSafeToRelease && !isSafeToRelease()) return false;
+    const releaseCall = send('setBenchmarkExclusive', { exclusive: false }).then((res) => res.result ?? { exclusive: false });
+    onReleaseDispatched?.(releaseCall);
+    await releaseCall;
+    return true;
+  } catch (e) {
+    console.warn('[sdk] reconcileBenchmarkExclusive failed', e);
+    return false;
+  }
+}
+
+/**
+ * Reads the sidecar's own `lastAppliedMemorySettingsSeq` watermark (see its declaration in
+ * `foundry-sidecar-main.js`), so a freshly-loaded page can seed its local `pushMemorySeq`
+ * counter above it before making its own first `applyMemorySettings` call.
+ *
+ * The sidecar process outlives a frontend reload/crash-recovery, but a page's own monotonic
+ * `pushMemorySeq` counter has no persistence of its own and always restarts at 0. Left
+ * unreconciled, this fresh page's first several pushes would carry a `seq` at or below the
+ * sidecar's retained watermark and be silently accepted-but-skipped (`stale: true` in the reply,
+ * which nothing currently surfaces to the caller) -- a pin or eviction-settings change the user
+ * just made would appear to succeed while having no actual effect.
+ *
+ * Best-effort: returns `null` on a failed probe rather than throwing, so a transient IPC hiccup
+ * during startup does not block the rest of initialization -- worst case, this page's first
+ * `applyMemorySettings` call is itself silently skipped as stale, same as before this existed.
+ */
+export async function getLastAppliedMemorySettingsSeq(): Promise<number | null> {
+  try {
+    const status = await send('getStatus');
+    const seq = status.result?.lastAppliedMemorySettingsSeq;
+    return typeof seq === 'number' ? seq : null;
+  } catch (e) {
+    console.warn('[sdk] getLastAppliedMemorySettingsSeq failed', e);
+    return null;
+  }
+}
+
 /**
  * Install eviction rules and model priorities together.
  *
@@ -1659,13 +1757,25 @@ export async function setModelPriorities(
 export async function applyMemorySettings(
   priorities: ModelPriorityEntry[],
   eviction?: Partial<EvictionConfig>,
-): Promise<EvictionConfig | null> {
+  seq?: number,
+): Promise<{ config: EvictionConfig | null; stale: boolean }> {
+  // `seq` (the caller's own monotonic push counter) lets the sidecar refuse to install this
+  // call's full-replace payload if a call with a higher `seq` already landed first -- otherwise
+  // a call delayed behind this transport's respawn/re-init wait could apply after, and silently
+  // overwrite, one issued later. See `lastAppliedMemorySettingsSeq` in foundry-sidecar-main.js.
   const res = await send('applyMemorySettings', {
     priorities,
     ...(eviction ? { eviction } : {}),
+    ...(typeof seq === 'number' ? { seq } : {}),
   });
   await refreshModels();
-  return res.result?.config ?? null;
+  // `stale` surfaces the sidecar's own ordering-guard verdict: `true` means this call's payload
+  // was *not* installed (a call with an equal or higher seq already landed first), so the config
+  // returned is whatever was already in effect, not a reflection of what this call asked for.
+  // Callers that skip seeding `seq` from `getLastAppliedMemorySettingsSeq()` at startup (or hit
+  // the rare cross-window race that seeding does not cover) get a way to notice a silently
+  // skipped pin/eviction change instead of assuming it took effect just because `ok` was true.
+  return { config: res.result?.config ?? null, stale: res.result?.stale === true };
 }
 
 export async function deleteModel(model: any, variantId?: string) {

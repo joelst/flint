@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
-import { createServer } from 'http';
+import { createServer, request as httpRequest } from 'http';
 import type { AddressInfo } from 'net';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
@@ -53,6 +53,19 @@ function waitForLine(
 
     proc.stdout.on('data', onData);
     proc.on('exit', onExit);
+  });
+}
+
+/** Kills the child and waits (briefly, best-effort) for it to actually exit, so cleanup that
+ * follows (closing an upstream server the child was still talking to, removing its temp home
+ * dir) doesn't race a process that is still shutting down. */
+function killAndWait(proc: ChildProcessWithoutNullStreams, timeoutMs = 3000): Promise<void> {
+  if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => { clearTimeout(timer); resolve(); };
+    const timer = setTimeout(done, timeoutMs);
+    proc.once('exit', done);
+    proc.kill();
   });
 }
 
@@ -162,6 +175,13 @@ describe('foundry-sidecar protocol basics', () => {
       proc.stdin.write(`${JSON.stringify({ id: 5, cmd: 'getStatus' })}\n`);
       const status = await waitForLine(proc, (msg) => msg.id === 5);
       expect(status.ok).toBe(true);
+
+      proc.stdin.write(`${JSON.stringify({ id: 6, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
+      const exclusiveOn = await waitForLine(proc, (msg) => msg.id === 6);
+      expect(exclusiveOn).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
+      proc.stdin.write(`${JSON.stringify({ id: 7, cmd: 'setBenchmarkExclusive', exclusive: false })}\n`);
+      const exclusiveOff = await waitForLine(proc, (msg) => msg.id === 7);
+      expect(exclusiveOff).toMatchObject({ ok: true, result: { exclusive: false } });
     } finally {
       if (!proc.killed) {
         proc.kill();
@@ -589,11 +609,16 @@ describe('foundry-sidecar protocol basics', () => {
     });
 
     try {
-      await waitForLine(proc, (msg) => msg.ready === true);
+      // This test does 5 sequential round trips against a real spawned child; a loaded CI
+      // runner can make any single one exceed the plain 5000ms default `waitForLine` timeout
+      // well within the outer 90000ms test timeout below, so every wait here gets an explicit,
+      // more generous per-call timeout (matching the pattern already used for other
+      // SDK-round-trip waits elsewhere in this file, e.g. lines 910/973/980/1103).
+      await waitForLine(proc, (msg) => msg.ready === true, 45000);
       proc.stdin.write(`${JSON.stringify({
         id: 50, cmd: 'init', appName: 'flint-test', logLevel: 'info'
       })}\n`);
-      expect((await waitForLine(proc, (msg) => msg.id === 50)).ok).toBe(true);
+      expect((await waitForLine(proc, (msg) => msg.id === 50, 45000)).ok).toBe(true);
 
       // Buffered (non-streaming) SDK branch.
       proc.stdin.write(`${JSON.stringify({
@@ -605,7 +630,7 @@ describe('foundry-sidecar protocol basics', () => {
         temperature: 0.42,
         maxTokens: 123,
       })}\n`);
-      const buffered = await waitForLine(proc, (msg) => msg.id === 51);
+      const buffered = await waitForLine(proc, (msg) => msg.id === 51, 45000);
       expect(buffered.ok).toBe(true);
       expect(JSON.parse(buffered.result.choices[0].message.content)).toEqual({
         temperature: 0.42,
@@ -622,9 +647,9 @@ describe('foundry-sidecar protocol basics', () => {
         temperature: 0.77,
         maxTokens: 55,
       })}\n`);
-      const streamedDelta = await waitForLine(proc, (msg) => msg.id === 52 && msg.stream === true);
+      const streamedDelta = await waitForLine(proc, (msg) => msg.id === 52 && msg.stream === true, 45000);
       expect(JSON.parse(streamedDelta.delta)).toEqual({ temperature: 0.77, maxTokens: 55 });
-      expect((await waitForLine(proc, (msg) => msg.id === 52 && msg.ok === true)).ok).toBe(true);
+      expect((await waitForLine(proc, (msg) => msg.id === 52 && msg.ok === true, 45000)).ok).toBe(true);
 
       // Omitted fields must not clobber the client's own defaults with undefined/NaN.
       proc.stdin.write(`${JSON.stringify({
@@ -634,7 +659,7 @@ describe('foundry-sidecar protocol basics', () => {
         messages: [{ role: 'user', content: 'hello' }],
         stream: false,
       })}\n`);
-      const defaulted = await waitForLine(proc, (msg) => msg.id === 53);
+      const defaulted = await waitForLine(proc, (msg) => msg.id === 53, 45000);
       expect(JSON.parse(defaulted.result.choices[0].message.content)).toEqual({
         temperature: 0.11,
         maxTokens: 7,
@@ -649,7 +674,7 @@ describe('foundry-sidecar protocol basics', () => {
         stream: false,
         temperature: 0.5,
       })}\n`);
-      const partial = await waitForLine(proc, (msg) => msg.id === 54);
+      const partial = await waitForLine(proc, (msg) => msg.id === 54, 45000);
       expect(JSON.parse(partial.result.choices[0].message.content)).toEqual({
         temperature: 0.5,
         maxTokens: 7,
@@ -658,6 +683,687 @@ describe('foundry-sidecar protocol basics', () => {
       if (!proc.killed) proc.kill();
       rmSync(homeDir, { recursive: true, force: true });
     }
+  }, 90000);
+});
+
+describe('foundry-sidecar benchmark exclusive gateway fence', () => {
+  /** Real request/response through the sidecar's actual gateway (not a mocked admitRequest,
+   * unlike gateway.test.ts) — this exercises the wiring in foundry-sidecar-main.js itself:
+   * `benchmarkExclusive`, `operationAdmission`, and `waitForBenchmarkDrainIdle`. */
+  function postToGateway(
+    port: number,
+    body: string,
+    headers: Record<string, string> = {},
+  ): Promise<{ status: number; body: string }> {
+    return new Promise((resolve, reject) => {
+      const req = httpRequest({
+        host: '127.0.0.1',
+        port,
+        path: '/v1/chat/completions',
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(body),
+          ...headers,
+        },
+      }, (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode || 0, body: data }));
+      });
+      req.on('error', reject);
+      req.end(body);
+    });
+  }
+
+  /** Like `postToGateway`, but exposes a `firstChunk` promise that resolves as soon as any
+   * response bytes reach the client. For an SSE chat completion, the gateway only completes
+   * admission once its whole `pipeline()` finishes (see gateway.js's `forward`), so receiving
+   * a first chunk deterministically proves the operation is still admitted/in-flight —
+   * without relying on a fixed sleep to "probably" win the race against the gateway. */
+  function postToGatewayStream(
+    port: number,
+    body: string,
+  ): { firstChunk: Promise<void>; done: Promise<{ status: number; body: string }> } {
+    let resolveFirstChunk: (() => void) | null = null;
+    const firstChunk = new Promise<void>((resolve) => { resolveFirstChunk = resolve; });
+    const done = new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const req = httpRequest({
+        host: '127.0.0.1',
+        port,
+        path: '/v1/chat/completions',
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+      }, (res) => {
+        let data = '';
+        res.on('data', (chunk) => {
+          data += chunk;
+          resolveFirstChunk?.();
+          resolveFirstChunk = null;
+        });
+        res.on('end', () => resolve({ status: res.statusCode || 0, body: data }));
+      });
+      req.on('error', reject);
+      req.end(body);
+    });
+    return { firstChunk, done };
+  }
+
+  /** Spawns the sidecar with a fake FoundryLocalManager (same pattern as the HTTP-fallback
+   * chat tests above) whose native service reports `upstreamPort` as its only URL, so
+   * `startService` (gateway on by default) proxies real HTTP traffic to a server we control. A
+   * short `FLINT_BENCHMARK_EXCLUSIVE_DRAIN_MS` lets the "could not drain in time" path be
+   * exercised without a correspondingly slow test. */
+  function spawnGatewaySidecar(upstreamPort: number, drainMs = 200, catalogModels: unknown[] = [], holdLoad = false) {
+    const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-gateway-fence-home-'));
+    const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
+    const corePath = join(homeDir, 'fake-core.dylib');
+    writeFileSync(corePath, '');
+    writeFileSync(loaderPath, `
+      const sdk = \`
+        class FakeModel {
+          constructor() { this.id = 'fake-variant'; this.loaded = false; }
+          async load() {
+            // Only holds when a test opts in ("holdLoad"): the default path must stay a plain,
+            // instant resolve so every other test using this helper (autoload, eviction, etc.)
+            // is unaffected. When held, this lets a test keep an IPC "load" admitted for as
+            // long as it needs to prove the exclusivity drain waits for it, exactly like
+            // "createChatClient" below already does for "chatCompletion".
+            if (${JSON.stringify(holdLoad)}) {
+              await fetch('http://127.0.0.1:${upstreamPort}/hold-load');
+            }
+            this.loaded = true;
+          }
+          isLoaded() { return this.loaded; }
+          getExecutionProvider() { return 'CPUExecutionProvider'; }
+          createChatClient() {
+            return {
+              settings: {},
+              // Held open via a GET to the test's own upstream server (same "hold" pattern the
+              // streaming-gateway-request tests below use), so a test can keep this IPC
+              // chatCompletion admitted for as long as it needs to prove the exclusivity drain
+              // actually waits for it rather than resolving immediately.
+              completeChat: async () => {
+                await fetch('http://127.0.0.1:${upstreamPort}/hold-chat');
+                return { choices: [{ message: { role: 'assistant', content: 'held-response' } }] };
+              },
+            };
+          }
+        }
+        class FakeManager {
+          constructor() {
+            this.urls = [];
+            this.catalog = {
+              getModel: async () => new FakeModel(),
+              getModels: async () => (${JSON.stringify(catalogModels)}),
+            };
+          }
+          startWebService() { this.urls = ['http://127.0.0.1:${upstreamPort}']; }
+          stopWebService() {}
+          static create() { return new FakeManager(); }
+        }
+        export { FakeManager as FoundryLocalManager };
+      \`;
+      export async function resolve(specifier, context, nextResolve) {
+        if (specifier === 'foundry-local-sdk') {
+          return { url: 'data:text/javascript,' + encodeURIComponent(sdk), shortCircuit: true };
+        }
+        return nextResolve(specifier, context);
+      }
+      export async function load(url, context, nextLoad) {
+        if (url.startsWith('data:text/javascript,')) {
+          return { format: 'module', source: decodeURIComponent(url.slice('data:text/javascript,'.length)), shortCircuit: true };
+        }
+        return nextLoad(url, context);
+      }
+    `);
+    const proc = spawn(process.execPath, [
+      '--experimental-loader', pathToFileURL(loaderPath).href, 'sidecar/foundry-sidecar.js'
+    ], {
+      cwd: process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        HOME: homeDir,
+        USERPROFILE: homeDir,
+        FLINT_FOUNDRY_CORE_PATH: corePath,
+        FLINT_BENCHMARK_EXCLUSIVE_DRAIN_MS: String(drainMs),
+      },
+    });
+    return { proc, homeDir };
+  }
+
+  /** Starts the sidecar and its gateway, returning the process, its temp home dir (for
+   * cleanup), and the gateway's bound public port. */
+  async function startedGateway(upstreamPort: number, drainMs = 200, catalogModels: unknown[] = [], holdLoad = false) {
+    const { proc, homeDir } = spawnGatewaySidecar(upstreamPort, drainMs, catalogModels, holdLoad);
+    await waitForLine(proc, (msg) => msg.ready === true);
+    proc.stdin.write(`${JSON.stringify({ id: 1, cmd: 'init', appName: 'flint-test', logLevel: 'info' })}\n`);
+    const initRes = await waitForLine(proc, (msg) => msg.id === 1);
+    if (!initRes.ok) throw new Error(`init failed: ${initRes.error}`);
+    // port: 0 — let the OS pick a free port; the endpoint in the reply reports which one the
+    // gateway actually bound (see foundry-sidecar-main.js's `sharedEndpoint` construction).
+    proc.stdin.write(`${JSON.stringify({ id: 2, cmd: 'startService', port: 0, bindAddress: '127.0.0.1' })}\n`);
+    const started = await waitForLine(proc, (msg) => msg.id === 2, 15000);
+    if (!started.ok) throw new Error(`startService failed: ${started.error}`);
+    const gatewayPort = Number(new URL(started.endpoint).port);
+    return { proc, homeDir, gatewayPort };
+  }
+
+  it('rejects a new gateway request while exclusive, and admits again after release', async () => {
+    const upstream = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }));
+    });
+    let proc: ChildProcessWithoutNullStreams | undefined;
+    let homeDir: string | undefined;
+    try {
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+      const { port: upstreamPort } = upstream.address() as AddressInfo;
+      const started = await startedGateway(upstreamPort);
+      proc = started.proc;
+      homeDir = started.homeDir;
+      const gatewayPort = started.gatewayPort;
+      // Nothing is in flight, so acquisition must not wait for the drain deadline at all.
+      const acquireStarted = Date.now();
+      proc.stdin.write(`${JSON.stringify({ id: 10, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
+      const acquired = await waitForLine(proc, (msg) => msg.id === 10, 5000);
+      expect(acquired).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
+      expect(Date.now() - acquireStarted).toBeLessThan(2000);
+
+      const denied = await postToGateway(gatewayPort, JSON.stringify({ model: 'fake-model', messages: [] }));
+      expect(denied.status).toBe(503);
+      expect(denied.body).toContain('benchmark run is in progress');
+
+      proc.stdin.write(`${JSON.stringify({ id: 11, cmd: 'setBenchmarkExclusive', exclusive: false })}\n`);
+      const released = await waitForLine(proc, (msg) => msg.id === 11, 5000);
+      expect(released).toMatchObject({ ok: true, result: { exclusive: false } });
+
+      const allowed = await postToGateway(gatewayPort, JSON.stringify({ model: 'fake-model', messages: [] }));
+      expect(allowed.status).toBe(200);
+    } finally {
+      if (proc) await killAndWait(proc);
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      if (homeDir) rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('waits for an already-admitted streaming gateway request to finish before acquiring exclusive admission', async () => {
+    // Simulates SSE token-by-token completion: the gateway only completes admission once its
+    // whole pipeline finishes (gateway.js `forward`), so the operation stays "admitted" for as
+    // long as this upstream keeps the event stream open.
+    let releaseUpstream: (() => void) | null = null;
+    const upstreamHeld = new Promise<void>((resolve) => { releaseUpstream = resolve; });
+    const upstream = createServer((req, res) => {
+      if (req.url !== '/v1/chat/completions') {
+        // Startup's own /status readiness probe must not be held, or startService itself
+        // times out before the test ever reaches the fence.
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      // Flush one token immediately so the client observes a first chunk without waiting on
+      // `upstreamHeld` — that first chunk is this test's proof the request is in flight.
+      res.write('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n');
+      void upstreamHeld.then(() => {
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+    });
+    let proc: ChildProcessWithoutNullStreams | undefined;
+    let homeDir: string | undefined;
+    try {
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+      const { port: upstreamPort } = upstream.address() as AddressInfo;
+      // A generous drain deadline: this test proves the fence waits for the in-flight request
+      // to finish, not that it gives up on it, so the deadline must not be the thing satisfied.
+      const started = await startedGateway(upstreamPort, 10_000);
+      proc = started.proc;
+      homeDir = started.homeDir;
+      const gatewayPort = started.gatewayPort;
+      const inFlightStream = postToGatewayStream(gatewayPort, JSON.stringify({
+        model: 'fake-model', messages: [], stream: true,
+      }));
+      // Deterministic, not timing-based: the operation is only admitted at all once the
+      // gateway has forwarded the request and started streaming a response back, so this
+      // proves it is in `operationAdmission`'s bookkeeping before the fence is requested.
+      await inFlightStream.firstChunk;
+      let inFlightSettledAt = 0;
+      const inFlight = inFlightStream.done.then((r) => { inFlightSettledAt = Date.now(); return r; });
+
+      let exclusiveSettledAt = 0;
+      const exclusivePromise = (async () => {
+        proc.stdin.write(`${JSON.stringify({ id: 20, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
+        const res = await waitForLine(proc, (msg) => msg.id === 20, 15000);
+        exclusiveSettledAt = Date.now();
+        return res;
+      })();
+
+      // The in-flight stream must still be unresolved a beat later — proving the fence is
+      // actually waiting on it, not completing (or, worse, killing it) immediately.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(inFlightSettledAt).toBe(0);
+
+      releaseUpstream?.();
+      const [inFlightResult, exclusiveResult] = await Promise.all([inFlight, exclusivePromise]);
+
+      expect(inFlightResult.status).toBe(200);
+      expect(exclusiveResult).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
+      expect(exclusiveSettledAt).toBeGreaterThanOrEqual(inFlightSettledAt);
+    } finally {
+      if (proc) await killAndWait(proc);
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      if (homeDir) rmSync(homeDir, { recursive: true, force: true });
+    }
+  }, 20000);
+
+  it('waits for an already-admitted IPC chatCompletion to finish before acquiring exclusive admission', async () => {
+    // A benchmark run's own inference goes over IPC `chatCompletion`, not the gateway (see
+    // +page.svelte's benchmark host, which calls `chatCompletion` directly) -- and this sidecar
+    // process survives a frontend reload, so a *previous*, now-gone page's still-running call
+    // is invisible to the new page's own busy-state checks. Only this sidecar-side drain can
+    // still see it. `createChatClient().completeChat` here holds on a GET to this test's own
+    // upstream server (the same "hold" pattern as the streaming-gateway-request test above),
+    // simulating that orphaned call.
+    let releaseUpstream: (() => void) | null = null;
+    const upstreamHeld = new Promise<void>((resolve) => { releaseUpstream = resolve; });
+    const upstream = createServer((req, res) => {
+      if (req.url !== '/hold-chat') {
+        // Startup's own /status readiness probe must not be held.
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      void upstreamHeld.then(() => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+      });
+    });
+    let proc: ChildProcessWithoutNullStreams | undefined;
+    let homeDir: string | undefined;
+    try {
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+      const { port: upstreamPort } = upstream.address() as AddressInfo;
+      const started = await startedGateway(upstreamPort, 10_000);
+      proc = started.proc;
+      homeDir = started.homeDir;
+
+      let chatSettledAt = 0;
+      proc.stdin.write(`${JSON.stringify({ id: 25, cmd: 'chatCompletion', model: 'fake-model', messages: [{ role: 'user', content: 'hi' }] })}\n`);
+      const chatDone = waitForLine(proc, (msg) => msg.id === 25, 15000)
+        .then((r) => { chatSettledAt = Date.now(); return r; });
+
+      let exclusiveSettledAt = 0;
+      const exclusivePromise = (async () => {
+        proc!.stdin.write(`${JSON.stringify({ id: 26, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
+        const res = await waitForLine(proc!, (msg) => msg.id === 26, 15000);
+        exclusiveSettledAt = Date.now();
+        return res;
+      })();
+
+      // A beat to let the exclusive acquire actually reach and start its drain wait before
+      // releasing the held chat call — proving the fence is waiting on it, not racing it.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(chatSettledAt).toBe(0);
+
+      releaseUpstream?.();
+      const [chatResult, exclusiveResult] = await Promise.all([chatDone, exclusivePromise]);
+
+      expect(chatResult).toMatchObject({ ok: true });
+      expect(exclusiveResult).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
+      expect(exclusiveSettledAt).toBeGreaterThanOrEqual(chatSettledAt);
+    } finally {
+      if (proc) await killAndWait(proc);
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      if (homeDir) rmSync(homeDir, { recursive: true, force: true });
+    }
+  }, 20000);
+
+  it('waits for an already-admitted IPC load (or unload/deleteModel) to finish before acquiring exclusive admission', async () => {
+    // A page reload leaves the sidecar process, and anything it already admitted, running: an
+    // in-flight `load`/`unload`/`deleteModel` from Models/Monitor or a *previous* page instance
+    // is invisible to a new page's own busy-state checks, which only see this page's in-memory
+    // `poolMutationsInFlight`. Only this sidecar-side drain can still see it. Without draining
+    // these commands too, a new benchmark could acquire exclusivity while an orphaned mutation
+    // is still changing pool residency underneath it -- e.g. measuring against a model that is
+    // still mid-unload, or racing a stale load that hasn't finished consuming its resources.
+    // `holdLoad: true` makes the fake model's `load()` hold on a GET to this test's own upstream
+    // server (same "hold" pattern as the chatCompletion test above) until released.
+    let releaseUpstream: (() => void) | null = null;
+    const upstreamHeld = new Promise<void>((resolve) => { releaseUpstream = resolve; });
+    const upstream = createServer((req, res) => {
+      if (req.url !== '/hold-load') {
+        // Startup's own /status readiness probe must not be held.
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      void upstreamHeld.then(() => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+      });
+    });
+    let proc: ChildProcessWithoutNullStreams | undefined;
+    let homeDir: string | undefined;
+    try {
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+      const { port: upstreamPort } = upstream.address() as AddressInfo;
+      const started = await startedGateway(upstreamPort, 10_000, [], true);
+      proc = started.proc;
+      homeDir = started.homeDir;
+
+      let loadSettledAt = 0;
+      proc.stdin.write(`${JSON.stringify({ id: 27, cmd: 'load', alias: 'fake-model' })}\n`);
+      const loadDone = waitForLine(proc, (msg) => msg.id === 27, 15000)
+        .then((r) => { loadSettledAt = Date.now(); return r; });
+
+      let exclusiveSettledAt = 0;
+      const exclusivePromise = (async () => {
+        proc!.stdin.write(`${JSON.stringify({ id: 28, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
+        const res = await waitForLine(proc!, (msg) => msg.id === 28, 15000);
+        exclusiveSettledAt = Date.now();
+        return res;
+      })();
+
+      // A beat to let the exclusive acquire actually reach and start its drain wait before
+      // releasing the held load — proving the fence is waiting on it, not racing it.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(loadSettledAt).toBe(0);
+
+      releaseUpstream?.();
+      const [loadResult, exclusiveResult] = await Promise.all([loadDone, exclusivePromise]);
+
+      expect(loadResult).toMatchObject({ ok: true });
+      expect(exclusiveResult).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
+      expect(exclusiveSettledAt).toBeGreaterThanOrEqual(loadSettledAt);
+    } finally {
+      if (proc) await killAndWait(proc);
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      if (homeDir) rmSync(homeDir, { recursive: true, force: true });
+    }
+  }, 20000);
+
+  it('serializes a concurrently-dispatched release behind an in-progress acquire, so it cannot clear the flag mid-drain', async () => {
+    // Same "held" streaming upstream as the previous test — this keeps the acquire's
+    // `waitForBenchmarkDrainIdle` genuinely waiting (not resolving immediately) so there is a real
+    // window in which a concurrently-dispatched command could interleave.
+    let releaseUpstream: (() => void) | null = null;
+    const upstreamHeld = new Promise<void>((resolve) => { releaseUpstream = resolve; });
+    const upstream = createServer((req, res) => {
+      if (req.url !== '/v1/chat/completions') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n');
+      void upstreamHeld.then(() => {
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+    });
+    let proc: ChildProcessWithoutNullStreams | undefined;
+    let homeDir: string | undefined;
+    try {
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+      const { port: upstreamPort } = upstream.address() as AddressInfo;
+      const started = await startedGateway(upstreamPort, 10_000);
+      proc = started.proc;
+      homeDir = started.homeDir;
+      const gatewayPort = started.gatewayPort;
+      const inFlightStream = postToGatewayStream(gatewayPort, JSON.stringify({
+        model: 'fake-model', messages: [], stream: true,
+      }));
+      await inFlightStream.firstChunk;
+
+      // Dispatch acquire, then — without waiting for it to settle — dispatch a release right
+      // behind it, exactly like two stdin lines arriving back-to-back. Each is its own
+      // concurrently-running `rl.on('line', ...)` handler in the sidecar; only the serialization
+      // queue is what should keep the release from running while the acquire is still waiting.
+      let acquireSettledAt = 0;
+      const acquirePromise = (async () => {
+        proc!.stdin.write(`${JSON.stringify({ id: 50, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
+        const res = await waitForLine(proc!, (msg) => msg.id === 50, 15000);
+        acquireSettledAt = Date.now();
+        return res;
+      })();
+      let releaseSettledAt = 0;
+      const releasePromise = (async () => {
+        proc!.stdin.write(`${JSON.stringify({ id: 51, cmd: 'setBenchmarkExclusive', exclusive: false })}\n`);
+        const res = await waitForLine(proc!, (msg) => msg.id === 51, 15000);
+        releaseSettledAt = Date.now();
+        return res;
+      })();
+
+      // A beat to let the release command reach and, if unserialized, run ahead of the still-
+      // waiting acquire — proving this isn't just a lucky ordering of two near-instant replies.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(acquireSettledAt).toBe(0);
+      expect(releaseSettledAt).toBe(0);
+
+      releaseUpstream?.();
+      const [acquireResult, releaseResult] = await Promise.all([acquirePromise, releasePromise]);
+
+      expect(acquireResult).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
+      expect(releaseResult).toMatchObject({ ok: true, result: { exclusive: false } });
+      // The release must not have been able to run — and thus settle — until the acquire's
+      // whole transition (including its drain wait) had already finished.
+      expect(releaseSettledAt).toBeGreaterThanOrEqual(acquireSettledAt);
+    } finally {
+      if (proc) await killAndWait(proc);
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      if (homeDir) rmSync(homeDir, { recursive: true, force: true });
+    }
+  }, 20000);
+
+  it('clears the fence and reports failure when in-flight gateway work does not drain in time, without leaving the endpoint blocked', async () => {
+    const upstream = createServer((req, res) => {
+      if (req.headers['x-test-stuck']) {
+        // Never respond: simulates a stuck/never-completing gateway request so the (short,
+        // test-overridden) drain deadline is guaranteed to be reached.
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }));
+    });
+    let proc: ChildProcessWithoutNullStreams | undefined;
+    let homeDir: string | undefined;
+    try {
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+      const { port: upstreamPort } = upstream.address() as AddressInfo;
+      const started = await startedGateway(upstreamPort);
+      proc = started.proc;
+      homeDir = started.homeDir;
+      const gatewayPort = started.gatewayPort;
+      const stuck = postToGateway(
+        gatewayPort,
+        JSON.stringify({ model: 'fake-model', messages: [] }),
+        { 'x-test-stuck': '1' },
+      );
+      // A rejection here (e.g. from the socket being destroyed during cleanup) is expected and
+      // is not what this test asserts on — only the sidecar's own behavior is under test.
+      stuck.catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      proc.stdin.write(`${JSON.stringify({ id: 30, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
+      const failed = await waitForLine(proc, (msg) => msg.id === 30, 5000);
+      expect(failed.ok).toBeUndefined();
+      expect(String(failed.error)).toContain('Could not drain');
+
+      // The fence must have cleared on the failed attempt: a fresh, well-behaved request (no
+      // stuck marker) is still admitted rather than being denied by a benchmarkExclusive flag
+      // left stuck on.
+      const admitted = await postToGateway(gatewayPort, JSON.stringify({ model: 'fake-model', messages: [] }));
+      expect(admitted.status).toBe(200);
+    } finally {
+      if (proc) await killAndWait(proc);
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      if (homeDir) rmSync(homeDir, { recursive: true, force: true });
+    }
+  }, 20000);
+
+  it('lets an already-admitted request finish autoloading its model even after exclusive admission is requested mid-flight', async () => {
+    // First chat call: held until the test releases it, then answers the exact "not loaded"
+    // rejection so the gateway's autoload path (`load` in foundry-sidecar-main.js) runs.
+    // Second chat call (the post-autoload replay): answered immediately with 200. Startup's own
+    // /status readiness probe must not be held, or `startedGateway` itself never resolves.
+    let chatCallCount = 0;
+    let releaseFirstResponse: (() => void) | null = null;
+    const firstResponseHeld = new Promise<void>((resolve) => { releaseFirstResponse = resolve; });
+    let resolveFirstRequestReceived: (() => void) | null = null;
+    const firstRequestReceived = new Promise<void>((resolve) => { resolveFirstRequestReceived = resolve; });
+    const upstream = createServer(async (req, res) => {
+      if (req.url !== '/v1/chat/completions') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      chatCallCount += 1;
+      if (chatCallCount === 1) {
+        resolveFirstRequestReceived?.();
+        await firstResponseHeld;
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: "Model 'fake-model' is not loaded. Please load the model first." } }));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }));
+    });
+    let proc: ChildProcessWithoutNullStreams | undefined;
+    let homeDir: string | undefined;
+    try {
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+      const { port: upstreamPort } = upstream.address() as AddressInfo;
+      // A generous drain deadline: this test proves already-admitted work is allowed to finish
+      // autoloading, not that the fence gives up waiting on it.
+      const started = await startedGateway(upstreamPort, 10_000, [
+        { alias: 'fake-model', variants: [{ id: 'fake-variant', isCached: true }] },
+      ]);
+      proc = started.proc;
+      homeDir = started.homeDir;
+      const gatewayPort = started.gatewayPort;
+
+      const admitted = postToGateway(gatewayPort, JSON.stringify({ model: 'fake-model', messages: [] }));
+      // The request is admitted (and holding upstream) before exclusive admission is ever
+      // requested, matching the real race: it reached the sidecar, and only later does a
+      // benchmark ask for exclusivity while this request is still working through its
+      // not-loaded retry.
+      await firstRequestReceived;
+
+      // `benchmarkExclusive` flips true synchronously here, before this call's drain-wait
+      // even starts polling -- exactly the window the fix must tolerate.
+      proc.stdin.write(`${JSON.stringify({ id: 40, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
+      const exclusivePromise = waitForLine(proc, (msg) => msg.id === 40, 15000);
+
+      // Prove `benchmarkExclusive` has actually flipped true in the sidecar process before
+      // releasing the held response, deterministically rather than via a fixed sleep. A probe
+      // to a non-chat path (so it cannot affect `chatCallCount`) is rejected with 503 only once
+      // admission actually observes the flag; before that it is admitted and proxied straight
+      // through by the test upstream (which answers 200 for any non-chat path).
+      const probeAdmission = (): Promise<number> => new Promise((resolve, reject) => {
+        const req = httpRequest({
+          host: '127.0.0.1', port: gatewayPort, path: '/v1/models', method: 'GET',
+        }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode || 0)); });
+        req.on('error', reject);
+        req.end();
+      });
+      for (;;) {
+        const status = await probeAdmission();
+        if (status === 503) break;
+      }
+      releaseFirstResponse?.();
+
+      const admittedResult = await admitted;
+      // The already-admitted request must still complete successfully via autoload + replay,
+      // not be rejected because exclusivity had already been requested.
+      expect(admittedResult.status).toBe(200);
+      expect(chatCallCount).toBe(2);
+
+      const exclusiveResult = await exclusivePromise;
+      expect(exclusiveResult).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
+    } finally {
+      if (proc) await killAndWait(proc);
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      if (homeDir) rmSync(homeDir, { recursive: true, force: true });
+    }
+  }, 20000);
+});
+
+describe('foundry-sidecar applyMemorySettings ordering guard', () => {
+  let proc: ChildProcessWithoutNullStreams;
+
+  beforeEach(async () => {
+    proc = spawn(process.execPath, ['sidecar/foundry-sidecar.js'], {
+      cwd: process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    await waitForLine(proc, (msg) => msg.ready === true);
+  });
+
+  afterEach(async () => {
+    if (proc && !proc.killed) await killAndWait(proc);
+  });
+
+  it('refuses to install a lower seq once a higher seq has already landed', async () => {
+    // Simulates the actual respawn/re-init hazard from sdk.ts's sendInternal: two
+    // applyMemorySettings calls dispatched in one order (seq 1, then seq 2) can still arrive at
+    // the sidecar in the opposite order. The stale call (seq 1) must not be allowed to overwrite
+    // what the fresher call (seq 2) already installed, since this command fully replaces the
+    // priority map rather than merging into it.
+    proc.stdin.write(`${JSON.stringify({
+      id: 1, cmd: 'applyMemorySettings', seq: 2,
+      priorities: [{ alias: 'newer-run-target', priority: 'pinned' }],
+    })}\n`);
+    const newer = await waitForLine(proc, (msg) => msg.id === 1);
+    expect(newer.ok).toBe(true);
+    expect(newer.result.stale).toBe(false);
+    expect(newer.result.priorities).toEqual(
+      expect.arrayContaining([{ alias: 'newer-run-target', priority: 'pinned' }]),
+    );
+
+    // Arrives "late" (lower seq, after a higher seq already installed).
+    proc.stdin.write(`${JSON.stringify({
+      id: 2, cmd: 'applyMemorySettings', seq: 1,
+      priorities: [],
+    })}\n`);
+    const stale = await waitForLine(proc, (msg) => msg.id === 2);
+    expect(stale.ok).toBe(true);
+    expect(stale.result.stale).toBe(true);
+    // The newer call's pin must still be in effect -- the stale call's empty priority list must
+    // not have been installed.
+    expect(stale.result.priorities).toEqual(
+      expect.arrayContaining([{ alias: 'newer-run-target', priority: 'pinned' }]),
+    );
+  });
+
+  it('applies calls without a seq exactly as before (no ordering guarantee, but never rejected)', async () => {
+    proc.stdin.write(`${JSON.stringify({
+      id: 1, cmd: 'applyMemorySettings',
+      priorities: [{ alias: 'legacy-caller', priority: 'pinned' }],
+    })}\n`);
+    const res = await waitForLine(proc, (msg) => msg.id === 1);
+    expect(res.ok).toBe(true);
+    expect(res.result.stale).toBe(false);
+    expect(res.result.priorities).toEqual(
+      expect.arrayContaining([{ alias: 'legacy-caller', priority: 'pinned' }]),
+    );
+  });
+
+  it('treats an equal seq as stale (idempotent replay, not a fresh write)', async () => {
+    proc.stdin.write(`${JSON.stringify({
+      id: 1, cmd: 'applyMemorySettings', seq: 5,
+      priorities: [{ alias: 'first', priority: 'pinned' }],
+    })}\n`);
+    await waitForLine(proc, (msg) => msg.id === 1);
+
+    proc.stdin.write(`${JSON.stringify({
+      id: 2, cmd: 'applyMemorySettings', seq: 5,
+      priorities: [{ alias: 'second', priority: 'pinned' }],
+    })}\n`);
+    const res = await waitForLine(proc, (msg) => msg.id === 2);
+    expect(res.result.stale).toBe(true);
+    expect(res.result.priorities).toEqual([{ alias: 'first', priority: 'pinned' }]);
   });
 });
 
@@ -834,6 +1540,50 @@ describe('foundry-sidecar error propagation and resilience', () => {
     expect(res.ok).toBe(true);
     expect(res.result.initialized).toBe(false);
     expect(res.result.modelLoaded).toBe(false);
+  });
+
+  it('getStatus reports benchmarkExclusive, reflecting setBenchmarkExclusive without requiring init', async () => {
+    // A frontend reload's fresh in-memory state has no way to know whether a now-gone page
+    // instance left this flag set in the still-running sidecar; getStatus is what a startup
+    // reconciliation call reads to detect and clear a stale lease. Exercised pre-init (no
+    // manager/model needed) since setBenchmarkExclusive/getStatus both work before init.
+    proc.stdin.write(`${JSON.stringify({ id: 60, cmd: 'getStatus' })}\n`);
+    const before = await waitForLine(proc, (msg) => msg.id === 60);
+    expect(before.result.benchmarkExclusive).toBe(false);
+
+    proc.stdin.write(`${JSON.stringify({ id: 61, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
+    await waitForLine(proc, (msg) => msg.id === 61);
+
+    proc.stdin.write(`${JSON.stringify({ id: 62, cmd: 'getStatus' })}\n`);
+    const during = await waitForLine(proc, (msg) => msg.id === 62);
+    expect(during.result.benchmarkExclusive).toBe(true);
+
+    proc.stdin.write(`${JSON.stringify({ id: 63, cmd: 'setBenchmarkExclusive', exclusive: false })}\n`);
+    await waitForLine(proc, (msg) => msg.id === 63);
+
+    proc.stdin.write(`${JSON.stringify({ id: 64, cmd: 'getStatus' })}\n`);
+    const after = await waitForLine(proc, (msg) => msg.id === 64);
+    expect(after.result.benchmarkExclusive).toBe(false);
+  });
+
+  it('getStatus reports lastAppliedMemorySettingsSeq, letting a fresh frontend reload seed its own counter above it', async () => {
+    // A page reload restarts the frontend's own `pushMemorySeq` at 0, but this sidecar process
+    // (and this watermark) survive the reload. Without seeding the new page's counter from this
+    // value, its first several pushes would carry a seq at or below this watermark and be
+    // silently accepted-but-skipped (see the ordering-guard describe block above), with no
+    // visible error -- getStatus is what a startup reconciliation reads to avoid that.
+    proc.stdin.write(`${JSON.stringify({ id: 70, cmd: 'getStatus' })}\n`);
+    const before = await waitForLine(proc, (msg) => msg.id === 70);
+    expect(before.result.lastAppliedMemorySettingsSeq).toBe(-1);
+
+    proc.stdin.write(`${JSON.stringify({
+      id: 71, cmd: 'applyMemorySettings', seq: 7, priorities: [],
+    })}\n`);
+    await waitForLine(proc, (msg) => msg.id === 71);
+
+    proc.stdin.write(`${JSON.stringify({ id: 72, cmd: 'getStatus' })}\n`);
+    const after = await waitForLine(proc, (msg) => msg.id === 72);
+    expect(after.result.lastAppliedMemorySettingsSeq).toBe(7);
   });
 
   it('cancelChatRequest is idempotent for unknown request IDs', async () => {

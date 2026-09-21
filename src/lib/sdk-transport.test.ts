@@ -323,6 +323,122 @@ describe('catalog queries', () => {
   });
 });
 
+describe('reconcileBenchmarkExclusive', () => {
+  it('releases a benchmarkExclusive lease the sidecar reports left over from a previous page instance', async () => {
+    const sdk = await loadSdk();
+    const request = sdk.reconcileBenchmarkExclusive();
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, result: { benchmarkExclusive: true } });
+    const releaseId = await waitForWrite('setBenchmarkExclusive');
+    expect(JSON.parse(harness.writes.find((w) => w.includes('setBenchmarkExclusive'))!).exclusive).toBe(false);
+    harness.emitStdout({ id: releaseId, result: { exclusive: false } });
+    expect(await request).toBe(true);
+  });
+
+  it('does not send a release when the sidecar reports no exclusive lease is held', async () => {
+    const sdk = await loadSdk();
+    const request = sdk.reconcileBenchmarkExclusive();
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, result: { benchmarkExclusive: false } });
+    expect(await request).toBe(false);
+    expect(harness.writes.some((w) => w.includes('setBenchmarkExclusive'))).toBe(false);
+  });
+
+  it('skips the release when isSafeToRelease turns false between the status probe and the release, so a legitimate concurrent acquire is not torn down', async () => {
+    const sdk = await loadSdk();
+    let safe = true;
+    const request = sdk.reconcileBenchmarkExclusive(() => safe);
+    const statusId = await waitForWrite('getStatus');
+    // Simulate this page claiming exclusivity itself in the window between the status probe
+    // landing and the release being sent -- the guard must be re-checked at that point, not
+    // only captured once at call time.
+    safe = false;
+    harness.emitStdout({ id: statusId, result: { benchmarkExclusive: true } });
+    expect(await request).toBe(false);
+    expect(harness.writes.some((w) => w.includes('setBenchmarkExclusive'))).toBe(false);
+  });
+
+  it('is best-effort: a failed status probe resolves false instead of throwing, so startup is not blocked', async () => {
+    const sdk = await loadSdk();
+    const request = capture(sdk.reconcileBenchmarkExclusive());
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, error: 'sidecar unavailable' });
+    await request.tracked;
+    expect(request.box.err).toBeUndefined();
+  });
+
+  it('invokes onReleaseDispatched with the release call the instant it is dispatched, before it settles, so a caller can track it against an overlapping newer acquire', async () => {
+    const sdk = await loadSdk();
+    let dispatchedCall: Promise<unknown> | null = null;
+    let dispatchedSettled = false;
+    const onReleaseDispatched = (releaseCall: Promise<unknown>) => {
+      dispatchedCall = releaseCall;
+      void releaseCall.then(() => { dispatchedSettled = true; });
+    };
+    const request = sdk.reconcileBenchmarkExclusive(undefined, onReleaseDispatched);
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, result: { benchmarkExclusive: true } });
+    const releaseId = await waitForWrite('setBenchmarkExclusive');
+    // The callback must have already fired by the time the release is on the wire -- a caller
+    // relying on it to register the call with a pending-release tracker (see +page.svelte's
+    // `pendingExclusiveRelease`) needs it available before the release settles, not after.
+    expect(dispatchedCall).not.toBeNull();
+    expect(dispatchedSettled).toBe(false);
+    harness.emitStdout({ id: releaseId, result: { exclusive: false } });
+    expect(await request).toBe(true);
+    await dispatchedCall;
+    expect(dispatchedSettled).toBe(true);
+  });
+});
+
+describe('getLastAppliedMemorySettingsSeq', () => {
+  it('returns the sidecar-reported watermark, letting a caller seed its own counter above it', async () => {
+    const sdk = await loadSdk();
+    const request = sdk.getLastAppliedMemorySettingsSeq();
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, result: { lastAppliedMemorySettingsSeq: 7 } });
+    expect(await request).toBe(7);
+  });
+
+  it('is best-effort: a failed status probe resolves null instead of throwing', async () => {
+    const sdk = await loadSdk();
+    const request = sdk.getLastAppliedMemorySettingsSeq();
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, error: 'sidecar unavailable' });
+    await expect(request).resolves.toBeNull();
+  });
+});
+
+describe('applyMemorySettings', () => {
+  it('surfaces stale: false for an ordinary, freshly-installed call', async () => {
+    const sdk = await loadSdk();
+    const request = sdk.applyMemorySettings([], undefined, 5);
+    const id = await waitForWrite('applyMemorySettings');
+    harness.emitStdout({ id, result: { config: { maxResident: 4 }, stale: false } });
+    const modelsId = await waitForWrite('listModels');
+    harness.emitStdout({ id: modelsId, result: [] });
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, result: {} });
+    const poolId = await waitForWrite('poolStatus');
+    harness.emitStdout({ id: poolId, result: { models: [] } });
+    await expect(request).resolves.toEqual({ config: { maxResident: 4 }, stale: false });
+  });
+
+  it('surfaces stale: true when the sidecar refuses an out-of-order call, instead of hiding it behind ok: true', async () => {
+    const sdk = await loadSdk();
+    const request = sdk.applyMemorySettings([], undefined, 1);
+    const id = await waitForWrite('applyMemorySettings');
+    harness.emitStdout({ id, result: { config: { maxResident: 4 }, stale: true } });
+    const modelsId = await waitForWrite('listModels');
+    harness.emitStdout({ id: modelsId, result: [] });
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, result: {} });
+    const poolId = await waitForWrite('poolStatus');
+    harness.emitStdout({ id: poolId, result: { models: [] } });
+    await expect(request).resolves.toEqual({ config: { maxResident: 4 }, stale: true });
+  });
+});
+
 describe('initialization', () => {
   it('passes the configured log level through initialization', async () => {
     const sdk = await loadSdk();

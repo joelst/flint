@@ -99,6 +99,18 @@ PRODUCT_PLAN Wave 1, not deferred.
       relaxing it would mean a second inference path to keep correct. Revisit if
       endpoint startup proves to be a common failure in practice.
 
+- [ ] **`setBenchmarkExclusive(false)` has no way to reject a stale release.** The client
+      (`pendingExclusiveRelease` in `+page.svelte`) now tracks every outstanding release call
+      (not just the newest) so a later run's acquire correctly waits for all of them, but the
+      `join()` calls that guard remain unbounded — if a dispatched release call's IPC promise
+      never settles (sidecar wedged without crashing, so `drainPending` never fires), a later
+      Start/Resume can block forever. A sidecar-side generation/lease token — acquire returns a
+      generation id, release must supply it, and a release for a superseded generation is a
+      safe no-op — would let the client bound every wait without needing perfect client-side
+      promise tracking at all, since a stale release could never clear a newer acquire's flag.
+      Bigger change (new payload field in three schema locations plus client plumbing); revisit
+      if the current client-side tracking proves fragile in practice.
+
 ## Conversation persistence (post-1.0)
 
 Quit-flush and conversation-id stream routing are PRODUCT_PLAN Wave 2.
