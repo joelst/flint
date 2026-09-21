@@ -93,7 +93,7 @@ Flint installs its native tray icon at app start, independent of the window (Ope
 
 ### Updating Flint
 
-On Windows, **Settings → About** checks the stable release channel. When an update is available you can **Install** it, watch download progress, then **Restart to update** or **Later** (revisit anytime from About). Prereleases are never offered through this channel.
+On Windows, **Settings → About** checks the stable release channel. Checking is always manual — click **Check**; Flint never checks automatically and there is no update-available banner elsewhere in the app. When an update is available you can **Install** it, watch download progress, then **Restart to update** or **Later** (revisit anytime from About); or click **View release** to open the GitHub release page instead and download/install it yourself. Prereleases are never offered through this channel.
 
 ### Model Arena
 
