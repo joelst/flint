@@ -754,7 +754,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
    * `startService` (gateway on by default) proxies real HTTP traffic to a server we control. A
    * short `FLINT_BENCHMARK_EXCLUSIVE_DRAIN_MS` lets the "could not drain in time" path be
    * exercised without a correspondingly slow test. */
-  function spawnGatewaySidecar(upstreamPort: number, drainMs = 200, catalogModels: unknown[] = [], holdLoad = false) {
+  function spawnGatewaySidecar(upstreamPort: number, drainMs = 200, catalogModels: unknown[] = [], holdLoad = false, secondStartServicePort: number | null = null) {
     const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-gateway-fence-home-'));
     const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
     const corePath = join(homeDir, 'fake-core.dylib');
@@ -793,12 +793,24 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
         class FakeManager {
           constructor() {
             this.urls = [];
+            this.startWebServiceCallCount = 0;
             this.catalog = {
               getModel: async () => new FakeModel(),
               getModels: async () => (${JSON.stringify(catalogModels)}),
             };
           }
-          startWebService() { this.urls = ['http://127.0.0.1:${upstreamPort}']; }
+          startWebService() {
+            this.startWebServiceCallCount += 1;
+            // "startedGateway"'s own initial "startService" call (bringing up the test's
+            // gateway) is always the first invocation and must succeed normally. Only a test
+            // that opts in via "secondStartServicePort" wants the *second* invocation (an
+            // orphaned restart it dispatches itself) to point at a distinct, test-held upstream
+            // it can keep pending, so both calls cannot be confused with each other.
+            const port = (this.startWebServiceCallCount === 2 && ${JSON.stringify(secondStartServicePort)} !== null)
+              ? ${JSON.stringify(secondStartServicePort)}
+              : ${upstreamPort};
+            this.urls = ['http://127.0.0.1:' + port];
+          }
           stopWebService() {}
           static create() { return new FakeManager(); }
         }
@@ -835,8 +847,8 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
 
   /** Starts the sidecar and its gateway, returning the process, its temp home dir (for
    * cleanup), and the gateway's bound public port. */
-  async function startedGateway(upstreamPort: number, drainMs = 200, catalogModels: unknown[] = [], holdLoad = false) {
-    const { proc, homeDir } = spawnGatewaySidecar(upstreamPort, drainMs, catalogModels, holdLoad);
+  async function startedGateway(upstreamPort: number, drainMs = 200, catalogModels: unknown[] = [], holdLoad = false, secondStartServicePort: number | null = null) {
+    const { proc, homeDir } = spawnGatewaySidecar(upstreamPort, drainMs, catalogModels, holdLoad, secondStartServicePort);
     await waitForLine(proc, (msg) => msg.ready === true);
     proc.stdin.write(`${JSON.stringify({ id: 1, cmd: 'init', appName: 'flint-test', logLevel: 'info' })}\n`);
     const initRes = await waitForLine(proc, (msg) => msg.id === 1);
@@ -1080,6 +1092,79 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
     } finally {
       if (proc) await killAndWait(proc);
       await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      if (homeDir) rmSync(homeDir, { recursive: true, force: true });
+    }
+  }, 20000);
+
+  it('waits for an already-admitted startService (destructive restart) to finish before acquiring exclusive admission', async () => {
+    // `startService` clears and repopulates the pool as part of its restart (see its handler's
+    // own comment on `pool.clear()`/`usage.clear()`) -- exactly the kind of resident-pool
+    // mutation the previous test covers for load/unload/deleteModel, but dispatched at the
+    // top-level command instead of through `ensureModel`. A page reload leaves this sidecar
+    // process (and anything it already admitted, including an in-flight `startService`) running,
+    // invisible to a new page's own busy-state checks.
+    //
+    // `startedGateway()` itself already calls `startService` once to bring up its own gateway;
+    // this test dispatches a *second* `startService` call to simulate the orphaned restart. The
+    // fake manager's `startWebService()` only holds on that second call (via
+    // `secondStartServicePort`, pointed at this test's own held upstream), so the first call
+    // that `startedGateway()` depends on to even start still resolves immediately as normal.
+    let releaseHeldStatus: (() => void) | null = null;
+    const heldStatusReleased = new Promise<void>((resolve) => { releaseHeldStatus = resolve; });
+    const heldUpstream = createServer((req, res) => {
+      if (req.url !== '/status') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      void heldStatusReleased.then(() => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+      });
+    });
+    const upstream = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{}');
+    });
+    let proc: ChildProcessWithoutNullStreams | undefined;
+    let homeDir: string | undefined;
+    try {
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+      await new Promise<void>((resolve) => heldUpstream.listen(0, '127.0.0.1', resolve));
+      const { port: upstreamPort } = upstream.address() as AddressInfo;
+      const { port: heldPort } = heldUpstream.address() as AddressInfo;
+      const started = await startedGateway(upstreamPort, 10_000, [], false, heldPort);
+      proc = started.proc;
+      homeDir = started.homeDir;
+
+      let startServiceSettledAt = 0;
+      proc.stdin.write(`${JSON.stringify({ id: 60, cmd: 'startService', port: 0, bindAddress: '127.0.0.1' })}\n`);
+      const startServiceDone = waitForLine(proc, (msg) => msg.id === 60, 15000)
+        .then((r) => { startServiceSettledAt = Date.now(); return r; });
+
+      let exclusiveSettledAt = 0;
+      const exclusivePromise = (async () => {
+        proc!.stdin.write(`${JSON.stringify({ id: 61, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
+        const res = await waitForLine(proc!, (msg) => msg.id === 61, 15000);
+        exclusiveSettledAt = Date.now();
+        return res;
+      })();
+
+      // A beat to let the exclusive acquire actually reach and start its drain wait before
+      // releasing the held restart — proving the fence is waiting on it, not racing it.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(startServiceSettledAt).toBe(0);
+
+      releaseHeldStatus?.();
+      const [startServiceResult, exclusiveResult] = await Promise.all([startServiceDone, exclusivePromise]);
+
+      expect(startServiceResult).toMatchObject({ ok: true });
+      expect(exclusiveResult).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
+      expect(exclusiveSettledAt).toBeGreaterThanOrEqual(startServiceSettledAt);
+    } finally {
+      if (proc) await killAndWait(proc);
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      await new Promise<void>((resolve) => heldUpstream.close(() => resolve()));
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });
     }
   }, 20000);
