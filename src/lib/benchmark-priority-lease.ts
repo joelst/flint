@@ -23,6 +23,31 @@ export interface PriorityLeaseAck {
 }
 
 /**
+ * Suspends the resident-model cap entirely for the duration a benchmark priority lease is held
+ * (`floor > 0`), rather than merely raising `maxResident` to the suite's target count: earlier
+ * targets are pinned (see `overlayPinnedPriorities`) and therefore not eviction candidates, so
+ * *any* other resident/pinned entry outside the suite (a user-pinned model left loaded from
+ * Monitor, or the previous target still draining) also counts against the cap once the sidecar
+ * re-checks admission (`resident + pendingAdmissions > maxResident`, gated only on
+ * `maxResidentEnabled` — see `foundry-sidecar-main.js`'s `admitModel`). A numeric floor sized to
+ * only the suite's own alias count does not account for that headroom, so it can still reject a
+ * load. Disabling the cap outright removes the failure mode entirely rather than sizing around
+ * it, and is safe because the run's own priority lease already keeps its targets protected from
+ * eviction independent of this cap. Pure and safe to call from every eviction/priority push made
+ * while the lease is held (see `overlayPinnedPriorities`'s docstring for why a per-push overlay,
+ * not a one-time snapshot, is required). Returns `config` unchanged (no copy) when there is no
+ * floor or the cap is already disabled, so `evictionConfigsEqual`-style identity checks upstream
+ * still see "no change" in the common case.
+ */
+export function overlayResidentCapFloor<T extends { maxResidentEnabled: boolean }>(
+  config: T,
+  floor: number,
+): T {
+  if (floor <= 0 || !config.maxResidentEnabled) return config;
+  return { ...config, maxResidentEnabled: false };
+}
+
+/**
  * Overlays `pinnedAliases` (forced to `'pinned'`) onto `priorities`. Pure, and safe to call from
  * every priority push made while a lease is held, not only the call that installs it — a
  * priority/eviction edit made elsewhere (e.g. Settings) during a benchmark run would otherwise

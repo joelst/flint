@@ -192,6 +192,7 @@
     acquirePriorityLease,
     releasePriorityLease,
     overlayPinnedPriorities,
+    overlayResidentCapFloor,
   } from "$lib/benchmark-priority-lease";
   import type { BenchmarkSuite } from "$lib/benchmark-suite";
 
@@ -764,6 +765,14 @@
   /** Aliases pinned for the duration of the active run; restored to 'normal' in a finally once
    * the run halts, so a benchmark never permanently changes a model's eviction priority. */
   let benchmarkPinnedAliases: string[] = [];
+  /** Non-zero for the duration a run's priority lease is held (the count is otherwise unused —
+   * only "is a lease held" matters). Earlier targets stay pinned once loaded (not eviction
+   * candidates), so *any* configured resident cap can make the sidecar reject loading a later
+   * target, or reject it outright if unrelated pinned models are also resident — see
+   * `overlayResidentCapFloor`, which suspends the cap entirely for the duration rather than
+   * merely raising it. Reset to 0 once the lease is released so a benchmark never permanently
+   * disables the user's configured cap. */
+  let benchmarkResidentCapFloor = $state(0);
   /** Set when a detached run/resume execution settles with anything the UI needs to surface:
    * a hard `!outcome.ok` failure, or an `ok: true` outcome whose `result.status ===
    * 'recovery_required'` — a durability write failed mid-run and the run is now stuck needing a
@@ -782,6 +791,10 @@
    * The lease mechanics (record-before-ack, retry-once restore) live in the pure, tested
    * `benchmark-priority-lease` module; this function only wires it to `pushMemorySettings`. */
   async function pinBenchmarkTargets(aliases: string[]): Promise<{ ok: true } | { ok: false; error: string }> {
+    // Set before acquiring the lease: `acquirePriorityLease` invokes `push` (and therefore
+    // `pushMemorySettings`) synchronously, so the floor must already be in place for that very
+    // first push, not only for later ones.
+    benchmarkResidentCapFloor = aliases.length;
     const lease = acquirePriorityLease(aliases, (pinnedAliases) =>
       pushMemorySettings({ throwOnError: true, pinnedAliasesOverride: pinnedAliases }),
     );
@@ -800,6 +813,9 @@
    * lease's retry-once restore also fails to settle within acceptable certainty. See
    * `pinBenchmarkTargets` for why the lease mechanics themselves live in a separate module. */
   async function unpinBenchmarkTargets(): Promise<void> {
+    // Cleared first, mirroring the pin side: the restore push this triggers must carry the
+    // user's real configured cap, not the floor this run needed.
+    benchmarkResidentCapFloor = 0;
     const lease = releasePriorityLease(benchmarkPinnedAliases, (pinnedAliases) =>
       pushMemorySettings({ throwOnError: true, pinnedAliasesOverride: pinnedAliases }),
     );
@@ -2304,7 +2320,9 @@
    * resend `modelPriorities` with no pin at all, dropping the overlay and re-exposing a running
    * benchmark's targets to eviction. Folding the overlay in here (rather than only where pinning
    * is first installed) makes it a standing invariant of every push for as long as a benchmark
-   * holds the lease, not a one-time snapshot.
+   * holds the lease, not a one-time snapshot. `benchmarkResidentCapFloor` (via
+   * `overlayResidentCapFloor`) gets the same treatment and for the same reason: a Settings edit
+   * mid-run must not silently re-enable the cap either.
    *
    * `pinnedAliasesOverride` lets `pinBenchmarkTargets`/`unpinBenchmarkTargets` (in
    * `benchmark-priority-lease.ts`) force the exact alias list for *this* push, independent of
@@ -2315,7 +2333,7 @@
   let pushMemorySeq = 0;
   async function pushMemorySettings(options?: { throwOnError?: boolean; pinnedAliasesOverride?: readonly string[] }) {
     const seq = ++pushMemorySeq;
-    const currentEviction = { ...evictionConfig };
+    const currentEviction = overlayResidentCapFloor({ ...evictionConfig }, benchmarkResidentCapFloor);
     const currentPriorities = overlayPinnedPriorities(
       { ...modelPriorities },
       options?.pinnedAliasesOverride ?? benchmarkPinnedAliases,
@@ -2331,9 +2349,18 @@
       );
       // Adopt the sidecar's normalized config, but only on real change and only when no newer
       // push is in flight — an unconditional assignment re-triggers every effect that reads
-      // evictionConfig (the serviceRunning re-apply effect looped on exactly that).
-      if (seq === pushMemorySeq && applied && !evictionConfigsEqual(applied, evictionConfig)) {
-        evictionConfig = applied;
+      // evictionConfig (the serviceRunning re-apply effect looped on exactly that). While the
+      // lease has suspended the cap, `applied` reflects that suspension (maxResidentEnabled:
+      // false), not the user's real setting — adopting it verbatim would leak the suspension
+      // into `evictionConfig` and make it stick around (re-sent by every later push) even after
+      // the run releases the lease. Restore the real maxResidentEnabled before comparing/
+      // adopting; every other normalized field (e.g. a clamped idle timeout, or maxResident
+      // itself, which this overlay never changes) still adopts normally.
+      const displayApplied = benchmarkResidentCapFloor > 0 && applied
+        ? { ...applied, maxResidentEnabled: evictionConfig.maxResidentEnabled }
+        : applied;
+      if (seq === pushMemorySeq && displayApplied && !evictionConfigsEqual(displayApplied, evictionConfig)) {
+        evictionConfig = displayApplied;
       }
     } catch (e) {
       console.warn("[flint] could not apply memory settings", e);

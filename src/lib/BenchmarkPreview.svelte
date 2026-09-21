@@ -69,7 +69,16 @@
    * they can be in flight at the same moment (e.g. a poll tick landing right after a failed
    * Resume sets its own message) and each must remain visible until its own next resolution. */
   let pollError = "";
-  let pollHandle: ReturnType<typeof setInterval> | null = null;
+  let pollHandle: ReturnType<typeof setTimeout> | null = null;
+  /** Bumped by every `stopPolling()` call, including the one `openRun` makes at its own start.
+   * `schedulePoll` captures the generation current when *it* was called and re-checks it both
+   * before and after awaiting `refreshSelectedRun()`; a mismatch means some newer chain has since
+   * taken over (a fresh `openRun` for the same or a different run, or `refreshSelectedRun`'s own
+   * internal stop) and this callback must not reschedule. Relying on `pollHandle === null` alone
+   * is not enough: reopening the *same* active run while a poll tick is still awaiting can
+   * install a new `pollHandle` before the old tick resumes, so the old tick would see a non-null
+   * handle (the new chain's) and wrongly conclude it is still the active chain. */
+  let pollGeneration = 0;
   let refreshGeneration = 0;
   /** Guards `refreshSuites()` the same way `refreshGeneration` guards a run refresh: a slower,
    * now-stale call (e.g. the initial `onMount` load racing a create/edit/delete) must not
@@ -283,10 +292,37 @@
   }
 
   function stopPolling() {
+    // Bumped unconditionally, even when nothing is currently scheduled: this is what lets a
+    // still-awaiting poll callback (see `schedulePoll`) detect that a newer chain has since
+    // taken over, so it must not reschedule itself even though `pollHandle` may already hold
+    // that newer chain's (non-null) timer by the time the old callback resumes.
+    pollGeneration += 1;
     if (pollHandle !== null) {
-      clearInterval(pollHandle);
+      clearTimeout(pollHandle);
       pollHandle = null;
     }
+  }
+
+  /** Schedules the next poll only after the previous one's IndexedDB reads finish, instead of a
+   * fixed-cadence `setInterval` — a slow refresh (device under load, a large attempt list) could
+   * otherwise start a new tick before the last one settled. Each new tick bumps
+   * `refreshGeneration` and discards the older tick's result, so overlapping ticks would starve
+   * every refresh and the progress view would neither update nor ever detect the run finishing.
+   * Captures `pollGeneration` at schedule time and re-checks it against the live value both
+   * before and after awaiting `refreshSelectedRun()`: a mismatch means some `stopPolling()` call
+   * happened since (a fresh `openRun` — including for this same run — or `refreshSelectedRun`'s
+   * own internal stop once the run is no longer active) and this chain must not continue.
+   * `pollHandle === null` alone is not a reliable "should stop" signal here: reopening the same
+   * run while a tick is still awaiting installs a *new* `pollHandle` before the old tick resumes,
+   * so the old tick would otherwise see a non-null handle belonging to that newer chain. */
+  function schedulePoll(runId: string) {
+    const generation = pollGeneration;
+    pollHandle = setTimeout(async () => {
+      if (destroyed || selectedRunId !== runId || generation !== pollGeneration) return;
+      await refreshSelectedRun();
+      if (destroyed || selectedRunId !== runId || generation !== pollGeneration) return;
+      schedulePoll(runId);
+    }, 1500);
   }
 
   /** Run row and attempt summaries are one snapshot. Partial success must not update either
@@ -358,7 +394,7 @@
     await refreshSelectedRun();
     if (token !== openRunToken || selectedRunId !== runId || destroyed) return;
     if (runId === activeRunId) {
-      pollHandle = setInterval(() => { void refreshSelectedRun(); }, 1500);
+      schedulePoll(runId);
     }
   }
 
