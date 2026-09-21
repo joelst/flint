@@ -84,6 +84,7 @@ export default defineConfig(() => ({
         'src/lib/benchmark-priority-lease.ts',
         'src/lib/benchmark-generation-guard.ts',
         'src/lib/benchmark-exclusive-retry.ts',
+        'src/lib/pending-call-tracker.ts',
         'src/lib/conversation-title.ts',
         'src/lib/conversation-session.ts',
         'src/lib/conversation-settings.ts',

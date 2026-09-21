@@ -198,6 +198,7 @@
     computeResidentCapFloor,
   } from "$lib/benchmark-priority-lease";
   import { assertBenchmarkGeneration } from "$lib/benchmark-generation-guard";
+  import { createPendingCallTracker } from "$lib/pending-call-tracker";
   import { createExclusiveReleaseRetrier, type ExclusiveReleaseRetrier } from "$lib/benchmark-exclusive-retry";
   import type { BenchmarkSuite } from "$lib/benchmark-suite";
 
@@ -928,13 +929,28 @@
     };
   }
 
+  /** Tracks whichever `setBenchmarkExclusive(false)` IPC call this module has in flight -- the
+   * initial attempt in `attemptReleaseBenchmarkExclusive`, and every one of the background
+   * retrier's own retry attempts. `startBenchmarkPreviewRun`/`resumeBenchmarkPreviewRun` join
+   * this before ever acquiring a new generation: without it, a release that is still awaiting a
+   * sidecar respawn/re-init (see `sdk.ts`'s `sendInternal`) can lose a race against a newer run's
+   * `true` acquire dispatched moments later, reopening the gateway mid-benchmark -- see "Prevent
+   * stale release from reopening gateway after a newer acquire". `benchmarkRunInFlight` already
+   * keeps the *caller's own* first release attempt from ever overlapping a new run (it is awaited
+   * before that flag clears), so in practice this only ever has something to join when the
+   * caller's own attempt already failed and the background retrier's own release call is
+   * mid-flight. See `pending-call-tracker.ts` for the (tested) tracking mechanics. */
+  const pendingExclusiveRelease = createPendingCallTracker();
+
   /** Single attempt to release exclusive gateway admission. Returns whether it is now confirmed
    * released; a rejected call (transport dispatch/timeout, not a sidecar-side failure — the
    * release direction has no failure branch once it reaches the sidecar) leaves the prior state
    * unconfirmed, so callers must not assume it succeeded. */
   async function attemptReleaseBenchmarkExclusive(): Promise<boolean> {
+    const releaseCall = sdkSetBenchmarkExclusive(false);
+    pendingExclusiveRelease.track(releaseCall);
     try {
-      await sdkSetBenchmarkExclusive(false);
+      await releaseCall;
       return true;
     } catch (e: any) {
       appendAppLog(
@@ -983,7 +999,9 @@
             // Re-checked at send time, not just at creation time: this retrier can still be
             // waiting on a scheduled backoff tick when a later run claims a new generation.
             if (generation !== benchmarkExclusiveGeneration) return;
-            await sdkSetBenchmarkExclusive(false);
+            const releaseCall = sdkSetBenchmarkExclusive(false);
+            pendingExclusiveRelease.track(releaseCall);
+            await releaseCall;
           },
           (stuck) => { benchmarkExclusiveStuck = stuck; },
         );
@@ -1098,6 +1116,10 @@
     benchmarkRunError = null;
     const myExclusiveGeneration = claimNextBenchmarkExclusiveGeneration();
     try {
+      // Must not overlap a still-in-flight release from a prior run (e.g. a background retrier
+      // mid-respawn-recovery) -- see `pendingExclusiveRelease`'s docstring for why the ordering
+      // otherwise cannot be guaranteed.
+      await pendingExclusiveRelease.join();
       try {
         await sdkSetBenchmarkExclusive(true);
       } catch (e: any) {
@@ -1137,6 +1159,8 @@
     // See startBenchmarkPreviewRun: claims the generation and retires any stale prior banner.
     const myExclusiveGeneration = claimNextBenchmarkExclusiveGeneration();
     try {
+      // See startBenchmarkPreviewRun: must not overlap a still-in-flight release.
+      await pendingExclusiveRelease.join();
       try {
         await sdkSetBenchmarkExclusive(true);
       } catch (e: any) {
