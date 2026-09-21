@@ -340,113 +340,117 @@ export async function startBenchmarkRun(
   preparedRun?: BenchmarkRun,
   boundVariantByAlias?: ReadonlyMap<string, string>,
 ): Promise<StartRunOutcome> {
-  // Snapshot (deep-clone) before any await: the caller's `suite` object must never be able to
-  // retroactively change what this run recorded or scheduled, even if it's mutated the instant
-  // after this call returns control to the event loop.
-  let run: BenchmarkRun;
-  if (preparedRun) {
-    // Defense-in-depth: `startBenchmarkRun` is exported and callable directly (not only via
-    // `startBenchmarkSession`), so a caller-supplied `preparedRun` must not be trusted on shape
-    // alone — a well-formed but unpersisted (or tampered) run would otherwise skip
-    // `createBenchmarkRun`, write orphan attempt rows, and dispatch real inference, only
-    // discovering the problem once the terminal status write finds no row to update. Re-read
-    // the reservation from storage — the same pattern `resumeBenchmarkRun` already uses — and
-    // execute exactly what storage holds for this id, not the caller's in-memory object.
-    //
-    // Checked before the storage read (and before `suiteSnapshotMatchesStored`, which assumes a
-    // well-formed suite and would throw on a malformed one) so a caller passing a structurally
-    // invalid suite gets the same clean validation error it always has, not a rejected promise.
-    // Surface the validator's actual errors rather than assuming duplicate aliases: this branch
-    // accepts any caller-supplied `preparedRun` (the test suite even passes `null`), so a great
-    // many unrelated shapes can fail here, and blaming all of them on duplicate aliases would be
-    // an incorrect diagnosis for anyone debugging a real caller bug.
-    const suiteValidation = validateBenchmarkSuite(preparedRun.suite);
-    if (!suiteValidation.ok) {
-      return {
-        ok: false,
-        error: `cannot start: prepared run's suite snapshot failed validation: ${suiteValidation.errors.join('; ')}`,
-      };
-    }
-    const reservation = await getBenchmarkRun(preparedRun.id);
-    if (!reservation.ok) return { ok: false, error: reservation.error };
-    if (!reservation.value) {
-      return { ok: false, error: `cannot start: no reservation found in storage for run "${preparedRun.id}"` };
-    }
-    // `getBenchmarkRun` above already validated `reservation.value` with `allowDuplicateAliases:
-    // true` (tolerating the legacy shape for readability), so the *only* way it can still fail
-    // this stricter check is that tolerated legacy duplicate-alias shape -- everything else about
-    // the row (id, suiteId, status, timestamps, every other suite constraint) was already
-    // confirmed valid. The message can therefore name the actual cause precisely.
-    if (!isBenchmarkRun(reservation.value)) {
-      return {
-        ok: false,
-        error: `cannot start: run "${preparedRun.id}"'s stored reservation has duplicate target aliases from before that shape was rejected`,
-      };
-    }
-    // The reservation exists and is well-formed, but may not be the run the caller intended to
-    // execute (e.g. a stale `preparedRun` reused after a retry created a fresh row for the same
-    // suite). Fail loud rather than silently execute storage's content in place of the caller's.
-    if (!suiteSnapshotMatchesStored(reservation.value.suite, preparedRun.suite)) {
-      return {
-        ok: false,
-        error: `cannot start: run "${preparedRun.id}"'s stored reservation does not match the suite snapshot being executed`,
-      };
-    }
-    // A valid, matching reservation is still not necessarily *fresh*: this branch always passes
-    // an empty prior-attempts list to `executePositions` below, so a reservation that already
-    // has recorded attempts (already started, resumed, or completed elsewhere) would have its
-    // finished positions dispatched all over again instead of being resumed. Only a reservation
-    // with zero attempts on record is safe to execute via this from-scratch path.
-    const existingAttempts = await listAttemptsForRun(preparedRun.id);
-    if (!existingAttempts.ok) return { ok: false, error: existingAttempts.error };
-    if ((existingAttempts.value ?? []).length > 0) {
-      return {
-        ok: false,
-        error: `cannot start: run "${preparedRun.id}" already has recorded attempts — resume it instead of starting it again`,
-      };
-    }
-    // Zero attempts alone is not enough: a run stopped before its first dispatch also has zero
-    // attempt rows, but its persisted status is `stopped` (or `recovery_required`/`completed`),
-    // not `running`. Starting it here would dispatch real inference while the stored row stays
-    // in that non-running status until finalization, and would bypass the required Resume path
-    // entirely (Resume is what re-opens a stopped run for further attempts). Only a reservation
-    // still recorded as `running` -- i.e. truly never touched since `prepareBenchmarkRun`
-    // created it -- may be executed from scratch via this path.
-    if (reservation.value.status !== 'running') {
-      return {
-        ok: false,
-        error: `cannot start: run "${preparedRun.id}" is not in a fresh running state (status "${reservation.value.status}") — resume it instead of starting it again`,
-      };
-    }
-    run = reservation.value;
-  } else {
-    // Same normalize-then-freeze reasoning as `prepareBenchmarkRun` above: freezing the
-    // caller's raw suite here would risk the same false "stale snapshot" rejection inside
-    // `createBenchmarkRun`.
-    const validated = validateBenchmarkSuite(suite);
-    if (!validated.ok) {
-      return { ok: false, error: `cannot start: ${validated.errors.join('; ')}` };
-    }
-    const frozenSuite = freezeSuiteSnapshot(validated.value!);
-    run = {
-      id: generateRunId(),
-      suiteId: frozenSuite.id,
-      suite: frozenSuite,
-      createdAt: Date.now(),
-      status: 'running' as const,
-      startedAt: Date.now(),
-    };
-  }
-  const frozenSuite = run.suite;
-  const runId = run.id;
-
+  // The run id is known synchronously in both branches (the caller's preparedRun.id, or a freshly
+  // generated id) -- claim it in `activeRunIds` before any `await`, so a concurrent start/resume
+  // racing this same run id cannot both pass their own reservation checks (each observing the
+  // other's pre-claim "running + zero attempts" snapshot as still valid) and then both dispatch
+  // the full schedule. Everything below, including the reservation re-read and validation awaits,
+  // now runs only while this run id is exclusively held.
+  const runId = preparedRun ? preparedRun.id : generateRunId();
   if (activeRunIds.has(runId)) {
-    // Vanishingly unlikely (a fresh id colliding with one already in flight), but a run must
-    // never be executed twice concurrently under the same id.
     return { ok: false, error: `benchmark run "${runId}" is already active` };
   }
   activeRunIds.add(runId);
   try {
+    // Snapshot (deep-clone) before any await: the caller's `suite` object must never be able to
+    // retroactively change what this run recorded or scheduled, even if it's mutated the instant
+    // after this call returns control to the event loop.
+    let run: BenchmarkRun;
+    if (preparedRun) {
+      // Defense-in-depth: `startBenchmarkRun` is exported and callable directly (not only via
+      // `startBenchmarkSession`), so a caller-supplied `preparedRun` must not be trusted on shape
+      // alone — a well-formed but unpersisted (or tampered) run would otherwise skip
+      // `createBenchmarkRun`, write orphan attempt rows, and dispatch real inference, only
+      // discovering the problem once the terminal status write finds no row to update. Re-read
+      // the reservation from storage — the same pattern `resumeBenchmarkRun` already uses — and
+      // execute exactly what storage holds for this id, not the caller's in-memory object.
+      //
+      // Checked before the storage read (and before `suiteSnapshotMatchesStored`, which assumes a
+      // well-formed suite and would throw on a malformed one) so a caller passing a structurally
+      // invalid suite gets the same clean validation error it always has, not a rejected promise.
+      // Surface the validator's actual errors rather than assuming duplicate aliases: this branch
+      // accepts any caller-supplied `preparedRun` (the test suite even passes `null`), so a great
+      // many unrelated shapes can fail here, and blaming all of them on duplicate aliases would be
+      // an incorrect diagnosis for anyone debugging a real caller bug.
+      const suiteValidation = validateBenchmarkSuite(preparedRun.suite);
+      if (!suiteValidation.ok) {
+        return {
+          ok: false,
+          error: `cannot start: prepared run's suite snapshot failed validation: ${suiteValidation.errors.join('; ')}`,
+        };
+      }
+      const reservation = await getBenchmarkRun(preparedRun.id);
+      if (!reservation.ok) return { ok: false, error: reservation.error };
+      if (!reservation.value) {
+        return { ok: false, error: `cannot start: no reservation found in storage for run "${preparedRun.id}"` };
+      }
+      // `getBenchmarkRun` above already validated `reservation.value` with `allowDuplicateAliases:
+      // true` (tolerating the legacy shape for readability), so the *only* way it can still fail
+      // this stricter check is that tolerated legacy duplicate-alias shape -- everything else about
+      // the row (id, suiteId, status, timestamps, every other suite constraint) was already
+      // confirmed valid. The message can therefore name the actual cause precisely.
+      if (!isBenchmarkRun(reservation.value)) {
+        return {
+          ok: false,
+          error: `cannot start: run "${preparedRun.id}"'s stored reservation has duplicate target aliases from before that shape was rejected`,
+        };
+      }
+      // The reservation exists and is well-formed, but may not be the run the caller intended to
+      // execute (e.g. a stale `preparedRun` reused after a retry created a fresh row for the same
+      // suite). Fail loud rather than silently execute storage's content in place of the caller's.
+      if (!suiteSnapshotMatchesStored(reservation.value.suite, preparedRun.suite)) {
+        return {
+          ok: false,
+          error: `cannot start: run "${preparedRun.id}"'s stored reservation does not match the suite snapshot being executed`,
+        };
+      }
+      // A valid, matching reservation is still not necessarily *fresh*: this branch always passes
+      // an empty prior-attempts list to `executePositions` below, so a reservation that already
+      // has recorded attempts (already started, resumed, or completed elsewhere) would have its
+      // finished positions dispatched all over again instead of being resumed. Only a reservation
+      // with zero attempts on record is safe to execute via this from-scratch path.
+      const existingAttempts = await listAttemptsForRun(preparedRun.id);
+      if (!existingAttempts.ok) return { ok: false, error: existingAttempts.error };
+      if ((existingAttempts.value ?? []).length > 0) {
+        return {
+          ok: false,
+          error: `cannot start: run "${preparedRun.id}" already has recorded attempts — resume it instead of starting it again`,
+        };
+      }
+      // Zero attempts alone is not enough: a run stopped before its first dispatch also has zero
+      // attempt rows, but its persisted status is `stopped` (or `recovery_required`/`completed`),
+      // not `running`. Starting it here would dispatch real inference while the stored row stays
+      // in that non-running status until finalization, and would bypass the required Resume path
+      // entirely (Resume is what re-opens a stopped run for further attempts). Only a reservation
+      // still recorded as `running` -- i.e. truly never touched since `prepareBenchmarkRun`
+      // created it -- may be executed from scratch via this path.
+      if (reservation.value.status !== 'running') {
+        return {
+          ok: false,
+          error: `cannot start: run "${preparedRun.id}" is not in a fresh running state (status "${reservation.value.status}") — resume it instead of starting it again`,
+        };
+      }
+      run = reservation.value;
+    } else {
+      // Same normalize-then-freeze reasoning as `prepareBenchmarkRun` above: freezing the
+      // caller's raw suite here would risk the same false "stale snapshot" rejection inside
+      // `createBenchmarkRun`.
+      const validated = validateBenchmarkSuite(suite);
+      if (!validated.ok) {
+        return { ok: false, error: `cannot start: ${validated.errors.join('; ')}` };
+      }
+      const frozenSuite = freezeSuiteSnapshot(validated.value!);
+      run = {
+        id: runId,
+        suiteId: frozenSuite.id,
+        suite: frozenSuite,
+        createdAt: Date.now(),
+        status: 'running' as const,
+        startedAt: Date.now(),
+      };
+    }
+    const frozenSuite = run.suite;
+
     if (!preparedRun) {
       const created = await createBenchmarkRun(run);
       if (!created.ok) return { ok: false, error: created.error };

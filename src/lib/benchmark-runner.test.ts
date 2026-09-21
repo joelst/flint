@@ -8,6 +8,7 @@ import {
   type AttemptTransport,
   type AttemptTransportResult,
 } from './benchmark-runner';
+import * as benchmarkRepository from './benchmark-repository';
 import { getBenchmarkRun, listAttemptsForRun, listBenchmarkRunsForSuite, openBenchmarkDatabase, putBenchmarkSuite } from './benchmark-repository';
 import type { BenchmarkSuite } from './benchmark-suite';
 
@@ -731,5 +732,66 @@ describe('resumeBenchmarkRun', () => {
     // Exactly one execution was ever recorded for the logical position — no duplicate dispatch.
     const attempts = await listAttemptsForRun(started.run!.id);
     expect(attempts.value).toHaveLength(1);
+  });
+
+  it('proof gate: claims the run id before any reservation-check await, so a call whose reservation reads are already in flight cannot let a second concurrent start slip through and double-dispatch', async () => {
+    // Reproduces the exact race the review comment described: call 1 reads a fresh "running +
+    // zero attempts" reservation, but is suspended (by this test) right after capturing that
+    // snapshot and before it can act on it. While call 1 is suspended, call 2 runs to completion
+    // for the same run id, dispatches the schedule, and releases `activeRunIds`. Call 1 then
+    // resumes holding its now-stale zero-attempts snapshot. Before this fix, call 1 would pass
+    // every remaining check against that stale snapshot and dispatch the schedule a second time.
+    // Reverting the `startBenchmarkRun` fix and running only this test proves it goes red: two
+    // attempt rows get recorded for the same logical position and both calls report success.
+    const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
+    const put = await putBenchmarkSuite(s);
+    expect(put.ok).toBe(true);
+    const prepared = await prepareBenchmarkRun(s);
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) throw new Error('unreachable');
+
+    let releaseFirst: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let firstCaptured: () => void = () => {};
+    const captured = new Promise<void>((resolve) => { firstCaptured = resolve; });
+    let listCalls = 0;
+    const originalListAttemptsForRun = benchmarkRepository.listAttemptsForRun;
+    const listSpy = vi.spyOn(benchmarkRepository, 'listAttemptsForRun').mockImplementation(async (id) => {
+      listCalls += 1;
+      const isFirstCall = listCalls === 1;
+      const result = await originalListAttemptsForRun(id); // real read, captured now (correctly zero at this point)
+      if (isFirstCall) {
+        firstCaptured(); // tell the test call 1 has its (soon-to-be-stale) snapshot in hand
+        await gate; // ...but hold it from acting on that snapshot until call 2 has finished
+      }
+      return result;
+    });
+
+    try {
+      let calls = 0;
+      const transport: AttemptTransport = async () => { calls++; return { ok: true, responseText: 'x' }; };
+      const first = startBenchmarkRun(s, transport, undefined, prepared.run);
+      // Wait until call 1 has captured its own reservation snapshot before starting call 2, so
+      // call 2's read of "zero attempts" is guaranteed to happen (and this whole race to be
+      // possible) before either call has written anything.
+      await captured;
+      const second = await startBenchmarkRun(s, transport, undefined, prepared.run);
+      releaseFirst();
+      const firstOutcome = await first;
+
+      const outcomes = [firstOutcome, second];
+      const succeeded = outcomes.filter((o) => o.ok);
+      const rejected = outcomes.filter((o) => !o.ok);
+      expect(succeeded).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0].ok === false && rejected[0].error).toMatch(/is already active/);
+      expect(calls).toBe(1);
+
+      // Exactly one execution was ever recorded for the logical position — no duplicate dispatch.
+      const attempts = await listAttemptsForRun(prepared.run.id);
+      expect(attempts.value).toHaveLength(1);
+    } finally {
+      listSpy.mockRestore();
+    }
   });
 });
