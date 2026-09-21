@@ -2781,6 +2781,12 @@ rl.on('line', async (line) => {
           // Legacy lane fields for frontend compatibility
           chatLane: { model: poolSnapshot[0]?.alias ?? null, endpoint: sharedEndpoint || null },
           audioLane: { model: poolSnapshot[1]?.alias ?? null, endpoint: sharedEndpoint || null },
+          // True while the gateway is refusing new admission for a benchmark run. Surfaced here
+          // (not only readable via the setBenchmarkExclusive reply) so a freshly-loaded frontend
+          // -- whose in-memory generation/retrier state always starts unset, since it has no
+          // persistence of its own -- can detect and reconcile a flag left set by a page instance
+          // that reloaded/crashed before releasing it; this sidecar process outlives that reload.
+          benchmarkExclusive,
         }
       });
     } else if (cmd === 'chatCompletion') {

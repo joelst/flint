@@ -323,6 +323,51 @@ describe('catalog queries', () => {
   });
 });
 
+describe('reconcileBenchmarkExclusive', () => {
+  it('releases a benchmarkExclusive lease the sidecar reports left over from a previous page instance', async () => {
+    const sdk = await loadSdk();
+    const request = sdk.reconcileBenchmarkExclusive();
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, result: { benchmarkExclusive: true } });
+    const releaseId = await waitForWrite('setBenchmarkExclusive');
+    expect(JSON.parse(harness.writes.find((w) => w.includes('setBenchmarkExclusive'))!).exclusive).toBe(false);
+    harness.emitStdout({ id: releaseId, result: { exclusive: false } });
+    expect(await request).toBe(true);
+  });
+
+  it('does not send a release when the sidecar reports no exclusive lease is held', async () => {
+    const sdk = await loadSdk();
+    const request = sdk.reconcileBenchmarkExclusive();
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, result: { benchmarkExclusive: false } });
+    expect(await request).toBe(false);
+    expect(harness.writes.some((w) => w.includes('setBenchmarkExclusive'))).toBe(false);
+  });
+
+  it('skips the release when isSafeToRelease turns false between the status probe and the release, so a legitimate concurrent acquire is not torn down', async () => {
+    const sdk = await loadSdk();
+    let safe = true;
+    const request = sdk.reconcileBenchmarkExclusive(() => safe);
+    const statusId = await waitForWrite('getStatus');
+    // Simulate this page claiming exclusivity itself in the window between the status probe
+    // landing and the release being sent -- the guard must be re-checked at that point, not
+    // only captured once at call time.
+    safe = false;
+    harness.emitStdout({ id: statusId, result: { benchmarkExclusive: true } });
+    expect(await request).toBe(false);
+    expect(harness.writes.some((w) => w.includes('setBenchmarkExclusive'))).toBe(false);
+  });
+
+  it('is best-effort: a failed status probe resolves false instead of throwing, so startup is not blocked', async () => {
+    const sdk = await loadSdk();
+    const request = capture(sdk.reconcileBenchmarkExclusive());
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, error: 'sidecar unavailable' });
+    await request.tracked;
+    expect(request.box.err).toBeUndefined();
+  });
+});
+
 describe('initialization', () => {
   it('passes the configured log level through initialization', async () => {
     const sdk = await loadSdk();

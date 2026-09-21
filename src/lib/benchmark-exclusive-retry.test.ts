@@ -98,6 +98,43 @@ describe('createExclusiveReleaseRetrier', () => {
     expect(release).toHaveBeenCalledTimes(2);
   });
 
+  it('a shared failure consumes exactly one backoff slot, not two, when retryNow joins an in-flight scheduled attempt', async () => {
+    // Regression: retryNow() joining a scheduled tick's in-flight release() must not ALSO call
+    // scheduleNext() when that shared attempt fails, or one failure would consume two backoff
+    // slots (jumping e.g. from the 5s to the 10s delay) and the joiner's scheduleNext() would
+    // cancel the owner's freshly-armed timer via clear().
+    vi.useFakeTimers();
+    let resolveRelease: (() => void) | null = null;
+    let rejectRelease: ((e: Error) => void) | null = null;
+    const release = vi.fn(() => new Promise<void>((resolve, reject) => {
+      resolveRelease = resolve;
+      rejectRelease = reject;
+    }));
+    const onStuckChange = vi.fn();
+    const retrier = createExclusiveReleaseRetrier(release, onStuckChange, [10, 20, 30, 40]);
+
+    // Let the scheduled tick fire and start its release() call, but don't let it settle yet.
+    await vi.advanceTimersByTimeAsync(10);
+    expect(release).toHaveBeenCalledTimes(1);
+
+    // A manual retry while that attempt is still pending joins it instead of starting a second.
+    const retryNowPromise = retrier.retryNow();
+    expect(release).toHaveBeenCalledTimes(1);
+
+    rejectRelease!(new Error('still blocked'));
+    await retryNowPromise;
+    expect(retrier.stuck).toBe(true);
+
+    // Only one backoff slot (the 20ms one, since the first attempt already consumed the 10ms
+    // one) should have been consumed by this single shared failure -- advancing by 20ms must
+    // fire exactly one more attempt, not zero (owner's timer silently cancelled) and not two.
+    await vi.advanceTimersByTimeAsync(20);
+    expect(release).toHaveBeenCalledTimes(2);
+    resolveRelease!();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(retrier.stuck).toBe(false);
+  });
+
   it('joins an in-flight scheduled attempt instead of firing a second concurrent release call', async () => {
     vi.useFakeTimers();
     let resolveRelease: (() => void) | null = null;

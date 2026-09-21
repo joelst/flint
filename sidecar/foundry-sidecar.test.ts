@@ -1393,6 +1393,30 @@ describe('foundry-sidecar error propagation and resilience', () => {
     expect(res.result.modelLoaded).toBe(false);
   });
 
+  it('getStatus reports benchmarkExclusive, reflecting setBenchmarkExclusive without requiring init', async () => {
+    // A frontend reload's fresh in-memory state has no way to know whether a now-gone page
+    // instance left this flag set in the still-running sidecar; getStatus is what a startup
+    // reconciliation call reads to detect and clear a stale lease. Exercised pre-init (no
+    // manager/model needed) since setBenchmarkExclusive/getStatus both work before init.
+    proc.stdin.write(`${JSON.stringify({ id: 60, cmd: 'getStatus' })}\n`);
+    const before = await waitForLine(proc, (msg) => msg.id === 60);
+    expect(before.result.benchmarkExclusive).toBe(false);
+
+    proc.stdin.write(`${JSON.stringify({ id: 61, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
+    await waitForLine(proc, (msg) => msg.id === 61);
+
+    proc.stdin.write(`${JSON.stringify({ id: 62, cmd: 'getStatus' })}\n`);
+    const during = await waitForLine(proc, (msg) => msg.id === 62);
+    expect(during.result.benchmarkExclusive).toBe(true);
+
+    proc.stdin.write(`${JSON.stringify({ id: 63, cmd: 'setBenchmarkExclusive', exclusive: false })}\n`);
+    await waitForLine(proc, (msg) => msg.id === 63);
+
+    proc.stdin.write(`${JSON.stringify({ id: 64, cmd: 'getStatus' })}\n`);
+    const after = await waitForLine(proc, (msg) => msg.id === 64);
+    expect(after.result.benchmarkExclusive).toBe(false);
+  });
+
   it('cancelChatRequest is idempotent for unknown request IDs', async () => {
     proc.stdin.write(`${JSON.stringify({ id: 31, cmd: 'cancelChatRequest', requestId: 99999 })}\n`);
     const res = await waitForLine(proc, (msg) => msg.id === 31);

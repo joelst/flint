@@ -131,6 +131,23 @@ describe('estimateDraftAttempts', () => {
     expect(estimateDraftAttempts(baseDraft({ repeatCount: Number.POSITIVE_INFINITY }))).toBeNull();
     expect(estimateDraftAttempts(baseDraft({ repeatCount: NaN }))).toBeNull();
   });
+
+  it('returns null for an in-range integer that is still out of the same warmup/repeat bounds Save enforces', () => {
+    // Regression: an integer failed only isFiniteInteger before, so an out-of-range value (e.g.
+    // warmup -1, or repeat 0/4 -- valid range is 0-1 warmup, 1-3 repeat per benchmark-suite.ts)
+    // produced a misleading zero/negative "Estimated attempts" preview even though Save's real
+    // validateBenchmarkSuite would reject the identical draft outright.
+    expect(estimateDraftAttempts(baseDraft({ warmupCount: -1, repeatCount: 1 }))).toBeNull();
+    expect(estimateDraftAttempts(baseDraft({ warmupCount: 2, repeatCount: 1 }))).toBeNull();
+    expect(estimateDraftAttempts(baseDraft({ warmupCount: 0, repeatCount: 0 }))).toBeNull();
+    expect(estimateDraftAttempts(baseDraft({ warmupCount: 0, repeatCount: 4 }))).toBeNull();
+    // The boundary values themselves remain valid.
+    expect(estimateDraftAttempts(baseDraft({
+      casesJsonl: '{"id":"c1","prompt":"x"}\n',
+      warmupCount: 1,
+      repeatCount: 3,
+    }))).toBe(4);
+  });
 });
 
 describe('applyTargetAlias', () => {

@@ -1666,6 +1666,45 @@ export async function setBenchmarkExclusive(exclusive: boolean): Promise<{ exclu
 }
 
 /**
+ * Releases a `benchmarkExclusive` lease left set by a *previous* page instance, if the sidecar
+ * still reports one. The sidecar process outlives a frontend reload/crash-recovery (it is a
+ * long-lived child process independent of the webview), but `benchmarkExclusive` is the only
+ * state that governs gateway admission, and a fresh page load's in-memory
+ * `benchmarkExclusiveGeneration`/retrier always start unset -- they have no persistence of their
+ * own and cannot know whether an earlier, now-gone page instance ever acquired it. Left
+ * unreconciled, every external OpenAI-shaped gateway client would keep getting 503s indefinitely
+ * with no local state left to drive a retry.
+ *
+ * Callers must call this once, early at startup, before this session has ever itself acquired
+ * exclusivity (a page that later legitimately acquires it does not need or want this called
+ * again). Best-effort: a failed probe or release is reported as `false` rather than thrown, so a
+ * transient IPC hiccup during startup does not block the rest of initialization -- worst case,
+ * the existing manual/automatic release-retry banner path still recovers once a benchmark run is
+ * next started or resumed (that acquire's own release path is unaffected by this reconciliation
+ * having skipped a turn).
+ *
+ * `isSafeToRelease`, if given, is re-checked immediately before the release is sent, not only at
+ * entry: `getStatus` is a separate round trip from `setBenchmarkExclusive`, and the UI is already
+ * interactive by the time this runs (readiness is published as part of the same init this
+ * follows), so a legitimate acquire from *this* page can land in between. The caller should pass
+ * a check that is only true while this page has never itself claimed exclusivity (e.g. its own
+ * claim generation still being at its initial, never-claimed value) so a concurrent legitimate
+ * acquire aborts the release instead of being torn down by it.
+ */
+export async function reconcileBenchmarkExclusive(isSafeToRelease?: () => boolean): Promise<boolean> {
+  try {
+    const status = await send('getStatus');
+    if (!status.result?.benchmarkExclusive) return false;
+    if (isSafeToRelease && !isSafeToRelease()) return false;
+    await send('setBenchmarkExclusive', { exclusive: false });
+    return true;
+  } catch (e) {
+    console.warn('[sdk] reconcileBenchmarkExclusive failed', e);
+    return false;
+  }
+}
+
+/**
  * Install eviction rules and model priorities together.
  *
  * One command because each of the two older commands sweeps immediately: sending them

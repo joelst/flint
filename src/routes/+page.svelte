@@ -52,6 +52,7 @@
     setEvictionConfig as sdkSetEvictionConfig,
     applyMemorySettings as sdkApplyMemorySettings,
     setBenchmarkExclusive as sdkSetBenchmarkExclusive,
+    reconcileBenchmarkExclusive,
     getWslStatus,
     enableWslMirroredNetworking,
     shutdownWsl,
@@ -4712,6 +4713,16 @@ updateStateFromSdk();
     void refreshNodeAboutLine();
 
     if (ok) {
+      // Best-effort, fire-and-forget: releases a `benchmarkExclusive` lease this page's own
+      // in-memory state has no memory of ever acquiring (its generation/retrier always start
+      // unset) but a previous, now-gone page instance (reload/crash-recovery) may have left set
+      // in the sidecar, which outlives that reload. Never awaited -- it must not delay startup.
+      // The guard re-checks that this page still hasn't claimed exclusivity itself by the time
+      // the release would actually be sent: `state.ready` publishes as part of this same init,
+      // so the user could in principle start a run before this call's second round trip lands,
+      // and that legitimate claim must win instead of being released out from under it.
+      void reconcileBenchmarkExclusive(() => benchmarkExclusiveGeneration === 0);
+
       // Startup does real pool mutation below (auto-load, multi-model pre-warm, and a
       // possible service (re)start via the `startService` callback below) with no user action
       // to gate it on. Benchmark admission must see this as in-flight pool work — same as any

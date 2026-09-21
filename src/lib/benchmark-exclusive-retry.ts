@@ -76,8 +76,8 @@ export function createExclusiveReleaseRetrier(
     timer = null;
   };
 
-  const attemptRelease = (): Promise<boolean> => {
-    if (inFlight) return inFlight;
+  const attemptRelease = (): { promise: Promise<boolean>; started: boolean } => {
+    if (inFlight) return { promise: inFlight, started: false };
     const p: Promise<boolean> = (async () => {
       try {
         await release();
@@ -88,7 +88,7 @@ export function createExclusiveReleaseRetrier(
     })();
     inFlight = p;
     void p.finally(() => { inFlight = null; });
-    return p;
+    return { promise: p, started: true };
   };
 
   const scheduleNext = () => {
@@ -101,13 +101,18 @@ export function createExclusiveReleaseRetrier(
   const tick = async () => {
     if (cancelled) return;
     timer = null;
-    const released = await attemptRelease();
+    const { promise, started } = attemptRelease();
+    const released = await promise;
     if (cancelled) return;
     if (released) {
       setStuck(false);
       return;
     }
-    scheduleNext();
+    // Only the call that actually started this attempt reschedules: a `retryNow()` that joined
+    // this same in-flight promise (see attemptRelease's doc) would otherwise also see `released
+    // === false` and call scheduleNext() itself once it wakes, consuming a second backoff slot
+    // and cancelling the first newly-scheduled timer for one single failed release.
+    if (started) scheduleNext();
   };
 
   scheduleNext();
@@ -117,13 +122,17 @@ export function createExclusiveReleaseRetrier(
     async retryNow() {
       if (cancelled) return;
       clear();
-      const released = await attemptRelease();
+      const { promise, started } = attemptRelease();
+      const released = await promise;
       if (cancelled) return;
       if (released) {
         setStuck(false);
       } else {
         setStuck(true);
-        scheduleNext();
+        // See tick()'s matching comment: only the call that started this attempt reschedules,
+        // so a retryNow() that joined a scheduled tick's already in-flight release() must not
+        // also call scheduleNext() once that shared attempt fails.
+        if (started) scheduleNext();
       }
     },
     cancel() {
