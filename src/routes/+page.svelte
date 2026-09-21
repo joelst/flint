@@ -4939,7 +4939,13 @@ updateStateFromSdk();
   }
 
   async function stopLocalService() {
+    const blocked = blockedByActiveBenchmark();
+    if (blocked) {
+      statusMessage = blocked;
+      return;
+    }
     startupAuthorization.invalidate();
+    const release = beginPoolMutation();
     try {
       await stopService();
       // The mirror is re-read rather than assumed: a Stop acknowledgement does not prove an
@@ -4952,6 +4958,8 @@ updateStateFromSdk();
     } catch (e: any) {
       statusMessage = `Failed to stop service: ${e?.message || e}`;
       appendAppLog(`Service stop failed: ${e?.message || e}`, 'error');
+    } finally {
+      release();
     }
   }
 
@@ -4962,6 +4970,7 @@ updateStateFromSdk();
       return;
     }
     startupAuthorization.invalidate();
+    const release = beginPoolMutation();
     try {
       statusMessage = "Stopping service and waiting for active work...";
       const result = await stopAndUnload();
@@ -4976,6 +4985,8 @@ updateStateFromSdk();
     } catch (e: any) {
       statusMessage = `Failed to stop and unload: ${e?.message || e}`;
       appendAppLog(statusMessage, "error");
+    } finally {
+      release();
     }
   }
 
@@ -8804,7 +8815,7 @@ Output only the summary text, no preamble.`;
               </button>
               <button
                 onclick={stopLocalService}
-                disabled={!state.serviceRunning}
+                disabled={!state.serviceRunning || benchmarkRunInFlight}
               >
                 Stop Service
               </button>
