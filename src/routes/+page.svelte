@@ -9821,6 +9821,7 @@ Output only the summary text, no preamble.`;
                   </button>
                   {#if availableUpdate && updateInstallState !== "ready" && updateInstallState !== "downloading"}
                     <button type="button" class="tiny" onclick={() => installAvailableUpdate()}>Install</button>
+                    <a class="tiny" href={`https://github.com/joelst/flint/releases/tag/v${availableUpdate.version}`} target="_blank" rel="noopener noreferrer">View release</a>
                     <button type="button" class="tiny" onclick={() => deferAvailableUpdate()}>Later</button>
                   {/if}
                   {#if updateInstallState === "ready"}
@@ -10699,6 +10700,7 @@ Output only the summary text, no preamble.`;
                   </button>
                   {#if availableUpdate && updateInstallState !== "ready" && updateInstallState !== "downloading"}
                     <button type="button" class="tiny" onclick={() => installAvailableUpdate()}>Install</button>
+                    <a class="tiny" href={`https://github.com/joelst/flint/releases/tag/v${availableUpdate.version}`} target="_blank" rel="noopener noreferrer">View release</a>
                     <button type="button" class="tiny" onclick={() => deferAvailableUpdate()}>Later</button>
                   {/if}
                   {#if updateInstallState === "ready"}
@@ -10952,6 +10954,23 @@ Output only the summary text, no preamble.`;
     display: inline-flex;
     align-items: center;
     gap: 4px;
+  }
+
+  a.tiny {
+    font-size: 0.7rem;
+    padding: 1px 6px;
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: inherit;
+    text-decoration: none;
+    border-radius: 3px;
+  }
+
+  a.tiny:hover {
+    color: var(--accent);
   }
 
   .inline-spinner,
