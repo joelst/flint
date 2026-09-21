@@ -10,8 +10,9 @@ document workflows, evaluation tools, integrations, or new views.
 
 ## Architecture boundaries
 
-Flint 0.7.0 uses the native Rust runtime supervisor to own the sidecar process
-and bridge stdio JSON lines to the frontend SDK transport.
+The Rust runtime supervisor (introduced in the 0.7.0 foundation, current through
+0.9.0) owns the sidecar process and bridges stdio JSON lines to the frontend SDK
+transport.
 
 ```text
 Svelte frontend
@@ -196,4 +197,4 @@ complete build and publication procedures.
 Describe the user problem, the Flint seam used, the new command or data shape,
 failure and cancellation semantics, tests, and any new resource or permission.
 Keep the change behind existing runtime ownership and document whether it is
-part of the 0.7.0 foundation or remains a later backlog feature.
+part of the current stable (0.9.0) surface or remains a later backlog feature.

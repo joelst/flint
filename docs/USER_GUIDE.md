@@ -8,13 +8,22 @@ Short path from install to chat and external tools. For **why** Flint exists, se
 
 - **Windows** (primary) or **macOS on Apple silicon**  
   Intel Mac is not supported until Foundry publishes `darwin-x64` native cores.
-  *macOS Installation note:* Unsigned prerelease builds may prompt macOS Gatekeeper to report *"Flint is damaged and can't be opened."* To install without quarantine or fix an existing drag-and-drop install, see [macOS Gatekeeper Installation](#macos-gatekeeper-installation-prerelease-builds).
+  *macOS Installation note:* Unsigned macOS builds may prompt macOS Gatekeeper to report *"Flint is damaged and can't be opened."* To install without quarantine or fix an existing drag-and-drop install, see [macOS Gatekeeper Installation](#macos-gatekeeper-installation-unsigned-builds).
 - **Node for the JS sidecar:** release builds ship a **bundled Node 22** binary; PATH Node is only a fallback (dev or incomplete install).  
 - Foundry Local **runtime is bundled** — you do not need a separate Foundry CLI for normal use.
 
 Flint prefers the packaged Node on launch (About shows `bundled` vs `PATH`) and shows guidance if neither works.
 
 ---
+
+## Navigation
+
+The sidebar is grouped by workflow:
+
+- **Build** — Playground (Chat/Voice), Model Arena Quick Compare, and an opt-in **Benchmark Preview**
+- **Discover** — Models
+- **Operate** — Monitor, Diagnostics, Integrations
+- **Manage** — Settings and Help
 
 ## First five minutes
 
@@ -48,14 +57,14 @@ Flint prefers the packaged Node on launch (About shows `bundled` vs `PATH`) and 
 ### Chat and conversations
 
 - Conversations live in the sidebar; new chat via UI or shortcut (see **?**).  
-- Streaming responses; stop/cancel when supported.  
+- Streaming responses. **Stop** settles Flint's own caller and hides further output, but Foundry Local has no native abort API, so the background generation may still finish; text already received before Stop is kept.
 - Vision: attach up to four images when the loaded model supports it.
 - **Export conversations**: Export any chat thread as structured JSON, formatted Markdown, or plain text for documentation or archive.
 
 ### Bring Your Own Model (BYOM) and External Linking
 
 - **Import local ONNX models**: Add custom ONNX models (containing `genai_config.json` and `inference_model.json`) into Flint's local cache directly from the Models tab.
-- **Embedding models**: folders whose architecture or name contains `embed` import without a chat prompt template. The Foundry catalog currently has no embedding models, so this is the path for `/v1/embeddings`.
+- **Embedding models**: folders whose architecture or name contains `embed` import without a chat prompt template. The gateway supports `POST /v1/embeddings` with autoload, and the sidecar has an `embedTexts` command, but the Foundry catalog currently ships no embedding models — there is no Flint-verified end-to-end embedding recipe yet.
 - **Link external model folders**: Connect existing models stored elsewhere on your drive using directory junctions without duplicating weights across folders.
 - **Prompt template authoring**: Validate and customize Jinja/chat prompt templates using the `{Content}` placeholder to ensure proper message formatting. Embedding imports skip this.
 
@@ -72,11 +81,25 @@ Flint prefers the packaged Node on launch (About shows `bundled` vs `PATH`) and 
 
 - **Playground → Voice**: pick an STT model, use mic or file.  
 - Chat and audio share the local service — only one “active” path at a time for some flows; load the right model for the task.
+- Transcription cannot be stopped once started; the Transcribe control says so while in flight.
+
+### Diagnostics self-test
+
+**Diagnostics → Test local endpoint** checks the local gateway's envelope, chat round-trip, streaming `[DONE]` termination, `usage`, disconnect handling, and tool-call behavior, plus an embeddings check. The embeddings check is blocked when no embedding-capable model is cached — a blocked check is not evidence embeddings work end to end (see BYOM above).
+
+### Tray and quitting
+
+Flint installs its native tray icon at app start, independent of the window (Open Flint, Quit). On quit, Flint waits for an in-flight conversation save to flush (up to ~2 seconds) before exiting, and streaming replies are tracked by their originating conversation so switching chats mid-stream doesn't misroute updates.
+
+### Updating Flint
+
+On Windows, **Settings → About** checks the stable release channel. When an update is available you can **Install** it, watch download progress, then **Restart to update** or **Later** (revisit anytime from About). Prereleases are never offered through this channel.
 
 ### Model Arena
 
-- **Model Arena**: pick 2–3 models/variants, one prompt, side-by-side results and ratings.  
+- **Quick Compare**: pick 2–3 models or variants, send one prompt, and watch results stream live into side-by-side cards. Each result shows the served variant, execution provider, and run status. **Stop** prevents further slots from starting and stops showing new output for the active slot, but generation has no native abort API — the sidecar keeps draining it in the background and it may run to completion; text already streamed is kept.
 - Useful before downloading large weights.
+- **Benchmark Preview** (opt-in, off by default — enable under Settings): a separate, repeatable multi-model benchmark runner for measured comparisons across warmup/repeat runs, with a hardened Stop/Resume lifecycle. Unlike Quick Compare's one-shot interactive comparison, a benchmark run is a persisted, resumable job.
 
 ### Monitor
 
@@ -119,7 +142,7 @@ Press **`?`** in the app for the full list (views, new chat, send, push-to-talk,
 
 | Symptom | What to try |
 |---|---|
-| macOS: "Flint is damaged and can't be opened" | Unsigned prerelease build quarantine. Run `xattr -cr /Applications/Flint.app` in Terminal or use the install script. |
+| macOS: "Flint is damaged and can't be opened" | Unsigned macOS build quarantine. Run `xattr -cr /Applications/Flint.app` in Terminal or use the install script. |
 | Could not start Foundry / sidecar | Release builds ship a bundled Node 22 (About shows `bundled`). Restart Flint. PATH Node is only a fallback for `tauri dev` or an incomplete install. |
 | No models | **Models** → download a starter; wait for catalog. |
 | Chat disabled | Load a **chat** model (not STT-only); check Help → Troubleshooting. |
@@ -132,9 +155,9 @@ In-app: **Help** tab and the first-run coach (Help → “Show the getting-start
 
 ---
 
-## macOS Gatekeeper Installation (Prerelease Builds)
+## macOS Gatekeeper Installation (Unsigned Builds)
 
-Because prerelease builds are not signed with an Apple Developer ID certificate, downloading the `.dmg` in a web browser attaches the `com.apple.quarantine` attribute. macOS Gatekeeper will then report that the app is *"damaged and can't be opened."*
+Because macOS builds are not signed with an Apple Developer ID certificate, downloading the `.dmg` in a web browser attaches the `com.apple.quarantine` attribute. macOS Gatekeeper will then report that the app is *"damaged and can't be opened."*
 
 ### Recommended: Install via CLI (bypasses quarantine)
 ```bash

@@ -1,6 +1,7 @@
 # Flint documentation
 
-Index by audience. These are the living docs; there is no archive. AI/agent
+Index by audience. These are the current living docs — completed work lives in
+`git log` and [CHANGELOG.md](../CHANGELOG.md), not in a doc body. AI/agent
 contributors: start at [AGENTS.md](../AGENTS.md) for a token-saving map of which doc
 to load for a given task.
 
@@ -9,7 +10,7 @@ to load for a given task.
 | Doc | Purpose |
 |---|---|
 | [README.md](../README.md) | Why Flint, who it’s for, screenshots, quick start |
-| [USER_GUIDE.md](./USER_GUIDE.md) | First run, common tasks, bind vs client URL, troubleshooting |
+| [USER_GUIDE.md](./USER_GUIDE.md) | Current navigation, first run, common tasks, bind vs client URL, troubleshooting |
 | [PRODUCT_PLAN.md](./PRODUCT_PLAN.md) | 1.0 implementation sequencing, acceptance gates, and native supervision decisions |
 | [CHANGELOG.md](../CHANGELOG.md) | Versioned release notes |
 
@@ -29,7 +30,6 @@ to load for a given task.
 |---|---|
 | [RELEASE.md](./RELEASE.md) | Signing, GitHub secrets, updater keys, test pipeline |
 | [ADMIN.md](./ADMIN.md) | Operator runbook for an installed app (logs, lifecycle, updater, uninstall) |
-| [RELEASE_0.7.0.md](./RELEASE_0.7.0.md) | 0.7.0 prerelease gates and evaluation checklist |
 | [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) | Current probe-backed plan through 1.0 and the 1.0 release bar (release history: [CHANGELOG.md](../CHANGELOG.md)) |
 
 ## Design / research

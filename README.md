@@ -48,14 +48,12 @@ Use the CLI when you want a terminal-first workflow. Use Flint when you want the
 
 ## What’s in the app
 
-- **Models** — catalog, search/filter, hardware-aware picks, download/load/unload, multi-model pool, update notifications per acceleration track  
-- **Chat** — streaming, conversations, personas, system prompts, multi-image vision, host-aware context, optional URL → context  
-- **Audio** — mic + file transcription (STT)  
-- **Model Arena** — side-by-side prompts, ratings, export  
-- **Monitor** — pool, resource gauges, access/audit logs  
-- **Integrations** — copy-paste setup for OpenAI-compatible tools  
-- **Diagnostics / Settings** — service start/stop, bind/port (Apply & restart), autostart, defaults, shortcuts (`?`)  
-- **Help** — first-run coaching, empty-state guidance, and an About strip
+- **Build** — Playground (Chat/Voice toggle), Model Arena Quick Compare (live streaming, Stop that halts further output per slot, served variant/provider/status), and an opt-in **Benchmark Preview** for repeatable multi-model runs with Stop/Resume
+- **Discover** — Models: catalog, search/filter, hardware-aware picks, download/load/unload, multi-model pool, update notifications per acceleration track
+- **Operate** — Monitor (pool, resource gauges, access/audit logs), Diagnostics (service start/stop, endpoint self-test, health ring), Integrations (copy-paste setup for OpenAI-compatible tools)
+- **Manage** — Settings (bind/port with Apply & restart, autostart, defaults, shortcuts (`?`)) and Help (first-run coaching, empty-state guidance, About strip)
+
+Chat supports streaming, conversations, personas, system prompts, multi-image vision, host-aware context, and optional URL → context. Audio supports mic + file transcription (STT).
 
 No system Node install is required: release builds bundle their own Node 22 runtime for the Foundry sidecar.
 
@@ -63,11 +61,11 @@ No system Node install is required: release builds bundle their own Node 22 runt
 
 ## Status
 
-Pre-1.0: expect breaking changes. **0.7.0 is Flint's first public release** — a foundation evaluation prerelease. [Installers and release notes](https://github.com/joelst/flint/releases).
+Pre-1.0: expect breaking changes. **0.9.0 is Flint's first stable channel release** (0.8.0 was skipped), following the 0.7.0 evaluation prerelease. [Installers and release notes](https://github.com/joelst/flint/releases).
 
 - Windows installers carry a **public-trust Authenticode signature** issued through Azure Trusted Signing, so they validate against the Microsoft-managed root on any machine — no certificate to install and no "unknown publisher" prompt. Bundles ship the Foundry native cores and a pinned Node 22 runtime, verified in CI.
 - macOS builds are **unsigned** (no Apple Developer account) — install with the one-liner below, not the DMG, or Gatekeeper will call the app "damaged".
-- The in-app updater is configured and its artifacts (`latest.json`, `.sig`) ship with every release, but it **will not offer 0.7.0**: GitHub's `releases/latest` pointer skips prereleases by design. Install this build manually. The first stable publish is **0.9.0** (skip 0.8.0), which is the upgrade test before 1.0.0.
+- The in-app updater is configured and its artifacts (`latest.json`, `.sig`) ship with every stable release. From **About**, an available update can be installed with visible download progress, then **Restart to update** or **Later**. Prereleases (like 0.7.0) are never offered through this channel — GitHub's `releases/latest` pointer skips them by design, so that build had to be installed manually.
 
 Next: [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) · [docs/BACKLOG.md](./docs/BACKLOG.md) · Release notes: [CHANGELOG.md](./CHANGELOG.md)
 
@@ -77,7 +75,7 @@ Living reliability plan: **[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md)** · E
 
 ## Screenshots
 
-Each section shows Windows and macOS in dark mode (Flint's default) and light mode.
+Each section shows Windows and macOS in dark mode (Flint's default) and light mode. Benchmark Preview is opt-in and off by default, so it is not part of this default screenshot set.
 Regenerate these with `node scripts/capture-screenshots.mjs` — see
 [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md#screenshots).
 
@@ -168,7 +166,7 @@ Regenerate these with `node scripts/capture-screenshots.mjs` — see
 
 ### Use a release build
 
-1. Install a build from [GitHub Releases](https://github.com/joelst/flint/releases) (or build from source below). 0.7.0 is published as a prerelease, so it appears in the releases list rather than under "Latest".
+1. Install a build from [GitHub Releases](https://github.com/joelst/flint/releases) (or build from source below). Once 0.9.0 is published as a full release (not a prerelease), it appears under "Latest".
    - **macOS**: builds are unsigned, so a browser-downloaded DMG is blocked by Gatekeeper as "damaged". Install with:
 
      ```bash
@@ -209,7 +207,7 @@ Signing and release pipeline: [docs/RELEASE.md](./docs/RELEASE.md)
 
 - **Node:** release builds prefer a **bundled** Node binary; PATH Node remains a dev/fallback. Packaged builds already remove the end-user Node install; shrinking the spawn surface further is post-1.0.
 - **macOS is unsigned** and evaluation-only for 1.0. Browser-downloaded DMGs trigger a Gatekeeper "damaged" warning; use the install one-liner or `xattr -cr`. 1.0 production is Windows. Windows installers are publicly trusted and do not carry this caveat. A new Windows publisher identity may still accumulate SmartScreen reputation over the first downloads.
-- **The updater does not discover prereleases.** 0.7.0 must be installed manually; see [Status](#status).
+- **The updater does not discover prereleases.** The 0.7.0 evaluation build had to be installed manually; see [Status](#status). Stable releases from 0.9.0 onward are discoverable through the in-app updater.
 - **Audio** quality depends on the STT model and runtime.
 - **Tool calling:** models may emit `tool_calls`; Flint’s chat UI does **not** execute tools — use an agent client against the local endpoint.  
 - Unit/contract tests are strong; full UI E2E is still light.
@@ -238,7 +236,6 @@ Architecture principles: [FLINT_DESIGN_SPEC.md](./FLINT_DESIGN_SPEC.md)
 | [docs/EXTENDING.md](./docs/EXTENDING.md) | Build new workflows and integrations on the Flint core |
 | [docs/RELEASE.md](./docs/RELEASE.md) | Sign & ship |
 | [docs/ADMIN.md](./docs/ADMIN.md) | Operator runbook for an installed app |
-| [docs/RELEASE_0.7.0.md](./docs/RELEASE_0.7.0.md) | 0.7.0 prerelease gates and release checklist |
 | [docs/BACKLOG.md](./docs/BACKLOG.md) | Deferred and post-1.0 follow-ups |
 | [CHANGELOG.md](./CHANGELOG.md) | Release notes |
 
