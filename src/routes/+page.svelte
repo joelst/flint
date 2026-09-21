@@ -3151,6 +3151,17 @@ updateStateFromSdk();
     await pollPoolStatus().catch(() => {});
   }
 
+  /** Monitor's Unload button — guarded the same as the Models tab's unload/delete actions so a
+   * benchmark run's pinned target can't be unloaded from here either. */
+  async function unloadFromMonitor(alias: string) {
+    const blocked = blockedByActiveBenchmark();
+    if (blocked) {
+      statusMessage = blocked;
+      return;
+    }
+    await sdkUnloadModel({ alias }).then(refreshMonitorNow);
+  }
+
   function makeCompareSlot(
     model: any,
     variant?: { id: string; deviceType?: string | null; executionProvider?: string | null } | null,
@@ -4642,6 +4653,11 @@ updateStateFromSdk();
   }
 
   async function stopAndUnloadModels() {
+    const blocked = blockedByActiveBenchmark();
+    if (blocked) {
+      statusMessage = blocked;
+      return;
+    }
     startupAuthorization.invalidate();
     try {
       statusMessage = "Stopping service and waiting for active work...";
@@ -5182,7 +5198,25 @@ updateStateFromSdk();
     return await sdkLoadModel(model, lane);
   }
 
+  /** Pinning only stops *automatic* eviction; it does nothing to stop a user from directly
+   * unloading, variant-switching, or deleting a benchmark's pinned target from Models/Monitor
+   * while a run is in flight, which would invalidate or fail the remaining measurements. Blocked
+   * globally (not scoped to the run's specific target aliases) to match the coarse-grained
+   * benchmark/Arena mutex above — the page doesn't otherwise track per-run target aliases, and
+   * per-alias scoping would add a new class of staleness bugs for a feature already accepted as
+   * coarse elsewhere in this PR. */
+  function blockedByActiveBenchmark(): string | null {
+    return benchmarkRunInFlight
+      ? "A benchmark run is active — stop it before changing loaded models."
+      : null;
+  }
+
   async function unloadModel(model: any) {
+    const blocked = blockedByActiveBenchmark();
+    if (blocked) {
+      statusMessage = blocked;
+      return;
+    }
     try {
       statusMessage = `Unloading ${model.alias}...`;
       await sdkUnloadModel(model);
@@ -5200,6 +5234,11 @@ updateStateFromSdk();
   }
 
   async function loadVariant(model: any, variantId: string) {
+    const blocked = blockedByActiveBenchmark();
+    if (blocked) {
+      statusMessage = blocked;
+      return;
+    }
     try {
       statusMessage = `Loading ${model.alias} (${shortVariantLabel(variantId)})...`;
       appendAppLog(`Loading model ${model.alias} variant ${variantId}`);
@@ -5216,6 +5255,11 @@ updateStateFromSdk();
   async function loadAndChatVariant(model: any, variantId: string) {
     if (!modelSupportsChat(model)) {
       statusMessage = `${model.alias} is not a chat model.`;
+      return;
+    }
+    const blocked = blockedByActiveBenchmark();
+    if (blocked) {
+      statusMessage = blocked;
       return;
     }
     try {
@@ -5275,6 +5319,11 @@ updateStateFromSdk();
   }
 
   async function deleteVariant(model: any, variantId: string) {
+    const blocked = blockedByActiveBenchmark();
+    if (blocked) {
+      statusMessage = blocked;
+      return;
+    }
     try {
       const label = shortVariantLabel(variantId);
       const confirmed = globalThis.confirm(
@@ -5343,6 +5392,11 @@ updateStateFromSdk();
   }
 
   async function deleteCachedModel(model: any) {
+    const blocked = blockedByActiveBenchmark();
+    if (blocked) {
+      statusMessage = blocked;
+      return;
+    }
     try {
       const variantCount = ((model as any).variants || []).filter((v: any) => v.cached).length;
       const confirmed = globalThis.confirm(
@@ -7009,7 +7063,7 @@ Output only the summary text, no preamble.`;
                       {#if tokens}
                         <span class="pool-tokens" title="Session tokens in / out">↑{tokens.tokensIn} ↓{tokens.tokensOut}</span>
                       {/if}
-                      <button class="small danger-btn" onclick={() => unloadModel({ alias: entry.alias })}>Unload</button>
+                      <button class="small danger-btn" disabled={benchmarkRunInFlight} onclick={() => unloadModel({ alias: entry.alias })}>Unload</button>
                     </div>
                   {/each}
                 </div>
@@ -7164,7 +7218,7 @@ Output only the summary text, no preamble.`;
                                     </button>
                                   {:else}
                                     {#if !isCurrentlyLoaded}
-                                      <button class="small" onclick={() => loadVariant(model, variant.id)}>Load</button>
+                                      <button class="small" disabled={benchmarkRunInFlight} onclick={() => loadVariant(model, variant.id)}>Load</button>
                                     {/if}
                                     {#if modelSupportsChat(model)}
                                       {#if isCurrentlyLoaded && isCurrentChat}
@@ -7172,12 +7226,13 @@ Output only the summary text, no preamble.`;
                                       {:else if isCurrentlyLoaded}
                                         <button class="small primary-chat" onclick={() => loadAndChatVariant(model, variant.id)}>Chat</button>
                                       {:else}
-                                        <button class="small primary-chat" onclick={() => loadAndChatVariant(model, variant.id)}>Load &amp; Chat</button>
+                                        <button class="small primary-chat" disabled={benchmarkRunInFlight} onclick={() => loadAndChatVariant(model, variant.id)}>Load &amp; Chat</button>
                                       {/if}
                                     {/if}
                                     <button
                                       class="small danger-btn"
                                       title={`Delete ${variant.id} from disk`}
+                                      disabled={benchmarkRunInFlight}
                                       onclick={() => deleteVariant(model, variant.id)}
                                     >Delete</button>
                                   {/if}
@@ -7219,7 +7274,7 @@ Output only the summary text, no preamble.`;
                             >
                           {/if}
                         {/if}
-                        <button onclick={() => unloadModel(model)}
+                        <button disabled={benchmarkRunInFlight} onclick={() => unloadModel(model)}
                           >Unload</button
                         >
                       {/if}
@@ -7238,7 +7293,7 @@ Output only the summary text, no preamble.`;
                       {/if}
 
                       {#if model.isCached}
-                        <button class="danger-btn" onclick={() => deleteCachedModel(model)}>Delete</button>
+                        <button class="danger-btn" disabled={benchmarkRunInFlight} onclick={() => deleteCachedModel(model)}>Delete</button>
                       {/if}
 
                       <label class="startup-toggle" title="Load this model automatically when Flint starts">
@@ -8336,7 +8391,7 @@ Output only the summary text, no preamble.`;
               </button>
               <button
                 onclick={stopAndUnloadModels}
-                disabled={!state.ready}
+                disabled={!state.ready || benchmarkRunInFlight}
               >
                 Stop &amp; Unload
               </button>
@@ -8708,7 +8763,7 @@ Output only the summary text, no preamble.`;
                           <option value="low">Unload first</option>
                         </select>
                       </td>
-                      <td><button class="small danger-btn" onclick={() => sdkUnloadModel({ alias: entry.alias }).then(refreshMonitorNow)}>Unload</button></td>
+                      <td><button class="small danger-btn" disabled={benchmarkRunInFlight} onclick={() => unloadFromMonitor(entry.alias)}>Unload</button></td>
                     </tr>
                   {/each}
                 </tbody>
@@ -9289,8 +9344,13 @@ Output only the summary text, no preamble.`;
                           <button
                             type="button"
                             class="tiny"
-                            disabled={isComparing || comparePreparing}
+                            disabled={isComparing || comparePreparing || benchmarkRunInFlight}
                             onclick={async () => {
+                              const blocked = blockedByActiveBenchmark();
+                              if (blocked) {
+                                statusMessage = blocked;
+                                return;
+                              }
                               try {
                                 statusMessage = `Loading ${slot.label}…`;
                                 await sdkLoadModel(
