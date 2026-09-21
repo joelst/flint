@@ -110,6 +110,7 @@ export default defineConfig(() => ({
         'src/lib/memory-watchdog.ts',
         'sidecar/pool-eviction.js',
         'sidecar/async-log-writer.js',
+        'sidecar/monotonic-wait.js',
         'sidecar/chat-response.js',
         'sidecar/inference-metrics.js',
         'sidecar/foundry-runtime-pin.js',

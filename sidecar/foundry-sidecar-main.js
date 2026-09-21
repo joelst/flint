@@ -25,6 +25,7 @@ import { assertWavBuffer } from './audio-format.js';
 import { createGateway } from './gateway.js';
 import { formatPublicEndpoint } from './gateway-http.js';
 import { buildModelIndex, resolveModelId } from './model-registry.js';
+import { waitUntilIdle } from './monotonic-wait.js';
 import {
   createOperationAdmission,
   createServiceTransitionLock,
@@ -101,13 +102,12 @@ function gatewayRequestsOutstanding() {
   return operationAdmission.snapshot().some((op) => op.command === 'gatewayRequest');
 }
 
+// Delegates the actual poll/deadline loop to `waitUntilIdle` (monotonic-wait.js), which measures
+// elapsed time via `performance.now()` rather than `Date.now()` — see that module's docstring for
+// why a wall-clock deadline here would let a clock rollback keep exclusivity, and therefore every
+// external gateway client, blocked well beyond this 10s limit.
 async function waitForGatewayIdle(timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    if (!gatewayRequestsOutstanding()) return true;
-    if (Date.now() >= deadline) return !gatewayRequestsOutstanding();
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
+  return waitUntilIdle(() => !gatewayRequestsOutstanding(), timeoutMs);
 }
 
 // Each incoming stdin line is dispatched as its own concurrent async handler (see the `rl.on
