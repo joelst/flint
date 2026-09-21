@@ -97,7 +97,7 @@ On Windows, **Settings → About** checks the stable release channel. When an up
 
 ### Model Arena
 
-- **Quick Compare**: pick 2–3 models or variants, send one prompt, and watch results stream live into side-by-side cards. Each result shows the served variant, execution provider, and run status. **Stop** prevents further slots from starting and asks the active slot to stop, but generation has no native abort API and may briefly continue; text already streamed is kept.
+- **Quick Compare**: pick 2–3 models or variants, send one prompt, and watch results stream live into side-by-side cards. Each result shows the served variant, execution provider, and run status. **Stop** prevents further slots from starting and stops showing new output for the active slot, but generation has no native abort API — the sidecar keeps draining it in the background and it may run to completion; text already streamed is kept.
 - Useful before downloading large weights.
 - **Benchmark Preview** (opt-in, off by default — enable under Settings): a separate, repeatable multi-model benchmark runner for measured comparisons across warmup/repeat runs, with a hardened Stop/Resume lifecycle. Unlike Quick Compare's one-shot interactive comparison, a benchmark run is a persisted, resumable job.
 
