@@ -222,8 +222,9 @@ refresh them:
 4. Update `SHOTS` in `scripts/capture-screenshots.mjs` if sidebar labels change, and update
    `README.md`'s Screenshots section if sections are added, renamed, or removed.
 
-The script only uses Node built-ins (global `fetch`/`WebSocket`), so it needs no new
-dependency.
+On Windows, the script only uses Node built-ins (global `fetch`/`WebSocket`), so it needs
+no new dependency. On macOS, it additionally shells out to the system `swift` compiler and
+`/usr/sbin/screencapture`, both of which ship with macOS.
 
 ---
 

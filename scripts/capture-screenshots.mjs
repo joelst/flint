@@ -29,6 +29,7 @@ if (!['darwin', 'win32'].includes(process.platform)) {
 import { execFile } from 'node:child_process';
 import { chmod, writeFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 
 const execFileAsync = promisify(execFile);
 const CDP_PORT = process.env.CDP_PORT ?? '9222';
@@ -399,7 +400,7 @@ async function captureMacScreenshots() {
       await sleep(shot.waitMs);
       const fileName = `${shot.file}-${themeName}.png`;
       const outPath = new URL(fileName, OUTPUT_DIR);
-      await execFileAsync('/usr/sbin/screencapture', ['-x', '-o', '-l', windowId, outPath.pathname]);
+      await execFileAsync('/usr/sbin/screencapture', ['-x', '-o', '-l', windowId, fileURLToPath(outPath)]);
       await chmod(outPath, 0o644);
       console.log(`  [ok] ${fileName}`);
     }
