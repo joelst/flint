@@ -318,6 +318,14 @@ describe('boundVariantIdForTarget / assertServedVariant', () => {
     expect(boundVariantIdForTarget({ variantId: null }, 0, [])).toEqual({ ok: true, variantId: null });
   });
 
+  it('fails closed when a target has attempts but none recorded a bound or served variant', () => {
+    const result = boundVariantIdForTarget({ variantId: null }, 0, [
+      { targetIndex: 0, boundVariantId: undefined, servedVariantId: undefined },
+    ]);
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.error).toMatch(/none recorded a bound or served variant/);
+  });
+
   it('prefers a durable boundVariantId over servedVariantId, recovering an uncertain (dispatched-only) attempt that never reached servedVariantId', () => {
     // A position left `dispatched` by Stop/crash has no servedVariantId (only ever written on a
     // terminal success), but its boundVariantId was committed before dispatch. Resume must
@@ -455,6 +463,37 @@ describe('resumeBenchmarkSession', () => {
     expect(outcome && !outcome.ok && outcome.error).toMatch(/Conflicting recorded variants/);
     // finishPreparedHalt best-effort unpins on the way out; neither loadModel nor pinAliases
     // (the load/pin path) ran, since the conflict is caught before pin/load begins.
+    expect(host.order).toEqual(['unpin']);
+  });
+
+  it('halts resume when alias-only attempts exist but none recorded a bound or served variant', async () => {
+    await putRawRun({
+      id: 'unbound-run',
+      suiteId: 'suite-1',
+      suite: suite({ targets: [{ alias: 'model-a', variantId: null }] }),
+      createdAt: Date.now(),
+      status: 'stopped',
+    });
+    await recordAttemptDispatched({
+      id: 'attempt-legacy',
+      runId: 'unbound-run',
+      logicalAttemptId: 'measured:0:0:0',
+      targetIndex: 0,
+      phase: 'measured',
+      caseIndex: 0,
+      repeatIndex: 0,
+      sequence: 0,
+      status: 'dispatched',
+      alias: 'model-a',
+      requestedVariantId: null,
+      intentCommittedAt: Date.now(),
+    });
+    const host = fakeHost();
+    const result = await resumeBenchmarkSession('unbound-run', host);
+    expect(result.ok).toBe(true);
+    const outcome = result.ok && await result.execution.done;
+    expect(outcome && outcome.ok).toBe(false);
+    expect(outcome && !outcome.ok && outcome.error).toMatch(/none recorded a bound or served variant/);
     expect(host.order).toEqual(['unpin']);
   });
 

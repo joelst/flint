@@ -10,6 +10,7 @@ import {
   getBenchmarkSuite,
   listAttemptsForRun,
   listAttemptSummariesForRun,
+  listBenchmarkRunHeadersForSuite,
   listBenchmarkRunsForSuite,
   listBenchmarkSuites,
   listDispatchedAttemptsForRun,
@@ -546,7 +547,7 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
 
     const db = await openBenchmarkDatabase();
     try {
-      expect(Array.from(db.objectStoreNames).sort()).toEqual(['attemptSummaries', 'attempts', 'runs', 'suites']);
+      expect(Array.from(db.objectStoreNames).sort()).toEqual(['attemptSummaries', 'attempts', 'runHeaders', 'runs', 'suites']);
     } finally {
       db.close();
     }
@@ -649,6 +650,39 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
     await expect(openBenchmarkDatabase()).rejects.toThrow(/backfill|Could not open|abort|fail/i);
   });
 
+  it('backfills runHeaders from existing v3 run rows on upgrade to v4', async () => {
+    await resetDatabase();
+    await new Promise<void>((resolve, reject) => {
+      const req = indexedDB.open('flint-benchmarks', 3);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        db.createObjectStore('suites', { keyPath: 'id' });
+        const runs = db.createObjectStore('runs', { keyPath: 'id' });
+        runs.createIndex('bySuiteId', 'suiteId');
+        const attempts = db.createObjectStore('attempts', { keyPath: 'id' });
+        attempts.createIndex('byRunId', 'runId');
+        attempts.createIndex('byRunStatus', ['runId', 'status']);
+        const summaries = db.createObjectStore('attemptSummaries', { keyPath: 'id' });
+        summaries.createIndex('byRunId', 'runId');
+      };
+      req.onsuccess = () => {
+        const db = req.result;
+        const tx = db.transaction(['suites', 'runs'], 'readwrite');
+        tx.objectStore('suites').put(testSuite);
+        tx.objectStore('runs').put(testRun());
+        tx.oncomplete = () => { db.close(); resolve(); };
+        tx.onerror = () => { db.close(); reject(tx.error); };
+      };
+      req.onerror = () => reject(req.error);
+    });
+
+    const headers = await listBenchmarkRunHeadersForSuite(testSuite.id);
+    expect(headers.ok).toBe(true);
+    expect(headers.value).toHaveLength(1);
+    expect(headers.value![0]).toMatchObject({ id: 'run-1', suiteId: testSuite.id, status: 'running' });
+    expect(headers.value![0]).not.toHaveProperty('suite');
+  });
+
   it('refuses to create a run whose frozen snapshot no longer matches the stored suite', async () => {
     await putBenchmarkSuite(testSuite);
     const stale = testRun({
@@ -672,6 +706,16 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
     expect(await createBenchmarkRun(testRun())).toEqual({ ok: true, value: undefined });
     expect(await getBenchmarkRun('run-1')).toEqual({ ok: true, value: testRun() });
     expect(await listBenchmarkRunsForSuite(testSuite.id)).toEqual({ ok: true, value: [testRun()] });
+    const headers = await listBenchmarkRunHeadersForSuite(testSuite.id);
+    expect(headers.ok).toBe(true);
+    expect(headers.value).toEqual([{
+      id: 'run-1',
+      suiteId: testSuite.id,
+      createdAt: testRun().createdAt,
+      status: 'running',
+      ...(testRun().startedAt !== undefined ? { startedAt: testRun().startedAt } : {}),
+    }]);
+    expect(headers.value![0]).not.toHaveProperty('suite');
   });
 
   it('countBenchmarkRunsForSuite matches listBenchmarkRunsForSuite length without reading full rows', async () => {
@@ -713,6 +757,17 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
     expect(update).toEqual({ ok: true, value: undefined });
     const got = await getBenchmarkRun('run-1');
     expect(got.value).toEqual(testRun({ status: 'completed', startedAt: 5, finalizedAt: 9 }));
+    expect(await listBenchmarkRunHeadersForSuite(testSuite.id)).toEqual({
+      ok: true,
+      value: [{
+        id: 'run-1',
+        suiteId: testSuite.id,
+        createdAt: testRun().createdAt,
+        status: 'completed',
+        startedAt: 5,
+        finalizedAt: 9,
+      }],
+    });
   });
 
   it('updateBenchmarkRunStatus fails when the run does not exist', async () => {

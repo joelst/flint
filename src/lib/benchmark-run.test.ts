@@ -3,6 +3,8 @@ import {
   buildAttemptSchedule,
   isBenchmarkAttempt,
   isBenchmarkRun,
+  isBenchmarkRunHeader,
+  summarizeRun,
   nextSequenceFor,
   pendingLogicalAttempts,
   pendingTargetIndexes,
@@ -186,6 +188,31 @@ describe('nextSequenceFor', () => {
     ];
     expect(nextSequenceFor('t0:c0:r0', attempts)).toBe(2);
     expect(nextSequenceFor('t0:c0:r1', attempts)).toBe(6);
+  });
+});
+
+describe('summarizeRun / isBenchmarkRunHeader', () => {
+  it('drops the embedded suite snapshot and rejects a header that still has one', () => {
+    const run: BenchmarkRun = {
+      id: 'run-1',
+      suiteId: 'suite-1',
+      suite: suite(),
+      createdAt: 1,
+      status: 'stopped',
+      startedAt: 2,
+      finalizedAt: 3,
+    };
+    const header = summarizeRun(run);
+    expect(header).toEqual({
+      id: 'run-1',
+      suiteId: 'suite-1',
+      createdAt: 1,
+      status: 'stopped',
+      startedAt: 2,
+      finalizedAt: 3,
+    });
+    expect(isBenchmarkRunHeader(header)).toBe(true);
+    expect(isBenchmarkRunHeader({ ...header, suite: suite() })).toBe(false);
   });
 });
 

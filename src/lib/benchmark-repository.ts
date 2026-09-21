@@ -10,26 +10,38 @@
  * migrating storage backends mid-feature.
  *
  * v2 adds `runs` and `attempts`. v3 adds `attemptSummaries` so live polling can read progress
- * without structured-cloning full response bodies.
+ * without structured-cloning full response bodies. v4 adds `runHeaders` so the suite run list
+ * can refresh without cloning each run's embedded suite snapshot.
  *
  * Benchmark Preview (`BenchmarkPreview.svelte`) is the UI reader: suite CRUD, run lists,
  * attempt-summary polling, and JSON export all go through this module.
  */
 
 import { isStoredBenchmarkSuite, suiteSnapshotMatchesStored, validateBenchmarkSuite, type BenchmarkSuite } from './benchmark-suite';
-import { isBenchmarkAttempt, isBenchmarkRun, type BenchmarkAttempt, type BenchmarkRun, type RunStatus } from './benchmark-run';
+import {
+  isBenchmarkAttempt,
+  isBenchmarkRun,
+  isBenchmarkRunHeader,
+  summarizeRun,
+  type BenchmarkAttempt,
+  type BenchmarkRun,
+  type BenchmarkRunHeader,
+  type RunStatus,
+} from './benchmark-run';
 import { isAttemptSummary, summarizeAttempt, type AttemptSummary } from './benchmark-progress';
 
 const DATABASE_NAME = 'flint-benchmarks';
-const DATABASE_VERSION = 3;
+const DATABASE_VERSION = 4;
 const SUITES_STORE = 'suites';
 const RUNS_STORE = 'runs';
 const ATTEMPTS_STORE = 'attempts';
 const ATTEMPT_SUMMARIES_STORE = 'attemptSummaries';
+const RUN_HEADERS_STORE = 'runHeaders';
 const RUNS_BY_SUITE_INDEX = 'bySuiteId';
 const ATTEMPTS_BY_RUN_INDEX = 'byRunId';
 const ATTEMPTS_BY_RUN_STATUS_INDEX = 'byRunStatus';
 const ATTEMPT_SUMMARIES_BY_RUN_INDEX = 'byRunId';
+const RUN_HEADERS_BY_SUITE_INDEX = 'bySuiteId';
 
 /** Idempotent schema setup: each version bump only adds what is missing, so upgrading from any
  * earlier version (including a fresh v1 database) never drops existing stores or data. */
@@ -61,6 +73,23 @@ export function upgradeBenchmarkDatabase(db: IDBDatabase, tx: IDBTransaction | n
           throw new Error('v3 backfill: a stored attempt failed validation; refusing a partial summary projection');
         }
         summaries.put(summarizeAttempt(row));
+        cursor.continue();
+      };
+    }
+  }
+  if (!db.objectStoreNames.contains(RUN_HEADERS_STORE)) {
+    const headers = db.createObjectStore(RUN_HEADERS_STORE, { keyPath: 'id' });
+    headers.createIndex(RUN_HEADERS_BY_SUITE_INDEX, 'suiteId');
+    if (tx && db.objectStoreNames.contains(RUNS_STORE)) {
+      const cursorReq = tx.objectStore(RUNS_STORE).openCursor();
+      cursorReq.onsuccess = () => {
+        const cursor = cursorReq.result;
+        if (!cursor) return;
+        const row = cursor.value;
+        if (!isBenchmarkRun(row, { allowDuplicateAliases: true })) {
+          throw new Error('v4 backfill: a stored run failed validation; refusing a partial header projection');
+        }
+        headers.put(summarizeRun(row));
         cursor.continue();
       };
     }
@@ -375,17 +404,32 @@ export async function deleteBenchmarkSuiteIfNoRuns(id: string): Promise<Reposito
  * definition. */
 export async function createBenchmarkRun(run: BenchmarkRun): Promise<RepositoryResult<void>> {
   if (!isBenchmarkRun(run)) return failResult('run failed shape validation');
-  const result = await withStores<void>([RUNS_STORE, SUITES_STORE], 'readwrite', (tx, trackRequest) => {
+  const result = await withStores<void>([RUNS_STORE, SUITES_STORE, RUN_HEADERS_STORE], 'readwrite', (tx, trackRequest) => {
     const getSuite = tx.objectStore(SUITES_STORE).get(run.suiteId) as IDBRequest<BenchmarkSuite | undefined>;
-    return chainFromSuccess(getSuite, trackRequest, (suite) => {
-      if (suite === undefined) {
-        throw new Error(`suite "${run.suiteId}" does not exist; refusing to create an orphaned run`);
-      }
-      if (!suiteSnapshotMatchesStored(suite, run.suite)) {
-        throw new Error(`suite "${run.suiteId}" changed after this run was prepared; refusing to insert a stale snapshot`);
-      }
-      return tx.objectStore(RUNS_STORE).add(run) as IDBRequest<IDBValidKey>;
-    }).then(() => undefined);
+    trackRequest(getSuite);
+    return new Promise<void>((resolve, reject) => {
+      getSuite.onsuccess = () => {
+        const suite = getSuite.result;
+        try {
+          if (suite === undefined) {
+            throw new Error(`suite "${run.suiteId}" does not exist; refusing to create an orphaned run`);
+          }
+          if (!suiteSnapshotMatchesStored(suite, run.suite)) {
+            throw new Error(`suite "${run.suiteId}" changed after this run was prepared; refusing to insert a stale snapshot`);
+          }
+        } catch (e) {
+          reject(e);
+          return;
+        }
+        const addRun = tx.objectStore(RUNS_STORE).add(run) as IDBRequest<IDBValidKey>;
+        trackRequest(addRun);
+        addRun.onsuccess = () => {
+          const putHeader = tx.objectStore(RUN_HEADERS_STORE).put(summarizeRun(run)) as IDBRequest<IDBValidKey>;
+          trackRequest(putHeader);
+          putHeader.onsuccess = () => resolve();
+        };
+      };
+    });
   });
   if (!result.ok) return failResult(result.error!);
   return okResult(undefined);
@@ -423,7 +467,7 @@ export async function listBenchmarkRunsForSuite(suiteId: string): Promise<Reposi
  * `listBenchmarkRunsForSuite` — a single corrupt run here can never fail this call (or, via
  * `refreshSuites`, block every *other* suite in the list from loading over one bad row in an
  * unrelated suite). Corruption is not silently lost: opening that suite still goes through
- * `refreshRunsForSelectedSuite`/`listBenchmarkRunsForSuite`, which does validate and surfaces
+ * `refreshRunsForSelectedSuite`/`listBenchmarkRunHeadersForSuite`, which does validate and surfaces
  * the error at that point. */
 export async function countBenchmarkRunsForSuite(suiteId: string): Promise<RepositoryResult<number>> {
   const result = await withStores<number>(RUNS_STORE, 'readonly', (tx, trackRequest) => {
@@ -442,20 +486,48 @@ export async function updateBenchmarkRunStatus(
   status: RunStatus,
   patch: Partial<Pick<BenchmarkRun, 'startedAt' | 'finalizedAt'>> = {},
 ): Promise<RepositoryResult<void>> {
-  const result = await withStores<void>(RUNS_STORE, 'readwrite', (tx, trackRequest) => {
+  const result = await withStores<void>([RUNS_STORE, RUN_HEADERS_STORE], 'readwrite', (tx, trackRequest) => {
     const store = tx.objectStore(RUNS_STORE);
     const getRequest = store.get(id) as IDBRequest<BenchmarkRun | undefined>;
-    return chainFromSuccess(getRequest, trackRequest, (existing) => {
-      if (existing === undefined) throw new Error(`no benchmark run "${id}" to update`);
-      // This re-persists the existing (write-once) suite snapshot unchanged, so a legacy
-      // duplicate-alias shape here is being carried forward, not newly authored — tolerate it.
-      if (!isBenchmarkRun(existing, { allowDuplicateAliases: true })) throw new Error(`stored benchmark run "${id}" failed validation`);
-      const updated: BenchmarkRun = { ...existing, ...patch, status };
-      return store.put(updated) as IDBRequest<IDBValidKey>;
-    }).then(() => undefined);
+    trackRequest(getRequest);
+    return new Promise<void>((resolve, reject) => {
+      getRequest.onsuccess = () => {
+        const existing = getRequest.result;
+        try {
+          if (existing === undefined) throw new Error(`no benchmark run "${id}" to update`);
+          // This re-persists the existing (write-once) suite snapshot unchanged, so a legacy
+          // duplicate-alias shape here is being carried forward, not newly authored — tolerate it.
+          if (!isBenchmarkRun(existing, { allowDuplicateAliases: true })) throw new Error(`stored benchmark run "${id}" failed validation`);
+        } catch (e) {
+          reject(e);
+          return;
+        }
+        const updated: BenchmarkRun = { ...existing, ...patch, status };
+        const putRun = store.put(updated) as IDBRequest<IDBValidKey>;
+        trackRequest(putRun);
+        putRun.onsuccess = () => {
+          const putHeader = tx.objectStore(RUN_HEADERS_STORE).put(summarizeRun(updated)) as IDBRequest<IDBValidKey>;
+          trackRequest(putHeader);
+          putHeader.onsuccess = () => resolve();
+        };
+      };
+    });
   });
   if (!result.ok) return failResult(result.error!);
   return okResult(undefined);
+}
+
+/** Lightweight run list for the suite panel: headers only, no embedded suite snapshot. */
+export async function listBenchmarkRunHeadersForSuite(suiteId: string): Promise<RepositoryResult<BenchmarkRunHeader[]>> {
+  const result = await withStores<BenchmarkRunHeader[]>(RUN_HEADERS_STORE, 'readonly', (tx, trackRequest) => {
+    const index = tx.objectStore(RUN_HEADERS_STORE).index(RUN_HEADERS_BY_SUITE_INDEX);
+    return requestAsPromise(index.getAll(suiteId) as IDBRequest<BenchmarkRunHeader[]>, trackRequest);
+  });
+  if (!result.ok) return failResult(result.error!);
+  const rows = result.value ?? [];
+  const invalidIndex = rows.findIndex((row) => !isBenchmarkRunHeader(row));
+  if (invalidIndex !== -1) return failResult(`stored benchmark run header at index ${invalidIndex} failed validation`);
+  return okResult(rows);
 }
 
 /** Write-ahead intent: durably records that `attempt` (status `'dispatched'`) is about to be

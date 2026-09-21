@@ -287,6 +287,10 @@
 
   async function runGatewaySelfTest() {
     if (endpointSelfTestBusy) return;
+    if (benchmarkRunInFlight) {
+      statusMessage = "A benchmark run is active — stop it before changing loaded models.";
+      return;
+    }
     endpointSelfTestBusy = true;
     try {
       const catalogModel = state.models.find((m: ModelInfo) => m.alias === selectedModelAlias);
@@ -918,7 +922,7 @@
    * Start/Resume controls proactively. Omits other-conversation streams (`streamsByConversation`
    * isn't a reactive rune) since this is UI feedback only — `otherInferenceInFlight()` at
    * admission time is the actual enforcement and does cover that case. */
-  const otherInferenceActiveForUi = $derived(isStreaming || isDictating || dictationTranscribing || isTranscribing || isSummarizing);
+  const otherInferenceActiveForUi = $derived(isStreaming || isDictating || dictationTranscribing || isTranscribing || isSummarizing || endpointSelfTestBusy);
 
   /** Counts explicit model-mutating operations (load/unload/delete/variant-switch/STT-load) in
    * flight from Models/Monitor/chat-model-switch. `blockedByActiveBenchmark()` only blocks a
@@ -948,15 +952,15 @@
   }
 
   /** True while chat (any conversation, including ones navigated away from), dictation,
-   * transcription, summarization, or an explicit model-mutating operation (see
-   * `poolMutationsInFlight`) is actually dispatching against, or mutating, the shared
+   * transcription, summarization, endpoint self-test, or an explicit model-mutating operation
+   * (see `poolMutationsInFlight`) is actually dispatching against, or mutating, the shared
    * alias-keyed pool. Benchmark Start/Resume must check this — not just Arena — or a benchmark
    * can begin admission while other inference or a pool mutation is still in flight and contend
    * for the same pool mid-run. Checked once at admission time (mirrors the existing Arena check
    * below); the composer/editor controls also disable proactively via the `otherInferenceActive`
    * prop, but this function call is the actual enforcement. */
   function otherInferenceInFlight(): boolean {
-    return streamsByConversation.size > 0 || isDictating || dictationTranscribing || isTranscribing || isSummarizing || poolMutationsInFlight > 0;
+    return streamsByConversation.size > 0 || isDictating || dictationTranscribing || isTranscribing || isSummarizing || poolMutationsInFlight > 0 || endpointSelfTestBusy;
   }
 
   /**
@@ -972,7 +976,7 @@
     // features can replace/unload each other's models mid-run. See runComparison's matching guard.
     if (isComparing || comparePreparing) return { ok: false, error: 'An Arena run is already active.' };
     if (otherInferenceInFlight()) {
-      return { ok: false, error: 'Chat, dictation, transcription, or summarization is in progress — finish or stop it before starting a benchmark.' };
+      return { ok: false, error: 'Chat, dictation, transcription, summarization, or endpoint self-test is in progress — finish or stop it before starting a benchmark.' };
     }
     benchmarkRunInFlight = true;
     benchmarkRunError = null;
@@ -1003,7 +1007,7 @@
     // See startBenchmarkPreviewRun: benchmark and Arena admission must be mutually exclusive.
     if (isComparing || comparePreparing) return { ok: false, error: 'An Arena run is already active.' };
     if (otherInferenceInFlight()) {
-      return { ok: false, error: 'Chat, dictation, transcription, or summarization is in progress — finish or stop it before resuming a benchmark.' };
+      return { ok: false, error: 'Chat, dictation, transcription, summarization, or endpoint self-test is in progress — finish or stop it before resuming a benchmark.' };
     }
     benchmarkRunInFlight = true;
     benchmarkRunError = null;
@@ -8694,7 +8698,7 @@ Output only the summary text, no preamble.`;
               <button onclick={copyDiagnosticsToClipboard}>
                 Copy All Diagnostics
               </button>
-              <button onclick={runGatewaySelfTest} disabled={endpointSelfTestBusy}>
+              <button onclick={runGatewaySelfTest} disabled={endpointSelfTestBusy || benchmarkRunInFlight}>
                 {endpointSelfTestBusy ? "Testing endpoint…" : "Test local endpoint"}
               </button>
               <button onclick={scanCacheInventory} disabled={!state.ready || cacheInventoryLoading}>

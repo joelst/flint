@@ -5,7 +5,7 @@
     listBenchmarkSuites,
     putBenchmarkSuiteIfNoRuns,
     deleteBenchmarkSuiteIfNoRuns,
-    listBenchmarkRunsForSuite,
+    listBenchmarkRunHeadersForSuite,
     countBenchmarkRunsForSuite,
     getBenchmarkRun,
     getBenchmarkRunWithAttempts,
@@ -21,7 +21,7 @@
   import { aliasChoicesForTarget, applyTargetAlias, cachedVariantIds, draftEditsSuite, draftFromSuite, buildSuiteFromDraft, estimateDraftAttempts, variantChoicesForTarget, type SuiteDraft } from "./benchmark-draft";
   import { buildProgressMatrix, isRunInterrupted, isRunResumable, nextRunPollAction, nextRunPollActionAfterReread, type AttemptSummary } from "./benchmark-progress";
   import { buildBenchmarkExport } from "./benchmark-export";
-  import type { BenchmarkRun } from "./benchmark-run";
+  import type { BenchmarkRun, BenchmarkRunHeader } from "./benchmark-run";
 
   export let availableModels: ModelInfo[] = [];
   /** The run id the parent is actually executing right now, or null. Used only to reflect
@@ -50,7 +50,7 @@
   let suites: BenchmarkSuite[] = [];
   let loadError = "";
   let selectedSuiteId: string | null = null;
-  let runsForSelectedSuite: BenchmarkRun[] = [];
+  let runsForSelectedSuite: BenchmarkRunHeader[] = [];
   let runCountsBySuite: Record<string, number> = {};
 
   let editingDraft: SuiteDraft | null = null;
@@ -141,7 +141,7 @@
 
   async function refreshRunsForSelectedSuite(id: string) {
     const generation = ++runsRefreshGeneration;
-    const res = await listBenchmarkRunsForSuite(id);
+    const res = await listBenchmarkRunHeadersForSuite(id);
     if (destroyed || generation !== runsRefreshGeneration || selectedSuiteId !== id) return;
     if (!res.ok) {
       loadError = res.error || `Could not read runs for suite "${id}"`;
@@ -685,7 +685,7 @@
               type="button"
               class="primary small"
               disabled={runBusy || otherInferenceActive || !!activeRunId || !isBenchmarkSuite(suite) || draftEditsSuite(editingDraft, suite.id)}
-              title={otherInferenceActive ? "Finish or stop chat, dictation, transcription, or summarization before starting a benchmark." : undefined}
+              title={otherInferenceActive ? "Finish or stop chat, dictation, transcription, summarization, or endpoint self-test before starting a benchmark." : undefined}
               onclick={() => handleStart(suite)}
             >
               {lifecycleBusy ? "Starting…" : "Start run"}
@@ -695,7 +695,7 @@
             <p class="muted small">Save or cancel your edits before starting a run.</p>
           {/if}
           {#if otherInferenceActive && !activeRunId}
-            <p class="muted small">Chat, dictation, transcription, or summarization is in progress — finish or stop it before starting a benchmark.</p>
+            <p class="muted small">Chat, dictation, transcription, summarization, or endpoint self-test is in progress — finish or stop it before starting a benchmark.</p>
           {/if}
           {#if !isBenchmarkSuite(suite)}
             <p class="muted small">
@@ -737,7 +737,7 @@
                     type="button"
                     class="primary small"
                     disabled={runBusy || otherInferenceActive || !!activeRunId}
-                    title={otherInferenceActive ? "Finish or stop chat, dictation, transcription, or summarization before resuming a benchmark." : undefined}
+                    title={otherInferenceActive ? "Finish or stop chat, dictation, transcription, summarization, or endpoint self-test before resuming a benchmark." : undefined}
                     onclick={() => handleResume(currentRun.id)}
                   >
                     {lifecycleBusy ? "Resuming…" : "Resume"}
@@ -846,6 +846,58 @@
   .benchmark-errors {
     color: var(--danger, #c0392b);
     font-size: 0.85rem;
+  }
+  /* Utility classes live in +page.svelte's scoped sheet and do not apply to this child. */
+  .muted { color: var(--muted, #888); }
+  .small { font-size: 0.85rem; }
+  .badge {
+    font-size: 0.7rem;
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: var(--subtle-bg, rgba(127,127,127,0.15));
+    color: var(--fg, inherit);
+  }
+  .warning-banner {
+    padding: 8px 12px;
+    border-radius: 6px;
+    border: 1px solid color-mix(in srgb, var(--warning, #b8860b) 40%, transparent);
+    background: color-mix(in srgb, var(--warning, #b8860b) 10%, transparent);
+    color: var(--warning, #b8860b);
+    font-size: 0.8rem;
+  }
+  button {
+    padding: 6px 12px;
+    background: var(--button-bg, #444);
+    color: white;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 0.85rem;
+  }
+  button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  button.secondary {
+    background: var(--subtle-bg, rgba(127,127,127,0.2));
+    color: var(--fg, inherit);
+  }
+  button.small {
+    font-size: 0.75rem;
+    padding: 2px 8px;
+  }
+  button.tiny {
+    font-size: 0.7rem;
+    padding: 1px 6px;
+    background: var(--panel-bg, transparent);
+    border: 1px solid var(--border, #ccc);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .danger-btn {
+    border-color: #ef4444;
+    color: #fecaca;
   }
   .benchmark-active-run-banner {
     display: flex;

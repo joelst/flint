@@ -54,7 +54,11 @@ export type PrepareResult = { ok: true } | { ok: false; error: string; stopped?:
  * disagree with an earlier one. If persisted rows disagree anyway (only reachable through data
  * corruption or a bug elsewhere), refuse to pick one arbitrarily: report the conflict so resume
  * fails loudly instead of silently binding to a value that may not match what the original run
- * actually executed against. */
+ * actually executed against.
+ *
+ * If this target has attempts but none recorded a binding (legacy dispatched-only rows from
+ * before `boundVariantId`), fail closed: treating that as never-run would load today's default
+ * and mix builds. Callers should only invoke this for targets Resume will still execute. */
 export function boundVariantIdForTarget(
   target: { variantId: string | null },
   targetIndex: number,
@@ -62,13 +66,23 @@ export function boundVariantIdForTarget(
 ): { ok: true; variantId: string | null } | { ok: false; error: string } {
   if (target.variantId) return { ok: true, variantId: target.variantId };
   const recorded = new Set<string>();
+  let matching = 0;
   for (const attempt of attempts) {
     if (attempt.targetIndex !== targetIndex) continue;
+    matching += 1;
     if (typeof attempt.boundVariantId === 'string' && attempt.boundVariantId.length > 0) {
       recorded.add(attempt.boundVariantId);
     } else if (typeof attempt.servedVariantId === 'string' && attempt.servedVariantId.length > 0) {
       recorded.add(attempt.servedVariantId);
     }
+  }
+  if (matching > 0 && recorded.size === 0) {
+    return {
+      ok: false,
+      error:
+        `Target ${targetIndex} has attempts but none recorded a bound or served variant; `
+        + `start a new run rather than mixing today's default with the original build`,
+    };
   }
   if (recorded.size > 1) {
     return {
@@ -335,14 +349,18 @@ export async function resumeBenchmarkSession(
     const attempts = await listAttemptsForRun(runId);
     if (!attempts.ok) return { ok: false, error: attempts.error };
     const rows = attempts.value ?? [];
-    for (const [i, target] of suite.targets.entries()) {
+    // Only bind variants for targets Resume will still execute. A completed alias-only target
+    // can have legacy terminal rows with neither boundVariantId nor servedVariantId; failing
+    // closed on those would block retries of still-pending targets we can bind.
+    const only = new Set(pendingTargetIndexes(suite, rows));
+    for (const i of only) {
+      const target = suite.targets[i];
       const bound = boundVariantIdForTarget(target, i, rows);
       if (!bound.ok) {
         return finishPreparedHalt(runId, host, 'failed', bound.error);
       }
       if (bound.variantId) expectedByAlias.set(target.alias, bound.variantId);
     }
-    const only = new Set(pendingTargetIndexes(suite, rows));
     if (only.size > 0) {
       const preparedPin = await pinThenLoad(suite, host, stopController, only, expectedByAlias);
       if (!preparedPin.ok) {

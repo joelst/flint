@@ -59,6 +59,30 @@ export interface BenchmarkRun {
   finalizedAt?: number;
 }
 
+/** List/header projection of a run: status and timestamps without the embedded suite snapshot. */
+export interface BenchmarkRunHeader {
+  id: string;
+  suiteId: string;
+  createdAt: number;
+  status: RunStatus;
+  startedAt?: number;
+  finalizedAt?: number;
+}
+
+export function summarizeRun(
+  run: Pick<BenchmarkRun, 'id' | 'suiteId' | 'createdAt' | 'status' | 'startedAt' | 'finalizedAt'>,
+): BenchmarkRunHeader {
+  const header: BenchmarkRunHeader = {
+    id: run.id,
+    suiteId: run.suiteId,
+    createdAt: run.createdAt,
+    status: run.status,
+  };
+  if (run.startedAt !== undefined) header.startedAt = run.startedAt;
+  if (run.finalizedAt !== undefined) header.finalizedAt = run.finalizedAt;
+  return header;
+}
+
 export interface AttemptUsage {
   promptTokens?: number;
   completionTokens?: number;
@@ -256,6 +280,18 @@ export function isBenchmarkRun(
   if (typeof v.status !== 'string' || !RUN_STATUSES.has(v.status as RunStatus)) return false;
   if (v.startedAt !== undefined && !isFiniteNumber(v.startedAt)) return false;
   if (v.finalizedAt !== undefined && !isFiniteNumber(v.finalizedAt)) return false;
+  return true;
+}
+
+export function isBenchmarkRunHeader(value: unknown): value is BenchmarkRunHeader {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  if (!isNonEmptyString(v.id) || !isNonEmptyString(v.suiteId)) return false;
+  if (!isFiniteNumber(v.createdAt)) return false;
+  if (typeof v.status !== 'string' || !RUN_STATUSES.has(v.status as RunStatus)) return false;
+  if (v.startedAt !== undefined && !isFiniteNumber(v.startedAt)) return false;
+  if (v.finalizedAt !== undefined && !isFiniteNumber(v.finalizedAt)) return false;
+  if ('suite' in v) return false;
   return true;
 }
 
