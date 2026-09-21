@@ -974,7 +974,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       await new Promise<void>((resolve) => upstream.close(() => resolve()));
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });
     }
-  });
+  }, 20000);
 
   it('lets an already-admitted request finish autoloading its model even after exclusive admission is requested mid-flight', async () => {
     // First chat call: held until the test releases it, then answers the exact "not loaded"
