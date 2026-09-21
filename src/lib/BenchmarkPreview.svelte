@@ -51,7 +51,7 @@
   let loadError = "";
   let selectedSuiteId: string | null = null;
   let runsForSelectedSuite: BenchmarkRunHeader[] = [];
-  let runCountsBySuite: Record<string, number> = {};
+  let runCountsBySuite: Record<string, number> = Object.create(null);
 
   let editingDraft: SuiteDraft | null = null;
   let editingErrors: string[] = [];
@@ -126,7 +126,11 @@
       return;
     }
     const raw = countRes.value ?? {};
-    const counts: Record<string, number> = {};
+    // Suite IDs are arbitrary validated strings, not property-safe keys: an id like
+    // `__proto__` would collide with Object.prototype in a plain object literal, so a
+    // null-prototype dictionary is used here too — mirroring `countBenchmarkRunsBySuite`,
+    // whose own fix does not, by itself, protect this second dictionary.
+    const counts: Record<string, number> = Object.create(null);
     for (const suite of nextSuites) {
       counts[suite.id] = raw[suite.id] ?? 0;
     }
@@ -145,7 +149,14 @@
       return;
     }
     runsForSelectedSuite = (res.value ?? []).sort((a, b) => b.createdAt - a.createdAt);
-    runCountsBySuite = { ...runCountsBySuite, [id]: runsForSelectedSuite.length };
+    // A spread into a plain object literal (`{ ...runCountsBySuite, [id]: n }`) would produce a
+    // normal-prototype object regardless of the source's own prototype, silently reintroducing
+    // the `__proto__`/`constructor` collision this dictionary is meant to avoid. Copy onto a
+    // fresh null-prototype object instead.
+    const nextCounts: Record<string, number> = Object.create(null);
+    Object.assign(nextCounts, runCountsBySuite);
+    nextCounts[id] = runsForSelectedSuite.length;
+    runCountsBySuite = nextCounts;
     loadError = "";
   }
 

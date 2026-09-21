@@ -477,7 +477,11 @@ export async function countBenchmarkRunsBySuite(): Promise<RepositoryResult<Reco
     const req = index.openKeyCursor() as IDBRequest<IDBCursor | null>;
     trackRequest(req);
     return new Promise<Record<string, number>>((resolve) => {
-      const counts: Record<string, number> = {};
+      // Suite IDs are arbitrary validated strings, not property-safe keys: an id like
+      // `__proto__` or `constructor` would collide with Object.prototype in a plain object
+      // literal, losing its count (or reading back an inherited non-number). A null-prototype
+      // object has no such inherited properties for any string key to collide with.
+      const counts: Record<string, number> = Object.create(null);
       req.onsuccess = () => {
         const cursor = req.result;
         if (!cursor) {

@@ -739,6 +739,18 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
     });
   });
 
+  it('countBenchmarkRunsBySuite does not lose a count for a suite id shadowing Object.prototype', async () => {
+    // A suite id like `__proto__` is a valid string and must not collide with the aggregation
+    // dictionary's own prototype chain — that would silently drop/misreport its count.
+    const protoSuite = { ...testSuite, id: '__proto__', name: 'Proto' };
+    await putBenchmarkSuite(protoSuite);
+    await createBenchmarkRun(testRun({ suiteId: '__proto__', suite: protoSuite }));
+    const result = await countBenchmarkRunsBySuite();
+    expect(result.ok).toBe(true);
+    expect((result as any).value.__proto__).toBe(1);
+    expect(Object.prototype.hasOwnProperty.call((result as any).value, '__proto__')).toBe(true);
+  });
+
   it('getBenchmarkRunWithAttempts returns null for a run id that does not exist', async () => {
     expect(await getBenchmarkRunWithAttempts('missing')).toEqual({ ok: true, value: null });
   });
