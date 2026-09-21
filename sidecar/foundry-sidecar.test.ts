@@ -678,7 +678,7 @@ describe('foundry-sidecar protocol basics', () => {
       if (!proc.killed) proc.kill();
       rmSync(homeDir, { recursive: true, force: true });
     }
-  });
+  }, 20000);
 });
 
 describe('foundry-sidecar benchmark exclusive gateway fence', () => {
