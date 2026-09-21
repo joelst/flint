@@ -28,8 +28,10 @@
    * status here — lifecycle state (start/stop/resume) itself lives in the parent so a run
    * survives navigating away from this view. */
   export let activeRunId: string | null = null;
-  /** Dispatches at or after this timestamp are this live session's in-flight work. */
-  export let liveAfter: number | null = null;
+  /** Attempt ids that already existed before this live session dispatched anything — an exact
+   * identity check for "this session's in-flight work" (see `PreparedExecution.knownAttemptIds`
+   * in benchmark-lifecycle.ts), immune to wall-clock repeats/rollbacks during model loading. */
+  export let knownAttemptIds: ReadonlySet<string> | null = null;
   /** True from the moment start/resume is requested until pin restore finishes. */
   export let runInFlight: boolean = false;
   /** True while chat, dictation, transcription, or summarization elsewhere in the app is
@@ -409,7 +411,7 @@
   $: progressMatrix = selectedRun
     ? buildProgressMatrix(selectedRun.suite, selectedRunAttempts, {
         live: selectedRun.id === activeRunId,
-        liveAfter: selectedRun.id === activeRunId ? liveAfter : null,
+        knownAttemptIds: selectedRun.id === activeRunId ? knownAttemptIds : null,
       })
     : [];
   $: selectedRunIsActive = !!selectedRun && selectedRun.id === activeRunId;

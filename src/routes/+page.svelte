@@ -766,7 +766,7 @@
   let benchmarkRunInFlight = $state(false);
   /** The run currently executing, set as soon as `prepareBenchmarkRun` commits the row. */
   let benchmarkActiveRunId = $state<string | null>(null);
-  let benchmarkLiveAfter = $state<number | null>(null);
+  let benchmarkKnownAttemptIds = $state<ReadonlySet<string> | null>(null);
   let benchmarkStopController: StopController | null = null;
   /** Aliases pinned for the duration of the active run; restored to 'normal' in a finally once
    * the run halts, so a benchmark never permanently changes a model's eviction priority. */
@@ -946,7 +946,7 @@
     try {
       benchmarkStopController = null;
       benchmarkActiveRunId = null;
-      benchmarkLiveAfter = null;
+      benchmarkKnownAttemptIds = null;
       await unpinBenchmarkTargets();
       if (generation !== benchmarkExclusiveGeneration) return;
       const released = await attemptReleaseBenchmarkExclusive();
@@ -1088,7 +1088,7 @@
       }
       benchmarkStopController = started.execution.stopController;
       benchmarkActiveRunId = started.execution.runId;
-      benchmarkLiveAfter = started.execution.liveAfter;
+      benchmarkKnownAttemptIds = started.execution.knownAttemptIds;
       started.execution.done
         .then(recordBenchmarkOutcome)
         .catch((e: any) => recordBenchmarkOutcome({ ok: false, error: e?.message || String(e) }))
@@ -1127,7 +1127,7 @@
       }
       benchmarkStopController = started.execution.stopController;
       benchmarkActiveRunId = started.execution.runId;
-      benchmarkLiveAfter = started.execution.liveAfter;
+      benchmarkKnownAttemptIds = started.execution.knownAttemptIds;
       started.execution.done
         .then(recordBenchmarkOutcome)
         .catch((e: any) => recordBenchmarkOutcome({ ok: false, error: e?.message || String(e) }))
@@ -10008,7 +10008,7 @@ Output only the summary text, no preamble.`;
           <BenchmarkPreview
             availableModels={chatPickerModels}
             activeRunId={benchmarkActiveRunId}
-            liveAfter={benchmarkLiveAfter}
+            knownAttemptIds={benchmarkKnownAttemptIds}
             runInFlight={benchmarkRunInFlight || isComparing || comparePreparing}
             otherInferenceActive={otherInferenceActiveForUi}
             runError={benchmarkRunError}

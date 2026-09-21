@@ -204,8 +204,13 @@ export interface PreparedExecution {
   runId: string;
   stopController: StopController;
   done: Promise<StartRunOutcome>;
-  /** Dispatches at or after this timestamp are this session's in-flight work. */
-  liveAfter: number;
+  /** Attempt IDs that already existed in storage before this session dispatched anything.
+   * A leftover `dispatched` row from a prior Stop/crash keeps its original id; only a genuinely
+   * new dispatch from *this* session mints a fresh one (see `generateAttemptId` in
+   * `benchmark-runner.ts`), so "not in this set" is an exact identity check for "this session's
+   * work" — unlike a wall-clock comparison, it cannot be fooled by the system clock repeating or
+   * moving backward during the unbounded model-loading phase between snapshot and dispatch. */
+  knownAttemptIds: ReadonlySet<string>;
 }
 
 async function pinThenLoad(
@@ -323,8 +328,8 @@ export async function startBenchmarkSession(
     }
     return startBenchmarkRun(frozen, transport, stopController, prepared.run, expectedByAlias);
   })();
-  // A new run has no leftover dispatched rows; 0 means every intent is this session.
-  return { ok: true, execution: { runId, stopController, done, liveAfter: 0 } };
+  // A new run has no leftover dispatched rows; an empty set means every intent is this session.
+  return { ok: true, execution: { runId, stopController, done, knownAttemptIds: new Set() } };
 }
 
 export async function resumeBenchmarkSession(
@@ -339,16 +344,22 @@ export async function resumeBenchmarkSession(
   const inexecutable = resumeInexecutableSuiteError(suite, runId);
   if (inexecutable) return { ok: false, error: inexecutable };
 
+  // Fetched once, up front, and reused by both `knownAttemptIds` (below) and `done` (which
+  // would otherwise have to re-fetch the same rows to compute `only`/`expectedByAlias`) — the
+  // set of ids captured here is exactly "every attempt that existed before this session
+  // dispatched anything", the leftover/this-session boundary `buildProgressMatrix` needs.
+  const attempts = await listAttemptsForRun(runId);
+  if (!attempts.ok) return { ok: false, error: attempts.error || 'Failed to load existing attempts' };
+  const existingRows = attempts.value ?? [];
+  const knownAttemptIds = new Set(existingRows.map((a) => a.id));
+
   const stopController = createStopController();
   const expectedByAlias = new Map<string, string>();
   const transport = createSidecarBenchmarkTransport(host.chatCompletion, expectedByAlias);
-  const liveAfter = Date.now();
   const done = (async (): Promise<StartRunOutcome> => {
     // Same attempt list resumeBenchmarkRun will use. Pin/load only unsettled targets so a
     // deleted completed model cannot fail this prepare and block the remaining retries.
-    const attempts = await listAttemptsForRun(runId);
-    if (!attempts.ok) return { ok: false, error: attempts.error };
-    const rows = attempts.value ?? [];
+    const rows = existingRows;
     // Only bind variants for targets Resume will still execute. A completed alias-only target
     // can have legacy terminal rows with neither boundVariantId nor servedVariantId; failing
     // closed on those would block retries of still-pending targets we can bind.
@@ -372,5 +383,5 @@ export async function resumeBenchmarkSession(
     }
     return resumeBenchmarkRun(runId, transport, stopController, expectedByAlias);
   })();
-  return { ok: true, execution: { runId, stopController, done, liveAfter } };
+  return { ok: true, execution: { runId, stopController, done, knownAttemptIds } };
 }

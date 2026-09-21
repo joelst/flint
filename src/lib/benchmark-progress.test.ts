@@ -151,21 +151,20 @@ describe('buildProgressMatrix', () => {
 
   it('keeps pre-session dispatched rows uncertain during a live Resume', () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
-    const old = summarizeAttempt(attempt({ logicalAttemptId: 't0:c0:r0', status: 'dispatched', intentCommittedAt: 10 }));
-    const matrix = buildProgressMatrix(s, [old], { live: true, liveAfter: 100 });
+    const old = summarizeAttempt(attempt({ id: 'old', logicalAttemptId: 't0:c0:r0', status: 'dispatched' }));
+    const matrix = buildProgressMatrix(s, [old], { live: true, knownAttemptIds: new Set(['old']) });
     const target0 = matrix.find((t) => t.targetIndex === 0)!;
     expect(target0.positions[0].state).toBe('uncertain');
     expect(target0.counts.uncertain).toBe(1);
     expect(target0.counts.running).toBe(0);
   });
 
-  it('marks only this-session dispatched rows as running when liveAfter is set', () => {
+  it('marks only this-session dispatched rows as running when knownAttemptIds is set', () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
     const leftover = summarizeAttempt(attempt({
       id: 'old',
       logicalAttemptId: 't0:c0:r0',
       status: 'dispatched',
-      intentCommittedAt: 10,
     }));
     const current = summarizeAttempt(attempt({
       id: 'new',
@@ -173,21 +172,23 @@ describe('buildProgressMatrix', () => {
       targetIndex: 1,
       alias: 'model-b',
       status: 'dispatched',
-      intentCommittedAt: 150,
     }));
-    const matrix = buildProgressMatrix(s, [leftover, current], { live: true, liveAfter: 100 });
+    const matrix = buildProgressMatrix(s, [leftover, current], { live: true, knownAttemptIds: new Set(['old']) });
     expect(matrix.find((t) => t.targetIndex === 0)!.positions[0].state).toBe('uncertain');
     expect(matrix.find((t) => t.targetIndex === 1)!.positions[0].state).toBe('running');
   });
 
-  it('treats a dispatched row with no intentCommittedAt as leftover when liveAfter is set', () => {
+  it('does not misclassify a leftover row as this-session merely because its wall-clock intentCommittedAt is newer', () => {
+    // Regression for relying on Date.now() ordering: a leftover row can carry a *later*
+    // intentCommittedAt than a genuinely new one if the system clock moved backward between the
+    // two writes. Identity (knownAttemptIds), not timestamp comparison, must decide this.
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
-    const legacy = summarizeAttempt(attempt({
-      logicalAttemptId: 't0:c0:r0',
-      status: 'dispatched',
+    const leftoverWithLaterClock = summarizeAttempt(attempt({
+      id: 'old', logicalAttemptId: 't0:c0:r0', status: 'dispatched', intentCommittedAt: 999_999,
     }));
-    delete legacy.intentCommittedAt;
-    const matrix = buildProgressMatrix(s, [legacy], { live: true, liveAfter: 100 });
+    const matrix = buildProgressMatrix(s, [leftoverWithLaterClock], {
+      live: true, knownAttemptIds: new Set(['old']),
+    });
     expect(matrix.find((t) => t.targetIndex === 0)!.positions[0].state).toBe('uncertain');
   });
 

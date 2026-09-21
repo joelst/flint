@@ -87,8 +87,8 @@ export function isAttemptSummary(value: unknown): value is AttemptSummary {
 
 /**
  * `pending`: no execution has been dispatched for this position yet.
- * `running`: a `dispatched` execution from *this* live session (intent after `liveAfter`) —
- *   the chat call is outstanding, not a leftover Stop/crash row.
+ * `running`: a `dispatched` execution from *this* live session (an id not in
+ *   `knownAttemptIds`) — the chat call is outstanding, not a leftover Stop/crash row.
  * `uncertain`: a `dispatched` execution after the process is gone (Stop/crash) with no
  *   terminal row — must never be folded into `succeeded`/`failed`/`pending`.
  * `succeeded` / `failed`: a terminal execution was durably recorded for this position.
@@ -132,7 +132,7 @@ function emptyCounts(): ProgressCounts {
 export function buildProgressMatrix(
   suite: Pick<BenchmarkSuite, 'targets' | 'cases' | 'warmupCount' | 'repeatCount'>,
   attempts: readonly AttemptSummary[],
-  opts: { live?: boolean; liveAfter?: number | null } = {},
+  opts: { live?: boolean; knownAttemptIds?: ReadonlySet<string> | null } = {},
 ): TargetProgress[] {
   const schedule = buildAttemptSchedule(suite as BenchmarkSuite);
 
@@ -153,11 +153,14 @@ export function buildProgressMatrix(
       else if (latest.status === 'failed') state = 'failed';
       else {
         // `live` alone is the whole historical run. Resume pin/load still owns the run while
-        // leftover dispatched rows from the previous Stop/crash sit in storage — only intents
-        // committed at/after this session's liveAfter are actually in flight.
-        const fromThisSession = opts.liveAfter == null
+        // leftover dispatched rows from a previous Stop/crash sit in storage — only an id that
+        // did not already exist before this session started is actually in flight. Identity
+        // (not a wall-clock comparison) so this can't be fooled by the system clock repeating
+        // or moving backward during the unbounded model-loading phase between snapshot and
+        // dispatch.
+        const fromThisSession = opts.knownAttemptIds == null
           ? !!opts.live
-          : (latest.intentCommittedAt ?? 0) >= opts.liveAfter;
+          : !opts.knownAttemptIds.has(latest.id);
         state = opts.live && fromThisSession ? 'running' : 'uncertain';
       }
     }
