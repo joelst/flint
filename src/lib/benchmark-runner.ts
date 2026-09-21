@@ -252,7 +252,12 @@ async function executePositions(
 
     if (!transportResult.ok && transportResult.haltRun === 'stopped') {
       stopController.stop();
-      return haltWith(run, 'stopped', undefined);
+      // This halt was triggered by the transport reporting a cancelled/lost-contact runtime, not
+      // by the user's Stop button (that path is the `stopController.isStopped()` check above,
+      // which halts with no message so a deliberate Stop stays silent). Preserving the message
+      // here lets the caller tell "runtime interruption" apart from an ordinary user stop instead
+      // of both looking identical.
+      return haltWith(run, 'stopped', undefined, transportResult.errorMessage);
     }
 
     const settledAt = Date.now();

@@ -846,7 +846,9 @@
   /** Shared classifier for a settled `startBenchmarkRun`/`resumeBenchmarkRun` outcome: surfaces
    * both a hard failure and a soft `recovery_required` halt (a durability write failed, but the
    * runner itself returned normally) to `benchmarkRunError` so the UI isn't limited to the app
-   * log for either case. */
+   * log for either case. A `stopped` outcome carrying a `haltedError` means the runtime itself
+   * cancelled or was lost — not that the user pressed Stop, which halts with no message — so
+   * that case is surfaced too; a plain user-requested stop stays silent. */
   function recordBenchmarkOutcome(outcome: { ok: boolean; error?: string; result?: { status: string; haltedError?: string } }): void {
     if (!outcome.ok) {
       benchmarkRunError = outcome.error || 'Benchmark run failed';
@@ -854,6 +856,9 @@
     } else if (outcome.result?.status === 'recovery_required') {
       benchmarkRunError = `Benchmark run needs recovery: ${outcome.result.haltedError || 'a durability write failed'}`;
       appendAppLog(`Benchmark run needs recovery: ${outcome.result.haltedError}`, 'error');
+    } else if (outcome.result?.status === 'stopped' && outcome.result.haltedError) {
+      benchmarkRunError = `Benchmark run halted unexpectedly: ${outcome.result.haltedError}`;
+      appendAppLog(`Benchmark run halted unexpectedly: ${outcome.result.haltedError}`, 'error');
     }
   }
 
@@ -5112,6 +5117,11 @@ updateStateFromSdk();
    * `failed` was simply lost; it is surfaced in the status line instead, where it is read.
    */
   async function loadModelAndMaybeStart(model: any): Promise<ServiceStartAttempt> {
+    const blocked = blockedByActiveBenchmark();
+    if (blocked) {
+      statusMessage = blocked;
+      throw new Error(blocked);
+    }
     let loadResult: any;
     try {
       statusMessage = `Loading ${model.alias}...`;
@@ -5170,6 +5180,16 @@ updateStateFromSdk();
     if (!model || !modelSupportsChat(model)) {
       statusMessage = `${next} is not a chat model.`;
       return;
+    }
+    // Checked before any state mutation: selecting an already-loaded model is harmless and stays
+    // allowed, but loading a new one would race the benchmark's own load, so it must not proceed
+    // — and must not leave selectedModelAlias pointing at a model that was never loaded.
+    if (!model.isLoaded) {
+      const blocked = blockedByActiveBenchmark();
+      if (blocked) {
+        statusMessage = blocked;
+        return;
+      }
     }
     // Recorded before the first await, against the conversation that was active when the user
     // picked. Loading a model can take a long time, and a switch made while it loads must not
@@ -7010,7 +7030,7 @@ Output only the summary text, no preamble.`;
                       <div class="actions">
                         <button
                           onclick={() => useStarterModel(model)}
-                          disabled={isLoadingRecommendations}
+                          disabled={isLoadingRecommendations || benchmarkRunInFlight}
                         >
                           {#if !model.isCached}
                             Download & Start
@@ -7031,6 +7051,7 @@ Output only the summary text, no preamble.`;
                 {#if recommendedStarters.length > 0 && !recommendedStarters.some((m) => m.isCached || m.isLoaded)}
                   <div style="margin-top:8px">
                     <button
+                      disabled={benchmarkRunInFlight}
                       onclick={() => useStarterModel(recommendedStarters[0])}
                     >
                       Quick Start with {recommendedStarters[0].alias}
@@ -7256,11 +7277,11 @@ Output only the summary text, no preamble.`;
                       {/if}
 
                       {#if model.isCached && !model.isLoaded}
-                        <button onclick={() => { void loadModelAndMaybeStart(model).catch(() => {}); }}
+                        <button disabled={benchmarkRunInFlight} onclick={() => { void loadModelAndMaybeStart(model).catch(() => {}); }}
                           >Load</button
                         >
                         {#if modelSupportsChat(model)}
-                          <button onclick={() => loadAndSelect(model)}
+                          <button disabled={benchmarkRunInFlight} onclick={() => loadAndSelect(model)}
                             >Load & Chat</button
                           >
                         {/if}

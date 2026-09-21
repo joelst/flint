@@ -332,6 +332,9 @@ describe('startBenchmarkRun', () => {
     const outcome = await startStored(s, transport, stopController);
     expect(outcome.result?.status).toBe('stopped');
     expect(outcome.run!.status).toBe('stopped');
+    // A user-requested Stop must stay silent — it must never carry a message that would make it
+    // look like the runtime-triggered halt covered below.
+    expect(outcome.result?.haltedError).toBeUndefined();
   });
 
   it('halts as stopped without recording a failed attempt when the transport reports haltRun', async () => {
@@ -343,6 +346,9 @@ describe('startBenchmarkRun', () => {
     });
     const outcome = await startStored(s, transport);
     expect(outcome.result?.status).toBe('stopped');
+    // The transport's message must survive so callers can tell a runtime-triggered halt apart
+    // from an ordinary user-requested Stop, which halts with no message.
+    expect(outcome.result?.haltedError).toBe('Runtime is draining');
     const attempts = await listAttemptsForRun(outcome.run!.id);
     expect(attempts.value).toHaveLength(1);
     expect(attempts.value![0].status).toBe('dispatched');
