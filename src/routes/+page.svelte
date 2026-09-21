@@ -866,6 +866,11 @@
    */
   async function startBenchmarkPreviewRun(suite: BenchmarkSuite): Promise<BenchmarkLifecycleOutcome> {
     if (benchmarkRunInFlight) return { ok: false, error: 'A benchmark run is already active.' };
+    // Model Arena (Quick Compare) explicitly loads/unloads pool entries for the same alias-keyed
+    // pool a benchmark run pins and dispatches against — pinning only blocks eviction, not those
+    // explicit operations. Admission must be mutually exclusive in both directions or the two
+    // features can replace/unload each other's models mid-run. See runComparison's matching guard.
+    if (isComparing || comparePreparing) return { ok: false, error: 'An Arena run is already active.' };
     benchmarkRunInFlight = true;
     benchmarkRunError = null;
     try {
@@ -892,6 +897,8 @@
    * there is no id-discovery step; it can return as soon as the run is confirmed under way. */
   async function resumeBenchmarkPreviewRun(runId: string): Promise<BenchmarkLifecycleOutcome> {
     if (benchmarkRunInFlight) return { ok: false, error: 'A benchmark run is already active.' };
+    // See startBenchmarkPreviewRun: benchmark and Arena admission must be mutually exclusive.
+    if (isComparing || comparePreparing) return { ok: false, error: 'An Arena run is already active.' };
     benchmarkRunInFlight = true;
     benchmarkRunError = null;
     try {
@@ -3784,6 +3791,13 @@ updateStateFromSdk();
   async function runComparison(e?: Event) {
     e?.preventDefault?.();
     if (compareSlots.length < 2 || !comparePrompt.trim() || isComparing || comparePreparing) return;
+    // See startBenchmarkPreviewRun: a benchmark run pins and dispatches against the same
+    // alias-keyed pool this loads/unloads explicitly (in one-at-a-time mode), so the two
+    // features must never run concurrently in either direction.
+    if (benchmarkRunInFlight) {
+      statusMessage = "A benchmark run is active — stop it before running the Arena.";
+      return;
+    }
 
     compareReviewId = null;
     const prompt = comparePrompt.trim();
@@ -9391,7 +9405,7 @@ Output only the summary text, no preamble.`;
                 bind:value={comparePrompt}
                 placeholder="Enter the same prompt for all selected models… (Ctrl/⌘+Enter to send)"
                 rows={3}
-                disabled={isComparing || comparePreparing}
+                disabled={isComparing || comparePreparing || benchmarkRunInFlight}
                 onkeydown={(e) => {
                   if ((isMac ? e.metaKey : e.ctrlKey) && e.key === "Enter") {
                     e.preventDefault();
@@ -9404,8 +9418,8 @@ Output only the summary text, no preamble.`;
                   type="submit"
                   class="compare-send"
                   aria-label="Run the arena"
-                  disabled={compareSlots.length < 2 || !comparePrompt.trim() || isComparing || comparePreparing}
-                  title={compareSlots.length < 2 ? "Add at least 2 models" : "Send prompt to all selected models"}
+                  disabled={compareSlots.length < 2 || !comparePrompt.trim() || isComparing || comparePreparing || benchmarkRunInFlight}
+                  title={benchmarkRunInFlight ? "A benchmark run is active — stop it before running the Arena" : compareSlots.length < 2 ? "Add at least 2 models" : "Send prompt to all selected models"}
                 >
                   {#if isComparing || comparePreparing}
                     <Icon name="loader" size={15} class="spin" />
@@ -9502,7 +9516,7 @@ Output only the summary text, no preamble.`;
             availableModels={chatPickerModels}
             activeRunId={benchmarkActiveRunId}
             liveAfter={benchmarkLiveAfter}
-            runInFlight={benchmarkRunInFlight}
+            runInFlight={benchmarkRunInFlight || isComparing || comparePreparing}
             runError={benchmarkRunError}
             onStart={startBenchmarkPreviewRun}
             onStop={stopBenchmarkPreviewRun}
