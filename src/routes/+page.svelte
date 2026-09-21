@@ -732,6 +732,12 @@
 
   // Settings: startup behaviour
   let autoStartService = $state(true);
+  // Listing/refreshing the model catalog (Foundry Local's `catalog.getModels()`) contacts
+  // Microsoft's remote Foundry model registry over the network to fetch the model list and
+  // check for updates -- distinct from inference, which stays local. Default on to preserve
+  // existing behavior; turning it off skips the catalog check at startup and leaves the
+  // existing manual "Refresh catalog" button as the only trigger.
+  let autoRefreshCatalogOnStartup = $state(true);
   let defaultChatAlias = $state('');
   let defaultAudioAlias = $state('');
   let osAutoStartEnabled = $state<boolean | null>(null);
@@ -3048,6 +3054,7 @@
           modelRuntimeMeta,
           startupModels,
           autoStartService,
+          autoRefreshCatalogOnStartup,
           defaultChatAlias,
           defaultAudioAlias,
           networkPort,
@@ -3153,6 +3160,9 @@
           startupModels = data.startupModels;
         }
         if (typeof data.autoStartService === 'boolean') autoStartService = data.autoStartService;
+        if (typeof data.autoRefreshCatalogOnStartup === 'boolean') {
+          autoRefreshCatalogOnStartup = data.autoRefreshCatalogOnStartup;
+        }
         if (typeof data.keepServiceInBackground === 'boolean') keepServiceInBackground = data.keepServiceInBackground;
         if (typeof data.benchmarkPreviewEnabled === 'boolean') benchmarkPreviewEnabled = data.benchmarkPreviewEnabled;
         if (typeof data.defaultChatAlias === 'string') defaultChatAlias = data.defaultChatAlias;
@@ -4854,9 +4864,13 @@ updateStateFromSdk();
       const release = beginPoolMutation();
       try {
       statusMessage = "Connected to Foundry Local";
-      await loadModels();
-      await loadRecommendations();
-      await loadSTTModels();
+      if (autoRefreshCatalogOnStartup) {
+        await loadModels();
+        await loadRecommendations();
+        await loadSTTModels();
+      } else {
+        statusMessage = "Connected to Foundry Local (model catalog not checked — use Refresh catalog)";
+      }
 
       // A restored alias for a model that is no longer in the catalog would otherwise pin the
       // selection forever, because the auto-select effect bails out whenever an alias is set.
@@ -4928,13 +4942,15 @@ updateStateFromSdk();
         if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
           throw new Error("Runtime changed while refreshing execution providers");
         }
-        await refreshModels();
-        if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
-          throw new Error("Runtime changed while refreshing the model catalog");
-        }
-        await loadRecommendations();
-        if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
-          throw new Error("Runtime changed while refreshing recommendations");
+        if (autoRefreshCatalogOnStartup) {
+          await refreshModels();
+          if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
+            throw new Error("Runtime changed while refreshing the model catalog");
+          }
+          await loadRecommendations();
+          if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
+            throw new Error("Runtime changed while refreshing recommendations");
+          }
         }
       } catch (e: any) {
         statusMessage = `Runtime startup stopped before model preload: ${e?.message || e}`;
@@ -10333,6 +10349,20 @@ Output only the summary text, no preamble.`;
               </div>
               <label class="toggle-switch">
                 <input type="checkbox" bind:checked={autoStartService} onchange={persistChatCheckbox((v) => { autoStartService = v; })} aria-labelledby="auto-start-service-label" />
+                <span class="toggle-track"></span>
+              </label>
+            </div>
+
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-name" id="auto-refresh-catalog-label">Check model catalog automatically</span>
+                <span class="setting-desc">
+                  Contacts Microsoft's Foundry Local model catalog over the network on startup to list
+                  models and check for updates. Turn off to only check when you click "Refresh catalog".
+                </span>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" bind:checked={autoRefreshCatalogOnStartup} onchange={persistChatCheckbox((v) => { autoRefreshCatalogOnStartup = v; })} aria-labelledby="auto-refresh-catalog-label" />
                 <span class="toggle-track"></span>
               </label>
             </div>
