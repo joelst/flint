@@ -100,16 +100,20 @@ const BENCHMARK_EXCLUSIVE_DRAIN_MS = Number.isFinite(parsedBenchmarkExclusiveDra
 
 // Commands that either run real inference against the shared pool, or mutate/populate what the
 // pool holds. Draining only `gatewayRequest` missed IPC `chatCompletion` (and the other inference
-// commands) entirely, and inference-only draining still missed `load`/`unload`/`deleteModel`:
-// this sidecar process -- and any operation it already admitted -- survives a frontend reload, so
-// an old page's still-running command from a *previous*, now-gone benchmark (or Models/Monitor)
-// session is invisible to the new page's own busy-state checks (those only see this page's
-// in-memory state). Without this, exclusive admission could be granted while:
+// commands) entirely, and inference-only draining still missed `load`/`unload`/`deleteModel`/
+// `startService`: this sidecar process -- and any operation it already admitted -- survives a
+// frontend reload, so an old page's still-running command from a *previous*, now-gone benchmark
+// (or Models/Monitor) session is invisible to the new page's own busy-state checks (those only
+// see this page's in-memory state). Without this, exclusive admission could be granted while:
 //   - an orphaned `chatCompletion`/`transcribeAudio`/`embedTexts` is still generating tokens
 //     against the same models the new run is about to benchmark, corrupting its latency numbers;
 //   - an orphaned `load`/`unload`/`deleteModel` is still mutating pool residency, so the new run
 //     could measure against a model that is still being unloaded, or race a stale load that
-//     hasn't finished consuming its resources yet.
+//     hasn't finished consuming its resources yet;
+//   - an orphaned `startService` is still clearing (`pool.clear()`/`usage.clear()`) or
+//     repopulating the pool as part of its destructive restart (see its handler's own comment),
+//     so the new run could begin pinning/loading and measuring its targets while that clear or
+//     the restart's own `ensureModel` call is still in flight, racing residency out from under it.
 // Deliberately excludes `download`: unlike the above, a download can legitimately run for minutes
 // (multi-GB model files) and is unrelated to what a benchmark is about to measure, while the
 // drain deadline below is a fixed ~10s in production -- draining it would turn "someone is
@@ -119,7 +123,7 @@ const BENCHMARK_EXCLUSIVE_DRAIN_MS = Number.isFinite(parsedBenchmarkExclusiveDra
 // reload-survives-it case is intentionally left unfenced here, as a scope tradeoff.
 const BENCHMARK_DRAIN_COMMANDS = new Set([
   'gatewayRequest', 'chatCompletion', 'transcribeAudio', 'embedTexts',
-  'load', 'unload', 'deleteModel',
+  'load', 'unload', 'deleteModel', 'startService',
 ]);
 
 function benchmarkDrainOperationsOutstanding() {
@@ -3334,9 +3338,9 @@ rl.on('line', async (line) => {
       // running by a *previous*, now-gone page instance either (this sidecar outlives a reload).
       // Exclusive admission lives here: new gateway work is rejected, and already-admitted
       // gateway requests, inference (chatCompletion/transcribeAudio/embedTexts), and resident-
-      // pool mutations (load/unload/deleteModel) all drain before this resolves -- see
-      // `BENCHMARK_DRAIN_COMMANDS`'s docstring for the full set and why `download` is excluded.
-      // New IPC chat/load calls (i.e. the benchmark's own) still run once granted.
+      // pool mutations (load/unload/deleteModel/startService) all drain before this resolves --
+      // see `BENCHMARK_DRAIN_COMMANDS`'s docstring for the full set and why `download` is
+      // excluded. New IPC chat/load calls (i.e. the benchmark's own) still run once granted.
       // Serialized (see serializeBenchmarkExclusiveTransition) so a concurrently-dispatched
       // release cannot clear the flag out from under an in-progress acquire's drain wait.
       await serializeBenchmarkExclusiveTransition(async () => {
