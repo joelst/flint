@@ -53,6 +53,7 @@
     applyMemorySettings as sdkApplyMemorySettings,
     setBenchmarkExclusive as sdkSetBenchmarkExclusive,
     reconcileBenchmarkExclusive,
+    getLastAppliedMemorySettingsSeq,
     getWslStatus,
     enableWslMirroredNetworking,
     shutdownWsl,
@@ -2622,7 +2623,17 @@
    * assign `benchmarkPinnedAliases` from the lease's return value.
    */
   let pushMemorySeq = 0;
+  // Gate every push behind startup's watermark reconciliation (see `performAppInit`) rather than
+  // only awaiting it before the *first* startup push. `initializeSDK()` can itself publish
+  // `state.serviceRunning: true` (adopting an already-running service) partway through its own
+  // internal awaits -- well before `performAppInit` reaches the seeding call below -- which fires
+  // the reactive `serviceRunning` effect's `pushMemorySettings()` immediately. Without this gate
+  // that queued call would run with the still-unseeded `pushMemorySeq`, reproducing the exact
+  // silently-skipped-push bug this reconciliation exists to prevent. `null` once reconciliation
+  // resolves (or a fresh page load hasn't started one), so steady-state pushes never wait on it.
+  let memorySeqReady: Promise<void> | null = null;
   async function pushMemorySettings(options?: { throwOnError?: boolean; pinnedAliasesOverride?: readonly string[] }) {
+    if (memorySeqReady) await memorySeqReady;
     const seq = ++pushMemorySeq;
     const ownAliases = options?.pinnedAliasesOverride ?? benchmarkPinnedAliases;
     const floor = residentCapFloorFor(ownAliases);
@@ -2640,13 +2651,33 @@
       // exactly the scenario a benchmark run's pin/unpin and a concurrent Settings/Monitor edit
       // can hit. Because this command fully replaces the priority map, an old call landing after
       // a new one would otherwise silently wipe out whatever the new one just pinned/restored.
-      const applied = await sdkApplyMemorySettings(
+      const { config: applied, stale } = await sdkApplyMemorySettings(
         Object.entries(currentPriorities)
           .filter(([, priority]) => priority === "pinned" || priority === "low")
           .map(([alias, priority]) => ({ alias, priority })),
         currentEviction,
         seq,
       );
+      if (stale) {
+        // The sidecar's own ordering guard refused this payload (an equal-or-higher seq already
+        // landed first) -- this push had no effect at all, not even a partial one. Startup seeds
+        // `pushMemorySeq` above the sidecar's watermark (see getLastAppliedMemorySettingsSeq) so
+        // this should not happen in the ordinary case; surfacing it as a failure rather than
+        // silently trusting `ok: true` is the defense for whatever startup ordering did not cover
+        // (e.g. the seeding call itself failing, or a second window sharing the same sidecar).
+        const err = new Error("The runtime reported this change as superseded by a later one and did not apply it.");
+        if (options?.throwOnError) throw err;
+        // Visible in the app log, not just the console -- the caller (e.g. `updateEvictionConfig`)
+        // already persisted this setting locally and returns as if it succeeded, so this is the
+        // only place a user could learn their pin/eviction change did not actually reach the
+        // runtime and evictionConfig/modelPriorities now disagree with what is really enforced.
+        appendAppLog(
+          "Memory settings change was not applied — the runtime reported it as superseded by a later change",
+          "warn",
+        );
+        console.warn("[flint] applyMemorySettings reported stale — payload was not installed", err);
+        return;
+      }
       // Adopt the sidecar's normalized config, but only on real change and only when no newer
       // push is in flight — an unconditional assignment re-triggers every effect that reads
       // evictionConfig (the serviceRunning re-apply effect looped on exactly that). While the
@@ -4735,6 +4766,17 @@ updateStateFromSdk();
     // is enabled — restoring it here would race the autosave effect.
     void refreshNodeAboutLine();
 
+    // Opened before the SDK call below, not after: `initializeSDK()` can itself publish
+    // `state.serviceRunning: true` partway through its own internal awaits (adopting an already-
+    // running service), which fires the reactive `serviceRunning` effect's `pushMemorySettings()`
+    // immediately — before this function ever reaches the seeding call further down. Every
+    // `pushMemorySettings()` call (including that one) now awaits this gate first, so a push
+    // queued that early still runs after `pushMemorySeq` is seeded rather than before it.
+    let resolveMemorySeqReady: () => void = () => {};
+    memorySeqReady = new Promise<void>((resolve) => {
+      resolveMemorySeqReady = resolve;
+    });
+
     // Settings are hydrated by this point (onMount runs restoreChat before init), so the
     // service honors the user's autostart choice, port and bind address instead of a hardcoded
     // 5272 that opened a port they never configured.
@@ -4748,17 +4790,34 @@ updateStateFromSdk();
     });
     void refreshNodeAboutLine();
 
-    if (ok) {
-      // Best-effort, fire-and-forget: releases a `benchmarkExclusive` lease this page's own
-      // in-memory state has no memory of ever acquiring (its generation/retrier always start
-      // unset) but a previous, now-gone page instance (reload/crash-recovery) may have left set
-      // in the sidecar, which outlives that reload. Never awaited -- it must not delay startup.
-      // The guard re-checks that this page still hasn't claimed exclusivity itself by the time
-      // the release would actually be sent: `state.ready` publishes as part of this same init,
-      // so the user could in principle start a run before this call's second round trip lands,
-      // and that legitimate claim must win instead of being released out from under it.
-      void reconcileBenchmarkExclusive(() => benchmarkExclusiveGeneration === 0);
+    try {
+      if (ok) {
+        // Best-effort, fire-and-forget: releases a `benchmarkExclusive` lease this page's own
+        // in-memory state has no memory of ever acquiring (its generation/retrier always start
+        // unset) but a previous, now-gone page instance (reload/crash-recovery) may have left set
+        // in the sidecar, which outlives that reload. Never awaited -- it must not delay startup.
+        // The guard re-checks that this page still hasn't claimed exclusivity itself by the time
+        // the release would actually be sent: `state.ready` publishes as part of this same init,
+        // so the user could in principle start a run before this call's second round trip lands,
+        // and that legitimate claim must win instead of being released out from under it.
+        void reconcileBenchmarkExclusive(() => benchmarkExclusiveGeneration === 0);
 
+        // Best-effort: on failure `lastAppliedMemorySettingsSeq` stays null and `pushMemorySeq`
+        // is left at 0, which just reproduces the pre-fix behavior for this one page instance
+        // rather than making startup depend on a diagnostic-only probe succeeding.
+        const lastAppliedMemorySettingsSeq = await getLastAppliedMemorySettingsSeq();
+        if (typeof lastAppliedMemorySettingsSeq === 'number') {
+          pushMemorySeq = Math.max(pushMemorySeq, lastAppliedMemorySettingsSeq);
+        }
+      }
+    } finally {
+      // Always released, `ok` or not -- a push already queued behind this gate (e.g. from the
+      // `serviceRunning` effect above) must not hang forever just because startup failed later.
+      memorySeqReady = null;
+      resolveMemorySeqReady();
+    }
+
+    if (ok) {
       // Startup does real pool mutation below (auto-load, multi-model pre-warm, and a
       // possible service (re)start via the `startService` callback below) with no user action
       // to gate it on. Benchmark admission must see this as in-flight pool work — same as any

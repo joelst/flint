@@ -1705,6 +1705,33 @@ export async function reconcileBenchmarkExclusive(isSafeToRelease?: () => boolea
 }
 
 /**
+ * Reads the sidecar's own `lastAppliedMemorySettingsSeq` watermark (see its declaration in
+ * `foundry-sidecar-main.js`), so a freshly-loaded page can seed its local `pushMemorySeq`
+ * counter above it before making its own first `applyMemorySettings` call.
+ *
+ * The sidecar process outlives a frontend reload/crash-recovery, but a page's own monotonic
+ * `pushMemorySeq` counter has no persistence of its own and always restarts at 0. Left
+ * unreconciled, this fresh page's first several pushes would carry a `seq` at or below the
+ * sidecar's retained watermark and be silently accepted-but-skipped (`stale: true` in the reply,
+ * which nothing currently surfaces to the caller) -- a pin or eviction-settings change the user
+ * just made would appear to succeed while having no actual effect.
+ *
+ * Best-effort: returns `null` on a failed probe rather than throwing, so a transient IPC hiccup
+ * during startup does not block the rest of initialization -- worst case, this page's first
+ * `applyMemorySettings` call is itself silently skipped as stale, same as before this existed.
+ */
+export async function getLastAppliedMemorySettingsSeq(): Promise<number | null> {
+  try {
+    const status = await send('getStatus');
+    const seq = status.result?.lastAppliedMemorySettingsSeq;
+    return typeof seq === 'number' ? seq : null;
+  } catch (e) {
+    console.warn('[sdk] getLastAppliedMemorySettingsSeq failed', e);
+    return null;
+  }
+}
+
+/**
  * Install eviction rules and model priorities together.
  *
  * One command because each of the two older commands sweeps immediately: sending them
@@ -1715,7 +1742,7 @@ export async function applyMemorySettings(
   priorities: ModelPriorityEntry[],
   eviction?: Partial<EvictionConfig>,
   seq?: number,
-): Promise<EvictionConfig | null> {
+): Promise<{ config: EvictionConfig | null; stale: boolean }> {
   // `seq` (the caller's own monotonic push counter) lets the sidecar refuse to install this
   // call's full-replace payload if a call with a higher `seq` already landed first -- otherwise
   // a call delayed behind this transport's respawn/re-init wait could apply after, and silently
@@ -1726,7 +1753,13 @@ export async function applyMemorySettings(
     ...(typeof seq === 'number' ? { seq } : {}),
   });
   await refreshModels();
-  return res.result?.config ?? null;
+  // `stale` surfaces the sidecar's own ordering-guard verdict: `true` means this call's payload
+  // was *not* installed (a call with an equal or higher seq already landed first), so the config
+  // returned is whatever was already in effect, not a reflection of what this call asked for.
+  // Callers that skip seeding `seq` from `getLastAppliedMemorySettingsSeq()` at startup (or hit
+  // the rare cross-window race that seeding does not cover) get a way to notice a silently
+  // skipped pin/eviction change instead of assuming it took effect just because `ok` was true.
+  return { config: res.result?.config ?? null, stale: res.result?.stale === true };
 }
 
 export async function deleteModel(model: any, variantId?: string) {

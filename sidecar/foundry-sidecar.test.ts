@@ -1417,6 +1417,26 @@ describe('foundry-sidecar error propagation and resilience', () => {
     expect(after.result.benchmarkExclusive).toBe(false);
   });
 
+  it('getStatus reports lastAppliedMemorySettingsSeq, letting a fresh frontend reload seed its own counter above it', async () => {
+    // A page reload restarts the frontend's own `pushMemorySeq` at 0, but this sidecar process
+    // (and this watermark) survive the reload. Without seeding the new page's counter from this
+    // value, its first several pushes would carry a seq at or below this watermark and be
+    // silently accepted-but-skipped (see the ordering-guard describe block above), with no
+    // visible error -- getStatus is what a startup reconciliation reads to avoid that.
+    proc.stdin.write(`${JSON.stringify({ id: 70, cmd: 'getStatus' })}\n`);
+    const before = await waitForLine(proc, (msg) => msg.id === 70);
+    expect(before.result.lastAppliedMemorySettingsSeq).toBe(-1);
+
+    proc.stdin.write(`${JSON.stringify({
+      id: 71, cmd: 'applyMemorySettings', seq: 7, priorities: [],
+    })}\n`);
+    await waitForLine(proc, (msg) => msg.id === 71);
+
+    proc.stdin.write(`${JSON.stringify({ id: 72, cmd: 'getStatus' })}\n`);
+    const after = await waitForLine(proc, (msg) => msg.id === 72);
+    expect(after.result.lastAppliedMemorySettingsSeq).toBe(7);
+  });
+
   it('cancelChatRequest is idempotent for unknown request IDs', async () => {
     proc.stdin.write(`${JSON.stringify({ id: 31, cmd: 'cancelChatRequest', requestId: 99999 })}\n`);
     const res = await waitForLine(proc, (msg) => msg.id === 31);

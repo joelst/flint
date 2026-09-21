@@ -2787,6 +2787,14 @@ rl.on('line', async (line) => {
           // persistence of its own -- can detect and reconcile a flag left set by a page instance
           // that reloaded/crashed before releasing it; this sidecar process outlives that reload.
           benchmarkExclusive,
+          // Highest `applyMemorySettings` client `seq` installed so far (see its declaration).
+          // A freshly-loaded frontend's own `pushMemorySeq` counter always restarts at 0, but
+          // this sidecar process (and this watermark) survive a reload -- without seeding the
+          // new page's counter from this value, its first several pushes would carry a `seq`
+          // at or below this watermark and be silently accepted-but-skipped (`stale: true`) by
+          // the guard below, with the page having no indication that its pin/eviction-settings
+          // push did not actually take effect.
+          lastAppliedMemorySettingsSeq,
         }
       });
     } else if (cmd === 'chatCompletion') {

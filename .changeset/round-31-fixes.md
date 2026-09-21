@@ -2,4 +2,4 @@
 "flint": patch
 ---
 
-Fix benchmark draft attempt estimates ignoring warmup/repeat bounds, fix a shared retry double-consuming a backoff slot, and reconcile a `benchmarkExclusive` gateway lease orphaned by a frontend reload.
+Fix incorrect benchmark attempt estimates for out-of-range warmup/repeat counts, smooth out benchmark retry timing, and clear a leftover exclusive gateway lock left over from a reload.

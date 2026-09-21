@@ -368,6 +368,54 @@ describe('reconcileBenchmarkExclusive', () => {
   });
 });
 
+describe('getLastAppliedMemorySettingsSeq', () => {
+  it('returns the sidecar-reported watermark, letting a caller seed its own counter above it', async () => {
+    const sdk = await loadSdk();
+    const request = sdk.getLastAppliedMemorySettingsSeq();
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, result: { lastAppliedMemorySettingsSeq: 7 } });
+    expect(await request).toBe(7);
+  });
+
+  it('is best-effort: a failed status probe resolves null instead of throwing', async () => {
+    const sdk = await loadSdk();
+    const request = sdk.getLastAppliedMemorySettingsSeq();
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, error: 'sidecar unavailable' });
+    await expect(request).resolves.toBeNull();
+  });
+});
+
+describe('applyMemorySettings', () => {
+  it('surfaces stale: false for an ordinary, freshly-installed call', async () => {
+    const sdk = await loadSdk();
+    const request = sdk.applyMemorySettings([], undefined, 5);
+    const id = await waitForWrite('applyMemorySettings');
+    harness.emitStdout({ id, result: { config: { maxResident: 4 }, stale: false } });
+    const modelsId = await waitForWrite('listModels');
+    harness.emitStdout({ id: modelsId, result: [] });
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, result: {} });
+    const poolId = await waitForWrite('poolStatus');
+    harness.emitStdout({ id: poolId, result: { models: [] } });
+    await expect(request).resolves.toEqual({ config: { maxResident: 4 }, stale: false });
+  });
+
+  it('surfaces stale: true when the sidecar refuses an out-of-order call, instead of hiding it behind ok: true', async () => {
+    const sdk = await loadSdk();
+    const request = sdk.applyMemorySettings([], undefined, 1);
+    const id = await waitForWrite('applyMemorySettings');
+    harness.emitStdout({ id, result: { config: { maxResident: 4 }, stale: true } });
+    const modelsId = await waitForWrite('listModels');
+    harness.emitStdout({ id: modelsId, result: [] });
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, result: {} });
+    const poolId = await waitForWrite('poolStatus');
+    harness.emitStdout({ id: poolId, result: { models: [] } });
+    await expect(request).resolves.toEqual({ config: { maxResident: 4 }, stale: true });
+  });
+});
+
 describe('initialization', () => {
   it('passes the configured log level through initialization', async () => {
     const sdk = await loadSdk();
