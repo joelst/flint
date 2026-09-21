@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
-import { createServer } from 'http';
+import { createServer, request as httpRequest } from 'http';
 import type { AddressInfo } from 'net';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
@@ -53,6 +53,19 @@ function waitForLine(
 
     proc.stdout.on('data', onData);
     proc.on('exit', onExit);
+  });
+}
+
+/** Kills the child and waits (briefly, best-effort) for it to actually exit, so cleanup that
+ * follows (closing an upstream server the child was still talking to, removing its temp home
+ * dir) doesn't race a process that is still shutting down. */
+function killAndWait(proc: ChildProcessWithoutNullStreams, timeoutMs = 3000): Promise<void> {
+  if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => { clearTimeout(timer); resolve(); };
+    const timer = setTimeout(done, timeoutMs);
+    proc.once('exit', done);
+    proc.kill();
   });
 }
 
@@ -664,6 +677,296 @@ describe('foundry-sidecar protocol basics', () => {
     } finally {
       if (!proc.killed) proc.kill();
       rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('foundry-sidecar benchmark exclusive gateway fence', () => {
+  /** Real request/response through the sidecar's actual gateway (not a mocked admitRequest,
+   * unlike gateway.test.ts) — this exercises the wiring in foundry-sidecar-main.js itself:
+   * `benchmarkExclusive`, `operationAdmission`, and `waitForGatewayIdle`. */
+  function postToGateway(
+    port: number,
+    body: string,
+    headers: Record<string, string> = {},
+  ): Promise<{ status: number; body: string }> {
+    return new Promise((resolve, reject) => {
+      const req = httpRequest({
+        host: '127.0.0.1',
+        port,
+        path: '/v1/chat/completions',
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(body),
+          ...headers,
+        },
+      }, (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode || 0, body: data }));
+      });
+      req.on('error', reject);
+      req.end(body);
+    });
+  }
+
+  /** Like `postToGateway`, but exposes a `firstChunk` promise that resolves as soon as any
+   * response bytes reach the client. For an SSE chat completion, the gateway only completes
+   * admission once its whole `pipeline()` finishes (see gateway.js's `forward`), so receiving
+   * a first chunk deterministically proves the operation is still admitted/in-flight —
+   * without relying on a fixed sleep to "probably" win the race against the gateway. */
+  function postToGatewayStream(
+    port: number,
+    body: string,
+  ): { firstChunk: Promise<void>; done: Promise<{ status: number; body: string }> } {
+    let resolveFirstChunk: (() => void) | null = null;
+    const firstChunk = new Promise<void>((resolve) => { resolveFirstChunk = resolve; });
+    const done = new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const req = httpRequest({
+        host: '127.0.0.1',
+        port,
+        path: '/v1/chat/completions',
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+      }, (res) => {
+        let data = '';
+        res.on('data', (chunk) => {
+          data += chunk;
+          resolveFirstChunk?.();
+          resolveFirstChunk = null;
+        });
+        res.on('end', () => resolve({ status: res.statusCode || 0, body: data }));
+      });
+      req.on('error', reject);
+      req.end(body);
+    });
+    return { firstChunk, done };
+  }
+
+  /** Spawns the sidecar with a fake FoundryLocalManager (same pattern as the HTTP-fallback
+   * chat tests above) whose native service reports `upstreamPort` as its only URL, so
+   * `startService` (gateway on by default) proxies real HTTP traffic to a server we control. A
+   * short `FLINT_BENCHMARK_EXCLUSIVE_DRAIN_MS` lets the "could not drain in time" path be
+   * exercised without a correspondingly slow test. */
+  function spawnGatewaySidecar(upstreamPort: number, drainMs = 200) {
+    const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-gateway-fence-home-'));
+    const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
+    const corePath = join(homeDir, 'fake-core.dylib');
+    writeFileSync(corePath, '');
+    writeFileSync(loaderPath, `
+      const sdk = \`
+        class FakeModel {
+          constructor() { this.id = 'fake-variant'; this.loaded = false; }
+          async load() { this.loaded = true; }
+          isLoaded() { return this.loaded; }
+          getExecutionProvider() { return 'CPUExecutionProvider'; }
+        }
+        class FakeManager {
+          constructor() { this.urls = []; this.catalog = { getModel: async () => new FakeModel(), getModels: async () => [] }; }
+          startWebService() { this.urls = ['http://127.0.0.1:${upstreamPort}']; }
+          stopWebService() {}
+          static create() { return new FakeManager(); }
+        }
+        export { FakeManager as FoundryLocalManager };
+      \`;
+      export async function resolve(specifier, context, nextResolve) {
+        if (specifier === 'foundry-local-sdk') {
+          return { url: 'data:text/javascript,' + encodeURIComponent(sdk), shortCircuit: true };
+        }
+        return nextResolve(specifier, context);
+      }
+      export async function load(url, context, nextLoad) {
+        if (url.startsWith('data:text/javascript,')) {
+          return { format: 'module', source: decodeURIComponent(url.slice('data:text/javascript,'.length)), shortCircuit: true };
+        }
+        return nextLoad(url, context);
+      }
+    `);
+    const proc = spawn(process.execPath, [
+      '--experimental-loader', pathToFileURL(loaderPath).href, 'sidecar/foundry-sidecar.js'
+    ], {
+      cwd: process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        HOME: homeDir,
+        USERPROFILE: homeDir,
+        FLINT_FOUNDRY_CORE_PATH: corePath,
+        FLINT_BENCHMARK_EXCLUSIVE_DRAIN_MS: String(drainMs),
+      },
+    });
+    return { proc, homeDir };
+  }
+
+  /** Starts the sidecar and its gateway, returning the process, its temp home dir (for
+   * cleanup), and the gateway's bound public port. */
+  async function startedGateway(upstreamPort: number, drainMs = 200) {
+    const { proc, homeDir } = spawnGatewaySidecar(upstreamPort, drainMs);
+    await waitForLine(proc, (msg) => msg.ready === true);
+    proc.stdin.write(`${JSON.stringify({ id: 1, cmd: 'init', appName: 'flint-test', logLevel: 'info' })}\n`);
+    const initRes = await waitForLine(proc, (msg) => msg.id === 1);
+    if (!initRes.ok) throw new Error(`init failed: ${initRes.error}`);
+    // port: 0 — let the OS pick a free port; the endpoint in the reply reports which one the
+    // gateway actually bound (see foundry-sidecar-main.js's `sharedEndpoint` construction).
+    proc.stdin.write(`${JSON.stringify({ id: 2, cmd: 'startService', port: 0, bindAddress: '127.0.0.1' })}\n`);
+    const started = await waitForLine(proc, (msg) => msg.id === 2, 15000);
+    if (!started.ok) throw new Error(`startService failed: ${started.error}`);
+    const gatewayPort = Number(new URL(started.endpoint).port);
+    return { proc, homeDir, gatewayPort };
+  }
+
+  it('rejects a new gateway request while exclusive, and admits again after release', async () => {
+    const upstream = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }));
+    });
+    let proc: ChildProcessWithoutNullStreams | undefined;
+    let homeDir: string | undefined;
+    try {
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+      const { port: upstreamPort } = upstream.address() as AddressInfo;
+      const started = await startedGateway(upstreamPort);
+      proc = started.proc;
+      homeDir = started.homeDir;
+      const gatewayPort = started.gatewayPort;
+      // Nothing is in flight, so acquisition must not wait for the drain deadline at all.
+      const acquireStarted = Date.now();
+      proc.stdin.write(`${JSON.stringify({ id: 10, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
+      const acquired = await waitForLine(proc, (msg) => msg.id === 10, 5000);
+      expect(acquired).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
+      expect(Date.now() - acquireStarted).toBeLessThan(2000);
+
+      const denied = await postToGateway(gatewayPort, JSON.stringify({ model: 'fake-model', messages: [] }));
+      expect(denied.status).toBe(503);
+      expect(denied.body).toContain('benchmark run is in progress');
+
+      proc.stdin.write(`${JSON.stringify({ id: 11, cmd: 'setBenchmarkExclusive', exclusive: false })}\n`);
+      const released = await waitForLine(proc, (msg) => msg.id === 11, 5000);
+      expect(released).toMatchObject({ ok: true, result: { exclusive: false } });
+
+      const allowed = await postToGateway(gatewayPort, JSON.stringify({ model: 'fake-model', messages: [] }));
+      expect(allowed.status).toBe(200);
+    } finally {
+      if (proc) await killAndWait(proc);
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      if (homeDir) rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('waits for an already-admitted streaming gateway request to finish before acquiring exclusive admission', async () => {
+    // Simulates SSE token-by-token completion: the gateway only completes admission once its
+    // whole pipeline finishes (gateway.js `forward`), so the operation stays "admitted" for as
+    // long as this upstream keeps the event stream open.
+    let releaseUpstream: (() => void) | null = null;
+    const upstreamHeld = new Promise<void>((resolve) => { releaseUpstream = resolve; });
+    const upstream = createServer((req, res) => {
+      if (req.url !== '/v1/chat/completions') {
+        // Startup's own /status readiness probe must not be held, or startService itself
+        // times out before the test ever reaches the fence.
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      // Flush one token immediately so the client observes a first chunk without waiting on
+      // `upstreamHeld` — that first chunk is this test's proof the request is in flight.
+      res.write('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n');
+      void upstreamHeld.then(() => {
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+    });
+    let proc: ChildProcessWithoutNullStreams | undefined;
+    let homeDir: string | undefined;
+    try {
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+      const { port: upstreamPort } = upstream.address() as AddressInfo;
+      // A generous drain deadline: this test proves the fence waits for the in-flight request
+      // to finish, not that it gives up on it, so the deadline must not be the thing satisfied.
+      const started = await startedGateway(upstreamPort, 10_000);
+      proc = started.proc;
+      homeDir = started.homeDir;
+      const gatewayPort = started.gatewayPort;
+      const inFlightStream = postToGatewayStream(gatewayPort, JSON.stringify({
+        model: 'fake-model', messages: [], stream: true,
+      }));
+      // Deterministic, not timing-based: the operation is only admitted at all once the
+      // gateway has forwarded the request and started streaming a response back, so this
+      // proves it is in `operationAdmission`'s bookkeeping before the fence is requested.
+      await inFlightStream.firstChunk;
+      let inFlightSettledAt = 0;
+      const inFlight = inFlightStream.done.then((r) => { inFlightSettledAt = Date.now(); return r; });
+
+      let exclusiveSettledAt = 0;
+      const exclusivePromise = (async () => {
+        proc.stdin.write(`${JSON.stringify({ id: 20, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
+        const res = await waitForLine(proc, (msg) => msg.id === 20, 15000);
+        exclusiveSettledAt = Date.now();
+        return res;
+      })();
+
+      // The in-flight stream must still be unresolved a beat later — proving the fence is
+      // actually waiting on it, not completing (or, worse, killing it) immediately.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(inFlightSettledAt).toBe(0);
+
+      releaseUpstream?.();
+      const [inFlightResult, exclusiveResult] = await Promise.all([inFlight, exclusivePromise]);
+
+      expect(inFlightResult.status).toBe(200);
+      expect(exclusiveResult).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
+      expect(exclusiveSettledAt).toBeGreaterThanOrEqual(inFlightSettledAt);
+    } finally {
+      if (proc) await killAndWait(proc);
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      if (homeDir) rmSync(homeDir, { recursive: true, force: true });
+    }
+  }, 20000);
+
+  it('clears the fence and reports failure when in-flight gateway work does not drain in time, without leaving the endpoint blocked', async () => {
+    const upstream = createServer((req, res) => {
+      if (req.headers['x-test-stuck']) {
+        // Never respond: simulates a stuck/never-completing gateway request so the (short,
+        // test-overridden) drain deadline is guaranteed to be reached.
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }));
+    });
+    let proc: ChildProcessWithoutNullStreams | undefined;
+    let homeDir: string | undefined;
+    try {
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+      const { port: upstreamPort } = upstream.address() as AddressInfo;
+      const started = await startedGateway(upstreamPort);
+      proc = started.proc;
+      homeDir = started.homeDir;
+      const gatewayPort = started.gatewayPort;
+      const stuck = postToGateway(
+        gatewayPort,
+        JSON.stringify({ model: 'fake-model', messages: [] }),
+        { 'x-test-stuck': '1' },
+      );
+      // A rejection here (e.g. from the socket being destroyed during cleanup) is expected and
+      // is not what this test asserts on — only the sidecar's own behavior is under test.
+      stuck.catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      proc.stdin.write(`${JSON.stringify({ id: 30, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
+      const failed = await waitForLine(proc, (msg) => msg.id === 30, 5000);
+      expect(failed.ok).toBeUndefined();
+      expect(String(failed.error)).toContain('Could not drain');
+
+      // The fence must have cleared on the failed attempt: a fresh, well-behaved request (no
+      // stuck marker) is still admitted rather than being denied by a benchmarkExclusive flag
+      // left stuck on.
+      const admitted = await postToGateway(gatewayPort, JSON.stringify({ model: 'fake-model', messages: [] }));
+      expect(admitted.status).toBe(200);
+    } finally {
+      if (proc) await killAndWait(proc);
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      if (homeDir) rmSync(homeDir, { recursive: true, force: true });
     }
   });
 });

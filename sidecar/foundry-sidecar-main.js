@@ -88,7 +88,14 @@ const operationAdmission = createOperationAdmission();
 /** Gateway-only exclusive lease for a measured benchmark. IPC chat/load still run (the
  * Preview uses those). Pinning does not stop a gateway autoload from switching variants. */
 let benchmarkExclusive = false;
-const BENCHMARK_EXCLUSIVE_DRAIN_MS = 10_000;
+// Overridable only for integration tests, which need a drain deadline far shorter than 10s to
+// exercise the "could not drain in time" path without a correspondingly slow test. Must stay
+// finite: an unbounded value (e.g. "Infinity") would let a stuck gateway request block the
+// endpoint forever instead of failing after the intended drain deadline.
+const parsedBenchmarkExclusiveDrainMs = Number(process.env.FLINT_BENCHMARK_EXCLUSIVE_DRAIN_MS);
+const BENCHMARK_EXCLUSIVE_DRAIN_MS = Number.isFinite(parsedBenchmarkExclusiveDrainMs) && parsedBenchmarkExclusiveDrainMs > 0
+  ? parsedBenchmarkExclusiveDrainMs
+  : 10_000;
 
 function gatewayRequestsOutstanding() {
   return operationAdmission.snapshot().some((op) => op.command === 'gatewayRequest');
