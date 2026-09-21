@@ -162,6 +162,13 @@ describe('foundry-sidecar protocol basics', () => {
       proc.stdin.write(`${JSON.stringify({ id: 5, cmd: 'getStatus' })}\n`);
       const status = await waitForLine(proc, (msg) => msg.id === 5);
       expect(status.ok).toBe(true);
+
+      proc.stdin.write(`${JSON.stringify({ id: 6, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
+      const exclusiveOn = await waitForLine(proc, (msg) => msg.id === 6);
+      expect(exclusiveOn).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
+      proc.stdin.write(`${JSON.stringify({ id: 7, cmd: 'setBenchmarkExclusive', exclusive: false })}\n`);
+      const exclusiveOff = await waitForLine(proc, (msg) => msg.id === 7);
+      expect(exclusiveOff).toMatchObject({ ok: true, result: { exclusive: false } });
     } finally {
       if (!proc.killed) {
         proc.kill();

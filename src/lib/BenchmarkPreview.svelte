@@ -6,7 +6,7 @@
     putBenchmarkSuiteIfNoRuns,
     deleteBenchmarkSuiteIfNoRuns,
     listBenchmarkRunHeadersForSuite,
-    countBenchmarkRunsForSuite,
+    countBenchmarkRunsBySuite,
     getBenchmarkRun,
     getBenchmarkRunWithAttempts,
     listAttemptSummariesForRun,
@@ -119,19 +119,16 @@
       return;
     }
     const nextSuites = (res.value ?? []).sort((a, b) => b.createdAt - a.createdAt);
+    const countRes = await countBenchmarkRunsBySuite();
+    if (generation !== suitesGeneration) return;
+    if (!countRes.ok) {
+      loadError = countRes.error || "Could not read run counts";
+      return;
+    }
+    const raw = countRes.value ?? {};
     const counts: Record<string, number> = {};
     for (const suite of nextSuites) {
-      // `countBenchmarkRunsForSuite` uses the index's count() request instead of getAll(): this
-      // list only needs "how many runs" (to gate Edit/Delete), and getAll() would deserialize
-      // every run row — including each one's embedded suite snapshot, up to 100 cases apiece —
-      // just to throw the rows away and keep a length.
-      const countRes = await countBenchmarkRunsForSuite(suite.id);
-      if (generation !== suitesGeneration) return;
-      if (!countRes.ok) {
-        loadError = countRes.error || `Could not read run count for suite "${suite.id}"`;
-        return;
-      }
-      counts[suite.id] = countRes.value ?? 0;
+      counts[suite.id] = raw[suite.id] ?? 0;
     }
     if (generation !== suitesGeneration) return;
     suites = nextSuites;

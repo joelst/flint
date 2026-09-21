@@ -1020,6 +1020,16 @@ describe('gateway activity hook', () => {
     expect(events).toEqual(['admit', 'complete']);
   });
 
+  it('uses a custom admission-denied message when provided', async () => {
+    gateway = await startGateway({
+      admitRequest: () => null,
+      admissionDeniedMessage: () => 'A benchmark run is in progress; the local gateway is not accepting other work.',
+    });
+    const res = await post(gateway.publicPort, 'qwen3-0.6b');
+    expect(res.status).toBe(503);
+    expect(JSON.stringify(res.body)).toMatch(/benchmark run is in progress/);
+  });
+
   it('rejects new model work when admission is fenced', async () => {
     gateway = await startGateway({ admitRequest: () => null });
     const res = await post(gateway.publicPort, 'qwen3-0.6b');

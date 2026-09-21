@@ -1649,6 +1649,12 @@ export async function setModelPriorities(
   if (opts.refresh !== false) await refreshModels();
 }
 
+/** Gateway-only exclusive lease for a measured benchmark. IPC chat/load still run. */
+export async function setBenchmarkExclusive(exclusive: boolean): Promise<{ exclusive: boolean; drained?: boolean }> {
+  const res = await send('setBenchmarkExclusive', { exclusive });
+  return res.result ?? { exclusive };
+}
+
 /**
  * Install eviction rules and model priorities together.
  *

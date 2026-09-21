@@ -4,6 +4,7 @@ import {
   createBenchmarkRun,
   deleteBenchmarkSuite,
   deleteBenchmarkSuiteIfNoRuns,
+  countBenchmarkRunsBySuite,
   countBenchmarkRunsForSuite,
   getBenchmarkRun,
   getBenchmarkRunWithAttempts,
@@ -724,6 +725,18 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
     await createBenchmarkRun(testRun({ id: 'run-2' }));
     expect(await countBenchmarkRunsForSuite(testSuite.id)).toEqual({ ok: true, value: 2 });
     expect(await countBenchmarkRunsForSuite('no-such-suite')).toEqual({ ok: true, value: 0 });
+  });
+
+  it('countBenchmarkRunsBySuite aggregates every suite in one transaction', async () => {
+    await putBenchmarkSuite(testSuite);
+    await putBenchmarkSuite({ ...testSuite, id: 'suite-2', name: 'Other' });
+    await createBenchmarkRun(testRun());
+    await createBenchmarkRun(testRun({ id: 'run-2' }));
+    await createBenchmarkRun(testRun({ id: 'run-3', suiteId: 'suite-2', suite: { ...testSuite, id: 'suite-2', name: 'Other' } }));
+    expect(await countBenchmarkRunsBySuite()).toEqual({
+      ok: true,
+      value: { [testSuite.id]: 2, 'suite-2': 1 },
+    });
   });
 
   it('getBenchmarkRunWithAttempts returns null for a run id that does not exist', async () => {

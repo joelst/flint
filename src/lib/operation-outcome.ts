@@ -75,6 +75,7 @@ export const COMMAND_EFFECTS: Record<SidecarCommandName, OperationEffect> = {
   setEvictionConfig: 'effectful',
   setModelPriorities: 'effectful',
   applyMemorySettings: 'effectful',
+  setBenchmarkExclusive: 'effectful',
 
   // Reach outside the sidecar entirely and can stop workloads that are not Flint's.
   wslEnableMirrored: 'effectful',
@@ -161,6 +162,7 @@ function recoveryAdvice(cmd: string): string {
     case 'setEvictionConfig':
     case 'setModelPriorities':
     case 'applyMemorySettings':
+    case 'setBenchmarkExclusive':
       return 'Check Diagnostics for the current runtime and service state before trying again.';
     case 'wslEnableMirrored':
     case 'wslShutdown':

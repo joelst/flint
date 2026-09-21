@@ -38,6 +38,7 @@ export type SidecarCommand =
   | { cmd: 'setEvictionConfig'; idleUnloadEnabled?: boolean; idleTimeoutMs?: number; maxResidentEnabled?: boolean; maxResident?: number }
   | { cmd: 'setModelPriorities'; priorities: ModelPriorityEntry[] }
   | { cmd: 'applyMemorySettings'; priorities: ModelPriorityEntry[]; eviction?: Partial<EvictionConfig> }
+  | { cmd: 'setBenchmarkExclusive'; exclusive: boolean }
   | { cmd: 'wslStatus' }
   | { cmd: 'wslEnableMirrored' }
   | { cmd: 'wslShutdown' };
@@ -95,6 +96,7 @@ export const KNOWN_COMMANDS = new Set<SidecarCommandName>([
   'inspectModelFolder', 'importModelFolder', 'linkModelFolder',
   'getModelTemplate', 'setModelTemplate',
   'setEvictionConfig', 'setModelPriorities', 'applyMemorySettings',
+  'setBenchmarkExclusive',
   'wslStatus', 'wslEnableMirrored', 'wslShutdown',
 ]);
 

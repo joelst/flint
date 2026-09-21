@@ -70,6 +70,7 @@ export function classifyGatewayRoute (urlPath) {
  *        metadata-only access log (no bodies, no headers) after each request finishes
  * @param {() => (() => void)|null} [options.admitRequest]
  *        atomically admits a request and returns its completion callback; null rejects it
+ * @param {string|(() => string)} [options.admissionDeniedMessage]
  * @param {boolean} [options.autoload]       default true
  * @param {boolean} [options.loopbackOnlyAutoload] default true
  * @param {number} [options.maxBufferedBody]
@@ -87,6 +88,7 @@ export function createGateway (options) {
     onActivity = () => {},
     onAccess = () => {},
     admitRequest,
+    admissionDeniedMessage,
     autoload = true,
     loopbackOnlyAutoload = true,
     maxBufferedBody = DEFAULT_MAX_BUFFERED_BODY,
@@ -185,8 +187,11 @@ export function createGateway (options) {
   async function handleRequest (req, res) {
     const completeAdmission = admitRequest?.();
     if (admitRequest && !completeAdmission) {
+      const denied = typeof admissionDeniedMessage === 'function'
+        ? admissionDeniedMessage()
+        : (admissionDeniedMessage || 'The local runtime is draining and is not accepting new work.');
       res.writeHead(503, { 'content-type': 'application/json' });
-      res.end(openAiError('The local runtime is draining and is not accepting new work.', 'server_error'));
+      res.end(openAiError(denied, 'server_error'));
       return;
     }
     try {

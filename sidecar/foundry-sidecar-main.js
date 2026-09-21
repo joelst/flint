@@ -85,6 +85,23 @@ const rl = readline.createInterface({ input: process.stdin, terminal: false });
 const SIDECAR_PROTOCOL_VERSION = 1;
 const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS = 5_000;
 const operationAdmission = createOperationAdmission();
+/** Gateway-only exclusive lease for a measured benchmark. IPC chat/load still run (the
+ * Preview uses those). Pinning does not stop a gateway autoload from switching variants. */
+let benchmarkExclusive = false;
+const BENCHMARK_EXCLUSIVE_DRAIN_MS = 10_000;
+
+function gatewayRequestsOutstanding() {
+  return operationAdmission.snapshot().some((op) => op.command === 'gatewayRequest');
+}
+
+async function waitForGatewayIdle(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (!gatewayRequestsOutstanding()) return true;
+    if (Date.now() >= deadline) return !gatewayRequestsOutstanding();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
 let explicitShutdownInProgress = false;
 const LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'fatal'];
 let activeLogLevel = 'info';
@@ -100,6 +117,7 @@ const KNOWN_COMMANDS = new Set([
   'inspectModelFolder', 'importModelFolder', 'linkModelFolder',
   'getModelTemplate', 'setModelTemplate',
   'setEvictionConfig', 'setModelPriorities', 'applyMemorySettings',
+  'setBenchmarkExclusive',
   'wslStatus', 'wslEnableMirrored', 'wslShutdown',
 ]);
 
@@ -131,6 +149,7 @@ const FIELD_TYPES = {
   },
   setModelPriorities: { priorities: 'array' },
   applyMemorySettings: { priorities: 'array' },
+  setBenchmarkExclusive: { exclusive: 'boolean' },
 };
 
 // Commands that accept a lane field; validated to 'chat' | 'audio'.
@@ -175,6 +194,7 @@ const COMMAND_SCHEMA = {
   setEvictionConfig:  { required: [], optional: ['idleUnloadEnabled', 'idleTimeoutMs', 'maxResidentEnabled', 'maxResident'] },
   setModelPriorities: { required: ['priorities'], optional: [] },
   applyMemorySettings: { required: ['priorities'], optional: ['eviction'] },
+  setBenchmarkExclusive: { required: ['exclusive'], optional: [] },
   wslStatus:          { required: [], optional: [] },
   wslEnableMirrored:  { required: [], optional: [] },
   wslShutdown:        { required: [], optional: [] },
@@ -2591,16 +2611,25 @@ rl.on('line', async (line) => {
             resolve: resolveForGateway,
             // The loaded variant id is what the replayed request must name: Foundry rejects
             // the friendly alias even once the model is resident.
-            load: async (alias, variantId) => (await ensureModel(alias, variantId))?.variantId ?? null,
+            load: async (alias, variantId) => {
+              if (benchmarkExclusive) {
+                throw new Error('A benchmark run is in progress; gateway autoload is disabled');
+              }
+              return (await ensureModel(alias, variantId))?.variantId ?? null;
+            },
             // Proxied traffic never reaches this process, so without this hook a model
             // serving a long completion would look idle and could be evicted underneath it.
             onActivity: noteActivity,
             onAccess: (entry) => appendAccessLog(entry),
             admitRequest: () => {
+              if (benchmarkExclusive) return null;
               const operationId = `gateway:${++gatewayOperationId}`;
               if (!operationAdmission.admit(operationId, 'gatewayRequest')) return null;
               return () => operationAdmission.complete(operationId);
             },
+            admissionDeniedMessage: () => benchmarkExclusive
+              ? 'A benchmark run is in progress; the local gateway is not accepting other work.'
+              : 'The local runtime is draining and is not accepting new work.',
             log,
           });
           try {
@@ -3218,6 +3247,22 @@ rl.on('line', async (line) => {
       });
     } else if (cmd === 'getCacheInventory') {
       reply({ ok: true, result: await getCacheInventory() });
+    } else if (cmd === 'setBenchmarkExclusive') {
+      // Page-local busy flags cannot see OpenAI-gateway clients. Exclusive admission lives here:
+      // new gateway work is rejected, already-admitted requests drain, IPC chat/load still run.
+      if (payload.exclusive === true) {
+        benchmarkExclusive = true;
+        const drained = await waitForGatewayIdle(BENCHMARK_EXCLUSIVE_DRAIN_MS);
+        if (!drained) {
+          benchmarkExclusive = false;
+          reply({ error: 'Could not drain in-flight gateway requests before taking exclusive admission' });
+          return;
+        }
+        reply({ ok: true, result: { exclusive: true, drained: true } });
+      } else {
+        benchmarkExclusive = false;
+        reply({ ok: true, result: { exclusive: false } });
+      }
     } else if (cmd === 'setEvictionConfig') {
       // Apply immediately: a user who has just lowered the cap expects the pool to shrink
       // now, not at some point in the next half minute.

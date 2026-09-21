@@ -469,6 +469,31 @@ export async function listBenchmarkRunsForSuite(suiteId: string): Promise<Reposi
  * unrelated suite). Corruption is not silently lost: opening that suite still goes through
  * `refreshRunsForSelectedSuite`/`listBenchmarkRunHeadersForSuite`, which does validate and surfaces
  * the error at that point. */
+/** One transaction: run counts for every suite, via the bySuiteId key cursor so values (and
+ * their embedded snapshots) are never deserialized. Suites with no runs are omitted. */
+export async function countBenchmarkRunsBySuite(): Promise<RepositoryResult<Record<string, number>>> {
+  const result = await withStores<Record<string, number>>(RUNS_STORE, 'readonly', (tx, trackRequest) => {
+    const index = tx.objectStore(RUNS_STORE).index(RUNS_BY_SUITE_INDEX);
+    const req = index.openKeyCursor() as IDBRequest<IDBCursor | null>;
+    trackRequest(req);
+    return new Promise<Record<string, number>>((resolve) => {
+      const counts: Record<string, number> = {};
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) {
+          resolve(counts);
+          return;
+        }
+        const suiteId = String(cursor.key);
+        counts[suiteId] = (counts[suiteId] ?? 0) + 1;
+        cursor.continue();
+      };
+    });
+  });
+  if (!result.ok) return failResult(result.error!);
+  return okResult(result.value ?? {});
+}
+
 export async function countBenchmarkRunsForSuite(suiteId: string): Promise<RepositoryResult<number>> {
   const result = await withStores<number>(RUNS_STORE, 'readonly', (tx, trackRequest) => {
     const index = tx.objectStore(RUNS_STORE).index(RUNS_BY_SUITE_INDEX);

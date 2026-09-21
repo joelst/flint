@@ -50,6 +50,7 @@
     TEMPLATE_PRESETS,
     setEvictionConfig as sdkSetEvictionConfig,
     applyMemorySettings as sdkApplyMemorySettings,
+    setBenchmarkExclusive as sdkSetBenchmarkExclusive,
     getWslStatus,
     enableWslMirroredNetworking,
     shutdownWsl,
@@ -892,6 +893,14 @@
       benchmarkActiveRunId = null;
       benchmarkLiveAfter = null;
       await unpinBenchmarkTargets();
+      try {
+        await sdkSetBenchmarkExclusive(false);
+      } catch (e: any) {
+        appendAppLog(
+          `Benchmark: could not release exclusive gateway admission (${e?.message || e}). External clients may still be blocked.`,
+          'warn',
+        );
+      }
     } finally {
       benchmarkRunInFlight = false;
     }
@@ -981,6 +990,12 @@
     benchmarkRunInFlight = true;
     benchmarkRunError = null;
     try {
+      try {
+        await sdkSetBenchmarkExclusive(true);
+      } catch (e: any) {
+        await finishBenchmarkExecution();
+        return { ok: false, error: e?.message || 'Could not take exclusive gateway admission for the benchmark' };
+      }
       const started = await startBenchmarkSession(suite, benchmarkHost());
       if (!started.ok) {
         await finishBenchmarkExecution();
@@ -1012,6 +1027,12 @@
     benchmarkRunInFlight = true;
     benchmarkRunError = null;
     try {
+      try {
+        await sdkSetBenchmarkExclusive(true);
+      } catch (e: any) {
+        await finishBenchmarkExecution();
+        return { ok: false, error: e?.message || 'Could not take exclusive gateway admission for the benchmark' };
+      }
       const started = await resumeBenchmarkSession(runId, benchmarkHost());
       if (!started.ok) {
         await finishBenchmarkExecution();
