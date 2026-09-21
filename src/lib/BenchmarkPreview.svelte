@@ -183,7 +183,7 @@
     // recorded against its frozen snapshot, and silently changing the live suite underneath
     // that history would be misleading even though runs themselves are immutable.
     if ((runCountsBySuite[suite.id] ?? 0) > 0) {
-      loadError = "This suite has runs and can no longer be edited. Duplicate it to make changes.";
+      loadError = "This suite has runs and can no longer be edited. Create a new suite to make changes.";
       return;
     }
     editingDraft = draftFromSuite(suite);
@@ -497,6 +497,16 @@
     <div class="warning-banner">{runError}</div>
   {/if}
 
+  {#if activeRunId && !selectedRunIsActive}
+    <!-- Suite/run selection stays enabled while a run executes, so the run-detail Stop button
+         below is hidden whenever the user has selected anything other than the live run. This
+         standing control is the only way to stop it in that case. -->
+    <div class="benchmark-active-run-banner">
+      <span>A benchmark run is active in the background.</span>
+      <button type="button" class="secondary small" onclick={handleStop}>Stop</button>
+    </div>
+  {/if}
+
   {#if editingDraft}
     <div class="benchmark-editor">
       <h3>{editingDraft.id ? "Edit suite" : "New suite"}</h3>
@@ -784,6 +794,17 @@
   }
   .benchmark-errors {
     color: var(--danger, #c0392b);
+    font-size: 0.85rem;
+  }
+  .benchmark-active-run-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 8px 12px;
+    border-radius: 6px;
+    border: 1px solid color-mix(in srgb, var(--warning, #b8860b) 40%, transparent);
+    background: color-mix(in srgb, var(--warning, #b8860b) 10%, transparent);
     font-size: 0.85rem;
   }
   .benchmark-run-list {

@@ -1115,6 +1115,7 @@
     const percent = contextUsagePercent;
     if (!percent || isStreaming || !state.ready) return;
     if (percent < 75) return;  // yellow/red threshold
+    if (benchmarkRunInFlight) return;  // avoid contending with benchmark inference
 
     const currentLen = chatMessages.length;
     // Avoid repeating too soon
@@ -5456,6 +5457,10 @@ updateStateFromSdk();
 
   async function sendMessage(e: Event) {
     e.preventDefault();
+    if (benchmarkRunInFlight) {
+      statusMessage = "Chat is disabled while a benchmark run is active — it would contend for inference and invalidate the measurements.";
+      return;
+    }
     if (chatBlockedByLoadedSTT) {
       statusMessage = "Text chat is disabled while an STT model is active. Load a chat model to continue.";
       return;
@@ -5753,6 +5758,10 @@ updateStateFromSdk();
    * Full history remains accessible via the "Full thread" toggle.
    */
   async function compactConversationWithSummary(turnsToKeep = 6) {
+    if (benchmarkRunInFlight) {
+      statusMessage = "Summarization is disabled while a benchmark run is active — it would contend for inference.";
+      return;
+    }
     if (chatMessages.length < turnsToKeep * 2 + 4) {
       statusMessage = "Not enough history to summarize yet.";
       return;
@@ -6045,6 +6054,11 @@ Output only the summary text, no preamble.`;
       return;
     }
 
+    if (benchmarkRunInFlight) {
+      statusMessage = "Dictation is disabled while a benchmark run is active — it would contend for inference.";
+      return;
+    }
+
     const sttAlias = effectiveSTTModelAlias || 'whisper-tiny';
 
     // Identify this recording *before* the first await. `getUserMedia` and transcription both
@@ -6094,6 +6108,11 @@ Output only the summary text, no preamble.`;
           dictationInterim = '';
           return;
         }
+        if (benchmarkRunInFlight) {
+          statusMessage = 'Dictation discarded — a benchmark run started while recording.';
+          dictationInterim = '';
+          return;
+        }
         try {
           const fullBlob = new Blob(chunks, { type: 'audio/webm' });
           const wavBlob = await convertAudioBlobToWav(fullBlob);
@@ -6132,6 +6151,7 @@ Output only the summary text, no preamble.`;
   async function triggerRollingTranscription(sttAlias: string, session: number) {
     if (session !== dictationSession) return;
     if (rollingOwner !== 0 || dictationChunks.length === 0) return;
+    if (benchmarkRunInFlight) return;
     rollingOwner = session;
     const snapshotLen = dictationChunks.length;
     try {
@@ -6339,6 +6359,15 @@ Output only the summary text, no preamble.`;
 
       const wavBlob = new Blob([audioBufferToWav(chunkBuf)], { type: 'audio/wav' });
 
+      if (benchmarkRunInFlight) {
+        // A benchmark started while this chunk loop was running — stop dispatching further
+        // STT inference so it doesn't contend with the benchmark, and count what's left as
+        // uncompleted rather than silently reporting a shorter transcript as complete.
+        failedChunks += (totalChunks - idx);
+        statusMessage = 'Transcription interrupted — a benchmark run became active.';
+        break;
+      }
+
       if (onProgress) onProgress(idx + 1, totalChunks);
       statusMessage = `Transcribing segment ${idx + 1} of ${totalChunks}...`;
 
@@ -6393,6 +6422,11 @@ Output only the summary text, no preamble.`;
       return;
     }
 
+    if (benchmarkRunInFlight) {
+      statusMessage = "Transcription is disabled while a benchmark run is active — it would contend for inference.";
+      return;
+    }
+
     isTranscribing = true;
     transcription = "";
     statusMessage = `Transcribing with ${sttAlias} via sidecar...`;
@@ -6431,6 +6465,10 @@ Output only the summary text, no preamble.`;
         });
       } else {
         const sendBlob = await convertAudioBlobToWav(audioBlob);
+
+        if (benchmarkRunInFlight) {
+          throw new Error('Transcription cancelled — a benchmark run became active.');
+        }
 
         result = await transcribeAudio(
           sendBlob,
@@ -7790,8 +7828,10 @@ Output only the summary text, no preamble.`;
                     <button
                       type="button"
                       class="compact-btn summarize-btn"
-                      title="Use the model to summarize older turns into a compact memory note. Allows continuing long chats efficiently."
-                      disabled={isStreaming}
+                      title={benchmarkRunInFlight
+                        ? "Disabled while a benchmark run is active."
+                        : "Use the model to summarize older turns into a compact memory note. Allows continuing long chats efficiently."}
+                      disabled={isStreaming || benchmarkRunInFlight}
                       onclick={() => compactConversationWithSummary(Math.max(4, Math.floor(contextTurns / 2)))}
                     >
                       Summarize &amp; Compact
@@ -8110,7 +8150,11 @@ Output only the summary text, no preamble.`;
               {/if}
 
               <form class="chat-input" onsubmit={sendMessage} ondrop={handleDrop} ondragover={handleDragOver} ondragenter={handleDragOver}>
-                {#if chatBlockedByLoadedSTT}
+                {#if benchmarkRunInFlight}
+                  <div style="width:100%; padding: 8px; font-size:0.8rem; color:var(--muted);">
+                    Chat is disabled while a benchmark run is active.
+                  </div>
+                {:else if chatBlockedByLoadedSTT}
                   <div style="width:100%; padding: 8px; font-size:0.8rem; color:var(--muted);">
                     Text chat is disabled while STT model <strong>{loadedAudioModel?.alias}</strong> is active.
                   </div>
@@ -8123,21 +8167,21 @@ Output only the summary text, no preamble.`;
                   class:active={isDictating}
                   onclick={toggleDictation}
                   title={isDictating ? "Stop dictation (finalizes transcript)" : "Dictate into chat (requires STT model)"} aria-label={isDictating ? "Stop dictation" : "Start dictation"}
-                  disabled={isStreaming}
+                  disabled={isStreaming || (benchmarkRunInFlight && !isDictating)}
                 >
                   {#if isDictating}<Icon name="stop" size={14} />{:else}<Icon name="mic" size={14} />{/if}
                 </button>
                 <input
                   bind:value={chatInput}
                   placeholder={isDictating ? "Dictating… (click Stop to finish)" : "Type your message... (model is running locally)"}
-                  disabled={chatBlockedByLoadedSTT || !selectedModelSupportsChat || (!state.endpoint && !chatClient) || isStreaming}
+                  disabled={benchmarkRunInFlight || chatBlockedByLoadedSTT || !selectedModelSupportsChat || (!state.endpoint && !chatClient) || isStreaming}
                   onkeydown={(e) => { if ((isMac ? e.metaKey : e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); sendMessage(e); } }}
                   onpaste={handlePaste}
                 />
                 <button
                   type="submit"
                   aria-label="Send message"
-                  disabled={chatBlockedByLoadedSTT || !selectedModelSupportsChat || !chatInput.trim() || (!state.endpoint && !chatClient) || isStreaming}
+                  disabled={benchmarkRunInFlight || chatBlockedByLoadedSTT || !selectedModelSupportsChat || !chatInput.trim() || (!state.endpoint && !chatClient) || isStreaming}
                 >
                   {#if isStreaming}<Icon name="loader" size={15} class="spin" />{:else}<Icon name="send" size={15} />{/if}
                 </button>
@@ -8306,7 +8350,7 @@ Output only the summary text, no preamble.`;
             </button>
             <button
               onclick={doTranscribe}
-              disabled={!audioBlob || isTranscribing || !effectiveSTTModelAlias}
+              disabled={!audioBlob || isTranscribing || !effectiveSTTModelAlias || benchmarkRunInFlight}
             >
               {isTranscribing
                 ? (transcriptionProgress
