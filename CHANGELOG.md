@@ -1,5 +1,39 @@
 # Flint Changelog
 
+## 0.10.0
+
+### Minor Changes
+
+- 288c4aa: Add a Benchmark Preview UI (opt-in, off by default) under Build, alongside Playground and Model Arena, for measured, repeatable multi-model benchmark runs with a hardened Stop/Resume lifecycle.
+
+### Patch Changes
+
+- 5bfdeb9: Extract Model Arena Quick Compare storage into a testable module; save/load failures now surface in the App Log instead of failing silently.
+- 77833c5: Quick Compare streams live, Stop is real, and each result shows served variant, execution provider, and run status.
+- b18e9da: Add a headless benchmark suite schema and IndexedDB-backed storage for the upcoming Model Arena benchmark runner.
+- ff720fa: Add a headless sequential benchmark runner (write-ahead-intent-then-terminal-commit journal, Stop/Resume) for the upcoming Model Arena benchmark preview. No UI yet.
+- d553bec: Add a repeatable screenshot-capture script (CDP-driven) and refresh README/docs screenshots for dark and light mode with the current sidebar layout and logo.
+- 961a196: Allow the app's own local gateway to be reached at http://127.0.0.1 (not just http://localhost) so the endpoint self-test and other in-app fetches don't fail CSP. A ::1 bind is published as http://localhost so WebView2 CSP can allow it.
+- 2ad3ef5: Fix chat completions silently ignoring requested temperature/maxTokens whenever the SDK transport is used (the common case) — they are now applied to the model's ChatClient settings, matching the audio path.
+- b17a1fb: Fix thinking-toggle/reasoning state bleeding between messages when Chat or Model Arena reuses a rendering slot for a new message, and fix Arena reasoning detection to use full model info instead of alias only.
+- b17a1fb: Fix chat reasoning ("thinking") not collapsing for models whose chat template opens `<think>` in the prompt prefix rather than the returned text, so only the closing tag ever appears in `content` (e.g. qwen3.5-9b). The full chain-of-thought was rendering as plain visible text; it now collapses into the "Thinking" toggle like other reasoning models.
+- b17a1fb: Chat: avoid dumping raw reasoning text into the visible answer while a model streams, and fix the Playground chat pane not sizing to fit its container on load.
+- c6b335a: Automate the complete native macOS screenshot suite in dark and light themes.
+- 1976017: Theme native selects (including the Models catalog sort dropdown) in dark mode so closed boxes and open lists follow the app theme.
+- 1585c4d: Group the sidebar nav into Build (Playground, Model Arena), Discover (Models), Operate (Monitor, Diagnostics, Integrations), and Manage (Settings, Help). Chat and Audio are merged into a single Playground entry with an internal Chat/Voice toggle.
+- d553bec: Replace the app icon and favicon with the new Flint "F" logo across the Windows/macOS bundles and web static assets.
+- 1793439: Show only integrations that can connect to Flint and keep the theme toggle visible in light mode.
+- 288c4aa: Fix incorrect benchmark attempt estimates for out-of-range warmup/repeat counts, smooth out benchmark retry timing, and clear a leftover exclusive gateway lock left over from a reload.
+- 288c4aa: Prevent a benchmark run from being permanently stuck when finishing it takes too long, and fix a case where cleanup could re-open external API access to a model pool mid-benchmark.
+- 288c4aa: Fixed memory/eviction settings silently failing to apply after a reload, and surfaced a warning when a settings change is superseded instead of failing silently.
+- 288c4aa: Fixed benchmark runs being able to overlap leftover inference from a previous run after a reload, which could corrupt benchmark timing results; fixed a benchmark export that could fail if the download hadn't started yet.
+- 288c4aa: Benchmark exclusivity now also drains orphaned load/unload/delete operations left by a previous page instance. Same-page model downloads are now fenced against active benchmark runs (blocked from starting while one is active, and vice versa); this does not cover a download orphaned by a page reload.
+- eb79399: Protect the runtime protocol from dependency/native stdout noise so operations do not fail with invalid JSON frames.
+  Keep redirected sidecar diagnostics out of the error log, and show Starting… for every queued service start or restart.
+- e05b1b8: Keep the header theme icon visible in light mode.
+- 4795309: Stop the sidecar from also echoing its ready message to stderr, which showed up in the SDK log panel as a spurious "error" entry on every startup even though nothing failed.
+- 37c0d5f: Drain an in-flight `startService` restart before a benchmark takes exclusive admission, so an orphaned pool clear/repopulate from a previous page instance can no longer race a new benchmark run.
+
 ## 0.9.0
 
 First **stable** channel release after the 0.7.0 evaluation prerelease. 0.8.0 is unused. Publish this version as a full GitHub release (not a prerelease) so `releases/latest` resolves and installed 0.7.0 builds can exercise the in-app updater. **1.0.0** is a later stable, after that upgrade is proven.
