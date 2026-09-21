@@ -1690,13 +1690,29 @@ export async function setBenchmarkExclusive(exclusive: boolean): Promise<{ exclu
  * a check that is only true while this page has never itself claimed exclusivity (e.g. its own
  * claim generation still being at its initial, never-claimed value) so a concurrent legitimate
  * acquire aborts the release instead of being torn down by it.
+ *
+ * `onReleaseDispatched`, if given, is invoked with the release call's promise the instant it is
+ * dispatched (before it is awaited here) -- not this function's own returned promise, which does
+ * not resolve until the release settles. The caller must register it with the same
+ * `pendingExclusiveRelease` tracker every other release path already goes through: like any other
+ * release, `send('setBenchmarkExclusive', ...)` can itself wait out a sidecar respawn/re-init
+ * (see `sdk.ts`'s `sendInternal`) and lose an ordering race against a newer run's own acquire
+ * dispatched moments later, clearing that new lease out from under it. Without this hook, this
+ * reconciliation release was invisible to `pendingExclusiveRelease.join()` (awaited by Start/
+ * Resume before every acquire) -- exactly the race that join exists to close for every other
+ * release path.
  */
-export async function reconcileBenchmarkExclusive(isSafeToRelease?: () => boolean): Promise<boolean> {
+export async function reconcileBenchmarkExclusive(
+  isSafeToRelease?: () => boolean,
+  onReleaseDispatched?: (releaseCall: Promise<{ exclusive: boolean; drained?: boolean }>) => void,
+): Promise<boolean> {
   try {
     const status = await send('getStatus');
     if (!status.result?.benchmarkExclusive) return false;
     if (isSafeToRelease && !isSafeToRelease()) return false;
-    await send('setBenchmarkExclusive', { exclusive: false });
+    const releaseCall = send('setBenchmarkExclusive', { exclusive: false }).then((res) => res.result ?? { exclusive: false });
+    onReleaseDispatched?.(releaseCall);
+    await releaseCall;
     return true;
   } catch (e) {
     console.warn('[sdk] reconcileBenchmarkExclusive failed', e);

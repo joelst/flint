@@ -366,6 +366,29 @@ describe('reconcileBenchmarkExclusive', () => {
     await request.tracked;
     expect(request.box.err).toBeUndefined();
   });
+
+  it('invokes onReleaseDispatched with the release call the instant it is dispatched, before it settles, so a caller can track it against an overlapping newer acquire', async () => {
+    const sdk = await loadSdk();
+    let dispatchedCall: Promise<unknown> | null = null;
+    let dispatchedSettled = false;
+    const onReleaseDispatched = (releaseCall: Promise<unknown>) => {
+      dispatchedCall = releaseCall;
+      void releaseCall.then(() => { dispatchedSettled = true; });
+    };
+    const request = sdk.reconcileBenchmarkExclusive(undefined, onReleaseDispatched);
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, result: { benchmarkExclusive: true } });
+    const releaseId = await waitForWrite('setBenchmarkExclusive');
+    // The callback must have already fired by the time the release is on the wire -- a caller
+    // relying on it to register the call with a pending-release tracker (see +page.svelte's
+    // `pendingExclusiveRelease`) needs it available before the release settles, not after.
+    expect(dispatchedCall).not.toBeNull();
+    expect(dispatchedSettled).toBe(false);
+    harness.emitStdout({ id: releaseId, result: { exclusive: false } });
+    expect(await request).toBe(true);
+    await dispatchedCall;
+    expect(dispatchedSettled).toBe(true);
+  });
 });
 
 describe('getLastAppliedMemorySettingsSeq', () => {

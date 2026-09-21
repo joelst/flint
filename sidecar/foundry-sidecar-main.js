@@ -3332,9 +3332,11 @@ rl.on('line', async (line) => {
     } else if (cmd === 'setBenchmarkExclusive') {
       // Page-local busy flags cannot see OpenAI-gateway clients, and cannot see IPC calls left
       // running by a *previous*, now-gone page instance either (this sidecar outlives a reload).
-      // Exclusive admission lives here: new gateway work is rejected, already-admitted gateway
-      // and inference (chatCompletion/transcribeAudio/embedTexts) requests drain before this
-      // resolves, and new IPC chat/load calls (i.e. the benchmark's own) still run once granted.
+      // Exclusive admission lives here: new gateway work is rejected, and already-admitted
+      // gateway requests, inference (chatCompletion/transcribeAudio/embedTexts), and resident-
+      // pool mutations (load/unload/deleteModel) all drain before this resolves -- see
+      // `BENCHMARK_DRAIN_COMMANDS`'s docstring for the full set and why `download` is excluded.
+      // New IPC chat/load calls (i.e. the benchmark's own) still run once granted.
       // Serialized (see serializeBenchmarkExclusiveTransition) so a concurrently-dispatched
       // release cannot clear the flag out from under an in-progress acquire's drain wait.
       await serializeBenchmarkExclusiveTransition(async () => {
@@ -3343,7 +3345,7 @@ rl.on('line', async (line) => {
           const drained = await waitForBenchmarkDrainIdle(BENCHMARK_EXCLUSIVE_DRAIN_MS);
           if (!drained) {
             benchmarkExclusive = false;
-            reply({ error: 'Could not drain in-flight gateway requests before taking exclusive admission' });
+            reply({ error: 'Could not drain in-flight gateway/inference/pool-mutation operations before taking exclusive admission' });
             return;
           }
           reply({ ok: true, result: { exclusive: true, drained: true } });

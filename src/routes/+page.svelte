@@ -4802,7 +4802,15 @@ updateStateFromSdk();
         // the release would actually be sent: `state.ready` publishes as part of this same init,
         // so the user could in principle start a run before this call's second round trip lands,
         // and that legitimate claim must win instead of being released out from under it.
-        void reconcileBenchmarkExclusive(() => benchmarkExclusiveGeneration === 0);
+        // `onReleaseDispatched` registers the release with the same `pendingExclusiveRelease`
+        // tracker every other release goes through -- otherwise, if this release itself waits out
+        // a sidecar respawn/re-init, it is invisible to the `pendingExclusiveRelease.join()`
+        // Start/Resume await before their own acquire, and could clear a newer run's freshly
+        // acquired lease out from under it after the fact.
+        void reconcileBenchmarkExclusive(
+          () => benchmarkExclusiveGeneration === 0,
+          (releaseCall) => pendingExclusiveRelease.track(releaseCall),
+        );
 
         // Best-effort: on failure `lastAppliedMemorySettingsSeq` stays null and `pushMemorySeq`
         // is left at 0, which just reproduces the pre-fix behavior for this one page instance
