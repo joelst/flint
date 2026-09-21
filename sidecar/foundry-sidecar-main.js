@@ -98,21 +98,31 @@ const BENCHMARK_EXCLUSIVE_DRAIN_MS = Number.isFinite(parsedBenchmarkExclusiveDra
   ? parsedBenchmarkExclusiveDrainMs
   : 10_000;
 
-function gatewayRequestsOutstanding() {
-  return operationAdmission.snapshot().some((op) => op.command === 'gatewayRequest');
+// Commands that run real inference against the shared pool. Draining only `gatewayRequest`
+// missed IPC `chatCompletion` (and the other inference commands) entirely: this sidecar process
+// -- and any operation it already admitted -- survives a frontend reload, so an old page's
+// still-running `chatCompletion` from a *previous*, now-gone benchmark run is invisible to the
+// new page's own busy-state checks (those only see this page's in-memory state). Without this,
+// exclusive admission could be granted while that orphaned call is still generating tokens
+// against the same models the new run is about to benchmark, corrupting its latency/throughput
+// numbers with contention neither side can see.
+const BENCHMARK_DRAIN_COMMANDS = new Set(['gatewayRequest', 'chatCompletion', 'transcribeAudio', 'embedTexts']);
+
+function inferenceOperationsOutstanding() {
+  return operationAdmission.snapshot().some((op) => BENCHMARK_DRAIN_COMMANDS.has(op.command));
 }
 
 // Delegates the actual poll/deadline loop to `waitUntilIdle` (monotonic-wait.js), which measures
 // elapsed time via `performance.now()` rather than `Date.now()` — see that module's docstring for
 // why a wall-clock deadline here would let a clock rollback keep exclusivity, and therefore every
 // external gateway client, blocked well beyond this 10s limit.
-async function waitForGatewayIdle(timeoutMs) {
-  return waitUntilIdle(() => !gatewayRequestsOutstanding(), timeoutMs);
+async function waitForInferenceIdle(timeoutMs) {
+  return waitUntilIdle(() => !inferenceOperationsOutstanding(), timeoutMs);
 }
 
 // Each incoming stdin line is dispatched as its own concurrent async handler (see the `rl.on
 // ('line', ...)` loop below), so two `setBenchmarkExclusive` commands can otherwise interleave:
-// an acquire can set the flag and suspend in `waitForGatewayIdle` while a concurrently-running
+// an acquire can set the flag and suspend in `waitForInferenceIdle` while a concurrently-running
 // release (or a second acquire that then times out) clears it, after which the suspended
 // acquire resumes and reports `{ exclusive: true }` even though admission is open again. Chain
 // every transition through this queue so only one body (including its drain wait) ever runs at
@@ -3306,14 +3316,17 @@ rl.on('line', async (line) => {
     } else if (cmd === 'getCacheInventory') {
       reply({ ok: true, result: await getCacheInventory() });
     } else if (cmd === 'setBenchmarkExclusive') {
-      // Page-local busy flags cannot see OpenAI-gateway clients. Exclusive admission lives here:
-      // new gateway work is rejected, already-admitted requests drain, IPC chat/load still run.
+      // Page-local busy flags cannot see OpenAI-gateway clients, and cannot see IPC calls left
+      // running by a *previous*, now-gone page instance either (this sidecar outlives a reload).
+      // Exclusive admission lives here: new gateway work is rejected, already-admitted gateway
+      // and inference (chatCompletion/transcribeAudio/embedTexts) requests drain before this
+      // resolves, and new IPC chat/load calls (i.e. the benchmark's own) still run once granted.
       // Serialized (see serializeBenchmarkExclusiveTransition) so a concurrently-dispatched
       // release cannot clear the flag out from under an in-progress acquire's drain wait.
       await serializeBenchmarkExclusiveTransition(async () => {
         if (payload.exclusive === true) {
           benchmarkExclusive = true;
-          const drained = await waitForGatewayIdle(BENCHMARK_EXCLUSIVE_DRAIN_MS);
+          const drained = await waitForInferenceIdle(BENCHMARK_EXCLUSIVE_DRAIN_MS);
           if (!drained) {
             benchmarkExclusive = false;
             reply({ error: 'Could not drain in-flight gateway requests before taking exclusive admission' });

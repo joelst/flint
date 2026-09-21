@@ -506,7 +506,10 @@
     a.href = url;
     a.download = `benchmark-${runId}.json`;
     a.click();
-    URL.revokeObjectURL(url);
+    // Deferred, not immediate: revoking right after click() can race the WebView actually
+    // starting the download and invalidate the URL before it reads the blob (see the identical
+    // fix and its 10s deferral in +page.svelte's access-log export).
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
   }
 
   onMount(() => {

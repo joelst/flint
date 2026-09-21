@@ -689,7 +689,7 @@ describe('foundry-sidecar protocol basics', () => {
 describe('foundry-sidecar benchmark exclusive gateway fence', () => {
   /** Real request/response through the sidecar's actual gateway (not a mocked admitRequest,
    * unlike gateway.test.ts) — this exercises the wiring in foundry-sidecar-main.js itself:
-   * `benchmarkExclusive`, `operationAdmission`, and `waitForGatewayIdle`. */
+   * `benchmarkExclusive`, `operationAdmission`, and `waitForInferenceIdle`. */
   function postToGateway(
     port: number,
     body: string,
@@ -766,6 +766,19 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
           async load() { this.loaded = true; }
           isLoaded() { return this.loaded; }
           getExecutionProvider() { return 'CPUExecutionProvider'; }
+          createChatClient() {
+            return {
+              settings: {},
+              // Held open via a GET to the test's own upstream server (same "hold" pattern the
+              // streaming-gateway-request tests below use), so a test can keep this IPC
+              // chatCompletion admitted for as long as it needs to prove the exclusivity drain
+              // actually waits for it rather than resolving immediately.
+              completeChat: async () => {
+                await fetch('http://127.0.0.1:${upstreamPort}/hold-chat');
+                return { choices: [{ message: { role: 'assistant', content: 'held-response' } }] };
+              },
+            };
+          }
         }
         class FakeManager {
           constructor() {
@@ -935,9 +948,71 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
     }
   }, 20000);
 
+  it('waits for an already-admitted IPC chatCompletion to finish before acquiring exclusive admission', async () => {
+    // A benchmark run's own inference goes over IPC `chatCompletion`, not the gateway (see
+    // +page.svelte's benchmark host, which calls `chatCompletion` directly) -- and this sidecar
+    // process survives a frontend reload, so a *previous*, now-gone page's still-running call
+    // is invisible to the new page's own busy-state checks. Only this sidecar-side drain can
+    // still see it. `createChatClient().completeChat` here holds on a GET to this test's own
+    // upstream server (the same "hold" pattern as the streaming-gateway-request test above),
+    // simulating that orphaned call.
+    let releaseUpstream: (() => void) | null = null;
+    const upstreamHeld = new Promise<void>((resolve) => { releaseUpstream = resolve; });
+    const upstream = createServer((req, res) => {
+      if (req.url !== '/hold-chat') {
+        // Startup's own /status readiness probe must not be held.
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      void upstreamHeld.then(() => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+      });
+    });
+    let proc: ChildProcessWithoutNullStreams | undefined;
+    let homeDir: string | undefined;
+    try {
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+      const { port: upstreamPort } = upstream.address() as AddressInfo;
+      const started = await startedGateway(upstreamPort, 10_000);
+      proc = started.proc;
+      homeDir = started.homeDir;
+
+      let chatSettledAt = 0;
+      proc.stdin.write(`${JSON.stringify({ id: 25, cmd: 'chatCompletion', model: 'fake-model', messages: [{ role: 'user', content: 'hi' }] })}\n`);
+      const chatDone = waitForLine(proc, (msg) => msg.id === 25, 15000)
+        .then((r) => { chatSettledAt = Date.now(); return r; });
+
+      let exclusiveSettledAt = 0;
+      const exclusivePromise = (async () => {
+        proc!.stdin.write(`${JSON.stringify({ id: 26, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
+        const res = await waitForLine(proc!, (msg) => msg.id === 26, 15000);
+        exclusiveSettledAt = Date.now();
+        return res;
+      })();
+
+      // A beat to let the exclusive acquire actually reach and start its drain wait before
+      // releasing the held chat call — proving the fence is waiting on it, not racing it.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(chatSettledAt).toBe(0);
+
+      releaseUpstream?.();
+      const [chatResult, exclusiveResult] = await Promise.all([chatDone, exclusivePromise]);
+
+      expect(chatResult).toMatchObject({ ok: true });
+      expect(exclusiveResult).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
+      expect(exclusiveSettledAt).toBeGreaterThanOrEqual(chatSettledAt);
+    } finally {
+      if (proc) await killAndWait(proc);
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      if (homeDir) rmSync(homeDir, { recursive: true, force: true });
+    }
+  }, 20000);
+
   it('serializes a concurrently-dispatched release behind an in-progress acquire, so it cannot clear the flag mid-drain', async () => {
     // Same "held" streaming upstream as the previous test — this keeps the acquire's
-    // `waitForGatewayIdle` genuinely waiting (not resolving immediately) so there is a real
+    // `waitForInferenceIdle` genuinely waiting (not resolving immediately) so there is a real
     // window in which a concurrently-dispatched command could interleave.
     let releaseUpstream: (() => void) | null = null;
     const upstreamHeld = new Promise<void>((resolve) => { releaseUpstream = resolve; });
