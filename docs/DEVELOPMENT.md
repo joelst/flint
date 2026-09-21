@@ -223,8 +223,9 @@ refresh them:
    `README.md`'s Screenshots section if sections are added, renamed, or removed.
 
 On Windows, the script only uses Node built-ins (global `fetch`/`WebSocket`), so it needs
-no new dependency. On macOS, it additionally shells out to the system `swift` compiler and
-`/usr/sbin/screencapture`, both of which ship with macOS.
+no new dependency. On macOS, it additionally shells out to the `swift` compiler and
+`/usr/sbin/screencapture`; `/usr/sbin/screencapture` ships with macOS, but `swift` requires
+Xcode or the Xcode Command Line Tools (`xcode-select --install`) to be installed.
 
 ---
 
