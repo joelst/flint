@@ -100,17 +100,21 @@ speech-to-text, audit logging, bind-address/network control.
 
 ### Inference
 
-- **Chat** — streaming, personas, system prompts, conversation history, vision image attach when supported
-- **Audio** — microphone + file transcription (STT models)
-- **Model Arena** — side-by-side model responses (bake-off)
+- **Playground** — Chat (streaming, personas, system prompts, conversation history, vision image attach when supported) and Voice (microphone + file transcription, STT models) in one view with a Chat/Voice toggle
+- **Model Arena** — Quick Compare: live-streamed side-by-side model responses (bake-off) with served variant/execution provider/status
+- **Benchmark Preview** — opt-in, off by default: measured, repeatable multi-model benchmark runs with a hardened Stop/Resume lifecycle
 
 ### Operations & education
 
-- **Diagnostics** — service status, endpoint, execution providers
-- **Monitor** — pool, resources, access/audit logs
-- **Integrations** — copy-paste snippets for external tools
-- **Learn** — Foundry Local education + tool-calling boundary
+- **Diagnostics** — service status, endpoint self-test, execution providers, health ring
+- **Monitor** — pool, resources, access/audit logs (metadata only)
+- **Integrations** — copy-paste snippets for external tools that can actually connect to Flint
+- **Help** — Foundry Local education + tool-calling boundary
 - Persistent local-first privacy messaging
+
+Navigation is grouped as **Build** (Playground, Model Arena, Benchmark Preview),
+**Discover** (Models), **Operate** (Monitor, Diagnostics, Integrations), and
+**Manage** (Settings, Help).
 
 ## 5. Logging Strategy
 
@@ -166,7 +170,7 @@ Azure connections and other future feature work are tracked in
 
 **Product packaging (current intent):**
 
-- Foundry Local **runtime is bundled** with Flint builds for a seamless first run (see in-app Learn copy).
+- Foundry Local **runtime is bundled** with Flint builds for a seamless first run (see in-app Help copy).
 - Release installers **bundle a Node 22 runtime** for the JS sidecar (Tauri `externalBin`); PATH Node remains a dev/fallback requirement, not an end-user one. See [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md).
 - SDK package selection (winml vs standard) is handled at build/install time.
 - First-run: accelerator detection + starter model recommendations when no persisted state exists.
@@ -183,7 +187,7 @@ Azure connections and other future feature work are tracked in
   - **Flint:** load models, run service, surface endpoint/snippets, audit metadata. Chat UI does **not** parse or execute tool calls.
   - **Future:** any Flint-side execution requires explicit opt-in, confirmation, and audit
     trail (this remains a non-goal before 1.0 — see §2 Non-Goals above).
-  - **UI:** Learn tab documents this split.
+  - **UI:** Help view documents this split.
 - **Vision** — supported when catalog + chat client accept image content; multi-image attach shipped in 0.3.
 - **Pinned SDK, not latest** — Foundry Local's REST API is preview and explicitly subject
   to breaking change. Flint deliberately pins to SDK 1.2.4 (2.0.0 drops

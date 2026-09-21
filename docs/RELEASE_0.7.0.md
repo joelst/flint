@@ -1,5 +1,10 @@
 # Flint 0.7.0 foundation release
 
+> **Historical document.** This checklist applies only to the 0.7.0 evaluation
+> prerelease and is superseded by the current 0.9.0 stable release. See
+> [RELEASE.md](./RELEASE.md), [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md), and
+> [CHANGELOG.md](../CHANGELOG.md) for current release process and notes.
+
 This release is a shareable Windows/macOS Apple Silicon prerelease. It is
 intended to establish a dependable Flint core and a documented extension
 surface, not to finish every item in the reliability backlog.
