@@ -98,17 +98,31 @@ const BENCHMARK_EXCLUSIVE_DRAIN_MS = Number.isFinite(parsedBenchmarkExclusiveDra
   ? parsedBenchmarkExclusiveDrainMs
   : 10_000;
 
-// Commands that run real inference against the shared pool. Draining only `gatewayRequest`
-// missed IPC `chatCompletion` (and the other inference commands) entirely: this sidecar process
-// -- and any operation it already admitted -- survives a frontend reload, so an old page's
-// still-running `chatCompletion` from a *previous*, now-gone benchmark run is invisible to the
-// new page's own busy-state checks (those only see this page's in-memory state). Without this,
-// exclusive admission could be granted while that orphaned call is still generating tokens
-// against the same models the new run is about to benchmark, corrupting its latency/throughput
-// numbers with contention neither side can see.
-const BENCHMARK_DRAIN_COMMANDS = new Set(['gatewayRequest', 'chatCompletion', 'transcribeAudio', 'embedTexts']);
+// Commands that either run real inference against the shared pool, or mutate/populate what the
+// pool holds. Draining only `gatewayRequest` missed IPC `chatCompletion` (and the other inference
+// commands) entirely, and inference-only draining still missed `load`/`unload`/`deleteModel`:
+// this sidecar process -- and any operation it already admitted -- survives a frontend reload, so
+// an old page's still-running command from a *previous*, now-gone benchmark (or Models/Monitor)
+// session is invisible to the new page's own busy-state checks (those only see this page's
+// in-memory state). Without this, exclusive admission could be granted while:
+//   - an orphaned `chatCompletion`/`transcribeAudio`/`embedTexts` is still generating tokens
+//     against the same models the new run is about to benchmark, corrupting its latency numbers;
+//   - an orphaned `load`/`unload`/`deleteModel` is still mutating pool residency, so the new run
+//     could measure against a model that is still being unloaded, or race a stale load that
+//     hasn't finished consuming its resources yet.
+// Deliberately excludes `download`: unlike the above, a download can legitimately run for minutes
+// (multi-GB model files) and is unrelated to what a benchmark is about to measure, while the
+// drain deadline below is a fixed ~10s in production -- draining it would turn "someone is
+// downloading an unrelated model" into a routine, confusing "could not drain" benchmark-start
+// failure. The client-side admission check (`otherInferenceInFlight` in +page.svelte) still sees
+// a same-page download via `poolMutationsInFlight` and rejects it promptly; only the
+// reload-survives-it case is intentionally left unfenced here, as a scope tradeoff.
+const BENCHMARK_DRAIN_COMMANDS = new Set([
+  'gatewayRequest', 'chatCompletion', 'transcribeAudio', 'embedTexts',
+  'load', 'unload', 'deleteModel',
+]);
 
-function inferenceOperationsOutstanding() {
+function benchmarkDrainOperationsOutstanding() {
   return operationAdmission.snapshot().some((op) => BENCHMARK_DRAIN_COMMANDS.has(op.command));
 }
 
@@ -116,13 +130,13 @@ function inferenceOperationsOutstanding() {
 // elapsed time via `performance.now()` rather than `Date.now()` — see that module's docstring for
 // why a wall-clock deadline here would let a clock rollback keep exclusivity, and therefore every
 // external gateway client, blocked well beyond this 10s limit.
-async function waitForInferenceIdle(timeoutMs) {
-  return waitUntilIdle(() => !inferenceOperationsOutstanding(), timeoutMs);
+async function waitForBenchmarkDrainIdle(timeoutMs) {
+  return waitUntilIdle(() => !benchmarkDrainOperationsOutstanding(), timeoutMs);
 }
 
 // Each incoming stdin line is dispatched as its own concurrent async handler (see the `rl.on
 // ('line', ...)` loop below), so two `setBenchmarkExclusive` commands can otherwise interleave:
-// an acquire can set the flag and suspend in `waitForInferenceIdle` while a concurrently-running
+// an acquire can set the flag and suspend in `waitForBenchmarkDrainIdle` while a concurrently-running
 // release (or a second acquire that then times out) clears it, after which the suspended
 // acquire resumes and reports `{ exclusive: true }` even though admission is open again. Chain
 // every transition through this queue so only one body (including its drain wait) ever runs at
@@ -3326,7 +3340,7 @@ rl.on('line', async (line) => {
       await serializeBenchmarkExclusiveTransition(async () => {
         if (payload.exclusive === true) {
           benchmarkExclusive = true;
-          const drained = await waitForInferenceIdle(BENCHMARK_EXCLUSIVE_DRAIN_MS);
+          const drained = await waitForBenchmarkDrainIdle(BENCHMARK_EXCLUSIVE_DRAIN_MS);
           if (!drained) {
             benchmarkExclusive = false;
             reply({ error: 'Could not drain in-flight gateway requests before taking exclusive admission' });

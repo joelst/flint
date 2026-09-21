@@ -1105,8 +1105,9 @@
    * admission time is the actual enforcement and does cover that case. */
   const otherInferenceActiveForUi = $derived(isStreaming || isDictating || dictationTranscribing || isTranscribing || isSummarizing || endpointSelfTestBusy);
 
-  /** Counts explicit model-mutating operations (load/unload/delete/variant-switch/STT-load) in
-   * flight from Models/Monitor/chat-model-switch. `blockedByActiveBenchmark()` only blocks a
+  /** Counts explicit model-mutating operations (load/unload/delete/variant-switch/STT-load) and
+   * model downloads in flight from Models/Monitor/chat-model-switch. `blockedByActiveBenchmark()`
+   * only blocks a
    * *new* mutation from starting once `benchmarkRunInFlight` is already true; it does nothing
    * about a mutation that started the instant before — e.g. the user clicks "Load" (admission
    * check passes, nothing is running yet), the load's IPC round-trip is still pending, and only
@@ -1117,11 +1118,12 @@
    * no rune-driven re-render needs to observe it). */
   let poolMutationsInFlight = 0;
 
-  /** Wraps a model-mutating operation with the fence above: call at the top of every
-   * Models/Monitor/chat-model-switch function that directly loads, unloads, deletes, or
-   * variant-switches a pool entry, immediately after its own `blockedByActiveBenchmark()` check
-   * (that check keeps a *new* mutation from starting once a benchmark is already running; this
-   * fence is what a benchmark's own admission check reads to catch one already in flight). */
+  /** Wraps a model-mutating operation, or a model download, with the fence above: call at the
+   * top of every Models/Monitor/chat-model-switch function that directly loads, unloads,
+   * deletes, variant-switches, or downloads a pool entry, immediately after its own
+   * `blockedByActiveBenchmark()` check (that check keeps a *new* mutation from starting once a
+   * benchmark is already running; this fence is what a benchmark's own admission check reads to
+   * catch one already in flight). */
   function beginPoolMutation(): () => void {
     poolMutationsInFlight += 1;
     let released = false;
@@ -5583,7 +5585,17 @@ updateStateFromSdk();
   });
 
   async function downloadAndTrack(model: any) {
+    const blocked = blockedByActiveBenchmark();
+    if (blocked) {
+      statusMessage = blocked;
+      throw new Error(blocked);
+    }
     downloadingModelAliases = { ...downloadingModelAliases, [model.alias]: true };
+    // Routed through the same fence as load/unload/delete: a download consumes disk/network
+    // work a benchmark's own target loads would otherwise have exclusive use of, and it must be
+    // visible to `otherInferenceInFlight()` (checked by benchmark admission) exactly like those
+    // other pool-affecting operations already are.
+    const release = beginPoolMutation();
     try {
       statusMessage = `Downloading ${model.alias}...`;
       await downloadModel(
@@ -5603,6 +5615,7 @@ updateStateFromSdk();
       statusMessage = `Download failed: ${e?.message || e}`;
       throw e;
     } finally {
+      release();
       const next = { ...downloadingModelAliases };
       delete next[model.alias];
       downloadingModelAliases = next;
@@ -5837,7 +5850,13 @@ updateStateFromSdk();
   }
 
   async function downloadVariant(model: any, variantId: string) {
+    const blocked = blockedByActiveBenchmark();
+    if (blocked) {
+      statusMessage = blocked;
+      return;
+    }
     downloadingVariantIds = { ...downloadingVariantIds, [variantId]: true };
+    const release = beginPoolMutation();
     try {
       statusMessage = `Downloading ${model.alias} variant...`;
       await downloadModel(
@@ -5856,6 +5875,7 @@ updateStateFromSdk();
     } catch (e: any) {
       statusMessage = `Download failed: ${e?.message || e}`;
     } finally {
+      release();
       const next = { ...downloadingVariantIds };
       delete next[variantId];
       downloadingVariantIds = next;
@@ -7820,7 +7840,7 @@ Output only the summary text, no preamble.`;
                                     <button
                                       class="small update-btn"
                                       onclick={() => downloadVariant(model, variant.update.latestVariantId)}
-                                      disabled={downloadingVariantIds[variant.update.latestVariantId]}
+                                      disabled={downloadingVariantIds[variant.update.latestVariantId] || benchmarkRunInFlight}
                                     >
                                       {downloadingVariantIds[variant.update.latestVariantId] ? 'Downloading…' : 'Download update'}
                                     </button>
@@ -7829,7 +7849,7 @@ Output only the summary text, no preamble.`;
                                     <button
                                       class="small"
                                       onclick={() => downloadVariant(model, variant.id)}
-                                      disabled={downloadingVariantIds[variant.id]}
+                                      disabled={downloadingVariantIds[variant.id] || benchmarkRunInFlight}
                                     >
                                       {downloadingVariantIds[variant.id] ? 'Downloading…' : 'Download'}
                                     </button>
@@ -7867,7 +7887,10 @@ Output only the summary text, no preamble.`;
                       {/if}
 
                       {#if !model.isCached}
-                        <button onclick={() => downloadAndTrack(model)} disabled={downloadingModelAliases[model.alias]}>
+                        <button
+                          onclick={() => { void downloadAndTrack(model).catch((e: any) => { statusMessage = `Download failed: ${e?.message || e}`; }); }}
+                          disabled={downloadingModelAliases[model.alias] || benchmarkRunInFlight}
+                        >
                           {downloadingModelAliases[model.alias] ? 'Downloading…' : 'Download'}
                         </button>
                       {/if}

@@ -689,7 +689,7 @@ describe('foundry-sidecar protocol basics', () => {
 describe('foundry-sidecar benchmark exclusive gateway fence', () => {
   /** Real request/response through the sidecar's actual gateway (not a mocked admitRequest,
    * unlike gateway.test.ts) — this exercises the wiring in foundry-sidecar-main.js itself:
-   * `benchmarkExclusive`, `operationAdmission`, and `waitForInferenceIdle`. */
+   * `benchmarkExclusive`, `operationAdmission`, and `waitForBenchmarkDrainIdle`. */
   function postToGateway(
     port: number,
     body: string,
@@ -754,7 +754,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
    * `startService` (gateway on by default) proxies real HTTP traffic to a server we control. A
    * short `FLINT_BENCHMARK_EXCLUSIVE_DRAIN_MS` lets the "could not drain in time" path be
    * exercised without a correspondingly slow test. */
-  function spawnGatewaySidecar(upstreamPort: number, drainMs = 200, catalogModels: unknown[] = []) {
+  function spawnGatewaySidecar(upstreamPort: number, drainMs = 200, catalogModels: unknown[] = [], holdLoad = false) {
     const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-gateway-fence-home-'));
     const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
     const corePath = join(homeDir, 'fake-core.dylib');
@@ -763,7 +763,17 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       const sdk = \`
         class FakeModel {
           constructor() { this.id = 'fake-variant'; this.loaded = false; }
-          async load() { this.loaded = true; }
+          async load() {
+            // Only holds when a test opts in ("holdLoad"): the default path must stay a plain,
+            // instant resolve so every other test using this helper (autoload, eviction, etc.)
+            // is unaffected. When held, this lets a test keep an IPC "load" admitted for as
+            // long as it needs to prove the exclusivity drain waits for it, exactly like
+            // "createChatClient" below already does for "chatCompletion".
+            if (${JSON.stringify(holdLoad)}) {
+              await fetch('http://127.0.0.1:${upstreamPort}/hold-load');
+            }
+            this.loaded = true;
+          }
           isLoaded() { return this.loaded; }
           getExecutionProvider() { return 'CPUExecutionProvider'; }
           createChatClient() {
@@ -825,8 +835,8 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
 
   /** Starts the sidecar and its gateway, returning the process, its temp home dir (for
    * cleanup), and the gateway's bound public port. */
-  async function startedGateway(upstreamPort: number, drainMs = 200, catalogModels: unknown[] = []) {
-    const { proc, homeDir } = spawnGatewaySidecar(upstreamPort, drainMs, catalogModels);
+  async function startedGateway(upstreamPort: number, drainMs = 200, catalogModels: unknown[] = [], holdLoad = false) {
+    const { proc, homeDir } = spawnGatewaySidecar(upstreamPort, drainMs, catalogModels, holdLoad);
     await waitForLine(proc, (msg) => msg.ready === true);
     proc.stdin.write(`${JSON.stringify({ id: 1, cmd: 'init', appName: 'flint-test', logLevel: 'info' })}\n`);
     const initRes = await waitForLine(proc, (msg) => msg.id === 1);
@@ -1010,9 +1020,73 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
     }
   }, 20000);
 
+  it('waits for an already-admitted IPC load (or unload/deleteModel) to finish before acquiring exclusive admission', async () => {
+    // A page reload leaves the sidecar process, and anything it already admitted, running: an
+    // in-flight `load`/`unload`/`deleteModel` from Models/Monitor or a *previous* page instance
+    // is invisible to a new page's own busy-state checks, which only see this page's in-memory
+    // `poolMutationsInFlight`. Only this sidecar-side drain can still see it. Without draining
+    // these commands too, a new benchmark could acquire exclusivity while an orphaned mutation
+    // is still changing pool residency underneath it -- e.g. measuring against a model that is
+    // still mid-unload, or racing a stale load that hasn't finished consuming its resources.
+    // `holdLoad: true` makes the fake model's `load()` hold on a GET to this test's own upstream
+    // server (same "hold" pattern as the chatCompletion test above) until released.
+    let releaseUpstream: (() => void) | null = null;
+    const upstreamHeld = new Promise<void>((resolve) => { releaseUpstream = resolve; });
+    const upstream = createServer((req, res) => {
+      if (req.url !== '/hold-load') {
+        // Startup's own /status readiness probe must not be held.
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      void upstreamHeld.then(() => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+      });
+    });
+    let proc: ChildProcessWithoutNullStreams | undefined;
+    let homeDir: string | undefined;
+    try {
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+      const { port: upstreamPort } = upstream.address() as AddressInfo;
+      const started = await startedGateway(upstreamPort, 10_000, [], true);
+      proc = started.proc;
+      homeDir = started.homeDir;
+
+      let loadSettledAt = 0;
+      proc.stdin.write(`${JSON.stringify({ id: 27, cmd: 'load', alias: 'fake-model' })}\n`);
+      const loadDone = waitForLine(proc, (msg) => msg.id === 27, 15000)
+        .then((r) => { loadSettledAt = Date.now(); return r; });
+
+      let exclusiveSettledAt = 0;
+      const exclusivePromise = (async () => {
+        proc!.stdin.write(`${JSON.stringify({ id: 28, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
+        const res = await waitForLine(proc!, (msg) => msg.id === 28, 15000);
+        exclusiveSettledAt = Date.now();
+        return res;
+      })();
+
+      // A beat to let the exclusive acquire actually reach and start its drain wait before
+      // releasing the held load — proving the fence is waiting on it, not racing it.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(loadSettledAt).toBe(0);
+
+      releaseUpstream?.();
+      const [loadResult, exclusiveResult] = await Promise.all([loadDone, exclusivePromise]);
+
+      expect(loadResult).toMatchObject({ ok: true });
+      expect(exclusiveResult).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
+      expect(exclusiveSettledAt).toBeGreaterThanOrEqual(loadSettledAt);
+    } finally {
+      if (proc) await killAndWait(proc);
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      if (homeDir) rmSync(homeDir, { recursive: true, force: true });
+    }
+  }, 20000);
+
   it('serializes a concurrently-dispatched release behind an in-progress acquire, so it cannot clear the flag mid-drain', async () => {
     // Same "held" streaming upstream as the previous test — this keeps the acquire's
-    // `waitForInferenceIdle` genuinely waiting (not resolving immediately) so there is a real
+    // `waitForBenchmarkDrainIdle` genuinely waiting (not resolving immediately) so there is a real
     // window in which a concurrently-dispatched command could interleave.
     let releaseUpstream: (() => void) | null = null;
     const upstreamHeld = new Promise<void>((resolve) => { releaseUpstream = resolve; });
