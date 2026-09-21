@@ -609,11 +609,16 @@ describe('foundry-sidecar protocol basics', () => {
     });
 
     try {
-      await waitForLine(proc, (msg) => msg.ready === true);
+      // This test does 5 sequential round trips against a real spawned child; a loaded CI
+      // runner can make any single one exceed the plain 5000ms default `waitForLine` timeout
+      // well within the outer 30000ms test timeout below, so every wait here gets an explicit,
+      // more generous per-call timeout (matching the pattern already used for other
+      // SDK-round-trip waits elsewhere in this file, e.g. lines 910/973/980/1103).
+      await waitForLine(proc, (msg) => msg.ready === true, 15000);
       proc.stdin.write(`${JSON.stringify({
         id: 50, cmd: 'init', appName: 'flint-test', logLevel: 'info'
       })}\n`);
-      expect((await waitForLine(proc, (msg) => msg.id === 50)).ok).toBe(true);
+      expect((await waitForLine(proc, (msg) => msg.id === 50, 15000)).ok).toBe(true);
 
       // Buffered (non-streaming) SDK branch.
       proc.stdin.write(`${JSON.stringify({
@@ -625,7 +630,7 @@ describe('foundry-sidecar protocol basics', () => {
         temperature: 0.42,
         maxTokens: 123,
       })}\n`);
-      const buffered = await waitForLine(proc, (msg) => msg.id === 51);
+      const buffered = await waitForLine(proc, (msg) => msg.id === 51, 15000);
       expect(buffered.ok).toBe(true);
       expect(JSON.parse(buffered.result.choices[0].message.content)).toEqual({
         temperature: 0.42,
@@ -642,9 +647,9 @@ describe('foundry-sidecar protocol basics', () => {
         temperature: 0.77,
         maxTokens: 55,
       })}\n`);
-      const streamedDelta = await waitForLine(proc, (msg) => msg.id === 52 && msg.stream === true);
+      const streamedDelta = await waitForLine(proc, (msg) => msg.id === 52 && msg.stream === true, 15000);
       expect(JSON.parse(streamedDelta.delta)).toEqual({ temperature: 0.77, maxTokens: 55 });
-      expect((await waitForLine(proc, (msg) => msg.id === 52 && msg.ok === true)).ok).toBe(true);
+      expect((await waitForLine(proc, (msg) => msg.id === 52 && msg.ok === true, 15000)).ok).toBe(true);
 
       // Omitted fields must not clobber the client's own defaults with undefined/NaN.
       proc.stdin.write(`${JSON.stringify({
@@ -654,7 +659,7 @@ describe('foundry-sidecar protocol basics', () => {
         messages: [{ role: 'user', content: 'hello' }],
         stream: false,
       })}\n`);
-      const defaulted = await waitForLine(proc, (msg) => msg.id === 53);
+      const defaulted = await waitForLine(proc, (msg) => msg.id === 53, 15000);
       expect(JSON.parse(defaulted.result.choices[0].message.content)).toEqual({
         temperature: 0.11,
         maxTokens: 7,
@@ -669,7 +674,7 @@ describe('foundry-sidecar protocol basics', () => {
         stream: false,
         temperature: 0.5,
       })}\n`);
-      const partial = await waitForLine(proc, (msg) => msg.id === 54);
+      const partial = await waitForLine(proc, (msg) => msg.id === 54, 15000);
       expect(JSON.parse(partial.result.choices[0].message.content)).toEqual({
         temperature: 0.5,
         maxTokens: 7,
@@ -678,7 +683,7 @@ describe('foundry-sidecar protocol basics', () => {
       if (!proc.killed) proc.kill();
       rmSync(homeDir, { recursive: true, force: true });
     }
-  }, 20000);
+  }, 30000);
 });
 
 describe('foundry-sidecar benchmark exclusive gateway fence', () => {
