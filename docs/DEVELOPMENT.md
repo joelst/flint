@@ -14,7 +14,7 @@ For signed release pipeline setup, see [RELEASE.md](./RELEASE.md).
 - **Rust** + Cargo (Tauri)
 - Windows: Visual Studio Build Tools / MSVC for native builds (use `build-local.ps1` if `cl.exe` / SignTool paths need wiring)
 
-`npm install` runs the Foundry Local SDK install script, which downloads native core libraries into `node_modules/foundry-local-sdk/foundry-local-core/<platform>/`. Release builds also run `npm run ensure:node` and `npm run ensure:foundry` via Tauri `beforeBuildCommand`.
+`npm install` runs the Foundry Local SDK install script, which downloads native core libraries into `node_modules/foundry-local-sdk/foundry-local-core/<platform>/`. Release builds also run `npm run ensure:foundry` so missing native assets fail before packaging.
 
 ### Bundled Node runtime (Spike A)
 
@@ -40,7 +40,7 @@ npm run verify:bundle
 
 Spike A (2026-08-10): MSI ~**54 MB** / NSIS ~**38 MB** with bundled Node (~+30 / +20 MB vs pre-spike 0.3.1 artifacts). Details: [spikes/node-bundle-spike.md](./spikes/node-bundle-spike.md).
 
-**CI:** `cargo check` and Tauri builds require `src-tauri/binaries/node-<triple>` to exist (`externalBin`). Workflows run `npm run ci:deps` (not plain `npm ci`) so the Foundry native cache is restored after package extract, then `npm run ensure:node` (see `.github/workflows/ci.yml` and `release.yml`).
+**CI:** `cargo check` and Tauri builds require `src-tauri/binaries/node-<triple>` to exist (`externalBin`). Workflows run `npm run ci:deps` (not plain `npm ci`) so the Foundry native cache is restored before staging Node.
 
 `ensure:foundry` prefers the **build target**, not the host:
 
@@ -67,7 +67,7 @@ Supported Foundry core layouts today: `win32-x64`, `win32-arm64`, `linux-x64`, `
 | `npm run test:coverage` | Tests + coverage |
 | `npm run build` | Frontend web build only |
 | `npm run tauri:build` | Package installers (msi/nsis/dmg); runs ensure:node + ensure:foundry first |
-| `npm run tauri:build:local` | Local package via `--no-sign`: skips **all** code signing (updater signatures, Windows Authenticode, macOS bundle signing), so no `TAURI_SIGNING_PRIVATE_KEY` is needed. Never use for a release. |
+| `npm run tauri:build:local` | Local package via `--no-sign`: skips **all** code signing (updater signatures, Windows Authenticode, macOS bundle signing), so no `TAURI_SIGNING_PRIVATE_KEY` is needed |
 | `npm run verify:bundle` | Post-build bundle resource check |
 | `npm run verify:release -- 0.9.0 --channel=stable` | Verify package/Tauri/Cargo versions and stable-channel metadata |
 | `npm run run:built` | Launch a release build without installing MSI |
@@ -94,14 +94,14 @@ shared hotspots, and the `npm run verify:ipc-contracts` check.
 ### Local OpenAI-compatible endpoint
 
 - **Bind address** (Settings → Network) controls which interface the service *listens* on (`127.0.0.1`, `0.0.0.0`, or a custom IP).
-- **Client / Integrations URL** (`sharedEndpoint`) is usually `http://127.0.0.1:<port>/v1` so this app and local tools connect over loopback even when the service is bound to all interfaces. WSL2 clients in default NAT mode use the Windows host address from **Settings → Network → WSL clients** instead.
+- **Client / Integrations URL** (`sharedEndpoint`) is usually `http://127.0.0.1:<port>/v1` so this app and local tools connect over loopback even when the service is bound to all interfaces. WSL2 clients should use the Windows host IP as shown in `resolv.conf`; LAN clients should use the machine's LAN IP.
 - Use **Apply & restart** after changing port or bind so the sidecar re-creates the Foundry manager with the new `webServiceUrls`.
 
 ### Why a sidecar?
 
-Direct use of `foundry-local-sdk` from the Svelte frontend hits bundling limits (Node core modules externalized; native prebuilts/DLL resolution). The JS sidecar is the current production path for rapid iteration.
+Direct use of `foundry-local-sdk` from the Svelte frontend hits bundling limits (Node core modules externalized; native prebuilts/DLL resolution). The JS sidecar is the current production path for all Foundry integration.
 
-**Spike A (in progress):** ship a **bundled Node** binary via Tauri `externalBin` so end users need not install Node. A full Rust Foundry bridge remains the longer-term path to remove the Node *process* entirely (see PRODUCT_PLAN / BACKLOG).
+**Spike A (in progress):** ship a **bundled Node** binary via Tauri `externalBin` so end users need not install Node. A full Rust Foundry bridge remains the longer-term path to remove the Node process entirely.
 
 The sidecar emits `{ "ready": true }` after listener setup and lazy-loads the SDK
 on first `init`. Rust resolves the trusted packaged resource path, configures
@@ -219,7 +219,8 @@ refresh them:
 3. Review the diffs — the app's live state (loaded models, conversation history, sample
    data) ends up in the screenshot, so put the app into a presentable state first (a
    clean/representative conversation, a model loaded, no error banners) before capturing.
-4. Update `SHOTS` in `scripts/capture-screenshots.mjs` if sidebar labels change, and update
+4. Update both `SHOTS` and `MAC_SHOTS` in `scripts/capture-screenshots.mjs` if sidebar
+   labels or page headings change (or replace them with a shared configuration), and update
    `README.md`'s Screenshots section if sections are added, renamed, or removed.
 
 On Windows, the script only uses Node built-ins (global `fetch`/`WebSocket`), so it needs
