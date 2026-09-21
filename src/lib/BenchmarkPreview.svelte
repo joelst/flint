@@ -32,6 +32,11 @@
   export let liveAfter: number | null = null;
   /** True from the moment start/resume is requested until pin restore finishes. */
   export let runInFlight: boolean = false;
+  /** True while chat, dictation, transcription, or summarization elsewhere in the app is
+   * dispatching inference against the same shared pool. Disables Start/Resume proactively so
+   * the user isn't surprised by the rejection `onStart`/`onResume` return in that case — the
+   * parent's admission check is the actual enforcement, this is just visible feedback. */
+  export let otherInferenceActive: boolean = false;
   /** Set by the parent when a detached run/resume execution settles with a failure or a
    * `recovery_required` halt — neither is visible from `onStart`/`onResume`'s own resolved
    * value, since both return as soon as the run is confirmed under way, well before the run
@@ -643,7 +648,8 @@
             <button
               type="button"
               class="primary small"
-              disabled={runBusy || !!activeRunId || !isBenchmarkSuite(suite) || draftEditsSuite(editingDraft, suite.id)}
+              disabled={runBusy || otherInferenceActive || !!activeRunId || !isBenchmarkSuite(suite) || draftEditsSuite(editingDraft, suite.id)}
+              title={otherInferenceActive ? "Finish or stop chat, dictation, transcription, or summarization before starting a benchmark." : undefined}
               onclick={() => handleStart(suite)}
             >
               {lifecycleBusy ? "Starting…" : "Start run"}
@@ -651,6 +657,9 @@
           </div>
           {#if draftEditsSuite(editingDraft, suite.id)}
             <p class="muted small">Save or cancel your edits before starting a run.</p>
+          {/if}
+          {#if otherInferenceActive && !activeRunId}
+            <p class="muted small">Chat, dictation, transcription, or summarization is in progress — finish or stop it before starting a benchmark.</p>
           {/if}
           {#if !isBenchmarkSuite(suite)}
             <p class="muted small">
@@ -688,7 +697,13 @@
                     finish. Flint only records a result if it durably receives and saves one.
                   </p>
                 {:else if isRunResumable(currentRun, activeRunId)}
-                  <button type="button" class="primary small" disabled={runBusy || !!activeRunId} onclick={() => handleResume(currentRun.id)}>
+                  <button
+                    type="button"
+                    class="primary small"
+                    disabled={runBusy || otherInferenceActive || !!activeRunId}
+                    title={otherInferenceActive ? "Finish or stop chat, dictation, transcription, or summarization before resuming a benchmark." : undefined}
+                    onclick={() => handleResume(currentRun.id)}
+                  >
                     {lifecycleBusy ? "Resuming…" : "Resume"}
                   </button>
                 {/if}

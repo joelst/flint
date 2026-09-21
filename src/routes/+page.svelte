@@ -864,6 +864,23 @@
 
   type BenchmarkLifecycleOutcome = { ok: true; runId: string } | { ok: false; error: string };
 
+  /** True while chat (any conversation, including ones navigated away from), dictation,
+   * transcription, or summarization is actually dispatching inference against the shared
+   * alias-keyed pool. Benchmark Start/Resume must check this — not just Arena — or a benchmark
+   * can begin admission while other inference is still in flight and contend for the same pool
+   * mid-run. Checked once at admission time (mirrors the existing Arena check below); the
+   * composer/editor controls also disable proactively via the `otherInferenceActive` prop, but
+   * this function call is the actual enforcement. */
+  function otherInferenceInFlight(): boolean {
+    return streamsByConversation.size > 0 || isDictating || dictationTranscribing || isTranscribing || isSummarizing;
+  }
+
+  /** Best-effort reactive approximation of `otherInferenceInFlight()` for disabling the
+   * Start/Resume controls proactively. Omits other-conversation streams (`streamsByConversation`
+   * isn't a reactive rune) since this is UI feedback only — `otherInferenceInFlight()` at
+   * admission time is the actual enforcement and does cover that case. */
+  const otherInferenceActiveForUi = $derived(isStreaming || isDictating || dictationTranscribing || isTranscribing || isSummarizing);
+
   /**
    * Prepares the run row (so the id is known and Stop is live) then executes in a detached
    * promise. `startBenchmarkRun` does not resolve until the schedule halts; blocking the
@@ -876,6 +893,9 @@
     // explicit operations. Admission must be mutually exclusive in both directions or the two
     // features can replace/unload each other's models mid-run. See runComparison's matching guard.
     if (isComparing || comparePreparing) return { ok: false, error: 'An Arena run is already active.' };
+    if (otherInferenceInFlight()) {
+      return { ok: false, error: 'Chat, dictation, transcription, or summarization is in progress — finish or stop it before starting a benchmark.' };
+    }
     benchmarkRunInFlight = true;
     benchmarkRunError = null;
     try {
@@ -904,6 +924,9 @@
     if (benchmarkRunInFlight) return { ok: false, error: 'A benchmark run is already active.' };
     // See startBenchmarkPreviewRun: benchmark and Arena admission must be mutually exclusive.
     if (isComparing || comparePreparing) return { ok: false, error: 'An Arena run is already active.' };
+    if (otherInferenceInFlight()) {
+      return { ok: false, error: 'Chat, dictation, transcription, or summarization is in progress — finish or stop it before resuming a benchmark.' };
+    }
     benchmarkRunInFlight = true;
     benchmarkRunError = null;
     try {
@@ -1206,6 +1229,19 @@
   let rollingOwner = 0;
   // Monotonic id for the current dictation recording; see toggleDictation.
   let dictationSession = 0;
+  // Count of rolling + final dictation transcription requests currently dispatched — a counter
+  // rather than a boolean because the rolling pass and the final `onstop` transcription can
+  // overlap (the final request doesn't wait for or cancel an in-flight rolling one), and either
+  // could settle first; a shared boolean would clear while the other request is still in flight.
+  // Distinct from `isDictating` (recording), since the final transcription fires *after*
+  // `isDictating` is cleared in the recorder's `onstop` handler. Benchmark admission needs to
+  // see this window too, or a benchmark could start while dictation's own STT call is in flight.
+  let dictationTranscribingCount = $state(0);
+  const dictationTranscribing = $derived(dictationTranscribingCount > 0);
+  // True while `compactConversationWithSummary` has an actual chatCompletion request in flight
+  // (not merely while its guard checks run) — same reason as `dictationTranscribing`. Guarded
+  // against re-entrancy at the top of the function, so this can stay a plain boolean.
+  let isSummarizing = $state(false);
   let sttModels = $state<ModelInfo[]>([]);
   let selectedSTTModelAlias = $state("");
   // Tracks the alias of a model explicitly loaded into the audio lane via
@@ -5758,6 +5794,10 @@ updateStateFromSdk();
    * Full history remains accessible via the "Full thread" toggle.
    */
   async function compactConversationWithSummary(turnsToKeep = 6) {
+    if (isSummarizing) {
+      statusMessage = "A summarization is already in progress.";
+      return;
+    }
     if (benchmarkRunInFlight) {
       statusMessage = "Summarization is disabled while a benchmark run is active — it would contend for inference.";
       return;
@@ -5794,6 +5834,7 @@ Output only the summary text, no preamble.`;
     statusMessage = "Summarizing older context...";
     let summary = "";
 
+    isSummarizing = true;
     try {
       const endpoint = state.endpoint;
       if (endpoint) {
@@ -5815,6 +5856,7 @@ Output only the summary text, no preamble.`;
         }
       }
     } catch (e: any) {
+      isSummarizing = false;
       if (chatThreadEpoch !== epoch) return;
       statusMessage = `Summarization failed: ${e?.message || e}. Using condense instead.`;
       // Non-destructive fallback
@@ -5822,6 +5864,7 @@ Output only the summary text, no preamble.`;
       chatMessages = [...chatMessages];
       return;
     }
+    isSummarizing = false;
 
     // The thread was replaced while the summary was being generated — it belongs nowhere now.
     if (chatThreadEpoch !== epoch) return;
@@ -6114,6 +6157,7 @@ Output only the summary text, no preamble.`;
           return;
         }
         try {
+          dictationTranscribingCount++;
           const fullBlob = new Blob(chunks, { type: 'audio/webm' });
           const wavBlob = await convertAudioBlobToWav(fullBlob);
           const res = await transcribeAudio(wavBlob, sttAlias, transcriptionLanguage, 'dictation.wav', { temperature: 0 });
@@ -6130,6 +6174,7 @@ Output only the summary text, no preamble.`;
         } catch (err) {
           if (isCurrent()) statusMessage = `Dictation failed: ${err}`;
         } finally {
+          dictationTranscribingCount--;
           if (isCurrent()) dictationInterim = '';
         }
       };
@@ -6153,6 +6198,7 @@ Output only the summary text, no preamble.`;
     if (rollingOwner !== 0 || dictationChunks.length === 0) return;
     if (benchmarkRunInFlight) return;
     rollingOwner = session;
+    dictationTranscribingCount++;
     const snapshotLen = dictationChunks.length;
     try {
       const windowChunks = dictationChunks.length <= 2
@@ -6168,6 +6214,7 @@ Output only the summary text, no preamble.`;
         statusMessage = `Live dictation preview unavailable: ${error}`;
       }
     } finally {
+      dictationTranscribingCount--;
       // Release only our own lock: a stale pass must not unlock the current session.
       if (rollingOwner === session) rollingOwner = 0;
       if (isDictating && session === dictationSession && dictationChunks.length > snapshotLen) {
@@ -7830,8 +7877,10 @@ Output only the summary text, no preamble.`;
                       class="compact-btn summarize-btn"
                       title={benchmarkRunInFlight
                         ? "Disabled while a benchmark run is active."
-                        : "Use the model to summarize older turns into a compact memory note. Allows continuing long chats efficiently."}
-                      disabled={isStreaming || benchmarkRunInFlight}
+                        : isSummarizing
+                          ? "A summarization is already in progress."
+                          : "Use the model to summarize older turns into a compact memory note. Allows continuing long chats efficiently."}
+                      disabled={isStreaming || benchmarkRunInFlight || isSummarizing}
                       onclick={() => compactConversationWithSummary(Math.max(4, Math.floor(contextTurns / 2)))}
                     >
                       Summarize &amp; Compact
@@ -9642,6 +9691,7 @@ Output only the summary text, no preamble.`;
             activeRunId={benchmarkActiveRunId}
             liveAfter={benchmarkLiveAfter}
             runInFlight={benchmarkRunInFlight || isComparing || comparePreparing}
+            otherInferenceActive={otherInferenceActiveForUi}
             runError={benchmarkRunError}
             onStart={startBenchmarkPreviewRun}
             onStop={stopBenchmarkPreviewRun}
