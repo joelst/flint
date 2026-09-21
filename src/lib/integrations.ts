@@ -18,9 +18,7 @@ export type IntegrationStatus =
   /** Reported to work by users / docs but not yet exercised by the Flint team. */
   | 'community'
   /** Config not yet confirmed — snippet is a best-effort starting point only. */
-  | 'research-needed'
-  /** Tool cannot use Flint directly (proprietary backend or non-OpenAI protocol). */
-  | 'unsupported';
+  | 'research-needed';
 
 export type IntegrationCategory =
   | 'editor'        // IDE / editor extensions
@@ -294,22 +292,6 @@ codex --model {MODEL}`,
   },
 
   {
-    id: 'claude-code',
-    name: 'Claude Code (CLI + VS Code extension)',
-    vendor: 'Anthropic',
-    category: 'cli',
-    status: 'unsupported',
-    description:
-      "Anthropic's terminal coding agent and the matching VS Code extension are wire-bound to the Anthropic Messages API shape. Flint speaks OpenAI-compatible, so there is no direct path. Translation proxies exist but lose features Claude Code actually uses (prompt caching, extended thinking, content-block tool use, computer-use tools) — we don't recommend that workaround.",
-    snippets: { windows: [], unix: [] },
-    limitations: [
-      'No direct OpenAI-compatible mode — Claude Code uses the Anthropic Messages API exclusively.',
-      'The VS Code extension drives the same CLI binary, so it inherits the same limitation; it does not expose a custom-backend setting.',
-      'For OpenAI-compatible terminal coding agents on Flint, see OpenClaw, OpenCode, or Codex CLI instead.',
-    ],
-  },
-
-  {
     id: 'github-copilot-vscode',
     name: 'GitHub Copilot (VS Code)',
     vendor: 'GitHub / Microsoft',
@@ -340,38 +322,6 @@ the picker layout differs from the steps above.`,
       'Only the chat surface accepts custom providers; inline completions still go through the hosted Copilot backend.',
     ],
     docsUrl: 'https://docs.github.com/en/copilot',
-  },
-
-  {
-    id: 'github-copilot-cli',
-    name: 'GitHub Copilot CLI',
-    vendor: 'GitHub',
-    category: 'cli',
-    status: 'unsupported',
-    description:
-      "GitHub's terminal AI tool (`gh copilot`) connects to GitHub's hosted backend and does not support custom endpoints. Distinct from the Copilot VS Code extension above, which does support Flint.",
-    snippets: { windows: [], unix: [] },
-    limitations: [
-      'No public mechanism to point gh copilot at a custom backend.',
-      'For terminal coding agents on Flint, consider OpenCode or Codex CLI; for editor integration, use Copilot for VS Code (entry above) or Continue.dev.',
-    ],
-    docsUrl: 'https://docs.github.com/en/copilot/github-copilot-in-the-cli',
-  },
-
-  {
-    id: 'openai-codex-app',
-    name: 'Codex App (hosted)',
-    vendor: 'OpenAI',
-    category: 'agent',
-    status: 'unsupported',
-    description:
-      "OpenAI's hosted Codex agent product runs in OpenAI's cloud and cannot be redirected to a local backend.",
-    snippets: { windows: [], unix: [] },
-    limitations: [
-      'Hosted product with no self-hosted or BYO-endpoint mode.',
-      'Use the open-source Codex CLI instead if you want a local-backed coding agent.',
-    ],
-    docsUrl: 'https://openai.com/codex',
   },
 
   {

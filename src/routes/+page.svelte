@@ -199,8 +199,7 @@
   function statusBadgeLabel(status: IntegrationStatus): string {
     if (status === 'verified') return 'Verified';
     if (status === 'community') return 'Community-reported';
-    if (status === 'research-needed') return 'Unverified';
-    return 'Not supported';
+    return 'Unverified';
   }
 
   // Simple client-side navigation
@@ -8579,7 +8578,7 @@ Output only the summary text, no preamble.`;
             {#each integrations as integration (integration.id)}
               {@const osSnippets = integration.snippets[integrationsOS]}
               {@const isExpanded = expandedIntegrationId === integration.id}
-              <article class="integration-card" class:status-unsupported={integration.status === 'unsupported'}>
+              <article class="integration-card">
                 <header class="integration-card-head">
                   <div class="integration-title">
                     <h3>{integration.name}</h3>
@@ -8596,27 +8595,23 @@ Output only the summary text, no preamble.`;
                 </header>
                 <p class="integration-desc">{integration.description}</p>
 
-                {#if osSnippets.length === 0}
-                  <p class="integration-empty">No snippet — see limitations below.</p>
-                {:else}
-                  {#each osSnippets as snippet, snippetIdx}
-                    {@const snippetKey = `${integration.id}-${integrationsOS}-${snippetIdx}`}
-                    {@const rendered = renderSnippet(snippet.body, state.endpoint || '')}
-                    <div class="snippet-block">
-                      <div class="snippet-head">
-                        <span class="snippet-label">{snippet.label}</span>
-                        <button
-                          class="snippet-copy"
-                          type="button"
-                          onclick={() => copyIntegrationSnippet(snippetKey, rendered)}
-                        >
-                          {copiedSnippetKey === snippetKey ? 'Copied' : 'Copy'}
-                        </button>
-                      </div>
-                      <pre class="snippet-body">{rendered}</pre>
+                {#each osSnippets as snippet, snippetIdx}
+                  {@const snippetKey = `${integration.id}-${integrationsOS}-${snippetIdx}`}
+                  {@const rendered = renderSnippet(snippet.body, state.endpoint || '')}
+                  <div class="snippet-block">
+                    <div class="snippet-head">
+                      <span class="snippet-label">{snippet.label}</span>
+                      <button
+                        class="snippet-copy"
+                        type="button"
+                        onclick={() => copyIntegrationSnippet(snippetKey, rendered)}
+                      >
+                        {copiedSnippetKey === snippetKey ? 'Copied' : 'Copy'}
+                      </button>
                     </div>
-                  {/each}
-                {/if}
+                    <pre class="snippet-body">{rendered}</pre>
+                  </div>
+                {/each}
 
                 {#if (integration.limitations && integration.limitations.length) || integration.docsUrl}
                   <button
@@ -9943,6 +9938,7 @@ Output only the summary text, no preamble.`;
   .theme-toggle {
     font-size: 1rem;
     background: none;
+    color: var(--fg);
     border: 1px solid var(--border);
     padding: 2px 6px;
     border-radius: 4px;
@@ -11978,10 +11974,6 @@ Output only the summary text, no preamble.`;
     gap: 10px;
   }
 
-  .integration-card.status-unsupported {
-    opacity: 0.85;
-  }
-
   .integration-card-head {
     display: flex;
     align-items: flex-start;
@@ -12027,24 +12019,11 @@ Output only the summary text, no preamble.`;
     border-color: rgba(241, 196, 15, 0.4);
   }
 
-  .status-badge.status-unsupported {
-    background: rgba(231, 76, 60, 0.1);
-    color: #e74c3c;
-    border-color: rgba(231, 76, 60, 0.4);
-  }
-
   .integration-desc {
     margin: 0;
     color: var(--muted);
     font-size: 13px;
     line-height: 1.5;
-  }
-
-  .integration-empty {
-    margin: 0;
-    color: var(--muted);
-    font-style: italic;
-    font-size: 13px;
   }
 
   .snippet-block {
