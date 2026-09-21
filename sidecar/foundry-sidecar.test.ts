@@ -749,7 +749,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
    * `startService` (gateway on by default) proxies real HTTP traffic to a server we control. A
    * short `FLINT_BENCHMARK_EXCLUSIVE_DRAIN_MS` lets the "could not drain in time" path be
    * exercised without a correspondingly slow test. */
-  function spawnGatewaySidecar(upstreamPort: number, drainMs = 200) {
+  function spawnGatewaySidecar(upstreamPort: number, drainMs = 200, catalogModels: unknown[] = []) {
     const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-gateway-fence-home-'));
     const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
     const corePath = join(homeDir, 'fake-core.dylib');
@@ -763,7 +763,13 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
           getExecutionProvider() { return 'CPUExecutionProvider'; }
         }
         class FakeManager {
-          constructor() { this.urls = []; this.catalog = { getModel: async () => new FakeModel(), getModels: async () => [] }; }
+          constructor() {
+            this.urls = [];
+            this.catalog = {
+              getModel: async () => new FakeModel(),
+              getModels: async () => (${JSON.stringify(catalogModels)}),
+            };
+          }
           startWebService() { this.urls = ['http://127.0.0.1:${upstreamPort}']; }
           stopWebService() {}
           static create() { return new FakeManager(); }
@@ -801,8 +807,8 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
 
   /** Starts the sidecar and its gateway, returning the process, its temp home dir (for
    * cleanup), and the gateway's bound public port. */
-  async function startedGateway(upstreamPort: number, drainMs = 200) {
-    const { proc, homeDir } = spawnGatewaySidecar(upstreamPort, drainMs);
+  async function startedGateway(upstreamPort: number, drainMs = 200, catalogModels: unknown[] = []) {
+    const { proc, homeDir } = spawnGatewaySidecar(upstreamPort, drainMs, catalogModels);
     await waitForLine(proc, (msg) => msg.ready === true);
     proc.stdin.write(`${JSON.stringify({ id: 1, cmd: 'init', appName: 'flint-test', logLevel: 'info' })}\n`);
     const initRes = await waitForLine(proc, (msg) => msg.id === 1);
@@ -969,6 +975,92 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });
     }
   });
+
+  it('lets an already-admitted request finish autoloading its model even after exclusive admission is requested mid-flight', async () => {
+    // First chat call: held until the test releases it, then answers the exact "not loaded"
+    // rejection so the gateway's autoload path (`load` in foundry-sidecar-main.js) runs.
+    // Second chat call (the post-autoload replay): answered immediately with 200. Startup's own
+    // /status readiness probe must not be held, or `startedGateway` itself never resolves.
+    let chatCallCount = 0;
+    let releaseFirstResponse: (() => void) | null = null;
+    const firstResponseHeld = new Promise<void>((resolve) => { releaseFirstResponse = resolve; });
+    let resolveFirstRequestReceived: (() => void) | null = null;
+    const firstRequestReceived = new Promise<void>((resolve) => { resolveFirstRequestReceived = resolve; });
+    const upstream = createServer(async (req, res) => {
+      if (req.url !== '/v1/chat/completions') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      chatCallCount += 1;
+      if (chatCallCount === 1) {
+        resolveFirstRequestReceived?.();
+        await firstResponseHeld;
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: "Model 'fake-model' is not loaded. Please load the model first." } }));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }));
+    });
+    let proc: ChildProcessWithoutNullStreams | undefined;
+    let homeDir: string | undefined;
+    try {
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+      const { port: upstreamPort } = upstream.address() as AddressInfo;
+      // A generous drain deadline: this test proves already-admitted work is allowed to finish
+      // autoloading, not that the fence gives up waiting on it.
+      const started = await startedGateway(upstreamPort, 10_000, [
+        { alias: 'fake-model', variants: [{ id: 'fake-variant', isCached: true }] },
+      ]);
+      proc = started.proc;
+      homeDir = started.homeDir;
+      const gatewayPort = started.gatewayPort;
+
+      const admitted = postToGateway(gatewayPort, JSON.stringify({ model: 'fake-model', messages: [] }));
+      // The request is admitted (and holding upstream) before exclusive admission is ever
+      // requested, matching the real race: it reached the sidecar, and only later does a
+      // benchmark ask for exclusivity while this request is still working through its
+      // not-loaded retry.
+      await firstRequestReceived;
+
+      // `benchmarkExclusive` flips true synchronously here, before this call's drain-wait
+      // even starts polling -- exactly the window the fix must tolerate.
+      proc.stdin.write(`${JSON.stringify({ id: 40, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
+      const exclusivePromise = waitForLine(proc, (msg) => msg.id === 40, 15000);
+
+      // Prove `benchmarkExclusive` has actually flipped true in the sidecar process before
+      // releasing the held response, deterministically rather than via a fixed sleep. A probe
+      // to a non-chat path (so it cannot affect `chatCallCount`) is rejected with 503 only once
+      // admission actually observes the flag; before that it is admitted and proxied straight
+      // through by the test upstream (which answers 200 for any non-chat path).
+      const probeAdmission = (): Promise<number> => new Promise((resolve, reject) => {
+        const req = httpRequest({
+          host: '127.0.0.1', port: gatewayPort, path: '/v1/models', method: 'GET',
+        }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode || 0)); });
+        req.on('error', reject);
+        req.end();
+      });
+      for (;;) {
+        const status = await probeAdmission();
+        if (status === 503) break;
+      }
+      releaseFirstResponse?.();
+
+      const admittedResult = await admitted;
+      // The already-admitted request must still complete successfully via autoload + replay,
+      // not be rejected because exclusivity had already been requested.
+      expect(admittedResult.status).toBe(200);
+      expect(chatCallCount).toBe(2);
+
+      const exclusiveResult = await exclusivePromise;
+      expect(exclusiveResult).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
+    } finally {
+      if (proc) await killAndWait(proc);
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      if (homeDir) rmSync(homeDir, { recursive: true, force: true });
+    }
+  }, 20000);
 });
 
 describe('foundry-sidecar command schema validation', () => {

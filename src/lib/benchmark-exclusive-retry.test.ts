@@ -134,4 +134,62 @@ describe('createExclusiveReleaseRetrier', () => {
     expect(retrier.stuck).toBe(true);
     expect(onStuckChange).toHaveBeenLastCalledWith(true);
   });
+
+  it('cancel called while a scheduled attempt is already awaiting its release() call prevents that attempt from rescheduling or notifying once it settles', async () => {
+    vi.useFakeTimers();
+    let resolveRelease: (() => void) | null = null;
+    const release = vi.fn(() => new Promise<void>((resolve) => { resolveRelease = resolve; }));
+    const onStuckChange = vi.fn();
+    const retrier = createExclusiveReleaseRetrier(release, onStuckChange);
+
+    // Let the scheduled tick fire and start its release() call, but don't let it settle yet.
+    await vi.advanceTimersByTimeAsync(DEFAULT_EXCLUSIVE_RETRY_DELAYS_MS[0]);
+    expect(release).toHaveBeenCalledTimes(1);
+    onStuckChange.mockClear();
+
+    // Cancel while that attempt is still in flight -- clearing the timer alone would not stop
+    // this attempt's continuation from running once release() finally resolves.
+    retrier.cancel();
+
+    // The in-flight release() now succeeds, but the retrier must not schedule a further retry
+    // or fire onStuckChange for a run this cancel already retired.
+    resolveRelease!();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(onStuckChange).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(100_000);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancel called while retryNow is awaiting a failed release() call prevents that call from rescheduling', async () => {
+    vi.useFakeTimers();
+    const release = vi.fn(async () => { throw new Error('still blocked'); });
+    const onStuckChange = vi.fn();
+    const retrier = createExclusiveReleaseRetrier(release, onStuckChange, [10, 20, 30]);
+
+    const retryNowPromise = retrier.retryNow();
+    retrier.cancel();
+    await retryNowPromise;
+
+    // The failed retryNow attempt must not have rescheduled a background retry after cancel.
+    await vi.advanceTimersByTimeAsync(100_000);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('retryNow is a no-op after cancel, even for a caller still holding a stale retrier reference', async () => {
+    vi.useFakeTimers();
+    const release = vi.fn(async () => {});
+    const onStuckChange = vi.fn();
+    const retrier = createExclusiveReleaseRetrier(release, onStuckChange);
+
+    retrier.cancel();
+    onStuckChange.mockClear();
+    await retrier.retryNow();
+
+    // A cancelled retrier is permanently retired: retryNow must not dispatch a fresh release()
+    // call or report any stuck/released transition, even though the underlying release()
+    // would have succeeded.
+    expect(release).not.toHaveBeenCalled();
+    expect(onStuckChange).not.toHaveBeenCalled();
+  });
 });

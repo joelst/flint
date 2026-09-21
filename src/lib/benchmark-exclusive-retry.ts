@@ -17,11 +17,17 @@ export type ExclusiveReleaseRetrier = {
   /** True once at least one attempt has failed and no attempt has confirmed release since. */
   readonly stuck: boolean;
   /** Immediate attempt rather than waiting for the next scheduled tick -- for a user actively
-   * watching a "stuck" banner. Cancels any pending scheduled retry first so the two never race. */
+   * watching a "stuck" banner. Cancels any pending scheduled retry first so the two never race.
+   * A no-op once `cancel()` has been called: a cancelled retrier is retired permanently, not
+   * merely paused, so it must not be resurrected by a caller still holding a stale reference. */
   retryNow: () => Promise<void>;
-  /** Cancels any pending scheduled retry without attempting one. Does not change `stuck` --
-   * cancelling does not mean released. Intended for teardown, not normal operation: the retrier
-   * is expected to keep running until it confirms release. */
+  /** Cancels any pending scheduled retry and permanently retires this retrier: any attempt
+   * already awaiting its own `release()` call becomes a no-op once it settles (it will not
+   * schedule a further retry or notify `onStuckChange`), and `retryNow()` becomes a no-op too.
+   * Does not change the last-reported `stuck` value itself (cancelling does not mean released);
+   * intended for retiring a retrier that a caller has superseded (e.g. a newer generation
+   * claiming exclusivity), not for normal operation, where the retrier is expected to keep
+   * running until it confirms release. */
   cancel: () => void;
 };
 
@@ -49,6 +55,14 @@ export function createExclusiveReleaseRetrier(
    * ordering at worst — see the module doc for why cancel() cannot abort an attempt already
    * past its `await`). */
   let inFlight: Promise<boolean> | null = null;
+  /** Set by `cancel()`. Checked after every awaited `attemptRelease()` (in `tick()` and in
+   * `retryNow()`) before scheduling the next attempt or calling `onStuckChange` -- clearing the
+   * timer alone does not stop a `tick()` that was already past its `await release()` when
+   * `cancel()` ran; without this flag that call resumes, finds itself "cancelled" too late, and
+   * either reschedules a new timer the caller believed was stopped or reports a stuck/released
+   * transition for a retrier the caller has already discarded (e.g. a superseded generation's
+   * retrier updating the current banner state after a newer run replaced it). */
+  let cancelled = false;
   onStuckChange(true);
 
   const setStuck = (next: boolean) => {
@@ -85,8 +99,10 @@ export function createExclusiveReleaseRetrier(
   };
 
   const tick = async () => {
+    if (cancelled) return;
     timer = null;
     const released = await attemptRelease();
+    if (cancelled) return;
     if (released) {
       setStuck(false);
       return;
@@ -99,8 +115,10 @@ export function createExclusiveReleaseRetrier(
   return {
     get stuck() { return stuck; },
     async retryNow() {
+      if (cancelled) return;
       clear();
       const released = await attemptRelease();
+      if (cancelled) return;
       if (released) {
         setStuck(false);
       } else {
@@ -109,6 +127,7 @@ export function createExclusiveReleaseRetrier(
       }
     },
     cancel() {
+      cancelled = true;
       clear();
     },
   };

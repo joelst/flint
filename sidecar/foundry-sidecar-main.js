@@ -2618,10 +2618,15 @@ rl.on('line', async (line) => {
             resolve: resolveForGateway,
             // The loaded variant id is what the replayed request must name: Foundry rejects
             // the friendly alias even once the model is resident.
+            //
+            // Deliberately does not re-check `benchmarkExclusive` here: `admitRequest` is the
+            // sole fence for *new* gateway work, and by the time a request reaches `load` it has
+            // already been admitted. `setBenchmarkExclusive(true)`'s acquisition explicitly
+            // waits for admitted work to drain before it settles, so an admitted request that
+            // still needs to autoload its model must be allowed to finish -- rejecting it here
+            // would abort work the fence is supposed to let complete, not the new work it exists
+            // to block.
             load: async (alias, variantId) => {
-              if (benchmarkExclusive) {
-                throw new Error('A benchmark run is in progress; gateway autoload is disabled');
-              }
               return (await ensureModel(alias, variantId))?.variantId ?? null;
             },
             // Proxied traffic never reaches this process, so without this hook a model
