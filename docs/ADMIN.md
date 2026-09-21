@@ -45,7 +45,7 @@ Delete those directories only if you intend to drop local models and chat histor
 
 The in-app updater follows GitHub `releases/latest`. **Prereleases are skipped** — 0.7.0 evaluation builds must be installed by hand. **0.9.0** is the first stable publish (skip 0.8.0) so `latest.json` resolves; that is the upgrade test from 0.7.0. **1.0.0** is a later stable after that upgrade is proven.
 
-From **Settings → About**, an available stable update can be **Install**ed with visible download progress, then **Restart to update** or **Later** (revisit anytime from About).
+From **Settings → About**, an available stable update can be installed with visible download progress, then **Restart to update** or **Later** (revisit anytime from About).
 
 If an update misbehaves: install the previous MSI/NSIS from GitHub Releases and do not take the in-app updater offer. See [RELEASE.md](./RELEASE.md).
 

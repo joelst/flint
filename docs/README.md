@@ -1,8 +1,7 @@
 # Flint documentation
 
-Index by audience. These are the current living docs, plus explicitly-labeled
-historical release checklists retained for their release record (e.g.
-RELEASE_0.7.0.md) — there is no separate archive. AI/agent
+Index by audience. These are the current living docs — completed work lives in
+`git log` and [CHANGELOG.md](../CHANGELOG.md), not in a doc body. AI/agent
 contributors: start at [AGENTS.md](../AGENTS.md) for a token-saving map of which doc
 to load for a given task.
 
@@ -31,7 +30,6 @@ to load for a given task.
 |---|---|
 | [RELEASE.md](./RELEASE.md) | Signing, GitHub secrets, updater keys, test pipeline |
 | [ADMIN.md](./ADMIN.md) | Operator runbook for an installed app (logs, lifecycle, updater, uninstall) |
-| [RELEASE_0.7.0.md](./RELEASE_0.7.0.md) | Historical: 0.7.0 evaluation prerelease gates and checklist, superseded by 0.9.0 |
 | [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) | Current probe-backed plan through 1.0 and the 1.0 release bar (release history: [CHANGELOG.md](../CHANGELOG.md)) |
 
 ## Design / research

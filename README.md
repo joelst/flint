@@ -236,7 +236,6 @@ Architecture principles: [FLINT_DESIGN_SPEC.md](./FLINT_DESIGN_SPEC.md)
 | [docs/EXTENDING.md](./docs/EXTENDING.md) | Build new workflows and integrations on the Flint core |
 | [docs/RELEASE.md](./docs/RELEASE.md) | Sign & ship |
 | [docs/ADMIN.md](./docs/ADMIN.md) | Operator runbook for an installed app |
-| [docs/RELEASE_0.7.0.md](./docs/RELEASE_0.7.0.md) | Historical: 0.7.0 evaluation prerelease gates and checklist |
 | [docs/BACKLOG.md](./docs/BACKLOG.md) | Deferred and post-1.0 follow-ups |
 | [CHANGELOG.md](./CHANGELOG.md) | Release notes |
 
