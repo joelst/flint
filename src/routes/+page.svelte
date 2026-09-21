@@ -819,6 +819,10 @@
    * The lease mechanics (record-before-ack, retry-once restore) live in the pure, tested
    * `benchmark-priority-lease` module; this function only wires it to `pushMemorySettings`. */
   async function pinBenchmarkTargets(aliases: string[]): Promise<{ ok: true } | { ok: false; error: string }> {
+    // Must not overlap a still-in-flight restore from a prior run's unpin (fire-and-forget from
+    // `finishBenchmarkExecution`) -- see `pendingPriorityRestore`'s docstring for why a stale
+    // restore landing after this push would silently clear this run's own pins.
+    await pendingPriorityRestore.join();
     // Set before acquiring the lease: `acquirePriorityLease` invokes `push` (and therefore
     // `pushMemorySettings`) synchronously, so the floor must already be in place for that very
     // first push, not only for later ones. Sized to the exact headroom this run needs: the
@@ -881,6 +885,7 @@
     );
     if (!lease) return;
     benchmarkPinnedAliases = lease.pinnedAliases;
+    pendingPriorityRestore.track(lease.ack);
     const result = await lease.ack;
     if (!result.ok) {
       appendAppLog(
@@ -942,6 +947,18 @@
    * mid-flight. See `pending-call-tracker.ts` for the (tested) tracking mechanics. */
   const pendingExclusiveRelease = createPendingCallTracker();
 
+  /** Tracks whichever priority-restore acknowledgement (`releasePriorityLease`'s `ack`, sent by
+   * `unpinBenchmarkTargets`) this module has in flight. `pinBenchmarkTargets` joins this before
+   * ever sending a new run's priority-pin push: `unpinBenchmarkTargets` is now fire-and-forget
+   * from `finishBenchmarkExecution` (see its docstring — `applyMemorySettings` has no IPC
+   * deadline and must not block gateway release or `benchmarkRunInFlight`'s clearing), so without
+   * this join a still in-flight restore for a *previous* run's targets could reach the sidecar
+   * after a new run's pin push and silently clear it — the priority map is a full replace, not a
+   * merge (see `installModelPriorities`), so a stale restore lands as an unconditional unpin of
+   * whatever is currently pinned. This is the same race Round 26 closed for the exclusive-gateway
+   * lease, applied here to the priority-lease side. */
+  const pendingPriorityRestore = createPendingCallTracker();
+
   /** Single attempt to release exclusive gateway admission. Returns whether it is now confirmed
    * released; a rejected call (transport dispatch/timeout, not a sidecar-side failure — the
    * release direction has no failure branch once it reaches the sidecar) leaves the prior state
@@ -980,13 +997,25 @@
    * generation at send time: its scheduled retries persist in the background well past this
    * function returning, and can legitimately span across a newer run claiming a later
    * generation. Releasing on a stale generation there would tear down that newer run's active
-   * lease instead of anything this call actually owns. */
+   * lease instead of anything this call actually owns.
+   *
+   * Priority/eviction restore (`unpinBenchmarkTargets`, via `applyMemorySettings`) and exclusive
+   * gateway release are independent operations with no ordering dependency on each other —
+   * `unpinBenchmarkTargets` already clears `benchmarkPinnedAliases` synchronously before this
+   * function is ever called back into, so a slow *acknowledgement* of that restore cannot leave
+   * the pin state itself inconsistent. But `applyMemorySettings` has no IPC deadline (see
+   * `ipc-deadlines.ts` — unbounded by design, since timing out after dispatch would not stop the
+   * native work and the caller could not know whether it took effect), so a genuinely stuck
+   * restore can hang indefinitely. Awaiting it before release would leave `benchmarkExclusive`
+   * true (every gateway client 503s) for as long as it hangs; awaiting it before `finally` would
+   * also leave `benchmarkRunInFlight` blocking every recovery control for the same duration. Fire
+   * it and let it finish (and log any failure) in the background instead of serializing on it. */
   async function finishBenchmarkExecution(generation: number): Promise<void> {
     try {
       benchmarkStopController = null;
       benchmarkActiveRunId = null;
       benchmarkKnownAttemptIds = null;
-      await unpinBenchmarkTargets();
+      void unpinBenchmarkTargets();
       if (generation !== benchmarkExclusiveGeneration) return;
       const released = await attemptReleaseBenchmarkExclusive();
       if (!released) {
