@@ -77,63 +77,72 @@ Living reliability plan: **[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md)** · E
 
 ## Screenshots
 
-Each section shows dark mode (Flint's default) and light mode side by side.
+Each section shows Windows and macOS in dark mode (Flint's default) and light mode.
 Regenerate these with `node scripts/capture-screenshots.mjs` — see
 [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md#screenshots).
 
 ### Chat
 
-| Dark | Light |
-|---|---|
-| ![Flint chat window (dark)](images/flint-chat-window-dark.png) | ![Flint chat window (light)](images/flint-chat-window-light.png) |
+| Platform | Dark | Light |
+|---|---|---|
+| Windows | ![Flint chat window on Windows (dark)](images/flint-chat-window-dark.png) | ![Flint chat window on Windows (light)](images/flint-chat-window-light.png) |
+| macOS | ![Flint chat window on macOS (dark)](images/flint-macos-chat-window-dark.png) | ![Flint chat window on macOS (light)](images/flint-macos-chat-window-light.png) |
 
 ### Voice
 
-| Dark | Light |
-|---|---|
-| ![Flint audio page (dark)](images/flint-audio-page-dark.png) | ![Flint audio page (light)](images/flint-audio-page-light.png) |
+| Platform | Dark | Light |
+|---|---|---|
+| Windows | ![Flint audio page on Windows (dark)](images/flint-audio-page-dark.png) | ![Flint audio page on Windows (light)](images/flint-audio-page-light.png) |
+| macOS | ![Flint audio page on macOS (dark)](images/flint-macos-audio-page-dark.png) | ![Flint audio page on macOS (light)](images/flint-macos-audio-page-light.png) |
 
 ### Model Arena
 
-| Dark | Light |
-|---|---|
-| ![Model Arena (dark)](images/flint-model-compare-page-1-dark.png) | ![Model Arena (light)](images/flint-model-compare-page-1-light.png) |
+| Platform | Dark | Light |
+|---|---|---|
+| Windows | ![Model Arena on Windows (dark)](images/flint-model-compare-page-1-dark.png) | ![Model Arena on Windows (light)](images/flint-model-compare-page-1-light.png) |
+| macOS | ![Model Arena on macOS (dark)](images/flint-macos-model-compare-page-1-dark.png) | ![Model Arena on macOS (light)](images/flint-macos-model-compare-page-1-light.png) |
 
 ### Models
 
-| Dark | Light |
-|---|---|
-| ![Flint model selection (dark)](images/flint-model-selection-dark.png) | ![Flint model selection (light)](images/flint-model-selection-light.png) |
+| Platform | Dark | Light |
+|---|---|---|
+| Windows | ![Flint model selection on Windows (dark)](images/flint-model-selection-dark.png) | ![Flint model selection on Windows (light)](images/flint-model-selection-light.png) |
+| macOS | ![Flint model selection on macOS (dark)](images/flint-macos-model-selection-dark.png) | ![Flint model selection on macOS (light)](images/flint-macos-model-selection-light.png) |
 
 ### Monitor
 
-| Dark | Light |
-|---|---|
-| ![Monitor resources (dark)](images/flint-monitor-page-dark.png) | ![Monitor resources (light)](images/flint-monitor-page-light.png) |
+| Platform | Dark | Light |
+|---|---|---|
+| Windows | ![Monitor resources on Windows (dark)](images/flint-monitor-page-dark.png) | ![Monitor resources on Windows (light)](images/flint-monitor-page-light.png) |
+| macOS | ![Monitor resources on macOS (dark)](images/flint-macos-monitor-page-dark.png) | ![Monitor resources on macOS (light)](images/flint-macos-monitor-page-light.png) |
 
 ### Diagnostics
 
-| Dark | Light |
-|---|---|
-| ![Diagnostics (dark)](images/flint-diagnostics-page-dark.png) | ![Diagnostics (light)](images/flint-diagnostics-page-light.png) |
+| Platform | Dark | Light |
+|---|---|---|
+| Windows | ![Diagnostics on Windows (dark)](images/flint-diagnostics-page-dark.png) | ![Diagnostics on Windows (light)](images/flint-diagnostics-page-light.png) |
+| macOS | ![Diagnostics on macOS (dark)](images/flint-macos-diagnostics-page-dark.png) | ![Diagnostics on macOS (light)](images/flint-macos-diagnostics-page-light.png) |
 
 ### Integrations
 
-| Dark | Light |
-|---|---|
-| ![Integrations (dark)](images/flint-integrations-page-dark.png) | ![Integrations (light)](images/flint-integrations-page-light.png) |
+| Platform | Dark | Light |
+|---|---|---|
+| Windows | ![Integrations on Windows (dark)](images/flint-integrations-page-dark.png) | ![Integrations on Windows (light)](images/flint-integrations-page-light.png) |
+| macOS | ![Integrations on macOS (dark)](images/flint-macos-integrations-page-dark.png) | ![Integrations on macOS (light)](images/flint-macos-integrations-page-light.png) |
 
 ### Settings
 
-| Dark | Light |
-|---|---|
-| ![Settings (dark)](images/flint-settings-page-dark.png) | ![Settings (light)](images/flint-settings-page-light.png) |
+| Platform | Dark | Light |
+|---|---|---|
+| Windows | ![Settings on Windows (dark)](images/flint-settings-page-dark.png) | ![Settings on Windows (light)](images/flint-settings-page-light.png) |
+| macOS | ![Settings on macOS (dark)](images/flint-macos-settings-page-dark.png) | ![Settings on macOS (light)](images/flint-macos-settings-page-light.png) |
 
 ### Help
 
-| Dark | Light |
-|---|---|
-| ![Help (dark)](images/flint-help-window-dark.png) | ![Help (light)](images/flint-help-window-light.png) |
+| Platform | Dark | Light |
+|---|---|---|
+| Windows | ![Help on Windows (dark)](images/flint-help-window-dark.png) | ![Help on Windows (light)](images/flint-help-window-light.png) |
+| macOS | ![Help on macOS (dark)](images/flint-macos-help-window-dark.png) | ![Help on macOS (light)](images/flint-macos-help-window-light.png) |
 
 ---
 
