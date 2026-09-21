@@ -530,9 +530,16 @@ export async function resumeBenchmarkRun(
     // returned snapshot could let the two disagree by a few ms, breaking the invariant that
     // the returned run always matches what was just persisted.
     const resumedStartedAt = run.startedAt ?? Date.now();
-    const resumedStart = await updateBenchmarkRunStatus(runId, 'running', { startedAt: resumedStartedAt });
+    // A previously finalized run (stopped/recovery_required) carries a stale `finalizedAt`
+    // from that terminal state. `updateBenchmarkRunStatus` merges its patch onto the existing
+    // row, so this must be cleared explicitly here or storage/exports would report a live
+    // "running" run alongside a finalization timestamp from before it was resumed.
+    const resumedStart = await updateBenchmarkRunStatus(runId, 'running', {
+      startedAt: resumedStartedAt,
+      finalizedAt: undefined,
+    });
     if (!resumedStart.ok) return { ok: false, error: resumedStart.error };
-    const resumingRun: BenchmarkRun = { ...run, status: 'running', startedAt: resumedStartedAt };
+    const resumingRun: BenchmarkRun = { ...run, status: 'running', startedAt: resumedStartedAt, finalizedAt: undefined };
 
     const { result, run: finalRun } = await executePositions(resumingRun, pending, [...attempts], transport, stopController, boundVariantByAlias);
     return { ok: true, result, run: finalRun };

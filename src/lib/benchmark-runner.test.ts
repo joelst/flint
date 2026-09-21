@@ -665,6 +665,56 @@ describe('resumeBenchmarkRun', () => {
     expect(resumed.run!.startedAt).toBe(stored.value!.startedAt);
   });
 
+  it('clears a stale finalizedAt when resuming a previously finalized (stopped) run', async () => {
+    const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
+    const stopController = createStopController();
+    stopController.stop();
+    const started = await startStored(s, succeedingTransport(), stopController);
+    expect(started.result?.status).toBe('stopped');
+    // Simulate the halt path having stamped finalizedAt on the stopped row (as
+    // updateBenchmarkRunStatus/haltWith do for every terminal transition).
+    const repo = await import('./benchmark-repository');
+    const stoppedPatch = await repo.updateBenchmarkRunStatus(started.run!.id, 'stopped', { finalizedAt: 12345 });
+    expect(stoppedPatch.ok).toBe(true);
+    const beforeResume = await getBenchmarkRun(started.run!.id);
+    expect(beforeResume.value!.finalizedAt).toBe(12345);
+
+    let releaseTransport: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { releaseTransport = resolve; });
+    let signalEnteredTransport: () => void = () => {};
+    const enteredTransport = new Promise<void>((resolve) => { signalEnteredTransport = resolve; });
+    const gatedTransport: AttemptTransport = async () => {
+      // Signal *before* awaiting the gate: by the time the attempt transport runs, resume has
+      // already completed its status-update await, so this is a deterministic proxy for
+      // "resume's transition to 'running' has landed in storage" -- no polling/fixed-tick guess
+      // about how many IndexedDB macrotasks the fake-indexeddb backend needs.
+      signalEnteredTransport();
+      await gate;
+      return { ok: true, responseText: 'ok' };
+    };
+    const resumePromise = resumeBenchmarkRun(started.run!.id, gatedTransport);
+    try {
+      await enteredTransport;
+      const whileRunning = await getBenchmarkRun(started.run!.id);
+
+      // While the resumed run is genuinely live ('running'), storage must not still report the
+      // finalization timestamp from before it was resumed.
+      expect(whileRunning.value!.status).toBe('running');
+      expect(whileRunning.value!.finalizedAt).toBeUndefined();
+    } finally {
+      // Always release the transport so the pending resume settles, even if an assertion above
+      // throws -- otherwise a failing run of this test leaves a dangling promise.
+      releaseTransport();
+    }
+    const resumed = await resumePromise;
+    expect(resumed.result).toEqual({ status: 'completed' });
+    // Completion legitimately re-stamps its own fresh finalizedAt — the bug was specifically
+    // the stale value being visible while resumed and running, not the absence of one at
+    // eventual completion.
+    expect(resumed.run!.finalizedAt).toEqual(expect.any(Number));
+    expect(resumed.run!.finalizedAt).not.toBe(12345);
+  });
+
   it('fails cleanly when resuming a run id that does not exist', async () => {
     const resumed = await resumeBenchmarkRun('missing', succeedingTransport());
     expect(resumed.ok).toBe(false);
