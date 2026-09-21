@@ -25,6 +25,7 @@
     withServiceTransition,
     downloadModel,
     loadModel as sdkLoadModel,
+    getSidecarGeneration,
     unloadModel as sdkUnloadModel,
     deleteModel as sdkDeleteModel,
     chatCompletion,
@@ -196,6 +197,7 @@
     overlayResidentCapFloor,
     computeResidentCapFloor,
   } from "$lib/benchmark-priority-lease";
+  import { assertBenchmarkGeneration } from "$lib/benchmark-generation-guard";
   import { createExclusiveReleaseRetrier, type ExclusiveReleaseRetrier } from "$lib/benchmark-exclusive-retry";
   import type { BenchmarkSuite } from "$lib/benchmark-suite";
 
@@ -887,19 +889,42 @@
     }
   }
 
+  /**
+   * Constructed once per run, immediately after `setBenchmarkExclusive(true)` resolves (see
+   * `startBenchmarkPreviewRun`/`resumeBenchmarkPreviewRun`), so `getSidecarGeneration()` here is
+   * the exact generation that received this run's exclusive fence and (shortly after) its
+   * priority pins. Every later host call is guarded against that generation having since changed
+   * -- a crash/respawn at any point (between targets, mid-load, between attempts) is transparent
+   * to `sdk.ts` callers (it silently re-inits and carries on against the new process), so without
+   * this the run would keep going with none of its exclusivity/pin/loaded-target guarantees still
+   * holding, and a load that happens to resolve the same variant on the new process would look
+   * indistinguishable from a healthy run. `sdk.ts`'s own per-call generation checks (e.g.
+   * `loadModel`) only prove no replacement happened *during* that one call; they say nothing about
+   * a replacement that already happened before it started, which is exactly the gap here.
+   */
   function benchmarkHost(): BenchmarkLifecycleHost {
+    const boundGeneration = getSidecarGeneration();
+    const assertBoundGeneration = () => assertBenchmarkGeneration(getSidecarGeneration(), boundGeneration);
     return {
       loadModel: async (alias, variantId) => {
+        assertBoundGeneration();
         const result = await sdkLoadModel({ alias }, undefined, variantId ?? undefined);
+        assertBoundGeneration();
         const loaded = result && typeof result === 'object' ? (result as { variantId?: unknown }).variantId : null;
         return typeof loaded === 'string' && loaded.length > 0 ? loaded : null;
       },
       pinAliases: async (aliases) => {
+        assertBoundGeneration();
         const pinned = await pinBenchmarkTargets(aliases);
         if (!pinned.ok) throw new Error(pinned.error);
       },
       unpin: unpinBenchmarkTargets,
-      chatCompletion,
+      chatCompletion: async (alias, messages, opts) => {
+        assertBoundGeneration();
+        const res = await chatCompletion(alias, messages, opts);
+        assertBoundGeneration();
+        return res;
+      },
     };
   }
 

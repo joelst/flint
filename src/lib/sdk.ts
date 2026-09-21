@@ -148,6 +148,16 @@ let managerInstance: any = null;
 let managerReady = false;
 /** Bumped for every sidecar child, so async work can tell whether its child is still the live one. */
 let sidecarGeneration = 0;
+
+/** Current sidecar generation, for callers that must bind a whole multi-call sequence (not just
+ * one call) to "this same live child process" -- e.g. a benchmark run that acquires exclusivity
+ * and priority pins once, then depends on them holding across many later loads/dispatches. Every
+ * individual `sdk.ts` call already guards itself against a respawn happening *during* that one
+ * call, but that says nothing about a respawn that already happened *before* it started; capture
+ * this value once and compare it before/after each later call to detect that case too. */
+export function getSidecarGeneration(): number {
+  return sidecarGeneration;
+}
 let currentEndpoint: string | undefined = undefined;
 /** Init payload of the last successful init, so a crash-respawned sidecar can be re-inited. */
 let lastInitPayload: { appName: string; logLevel: string } | null = null;
