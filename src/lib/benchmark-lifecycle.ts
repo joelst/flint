@@ -51,8 +51,12 @@ export type PrepareResult = { ok: true } | { ok: false; error: string; stopped?:
  *
  * All attempts for one target within a run are expected to record the same binding — pinThenLoad
  * aborts preparation the moment a load resolves to something else, so no attempt should ever
- * disagree with an earlier one. If persisted rows disagree anyway (only reachable through data
- * corruption or a bug elsewhere), refuse to pick one arbitrarily: report the conflict so resume
+ * disagree with an earlier one, *and* an explicit suite variant is validated against whatever was
+ * actually recorded rather than trusted blindly: an older/headless run (or a suite edited after
+ * the fact) could have bound to a different build, and silently loading today's suite variant
+ * instead would mix measurements from two variants into one target. If persisted rows disagree
+ * with each other or with an explicit suite variant (only reachable through data corruption, a
+ * suite edit, or a bug elsewhere), refuse to pick one arbitrarily: report the conflict so resume
  * fails loudly instead of silently binding to a value that may not match what the original run
  * actually executed against.
  *
@@ -64,17 +68,34 @@ export function boundVariantIdForTarget(
   targetIndex: number,
   attempts: readonly Pick<BenchmarkAttempt, 'targetIndex' | 'boundVariantId' | 'servedVariantId'>[],
 ): { ok: true; variantId: string | null } | { ok: false; error: string } {
-  if (target.variantId) return { ok: true, variantId: target.variantId };
   const recorded = new Set<string>();
   let matching = 0;
   for (const attempt of attempts) {
     if (attempt.targetIndex !== targetIndex) continue;
     matching += 1;
+    // Both fields are recorded independently (not boundVariantId-else-servedVariantId): an
+    // attempt where they disagree is exactly the "another load replaced the pinned variant
+    // mid-run" case assertServedVariant already detects at record time, and Resume must not
+    // paper over it by only ever looking at one of the two fields.
     if (typeof attempt.boundVariantId === 'string' && attempt.boundVariantId.length > 0) {
       recorded.add(attempt.boundVariantId);
-    } else if (typeof attempt.servedVariantId === 'string' && attempt.servedVariantId.length > 0) {
+    }
+    if (typeof attempt.servedVariantId === 'string' && attempt.servedVariantId.length > 0) {
       recorded.add(attempt.servedVariantId);
     }
+  }
+  if (target.variantId) {
+    const conflicting = [...recorded].filter((v) => v !== target.variantId);
+    if (conflicting.length > 0) {
+      return {
+        ok: false,
+        error:
+          `Target ${targetIndex} recorded variant(s) ${conflicting.join(', ')} that do not match `
+          + `the suite's explicit variant "${target.variantId}" — start a new run rather than `
+          + `mixing measurements from two variants`,
+      };
+    }
+    return { ok: true, variantId: target.variantId };
   }
   if (matching > 0 && recorded.size === 0) {
     return {

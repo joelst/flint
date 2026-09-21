@@ -307,15 +307,44 @@ describe('createSidecarBenchmarkTransport', () => {
 });
 
 describe('boundVariantIdForTarget / assertServedVariant', () => {
-  it('prefers the suite variant, else the first served variant already recorded for that target', () => {
+  it('uses an explicit suite variant when nothing was recorded, or when it matches what was recorded', () => {
+    expect(boundVariantIdForTarget({ variantId: 'explicit' }, 0, [])).toEqual({ ok: true, variantId: 'explicit' });
     expect(boundVariantIdForTarget({ variantId: 'explicit' }, 0, [
-      { targetIndex: 0, servedVariantId: 'hist' },
+      { targetIndex: 0, servedVariantId: 'explicit' },
     ])).toEqual({ ok: true, variantId: 'explicit' });
     expect(boundVariantIdForTarget({ variantId: null }, 1, [
       { targetIndex: 0, servedVariantId: 'other' },
       { targetIndex: 1, servedVariantId: 'hist-v' },
     ])).toEqual({ ok: true, variantId: 'hist-v' });
     expect(boundVariantIdForTarget({ variantId: null }, 0, [])).toEqual({ ok: true, variantId: null });
+  });
+
+  it('rejects an explicit suite variant that conflicts with a variant already recorded for that target', () => {
+    // An older/headless run (or a suite edited after the fact) could have bound to a different
+    // build; silently loading today's explicit suite variant instead would mix measurements from
+    // two variants into one target, so this must fail loudly rather than pick the suite value.
+    const result = boundVariantIdForTarget({ variantId: 'explicit' }, 0, [
+      { targetIndex: 0, servedVariantId: 'hist' },
+    ]);
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.error).toMatch(/recorded variant\(s\) hist.*do not match.*explicit/);
+  });
+
+  it('checks both boundVariantId and servedVariantId independently, not just whichever is present first', () => {
+    // A single attempt recording boundVariantId='explicit' but servedVariantId='hist' means the
+    // load bound one variant and chat served a different one -- exactly the mid-run variant swap
+    // assertServedVariant already flags as a failed attempt. Resume must see that disagreement
+    // even though boundVariantId alone would otherwise match the suite's explicit variant.
+    const result = boundVariantIdForTarget({ variantId: 'explicit' }, 0, [
+      { targetIndex: 0, boundVariantId: 'explicit', servedVariantId: 'hist' },
+    ]);
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.error).toMatch(/recorded variant\(s\) hist.*do not match.*explicit/);
+
+    // Both fields present and matching the explicit variant is fine.
+    expect(boundVariantIdForTarget({ variantId: 'explicit' }, 0, [
+      { targetIndex: 0, boundVariantId: 'explicit', servedVariantId: 'explicit' },
+    ])).toEqual({ ok: true, variantId: 'explicit' });
   });
 
   it('fails closed when a target has attempts but none recorded a bound or served variant', () => {
