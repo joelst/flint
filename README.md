@@ -166,7 +166,7 @@ Regenerate these with `node scripts/capture-screenshots.mjs` — see
 
 ### Use a release build
 
-1. Install a build from [GitHub Releases](https://github.com/joelst/flint/releases) (or build from source below). 0.9.0 is published as the latest full release, so it appears under "Latest".
+1. Install a build from [GitHub Releases](https://github.com/joelst/flint/releases) (or build from source below). Once 0.9.0 is published as a full release (not a prerelease), it appears under "Latest".
    - **macOS**: builds are unsigned, so a browser-downloaded DMG is blocked by Gatekeeper as "damaged". Install with:
 
      ```bash
