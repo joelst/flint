@@ -195,6 +195,7 @@
     overlayPinnedPriorities,
     overlayResidentCapFloor,
   } from "$lib/benchmark-priority-lease";
+  import { createExclusiveReleaseRetrier, type ExclusiveReleaseRetrier } from "$lib/benchmark-exclusive-retry";
   import type { BenchmarkSuite } from "$lib/benchmark-suite";
 
   // Integrations tab state
@@ -780,6 +781,25 @@
    * Reset to 0 once the lease is released so a benchmark never permanently raises the user's
    * configured cap. */
   let benchmarkResidentCapFloor = $state(0);
+  /** True once a `setBenchmarkExclusive(false)` release has failed and every automatic retry so
+   * far has also failed. The sidecar's `benchmarkExclusive` flag has no failure branch of its
+   * own for the release direction (it is a synchronous, unconditional assignment) — a rejected
+   * release call means the *round trip* did not confirm, not that the flag is known to still be
+   * set, but the safe assumption is that it may still be blocking every external OpenAI-shaped
+   * gateway client with 503s. Surfaced globally (not just in the Benchmark view) since it affects
+   * clients outside the app entirely. Driven purely from the retrier's `onStuckChange` callback
+   * (see `benchmarkExclusiveRetrier`); never set directly. */
+  let benchmarkExclusiveStuck = $state(false);
+  /** Non-null while a background retry loop for a stuck exclusive-release is running, so a
+   * second stuck run cannot spawn a duplicate loop racing the first — the retry/backoff logic
+   * itself lives in the pure, tested `benchmark-exclusive-retry` module. */
+  let benchmarkExclusiveRetrier: ExclusiveReleaseRetrier | null = null;
+  /** Bumped by every start/resume attempt right before it ever touches `setBenchmarkExclusive`
+   * (whether or not that acquire ultimately succeeds — a rejected acquire call can still have
+   * landed server-side), so cleanup and any retrier it spawns can tell "am I still the run
+   * responsible for releasing this?" See `finishBenchmarkExecution`'s docstring. Plain variable,
+   * not `$state`: nothing reads it reactively, only compares it inside cleanup/retry closures. */
+  let benchmarkExclusiveGeneration = 0;
   /** Set when a detached run/resume execution settles with anything the UI needs to surface:
    * a hard `!outcome.ok` failure, or an `ok: true` outcome whose `result.status ===
    * 'recovery_required'` — a durability write failed mid-run and the run is now stuck needing a
@@ -885,20 +905,64 @@
     };
   }
 
+  /** Single attempt to release exclusive gateway admission. Returns whether it is now confirmed
+   * released; a rejected call (transport dispatch/timeout, not a sidecar-side failure — the
+   * release direction has no failure branch once it reaches the sidecar) leaves the prior state
+   * unconfirmed, so callers must not assume it succeeded. */
+  async function attemptReleaseBenchmarkExclusive(): Promise<boolean> {
+    try {
+      await sdkSetBenchmarkExclusive(false);
+      return true;
+    } catch (e: any) {
+      appendAppLog(
+        `Benchmark: could not release exclusive gateway admission (${e?.message || e}). External clients may still be blocked.`,
+        'warn',
+      );
+      return false;
+    }
+  }
+
+  /** Manual retry surfaced from the stuck-release banner: delegates to the retrier's own
+   * immediate attempt (see `benchmark-exclusive-retry.ts`), since the user is actively watching
+   * rather than waiting for the next scheduled background tick. */
+  async function retryBenchmarkExclusiveRelease(): Promise<void> {
+    await benchmarkExclusiveRetrier?.retryNow();
+  }
+
   /** Common cleanup once a run's execution has fully halted (completed/stopped/recovery), shared
-   * by both start and resume so neither path can forget a step the other remembers. */
-  async function finishBenchmarkExecution(): Promise<void> {
+   * by both start and resume so neither path can forget a step the other remembers.
+   *
+   * `generation` is the exclusivity-claim id the caller captured for *its own* run (see
+   * `benchmarkExclusiveGeneration` at the call sites) before ever attempting acquire. Under
+   * today's admission guard (`benchmarkRunInFlight` blocks a new Start/Resume until this exact
+   * call reaches its own `finally`), the top-level generation check below can never actually
+   * trip — it is a fail-safe against this invariant changing, not the active defense. The
+   * defense that matters is the *retrier's* own `release` callback re-checking this same
+   * generation at send time: its scheduled retries persist in the background well past this
+   * function returning, and can legitimately span across a newer run claiming a later
+   * generation. Releasing on a stale generation there would tear down that newer run's active
+   * lease instead of anything this call actually owns. */
+  async function finishBenchmarkExecution(generation: number): Promise<void> {
     try {
       benchmarkStopController = null;
       benchmarkActiveRunId = null;
       benchmarkLiveAfter = null;
       await unpinBenchmarkTargets();
-      try {
-        await sdkSetBenchmarkExclusive(false);
-      } catch (e: any) {
-        appendAppLog(
-          `Benchmark: could not release exclusive gateway admission (${e?.message || e}). External clients may still be blocked.`,
-          'warn',
+      if (generation !== benchmarkExclusiveGeneration) return;
+      const released = await attemptReleaseBenchmarkExclusive();
+      if (!released) {
+        // A prior retrier could still be running (e.g. this is a second run started while the
+        // first one's release was never confirmed) -- cancel it so its schedule cannot race a
+        // freshly created one that starts its own backoff from the beginning.
+        benchmarkExclusiveRetrier?.cancel();
+        benchmarkExclusiveRetrier = createExclusiveReleaseRetrier(
+          async () => {
+            // Re-checked at send time, not just at creation time: this retrier can still be
+            // waiting on a scheduled backoff tick when a later run claims a new generation.
+            if (generation !== benchmarkExclusiveGeneration) return;
+            await sdkSetBenchmarkExclusive(false);
+          },
+          (stuck) => { benchmarkExclusiveStuck = stuck; },
         );
       }
     } finally {
@@ -972,6 +1036,26 @@
     return streamsByConversation.size > 0 || isDictating || dictationTranscribing || isTranscribing || isSummarizing || poolMutationsInFlight > 0 || endpointSelfTestBusy;
   }
 
+  /** Claimed before ever touching `setBenchmarkExclusive` -- see `finishBenchmarkExecution`'s
+   * docstring for why even a rejected acquire call must still own this generation. Also retires
+   * (cancels, clears the banner for) any still-running retrier from a *previous* run's failed
+   * release: that release is now moot the instant a new run starts, since the new run's own
+   * exclusivity claim supersedes it regardless of whether the old release itself ever gets
+   * confirmed -- there is no reason to keep showing "could not release" once a newer run has
+   * already re-claimed exclusivity. Without this, the stale retrier would eventually self-retire
+   * on its own next tick and clear the banner anyway (see its generation check), but a user
+   * starting a new run would see a stuck banner describing a run that no longer exists for up to
+   * that whole delay in the meantime. */
+  function claimNextBenchmarkExclusiveGeneration(): number {
+    benchmarkExclusiveGeneration += 1;
+    if (benchmarkExclusiveRetrier) {
+      benchmarkExclusiveRetrier.cancel();
+      benchmarkExclusiveRetrier = null;
+      benchmarkExclusiveStuck = false;
+    }
+    return benchmarkExclusiveGeneration;
+  }
+
   /**
    * Prepares the run row (so the id is known and Stop is live) then executes in a detached
    * promise. `startBenchmarkRun` does not resolve until the schedule halts; blocking the
@@ -989,16 +1073,17 @@
     }
     benchmarkRunInFlight = true;
     benchmarkRunError = null;
+    const myExclusiveGeneration = claimNextBenchmarkExclusiveGeneration();
     try {
       try {
         await sdkSetBenchmarkExclusive(true);
       } catch (e: any) {
-        await finishBenchmarkExecution();
+        await finishBenchmarkExecution(myExclusiveGeneration);
         return { ok: false, error: e?.message || 'Could not take exclusive gateway admission for the benchmark' };
       }
       const started = await startBenchmarkSession(suite, benchmarkHost());
       if (!started.ok) {
-        await finishBenchmarkExecution();
+        await finishBenchmarkExecution(myExclusiveGeneration);
         return started;
       }
       benchmarkStopController = started.execution.stopController;
@@ -1007,10 +1092,10 @@
       started.execution.done
         .then(recordBenchmarkOutcome)
         .catch((e: any) => recordBenchmarkOutcome({ ok: false, error: e?.message || String(e) }))
-        .finally(() => { void finishBenchmarkExecution(); });
+        .finally(() => { void finishBenchmarkExecution(myExclusiveGeneration); });
       return { ok: true, runId: started.execution.runId };
     } catch (e: any) {
-      await finishBenchmarkExecution();
+      await finishBenchmarkExecution(myExclusiveGeneration);
       return { ok: false, error: e?.message || String(e) };
     }
   }
@@ -1026,16 +1111,18 @@
     }
     benchmarkRunInFlight = true;
     benchmarkRunError = null;
+    // See startBenchmarkPreviewRun: claims the generation and retires any stale prior banner.
+    const myExclusiveGeneration = claimNextBenchmarkExclusiveGeneration();
     try {
       try {
         await sdkSetBenchmarkExclusive(true);
       } catch (e: any) {
-        await finishBenchmarkExecution();
+        await finishBenchmarkExecution(myExclusiveGeneration);
         return { ok: false, error: e?.message || 'Could not take exclusive gateway admission for the benchmark' };
       }
       const started = await resumeBenchmarkSession(runId, benchmarkHost());
       if (!started.ok) {
-        await finishBenchmarkExecution();
+        await finishBenchmarkExecution(myExclusiveGeneration);
         return started;
       }
       benchmarkStopController = started.execution.stopController;
@@ -1044,10 +1131,10 @@
       started.execution.done
         .then(recordBenchmarkOutcome)
         .catch((e: any) => recordBenchmarkOutcome({ ok: false, error: e?.message || String(e) }))
-        .finally(() => { void finishBenchmarkExecution(); });
+        .finally(() => { void finishBenchmarkExecution(myExclusiveGeneration); });
       return { ok: true, runId: started.execution.runId };
     } catch (e: any) {
-      await finishBenchmarkExecution();
+      await finishBenchmarkExecution(myExclusiveGeneration);
       return { ok: false, error: e?.message || String(e) };
     }
   }
@@ -6892,6 +6979,20 @@ Output only the summary text, no preamble.`;
       </div>
       <button class="small" onclick={() => (currentView = "monitor")}>Open Monitor</button>
       <button class="small secondary" onclick={dismissWatchAlerts}>Dismiss</button>
+    </div>
+  {/if}
+
+  {#if benchmarkExclusiveStuck}
+    <!-- Global, not Benchmark-view-only: this blocks external OpenAI-shaped gateway clients
+         (503s), not just something visible from inside the app. Retries automatically in the
+         background; this button is for a user actively watching who wants an immediate attempt. -->
+    <div class="memory-alert" role="status">
+      <Icon name="monitor" size={16} />
+      <div class="memory-alert-text">
+        <strong>Benchmark gateway lock could not be released</strong>
+        <span>External API clients may still receive 503s. Retrying automatically in the background.</span>
+      </div>
+      <button class="small" onclick={retryBenchmarkExclusiveRelease}>Retry now</button>
     </div>
   {/if}
 
