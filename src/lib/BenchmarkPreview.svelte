@@ -217,6 +217,9 @@
     resultView = buildRunResultView(res.value.run, res.value.attempts);
     resultViewRunId = runId;
     resultError = "";
+    // The summary poll can fail and leave selectedRun null. The full read already
+    // has the run, so the detail and its error have somewhere to render.
+    if (!selectedRun) selectedRun = res.value.run;
   }
 
   function newSuiteDraft(): SuiteDraft {
@@ -569,6 +572,10 @@
     clearRunResults();
     stopPolling();
     const token = ++openRunToken;
+    // A historical run does not start the summary poll. A failed summary read
+    // returns "keep" and never reaches the full-attempt load, so that load has
+    // to start here. A live run still waits for the poll to stop.
+    if (runId !== activeRunId) void loadRunResults(runId);
     await refreshSelectedRun();
     if (token !== openRunToken || selectedRunId !== runId || destroyed) return;
     if (runId === activeRunId) {
@@ -1058,6 +1065,11 @@
               </li>
             {/each}
           </ul>
+
+          {#if selectedRunId && !selectedRun}
+            {#if pollError}<div class="warning-banner">{pollError}</div>{/if}
+            {#if resultError}<div class="warning-banner">{resultError}</div>{/if}
+          {/if}
 
           {#if selectedRun}
             {@const currentRun = selectedRun}
