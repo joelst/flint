@@ -1,5 +1,9 @@
 # Flint Changelog
 
+## 0.9.2
+
+Maintenance release built from the 0.9.0 line through #150. It adds the About release link, release icon packaging fix, optional startup catalog check, and benchmark/download admission fix, plus selected #153 visual improvements for control contrast, chat-tool layout, and readable compact actions.
+
 ## 0.9.0
 
 First **stable** channel release after the 0.7.0 evaluation prerelease. 0.8.0 is unused. Publish this version as a full GitHub release (not a prerelease) so `releases/latest` resolves and installed 0.7.0 builds can exercise the in-app updater. **1.0.0** is a later stable, after that upgrade is proven.

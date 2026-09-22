@@ -365,7 +365,7 @@
     padding: 2px 6px;
     font-size: 0.7rem;
     background: var(--subtle-bg);
-    color: var(--muted);
+    color: var(--fg);
     border: 1px solid var(--border);
     border-radius: 3px;
     cursor: pointer;

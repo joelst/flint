@@ -8701,7 +8701,7 @@ Output only the summary text, no preamble.`;
 
                 <!-- Context management -->
                 <div class="context-control">
-                  <label for="ctx-select" title="Context window for this model">Ctx</label>
+                  <label for="ctx-select" title="How many recent turns are sent with the next message">Context</label>
                   <select
                     id="ctx-select"
                     value={contextTurns}
@@ -8720,9 +8720,9 @@ Output only the summary text, no preamble.`;
                   </select>
                   <span
                     class="context-estimate"
-                    title="Estimated tokens being sent this turn (rough). Smaller = less time & energy."
+                    title="Rough token count for this turn. Smaller means a faster, cheaper reply."
                   >
-                    ~{estimatedContextTokens}t
+                    ~{estimatedContextTokens} tokens
                     {#if contextUsagePercent !== null}
                       <span class="usage-pct" class:high={contextUsagePercent > 70}>({contextUsagePercent}%)</span>
                     {/if}
@@ -8737,7 +8737,7 @@ Output only the summary text, no preamble.`;
                         class="recommend-btn"
                         onclick={applyRecommendedContext}
                         title={`Use recommended ${recommendedMaxTurns} turns for this model`}
-                      >rec</button>
+                      >Recommended</button>
                     {/if}
                   {/if}
 
@@ -10868,12 +10868,17 @@ Output only the summary text, no preamble.`;
     --panel-bg: #222226;
     --border: #2a2a30;
     --accent: #3b82f6;
+    --accent-fg: #111;
     --muted: #888;
     --success: #4ade80;
     --warning: #facc15;
     --danger: #f87171;
     --input-bg: #222226;
-    --button-bg: #001639;
+    /* #001639 sits on #1a1a1e and the button disappears. This blue stays
+       distinct and keeps white text above 4.5:1. */
+    --button-bg: #1d4ed8;
+    --danger-btn-bg: #9f1239;
+    --danger-btn-fg: #fff;
     --subtle-bg: #2a2a30;
     --messages-bg: #16161a;
   }
@@ -10886,12 +10891,15 @@ Output only the summary text, no preamble.`;
     --panel-bg: #ffffff;
     --border: #dee2e6;
     --accent: #0d6efd;
+    --accent-fg: #fff;
     --muted: #6c757d;
     --success: #198754;
     --warning: #ffc107;
     --danger: #dc3545;
     --input-bg: #ffffff;
     --button-bg: #001639;
+    --danger-btn-bg: #9f1239;
+    --danger-btn-fg: #fff;
     --subtle-bg: #e9ecef;
     --messages-bg: #f8f9fa;
   }
@@ -11685,6 +11693,22 @@ Output only the summary text, no preamble.`;
   button.small {
     font-size: 0.75rem;
     padding: 2px 8px;
+    /* `.small` later sets muted text for labels. On a button that wins over
+       `color: white`, so Unload / Clear display / Export sit gray on the navy fill. */
+    color: #fff;
+  }
+
+  button.small.secondary {
+    color: var(--fg);
+  }
+
+  button.small.danger-btn {
+    color: var(--danger-btn-fg);
+  }
+
+  button.small.update-btn {
+    background: var(--subtle-bg);
+    color: var(--fg);
   }
 
   /* Startup toggle */
@@ -11708,9 +11732,10 @@ Output only the summary text, no preamble.`;
     font-family: monospace;
   }
 
-  .danger-btn {
-    border-color: #ef4444;
-    color: #fecaca;
+  button.danger-btn {
+    background: var(--danger-btn-bg);
+    border: 1px solid var(--danger-btn-bg);
+    color: var(--danger-btn-fg);
   }
 
   .model-details {
@@ -12137,6 +12162,8 @@ Output only the summary text, no preamble.`;
 
   .primary-chat {
     background: #22c55e !important;
+    /* Dark text is 8.29:1 on this green; white is only 2.28:1. */
+    color: #111 !important;
   }
 
   /* Chat styles */
@@ -12388,6 +12415,20 @@ Output only the summary text, no preamble.`;
     overflow: visible;
   }
 
+  /* Persona, context, and image attach share one control height. The image
+     button otherwise inherits the tall primary fill and the select stays a
+     native stub beside it. */
+  .chat-controls .persona-btn,
+  .chat-controls .context-control select,
+  .chat-controls .vision-attach > button:not(.mini),
+  .chat-controls .recommend-btn {
+    box-sizing: border-box;
+    height: 32px;
+    margin: 0;
+    border-radius: 6px;
+    font-size: 0.8125rem;
+  }
+
   .persona-control {
     display: flex;
     align-items: center;
@@ -12457,9 +12498,15 @@ Output only the summary text, no preamble.`;
     font-style: italic;
   }
 
-  .vision-attach button {
-    padding: 4px 8px;
-    font-size: 0.75rem;
+  .vision-attach > button:not(.mini) {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 10px;
+    background: var(--input-bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    font-weight: 500;
   }
 
   .image-strip {
@@ -13037,8 +13084,10 @@ Output only the summary text, no preamble.`;
   }
 
   .vision-attach {
-    margin-bottom: 8px;
-    font-size: 0.8rem;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.8125rem;
   }
 
   .service-panel {
@@ -13380,12 +13429,14 @@ Output only the summary text, no preamble.`;
 
   /* Persona dropdown + manager */
   .persona-btn {
-    padding: 2px 8px;
-    font-size: 1rem;
+    width: 32px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     line-height: 1;
-    background: var(--subtle-bg);
+    background: var(--input-bg);
     border: 1px solid var(--border);
-    border-radius: 4px;
     cursor: pointer;
     color: var(--fg);
   }
@@ -13404,26 +13455,29 @@ Output only the summary text, no preamble.`;
 
   .context-control {
     display: flex;
+    flex: 1 1 420px;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 4px;
-    font-size: 0.7rem;
+    gap: 8px;
+    min-width: 0;
+    max-width: 100%;
+    font-size: 0.8125rem;
     color: var(--muted);
   }
+  .context-control label {
+    line-height: 1;
+  }
   .context-control select {
-    font-size: 0.7rem;
     background: var(--input-bg);
     border: 1px solid var(--border);
     color: var(--fg);
-    border-radius: 3px;
-    padding: 1px 4px;
+    padding: 0 8px;
   }
   .context-estimate {
-    font-family: ui-monospace, monospace;
-    font-size: 0.65rem;
-    background: color-mix(in srgb, var(--success) 15%, var(--panel-bg));
-    color: var(--success);
-    padding: 1px 5px;
-    border-radius: 3px;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.8125rem;
+    color: var(--muted);
+    white-space: nowrap;
   }
 
   .context-model-info {
@@ -13443,17 +13497,15 @@ Output only the summary text, no preamble.`;
   }
 
   .recommend-btn {
-    font-size: 0.6rem;
-    padding: 1px 5px;
-    background: var(--panel-bg);
-    color: var(--accent);
+    padding: 0 8px;
+    background: var(--input-bg);
+    color: var(--fg);
     border: 1px solid var(--border);
-    border-radius: 2px;
     cursor: pointer;
   }
   .recommend-btn:hover {
     background: var(--accent);
-    color: white;
+    color: var(--accent-fg);
   }
 
   .context-meter {
