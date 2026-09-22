@@ -148,18 +148,21 @@ function terminalRegistrationResult(previous, error) {
  * so the snapshot is not taken between the two.
  */
 export function createCatalogRegistrationGate(register) {
-  let progress = null;
   let settled = null;
   let committed = false;
   /** @type {Promise<unknown>} */
   let tail = Promise.resolve();
 
-  async function attempts() {
+  // `report` is the caller that queued this cycle. A later Settings click must not
+  // steal these events: the UI stall watchdog for the in-flight command only resets
+  // when progress arrives on that command's id.
+  async function attempts(report) {
+    const notify = typeof report === 'function' ? report : () => {};
     let last = null;
     for (let attempt = 1; attempt <= CATALOG_REGISTRATION_ATTEMPTS; attempt++) {
       try {
         last = await register(
-          (name, pct) => progress?.(name, pct),
+          (name, pct) => notify(name, pct),
           { allowLegacyFallback: attempt === CATALOG_REGISTRATION_ATTEMPTS },
         );
       } catch (error) {
@@ -181,24 +184,24 @@ export function createCatalogRegistrationGate(register) {
 
   return {
     ensure(onProgress) {
-      if (typeof onProgress === 'function') progress = onProgress;
+      const report = typeof onProgress === 'function' ? onProgress : null;
       return enqueue(async () => {
-        if (!settled) settled = await attempts();
+        if (!settled) settled = await attempts(report);
         return settled;
       });
     },
     rerun(onProgress) {
-      if (typeof onProgress === 'function') progress = onProgress;
+      const report = typeof onProgress === 'function' ? onProgress : null;
       return enqueue(async () => {
         if (committed) return settled;
-        settled = await attempts();
+        settled = await attempts(report);
         return settled;
       });
     },
     commit(onProgress) {
-      if (typeof onProgress === 'function') progress = onProgress;
+      const report = typeof onProgress === 'function' ? onProgress : null;
       return enqueue(async () => {
-        if (!settled) settled = await attempts();
+        if (!settled) settled = await attempts(report);
         committed = true;
         return settled;
       });

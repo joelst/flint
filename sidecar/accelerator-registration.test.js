@@ -333,6 +333,31 @@ describe('createCatalogRegistrationGate', () => {
     expect(register).toHaveBeenCalledTimes(3);
   });
 
+  it('reports progress to the attempt that is running, not to a caller still waiting', async () => {
+    let emit = () => {};
+    let release = () => {};
+    const register = vi.fn((onProgress) => {
+      if (register.mock.calls.length === 1) {
+        emit = onProgress;
+        return new Promise((resolve) => {
+          release = () => resolve({ success: true, registeredEps: ['CUDAExecutionProvider'] });
+        });
+      }
+      onProgress('WebGpuExecutionProvider', 5);
+      return Promise.resolve({ success: true, registeredEps: ['WebGpuExecutionProvider'] });
+    });
+    const seen = [];
+    const gate = createCatalogRegistrationGate(register);
+    const first = gate.rerun((name) => seen.push(`first:${name}`));
+    await Promise.resolve();
+    const second = gate.rerun((name) => seen.push(`second:${name}`));
+    emit('CUDAExecutionProvider', 40);
+    release();
+    await first;
+    await second;
+    expect(seen).toEqual(['first:CUDAExecutionProvider', 'second:WebGpuExecutionProvider']);
+  });
+
   it('lets explicit setup retry before the catalog is read, and not after', async () => {
     let calls = 0;
     const register = vi.fn(async () => {
