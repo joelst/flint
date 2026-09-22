@@ -44,6 +44,11 @@ function fakeSdk(response, { failDispose = false } = {}) {
 }
 
 describe('generateEmbeddings', () => {
+  it('rejects a model without a usable id before constructing a request', async () => {
+    const { sdk } = fakeSdk({ output: [] });
+    await expect(generateEmbeddings({}, ['ping'], sdk)).rejects.toThrow('Embedding model has no id');
+  });
+
   it('sends openai-json for the loaded variant id and returns the parsed reply', async () => {
     const { sdk, request, dispose } = fakeSdk({
       output: [{
@@ -112,6 +117,7 @@ describe('openAiJsonText', () => {
   it('ignores other text items', () => {
     expect(openAiJsonText([
       { type: 'text', text: 'hello' },
+      { type: 'text', textType: 'openai-json', text: 42 },
       { type: 'text', textType: 'openai-json', text: '{"ok":true}' },
     ])).toBe('{"ok":true}');
     expect(openAiJsonText(null)).toBeUndefined();

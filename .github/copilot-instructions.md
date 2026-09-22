@@ -119,7 +119,7 @@ Facts only — no history. Record what is true now; `git log` and `CHANGELOG.md`
 - A model must be **loaded first** — otherwise requests fail `400 Model is not loaded`. Load via `catModel.load()` (there is no `manager.loadModel()`).
 - The catalog has **zero embedding models** (97 chat / 21 vision / 10 ASR of 128), so hiding them in the UI is a no-op; `/v1/embeddings` exists but needs a BYOM model. 75 of 128 declare `supportsToolCalling` — treat that as catalog-declared, not verified.
 - Gateway autoload/replay for `POST /v1/embeddings` is the same path as chat. Access-log `routeClass` is `'embeddings'`. Chat JSON/SSE normalization stays chat-only (`isChatCompletionPath`).
-- Sidecar `embedTexts` is effectful, unbounded, and bounded to 32 non-empty strings of at most 8192 characters. It uses `createEmbeddingClient().generateEmbeddings()` with the same `noteActivity` inFlight fencing as chat.
+- Sidecar `embedTexts` is effectful, unbounded, and bounded to 32 non-empty strings of at most 8192 characters. It uses `EmbeddingsSession` through `sidecar/embeddings-session.js` with the same `noteActivity` inFlight fencing as chat.
 
 ## Model cache / BYOM
 - Cache root comes from `appName`: Flint uses `~/.flint`, the Foundry CLI uses `~/.foundry`. They do **not** share models, and duplication is real (15.3 GB measured).
