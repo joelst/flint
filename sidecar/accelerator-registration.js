@@ -131,47 +131,77 @@ function terminalRegistrationResult(previous, error) {
 }
 
 /**
- * One registration cycle for the process, retried before the first catalog read.
+ * Registration before the first catalog read, plus one explicit retry before that
+ * read is committed.
  *
- * An empty discovery or a failed provider download used to be kept forever. The
- * next catalog read then froze the snapshot without the providers a later attempt
- * would have found. Callers share this promise, so none of them read the catalog
- * until the retries are finished. A finished result is kept: another registration
- * after that read cannot put the missing variants back.
+ * Catalog readers share one cycle: an empty discovery or a failed download is tried
+ * again inside that cycle, and a throw on the last attempt is kept so later readers
+ * are not sent through the same three failures. Once a catalog read commits, the
+ * snapshot cannot gain providers, so `ensure` does not run again.
  *
- * A later `onProgress` replaces the previous one so the startup call still hears
- * progress if another caller started the work. A throw before the last attempt is
- * tried again. A throw on the last attempt becomes a kept failure result, so a
- * later catalog read does not start the cycle over. An earlier partial result is
- * kept with that failure.
+ * Settings can call `rerun` before that commit. Startup's `ensureAccelerators` is
+ * that same command, and the button calls it again. A kept startup failure must not
+ * make the button a no-op while the catalog is still unread. After the commit,
+ * `rerun` returns the kept result.
+ *
+ * Work is serialized. A catalog read queued behind an explicit retry waits for it,
+ * so the snapshot is not taken between the two.
  */
 export function createCatalogRegistrationGate(register) {
-  let pending = null;
   let progress = null;
+  let settled = null;
+  let committed = false;
+  /** @type {Promise<unknown>} */
+  let tail = Promise.resolve();
+
+  async function attempts() {
+    let last = null;
+    for (let attempt = 1; attempt <= CATALOG_REGISTRATION_ATTEMPTS; attempt++) {
+      try {
+        last = await register(
+          (name, pct) => progress?.(name, pct),
+          { allowLegacyFallback: attempt === CATALOG_REGISTRATION_ATTEMPTS },
+        );
+      } catch (error) {
+        if (attempt === CATALOG_REGISTRATION_ATTEMPTS) return terminalRegistrationResult(last, error);
+        continue;
+      }
+      if (!last?.retry) return last;
+    }
+    return last;
+  }
+
+  // One chain. A catalog read queued behind an explicit retry waits for that retry,
+  // and a second caller cannot start another registration beside the first.
+  function enqueue(task) {
+    const run = tail.then(() => task());
+    tail = run.then(() => {}, () => {});
+    return run;
+  }
+
   return {
     ensure(onProgress) {
       if (typeof onProgress === 'function') progress = onProgress;
-      if (!pending) {
-        // Start synchronously so a second caller in the same turn joins this
-        // attempt instead of passing the catalog read before registration exists.
-        pending = (async () => {
-          let last = null;
-          for (let attempt = 1; attempt <= CATALOG_REGISTRATION_ATTEMPTS; attempt++) {
-            try {
-              last = await register(
-                (name, pct) => progress?.(name, pct),
-                { allowLegacyFallback: attempt === CATALOG_REGISTRATION_ATTEMPTS },
-              );
-            } catch (error) {
-              if (attempt === CATALOG_REGISTRATION_ATTEMPTS) return terminalRegistrationResult(last, error);
-              continue;
-            }
-            if (!last?.retry) return last;
-          }
-          return last;
-        })();
-      }
-      return pending;
+      return enqueue(async () => {
+        if (!settled) settled = await attempts();
+        return settled;
+      });
+    },
+    rerun(onProgress) {
+      if (typeof onProgress === 'function') progress = onProgress;
+      return enqueue(async () => {
+        if (committed) return settled;
+        settled = await attempts();
+        return settled;
+      });
+    },
+    commit(onProgress) {
+      if (typeof onProgress === 'function') progress = onProgress;
+      return enqueue(async () => {
+        if (!settled) settled = await attempts();
+        committed = true;
+        return settled;
+      });
     },
   };
 }

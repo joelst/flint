@@ -206,14 +206,18 @@ describe('native service startup', () => {
   it('registers providers before startWebService can answer /v1/models', () => {
     const source = readFileSync(join(process.cwd(), 'sidecar', 'foundry-sidecar-main.js'), 'utf8');
     const start = source.indexOf("} else if (cmd === 'startService') {");
-    const gate = source.indexOf('await beforeCatalogRead()', start);
+    const gate = source.indexOf('commit: true', start);
     const web = source.indexOf('manager.startWebService()', start);
+    const setup = source.indexOf("} else if (cmd === 'ensureAccelerators') {");
+    const rerun = source.indexOf('rerunAcceleratorRegistration(', setup);
     expect(start).toBeGreaterThan(-1);
     expect(gate).toBeGreaterThan(start);
     expect(web).toBeGreaterThan(gate);
+    expect(setup).toBeGreaterThan(-1);
+    expect(rerun).toBeGreaterThan(setup);
     for (const cmd of ['importModelFolder', 'linkModelFolder', 'setModelTemplate']) {
       const at = source.indexOf(`} else if (cmd === '${cmd}') {`);
-      const read = source.indexOf('await beforeCatalogRead()', at);
+      const read = source.indexOf('beforeCatalogRead(undefined, { commit: true })', at);
       const call = source.indexOf(`${cmd}(`, at);
       expect(at, cmd).toBeGreaterThan(-1);
       expect(read, cmd).toBeGreaterThan(at);
@@ -231,6 +235,7 @@ describe('createCatalogRegistrationGate', () => {
     const gate = createCatalogRegistrationGate(register);
     const first = gate.ensure();
     const second = gate.ensure();
+    await Promise.resolve();
     expect(register).toHaveBeenCalledTimes(1);
     release({ registeredEps: ['CUDAExecutionProvider'] });
     await expect(first).resolves.toEqual({ registeredEps: ['CUDAExecutionProvider'] });
@@ -325,6 +330,27 @@ describe('createCatalogRegistrationGate', () => {
     });
     expect(register).toHaveBeenCalledTimes(3);
     await gate.ensure();
+    expect(register).toHaveBeenCalledTimes(3);
+  });
+
+  it('lets explicit setup retry before the catalog is read, and not after', async () => {
+    let calls = 0;
+    const register = vi.fn(async () => {
+      calls += 1;
+      return calls === 1
+        ? { success: false, retry: true, registeredEps: [], failedEps: ['CUDAExecutionProvider'] }
+        : { success: true, registeredEps: ['CUDAExecutionProvider'], failedEps: [] };
+    });
+    const gate = createCatalogRegistrationGate(register);
+    await gate.ensure();
+    expect(register).toHaveBeenCalledTimes(2);
+    await expect(gate.rerun()).resolves.toMatchObject({
+      success: true,
+      registeredEps: ['CUDAExecutionProvider'],
+    });
+    expect(register).toHaveBeenCalledTimes(3);
+    await gate.commit();
+    await gate.rerun();
     expect(register).toHaveBeenCalledTimes(3);
   });
 

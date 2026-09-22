@@ -408,15 +408,40 @@ let manager = null;
 // or pool status can arrive while startup is still registering providers.
 let catalogRegistrationGate = null;
 
-function beforeCatalogRead(onProgress) {
-  if (!manager) return Promise.resolve(null);
+function acceleratorGate() {
+  if (!manager) return null;
   if (!catalogRegistrationGate) {
     catalogRegistrationGate = createCatalogRegistrationGate((progress, options) => {
       if (!manager || typeof manager.downloadAndRegisterEps !== 'function') return null;
       return registerDiscoveredExecutionProviders(manager, progress, options);
     });
   }
-  return catalogRegistrationGate.ensure(onProgress);
+  return catalogRegistrationGate;
+}
+
+function beforeCatalogRead(onProgress, options = {}) {
+  const gate = acceleratorGate();
+  if (!gate) return Promise.resolve(null);
+  // A catalog read commits the snapshot. Registration queued behind it still
+  // finishes first; a later explicit retry sees the commit and does not run.
+  return options.commit ? gate.commit(onProgress) : gate.ensure(onProgress);
+}
+
+/** Settings “Install / Update Accelerators” uses the same command as startup.
+ * Before the catalog snapshot is taken, that button has to be able to try again.
+ * After a catalog read, another registration cannot add the missing variants. */
+function rerunAcceleratorRegistration(onProgress) {
+  const gate = acceleratorGate();
+  if (!gate) return Promise.resolve(null);
+  return gate.rerun(onProgress);
+}
+
+/** Mark the snapshot committed, then read. A retry queued behind this waits, and a
+ * retry after it sees the commit and does not register again. */
+async function withCatalog(read) {
+  const gate = acceleratorGate();
+  if (gate) await gate.commit();
+  return read();
 }
 let FoundryLocalManager = null;
 let initConfig = null; // { appName, logLevel } — kept so startService can re-create manager with webServiceUrls
@@ -878,7 +903,7 @@ async function resolveForGateway (requested) {
   if (!modelIndex) {
     if (!manager) return null;
     try {
-      await beforeCatalogRead();
+      await beforeCatalogRead(undefined, { commit: true });
       const models = await manager.catalog.getModels();
       cacheModelIndexFromCatalog(models);
     } catch (e) {
@@ -1903,7 +1928,7 @@ async function ensureModelLocked(alias, variantId) {
     },
   } : null);
   try {
-    await beforeCatalogRead();
+    await beforeCatalogRead(undefined, { commit: true });
     const catModel = await manager.catalog.getModel(alias);
     if (variantId) {
       const variant = await manager.catalog.getModelVariant(variantId);
@@ -2458,7 +2483,7 @@ rl.on('line', async (line) => {
       audit('init', { appName, libraryPath });
       reply({ ok: true, result: 'initialized' });
     } else if (cmd === 'listModels') {
-      await beforeCatalogRead();
+      await beforeCatalogRead(undefined, { commit: true });
       const models = await manager.catalog.getModels();
       cacheModelIndexFromCatalog(models);
       reply({
@@ -2513,7 +2538,7 @@ rl.on('line', async (line) => {
         })
       });
     } else if (cmd === 'getSTTModels') {
-      await beforeCatalogRead();
+      await beforeCatalogRead(undefined, { commit: true });
       const all = await manager.catalog.getModels();
       const stt = all.filter(m => {
         const t = (m.info?.task || '').toLowerCase();
@@ -2522,7 +2547,7 @@ rl.on('line', async (line) => {
       });
       reply({ ok: true, result: stt.map(m => ({ alias: m.alias, cached: m.isCached })) });
     } else if (cmd === 'getVisionModels') {
-      await beforeCatalogRead();
+      await beforeCatalogRead(undefined, { commit: true });
       const all = await manager.catalog.getModels();
       const vision = all.filter(m => {
         const t = (m.info?.task || '').toLowerCase();
@@ -2532,7 +2557,7 @@ rl.on('line', async (line) => {
       });
       reply({ ok: true, result: vision.map(m => ({ alias: m.alias, cached: m.isCached })) });
     } else if (cmd === 'download') {
-      await beforeCatalogRead();
+      await beforeCatalogRead(undefined, { commit: true });
       const model = payload.variantId
         ? await manager.catalog.getModelVariant(payload.variantId)
         : await manager.catalog.getModel(payload.alias);
@@ -2587,7 +2612,7 @@ rl.on('line', async (line) => {
         return false;
       };
 
-      await beforeCatalogRead();
+      await beforeCatalogRead(undefined, { commit: true });
       if (variantId) {
         // Delete a single variant from the local cache.
         const variant = await manager.catalog.getModelVariant(variantId);
@@ -2648,14 +2673,14 @@ rl.on('line', async (line) => {
       // These handlers touch manager.catalog to drop a stale cache entry. The getter
       // is a catalog access, so it has to wait out registration or it can freeze the
       // snapshot while a retry is still registering another provider.
-      await beforeCatalogRead();
+      await beforeCatalogRead(undefined, { commit: true });
       const result = importModelFolder(payload);
       log('info', `Imported model ${result.name}:${result.version} from ${payload.folderPath}`);
       invalidateModelIndex();
       audit('importModelFolder', { alias: result.name, variantId: `${result.name}:${result.version}`, kind: 'copy' });
       reply({ ok: true, result });
     } else if (cmd === 'linkModelFolder') {
-      await beforeCatalogRead();
+      await beforeCatalogRead(undefined, { commit: true });
       const result = linkModelFolder(payload);
       log('info', `Linked model ${result.name} -> ${result.target}`);
       invalidateModelIndex();
@@ -2664,7 +2689,7 @@ rl.on('line', async (line) => {
     } else if (cmd === 'getModelTemplate') {
       reply({ ok: true, result: getModelTemplate(payload.name) });
     } else if (cmd === 'setModelTemplate') {
-      await beforeCatalogRead();
+      await beforeCatalogRead(undefined, { commit: true });
       const result = setModelTemplate(payload.name, payload.promptTemplate);
       log('info', `Updated prompt template for ${result.name}`);
       audit('setModelTemplate', { alias: result.name, variantId: null });
@@ -2699,7 +2724,7 @@ rl.on('line', async (line) => {
         // sidecar's catalog calls, and Start is enabled as soon as the runtime is ready,
         // which is before startup finishes registering providers. Register first or that
         // request freezes the CPU-only snapshot for the process.
-        await beforeCatalogRead();
+        await beforeCatalogRead(undefined, { commit: true });
         // Start service BEFORE loading models so HTTP routing layer initializes with the registry.
         if (typeof manager.startWebService === 'function') {
           nativeServiceStartAttempted = true;
@@ -3342,7 +3367,7 @@ rl.on('line', async (line) => {
     } else if (cmd === 'poolStatus') {
       let loadedIds = new Set();
       try {
-        await beforeCatalogRead();
+        await beforeCatalogRead(undefined, { commit: true });
         const loaded = await manager.catalog.getLoadedModels();
         for (const m of loaded) loadedIds.add(m.id);
       } catch {}
@@ -3618,7 +3643,7 @@ rl.on('line', async (line) => {
       reply({ ok: true, result: eps });
     } else if (cmd === 'ensureAccelerators') {
       if (typeof manager.downloadAndRegisterEps === 'function') {
-        const result = await beforeCatalogRead((name, pct) => {
+        const result = await rerunAcceleratorRegistration((name, pct) => {
           send({ id, progress: pct, ep: name });
         });
         reply({ ok: true, result: result ?? null });
