@@ -2230,7 +2230,7 @@ function nativeLibraryFileName () {
  *
  * Dev and packaged layouts both use <sdk>/prebuilds/<platform>/.
  */
-function resolveFoundryCoreLibraryPath () {
+function resolveFoundryLibraryDir () {
   const override = process.env.FLINT_FOUNDRY_CORE_PATH;
   if (override && fs.existsSync(override)) {
     return fs.statSync(override).isDirectory() ? override : path.dirname(override);
@@ -2415,10 +2415,10 @@ rl.on('line', async (line) => {
     if (cmd === 'init') {
       const FManager = await getFoundryManager();
       const appName = payload.appName || 'flint';
-      const libraryPath = resolveFoundryCoreLibraryPath();
+      const libraryPath = resolveFoundryLibraryDir();
       if (!libraryPath) {
         throw new Error(
-          "FoundryLocalCorePath not specified in configuration and could not auto-discover binaries. " +
+          "Foundry native library directory not specified in configuration and could not be auto-discovered. " +
           "Please run 'npm install' / 'npm run ensure:foundry' so native libraries are present, " +
           "then rebuild the installer (natives must be packaged under foundry-local-sdk/prebuilds)."
         );
@@ -2428,7 +2428,7 @@ rl.on('line', async (line) => {
         throw new Error(`Unsupported log level "${initConfig.logLevel}". Expected one of: ${LOG_LEVELS.join(', ')}`);
       }
       activeLogLevel = initConfig.logLevel;
-      log('info', `Using Foundry core library: ${libraryPath}`);
+      log('info', `Using Foundry native library directory: ${libraryPath}`);
       manager = FManager.create(initConfig);
       log('info', `SDK initialized for ${appName}`);
       const pinWarning = foundryRuntimePinWarning(readFoundryRuntimeVersions(libraryPath));

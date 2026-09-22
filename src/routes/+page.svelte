@@ -5144,10 +5144,9 @@ updateStateFromSdk();
             `${startupLoaded} startup model${startupLoaded !== 1 ? 's' : ''} loaded` +
             (startupBlocked > 0 ? `; ${startupBlocked} skipped for unavailable acceleration` : "") +
             (startupFailed > 0 ? `; ${startupFailed} failed (see the app log)` : "");
-        } else if (startupFailed > 0) {
-          // Nothing loaded: the header keeps the reason for the last failure instead of
-          // a count, and every failure is already in the app log.
-        } else if (startupBlocked > 0) {
+        // Nothing loaded but something failed: the header keeps the reason for that
+        // failure rather than a count, and every failure is already in the app log.
+        } else if (startupFailed === 0 && startupBlocked > 0) {
           statusMessage =
             `${startupBlocked} startup model${startupBlocked !== 1 ? "s" : ""} skipped for unavailable acceleration`;
         }
