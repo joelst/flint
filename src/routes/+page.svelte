@@ -11728,7 +11728,7 @@ Output only the summary text, no preamble.`;
 
   button.small.update-btn {
     background: var(--subtle-bg);
-    color: var(--warning);
+    color: var(--fg);
   }
 
   /* Startup toggle */
@@ -11752,7 +11752,7 @@ Output only the summary text, no preamble.`;
     font-family: monospace;
   }
 
-  .danger-btn {
+  button.danger-btn {
     background: var(--danger-btn-bg);
     border: 1px solid var(--danger-btn-bg);
     color: var(--danger-btn-fg);
@@ -13475,8 +13475,12 @@ Output only the summary text, no preamble.`;
 
   .context-control {
     display: flex;
+    flex: 1 1 420px;
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
+    min-width: 0;
+    max-width: 100%;
     font-size: 0.8125rem;
     color: var(--muted);
   }
