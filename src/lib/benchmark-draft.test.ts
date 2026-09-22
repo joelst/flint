@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { aliasChoicesForTarget, applyTargetAlias, buildSuiteFromDraft, cachedVariantIds, draftEditsSuite, draftFromSuite, estimateDraftAttempts, variantChoicesForTarget, type SuiteDraft } from './benchmark-draft';
-import { BENCHMARK_MAX_ATTEMPTS, BENCHMARK_MAX_JSONL_CHARS } from './benchmark-suite';
+import { aliasChoicesForTarget, applyTargetAlias, buildSuiteFromDraft, cachedVariantIds, caseRowsFromJsonl, copiedSuiteName, draftEditsSuite, draftFromSuite, duplicateSuiteDraft, estimateDraftAttempts, jsonlFromCaseRows, newPromptCaseRow, optionalDraftNumber, variantChoicesForTarget, type SuiteDraft } from './benchmark-draft';
+import { BENCHMARK_MAX_ATTEMPTS, BENCHMARK_MAX_JSONL_CHARS, BENCHMARK_MAX_NAME_LENGTH } from './benchmark-suite';
 import type { BenchmarkSuite } from './benchmark-suite';
 
 const baseDraft = (over: Partial<SuiteDraft> = {}): SuiteDraft => ({
@@ -51,6 +51,15 @@ describe('buildSuiteFromDraft', () => {
     const result = buildSuiteFromDraft(baseDraft({ description: '   ' }));
     expect(result.ok).toBe(true);
     expect(result.value!.description).toBeUndefined();
+  });
+
+  it('omits a cleared temperature or max tokens instead of storing a runtime default as a number', () => {
+    const cleared = buildSuiteFromDraft(baseDraft({ temperature: null, maxTokens: null }));
+    expect(cleared.ok).toBe(true);
+    expect(cleared.value!.temperature).toBeUndefined();
+    expect(cleared.value!.maxTokens).toBeUndefined();
+    const invalid = buildSuiteFromDraft(baseDraft({ temperature: Number.NaN }));
+    expect(invalid.ok).toBe(false);
   });
 
   it('rejects a draft with no targets, matching validateBenchmarkSuite\'s own target-count rule', () => {
@@ -170,6 +179,102 @@ describe('applyTargetAlias', () => {
       alias: 'model-a',
       variantId: 'v1',
     });
+  });
+});
+
+describe('optionalDraftNumber', () => {
+  it('treats an empty input as omitted and parses a typed number', () => {
+    expect(optionalDraftNumber(null)).toBeUndefined();
+    expect(optionalDraftNumber('')).toBeUndefined();
+    expect(optionalDraftNumber('  ')).toBeUndefined();
+    expect(optionalDraftNumber('0.2')).toBe(0.2);
+    expect(optionalDraftNumber(0)).toBe(0);
+    expect(optionalDraftNumber('nope')).toBeNaN();
+  });
+});
+
+describe('case rows', () => {
+  it('treats a blank case list as no rows, not a parse failure', () => {
+    expect(caseRowsFromJsonl('')).toEqual({ ok: true, rows: [] });
+    expect(caseRowsFromJsonl('  \n')).toEqual({ ok: true, rows: [] });
+    expect(jsonlFromCaseRows([])).toBe('');
+  });
+
+  it('round-trips prompt rows, including expected and tags, through the suite validator', () => {
+    const rows = caseRowsFromJsonl('{"id":"c1","prompt":"2+2","expected":"4","tags":["math"]}');
+    expect(rows.ok).toBe(true);
+    if (!rows.ok) return;
+    expect(rows.rows).toEqual([{ kind: 'prompt', id: 'c1', prompt: '2+2', expected: '4', tagsText: 'math' }]);
+    const rebuilt = buildSuiteFromDraft(baseDraft({ casesJsonl: jsonlFromCaseRows(rows.rows) }));
+    expect(rebuilt.ok).toBe(true);
+    expect(rebuilt.value!.cases).toEqual([{ id: 'c1', prompt: '2+2', expected: '4', tags: ['math'] }]);
+  });
+
+  it('keeps a messages case verbatim when prompt rows around it are edited', () => {
+    const text = [
+      '{"id":"c1","prompt":"hi"}',
+      '{"id":"c2","messages":[{"role":"user","content":"hello"}]}',
+    ].join('\n');
+    const parsed = caseRowsFromJsonl(text);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const messages = parsed.rows[1];
+    expect(messages).toMatchObject({ kind: 'messages', id: 'c2', messageCount: 1 });
+    const reordered = [messages, { kind: 'prompt' as const, id: 'c1', prompt: 'edited', expected: '', tagsText: '' }];
+    const rebuilt = buildSuiteFromDraft(baseDraft({ casesJsonl: jsonlFromCaseRows(reordered) }));
+    expect(rebuilt.ok).toBe(true);
+    expect(rebuilt.value!.cases.map((entry) => entry.id)).toEqual(['c2', 'c1']);
+    expect(rebuilt.value!.cases[0].messages).toEqual([{ role: 'user', content: 'hello' }]);
+    expect(rebuilt.value!.cases[1].prompt).toBe('edited');
+  });
+
+  it('surfaces the JSONL parser error instead of a partial row list', () => {
+    const parsed = caseRowsFromJsonl('not json');
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.error).toMatch(/not valid JSON/);
+  });
+
+  it('picks a case id that does not collide with rows already on the form', () => {
+    expect(newPromptCaseRow(['c1'])).toMatchObject({ kind: 'prompt', id: 'c2' });
+    expect(newPromptCaseRow(['c1', 'c2'])).toMatchObject({ id: 'c3' });
+    expect(newPromptCaseRow(['c1', 'c3'])).toMatchObject({ id: 'c4' });
+  });
+});
+
+describe('duplicateSuiteDraft', () => {
+  it('drops the stored id so Save creates a suite with no runs', () => {
+    const stored: BenchmarkSuite = {
+      id: 'suite-1',
+      name: 'Arithmetic',
+      description: 'basic math',
+      createdAt: 5,
+      targets: [{ alias: 'model-a', variantId: 'v1' }],
+      cases: [{ id: 'c1', prompt: 'What is 2+2?' }],
+      temperature: 0.5,
+      maxTokens: 256,
+      warmupCount: 1,
+      repeatCount: 2,
+    };
+    const draft = duplicateSuiteDraft(stored);
+    expect(draft.id).toBeUndefined();
+    expect(draft.createdAt).toBeUndefined();
+    expect(draft.name).toBe('Arithmetic copy');
+    expect(draft.temperature).toBe(0.5);
+    expect(draft.casesJsonl).toContain('"prompt":"What is 2+2?"');
+    const rebuilt = buildSuiteFromDraft(draft, 99);
+    expect(rebuilt.ok).toBe(true);
+    expect(rebuilt.value!.id).not.toBe('suite-1');
+    expect(rebuilt.value!.createdAt).toBe(99);
+    expect(rebuilt.value!.cases).toEqual(stored.cases);
+  });
+
+  it('shortens a max-length name so the copy suffix still fits', () => {
+    const name = 'a'.repeat(BENCHMARK_MAX_NAME_LENGTH);
+    const copied = copiedSuiteName(name);
+    expect(copied.length).toBe(BENCHMARK_MAX_NAME_LENGTH);
+    expect(copied.endsWith(' copy')).toBe(true);
+    expect(copiedSuiteName('   ')).toBe('copy');
   });
 });
 

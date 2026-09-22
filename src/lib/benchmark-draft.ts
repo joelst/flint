@@ -13,6 +13,7 @@ import {
   BENCHMARK_MAX_CASES,
   BENCHMARK_MAX_JSONL_CHARS,
   BENCHMARK_MAX_JSONL_LINE_CHARS,
+  BENCHMARK_MAX_NAME_LENGTH,
   BENCHMARK_MAX_REPEAT_COUNT,
   BENCHMARK_MAX_WARMUP_COUNT,
   BENCHMARK_MIN_REPEAT_COUNT,
@@ -21,6 +22,7 @@ import {
   isFiniteInteger,
   parseBenchmarkCasesJsonl,
   validateBenchmarkSuite,
+  type BenchmarkCase,
   type BenchmarkSuite,
   type BenchmarkTarget,
   type ValidationResult,
@@ -45,10 +47,101 @@ export interface SuiteDraft {
   /** One JSON case object per non-blank line — the same shape `parseBenchmarkCasesJsonl` (and
    * a JSONL file import) already accepts. */
   casesJsonl: string;
-  temperature?: number;
-  maxTokens?: number;
+  /**
+   * Empty number inputs arrive as null or ''. Those mean "runtime default", not a numeric
+   * value — `optionalDraftNumber` drops them before validation.
+   */
+  temperature?: number | null;
+  maxTokens?: number | null;
   warmupCount: number;
   repeatCount: number;
+}
+
+/** A prompt the form can edit, or a messages-array case preserved verbatim so Save does not
+ * flatten it into a single prompt. */
+export type SuiteCaseRow =
+  | { kind: 'prompt'; id: string; prompt: string; expected: string; tagsText: string }
+  | { kind: 'messages'; id: string; messageCount: number; jsonlLine: string };
+
+/**
+ * Number inputs clear to null or '' while the field is empty. Those mean "runtime default".
+ * A non-numeric entry is returned as NaN so `validateBenchmarkSuite` rejects it instead of
+ * the form inventing a second error string.
+ */
+export function optionalDraftNumber(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === 'string') {
+    if (value.trim() === '') return undefined;
+    return Number(value);
+  }
+  if (typeof value === 'number') return value;
+  return undefined;
+}
+
+function caseToRow(entry: BenchmarkCase): SuiteCaseRow {
+  if (entry.messages) {
+    return {
+      kind: 'messages',
+      id: entry.id,
+      messageCount: entry.messages.length,
+      jsonlLine: JSON.stringify(entry),
+    };
+  }
+  return {
+    kind: 'prompt',
+    id: entry.id,
+    prompt: entry.prompt ?? '',
+    expected: entry.expected ?? '',
+    tagsText: entry.tags?.join(', ') ?? '',
+  };
+}
+
+/** Blank text is an empty form, not a parse error — a new suite has no cases yet. */
+export function caseRowsFromJsonl(text: string): { ok: true; rows: SuiteCaseRow[] } | { ok: false; error: string } {
+  if (!text.trim()) return { ok: true, rows: [] };
+  const parsed = parseBenchmarkCasesJsonl(text);
+  if (!parsed.ok || !parsed.cases) return { ok: false, error: parsed.error ?? 'cases are invalid' };
+  return { ok: true, rows: parsed.cases.map(caseToRow) };
+}
+
+export function jsonlFromCaseRows(rows: readonly SuiteCaseRow[]): string {
+  return rows.map((row) => {
+    if (row.kind === 'messages') return row.jsonlLine;
+    const raw: Record<string, unknown> = { id: row.id, prompt: row.prompt };
+    if (row.expected.trim()) raw.expected = row.expected;
+    const tags = row.tagsText.split(',').map((tag) => tag.trim()).filter((tag) => tag.length > 0);
+    if (tags.length > 0) raw.tags = tags;
+    return JSON.stringify(raw);
+  }).join('\n');
+}
+
+export function newPromptCaseRow(existingIds: readonly string[]): SuiteCaseRow {
+  const taken = new Set(existingIds);
+  let n = existingIds.length + 1;
+  let id = `c${n}`;
+  while (taken.has(id)) {
+    n += 1;
+    id = `c${n}`;
+  }
+  return { kind: 'prompt', id, prompt: '', expected: '', tagsText: '' };
+}
+
+/** "copy" suffix, shortened so the result still fits the suite name limit. */
+export function copiedSuiteName(name: string): string {
+  const suffix = ' copy';
+  const base = name.trim();
+  const combined = base ? `${base}${suffix}` : 'copy';
+  if (combined.length <= BENCHMARK_MAX_NAME_LENGTH) return combined;
+  return base.slice(0, BENCHMARK_MAX_NAME_LENGTH - suffix.length) + suffix;
+}
+
+/** A new draft: no id and no createdAt, so Save inserts a suite with no run history. */
+export function duplicateSuiteDraft(suite: BenchmarkSuite): SuiteDraft {
+  const draft = draftFromSuite(suite);
+  delete draft.id;
+  delete draft.createdAt;
+  draft.name = copiedSuiteName(suite.name);
+  return draft;
 }
 
 /** Variant ids that are already on disk — Start loads, it does not download. */
@@ -205,8 +298,10 @@ export function buildSuiteFromDraft(draft: SuiteDraft, now: number = Date.now())
     repeatCount: draft.repeatCount,
   };
   if (draft.description !== undefined && draft.description.trim()) raw.description = draft.description;
-  if (draft.temperature !== undefined) raw.temperature = draft.temperature;
-  if (draft.maxTokens !== undefined) raw.maxTokens = draft.maxTokens;
+  const temperature = optionalDraftNumber(draft.temperature);
+  const maxTokens = optionalDraftNumber(draft.maxTokens);
+  if (temperature !== undefined) raw.temperature = temperature;
+  if (maxTokens !== undefined) raw.maxTokens = maxTokens;
 
   return validateBenchmarkSuite(raw);
 }

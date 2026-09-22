@@ -5,7 +5,7 @@
  * Pure orchestration over an injected `AttemptTransport` — this module never imports `sdk.ts`
  * and never calls the SDK directly. The actual chat dispatch (through `chatCompletion`, model
  * load/preflight, memory/unload consent) is real, effectful, UI-adjacent policy that belongs to
- * whatever wires this runner up to the app (a later PR); this module only needs *a* function
+ * whatever wires this runner up to the app (`benchmark-lifecycle.ts`); this module only needs *a* function
  * shaped like `AttemptTransport` to be fully testable with a fake one.
  *
  * Durability contract (this is the part a benchmark runner cannot get wrong):
@@ -237,6 +237,11 @@ async function executePositions(
       return haltWith(run, 'stopped', undefined);
     }
 
+    // Stamp the start on the terminal patch, not the write-ahead intent. A crash or Stop
+    // during the call leaves the row `dispatched` with no start time, so a later results
+    // view cannot invent a duration for a call that never settled. This is the full
+    // non-streaming call, not time to first token.
+    const sdkCallStartedAt = Date.now();
     let transportResult: AttemptTransportResult;
     try {
       transportResult = await transport({
@@ -268,11 +273,13 @@ async function executePositions(
           servedVariantId: transportResult.servedVariantId ?? null,
           usage: transportResult.usage,
           ttftMs: transportResult.ttftMs,
+          sdkCallStartedAt,
           settledAt,
         })
       : await recordAttemptTerminal(intent.id, {
           status: 'failed',
           errorMessage: transportResult.errorMessage,
+          sdkCallStartedAt,
           settledAt,
         });
 
@@ -290,8 +297,8 @@ async function executePositions(
     attemptsSoFar[attemptsSoFar.length - 1] = {
       ...intent,
       ...(transportResult.ok
-        ? { status: 'succeeded' as const, responseText: transportResult.responseText, settledAt }
-        : { status: 'failed' as const, errorMessage: transportResult.errorMessage, settledAt }),
+        ? { status: 'succeeded' as const, responseText: transportResult.responseText, sdkCallStartedAt, settledAt }
+        : { status: 'failed' as const, errorMessage: transportResult.errorMessage, sdkCallStartedAt, settledAt }),
     };
   }
 
