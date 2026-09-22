@@ -76,4 +76,21 @@ describe('benchmark editor wiring', () => {
     expect(openRun).toContain('if (!liveAtOpen) return;');
     expect(openRun.match(/void loadRunResults\(runId\);/g)).toHaveLength(2);
   });
+
+  it('coalesces overlapping full-result reads for the same run', () => {
+    expect(source).toContain('let resultLoadRunId: string | null = null;');
+    expect(source).toContain('let resultLoadPromise: Promise<void> | null = null;');
+    expect(source).toContain('if (resultViewRunId === runId && resultView) return;');
+    expect(source).toContain('if (resultLoadRunId === runId && resultLoadPromise)');
+    expect(source).toContain('return resultLoadPromise;');
+    expect(source).toContain('resultLoadRunId = runId;');
+    expect(source).toContain('resultLoadPromise = load;');
+    expect(source).toContain('if (resultLoadPromise === load)');
+
+    const clearStart = source.indexOf('function clearRunResults()');
+    const clearEnd = source.indexOf('\n  }', clearStart);
+    const clear = source.slice(clearStart, clearEnd);
+    expect(clear).toContain('resultLoadRunId = null;');
+    expect(clear).toContain('resultLoadPromise = null;');
+  });
 });

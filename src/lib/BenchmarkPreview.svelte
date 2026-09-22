@@ -74,6 +74,8 @@
   let resultViewRunId: string | null = null;
   let resultError = "";
   let resultGeneration = 0;
+  let resultLoadRunId: string | null = null;
+  let resultLoadPromise: Promise<void> | null = null;
   let expandedResultId: string | null = null;
 
   let selectedRunId: string | null = null;
@@ -196,6 +198,8 @@
     resultView = null;
     resultViewRunId = null;
     resultError = "";
+    resultLoadRunId = null;
+    resultLoadPromise = null;
     expandedResultId = null;
   }
 
@@ -203,28 +207,44 @@
    * stays on summaries so a 1.5s tick never clones response text. */
   async function loadRunResults(runId: string) {
     if (runId === activeRunId) return;
-    const generation = ++resultGeneration;
-    const res = await getBenchmarkRunWithAttempts(runId);
-    if (destroyed || generation !== resultGeneration || selectedRunId !== runId || runId === activeRunId) return;
-    if (!res.ok || !res.value) {
-      resultView = null;
-      resultViewRunId = null;
-      resultError = !res.ok
-        ? (res.error || "Could not load results")
-        : `Could not load results: run "${runId}" was not found`;
-      return;
+    if (resultViewRunId === runId && resultView) return;
+    if (resultLoadRunId === runId && resultLoadPromise) {
+      return resultLoadPromise;
     }
-    resultView = buildRunResultView(res.value.run, res.value.attempts);
-    resultViewRunId = runId;
-    resultError = "";
-    // The summary poll can fail and leave selectedRun null. The full read already
-    // has the run, so the detail and its error have somewhere to render.
-    if (!selectedRun) selectedRun = res.value.run;
-    // An empty summary list with a full read would draw every cell as pending while
-    // the Results table shows the real terminal rows, and Resume would be judged
-    // against that empty matrix.
-    if (selectedRunAttempts.length === 0) {
-      selectedRunAttempts = res.value.attempts.map(summarizeAttempt);
+    const generation = ++resultGeneration;
+    const load = (async () => {
+      const res = await getBenchmarkRunWithAttempts(runId);
+      if (destroyed || generation !== resultGeneration || selectedRunId !== runId || runId === activeRunId) return;
+      if (!res.ok || !res.value) {
+        resultView = null;
+        resultViewRunId = null;
+        resultError = !res.ok
+          ? (res.error || "Could not load results")
+          : `Could not load results: run "${runId}" was not found`;
+        return;
+      }
+      resultView = buildRunResultView(res.value.run, res.value.attempts);
+      resultViewRunId = runId;
+      resultError = "";
+      // The summary poll can fail and leave selectedRun null. The full read already
+      // has the run, so the detail and its error have somewhere to render.
+      if (!selectedRun) selectedRun = res.value.run;
+      // An empty summary list with a full read would draw every cell as pending while
+      // the Results table shows the real terminal rows, and Resume would be judged
+      // against that empty matrix.
+      if (selectedRunAttempts.length === 0) {
+        selectedRunAttempts = res.value.attempts.map(summarizeAttempt);
+      }
+    })();
+    resultLoadRunId = runId;
+    resultLoadPromise = load;
+    try {
+      await load;
+    } finally {
+      if (resultLoadPromise === load) {
+        resultLoadRunId = null;
+        resultLoadPromise = null;
+      }
     }
   }
 
