@@ -23,7 +23,7 @@
   import { aliasChoicesForTarget, applyTargetAlias, cachedVariantIds, caseRowsFromJsonl, draftEditsSuite, draftFromSuite, duplicateSuiteDraft, jsonlFromCaseRows, jsonlImportCanFitCharacterLimit, newPromptCaseRow, buildSuiteFromDraft, estimateDraftAttempts, tagsJsonError, variantChoicesForTarget, type SuiteCaseRow, type SuiteDraft } from "./benchmark-draft";
   import { suiteDefinitionView } from "./benchmark-suite-summary";
   import { buildRunResultView, formatResponseMs, type TargetResultView } from "./benchmark-results";
-  import { buildProgressMatrix, isRunInterrupted, isRunResumable, nextRunPollAction, nextRunPollActionAfterReread, type AttemptSummary } from "./benchmark-progress";
+  import { buildProgressMatrix, isRunInterrupted, isRunResumable, nextRunPollAction, nextRunPollActionAfterReread, summarizeAttempt, type AttemptSummary } from "./benchmark-progress";
   import { buildBenchmarkExport } from "./benchmark-export";
   import type { BenchmarkRun, BenchmarkRunHeader } from "./benchmark-run";
 
@@ -220,6 +220,12 @@
     // The summary poll can fail and leave selectedRun null. The full read already
     // has the run, so the detail and its error have somewhere to render.
     if (!selectedRun) selectedRun = res.value.run;
+    // An empty summary list with a full read would draw every cell as pending while
+    // the Results table shows the real terminal rows, and Resume would be judged
+    // against that empty matrix.
+    if (selectedRunAttempts.length === 0) {
+      selectedRunAttempts = res.value.attempts.map(summarizeAttempt);
+    }
   }
 
   function newSuiteDraft(): SuiteDraft {
