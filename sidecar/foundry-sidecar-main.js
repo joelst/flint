@@ -114,13 +114,12 @@ const BENCHMARK_EXCLUSIVE_DRAIN_MS = Number.isFinite(parsedBenchmarkExclusiveDra
 //     repopulating the pool as part of its destructive restart (see its handler's own comment),
 //     so the new run could begin pinning/loading and measuring its targets while that clear or
 //     the restart's own `ensureModel` call is still in flight, racing residency out from under it.
-// Deliberately excludes `download`: unlike the above, a download can legitimately run for minutes
-// (multi-GB model files) and is unrelated to what a benchmark is about to measure, while the
-// drain deadline below is a fixed ~10s in production -- draining it would turn "someone is
-// downloading an unrelated model" into a routine, confusing "could not drain" benchmark-start
-// failure. The client-side admission check (`otherInferenceInFlight` in +page.svelte) still sees
-// a same-page download via `poolMutationsInFlight` and rejects it promptly; only the
-// reload-survives-it case is intentionally left unfenced here, as a scope tradeoff.
+// Deliberately excludes `download` from the timed drain: a download can run for minutes
+// (multi-GB files) and the deadline below is ~10s, so waiting it out would turn "a download
+// is still going" into a generic "could not drain" failure. It is still a fence: acquire
+// refuses immediately while a download is already admitted (including one left by a page
+// reload — this process outlives the webview, and the new page's in-memory counter does
+// not), and a new download is rejected for as long as the lease is held.
 const BENCHMARK_DRAIN_COMMANDS = new Set([
   'gatewayRequest', 'chatCompletion', 'transcribeAudio', 'embedTexts',
   'load', 'unload', 'deleteModel', 'startService',
@@ -128,6 +127,10 @@ const BENCHMARK_DRAIN_COMMANDS = new Set([
 
 function benchmarkDrainOperationsOutstanding() {
   return operationAdmission.snapshot().some((op) => BENCHMARK_DRAIN_COMMANDS.has(op.command));
+}
+
+function downloadInFlight() {
+  return operationAdmission.snapshot().some((op) => op.command === 'download');
 }
 
 // Delegates the actual poll/deadline loop to `waitUntilIdle` (monotonic-wait.js), which measures
@@ -2377,6 +2380,15 @@ rl.on('line', async (line) => {
 
   const isRuntimeShutdown = cmd === 'shutdownRuntime';
   const isDrainCommand = cmd === 'stopAndUnload' || isRuntimeShutdown;
+  // Before admission, so a rejected download is not itself "in flight". The benchmark never
+  // downloads; its own load/chat calls stay admitted.
+  if (benchmarkExclusive && cmd === 'download') {
+    reply({
+      error: 'A benchmark run is active — stop it before downloading a model.',
+      certainty: 'cancelled',
+    });
+    return;
+  }
   let operationAdmitted = false;
   if (isDrainCommand) {
     // Fence synchronously, before waiting for the service-transition lock. Otherwise commands
@@ -3338,14 +3350,22 @@ rl.on('line', async (line) => {
       // running by a *previous*, now-gone page instance either (this sidecar outlives a reload).
       // Exclusive admission lives here: new gateway work is rejected, and already-admitted
       // gateway requests, inference (chatCompletion/transcribeAudio/embedTexts), and resident-
-      // pool mutations (load/unload/deleteModel/startService) all drain before this resolves --
-      // see `BENCHMARK_DRAIN_COMMANDS`'s docstring for the full set and why `download` is
-      // excluded. New IPC chat/load calls (i.e. the benchmark's own) still run once granted.
+      // pool mutations (load/unload/deleteModel/startService) all drain before this resolves.
+      // An in-flight download is refused up front instead of drained — see
+      // `BENCHMARK_DRAIN_COMMANDS`. New IPC chat/load calls (the benchmark's own) still run
+      // once granted.
       // Serialized (see serializeBenchmarkExclusiveTransition) so a concurrently-dispatched
       // release cannot clear the flag out from under an in-progress acquire's drain wait.
       await serializeBenchmarkExclusiveTransition(async () => {
         if (payload.exclusive === true) {
+          // Flag first, synchronously, so a download that has not yet been admitted is
+          // rejected above instead of slipping in during the check below.
           benchmarkExclusive = true;
+          if (downloadInFlight()) {
+            benchmarkExclusive = false;
+            reply({ error: 'A model download is still in progress. Wait for it to finish before starting a benchmark.' });
+            return;
+          }
           const drained = await waitForBenchmarkDrainIdle(BENCHMARK_EXCLUSIVE_DRAIN_MS);
           if (!drained) {
             benchmarkExclusive = false;

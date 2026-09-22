@@ -11271,13 +11271,35 @@ Output only the summary text, no preamble.`;
 
   .toolbar {
     display: flex;
+    align-items: center;
     gap: 12px;
     margin-bottom: 16px;
   }
 
+  /* Search, sort, and Add share one height. The text field's padding otherwise
+     makes it taller than the native select and the button, and the row then
+     hangs the field below the rest. */
+  .toolbar > input,
+  .toolbar > select,
+  .toolbar > button {
+    box-sizing: border-box;
+    height: 36px;
+    margin: 0;
+  }
+
+  .toolbar > input,
+  .toolbar > select {
+    padding: 0 12px;
+  }
+
+  .toolbar > button {
+    padding: 0 12px;
+    display: inline-flex;
+    align-items: center;
+  }
+
   .toolbar select {
     flex: 0 0 auto;
-    padding: 8px 12px;
     background: var(--input-bg);
     border: 1px solid var(--border);
     color: var(--fg);
