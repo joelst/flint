@@ -10864,6 +10864,7 @@ Output only the summary text, no preamble.`;
     --panel-bg: #222226;
     --border: #2a2a30;
     --accent: #3b82f6;
+    --accent-fg: #111;
     --muted: #888;
     --success: #4ade80;
     --warning: #facc15;
@@ -10886,6 +10887,7 @@ Output only the summary text, no preamble.`;
     --panel-bg: #ffffff;
     --border: #dee2e6;
     --accent: #0d6efd;
+    --accent-fg: #fff;
     --muted: #6c757d;
     --success: #198754;
     --warning: #ffc107;
@@ -11725,6 +11727,7 @@ Output only the summary text, no preamble.`;
   }
 
   button.small.update-btn {
+    background: var(--subtle-bg);
     color: var(--warning);
   }
 
@@ -13512,13 +13515,13 @@ Output only the summary text, no preamble.`;
   .recommend-btn {
     padding: 0 8px;
     background: var(--input-bg);
-    color: var(--accent);
+    color: var(--fg);
     border: 1px solid var(--border);
     cursor: pointer;
   }
   .recommend-btn:hover {
     background: var(--accent);
-    color: white;
+    color: var(--accent-fg);
   }
 
   .context-meter {
