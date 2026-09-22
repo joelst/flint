@@ -6,9 +6,8 @@ import { generateEmbeddings, openAiJsonText } from './embeddings-session.js';
 // The hand-rolled fakeSdk() below only proves generateEmbeddings() calls the shape it
 // assumes; it can't catch a real signature drift in Request, Item, or EmbeddingsSession.
 // Where the native addon for this platform/arch is present, exercise the actual
-// 'foundry-local-sdk' module instead of a fake — no model load is required because
-// EmbeddingsSession validates `model instanceof Model` in pure JS before touching native
-// code (sidecar/dist prebuild lives at prebuilds/<platform>-<arch>).
+// 'foundry-local-sdk' module instead of a fake. Constructing Request loads that addon;
+// no model load is required for the constructor validation below.
 const nativeAddonPath = path.resolve(
   'node_modules/foundry-local-sdk/prebuilds',
   `${process.platform}-${process.arch}`,
@@ -70,20 +69,42 @@ describe('generateEmbeddings', () => {
       processRequest = vi.fn(async () => { throw new Error('native rejected'); });
       dispose = dispose;
     };
-    await expect(generateEmbeddings({ id: 'bge-cpu:1' }, ['ping'], sdk)).rejects.toThrow(/native rejected/);
+    await expect(generateEmbeddings({ id: 'bge-cpu:1' }, ['ping'], sdk))
+      .rejects.toThrow(/Embedding generation failed.*native rejected/);
     expect(dispose).toHaveBeenCalledOnce();
   });
 
-  it('keeps a successful vector when dispose fails', async () => {
+  it('returns a completed vector and reports a dispose warning', async () => {
     const { sdk } = fakeSdk({
       output: [{ type: 'text', textType: 'openai-json', text: '{"data":[]}' }],
     }, { failDispose: true });
-    await expect(generateEmbeddings({ id: 'bge-cpu:1' }, ['ping'], sdk)).resolves.toEqual({ data: [] });
+    const warn = vi.fn();
+    await expect(generateEmbeddings({ id: 'bge-cpu:1' }, ['ping'], sdk, warn))
+      .resolves.toEqual({ data: [] });
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/cleanup failed.*dispose failed/));
+  });
+
+  it('reports both generation and cleanup failures', async () => {
+    const { sdk, dispose } = fakeSdk(undefined, { failDispose: true });
+    sdk.EmbeddingsSession = class {
+      processRequest = vi.fn(async () => { throw new Error('native rejected'); });
+      dispose = dispose;
+    };
+    await expect(generateEmbeddings({ id: 'bge-cpu:1' }, ['ping'], sdk))
+      .rejects.toThrow(/native rejected.*cleanup also failed.*dispose failed/i);
   });
 
   it('rejects a response that is not openai-json', async () => {
     const { sdk } = fakeSdk({ output: [{ type: 'tensor', data: new Uint8Array() }] });
     await expect(generateEmbeddings({ id: 'bge-cpu:1' }, ['ping'], sdk)).rejects.toThrow(/no openai-json/);
+  });
+
+  it('adds model context when openai-json is malformed', async () => {
+    const { sdk } = fakeSdk({
+      output: [{ type: 'text', textType: 'openai-json', text: '{' }],
+    });
+    await expect(generateEmbeddings({ id: 'bge-cpu:1' }, ['ping'], sdk))
+      .rejects.toThrow(/model 'bge-cpu:1'.*invalid openai-json/i);
   });
 });
 
@@ -98,10 +119,10 @@ describe('openAiJsonText', () => {
 });
 
 // No cached model in this repo's catalog declares task 'embeddings' (BYOM aside), so a
-// real load-and-embed round trip isn't reachable without shipping a model binary. This
-// still drives the real native addon end to end for everything short of that load, so a
-// drift in the SDK's Request/Item/EmbeddingsSession contract fails here instead of only
-// surfacing behind the fake in the suite above.
+// real load-and-embed round trip isn't reachable without shipping a model binary. These
+// checks cover the actual Request/Item/session-constructor surface; the openai-json
+// response contract remains covered by the fake above and mirrors SDK 2.0.1's deprecated
+// EmbeddingClient implementation.
 describe.skipIf(!hasNativeAddon)('generateEmbeddings against the real foundry-local-sdk', () => {
   it('sends a real openai-json Request item with the shape generateEmbeddings assumes', async () => {
     const sdk = await import('foundry-local-sdk');
@@ -114,9 +135,8 @@ describe.skipIf(!hasNativeAddon)('generateEmbeddings against the real foundry-lo
 
   it('surfaces the real EmbeddingsSession task-validation error for a non-Model argument', async () => {
     const sdk = await import('foundry-local-sdk');
-    // Confirms our call shape (model, inputs, sdk) reaches the real constructor: the SDK
-    // validates `model instanceof Model` in JS before any native call, so this exercises
-    // the actual contract without needing a loaded model.
+    // Confirms our call shape reaches the real constructor and its Model validation
+    // without requiring a loaded embeddings model.
     await expect(generateEmbeddings({ id: 'bge-cpu:1' }, ['ping'], sdk))
       .rejects.toThrow(/expected a Model/);
   });

@@ -2310,6 +2310,9 @@ function rememberFoundrySdk (mod) {
 
 async function getFoundrySdk () {
   if (!FoundrySdkModule) await getFoundryManager();
+  if (!FoundrySdkModule) {
+    throw new Error('Foundry SDK module is unavailable after manager initialization');
+  }
   return FoundrySdkModule;
 }
 
@@ -3567,7 +3570,12 @@ rl.on('line', async (line) => {
         const embedModel = poolEntry.catModel;
         if (!embedModel) throw new Error(`Model ${modelAlias} is not loaded`);
         const sdk = await getFoundrySdk();
-        const result = await generateEmbeddings(embedModel, inputs, sdk);
+        const result = await generateEmbeddings(
+          embedModel,
+          inputs,
+          sdk,
+          (message) => log('warn', message),
+        );
         embedOk = true;
         audit('embedTexts', { alias: modelAlias, count: inputs.length });
         reply({ ok: true, result });
