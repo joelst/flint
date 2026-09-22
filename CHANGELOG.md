@@ -1,5 +1,16 @@
 # Flint Changelog
 
+## 0.9.1
+
+### Patch Changes
+
+- af0f764: Refuse to start a benchmark while a model download is still in progress, including one left running by a page reload, and refuse a new download while a benchmark holds exclusive admission.
+- 531dacd: Add a Settings → Startup toggle ("Check model catalog on startup") to disable the automatic startup check against Microsoft's Foundry Local model catalog. Recommendations and configured model preloads are skipped for that launch when disabled. Docs now disclose when catalog network access occurs.
+- 33cfbf6: Rebuild app resources when Flint icons change and brand the Windows installer and uninstaller with the current app icon.
+- f60cffc: Update the bundled Foundry Local SDK from 1.2.4 to 2.0.1 so models such as Gemma 4 can load. Long native load errors stay in the app log; the header shows one truncated line instead of growing to fit the stack trace.
+- 2506d2b: Improve control contrast, catalog accelerator labels, and runtime failure diagnostics.
+- 87f5dd0: About → Updates: add a "View release" link next to Install/Later that opens the GitHub release page for the available version, so users can download and install it manually as an alternative to the in-app updater.
+
 ## 0.9.0
 
 First **stable** channel release after the 0.7.0 evaluation prerelease. 0.8.0 is unused. Publish this version as a full GitHub release (not a prerelease) so `releases/latest` resolves and installed 0.7.0 builds can exercise the in-app updater. **1.0.0** is a later stable, after that upgrade is proven.
