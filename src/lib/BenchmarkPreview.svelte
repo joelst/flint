@@ -595,12 +595,15 @@
   }
 
   async function openRun(runId: string) {
+    const preserveHistoricalResults = selectedRunId === runId && runId !== activeRunId;
     selectedRunId = runId;
-    selectedRun = null;
-    selectedRunAttempts = [];
+    if (!preserveHistoricalResults) {
+      selectedRun = null;
+      selectedRunAttempts = [];
+      clearRunResults();
+    }
     lifecycleError = "";
     pollError = "";
-    clearRunResults();
     stopPolling();
     const token = ++openRunToken;
     const liveAtOpen = runId === activeRunId;

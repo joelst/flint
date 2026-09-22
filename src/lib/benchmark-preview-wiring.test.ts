@@ -110,4 +110,18 @@ describe('benchmark editor wiring', () => {
     expect(clear).toContain('resultLoadRunId = null;');
     expect(clear).toContain('resultLoadPromise = null;');
   });
+
+  it('preserves same-run historical result ownership when the row is reopened', () => {
+    const start = source.indexOf('async function openRun(');
+    const end = source.indexOf('\n  $: progressMatrix', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const openRun = source.slice(start, end);
+    expect(openRun).toContain(
+      'const preserveHistoricalResults = selectedRunId === runId && runId !== activeRunId;',
+    );
+    expect(openRun).toMatch(
+      /if \(!preserveHistoricalResults\) \{[\s\S]*?clearRunResults\(\);[\s\S]*?\}/,
+    );
+  });
 });
