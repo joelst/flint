@@ -21,6 +21,9 @@ describe('prepareHydratedRuntime', () => {
     expect(startupEnd, 'startup sequence end marker not found').toBeGreaterThan(startupStart);
     const startup = source.slice(startupStart, startupEnd);
 
+    expect(startup).toContain('refreshCatalog: false');
+    expect(startup).not.toContain('refreshCatalog: autoRefreshCatalogOnStartup');
+
     const prepareStart = startup.indexOf('prepareAccelerators:');
     const prepareEnd = startup.indexOf('validateAccelerators:');
     expect(prepareStart, 'accelerator stage marker not found').toBeGreaterThan(-1);
@@ -66,6 +69,7 @@ describe('prepareHydratedRuntime', () => {
     expect(startup).toMatch(
       /if \(autoRefreshCatalogOnStartup\) \{\s+await refreshCatalogModels\(\);/,
     );
+    expect(startup.indexOf('await refreshCatalogModels();')).toBeGreaterThan(prepareEnd);
     expect(startup).toContain(
       'state.catalogStatus === "ready"',
     );

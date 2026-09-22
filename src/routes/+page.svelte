@@ -4810,9 +4810,10 @@ updateStateFromSdk();
     const ok = await initializeSDK({
       appName: "flint",
       // Hydrated runtime policy and accelerator registration must land before HTTP startup or
-      // any model preload. Autostart is performed below after those prerequisites complete.
+      // any catalog read or model preload. The native catalog is fixed on first access, so reading
+      // it before provider registration permanently omits those provider-specific variants.
       autoStartService: false,
-      refreshCatalog: autoRefreshCatalogOnStartup,
+      refreshCatalog: false,
       servicePort: networkPort,
       bindAddress: networkBindAddress || undefined,
     });
@@ -4863,11 +4864,7 @@ updateStateFromSdk();
       const release = beginPoolMutation();
       try {
       statusMessage = "Connected to Foundry Local";
-      if (autoRefreshCatalogOnStartup) {
-        await loadModels();
-        await loadRecommendations();
-        await loadSTTModels();
-      } else {
+      if (!autoRefreshCatalogOnStartup) {
         appendAppLog(
           "Automatic startup catalog check is off; recommendations and configured startup preloads are skipped for this launch. Use Refresh catalog to browse models.",
           "info",
@@ -4946,12 +4943,17 @@ updateStateFromSdk();
         }
         if (autoRefreshCatalogOnStartup) {
           await refreshCatalogModels();
+          statusMessage = `${state.models.length} models available`;
           if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
             throw new Error("Runtime changed while refreshing the model catalog");
           }
           await loadRecommendations();
           if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
             throw new Error("Runtime changed while refreshing recommendations");
+          }
+          await loadSTTModels();
+          if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
+            throw new Error("Runtime changed while refreshing the speech model catalog");
           }
         }
       } catch (e: any) {

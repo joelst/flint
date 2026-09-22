@@ -34,6 +34,7 @@ import {
 import {
   applyPreferredExecutionProvider as applyPreferredExecutionProviderTo,
 } from './execution-provider.js';
+import { registerDiscoveredExecutionProviders } from './accelerator-registration.js';
 import {
   stopNativeWebService as stopNativeWebServiceFor,
   waitForHttpReady,
@@ -3580,7 +3581,7 @@ rl.on('line', async (line) => {
       reply({ ok: true, result: eps });
     } else if (cmd === 'ensureAccelerators') {
       if (typeof manager.downloadAndRegisterEps === 'function') {
-        const result = await manager.downloadAndRegisterEps((name, pct) => {
+        const result = await registerDiscoveredExecutionProviders(manager, (name, pct) => {
           send({ id, progress: pct, ep: name });
         });
         reply({ ok: true, result: result ?? null });

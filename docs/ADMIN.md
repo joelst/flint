@@ -46,7 +46,9 @@ also refresh the catalog to show their results.
 
 Accelerator setup is separate from the catalog setting. Flint runs it automatically at startup,
 and Foundry Local may download and register execution-provider components when the machine needs
-them. Turning off the startup catalog check does not disable accelerator setup. Model downloads
+them. Flint completes that registration before its first catalog read so the SDK includes every
+compatible provider-specific variant in the snapshot. Turning off the startup catalog check does
+not disable accelerator setup. Model downloads
 and other explicitly requested model-management operations can also require network access.
 There is currently no separate switch for startup accelerator setup, so prepare the required
 components before disconnecting if the machine must launch fully offline.
