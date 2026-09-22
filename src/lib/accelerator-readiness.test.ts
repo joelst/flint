@@ -48,6 +48,17 @@ describe('publishedAccelerationLabels', () => {
     ])).toEqual(['CPU']);
   });
 
+  it('keeps an execution-provider GPU label when deviceType is absent and the id still says cpu', () => {
+    expect(publishedAccelerationLabels([
+      { id: 'model-generic-cpu:1', executionProvider: 'DmlExecutionProvider' },
+      { id: 'model-generic-cpu:2', executionProvider: 'CUDAExecutionProvider' },
+      { id: 'model-cpu:3', executionProvider: 'WebGpuExecutionProvider' },
+    ])).toEqual(['GPU']);
+    expect(publishedAccelerationLabels([
+      { id: 'model-generic-cpu:4', executionProvider: 'QNNExecutionProvider' },
+    ])).toEqual(['NPU']);
+  });
+
   it('classifies device-qualified OpenVINO builds without treating generic OpenVINO as GPU', () => {
     expect(publishedAccelerationLabels([
       { id: 'example-openvino-gpu:1', executionProvider: 'OpenVINO' },
