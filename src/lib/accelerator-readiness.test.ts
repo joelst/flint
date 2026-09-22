@@ -48,7 +48,7 @@ describe('publishedAccelerationLabels', () => {
     ])).toEqual(['CPU']);
   });
 
-  it('keeps an execution-provider GPU label when deviceType is absent and the id still says cpu', () => {
+  it('lets the execution provider override a CPU-looking id when deviceType is absent', () => {
     expect(publishedAccelerationLabels([
       { id: 'model-generic-cpu:1', executionProvider: 'DmlExecutionProvider' },
       { id: 'model-generic-cpu:2', executionProvider: 'CUDAExecutionProvider' },
@@ -56,6 +56,7 @@ describe('publishedAccelerationLabels', () => {
     ])).toEqual(['GPU']);
     expect(publishedAccelerationLabels([
       { id: 'model-generic-cpu:4', executionProvider: 'QNNExecutionProvider' },
+      { id: 'model-generic-cpu:5', executionProvider: 'VitisAIExecutionProvider' },
     ])).toEqual(['NPU']);
   });
 

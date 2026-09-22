@@ -69,7 +69,7 @@ function publishedAccelerationKind(
 
 function kindFromProviderName(name: string): 'GPU' | 'CPU' | 'NPU' | null {
   if (!name) return null;
-  if (name === 'qnn' || name === 'vitis' || name.includes('npu')) return 'NPU';
+  if (name.includes('qnn') || name.includes('vitis') || name.includes('npu')) return 'NPU';
   if (
     name === 'cuda' || name === 'dml' || name === 'webgpu' || name === 'coreml'
     || name === 'metal' || name === 'rocm'
