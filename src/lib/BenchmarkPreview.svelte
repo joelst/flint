@@ -907,10 +907,12 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
+    color: var(--fg, inherit);
   }
-  .danger-btn {
-    border-color: #ef4444;
-    color: #fecaca;
+  button.tiny.danger-btn {
+    background: var(--danger-btn-bg, #9f1239);
+    border-color: var(--danger-btn-bg, #9f1239);
+    color: var(--danger-btn-fg, #fff);
   }
   .benchmark-active-run-banner {
     display: flex;

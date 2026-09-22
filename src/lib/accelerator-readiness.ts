@@ -35,6 +35,59 @@ function normalizeProviderName(value: string | null | undefined): string {
   return normalized;
 }
 
+export type CatalogVariantAccel = {
+  id?: string | null;
+  deviceType?: string | null;
+  executionProvider?: string | null;
+};
+
+/** Device builds the catalog actually publishes. Not the accelerators installed on this PC. */
+export function publishedAccelerationLabels(
+  variants: readonly CatalogVariantAccel[] | null | undefined,
+): string[] {
+  const found = new Set<'GPU' | 'CPU' | 'NPU'>();
+  for (const variant of variants ?? []) {
+    const kind = publishedAccelerationKind(variant);
+    if (kind) found.add(kind);
+  }
+  return (['GPU', 'CPU', 'NPU'] as const).filter((label) => found.has(label));
+}
+
+function publishedAccelerationKind(
+  variant: CatalogVariantAccel,
+): 'GPU' | 'CPU' | 'NPU' | null {
+  const device = String(variant.deviceType || '').toLowerCase();
+  if (device.includes('npu')) return 'NPU';
+  if (device.includes('gpu')) return 'GPU';
+  if (device.includes('cpu')) return 'CPU';
+  // deviceType is absent. The execution provider is the build; a CPU-looking
+  // id must not override DML/CUDA/WebGPU glued into one token.
+  const fromProvider = kindFromProviderName(normalizeProviderName(variant.executionProvider));
+  if (fromProvider) return fromProvider;
+  return kindFromVariantId(variant.id);
+}
+
+function kindFromProviderName(name: string): 'GPU' | 'CPU' | 'NPU' | null {
+  if (!name) return null;
+  if (name.includes('qnn') || name.includes('vitis') || name.includes('npu')) return 'NPU';
+  if (
+    name === 'cuda' || name === 'dml' || name === 'webgpu' || name === 'coreml'
+    || name === 'metal' || name === 'rocm'
+    || name.includes('gpu') || name.includes('tensorrt')
+  ) return 'GPU';
+  if (name === 'cpu' || name === 'generic') return 'CPU';
+  return null;
+}
+
+function kindFromVariantId(id: string | null | undefined): 'GPU' | 'CPU' | 'NPU' | null {
+  const blob = String(id || '').toLowerCase();
+  if (!blob) return null;
+  if (/qnn|vitis|(?:^|[^a-z0-9])npu(?:[^a-z0-9]|$)/.test(blob)) return 'NPU';
+  if (/(?:^|[^a-z0-9])gpu(?:[^a-z0-9]|$)/.test(blob)) return 'GPU';
+  if (/(?:^|[^a-z0-9])cpu(?:[^a-z0-9]|$)|generic/.test(blob)) return 'CPU';
+  return null;
+}
+
 export function hasRegisteredAccelerator(providers: EpInfo[]): boolean {
   return providers.some(
     (provider) =>
