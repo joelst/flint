@@ -248,6 +248,19 @@
 
   async function refreshCatalogModels() {
     await sdkRefreshModels();
+    // state.models is empty until this returns. Checking earlier always no-ops, and
+    // auto-select will not replace a leftover alias. A conversation's own model stays
+    // so the not-installed explanation is not swapped for another model.
+    if (
+      selectedModelAlias &&
+      selectedModelAlias !== activeConversationModelAlias() &&
+      state.models.length > 0 &&
+      !state.models.some((m: ModelInfo) => m.alias === selectedModelAlias)
+    ) {
+      appendAppLog(`Previously selected model "${selectedModelAlias}" is no longer available`, 'warn');
+      selectedModelAlias = "";
+      selectedModel = null;
+    }
   }
 
   /** About strip — app + Node + service (Help + Settings). */
@@ -4869,25 +4882,6 @@ updateStateFromSdk();
           "Automatic startup catalog check is off; recommendations and configured startup preloads are skipped for this launch. Use Refresh catalog to browse models.",
           "info",
         );
-      }
-
-      // A restored alias for a model that is no longer in the catalog would otherwise pin the
-      // selection forever, because the auto-select effect bails out whenever an alias is set.
-      //
-      // Not applied to an alias the active conversation asked for explicitly. That is a stored
-      // choice rather than a stale global fallback, so clearing it would replace the "not
-      // installed" explanation with a silently auto-selected substitute — and the conversation
-      // would still be storing the model it is no longer shown as using. Read live rather than
-      // from the startup snapshot, because the user may already have switched conversations.
-      if (
-        selectedModelAlias &&
-        selectedModelAlias !== activeConversationModelAlias() &&
-        state.models.length > 0 &&
-        !state.models.some((m: ModelInfo) => m.alias === selectedModelAlias)
-      ) {
-        appendAppLog(`Previously selected model "${selectedModelAlias}" is no longer available`, 'warn');
-        selectedModelAlias = "";
-        selectedModel = null;
       }
 
       let acceleratorReadiness: AcceleratorReadiness;

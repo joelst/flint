@@ -2689,6 +2689,11 @@ rl.on('line', async (line) => {
       usage.clear();
       try {
         stopNativeWebService();
+        // The native listener answers GET /v1/models itself. That read is not one of the
+        // sidecar's catalog calls, and Start is enabled as soon as the runtime is ready,
+        // which is before startup finishes registering providers. Register first or that
+        // request freezes the CPU-only snapshot for the process.
+        await beforeCatalogRead();
         // Start service BEFORE loading models so HTTP routing layer initializes with the registry.
         if (typeof manager.startWebService === 'function') {
           nativeServiceStartAttempted = true;

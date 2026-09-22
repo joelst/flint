@@ -66,6 +66,9 @@ describe('prepareHydratedRuntime', () => {
     const refreshCatalog = source.slice(refreshCatalogStart, refreshCatalogEnd);
     expect(refreshCatalog).toContain('await sdkRefreshModels();');
     expect(refreshCatalog).not.toContain('catalogRefreshError');
+    expect(refreshCatalog.indexOf('is no longer available')).toBeGreaterThan(
+      refreshCatalog.indexOf('await sdkRefreshModels();'),
+    );
     expect(startup).toMatch(
       /if \(autoRefreshCatalogOnStartup\) \{\s+await refreshCatalogModels\(\);/,
     );

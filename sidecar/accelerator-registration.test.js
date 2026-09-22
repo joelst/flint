@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { createCatalogRegistrationGate, registerDiscoveredExecutionProviders } from './accelerator-registration.js';
 
@@ -144,6 +146,18 @@ describe('registerDiscoveredExecutionProviders', () => {
       ['CUDAExecutionProvider'],
     ]);
     expect(result.registeredEps).toEqual(['CPUExecutionProvider', 'CUDAExecutionProvider']);
+  });
+});
+
+describe('native service startup', () => {
+  it('registers providers before startWebService can answer /v1/models', () => {
+    const source = readFileSync(join(process.cwd(), 'sidecar', 'foundry-sidecar-main.js'), 'utf8');
+    const start = source.indexOf("} else if (cmd === 'startService') {");
+    const gate = source.indexOf('await beforeCatalogRead()', start);
+    const web = source.indexOf('manager.startWebService()', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(gate).toBeGreaterThan(start);
+    expect(web).toBeGreaterThan(gate);
   });
 });
 
