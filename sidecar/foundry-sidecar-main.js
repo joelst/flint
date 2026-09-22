@@ -74,6 +74,7 @@ import { normalizeChatResponse } from './chat-response.js';
 import { buildInferenceMetrics } from './inference-metrics.js';
 import { summarizeCacheInventory } from './cache-inventory.js';
 import { createHealthRing } from './health-ring.js';
+import { generateEmbeddings } from './embeddings-session.js';
 import { foundryRuntimePinWarning } from './foundry-runtime-pin.js';
 import { writeProtocolLine } from './protocol-stdout.js';
 
@@ -400,6 +401,7 @@ function validateCommand(cmd, payload) {
 
 let manager = null;
 let FoundryLocalManager = null;
+let FoundrySdkModule = null;
 let initConfig = null; // { appName, logLevel } — kept so startService can re-create manager with webServiceUrls
 let nativeServiceStartAttempted = false;
 const canceledRequests = new Set();
@@ -2300,13 +2302,23 @@ function toFileUrl (filePath) {
   return pathToFileURL(path.resolve(filePath)).href;
 }
 
+function rememberFoundrySdk (mod) {
+  FoundrySdkModule = mod;
+  FoundryLocalManager = mod.FoundryLocalManager;
+  return FoundryLocalManager;
+}
+
+async function getFoundrySdk () {
+  if (!FoundrySdkModule) await getFoundryManager();
+  return FoundrySdkModule;
+}
+
 async function getFoundryManager () {
   if (FoundryLocalManager) return FoundryLocalManager;
   try {
     // Try normal module resolution (works in dev when node_modules is present)
     const mod = await import('foundry-local-sdk');
-    FoundryLocalManager = mod.FoundryLocalManager;
-    return FoundryLocalManager;
+    return rememberFoundrySdk(mod);
   } catch (err) {
     log('warn', `Normal SDK import failed (${err?.message || err}), trying bundled resource paths`);
   }
@@ -2326,8 +2338,7 @@ async function getFoundryManager () {
     try {
       log('info', `Loading Foundry SDK from ${sdkEntry}`);
       const mod = await import(toFileUrl(sdkEntry));
-      FoundryLocalManager = mod.FoundryLocalManager;
-      return FoundryLocalManager;
+      return rememberFoundrySdk(mod);
     } catch (e) {
       lastErr = e;
       log('warn', `Failed loading SDK from ${sdkEntry}: ${e?.message || e}`);
@@ -3554,11 +3565,9 @@ rl.on('line', async (line) => {
       try {
         const poolEntry = await ensureModel(modelAlias);
         const embedModel = poolEntry.catModel;
-        if (typeof embedModel?.createEmbeddingClient !== 'function') {
-          throw new Error(`Model ${modelAlias} does not expose createEmbeddingClient`);
-        }
-        const client = embedModel.createEmbeddingClient();
-        const result = await client.generateEmbeddings(inputs);
+        if (!embedModel) throw new Error(`Model ${modelAlias} is not loaded`);
+        const sdk = await getFoundrySdk();
+        const result = await generateEmbeddings(embedModel, inputs, sdk);
         embedOk = true;
         audit('embedTexts', { alias: modelAlias, count: inputs.length });
         reply({ ok: true, result });
