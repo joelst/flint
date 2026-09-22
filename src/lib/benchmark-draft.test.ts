@@ -316,6 +316,7 @@ describe('case rows', () => {
     expect(newPromptCaseRow(['c1'])).toMatchObject({ kind: 'prompt', id: 'c2' });
     expect(newPromptCaseRow(['c1', 'c2'])).toMatchObject({ id: 'c3' });
     expect(newPromptCaseRow(['c1', 'c3'])).toMatchObject({ id: 'c4' });
+    expect(newPromptCaseRow([' c2 '])).toMatchObject({ id: 'c3' });
   });
 });
 

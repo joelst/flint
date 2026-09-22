@@ -148,7 +148,7 @@ export function tagsJsonError(raw: string): string | null {
 }
 
 export function newPromptCaseRow(existingIds: readonly string[]): SuiteCaseRow {
-  const taken = new Set(existingIds);
+  const taken = new Set(existingIds.map((id) => id.trim()));
   let n = existingIds.length + 1;
   let id = `c${n}`;
   while (taken.has(id)) {

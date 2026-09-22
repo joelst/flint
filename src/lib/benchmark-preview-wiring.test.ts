@@ -64,4 +64,15 @@ describe('benchmark editor wiring', () => {
     expect(source).toContain('Benchmark targets are keyed by alias.');
     expect(source).toContain('{#each editingNotices as notice}');
   });
+
+  it('loads results when a run stops being active while it is opened', () => {
+    const start = source.indexOf('async function openRun(');
+    const end = source.indexOf('\n  $: progressMatrix', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const openRun = source.slice(start, end);
+    expect(openRun).toContain('const liveAtOpen = runId === activeRunId;');
+    expect(openRun).toContain('if (!liveAtOpen) void loadRunResults(runId);');
+    expect(openRun).toContain('else if (liveAtOpen) void loadRunResults(runId);');
+  });
 });

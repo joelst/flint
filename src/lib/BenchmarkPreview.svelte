@@ -578,15 +578,16 @@
     clearRunResults();
     stopPolling();
     const token = ++openRunToken;
+    const liveAtOpen = runId === activeRunId;
     // A historical run does not start the summary poll. A failed summary read
     // returns "keep" and never reaches the full-attempt load, so that load has
     // to start here. A live run still waits for the poll to stop.
-    if (runId !== activeRunId) void loadRunResults(runId);
+    if (!liveAtOpen) void loadRunResults(runId);
     await refreshSelectedRun();
     if (token !== openRunToken || selectedRunId !== runId || destroyed) return;
     if (runId === activeRunId) {
       schedulePoll(runId);
-    }
+    } else if (liveAtOpen) void loadRunResults(runId);
   }
 
   $: progressMatrix = selectedRun
