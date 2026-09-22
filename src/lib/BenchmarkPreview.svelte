@@ -378,6 +378,10 @@
       editingCaseRows = parsed.rows;
       casesAdvanced = false;
       editingErrors = [];
+    } catch {
+      if (!destroyed && editingDraft === draftAtImport) {
+        editingErrors = ["Could not read JSONL file"];
+      }
     } finally {
       casesImporting = false;
     }

@@ -78,6 +78,8 @@ describe('benchmark editor wiring', () => {
       importCasesFile.indexOf('jsonlImportCanFitCharacterLimit(file.size)'),
     );
     expect(importCasesFile).toContain('editingDraft.casesJsonl = text;');
+    expect(importCasesFile).toContain('if (!destroyed && editingDraft === draftAtImport)');
+    expect(importCasesFile).toContain('editingErrors = ["Could not read JSONL file"];');
   });
 
   it('loads results when a run stops being active while it is opened', () => {

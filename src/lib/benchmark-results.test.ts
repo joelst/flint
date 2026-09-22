@@ -33,7 +33,8 @@ function attempt(over: Partial<BenchmarkAttempt> & Pick<BenchmarkAttempt, 'id' |
 }
 
 describe('responseTimeMs', () => {
-  it('is the full call, clamped at 0 when the clock steps backward', () => {
+  it('prefers the monotonic duration and falls back to wall-clock stamps for older rows', () => {
+    expect(responseTimeMs({ sdkCallStartedAt: 200, sdkCallDurationMs: 75, settledAt: 150 })).toBe(75);
     expect(responseTimeMs({ sdkCallStartedAt: 50, settledAt: 150 })).toBe(100);
     expect(responseTimeMs({ sdkCallStartedAt: 200, settledAt: 150 })).toBe(0);
   });

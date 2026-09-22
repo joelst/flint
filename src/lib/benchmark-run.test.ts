@@ -295,6 +295,13 @@ describe('isBenchmarkAttempt', () => {
     expect(isBenchmarkAttempt(attempt({ status: 'succeeded', responseText: 'ok', settledAt: 2 }))).toBe(true);
   });
 
+  it('accepts only finite non-negative monotonic call durations', () => {
+    expect(isBenchmarkAttempt(attempt({ sdkCallDurationMs: 0 }))).toBe(true);
+    expect(isBenchmarkAttempt(attempt({ sdkCallDurationMs: 12.5 }))).toBe(true);
+    expect(isBenchmarkAttempt(attempt({ sdkCallDurationMs: -1 }))).toBe(false);
+    expect(isBenchmarkAttempt(attempt({ sdkCallDurationMs: Number.NaN }))).toBe(false);
+  });
+
   it('rejects a warmup attempt carrying non-null caseIndex/repeatIndex', () => {
     expect(isBenchmarkAttempt(attempt({ phase: 'warmup', caseIndex: 0, repeatIndex: 0 }))).toBe(false);
   });

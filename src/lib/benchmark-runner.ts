@@ -242,6 +242,7 @@ async function executePositions(
     // view cannot invent a duration for a call that never settled. This is the full
     // transport call, not time to first token.
     const sdkCallStartedAt = Date.now();
+    const sdkCallStartedMonotonicAt = performance.now();
     let transportResult: AttemptTransportResult;
     try {
       transportResult = await transport({
@@ -264,8 +265,8 @@ async function executePositions(
       // of both looking identical.
       return haltWith(run, 'stopped', undefined, transportResult.errorMessage);
     }
-
     const settledAt = Date.now();
+    const sdkCallDurationMs = Math.max(0, performance.now() - sdkCallStartedMonotonicAt);
     const terminalWrite = transportResult.ok
       ? await recordAttemptTerminal(intent.id, {
           status: 'succeeded',
@@ -274,12 +275,14 @@ async function executePositions(
           usage: transportResult.usage,
           ttftMs: transportResult.ttftMs,
           sdkCallStartedAt,
+          sdkCallDurationMs,
           settledAt,
         })
       : await recordAttemptTerminal(intent.id, {
           status: 'failed',
           errorMessage: transportResult.errorMessage,
           sdkCallStartedAt,
+          sdkCallDurationMs,
           settledAt,
         });
 
@@ -297,8 +300,8 @@ async function executePositions(
     attemptsSoFar[attemptsSoFar.length - 1] = {
       ...intent,
       ...(transportResult.ok
-        ? { status: 'succeeded' as const, responseText: transportResult.responseText, sdkCallStartedAt, settledAt }
-        : { status: 'failed' as const, errorMessage: transportResult.errorMessage, sdkCallStartedAt, settledAt }),
+        ? { status: 'succeeded' as const, responseText: transportResult.responseText, sdkCallStartedAt, sdkCallDurationMs, settledAt }
+        : { status: 'failed' as const, errorMessage: transportResult.errorMessage, sdkCallStartedAt, sdkCallDurationMs, settledAt }),
     };
   }
 

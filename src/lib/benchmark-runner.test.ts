@@ -385,6 +385,32 @@ describe('startBenchmarkRun', () => {
     }
   });
 
+  it('records response duration with a monotonic clock when the wall clock moves backward', async () => {
+    let wallClock = 1_000;
+    let monotonicClock = 100;
+    const dateNow = vi.spyOn(Date, 'now').mockImplementation(() => wallClock);
+    const performanceNow = vi.spyOn(performance, 'now').mockImplementation(() => monotonicClock);
+    try {
+      const outcome = await startStored(
+        suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] }),
+        async () => {
+          wallClock = 500;
+          monotonicClock = 175;
+          return { ok: true, responseText: 'ok' };
+        },
+      );
+      const attempts = await listAttemptsForRun(outcome.run!.id);
+      expect(attempts.value![0]).toMatchObject({
+        sdkCallStartedAt: 1_000,
+        sdkCallDurationMs: 75,
+        settledAt: 500,
+      });
+    } finally {
+      dateNow.mockRestore();
+      performanceNow.mockRestore();
+    }
+  });
+
   it('records a failed attempt without halting the run when the transport reports failure', async () => {
     const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] });
     const { transport } = scriptedTransport([{ ok: false, errorMessage: 'model unavailable' }]);
