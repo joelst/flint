@@ -111,15 +111,15 @@ console.log('FoundryLocalManager:', typeof mod.FoundryLocalManager);
 const plat = process.platform + '-' + process.arch;
 const coreName =
   process.platform === 'win32'
-    ? 'Microsoft.AI.Foundry.Local.Core.dll'
+    ? 'foundry_local.dll'
     : process.platform === 'darwin'
-      ? 'Microsoft.AI.Foundry.Local.Core.dylib'
-      : 'Microsoft.AI.Foundry.Local.Core.so';
+      ? 'libfoundry_local.dylib'
+      : 'libfoundry_local.so';
 const core = path.join(
   root,
   'node_modules',
   'foundry-local-sdk',
-  'foundry-local-core',
+  'prebuilds',
   plat,
   coreName,
 );

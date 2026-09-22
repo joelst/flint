@@ -17,7 +17,7 @@ Rubber-duck: this is not a security product. The boundary already exists; 1.0 re
 - Prune unused grants: opener plugin (renderer never imported it); `$RESOURCE` read scope (sidecar paths are native `trusted_runtime_paths`); redundant `core:tray:default` / `core:menu:default` (already in `core:default`). Keep `$RESOURCE` write deny. Comment each survivor.
 - Dedicated `src/lib/security-boundary.test.ts` that fails CI if opener/spawn/kill return, `$RESOURCE` reads return, shell execute is more than `node -v`, IPC allowlists drift, or BYOM `isInsideRoot` accepts a traversal.
 - Cache `runtime/foundry-native-cache` in CI/release. CI runs `npm run ci:deps` (extract packages, restore cache, `npm rebuild`) so the SDK `skipIfPresent` installer sees the cores. There is no root `preinstall` restore; that hook cannot run before the SDK installer.
-- Pin `foundry-local-sdk` to `1.2.4`. Warn (do not fail) at sidecar `init` when loaded SDK/core versions differ from that pin.
+- Pin `foundry-local-sdk` to `2.0.1`. Warn (do not fail) at sidecar `init` when loaded SDK/core versions differ from that pin.
 
 ### Wave 2 — Native lifecycle and conversation integrity
 

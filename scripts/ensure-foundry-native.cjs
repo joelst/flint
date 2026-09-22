@@ -1,5 +1,5 @@
-// Ensure Foundry Local native core binaries exist before tauri build.
-// Downloaded into node_modules/foundry-local-sdk/foundry-local-core/<platformKey>/.
+// Ensure Foundry Local native binaries exist before tauri build.
+// Foundry SDK 2.0 ships them in node_modules/foundry-local-sdk/prebuilds/<platformKey>/.
 //
 // Invoked from tauri.conf.json beforeBuildCommand.
 //
@@ -12,7 +12,6 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execFileSync } = require('child_process');
 
 const root = path.resolve(__dirname, '..');
 
@@ -118,15 +117,10 @@ function resolvePlatformKey() {
   };
 }
 
-function coreExtension(platformKey) {
-  if (platformKey.startsWith('win32')) return '.dll';
-  if (platformKey.startsWith('darwin')) return '.dylib';
-  return '.so';
-}
-
-function nodePlatformArch(platformKey) {
-  const [platform, arch] = platformKey.split('-');
-  return { platform, arch };
+function nativeLibName(platformKey) {
+  if (platformKey.startsWith('win32')) return 'foundry_local.dll';
+  if (platformKey.startsWith('darwin')) return 'libfoundry_local.dylib';
+  return 'libfoundry_local.so';
 }
 
 function corePathFor(platformKey) {
@@ -134,9 +128,9 @@ function corePathFor(platformKey) {
     root,
     'node_modules',
     'foundry-local-sdk',
-    'foundry-local-core',
+    'prebuilds',
     platformKey,
-    `Microsoft.AI.Foundry.Local.Core${coreExtension(platformKey)}`
+    nativeLibName(platformKey),
   );
 }
 
@@ -147,54 +141,6 @@ function coreOk(corePath) {
   } catch {
     return false;
   }
-}
-
-/**
- * Run foundry-local-sdk install-standard.cjs as if on the *target* platform.
- * install-utils.cjs snapshots os.platform()/os.arch() at load time, so we must
- * patch `os` before requiring the install script when host ≠ target.
- */
-function runInstallForPlatformKey(platformKey) {
-  const standardScript = path.join(
-    root,
-    'node_modules',
-    'foundry-local-sdk',
-    'script',
-    'install-standard.cjs'
-  );
-  if (!fs.existsSync(standardScript)) {
-    return false;
-  }
-
-  const { platform, arch } = nodePlatformArch(platformKey);
-  const hostKey = `${process.platform}-${process.arch}`;
-
-  if (platformKey === hostKey) {
-    log(`Running install-standard.cjs for host ${platformKey}...`);
-    execFileSync(process.execPath, [standardScript], {
-      cwd: root,
-      stdio: 'inherit',
-      env: process.env,
-    });
-    return true;
-  }
-
-  // Cross-target: patch os.platform/arch before the install utils load.
-  log(
-    `Host is ${hostKey}; installing natives for build target ${platformKey} (patched os.platform/arch)...`
-  );
-  const bootstrap = `
-    const os = require('os');
-    os.platform = () => ${JSON.stringify(platform)};
-    os.arch = () => ${JSON.stringify(arch)};
-    require(${JSON.stringify(standardScript)});
-  `;
-  execFileSync(process.execPath, ['-e', bootstrap], {
-    cwd: root,
-    stdio: 'inherit',
-    env: process.env,
-  });
-  return true;
 }
 
 // --- main ---
@@ -220,29 +166,8 @@ if (coreOk(corePath)) {
 }
 
 log(`Missing or too small: ${path.relative(root, corePath)}`);
-log('Native Foundry Local binaries are not present. Downloading via package install script...');
-
-let ran = false;
-try {
-  ran = runInstallForPlatformKey(platformKey);
-} catch (err) {
-  fail(`Install script failed: ${err instanceof Error ? err.message : err}`);
-}
-
-if (!ran) {
-  fail(
-    'No foundry-local-sdk install script found. Run `npm install` first (lifecycle scripts must be enabled).'
-  );
-}
-
-if (!coreOk(corePath)) {
-  fail(
-    `Still missing after install: ${path.relative(root, corePath)}\n` +
-      '  Release installers will be broken without this file.\n' +
-      '  Re-run npm install with scripts enabled, then npm run ensure:foundry.\n' +
-      `  For cross-targets: ensure:foundry --target <triple> or FOUNDRY_PLATFORM_KEY=${platformKey}`
-  );
-}
-
-const st = fs.statSync(corePath);
-log(`Installed OK (${(st.size / (1024 * 1024)).toFixed(1)} MB): ${path.relative(root, corePath)}`);
+fail(
+  `Foundry 2.0 natives are missing: ${path.relative(root, corePath)}\n` +
+    '  They ship inside the foundry-local-sdk package (prebuilds/).\n' +
+    '  Re-run npm install with scripts enabled, then npm run ensure:foundry.'
+);

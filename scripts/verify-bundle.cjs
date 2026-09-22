@@ -1,5 +1,5 @@
 // Verify Foundry Local native binaries are present for packaging / after build.
-// Fails hard when Microsoft.AI.Foundry.Local.Core is missing — that is the
+// Fails hard when foundry_local is missing — that is the
 // FoundryLocalCorePath error mode in release installs.
 
 'use strict';
@@ -35,9 +35,12 @@ const releaseDir = buildTarget
   : path.join(root, 'src-tauri', 'target', 'release');
 
 const platformKey = `${process.platform}-${process.arch}`;
-const coreExt =
-  process.platform === 'win32' ? '.dll' : process.platform === 'darwin' ? '.dylib' : '.so';
-const coreFile = `Microsoft.AI.Foundry.Local.Core${coreExt}`;
+const coreFile =
+  process.platform === 'win32'
+    ? 'foundry_local.dll'
+    : process.platform === 'darwin'
+      ? 'libfoundry_local.dylib'
+      : 'libfoundry_local.so';
 
 let failed = false;
 
@@ -55,7 +58,7 @@ function escapeRegExp(value) {
 }
 
 function checkCoreAt(label, dir) {
-  const corePath = path.join(dir, 'foundry-local-core', platformKey, coreFile);
+  const corePath = path.join(dir, 'prebuilds', platformKey, coreFile);
   if (!fs.existsSync(corePath)) {
     bad(`${label}: missing ${path.relative(root, corePath)}`);
     return;
@@ -116,7 +119,7 @@ if (!fs.existsSync(sdkRoot)) {
   bad('node_modules/foundry-local-sdk not installed — run npm install');
 } else {
   checkCoreAt('node_modules', sdkRoot);
-  const prebuild = path.join(sdkRoot, 'prebuilds', platformKey, 'foundry_local_napi.node');
+  const prebuild = path.join(sdkRoot, 'prebuilds', platformKey, 'foundry_local_node.node');
   if (fs.existsSync(prebuild)) {
     ok(`prebuild present: ${path.relative(root, prebuild)}`);
   } else {
@@ -152,9 +155,9 @@ if (fs.existsSync(releaseDir)) {
   const nsiPath = path.join(releaseDir, 'nsis', 'x64', 'installer.nsi');
   if (fs.existsSync(nsiPath)) {
     const nsi = fs.readFileSync(nsiPath, 'utf8');
-    // NSI lists each resource with File /oname=...foundry-local-core\win32-x64\...
+    // NSI lists each resource with File /oname=...prebuilds\win32-x64\...
     const coreRe = new RegExp(
-      `foundry-local-core[\\\\/]${escapeRegExp(platformKey)}[\\\\/]${escapeRegExp(coreFile)}`,
+      `prebuilds[\\\\/]${escapeRegExp(platformKey)}[\\\\/]${escapeRegExp(coreFile)}`,
       'i'
     );
     if (coreRe.test(nsi) || nsi.includes(coreFile)) {

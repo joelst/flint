@@ -18,13 +18,14 @@ const APP = `flint-byom-test-${process.pid}`;
 const appHome = path.join(os.homedir(), `.${APP}`);
 const cacheRoot = path.join(appHome, 'cache', 'models');
 const libraryPath = path.resolve(
-  'node_modules/foundry-local-sdk/foundry-local-core/win32-x64/Microsoft.AI.Foundry.Local.Core.dll',
+  'node_modules/foundry-local-sdk/prebuilds/win32-x64',
 );
 
 // The native core is Windows-only and ships as a platform binary. Tests that ask the
 // real SDK to resolve an imported model can only run where that binary exists; the
 // rest of this file drives the sidecar directly and runs everywhere.
-const hasNativeSdk = process.platform === 'win32' && fs.existsSync(libraryPath);
+const hasNativeSdk = process.platform === 'win32'
+  && fs.existsSync(path.join(libraryPath, 'foundry_local.dll'));
 
 let proc: ChildProcessWithoutNullStreams;
 let nextId = 1;

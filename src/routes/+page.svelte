@@ -661,6 +661,19 @@
   let searchTerm = $state("");
   let statusMessage = $state("");
 
+  /** Header status is one line. Native load failures append a stack that would
+   * stretch the bar; the useful sentence stays here and the full text goes to the log. */
+  function briefStatusFailure(prefix: string, error: unknown): string {
+    const raw = String((error as { message?: string })?.message || error || prefix);
+    const json = raw.match(/JSON Error:\s*(.+?)\s+at line/i);
+    const detail = (json ? json[1] : raw.split(/\s+at\s+Microsoft\./)[0])
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(new RegExp(`^${prefix}:\\s*`), "");
+    const line = `${prefix}: ${detail}`;
+    return line.length > 180 ? `${line.slice(0, 177)}…` : line;
+  }
+
   // Mirror of SDK store for easy template access
   let state = $state({
     runtime: {
@@ -5460,7 +5473,8 @@ updateStateFromSdk();
       }
       await selectAndChat(model);
     } catch (e: any) {
-      statusMessage = `Load failed: ${e?.message || e}`;
+      appendAppLog(`Load failed: ${e?.message || e}`, "error");
+      statusMessage = briefStatusFailure("Load failed", e);
     }
   }
 
@@ -5721,7 +5735,9 @@ updateStateFromSdk();
       appendAppLog(`Loading model ${model.alias} (chat lane)`);
       loadResult = await sendLoadToSidecar(model, 'chat');
     } catch (e: any) {
-      statusMessage = `Load failed: ${e?.message || e}`;
+      const full = `Load failed: ${e?.message || e}`;
+      appendAppLog(full, "error");
+      statusMessage = briefStatusFailure("Load failed", e);
       throw e;
     } finally {
       release();
@@ -5866,7 +5882,8 @@ updateStateFromSdk();
       statusMessage = `${model.alias} loaded (${shortVariantLabel(variantId)})${serviceQualifier(startResult.result)}`;
       await refreshCatalogModels();
     } catch (e: any) {
-      statusMessage = `Load failed: ${e?.message || e}`;
+      appendAppLog(`Load failed: ${e?.message || e}`, "error");
+      statusMessage = briefStatusFailure("Load failed", e);
     } finally {
       release();
     }
@@ -5910,7 +5927,8 @@ updateStateFromSdk();
       currentView = "chat";
       persistChat();
     } catch (e: any) {
-      statusMessage = `Load & Chat failed: ${e?.message || e}`;
+      appendAppLog(`Load & Chat failed: ${e?.message || e}`, "error");
+      statusMessage = briefStatusFailure("Load & Chat failed", e);
     } finally {
       release();
     }
@@ -7242,7 +7260,7 @@ Output only the summary text, no preamble.`;
         <button class="tiny" onclick={startLocalService} disabled={serviceTransitionBusy || benchmarkRunInFlight}>Start Service</button>
       {/if}
 
-      <span class="status-msg">{statusMessage}</span>
+      <span class="status-msg" title={statusMessage}>{statusMessage}</span>
     </div>
 
     <div class="header-actions">
@@ -10130,7 +10148,8 @@ Output only the summary text, no preamble.`;
                                 await refreshCatalogModels();
                                 statusMessage = `Loaded ${slot.label}`;
                               } catch (err: any) {
-                                statusMessage = `Load failed: ${err?.message || err}`;
+                                appendAppLog(`Load failed: ${err?.message || err}`, "error");
+                                statusMessage = briefStatusFailure("Load failed", err);
                               } finally {
                                 release();
                               }
@@ -10931,9 +10950,11 @@ Output only the summary text, no preamble.`;
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 16px;
     padding: 12px 20px;
     background: var(--header-bg);
     border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
   }
 
   .brand {
@@ -10956,6 +10977,9 @@ Output only the summary text, no preamble.`;
     align-items: center;
     gap: 16px;
     font-size: 0.875rem;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
   }
 
   .status {
@@ -11050,6 +11074,13 @@ Output only the summary text, no preamble.`;
     gap: 4px;
   }
 
+  /* Global `button` is white text on the navy fill. Tiny buttons sit on the
+     panel instead, which is white in light mode — without this the Check and
+     Recheck labels disappear. Danger buttons keep their own color. */
+  button.tiny:not(.danger-btn) {
+    color: var(--fg);
+  }
+
   a.tiny {
     font-size: 0.7rem;
     padding: 1px 6px;
@@ -11106,6 +11137,18 @@ Output only the summary text, no preamble.`;
   .status-msg {
     color: var(--muted);
     font-size: 0.8rem;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
   }
 
   .body {
