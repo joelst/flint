@@ -10,7 +10,7 @@
     setAutomaticCatalogRefreshEnabled,
     getSDKState,
     getEps,
-    refreshModels,
+    refreshModels as sdkRefreshModels,
     ensureAccelerators,
     isAcceleratorReadinessCurrent,
     getRecommendedStarterModels,
@@ -243,6 +243,11 @@
   const FIRST_RUN_KEY = "flint-first-run-dismissed-v1";
   let showFirstRunCoach = $state(false);
   let catalogCheckedThisSession = $state(false);
+
+  async function refreshCatalogModels() {
+    await sdkRefreshModels();
+    catalogCheckedThisSession = true;
+  }
 
   /** About strip — app + Node + service (Help + Settings). */
   const appVersion = String((packageJson as { version?: string }).version || "0.0.0");
@@ -865,8 +870,7 @@
     // close, that window — the sidecar's own admission check is still the last line of defense
     // for anything pinned between this read and the push below.
     try {
-      await refreshModels();
-      catalogCheckedThisSession = true;
+      await refreshCatalogModels();
     } catch (e) {
       appendAppLog(`Benchmark: could not refresh pool state before pinning (${(e as any)?.message || e})`, 'warn');
     }
@@ -4031,8 +4035,7 @@ updateStateFromSdk();
         statusMessage = comparePrepStatus;
       },
     );
-    await refreshModels();
-    catalogCheckedThisSession = true;
+    await refreshCatalogModels();
   }
 
   async function ensureServiceForCompare(alias: string) {
@@ -4070,7 +4073,7 @@ updateStateFromSdk();
     try {
       comparePrepStatus = `Unloading ${slot.label}…`;
       await sdkUnloadModel({ alias: slot.alias });
-      await refreshModels();
+      await refreshCatalogModels();
     } catch (e: any) {
       console.warn("Compare unload failed", e);
     }
@@ -4951,7 +4954,7 @@ updateStateFromSdk();
           throw new Error("Runtime changed while refreshing execution providers");
         }
         if (autoRefreshCatalogOnStartup) {
-          await refreshModels();
+          await refreshCatalogModels();
           if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
             throw new Error("Runtime changed while refreshing the model catalog");
           }
@@ -5119,8 +5122,7 @@ updateStateFromSdk();
     if (!state.ready) return;
     isLoadingModels = true;
     try {
-      await refreshModels();
-      catalogCheckedThisSession = true;
+      await refreshCatalogModels();
       statusMessage = `${state.models.length} models available`;
       // Keep STT list fresh too (metadata driven)
       void loadSTTModels();
@@ -5238,7 +5240,7 @@ updateStateFromSdk();
   }
 
   async function refreshServiceStatus() {
-    await refreshModels();
+    await refreshCatalogModels();
     updateStateFromSdk();
   }
 
@@ -5336,7 +5338,7 @@ updateStateFromSdk();
         if (!isAcceleratorReadinessCurrent(readiness)) {
           throw new Error("Runtime changed while refreshing execution providers");
         }
-        await refreshModels();
+        await refreshCatalogModels();
         if (!isAcceleratorReadinessCurrent(readiness)) {
           throw new Error("Runtime changed while refreshing the model catalog");
         }
@@ -5470,7 +5472,7 @@ updateStateFromSdk();
       audioLaneModelAlias = alias;
 
       statusMessage = `Audio ready: ${alias}`;
-      await refreshModels();
+      await refreshCatalogModels();
       await loadSTTModels();
     } catch (e: any) {
       statusMessage = `Failed to prepare STT model: ${e?.message || e}`;
@@ -5660,7 +5662,7 @@ updateStateFromSdk();
       );
       setModelRuntimeMeta(model.alias, { downloadedAt: new Date().toISOString() });
       statusMessage = `${model.alias} downloaded`;
-      await refreshModels();
+      await refreshCatalogModels();
     } catch (e: any) {
       statusMessage = `Download failed: ${e?.message || e}`;
       throw e;
@@ -5723,7 +5725,7 @@ updateStateFromSdk();
     }
 
     try {
-      await refreshModels();
+      await refreshCatalogModels();
     } catch (e: any) {
       // The list is a view of the model, not the model itself, so a stale list does not make the
       // loaded model unusable — and saying "load failed" about a model that is loaded would send
@@ -5820,7 +5822,7 @@ updateStateFromSdk();
       statusMessage = `Unloading ${model.alias}...`;
       await sdkUnloadModel(model);
       statusMessage = `${model.alias} unloaded`;
-      await refreshModels();
+      await refreshCatalogModels();
     } catch (e: any) {
       statusMessage = `Unload failed: ${e?.message || e}`;
     } finally {
@@ -5847,7 +5849,7 @@ updateStateFromSdk();
       await sdkLoadModel(model, "chat", variantId);
       const startResult = await startServiceForModel(model.alias);
       statusMessage = `${model.alias} loaded (${shortVariantLabel(variantId)})${serviceQualifier(startResult.result)}`;
-      await refreshModels();
+      await refreshCatalogModels();
     } catch (e: any) {
       statusMessage = `Load failed: ${e?.message || e}`;
     } finally {
@@ -5888,7 +5890,7 @@ updateStateFromSdk();
         contextTurns = recommendedMaxTurns;
       }
       const startResult = await startServiceForModel(model.alias);
-      await refreshModels();
+      await refreshCatalogModels();
       statusMessage = `Chatting with ${model.alias} (${shortVariantLabel(variantId)})${serviceQualifier(startResult.result)}`;
       currentView = "chat";
       persistChat();
@@ -5921,7 +5923,7 @@ updateStateFromSdk();
       );
       setModelRuntimeMeta(model.alias, { downloadedAt: new Date().toISOString() });
       statusMessage = `${model.alias} variant downloaded`;
-      await refreshModels();
+      await refreshCatalogModels();
     } catch (e: any) {
       statusMessage = `Download failed: ${e?.message || e}`;
     } finally {
@@ -5958,7 +5960,7 @@ updateStateFromSdk();
         }
         await sdkDeleteModel(model, variantId);
         // If no other variants remain cached, clear selection/meta like full delete
-        await refreshModels();
+        await refreshCatalogModels();
         const refreshed = state.models.find((m: ModelInfo) => m.alias === model.alias);
         const anyCached =
           refreshed?.isCached ||
@@ -6044,7 +6046,7 @@ updateStateFromSdk();
           persistChat();
         }
         statusMessage = `${model.alias} deleted`;
-        await refreshModels();
+        await refreshCatalogModels();
       } finally {
         release();
       }
@@ -6054,7 +6056,7 @@ updateStateFromSdk();
       statusMessage = isUncertainOutcome(e)
         ? e?.message || String(e)
         : `Delete failed: ${e?.message || e}`;
-      await refreshModels().catch(() => {});
+      await refreshCatalogModels().catch(() => {});
     }
   }
 
@@ -10083,7 +10085,7 @@ Output only the summary text, no preamble.`;
                                   "chat",
                                   slot.variantId ?? undefined,
                                 );
-                                await refreshModels();
+                                await refreshCatalogModels();
                                 statusMessage = `Loaded ${slot.label}`;
                               } catch (err: any) {
                                 statusMessage = `Load failed: ${err?.message || err}`;

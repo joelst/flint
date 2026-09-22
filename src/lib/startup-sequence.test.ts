@@ -45,14 +45,20 @@ describe('prepareHydratedRuntime', () => {
       'if (autoRefreshCatalogOnStartup && startupEntries.length > 0) {',
     );
 
+    expect(source).toMatch(
+      /async function refreshCatalogModels\(\) \{\s+await sdkRefreshModels\(\);\s+catalogCheckedThisSession = true;\s+\}/,
+    );
+    expect(startup).toMatch(
+      /if \(autoRefreshCatalogOnStartup\) \{\s+await refreshCatalogModels\(\);/,
+    );
+
     const loadModelsStart = source.indexOf('async function loadModels()');
     const loadModelsEnd = source.indexOf('async function loadRecommendations()');
     expect(loadModelsStart, 'loadModels marker not found').toBeGreaterThan(-1);
     expect(loadModelsEnd, 'loadRecommendations marker not found').toBeGreaterThan(loadModelsStart);
     const loadModels = source.slice(loadModelsStart, loadModelsEnd);
-    expect(loadModels).toMatch(
-      /await refreshModels\(\);\s+catalogCheckedThisSession = true;/,
-    );
+    expect(loadModels).toContain('await refreshCatalogModels();');
+    expect(source).not.toMatch(/await refreshModels\(/);
   });
 
   it('applies memory policy, then accelerators, then optional service startup', async () => {
