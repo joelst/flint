@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { aliasChoicesForTarget, applyTargetAlias, buildSuiteFromDraft, cachedVariantIds, caseRowsFromJsonl, copiedSuiteName, draftEditsSuite, draftFromSuite, duplicateSuiteDraft, estimateDraftAttempts, jsonlFromCaseRows, newPromptCaseRow, optionalDraftNumber, variantChoicesForTarget, type SuiteDraft } from './benchmark-draft';
+import { aliasChoicesForTarget, applyTargetAlias, buildSuiteFromDraft, cachedVariantIds, caseRowsFromJsonl, copiedSuiteName, draftEditsSuite, draftFromSuite, duplicateSuiteDraft, estimateDraftAttempts, jsonlFromCaseRows, jsonlImportCanFitCharacterLimit, newPromptCaseRow, optionalDraftNumber, variantChoicesForTarget, type SuiteDraft } from './benchmark-draft';
 import { BENCHMARK_MAX_ATTEMPTS, BENCHMARK_MAX_JSONL_CHARS, BENCHMARK_MAX_NAME_LENGTH } from './benchmark-suite';
 import type { BenchmarkSuite } from './benchmark-suite';
 
@@ -60,6 +60,15 @@ describe('buildSuiteFromDraft', () => {
     expect(cleared.value!.maxTokens).toBeUndefined();
     const invalid = buildSuiteFromDraft(baseDraft({ temperature: Number.NaN }));
     expect(invalid.ok).toBe(false);
+  });
+
+  it('keeps numeric input text parseable until save', () => {
+    const intermediate = baseDraft({ temperature: '0.', maxTokens: '256' });
+    expect(intermediate.temperature).toBe('0.');
+    const result = buildSuiteFromDraft(intermediate);
+    expect(result.ok).toBe(true);
+    expect(result.value!.temperature).toBe(0);
+    expect(result.value!.maxTokens).toBe(256);
   });
 
   it('rejects a draft with no targets, matching validateBenchmarkSuite\'s own target-count rule', () => {
@@ -190,6 +199,17 @@ describe('optionalDraftNumber', () => {
     expect(optionalDraftNumber('0.2')).toBe(0.2);
     expect(optionalDraftNumber(0)).toBe(0);
     expect(optionalDraftNumber('nope')).toBeNaN();
+  });
+});
+
+describe('jsonlImportCanFitCharacterLimit', () => {
+  it('allows multibyte UTF-8 files that can still fit the character cap', () => {
+    expect(jsonlImportCanFitCharacterLimit(BENCHMARK_MAX_JSONL_CHARS * 2)).toBe(true);
+  });
+
+  it('rejects only byte sizes that cannot fit the character cap', () => {
+    expect(jsonlImportCanFitCharacterLimit(BENCHMARK_MAX_JSONL_CHARS * 3)).toBe(true);
+    expect(jsonlImportCanFitCharacterLimit(BENCHMARK_MAX_JSONL_CHARS * 3 + 1)).toBe(false);
   });
 });
 

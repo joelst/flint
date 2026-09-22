@@ -16,12 +16,11 @@
     BENCHMARK_MAX_ATTEMPTS,
     BENCHMARK_MAX_CASES,
     BENCHMARK_MAX_JSONL_CHARS,
-    BENCHMARK_MAX_TOKENS_LIMIT,
     isBenchmarkSuite,
     type BenchmarkSuite,
     type BenchmarkTarget,
   } from "./benchmark-suite";
-  import { aliasChoicesForTarget, applyTargetAlias, cachedVariantIds, caseRowsFromJsonl, draftEditsSuite, draftFromSuite, duplicateSuiteDraft, jsonlFromCaseRows, newPromptCaseRow, optionalDraftNumber, buildSuiteFromDraft, estimateDraftAttempts, variantChoicesForTarget, type SuiteCaseRow, type SuiteDraft } from "./benchmark-draft";
+  import { aliasChoicesForTarget, applyTargetAlias, cachedVariantIds, caseRowsFromJsonl, draftEditsSuite, draftFromSuite, duplicateSuiteDraft, jsonlFromCaseRows, jsonlImportCanFitCharacterLimit, newPromptCaseRow, buildSuiteFromDraft, estimateDraftAttempts, variantChoicesForTarget, type SuiteCaseRow, type SuiteDraft } from "./benchmark-draft";
   import { suiteDefinitionView } from "./benchmark-suite-summary";
   import { buildRunResultView, formatResponseMs, type TargetResultView } from "./benchmark-results";
   import { buildProgressMatrix, isRunInterrupted, isRunResumable, nextRunPollAction, nextRunPollActionAfterReread, type AttemptSummary } from "./benchmark-progress";
@@ -312,7 +311,7 @@
 
   function setDraftNumber(field: "temperature" | "maxTokens", raw: string) {
     if (!editingDraft || editorBusy) return;
-    editingDraft = { ...editingDraft, [field]: optionalDraftNumber(raw) };
+    editingDraft = { ...editingDraft, [field]: raw };
   }
 
   async function importCasesFile(event: Event) {
@@ -321,17 +320,20 @@
     const file = input.files?.[0];
     input.value = "";
     if (!file) return;
-    // Multi-byte text can be over this byte size and still under the parser's character cap.
-    // Refuse before reading anyway so a much larger file never becomes a string. Paste the
-    // text if a non-ASCII file is rejected here.
-    if (file.size > BENCHMARK_MAX_JSONL_CHARS) {
-      editingErrors = [`file is larger than ${BENCHMARK_MAX_JSONL_CHARS} bytes`];
+    // The parser enforces the exact character limit after decoding. This byte bound only rejects
+    // files that cannot possibly fit, while allowing valid multi-byte UTF-8 JSONL through.
+    if (!jsonlImportCanFitCharacterLimit(file.size)) {
+      editingErrors = [`file cannot fit within ${BENCHMARK_MAX_JSONL_CHARS} characters`];
       return;
     }
     casesImporting = true;
     try {
       const text = await file.text();
       if (destroyed || !editingDraft) return;
+      if (text.length > BENCHMARK_MAX_JSONL_CHARS) {
+        editingErrors = [`file is larger than ${BENCHMARK_MAX_JSONL_CHARS} characters`];
+        return;
+      }
       editingDraft.casesJsonl = text;
       const parsed = caseRowsFromJsonl(text);
       if (!parsed.ok) {
@@ -760,7 +762,7 @@
               aria-label={`Target ${i + 1} variant`}
               onchange={(e) => updateTargetVariant(i, e.currentTarget.value || null)}
             >
-              <option value="">Default variant</option>
+              <option value="">Runtime-selected variant</option>
               {#each variantChoicesForTarget(variantsForAlias(target.alias), target.variantId) as choice (choice.id)}
                 <option value={choice.id}>{choice.id}{choice.available ? "" : " (not downloaded)"}</option>
               {/each}
@@ -865,10 +867,8 @@
         <label>
           Temperature
           <input
-            type="number"
-            min="0"
-            max="2"
-            step="any"
+            type="text"
+            inputmode="decimal"
             value={editingDraft.temperature ?? ""}
             oninput={(e) => setDraftNumber("temperature", e.currentTarget.value)}
           />
@@ -876,10 +876,8 @@
         <label>
           Max tokens
           <input
-            type="number"
-            min="1"
-            max={BENCHMARK_MAX_TOKENS_LIMIT}
-            step="1"
+            type="text"
+            inputmode="numeric"
             value={editingDraft.maxTokens ?? ""}
             oninput={(e) => setDraftNumber("maxTokens", e.currentTarget.value)}
           />

@@ -51,8 +51,8 @@ export interface SuiteDraft {
    * Empty number inputs arrive as null or ''. Those mean "runtime default", not a numeric
    * value — `optionalDraftNumber` drops them before validation.
    */
-  temperature?: number | null;
-  maxTokens?: number | null;
+  temperature?: number | string | null;
+  maxTokens?: number | string | null;
   warmupCount: number;
   repeatCount: number;
 }
@@ -76,6 +76,17 @@ export function optionalDraftNumber(value: unknown): number | undefined {
   }
   if (typeof value === 'number') return value;
   return undefined;
+}
+
+/**
+ * `File.size` is bytes while the suite limit is JavaScript string length. UTF-8 needs at most
+ * three bytes per UTF-16 code unit, so only a file above this bound is guaranteed not to fit.
+ */
+export function jsonlImportCanFitCharacterLimit(
+  byteLength: number,
+  characterLimit: number = BENCHMARK_MAX_JSONL_CHARS,
+): boolean {
+  return byteLength <= characterLimit * 3;
 }
 
 function caseToRow(entry: BenchmarkCase): SuiteCaseRow {

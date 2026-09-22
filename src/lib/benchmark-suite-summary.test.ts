@@ -17,8 +17,8 @@ const suite = (over: Partial<BenchmarkSuite> = {}): BenchmarkSuite => ({
 });
 
 describe('suite definition labels', () => {
-  it('names an alias-only target as the default variant', () => {
-    expect(targetVariantLabel(null)).toBe('default');
+  it('names an alias-only target as runtime-selected', () => {
+    expect(targetVariantLabel(null)).toBe('runtime-selected');
     expect(targetVariantLabel('cuda')).toBe('cuda');
   });
 
@@ -40,7 +40,7 @@ describe('suite definition labels', () => {
     expect(view.temperatureLabel).toBe('0.2');
     expect(view.maxTokensLabel).toBe('128');
     expect(view.targets).toEqual([
-      { alias: 'model-a', variantLabel: 'default' },
+      { alias: 'model-a', variantLabel: 'runtime-selected' },
       { alias: 'model-b', variantLabel: 'cuda' },
     ]);
     expect(view.cases[0]).toEqual({ id: 'c1', body: 'What is 2+2?', tags: ['math'], expected: '4' });

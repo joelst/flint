@@ -7,7 +7,7 @@
 import type { BenchmarkCase, BenchmarkSuite, BenchmarkTarget } from './benchmark-suite';
 
 export function targetVariantLabel(variantId: string | null): string {
-  return variantId ?? 'default';
+  return variantId ?? 'runtime-selected';
 }
 
 /** Blank generation settings are not zero — the run uses whatever the runtime defaults to. */

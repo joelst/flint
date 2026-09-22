@@ -265,7 +265,7 @@ export function validateBenchmarkSuite(
       if (!r.ok) { errors.push(...r.errors); continue; }
       const exactKey = `${r.value!.alias}\0${r.value!.variantId ?? ''}`;
       if (seenExact.has(exactKey)) {
-        errors.push(`targets[${i}]: duplicate target "${r.value!.alias}" / ${r.value!.variantId ?? 'default'}`);
+        errors.push(`targets[${i}]: duplicate target "${r.value!.alias}" / ${r.value!.variantId ?? 'runtime-selected'}`);
         continue;
       }
       seenExact.add(exactKey);
