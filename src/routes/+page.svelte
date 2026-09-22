@@ -668,11 +668,12 @@
    *
    * A rethrown failure is logged once — the outer catch re-reports it under its own
    * prefix without repeating the stack in the log. */
-  let lastLoggedFailure: unknown = null;
+  const loggedFailures = new WeakSet<object>();
   function reportFailure(prefix: string, error: unknown): string {
-    if (error !== lastLoggedFailure || error === null || error === undefined) {
+    const tracked = error !== null && (typeof error === "object" || typeof error === "function");
+    if (!tracked || !loggedFailures.has(error as object)) {
       appendAppLog(failureLogLine(prefix, error), "error");
-      lastLoggedFailure = error;
+      if (tracked) loggedFailures.add(error as object);
     }
     statusMessage = summarizeFailure(prefix, error);
     return statusMessage;
@@ -5052,7 +5053,7 @@ updateStateFromSdk();
                 statusMessage = `${targetAlias} is ready. The chat changed while it loaded.`;
               }
             } catch (e: any) {
-              statusMessage = `Failed to restore ${targetAlias}: ${e?.message || e}`;
+              reportFailure(`Failed to restore ${targetAlias}`, e);
             }
           }
         }
@@ -5070,6 +5071,7 @@ updateStateFromSdk();
       if (autoRefreshCatalogOnStartup && startupEntries.length > 0) {
         let startupLoaded = 0;
         let startupBlocked = 0;
+        let startupFailed = 0;
         let startupInterrupted = false;
         for (const [alias, variantId] of startupEntries) {
           if (!startupAuthorization.isCurrent(startupAuthorizationToken)) break;
@@ -5119,6 +5121,7 @@ updateStateFromSdk();
                 break;
               }
               console.warn(`Startup auto-load failed for ${alias}:`, e);
+              startupFailed++;
               reportFailure(`Startup load failed for ${alias}`, e);
             }
           }
@@ -5135,9 +5138,15 @@ updateStateFromSdk();
           return;
         }
         if (startupLoaded > 0) {
+          // A failure must survive the summary: without the count, one model loading
+          // after another failed would report only the success and hide the failure.
           statusMessage =
             `${startupLoaded} startup model${startupLoaded !== 1 ? 's' : ''} loaded` +
-            (startupBlocked > 0 ? `; ${startupBlocked} skipped for unavailable acceleration` : "");
+            (startupBlocked > 0 ? `; ${startupBlocked} skipped for unavailable acceleration` : "") +
+            (startupFailed > 0 ? `; ${startupFailed} failed (see the app log)` : "");
+        } else if (startupFailed > 0) {
+          // Nothing loaded: the header keeps the reason for the last failure instead of
+          // a count, and every failure is already in the app log.
         } else if (startupBlocked > 0) {
           statusMessage =
             `${startupBlocked} startup model${startupBlocked !== 1 ? "s" : ""} skipped for unavailable acceleration`;

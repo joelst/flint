@@ -8,13 +8,14 @@ const script = join(process.cwd(), 'scripts', 'hydrate-foundry-native.cjs');
 
 const DEPS = { onnxruntime: { version: '1.28.0' }, 'onnxruntime-genai': { version: '0.15.2' } };
 
-function run (mode, cacheDir, destDir) {
+function run (mode, cacheDir, destDir, baselineFile) {
   return spawnSync(process.execPath, [script, mode], {
     encoding: 'utf8',
     env: {
       ...process.env,
       FLINT_FOUNDRY_CACHE_DIR: cacheDir,
       FLINT_FOUNDRY_DEST_DIR: destDir,
+      FLINT_FOUNDRY_BASELINE_FILE: baselineFile || join(cacheDir, '..', 'baseline.json'),
     },
   });
 }
@@ -31,6 +32,20 @@ function makeSdk (root, { version = '2.0.1', deps = DEPS } = {}) {
 }
 
 describe('hydrate-foundry-native', () => {
+  it('caches only what the installer downloaded, not the tarball payload', () => {
+    const root = mkdtempSync(join(tmpdir(), 'flint-hydrate-baseline-'));
+    const cacheDir = join(root, 'cache');
+    const { destDir } = makeSdk(root);
+
+    // Baseline is taken right after extraction, before the installer downloads.
+    expect(run('--baseline', cacheDir, destDir).status).toBe(0);
+    writeFileSync(join(destDir, 'win32-x64', 'onnxruntime.dll'), 'ort');
+    expect(run('--save', cacheDir, destDir).status).toBe(0);
+
+    expect(existsSync(join(cacheDir, 'win32-x64', 'onnxruntime.dll'))).toBe(true);
+    expect(existsSync(join(cacheDir, 'win32-x64', 'foundry_local.dll'))).toBe(false);
+  });
+
   it('round-trips the downloaded runtime for a matching SDK install', () => {
     const root = mkdtempSync(join(tmpdir(), 'flint-hydrate-'));
     const cacheDir = join(root, 'cache');

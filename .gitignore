@@ -24,6 +24,7 @@ flint-selfsigned.pfx.base64
 # Bundled Node runtime (Spike A: scripts/ensure-bundled-node.cjs)
 /runtime/node-staging/
 /runtime/foundry-native-cache/
+/runtime/foundry-native-baseline.json
 /src-tauri/binaries/node-*
 /src-tauri/binaries/node.VERSION
 /src-tauri/binaries/node.README.txt

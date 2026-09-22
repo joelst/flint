@@ -50,6 +50,9 @@ if (!dirHasFiles(DEST_DIR)) {
   console.error(`[ci-npm-ci] ${path.relative(root, DEST_DIR)} is empty after npm ci`);
   process.exit(1);
 }
+// Snapshot what the tarball shipped so the saved cache carries only the files the
+// SDK installer downloads.
+run(process.execPath, [path.join(__dirname, 'hydrate-foundry-native.cjs'), '--baseline']);
 // Refuses a cache saved for a different SDK/runtime version and exits non-zero if
 // a matching cache fails to land.
 run(process.execPath, [path.join(__dirname, 'hydrate-foundry-native.cjs'), '--restore']);

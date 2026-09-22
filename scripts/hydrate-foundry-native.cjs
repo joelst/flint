@@ -12,7 +12,12 @@
  * from, and a restore that does not match is refused rather than applied.
  * Restores also never overwrite a file the package tarball already provided.
  *
+ * Only what the installer downloads is worth caching. `--baseline`, run right
+ * after packages are extracted, records the files the tarball shipped so
+ * `--save` can leave them out.
+ *
  * Usage:
+ *   node scripts/hydrate-foundry-native.cjs --baseline
  *   node scripts/hydrate-foundry-native.cjs --restore
  *   node scripts/hydrate-foundry-native.cjs --save
  */
@@ -28,6 +33,8 @@ const DEST_DIR = process.env.FLINT_FOUNDRY_DEST_DIR
   || path.join(root, 'node_modules', 'foundry-local-sdk', 'prebuilds');
 // The SDK package root is the parent of prebuilds/; it holds the identity files.
 const SDK_DIR = path.dirname(DEST_DIR);
+const BASELINE_FILE = process.env.FLINT_FOUNDRY_BASELINE_FILE
+  || path.join(root, 'runtime', 'foundry-native-baseline.json');
 const MANIFEST = 'flint-native-cache.json';
 
 function log(message) {
@@ -55,7 +62,9 @@ function sdkIdentity() {
 
 function sameIdentity(a, b) {
   if (!a || !b) return false;
-  return JSON.stringify(a) === JSON.stringify(b);
+  return a.layout === b.layout
+    && a.sdkVersion === b.sdkVersion
+    && JSON.stringify(a.deps) === JSON.stringify(b.deps);
 }
 
 function listFiles(dir) {
@@ -118,27 +127,58 @@ function restore() {
   log(`restored ${cached.length} cached file(s) into ${path.relative(root, DEST_DIR)}`);
 }
 
-function save() {
-  if (listFiles(DEST_DIR).length === 0) {
-    log('no native payload to cache');
+/** Record what the package tarball shipped, before the installer adds to it. */
+function baseline() {
+  const identity = sdkIdentity();
+  const files = listFiles(DEST_DIR);
+  if (!identity || files.length === 0) {
+    log(`skipped baseline: nothing extracted under ${path.relative(root, DEST_DIR)}`);
     return;
   }
+  fs.mkdirSync(path.dirname(BASELINE_FILE), { recursive: true });
+  fs.writeFileSync(BASELINE_FILE, `${JSON.stringify({ ...identity, files }, null, 2)}\n`);
+  log(`recorded ${files.length} tarball file(s) for SDK ${identity.sdkVersion}`);
+}
+
+/** Files the tarball shipped for this exact SDK, which the cache need not carry. */
+function shippedFiles(identity) {
+  const recorded = readJson(BASELINE_FILE);
+  if (!recorded || !Array.isArray(recorded.files)) return new Set();
+  if (!sameIdentity(identity, recorded)) return new Set();
+  return new Set(recorded.files.map((entry) => String(entry)));
+}
+
+function save() {
   const identity = sdkIdentity();
   if (!identity) {
     log(`skipped save: cannot read the SDK identity under ${path.relative(root, SDK_DIR)}`);
     return;
   }
+  const shipped = shippedFiles(identity);
+  const downloaded = listFiles(DEST_DIR).filter((entry) => !shipped.has(entry));
+  if (downloaded.length === 0) {
+    log('no downloaded native payload to cache');
+    return;
+  }
   fs.mkdirSync(path.dirname(CACHE_DIR), { recursive: true });
   if (fs.existsSync(CACHE_DIR)) fs.rmSync(CACHE_DIR, { recursive: true, force: true });
-  copyDir(DEST_DIR, CACHE_DIR, { overwrite: true });
+  for (const entry of downloaded) {
+    const to = path.join(CACHE_DIR, entry);
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    fs.copyFileSync(path.join(DEST_DIR, entry), to);
+  }
   fs.writeFileSync(path.join(CACHE_DIR, MANIFEST), `${JSON.stringify(identity, null, 2)}\n`);
-  log(`saved native payload for SDK ${identity.sdkVersion} to ${path.relative(root, CACHE_DIR)}`);
+  log(
+    `saved ${downloaded.length} downloaded file(s) for SDK ${identity.sdkVersion}`
+      + ` to ${path.relative(root, CACHE_DIR)}`
+  );
 }
 
 const mode = process.argv[2];
 if (mode === '--restore') restore();
 else if (mode === '--save') save();
+else if (mode === '--baseline') baseline();
 else {
-  console.error('Usage: node scripts/hydrate-foundry-native.cjs --restore|--save');
+  console.error('Usage: node scripts/hydrate-foundry-native.cjs --baseline|--restore|--save');
   process.exit(1);
 }
