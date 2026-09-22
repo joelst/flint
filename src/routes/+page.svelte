@@ -254,6 +254,7 @@
   const appVersion = String((packageJson as { version?: string }).version || "0.0.0");
   let nodeVersionLabel = $state<string>("Checking…");
   let nodeVersionOk = $state<boolean | null>(null);
+  let nodeRecheckBusy = $state(false);
   let availableUpdate = $state<Update | null>(null);
   let updateCheckAt = $state<number | null>(null);
   let updateCheckError = $state<string | null>(null);
@@ -348,6 +349,7 @@
     try {
       availableUpdate = await checkForUpdate();
       updateCheckAt = Date.now();
+      updateCheckError = null;
       updateCheckState = availableUpdate ? "available" : "current";
     } catch (error) {
       availableUpdate = null;
@@ -360,6 +362,8 @@
   }
 
   async function refreshNodeAboutLine() {
+    if (nodeRecheckBusy) return;
+    nodeRecheckBusy = true;
     try {
       const r = await ensureNodeRuntime();
       if (r.ok) {
@@ -375,6 +379,8 @@
     } catch {
       nodeVersionLabel = "Unknown";
       nodeVersionOk = null;
+    } finally {
+      nodeRecheckBusy = false;
     }
   }
 
@@ -9828,7 +9834,9 @@ Output only the summary text, no preamble.`;
                 <dt>Node.js</dt>
                 <dd class:about-ok={nodeVersionOk === true} class:about-bad={nodeVersionOk === false}>
                   {nodeVersionLabel}
-                  <button type="button" class="tiny about-refresh" onclick={() => refreshNodeAboutLine()}>Recheck</button>
+                  <button type="button" class="tiny about-refresh" onclick={() => refreshNodeAboutLine()} disabled={nodeRecheckBusy}>
+                    {nodeRecheckBusy ? "Checking…" : "Recheck"}
+                  </button>
                 </dd>
               </div>
               <div class="about-row">
@@ -10738,7 +10746,9 @@ Output only the summary text, no preamble.`;
                 <dt>Node.js</dt>
                 <dd class:about-ok={nodeVersionOk === true} class:about-bad={nodeVersionOk === false}>
                   {nodeVersionLabel}
-                  <button type="button" class="tiny about-refresh" onclick={() => refreshNodeAboutLine()}>Recheck</button>
+                  <button type="button" class="tiny about-refresh" onclick={() => refreshNodeAboutLine()} disabled={nodeRecheckBusy}>
+                    {nodeRecheckBusy ? "Checking…" : "Recheck"}
+                  </button>
                 </dd>
               </div>
               <div class="about-row">
