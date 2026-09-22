@@ -1924,6 +1924,8 @@ export async function pollPoolStatus(): Promise<void> {
         ...state,
         pool,
         poolStats: mapPoolStats(ps.result),
+        chatLaneModel: pool[0]?.alias,
+        audioLaneModel: pool[1]?.alias,
         loadedModels: models.filter((model) => model.isLoaded),
         models,
       };

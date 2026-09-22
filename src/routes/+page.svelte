@@ -672,6 +672,8 @@
     },
     ready: false,
     error: null as string | null,
+    catalogStatus: "not-checked" as "not-checked" | "loading" | "ready" | "failed",
+    catalogError: null as string | null,
     models: [] as ModelInfo[],
     endpoint: undefined as string | undefined,
     eps: [] as EpInfo[],
@@ -2548,6 +2550,8 @@
     state.runtime = s.runtime ?? state.runtime;
     state.ready = s.ready;
     state.error = s.error;
+    state.catalogStatus = s.catalogStatus ?? "not-checked";
+    state.catalogError = s.catalogError ?? null;
     state.models = s.models ?? [];
     state.endpoint = s.endpoint;
     state.eps = s.eps ?? [];

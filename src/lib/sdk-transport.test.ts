@@ -1125,6 +1125,40 @@ describe('one answer per request', () => {
     }
   });
 
+  it('keeps lane aliases aligned with catalog-free pool polling', async () => {
+    const sdk = await loadSdk();
+    const firstPoll = sdk.pollPoolStatus();
+    const firstPoolId = await waitForWrite('poolStatus');
+    harness.emitStdout({
+      id: firstPoolId,
+      result: {
+        models: [
+          { alias: 'chat-model', variantId: 'chat-variant', isLoaded: true },
+          { alias: 'audio-model', variantId: 'audio-variant', isLoaded: true },
+        ],
+      },
+    });
+    await firstPoll;
+    expect(sdkSnapshot(sdk)).toMatchObject({
+      chatLaneModel: 'chat-model',
+      audioLaneModel: 'audio-model',
+    });
+
+    const secondPoll = sdk.pollPoolStatus();
+    const secondPoolId = await waitForWrite('poolStatus', 1);
+    harness.emitStdout({
+      id: secondPoolId,
+      result: {
+        models: [{ alias: 'audio-model', variantId: 'audio-variant', isLoaded: true }],
+      },
+    });
+    await secondPoll;
+    expect(sdkSnapshot(sdk)).toMatchObject({
+      chatLaneModel: 'audio-model',
+      audioLaneModel: undefined,
+    });
+  });
+
   it('keeps the sidecar reply when a close arrives afterwards', async () => {
     const sdk = await loadSdk();
     const p = sdk.getEps();
