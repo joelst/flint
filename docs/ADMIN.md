@@ -39,8 +39,8 @@ available) calls Foundry Local's SDK, which contacts Microsoft's remote Foundry 
 over the network — separate from inference, which always stays local. By default Flint checks
 the catalog on startup and after actions like downloads. **Settings → Startup → "Check model
 catalog on startup"** disables the startup check; the **Refresh catalog** button in the
-Models view remains available for on-demand checks. Disabling the startup check also defers
-skips recommendations and configured model preloads for that launch. A later manual refresh
+Models view remains available for on-demand checks. Disabling the startup check also skips
+recommendations and configured model preloads for that launch. A later manual refresh
 populates the Models view but does not replay startup-only work; model-management actions can
 also refresh the catalog to show their results.
 
