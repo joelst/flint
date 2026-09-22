@@ -28,4 +28,34 @@ describe('benchmark editor wiring', () => {
   it('uses runtime-selected consistently for alias-only benchmark targets', () => {
     expect(source).toContain('<option value="">Runtime-selected variant</option>');
   });
+
+  it('does not replace an open unsaved draft', () => {
+    for (const functionName of ['startCreateSuite', 'startDuplicateSuite', 'startEditSuite']) {
+      const start = source.indexOf(`function ${functionName}(`);
+      const end = source.indexOf('\n  }', start);
+      expect(start, `${functionName} marker not found`).toBeGreaterThan(-1);
+      expect(source.slice(start, end)).toContain(
+        'if (editorBusy || lifecycleBusy || editingDraft) return;',
+      );
+    }
+    expect(source).toMatch(
+      /disabled=\{editorBusy \|\| lifecycleBusy \|\| !!editingDraft\}[\s\S]*?>New suite<\/button>/,
+    );
+    expect(source).toMatch(
+      /disabled=\{editorBusy \|\| lifecycleBusy \|\| !!editingDraft\}[\s\S]*?onclick=\{\(\) => startDuplicateSuite\(suite\)\}/,
+    );
+    expect(source).toMatch(
+      /disabled=\{editorBusy \|\| lifecycleBusy \|\| !!editingDraft \|\| suiteHasStoredRuns\(suite\.id\)\}/,
+    );
+    expect(source).toContain('Save or cancel this draft before creating, editing, or duplicating another suite.');
+    expect(source.match(/Save or cancel the open draft first\./g)).toHaveLength(3);
+  });
+
+  it('edits tags as a JSON array so commas remain part of a tag', () => {
+    expect(source).toContain('Tags (JSON array)');
+    expect(source).toContain('bind:value={row.tagsJson}');
+    expect(source).toContain(`placeholder='["math","easy"]'`);
+    expect(source).toContain('{@const tagsError = tagsJsonError(row.tagsJson)}');
+    expect(source).not.toContain('Tags (comma-separated)');
+  });
 });

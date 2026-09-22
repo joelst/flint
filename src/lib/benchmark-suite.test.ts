@@ -402,6 +402,12 @@ describe('parseBenchmarkCasesJsonl', () => {
     ]);
   });
 
+  it('accepts a UTF-8 BOM before the first JSONL row', () => {
+    const r = parseBenchmarkCasesJsonl('\uFEFF{"id":"c1","prompt":"a"}');
+    expect(r.ok).toBe(true);
+    expect(r.cases).toEqual([{ id: 'c1', prompt: 'a' }]);
+  });
+
   it('generates an id from the line number when one is missing', () => {
     const r = parseBenchmarkCasesJsonl('{"prompt":"a"}\n{"prompt":"b"}');
     expect(r.ok).toBe(true);

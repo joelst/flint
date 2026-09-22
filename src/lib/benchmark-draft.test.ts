@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { aliasChoicesForTarget, applyTargetAlias, buildSuiteFromDraft, cachedVariantIds, caseRowsFromJsonl, copiedSuiteName, draftEditsSuite, draftFromSuite, duplicateSuiteDraft, estimateDraftAttempts, jsonlFromCaseRows, jsonlImportCanFitCharacterLimit, newPromptCaseRow, optionalDraftNumber, variantChoicesForTarget, type SuiteDraft } from './benchmark-draft';
+import { aliasChoicesForTarget, applyTargetAlias, buildSuiteFromDraft, cachedVariantIds, caseRowsFromJsonl, copiedSuiteName, draftEditsSuite, draftFromSuite, duplicateSuiteDraft, estimateDraftAttempts, jsonlFromCaseRows, jsonlImportCanFitCharacterLimit, newPromptCaseRow, optionalDraftNumber, tagsJsonError, variantChoicesForTarget, type SuiteDraft } from './benchmark-draft';
 import { BENCHMARK_MAX_ATTEMPTS, BENCHMARK_MAX_JSONL_CHARS, BENCHMARK_MAX_NAME_LENGTH } from './benchmark-suite';
 import type { BenchmarkSuite } from './benchmark-suite';
 
@@ -224,7 +224,7 @@ describe('case rows', () => {
     const rows = caseRowsFromJsonl('{"id":"c1","prompt":"2+2","expected":"4","tags":["math"]}');
     expect(rows.ok).toBe(true);
     if (!rows.ok) return;
-    expect(rows.rows).toEqual([{ kind: 'prompt', id: 'c1', prompt: '2+2', expected: '4', tagsText: 'math' }]);
+    expect(rows.rows).toEqual([{ kind: 'prompt', id: 'c1', prompt: '2+2', expected: '4', tagsJson: '["math"]' }]);
     const rebuilt = buildSuiteFromDraft(baseDraft({ casesJsonl: jsonlFromCaseRows(rows.rows) }));
     expect(rebuilt.ok).toBe(true);
     expect(rebuilt.value!.cases).toEqual([{ id: 'c1', prompt: '2+2', expected: '4', tags: ['math'] }]);
@@ -240,12 +240,69 @@ describe('case rows', () => {
     if (!parsed.ok) return;
     const messages = parsed.rows[1];
     expect(messages).toMatchObject({ kind: 'messages', id: 'c2', messageCount: 1 });
-    const reordered = [messages, { kind: 'prompt' as const, id: 'c1', prompt: 'edited', expected: '', tagsText: '' }];
+    const reordered = [messages, { kind: 'prompt' as const, id: 'c1', prompt: 'edited', expected: '', tagsJson: '' }];
     const rebuilt = buildSuiteFromDraft(baseDraft({ casesJsonl: jsonlFromCaseRows(reordered) }));
     expect(rebuilt.ok).toBe(true);
     expect(rebuilt.value!.cases.map((entry) => entry.id)).toEqual(['c2', 'c1']);
     expect(rebuilt.value!.cases[0].messages).toEqual([{ role: 'user', content: 'hello' }]);
     expect(rebuilt.value!.cases[1].prompt).toBe('edited');
+  });
+
+  it('round-trips tags containing commas without changing their identity', () => {
+    const parsed = caseRowsFromJsonl('{"id":"c1","prompt":"hi","tags":["a,b","plain"]}');
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.rows[0]).toMatchObject({ tagsJson: '["a,b","plain"]' });
+    const rebuilt = buildSuiteFromDraft(baseDraft({ casesJsonl: jsonlFromCaseRows(parsed.rows) }));
+    expect(rebuilt.ok).toBe(true);
+    expect(rebuilt.value!.cases[0].tags).toEqual(['a,b', 'plain']);
+  });
+
+  it('does not add an empty tags array to a tagless case', () => {
+    const parsed = caseRowsFromJsonl('{"id":"c1","prompt":"hi"}');
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.rows[0]).toMatchObject({ tagsJson: '' });
+    const rebuilt = buildSuiteFromDraft(baseDraft({ casesJsonl: jsonlFromCaseRows(parsed.rows) }));
+    expect(rebuilt.ok).toBe(true);
+    expect(rebuilt.value!.cases[0]).toEqual({ id: 'c1', prompt: 'hi' });
+  });
+
+  it('preserves an explicit empty tags array', () => {
+    const parsed = caseRowsFromJsonl('{"id":"c1","prompt":"hi","tags":[]}');
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const rebuilt = buildSuiteFromDraft(baseDraft({ casesJsonl: jsonlFromCaseRows(parsed.rows) }));
+    expect(rebuilt.ok).toBe(true);
+    expect(rebuilt.value!.cases[0]).toEqual({ id: 'c1', prompt: 'hi', tags: [] });
+  });
+
+  it('keeps invalid tag JSON as a validation error instead of throwing during editing', () => {
+    const rows = [{
+      kind: 'prompt' as const,
+      id: 'c1',
+      prompt: 'hi',
+      expected: '',
+      tagsJson: '[',
+    }];
+    expect(() => jsonlFromCaseRows(rows)).not.toThrow();
+    const rebuilt = buildSuiteFromDraft(baseDraft({ casesJsonl: jsonlFromCaseRows(rows) }));
+    expect(rebuilt.ok).toBe(false);
+    expect(rebuilt.errors.join(' ')).toContain('tags must be an array');
+  });
+
+  it('explains tag JSON errors using the suite tag validator', () => {
+    expect(tagsJsonError('')).toBeNull();
+    expect(tagsJsonError('[')).toBe('Tags must be valid JSON.');
+    expect(tagsJsonError('"math"')).toBe('tags must be an array');
+    expect(tagsJsonError('["math"]')).toBeNull();
+  });
+
+  it('accepts a UTF-8 BOM through the form row conversion path', () => {
+    expect(caseRowsFromJsonl('\uFEFF{"id":"c1","prompt":"hi"}')).toEqual({
+      ok: true,
+      rows: [{ kind: 'prompt', id: 'c1', prompt: 'hi', expected: '', tagsJson: '' }],
+    });
   });
 
   it('surfaces the JSONL parser error instead of a partial row list', () => {

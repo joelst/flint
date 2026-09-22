@@ -21,6 +21,7 @@ import {
   benchmarkAttemptCount,
   isFiniteInteger,
   parseBenchmarkCasesJsonl,
+  validateBenchmarkCase,
   validateBenchmarkSuite,
   type BenchmarkCase,
   type BenchmarkSuite,
@@ -60,7 +61,7 @@ export interface SuiteDraft {
 /** A prompt the form can edit, or a messages-array case preserved verbatim so Save does not
  * flatten it into a single prompt. */
 export type SuiteCaseRow =
-  | { kind: 'prompt'; id: string; prompt: string; expected: string; tagsText: string }
+  | { kind: 'prompt'; id: string; prompt: string; expected: string; tagsJson: string }
   | { kind: 'messages'; id: string; messageCount: number; jsonlLine: string };
 
 /**
@@ -103,7 +104,7 @@ function caseToRow(entry: BenchmarkCase): SuiteCaseRow {
     id: entry.id,
     prompt: entry.prompt ?? '',
     expected: entry.expected ?? '',
-    tagsText: entry.tags?.join(', ') ?? '',
+    tagsJson: entry.tags ? JSON.stringify(entry.tags) : '',
   };
 }
 
@@ -120,10 +121,30 @@ export function jsonlFromCaseRows(rows: readonly SuiteCaseRow[]): string {
     if (row.kind === 'messages') return row.jsonlLine;
     const raw: Record<string, unknown> = { id: row.id, prompt: row.prompt };
     if (row.expected.trim()) raw.expected = row.expected;
-    const tags = row.tagsText.split(',').map((tag) => tag.trim()).filter((tag) => tag.length > 0);
-    if (tags.length > 0) raw.tags = tags;
+    if (row.tagsJson.trim()) {
+      try {
+        const parsedTags = JSON.parse(row.tagsJson);
+        raw.tags = parsedTags;
+      } catch {
+        // Keep the generated JSONL valid while preserving a value the suite validator rejects.
+        raw.tags = row.tagsJson;
+      }
+    }
     return JSON.stringify(raw);
   }).join('\n');
+}
+
+export function tagsJsonError(raw: string): string | null {
+  if (!raw.trim()) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return 'Tags must be valid JSON.';
+  }
+  const result = validateBenchmarkCase({ id: 'preview', prompt: 'preview', tags: parsed }, 'case');
+  if (result.ok) return null;
+  return result.errors[0]?.replace(/^case: /, '') ?? 'Tags are invalid.';
 }
 
 export function newPromptCaseRow(existingIds: readonly string[]): SuiteCaseRow {
@@ -134,7 +155,7 @@ export function newPromptCaseRow(existingIds: readonly string[]): SuiteCaseRow {
     n += 1;
     id = `c${n}`;
   }
-  return { kind: 'prompt', id, prompt: '', expected: '', tagsText: '' };
+  return { kind: 'prompt', id, prompt: '', expected: '', tagsJson: '' };
 }
 
 /** "copy" suffix, shortened so the result still fits the suite name limit. */

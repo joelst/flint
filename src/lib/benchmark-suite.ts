@@ -373,6 +373,7 @@ export function parseBenchmarkCasesJsonl(text: string): JsonlImportResult {
   const lines = text.split(/\r?\n/);
   const rawRows: Array<{ lineNumber: number; raw: unknown }> = [];
   for (let i = 0; i < lines.length; i++) {
+    // trim() also removes a leading U+FEFF BOM from the first decoded line.
     const line = lines[i].trim();
     if (!line) continue;
     const lineNumber = i + 1;

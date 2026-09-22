@@ -20,7 +20,7 @@
     type BenchmarkSuite,
     type BenchmarkTarget,
   } from "./benchmark-suite";
-  import { aliasChoicesForTarget, applyTargetAlias, cachedVariantIds, caseRowsFromJsonl, draftEditsSuite, draftFromSuite, duplicateSuiteDraft, jsonlFromCaseRows, jsonlImportCanFitCharacterLimit, newPromptCaseRow, buildSuiteFromDraft, estimateDraftAttempts, variantChoicesForTarget, type SuiteCaseRow, type SuiteDraft } from "./benchmark-draft";
+  import { aliasChoicesForTarget, applyTargetAlias, cachedVariantIds, caseRowsFromJsonl, draftEditsSuite, draftFromSuite, duplicateSuiteDraft, jsonlFromCaseRows, jsonlImportCanFitCharacterLimit, newPromptCaseRow, buildSuiteFromDraft, estimateDraftAttempts, tagsJsonError, variantChoicesForTarget, type SuiteCaseRow, type SuiteDraft } from "./benchmark-draft";
   import { suiteDefinitionView } from "./benchmark-suite-summary";
   import { buildRunResultView, formatResponseMs, type TargetResultView } from "./benchmark-results";
   import { buildProgressMatrix, isRunInterrupted, isRunResumable, nextRunPollAction, nextRunPollActionAfterReread, type AttemptSummary } from "./benchmark-progress";
@@ -260,7 +260,7 @@
     editingDraft.casesJsonl = jsonlFromCaseRows(editingCaseRows);
   }
 
-  function setPromptField(row: Extract<SuiteCaseRow, { kind: "prompt" }>, field: "id" | "prompt" | "expected" | "tagsText", value: string) {
+  function setPromptField(row: Extract<SuiteCaseRow, { kind: "prompt" }>, field: "id" | "prompt" | "expected" | "tagsJson", value: string) {
     if (editorBusy) return;
     row[field] = value;
     syncJsonlFromRows();
@@ -351,17 +351,17 @@
   }
 
   function startCreateSuite() {
-    if (editorBusy || lifecycleBusy) return;
+    if (editorBusy || lifecycleBusy || editingDraft) return;
     openDraft(newSuiteDraft());
   }
 
   function startDuplicateSuite(suite: BenchmarkSuite) {
-    if (editorBusy || lifecycleBusy) return;
+    if (editorBusy || lifecycleBusy || editingDraft) return;
     openDraft(duplicateSuiteDraft(suite));
   }
 
   function startEditSuite(suite: BenchmarkSuite) {
-    if (editorBusy || lifecycleBusy) return;
+    if (editorBusy || lifecycleBusy || editingDraft) return;
     // Editing is restricted to suites with no runs yet — a suite with runs already has attempts
     // recorded against its frozen snapshot, and silently changing the live suite underneath
     // that history would be misleading even though runs themselves are immutable.
@@ -425,7 +425,7 @@
         editingErrors = [saved.error || "Could not save suite"];
         return;
       }
-      editingDraft = null;
+      discardDraft();
       await refreshSuites();
     } finally {
       editingBusy = false;
@@ -700,7 +700,13 @@
         Early preview.
       </p>
     </div>
-    <button type="button" class="secondary small" onclick={startCreateSuite} disabled={editorBusy || lifecycleBusy}>New suite</button>
+    <button
+      type="button"
+      class="secondary small"
+      onclick={startCreateSuite}
+      disabled={editorBusy || lifecycleBusy || !!editingDraft}
+      title={editingDraft ? "Save or cancel the open draft first." : undefined}
+    >New suite</button>
   </div>
 
   {#if loadError}
@@ -724,6 +730,7 @@
   {#if editingDraft}
     <div class="benchmark-editor">
       <h3>{editingDraft.id ? "Edit suite" : "New suite"}</h3>
+      <p class="muted small">Save or cancel this draft before creating, editing, or duplicating another suite.</p>
       {#if editingErrors.length}
         <ul class="benchmark-errors">
           {#each editingErrors as err}<li>{err}</li>{/each}
@@ -827,6 +834,7 @@
                   <span class="muted"> — {row.messageCount === 1 ? "1 message" : `${row.messageCount} messages`}. Edit this case in JSONL.</span>
                 </p>
               {:else}
+                {@const tagsError = tagsJsonError(row.tagsJson)}
                 <label>
                   Id
                   <input type="text" bind:value={row.id} oninput={(e) => setPromptField(row, "id", e.currentTarget.value)} />
@@ -840,8 +848,16 @@
                   <input type="text" bind:value={row.expected} oninput={(e) => setPromptField(row, "expected", e.currentTarget.value)} />
                 </label>
                 <label>
-                  Tags (comma-separated)
-                  <input type="text" bind:value={row.tagsText} oninput={(e) => setPromptField(row, "tagsText", e.currentTarget.value)} />
+                  Tags (JSON array)
+                  <input
+                    type="text"
+                    placeholder='["math","easy"]'
+                    bind:value={row.tagsJson}
+                    oninput={(e) => setPromptField(row, "tagsJson", e.currentTarget.value)}
+                  />
+                  {#if tagsError}
+                    <span class="field-error">{tagsError}</span>
+                  {/if}
                 </label>
               {/if}
               <div class="benchmark-case-edit-actions">
@@ -916,11 +932,21 @@
           <button
             type="button"
             class="tiny"
-            disabled={editorBusy || lifecycleBusy || suiteHasStoredRuns(suite.id)}
-            title={suiteHasStoredRuns(suite.id) ? "This suite has runs. Duplicate it to make changes." : undefined}
+            disabled={editorBusy || lifecycleBusy || !!editingDraft || suiteHasStoredRuns(suite.id)}
+            title={editingDraft
+              ? "Save or cancel the open draft first."
+              : suiteHasStoredRuns(suite.id)
+                ? "This suite has runs. Duplicate it to make changes."
+                : undefined}
             onclick={() => startEditSuite(suite)}
           >Edit</button>
-          <button type="button" class="tiny" disabled={editorBusy || lifecycleBusy} onclick={() => startDuplicateSuite(suite)}>Duplicate</button>
+          <button
+            type="button"
+            class="tiny"
+            disabled={editorBusy || lifecycleBusy || !!editingDraft}
+            title={editingDraft ? "Save or cancel the open draft first." : undefined}
+            onclick={() => startDuplicateSuite(suite)}
+          >Duplicate</button>
           <button
             type="button"
             class="tiny danger-btn"
@@ -1218,6 +1244,10 @@
   .benchmark-errors {
     color: var(--danger, #c0392b);
     font-size: 0.85rem;
+  }
+  .field-error {
+    color: var(--danger, #c0392b);
+    font-size: 0.8rem;
   }
   /* Utility classes live in +page.svelte's scoped sheet and do not apply to this child. */
   .muted { color: var(--muted, #888); }
