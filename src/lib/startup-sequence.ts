@@ -53,3 +53,21 @@ export function resolveStartupAudioAlias(
   }
   return defaultAudioAlias;
 }
+
+export type CatalogCheckPresentation =
+  | 'checked'
+  | 'disabled'
+  | 'loading'
+  | 'failed'
+  | 'pending';
+
+export function resolveCatalogCheckPresentation(options: {
+  automaticCheckEnabled: boolean;
+  status: 'not-checked' | 'loading' | 'ready' | 'failed';
+}): CatalogCheckPresentation {
+  if (options.status === 'loading') return 'loading';
+  if (options.status === 'failed') return 'failed';
+  if (options.status === 'ready') return 'checked';
+  if (!options.automaticCheckEnabled) return 'disabled';
+  return 'pending';
+}

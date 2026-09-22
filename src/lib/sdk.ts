@@ -163,15 +163,8 @@ let currentEndpoint: string | undefined = undefined;
 let lastInitPayload: { appName: string; logLevel: string } | null = null;
 /** Latest frontend catalog policy, preserved across sidecar crash recovery. */
 let lastInitRefreshCatalog = true;
-/** Direct evidence that this frontend session received a successful catalog response. */
-let modelCatalogRefreshed = false;
-
 export function setAutomaticCatalogRefreshEnabled(enabled: boolean): void {
   lastInitRefreshCatalog = enabled;
-}
-
-export function hasRefreshedModelCatalog(): boolean {
-  return modelCatalogRefreshed;
 }
 
 function decodeShellOutput(data: string | Uint8Array): string {
@@ -357,6 +350,7 @@ export type RuntimeProcessState = 'stopped' | 'starting' | 'ready' | 'stopping' 
 export type RuntimeManagerState = 'unknown' | 'uninitialized' | 'initializing' | 'ready' | 'failed';
 export type RuntimeServiceState = 'unknown' | 'stopped' | 'starting' | 'draining' | 'stopping' | 'running' | 'failed';
 export type RuntimeModelState = 'unknown' | 'empty' | 'loading' | 'ready';
+export type ModelCatalogStatus = 'not-checked' | 'loading' | 'ready' | 'failed';
 
 export interface RuntimeState {
   process: RuntimeProcessState;
@@ -372,6 +366,8 @@ export interface FlintSDKState {
   runtime: RuntimeState;
   ready: boolean;
   error: string | null;
+  catalogStatus: ModelCatalogStatus;
+  catalogError: string | null;
   models: ModelInfo[];
   cachedModels: ModelInfo[];
   loadedModels: ModelInfo[];
@@ -424,6 +420,8 @@ const initialState: FlintSDKState = {
   },
   ready: false,
   error: null,
+  catalogStatus: 'not-checked',
+  catalogError: null,
   models: [],
   cachedModels: [],
   loadedModels: [],
@@ -1533,9 +1531,9 @@ async function performInitializeSDK(config: Partial<any>): Promise<boolean> {
 
 export async function refreshModels(): Promise<void> {
   updateRuntime({ models: 'loading' });
+  updateState({ catalogStatus: 'loading', catalogError: null });
   try {
     const res = await send('listModels');
-    modelCatalogRefreshed = true;
     const list = res.result || [];
     let currentLoadedAlias: string | undefined;
 
@@ -1567,6 +1565,8 @@ export async function refreshModels(): Promise<void> {
     } as ModelInfo));
 
     updateState({
+      catalogStatus: 'ready',
+      catalogError: null,
       models,
       cachedModels: models.filter((m: ModelInfo) => m.isCached),
       loadedModels: models.filter((m: ModelInfo) => m.isLoaded),
@@ -1587,6 +1587,10 @@ export async function refreshModels(): Promise<void> {
     }
   } catch (e) {
     console.error('refreshModels via sidecar failed', e);
+    updateState({
+      catalogStatus: 'failed',
+      catalogError: e instanceof Error ? e.message : String(e),
+    });
     updateRuntime({ models: 'unknown' });
     throw e;
   }
@@ -2624,7 +2628,6 @@ export function resetSDK() {
   managerReady = false;
   lastInitPayload = null; // a deliberate reset must not auto-re-init on the next send
   lastInitRefreshCatalog = true;
-  modelCatalogRefreshed = false;
   currentEndpoint = undefined;
   runtimeQuitRequested = false;
   runtimeQuitPromise = null;

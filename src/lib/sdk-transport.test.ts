@@ -1672,7 +1672,7 @@ describe('initialization readiness recovery', () => {
 
     await expect(initialized).resolves.toBe(true);
     expect(harness.writes.filter((line) => line.includes('"cmd":"listModels"'))).toHaveLength(0);
-    expect(sdk.hasRefreshedModelCatalog()).toBe(false);
+    expect(sdkSnapshot(sdk).catalogStatus).toBe('not-checked');
   }, 15000);
 
   it('preserves an explicit disabled policy when a later initialization omits the option', async () => {
@@ -1697,7 +1697,7 @@ describe('initialization readiness recovery', () => {
 
     await expect(initialized).resolves.toBe(true);
     expect(harness.writes.filter((line) => line.includes('"cmd":"listModels"'))).toHaveLength(0);
-    expect(sdk.hasRefreshedModelCatalog()).toBe(false);
+    expect(sdkSnapshot(sdk).catalogStatus).toBe('not-checked');
   }, 15000);
 
   it('uses the current catalog policy across sidecar crash recovery', async () => {
@@ -1761,7 +1761,7 @@ describe('initialization readiness recovery', () => {
     });
     await expect(initialized).resolves.toBe(true);
     await expect(policyUpdate).resolves.toBe(true);
-    expect(sdk.hasRefreshedModelCatalog()).toBe(true);
+    expect(sdkSnapshot(sdk).catalogStatus).toBe('ready');
 
     harness.emitClose({ code: 1 });
     const poll = sdk.pollPoolStatus();
@@ -1810,6 +1810,8 @@ describe('initialization readiness recovery', () => {
     const firstListId = await waitForWrite('listModels');
     harness.emitStdout({ id: firstListId, error: 'catalog unavailable' });
     await expect(first).resolves.toBe(false);
+    expect(sdkSnapshot(sdk).catalogStatus).toBe('failed');
+    expect(sdkSnapshot(sdk).catalogError).toContain('catalog unavailable');
 
     const retry = sdk.initializeSDK({ autoStartService: false });
     const secondListId = await waitForWrite('listModels', 1);
@@ -1821,6 +1823,10 @@ describe('initialization readiness recovery', () => {
     const startupStatusId = await waitForWrite('getStatus', 1);
     harness.emitStdout({ id: startupStatusId, result: { serviceRunning: false, endpoint: null } });
     await expect(retry).resolves.toBe(true);
+    expect(sdkSnapshot(sdk)).toMatchObject({
+      catalogStatus: 'ready',
+      catalogError: null,
+    });
 
     expect(harness.writes.filter((line) => line.includes('"cmd":"init"'))).toHaveLength(1);
   }, 15000);

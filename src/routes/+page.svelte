@@ -8,7 +8,6 @@
   import {
     initializeSDK,
     setAutomaticCatalogRefreshEnabled,
-    hasRefreshedModelCatalog,
     getSDKState,
     getEps,
     refreshModels as sdkRefreshModels,
@@ -85,6 +84,7 @@
     createSingleFlight,
     createStartupAuthorization,
     prepareHydratedRuntime,
+    resolveCatalogCheckPresentation,
     resolveStartupAudioAlias,
   } from "$lib/startup-sequence";
   import packageJson from "../../package.json";
@@ -244,14 +244,9 @@
 
   const FIRST_RUN_KEY = "flint-first-run-dismissed-v1";
   let showFirstRunCoach = $state(false);
-  let catalogCheckedThisSession = $state(false);
 
   async function refreshCatalogModels() {
-    try {
-      await sdkRefreshModels();
-    } finally {
-      catalogCheckedThisSession = hasRefreshedModelCatalog();
-    }
+    await sdkRefreshModels();
   }
 
   /** About strip — app + Node + service (Help + Settings). */
@@ -752,6 +747,10 @@
   let autoRefreshCatalogOnStartup = $state(true);
   let defaultChatAlias = $state('');
   let defaultAudioAlias = $state('');
+  const catalogCheckPresentation = $derived(resolveCatalogCheckPresentation({
+    automaticCheckEnabled: autoRefreshCatalogOnStartup,
+    status: state.catalogStatus,
+  }));
   let osAutoStartEnabled = $state<boolean | null>(null);
 
   // Settings: network (draft UI values — Apply restarts service to take effect)
@@ -4831,7 +4830,6 @@ updateStateFromSdk();
       servicePort: networkPort,
       bindAddress: networkBindAddress || undefined,
     });
-    catalogCheckedThisSession = hasRefreshedModelCatalog();
     void refreshNodeAboutLine();
 
     try {
@@ -4980,7 +4978,7 @@ updateStateFromSdk();
       // First-run coach (dismissible); keep until user skips or completes basics
       try {
         const coachDismissed = localStorage.getItem(FIRST_RUN_KEY) === "1";
-        if (!coachDismissed && catalogCheckedThisSession) {
+        if (!coachDismissed && state.catalogStatus === "ready") {
           const hasAnyCached = state.models.some((m: ModelInfo) => m.isCached);
           // Show coach when nothing cached yet, or always until dismissed after first install
           showFirstRunCoach = !hasAnyCached || !hadPersistedChatAtLaunch;
@@ -4992,7 +4990,7 @@ updateStateFromSdk();
       // Auto first launch: if no cached models and no persisted chat, offer starter (do not force-download)
       const hasAnyCached = state.models.some((m: ModelInfo) => m.isCached);
       const hasPersisted = hadPersistedChatAtLaunch;
-      if (catalogCheckedThisSession && !hasAnyCached && !hasPersisted && recommendedStarters.length > 0) {
+      if (state.catalogStatus === "ready" && !hasAnyCached && !hasPersisted && recommendedStarters.length > 0) {
         statusMessage = `First launch — pick a starter model below, or open Help for a guided path.`;
         currentView = "models";
       } else if (autoRefreshCatalogOnStartup && autoStartService) {
@@ -7564,10 +7562,16 @@ Output only the summary text, no preamble.`;
             </li>
             <li class:done={firstRunHasModel}>
               <strong>Get a model</strong>
-              {#if state.ready && catalogCheckedThisSession && state.models.length === 0}
+              {#if state.ready && catalogCheckPresentation === "checked" && state.models.length === 0}
                 <span class="first-run-bad">Catalog is empty — check the network, then Models → Retry.</span>
-              {:else if state.ready && !catalogCheckedThisSession}
+              {:else if state.ready && catalogCheckPresentation === "disabled"}
                 <span class="muted">Catalog check is off — open Models and refresh when you want to browse or download.</span>
+              {:else if state.ready && state.models.length === 0 && catalogCheckPresentation === "failed"}
+                <span class="first-run-bad">Catalog check failed — open Models to retry.</span>
+              {:else if state.ready && state.models.length === 0 && catalogCheckPresentation === "loading"}
+                <span class="muted">Checking the model catalog…</span>
+              {:else if state.ready && state.models.length === 0 && catalogCheckPresentation === "pending"}
+                <span class="muted">Catalog has not been checked yet — open Models to refresh.</span>
               {:else}
                 <span class="muted">Download a small starter from Models (hardware-aware picks appear when available).</span>
               {/if}
@@ -7640,9 +7644,21 @@ Output only the summary text, no preamble.`;
                 <option value="updated">Last updated</option>
               </select>
               <span class="count">{filteredModels.length} models</span>
-              {#if state.models.length === 0 && !catalogCheckedThisSession}
+              {#if state.models.length === 0 && catalogCheckPresentation === "disabled"}
                 <p class="notice" style="flex-basis:100%;">
                   <strong>Catalog not checked.</strong> Automatic startup checks are off. Refresh when you want to contact Microsoft's Foundry Local model catalog.
+                </p>
+              {:else if state.models.length === 0 && catalogCheckPresentation === "failed"}
+                <p class="notice" style="flex-basis:100%;">
+                  <strong>Catalog check failed.</strong> {state.catalogError || "The catalog request did not complete."} Retry when the network or catalog service is available.
+                </p>
+              {:else if state.models.length === 0 && catalogCheckPresentation === "loading"}
+                <p class="notice" style="flex-basis:100%;">
+                  <strong>Checking the model catalog…</strong>
+                </p>
+              {:else if state.models.length === 0 && catalogCheckPresentation === "pending"}
+                <p class="notice" style="flex-basis:100%;">
+                  <strong>Catalog check has not completed.</strong> Retry to contact Microsoft's Foundry Local model catalog.
                 </p>
               {:else if state.models.length === 0}
                 <p class="notice" style="flex-basis:100%;">
@@ -7794,14 +7810,22 @@ Output only the summary text, no preamble.`;
               </div>
             {/if}
 
-            {#if isLoadingModels && state.models.length === 0}
+            {#if catalogCheckPresentation === "loading" && state.models.length === 0}
               <p>Loading catalog...</p>
             {:else if filteredModels.length === 0}
               <div class="empty-state-card">
-                {#if state.models.length === 0 && !catalogCheckedThisSession}
+                {#if state.models.length === 0 && catalogCheckPresentation === "disabled"}
                   <h3>Model catalog not checked</h3>
                   <p>Automatic startup checks are off. Refresh only when you want to browse models or check for updates.</p>
                   <button type="button" onclick={() => loadModels()}>Refresh catalog</button>
+                {:else if state.models.length === 0 && catalogCheckPresentation === "failed"}
+                  <h3>Model catalog check failed</h3>
+                  <p>{state.catalogError || "The catalog request did not complete."}</p>
+                  <button type="button" onclick={() => loadModels()}>Retry catalog</button>
+                {:else if state.models.length === 0 && catalogCheckPresentation === "pending"}
+                  <h3>Model catalog check has not completed</h3>
+                  <p>Retry to browse models or check for updates.</p>
+                  <button type="button" onclick={() => loadModels()}>Retry catalog</button>
                 {:else if state.models.length === 0}
                   <h3>No models in the catalog yet</h3>
                   <p>Wait for Foundry Local to finish loading the catalog, or retry if something failed.</p>
@@ -10393,6 +10417,7 @@ Output only the summary text, no preamble.`;
                   Contacts Microsoft's Foundry Local model catalog over the network on startup to list
                   models and check for updates. Turning this off skips recommendations and configured
                   model preloads for that launch; manual refresh and model actions may contact it later.
+                  Accelerator setup is separate and may download runtime components automatically.
                 </span>
               </div>
               <label class="toggle-switch">

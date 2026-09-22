@@ -5,6 +5,7 @@ import {
   createSingleFlight,
   createStartupAuthorization,
   prepareHydratedRuntime,
+  resolveCatalogCheckPresentation,
   resolveStartupAudioAlias,
 } from './startup-sequence';
 
@@ -46,14 +47,20 @@ describe('prepareHydratedRuntime', () => {
       'if (autoRefreshCatalogOnStartup && startupEntries.length > 0) {',
     );
 
-    expect(source).toMatch(
-      /async function refreshCatalogModels\(\) \{\s+try \{\s+await sdkRefreshModels\(\);\s+\} finally \{\s+catalogCheckedThisSession = hasRefreshedModelCatalog\(\);\s+\}\s+\}/,
+    const refreshCatalogStart = source.indexOf('async function refreshCatalogModels()');
+    const refreshCatalogEnd = source.indexOf('/** About strip', refreshCatalogStart);
+    expect(refreshCatalogStart, 'catalog refresh wrapper marker not found').toBeGreaterThan(-1);
+    expect(refreshCatalogEnd, 'catalog refresh wrapper end marker not found').toBeGreaterThan(
+      refreshCatalogStart,
     );
+    const refreshCatalog = source.slice(refreshCatalogStart, refreshCatalogEnd);
+    expect(refreshCatalog).toContain('await sdkRefreshModels();');
+    expect(refreshCatalog).not.toContain('catalogRefreshError');
     expect(startup).toMatch(
       /if \(autoRefreshCatalogOnStartup\) \{\s+await refreshCatalogModels\(\);/,
     );
     expect(startup).toContain(
-      'catalogCheckedThisSession = hasRefreshedModelCatalog();',
+      'state.catalogStatus === "ready"',
     );
 
     const defaultAudioStart = startup.indexOf(
@@ -73,9 +80,47 @@ describe('prepareHydratedRuntime', () => {
     const loadModels = source.slice(loadModelsStart, loadModelsEnd);
     expect(loadModels).toContain('await refreshCatalogModels();');
     expect(source).not.toMatch(/await refreshModels\(/);
+    expect(source).not.toContain(
+      '!catalogCheckedThisSession',
+    );
+    expect(source).toContain(
+      'catalogCheckPresentation === "disabled"',
+    );
+    expect(source).toContain(
+      'catalogCheckPresentation === "failed"',
+    );
+    expect(source).toContain(
+      'catalogCheckPresentation === "pending"',
+    );
+    expect(source).toContain(
+      '{#if catalogCheckPresentation === "loading" && state.models.length === 0}',
+    );
   });
 
   describe('startup preference resolution', () => {
+    it('distinguishes disabled, pending, loading, failed, and completed catalog checks', () => {
+      expect(resolveCatalogCheckPresentation({
+        automaticCheckEnabled: false,
+        status: 'not-checked',
+      })).toBe('disabled');
+      expect(resolveCatalogCheckPresentation({
+        automaticCheckEnabled: true,
+        status: 'not-checked',
+      })).toBe('pending');
+      expect(resolveCatalogCheckPresentation({
+        automaticCheckEnabled: false,
+        status: 'loading',
+      })).toBe('loading');
+      expect(resolveCatalogCheckPresentation({
+        automaticCheckEnabled: false,
+        status: 'failed',
+      })).toBe('failed');
+      expect(resolveCatalogCheckPresentation({
+        automaticCheckEnabled: true,
+        status: 'ready',
+      })).toBe('checked');
+    });
+
     it('applies a valid configured audio default when startup still owns the selection', () => {
       expect(resolveStartupAudioAlias(
         'whisper-default',
