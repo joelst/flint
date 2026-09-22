@@ -7,6 +7,7 @@
 const fs = require('fs');
 const path = require('path');
 const {
+  describeInvalidNativeFile,
   platformKeyForTriple,
   validateNativePayload,
 } = require('./foundry-native-payload.cjs');
@@ -71,13 +72,9 @@ function checkPayloadAt(label, dir) {
     return [];
   }
   for (const file of validation.invalid) {
-    const detail =
-      file.symlinkTo && file.linkTarget !== file.symlinkTo
-        ? `not a symlink to ${file.symlinkTo}`
-        : file.size === 0
-          ? 'missing'
-          : `only ${file.size} bytes`;
-    bad(`${label}: ${path.relative(root, file.filePath)} is ${detail}`);
+    bad(
+      `${label}: ${path.relative(root, file.filePath)} is ${describeInvalidNativeFile(file)}`,
+    );
   }
   if (validation.invalid.length === 0) {
     ok(`${label}: complete ${platformKey} native payload (${validation.files.length} files)`);

@@ -77,6 +77,9 @@ function requiredNativeFiles(platformKey, dependencies) {
         name: 'libonnxruntime.dylib',
         minBytes: 1_000_000,
         role: 'ONNX Runtime unversioned alias',
+        // The SDK installer symlinks this name at the versioned dylib. Tauri's
+        // resource copy replaces that symlink with a regular file of the same
+        // bytes (tauri-apps/tauri#13219). Either form can load.
         symlinkTo: `libonnxruntime.${ortMajor}.dylib`,
       },
       { name: 'libonnxruntime-genai.dylib', minBytes: 1_000_000, role: 'ONNX Runtime GenAI' },
@@ -93,6 +96,41 @@ function requiredNativeFiles(platformKey, dependencies) {
   throw new Error(`Unsupported Foundry platformKey: ${platformKey}`);
 }
 
+function inspectNativeFile(filePath) {
+  try {
+    const linkStat = fs.lstatSync(filePath);
+    if (linkStat.isSymbolicLink()) {
+      let size = 0;
+      try {
+        const stat = fs.statSync(filePath);
+        if (stat.isFile()) size = stat.size;
+      } catch {
+        size = 0;
+      }
+      return { size, linkTarget: path.basename(fs.readlinkSync(filePath)) };
+    }
+    if (linkStat.isFile()) return { size: linkStat.size, linkTarget: null };
+  } catch {
+    // Missing. Reported with the rest of the payload.
+  }
+  return { size: 0, linkTarget: null };
+}
+
+function nativeFileProblem(file, inspected) {
+  const { size, linkTarget } = inspected;
+  if (linkTarget && file.symlinkTo && linkTarget !== file.symlinkTo) return 'wrong-link';
+  if (size < file.minBytes) return size === 0 ? 'missing' : 'truncated';
+  return null;
+}
+
+function describeInvalidNativeFile(file) {
+  if (file.reason === 'missing') return 'missing';
+  if (file.reason === 'wrong-link') {
+    return `a symlink to ${file.linkTarget || 'nothing'}, not ${file.symlinkTo}`;
+  }
+  return `only ${file.size} bytes`;
+}
+
 function validateNativePayload(sdkRoot, platformKey) {
   const dependencies = readDependencies(sdkRoot);
   const platformDir = path.join(sdkRoot, 'prebuilds', platformKey);
@@ -101,28 +139,10 @@ function validateNativePayload(sdkRoot, platformKey) {
 
   for (const file of files) {
     const filePath = path.join(platformDir, file.name);
-    let size = 0;
-    try {
-      const stat = fs.statSync(filePath);
-      if (stat.isFile()) size = stat.size;
-    } catch {
-      // Report all missing or incomplete files together.
-    }
-    let linkTarget = null;
-    if (file.symlinkTo) {
-      try {
-        if (fs.lstatSync(filePath).isSymbolicLink()) {
-          linkTarget = path.basename(fs.readlinkSync(filePath));
-        }
-      } catch {
-        // The size check below also reports a missing alias.
-      }
-    }
-    if (
-      size < file.minBytes ||
-      (file.symlinkTo && linkTarget !== file.symlinkTo)
-    ) {
-      invalid.push({ ...file, filePath, size, linkTarget });
+    const inspected = inspectNativeFile(filePath);
+    const reason = nativeFileProblem(file, inspected);
+    if (reason) {
+      invalid.push({ ...file, filePath, ...inspected, reason });
     }
   }
 
@@ -131,6 +151,7 @@ function validateNativePayload(sdkRoot, platformKey) {
 
 module.exports = {
   INSTALLABLE_PLATFORM_KEYS,
+  describeInvalidNativeFile,
   platformKeyForTriple,
   readDependencies,
   requiredNativeFiles,

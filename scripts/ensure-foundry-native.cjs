@@ -14,6 +14,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('node:child_process');
 const {
+  describeInvalidNativeFile,
   INSTALLABLE_PLATFORM_KEYS,
   platformKeyForTriple,
   validateNativePayload,
@@ -173,13 +174,9 @@ if (validation.invalid.length > 0) {
 
 if (validation.invalid.length > 0) {
   for (const file of validation.invalid) {
-    const detail =
-      file.symlinkTo && file.linkTarget !== file.symlinkTo
-        ? `not a symlink to ${file.symlinkTo}`
-        : file.size === 0
-          ? 'missing'
-          : `${file.size} bytes`;
-    log(`${file.role} is ${detail}: ${path.relative(root, file.filePath)}`);
+    log(
+      `${file.role} is ${describeInvalidNativeFile(file)}: ${path.relative(root, file.filePath)}`,
+    );
   }
   fail(
     `Foundry 2.0 native payload is incomplete for ${platformKey}.\n` +
