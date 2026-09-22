@@ -1677,7 +1677,17 @@ describe('initialization readiness recovery', () => {
   it('uses the current catalog policy across sidecar crash recovery', async () => {
     const sdk = await loadSdk();
     await completeInitialization(sdk);
-    sdk.setAutomaticCatalogRefreshEnabled(false);
+
+    const policyUpdate = sdk.initializeSDK({
+      autoStartService: false,
+      refreshCatalog: false,
+    });
+    const policyStatusId = await waitForWrite('getStatus', 2);
+    harness.emitStdout({
+      id: policyStatusId,
+      result: { serviceRunning: false, endpoint: null },
+    });
+    await expect(policyUpdate).resolves.toBe(true);
 
     harness.emitClose({ code: 1 });
     const poll = sdk.pollPoolStatus();
@@ -1685,7 +1695,7 @@ describe('initialization readiness recovery', () => {
     harness.emitStdout({ id: recoveryInitId, result: 'initialized' });
     const recoveryLogId = await waitForWrite('setLogLevel', 1);
     harness.emitStdout({ id: recoveryLogId, result: {} });
-    const recoveryStatusId = await waitForWrite('getStatus', 2);
+    const recoveryStatusId = await waitForWrite('getStatus', 3);
     harness.emitStdout({
       id: recoveryStatusId,
       result: { serviceRunning: false, endpoint: null },

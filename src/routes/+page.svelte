@@ -5120,6 +5120,7 @@ updateStateFromSdk();
     isLoadingModels = true;
     try {
       await refreshModels();
+      catalogCheckedThisSession = true;
       statusMessage = `${state.models.length} models available`;
       // Keep STT list fresh too (metadata driven)
       void loadSTTModels();

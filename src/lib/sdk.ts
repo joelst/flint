@@ -1463,6 +1463,9 @@ export async function initializeSDK(config: Partial<any> = {}): Promise<boolean>
 async function performInitializeSDK(config: Partial<any>): Promise<boolean> {
   const initPayload = { appName: config.appName || 'flint', logLevel: config.logLevel || 'info' };
   const refreshCatalog = config.refreshCatalog !== false;
+  // This call is the current frontend policy even when the manager is already ready and
+  // ensureInitialized short-circuits. Crash recovery must not retain an older preference.
+  lastInitRefreshCatalog = refreshCatalog;
   const alreadyInitialized = !!managerInstance;
   updateState({ error: null });
 
