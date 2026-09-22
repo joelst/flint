@@ -288,6 +288,46 @@ describe('createCatalogRegistrationGate', () => {
     expect(register).toHaveBeenCalledTimes(3);
   });
 
+  it('keeps a terminal failure when the last attempt throws, including providers from an earlier attempt', async () => {
+    const register = vi.fn(async () => {
+      if (register.mock.calls.length === 1) {
+        return {
+          success: false,
+          retry: true,
+          registeredEps: ['CUDAExecutionProvider'],
+          failedEps: ['WebGpuExecutionProvider'],
+        };
+      }
+      throw new Error('offline');
+    });
+    const gate = createCatalogRegistrationGate(register);
+    await expect(gate.ensure()).resolves.toEqual({
+      success: false,
+      status: 'Registered 1; last attempt failed: offline',
+      registeredEps: ['CUDAExecutionProvider'],
+      failedEps: ['WebGpuExecutionProvider'],
+    });
+    expect(register).toHaveBeenCalledTimes(3);
+    await gate.ensure();
+    expect(register).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not make later catalog readers repeat a registration that only throws', async () => {
+    const register = vi.fn(async () => {
+      throw new Error('offline');
+    });
+    const gate = createCatalogRegistrationGate(register);
+    await expect(gate.ensure()).resolves.toEqual({
+      success: false,
+      status: 'offline',
+      registeredEps: [],
+      failedEps: [],
+    });
+    expect(register).toHaveBeenCalledTimes(3);
+    await gate.ensure();
+    expect(register).toHaveBeenCalledTimes(3);
+  });
+
   it('stops retrying a provider that keeps failing so the catalog read is not blocked', async () => {
     const register = vi.fn(async () => ({
       success: false,

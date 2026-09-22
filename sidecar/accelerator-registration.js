@@ -110,6 +110,27 @@ export async function registerDiscoveredExecutionProviders(manager, onProgress, 
 const CATALOG_REGISTRATION_ATTEMPTS = 3;
 
 /**
+ * The bounded attempts are spent. Callers must be able to read the catalog anyway.
+ * A thrown last attempt used to clear the gate, so every later list, load, and
+ * service start ran the same three failures and never got that far. Providers
+ * that registered on an earlier attempt stay in the result; another pass cannot
+ * add them after this result is kept and the snapshot is taken.
+ */
+function terminalRegistrationResult(previous, error) {
+  const registeredEps = Array.isArray(previous?.registeredEps) ? previous.registeredEps : [];
+  const failedEps = Array.isArray(previous?.failedEps) ? previous.failedEps : [];
+  const message = errorMessage(error);
+  return {
+    success: false,
+    status: registeredEps.length > 0
+      ? `Registered ${registeredEps.length}; last attempt failed: ${message}`
+      : message,
+    registeredEps,
+    failedEps,
+  };
+}
+
+/**
  * One registration cycle for the process, retried before the first catalog read.
  *
  * An empty discovery or a failed provider download used to be kept forever. The
@@ -119,9 +140,10 @@ const CATALOG_REGISTRATION_ATTEMPTS = 3;
  * after that read cannot put the missing variants back.
  *
  * A later `onProgress` replaces the previous one so the startup call still hears
- * progress if another caller started the work. A thrown registration is not kept,
- * so a later read can try again. A returned result is kept, including a partial
- * failure on the last attempt.
+ * progress if another caller started the work. A throw before the last attempt is
+ * tried again. A throw on the last attempt becomes a kept failure result, so a
+ * later catalog read does not start the cycle over. An earlier partial result is
+ * kept with that failure.
  */
 export function createCatalogRegistrationGate(register) {
   let pending = null;
@@ -132,31 +154,22 @@ export function createCatalogRegistrationGate(register) {
       if (!pending) {
         // Start synchronously so a second caller in the same turn joins this
         // attempt instead of passing the catalog read before registration exists.
-        let started;
-        try {
-          started = (async () => {
-            let last = null;
-            for (let attempt = 1; attempt <= CATALOG_REGISTRATION_ATTEMPTS; attempt++) {
-              try {
-                last = await register(
-                  (name, pct) => progress?.(name, pct),
-                  { allowLegacyFallback: attempt === CATALOG_REGISTRATION_ATTEMPTS },
-                );
-              } catch (error) {
-                if (attempt === CATALOG_REGISTRATION_ATTEMPTS) throw error;
-                continue;
-              }
-              if (!last?.retry) return last;
+        pending = (async () => {
+          let last = null;
+          for (let attempt = 1; attempt <= CATALOG_REGISTRATION_ATTEMPTS; attempt++) {
+            try {
+              last = await register(
+                (name, pct) => progress?.(name, pct),
+                { allowLegacyFallback: attempt === CATALOG_REGISTRATION_ATTEMPTS },
+              );
+            } catch (error) {
+              if (attempt === CATALOG_REGISTRATION_ATTEMPTS) return terminalRegistrationResult(last, error);
+              continue;
             }
-            return last;
-          })();
-        } catch (error) {
-          return Promise.reject(error);
-        }
-        pending = started.catch((error) => {
-          pending = null;
-          throw error;
-        });
+            if (!last?.retry) return last;
+          }
+          return last;
+        })();
       }
       return pending;
     },
