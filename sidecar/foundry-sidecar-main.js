@@ -2662,9 +2662,7 @@ rl.on('line', async (line) => {
       pool.clear();
       usage.clear();
       try {
-        try { stopNativeWebService(); } catch (e) {
-          log('warn', `stopWebService before restart (ignored): ${e?.message ?? e}`);
-        }
+        stopNativeWebService();
         // Start service BEFORE loading models so HTTP routing layer initializes with the registry.
         if (typeof manager.startWebService === 'function') {
           nativeServiceStartAttempted = true;
@@ -2775,16 +2773,28 @@ rl.on('line', async (line) => {
       }
     } else if (cmd === 'stopService') {
       await stopGateway();
+      let nativeStopError = null;
       try {
         stopNativeWebService(); // synchronous
       } catch (e) {
-        log('warn', `stopWebService error (ignored): ${e?.message ?? e}`);
+        nativeStopError = e;
+        log('warn', `stopWebService error: ${e?.message ?? e}`);
       }
       clearPublishedService();
       tokenAccumulator.clear();
+      if (nativeStopError) {
+        const message = (
+          `The service endpoint was withdrawn, but native listener termination is unconfirmed: ${
+            nativeStopError?.message ?? nativeStopError
+          }`
+        );
+        healthRing.record({ kind: 'service-stop', ok: false, error: message });
+        audit('stopService', { ok: false, error: message });
+        throw new Error(message, { cause: nativeStopError });
+      }
       log('info', 'Service stopped');
       healthRing.record({ kind: 'service-stop', ok: true });
-      audit('stopService', {});
+      audit('stopService', { ok: true });
       reply({ ok: true });
     } else if (cmd === 'stopAndUnload') {
       const drainTimeoutMs = payload.drainTimeoutMs === undefined
