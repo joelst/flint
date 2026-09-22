@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { registerDiscoveredExecutionProviders } from './accelerator-registration.js';
+import { createCatalogRegistrationGate, registerDiscoveredExecutionProviders } from './accelerator-registration.js';
 
 describe('registerDiscoveredExecutionProviders', () => {
   it('registers every discovered provider explicitly', async () => {
@@ -78,5 +78,110 @@ describe('registerDiscoveredExecutionProviders', () => {
       registerDiscoveredExecutionProviders(manager, onProgress),
     ).resolves.toBe(fallback);
     expect(manager.downloadAndRegisterEps).toHaveBeenCalledWith(onProgress);
+  });
+
+  it('registers a provider that shows up only after another registration', async () => {
+    let discovered = [{ name: 'CUDAExecutionProvider', isRegistered: false }];
+    const manager = {
+      discoverEps: () => discovered,
+      downloadAndRegisterEps: vi.fn(async ([name]) => {
+        discovered = discovered.map((provider) =>
+          provider.name === name ? { ...provider, isRegistered: true } : provider,
+        );
+        if (name === 'CUDAExecutionProvider') {
+          discovered = [...discovered, { name: 'NvTensorRTRTXExecutionProvider', isRegistered: false }];
+        }
+        return { success: true, registeredEps: [name], failedEps: [] };
+      }),
+    };
+
+    const result = await registerDiscoveredExecutionProviders(manager);
+    expect(manager.downloadAndRegisterEps.mock.calls.map(([names]) => names)).toEqual([
+      ['CUDAExecutionProvider'],
+      ['NvTensorRTRTXExecutionProvider'],
+    ]);
+    expect(result.registeredEps).toEqual([
+      'CUDAExecutionProvider',
+      'NvTensorRTRTXExecutionProvider',
+    ]);
+    expect(result.failedEps).toEqual([]);
+  });
+
+  it('does not report a provider as registered when discovery still says it is not', async () => {
+    const providers = [{ name: 'CUDAExecutionProvider', isRegistered: false }];
+    const manager = {
+      discoverEps: () => providers,
+      downloadAndRegisterEps: async () => ({
+        success: true,
+        status: 'Requested EPs registered',
+        registeredEps: ['CUDAExecutionProvider'],
+        failedEps: [],
+      }),
+    };
+
+    const result = await registerDiscoveredExecutionProviders(manager);
+    expect(result.registeredEps).toEqual([]);
+    expect(result.failedEps).toEqual(['CUDAExecutionProvider']);
+    expect(result.success).toBe(false);
+    expect(result.status).toContain('runtime did not confirm registration');
+  });
+
+  it('does not download a provider discovery already marks registered', async () => {
+    const providers = [
+      { name: 'CPUExecutionProvider', isRegistered: true },
+      { name: 'CUDAExecutionProvider', isRegistered: false },
+    ];
+    const manager = {
+      discoverEps: () => providers,
+      downloadAndRegisterEps: vi.fn(async ([name]) => {
+        providers.find((provider) => provider.name === name).isRegistered = true;
+        return { success: true, registeredEps: [name], failedEps: [] };
+      }),
+    };
+
+    const result = await registerDiscoveredExecutionProviders(manager);
+    expect(manager.downloadAndRegisterEps.mock.calls.map(([names]) => names)).toEqual([
+      ['CUDAExecutionProvider'],
+    ]);
+    expect(result.registeredEps).toEqual(['CPUExecutionProvider', 'CUDAExecutionProvider']);
+  });
+});
+
+describe('createCatalogRegistrationGate', () => {
+  it('runs one registration for concurrent readers and keeps the result', async () => {
+    let release;
+    const register = vi.fn(() => new Promise((resolve) => {
+      release = resolve;
+    }));
+    const gate = createCatalogRegistrationGate(register);
+    const first = gate.ensure();
+    const second = gate.ensure();
+    expect(register).toHaveBeenCalledTimes(1);
+    release({ registeredEps: ['CUDAExecutionProvider'] });
+    await expect(first).resolves.toEqual({ registeredEps: ['CUDAExecutionProvider'] });
+    await expect(second).resolves.toEqual({ registeredEps: ['CUDAExecutionProvider'] });
+    await gate.ensure();
+    expect(register).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets a later caller hear progress and retries after a throw', async () => {
+    const seen = [];
+    let emit;
+    const register = vi.fn((onProgress) => new Promise((resolve, reject) => {
+      emit = onProgress;
+      if (register.mock.calls.length === 1) {
+        queueMicrotask(() => reject(new Error('package unavailable')));
+        return;
+      }
+      queueMicrotask(() => {
+        emit('CUDAExecutionProvider', 40);
+        resolve('ok');
+      });
+    }));
+    const gate = createCatalogRegistrationGate(register);
+    await expect(gate.ensure(() => seen.push('first'))).rejects.toThrow('package unavailable');
+    await expect(gate.ensure((name) => seen.push(name))).resolves.toBe('ok');
+    expect(seen).toEqual(['CUDAExecutionProvider']);
+    expect(register).toHaveBeenCalledTimes(2);
   });
 });

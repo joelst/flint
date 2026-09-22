@@ -34,7 +34,10 @@ import {
 import {
   applyPreferredExecutionProvider as applyPreferredExecutionProviderTo,
 } from './execution-provider.js';
-import { registerDiscoveredExecutionProviders } from './accelerator-registration.js';
+import {
+  createCatalogRegistrationGate,
+  registerDiscoveredExecutionProviders,
+} from './accelerator-registration.js';
 import {
   stopNativeWebService as stopNativeWebServiceFor,
   waitForHttpReady,
@@ -400,6 +403,21 @@ function validateCommand(cmd, payload) {
 // --- end allowlist ---
 
 let manager = null;
+// One registration for this process. SDK 2.0.1 freezes the catalog on first read,
+// and the IPC handler does not serialize commands, so a list, load, gateway resolve,
+// or pool status can arrive while startup is still registering providers.
+let catalogRegistrationGate = null;
+
+function beforeCatalogRead(onProgress) {
+  if (!manager) return Promise.resolve(null);
+  if (!catalogRegistrationGate) {
+    catalogRegistrationGate = createCatalogRegistrationGate((progress) => {
+      if (!manager || typeof manager.downloadAndRegisterEps !== 'function') return null;
+      return registerDiscoveredExecutionProviders(manager, progress);
+    });
+  }
+  return catalogRegistrationGate.ensure(onProgress);
+}
 let FoundryLocalManager = null;
 let initConfig = null; // { appName, logLevel } — kept so startService can re-create manager with webServiceUrls
 let nativeServiceStartAttempted = false;
@@ -860,6 +878,7 @@ async function resolveForGateway (requested) {
   if (!modelIndex) {
     if (!manager) return null;
     try {
+      await beforeCatalogRead();
       const models = await manager.catalog.getModels();
       cacheModelIndexFromCatalog(models);
     } catch (e) {
@@ -1884,6 +1903,7 @@ async function ensureModelLocked(alias, variantId) {
     },
   } : null);
   try {
+    await beforeCatalogRead();
     const catModel = await manager.catalog.getModel(alias);
     if (variantId) {
       const variant = await manager.catalog.getModelVariant(variantId);
@@ -2438,6 +2458,7 @@ rl.on('line', async (line) => {
       audit('init', { appName, libraryPath });
       reply({ ok: true, result: 'initialized' });
     } else if (cmd === 'listModels') {
+      await beforeCatalogRead();
       const models = await manager.catalog.getModels();
       cacheModelIndexFromCatalog(models);
       reply({
@@ -2492,6 +2513,7 @@ rl.on('line', async (line) => {
         })
       });
     } else if (cmd === 'getSTTModels') {
+      await beforeCatalogRead();
       const all = await manager.catalog.getModels();
       const stt = all.filter(m => {
         const t = (m.info?.task || '').toLowerCase();
@@ -2500,6 +2522,7 @@ rl.on('line', async (line) => {
       });
       reply({ ok: true, result: stt.map(m => ({ alias: m.alias, cached: m.isCached })) });
     } else if (cmd === 'getVisionModels') {
+      await beforeCatalogRead();
       const all = await manager.catalog.getModels();
       const vision = all.filter(m => {
         const t = (m.info?.task || '').toLowerCase();
@@ -2509,6 +2532,7 @@ rl.on('line', async (line) => {
       });
       reply({ ok: true, result: vision.map(m => ({ alias: m.alias, cached: m.isCached })) });
     } else if (cmd === 'download') {
+      await beforeCatalogRead();
       const model = payload.variantId
         ? await manager.catalog.getModelVariant(payload.variantId)
         : await manager.catalog.getModel(payload.alias);
@@ -2563,6 +2587,7 @@ rl.on('line', async (line) => {
         return false;
       };
 
+      await beforeCatalogRead();
       if (variantId) {
         // Delete a single variant from the local cache.
         const variant = await manager.catalog.getModelVariant(variantId);
@@ -3306,6 +3331,7 @@ rl.on('line', async (line) => {
     } else if (cmd === 'poolStatus') {
       let loadedIds = new Set();
       try {
+        await beforeCatalogRead();
         const loaded = await manager.catalog.getLoadedModels();
         for (const m of loaded) loadedIds.add(m.id);
       } catch {}
@@ -3581,7 +3607,7 @@ rl.on('line', async (line) => {
       reply({ ok: true, result: eps });
     } else if (cmd === 'ensureAccelerators') {
       if (typeof manager.downloadAndRegisterEps === 'function') {
-        const result = await registerDiscoveredExecutionProviders(manager, (name, pct) => {
+        const result = await beforeCatalogRead((name, pct) => {
           send({ id, progress: pct, ep: name });
         });
         reply({ ok: true, result: result ?? null });
