@@ -58,6 +58,10 @@
           "-FilePath",
           "%1"
         ]
+      },
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico"
       }
     }
   },

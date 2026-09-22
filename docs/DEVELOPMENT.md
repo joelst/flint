@@ -186,14 +186,9 @@ Workflow:
 pwsh .\scripts\flint-icon-generator.ps1 -SourceImage .\static\flint-master-1024.png -RepositoryRoot .
 ```
 
-Updates `static\` and `src-tauri\icons\` (including `.ico`). SVG generation is intentionally excluded (was producing raster-wrapped output).
-
-`icon.icns` needs `png2icns`, which is macOS-only; the script skips it with a warning on
-other platforms. On Windows/Linux, regenerate it with Pillow instead:
-
-```powershell
-python -c "from PIL import Image; Image.open('static/flint-master-1024.png').convert('RGBA').save('src-tauri/icons/icon.icns')"
-```
+Updates `static\` and `src-tauri\icons\`, using the Tauri CLI for the platform bundle
+assets so `.ico` contains the required Windows sizes and `.icns` is generated consistently
+on every development OS. SVG generation is intentionally excluded.
 
 ---
 
