@@ -70,6 +70,7 @@
     type CacheInventory,
   } from "$lib/sdk";
   import { evaluateStartupPreload } from "$lib/accelerator-readiness";
+  import { failureLogLine, summarizeFailure } from "$lib/status-message";
   import {
     evaluate as evaluateWatch,
     emptyWatchState,
@@ -661,17 +662,20 @@
   let searchTerm = $state("");
   let statusMessage = $state("");
 
-  /** Header status is one line. Native load failures append a stack that would
-   * stretch the bar; the useful sentence stays here and the full text goes to the log. */
-  function briefStatusFailure(prefix: string, error: unknown): string {
-    const raw = String((error as { message?: string })?.message || error || prefix);
-    const json = raw.match(/JSON Error:\s*(.+?)\s+at line/i);
-    const detail = (json ? json[1] : raw.split(/\s+at\s+Microsoft\./)[0])
-      .replace(/\s+/g, " ")
-      .trim()
-      .replace(new RegExp(`^${prefix}:\\s*`), "");
-    const line = `${prefix}: ${detail}`;
-    return line.length > 180 ? `${line.slice(0, 177)}…` : line;
+  /** Every model-load failure goes through here: the full native text (stack included)
+   * to the app log, one sentence to the header, which CSS truncates to the bar width
+   * while the hover title still shows the whole sentence.
+   *
+   * A rethrown failure is logged once — the outer catch re-reports it under its own
+   * prefix without repeating the stack in the log. */
+  let lastLoggedFailure: unknown = null;
+  function reportFailure(prefix: string, error: unknown): string {
+    if (error !== lastLoggedFailure || error === null || error === undefined) {
+      appendAppLog(failureLogLine(prefix, error), "error");
+      lastLoggedFailure = error;
+    }
+    statusMessage = summarizeFailure(prefix, error);
+    return statusMessage;
   }
 
   // Mirror of SDK store for easy template access
@@ -5115,6 +5119,7 @@ updateStateFromSdk();
                 break;
               }
               console.warn(`Startup auto-load failed for ${alias}:`, e);
+              reportFailure(`Startup load failed for ${alias}`, e);
             }
           }
         }
@@ -5426,7 +5431,7 @@ updateStateFromSdk();
       statusMessage = `${alias} ready. Switching to chat...${serviceQualifier(startResult.result)}`;
       currentView = "chat";
     } catch (e: any) {
-      statusMessage = `Failed with starter: ${e?.message || e}`;
+      reportFailure("Failed with starter", e);
     }
   }
 
@@ -5453,7 +5458,7 @@ updateStateFromSdk();
       const startResult = await startServiceForModel(model.alias);
       statusMessage = `Chatting with ${model.alias}${serviceQualifier(startResult.result)}`;
     } catch (e: any) {
-      statusMessage = `Failed to select: ${e?.message || e}`;
+      reportFailure("Failed to select", e);
     }
   }
 
@@ -5473,8 +5478,7 @@ updateStateFromSdk();
       }
       await selectAndChat(model);
     } catch (e: any) {
-      appendAppLog(`Load failed: ${e?.message || e}`, "error");
-      statusMessage = briefStatusFailure("Load failed", e);
+      reportFailure("Load failed", e);
     }
   }
 
@@ -5504,7 +5508,7 @@ updateStateFromSdk();
       await refreshCatalogModels();
       await loadSTTModels();
     } catch (e: any) {
-      statusMessage = `Failed to prepare STT model: ${e?.message || e}`;
+      reportFailure("Failed to prepare STT model", e);
     } finally {
       release();
     }
@@ -5735,9 +5739,7 @@ updateStateFromSdk();
       appendAppLog(`Loading model ${model.alias} (chat lane)`);
       loadResult = await sendLoadToSidecar(model, 'chat');
     } catch (e: any) {
-      const full = `Load failed: ${e?.message || e}`;
-      appendAppLog(full, "error");
-      statusMessage = briefStatusFailure("Load failed", e);
+      reportFailure("Load failed", e);
       throw e;
     } finally {
       release();
@@ -5821,7 +5823,7 @@ updateStateFromSdk();
         statusMessage = `Chatting with ${next}${serviceQualifier(startResult.result)}`;
       persistChat();
     } catch (e: any) {
-      statusMessage = `Failed to select ${next}: ${e?.message || e}`;
+      reportFailure(`Failed to select ${next}`, e);
     }
   }
 
@@ -5882,8 +5884,7 @@ updateStateFromSdk();
       statusMessage = `${model.alias} loaded (${shortVariantLabel(variantId)})${serviceQualifier(startResult.result)}`;
       await refreshCatalogModels();
     } catch (e: any) {
-      appendAppLog(`Load failed: ${e?.message || e}`, "error");
-      statusMessage = briefStatusFailure("Load failed", e);
+      reportFailure("Load failed", e);
     } finally {
       release();
     }
@@ -5927,8 +5928,7 @@ updateStateFromSdk();
       currentView = "chat";
       persistChat();
     } catch (e: any) {
-      appendAppLog(`Load & Chat failed: ${e?.message || e}`, "error");
-      statusMessage = briefStatusFailure("Load & Chat failed", e);
+      reportFailure("Load & Chat failed", e);
     } finally {
       release();
     }
@@ -10148,8 +10148,7 @@ Output only the summary text, no preamble.`;
                                 await refreshCatalogModels();
                                 statusMessage = `Loaded ${slot.label}`;
                               } catch (err: any) {
-                                appendAppLog(`Load failed: ${err?.message || err}`, "error");
-                                statusMessage = briefStatusFailure("Load failed", err);
+                                reportFailure("Load failed", err);
                               } finally {
                                 release();
                               }

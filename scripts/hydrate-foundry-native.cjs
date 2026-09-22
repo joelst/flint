@@ -1,8 +1,16 @@
 #!/usr/bin/env node
 /**
  * Copy Foundry native binaries between a CI cache directory and the SDK
- * install location. The SDK's install script skips nuget.org when
- * Microsoft.AI.Foundry.Local.Core.* is already present.
+ * install location. SDK 2.x ships foundry_local itself inside the package and
+ * downloads ONNX Runtime / ORT-GenAI from NuGet in its install script; that
+ * script skips a download when the expected file is already in
+ * node_modules/foundry-local-sdk/prebuilds/<platform>/.
+ *
+ * Those expected file names carry no version, so an older cache restored over
+ * a newer SDK would silently satisfy that skip with the wrong runtime. The
+ * cache therefore records the SDK version and deps_versions.json it was saved
+ * from, and a restore that does not match is refused rather than applied.
+ * Restores also never overwrite a file the package tarball already provided.
  *
  * Usage:
  *   node scripts/hydrate-foundry-native.cjs --restore
@@ -17,46 +25,114 @@ const root = path.resolve(__dirname, '..');
 const CACHE_DIR = process.env.FLINT_FOUNDRY_CACHE_DIR
   || path.join(root, 'runtime', 'foundry-native-cache');
 const DEST_DIR = process.env.FLINT_FOUNDRY_DEST_DIR
-  || path.join(root, 'node_modules', 'foundry-local-sdk', 'foundry-local-core');
+  || path.join(root, 'node_modules', 'foundry-local-sdk', 'prebuilds');
+// The SDK package root is the parent of prebuilds/; it holds the identity files.
+const SDK_DIR = path.dirname(DEST_DIR);
+const MANIFEST = 'flint-native-cache.json';
 
-function copyDir(from, to) {
-  if (!fs.existsSync(from)) return false;
-  fs.mkdirSync(to, { recursive: true });
-  fs.cpSync(from, to, { recursive: true, force: true });
-  return true;
+function log(message) {
+  console.log(`[hydrate-foundry-native] ${message}`);
 }
 
-function dirHasFiles(dir) {
-  if (!fs.existsSync(dir)) return false;
+function readJson(file) {
   try {
-    const entries = fs.readdirSync(dir, { recursive: true });
-    return entries.some((entry) => {
-      const full = path.join(dir, entry);
-      return fs.statSync(full).isFile();
-    });
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch {
-    return false;
+    return null;
   }
 }
 
+/**
+ * Identity of the SDK install the cache belongs to. `null` when it cannot be
+ * read, which is treated as "cannot be verified" rather than "matches".
+ */
+function sdkIdentity() {
+  const pkg = readJson(path.join(SDK_DIR, 'package.json'));
+  const deps = readJson(path.join(SDK_DIR, 'deps_versions.json'));
+  if (!pkg || typeof pkg.version !== 'string' || !deps) return null;
+  return { layout: 'prebuilds', sdkVersion: pkg.version, deps };
+}
+
+function sameIdentity(a, b) {
+  if (!a || !b) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function listFiles(dir) {
+  if (!fs.existsSync(dir)) return [];
+  try {
+    return fs.readdirSync(dir, { recursive: true })
+      .map((entry) => String(entry))
+      .filter((entry) => {
+        try {
+          return fs.statSync(path.join(dir, entry)).isFile();
+        } catch {
+          return false;
+        }
+      });
+  } catch {
+    return [];
+  }
+}
+
+function copyDir(from, to, { overwrite }) {
+  fs.mkdirSync(to, { recursive: true });
+  fs.cpSync(from, to, {
+    recursive: true,
+    force: overwrite,
+    errorOnExist: false,
+    filter: (src) => path.basename(src) !== MANIFEST,
+  });
+}
+
 function restore() {
-  if (!dirHasFiles(CACHE_DIR)) return;
-  // Creating dest is not enough for a plain `npm ci`: the SDK installer runs as
-  // the package is extracted. CI must restore after extract (see ci-npm-ci.cjs).
-  fs.mkdirSync(DEST_DIR, { recursive: true });
-  copyDir(CACHE_DIR, DEST_DIR);
-  console.log(`[hydrate-foundry-native] restored cache into ${path.relative(root, DEST_DIR)}`);
+  const cached = listFiles(CACHE_DIR).filter((entry) => path.basename(entry) !== MANIFEST);
+  if (cached.length === 0) return;
+
+  const expected = sdkIdentity();
+  const recorded = readJson(path.join(CACHE_DIR, MANIFEST));
+  if (!expected) {
+    log(`skipped restore: cannot read the SDK identity under ${path.relative(root, SDK_DIR)}`);
+    return;
+  }
+  if (!sameIdentity(expected, recorded)) {
+    log(
+      `skipped restore: cache was saved for ${recorded?.sdkVersion || 'an unknown SDK'}`
+        + ` (${recorded?.layout || 'unknown layout'}), install is ${expected.sdkVersion}`
+    );
+    return;
+  }
+
+  // Never overwrite what the package tarball shipped; only fill in the files
+  // the SDK install script would otherwise download.
+  copyDir(CACHE_DIR, DEST_DIR, { overwrite: false });
+
+  const missing = cached.filter((entry) => !fs.existsSync(path.join(DEST_DIR, entry)));
+  if (missing.length > 0) {
+    console.error(
+      `[hydrate-foundry-native] restore did not land ${missing.length} cached file(s), `
+        + `first: ${missing[0]}`
+    );
+    process.exit(1);
+  }
+  log(`restored ${cached.length} cached file(s) into ${path.relative(root, DEST_DIR)}`);
 }
 
 function save() {
-  if (!dirHasFiles(DEST_DIR)) {
-    console.log('[hydrate-foundry-native] no native payload to cache');
+  if (listFiles(DEST_DIR).length === 0) {
+    log('no native payload to cache');
+    return;
+  }
+  const identity = sdkIdentity();
+  if (!identity) {
+    log(`skipped save: cannot read the SDK identity under ${path.relative(root, SDK_DIR)}`);
     return;
   }
   fs.mkdirSync(path.dirname(CACHE_DIR), { recursive: true });
   if (fs.existsSync(CACHE_DIR)) fs.rmSync(CACHE_DIR, { recursive: true, force: true });
-  copyDir(DEST_DIR, CACHE_DIR);
-  console.log(`[hydrate-foundry-native] saved native payload to ${path.relative(root, CACHE_DIR)}`);
+  copyDir(DEST_DIR, CACHE_DIR, { overwrite: true });
+  fs.writeFileSync(path.join(CACHE_DIR, MANIFEST), `${JSON.stringify(identity, null, 2)}\n`);
+  log(`saved native payload for SDK ${identity.sdkVersion} to ${path.relative(root, CACHE_DIR)}`);
 }
 
 const mode = process.argv[2];

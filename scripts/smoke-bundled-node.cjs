@@ -115,14 +115,10 @@ const coreName =
     : process.platform === 'darwin'
       ? 'libfoundry_local.dylib'
       : 'libfoundry_local.so';
-const core = path.join(
-  root,
-  'node_modules',
-  'foundry-local-sdk',
-  'prebuilds',
-  plat,
-  coreName,
-);
+// SDK 2.x takes the directory that holds foundry_local.* plus ONNX Runtime as
+// libraryPath; the file path is only used to prove the native is there.
+const libraryPath = path.join(root, 'node_modules', 'foundry-local-sdk', 'prebuilds', plat);
+const core = path.join(libraryPath, coreName);
 if (!fs.existsSync(core)) {
   console.error('core missing (run npm run ensure:foundry):', core);
   process.exit(5);
@@ -133,7 +129,7 @@ try {
   const mgr = mod.FoundryLocalManager.create({
     appName: 'flint-smoke',
     logLevel: 'error',
-    libraryPath: core,
+    libraryPath,
   });
   console.log('manager create: ok', !!mgr);
 } catch (e) {

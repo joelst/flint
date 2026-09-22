@@ -6,7 +6,8 @@
  * `node_modules/foundry-local-sdk` can survive.
  *
  * Sequence: extract packages without scripts → restore cache → run install
- * scripts (SDK skipIfPresent hits).
+ * scripts (the SDK installer skips downloading artifacts already present in
+ * its prebuilds dir).
  */
 'use strict';
 
@@ -15,8 +16,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const root = path.resolve(__dirname, '..');
-const CACHE_DIR = path.join(root, 'runtime', 'foundry-native-cache');
-const DEST_DIR = path.join(root, 'node_modules', 'foundry-local-sdk', 'foundry-local-core');
+const DEST_DIR = path.join(root, 'node_modules', 'foundry-local-sdk', 'prebuilds');
 
 function dirHasFiles (dir) {
   if (!fs.existsSync(dir)) return false;
@@ -44,10 +44,13 @@ function run (command, args) {
 }
 
 run('npm', ['ci', '--ignore-scripts']);
-const hadCache = dirHasFiles(CACHE_DIR);
-run(process.execPath, [path.join(__dirname, 'hydrate-foundry-native.cjs'), '--restore']);
-if (hadCache && !dirHasFiles(DEST_DIR)) {
-  console.error('[ci-npm-ci] Foundry native cache was present but restore left dest empty');
+// SDK 2.x ships its own natives in the tarball; an empty prebuilds dir means the
+// package never extracted, and restoring into it would hide that.
+if (!dirHasFiles(DEST_DIR)) {
+  console.error(`[ci-npm-ci] ${path.relative(root, DEST_DIR)} is empty after npm ci`);
   process.exit(1);
 }
+// Refuses a cache saved for a different SDK/runtime version and exits non-zero if
+// a matching cache fails to land.
+run(process.execPath, [path.join(__dirname, 'hydrate-foundry-native.cjs'), '--restore']);
 run('npm', ['rebuild']);

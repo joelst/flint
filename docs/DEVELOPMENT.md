@@ -14,7 +14,7 @@ For signed release pipeline setup, see [RELEASE.md](./RELEASE.md).
 - **Rust** + Cargo (Tauri)
 - Windows: Visual Studio Build Tools / MSVC for native builds (use `build-local.ps1` if `cl.exe` / SignTool paths need wiring)
 
-`npm install` runs the Foundry Local SDK install script, which downloads native core libraries into `node_modules/foundry-local-sdk/foundry-local-core/<platform>/`. Release builds also run `npm run ensure:foundry` so missing native assets fail before packaging.
+`npm install` runs the Foundry Local SDK install script, which downloads the ONNX Runtime / ORT-GenAI libraries into `node_modules/foundry-local-sdk/prebuilds/<platform>/`, next to the `foundry_local` native the package itself ships. Release builds also run `npm run ensure:foundry` so missing native assets fail before packaging. In CI, `npm run ci:deps` restores `runtime/foundry-native-cache` into that directory before the install script runs; the cache records the SDK and runtime versions it was saved from and a restore that does not match them is refused.
 
 ### Bundled Node runtime (Spike A)
 
