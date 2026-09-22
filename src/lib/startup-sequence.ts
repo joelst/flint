@@ -42,11 +42,13 @@ export function createStartupAuthorization() {
 }
 
 export function resolveStartupAudioAlias(
+  autoStartService: boolean,
   defaultAudioAlias: string,
   initialAudioAlias: string,
   lastUsedAudioAlias: string,
   availableAudioAliases: readonly string[],
 ): string {
+  if (!autoStartService) return lastUsedAudioAlias;
   if (lastUsedAudioAlias !== initialAudioAlias) return lastUsedAudioAlias;
   if (!defaultAudioAlias || !availableAudioAliases.includes(defaultAudioAlias)) {
     return lastUsedAudioAlias;

@@ -5037,6 +5037,7 @@ updateStateFromSdk();
         }
       }
       selectedSTTModelAlias = resolveStartupAudioAlias(
+        autoStartService,
         defaultAudioAlias,
         startupAudioAlias,
         selectedSTTModelAlias,

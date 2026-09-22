@@ -72,6 +72,9 @@ describe('prepareHydratedRuntime', () => {
     expect(defaultAudioStart, 'default audio selection marker not found').toBeGreaterThan(-1);
     expect(startupModelsStart, 'startup models marker not found').toBeGreaterThan(defaultAudioStart);
     expect(startup.slice(defaultAudioStart - 10, defaultAudioStart)).toMatch(/\}\s+$/);
+    expect(startup.slice(defaultAudioStart, startupModelsStart)).toMatch(
+      /resolveStartupAudioAlias\(\s+autoStartService,/,
+    );
 
     const loadModelsStart = source.indexOf('async function loadModels()');
     const loadModelsEnd = source.indexOf('async function loadRecommendations()');
@@ -123,6 +126,7 @@ describe('prepareHydratedRuntime', () => {
 
     it('applies a valid configured audio default when startup still owns the selection', () => {
       expect(resolveStartupAudioAlias(
+        true,
         'whisper-default',
         'whisper-last-used',
         'whisper-last-used',
@@ -134,6 +138,7 @@ describe('prepareHydratedRuntime', () => {
 
     it('preserves the last-used audio model when no default is configured', () => {
       expect(resolveStartupAudioAlias(
+        true,
         '',
         'whisper-last-used',
         'whisper-last-used',
@@ -143,6 +148,7 @@ describe('prepareHydratedRuntime', () => {
 
     it('does not select a stale audio default absent from the refreshed catalog', () => {
       expect(resolveStartupAudioAlias(
+        true,
         'whisper-removed',
         'whisper-last-used',
         'whisper-last-used',
@@ -152,11 +158,22 @@ describe('prepareHydratedRuntime', () => {
 
     it('does not overwrite an audio selection changed while startup was awaiting work', () => {
       expect(resolveStartupAudioAlias(
+        true,
         'whisper-default',
         'whisper-at-launch',
         'whisper-user-choice',
         ['whisper-default', 'whisper-user-choice'],
       )).toBe('whisper-user-choice');
+    });
+
+    it('preserves the last-used audio model when automatic service startup is disabled', () => {
+      expect(resolveStartupAudioAlias(
+        false,
+        'whisper-default',
+        'whisper-last-used',
+        'whisper-last-used',
+        ['whisper-default', 'whisper-last-used'],
+      )).toBe('whisper-last-used');
     });
   });
 
