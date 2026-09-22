@@ -8,6 +8,7 @@
   import {
     initializeSDK,
     setAutomaticCatalogRefreshEnabled,
+    hasRefreshedModelCatalog,
     getSDKState,
     getEps,
     refreshModels as sdkRefreshModels,
@@ -84,6 +85,7 @@
     createSingleFlight,
     createStartupAuthorization,
     prepareHydratedRuntime,
+    resolveStartupAudioAlias,
   } from "$lib/startup-sequence";
   import packageJson from "../../package.json";
 
@@ -245,8 +247,11 @@
   let catalogCheckedThisSession = $state(false);
 
   async function refreshCatalogModels() {
-    await sdkRefreshModels();
-    catalogCheckedThisSession = true;
+    try {
+      await sdkRefreshModels();
+    } finally {
+      catalogCheckedThisSession = hasRefreshedModelCatalog();
+    }
   }
 
   /** About strip — app + Node + service (Help + Settings). */
@@ -4797,6 +4802,7 @@ updateStateFromSdk();
     // the SDK, the model list and the recommendations, and the user can select a conversation or
     // a model throughout — after which the startup selection must not be published over theirs.
     const startupNav = currentChatNavigation();
+    const startupAudioAlias = selectedSTTModelAlias;
 
     // Persisted state (chat, conversations, personas) is hydrated in onMount, before autosave
     // is enabled — restoring it here would race the autosave effect.
@@ -4825,6 +4831,7 @@ updateStateFromSdk();
       servicePort: networkPort,
       bindAddress: networkBindAddress || undefined,
     });
+    catalogCheckedThisSession = hasRefreshedModelCatalog();
     void refreshNodeAboutLine();
 
     try {
@@ -5030,8 +5037,13 @@ updateStateFromSdk();
             }
           }
         }
-        if (defaultAudioAlias) selectedSTTModelAlias = defaultAudioAlias;
       }
+      selectedSTTModelAlias = resolveStartupAudioAlias(
+        defaultAudioAlias,
+        startupAudioAlias,
+        selectedSTTModelAlias,
+        sttModels.filter((model: ModelInfo) => model.isCached).map((model: ModelInfo) => model.alias),
+      );
 
       // Load any additional startup models (multi-model pool pre-warm)
       const startupEntries = Object.entries(startupModels);

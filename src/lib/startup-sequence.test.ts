@@ -5,6 +5,7 @@ import {
   createSingleFlight,
   createStartupAuthorization,
   prepareHydratedRuntime,
+  resolveStartupAudioAlias,
 } from './startup-sequence';
 
 describe('prepareHydratedRuntime', () => {
@@ -46,11 +47,24 @@ describe('prepareHydratedRuntime', () => {
     );
 
     expect(source).toMatch(
-      /async function refreshCatalogModels\(\) \{\s+await sdkRefreshModels\(\);\s+catalogCheckedThisSession = true;\s+\}/,
+      /async function refreshCatalogModels\(\) \{\s+try \{\s+await sdkRefreshModels\(\);\s+\} finally \{\s+catalogCheckedThisSession = hasRefreshedModelCatalog\(\);\s+\}\s+\}/,
     );
     expect(startup).toMatch(
       /if \(autoRefreshCatalogOnStartup\) \{\s+await refreshCatalogModels\(\);/,
     );
+    expect(startup).toContain(
+      'catalogCheckedThisSession = hasRefreshedModelCatalog();',
+    );
+
+    const defaultAudioStart = startup.indexOf(
+      'selectedSTTModelAlias = resolveStartupAudioAlias(',
+    );
+    const startupModelsStart = startup.indexOf(
+      'const startupEntries = Object.entries(startupModels);',
+    );
+    expect(defaultAudioStart, 'default audio selection marker not found').toBeGreaterThan(-1);
+    expect(startupModelsStart, 'startup models marker not found').toBeGreaterThan(defaultAudioStart);
+    expect(startup.slice(defaultAudioStart - 10, defaultAudioStart)).toMatch(/\}\s+$/);
 
     const loadModelsStart = source.indexOf('async function loadModels()');
     const loadModelsEnd = source.indexOf('async function loadRecommendations()');
@@ -59,6 +73,46 @@ describe('prepareHydratedRuntime', () => {
     const loadModels = source.slice(loadModelsStart, loadModelsEnd);
     expect(loadModels).toContain('await refreshCatalogModels();');
     expect(source).not.toMatch(/await refreshModels\(/);
+  });
+
+  describe('startup preference resolution', () => {
+    it('applies a valid configured audio default when startup still owns the selection', () => {
+      expect(resolveStartupAudioAlias(
+        'whisper-default',
+        'whisper-last-used',
+        'whisper-last-used',
+        ['whisper-default', 'whisper-last-used'],
+      )).toBe(
+        'whisper-default',
+      );
+    });
+
+    it('preserves the last-used audio model when no default is configured', () => {
+      expect(resolveStartupAudioAlias(
+        '',
+        'whisper-last-used',
+        'whisper-last-used',
+        ['whisper-last-used'],
+      )).toBe('whisper-last-used');
+    });
+
+    it('does not select a stale audio default absent from the refreshed catalog', () => {
+      expect(resolveStartupAudioAlias(
+        'whisper-removed',
+        'whisper-last-used',
+        'whisper-last-used',
+        ['whisper-last-used'],
+      )).toBe('whisper-last-used');
+    });
+
+    it('does not overwrite an audio selection changed while startup was awaiting work', () => {
+      expect(resolveStartupAudioAlias(
+        'whisper-default',
+        'whisper-at-launch',
+        'whisper-user-choice',
+        ['whisper-default', 'whisper-user-choice'],
+      )).toBe('whisper-user-choice');
+    });
   });
 
   it('applies memory policy, then accelerators, then optional service startup', async () => {

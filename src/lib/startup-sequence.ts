@@ -40,3 +40,16 @@ export function createStartupAuthorization() {
     invalidate: () => { epoch += 1; },
   };
 }
+
+export function resolveStartupAudioAlias(
+  defaultAudioAlias: string,
+  initialAudioAlias: string,
+  lastUsedAudioAlias: string,
+  availableAudioAliases: readonly string[],
+): string {
+  if (lastUsedAudioAlias !== initialAudioAlias) return lastUsedAudioAlias;
+  if (!defaultAudioAlias || !availableAudioAliases.includes(defaultAudioAlias)) {
+    return lastUsedAudioAlias;
+  }
+  return defaultAudioAlias;
+}

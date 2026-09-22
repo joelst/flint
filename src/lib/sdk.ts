@@ -161,11 +161,17 @@ export function getSidecarGeneration(): number {
 let currentEndpoint: string | undefined = undefined;
 /** Init payload of the last successful init, so a crash-respawned sidecar can be re-inited. */
 let lastInitPayload: { appName: string; logLevel: string } | null = null;
-/** Catalog policy from the last successful init, preserved across sidecar crash recovery. */
+/** Latest frontend catalog policy, preserved across sidecar crash recovery. */
 let lastInitRefreshCatalog = true;
+/** Direct evidence that this frontend session received a successful catalog response. */
+let modelCatalogRefreshed = false;
 
 export function setAutomaticCatalogRefreshEnabled(enabled: boolean): void {
   lastInitRefreshCatalog = enabled;
+}
+
+export function hasRefreshedModelCatalog(): boolean {
+  return modelCatalogRefreshed;
 }
 
 function decodeShellOutput(data: string | Uint8Array): string {
@@ -1380,7 +1386,6 @@ async function performInit(
       throw new Error('Sidecar was replaced during initialization');
     }
     lastInitPayload = payload;
-    lastInitRefreshCatalog = refreshCatalog;
     managerInstance = true;
     updateRuntime({ manager: 'ready', models: 'unknown' });
     // The previous child's residency is meaningless. Refresh the catalog when allowed; otherwise
@@ -1453,6 +1458,11 @@ let initializeSDKPromise: Promise<boolean> | null = null;
  * destructive restart that would clear the pool out from under the first caller.
  */
 export async function initializeSDK(config: Partial<any> = {}): Promise<boolean> {
+  // This invocation carries the current frontend policy even when it joins initialization that
+  // is already in flight. Recovery must use the latest request, not whichever call won the race.
+  if (typeof config.refreshCatalog === 'boolean') {
+    lastInitRefreshCatalog = config.refreshCatalog;
+  }
   if (initializeSDKPromise) return initializeSDKPromise;
   initializeSDKPromise = performInitializeSDK(config).finally(() => {
     initializeSDKPromise = null;
@@ -1462,10 +1472,10 @@ export async function initializeSDK(config: Partial<any> = {}): Promise<boolean>
 
 async function performInitializeSDK(config: Partial<any>): Promise<boolean> {
   const initPayload = { appName: config.appName || 'flint', logLevel: config.logLevel || 'info' };
-  const refreshCatalog = config.refreshCatalog !== false;
-  // This call is the current frontend policy even when the manager is already ready and
-  // ensureInitialized short-circuits. Crash recovery must not retain an older preference.
-  lastInitRefreshCatalog = refreshCatalog;
+  const refreshCatalog =
+    typeof config.refreshCatalog === 'boolean'
+      ? config.refreshCatalog
+      : lastInitRefreshCatalog;
   const alreadyInitialized = !!managerInstance;
   updateState({ error: null });
 
@@ -1525,6 +1535,7 @@ export async function refreshModels(): Promise<void> {
   updateRuntime({ models: 'loading' });
   try {
     const res = await send('listModels');
+    modelCatalogRefreshed = true;
     const list = res.result || [];
     let currentLoadedAlias: string | undefined;
 
@@ -2613,6 +2624,7 @@ export function resetSDK() {
   managerReady = false;
   lastInitPayload = null; // a deliberate reset must not auto-re-init on the next send
   lastInitRefreshCatalog = true;
+  modelCatalogRefreshed = false;
   currentEndpoint = undefined;
   runtimeQuitRequested = false;
   runtimeQuitPromise = null;
