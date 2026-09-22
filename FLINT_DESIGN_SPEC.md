@@ -201,7 +201,7 @@ Azure connections and other future feature work are tracked in
 
 - Local inference default (in-process or localhost server).
 - “Running locally” style messaging; clear cloud indicators when remote endpoints exist.
-- No telemetry by default. Model catalog listing/refresh is the one built-in network call outside inference — it contacts Microsoft's remote Foundry catalog, runs automatically at startup by default, and its startup check can be disabled in Settings (manual "Refresh catalog" and user-driven model actions remain available).
+- No telemetry by default. The automatic model catalog listing/refresh check is a built-in background network call outside inference — it contacts Microsoft's remote Foundry catalog, runs automatically at startup by default, and its startup check can be disabled in Settings. Manual catalog refreshes and user-driven model downloads remain available.
 - Minimal permissions (mic only when user starts audio; filesystem limited to needed paths).
 - Settings, conversations, logs exportable/deletable where implemented.
 - Tauri CSP and capability model restrict webview powers.
