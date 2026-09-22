@@ -11728,10 +11728,6 @@ Output only the summary text, no preamble.`;
     color: var(--warning);
   }
 
-  button.small.primary-chat {
-    color: #111;
-  }
-
   /* Startup toggle */
   .startup-toggle {
     display: inline-flex;
@@ -12183,6 +12179,8 @@ Output only the summary text, no preamble.`;
 
   .primary-chat {
     background: #22c55e !important;
+    /* Dark text is 8.29:1 on this green; white is only 2.28:1. */
+    color: #111 !important;
   }
 
   /* Chat styles */
