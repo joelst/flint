@@ -182,7 +182,7 @@ const KNOWN_COMMANDS = new Set([
 const FIELD_TYPES = {
   init:              { appName: 'non-empty-string', logLevel: 'non-empty-string' },
   setLogLevel:       { level: 'non-empty-string' },
-  startService:      { port: 'number', bindAddress: 'string', gateway: 'boolean' },
+  startService:      { port: 'number', bindAddress: 'string', gateway: 'boolean', deferCatalogRead: 'boolean' },
   stopAndUnload:     { drainTimeoutMs: 'number' },
   shutdownRuntime:   { drainTimeoutMs: 'number' },
   download:          { alias: 'non-empty-string', variantId: 'non-empty-string' },
@@ -218,7 +218,7 @@ const VALID_LANES = new Set(['chat', 'audio']);
 const COMMAND_SCHEMA = {
   init:               { required: ['appName', 'logLevel'], optional: [] },
   setLogLevel:        { required: ['level'], optional: [] },
-  startService:       { required: ['port'], optional: ['alias', 'preferredEp', 'bindAddress', 'gateway'] },
+  startService:       { required: ['port'], optional: ['alias', 'preferredEp', 'bindAddress', 'gateway', 'deferCatalogRead'] },
   stopService:        { required: [], optional: [] },
   stopAndUnload:      { required: [], optional: ['drainTimeoutMs'] },
   shutdownRuntime:    { required: [], optional: ['drainTimeoutMs'] },
@@ -428,6 +428,7 @@ function acceleratorGate() {
 function beforeCatalogRead(onProgress, options = {}) {
   const gate = acceleratorGate();
   if (!gate) return Promise.resolve(null);
+  if (options.seal) return gate.seal(onProgress);
   // `commit` performs the actual first catalog read inside the same queue as
   // registration. An explicit update cannot register beside snapshot creation.
   return options.commit ? gate.commit(onProgress) : gate.ensure(onProgress);
@@ -2729,11 +2730,15 @@ rl.on('line', async (line) => {
       usage.clear();
       try {
         stopNativeWebService();
-        // The native listener answers GET /v1/models itself. That read is not one of the
-        // sidecar's catalog calls, and Start is enabled as soon as the runtime is ready,
-        // which is before startup finishes registering providers. Register first or that
-        // request freezes the CPU-only snapshot for the process.
-        await beforeCatalogRead(undefined, { commit: true });
+        // The native listener answers GET /v1/models itself. Register providers before
+        // exposure. Normal starts also force the immutable snapshot under the gate; startup
+        // can explicitly defer that network-backed read when the user disabled automatic
+        // catalog checks, after its own accelerator setup has completed.
+        if (payload.deferCatalogRead) {
+          await beforeCatalogRead(undefined, { seal: true });
+        } else {
+          await beforeCatalogRead(undefined, { commit: true });
+        }
         // Start service BEFORE loading models so HTTP routing layer initializes with the registry.
         if (typeof manager.startWebService === 'function') {
           nativeServiceStartAttempted = true;
@@ -2812,7 +2817,11 @@ rl.on('line', async (line) => {
           ok: true,
         });
         audit('startService', {
-          port: payload.port, bindAddress: bindAddr, endpoint: sharedEndpoint, gateway: useGateway,
+          port: payload.port,
+          bindAddress: bindAddr,
+          endpoint: sharedEndpoint,
+          gateway: useGateway,
+          deferCatalogRead: payload.deferCatalogRead === true,
         });
         const desired = payload.alias;
         if (desired) {

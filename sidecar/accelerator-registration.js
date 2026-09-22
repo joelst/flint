@@ -245,5 +245,17 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
         return settled;
       });
     },
+    seal(onProgress) {
+      const report = typeof onProgress === 'function' ? onProgress : null;
+      return enqueue(async () => {
+        if (!settled) settled = await attempts(report);
+        // The native listener can perform the first read outside this process.
+        // Close the provider boundary without contacting the registry so every
+        // later update is conservatively reported as restart-bound.
+        committed = true;
+        commitConfirmed = true;
+        return settled;
+      });
+    },
   };
 }

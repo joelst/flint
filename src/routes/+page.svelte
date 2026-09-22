@@ -4920,6 +4920,7 @@ updateStateFromSdk();
               {
                 convenience: true,
                 expectedGeneration: readiness.generation,
+                deferCatalogRead: !autoRefreshCatalogOnStartup,
               },
             );
             if (ensured.started) markNetworkSettingsApplied();
@@ -5358,6 +5359,7 @@ updateStateFromSdk();
         appendAppLog(statusMessage, "warn");
       } else if (readiness.registration?.catalogRefreshRequiresRestart) {
         statusMessage = "Accelerator setup finished. Restart Flint to let the model catalog detect any newly available variants.";
+        appendAppLog(statusMessage, "warn");
       } else {
         statusMessage =
           state.acceleratorsReady

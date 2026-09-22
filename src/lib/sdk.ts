@@ -2003,7 +2003,7 @@ async function startServiceLocked(
   alias?: string,
   preferredEp?: string,
   bindAddress?: string,
-  opts?: { convenience?: boolean },
+  opts?: { convenience?: boolean; deferCatalogRead?: boolean },
   fence?: number,
 ): Promise<string> {
   if (fence !== undefined && fence !== serviceStopFence) {
@@ -2031,6 +2031,9 @@ async function startServiceLocked(
   }
   if (bindAddress) {
     payload.bindAddress = bindAddress;
+  }
+  if (opts?.deferCatalogRead) {
+    payload.deferCatalogRead = true;
   }
   let res: any;
   let generation: number | null = null;
@@ -2084,7 +2087,7 @@ export async function startService(
   alias?: string,
   preferredEp?: string,
   bindAddress?: string,
-  opts?: { convenience?: boolean }
+  opts?: { convenience?: boolean; deferCatalogRead?: boolean }
 ): Promise<string> {
   const fence = serviceStopFence;
   return withServiceTransition(() =>
@@ -2103,7 +2106,7 @@ export async function ensureServiceRunning(
   alias?: string,
   preferredEp?: string,
   bindAddress?: string,
-  opts?: { convenience?: boolean; expectedGeneration?: number },
+  opts?: { convenience?: boolean; expectedGeneration?: number; deferCatalogRead?: boolean },
 ): Promise<{ endpoint: string; started: boolean }> {
   const authorizationFence = serviceStopFence;
   return withServiceTransition(async ({ startNow }) => {

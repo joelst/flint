@@ -32,6 +32,9 @@ describe('prepareHydratedRuntime', () => {
     expect(prepareAccelerators).toContain('return');
     expect(prepareAccelerators).toContain('ensureHardwareAccel({');
     expect(prepareAccelerators).toContain('refreshCatalog: false');
+    expect(startup).toContain(
+      'deferCatalogRead: !autoRefreshCatalogOnStartup',
+    );
 
     const fenceStart = startup.indexOf('startupInterrupted ||');
     const fenceEnd = startup.indexOf('if (startupLoaded > 0)');
@@ -137,6 +140,9 @@ describe('prepareHydratedRuntime', () => {
     expect(setup).toContain('readiness.registration?.catalogRefreshRequiresRestart');
     expect(setup).toContain('readiness.registration.catalogRefreshRequiresRestart');
     expect(setup.match(/Restart Flint to let the model catalog detect any newly available variants\./g)).toHaveLength(2);
+    expect(setup).toMatch(
+      /Accelerator setup finished\. Restart Flint[\s\S]*?appendAppLog\(statusMessage, "warn"\);/,
+    );
   });
 
   describe('startup preference resolution', () => {

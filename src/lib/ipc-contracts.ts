@@ -6,7 +6,7 @@ export const SIDECAR_PROTOCOL_VERSION = 1;
 export type SidecarCommand =
   | { cmd: 'init'; appName: string; logLevel: string }
   | { cmd: 'setLogLevel'; level: string }
-  | { cmd: 'startService'; port: number; alias?: string; preferredEp?: string; bindAddress?: string; gateway?: boolean }
+  | { cmd: 'startService'; port: number; alias?: string; preferredEp?: string; bindAddress?: string; gateway?: boolean; deferCatalogRead?: boolean }
   | { cmd: 'stopService' }
   | { cmd: 'stopAndUnload'; drainTimeoutMs?: number }
   | { cmd: 'shutdownRuntime'; drainTimeoutMs?: number }

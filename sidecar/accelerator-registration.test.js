@@ -208,6 +208,8 @@ describe('native service startup', () => {
     const gateStart = source.indexOf('catalogRegistrationGate = createCatalogRegistrationGate(');
     const forcedRead = source.indexOf('return catalog.getModels();', gateStart);
     const start = source.indexOf("} else if (cmd === 'startService') {");
+    const deferredRead = source.indexOf('payload.deferCatalogRead', start);
+    const sealed = source.indexOf('seal: true', deferredRead);
     const gate = source.indexOf('commit: true', start);
     const web = source.indexOf('manager.startWebService()', start);
     const setup = source.indexOf("} else if (cmd === 'ensureAccelerators') {");
@@ -215,7 +217,10 @@ describe('native service startup', () => {
     expect(gateStart).toBeGreaterThan(-1);
     expect(forcedRead).toBeGreaterThan(gateStart);
     expect(start).toBeGreaterThan(-1);
+    expect(deferredRead).toBeGreaterThan(start);
+    expect(sealed).toBeGreaterThan(deferredRead);
     expect(gate).toBeGreaterThan(start);
+    expect(gate).toBeGreaterThan(sealed);
     expect(web).toBeGreaterThan(gate);
     expect(setup).toBeGreaterThan(-1);
     expect(rerun).toBeGreaterThan(setup);
@@ -259,6 +264,21 @@ describe('createCatalogRegistrationGate', () => {
 
     await gate.ensure();
     expect(readCatalog).not.toHaveBeenCalled();
+  });
+
+  it('seals a listener-exposed catalog without reading it and restart-bounds later updates', async () => {
+    const register = vi.fn()
+      .mockResolvedValueOnce({ success: true, registeredEps: ['CPUExecutionProvider'] })
+      .mockResolvedValueOnce({ success: true, registeredEps: ['CUDAExecutionProvider'] });
+    const readCatalog = vi.fn();
+    const gate = createCatalogRegistrationGate(register, readCatalog);
+
+    await gate.seal();
+    expect(readCatalog).not.toHaveBeenCalled();
+    await expect(gate.rerun()).resolves.toMatchObject({
+      registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+      catalogRefreshRequiresRestart: true,
+    });
   });
 
   it('retries a thrown registration and a partial failure before the catalog is read', async () => {

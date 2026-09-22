@@ -2087,6 +2087,44 @@ describe('accelerator readiness ownership', () => {
     unsubscribe();
   }, 15000);
 
+  it('forwards deferred catalog reads for offline startup service starts', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+
+    const ensured = sdk.ensureServiceRunning(
+      5272,
+      undefined,
+      undefined,
+      undefined,
+      {
+        convenience: true,
+        expectedGeneration: snapshot.runtime.generation,
+        deferCatalogRead: true,
+      },
+    );
+    const statusId = await waitForWrite('getStatus', 2);
+    harness.emitStdout({ id: statusId, result: { serviceRunning: false, endpoint: null } });
+    const startId = await waitForWrite('startService');
+    const startRequest = harness.writes
+      .map((line) => JSON.parse(line))
+      .find((request) => request.id === startId);
+    expect(startRequest).toMatchObject({
+      cmd: 'startService',
+      deferCatalogRead: true,
+    });
+    harness.emitStdout({ id: startId, endpoint: 'http://127.0.0.1:5272' });
+
+    await expect(ensured).resolves.toEqual({
+      endpoint: 'http://127.0.0.1:5272',
+      started: true,
+    });
+    unsubscribe();
+  }, 15000);
+
   it('does not report a model load after its sidecar exits before refresh', async () => {
     const sdk = await loadSdk();
     await completeInitialization(sdk);
