@@ -1027,7 +1027,13 @@
                     {#if entry.tags.length}
                       <span class="muted small">{entry.tags.join(", ")}</span>
                     {/if}
-                    <p class="small benchmark-case-body">{entry.body}</p>
+                    {#if entry.messages}
+                      {#each entry.messages as message, messageIndex (messageIndex)}
+                        <p class="small benchmark-case-body"><span class="muted">{message.role}:</span> {message.content}</p>
+                      {/each}
+                    {:else}
+                      <p class="small benchmark-case-body">{entry.prompt}</p>
+                    {/if}
                     {#if entry.expected}
                       <p class="muted small">Expected (stored, not scored): {entry.expected}</p>
                     {/if}

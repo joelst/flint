@@ -4,7 +4,7 @@
  * attempt bodies.
  */
 
-import type { BenchmarkCase, BenchmarkSuite, BenchmarkTarget } from './benchmark-suite';
+import type { BenchmarkSuite, BenchmarkTarget } from './benchmark-suite';
 
 export function targetVariantLabel(variantId: string | null): string {
   return variantId ?? 'runtime-selected';
@@ -15,11 +15,9 @@ export function generationSettingLabel(value: number | undefined): string {
   return value === undefined ? 'runtime default' : String(value);
 }
 
-/** Prompt text, or a count when the case is a messages array the form cannot edit as one prompt. */
-export function caseBodyLabel(entry: Pick<BenchmarkCase, 'prompt' | 'messages'>): string {
-  if (typeof entry.prompt === 'string') return entry.prompt;
-  const count = entry.messages?.length ?? 0;
-  return count === 1 ? '1 message' : `${count} messages`;
+export interface SuiteCaseMessageView {
+  role: string;
+  content: string;
 }
 
 export interface SuiteDefinitionView {
@@ -29,7 +27,17 @@ export interface SuiteDefinitionView {
   temperatureLabel: string;
   maxTokensLabel: string;
   targets: Array<{ alias: string; variantLabel: string }>;
-  cases: Array<{ id: string; body: string; tags: string[]; expected?: string }>;
+  /**
+   * A messages case keeps every role and its text. After the first run the suite is
+   * locked, so a count would hide the prompt that was actually measured.
+   */
+  cases: Array<{
+    id: string;
+    prompt?: string;
+    messages?: SuiteCaseMessageView[];
+    tags: string[];
+    expected?: string;
+  }>;
 }
 
 export function suiteDefinitionView(suite: BenchmarkSuite): SuiteDefinitionView {
@@ -45,9 +53,15 @@ export function suiteDefinitionView(suite: BenchmarkSuite): SuiteDefinitionView 
     cases: suite.cases.map((entry) => {
       const row: SuiteDefinitionView['cases'][number] = {
         id: entry.id,
-        body: caseBodyLabel(entry),
         tags: entry.tags ? [...entry.tags] : [],
       };
+      if (typeof entry.prompt === 'string') row.prompt = entry.prompt;
+      if (entry.messages) {
+        row.messages = entry.messages.map((message) => ({
+          role: message.role,
+          content: message.content,
+        }));
+      }
       if (entry.expected !== undefined) row.expected = entry.expected;
       return row;
     }),

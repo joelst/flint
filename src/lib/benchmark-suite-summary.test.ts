@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { caseBodyLabel, generationSettingLabel, suiteDefinitionView, targetVariantLabel } from './benchmark-suite-summary';
+import { generationSettingLabel, suiteDefinitionView, targetVariantLabel } from './benchmark-suite-summary';
 import type { BenchmarkSuite } from './benchmark-suite';
 
 const suite = (over: Partial<BenchmarkSuite> = {}): BenchmarkSuite => ({
@@ -28,12 +28,6 @@ describe('suite definition labels', () => {
     expect(generationSettingLabel(256)).toBe('256');
   });
 
-  it('labels a messages case by count instead of dropping it', () => {
-    expect(caseBodyLabel({ prompt: 'hi' })).toBe('hi');
-    expect(caseBodyLabel({ messages: [{ role: 'user', content: 'hi' }] })).toBe('1 message');
-    expect(caseBodyLabel({ messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'yo' }] })).toBe('2 messages');
-  });
-
   it('projects the stored suite, including expected text, without attempt data', () => {
     const view = suiteDefinitionView(suite({ description: 'basic math', temperature: 0.2, maxTokens: 128 }));
     expect(view.description).toBe('basic math');
@@ -43,8 +37,15 @@ describe('suite definition labels', () => {
       { alias: 'model-a', variantLabel: 'runtime-selected' },
       { alias: 'model-b', variantLabel: 'cuda' },
     ]);
-    expect(view.cases[0]).toEqual({ id: 'c1', body: 'What is 2+2?', tags: ['math'], expected: '4' });
-    expect(view.cases[1]).toEqual({ id: 'c2', body: '2 messages', tags: [] });
+    expect(view.cases[0]).toEqual({ id: 'c1', prompt: 'What is 2+2?', tags: ['math'], expected: '4' });
+    expect(view.cases[1]).toEqual({
+      id: 'c2',
+      messages: [
+        { role: 'user', content: 'hi' },
+        { role: 'assistant', content: 'hello' },
+      ],
+      tags: [],
+    });
   });
 
   it('labels omitted temperature and max tokens as the runtime default', () => {
