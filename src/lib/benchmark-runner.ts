@@ -240,7 +240,7 @@ async function executePositions(
     // Stamp the start on the terminal patch, not the write-ahead intent. A crash or Stop
     // during the call leaves the row `dispatched` with no start time, so a later results
     // view cannot invent a duration for a call that never settled. This is the full
-    // non-streaming call, not time to first token.
+    // transport call, not time to first token.
     const sdkCallStartedAt = Date.now();
     let transportResult: AttemptTransportResult;
     try {

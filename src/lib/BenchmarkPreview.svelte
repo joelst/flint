@@ -585,9 +585,15 @@
     if (!liveAtOpen) void loadRunResults(runId);
     await refreshSelectedRun();
     if (token !== openRunToken || selectedRunId !== runId || destroyed) return;
+    // Historical opens already own the full read started above. Only a run that was live when
+    // opened needs a post-refresh decision: keep polling if it is still live, otherwise load its
+    // now-terminal result once.
+    if (!liveAtOpen) return;
     if (runId === activeRunId) {
       schedulePoll(runId);
-    } else if (liveAtOpen) void loadRunResults(runId);
+    } else {
+      void loadRunResults(runId);
+    }
   }
 
   $: progressMatrix = selectedRun

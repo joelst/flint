@@ -73,6 +73,7 @@ describe('benchmark editor wiring', () => {
     const openRun = source.slice(start, end);
     expect(openRun).toContain('const liveAtOpen = runId === activeRunId;');
     expect(openRun).toContain('if (!liveAtOpen) void loadRunResults(runId);');
-    expect(openRun).toContain('else if (liveAtOpen) void loadRunResults(runId);');
+    expect(openRun).toContain('if (!liveAtOpen) return;');
+    expect(openRun.match(/void loadRunResults\(runId\);/g)).toHaveLength(2);
   });
 });
