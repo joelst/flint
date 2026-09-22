@@ -161,6 +161,12 @@ export function getSidecarGeneration(): number {
 let currentEndpoint: string | undefined = undefined;
 /** Init payload of the last successful init, so a crash-respawned sidecar can be re-inited. */
 let lastInitPayload: { appName: string; logLevel: string } | null = null;
+/** Catalog policy from the last successful init, preserved across sidecar crash recovery. */
+let lastInitRefreshCatalog = true;
+
+export function setAutomaticCatalogRefreshEnabled(enabled: boolean): void {
+  lastInitRefreshCatalog = enabled;
+}
 
 function decodeShellOutput(data: string | Uint8Array): string {
   return typeof data === 'string' ? data : new TextDecoder().decode(data);
@@ -1313,7 +1319,44 @@ let initPromise: Promise<void> | null = null;
 // recover the very commands init itself is issuing (which would await its own promise forever).
 let initializing = false;
 
-async function performInit(payload: { appName: string; logLevel: string }) {
+async function establishManagerReadiness(refreshCatalog: boolean): Promise<void> {
+  if (refreshCatalog) {
+    await refreshModels();
+    return;
+  }
+
+  // A local status probe proves the manager is usable without calling listModels(), whose
+  // Foundry Local implementation contacts Microsoft's remote model catalog.
+  const status = await sendInternal('getStatus');
+  if (status.result) {
+    currentEndpoint = status.result.endpoint;
+    const loadedAliases = new Set(
+      (status.result.pool ?? []).map((entry: any) => entry.alias).filter(Boolean),
+    );
+    sdkState.update((state) => {
+      const models = state.models.map((model) => ({
+        ...model,
+        isLoaded: loadedAliases.has(model.alias),
+      }));
+      return {
+        ...state,
+        endpoint: currentEndpoint || undefined,
+        serviceRunning: !!status.result.serviceRunning,
+        chatLaneModel: status.result.chatLane?.model || status.result.currentModel || undefined,
+        audioLaneModel: status.result.audioLane?.model || undefined,
+        pool: status.result.pool ?? [],
+        loadedModels: models.filter((model) => model.isLoaded),
+        models,
+      };
+    });
+  }
+  updateRuntime({ models: 'unknown' });
+}
+
+async function performInit(
+  payload: { appName: string; logLevel: string },
+  refreshCatalog: boolean,
+) {
   initializing = true;
   updateRuntime({ manager: 'initializing' });
   try {
@@ -1337,10 +1380,12 @@ async function performInit(payload: { appName: string; logLevel: string }) {
       throw new Error('Sidecar was replaced during initialization');
     }
     lastInitPayload = payload;
+    lastInitRefreshCatalog = refreshCatalog;
     managerInstance = true;
     updateRuntime({ manager: 'ready', models: 'unknown' });
-    // The previous child's residency is meaningless; refresh before anyone reads the pool.
-    await refreshModels();
+    // The previous child's residency is meaningless. Refresh the catalog when allowed; otherwise
+    // establish local manager readiness without making the remote catalog request.
+    await establishManagerReadiness(refreshCatalog);
     if (!stillOurChild()) {
       throw new Error('Sidecar was replaced while establishing manager readiness');
     }
@@ -1358,7 +1403,10 @@ async function performInit(payload: { appName: string; logLevel: string }) {
  * "already initialized". After a crash several concurrent commands (plus a user-pressed Retry)
  * can all reach for recovery simultaneously, so every path must share one attempt.
  */
-function ensureInitialized(payload: { appName: string; logLevel: string }): Promise<void> {
+function ensureInitialized(
+  payload: { appName: string; logLevel: string },
+  refreshCatalog = lastInitRefreshCatalog,
+): Promise<void> {
   if (managerInstance && managerReady) return Promise.resolve();
   if (managerInstance) {
     if (initPromise) return initPromise;
@@ -1367,7 +1415,7 @@ function ensureInitialized(payload: { appName: string; logLevel: string }): Prom
       initializing = true;
       updateRuntime({ manager: 'initializing' });
       try {
-        await refreshModels();
+        await establishManagerReadiness(refreshCatalog);
         if (
           generation !== sidecarGeneration ||
           !sidecarProcess ||
@@ -1389,7 +1437,7 @@ function ensureInitialized(payload: { appName: string; logLevel: string }): Prom
     return initPromise;
   }
   if (initPromise) return initPromise;
-  initPromise = performInit(payload).finally(() => {
+  initPromise = performInit(payload, refreshCatalog).finally(() => {
     initPromise = null;
   });
   return initPromise;
@@ -1414,11 +1462,12 @@ export async function initializeSDK(config: Partial<any> = {}): Promise<boolean>
 
 async function performInitializeSDK(config: Partial<any>): Promise<boolean> {
   const initPayload = { appName: config.appName || 'flint', logLevel: config.logLevel || 'info' };
+  const refreshCatalog = config.refreshCatalog !== false;
   const alreadyInitialized = !!managerInstance;
   updateState({ error: null });
 
   try {
-    await ensureInitialized(initPayload);
+    await ensureInitialized(initPayload, refreshCatalog);
     const readyGeneration = sidecarGeneration;
     // Autostart is a user setting, and the port/bind address belong to the frontend. Starting
     // the service here unconditionally on a hardcoded 5272 both ignored "don't autostart" and
@@ -1646,7 +1695,7 @@ export async function setEvictionConfig(
   const res = await send('setEvictionConfig', payload);
   // Applying the rules can unload models, so the pool view is stale the moment this returns.
   // Callers that immediately follow up with another refreshing call can skip this one.
-  if (opts.refresh !== false) await refreshModels();
+  if (opts.refresh !== false) await pollPoolStatus();
   return res.result?.config ?? null;
 }
 
@@ -1656,7 +1705,7 @@ export async function setModelPriorities(
   opts: { refresh?: boolean } = {},
 ): Promise<void> {
   await send('setModelPriorities', { priorities });
-  if (opts.refresh !== false) await refreshModels();
+  if (opts.refresh !== false) await pollPoolStatus();
 }
 
 /** Gateway-only exclusive lease for a measured benchmark. IPC chat/load still run. */
@@ -1768,7 +1817,7 @@ export async function applyMemorySettings(
     ...(eviction ? { eviction } : {}),
     ...(typeof seq === 'number' ? { seq } : {}),
   });
-  await refreshModels();
+  await pollPoolStatus();
   // `stale` surfaces the sidecar's own ordering-guard verdict: `true` means this call's payload
   // was *not* installed (a call with an equal or higher seq already landed first), so the config
   // returned is whatever was already in effect, not a reflection of what this call asked for.
@@ -1846,9 +1895,20 @@ export async function shutdownWsl(): Promise<void> {
 export async function pollPoolStatus(): Promise<void> {
   const ps = await send('poolStatus');
   if (ps?.result) {
-    updateState({
-      pool: ps.result.models ?? [],
-      poolStats: mapPoolStats(ps.result),
+    const pool = ps.result.models ?? [];
+    const loadedAliases = new Set(pool.map((entry: any) => entry.alias).filter(Boolean));
+    sdkState.update((state) => {
+      const models = state.models.map((model) => ({
+        ...model,
+        isLoaded: loadedAliases.has(model.alias),
+      }));
+      return {
+        ...state,
+        pool,
+        poolStats: mapPoolStats(ps.result),
+        loadedModels: models.filter((model) => model.isLoaded),
+        models,
+      };
     });
   }
 }
@@ -2549,6 +2609,7 @@ export function resetSDK() {
   managerInstance = null;
   managerReady = false;
   lastInitPayload = null; // a deliberate reset must not auto-re-init on the next send
+  lastInitRefreshCatalog = true;
   currentEndpoint = undefined;
   runtimeQuitRequested = false;
   runtimeQuitPromise = null;

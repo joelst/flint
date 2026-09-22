@@ -415,13 +415,10 @@ describe('applyMemorySettings', () => {
     const request = sdk.applyMemorySettings([], undefined, 5);
     const id = await waitForWrite('applyMemorySettings');
     harness.emitStdout({ id, result: { config: { maxResident: 4 }, stale: false } });
-    const modelsId = await waitForWrite('listModels');
-    harness.emitStdout({ id: modelsId, result: [] });
-    const statusId = await waitForWrite('getStatus');
-    harness.emitStdout({ id: statusId, result: {} });
     const poolId = await waitForWrite('poolStatus');
     harness.emitStdout({ id: poolId, result: { models: [] } });
     await expect(request).resolves.toEqual({ config: { maxResident: 4 }, stale: false });
+    expect(harness.writes.some((line) => line.includes('"cmd":"listModels"'))).toBe(false);
   });
 
   it('surfaces stale: true when the sidecar refuses an out-of-order call, instead of hiding it behind ok: true', async () => {
@@ -429,13 +426,10 @@ describe('applyMemorySettings', () => {
     const request = sdk.applyMemorySettings([], undefined, 1);
     const id = await waitForWrite('applyMemorySettings');
     harness.emitStdout({ id, result: { config: { maxResident: 4 }, stale: true } });
-    const modelsId = await waitForWrite('listModels');
-    harness.emitStdout({ id: modelsId, result: [] });
-    const statusId = await waitForWrite('getStatus');
-    harness.emitStdout({ id: statusId, result: {} });
     const poolId = await waitForWrite('poolStatus');
     harness.emitStdout({ id: poolId, result: { models: [] } });
     await expect(request).resolves.toEqual({ config: { maxResident: 4 }, stale: true });
+    expect(harness.writes.some((line) => line.includes('"cmd":"listModels"'))).toBe(false);
   });
 });
 
@@ -1654,6 +1648,55 @@ describe('service start uncertainty', () => {
 });
 
 describe('initialization readiness recovery', () => {
+  it('does not request the remote catalog when initialization disables catalog refresh', async () => {
+    const sdk = await loadSdk();
+    const initialized = sdk.initializeSDK({
+      autoStartService: false,
+      refreshCatalog: false,
+    });
+
+    const initId = await waitForWrite('init');
+    harness.emitStdout({ id: initId, result: 'initialized' });
+    const logId = await waitForWrite('setLogLevel');
+    harness.emitStdout({ id: logId, result: {} });
+    const readinessStatusId = await waitForWrite('getStatus');
+    harness.emitStdout({
+      id: readinessStatusId,
+      result: { serviceRunning: false, endpoint: null },
+    });
+    const finalStatusId = await waitForWrite('getStatus', 1);
+    harness.emitStdout({
+      id: finalStatusId,
+      result: { serviceRunning: false, endpoint: null },
+    });
+
+    await expect(initialized).resolves.toBe(true);
+    expect(harness.writes.filter((line) => line.includes('"cmd":"listModels"'))).toHaveLength(0);
+  }, 15000);
+
+  it('uses the current catalog policy across sidecar crash recovery', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    sdk.setAutomaticCatalogRefreshEnabled(false);
+
+    harness.emitClose({ code: 1 });
+    const poll = sdk.pollPoolStatus();
+    const recoveryInitId = await waitForWrite('init', 1);
+    harness.emitStdout({ id: recoveryInitId, result: 'initialized' });
+    const recoveryLogId = await waitForWrite('setLogLevel', 1);
+    harness.emitStdout({ id: recoveryLogId, result: {} });
+    const recoveryStatusId = await waitForWrite('getStatus', 2);
+    harness.emitStdout({
+      id: recoveryStatusId,
+      result: { serviceRunning: false, endpoint: null },
+    });
+    const poolId = await waitForWrite('poolStatus', 1);
+    harness.emitStdout({ id: poolId, result: { models: [] } });
+
+    await expect(poll).resolves.toBeUndefined();
+    expect(harness.writes.filter((line) => line.includes('"cmd":"listModels"'))).toHaveLength(1);
+  }, 15000);
+
   it('does not publish readiness when the initial child is lost during catalog refresh', async () => {
     const sdk = await loadSdk();
     const first = sdk.initializeSDK({ autoStartService: false });

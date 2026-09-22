@@ -7,6 +7,7 @@
   import type { Conversation } from "$lib/ConversationSidebar.svelte";
   import {
     initializeSDK,
+    setAutomaticCatalogRefreshEnabled,
     getSDKState,
     getEps,
     refreshModels,
@@ -241,6 +242,7 @@
 
   const FIRST_RUN_KEY = "flint-first-run-dismissed-v1";
   let showFirstRunCoach = $state(false);
+  let catalogCheckedThisSession = $state(false);
 
   /** About strip — app + Node + service (Help + Settings). */
   const appVersion = String((packageJson as { version?: string }).version || "0.0.0");
@@ -735,8 +737,8 @@
   // Listing/refreshing the model catalog (Foundry Local's `catalog.getModels()`) contacts
   // Microsoft's remote Foundry model registry over the network to fetch the model list and
   // check for updates -- distinct from inference, which stays local. Default on to preserve
-  // existing behavior; turning it off skips the catalog check at startup and leaves the
-  // existing manual "Refresh catalog" button as the only trigger.
+  // existing behavior; turning it off skips startup catalog access. Manual refresh and later
+  // model-management actions may still refresh the catalog when the user asks them to.
   let autoRefreshCatalogOnStartup = $state(true);
   let defaultChatAlias = $state('');
   let defaultAudioAlias = $state('');
@@ -864,6 +866,7 @@
     // for anything pinned between this read and the push below.
     try {
       await refreshModels();
+      catalogCheckedThisSession = true;
     } catch (e) {
       appendAppLog(`Benchmark: could not refresh pool state before pinning (${(e as any)?.message || e})`, 'warn');
     }
@@ -4029,6 +4032,7 @@ updateStateFromSdk();
       },
     );
     await refreshModels();
+    catalogCheckedThisSession = true;
   }
 
   async function ensureServiceForCompare(alias: string) {
@@ -4814,6 +4818,7 @@ updateStateFromSdk();
       // Hydrated runtime policy and accelerator registration must land before HTTP startup or
       // any model preload. Autostart is performed below after those prerequisites complete.
       autoStartService: false,
+      refreshCatalog: autoRefreshCatalogOnStartup,
       servicePort: networkPort,
       bindAddress: networkBindAddress || undefined,
     });
@@ -4869,7 +4874,10 @@ updateStateFromSdk();
         await loadRecommendations();
         await loadSTTModels();
       } else {
-        statusMessage = "Connected to Foundry Local (model catalog not checked — use Refresh catalog)";
+        appendAppLog(
+          "Automatic startup catalog check is off; model recommendations and startup preloads wait until Refresh catalog is used",
+          "info",
+        );
       }
 
       // A restored alias for a model that is no longer in the catalog would otherwise pin the
@@ -4962,7 +4970,7 @@ updateStateFromSdk();
       // First-run coach (dismissible); keep until user skips or completes basics
       try {
         const coachDismissed = localStorage.getItem(FIRST_RUN_KEY) === "1";
-        if (!coachDismissed) {
+        if (!coachDismissed && catalogCheckedThisSession) {
           const hasAnyCached = state.models.some((m: ModelInfo) => m.isCached);
           // Show coach when nothing cached yet, or always until dismissed after first install
           showFirstRunCoach = !hasAnyCached || !hadPersistedChatAtLaunch;
@@ -4974,7 +4982,7 @@ updateStateFromSdk();
       // Auto first launch: if no cached models and no persisted chat, offer starter (do not force-download)
       const hasAnyCached = state.models.some((m: ModelInfo) => m.isCached);
       const hasPersisted = hadPersistedChatAtLaunch;
-      if (!hasAnyCached && !hasPersisted && recommendedStarters.length > 0) {
+      if (catalogCheckedThisSession && !hasAnyCached && !hasPersisted && recommendedStarters.length > 0) {
         statusMessage = `First launch — pick a starter model below, or open Help for a guided path.`;
         currentView = "models";
       } else if (autoStartService) {
@@ -7541,8 +7549,10 @@ Output only the summary text, no preamble.`;
             </li>
             <li class:done={firstRunHasModel}>
               <strong>Get a model</strong>
-              {#if state.ready && state.models.length === 0}
+              {#if state.ready && catalogCheckedThisSession && state.models.length === 0}
                 <span class="first-run-bad">Catalog is empty — check the network, then Models → Retry.</span>
+              {:else if state.ready && !catalogCheckedThisSession}
+                <span class="muted">Catalog check is off — open Models and refresh when you want to browse or download.</span>
               {:else}
                 <span class="muted">Download a small starter from Models (hardware-aware picks appear when available).</span>
               {/if}
@@ -7615,7 +7625,11 @@ Output only the summary text, no preamble.`;
                 <option value="updated">Last updated</option>
               </select>
               <span class="count">{filteredModels.length} models</span>
-              {#if state.models.length === 0}
+              {#if state.models.length === 0 && !catalogCheckedThisSession}
+                <p class="notice" style="flex-basis:100%;">
+                  <strong>Catalog not checked.</strong> Automatic startup checks are off. Refresh when you want to contact Microsoft's Foundry Local model catalog.
+                </p>
+              {:else if state.models.length === 0}
                 <p class="notice" style="flex-basis:100%;">
                   <strong>Catalog is empty.</strong> The sidecar is ready but returned no models — check the network and Retry, or add a local ONNX folder.
                 </p>
@@ -7769,7 +7783,11 @@ Output only the summary text, no preamble.`;
               <p>Loading catalog...</p>
             {:else if filteredModels.length === 0}
               <div class="empty-state-card">
-                {#if state.models.length === 0}
+                {#if state.models.length === 0 && !catalogCheckedThisSession}
+                  <h3>Model catalog not checked</h3>
+                  <p>Automatic startup checks are off. Refresh only when you want to browse models or check for updates.</p>
+                  <button type="button" onclick={() => loadModels()}>Refresh catalog</button>
+                {:else if state.models.length === 0}
                   <h3>No models in the catalog yet</h3>
                   <p>Wait for Foundry Local to finish loading the catalog, or retry if something failed.</p>
                   <button type="button" onclick={() => loadModels()}>Refresh catalog</button>
@@ -10355,14 +10373,15 @@ Output only the summary text, no preamble.`;
 
             <div class="setting-row">
               <div class="setting-info">
-                <span class="setting-name" id="auto-refresh-catalog-label">Check model catalog automatically</span>
+                <span class="setting-name" id="auto-refresh-catalog-label">Check model catalog on startup</span>
                 <span class="setting-desc">
                   Contacts Microsoft's Foundry Local model catalog over the network on startup to list
-                  models and check for updates. Turn off to only check when you click "Refresh catalog".
+                  models and check for updates. Turning this off also delays startup recommendations
+                  and model preloads until you use "Refresh catalog"; model actions may refresh afterward.
                 </span>
               </div>
               <label class="toggle-switch">
-                <input type="checkbox" bind:checked={autoRefreshCatalogOnStartup} onchange={persistChatCheckbox((v) => { autoRefreshCatalogOnStartup = v; })} aria-labelledby="auto-refresh-catalog-label" />
+                <input type="checkbox" bind:checked={autoRefreshCatalogOnStartup} onchange={persistChatCheckbox((v) => { autoRefreshCatalogOnStartup = v; setAutomaticCatalogRefreshEnabled(v); })} aria-labelledby="auto-refresh-catalog-label" />
                 <span class="toggle-track"></span>
               </label>
             </div>
