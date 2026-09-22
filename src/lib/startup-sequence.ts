@@ -40,3 +40,36 @@ export function createStartupAuthorization() {
     invalidate: () => { epoch += 1; },
   };
 }
+
+export function resolveStartupAudioAlias(
+  autoStartService: boolean,
+  defaultAudioAlias: string,
+  initialAudioAlias: string,
+  lastUsedAudioAlias: string,
+  availableAudioAliases: readonly string[],
+): string {
+  if (!autoStartService) return lastUsedAudioAlias;
+  if (lastUsedAudioAlias !== initialAudioAlias) return lastUsedAudioAlias;
+  if (!defaultAudioAlias || !availableAudioAliases.includes(defaultAudioAlias)) {
+    return lastUsedAudioAlias;
+  }
+  return defaultAudioAlias;
+}
+
+export type CatalogCheckPresentation =
+  | 'checked'
+  | 'disabled'
+  | 'loading'
+  | 'failed'
+  | 'pending';
+
+export function resolveCatalogCheckPresentation(options: {
+  automaticCheckEnabled: boolean;
+  status: 'not-checked' | 'loading' | 'ready' | 'failed';
+}): CatalogCheckPresentation {
+  if (options.status === 'loading') return 'loading';
+  if (options.status === 'failed') return 'failed';
+  if (options.status === 'ready') return 'checked';
+  if (!options.automaticCheckEnabled) return 'disabled';
+  return 'pending';
+}

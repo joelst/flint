@@ -415,13 +415,10 @@ describe('applyMemorySettings', () => {
     const request = sdk.applyMemorySettings([], undefined, 5);
     const id = await waitForWrite('applyMemorySettings');
     harness.emitStdout({ id, result: { config: { maxResident: 4 }, stale: false } });
-    const modelsId = await waitForWrite('listModels');
-    harness.emitStdout({ id: modelsId, result: [] });
-    const statusId = await waitForWrite('getStatus');
-    harness.emitStdout({ id: statusId, result: {} });
     const poolId = await waitForWrite('poolStatus');
     harness.emitStdout({ id: poolId, result: { models: [] } });
     await expect(request).resolves.toEqual({ config: { maxResident: 4 }, stale: false });
+    expect(harness.writes.some((line) => line.includes('"cmd":"listModels"'))).toBe(false);
   });
 
   it('surfaces stale: true when the sidecar refuses an out-of-order call, instead of hiding it behind ok: true', async () => {
@@ -429,13 +426,10 @@ describe('applyMemorySettings', () => {
     const request = sdk.applyMemorySettings([], undefined, 1);
     const id = await waitForWrite('applyMemorySettings');
     harness.emitStdout({ id, result: { config: { maxResident: 4 }, stale: true } });
-    const modelsId = await waitForWrite('listModels');
-    harness.emitStdout({ id: modelsId, result: [] });
-    const statusId = await waitForWrite('getStatus');
-    harness.emitStdout({ id: statusId, result: {} });
     const poolId = await waitForWrite('poolStatus');
     harness.emitStdout({ id: poolId, result: { models: [] } });
     await expect(request).resolves.toEqual({ config: { maxResident: 4 }, stale: true });
+    expect(harness.writes.some((line) => line.includes('"cmd":"listModels"'))).toBe(false);
   });
 });
 
@@ -1131,6 +1125,40 @@ describe('one answer per request', () => {
     }
   });
 
+  it('keeps lane aliases aligned with catalog-free pool polling', async () => {
+    const sdk = await loadSdk();
+    const firstPoll = sdk.pollPoolStatus();
+    const firstPoolId = await waitForWrite('poolStatus');
+    harness.emitStdout({
+      id: firstPoolId,
+      result: {
+        models: [
+          { alias: 'chat-model', variantId: 'chat-variant', isLoaded: true },
+          { alias: 'audio-model', variantId: 'audio-variant', isLoaded: true },
+        ],
+      },
+    });
+    await firstPoll;
+    expect(sdkSnapshot(sdk)).toMatchObject({
+      chatLaneModel: 'chat-model',
+      audioLaneModel: 'audio-model',
+    });
+
+    const secondPoll = sdk.pollPoolStatus();
+    const secondPoolId = await waitForWrite('poolStatus', 1);
+    harness.emitStdout({
+      id: secondPoolId,
+      result: {
+        models: [{ alias: 'audio-model', variantId: 'audio-variant', isLoaded: true }],
+      },
+    });
+    await secondPoll;
+    expect(sdkSnapshot(sdk)).toMatchObject({
+      chatLaneModel: 'audio-model',
+      audioLaneModel: undefined,
+    });
+  });
+
   it('keeps the sidecar reply when a close arrives afterwards', async () => {
     const sdk = await loadSdk();
     const p = sdk.getEps();
@@ -1654,6 +1682,139 @@ describe('service start uncertainty', () => {
 });
 
 describe('initialization readiness recovery', () => {
+  it('does not request the remote catalog when initialization disables catalog refresh', async () => {
+    const sdk = await loadSdk();
+    const initialized = sdk.initializeSDK({
+      autoStartService: false,
+      refreshCatalog: false,
+    });
+
+    const initId = await waitForWrite('init');
+    harness.emitStdout({ id: initId, result: 'initialized' });
+    const logId = await waitForWrite('setLogLevel');
+    harness.emitStdout({ id: logId, result: {} });
+    const readinessStatusId = await waitForWrite('getStatus');
+    harness.emitStdout({
+      id: readinessStatusId,
+      result: { serviceRunning: false, endpoint: null },
+    });
+    const finalStatusId = await waitForWrite('getStatus', 1);
+    harness.emitStdout({
+      id: finalStatusId,
+      result: { serviceRunning: false, endpoint: null },
+    });
+
+    await expect(initialized).resolves.toBe(true);
+    expect(harness.writes.filter((line) => line.includes('"cmd":"listModels"'))).toHaveLength(0);
+    expect(sdkSnapshot(sdk).catalogStatus).toBe('not-checked');
+  }, 15000);
+
+  it('preserves an explicit disabled policy when a later initialization omits the option', async () => {
+    const sdk = await loadSdk();
+    sdk.setAutomaticCatalogRefreshEnabled(false);
+    const initialized = sdk.initializeSDK({ autoStartService: false });
+
+    const initId = await waitForWrite('init');
+    harness.emitStdout({ id: initId, result: 'initialized' });
+    const logId = await waitForWrite('setLogLevel');
+    harness.emitStdout({ id: logId, result: {} });
+    const readinessStatusId = await waitForWrite('getStatus');
+    harness.emitStdout({
+      id: readinessStatusId,
+      result: { serviceRunning: false, endpoint: null },
+    });
+    const startupStatusId = await waitForWrite('getStatus', 1);
+    harness.emitStdout({
+      id: startupStatusId,
+      result: { serviceRunning: false, endpoint: null },
+    });
+
+    await expect(initialized).resolves.toBe(true);
+    expect(harness.writes.filter((line) => line.includes('"cmd":"listModels"'))).toHaveLength(0);
+    expect(sdkSnapshot(sdk).catalogStatus).toBe('not-checked');
+  }, 15000);
+
+  it('uses the current catalog policy across sidecar crash recovery', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const policyUpdate = sdk.initializeSDK({
+      autoStartService: false,
+      refreshCatalog: false,
+    });
+    const policyStatusId = await waitForWrite('getStatus', 2);
+    harness.emitStdout({
+      id: policyStatusId,
+      result: { serviceRunning: false, endpoint: null },
+    });
+    await expect(policyUpdate).resolves.toBe(true);
+
+    harness.emitClose({ code: 1 });
+    const poll = sdk.pollPoolStatus();
+    const recoveryInitId = await waitForWrite('init', 1);
+    harness.emitStdout({ id: recoveryInitId, result: 'initialized' });
+    const recoveryLogId = await waitForWrite('setLogLevel', 1);
+    harness.emitStdout({ id: recoveryLogId, result: {} });
+    const recoveryStatusId = await waitForWrite('getStatus', 3);
+    harness.emitStdout({
+      id: recoveryStatusId,
+      result: { serviceRunning: false, endpoint: null },
+    });
+    const poolId = await waitForWrite('poolStatus', 1);
+    harness.emitStdout({ id: poolId, result: { models: [] } });
+
+    await expect(poll).resolves.toBeUndefined();
+    expect(harness.writes.filter((line) => line.includes('"cmd":"listModels"'))).toHaveLength(1);
+  }, 15000);
+
+  it('uses a newer catalog policy requested while initialization is still in flight', async () => {
+    const sdk = await loadSdk();
+    const initialized = sdk.initializeSDK({
+      autoStartService: false,
+      refreshCatalog: true,
+    });
+    const policyUpdate = sdk.initializeSDK({
+      autoStartService: false,
+      refreshCatalog: false,
+    });
+
+    const initId = await waitForWrite('init');
+    harness.emitStdout({ id: initId, result: 'initialized' });
+    const logId = await waitForWrite('setLogLevel');
+    harness.emitStdout({ id: logId, result: {} });
+    const listId = await waitForWrite('listModels');
+    harness.emitStdout({ id: listId, result: [] });
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, result: { serviceRunning: false, endpoint: null } });
+    const poolId = await waitForWrite('poolStatus');
+    harness.emitStdout({ id: poolId, result: { models: [] } });
+    const startupStatusId = await waitForWrite('getStatus', 1);
+    harness.emitStdout({
+      id: startupStatusId,
+      result: { serviceRunning: false, endpoint: null },
+    });
+    await expect(initialized).resolves.toBe(true);
+    await expect(policyUpdate).resolves.toBe(true);
+    expect(sdkSnapshot(sdk).catalogStatus).toBe('ready');
+
+    harness.emitClose({ code: 1 });
+    const poll = sdk.pollPoolStatus();
+    const recoveryInitId = await waitForWrite('init', 1);
+    harness.emitStdout({ id: recoveryInitId, result: 'initialized' });
+    const recoveryLogId = await waitForWrite('setLogLevel', 1);
+    harness.emitStdout({ id: recoveryLogId, result: {} });
+    const recoveryStatusId = await waitForWrite('getStatus', 2);
+    harness.emitStdout({
+      id: recoveryStatusId,
+      result: { serviceRunning: false, endpoint: null },
+    });
+    const recoveryPoolId = await waitForWrite('poolStatus', 1);
+    harness.emitStdout({ id: recoveryPoolId, result: { models: [] } });
+
+    await expect(poll).resolves.toBeUndefined();
+    expect(harness.writes.filter((line) => line.includes('"cmd":"listModels"'))).toHaveLength(1);
+  }, 15000);
+
   it('does not publish readiness when the initial child is lost during catalog refresh', async () => {
     const sdk = await loadSdk();
     const first = sdk.initializeSDK({ autoStartService: false });
@@ -1683,6 +1844,8 @@ describe('initialization readiness recovery', () => {
     const firstListId = await waitForWrite('listModels');
     harness.emitStdout({ id: firstListId, error: 'catalog unavailable' });
     await expect(first).resolves.toBe(false);
+    expect(sdkSnapshot(sdk).catalogStatus).toBe('failed');
+    expect(sdkSnapshot(sdk).catalogError).toContain('catalog unavailable');
 
     const retry = sdk.initializeSDK({ autoStartService: false });
     const secondListId = await waitForWrite('listModels', 1);
@@ -1694,6 +1857,10 @@ describe('initialization readiness recovery', () => {
     const startupStatusId = await waitForWrite('getStatus', 1);
     harness.emitStdout({ id: startupStatusId, result: { serviceRunning: false, endpoint: null } });
     await expect(retry).resolves.toBe(true);
+    expect(sdkSnapshot(sdk)).toMatchObject({
+      catalogStatus: 'ready',
+      catalogError: null,
+    });
 
     expect(harness.writes.filter((line) => line.includes('"cmd":"init"'))).toHaveLength(1);
   }, 15000);

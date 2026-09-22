@@ -30,7 +30,26 @@ About shows Node as `bundled` or `PATH`. Release installers include Node 22. PAT
 
 ## Offline and first run
 
-The installer contains Flint, bundled Node, and Foundry native libraries. It does **not** contain chat model weights. First run downloads a model from the catalog (needs network). Cached models remain usable offline.
+The installer contains Flint, bundled Node, and Foundry native libraries. It does **not** contain chat model weights. Downloading your first model needs network access; cached models remain usable offline.
+
+## Startup and model-management network access
+
+Listing or refreshing the model catalog (which models exist, and whether a newer variant is
+available) calls Foundry Local's SDK, which contacts Microsoft's remote Foundry model catalog
+over the network — separate from inference, which always stays local. By default Flint checks
+the catalog on startup and after actions like downloads. **Settings → Startup → "Check model
+catalog on startup"** disables the startup check; the **Refresh catalog** button in the
+Models view remains available for on-demand checks. Disabling the startup check also skips
+recommendations and configured model preloads for that launch. A later manual refresh
+populates the Models view but does not replay startup-only work; model-management actions can
+also refresh the catalog to show their results.
+
+Accelerator setup is separate from the catalog setting. Flint runs it automatically at startup,
+and Foundry Local may download and register execution-provider components when the machine needs
+them. Turning off the startup catalog check does not disable accelerator setup. Model downloads
+and other explicitly requested model-management operations can also require network access.
+There is currently no separate switch for startup accelerator setup, so prepare the required
+components before disconnecting if the machine must launch fully offline.
 
 ## Uninstall leftovers
 

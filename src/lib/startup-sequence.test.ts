@@ -5,6 +5,8 @@ import {
   createSingleFlight,
   createStartupAuthorization,
   prepareHydratedRuntime,
+  resolveCatalogCheckPresentation,
+  resolveStartupAudioAlias,
 } from './startup-sequence';
 
 describe('prepareHydratedRuntime', () => {
@@ -37,6 +39,152 @@ describe('prepareHydratedRuntime', () => {
       '!isAcceleratorReadinessCurrent(acceleratorReadiness)',
     );
     expect(summaryFence).toContain('return;');
+
+    expect(startup).toContain(
+      '} else if (autoRefreshCatalogOnStartup && autoStartService) {',
+    );
+    expect(startup).toContain(
+      'if (autoRefreshCatalogOnStartup && startupEntries.length > 0) {',
+    );
+
+    const refreshCatalogStart = source.indexOf('async function refreshCatalogModels()');
+    const refreshCatalogEnd = source.indexOf('/** About strip', refreshCatalogStart);
+    expect(refreshCatalogStart, 'catalog refresh wrapper marker not found').toBeGreaterThan(-1);
+    expect(refreshCatalogEnd, 'catalog refresh wrapper end marker not found').toBeGreaterThan(
+      refreshCatalogStart,
+    );
+    const refreshCatalog = source.slice(refreshCatalogStart, refreshCatalogEnd);
+    expect(refreshCatalog).toContain('await sdkRefreshModels();');
+    expect(refreshCatalog).not.toContain('catalogRefreshError');
+    expect(startup).toMatch(
+      /if \(autoRefreshCatalogOnStartup\) \{\s+await refreshCatalogModels\(\);/,
+    );
+    expect(startup).toContain(
+      'state.catalogStatus === "ready"',
+    );
+
+    const defaultAudioStart = startup.indexOf(
+      'selectedSTTModelAlias = resolveStartupAudioAlias(',
+    );
+    const startupModelsStart = startup.indexOf(
+      'const startupEntries = Object.entries(startupModels);',
+    );
+    expect(defaultAudioStart, 'default audio selection marker not found').toBeGreaterThan(-1);
+    expect(startupModelsStart, 'startup models marker not found').toBeGreaterThan(defaultAudioStart);
+    expect(startup.slice(defaultAudioStart - 10, defaultAudioStart)).toMatch(/\}\s+$/);
+    expect(startup.slice(defaultAudioStart, startupModelsStart)).toMatch(
+      /resolveStartupAudioAlias\(\s+autoStartService,/,
+    );
+
+    const loadModelsStart = source.indexOf('async function loadModels()');
+    const loadModelsEnd = source.indexOf('async function loadRecommendations()');
+    expect(loadModelsStart, 'loadModels marker not found').toBeGreaterThan(-1);
+    expect(loadModelsEnd, 'loadRecommendations marker not found').toBeGreaterThan(loadModelsStart);
+    const loadModels = source.slice(loadModelsStart, loadModelsEnd);
+    expect(loadModels).toContain('await refreshCatalogModels();');
+    expect(source).not.toMatch(/await refreshModels\(/);
+    expect(source).not.toContain(
+      '!catalogCheckedThisSession',
+    );
+    expect(source).toContain(
+      'catalogCheckPresentation === "disabled"',
+    );
+    expect(source).toContain(
+      'catalogCheckPresentation === "failed"',
+    );
+    expect(source).toContain(
+      'catalogCheckPresentation === "pending"',
+    );
+    expect(source).toContain(
+      '{#if catalogCheckPresentation === "loading" && state.models.length === 0}',
+    );
+    expect(source).toMatch(
+      /catalogStatus: "not-checked" as "not-checked" \| "loading" \| "ready" \| "failed",\s+catalogError: null as string \| null,/,
+    );
+    const syncStart = source.indexOf('function syncFromStore(s: any)');
+    const syncEnd = source.indexOf('// Local reactive derived', syncStart);
+    expect(syncStart, 'SDK state mirror marker not found').toBeGreaterThan(-1);
+    expect(syncEnd, 'SDK state mirror end marker not found').toBeGreaterThan(syncStart);
+    const syncFromStore = source.slice(syncStart, syncEnd);
+    expect(syncFromStore).toContain('state.catalogStatus = s.catalogStatus ?? "not-checked";');
+    expect(syncFromStore).toContain('state.catalogError = s.catalogError ?? null;');
+  });
+
+  describe('startup preference resolution', () => {
+    it('distinguishes disabled, pending, loading, failed, and completed catalog checks', () => {
+      expect(resolveCatalogCheckPresentation({
+        automaticCheckEnabled: false,
+        status: 'not-checked',
+      })).toBe('disabled');
+      expect(resolveCatalogCheckPresentation({
+        automaticCheckEnabled: true,
+        status: 'not-checked',
+      })).toBe('pending');
+      expect(resolveCatalogCheckPresentation({
+        automaticCheckEnabled: false,
+        status: 'loading',
+      })).toBe('loading');
+      expect(resolveCatalogCheckPresentation({
+        automaticCheckEnabled: false,
+        status: 'failed',
+      })).toBe('failed');
+      expect(resolveCatalogCheckPresentation({
+        automaticCheckEnabled: true,
+        status: 'ready',
+      })).toBe('checked');
+    });
+
+    it('applies a valid configured audio default when startup still owns the selection', () => {
+      expect(resolveStartupAudioAlias(
+        true,
+        'whisper-default',
+        'whisper-last-used',
+        'whisper-last-used',
+        ['whisper-default', 'whisper-last-used'],
+      )).toBe(
+        'whisper-default',
+      );
+    });
+
+    it('preserves the last-used audio model when no default is configured', () => {
+      expect(resolveStartupAudioAlias(
+        true,
+        '',
+        'whisper-last-used',
+        'whisper-last-used',
+        ['whisper-last-used'],
+      )).toBe('whisper-last-used');
+    });
+
+    it('does not select a stale audio default absent from the refreshed catalog', () => {
+      expect(resolveStartupAudioAlias(
+        true,
+        'whisper-removed',
+        'whisper-last-used',
+        'whisper-last-used',
+        ['whisper-last-used'],
+      )).toBe('whisper-last-used');
+    });
+
+    it('does not overwrite an audio selection changed while startup was awaiting work', () => {
+      expect(resolveStartupAudioAlias(
+        true,
+        'whisper-default',
+        'whisper-at-launch',
+        'whisper-user-choice',
+        ['whisper-default', 'whisper-user-choice'],
+      )).toBe('whisper-user-choice');
+    });
+
+    it('preserves the last-used audio model when automatic service startup is disabled', () => {
+      expect(resolveStartupAudioAlias(
+        false,
+        'whisper-default',
+        'whisper-last-used',
+        'whisper-last-used',
+        ['whisper-default', 'whisper-last-used'],
+      )).toBe('whisper-last-used');
+    });
   });
 
   it('applies memory policy, then accelerators, then optional service startup', async () => {

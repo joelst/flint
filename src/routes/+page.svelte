@@ -7,9 +7,10 @@
   import type { Conversation } from "$lib/ConversationSidebar.svelte";
   import {
     initializeSDK,
+    setAutomaticCatalogRefreshEnabled,
     getSDKState,
     getEps,
-    refreshModels,
+    refreshModels as sdkRefreshModels,
     ensureAccelerators,
     isAcceleratorReadinessCurrent,
     getRecommendedStarterModels,
@@ -83,6 +84,8 @@
     createSingleFlight,
     createStartupAuthorization,
     prepareHydratedRuntime,
+    resolveCatalogCheckPresentation,
+    resolveStartupAudioAlias,
   } from "$lib/startup-sequence";
   import packageJson from "../../package.json";
 
@@ -241,6 +244,10 @@
 
   const FIRST_RUN_KEY = "flint-first-run-dismissed-v1";
   let showFirstRunCoach = $state(false);
+
+  async function refreshCatalogModels() {
+    await sdkRefreshModels();
+  }
 
   /** About strip — app + Node + service (Help + Settings). */
   const appVersion = String((packageJson as { version?: string }).version || "0.0.0");
@@ -665,6 +672,8 @@
     },
     ready: false,
     error: null as string | null,
+    catalogStatus: "not-checked" as "not-checked" | "loading" | "ready" | "failed",
+    catalogError: null as string | null,
     models: [] as ModelInfo[],
     endpoint: undefined as string | undefined,
     eps: [] as EpInfo[],
@@ -732,8 +741,18 @@
 
   // Settings: startup behaviour
   let autoStartService = $state(true);
+  // Listing/refreshing the model catalog (Foundry Local's `catalog.getModels()`) contacts
+  // Microsoft's remote Foundry model registry over the network to fetch the model list and
+  // check for updates -- distinct from inference, which stays local. Default on to preserve
+  // existing behavior; turning it off skips startup catalog access. Manual refresh and later
+  // model-management actions may still refresh the catalog when the user asks them to.
+  let autoRefreshCatalogOnStartup = $state(true);
   let defaultChatAlias = $state('');
   let defaultAudioAlias = $state('');
+  const catalogCheckPresentation = $derived(resolveCatalogCheckPresentation({
+    automaticCheckEnabled: autoRefreshCatalogOnStartup,
+    status: state.catalogStatus,
+  }));
   let osAutoStartEnabled = $state<boolean | null>(null);
 
   // Settings: network (draft UI values — Apply restarts service to take effect)
@@ -857,7 +876,7 @@
     // close, that window — the sidecar's own admission check is still the last line of defense
     // for anything pinned between this read and the push below.
     try {
-      await refreshModels();
+      await refreshCatalogModels();
     } catch (e) {
       appendAppLog(`Benchmark: could not refresh pool state before pinning (${(e as any)?.message || e})`, 'warn');
     }
@@ -2531,6 +2550,8 @@
     state.runtime = s.runtime ?? state.runtime;
     state.ready = s.ready;
     state.error = s.error;
+    state.catalogStatus = s.catalogStatus ?? "not-checked";
+    state.catalogError = s.catalogError ?? null;
     state.models = s.models ?? [];
     state.endpoint = s.endpoint;
     state.eps = s.eps ?? [];
@@ -3048,6 +3069,7 @@
           modelRuntimeMeta,
           startupModels,
           autoStartService,
+          autoRefreshCatalogOnStartup,
           defaultChatAlias,
           defaultAudioAlias,
           networkPort,
@@ -3153,6 +3175,9 @@
           startupModels = data.startupModels;
         }
         if (typeof data.autoStartService === 'boolean') autoStartService = data.autoStartService;
+        if (typeof data.autoRefreshCatalogOnStartup === 'boolean') {
+          autoRefreshCatalogOnStartup = data.autoRefreshCatalogOnStartup;
+        }
         if (typeof data.keepServiceInBackground === 'boolean') keepServiceInBackground = data.keepServiceInBackground;
         if (typeof data.benchmarkPreviewEnabled === 'boolean') benchmarkPreviewEnabled = data.benchmarkPreviewEnabled;
         if (typeof data.defaultChatAlias === 'string') defaultChatAlias = data.defaultChatAlias;
@@ -4018,7 +4043,7 @@ updateStateFromSdk();
         statusMessage = comparePrepStatus;
       },
     );
-    await refreshModels();
+    await refreshCatalogModels();
   }
 
   async function ensureServiceForCompare(alias: string) {
@@ -4056,7 +4081,7 @@ updateStateFromSdk();
     try {
       comparePrepStatus = `Unloading ${slot.label}…`;
       await sdkUnloadModel({ alias: slot.alias });
-      await refreshModels();
+      await refreshCatalogModels();
     } catch (e: any) {
       console.warn("Compare unload failed", e);
     }
@@ -4780,6 +4805,7 @@ updateStateFromSdk();
     // the SDK, the model list and the recommendations, and the user can select a conversation or
     // a model throughout — after which the startup selection must not be published over theirs.
     const startupNav = currentChatNavigation();
+    const startupAudioAlias = selectedSTTModelAlias;
 
     // Persisted state (chat, conversations, personas) is hydrated in onMount, before autosave
     // is enabled — restoring it here would race the autosave effect.
@@ -4804,6 +4830,7 @@ updateStateFromSdk();
       // Hydrated runtime policy and accelerator registration must land before HTTP startup or
       // any model preload. Autostart is performed below after those prerequisites complete.
       autoStartService: false,
+      refreshCatalog: autoRefreshCatalogOnStartup,
       servicePort: networkPort,
       bindAddress: networkBindAddress || undefined,
     });
@@ -4854,9 +4881,16 @@ updateStateFromSdk();
       const release = beginPoolMutation();
       try {
       statusMessage = "Connected to Foundry Local";
-      await loadModels();
-      await loadRecommendations();
-      await loadSTTModels();
+      if (autoRefreshCatalogOnStartup) {
+        await loadModels();
+        await loadRecommendations();
+        await loadSTTModels();
+      } else {
+        appendAppLog(
+          "Automatic startup catalog check is off; recommendations and configured startup preloads are skipped for this launch. Use Refresh catalog to browse models.",
+          "info",
+        );
+      }
 
       // A restored alias for a model that is no longer in the catalog would otherwise pin the
       // selection forever, because the auto-select effect bails out whenever an alias is set.
@@ -4928,13 +4962,15 @@ updateStateFromSdk();
         if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
           throw new Error("Runtime changed while refreshing execution providers");
         }
-        await refreshModels();
-        if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
-          throw new Error("Runtime changed while refreshing the model catalog");
-        }
-        await loadRecommendations();
-        if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
-          throw new Error("Runtime changed while refreshing recommendations");
+        if (autoRefreshCatalogOnStartup) {
+          await refreshCatalogModels();
+          if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
+            throw new Error("Runtime changed while refreshing the model catalog");
+          }
+          await loadRecommendations();
+          if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
+            throw new Error("Runtime changed while refreshing recommendations");
+          }
         }
       } catch (e: any) {
         statusMessage = `Runtime startup stopped before model preload: ${e?.message || e}`;
@@ -4946,7 +4982,7 @@ updateStateFromSdk();
       // First-run coach (dismissible); keep until user skips or completes basics
       try {
         const coachDismissed = localStorage.getItem(FIRST_RUN_KEY) === "1";
-        if (!coachDismissed) {
+        if (!coachDismissed && state.catalogStatus === "ready") {
           const hasAnyCached = state.models.some((m: ModelInfo) => m.isCached);
           // Show coach when nothing cached yet, or always until dismissed after first install
           showFirstRunCoach = !hasAnyCached || !hadPersistedChatAtLaunch;
@@ -4958,10 +4994,10 @@ updateStateFromSdk();
       // Auto first launch: if no cached models and no persisted chat, offer starter (do not force-download)
       const hasAnyCached = state.models.some((m: ModelInfo) => m.isCached);
       const hasPersisted = hadPersistedChatAtLaunch;
-      if (!hasAnyCached && !hasPersisted && recommendedStarters.length > 0) {
+      if (state.catalogStatus === "ready" && !hasAnyCached && !hasPersisted && recommendedStarters.length > 0) {
         statusMessage = `First launch — pick a starter model below, or open Help for a guided path.`;
         currentView = "models";
-      } else if (autoStartService) {
+      } else if (autoRefreshCatalogOnStartup && autoStartService) {
         // A conversation restored at startup names the model this chat will actually use, so it
         // outranks the configured default. Prewarming must also still run for it even though
         // applying the conversation already installed a model handle, or the restored model
@@ -5003,12 +5039,18 @@ updateStateFromSdk();
             }
           }
         }
-        if (defaultAudioAlias) selectedSTTModelAlias = defaultAudioAlias;
       }
+      selectedSTTModelAlias = resolveStartupAudioAlias(
+        autoStartService,
+        defaultAudioAlias,
+        startupAudioAlias,
+        selectedSTTModelAlias,
+        sttModels.filter((model: ModelInfo) => model.isCached).map((model: ModelInfo) => model.alias),
+      );
 
       // Load any additional startup models (multi-model pool pre-warm)
       const startupEntries = Object.entries(startupModels);
-      if (startupEntries.length > 0) {
+      if (autoRefreshCatalogOnStartup && startupEntries.length > 0) {
         let startupLoaded = 0;
         let startupBlocked = 0;
         let startupInterrupted = false;
@@ -5095,7 +5137,7 @@ updateStateFromSdk();
     if (!state.ready) return;
     isLoadingModels = true;
     try {
-      await refreshModels();
+      await refreshCatalogModels();
       statusMessage = `${state.models.length} models available`;
       // Keep STT list fresh too (metadata driven)
       void loadSTTModels();
@@ -5213,7 +5255,7 @@ updateStateFromSdk();
   }
 
   async function refreshServiceStatus() {
-    await refreshModels();
+    await refreshCatalogModels();
     updateStateFromSdk();
   }
 
@@ -5311,7 +5353,7 @@ updateStateFromSdk();
         if (!isAcceleratorReadinessCurrent(readiness)) {
           throw new Error("Runtime changed while refreshing execution providers");
         }
-        await refreshModels();
+        await refreshCatalogModels();
         if (!isAcceleratorReadinessCurrent(readiness)) {
           throw new Error("Runtime changed while refreshing the model catalog");
         }
@@ -5445,7 +5487,7 @@ updateStateFromSdk();
       audioLaneModelAlias = alias;
 
       statusMessage = `Audio ready: ${alias}`;
-      await refreshModels();
+      await refreshCatalogModels();
       await loadSTTModels();
     } catch (e: any) {
       statusMessage = `Failed to prepare STT model: ${e?.message || e}`;
@@ -5635,7 +5677,7 @@ updateStateFromSdk();
       );
       setModelRuntimeMeta(model.alias, { downloadedAt: new Date().toISOString() });
       statusMessage = `${model.alias} downloaded`;
-      await refreshModels();
+      await refreshCatalogModels();
     } catch (e: any) {
       statusMessage = `Download failed: ${e?.message || e}`;
       throw e;
@@ -5698,7 +5740,7 @@ updateStateFromSdk();
     }
 
     try {
-      await refreshModels();
+      await refreshCatalogModels();
     } catch (e: any) {
       // The list is a view of the model, not the model itself, so a stale list does not make the
       // loaded model unusable — and saying "load failed" about a model that is loaded would send
@@ -5795,7 +5837,7 @@ updateStateFromSdk();
       statusMessage = `Unloading ${model.alias}...`;
       await sdkUnloadModel(model);
       statusMessage = `${model.alias} unloaded`;
-      await refreshModels();
+      await refreshCatalogModels();
     } catch (e: any) {
       statusMessage = `Unload failed: ${e?.message || e}`;
     } finally {
@@ -5822,7 +5864,7 @@ updateStateFromSdk();
       await sdkLoadModel(model, "chat", variantId);
       const startResult = await startServiceForModel(model.alias);
       statusMessage = `${model.alias} loaded (${shortVariantLabel(variantId)})${serviceQualifier(startResult.result)}`;
-      await refreshModels();
+      await refreshCatalogModels();
     } catch (e: any) {
       statusMessage = `Load failed: ${e?.message || e}`;
     } finally {
@@ -5863,7 +5905,7 @@ updateStateFromSdk();
         contextTurns = recommendedMaxTurns;
       }
       const startResult = await startServiceForModel(model.alias);
-      await refreshModels();
+      await refreshCatalogModels();
       statusMessage = `Chatting with ${model.alias} (${shortVariantLabel(variantId)})${serviceQualifier(startResult.result)}`;
       currentView = "chat";
       persistChat();
@@ -5896,7 +5938,7 @@ updateStateFromSdk();
       );
       setModelRuntimeMeta(model.alias, { downloadedAt: new Date().toISOString() });
       statusMessage = `${model.alias} variant downloaded`;
-      await refreshModels();
+      await refreshCatalogModels();
     } catch (e: any) {
       statusMessage = `Download failed: ${e?.message || e}`;
     } finally {
@@ -5933,7 +5975,7 @@ updateStateFromSdk();
         }
         await sdkDeleteModel(model, variantId);
         // If no other variants remain cached, clear selection/meta like full delete
-        await refreshModels();
+        await refreshCatalogModels();
         const refreshed = state.models.find((m: ModelInfo) => m.alias === model.alias);
         const anyCached =
           refreshed?.isCached ||
@@ -6019,7 +6061,7 @@ updateStateFromSdk();
           persistChat();
         }
         statusMessage = `${model.alias} deleted`;
-        await refreshModels();
+        await refreshCatalogModels();
       } finally {
         release();
       }
@@ -6029,7 +6071,7 @@ updateStateFromSdk();
       statusMessage = isUncertainOutcome(e)
         ? e?.message || String(e)
         : `Delete failed: ${e?.message || e}`;
-      await refreshModels().catch(() => {});
+      await refreshCatalogModels().catch(() => {});
     }
   }
 
@@ -7525,8 +7567,16 @@ Output only the summary text, no preamble.`;
             </li>
             <li class:done={firstRunHasModel}>
               <strong>Get a model</strong>
-              {#if state.ready && state.models.length === 0}
+              {#if state.ready && catalogCheckPresentation === "checked" && state.models.length === 0}
                 <span class="first-run-bad">Catalog is empty — check the network, then Models → Retry.</span>
+              {:else if state.ready && catalogCheckPresentation === "disabled"}
+                <span class="muted">Catalog check is off — open Models and refresh when you want to browse or download.</span>
+              {:else if state.ready && state.models.length === 0 && catalogCheckPresentation === "failed"}
+                <span class="first-run-bad">Catalog check failed — open Models to retry.</span>
+              {:else if state.ready && state.models.length === 0 && catalogCheckPresentation === "loading"}
+                <span class="muted">Checking the model catalog…</span>
+              {:else if state.ready && state.models.length === 0 && catalogCheckPresentation === "pending"}
+                <span class="muted">Catalog has not been checked yet — open Models to refresh.</span>
               {:else}
                 <span class="muted">Download a small starter from Models (hardware-aware picks appear when available).</span>
               {/if}
@@ -7599,7 +7649,23 @@ Output only the summary text, no preamble.`;
                 <option value="updated">Last updated</option>
               </select>
               <span class="count">{filteredModels.length} models</span>
-              {#if state.models.length === 0}
+              {#if state.models.length === 0 && catalogCheckPresentation === "disabled"}
+                <p class="notice" style="flex-basis:100%;">
+                  <strong>Catalog not checked.</strong> Automatic startup checks are off. Refresh when you want to contact Microsoft's Foundry Local model catalog.
+                </p>
+              {:else if state.models.length === 0 && catalogCheckPresentation === "failed"}
+                <p class="notice" style="flex-basis:100%;">
+                  <strong>Catalog check failed.</strong> {state.catalogError || "The catalog request did not complete."} Retry when the network or catalog service is available.
+                </p>
+              {:else if state.models.length === 0 && catalogCheckPresentation === "loading"}
+                <p class="notice" style="flex-basis:100%;">
+                  <strong>Checking the model catalog…</strong>
+                </p>
+              {:else if state.models.length === 0 && catalogCheckPresentation === "pending"}
+                <p class="notice" style="flex-basis:100%;">
+                  <strong>Catalog check has not completed.</strong> Retry to contact Microsoft's Foundry Local model catalog.
+                </p>
+              {:else if state.models.length === 0}
                 <p class="notice" style="flex-basis:100%;">
                   <strong>Catalog is empty.</strong> The sidecar is ready but returned no models — check the network and Retry, or add a local ONNX folder.
                 </p>
@@ -7749,11 +7815,23 @@ Output only the summary text, no preamble.`;
               </div>
             {/if}
 
-            {#if isLoadingModels && state.models.length === 0}
+            {#if catalogCheckPresentation === "loading" && state.models.length === 0}
               <p>Loading catalog...</p>
             {:else if filteredModels.length === 0}
               <div class="empty-state-card">
-                {#if state.models.length === 0}
+                {#if state.models.length === 0 && catalogCheckPresentation === "disabled"}
+                  <h3>Model catalog not checked</h3>
+                  <p>Automatic startup checks are off. Refresh only when you want to browse models or check for updates.</p>
+                  <button type="button" onclick={() => loadModels()}>Refresh catalog</button>
+                {:else if state.models.length === 0 && catalogCheckPresentation === "failed"}
+                  <h3>Model catalog check failed</h3>
+                  <p>{state.catalogError || "The catalog request did not complete."}</p>
+                  <button type="button" onclick={() => loadModels()}>Retry catalog</button>
+                {:else if state.models.length === 0 && catalogCheckPresentation === "pending"}
+                  <h3>Model catalog check has not completed</h3>
+                  <p>Retry to browse models or check for updates.</p>
+                  <button type="button" onclick={() => loadModels()}>Retry catalog</button>
+                {:else if state.models.length === 0}
                   <h3>No models in the catalog yet</h3>
                   <p>Wait for Foundry Local to finish loading the catalog, or retry if something failed.</p>
                   <button type="button" onclick={() => loadModels()}>Refresh catalog</button>
@@ -10049,7 +10127,7 @@ Output only the summary text, no preamble.`;
                                   "chat",
                                   slot.variantId ?? undefined,
                                 );
-                                await refreshModels();
+                                await refreshCatalogModels();
                                 statusMessage = `Loaded ${slot.label}`;
                               } catch (err: any) {
                                 statusMessage = `Load failed: ${err?.message || err}`;
@@ -10334,6 +10412,22 @@ Output only the summary text, no preamble.`;
               </div>
               <label class="toggle-switch">
                 <input type="checkbox" bind:checked={autoStartService} onchange={persistChatCheckbox((v) => { autoStartService = v; })} aria-labelledby="auto-start-service-label" />
+                <span class="toggle-track"></span>
+              </label>
+            </div>
+
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-name" id="auto-refresh-catalog-label">Check model catalog on startup</span>
+                <span class="setting-desc">
+                  Contacts Microsoft's Foundry Local model catalog over the network on startup to list
+                  models and check for updates. Turning this off skips recommendations and configured
+                  model preloads for that launch; manual refresh and model actions may contact it later.
+                  Accelerator setup is separate and may download runtime components automatically.
+                </span>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" bind:checked={autoRefreshCatalogOnStartup} onchange={persistChatCheckbox((v) => { autoRefreshCatalogOnStartup = v; setAutomaticCatalogRefreshEnabled(v); })} aria-labelledby="auto-refresh-catalog-label" />
                 <span class="toggle-track"></span>
               </label>
             </div>

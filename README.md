@@ -21,7 +21,7 @@ typed SDK/sidecar boundary without owning another model manager.
 
 | You want… | Flint gives you… |
 |---|---|
-| **Privacy** | Inference stays on-device. Network bind defaults to loopback; non-loopback requires an explicit choice and confirmation. |
+| **Privacy** | Inference stays on-device. Network bind defaults to loopback; non-loopback requires an explicit choice and confirmation. Listing/refreshing the model catalog contacts Microsoft's Foundry Local catalog over the network (the startup check can be turned off in Settings). Startup accelerator setup may separately download execution-provider components. |
 | **Full catalog, not a CLI subset** | The Foundry Local **CLI** is great for quick experiments, but it only surfaces **part** of what the runtime can run. Flint talks to the **official SDK**, so you get the broader model catalog (chat, vision, STT, acceleration variants) without writing and maintaining your own wrapper around the service. |
 | **Hardware you already paid for** | Hardware-aware recommendations and CPU / GPU / NPU variants through the SDK—not guesswork from CLI flags alone. |
 | **One local endpoint for many tools** | Start a service and point Continue, Cline, OpenAI SDKs, and other clients at `http://127.0.0.1:<port>/v1`. |

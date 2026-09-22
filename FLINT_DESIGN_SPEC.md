@@ -146,6 +146,8 @@ Azure connections and other future feature work are tracked in
 - Inference local by default
 - Clear indicators when any remote provider is used
 - Localhost-only bind by default; non-loopback bind requires explicit user choice and warning
+- Model catalog listing/refresh (via Foundry Local's SDK) contacts Microsoft's remote catalog over the network — enabled by default, with a Settings toggle to disable that startup check
+- Accelerator setup runs automatically at startup and may separately download/register execution-provider components; the catalog toggle does not control it
 - Minimal OS permissions
 - Export/clear paths for logs, cache, and settings
 - Sidecar command validation and least-privilege Tauri capabilities (hardened across 0.2+)
@@ -200,7 +202,7 @@ Azure connections and other future feature work are tracked in
 
 - Local inference default (in-process or localhost server).
 - “Running locally” style messaging; clear cloud indicators when remote endpoints exist.
-- No telemetry by default.
+- No telemetry by default. Model catalog listing/refresh contacts Microsoft's remote Foundry catalog at startup by default, and that startup check can be disabled in Settings. Accelerator setup also runs automatically at startup and may download/register execution-provider components; it is not controlled by the catalog toggle. User-triggered downloads, manual "Refresh catalog", and other model-management actions can also require network access.
 - Minimal permissions (mic only when user starts audio; filesystem limited to needed paths).
 - Settings, conversations, logs exportable/deletable where implemented.
 - Tauri CSP and capability model restrict webview powers.
