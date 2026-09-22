@@ -114,6 +114,10 @@ beforeAll(async () => {
   });
   // init binds the cache root to our throwaway appName.
   await send('init', { appName: APP, logLevel: 'error' });
+  // Catalog mutations are gated behind accelerator registration so they cannot commit an
+  // incomplete SDK snapshot. Establish provider setup once; the first mutation below still
+  // owns the initial native catalog scan and has a matching timeout.
+  await send('ensureAccelerators');
 }, 60000);
 
 afterAll(() => {
@@ -166,7 +170,7 @@ describe('BYOM import', () => {
 
     // Ownership marker is what lets Flint know it may delete this directory later.
     expect(fs.existsSync(path.join(dir, '.flint-import.json'))).toBe(true);
-  });
+  }, 120000);
 
   it('refuses to overwrite an existing model', async () => {
     const src = track(makeSourceRepo());

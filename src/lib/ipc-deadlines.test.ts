@@ -26,8 +26,14 @@ describe('IPC command deadlines', () => {
     expect(deadlineForCommand('startService')).toBeNull();
   });
 
+  it('leaves catalog-gated queries unbounded while accelerator registration is running', () => {
+    expect(deadlineForCommand('listModels')).toBeNull();
+    expect(deadlineForCommand('getVisionModels')).toBeNull();
+    expect(deadlineForCommand('getSTTModels')).toBeNull();
+    expect(deadlineForCommand('poolStatus')).toBeNull();
+  });
+
   it('leaves headroom beyond nested control-plane probe budgets', () => {
-    expect(deadlineForCommand('poolStatus')).toBeGreaterThan(10_000);
     expect(deadlineForCommand('wslStatus')).toBeGreaterThan(15_000);
   });
 

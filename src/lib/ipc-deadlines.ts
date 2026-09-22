@@ -12,14 +12,16 @@ export const IPC_COMMAND_DEADLINES_MS: Record<SidecarCommandName, number | null>
   getAccessLog: 10_000,
   getHealthRing: 10_000,
   getCacheInventory: 30_000,
-  // Windows accelerator telemetry has its own 10-second fallback budget.
-  poolStatus: 20_000,
+  // These catalog readers can wait behind accelerator registration. That work may download
+  // execution providers and is intentionally unbounded, so an outer query deadline would only
+  // discard a valid late reply while the native work continues.
+  poolStatus: null,
   getEps: 10_000,
   // WSL version discovery may use a 15-second subprocess timeout.
   wslStatus: 20_000,
-  listModels: 30_000,
-  getVisionModels: 30_000,
-  getSTTModels: 30_000,
+  listModels: null,
+  getVisionModels: null,
+  getSTTModels: null,
   inspectModelFolder: 30_000,
   getModelTemplate: 30_000,
 
