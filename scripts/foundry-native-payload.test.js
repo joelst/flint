@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
 const {
+  describeInvalidNativeFile,
   platformKeyForTriple,
   requiredNativeFiles,
   validateNativePayload,
@@ -60,6 +61,37 @@ describe('Foundry native payload manifest', () => {
   it('accepts a complete model-load payload', () => {
     const sdkRoot = makeSdk('linux-x64');
     expect(validateNativePayload(sdkRoot, 'linux-x64').invalid).toEqual([]);
+  });
+
+  it('accepts a macOS ONNX Runtime alias that packaging copied as a regular file', () => {
+    const sdkRoot = makeSdk('darwin-arm64');
+    expect(validateNativePayload(sdkRoot, 'darwin-arm64').invalid).toEqual([]);
+  });
+
+  it('reports a missing macOS ONNX Runtime alias as missing, not as a bad symlink', () => {
+    const sdkRoot = makeSdk('darwin-arm64', 'libonnxruntime.dylib');
+    const invalid = validateNativePayload(sdkRoot, 'darwin-arm64').invalid;
+
+    expect(invalid.map((file) => file.name)).toEqual(['libonnxruntime.dylib']);
+    expect(describeInvalidNativeFile(invalid[0])).toBe('missing');
+  });
+
+  it('rejects a macOS ONNX Runtime alias that points at the wrong library', () => {
+    const sdkRoot = makeSdk('darwin-arm64');
+    const alias = join(sdkRoot, 'prebuilds', 'darwin-arm64', 'libonnxruntime.dylib');
+    rmSync(alias);
+    try {
+      symlinkSync('libonnxruntime-genai.dylib', alias);
+    } catch (error) {
+      if (error && (error.code === 'EPERM' || error.code === 'ENOTSUP')) return;
+      throw error;
+    }
+
+    const invalid = validateNativePayload(sdkRoot, 'darwin-arm64').invalid;
+    expect(invalid.map((file) => file.name)).toEqual(['libonnxruntime.dylib']);
+    expect(describeInvalidNativeFile(invalid[0])).toBe(
+      'a symlink to libonnxruntime-genai.dylib, not libonnxruntime.1.dylib',
+    );
   });
 
   it('rejects a truncated core that is present but cannot be a real runtime', () => {
