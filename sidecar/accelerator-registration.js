@@ -39,7 +39,12 @@ export async function registerDiscoveredExecutionProviders(manager, onProgress, 
         retry: true,
       };
     }
-    return await manager.downloadAndRegisterEps(onProgress);
+    // No-argument registration selects one preferred provider and reports success
+    // with an empty registeredEps list. Returning that result seals the gate, so
+    // the catalog can be read before any provider that is visible after the call
+    // gets an explicit registration.
+    const fallback = await manager.downloadAndRegisterEps(onProgress);
+    if (!discoveredProviders(manager).some((provider) => providerName(provider))) return fallback;
   }
 
   const failures = new Map();

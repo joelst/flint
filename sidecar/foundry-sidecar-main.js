@@ -2645,12 +2645,17 @@ rl.on('line', async (line) => {
     } else if (cmd === 'inspectModelFolder') {
       reply({ ok: true, result: inspectFolder(payload.folderPath) });
     } else if (cmd === 'importModelFolder') {
+      // These handlers touch manager.catalog to drop a stale cache entry. The getter
+      // is a catalog access, so it has to wait out registration or it can freeze the
+      // snapshot while a retry is still registering another provider.
+      await beforeCatalogRead();
       const result = importModelFolder(payload);
       log('info', `Imported model ${result.name}:${result.version} from ${payload.folderPath}`);
       invalidateModelIndex();
       audit('importModelFolder', { alias: result.name, variantId: `${result.name}:${result.version}`, kind: 'copy' });
       reply({ ok: true, result });
     } else if (cmd === 'linkModelFolder') {
+      await beforeCatalogRead();
       const result = linkModelFolder(payload);
       log('info', `Linked model ${result.name} -> ${result.target}`);
       invalidateModelIndex();
@@ -2659,6 +2664,7 @@ rl.on('line', async (line) => {
     } else if (cmd === 'getModelTemplate') {
       reply({ ok: true, result: getModelTemplate(payload.name) });
     } else if (cmd === 'setModelTemplate') {
+      await beforeCatalogRead();
       const result = setModelTemplate(payload.name, payload.promptTemplate);
       log('info', `Updated prompt template for ${result.name}`);
       audit('setModelTemplate', { alias: result.name, variantId: null });

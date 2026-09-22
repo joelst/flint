@@ -129,6 +129,41 @@ describe('registerDiscoveredExecutionProviders', () => {
     expect(result.status).toContain('runtime did not confirm registration');
   });
 
+  it('registers providers that become visible after the one-provider fallback', async () => {
+    let discovered = [];
+    const manager = {
+      discoverEps: () => discovered,
+      downloadAndRegisterEps: vi.fn(async (names) => {
+        if (!Array.isArray(names)) {
+          discovered = [
+            { name: 'CPUExecutionProvider', isRegistered: true },
+            { name: 'CUDAExecutionProvider', isRegistered: false },
+          ];
+          return { success: true, status: 'All providers registered', registeredEps: [], failedEps: [] };
+        }
+        const name = names[0];
+        discovered = discovered.map((provider) =>
+          provider.name === name ? { ...provider, isRegistered: true } : provider,
+        );
+        return { success: true, registeredEps: [name], failedEps: [] };
+      }),
+    };
+
+    const result = await registerDiscoveredExecutionProviders(manager, undefined, {
+      allowLegacyFallback: true,
+    });
+    expect(manager.downloadAndRegisterEps.mock.calls.map(([names]) => names)).toEqual([
+      undefined,
+      ['CUDAExecutionProvider'],
+    ]);
+    expect(result).toMatchObject({
+      success: true,
+      registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+      failedEps: [],
+    });
+    expect(result.retry).toBeUndefined();
+  });
+
   it('does not take the one-provider fallback while discovery can be tried again', async () => {
     const manager = {
       discoverEps: () => [],
@@ -176,6 +211,14 @@ describe('native service startup', () => {
     expect(start).toBeGreaterThan(-1);
     expect(gate).toBeGreaterThan(start);
     expect(web).toBeGreaterThan(gate);
+    for (const cmd of ['importModelFolder', 'linkModelFolder', 'setModelTemplate']) {
+      const at = source.indexOf(`} else if (cmd === '${cmd}') {`);
+      const read = source.indexOf('await beforeCatalogRead()', at);
+      const call = source.indexOf(`${cmd}(`, at);
+      expect(at, cmd).toBeGreaterThan(-1);
+      expect(read, cmd).toBeGreaterThan(at);
+      expect(call, cmd).toBeGreaterThan(read);
+    }
   });
 });
 
