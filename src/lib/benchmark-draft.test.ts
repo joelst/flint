@@ -346,6 +346,62 @@ describe('duplicateSuiteDraft', () => {
     expect(rebuilt.value!.cases).toEqual(stored.cases);
   });
 
+  it('makes a legacy duplicate-alias suite saveable by keeping the first target per alias', () => {
+    const stored: BenchmarkSuite = {
+      id: 'suite-legacy',
+      name: 'Legacy variants',
+      createdAt: 5,
+      targets: [
+        { alias: 'model-a', variantId: 'v1' },
+        { alias: 'model-a', variantId: 'v2' },
+        { alias: 'model-b', variantId: null },
+      ],
+      cases: [{ id: 'c1', prompt: 'hello' }],
+      warmupCount: 0,
+      repeatCount: 1,
+    };
+    const draft = duplicateSuiteDraft(stored);
+    expect(draft.targets).toEqual([
+      { alias: 'model-a', variantId: 'v1' },
+      { alias: 'model-b', variantId: null },
+    ]);
+    expect(buildSuiteFromDraft(draft).ok).toBe(true);
+  });
+
+  it('uses trimmed alias identity when repairing a legacy duplicate', () => {
+    const stored: BenchmarkSuite = {
+      id: 'suite-legacy-whitespace',
+      name: 'Legacy whitespace',
+      createdAt: 5,
+      targets: [
+        { alias: 'model-a', variantId: 'v1' },
+        { alias: ' model-a ', variantId: 'v2' },
+      ],
+      cases: [{ id: 'c1', prompt: 'hello' }],
+      warmupCount: 0,
+      repeatCount: 1,
+    };
+    const draft = duplicateSuiteDraft(stored);
+    expect(draft.targets).toEqual([{ alias: 'model-a', variantId: 'v1' }]);
+    expect(buildSuiteFromDraft(draft).ok).toBe(true);
+  });
+
+  it('preserves every target when their aliases are distinct', () => {
+    const stored: BenchmarkSuite = {
+      id: 'suite-distinct',
+      name: 'Distinct models',
+      createdAt: 5,
+      targets: [
+        { alias: 'model-a', variantId: 'v1' },
+        { alias: 'model-b', variantId: 'v2' },
+      ],
+      cases: [{ id: 'c1', prompt: 'hello' }],
+      warmupCount: 0,
+      repeatCount: 1,
+    };
+    expect(duplicateSuiteDraft(stored).targets).toEqual(stored.targets);
+  });
+
   it('shortens a max-length name so the copy suffix still fits', () => {
     const name = 'a'.repeat(BENCHMARK_MAX_NAME_LENGTH);
     const copied = copiedSuiteName(name);

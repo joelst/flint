@@ -173,6 +173,13 @@ export function duplicateSuiteDraft(suite: BenchmarkSuite): SuiteDraft {
   delete draft.id;
   delete draft.createdAt;
   draft.name = copiedSuiteName(suite.name);
+  const seenAliases = new Set<string>();
+  draft.targets = draft.targets.filter((target) => {
+    const alias = target.alias.trim();
+    if (seenAliases.has(alias)) return false;
+    seenAliases.add(alias);
+    return true;
+  });
   return draft;
 }
 

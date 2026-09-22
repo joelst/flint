@@ -66,6 +66,7 @@
   let casesImporting = false;
   let casesFileInput: HTMLInputElement | null = null;
   let editingErrors: string[] = [];
+  let editingNotices: string[] = [];
   let editingBusy = false;
   /** Held across create/edit/save/delete so Delete cannot race a Save that recreates the suite. */
   let suiteBusy = false;
@@ -238,11 +239,13 @@
     editingCaseRows = [];
     casesAdvanced = false;
     editingErrors = [];
+    editingNotices = [];
   }
 
-  function openDraft(draft: SuiteDraft) {
+  function openDraft(draft: SuiteDraft, notices: string[] = []) {
     editingDraft = draft;
     editingErrors = [];
+    editingNotices = notices;
     const parsed = caseRowsFromJsonl(draft.casesJsonl);
     if (parsed.ok) {
       editingCaseRows = parsed.rows;
@@ -357,7 +360,12 @@
 
   function startDuplicateSuite(suite: BenchmarkSuite) {
     if (editorBusy || lifecycleBusy || editingDraft) return;
-    openDraft(duplicateSuiteDraft(suite));
+    const draft = duplicateSuiteDraft(suite);
+    const removedTargets = suite.targets.length - draft.targets.length;
+    const notices = removedTargets > 0
+      ? [`Removed ${removedTargets} ${removedTargets === 1 ? "target" : "targets"} that repeated a model alias. Benchmark targets are keyed by alias.`]
+      : [];
+    openDraft(draft, notices);
   }
 
   function startEditSuite(suite: BenchmarkSuite) {
@@ -736,6 +744,9 @@
           {#each editingErrors as err}<li>{err}</li>{/each}
         </ul>
       {/if}
+      {#each editingNotices as notice}
+        <div class="warning-banner">{notice}</div>
+      {/each}
       <!-- A save in flight must not let any control here keep mutating `editingDraft` --
            a successful save clears the draft, and any edit made during that window would be
            silently discarded rather than saved or visibly rejected. A native `fieldset` disables

@@ -58,4 +58,10 @@ describe('benchmark editor wiring', () => {
     expect(source).toContain('{@const tagsError = tagsJsonError(row.tagsJson)}');
     expect(source).not.toContain('Tags (comma-separated)');
   });
+
+  it('explains when duplicating a legacy suite removes repeated aliases', () => {
+    expect(source).toContain('const removedTargets = suite.targets.length - draft.targets.length;');
+    expect(source).toContain('Benchmark targets are keyed by alias.');
+    expect(source).toContain('{#each editingNotices as notice}');
+  });
 });
