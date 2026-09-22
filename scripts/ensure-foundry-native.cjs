@@ -1,5 +1,5 @@
-// Ensure Foundry Local native core binaries exist before tauri build.
-// Downloaded into node_modules/foundry-local-sdk/foundry-local-core/<platformKey>/.
+// Ensure Foundry Local native binaries exist before tauri build.
+// Foundry SDK 2.0 ships them in node_modules/foundry-local-sdk/prebuilds/<platformKey>/.
 //
 // Invoked from tauri.conf.json beforeBuildCommand.
 //
@@ -12,40 +12,14 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFileSync } = require('node:child_process');
+const {
+  INSTALLABLE_PLATFORM_KEYS,
+  platformKeyForTriple,
+  validateNativePayload,
+} = require('./foundry-native-payload.cjs');
 
 const root = path.resolve(__dirname, '..');
-
-/** Map Rust / Tauri target triples → Node-style platformKey used by foundry-local-sdk. */
-const TRIPLE_TO_PLATFORM_KEY = {
-  'x86_64-pc-windows-msvc': 'win32-x64',
-  'x86_64-pc-windows-gnu': 'win32-x64',
-  'aarch64-pc-windows-msvc': 'win32-arm64',
-  'x86_64-apple-darwin': 'darwin-x64',
-  'aarch64-apple-darwin': 'darwin-arm64',
-  'x86_64-unknown-linux-gnu': 'linux-x64',
-  'aarch64-unknown-linux-gnu': 'linux-arm64',
-};
-
-/** NuGet RIDs supported by foundry-local-sdk install-utils (must stay in sync). */
-const SUPPORTED_PLATFORM_KEYS = new Set([
-  'win32-x64',
-  'win32-arm64',
-  'linux-x64',
-  'linux-arm64',
-  'darwin-arm64',
-  // darwin-x64 is intentionally absent from current foundry-local-sdk PLATFORM_MAP;
-  // we still resolve it so we can fail with a clear message instead of arm64-on-intel mismatch.
-]);
-
-/** foundry-local-sdk install-utils PLATFORM_MAP keys that actually download. */
-const INSTALLABLE_PLATFORM_KEYS = new Set([
-  'win32-x64',
-  'win32-arm64',
-  'linux-x64',
-  'linux-arm64',
-  'darwin-arm64',
-]);
 
 function log(msg) {
   console.log(`[ensure-foundry-native] ${msg}`);
@@ -56,6 +30,47 @@ function fail(msg) {
   process.exit(1);
 }
 
+function nodePlatformArch(platformKey) {
+  const [platform, arch] = platformKey.split('-');
+  return { platform, arch };
+}
+
+function runInstallForPlatformKey(sdkRoot, platformKey) {
+  const installScript = path.join(sdkRoot, 'script', 'install-native.cjs');
+  if (!fs.existsSync(installScript)) return false;
+
+  const hostKey = `${process.platform}-${process.arch}`;
+  if (platformKey === hostKey) {
+    log(`Installing missing runtime libraries for host ${platformKey}...`);
+    execFileSync(process.execPath, [installScript], {
+      cwd: root,
+      stdio: 'inherit',
+      env: process.env,
+    });
+    return true;
+  }
+
+  const { platform, arch } = nodePlatformArch(platformKey);
+  log(`Installing runtime libraries for build target ${platformKey} from host ${hostKey}...`);
+  const bootstrap = `
+    const os = require('node:os');
+    os.platform = () => ${JSON.stringify(platform)};
+    os.arch = () => ${JSON.stringify(arch)};
+    Promise.resolve(require(${JSON.stringify(installScript)}).main())
+      .then((code) => { process.exitCode = code ?? 0; })
+      .catch((error) => {
+        console.error(error instanceof Error ? error.message : String(error));
+        process.exitCode = 1;
+      });
+  `;
+  execFileSync(process.execPath, ['-e', bootstrap], {
+    cwd: root,
+    stdio: 'inherit',
+    env: process.env,
+  });
+  return true;
+}
+
 /**
  * Resolve Node-style platformKey (e.g. darwin-arm64) for the build target.
  * Order: CLI --target / FOUNDRY_PLATFORM_KEY → TAURI_ENV_* → CARGO_BUILD_TARGET → host.
@@ -64,13 +79,13 @@ function resolvePlatformKey() {
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--target' && args[i + 1]) {
-      const fromTriple = TRIPLE_TO_PLATFORM_KEY[args[i + 1]];
+      const fromTriple = platformKeyForTriple(args[i + 1]);
       if (fromTriple) return { platformKey: fromTriple, source: `--target ${args[i + 1]}` };
       fail(`Unknown --target triple: ${args[i + 1]}`);
     }
     if (args[i].startsWith('--target=')) {
       const triple = args[i].slice('--target='.length);
-      const fromTriple = TRIPLE_TO_PLATFORM_KEY[triple];
+      const fromTriple = platformKeyForTriple(triple);
       if (fromTriple) return { platformKey: fromTriple, source: `--target=${triple}` };
       fail(`Unknown --target triple: ${triple}`);
     }
@@ -105,9 +120,10 @@ function resolvePlatformKey() {
     process.env.TAURI_ENV_TARGET_TRIPLE ||
     process.env.CARGO_BUILD_TARGET ||
     process.env.CARGO_CFG_TARGET_TRIPLE;
-  if (triple && TRIPLE_TO_PLATFORM_KEY[triple]) {
+  const fromTriple = triple ? platformKeyForTriple(triple) : null;
+  if (triple && fromTriple) {
     return {
-      platformKey: TRIPLE_TO_PLATFORM_KEY[triple],
+      platformKey: fromTriple,
       source: `target triple env (${triple})`,
     };
   }
@@ -118,89 +134,12 @@ function resolvePlatformKey() {
   };
 }
 
-function coreExtension(platformKey) {
-  if (platformKey.startsWith('win32')) return '.dll';
-  if (platformKey.startsWith('darwin')) return '.dylib';
-  return '.so';
-}
-
-function nodePlatformArch(platformKey) {
-  const [platform, arch] = platformKey.split('-');
-  return { platform, arch };
-}
-
-function corePathFor(platformKey) {
-  return path.join(
-    root,
-    'node_modules',
-    'foundry-local-sdk',
-    'foundry-local-core',
-    platformKey,
-    `Microsoft.AI.Foundry.Local.Core${coreExtension(platformKey)}`
-  );
-}
-
-function coreOk(corePath) {
-  try {
-    const st = fs.statSync(corePath);
-    return st.isFile() && st.size > 1_000_000;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Run foundry-local-sdk install-standard.cjs as if on the *target* platform.
- * install-utils.cjs snapshots os.platform()/os.arch() at load time, so we must
- * patch `os` before requiring the install script when host ≠ target.
- */
-function runInstallForPlatformKey(platformKey) {
-  const standardScript = path.join(
-    root,
-    'node_modules',
-    'foundry-local-sdk',
-    'script',
-    'install-standard.cjs'
-  );
-  if (!fs.existsSync(standardScript)) {
-    return false;
-  }
-
-  const { platform, arch } = nodePlatformArch(platformKey);
-  const hostKey = `${process.platform}-${process.arch}`;
-
-  if (platformKey === hostKey) {
-    log(`Running install-standard.cjs for host ${platformKey}...`);
-    execFileSync(process.execPath, [standardScript], {
-      cwd: root,
-      stdio: 'inherit',
-      env: process.env,
-    });
-    return true;
-  }
-
-  // Cross-target: patch os.platform/arch before the install utils load.
-  log(
-    `Host is ${hostKey}; installing natives for build target ${platformKey} (patched os.platform/arch)...`
-  );
-  const bootstrap = `
-    const os = require('os');
-    os.platform = () => ${JSON.stringify(platform)};
-    os.arch = () => ${JSON.stringify(arch)};
-    require(${JSON.stringify(standardScript)});
-  `;
-  execFileSync(process.execPath, ['-e', bootstrap], {
-    cwd: root,
-    stdio: 'inherit',
-    env: process.env,
-  });
-  return true;
-}
-
 // --- main ---
 
 const { platformKey, source } = resolvePlatformKey();
-const corePath = corePathFor(platformKey);
+const sdkRoot =
+  process.env.FLINT_FOUNDRY_SDK_DIR ||
+  path.join(root, 'node_modules', 'foundry-local-sdk');
 
 log(`Target platformKey=${platformKey} (from ${source})`);
 
@@ -213,36 +152,44 @@ if (!INSTALLABLE_PLATFORM_KEYS.has(platformKey)) {
   );
 }
 
-if (coreOk(corePath)) {
-  const st = fs.statSync(corePath);
-  log(`OK (${(st.size / (1024 * 1024)).toFixed(1)} MB): ${path.relative(root, corePath)}`);
-  process.exit(0);
-}
-
-log(`Missing or too small: ${path.relative(root, corePath)}`);
-log('Native Foundry Local binaries are not present. Downloading via package install script...');
-
-let ran = false;
+let validation;
 try {
-  ran = runInstallForPlatformKey(platformKey);
-} catch (err) {
-  fail(`Install script failed: ${err instanceof Error ? err.message : err}`);
+  validation = validateNativePayload(sdkRoot, platformKey);
+} catch (error) {
+  fail(error instanceof Error ? error.message : String(error));
 }
 
-if (!ran) {
+if (validation.invalid.length > 0) {
+  log(`Native payload is incomplete for ${platformKey}; running the SDK installer.`);
+  try {
+    if (!runInstallForPlatformKey(sdkRoot, platformKey)) {
+      fail(`Foundry SDK install script is missing under ${path.relative(root, sdkRoot)}.`);
+    }
+    validation = validateNativePayload(sdkRoot, platformKey);
+  } catch (error) {
+    fail(`Foundry SDK native install failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+if (validation.invalid.length > 0) {
+  for (const file of validation.invalid) {
+    const detail =
+      file.symlinkTo && file.linkTarget !== file.symlinkTo
+        ? `not a symlink to ${file.symlinkTo}`
+        : file.size === 0
+          ? 'missing'
+          : `${file.size} bytes`;
+    log(`${file.role} is ${detail}: ${path.relative(root, file.filePath)}`);
+  }
   fail(
-    'No foundry-local-sdk install script found. Run `npm install` first (lifecycle scripts must be enabled).'
+    `Foundry 2.0 native payload is incomplete for ${platformKey}.\n` +
+      '  Re-run npm install with scripts enabled, or npm rebuild foundry-local-sdk,\n' +
+      '  then run npm run ensure:foundry again.'
   );
 }
 
-if (!coreOk(corePath)) {
-  fail(
-    `Still missing after install: ${path.relative(root, corePath)}\n` +
-      '  Release installers will be broken without this file.\n' +
-      '  Re-run npm install with scripts enabled, then npm run ensure:foundry.\n' +
-      `  For cross-targets: ensure:foundry --target <triple> or FOUNDRY_PLATFORM_KEY=${platformKey}`
-  );
+for (const file of validation.files) {
+  const filePath = path.join(validation.platformDir, file.name);
+  const size = fs.statSync(filePath).size;
+  log(`OK ${file.role} (${(size / (1024 * 1024)).toFixed(1)} MB): ${path.relative(root, filePath)}`);
 }
-
-const st = fs.statSync(corePath);
-log(`Installed OK (${(st.size / (1024 * 1024)).toFixed(1)} MB): ${path.relative(root, corePath)}`);

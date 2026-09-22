@@ -1,18 +1,21 @@
 /**
- * Stop Foundry's native listener, including a start that opened a listener but failed before
- * the SDK decoded and published its URL list.
+ * Stop Foundry's native listener through the public SDK surface. When startup may have opened
+ * a listener but failed before publishing URLs, the SDK cannot confirm that it stopped.
  */
 export function stopNativeWebService({ manager, startAttempted }) {
   if (!manager) return false;
+  if (!startAttempted && !manager.urls?.length) return false;
 
-  if (startAttempted && !manager.urls?.length) {
-    const interop = manager.coreInterop;
-    if (typeof interop?.executeCommand !== 'function') {
-      throw new Error('Cannot stop a native service whose startup did not publish an address.');
-    }
-    interop.executeCommand('stop_service');
-  } else {
-    manager.stopWebService?.();
+  if (typeof manager.stopWebService !== 'function') {
+    throw new Error('Foundry manager does not expose stopWebService().');
+  }
+
+  const hadPublishedAddress = Boolean(manager.urls?.length);
+  manager.stopWebService();
+  if (startAttempted && !hadPublishedAddress) {
+    throw new Error(
+      'Native service stop is unconfirmed because the SDK did not publish an address.',
+    );
   }
   return true;
 }

@@ -18,17 +18,36 @@ const APP = `flint-byom-test-${process.pid}`;
 const appHome = path.join(os.homedir(), `.${APP}`);
 const cacheRoot = path.join(appHome, 'cache', 'models');
 const libraryPath = path.resolve(
-  'node_modules/foundry-local-sdk/foundry-local-core/win32-x64/Microsoft.AI.Foundry.Local.Core.dll',
+  'node_modules/foundry-local-sdk/prebuilds/win32-x64',
 );
 
 // The native core is Windows-only and ships as a platform binary. Tests that ask the
 // real SDK to resolve an imported model can only run where that binary exists; the
 // rest of this file drives the sidecar directly and runs everywhere.
-const hasNativeSdk = process.platform === 'win32' && fs.existsSync(libraryPath);
+const hasNativeSdk = process.platform === 'win32'
+  && fs.existsSync(path.join(libraryPath, 'foundry_local.dll'));
+const CUSTOM_TEMPLATE = {
+  system: '[SYS]{Content}[/SYS]',
+  user: '[U]{Content}[/U]',
+  assistant: '[A]{Content}[/A]',
+  prompt: '[U]{Content}[/U][A]',
+};
 
 let proc: ChildProcessWithoutNullStreams;
 let nextId = 1;
 const pending = new Map<number, (msg: any) => void>();
+let nativeManager: any;
+
+async function getNativeManager() {
+  if (nativeManager) return nativeManager;
+  const { FoundryLocalManager } = await import('foundry-local-sdk');
+  nativeManager = (FoundryLocalManager as any).create({
+    appName: APP,
+    logLevel: 'error',
+    libraryPath,
+  });
+  return nativeManager;
+}
 
 function send(cmd: string, payload: Record<string, unknown> = {}): Promise<any> {
   const id = nextId++;
@@ -252,8 +271,15 @@ describe('BYOM discovery by the Foundry SDK', () => {
     const embedImported = await send('importModelFolder', { folderPath: embedSrc, name: 'discoverable-embed' });
     expect(embedImported.ok, JSON.stringify(embedImported)).toBe(true);
 
-    const { FoundryLocalManager } = await import('foundry-local-sdk');
-    const mgr = (FoundryLocalManager as any).create({ appName: APP, logLevel: 'error', libraryPath });
+    const templateSrc = track(makeSourceRepo());
+    await send('importModelFolder', { folderPath: templateSrc, name: 'tpl-write-sdk' });
+    const templateUpdated = await send('setModelTemplate', {
+      name: 'tpl-write-sdk',
+      promptTemplate: CUSTOM_TEMPLATE,
+    });
+    expect(templateUpdated.ok, JSON.stringify(templateUpdated)).toBe(true);
+
+    const mgr = await getNativeManager();
     const cached = await mgr.catalog.getCachedModels();
 
     const found = cached.find((m: any) => String(m.id).startsWith('discoverable-model'));
@@ -268,16 +294,13 @@ describe('BYOM discovery by the Foundry SDK', () => {
 
     const byAlias = await mgr.catalog.getModel('discoverable-model');
     expect(byAlias.id).toBe('discoverable-model:1');
+    const rewrittenTemplate = await mgr.catalog.getModel('tpl-write-sdk');
+    expect(rewrittenTemplate.id).toBe('tpl-write-sdk:1');
   }, 60000);
 });
 
 describe('BYOM prompt template editing', () => {
-  const custom = {
-    system: '[SYS]{Content}[/SYS]',
-    user: '[U]{Content}[/U]',
-    assistant: '[A]{Content}[/A]',
-    prompt: '[U]{Content}[/U][A]',
-  };
+  const custom = CUSTOM_TEMPLATE;
 
   it('honours a template supplied at import time', async () => {
     const src = track(makeSourceRepo());
@@ -329,19 +352,6 @@ describe('BYOM prompt template editing', () => {
     );
     expect(inf.Name).toBe('tpl-write:1');
   });
-
-  it.skipIf(!hasNativeSdk)('rewrites the template and the SDK still resolves the model', async () => {
-    const src = track(makeSourceRepo());
-    await send('importModelFolder', { folderPath: src, name: 'tpl-write-sdk' });
-
-    const res = await send('setModelTemplate', { name: 'tpl-write-sdk', promptTemplate: custom });
-    expect(res.ok, JSON.stringify(res)).toBe(true);
-
-    const { FoundryLocalManager } = await import('foundry-local-sdk');
-    const mgr = (FoundryLocalManager as any).create({ appName: APP, logLevel: 'error', libraryPath });
-    const byAlias = await mgr.catalog.getModel('tpl-write-sdk');
-    expect(byAlias.id).toBe('tpl-write-sdk:1');
-  }, 60000);
 
   it('leaves the previous template intact when the new one is invalid', async () => {
     const src = track(makeSourceRepo());

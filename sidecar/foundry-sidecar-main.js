@@ -2218,28 +2218,27 @@ function log (level, message) {
   writeToDisk(entry);
 }
 
-function coreLibraryFileName () {
-  if (process.platform === 'win32') return 'Microsoft.AI.Foundry.Local.Core.dll';
-  if (process.platform === 'darwin') return 'Microsoft.AI.Foundry.Local.Core.dylib';
-  return 'Microsoft.AI.Foundry.Local.Core.so';
+function nativeLibraryFileName () {
+  if (process.platform === 'win32') return 'foundry_local.dll';
+  if (process.platform === 'darwin') return 'libfoundry_local.dylib';
+  return 'libfoundry_local.so';
 }
 
 /**
- * Resolve the full path to Microsoft.AI.Foundry.Local.Core.* for FoundryLocalManager
- * config.libraryPath (the SDK stores it as FoundryLocalCorePath).
+ * Directory that contains foundry_local.* plus ONNX Runtime. Foundry 2.0.1's
+ * libraryPath must be that directory, not the library file.
  *
- * Layouts we support:
- * - Dev:            <repo>/node_modules/foundry-local-sdk/foundry-local-core/<plat>/
- * - Flattened prod: <res>/foundry-local-sdk/foundry-local-core/<plat>/
+ * Dev and packaged layouts both use <sdk>/prebuilds/<platform>/.
  */
-function resolveFoundryCoreLibraryPath () {
-  if (process.env.FLINT_FOUNDRY_CORE_PATH && fs.existsSync(process.env.FLINT_FOUNDRY_CORE_PATH)) {
-    return process.env.FLINT_FOUNDRY_CORE_PATH;
+function resolveFoundryLibraryDir () {
+  const override = process.env.FLINT_FOUNDRY_CORE_PATH;
+  if (override && fs.existsSync(override)) {
+    return fs.statSync(override).isDirectory() ? override : path.dirname(override);
   }
 
   const platformKey = `${process.platform}-${process.arch}`;
-  const coreFile = coreLibraryFileName();
-  const relativeCore = path.join('foundry-local-core', platformKey, coreFile);
+  const libFile = nativeLibraryFileName();
+  const relativeCore = path.join('prebuilds', platformKey, libFile);
 
   const packageRoots = [];
   const pushRoot = (p) => {
@@ -2263,7 +2262,7 @@ function resolveFoundryCoreLibraryPath () {
   for (const root of packageRoots) {
     const candidate = path.join(root, relativeCore);
     if (fs.existsSync(candidate)) {
-      return candidate;
+      return path.dirname(candidate);
     }
   }
   return null;
@@ -2280,9 +2279,11 @@ function readFoundryRuntimeVersions (libraryPath) {
         const deps = JSON.parse(fs.readFileSync(depsFile, 'utf8'));
         return {
           sdkVersion: typeof pkg.version === 'string' ? pkg.version : null,
+          // 1.x recorded the core as a NuGet version. 2.0 ships the runtime inside the
+          // SDK package, so the package version is the core version.
           coreVersion: typeof deps['foundry-local-core']?.nuget === 'string'
             ? deps['foundry-local-core'].nuget
-            : null,
+            : (typeof pkg.version === 'string' ? pkg.version : null),
         };
       } catch {
         return { sdkVersion: null, coreVersion: null };
@@ -2414,12 +2415,12 @@ rl.on('line', async (line) => {
     if (cmd === 'init') {
       const FManager = await getFoundryManager();
       const appName = payload.appName || 'flint';
-      const libraryPath = resolveFoundryCoreLibraryPath();
+      const libraryPath = resolveFoundryLibraryDir();
       if (!libraryPath) {
         throw new Error(
-          "FoundryLocalCorePath not specified in configuration and could not auto-discover binaries. " +
+          "Foundry native library directory not specified in configuration and could not be auto-discovered. " +
           "Please run 'npm install' / 'npm run ensure:foundry' so native libraries are present, " +
-          "then rebuild the installer (natives must be packaged under foundry-local-sdk/foundry-local-core)."
+          "then rebuild the installer (natives must be packaged under foundry-local-sdk/prebuilds)."
         );
       }
       initConfig = { appName, logLevel: payload.logLevel || 'info', libraryPath };
@@ -2427,7 +2428,7 @@ rl.on('line', async (line) => {
         throw new Error(`Unsupported log level "${initConfig.logLevel}". Expected one of: ${LOG_LEVELS.join(', ')}`);
       }
       activeLogLevel = initConfig.logLevel;
-      log('info', `Using Foundry core library: ${libraryPath}`);
+      log('info', `Using Foundry native library directory: ${libraryPath}`);
       manager = FManager.create(initConfig);
       log('info', `SDK initialized for ${appName}`);
       const pinWarning = foundryRuntimePinWarning(readFoundryRuntimeVersions(libraryPath));
@@ -2661,9 +2662,7 @@ rl.on('line', async (line) => {
       pool.clear();
       usage.clear();
       try {
-        try { stopNativeWebService(); } catch (e) {
-          log('warn', `stopWebService before restart (ignored): ${e?.message ?? e}`);
-        }
+        stopNativeWebService();
         // Start service BEFORE loading models so HTTP routing layer initializes with the registry.
         if (typeof manager.startWebService === 'function') {
           nativeServiceStartAttempted = true;
@@ -2774,16 +2773,28 @@ rl.on('line', async (line) => {
       }
     } else if (cmd === 'stopService') {
       await stopGateway();
+      let nativeStopError = null;
       try {
         stopNativeWebService(); // synchronous
       } catch (e) {
-        log('warn', `stopWebService error (ignored): ${e?.message ?? e}`);
+        nativeStopError = e;
+        log('warn', `stopWebService error: ${e?.message ?? e}`);
       }
       clearPublishedService();
       tokenAccumulator.clear();
+      if (nativeStopError) {
+        const message = (
+          `The service endpoint was withdrawn, but native listener termination is unconfirmed: ${
+            nativeStopError?.message ?? nativeStopError
+          }`
+        );
+        healthRing.record({ kind: 'service-stop', ok: false, error: message });
+        audit('stopService', { ok: false, error: message });
+        throw new Error(message, { cause: nativeStopError });
+      }
       log('info', 'Service stopped');
       healthRing.record({ kind: 'service-stop', ok: true });
-      audit('stopService', {});
+      audit('stopService', { ok: true });
       reply({ ok: true });
     } else if (cmd === 'stopAndUnload') {
       const drainTimeoutMs = payload.drainTimeoutMs === undefined

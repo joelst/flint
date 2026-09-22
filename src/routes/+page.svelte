@@ -70,6 +70,7 @@
     type CacheInventory,
   } from "$lib/sdk";
   import { evaluateStartupPreload } from "$lib/accelerator-readiness";
+  import { failureLogLine, summarizeFailure } from "$lib/status-message";
   import {
     evaluate as evaluateWatch,
     emptyWatchState,
@@ -660,6 +661,23 @@
   let isLoadingModels = $state(false);
   let searchTerm = $state("");
   let statusMessage = $state("");
+
+  /** Every model-load failure goes through here: the full native text (stack included)
+   * to the app log, one sentence to the header, which CSS truncates to the bar width
+   * while the hover title still shows the whole sentence.
+   *
+   * A rethrown failure is logged once — the outer catch re-reports it under its own
+   * prefix without repeating the stack in the log. */
+  const loggedFailures = new WeakSet<object>();
+  function reportFailure(prefix: string, error: unknown): string {
+    const tracked = error !== null && (typeof error === "object" || typeof error === "function");
+    if (!tracked || !loggedFailures.has(error as object)) {
+      appendAppLog(failureLogLine(prefix, error), "error");
+      if (tracked) loggedFailures.add(error as object);
+    }
+    statusMessage = summarizeFailure(prefix, error);
+    return statusMessage;
+  }
 
   // Mirror of SDK store for easy template access
   let state = $state({
@@ -4994,6 +5012,7 @@ updateStateFromSdk();
       // Auto first launch: if no cached models and no persisted chat, offer starter (do not force-download)
       const hasAnyCached = state.models.some((m: ModelInfo) => m.isCached);
       const hasPersisted = hadPersistedChatAtLaunch;
+      let startupRestoreFailed = false;
       if (state.catalogStatus === "ready" && !hasAnyCached && !hasPersisted && recommendedStarters.length > 0) {
         statusMessage = `First launch — pick a starter model below, or open Help for a guided path.`;
         currentView = "models";
@@ -5035,7 +5054,8 @@ updateStateFromSdk();
                 statusMessage = `${targetAlias} is ready. The chat changed while it loaded.`;
               }
             } catch (e: any) {
-              statusMessage = `Failed to restore ${targetAlias}: ${e?.message || e}`;
+              startupRestoreFailed = true;
+              reportFailure(`Failed to restore ${targetAlias}`, e);
             }
           }
         }
@@ -5053,6 +5073,7 @@ updateStateFromSdk();
       if (autoRefreshCatalogOnStartup && startupEntries.length > 0) {
         let startupLoaded = 0;
         let startupBlocked = 0;
+        let startupFailed = startupRestoreFailed ? 1 : 0;
         let startupInterrupted = false;
         for (const [alias, variantId] of startupEntries) {
           if (!startupAuthorization.isCurrent(startupAuthorizationToken)) break;
@@ -5102,6 +5123,8 @@ updateStateFromSdk();
                 break;
               }
               console.warn(`Startup auto-load failed for ${alias}:`, e);
+              startupFailed++;
+              reportFailure(`Startup load failed for ${alias}`, e);
             }
           }
         }
@@ -5117,10 +5140,15 @@ updateStateFromSdk();
           return;
         }
         if (startupLoaded > 0) {
+          // A failure must survive the summary: without the count, one model loading
+          // after another failed would report only the success and hide the failure.
           statusMessage =
             `${startupLoaded} startup model${startupLoaded !== 1 ? 's' : ''} loaded` +
-            (startupBlocked > 0 ? `; ${startupBlocked} skipped for unavailable acceleration` : "");
-        } else if (startupBlocked > 0) {
+            (startupBlocked > 0 ? `; ${startupBlocked} skipped for unavailable acceleration` : "") +
+            (startupFailed > 0 ? `; ${startupFailed} failed (see the app log)` : "");
+        // Nothing loaded but something failed: the header keeps the reason for that
+        // failure rather than a count, and every failure is already in the app log.
+        } else if (startupFailed === 0 && startupBlocked > 0) {
           statusMessage =
             `${startupBlocked} startup model${startupBlocked !== 1 ? "s" : ""} skipped for unavailable acceleration`;
         }
@@ -5413,7 +5441,7 @@ updateStateFromSdk();
       statusMessage = `${alias} ready. Switching to chat...${serviceQualifier(startResult.result)}`;
       currentView = "chat";
     } catch (e: any) {
-      statusMessage = `Failed with starter: ${e?.message || e}`;
+      reportFailure("Failed with starter", e);
     }
   }
 
@@ -5440,7 +5468,7 @@ updateStateFromSdk();
       const startResult = await startServiceForModel(model.alias);
       statusMessage = `Chatting with ${model.alias}${serviceQualifier(startResult.result)}`;
     } catch (e: any) {
-      statusMessage = `Failed to select: ${e?.message || e}`;
+      reportFailure("Failed to select", e);
     }
   }
 
@@ -5460,7 +5488,7 @@ updateStateFromSdk();
       }
       await selectAndChat(model);
     } catch (e: any) {
-      statusMessage = `Load failed: ${e?.message || e}`;
+      reportFailure("Load failed", e);
     }
   }
 
@@ -5490,7 +5518,7 @@ updateStateFromSdk();
       await refreshCatalogModels();
       await loadSTTModels();
     } catch (e: any) {
-      statusMessage = `Failed to prepare STT model: ${e?.message || e}`;
+      reportFailure("Failed to prepare STT model", e);
     } finally {
       release();
     }
@@ -5721,7 +5749,7 @@ updateStateFromSdk();
       appendAppLog(`Loading model ${model.alias} (chat lane)`);
       loadResult = await sendLoadToSidecar(model, 'chat');
     } catch (e: any) {
-      statusMessage = `Load failed: ${e?.message || e}`;
+      reportFailure("Load failed", e);
       throw e;
     } finally {
       release();
@@ -5805,7 +5833,7 @@ updateStateFromSdk();
         statusMessage = `Chatting with ${next}${serviceQualifier(startResult.result)}`;
       persistChat();
     } catch (e: any) {
-      statusMessage = `Failed to select ${next}: ${e?.message || e}`;
+      reportFailure(`Failed to select ${next}`, e);
     }
   }
 
@@ -5866,7 +5894,7 @@ updateStateFromSdk();
       statusMessage = `${model.alias} loaded (${shortVariantLabel(variantId)})${serviceQualifier(startResult.result)}`;
       await refreshCatalogModels();
     } catch (e: any) {
-      statusMessage = `Load failed: ${e?.message || e}`;
+      reportFailure("Load failed", e);
     } finally {
       release();
     }
@@ -5910,7 +5938,7 @@ updateStateFromSdk();
       currentView = "chat";
       persistChat();
     } catch (e: any) {
-      statusMessage = `Load & Chat failed: ${e?.message || e}`;
+      reportFailure("Load & Chat failed", e);
     } finally {
       release();
     }
@@ -7242,7 +7270,7 @@ Output only the summary text, no preamble.`;
         <button class="tiny" onclick={startLocalService} disabled={serviceTransitionBusy || benchmarkRunInFlight}>Start Service</button>
       {/if}
 
-      <span class="status-msg">{statusMessage}</span>
+      <span class="status-msg" title={statusMessage}>{statusMessage}</span>
     </div>
 
     <div class="header-actions">
@@ -10130,7 +10158,7 @@ Output only the summary text, no preamble.`;
                                 await refreshCatalogModels();
                                 statusMessage = `Loaded ${slot.label}`;
                               } catch (err: any) {
-                                statusMessage = `Load failed: ${err?.message || err}`;
+                                reportFailure("Load failed", err);
                               } finally {
                                 release();
                               }
@@ -10931,9 +10959,11 @@ Output only the summary text, no preamble.`;
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 16px;
     padding: 12px 20px;
     background: var(--header-bg);
     border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
   }
 
   .brand {
@@ -10956,6 +10986,9 @@ Output only the summary text, no preamble.`;
     align-items: center;
     gap: 16px;
     font-size: 0.875rem;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
   }
 
   .status {
@@ -11050,6 +11083,13 @@ Output only the summary text, no preamble.`;
     gap: 4px;
   }
 
+  /* Global `button` is white text on the navy fill. Tiny buttons sit on the
+     panel instead, which is white in light mode — without this the Check and
+     Recheck labels disappear. Danger buttons keep their own color. */
+  button.tiny:not(.danger-btn) {
+    color: var(--fg);
+  }
+
   a.tiny {
     font-size: 0.7rem;
     padding: 1px 6px;
@@ -11106,6 +11146,18 @@ Output only the summary text, no preamble.`;
   .status-msg {
     color: var(--muted);
     font-size: 0.8rem;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
   }
 
   .body {

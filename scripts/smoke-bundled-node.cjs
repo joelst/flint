@@ -9,6 +9,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { validateNativePayload } = require('./foundry-native-payload.cjs');
 
 const root = path.resolve(__dirname, '..');
 const binariesDir = path.join(root, 'src-tauri', 'binaries');
@@ -85,6 +86,13 @@ function main() {
     console.error('  ✗ node_modules/foundry-local-sdk missing — npm install');
     process.exit(1);
   }
+  const payload = validateNativePayload(sdkRoot, `${process.platform}-${process.arch}`);
+  if (payload.invalid.length > 0) {
+    console.error(
+      `  ✗ incomplete Foundry native payload: ${payload.invalid.map((file) => file.name).join(', ')}`,
+    );
+    process.exit(1);
+  }
 
   const loader = path.join(root, 'scripts', '_smoke-load-foundry.mjs');
   fs.writeFileSync(
@@ -111,18 +119,14 @@ console.log('FoundryLocalManager:', typeof mod.FoundryLocalManager);
 const plat = process.platform + '-' + process.arch;
 const coreName =
   process.platform === 'win32'
-    ? 'Microsoft.AI.Foundry.Local.Core.dll'
+    ? 'foundry_local.dll'
     : process.platform === 'darwin'
-      ? 'Microsoft.AI.Foundry.Local.Core.dylib'
-      : 'Microsoft.AI.Foundry.Local.Core.so';
-const core = path.join(
-  root,
-  'node_modules',
-  'foundry-local-sdk',
-  'foundry-local-core',
-  plat,
-  coreName,
-);
+      ? 'libfoundry_local.dylib'
+      : 'libfoundry_local.so';
+// SDK 2.x takes the directory that holds foundry_local.* plus ONNX Runtime as
+// libraryPath; the file path is only used to prove the native is there.
+const libraryPath = path.join(root, 'node_modules', 'foundry-local-sdk', 'prebuilds', plat);
+const core = path.join(libraryPath, coreName);
 if (!fs.existsSync(core)) {
   console.error('core missing (run npm run ensure:foundry):', core);
   process.exit(5);
@@ -133,7 +137,7 @@ try {
   const mgr = mod.FoundryLocalManager.create({
     appName: 'flint-smoke',
     logLevel: 'error',
-    libraryPath: core,
+    libraryPath,
   });
   console.log('manager create: ok', !!mgr);
 } catch (e) {

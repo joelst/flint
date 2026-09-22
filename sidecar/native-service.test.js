@@ -15,25 +15,24 @@ describe('stopNativeWebService', () => {
     expect(stopWebService).toHaveBeenCalledOnce();
   });
 
-  it('uses core stop_service when startup did not publish an address', () => {
-    const executeCommand = vi.fn();
+  it('calls the public SDK stop and reports unconfirmed teardown when no address was published', () => {
+    const stopWebService = vi.fn();
 
-    stopNativeWebService({
-      manager: {
-        urls: [],
-        coreInterop: { executeCommand },
-      },
+    expect(() => stopNativeWebService({
+      manager: { urls: [], stopWebService },
       startAttempted: true,
-    });
-
-    expect(executeCommand).toHaveBeenCalledWith('stop_service');
+    })).toThrow('stop is unconfirmed');
+    expect(stopWebService).toHaveBeenCalledOnce();
   });
 
-  it('fails explicitly when an unpublished native listener has no teardown path', () => {
-    expect(() => stopNativeWebService({
-      manager: { urls: [] },
-      startAttempted: true,
-    })).toThrow('did not publish an address');
+  it('does not call the SDK when no service start was attempted', () => {
+    const stopWebService = vi.fn();
+
+    expect(stopNativeWebService({
+      manager: { urls: [], stopWebService },
+      startAttempted: false,
+    })).toBe(false);
+    expect(stopWebService).not.toHaveBeenCalled();
   });
 });
 

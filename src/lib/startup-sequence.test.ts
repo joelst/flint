@@ -46,6 +46,13 @@ describe('prepareHydratedRuntime', () => {
     expect(startup).toContain(
       'if (autoRefreshCatalogOnStartup && startupEntries.length > 0) {',
     );
+    expect(startup).toContain('let startupRestoreFailed = false;');
+    expect(startup).toMatch(
+      /catch \(e: any\) \{\s+startupRestoreFailed = true;\s+reportFailure\(`Failed to restore \$\{targetAlias\}`/,
+    );
+    expect(startup).toContain(
+      'let startupFailed = startupRestoreFailed ? 1 : 0;',
+    );
 
     const refreshCatalogStart = source.indexOf('async function refreshCatalogModels()');
     const refreshCatalogEnd = source.indexOf('/** About strip', refreshCatalogStart);
