@@ -35,6 +35,39 @@ function normalizeProviderName(value: string | null | undefined): string {
   return normalized;
 }
 
+export type CatalogVariantAccel = {
+  id?: string | null;
+  deviceType?: string | null;
+  executionProvider?: string | null;
+};
+
+/** Device builds the catalog actually publishes. Not the accelerators installed on this PC. */
+export function publishedAccelerationLabels(
+  variants: readonly CatalogVariantAccel[] | null | undefined,
+): string[] {
+  const found = new Set<'GPU' | 'CPU' | 'NPU'>();
+  for (const variant of variants ?? []) {
+    const kind = publishedAccelerationKind(variant);
+    if (kind) found.add(kind);
+  }
+  return (['GPU', 'CPU', 'NPU'] as const).filter((label) => found.has(label));
+}
+
+function publishedAccelerationKind(
+  variant: CatalogVariantAccel,
+): 'GPU' | 'CPU' | 'NPU' | null {
+  const device = String(variant.deviceType || '').toLowerCase();
+  if (device.includes('npu')) return 'NPU';
+  if (device.includes('gpu')) return 'GPU';
+  if (device.includes('cpu')) return 'CPU';
+  const blob = `${variant.executionProvider || ''} ${variant.id || ''}`.toLowerCase();
+  if (!blob.trim()) return null;
+  if (/qnn|vitis/.test(blob)) return 'NPU';
+  if (/cuda|directml|\bdml\b|webgpu|tensorrt|coreml|metal|rocm/.test(blob)) return 'GPU';
+  if (/cpu|generic/.test(blob)) return 'CPU';
+  return null;
+}
+
 export function hasRegisteredAccelerator(providers: EpInfo[]): boolean {
   return providers.some(
     (provider) =>

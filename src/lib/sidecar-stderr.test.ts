@@ -24,6 +24,25 @@ describe('classifySidecarStderrLine', () => {
     });
   });
 
+  it('reads Foundry bracket levels instead of treating every stderr line as an error', () => {
+    expect(classifySidecarStderrLine('[info] Runtime versions: onnxruntime=1.28.0')).toEqual({
+      level: 'info',
+      message: 'Runtime versions: onnxruntime=1.28.0',
+    });
+    expect(classifySidecarStderrLine('[info] [Telemetry] 1DS initialized')).toEqual({
+      level: 'info',
+      message: '[Telemetry] 1DS initialized',
+    });
+    expect(classifySidecarStderrLine('[warning] cache almost full')).toEqual({
+      level: 'warn',
+      message: 'cache almost full',
+    });
+    expect(classifySidecarStderrLine('[error] Failed to commit download state file: Access is denied.')).toEqual({
+      level: 'error',
+      message: 'Failed to commit download state file: Access is denied.',
+    });
+  });
+
   it('treats a malformed diagnostic tag as an error', () => {
     expect(classifySidecarStderrLine('FLINT_DIAG')).toEqual({
       level: 'error',

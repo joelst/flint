@@ -907,10 +907,17 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
+    color: var(--fg, inherit);
   }
-  .danger-btn {
-    border-color: #ef4444;
-    color: #fecaca;
+  button.tiny.danger-btn {
+    background: transparent;
+    border-color: var(--danger, #ef4444);
+    color: var(--danger, #f87171);
+  }
+  button.danger-btn:not(.tiny) {
+    background: var(--danger-btn-bg, #9f1239);
+    border: 1px solid var(--danger-btn-bg, #9f1239);
+    color: var(--danger-btn-fg, #fff);
   }
   .benchmark-active-run-banner {
     display: flex;

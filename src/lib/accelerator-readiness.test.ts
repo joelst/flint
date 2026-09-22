@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   evaluateStartupPreload,
   hasRegisteredAccelerator,
+  publishedAccelerationLabels,
 } from './accelerator-readiness';
 
 const partialReadiness = {
@@ -28,6 +29,25 @@ const model = {
     { id: 'example-dml-gpu:1', executionProvider: 'DirectML' },
   ],
 };
+
+describe('publishedAccelerationLabels', () => {
+  it('lists only device builds the catalog publishes', () => {
+    expect(publishedAccelerationLabels([
+      { id: 'gemma-4-e2b-it-generic-cpu:3', deviceType: 'CPU', executionProvider: 'generic' },
+    ])).toEqual(['CPU']);
+    expect(publishedAccelerationLabels([
+      { id: 'example-generic-cpu:1', executionProvider: 'generic' },
+      { id: 'example-cuda-gpu:1', deviceType: 'GPU', executionProvider: 'CUDA' },
+      { id: 'example-qnn-npu:1', executionProvider: 'QNN' },
+    ])).toEqual(['GPU', 'CPU', 'NPU']);
+  });
+
+  it('does not invent a GPU build when the only variant is CPU', () => {
+    expect(publishedAccelerationLabels([
+      { id: 'gemma-4-e2b-it-generic-cpu:3' },
+    ])).toEqual(['CPU']);
+  });
+});
 
 describe('evaluateStartupPreload', () => {
   it('allows alias-only loads for runtime provider resolution', () => {
