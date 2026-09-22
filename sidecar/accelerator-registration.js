@@ -145,12 +145,14 @@ function terminalRegistrationResult(previous, error) {
  * provider update still runs, but callers must treat new catalog variants as
  * restart-bound because the current snapshot cannot gain them.
  *
- * Work is serialized. A catalog read queued behind an explicit retry waits for it,
- * so the snapshot is not taken between the two.
+ * Work is serialized through the actual first catalog read. A read queued behind
+ * an explicit retry waits for it, and an update queued behind that read cannot
+ * register providers while the runtime freezes its snapshot.
  */
-export function createCatalogRegistrationGate(register) {
+export function createCatalogRegistrationGate(register, commitCatalog) {
   let settled = null;
   let committed = false;
+  let commitConfirmed = false;
   /** @type {Promise<unknown>} */
   let tail = Promise.resolve();
 
@@ -226,7 +228,20 @@ export function createCatalogRegistrationGate(register) {
       const report = typeof onProgress === 'function' ? onProgress : null;
       return enqueue(async () => {
         if (!settled) settled = await attempts(report);
-        committed = true;
+        if (!commitConfirmed) {
+          if (typeof commitCatalog === 'function') {
+            try {
+              await commitCatalog();
+              commitConfirmed = true;
+            } finally {
+              // A rejected native read does not establish whether the immutable
+              // snapshot was taken. Treat any attempted read as committed for
+              // restart reporting, but retry it inside this queue until one is
+              // confirmed so no later catalog caller races provider setup.
+              committed = true;
+            }
+          }
+        }
         return settled;
       });
     },

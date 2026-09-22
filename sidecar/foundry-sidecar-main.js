@@ -414,6 +414,12 @@ function acceleratorGate() {
     catalogRegistrationGate = createCatalogRegistrationGate((progress, options) => {
       if (!manager || typeof manager.downloadAndRegisterEps !== 'function') return null;
       return registerDiscoveredExecutionProviders(manager, progress, options);
+    }, () => {
+      const catalog = manager?.catalog;
+      if (!catalog || typeof catalog.getModels !== 'function') {
+        throw new Error('Foundry catalog is unavailable');
+      }
+      return catalog.getModels();
     });
   }
   return catalogRegistrationGate;
@@ -422,8 +428,8 @@ function acceleratorGate() {
 function beforeCatalogRead(onProgress, options = {}) {
   const gate = acceleratorGate();
   if (!gate) return Promise.resolve(null);
-  // A catalog read commits the snapshot. Registration queued behind it still
-  // finishes first; a later explicit retry sees the commit and does not run.
+  // `commit` performs the actual first catalog read inside the same queue as
+  // registration. An explicit update cannot register beside snapshot creation.
   return options.commit ? gate.commit(onProgress) : gate.ensure(onProgress);
 }
 
@@ -436,13 +442,19 @@ async function rerunAcceleratorRegistration(onProgress) {
   return gate.rerun(onProgress);
 }
 
-/** Mark the snapshot committed, then read. A retry queued behind this waits, and a
- * retry after it sees the commit and does not register again. */
-async function withCatalog(read) {
-  const gate = acceleratorGate();
-  if (gate) await gate.commit();
-  return read();
+async function commitCatalogAfterLocalMutation(operation) {
+  try {
+    await beforeCatalogRead(undefined, { commit: true });
+  } catch (error) {
+    log('warn', `Catalog snapshot read failed after ${operation}: ${error?.message ?? error}`);
+  }
+  try {
+    manager?.catalog?.invalidateCache?.();
+  } catch (error) {
+    log('warn', `Catalog cache invalidation failed after ${operation}: ${error?.message ?? error}`);
+  }
 }
+
 let FoundryLocalManager = null;
 let initConfig = null; // { appName, logLevel } — kept so startService can re-create manager with webServiceUrls
 let nativeServiceStartAttempted = false;
@@ -1680,7 +1692,6 @@ function importModelFolder(payload) {
     throw e;
   }
 
-  try { manager?.catalog?.invalidateCache?.(); } catch {}
   return {
     name, version, publisher,
     path: finalDir,
@@ -1728,7 +1739,6 @@ function linkModelFolder(payload) {
   fs.mkdirSync(path.dirname(linkPath), { recursive: true });
   fs.symlinkSync(target, linkPath, 'junction');
 
-  try { manager?.catalog?.invalidateCache?.(); } catch {}
   return { name, publisher, linkPath, target, warnings: inspection.warnings };
 }
 
@@ -1823,7 +1833,6 @@ function setModelTemplate(name, promptTemplate) {
     fs.writeFileSync(markerPath, `${JSON.stringify(marker, null, 2)}\n`, 'utf8');
   } catch {}
 
-  try { manager?.catalog?.invalidateCache?.(); } catch {}
   return { name: sanitizeModelName(name), promptTemplate: content.PromptTemplate, warnings: check.warnings };
 }
 
@@ -2670,18 +2679,17 @@ rl.on('line', async (line) => {
     } else if (cmd === 'inspectModelFolder') {
       reply({ ok: true, result: inspectFolder(payload.folderPath) });
     } else if (cmd === 'importModelFolder') {
-      // These handlers touch manager.catalog to drop a stale cache entry. The getter
-      // is a catalog access, so it has to wait out registration or it can freeze the
-      // snapshot while a retry is still registering another provider.
-      await beforeCatalogRead(undefined, { commit: true });
+      await beforeCatalogRead();
       const result = importModelFolder(payload);
+      await commitCatalogAfterLocalMutation('model import');
       log('info', `Imported model ${result.name}:${result.version} from ${payload.folderPath}`);
       invalidateModelIndex();
       audit('importModelFolder', { alias: result.name, variantId: `${result.name}:${result.version}`, kind: 'copy' });
       reply({ ok: true, result });
     } else if (cmd === 'linkModelFolder') {
-      await beforeCatalogRead(undefined, { commit: true });
+      await beforeCatalogRead();
       const result = linkModelFolder(payload);
+      await commitCatalogAfterLocalMutation('model link');
       log('info', `Linked model ${result.name} -> ${result.target}`);
       invalidateModelIndex();
       audit('linkModelFolder', { alias: result.name, variantId: null, kind: 'junction' });
@@ -2689,8 +2697,9 @@ rl.on('line', async (line) => {
     } else if (cmd === 'getModelTemplate') {
       reply({ ok: true, result: getModelTemplate(payload.name) });
     } else if (cmd === 'setModelTemplate') {
-      await beforeCatalogRead(undefined, { commit: true });
+      await beforeCatalogRead();
       const result = setModelTemplate(payload.name, payload.promptTemplate);
+      await commitCatalogAfterLocalMutation('template update');
       log('info', `Updated prompt template for ${result.name}`);
       audit('setModelTemplate', { alias: result.name, variantId: null });
       reply({ ok: true, result });

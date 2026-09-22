@@ -205,11 +205,15 @@ describe('registerDiscoveredExecutionProviders', () => {
 describe('native service startup', () => {
   it('registers providers before startWebService can answer /v1/models', () => {
     const source = readFileSync(join(process.cwd(), 'sidecar', 'foundry-sidecar-main.js'), 'utf8');
+    const gateStart = source.indexOf('catalogRegistrationGate = createCatalogRegistrationGate(');
+    const forcedRead = source.indexOf('return catalog.getModels();', gateStart);
     const start = source.indexOf("} else if (cmd === 'startService') {");
     const gate = source.indexOf('commit: true', start);
     const web = source.indexOf('manager.startWebService()', start);
     const setup = source.indexOf("} else if (cmd === 'ensureAccelerators') {");
     const rerun = source.indexOf('rerunAcceleratorRegistration(', setup);
+    expect(gateStart).toBeGreaterThan(-1);
+    expect(forcedRead).toBeGreaterThan(gateStart);
     expect(start).toBeGreaterThan(-1);
     expect(gate).toBeGreaterThan(start);
     expect(web).toBeGreaterThan(gate);
@@ -217,11 +221,13 @@ describe('native service startup', () => {
     expect(rerun).toBeGreaterThan(setup);
     for (const cmd of ['importModelFolder', 'linkModelFolder', 'setModelTemplate']) {
       const at = source.indexOf(`} else if (cmd === '${cmd}') {`);
-      const read = source.indexOf('beforeCatalogRead(undefined, { commit: true })', at);
+      const ensure = source.indexOf('await beforeCatalogRead();', at);
       const call = source.indexOf(`${cmd}(`, at);
+      const read = source.indexOf('commitCatalogAfterLocalMutation(', call);
       expect(at, cmd).toBeGreaterThan(-1);
-      expect(read, cmd).toBeGreaterThan(at);
-      expect(call, cmd).toBeGreaterThan(read);
+      expect(ensure, cmd).toBeGreaterThan(at);
+      expect(call, cmd).toBeGreaterThan(ensure);
+      expect(read, cmd).toBeGreaterThan(call);
     }
   });
 });
@@ -242,6 +248,17 @@ describe('createCatalogRegistrationGate', () => {
     await expect(second).resolves.toEqual({ registeredEps: ['CUDAExecutionProvider'] });
     await gate.ensure();
     expect(register).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not commit the catalog during registration-only ensure calls', async () => {
+    const readCatalog = vi.fn();
+    const gate = createCatalogRegistrationGate(
+      vi.fn().mockResolvedValue({ registeredEps: ['CUDAExecutionProvider'] }),
+      readCatalog,
+    );
+
+    await gate.ensure();
+    expect(readCatalog).not.toHaveBeenCalled();
   });
 
   it('retries a thrown registration and a partial failure before the catalog is read', async () => {
@@ -362,7 +379,7 @@ describe('createCatalogRegistrationGate', () => {
     const register = vi.fn()
       .mockResolvedValueOnce({ success: true, registeredEps: ['CPUExecutionProvider'] })
       .mockResolvedValueOnce({ success: true, registeredEps: ['CUDAExecutionProvider'] });
-    const gate = createCatalogRegistrationGate(register);
+    const gate = createCatalogRegistrationGate(register, vi.fn());
 
     await gate.commit();
     await expect(gate.rerun()).resolves.toEqual({
@@ -381,7 +398,7 @@ describe('createCatalogRegistrationGate', () => {
         release = () => resolve({ success: true, registeredEps: ['CPUExecutionProvider'] });
       }))
       .mockResolvedValueOnce({ success: true, registeredEps: ['CUDAExecutionProvider'] });
-    const gate = createCatalogRegistrationGate(register);
+    const gate = createCatalogRegistrationGate(register, vi.fn());
 
     const commit = gate.commit();
     await Promise.resolve();
@@ -394,6 +411,55 @@ describe('createCatalogRegistrationGate', () => {
     });
   });
 
+  it('keeps a queued update behind the actual first catalog read', async () => {
+    let releaseCatalog = () => {};
+    const register = vi.fn()
+      .mockResolvedValueOnce({ success: true, registeredEps: ['CPUExecutionProvider'] })
+      .mockResolvedValueOnce({ success: true, registeredEps: ['CUDAExecutionProvider'] });
+    const readCatalog = vi.fn(() => new Promise((resolve) => {
+      releaseCatalog = () => resolve(['cpu-model']);
+    }));
+    const gate = createCatalogRegistrationGate(register, readCatalog);
+
+    const commit = gate.commit();
+    await vi.waitFor(() => expect(readCatalog).toHaveBeenCalledTimes(1));
+    const rerun = gate.rerun();
+    await Promise.resolve();
+    expect(register).toHaveBeenCalledTimes(1);
+
+    releaseCatalog();
+    await commit;
+    await expect(rerun).resolves.toMatchObject({
+      registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+      catalogRefreshRequiresRestart: true,
+    });
+    expect(register).toHaveBeenCalledTimes(2);
+    expect(readCatalog).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats a rejected first catalog read as committed because its native outcome is unknown', async () => {
+    const register = vi.fn()
+      .mockResolvedValueOnce({ success: true, registeredEps: ['CPUExecutionProvider'] })
+      .mockResolvedValueOnce({ success: true, registeredEps: ['CUDAExecutionProvider'] });
+    const readCatalog = vi.fn()
+      .mockRejectedValueOnce(new Error('catalog failed'))
+      .mockResolvedValueOnce(['cpu-model', 'cuda-model']);
+    const gate = createCatalogRegistrationGate(
+      register,
+      readCatalog,
+    );
+
+    await expect(gate.commit()).rejects.toThrow('catalog failed');
+    await expect(gate.rerun()).resolves.toMatchObject({
+      registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+      catalogRefreshRequiresRestart: true,
+    });
+    await expect(gate.commit()).resolves.toMatchObject({
+      registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+    });
+    expect(readCatalog).toHaveBeenCalledTimes(2);
+  });
+
   it('preserves confirmed providers when a post-commit update fails', async () => {
     const register = vi.fn()
       .mockResolvedValueOnce({
@@ -402,7 +468,7 @@ describe('createCatalogRegistrationGate', () => {
         failedEps: [],
       })
       .mockRejectedValue(new Error('offline'));
-    const gate = createCatalogRegistrationGate(register);
+    const gate = createCatalogRegistrationGate(register, vi.fn());
 
     await gate.commit();
     await expect(gate.rerun()).resolves.toMatchObject({
@@ -420,7 +486,7 @@ describe('createCatalogRegistrationGate', () => {
         ? { success: false, retry: true, registeredEps: [], failedEps: ['CUDAExecutionProvider'] }
         : { success: true, registeredEps: ['CUDAExecutionProvider'], failedEps: [] };
     });
-    const gate = createCatalogRegistrationGate(register);
+    const gate = createCatalogRegistrationGate(register, vi.fn());
     await gate.ensure();
     expect(register).toHaveBeenCalledTimes(2);
     await expect(gate.rerun()).resolves.toMatchObject({
