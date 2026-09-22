@@ -37,6 +37,13 @@ describe('prepareHydratedRuntime', () => {
       '!isAcceleratorReadinessCurrent(acceleratorReadiness)',
     );
     expect(summaryFence).toContain('return;');
+
+    expect(startup).toContain(
+      '} else if (autoRefreshCatalogOnStartup && autoStartService) {',
+    );
+    expect(startup).toContain(
+      'if (autoRefreshCatalogOnStartup && startupEntries.length > 0) {',
+    );
   });
 
   it('applies memory policy, then accelerators, then optional service startup', async () => {

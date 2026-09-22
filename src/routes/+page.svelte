@@ -4985,7 +4985,7 @@ updateStateFromSdk();
       if (catalogCheckedThisSession && !hasAnyCached && !hasPersisted && recommendedStarters.length > 0) {
         statusMessage = `First launch — pick a starter model below, or open Help for a guided path.`;
         currentView = "models";
-      } else if (autoStartService) {
+      } else if (autoRefreshCatalogOnStartup && autoStartService) {
         // A conversation restored at startup names the model this chat will actually use, so it
         // outranks the configured default. Prewarming must also still run for it even though
         // applying the conversation already installed a model handle, or the restored model
@@ -5032,7 +5032,7 @@ updateStateFromSdk();
 
       // Load any additional startup models (multi-model pool pre-warm)
       const startupEntries = Object.entries(startupModels);
-      if (startupEntries.length > 0) {
+      if (autoRefreshCatalogOnStartup && startupEntries.length > 0) {
         let startupLoaded = 0;
         let startupBlocked = 0;
         let startupInterrupted = false;
