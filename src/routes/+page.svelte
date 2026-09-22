@@ -5012,6 +5012,7 @@ updateStateFromSdk();
       // Auto first launch: if no cached models and no persisted chat, offer starter (do not force-download)
       const hasAnyCached = state.models.some((m: ModelInfo) => m.isCached);
       const hasPersisted = hadPersistedChatAtLaunch;
+      let startupRestoreFailed = false;
       if (state.catalogStatus === "ready" && !hasAnyCached && !hasPersisted && recommendedStarters.length > 0) {
         statusMessage = `First launch — pick a starter model below, or open Help for a guided path.`;
         currentView = "models";
@@ -5053,6 +5054,7 @@ updateStateFromSdk();
                 statusMessage = `${targetAlias} is ready. The chat changed while it loaded.`;
               }
             } catch (e: any) {
+              startupRestoreFailed = true;
               reportFailure(`Failed to restore ${targetAlias}`, e);
             }
           }
@@ -5071,7 +5073,7 @@ updateStateFromSdk();
       if (autoRefreshCatalogOnStartup && startupEntries.length > 0) {
         let startupLoaded = 0;
         let startupBlocked = 0;
-        let startupFailed = 0;
+        let startupFailed = startupRestoreFailed ? 1 : 0;
         let startupInterrupted = false;
         for (const [alias, variantId] of startupEntries) {
           if (!startupAuthorization.isCurrent(startupAuthorizationToken)) break;

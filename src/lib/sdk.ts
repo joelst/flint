@@ -2174,8 +2174,8 @@ export async function stopService(): Promise<void> {
     // The latch is deliberately **not** cleared here. A Stop acknowledgement is not a quiescence
     // guarantee: the sidecar handles commands concurrently, so a start whose acknowledgement was
     // lost may still be inside `startWebService()` and can bring the service up again after Stop
-    // has replied. The sidecar also reports Stop as successful when the native stop throws. Only
-    // a start that reports its own outcome can retire the uncertainty.
+    // has replied. A rejected Stop now preserves an unknown/failed runtime state above; only a
+    // start that reports its own outcome can retire transport-level uncertainty.
     currentEndpoint = undefined;
     updateState({ endpoint: undefined, serviceRunning: false });
     updateRuntime({ service: 'stopped' });
