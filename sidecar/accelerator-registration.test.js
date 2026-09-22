@@ -125,7 +125,25 @@ describe('registerDiscoveredExecutionProviders', () => {
     expect(result.registeredEps).toEqual([]);
     expect(result.failedEps).toEqual(['CUDAExecutionProvider']);
     expect(result.success).toBe(false);
+    expect(result.retry).toBe(true);
     expect(result.status).toContain('runtime did not confirm registration');
+  });
+
+  it('does not take the one-provider fallback while discovery can be tried again', async () => {
+    const manager = {
+      discoverEps: () => [],
+      downloadAndRegisterEps: vi.fn(),
+    };
+    const result = await registerDiscoveredExecutionProviders(manager, undefined, {
+      allowLegacyFallback: false,
+    });
+    expect(manager.downloadAndRegisterEps).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      success: false,
+      retry: true,
+      registeredEps: [],
+      failedEps: [],
+    });
   });
 
   it('does not download a provider discovery already marks registered', async () => {
@@ -178,24 +196,69 @@ describe('createCatalogRegistrationGate', () => {
     expect(register).toHaveBeenCalledTimes(1);
   });
 
-  it('lets a later caller hear progress and retries after a throw', async () => {
+  it('retries a thrown registration and a partial failure before the catalog is read', async () => {
     const seen = [];
-    let emit;
-    const register = vi.fn((onProgress) => new Promise((resolve, reject) => {
-      emit = onProgress;
-      if (register.mock.calls.length === 1) {
-        queueMicrotask(() => reject(new Error('package unavailable')));
-        return;
+    const throwing = vi.fn((onProgress) => {
+      if (throwing.mock.calls.length === 1) return Promise.reject(new Error('package unavailable'));
+      onProgress('CUDAExecutionProvider', 40);
+      return Promise.resolve('ok');
+    });
+    const throwingGate = createCatalogRegistrationGate(throwing);
+    await expect(throwingGate.ensure((name) => seen.push(name))).resolves.toBe('ok');
+    expect(seen).toEqual(['CUDAExecutionProvider']);
+    expect(throwing).toHaveBeenCalledTimes(2);
+    await throwingGate.ensure();
+    expect(throwing).toHaveBeenCalledTimes(2);
+
+    const partial = vi.fn(async () => {
+      if (partial.mock.calls.length === 1) {
+        return { success: false, failedEps: ['CUDAExecutionProvider'], retry: true };
       }
-      queueMicrotask(() => {
-        emit('CUDAExecutionProvider', 40);
-        resolve('ok');
-      });
+      return { success: true, registeredEps: ['CUDAExecutionProvider'] };
+    });
+    const partialGate = createCatalogRegistrationGate(partial);
+    await expect(partialGate.ensure()).resolves.toEqual({
+      success: true,
+      registeredEps: ['CUDAExecutionProvider'],
+    });
+    expect(partial).toHaveBeenCalledTimes(2);
+    await partialGate.ensure();
+    expect(partial).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses the one-provider fallback only on the last attempt, then keeps that result', async () => {
+    const register = vi.fn(async (_onProgress, options) => {
+      if (!options.allowLegacyFallback) return { success: false, retry: true, registeredEps: [], failedEps: [] };
+      return { success: true, registeredEps: ['CPUExecutionProvider'] };
+    });
+    const gate = createCatalogRegistrationGate(register);
+    await expect(gate.ensure()).resolves.toEqual({
+      success: true,
+      registeredEps: ['CPUExecutionProvider'],
+    });
+    expect(register.mock.calls.map(([, options]) => options.allowLegacyFallback)).toEqual([
+      false,
+      false,
+      true,
+    ]);
+    await gate.ensure();
+    expect(register).toHaveBeenCalledTimes(3);
+  });
+
+  it('stops retrying a provider that keeps failing so the catalog read is not blocked', async () => {
+    const register = vi.fn(async () => ({
+      success: false,
+      retry: true,
+      failedEps: ['CUDAExecutionProvider'],
     }));
     const gate = createCatalogRegistrationGate(register);
-    await expect(gate.ensure(() => seen.push('first'))).rejects.toThrow('package unavailable');
-    await expect(gate.ensure((name) => seen.push(name))).resolves.toBe('ok');
-    expect(seen).toEqual(['CUDAExecutionProvider']);
-    expect(register).toHaveBeenCalledTimes(2);
+    await expect(gate.ensure()).resolves.toMatchObject({
+      success: false,
+      retry: true,
+      failedEps: ['CUDAExecutionProvider'],
+    });
+    expect(register).toHaveBeenCalledTimes(3);
+    await gate.ensure();
+    expect(register).toHaveBeenCalledTimes(3);
   });
 });

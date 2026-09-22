@@ -411,9 +411,9 @@ let catalogRegistrationGate = null;
 function beforeCatalogRead(onProgress) {
   if (!manager) return Promise.resolve(null);
   if (!catalogRegistrationGate) {
-    catalogRegistrationGate = createCatalogRegistrationGate((progress) => {
+    catalogRegistrationGate = createCatalogRegistrationGate((progress, options) => {
       if (!manager || typeof manager.downloadAndRegisterEps !== 'function') return null;
-      return registerDiscoveredExecutionProviders(manager, progress);
+      return registerDiscoveredExecutionProviders(manager, progress, options);
     });
   }
   return catalogRegistrationGate.ensure(onProgress);
