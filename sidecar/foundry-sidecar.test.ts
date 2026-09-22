@@ -754,7 +754,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
    * `startService` (gateway on by default) proxies real HTTP traffic to a server we control. A
    * short `FLINT_BENCHMARK_EXCLUSIVE_DRAIN_MS` lets the "could not drain in time" path be
    * exercised without a correspondingly slow test. */
-  function spawnGatewaySidecar(upstreamPort: number, drainMs = 200, catalogModels: unknown[] = [], holdLoad = false, secondStartServicePort: number | null = null) {
+  function spawnGatewaySidecar(upstreamPort: number, drainMs = 200, catalogModels: unknown[] = [], holdLoad = false, secondStartServicePort: number | null = null, holdDownload = false) {
     const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-gateway-fence-home-'));
     const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
     const corePath = join(homeDir, 'fake-core.dylib');
@@ -775,6 +775,11 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
             this.loaded = true;
           }
           isLoaded() { return this.loaded; }
+          async download() {
+            if (${JSON.stringify(holdDownload)}) {
+              await fetch('http://127.0.0.1:${upstreamPort}/hold-download');
+            }
+          }
           getExecutionProvider() { return 'CPUExecutionProvider'; }
           createChatClient() {
             return {
@@ -847,8 +852,8 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
 
   /** Starts the sidecar and its gateway, returning the process, its temp home dir (for
    * cleanup), and the gateway's bound public port. */
-  async function startedGateway(upstreamPort: number, drainMs = 200, catalogModels: unknown[] = [], holdLoad = false, secondStartServicePort: number | null = null) {
-    const { proc, homeDir } = spawnGatewaySidecar(upstreamPort, drainMs, catalogModels, holdLoad, secondStartServicePort);
+  async function startedGateway(upstreamPort: number, drainMs = 200, catalogModels: unknown[] = [], holdLoad = false, secondStartServicePort: number | null = null, holdDownload = false) {
+    const { proc, homeDir } = spawnGatewaySidecar(upstreamPort, drainMs, catalogModels, holdLoad, secondStartServicePort, holdDownload);
     await waitForLine(proc, (msg) => msg.ready === true);
     proc.stdin.write(`${JSON.stringify({ id: 1, cmd: 'init', appName: 'flint-test', logLevel: 'info' })}\n`);
     const initRes = await waitForLine(proc, (msg) => msg.id === 1);
@@ -1089,6 +1094,65 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       expect(loadResult).toMatchObject({ ok: true });
       expect(exclusiveResult).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
       expect(exclusiveSettledAt).toBeGreaterThanOrEqual(loadSettledAt);
+    } finally {
+      if (proc) await killAndWait(proc);
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      if (homeDir) rmSync(homeDir, { recursive: true, force: true });
+    }
+  }, 20000);
+
+  it('refuses exclusive admission while a download is still in progress, and refuses a new download while exclusive is held', async () => {
+    // A download can run for minutes, so it is not part of the timed drain. A page reload
+    // still leaves that IPC call admitted in this process, invisible to the new page's
+    // in-memory counter. Acquire must fail closed immediately instead of measuring on top
+    // of it or waiting out the 10s drain deadline.
+    let releaseUpstream: (() => void) | null = null;
+    const upstreamHeld = new Promise<void>((resolve) => { releaseUpstream = resolve; });
+    const upstream = createServer((req, res) => {
+      if (req.url !== '/hold-download') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      void upstreamHeld.then(() => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+      });
+    });
+    let proc: ChildProcessWithoutNullStreams | undefined;
+    let homeDir: string | undefined;
+    try {
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+      const { port: upstreamPort } = upstream.address() as AddressInfo;
+      const started = await startedGateway(upstreamPort, 200, [], false, null, true);
+      proc = started.proc;
+      homeDir = started.homeDir;
+
+      proc.stdin.write(`${JSON.stringify({ id: 70, cmd: 'download', alias: 'fake-model' })}\n`);
+      const downloadDone = waitForLine(proc, (msg) => msg.id === 70, 15000);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      proc.stdin.write(`${JSON.stringify({ id: 71, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
+      const refused = await waitForLine(proc, (msg) => msg.id === 71, 15000);
+      expect(refused.ok).toBeFalsy();
+      expect(String(refused.error)).toMatch(/download is still in progress/);
+
+      releaseUpstream?.();
+      const downloadResult = await downloadDone;
+      expect(downloadResult).toMatchObject({ ok: true });
+
+      proc.stdin.write(`${JSON.stringify({ id: 72, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
+      const acquired = await waitForLine(proc, (msg) => msg.id === 72, 15000);
+      expect(acquired).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
+
+      proc.stdin.write(`${JSON.stringify({ id: 73, cmd: 'download', alias: 'fake-model' })}\n`);
+      const denied = await waitForLine(proc, (msg) => msg.id === 73, 15000);
+      expect(denied.ok).toBeFalsy();
+      expect(String(denied.error)).toMatch(/benchmark run is active/);
+
+      proc.stdin.write(`${JSON.stringify({ id: 74, cmd: 'setBenchmarkExclusive', exclusive: false })}\n`);
+      const released = await waitForLine(proc, (msg) => msg.id === 74, 15000);
+      expect(released).toMatchObject({ ok: true, result: { exclusive: false } });
     } finally {
       if (proc) await killAndWait(proc);
       await new Promise<void>((resolve) => upstream.close(() => resolve()));
