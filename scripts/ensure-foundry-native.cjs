@@ -12,6 +12,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('node:child_process');
 const {
   INSTALLABLE_PLATFORM_KEYS,
   platformKeyForTriple,
@@ -27,6 +28,47 @@ function log(msg) {
 function fail(msg) {
   console.error(`[ensure-foundry-native] ${msg}`);
   process.exit(1);
+}
+
+function nodePlatformArch(platformKey) {
+  const [platform, arch] = platformKey.split('-');
+  return { platform, arch };
+}
+
+function runInstallForPlatformKey(sdkRoot, platformKey) {
+  const installScript = path.join(sdkRoot, 'script', 'install-native.cjs');
+  if (!fs.existsSync(installScript)) return false;
+
+  const hostKey = `${process.platform}-${process.arch}`;
+  if (platformKey === hostKey) {
+    log(`Installing missing runtime libraries for host ${platformKey}...`);
+    execFileSync(process.execPath, [installScript], {
+      cwd: root,
+      stdio: 'inherit',
+      env: process.env,
+    });
+    return true;
+  }
+
+  const { platform, arch } = nodePlatformArch(platformKey);
+  log(`Installing runtime libraries for build target ${platformKey} from host ${hostKey}...`);
+  const bootstrap = `
+    const os = require('node:os');
+    os.platform = () => ${JSON.stringify(platform)};
+    os.arch = () => ${JSON.stringify(arch)};
+    Promise.resolve(require(${JSON.stringify(installScript)}).main())
+      .then((code) => { process.exitCode = code ?? 0; })
+      .catch((error) => {
+        console.error(error instanceof Error ? error.message : String(error));
+        process.exitCode = 1;
+      });
+  `;
+  execFileSync(process.execPath, ['-e', bootstrap], {
+    cwd: root,
+    stdio: 'inherit',
+    env: process.env,
+  });
+  return true;
 }
 
 /**
@@ -115,6 +157,18 @@ try {
   validation = validateNativePayload(sdkRoot, platformKey);
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error));
+}
+
+if (validation.invalid.length > 0) {
+  log(`Native payload is incomplete for ${platformKey}; running the SDK installer.`);
+  try {
+    if (!runInstallForPlatformKey(sdkRoot, platformKey)) {
+      fail(`Foundry SDK install script is missing under ${path.relative(root, sdkRoot)}.`);
+    }
+    validation = validateNativePayload(sdkRoot, platformKey);
+  } catch (error) {
+    fail(`Foundry SDK native install failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 if (validation.invalid.length > 0) {

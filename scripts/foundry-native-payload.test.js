@@ -1,5 +1,6 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -11,6 +12,7 @@ const {
   requiredNativeFiles,
   validateNativePayload,
 } = require('./foundry-native-payload.cjs');
+const ensureScript = join(process.cwd(), 'scripts', 'ensure-foundry-native.cjs');
 
 const dependencies = { ortVersion: '1.28.0', genaiVersion: '0.15.2' };
 
@@ -74,5 +76,53 @@ describe('Foundry native payload manifest', () => {
     expect(() => validateNativePayload(sdkRoot, 'darwin-x64')).toThrow(
       'Unsupported Foundry platformKey',
     );
+  });
+
+  it('runs the SDK installer as the requested cross-target platform before validating', () => {
+    const sdkRoot = mkdtempSync(join(tmpdir(), 'flint-cross-target-install-'));
+    const platformDir = join(sdkRoot, 'prebuilds', 'linux-arm64');
+    const scriptDir = join(sdkRoot, 'script');
+    mkdirSync(platformDir, { recursive: true });
+    mkdirSync(scriptDir, { recursive: true });
+    writeFileSync(
+      join(sdkRoot, 'deps_versions.json'),
+      JSON.stringify({
+        onnxruntime: { version: dependencies.ortVersion },
+        'onnxruntime-genai': { version: dependencies.genaiVersion },
+      }),
+    );
+    for (const file of requiredNativeFiles('linux-arm64', dependencies)) {
+      if (!file.name.includes('onnxruntime')) {
+        writeFileSync(join(platformDir, file.name), Buffer.alloc(file.minBytes));
+      }
+    }
+    writeFileSync(
+      join(scriptDir, 'install-native.cjs'),
+      `const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+async function main() {
+  const dir = path.join(__dirname, '..', 'prebuilds', os.platform() + '-' + os.arch());
+  fs.writeFileSync(path.join(__dirname, '..', 'installed-platform.txt'), os.platform() + '-' + os.arch());
+  fs.writeFileSync(path.join(dir, 'libonnxruntime.so.1'), Buffer.alloc(1000000));
+  fs.writeFileSync(path.join(dir, 'libonnxruntime-genai.so'), Buffer.alloc(1000000));
+  return 0;
+}
+module.exports = { main };
+if (require.main === module) main().then((code) => { process.exitCode = code; });
+`,
+    );
+
+    const result = spawnSync(process.execPath, [ensureScript], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        FLINT_FOUNDRY_SDK_DIR: sdkRoot,
+        FOUNDRY_PLATFORM_KEY: 'linux-arm64',
+      },
+    });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    expect(readFileSync(join(sdkRoot, 'installed-platform.txt'), 'utf8')).toBe('linux-arm64');
   });
 });
