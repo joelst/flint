@@ -428,9 +428,9 @@ function beforeCatalogRead(onProgress, options = {}) {
 }
 
 /** Settings “Install / Update Accelerators” uses the same command as startup.
- * Before the catalog snapshot is taken, that button has to be able to try again.
- * After a catalog read, another registration cannot add the missing variants. */
-function rerunAcceleratorRegistration(onProgress) {
+ * The update still runs after catalog commitment, but new variants remain invisible
+ * to the current immutable snapshot and require a runtime restart. */
+async function rerunAcceleratorRegistration(onProgress) {
   const gate = acceleratorGate();
   if (!gate) return Promise.resolve(null);
   return gate.rerun(onProgress);

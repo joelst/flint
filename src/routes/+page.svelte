@@ -5352,7 +5352,12 @@ updateStateFromSdk();
       }
       if (readiness.registration?.success === false) {
         statusMessage = readiness.registration.status || "Some accelerators could not be registered";
+        if (readiness.registration.catalogRefreshRequiresRestart) {
+          statusMessage += " Restart Flint to let the model catalog detect any newly available variants.";
+        }
         appendAppLog(statusMessage, "warn");
+      } else if (readiness.registration?.catalogRefreshRequiresRestart) {
+        statusMessage = "Accelerator setup finished. Restart Flint to let the model catalog detect any newly available variants.";
       } else {
         statusMessage =
           state.acceleratorsReady

@@ -124,6 +124,21 @@ describe('prepareHydratedRuntime', () => {
     expect(syncFromStore).toContain('state.catalogError = s.catalogError ?? null;');
   });
 
+  it('explains the catalog restart boundary after a post-commit accelerator update', () => {
+    const source = readFileSync(
+      join(process.cwd(), 'src', 'routes', '+page.svelte'),
+      'utf8',
+    );
+    const start = source.indexOf('async function ensureHardwareAccel(');
+    const end = source.indexOf('\n  async function useStarterModel', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const setup = source.slice(start, end);
+    expect(setup).toContain('readiness.registration?.catalogRefreshRequiresRestart');
+    expect(setup).toContain('readiness.registration.catalogRefreshRequiresRestart');
+    expect(setup.match(/Restart Flint to let the model catalog detect any newly available variants\./g)).toHaveLength(2);
+  });
+
   describe('startup preference resolution', () => {
     it('distinguishes disabled, pending, loading, failed, and completed catalog checks', () => {
       expect(resolveCatalogCheckPresentation({

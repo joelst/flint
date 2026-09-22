@@ -74,6 +74,8 @@ export interface EpDownloadResult {
   status: string;
   registeredEps: string[];
   failedEps: string[];
+  /** Provider setup ran after the immutable catalog snapshot was committed. */
+  catalogRefreshRequiresRestart?: boolean;
 }
 
 /** The four turn wrappers Foundry substitutes `{Content}` into when building a prompt. */

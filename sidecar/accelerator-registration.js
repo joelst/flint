@@ -139,10 +139,11 @@ function terminalRegistrationResult(previous, error) {
  * are not sent through the same three failures. Once a catalog read commits, the
  * snapshot cannot gain providers, so `ensure` does not run again.
  *
- * Settings can call `rerun` before that commit. Startup's `ensureAccelerators` is
- * that same command, and the button calls it again. A kept startup failure must not
- * make the button a no-op while the catalog is still unread. After the commit,
- * `rerun` returns the kept result.
+ * Settings can call `rerun` before or after that commit. Startup's
+ * `ensureAccelerators` is that same command, and the button calls it again. Before
+ * commitment, the result can affect the catalog snapshot. After commitment, the
+ * provider update still runs, but callers must treat new catalog variants as
+ * restart-bound because the current snapshot cannot gain them.
  *
  * Work is serialized. A catalog read queued behind an explicit retry waits for it,
  * so the snapshot is not taken between the two.
@@ -182,6 +183,22 @@ export function createCatalogRegistrationGate(register) {
     return run;
   }
 
+  function preserveRegisteredProviders(previous, current) {
+    if (!previous || typeof previous !== 'object' || !current || typeof current !== 'object') {
+      return current;
+    }
+    const registeredEps = [...new Set([
+      ...(Array.isArray(previous.registeredEps) ? previous.registeredEps : []),
+      ...(Array.isArray(current.registeredEps) ? current.registeredEps : []),
+    ])];
+    const registered = new Set(registeredEps);
+    const failedEps = [...new Set(
+      (Array.isArray(current.failedEps) ? current.failedEps : [])
+        .filter((name) => !registered.has(name)),
+    )];
+    return { ...current, registeredEps, failedEps };
+  }
+
   return {
     ensure(onProgress) {
       const report = typeof onProgress === 'function' ? onProgress : null;
@@ -193,8 +210,15 @@ export function createCatalogRegistrationGate(register) {
     rerun(onProgress) {
       const report = typeof onProgress === 'function' ? onProgress : null;
       return enqueue(async () => {
-        if (committed) return settled;
-        settled = await attempts(report);
+        const catalogRefreshRequiresRestart = committed;
+        settled = preserveRegisteredProviders(settled, await attempts(report));
+        if (
+          catalogRefreshRequiresRestart &&
+          settled &&
+          typeof settled === 'object'
+        ) {
+          settled = { ...settled, catalogRefreshRequiresRestart: true };
+        }
         return settled;
       });
     },

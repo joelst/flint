@@ -358,7 +358,61 @@ describe('createCatalogRegistrationGate', () => {
     expect(seen).toEqual(['first:CUDAExecutionProvider', 'second:WebGpuExecutionProvider']);
   });
 
-  it('lets explicit setup retry before the catalog is read, and not after', async () => {
+  it('runs an explicit accelerator update after the catalog is committed', async () => {
+    const register = vi.fn()
+      .mockResolvedValueOnce({ success: true, registeredEps: ['CPUExecutionProvider'] })
+      .mockResolvedValueOnce({ success: true, registeredEps: ['CUDAExecutionProvider'] });
+    const gate = createCatalogRegistrationGate(register);
+
+    await gate.commit();
+    await expect(gate.rerun()).resolves.toEqual({
+      success: true,
+      registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+      failedEps: [],
+      catalogRefreshRequiresRestart: true,
+    });
+    expect(register).toHaveBeenCalledTimes(2);
+  });
+
+  it('detects catalog commitment inside the queue before an explicit update runs', async () => {
+    let release = () => {};
+    const register = vi.fn()
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        release = () => resolve({ success: true, registeredEps: ['CPUExecutionProvider'] });
+      }))
+      .mockResolvedValueOnce({ success: true, registeredEps: ['CUDAExecutionProvider'] });
+    const gate = createCatalogRegistrationGate(register);
+
+    const commit = gate.commit();
+    await Promise.resolve();
+    const rerun = gate.rerun();
+    release();
+    await commit;
+    await expect(rerun).resolves.toMatchObject({
+      registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+      catalogRefreshRequiresRestart: true,
+    });
+  });
+
+  it('preserves confirmed providers when a post-commit update fails', async () => {
+    const register = vi.fn()
+      .mockResolvedValueOnce({
+        success: true,
+        registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+        failedEps: [],
+      })
+      .mockRejectedValue(new Error('offline'));
+    const gate = createCatalogRegistrationGate(register);
+
+    await gate.commit();
+    await expect(gate.rerun()).resolves.toMatchObject({
+      success: false,
+      registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+      catalogRefreshRequiresRestart: true,
+    });
+  });
+
+  it('lets explicit setup retry before and after the catalog is read', async () => {
     let calls = 0;
     const register = vi.fn(async () => {
       calls += 1;
@@ -376,7 +430,7 @@ describe('createCatalogRegistrationGate', () => {
     expect(register).toHaveBeenCalledTimes(3);
     await gate.commit();
     await gate.rerun();
-    expect(register).toHaveBeenCalledTimes(3);
+    expect(register).toHaveBeenCalledTimes(4);
   });
 
   it('stops retrying a provider that keeps failing so the catalog read is not blocked', async () => {
