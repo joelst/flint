@@ -118,7 +118,7 @@ beforeAll(async () => {
   // incomplete SDK snapshot. Establish provider setup once; the first mutation below still
   // owns the initial native catalog scan and has a matching timeout.
   await send('ensureAccelerators');
-}, 60000);
+}, 0);
 
 afterAll(() => {
   if (proc && !proc.killed) proc.kill();
