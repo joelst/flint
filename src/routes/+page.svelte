@@ -569,7 +569,7 @@
     }
     const kind = classifyExecutionProvider(preference);
     const wants = kind === "gpu" ? "GPU" : kind === "npu" ? "NPU" : kind === "cpu" ? "CPU" : null;
-    if (wants && published.length && !published.includes(wants)) {
+    if (wants && !published.includes(wants)) {
       return `No ${wants} build to download. Published: ${publishedText}.`;
     }
     if (wants === "cpu") {
@@ -12434,7 +12434,7 @@ Output only the summary text, no preamble.`;
      native stub beside it. */
   .chat-controls .persona-btn,
   .chat-controls .context-control select,
-  .chat-controls .vision-attach > button,
+  .chat-controls .vision-attach > button:not(.mini),
   .chat-controls .recommend-btn {
     box-sizing: border-box;
     height: 32px;
@@ -12512,7 +12512,7 @@ Output only the summary text, no preamble.`;
     font-style: italic;
   }
 
-  .vision-attach > button {
+  .vision-attach > button:not(.mini) {
     display: inline-flex;
     align-items: center;
     gap: 6px;
