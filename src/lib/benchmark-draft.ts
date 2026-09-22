@@ -81,13 +81,14 @@ export function optionalDraftNumber(value: unknown): number | undefined {
 
 /**
  * `File.size` is bytes while the suite limit is JavaScript string length. UTF-8 needs at most
- * three bytes per UTF-16 code unit, so only a file above this bound is guaranteed not to fit.
+ * three bytes per UTF-16 code unit. `Blob.text()` strips a leading three-byte UTF-8 BOM, so
+ * allow those bytes in addition to the largest payload that can decode within the limit.
  */
 export function jsonlImportCanFitCharacterLimit(
   byteLength: number,
   characterLimit: number = BENCHMARK_MAX_JSONL_CHARS,
 ): boolean {
-  return byteLength <= characterLimit * 3;
+  return byteLength <= characterLimit * 3 + 3;
 }
 
 function caseToRow(entry: BenchmarkCase): SuiteCaseRow {

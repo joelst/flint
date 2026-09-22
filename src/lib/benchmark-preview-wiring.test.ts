@@ -65,6 +65,21 @@ describe('benchmark editor wiring', () => {
     expect(source).toContain('{#each editingNotices as notice}');
   });
 
+  it('takes the import lock synchronously instead of relying on reactive editorBusy', () => {
+    const start = source.indexOf('async function importCasesFile(');
+    const end = source.indexOf('\n  function startCreateSuite', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const importCasesFile = source.slice(start, end);
+    expect(importCasesFile).toContain(
+      'if (!(input instanceof HTMLInputElement) || !editingDraft || editingBusy || suiteBusy || casesImporting) return;',
+    );
+    expect(importCasesFile.indexOf('casesImporting = true;')).toBeLessThan(
+      importCasesFile.indexOf('jsonlImportCanFitCharacterLimit(file.size)'),
+    );
+    expect(importCasesFile).toContain('editingDraft.casesJsonl = text;');
+  });
+
   it('loads results when a run stops being active while it is opened', () => {
     const start = source.indexOf('async function openRun(');
     const end = source.indexOf('\n  $: progressMatrix', start);

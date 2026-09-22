@@ -207,9 +207,12 @@ describe('jsonlImportCanFitCharacterLimit', () => {
     expect(jsonlImportCanFitCharacterLimit(BENCHMARK_MAX_JSONL_CHARS * 2)).toBe(true);
   });
 
+  it('allows the three-byte UTF-8 BOM in addition to a max-length multibyte payload', () => {
+    expect(jsonlImportCanFitCharacterLimit(BENCHMARK_MAX_JSONL_CHARS * 3 + 3)).toBe(true);
+  });
+
   it('rejects only byte sizes that cannot fit the character cap', () => {
-    expect(jsonlImportCanFitCharacterLimit(BENCHMARK_MAX_JSONL_CHARS * 3)).toBe(true);
-    expect(jsonlImportCanFitCharacterLimit(BENCHMARK_MAX_JSONL_CHARS * 3 + 1)).toBe(false);
+    expect(jsonlImportCanFitCharacterLimit(BENCHMARK_MAX_JSONL_CHARS * 3 + 4)).toBe(false);
   });
 });
 

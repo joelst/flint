@@ -348,20 +348,21 @@
 
   async function importCasesFile(event: Event) {
     const input = event.currentTarget;
-    if (!(input instanceof HTMLInputElement) || !editingDraft || editorBusy) return;
+    if (!(input instanceof HTMLInputElement) || !editingDraft || editingBusy || suiteBusy || casesImporting) return;
     const file = input.files?.[0];
     input.value = "";
     if (!file) return;
-    // The parser enforces the exact character limit after decoding. This byte bound only rejects
-    // files that cannot possibly fit, while allowing valid multi-byte UTF-8 JSONL through.
-    if (!jsonlImportCanFitCharacterLimit(file.size)) {
-      editingErrors = [`file cannot fit within ${BENCHMARK_MAX_JSONL_CHARS} characters`];
-      return;
-    }
+    const draftAtImport = editingDraft;
     casesImporting = true;
     try {
+      // The parser enforces the exact character limit after decoding. This byte bound only rejects
+      // files that cannot possibly fit, while allowing valid multi-byte UTF-8 JSONL through.
+      if (!jsonlImportCanFitCharacterLimit(file.size)) {
+        editingErrors = [`file cannot fit within ${BENCHMARK_MAX_JSONL_CHARS} characters`];
+        return;
+      }
       const text = await file.text();
-      if (destroyed || !editingDraft) return;
+      if (destroyed || editingDraft !== draftAtImport) return;
       if (text.length > BENCHMARK_MAX_JSONL_CHARS) {
         editingErrors = [`file is larger than ${BENCHMARK_MAX_JSONL_CHARS} characters`];
         return;
