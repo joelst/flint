@@ -9,6 +9,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { validateNativePayload } = require('./foundry-native-payload.cjs');
 
 const root = path.resolve(__dirname, '..');
 const binariesDir = path.join(root, 'src-tauri', 'binaries');
@@ -83,6 +84,13 @@ function main() {
   const sdkRoot = path.join(root, 'node_modules', 'foundry-local-sdk');
   if (!fs.existsSync(sdkRoot)) {
     console.error('  ✗ node_modules/foundry-local-sdk missing — npm install');
+    process.exit(1);
+  }
+  const payload = validateNativePayload(sdkRoot, `${process.platform}-${process.arch}`);
+  if (payload.invalid.length > 0) {
+    console.error(
+      `  ✗ incomplete Foundry native payload: ${payload.invalid.map((file) => file.name).join(', ')}`,
+    );
     process.exit(1);
   }
 

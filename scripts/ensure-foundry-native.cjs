@@ -12,39 +12,13 @@
 
 const fs = require('fs');
 const path = require('path');
+const {
+  INSTALLABLE_PLATFORM_KEYS,
+  platformKeyForTriple,
+  validateNativePayload,
+} = require('./foundry-native-payload.cjs');
 
 const root = path.resolve(__dirname, '..');
-
-/** Map Rust / Tauri target triples → Node-style platformKey used by foundry-local-sdk. */
-const TRIPLE_TO_PLATFORM_KEY = {
-  'x86_64-pc-windows-msvc': 'win32-x64',
-  'x86_64-pc-windows-gnu': 'win32-x64',
-  'aarch64-pc-windows-msvc': 'win32-arm64',
-  'x86_64-apple-darwin': 'darwin-x64',
-  'aarch64-apple-darwin': 'darwin-arm64',
-  'x86_64-unknown-linux-gnu': 'linux-x64',
-  'aarch64-unknown-linux-gnu': 'linux-arm64',
-};
-
-/** NuGet RIDs supported by foundry-local-sdk install-utils (must stay in sync). */
-const SUPPORTED_PLATFORM_KEYS = new Set([
-  'win32-x64',
-  'win32-arm64',
-  'linux-x64',
-  'linux-arm64',
-  'darwin-arm64',
-  // darwin-x64 is intentionally absent from current foundry-local-sdk PLATFORM_MAP;
-  // we still resolve it so we can fail with a clear message instead of arm64-on-intel mismatch.
-]);
-
-/** foundry-local-sdk install-utils PLATFORM_MAP keys that actually download. */
-const INSTALLABLE_PLATFORM_KEYS = new Set([
-  'win32-x64',
-  'win32-arm64',
-  'linux-x64',
-  'linux-arm64',
-  'darwin-arm64',
-]);
 
 function log(msg) {
   console.log(`[ensure-foundry-native] ${msg}`);
@@ -63,13 +37,13 @@ function resolvePlatformKey() {
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--target' && args[i + 1]) {
-      const fromTriple = TRIPLE_TO_PLATFORM_KEY[args[i + 1]];
+      const fromTriple = platformKeyForTriple(args[i + 1]);
       if (fromTriple) return { platformKey: fromTriple, source: `--target ${args[i + 1]}` };
       fail(`Unknown --target triple: ${args[i + 1]}`);
     }
     if (args[i].startsWith('--target=')) {
       const triple = args[i].slice('--target='.length);
-      const fromTriple = TRIPLE_TO_PLATFORM_KEY[triple];
+      const fromTriple = platformKeyForTriple(triple);
       if (fromTriple) return { platformKey: fromTriple, source: `--target=${triple}` };
       fail(`Unknown --target triple: ${triple}`);
     }
@@ -104,9 +78,10 @@ function resolvePlatformKey() {
     process.env.TAURI_ENV_TARGET_TRIPLE ||
     process.env.CARGO_BUILD_TARGET ||
     process.env.CARGO_CFG_TARGET_TRIPLE;
-  if (triple && TRIPLE_TO_PLATFORM_KEY[triple]) {
+  const fromTriple = triple ? platformKeyForTriple(triple) : null;
+  if (triple && fromTriple) {
     return {
-      platformKey: TRIPLE_TO_PLATFORM_KEY[triple],
+      platformKey: fromTriple,
       source: `target triple env (${triple})`,
     };
   }
@@ -117,36 +92,12 @@ function resolvePlatformKey() {
   };
 }
 
-function nativeLibName(platformKey) {
-  if (platformKey.startsWith('win32')) return 'foundry_local.dll';
-  if (platformKey.startsWith('darwin')) return 'libfoundry_local.dylib';
-  return 'libfoundry_local.so';
-}
-
-function corePathFor(platformKey) {
-  return path.join(
-    root,
-    'node_modules',
-    'foundry-local-sdk',
-    'prebuilds',
-    platformKey,
-    nativeLibName(platformKey),
-  );
-}
-
-function coreOk(corePath) {
-  try {
-    const st = fs.statSync(corePath);
-    return st.isFile() && st.size > 1_000_000;
-  } catch {
-    return false;
-  }
-}
-
 // --- main ---
 
 const { platformKey, source } = resolvePlatformKey();
-const corePath = corePathFor(platformKey);
+const sdkRoot =
+  process.env.FLINT_FOUNDRY_SDK_DIR ||
+  path.join(root, 'node_modules', 'foundry-local-sdk');
 
 log(`Target platformKey=${platformKey} (from ${source})`);
 
@@ -159,15 +110,32 @@ if (!INSTALLABLE_PLATFORM_KEYS.has(platformKey)) {
   );
 }
 
-if (coreOk(corePath)) {
-  const st = fs.statSync(corePath);
-  log(`OK (${(st.size / (1024 * 1024)).toFixed(1)} MB): ${path.relative(root, corePath)}`);
-  process.exit(0);
+let validation;
+try {
+  validation = validateNativePayload(sdkRoot, platformKey);
+} catch (error) {
+  fail(error instanceof Error ? error.message : String(error));
 }
 
-log(`Missing or too small: ${path.relative(root, corePath)}`);
-fail(
-  `Foundry 2.0 natives are missing: ${path.relative(root, corePath)}\n` +
-    '  They ship inside the foundry-local-sdk package (prebuilds/).\n' +
-    '  Re-run npm install with scripts enabled, then npm run ensure:foundry.'
-);
+if (validation.invalid.length > 0) {
+  for (const file of validation.invalid) {
+    const detail =
+      file.symlinkTo && file.linkTarget !== file.symlinkTo
+        ? `not a symlink to ${file.symlinkTo}`
+        : file.size === 0
+          ? 'missing'
+          : `${file.size} bytes`;
+    log(`${file.role} is ${detail}: ${path.relative(root, file.filePath)}`);
+  }
+  fail(
+    `Foundry 2.0 native payload is incomplete for ${platformKey}.\n` +
+      '  Re-run npm install with scripts enabled, or npm rebuild foundry-local-sdk,\n' +
+      '  then run npm run ensure:foundry again.'
+  );
+}
+
+for (const file of validation.files) {
+  const filePath = path.join(validation.platformDir, file.name);
+  const size = fs.statSync(filePath).size;
+  log(`OK ${file.role} (${(size / (1024 * 1024)).toFixed(1)} MB): ${path.relative(root, filePath)}`);
+}

@@ -90,6 +90,8 @@ function copyDir(from, to, { overwrite }) {
     recursive: true,
     force: overwrite,
     errorOnExist: false,
+    dereference: false,
+    verbatimSymlinks: true,
     filter: (src) => path.basename(src) !== MANIFEST,
   });
 }
@@ -163,9 +165,15 @@ function save() {
   fs.mkdirSync(path.dirname(CACHE_DIR), { recursive: true });
   if (fs.existsSync(CACHE_DIR)) fs.rmSync(CACHE_DIR, { recursive: true, force: true });
   for (const entry of downloaded) {
+    const from = path.join(DEST_DIR, entry);
     const to = path.join(CACHE_DIR, entry);
     fs.mkdirSync(path.dirname(to), { recursive: true });
-    fs.copyFileSync(path.join(DEST_DIR, entry), to);
+    const stat = fs.lstatSync(from);
+    if (stat.isSymbolicLink()) {
+      fs.symlinkSync(fs.readlinkSync(from), to);
+    } else {
+      fs.copyFileSync(from, to);
+    }
   }
   fs.writeFileSync(path.join(CACHE_DIR, MANIFEST), `${JSON.stringify(identity, null, 2)}\n`);
   log(

@@ -1,5 +1,15 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -44,6 +54,33 @@ describe('hydrate-foundry-native', () => {
 
     expect(existsSync(join(cacheDir, 'win32-x64', 'onnxruntime.dll'))).toBe(true);
     expect(existsSync(join(cacheDir, 'win32-x64', 'foundry_local.dll'))).toBe(false);
+  });
+
+  const symlinkIt = process.platform === 'win32' ? it.skip : it;
+  symlinkIt('preserves downloaded symlinks through a cache round trip', () => {
+    const root = mkdtempSync(join(tmpdir(), 'flint-hydrate-symlink-'));
+    const cacheDir = join(root, 'cache');
+    const baselineFile = join(root, 'baseline.json');
+    const { destDir } = makeSdk(root);
+    const platformDir = join(destDir, 'darwin-arm64');
+    mkdirSync(platformDir, { recursive: true });
+
+    expect(run('--baseline', cacheDir, destDir, baselineFile).status).toBe(0);
+    const versioned = join(platformDir, 'libonnxruntime.1.dylib');
+    const alias = join(platformDir, 'libonnxruntime.dylib');
+    writeFileSync(versioned, 'ort');
+    symlinkSync('libonnxruntime.1.dylib', alias);
+
+    expect(run('--save', cacheDir, destDir, baselineFile).status).toBe(0);
+    expect(lstatSync(join(cacheDir, 'darwin-arm64', 'libonnxruntime.dylib')).isSymbolicLink()).toBe(
+      true,
+    );
+
+    rmSync(versioned);
+    rmSync(alias);
+    expect(run('--restore', cacheDir, destDir, baselineFile).status).toBe(0);
+    expect(lstatSync(alias).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(alias)).toBe('libonnxruntime.1.dylib');
   });
 
   it('round-trips the downloaded runtime for a matching SDK install', () => {

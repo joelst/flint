@@ -137,7 +137,7 @@ prebuild.
 
 ### macOS: Gatekeeper quarantines the Foundry native library
 
-`foundry-local-sdk` ships `Microsoft.AI.Foundry.Local.Core.dylib` **ad-hoc signed only** — it
+`foundry-local-sdk` ships `prebuilds/darwin-arm64/libfoundry_local.dylib` **ad-hoc signed only** — it
 carries no Developer ID signature and is not notarized. macOS therefore tags it with
 `com.apple.quarantine` on install and refuses to `dlopen` it, showing a *"Apple could not verify
 … is free of malware"* dialog. Choose **Done**, never *Move to Trash* — trashing it breaks
