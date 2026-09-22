@@ -4875,7 +4875,7 @@ updateStateFromSdk();
         await loadSTTModels();
       } else {
         appendAppLog(
-          "Automatic startup catalog check is off; model recommendations and startup preloads wait until Refresh catalog is used",
+          "Automatic startup catalog check is off; recommendations and configured startup preloads are skipped for this launch. Use Refresh catalog to browse models.",
           "info",
         );
       }
@@ -10376,8 +10376,8 @@ Output only the summary text, no preamble.`;
                 <span class="setting-name" id="auto-refresh-catalog-label">Check model catalog on startup</span>
                 <span class="setting-desc">
                   Contacts Microsoft's Foundry Local model catalog over the network on startup to list
-                  models and check for updates. Turning this off also delays startup recommendations
-                  and model preloads until you use "Refresh catalog"; model actions may refresh afterward.
+                  models and check for updates. Turning this off skips recommendations and configured
+                  model preloads for that launch; manual refresh and model actions may contact it later.
                 </span>
               </div>
               <label class="toggle-switch">

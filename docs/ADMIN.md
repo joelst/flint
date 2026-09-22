@@ -40,8 +40,9 @@ over the network — separate from inference, which always stays local. By defau
 the catalog on startup and after actions like downloads. **Settings → Startup → "Check model
 catalog on startup"** disables the startup check; the **Refresh catalog** button in the
 Models view remains available for on-demand checks. Disabling the startup check also defers
-startup recommendations and model preloads until that manual refresh; later model-management
-actions can refresh the catalog to show their results.
+skips recommendations and configured model preloads for that launch. A later manual refresh
+populates the Models view but does not replay startup-only work; model-management actions can
+also refresh the catalog to show their results.
 
 ## Uninstall leftovers
 

@@ -53,7 +53,7 @@ The sidebar is grouped by workflow:
 - **Models** tab: search, filter, download with progress, load into the pool.  
 - Multiple models can stay loaded when memory allows (see **Monitor**).  
 - Update badges: newer catalog versions for the **same** acceleration track (CPU/GPU/NPU), not cross-grade noise.
-- Listing/refreshing the catalog contacts Microsoft's Foundry Local model catalog over the network (separate from inference, which stays local). Flint checks it on startup by default; disable **Settings → Startup → "Check model catalog on startup"** to defer model recommendations and startup preloads until you use **Refresh catalog**. Model actions such as download or import may refresh the catalog afterward.
+- Listing/refreshing the catalog contacts Microsoft's Foundry Local model catalog over the network (separate from inference, which stays local). Flint checks it on startup by default; disable **Settings → Startup → "Check model catalog on startup"** to skip recommendations and configured model preloads for that launch. **Refresh catalog** later populates the Models view but does not replay startup-only work. Model actions such as download or import may refresh the catalog afterward.
 
 ### Chat and conversations
 
