@@ -47,6 +47,16 @@ describe('publishedAccelerationLabels', () => {
       { id: 'gemma-4-e2b-it-generic-cpu:3' },
     ])).toEqual(['CPU']);
   });
+
+  it('classifies device-qualified OpenVINO builds without treating generic OpenVINO as GPU', () => {
+    expect(publishedAccelerationLabels([
+      { id: 'example-openvino-gpu:1', executionProvider: 'OpenVINO' },
+      { id: 'example-openvino-cpu:1', executionProvider: 'OpenVINO' },
+    ])).toEqual(['GPU', 'CPU']);
+    expect(publishedAccelerationLabels([
+      { id: 'example-openvino:1', executionProvider: 'OpenVINO' },
+    ])).toEqual([]);
+  });
 });
 
 describe('evaluateStartupPreload', () => {

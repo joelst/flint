@@ -62,7 +62,8 @@ function publishedAccelerationKind(
   if (device.includes('cpu')) return 'CPU';
   const blob = `${variant.executionProvider || ''} ${variant.id || ''}`.toLowerCase();
   if (!blob.trim()) return null;
-  if (/qnn|vitis/.test(blob)) return 'NPU';
+  if (/qnn|vitis|(?:^|[-_ ])npu(?:$|[-_ :])/.test(blob)) return 'NPU';
+  if (/(?:^|[-_ ])gpu(?:$|[-_ :])/.test(blob)) return 'GPU';
   if (/cuda|directml|\bdml\b|webgpu|tensorrt|coreml|metal|rocm/.test(blob)) return 'GPU';
   if (/cpu|generic/.test(blob)) return 'CPU';
   return null;

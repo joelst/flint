@@ -561,11 +561,12 @@
 
   function describeAccelerationFit(model: any, preference: string): string {
     const published = publishedAccelerationLabels(model?.variants);
-    const publishedText = published.length ? published.join(", ") : "none listed";
+    if (!published.length) {
+      return "Flint could not determine which device builds are published for this model.";
+    }
+    const publishedText = published.join(", ");
     if (preference === "auto") {
-      return published.length
-        ? `Auto uses a published build (${publishedText}).`
-        : "No device-specific build is listed for this model.";
+      return `Auto uses a published build (${publishedText}).`;
     }
     const kind = classifyExecutionProvider(preference);
     const wants = kind === "gpu" ? "GPU" : kind === "npu" ? "NPU" : kind === "cpu" ? "CPU" : null;
@@ -7871,13 +7872,13 @@ Output only the summary text, no preamble.`;
                           </span>
                         </span>
                       {/if}
-                      <span title="Device builds published for this model. Only these can be downloaded. This is not the accelerators installed on this PC.">
+                      <span title="Device build types Flint can identify in this model's catalog variants. This is not the accelerators installed on this PC.">
                         Available as:
                         <span class="meta-badges">
                           {#each publishedAccelerationLabels(model.variants) as accel}
                             <span class="meta-badge">{accel}</span>
                           {:else}
-                            <span class="meta-badge">Not listed</span>
+                            <span class="meta-badge">Unknown</span>
                           {/each}
                         </span>
                       </span>
@@ -8389,7 +8390,7 @@ Output only the summary text, no preamble.`;
                             {#each publishedAccelerationLabels(detailModel.variants) as accel}
                               <span class="meta-badge">{accel}</span>
                             {:else}
-                              <span class="meta-badge">Not listed</span>
+                              <span class="meta-badge">Unknown</span>
                             {/each}
                           </span>
                         </div>
@@ -11721,6 +11722,10 @@ Output only the summary text, no preamble.`;
 
   button.small.danger-btn {
     color: var(--danger-btn-fg);
+  }
+
+  button.small.update-btn {
+    color: var(--warning);
   }
 
   button.small.primary-chat {
