@@ -232,13 +232,11 @@ describe('native service startup', () => {
     expect(poolSeal).toBeLessThan(loadedModels);
     for (const cmd of ['importModelFolder', 'linkModelFolder', 'setModelTemplate']) {
       const at = source.indexOf(`} else if (cmd === '${cmd}') {`);
-      const ensure = source.indexOf('await beforeCatalogRead();', at);
-      const call = source.indexOf(`${cmd}(`, at);
-      const read = source.indexOf('commitCatalogAfterLocalMutation(', call);
+      const atomicMutation = source.indexOf('runCatalogMutation(', at);
+      const call = source.indexOf(`${cmd}(`, atomicMutation);
       expect(at, cmd).toBeGreaterThan(-1);
-      expect(ensure, cmd).toBeGreaterThan(at);
-      expect(call, cmd).toBeGreaterThan(ensure);
-      expect(read, cmd).toBeGreaterThan(call);
+      expect(atomicMutation, cmd).toBeGreaterThan(at);
+      expect(call, cmd).toBeGreaterThan(atomicMutation);
     }
   });
 });
@@ -310,6 +308,34 @@ describe('createCatalogRegistrationGate', () => {
       registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
       catalogRefreshRequiresRestart: true,
     });
+  });
+
+  it('keeps a local mutation and the first catalog read atomic against other readers', async () => {
+    let releaseMutation = () => {};
+    const order = [];
+    const readCatalog = vi.fn(async () => {
+      order.push('read');
+      return [];
+    });
+    const gate = createCatalogRegistrationGate(
+      vi.fn().mockResolvedValue({ success: true, registeredEps: ['CPUExecutionProvider'] }),
+      readCatalog,
+    );
+
+    const mutation = gate.mutateAndCommit(() => new Promise((resolve) => {
+      order.push('mutate');
+      releaseMutation = () => resolve('imported');
+    }));
+    await vi.waitFor(() => expect(order).toEqual(['mutate']));
+    const reader = gate.commit();
+    await Promise.resolve();
+    expect(readCatalog).not.toHaveBeenCalled();
+
+    releaseMutation();
+    await expect(mutation).resolves.toBe('imported');
+    await reader;
+    expect(order).toEqual(['mutate', 'read']);
+    expect(readCatalog).toHaveBeenCalledTimes(1);
   });
 
   it('retries a thrown registration and a partial failure before the catalog is read', async () => {

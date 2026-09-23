@@ -201,6 +201,20 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
     return { ...current, registeredEps, failedEps };
   }
 
+  async function confirmCatalogCommit() {
+    if (commitConfirmed || typeof commitCatalog !== 'function') return;
+    try {
+      await commitCatalog();
+      commitConfirmed = true;
+    } finally {
+      // A rejected native read does not establish whether the immutable
+      // snapshot was taken. Treat any attempted read as committed for
+      // restart reporting, but retry it inside this queue until one is
+      // confirmed so no later catalog caller races provider setup.
+      committed = true;
+    }
+  }
+
   return {
     ensure(onProgress) {
       const report = typeof onProgress === 'function' ? onProgress : null;
@@ -228,21 +242,21 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
       const report = typeof onProgress === 'function' ? onProgress : null;
       return enqueue(async () => {
         if (!settled) settled = await attempts(report);
-        if (!commitConfirmed) {
-          if (typeof commitCatalog === 'function') {
-            try {
-              await commitCatalog();
-              commitConfirmed = true;
-            } finally {
-              // A rejected native read does not establish whether the immutable
-              // snapshot was taken. Treat any attempted read as committed for
-              // restart reporting, but retry it inside this queue until one is
-              // confirmed so no later catalog caller races provider setup.
-              committed = true;
-            }
-          }
-        }
+        await confirmCatalogCommit();
         return settled;
+      });
+    },
+    mutateAndCommit(operation, onCommitError) {
+      return enqueue(async () => {
+        if (!settled) settled = await attempts(null);
+        const result = await operation();
+        try {
+          await confirmCatalogCommit();
+        } catch (error) {
+          if (typeof onCommitError !== 'function') throw error;
+          onCommitError(error);
+        }
+        return result;
       });
     },
     seal(onProgress) {

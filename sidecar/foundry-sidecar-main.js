@@ -443,17 +443,19 @@ async function rerunAcceleratorRegistration(onProgress) {
   return gate.rerun(onProgress);
 }
 
-async function commitCatalogAfterLocalMutation(operation) {
-  try {
-    await beforeCatalogRead(undefined, { commit: true });
-  } catch (error) {
-    log('warn', `Catalog snapshot read failed after ${operation}: ${error?.message ?? error}`);
-  }
+async function runCatalogMutation(mutate, operation) {
+  const gate = acceleratorGate();
+  const result = gate
+    ? await gate.mutateAndCommit(mutate, (error) => {
+        log('warn', `Catalog snapshot read failed after ${operation}: ${error?.message ?? error}`);
+      })
+    : await mutate();
   try {
     manager?.catalog?.invalidateCache?.();
   } catch (error) {
     log('warn', `Catalog cache invalidation failed after ${operation}: ${error?.message ?? error}`);
   }
+  return result;
 }
 
 let FoundryLocalManager = null;
@@ -2680,17 +2682,13 @@ rl.on('line', async (line) => {
     } else if (cmd === 'inspectModelFolder') {
       reply({ ok: true, result: inspectFolder(payload.folderPath) });
     } else if (cmd === 'importModelFolder') {
-      await beforeCatalogRead();
-      const result = importModelFolder(payload);
-      await commitCatalogAfterLocalMutation('model import');
+      const result = await runCatalogMutation(() => importModelFolder(payload), 'model import');
       log('info', `Imported model ${result.name}:${result.version} from ${payload.folderPath}`);
       invalidateModelIndex();
       audit('importModelFolder', { alias: result.name, variantId: `${result.name}:${result.version}`, kind: 'copy' });
       reply({ ok: true, result });
     } else if (cmd === 'linkModelFolder') {
-      await beforeCatalogRead();
-      const result = linkModelFolder(payload);
-      await commitCatalogAfterLocalMutation('model link');
+      const result = await runCatalogMutation(() => linkModelFolder(payload), 'model link');
       log('info', `Linked model ${result.name} -> ${result.target}`);
       invalidateModelIndex();
       audit('linkModelFolder', { alias: result.name, variantId: null, kind: 'junction' });
@@ -2698,9 +2696,10 @@ rl.on('line', async (line) => {
     } else if (cmd === 'getModelTemplate') {
       reply({ ok: true, result: getModelTemplate(payload.name) });
     } else if (cmd === 'setModelTemplate') {
-      await beforeCatalogRead();
-      const result = setModelTemplate(payload.name, payload.promptTemplate);
-      await commitCatalogAfterLocalMutation('template update');
+      const result = await runCatalogMutation(
+        () => setModelTemplate(payload.name, payload.promptTemplate),
+        'template update',
+      );
       log('info', `Updated prompt template for ${result.name}`);
       audit('setModelTemplate', { alias: result.name, variantId: null });
       reply({ ok: true, result });
