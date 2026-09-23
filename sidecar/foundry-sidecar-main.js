@@ -2740,6 +2740,14 @@ rl.on('line', async (line) => {
         if (fenced.result) {
           log('info', `Model ${alias} unloaded from pool`);
           audit('unload', { alias });
+          return;
+        }
+        // `unloadAliasLocked` returns false both for an alias that was not resident and for a
+        // native unload that threw, and it keeps the failed entry in the pool. Reporting the
+        // latter as success would tell the caller memory was released while the model is still
+        // loaded, so only the "nothing to unload" case is a successful no-op.
+        if (pool.has(alias)) {
+          throw new Error(`Unload of ${alias} failed; the model is still loaded.`);
         }
       });
       reply({ ok: true });

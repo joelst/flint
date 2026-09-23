@@ -876,6 +876,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
     secondStartServicePort: number | null = null,
     holdDownload = false,
     holdUnload = false,
+    failUnload = false,
   ) {
     const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-gateway-fence-home-'));
     const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
@@ -905,6 +906,9 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
           async unload() {
             if (${JSON.stringify(holdUnload)}) {
               await fetch('http://127.0.0.1:${upstreamPort}/hold-unload');
+            }
+            if (${JSON.stringify(failUnload)}) {
+              throw new Error('native unload refused');
             }
             this.loaded = false;
           }
@@ -988,6 +992,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
     secondStartServicePort: number | null = null,
     holdDownload = false,
     holdUnload = false,
+    failUnload = false,
   ) {
     const { proc, homeDir } = spawnGatewaySidecar(
       upstreamPort,
@@ -997,6 +1002,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       secondStartServicePort,
       holdDownload,
       holdUnload,
+      failUnload,
     );
     await waitForLine(proc, (msg) => msg.ready === true);
     proc.stdin.write(`${JSON.stringify({ id: 1, cmd: 'init', appName: 'flint-test', logLevel: 'info' })}\n`);
@@ -1101,6 +1107,41 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       await expect(unloadReply).resolves.toMatchObject({ ok: true });
     } finally {
       releaseUnload?.();
+      if (proc) await killAndWait(proc);
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      if (homeDir) rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports an error when the native unload fails and the model is still loaded', async () => {
+    // `unloadAliasLocked` keeps a model it could not unload in the pool, so replying ok would
+    // tell the caller the memory was released while the model is still resident.
+    const upstream = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{}');
+    });
+    let proc: ChildProcessWithoutNullStreams | undefined;
+    let homeDir: string | undefined;
+    try {
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+      const { port: upstreamPort } = upstream.address() as AddressInfo;
+      const started = await startedGateway(upstreamPort, 200, [], false, null, false, false, true);
+      proc = started.proc;
+      homeDir = started.homeDir;
+
+      proc.stdin.write(`${JSON.stringify({ id: 40, cmd: 'load', alias: 'fake-model' })}\n`);
+      expect(await waitForLine(proc, (msg) => msg.id === 40, 5000)).toMatchObject({ ok: true });
+
+      proc.stdin.write(`${JSON.stringify({ id: 41, cmd: 'unload', alias: 'fake-model' })}\n`);
+      const unloadReply = await waitForLine(proc, (msg) => msg.id === 41, 5000);
+      expect(unloadReply.ok).toBeUndefined();
+      expect(String(unloadReply.error)).toContain('still loaded');
+
+      // The failed model stays resident, so poolStatus must still report it.
+      proc.stdin.write(`${JSON.stringify({ id: 42, cmd: 'poolStatus' })}\n`);
+      const status = await waitForLine(proc, (msg) => msg.id === 42, 5000);
+      expect(status.result.models.map((m: { alias: string }) => m.alias)).toContain('fake-model');
+    } finally {
       if (proc) await killAndWait(proc);
       await new Promise<void>((resolve) => upstream.close(() => resolve()));
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });

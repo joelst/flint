@@ -1,3 +1,5 @@
+import type { EpDownloadResult } from './ipc-contracts';
+
 export interface HydratedStartupStages<TAccelerators = void> {
   applyMemorySettings(): Promise<void>;
   prepareAccelerators(): Promise<TAccelerators>;
@@ -89,4 +91,3 @@ export function resolveAcceleratorRestartGuidance(
   }
   return 'Accelerator setup finished. Restart Flint to let the model catalog detect any newly available variants.';
 }
-import type { EpDownloadResult } from './ipc-contracts';
