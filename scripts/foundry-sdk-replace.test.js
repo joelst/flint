@@ -182,6 +182,47 @@ describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
       expect(state()).toEqual({ [`${SDK}.moved`]: true, [`${SDK}.previous`]: 'installed' });
     });
 
+    // The step that moves the installed SDK. Everything before it, including the ownership
+    // marker, has to be in place before it runs.
+    const MOVE_LIVE = `(if exist "${SDK}" ren "${SDK}" "${SDK}.previous")`;
+
+    it('owns the backup before renaming anything', () => {
+      const move = commands.MoveFoundrySdk;
+      const owned = move.indexOf(`(if exist "${SDK}" if not exist "${SDK}.moved" exit /b 1)`);
+      expect(owned).toBeGreaterThan(move.indexOf(`(if exist "${SDK}" type nul> "${SDK}.moved")`));
+      expect(owned).toBeLessThan(move.indexOf(MOVE_LIVE));
+      expect(owned).toBeLessThan(move.indexOf(`ren "${SDK}" "${SDK}.failed"`));
+      // Nothing is left to mark after the move.
+      expect(move.slice(move.indexOf(MOVE_LIVE))).not.toContain('type nul>');
+    });
+
+    it('rolls back when the move is the last thing that ran before the action died', () => {
+      tree(SDK, 'installed');
+      const move = commands.MoveFoundrySdk;
+      const upToMove = move.slice(0, move.indexOf(MOVE_LIVE) + MOVE_LIVE.length);
+      settle();
+      spawnSync(process.env.ComSpec || 'cmd.exe', [upToMove], {
+        cwd: dir, windowsVerbatimArguments: true, encoding: 'utf8',
+      });
+      expect(state()).toEqual({ [`${SDK}.moved`]: true, [`${SDK}.previous`]: 'installed' });
+      expect(run('RestoreFoundrySdk')).toBe(0);
+      expect(state()).toEqual({ [SDK]: 'installed' });
+    });
+
+    it('leaves no marker when the installed SDK cannot be moved', async () => {
+      const live = tree(SDK, 'installed');
+      settle();
+      const release = await holdExclusive(join(live, 'prebuilds', 'win32-x64', 'onnxruntime.dll'));
+      try {
+        expect(run('MoveFoundrySdk', { settled: false })).toBe(1);
+        expect(state()).toEqual({ [SDK]: 'installed' });
+        expect(run('RestoreFoundrySdk', { settled: false })).toBe(0);
+        expect(state()).toEqual({ [SDK]: 'installed' });
+      } finally {
+        await release();
+      }
+    }, 30_000);
+
     it('does nothing on a first install', () => {
       expect(run('MoveFoundrySdk')).toBe(0);
       expect(state()).toEqual({});
