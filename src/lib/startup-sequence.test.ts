@@ -240,12 +240,14 @@ describe('prepareHydratedRuntime', () => {
     const importEnd = source.indexOf('function byomTemplateDirty()', importStart);
     const templateStart = source.indexOf('async function saveTemplateEdit()');
     const templateEnd = source.indexOf('// Persistence for chat history', templateStart);
+    const deleteHandlerStart = source.indexOf('function handleDeleteResult(');
     const variantDeleteStart = source.indexOf('async function deleteVariant(');
     const variantDeleteEnd = source.indexOf('function accelBadgeInfo(', variantDeleteStart);
     const modelDeleteStart = source.indexOf('async function deleteCachedModel(');
     const modelDeleteEnd = source.indexOf('async function sendMessage(', modelDeleteStart);
     const importFlow = source.slice(importStart, importEnd);
     const templateFlow = source.slice(templateStart, templateEnd);
+    const deleteHandler = source.slice(deleteHandlerStart, variantDeleteStart);
     const variantDeleteFlow = source.slice(variantDeleteStart, variantDeleteEnd);
     const modelDeleteFlow = source.slice(modelDeleteStart, modelDeleteEnd);
 
@@ -253,10 +255,10 @@ describe('prepareHydratedRuntime', () => {
     expect(importFlow).toMatch(/Restart Flint[\s\S]*?appendAppLog\(statusMessage, "warn"\)/);
     expect(templateFlow).toContain('result.catalogRefreshRequiresRestart');
     expect(templateFlow).toMatch(/Restart Flint[\s\S]*?appendAppLog\(statusMessage, "warn"\)/);
-    expect(variantDeleteFlow).toContain('result.catalogRefreshRequiresRestart');
-    expect(variantDeleteFlow).toMatch(/Restart Flint[\s\S]*?appendAppLog\(statusMessage, "warn"\)/);
-    expect(modelDeleteFlow).toContain('result.catalogRefreshRequiresRestart');
-    expect(modelDeleteFlow).toMatch(/Restart Flint[\s\S]*?appendAppLog\(statusMessage, "warn"\)/);
+    expect(deleteHandler).toContain('deleteResult?.catalogRefreshRequiresRestart');
+    expect(deleteHandler).toMatch(/Restart Flint[\s\S]*?appendAppLog\(statusMessage, "warn"\)/);
+    expect(variantDeleteFlow).toContain('handleDeleteResult(result, deletedMessage)');
+    expect(modelDeleteFlow).toContain('handleDeleteResult(result, `${model.alias} deleted`)');
   });
 
   it('shows progress and quiet-period guidance for manual catalog refresh registration', () => {
