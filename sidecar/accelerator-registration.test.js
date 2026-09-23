@@ -181,6 +181,47 @@ describe('registerDiscoveredExecutionProviders', () => {
     expect(result.retry).toBeUndefined();
   });
 
+  it('preserves failed fallback providers that rediscovery does not return', async () => {
+    let discovered = [];
+    const manager = {
+      discoverEps: () => discovered,
+      downloadAndRegisterEps: vi.fn(async (names) => {
+        if (!Array.isArray(names)) {
+          discovered = [
+            { name: 'CPUExecutionProvider', isRegistered: true },
+            { name: 'WebGpuExecutionProvider', isRegistered: false },
+          ];
+          return {
+            success: false,
+            status: 'CUDA package unavailable',
+            registeredEps: [],
+            failedEps: ['CUDAExecutionProvider'],
+          };
+        }
+        const name = names[0];
+        discovered = discovered.map((provider) =>
+          provider.name === name ? { ...provider, isRegistered: true } : provider,
+        );
+        return { success: true, registeredEps: [name], failedEps: [] };
+      }),
+    };
+
+    const result = await registerDiscoveredExecutionProviders(manager, undefined, {
+      allowLegacyFallback: true,
+    });
+    expect(manager.downloadAndRegisterEps.mock.calls.map(([names]) => names)).toEqual([
+      undefined,
+      ['WebGpuExecutionProvider'],
+    ]);
+    expect(result).toMatchObject({
+      success: false,
+      registeredEps: ['CPUExecutionProvider', 'WebGpuExecutionProvider'],
+      failedEps: ['CUDAExecutionProvider'],
+      retry: true,
+    });
+    expect(result.status).toContain('CUDAExecutionProvider');
+  });
+
   it('does not take the one-provider fallback while discovery can be tried again', async () => {
     const manager = {
       discoverEps: () => [],
@@ -334,6 +375,19 @@ describe('native service startup', () => {
     expect(ensureModelFlow).toContain('manager.catalog.getModel(alias)');
     expect(source.indexOf('ensureModel(payload.alias, payload.variantId, reportCatalogProgress)', load))
       .toBeGreaterThan(load);
+    const cleanup = source.indexOf('async function performRuntimeCleanup');
+    const cleanupEnd = source.indexOf('let runtimeShutdownPromise', cleanup);
+    const cleanupFlow = source.slice(cleanup, cleanupEnd);
+    const sweep = source.indexOf('async function runEvictionSweepLocked');
+    const sweepEnd = source.indexOf('/**\n * Reserve room for one load', sweep);
+    const sweepFlow = source.slice(sweep, sweepEnd);
+    expect(cleanup).toBeGreaterThan(-1);
+    expect(cleanupFlow).toContain('withSweepLock(');
+    expect(cleanupFlow).toContain('await unloadAliasLocked(alias)');
+    expect(cleanupFlow).not.toContain('await unloadAlias(alias)');
+    expect(sweep).toBeGreaterThan(-1);
+    expect(sweepFlow).toContain('await unloadAliasLocked(item.alias)');
+    expect(sweepFlow).not.toContain('await unloadAlias(item.alias)');
     for (const cmd of ['importModelFolder', 'linkModelFolder', 'setModelTemplate']) {
       const at = source.indexOf(`} else if (cmd === '${cmd}') {`);
       const atomicMutation = source.indexOf('runCatalogMutation(', at);

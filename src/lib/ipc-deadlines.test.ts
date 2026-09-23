@@ -26,7 +26,8 @@ describe('IPC command deadlines', () => {
     expect(deadlineForCommand('startService')).toBeNull();
   });
 
-  it('leaves catalog-gated queries unbounded while accelerator registration is running', () => {
+  it('leaves provider/catalog-gated queries unbounded while accelerator registration is running', () => {
+    expect(deadlineForCommand('getEps')).toBeNull();
     expect(deadlineForCommand('listModels')).toBeNull();
     expect(deadlineForCommand('getVisionModels')).toBeNull();
     expect(deadlineForCommand('getSTTModels')).toBeNull();

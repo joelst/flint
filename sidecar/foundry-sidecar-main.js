@@ -671,6 +671,10 @@ function unloadAlias(alias) {
   return serializeModelOperation(alias, ['residency'], () => unloadAliasLocked(alias));
 }
 
+// Callers that already hold the sweep lock use unloadAliasLocked directly. Taking the
+// model-operation queue from inside the sweep lock can deadlock against an ensureModel
+// operation that already owns the queue and is waiting for that same sweep lock.
+
 /**
  * Stop admitting work, let already-admitted commands finish for a bounded period, then release
  * native resources only when doing so cannot race an operation that still owns a model.
@@ -711,7 +715,7 @@ async function performRuntimeCleanup (
     if (drained) {
       await withSweepLock(async () => {
         for (const alias of [...pool.keys()]) {
-          if (await unloadAlias(alias)) modelsUnloaded.push(alias);
+          if (await unloadAliasLocked(alias)) modelsUnloaded.push(alias);
           else unloadFailures.push(alias);
         }
       });
@@ -822,7 +826,7 @@ async function runEvictionSweepLocked (options = {}) {
     // Priorities can change mid-sweep too, and a model the user just pinned must survive
     // the plan that was drawn before the pin.
     if (normalizePriority(modelPriorities.get(item.alias)) === 'pinned') continue;
-    if (await unloadAlias(item.alias)) {
+    if (await unloadAliasLocked(item.alias)) {
       log('info', describeEviction(item, evictionConfig));
       audit('evict', { alias: item.alias, reason: item.reason });
       done.push(item);

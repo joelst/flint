@@ -37,6 +37,7 @@ export async function registerDiscoveredExecutionProviders(manager, onProgress, 
   if (typeof manager?.downloadAndRegisterEps !== 'function') return null;
 
   let usedLegacyFallback = false;
+  const fallbackFailures = new Map();
   const initial = discoveredProviders(manager);
   if (initial.length === 0) {
     // An empty list is not proof the machine has no GPU. Discovery can be empty
@@ -57,6 +58,10 @@ export async function registerDiscoveredExecutionProviders(manager, onProgress, 
     // gets an explicit registration.
     const fallback = await manager.downloadAndRegisterEps(onProgress);
     usedLegacyFallback = true;
+    for (const name of Array.isArray(fallback?.failedEps) ? fallback.failedEps : []) {
+      const normalized = String(name || '').trim();
+      if (normalized) fallbackFailures.set(normalized, 'legacy fallback did not confirm registration');
+    }
     if (!discoveredProviders(manager).some((provider) => providerName(provider))) {
       if (fallback?.success === false) {
         return markLegacyFallbackRetry(fallback);
@@ -97,6 +102,7 @@ export async function registerDiscoveredExecutionProviders(manager, onProgress, 
     if (provider.isRegistered) {
       registeredEps.push(name);
       failures.delete(name);
+      fallbackFailures.delete(name);
     } else {
       failedEps.push(name);
       if (!failures.has(name)) failures.set(name, 'runtime did not confirm registration');
@@ -106,6 +112,11 @@ export async function registerDiscoveredExecutionProviders(manager, onProgress, 
     if (seen.has(name)) continue;
     failedEps.push(name);
     if (!failures.has(name)) failures.set(name, 'runtime did not confirm registration');
+  }
+  for (const [name, message] of fallbackFailures) {
+    if (seen.has(name)) continue;
+    failedEps.push(name);
+    failures.set(name, message);
   }
 
   const success = failedEps.length === 0;
