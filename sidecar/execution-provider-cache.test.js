@@ -265,7 +265,10 @@ describe('rebuildBrokenExecutionProviders', () => {
   it('names a provider that is still unregistered after the retry', async () => {
     const calls = [];
     const outcome = await rebuildBrokenExecutionProviders({
-      discover: () => [{ name: 'CUDAExecutionProvider', isRegistered: false }],
+      discover: () => [
+        { name: 'WebGpuExecutionProvider', isRegistered: true },
+        { name: 'CUDAExecutionProvider', isRegistered: false },
+      ],
       removeCache: () => true,
       downloadAndRegister: async (names) => {
         calls.push(names);
@@ -275,6 +278,7 @@ describe('rebuildBrokenExecutionProviders', () => {
     expect(calls).toEqual([['CUDAExecutionProvider'], ['CUDAExecutionProvider']]);
     expect(outcome.result?.success).toBe(false);
     expect(outcome.result?.failedEps).toEqual(['CUDAExecutionProvider']);
+    expect(outcome.result?.registeredEps).toEqual(['WebGpuExecutionProvider']);
   });
 });
 
