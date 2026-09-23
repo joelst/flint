@@ -18,6 +18,22 @@ const CACHE_DIR = process.env.FLINT_FOUNDRY_CACHE_DIR
   || path.join(root, 'runtime', 'foundry-native-cache');
 const DEST_DIR = process.env.FLINT_FOUNDRY_DEST_DIR
   || path.join(root, 'node_modules', 'foundry-local-sdk', 'foundry-local-core');
+/** The SDK package: foundry-local-core's parent, where deps_versions.json lives. */
+const SDK_ROOT = path.dirname(DEST_DIR);
+
+const {
+  describeRuntimeProblem,
+  removeUnpinnedRuntimeFiles,
+  runtimeProblems,
+} = require('./foundry-runtime-pins.cjs');
+
+function platformKeysIn(dir) {
+  try {
+    return fs.readdirSync(dir).filter((name) => fs.statSync(path.join(dir, name)).isDirectory());
+  } catch {
+    return [];
+  }
+}
 
 function copyDir(from, to) {
   if (!fs.existsSync(from)) return false;
@@ -46,11 +62,25 @@ function restore() {
   fs.mkdirSync(DEST_DIR, { recursive: true });
   copyDir(CACHE_DIR, DEST_DIR);
   console.log(`[hydrate-foundry-native] restored cache into ${path.relative(root, DEST_DIR)}`);
+  // The SDK installer skips a package whose file name exists, so a runtime that is not the
+  // pinned build must go before it runs, or it ships.
+  for (const removed of removeUnpinnedRuntimeFiles(SDK_ROOT)) {
+    console.log(`[hydrate-foundry-native] removed cached runtime that is not the pinned build: ${path.relative(root, removed)}`);
+  }
 }
 
 function save() {
   if (!dirHasFiles(DEST_DIR)) {
     console.log('[hydrate-foundry-native] no native payload to cache');
+    return;
+  }
+  // A cache is reused by every later build with this key, so never save a runtime that is not
+  // the pinned build.
+  const problems = platformKeysIn(DEST_DIR).flatMap((platformKey) => runtimeProblems(SDK_ROOT, platformKey));
+  if (problems.length) {
+    for (const problem of problems) {
+      console.log(`[hydrate-foundry-native] not saving: ${problem.role} ${path.relative(root, problem.file)} is ${describeRuntimeProblem(problem)}`);
+    }
     return;
   }
   fs.mkdirSync(path.dirname(CACHE_DIR), { recursive: true });

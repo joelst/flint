@@ -13,6 +13,11 @@
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
+const {
+  describeRuntimeProblem,
+  removeUnpinnedRuntimeFiles,
+  runtimeProblems,
+} = require('./foundry-runtime-pins.cjs');
 
 const root = path.resolve(__dirname, '..');
 
@@ -213,14 +218,21 @@ if (!INSTALLABLE_PLATFORM_KEYS.has(platformKey)) {
   );
 }
 
-if (coreOk(corePath)) {
+// A present core is not enough: the SDK installer skips every package whose file name exists,
+// so an ONNX Runtime from another SDK can sit beside it and ship.
+const sdkRoot = path.join(root, 'node_modules', 'foundry-local-sdk');
+for (const removed of removeUnpinnedRuntimeFiles(sdkRoot)) {
+  log(`Removed runtime that is not the pinned build: ${path.relative(root, removed)}`);
+}
+
+if (coreOk(corePath) && runtimeProblems(sdkRoot, platformKey).length === 0) {
   const st = fs.statSync(corePath);
   log(`OK (${(st.size / (1024 * 1024)).toFixed(1)} MB): ${path.relative(root, corePath)}`);
   process.exit(0);
 }
 
-log(`Missing or too small: ${path.relative(root, corePath)}`);
-log('Native Foundry Local binaries are not present. Downloading via package install script...');
+if (!coreOk(corePath)) log(`Missing or too small: ${path.relative(root, corePath)}`);
+log('Native Foundry Local binaries are not all present. Downloading via package install script...');
 
 let ran = false;
 try {
@@ -241,6 +253,14 @@ if (!coreOk(corePath)) {
       '  Release installers will be broken without this file.\n' +
       '  Re-run npm install with scripts enabled, then npm run ensure:foundry.\n' +
       `  For cross-targets: ensure:foundry --target <triple> or FOUNDRY_PLATFORM_KEY=${platformKey}`
+  );
+}
+
+const stillWrong = runtimeProblems(sdkRoot, platformKey);
+if (stillWrong.length) {
+  fail(
+    'ONNX Runtime files are not the builds deps_versions.json pins:\n'
+      + stillWrong.map((problem) => `  ${problem.role} ${path.relative(root, problem.file)} is ${describeRuntimeProblem(problem)}`).join('\n')
   );
 }
 
