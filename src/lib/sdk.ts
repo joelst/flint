@@ -1492,8 +1492,10 @@ async function performInitializeSDK(config: Partial<any>): Promise<boolean> {
           undefined,
           config.bindAddress || undefined,
           // Automatic, not user-driven: it must both respect an earlier unestablished outcome
-          // and record its own, since the error is swallowed just below.
-          { convenience: true },
+          // and record its own, since the error is swallowed just below. The no-refresh policy
+          // must also carry through to this automatic start, or a disabled startup catalog
+          // check would still be violated by the service's own preflight catalog read.
+          { convenience: true, deferCatalogRead: !refreshCatalog },
         );
       } else {
         // Adopt whatever is actually running — including a service started before this init.
@@ -2575,6 +2577,25 @@ export interface CatalogMutationResult {
   [key: string]: unknown;
 }
 
+/**
+ * A mutation flagged `catalogRefreshRequiresRestart` already found the snapshot frozen (or
+ * unconfirmed) on the sidecar side. Retrying the read here would just fail again and, since
+ * that failure previously propagated, made a durable import/link/template write look like a
+ * failed command. Swallow only that expected re-read failure; an unflagged refresh failure is
+ * unrelated to the freeze and must still surface.
+ */
+async function refreshModelsAfterMutation(result: CatalogMutationResult | undefined): Promise<void> {
+  try {
+    await refreshModels();
+  } catch (e) {
+    if (result?.catalogRefreshRequiresRestart) {
+      console.warn('[sdk] Catalog refresh skipped after mutation pending restart', e);
+      return;
+    }
+    throw e;
+  }
+}
+
 export async function importModelFolder(options: {
   folderPath: string;
   name: string;
@@ -2583,8 +2604,9 @@ export async function importModelFolder(options: {
   promptTemplate?: PromptTemplate;
 }): Promise<CatalogMutationResult> {
   const res = await send('importModelFolder', options);
-  await refreshModels();
-  return res.result as CatalogMutationResult;
+  const result = res.result as CatalogMutationResult;
+  await refreshModelsAfterMutation(result);
+  return result;
 }
 
 export async function linkModelFolder(options: {
@@ -2593,8 +2615,9 @@ export async function linkModelFolder(options: {
   publisher?: string;
 }): Promise<CatalogMutationResult> {
   const res = await send('linkModelFolder', options);
-  await refreshModels();
-  return res.result as CatalogMutationResult;
+  const result = res.result as CatalogMutationResult;
+  await refreshModelsAfterMutation(result);
+  return result;
 }
 
 export interface ModelTemplateResult {
@@ -2616,8 +2639,9 @@ export async function setModelTemplate(
   promptTemplate: PromptTemplate,
 ): Promise<CatalogMutationResult> {
   const res = await send('setModelTemplate', { name, promptTemplate });
-  await refreshModels();
-  return res.result as CatalogMutationResult;
+  const result = res.result as CatalogMutationResult;
+  await refreshModelsAfterMutation(result);
+  return result;
 }
 
 export function appendAppLog(message: string, level: LogEntry['level'] = 'info') {

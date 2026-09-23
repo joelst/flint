@@ -1709,6 +1709,35 @@ describe('initialization readiness recovery', () => {
     expect(sdkSnapshot(sdk).catalogStatus).toBe('not-checked');
   }, 15000);
 
+  it('defers the catalog read for an automatic startup service start with refresh disabled', async () => {
+    const sdk = await loadSdk();
+    const initialized = sdk.initializeSDK({
+      autoStartService: true,
+      refreshCatalog: false,
+    });
+
+    const initId = await waitForWrite('init');
+    harness.emitStdout({ id: initId, result: 'initialized' });
+    const logId = await waitForWrite('setLogLevel');
+    harness.emitStdout({ id: logId, result: {} });
+    const readinessStatusId = await waitForWrite('getStatus');
+    harness.emitStdout({
+      id: readinessStatusId,
+      result: { serviceRunning: false, endpoint: null },
+    });
+    const startId = await waitForWrite('startService');
+    const startRequest = harness.writes
+      .map((line) => JSON.parse(line))
+      .find((request) => request.id === startId);
+    expect(startRequest).toMatchObject({
+      cmd: 'startService',
+      deferCatalogRead: true,
+    });
+    harness.emitStdout({ id: startId, endpoint: 'http://127.0.0.1:5272' });
+
+    await expect(initialized).resolves.toBe(true);
+  }, 15000);
+
   it('preserves an explicit disabled policy when a later initialization omits the option', async () => {
     const sdk = await loadSdk();
     sdk.setAutomaticCatalogRefreshEnabled(false);
@@ -2225,4 +2254,38 @@ describe('cancellation from inside onAssignedId', () => {
     harness.emitStdout({ id: stopId, result: {} });
     await stop;
   });
+});
+
+describe('catalog mutation results', () => {
+  it('preserves a restart-flagged mutation result when the post-mutation refresh fails', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const imported = sdk.importModelFolder({ folderPath: '/models/foo', name: 'foo' });
+    const importId = await waitForWrite('importModelFolder');
+    harness.emitStdout({
+      id: importId,
+      result: { catalogRefreshRequiresRestart: true, name: 'foo' },
+    });
+    const listId = await waitForWrite('listModels', 1);
+    harness.emitStdout({ id: listId, error: 'catalog frozen until restart' });
+
+    await expect(imported).resolves.toEqual({
+      catalogRefreshRequiresRestart: true,
+      name: 'foo',
+    });
+  }, 15000);
+
+  it('still rejects when an unflagged mutation result is followed by a failed refresh', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const imported = sdk.importModelFolder({ folderPath: '/models/foo', name: 'foo' });
+    const importId = await waitForWrite('importModelFolder');
+    harness.emitStdout({ id: importId, result: { name: 'foo' } });
+    const listId = await waitForWrite('listModels', 1);
+    harness.emitStdout({ id: listId, error: 'catalog unavailable' });
+
+    await expect(imported).rejects.toThrow('catalog unavailable');
+  }, 15000);
 });
