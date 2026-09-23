@@ -202,6 +202,8 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
   /** @type {Set<Promise<unknown>>} */
   const activeReads = new Set();
   /** @type {Set<Promise<unknown>>} */
+  const activeProviderReads = new Set();
+  /** @type {Set<Promise<unknown>>} */
   const activeTelemetryReads = new Set();
 
   // `report` is the caller that queued this cycle. A later Settings click must not
@@ -262,9 +264,11 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
     // confirmation flag becomes observable.
     const priorMutations = mutationBarrier;
     const priorWrites = postCommitWriteBarrier;
+    const priorProviderReads = [...activeProviderReads];
     const run = Promise.all([
       priorMutations,
       priorWrites,
+      Promise.allSettled(priorProviderReads),
     ]).then(() => task());
     return publishPostCommitWrite(run);
   }
@@ -290,6 +294,15 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
     void read.then(
       () => activeTelemetryReads.delete(read),
       () => activeTelemetryReads.delete(read),
+    );
+    return trackRead(read);
+  }
+
+  function trackProviderRead(read) {
+    activeProviderReads.add(read);
+    void read.then(
+      () => activeProviderReads.delete(read),
+      () => activeProviderReads.delete(read),
     );
     return trackRead(read);
   }
@@ -459,7 +472,7 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
       if (commitConfirmed) {
         // Model lookup can depend on the registered provider set, unlike reads
         // of the already-frozen public snapshot and loaded-model telemetry.
-        return trackRead(Promise.all([
+        return trackProviderRead(Promise.all([
           mutationBarrier,
           postCommitWriteBarrier,
         ]).then(() => operation()));
