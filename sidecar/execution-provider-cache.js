@@ -10,8 +10,11 @@
 // 1.2.4 returns { failedEps } for a partial failure. 2.0.1 throws, and a
 // successful return always has failedEps: [] with registeredEps equal to the
 // names that were requested. A call with no names registers one preferred
-// provider. Confirmation is a later discoverEps, and a retry passes the
-// failed names explicitly.
+// provider. A provider is one cache slug. Recheck remembers every slug that
+// was not registered at the start, and a later discoverEps is the only proof
+// that slug is registered. Deleting the directory, or Foundry omitting the
+// provider after that delete, is not success. Each native call names one
+// provider, because 2.0.1 fails the whole call when one provider fails.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -151,60 +154,75 @@ export function providersWithUnregisteredCache (epRoot, discovered) {
  */
 function brokenProviderNames (discovered, epRoot, extraNames = []) {
   const registered = registeredCacheSlugs(discovered);
-  const names = new Set();
+  const bySlug = new Map();
   const add = (name) => {
     const slug = providerCacheSlug(name);
-    if (!slug || registered.has(slug)) return;
-    names.add(name);
+    if (!slug || registered.has(slug) || bySlug.has(slug)) return;
+    bySlug.set(slug, name);
   };
   for (const ep of discovered ?? []) {
     if (ep && ep.isRegistered === false && ep.name) add(ep.name);
   }
   for (const name of providersWithUnregisteredCache(epRoot, discovered)) add(name);
   for (const name of extraNames) add(name);
-  return [...names];
+  return [...bySlug.values()];
 }
 
-function reportedFailures (result) {
-  const failed = Array.isArray(result?.failedEps) ? result.failedEps.filter(Boolean) : [];
-  if (failed.length > 0) return failed;
-  if (result?.success === false) return providerNamesInText(result?.status);
-  return [];
+/**
+ * Candidate names whose cache slug the latest discover does not show as
+ * registered. The first spelling wins, so two names for one directory stay
+ * one provider. Names discover no longer lists stay in the result.
+ * @param {string[]} candidates
+ * @param {Array<{ name?: string, isRegistered?: boolean }>|null|undefined} discovered
+ * @returns {string[]}
+ */
+function stillUnregistered (candidates, discovered) {
+  const registered = registeredCacheSlugs(discovered);
+  const bySlug = new Map();
+  for (const name of candidates) {
+    const slug = providerCacheSlug(name);
+    if (!slug || registered.has(slug) || bySlug.has(slug)) continue;
+    bySlug.set(slug, name);
+  }
+  return [...bySlug.values()];
 }
 
 /**
  * @param {{
- *   downloadAndRegister: (names: string[]|undefined, onProgress?: (name: string, pct: number) => void) => Promise<{ success?: boolean, failedEps?: string[], status?: string }|null|undefined>,
+ *   downloadAndRegister: (names: string[], onProgress?: (name: string, pct: number) => void) => Promise<{ success?: boolean, failedEps?: string[], status?: string }|null|undefined>,
  *   onProgress?: (name: string, pct: number) => void,
  * }} deps
  * @param {string[]} names
  */
 async function registerProviders (deps, names) {
+  if (!names.length) return { success: true, failedEps: [], status: '' };
   try {
-    const result = await deps.downloadAndRegister(names.length ? names : undefined, deps.onProgress);
-    return result ?? { success: false, failedEps: [], status: '' };
+    const result = await deps.downloadAndRegister(names, deps.onProgress);
+    return result ?? { success: false, failedEps: [...names], status: '' };
   } catch (error) {
     const status = error?.message || String(error);
-    return { success: false, failedEps: providerNamesInText(status), status };
+    return { success: false, failedEps: [...names], status };
   }
 }
 
 /**
  * Replace providers that are not registered. A provider discover marks
  * registered is left alone, including when a status string mentions it as
- * available. A cache Windows will not delete is left out of the registration
- * batch, because Foundry 2.0.1 fails the whole batch when one provider fails.
+ * available. Status text is not a list of providers to delete.
  *
- * The SDK result is not proof. 1.2.4 can list available providers in the same
- * sentence as the failure, and 2.0.1 throws or returns the names that were
- * requested. After the attempt, discoverEps is the result. Nothing is sent to
- * Foundry when discover and the cache agree that every provider is ready.
- * Registration always names the providers; the no-name call registers one
- * preferred provider on 2.0.1.
+ * Each provider is registered by itself. Foundry 2.0.1 fails the whole call
+ * when one name fails, so a locked or broken provider must not share a call
+ * with the others. A cache Windows will not delete stays out of that call.
+ *
+ * The SDK result is not proof. The names that were broken, attempted, or
+ * busy stay failed until a later discoverEps shows that cache slug
+ * registered. Nothing is sent to Foundry when discover and the cache agree
+ * that every provider is ready. Registration always names the provider; the
+ * no-name call registers one preferred provider on 2.0.1.
  *
  * @param {{
  *   discover: () => Array<{ name?: string, isRegistered?: boolean }>|null|undefined,
- *   downloadAndRegister: (names: string[]|undefined, onProgress?: (name: string, pct: number) => void) => Promise<{ success?: boolean, failedEps?: string[], status?: string }|null|undefined>,
+ *   downloadAndRegister: (names: string[], onProgress?: (name: string, pct: number) => void) => Promise<{ success?: boolean, failedEps?: string[], status?: string }|null|undefined>,
  *   removeCache: (name: string) => true|false|'busy'|Promise<true|false|'busy'>,
  *   onProgress?: (name: string, pct: number) => void,
  *   epRoot?: string|null,
@@ -214,6 +232,9 @@ export async function rebuildBrokenExecutionProviders (deps) {
   const removed = [];
   const attempted = [];
   const busy = [];
+  const registeredNames = (discovered) => (discovered ?? [])
+    .filter((ep) => ep?.isRegistered && ep.name)
+    .map((ep) => ep.name);
   const classify = async (name) => {
     let outcome;
     try {
@@ -237,16 +258,20 @@ export async function rebuildBrokenExecutionProviders (deps) {
       if (name && !attempted.includes(name)) attempted.push(name);
     }
   };
-  const registrable = async (names) => {
-    const ready = [];
+  let sdkResult = { success: true, failedEps: [], status: '' };
+  const registerEach = async (names) => {
     for (const name of names) {
       if (busy.includes(name)) continue;
-      if (await classify(name) !== 'busy') ready.push(name);
+      const outcome = await classify(name);
+      if (outcome === 'busy') continue;
+      const result = await registerProviders(deps, [name]);
+      rememberAttempt([name]);
+      if (result?.success === false || sdkResult.success !== false) sdkResult = result;
     }
-    return ready;
   };
 
-  const broken = brokenProviderNames(deps.discover() ?? [], deps.epRoot);
+  const initial = deps.discover() ?? [];
+  const broken = brokenProviderNames(initial, deps.epRoot);
   if (broken.length === 0) {
     return {
       removed,
@@ -255,36 +280,22 @@ export async function rebuildBrokenExecutionProviders (deps) {
       result: {
         success: true,
         failedEps: [],
-        registeredEps: (deps.discover() ?? [])
-          .filter((ep) => ep?.isRegistered && ep.name)
-          .map((ep) => ep.name),
+        registeredEps: registeredNames(initial),
         status: 'No broken providers',
       },
     };
   }
 
-  const first = await registrable(broken);
-  let sdkResult = first.length
-    ? await registerProviders(deps, first)
-    : { success: true, failedEps: [], status: '' };
-  rememberAttempt(first);
-
-  const retryNames = brokenProviderNames(
-    deps.discover() ?? [],
-    deps.epRoot,
-    reportedFailures(sdkResult),
-  ).filter((name) => !busy.includes(name));
-  const retry = await registrable(retryNames);
-  if (retry.length) {
-    sdkResult = await registerProviders(deps, retry);
-    rememberAttempt(retry);
-  }
+  await registerEach(broken);
+  const retryNames = stillUnregistered([...broken, ...attempted], deps.discover() ?? [])
+    .filter((name) => !busy.includes(name));
+  await registerEach(retryNames);
 
   const final = deps.discover() ?? [];
-  const stillBroken = brokenProviderNames(final, deps.epRoot);
-  const registeredEps = final
-    .filter((ep) => ep?.isRegistered && ep.name)
-    .map((ep) => ep.name);
+  const stillBroken = stillUnregistered(
+    [...broken, ...attempted, ...busy, ...brokenProviderNames(final, deps.epRoot)],
+    final,
+  );
   return {
     removed,
     attempted,
@@ -292,7 +303,7 @@ export async function rebuildBrokenExecutionProviders (deps) {
     result: {
       success: stillBroken.length === 0,
       failedEps: stillBroken,
-      registeredEps,
+      registeredEps: registeredNames(final),
       status: stillBroken.length
         ? (sdkResult?.status || 'Provider still not registered')
         : (sdkResult?.status || 'No broken providers'),
