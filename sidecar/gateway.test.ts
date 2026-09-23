@@ -972,6 +972,41 @@ describe('gateway activity hook', () => {
     expect(events).toEqual([]);
   });
 
+  it('rejects a request whose lease the owner refuses', async () => {
+    const events = [];
+    upstream.state.loaded.add('phi-4-mini');
+    gateway = await startGateway({
+      onActivity: (model, phase) => { events.push([model, phase]); return phase === 'start' ? false : undefined; },
+    });
+
+    const res = await post(gateway.publicPort, 'phi-4-mini');
+
+    expect(res.status).toBe(503);
+    // No end for a start that was refused, and nothing reached the service.
+    expect(events).toEqual([['phi-4-mini', 'start']]);
+    expect(upstream.state.hits.filter(h => h.url === '/v1/chat/completions')).toEqual([]);
+  });
+
+  it('rejects a refused multipart speech lease without forwarding the upload', async () => {
+    const events = [];
+    const boundary = 'flint-refused-boundary';
+    gateway = await startGateway({
+      onActivity: (model, phase) => { events.push([model, phase]); return phase === 'start' ? false : undefined; },
+    });
+
+    const res = await request(gateway.publicPort, '/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+      body: `--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-tiny:1\r\n`
+        + `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="ping.wav"\r\n`
+        + `Content-Type: audio/wav\r\n\r\nRIFF\r\n--${boundary}--\r\n`,
+    });
+
+    expect(res.status).toBe(503);
+    expect(events).toEqual([['whisper-tiny:1', 'start']]);
+    expect(upstream.state.hits.filter(h => h.url === '/v1/audio/transcriptions')).toEqual([]);
+  });
+
   it('leases a multipart speech request whose leading field names a model', async () => {
     const events = [];
     const boundary = 'flint-test-boundary';

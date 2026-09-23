@@ -93,7 +93,9 @@ function extractLeadingMultipartModel (body, boundary) {
  * @param {(model: string, phase: 'start'|'end', booking?: unknown) => unknown} [options.onActivity]
  *        called around every request that names a model, so the owner can keep a model
  *        alive while it is being served and record when it was last used. The value returned
- *        for start is supplied to its matching end call.
+ *        for start is supplied to its matching end call; returning exactly `false` refuses the
+ *        lease (the model is being unloaded), which rejects the request with 503 and books
+ *        no matching end.
  * @param {(entry: object) => void} [options.onAccess]
  *        metadata-only access log (no bodies, no headers) after each request finishes
  * @param {() => (() => void)|null} [options.admitRequest]
@@ -238,6 +240,7 @@ export function createGateway (options) {
     const requested = buffered === null ? req[multipartModel] ?? null : extractModelName(buffered);
     let activeModel = requested;
     let activeBooking;
+    let booked = false;
     try {
       if (!requested) return await route(req, res, buffered, requested);
 
@@ -246,15 +249,31 @@ export function createGateway (options) {
       // model generating a long completion apart from one sitting idle — and unloading the
       // former would kill a live request.
       activeBooking = notifyActivity(requested, 'start');
+      // An explicit `false` is the owner refusing the lease because that model is being
+      // unloaded. Forwarding anyway would race the teardown, and the unleased request would
+      // later decrement an in-flight count it never took.
+      if (activeBooking === false) {
+        res.writeHead(503, { 'content-type': 'application/json', connection: 'close' });
+        res.end(openAiError(
+          `Model ${requested} is unloading and is not accepting new requests.`,
+          'server_error',
+        ));
+        req.resume();
+        return;
+      }
+      booked = true;
       try {
         return await route(req, res, buffered, requested, (model) => {
           if (!model || model === activeModel) return;
-          notifyActivity(activeModel, 'end', activeBooking);
+          if (booked) notifyActivity(activeModel, 'end', activeBooking);
           activeModel = model;
           activeBooking = notifyActivity(activeModel, 'start');
+          // A refusal here arrives after the request is already under way; the honest
+          // response is to hold no lease rather than to end one that was never taken.
+          booked = activeBooking !== false;
         });
       } finally {
-        notifyActivity(activeModel, 'end', activeBooking);
+        if (booked) notifyActivity(activeModel, 'end', activeBooking);
       }
     } finally {
       const completedAt = Date.now();
