@@ -232,29 +232,14 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
   }
 
   function trackRead(read) {
+    // Add at dispatch time, not when the operation starts, so a later mutation
+    // snapshots every read that was requested before it.
     activeReads.add(read);
     void read.then(
       () => activeReads.delete(read),
       () => activeReads.delete(read),
     );
     return read;
-  }
-
-  function runTrackedReadAfter(waitFor, operation) {
-    let read;
-    read = waitFor.then(() => {
-      activeReads.add(read);
-      return operation();
-    });
-    void read.then(
-      () => activeReads.delete(read),
-      () => activeReads.delete(read),
-    );
-    return read;
-  }
-
-  function runTrackedReadNow(operation) {
-    return trackRead(Promise.resolve().then(() => operation()));
   }
 
   function preserveRegisteredProviders(previous, current) {
@@ -381,16 +366,17 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
       }
       // Confirmed reads run concurrently, but remain ordered against local mutations.
       if (commitConfirmed) {
-        return runTrackedReadAfter(tail, operation);
+        return trackRead(tail.then(() => operation()));
       }
       const report = typeof onProgress === 'function' ? onProgress : null;
-      return enqueue(async () => {
+      const queued = enqueue(async () => {
         await ensureSettled(report);
         if (commitConfirmed) return { runOutsideQueue: true };
         return { runOutsideQueue: false, result: await commitOperation(operation) };
-      }).then((outcome) => (
-        outcome.runOutsideQueue ? runTrackedReadNow(operation) : outcome.result
-      ));
+      });
+      return trackRead(queued.then((outcome) => (
+        outcome.runOutsideQueue ? operation() : outcome.result
+      )));
     },
     isCommitConfirmed() {
       return commitConfirmed;
@@ -400,9 +386,9 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
         return Promise.reject(new TypeError('mutateAndCommit requires an onCommitError handler'));
       }
       const report = typeof onProgress === 'function' ? onProgress : null;
+      const readsBeforeMutation = [...activeReads];
       return enqueue(async () => {
         await ensureSettled(report);
-        const readsBeforeMutation = [...activeReads];
         await Promise.allSettled(readsBeforeMutation);
         let catalogRefreshRequiresRestart = committed;
         const result = await operation();
