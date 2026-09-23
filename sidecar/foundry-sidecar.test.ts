@@ -1421,8 +1421,13 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
   }, 20000);
 
   it('clears the fence and reports failure when in-flight gateway work does not drain in time, without leaving the endpoint blocked', async () => {
+    let resolveStuckRequestReceived: (() => void) | null = null;
+    const stuckRequestReceived = new Promise<void>((resolve) => {
+      resolveStuckRequestReceived = resolve;
+    });
     const upstream = createServer((req, res) => {
       if (req.headers['x-test-stuck']) {
+        resolveStuckRequestReceived?.();
         // Never respond: simulates a stuck/never-completing gateway request so the (short,
         // test-overridden) drain deadline is guaranteed to be reached.
         return;
@@ -1447,7 +1452,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       // A rejection here (e.g. from the socket being destroyed during cleanup) is expected and
       // is not what this test asserts on — only the sidecar's own behavior is under test.
       stuck.catch(() => {});
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      await stuckRequestReceived;
 
       proc.stdin.write(`${JSON.stringify({ id: 30, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
       const failed = await waitForLine(proc, (msg) => msg.id === 30, 5000);
