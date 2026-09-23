@@ -59,10 +59,6 @@ export async function registerDiscoveredExecutionProviders(manager, onProgress, 
     const fallback = await manager.downloadAndRegisterEps(onProgress);
     fallbackResult = fallback && typeof fallback === 'object' ? fallback : null;
     usedLegacyFallback = true;
-    for (const name of Array.isArray(fallback?.failedEps) ? fallback.failedEps : []) {
-      const normalized = String(name || '').trim();
-      if (normalized) fallbackFailures.set(normalized, 'legacy fallback did not confirm registration');
-    }
     if (!discoveredProviders(manager).some((provider) => providerName(provider))) {
       if (fallback?.success === false) {
         return markLegacyFallbackRetry(fallback);

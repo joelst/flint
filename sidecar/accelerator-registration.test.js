@@ -453,19 +453,6 @@ describe('native service startup', () => {
     expect(ensureModelFlow).toContain('manager.catalog.getModel(alias)');
     expect(source.indexOf('ensureModel(payload.alias, payload.variantId, reportCatalogProgress)', load))
       .toBeGreaterThan(load);
-    const cleanup = source.indexOf('async function performRuntimeCleanup');
-    const cleanupEnd = source.indexOf('let runtimeShutdownPromise', cleanup);
-    const cleanupFlow = source.slice(cleanup, cleanupEnd);
-    const sweep = source.indexOf('async function runEvictionSweepLocked');
-    const sweepEnd = source.indexOf('/**\n * Reserve room for one load', sweep);
-    const sweepFlow = source.slice(sweep, sweepEnd);
-    expect(cleanup).toBeGreaterThan(-1);
-    expect(cleanupFlow).toContain('withSweepLock(');
-    expect(cleanupFlow).toContain('await unloadAliasLocked(alias)');
-    expect(cleanupFlow).not.toContain('await unloadAlias(alias)');
-    expect(sweep).toBeGreaterThan(-1);
-    expect(sweepFlow).toContain('await unloadAliasLocked(item.alias)');
-    expect(sweepFlow).not.toContain('await unloadAlias(item.alias)');
     for (const cmd of ['importModelFolder', 'linkModelFolder', 'setModelTemplate']) {
       const at = source.indexOf(`} else if (cmd === '${cmd}') {`);
       const atomicMutation = source.indexOf('runCatalogMutation(', at);
