@@ -38,7 +38,6 @@ export interface FlintVerifiedAlias {
   chat: boolean;
   stream: boolean;
   usage: boolean;
-  disconnect: boolean;
   embeddings: boolean;
   speech: boolean;
   tools: 'verified' | 'not-verified';
@@ -113,7 +112,6 @@ export function flintVerifiedFromReport(report: SelfTestReport): FlintVerified |
     chat: passedFor(report, 'chat', modelId),
     stream: passedFor(report, 'stream', modelId),
     usage: passedFor(report, 'usage', modelId),
-    disconnect: passed(report, 'disconnect'),
     embeddings: passedFor(report, 'embeddings', modelId),
     speech: passedFor(report, 'speech', modelId),
     tools: toolsLabel(report, modelId),

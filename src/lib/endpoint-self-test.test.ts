@@ -134,7 +134,7 @@ describe('runEndpointSelfTest', () => {
     expect(report.checks.at(-1)).not.toHaveProperty('modelId');
     const verified = flintVerifiedFromReport(report);
     expect(verified?.disconnect).toBe(true);
-    expect(verified?.aliases.every((alias) => alias.disconnect)).toBe(true);
+    expect(verified?.aliases.every((alias) => 'disconnect' in alias)).toBe(false);
     expect(progress.at(-1)).toEqual({
       modelId: 'model',
       index: progress.length - 1,
