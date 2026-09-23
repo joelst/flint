@@ -240,7 +240,7 @@ export async function rebuildBrokenExecutionProviders (deps) {
       return 'busy';
     }
     if (outcome) {
-      removed.push(name);
+      if (!removed.includes(name)) removed.push(name);
       return 'removed';
     }
     return 'missing';
