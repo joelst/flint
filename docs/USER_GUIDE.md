@@ -86,7 +86,7 @@ The sidebar is grouped by workflow:
 
 ### Diagnostics self-test
 
-**Diagnostics → Test local endpoint** checks the local gateway's envelope, then runs a chat round-trip, streaming `[DONE]` termination, `usage`, and tool-call behavior for every listed chat id and parent alias. It runs the disconnect check last, after the switchable chat builds, because aborting the client stream does not prove that native generation has stopped. Each listed embedding id gets an embeddings check, and each listed speech id gets a transcription check. Speech checks prepare the model first and submit its loaded variant because multipart transcription requests cannot be gateway-replayed. The embeddings check is blocked when no embedding-capable model is cached — a blocked check is not evidence embeddings work end to end (see BYOM above).
+**Diagnostics → Test local endpoint** checks the local gateway's envelope, then runs a chat round-trip, streaming `[DONE]` termination, `usage`, and tool-call behavior for every listed chat id and parent alias. Each listed embedding id gets an embeddings check, and each listed speech id gets a transcription check. The disconnect check runs after every other model probe because aborting the client stream does not prove that native generation has stopped. Speech checks prepare the model first and submit its loaded variant because multipart transcription requests cannot be gateway-replayed. The embeddings check is blocked when no embedding-capable model is cached — a blocked check is not evidence embeddings work end to end (see BYOM above).
 
 ### Tray and quitting
 

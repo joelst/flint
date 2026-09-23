@@ -84,14 +84,23 @@ describe('runEndpointSelfTest', () => {
     });
   });
 
-  it('runs the disconnect probe only after every switchable chat target', async () => {
+  it('runs the disconnect probe only after every other endpoint probe', async () => {
     const requests: Array<{ model: string; disconnect: boolean }> = [];
+    const progress: Array<{ modelId: string; index: number; total: number }> = [];
     const fetchMock: typeof fetch = async (input, init) => {
       if (String(input).endsWith('/models')) {
         return jsonResponse(200, { data: [
           { id: 'model-generic-cpu', parent: 'model' },
           { id: 'model-generic-cuda', parent: 'model' },
+          { id: 'whisper-tiny-generic-cpu' },
         ] });
+      }
+      if (init?.body instanceof FormData) {
+        requests.push({
+          model: String(init.body.get('model')),
+          disconnect: false,
+        });
+        return jsonResponse(200, { text: 'test audio' });
       }
       const body = JSON.parse(String(init?.body || '{}'));
       requests.push({
@@ -111,17 +120,26 @@ describe('runEndpointSelfTest', () => {
     const report = await runEndpointSelfTest({
       fetch: fetchMock,
       endpoint: 'http://127.0.0.1:5272/v1',
-      catalogSupportsToolCalling: false,
+      catalogSupportsToolCalling: true,
+      prepareSpeechModel: async (modelId) => modelId,
+      onProgress: (event) => progress.push(event),
     });
 
     expect(report.modelIds).toEqual(['model-generic-cpu', 'model-generic-cuda', 'model']);
     expect(requests.filter((request) => request.disconnect).map((request) => request.model))
       .toEqual(['model']);
     const disconnectIndex = requests.findIndex((request) => request.disconnect);
-    expect(disconnectIndex).toBeGreaterThan(
-      requests.map((request) => request.model).lastIndexOf('model-generic-cuda'),
-    );
-    expect(requests.slice(disconnectIndex).every((request) => request.model === 'model')).toBe(true);
+    expect(disconnectIndex).toBe(requests.length - 1);
+    expect(report.checks.at(-1)).toMatchObject({ id: 'disconnect' });
+    expect(report.checks.at(-1)).not.toHaveProperty('modelId');
+    const verified = flintVerifiedFromReport(report);
+    expect(verified?.disconnect).toBe(true);
+    expect(verified?.aliases.every((alias) => alias.disconnect)).toBe(true);
+    expect(progress.at(-1)).toEqual({
+      modelId: 'model',
+      index: progress.length - 1,
+      total: progress.length,
+    });
   });
 
   it('accepts usage from input_tokens fields and SSE data lines that are not JSON', async () => {

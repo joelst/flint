@@ -113,7 +113,7 @@ export function flintVerifiedFromReport(report: SelfTestReport): FlintVerified |
     chat: passedFor(report, 'chat', modelId),
     stream: passedFor(report, 'stream', modelId),
     usage: passedFor(report, 'usage', modelId),
-    disconnect: passedFor(report, 'disconnect', modelId),
+    disconnect: passed(report, 'disconnect'),
     embeddings: passedFor(report, 'embeddings', modelId),
     speech: passedFor(report, 'speech', modelId),
     tools: toolsLabel(report, modelId),
@@ -125,7 +125,7 @@ export function flintVerifiedFromReport(report: SelfTestReport): FlintVerified |
     chat: report.modelId ? passedFor(report, 'chat', report.modelId) : passed(report, 'chat'),
     stream: report.modelId ? passedFor(report, 'stream', report.modelId) : passed(report, 'stream'),
     usage: report.modelId ? passedFor(report, 'usage', report.modelId) : passed(report, 'usage'),
-    disconnect: report.modelId ? passedFor(report, 'disconnect', report.modelId) : passed(report, 'disconnect'),
+    disconnect: passed(report, 'disconnect'),
     embeddings: passed(report, 'embeddings'),
     tools: toolsLabel(report, report.modelId),
     aliases,
@@ -492,9 +492,7 @@ async function runChatChecks(
   endpoint: string,
   modelId: string,
   requestTimeoutMs: number,
-  disconnectStartMs: number,
   toolsDeclared: boolean | null,
-  runDisconnect: boolean,
 ): Promise<SelfTestCheck[]> {
   const checks: SelfTestCheck[] = [];
   let usageSeen = false;
@@ -581,90 +579,6 @@ async function runChatChecks(
     ));
   }
 
-  if (runDisconnect) {
-    try {
-    const abort = new AbortController();
-    const pending = fetchFn(joinUrl(endpoint, '/chat/completions'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: modelId,
-        messages: [{ role: 'user', content: 'Keep writing until stopped.' }],
-        stream: true,
-        max_tokens: 64,
-      }),
-      signal: abort.signal,
-    });
-    // Wait until headers (and a first body chunk, if any) so this is a disconnect of
-    // an in-flight stream, not a cancel of a request that never left the client.
-    const started = await Promise.race([
-      pending.then((res) => ({ kind: 'headers' as const, res })).catch((error) => ({ kind: 'error' as const, error })),
-      new Promise<{ kind: 'slow' }>((resolve) => {
-        setTimeout(() => resolve({ kind: 'slow' }), disconnectStartMs);
-      }),
-    ]);
-    if (started.kind !== 'headers') {
-      abort.abort();
-      checks.push(check(
-        'disconnect',
-        'Aborting a stream settles the caller',
-        'fail',
-        started.kind === 'error'
-          ? (started.error instanceof Error ? started.error.message : String(started.error))
-          : `Streaming response did not start within ${disconnectStartMs} ms; disconnect was not exercised.`,
-        modelId,
-      ));
-    } else {
-      const reader = started.res.body?.getReader() ?? null;
-      const pendingRead = reader
-        ? reader.read().then(() => 'read' as const, () => 'rejected' as const)
-        : null;
-      if (pendingRead) {
-        await Promise.race([
-          pendingRead,
-          new Promise<void>((resolve) => {
-            setTimeout(resolve, disconnectStartMs);
-          }),
-        ]);
-      }
-      abort.abort();
-      if (pendingRead) {
-        const settled = await Promise.race([
-          pendingRead.then(() => 'settled' as const),
-          new Promise<'timeout'>((resolve) => {
-            setTimeout(() => resolve('timeout'), ABORT_SETTLE_TIMEOUT_MS);
-          }),
-        ]);
-        checks.push(check(
-          'disconnect',
-          'Aborting a stream settles the caller',
-          settled === 'timeout' ? 'fail' : 'pass',
-          settled === 'timeout'
-            ? `Abort did not settle the stream body within ${ABORT_SETTLE_TIMEOUT_MS} ms.`
-            : 'Stream started and abort settled the body reader. Native generation may still finish.',
-          modelId,
-        ));
-      } else {
-        checks.push(check(
-          'disconnect',
-          'Aborting a stream settles the caller',
-          'pass',
-          'Stream started and abort was issued. Native generation may still finish.',
-          modelId,
-        ));
-      }
-    }
-    } catch (error) {
-      checks.push(check(
-        'disconnect',
-        'Aborting a stream settles the caller',
-        'fail',
-        error instanceof Error ? error.message : String(error),
-        modelId,
-      ));
-    }
-  }
-
   if (toolsDeclared === false) {
     checks.push(check(
       'tools',
@@ -734,6 +648,92 @@ async function runChatChecks(
   return checks;
 }
 
+async function runDisconnectCheck(
+  fetchFn: typeof fetch,
+  endpoint: string,
+  modelId: string,
+  requestStartMs: number,
+  disconnectStartMs: number,
+): Promise<SelfTestCheck> {
+  try {
+    const abort = new AbortController();
+    const pending = fetchFn(joinUrl(endpoint, '/chat/completions'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: modelId,
+        messages: [{ role: 'user', content: 'Keep writing until stopped.' }],
+        stream: true,
+        max_tokens: 64,
+      }),
+      signal: abort.signal,
+    });
+    // Wait until headers (and a first body chunk, if any) so this is a disconnect of
+    // an in-flight stream, not a cancel of a request that never left the client.
+    const started = await Promise.race([
+      pending.then((res) => ({ kind: 'headers' as const, res })).catch((error) => ({ kind: 'error' as const, error })),
+      new Promise<{ kind: 'slow' }>((resolve) => {
+        setTimeout(() => resolve({ kind: 'slow' }), requestStartMs);
+      }),
+    ]);
+    if (started.kind !== 'headers') {
+      abort.abort();
+      return check(
+        'disconnect',
+        'Aborting a stream settles the caller',
+        'fail',
+        started.kind === 'error'
+          ? (started.error instanceof Error ? started.error.message : String(started.error))
+          : `Streaming response did not start within ${requestStartMs} ms; disconnect was not exercised.`,
+      );
+    }
+
+    const reader = started.res.body?.getReader() ?? null;
+    const pendingRead = reader
+      ? reader.read().then(() => 'read' as const, () => 'rejected' as const)
+      : null;
+    if (pendingRead) {
+      await Promise.race([
+        pendingRead,
+        new Promise<void>((resolve) => {
+          setTimeout(resolve, disconnectStartMs);
+        }),
+      ]);
+    }
+    abort.abort();
+    if (!pendingRead) {
+      return check(
+        'disconnect',
+        'Aborting a stream settles the caller',
+        'pass',
+        'Stream started and abort was issued. Native generation may still finish.',
+      );
+    }
+
+    const settled = await Promise.race([
+      pendingRead.then(() => 'settled' as const),
+      new Promise<'timeout'>((resolve) => {
+        setTimeout(() => resolve('timeout'), ABORT_SETTLE_TIMEOUT_MS);
+      }),
+    ]);
+    return check(
+      'disconnect',
+      'Aborting a stream settles the caller',
+      settled === 'timeout' ? 'fail' : 'pass',
+      settled === 'timeout'
+        ? `Abort did not settle the stream body within ${ABORT_SETTLE_TIMEOUT_MS} ms.`
+        : 'Stream started and abort settled the body reader. Native generation may still finish.',
+    );
+  } catch (error) {
+    return check(
+      'disconnect',
+      'Aborting a stream settles the caller',
+      'fail',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
 export async function runEndpointSelfTest(options: {
   fetch: typeof fetch;
   endpoint: string | null;
@@ -758,6 +758,9 @@ export async function runEndpointSelfTest(options: {
   const requestedModel = options.modelId?.trim() || null;
   const requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
   const disconnectStartMs = options.disconnectStartMs ?? DISCONNECT_START_MS;
+  const disconnectRequestStartMs = options.disconnectStartMs == null
+    ? requestTimeoutMs
+    : disconnectStartMs;
 
   if (!endpoint) {
     return {
@@ -849,8 +852,9 @@ export async function runEndpointSelfTest(options: {
 
   let index = 0;
   const lastChatModelId = aliases.chat[aliases.chat.length - 1] ?? null;
+  const progressTotal = queue.length + (lastChatModelId ? 1 : 0);
   for (const target of queue) {
-    options.onProgress?.({ modelId: target.modelId, index, total: queue.length });
+    options.onProgress?.({ modelId: target.modelId, index, total: progressTotal });
     index += 1;
     if (target.kind === 'embed') {
       checks.push(...await runEmbeddingChecks(options.fetch, endpoint, target.modelId, requestTimeoutMs));
@@ -860,9 +864,7 @@ export async function runEndpointSelfTest(options: {
         endpoint,
         target.modelId,
         requestTimeoutMs,
-        disconnectStartMs,
         declaredToolCalling(target.modelId, options),
-        target.modelId === lastChatModelId,
       ));
     } else {
       checks.push(...await runSpeechChecks(
@@ -875,7 +877,18 @@ export async function runEndpointSelfTest(options: {
     }
   }
 
-  if (aliases.chat.length === 0) checks.push(...noChatModelChecks());
+  if (lastChatModelId) {
+    options.onProgress?.({ modelId: lastChatModelId, index, total: progressTotal });
+    checks.push(await runDisconnectCheck(
+      options.fetch,
+      endpoint,
+      lastChatModelId,
+      disconnectRequestStartMs,
+      disconnectStartMs,
+    ));
+  } else {
+    checks.push(...noChatModelChecks());
+  }
 
   return {
     ranAt,
