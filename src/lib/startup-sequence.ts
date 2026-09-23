@@ -83,8 +83,9 @@ export function resolveAcceleratorRestartGuidance(
   }
   if (!registration.catalogRefreshRequiresRestart) return '';
   if (registration.success === false) {
-    return `${registration.status || 'Some accelerators could not be registered'
-      } Restart Flint to let the model catalog detect any newly available variants.`;
+    const status = (registration.status || 'Some accelerators could not be registered').trim();
+    const punctuation = /[.!?]$/.test(status) ? '' : '.';
+    return `${status}${punctuation} Restart Flint to let the model catalog detect any newly available variants.`;
   }
   return 'Accelerator setup finished. Restart Flint to let the model catalog detect any newly available variants.';
 }

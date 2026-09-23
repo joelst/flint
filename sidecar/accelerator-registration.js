@@ -172,10 +172,13 @@ function terminalRegistrationResult(previous, error) {
  */
 export function createCatalogRegistrationGate(register, commitCatalog) {
   let settled = null;
+  let hasSettled = false;
   let committed = false;
   let commitConfirmed = false;
   /** @type {Promise<unknown>} */
   let tail = Promise.resolve();
+  /** @type {Set<Promise<unknown>>} */
+  const activeReads = new Set();
 
   // `report` is the caller that queued this cycle. A later Settings click must not
   // steal these events: the UI stall watchdog for the in-flight command only resets
@@ -191,7 +194,17 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
         );
         last = preserveRegisteredProviders(last, current);
       } catch (error) {
-        if (attempt === CATALOG_REGISTRATION_ATTEMPTS) return terminalRegistrationResult(last, error);
+        if (attempt === CATALOG_REGISTRATION_ATTEMPTS) {
+          try {
+            const finalRetry = await register(
+              (name, pct) => notify(name, pct),
+              { allowLegacyFallback: true },
+            );
+            return preserveRegisteredProviders(last, finalRetry);
+          } catch (retryError) {
+            return terminalRegistrationResult(last, retryError);
+          }
+        }
         continue;
       }
       if (!last?.retry) return last;
@@ -269,11 +282,24 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
     return merged;
   }
 
+  async function ensureSettled(report) {
+    if (!hasSettled) {
+      settled = await attempts(report);
+      hasSettled = true;
+    }
+    return settled;
+  }
+
   async function confirmCatalogCommit() {
     if (commitConfirmed || typeof commitCatalog !== 'function') return;
+    await commitOperation(commitCatalog);
+  }
+
+  async function commitOperation(operation) {
     try {
-      await commitCatalog();
+      const result = await operation();
       commitConfirmed = true;
+      return result;
     } finally {
       // A rejected native read does not establish whether the immutable
       // snapshot was taken. Treat any attempted read as committed for
@@ -287,8 +313,7 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
     ensure(onProgress) {
       const report = typeof onProgress === 'function' ? onProgress : null;
       return enqueue(async () => {
-        if (!settled) settled = await attempts(report);
-        return settled;
+        return ensureSettled(report);
       });
     },
     rerun(onProgress) {
@@ -305,6 +330,7 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
           };
         }
         settled = preserveRegisteredProviders(settled, await attempts(report));
+        hasSettled = true;
         if (
           catalogRefreshRequiresRestart &&
           settled &&
@@ -318,10 +344,33 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
     commit(onProgress) {
       const report = typeof onProgress === 'function' ? onProgress : null;
       return enqueue(async () => {
-        if (!settled) settled = await attempts(report);
+        await ensureSettled(report);
         await confirmCatalogCommit();
         return settled;
       });
+    },
+    read(operation, onProgress) {
+      if (typeof operation !== 'function') {
+        return Promise.reject(new TypeError('read requires a catalog operation'));
+      }
+      // Confirmed reads run concurrently, but remain ordered against local mutations.
+      if (commitConfirmed) {
+        const read = tail.then(() => operation());
+        activeReads.add(read);
+        void read.then(
+          () => activeReads.delete(read),
+          () => activeReads.delete(read),
+        );
+        return read;
+      }
+      const report = typeof onProgress === 'function' ? onProgress : null;
+      return enqueue(async () => {
+        await ensureSettled(report);
+        if (commitConfirmed) return { runOutsideQueue: true };
+        return { runOutsideQueue: false, result: await commitOperation(operation) };
+      }).then((outcome) => (
+        outcome.runOutsideQueue ? operation() : outcome.result
+      ));
     },
     isCommitConfirmed() {
       return commitConfirmed;
@@ -331,8 +380,10 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
         return Promise.reject(new TypeError('mutateAndCommit requires an onCommitError handler'));
       }
       const report = typeof onProgress === 'function' ? onProgress : null;
+      const readsBeforeMutation = [...activeReads];
       return enqueue(async () => {
-        if (!settled) settled = await attempts(report);
+        await ensureSettled(report);
+        await Promise.allSettled(readsBeforeMutation);
         let catalogRefreshRequiresRestart = committed;
         const result = await operation();
         try {
@@ -352,7 +403,7 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
     seal(onProgress) {
       const report = typeof onProgress === 'function' ? onProgress : null;
       return enqueue(async () => {
-        if (!settled) settled = await attempts(report);
+        await ensureSettled(report);
         // The native listener can perform the first read outside this process.
         // Close the provider boundary without contacting the registry. Until a
         // later JS read confirms the snapshot, rerun must defer rather than

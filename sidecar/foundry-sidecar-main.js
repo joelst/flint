@@ -24,7 +24,7 @@ import { selectChatTransport } from './chat-transport.js';
 import { assertWavBuffer } from './audio-format.js';
 import { createGateway } from './gateway.js';
 import { formatPublicEndpoint } from './gateway-http.js';
-import { buildModelIndex, resolveModelId } from './model-registry.js';
+import { buildCachedModelIndex, buildModelIndex, resolveModelId } from './model-registry.js';
 import { waitUntilIdle } from './monotonic-wait.js';
 import {
   createOperationAdmission,
@@ -437,6 +437,11 @@ function beforeCatalogRead(onProgress, options = {}) {
 function catalogReadConfirmed() {
   const gate = acceleratorGate();
   return !gate || gate.isCommitConfirmed();
+}
+
+function readCatalog(operation, onProgress) {
+  const gate = acceleratorGate();
+  return gate ? gate.read(operation, onProgress) : operation();
 }
 
 /** Settings “Install / Update Accelerators” uses the same command as startup.
@@ -926,6 +931,11 @@ function cacheModelIndexFromCatalog(models) {
   return modelIndex;
 }
 
+function cacheModelIndexFromCachedModels(models) {
+  modelIndex = buildCachedModelIndex(models);
+  return modelIndex;
+}
+
 async function resolveForGateway (requested) {
   if (!modelIndex) {
     if (!manager) return null;
@@ -935,7 +945,14 @@ async function resolveForGateway (requested) {
       cacheModelIndexFromCatalog(models);
     } catch (e) {
       log('warn', `Gateway could not read the catalog: ${e?.message ?? e}`);
-      return null;
+      try {
+        const cached = await readCatalog(() => manager.catalog.getCachedModels());
+        cacheModelIndexFromCachedModels(cached);
+        return resolveModelId(modelIndex, requested);
+      } catch (lookupError) {
+        log('warn', `Gateway could not resolve cached model ${requested}: ${lookupError?.message ?? lookupError}`);
+        return null;
+      }
     }
   }
   return resolveModelId(modelIndex, requested);
@@ -1952,10 +1969,17 @@ async function ensureModelLocked(alias, variantId, onCatalogProgress) {
     },
   } : null);
   try {
-    await beforeCatalogRead(onCatalogProgress, { commit: true });
-    const catModel = await manager.catalog.getModel(alias);
+    const { catModel, variant } = await readCatalog(
+      async () => {
+        const model = await manager.catalog.getModel(alias);
+        return {
+          catModel: model,
+          variant: variantId ? await manager.catalog.getModelVariant(variantId) : null,
+        };
+      },
+      onCatalogProgress,
+    );
     if (variantId) {
-      const variant = await manager.catalog.getModelVariant(variantId);
       const fileSizeMb = variant.info?.fileSizeMb;
       if (fileSizeMb && os.freemem() < fileSizeMb * 1024 * 1024 * 1.15) {
         log('warn', `Low memory: loading ${alias} (${fileSizeMb} MB) but only ${Math.round(os.freemem() / 1024 / 1024)} MB free`);

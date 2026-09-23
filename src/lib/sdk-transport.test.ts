@@ -1040,6 +1040,24 @@ describe('progress stall notices', () => {
     expect(onStall).toHaveBeenCalledTimes(2);
   });
 
+  it('uses a default quiet-period notice when download callers omit one', async () => {
+    const sdk = await loadSdk();
+    vi.useFakeTimers();
+
+    const download = capture(sdk.downloadModel({ alias: 'model-a' }));
+    await vi.advanceTimersByTimeAsync(0);
+    const downloadLine = harness.writes.find((line) => line.includes('"download"'))!;
+    const downloadId = JSON.parse(downloadLine).id;
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sdkSnapshot(sdk).logs.at(-1)?.message).toBe(
+      'No progress reported for 60 seconds while running download. Still awaiting the runtime; Flint has not cancelled this operation.',
+    );
+
+    harness.emitStdout({ id: downloadId, error: 'download failed' });
+    await download.tracked;
+  });
+
   it('retires accelerator stall notices when reset makes the outcome unknown', async () => {
     const sdk = await loadSdk();
     await completeInitialization(sdk);

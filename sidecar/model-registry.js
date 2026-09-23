@@ -68,6 +68,28 @@ export function buildModelIndex (models) {
   return index;
 }
 
+/**
+ * Build the same lookup from the SDK's cached-only inventory, whose rows are
+ * individual variants rather than aliases containing a variants array.
+ *
+ * @param {Array<{alias?: string, id?: string}>} models
+ * @returns {Map<string, { alias: string, variantId: string|null }>}
+ */
+export function buildCachedModelIndex (models) {
+  const normalized = [];
+  for (const model of Array.isArray(models) ? models : []) {
+    try {
+      normalized.push({
+        alias: model?.alias,
+        variants: [{ id: model?.id, cached: true }],
+      });
+    } catch {
+      // Native-backed SDK getters can fail independently; keep usable cached rows.
+    }
+  }
+  return buildModelIndex(normalized);
+}
+
 /** Compare the trailing `:<version>` of two variant ids. Missing sorts lowest. */
 function compareVersions (a, b) {
   const va = Number(String(a || '').match(/:(\d+)$/)?.[1] ?? -1);

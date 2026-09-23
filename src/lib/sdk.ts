@@ -1711,7 +1711,11 @@ export async function downloadModel(
   const payload: any = { alias: model.alias };
   if (variantId) payload.variantId = variantId;
   await sendInternal('download', payload, undefined, (id: number) => {
-    registerProgressHandler(id, onProgress, onStall);
+    registerProgressHandler(
+      id,
+      onProgress,
+      onStall ?? (() => reportRuntimeProgressStall('download')),
+    );
   });
   // Sidecar sends progress messages via stdout; onAssignedId registers the handler above.
   // The pending promise resolves only on the final reply (see stdout processing).

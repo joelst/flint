@@ -27,7 +27,25 @@ describe('resolveAcceleratorRestartGuidance', () => {
       failedEps: ['CUDAExecutionProvider'],
       catalogRefreshRequiresRestart: true,
     })).toBe(
-      'CUDA registration failed Restart Flint to let the model catalog detect any newly available variants.',
+      'CUDA registration failed. Restart Flint to let the model catalog detect any newly available variants.',
+    );
+    expect(resolveAcceleratorRestartGuidance({
+      success: false,
+      status: 'CUDA registration failed!',
+      registeredEps: [],
+      failedEps: ['CUDAExecutionProvider'],
+      catalogRefreshRequiresRestart: true,
+    })).toBe(
+      'CUDA registration failed! Restart Flint to let the model catalog detect any newly available variants.',
+    );
+    expect(resolveAcceleratorRestartGuidance({
+      success: false,
+      status: 'CUDA registration failed. ',
+      registeredEps: [],
+      failedEps: ['CUDAExecutionProvider'],
+      catalogRefreshRequiresRestart: true,
+    })).toBe(
+      'CUDA registration failed. Restart Flint to let the model catalog detect any newly available variants.',
     );
     expect(resolveAcceleratorRestartGuidance({
       success: true,

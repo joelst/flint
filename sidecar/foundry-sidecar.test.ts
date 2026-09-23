@@ -556,11 +556,30 @@ describe('foundry-sidecar protocol basics', () => {
     writeFileSync(corePath, '');
     writeFileSync(loaderPath, `
       const sdk = \`
+        class FakeModel {
+          constructor(alias, id) { this.alias = alias; this.id = id; this.loaded = false; }
+          async load() { this.loaded = true; }
+          isLoaded() { return this.loaded; }
+          getExecutionProvider() { return 'CPUExecutionProvider'; }
+          selectVariant(variant) { this.id = variant.id; }
+        }
         class FakeManager {
           constructor() {
             this.urls = [];
             this.catalog = {
               getModels: async () => { throw new Error('catalog unreachable'); },
+              getCachedModels: async () => [
+                new FakeModel('cached-model', 'cached-variant:1'),
+                new FakeModel('other-model', 'other-explicit:1'),
+              ],
+              getModel: async (alias) => {
+                if (alias !== 'cached-model' && alias !== 'other-model') throw new Error('model not cached');
+                return new FakeModel(alias, alias === 'cached-model' ? 'cached-variant:1' : 'other-default:1');
+              },
+              getModelVariant: async (id) => {
+                if (id !== 'other-explicit:1') throw new Error('variant not cached');
+                return new FakeModel('other-model', id);
+              },
             };
           }
           startWebService() { this.urls = ['http://127.0.0.1:${port}']; }
@@ -594,11 +613,17 @@ describe('foundry-sidecar protocol basics', () => {
       proc.stdin.write(`${JSON.stringify({ id: 70, cmd: 'init', appName: 'flint-test', logLevel: 'info' })}\n`);
       expect((await waitForLine(proc, (msg) => msg.id === 70)).ok).toBe(true);
       proc.stdin.write(`${JSON.stringify({
-        id: 71, cmd: 'startService', port: 0, bindAddress: '127.0.0.1',
+        id: 71, cmd: 'startService', port: 0, bindAddress: '127.0.0.1', alias: 'cached-model',
       })}\n`);
       const started = await waitForLine(proc, (msg) => msg.id === 71, 15000);
       expect(started.ok).toBe(true);
       expect(started.endpoint).toContain('127.0.0.1');
+      proc.stdin.write(`${JSON.stringify({
+        id: 72, cmd: 'load', alias: 'other-model', variantId: 'other-explicit:1',
+      })}\n`);
+      const loaded = await waitForLine(proc, (msg) => msg.id === 72, 15000);
+      expect(loaded.ok, JSON.stringify(loaded)).toBe(true);
+      expect(loaded.result?.variantId).toBe('other-explicit:1');
     } finally {
       if (!proc.killed) proc.kill();
       await new Promise<void>((resolve) => server.close(() => resolve()));

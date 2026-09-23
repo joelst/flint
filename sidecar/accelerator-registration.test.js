@@ -662,6 +662,31 @@ describe('createCatalogRegistrationGate', () => {
     ]);
   });
 
+  it('retries once when the delayed fallback throws', async () => {
+    const manager = {
+      discoverEps: vi.fn(() => []),
+      downloadAndRegisterEps: vi.fn()
+        .mockRejectedValueOnce(new Error('temporary fallback failure'))
+        .mockResolvedValueOnce({
+          success: true,
+          registeredEps: ['CUDAExecutionProvider'],
+          failedEps: [],
+        }),
+    };
+    const register = vi.fn((onProgress, options) => (
+      registerDiscoveredExecutionProviders(manager, onProgress, options)
+    ));
+    const gate = createCatalogRegistrationGate(register);
+
+    await expect(gate.ensure()).resolves.toEqual({
+      success: true,
+      registeredEps: ['CUDAExecutionProvider'],
+      failedEps: [],
+    });
+    expect(register).toHaveBeenCalledTimes(4);
+    expect(manager.downloadAndRegisterEps).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps a second failed fallback without retrying later readers', async () => {
     const manager = {
       discoverEps: vi.fn(() => []),
@@ -738,9 +763,9 @@ describe('createCatalogRegistrationGate', () => {
       registeredEps: ['CUDAExecutionProvider'],
       failedEps: ['WebGpuExecutionProvider'],
     });
-    expect(register).toHaveBeenCalledTimes(3);
+    expect(register).toHaveBeenCalledTimes(4);
     await gate.ensure();
-    expect(register).toHaveBeenCalledTimes(3);
+    expect(register).toHaveBeenCalledTimes(4);
   });
 
   it('does not make later catalog readers repeat a registration that only throws', async () => {
@@ -754,9 +779,22 @@ describe('createCatalogRegistrationGate', () => {
       registeredEps: [],
       failedEps: [],
     });
-    expect(register).toHaveBeenCalledTimes(3);
+    expect(register).toHaveBeenCalledTimes(4);
     await gate.ensure();
-    expect(register).toHaveBeenCalledTimes(3);
+    expect(register).toHaveBeenCalledTimes(4);
+  });
+
+  it('settles a falsy terminal registration result instead of reopening retries', async () => {
+    const register = vi.fn()
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce(null);
+    const gate = createCatalogRegistrationGate(register);
+
+    await expect(gate.ensure()).resolves.toBeNull();
+    await expect(gate.ensure()).resolves.toBeNull();
+    expect(register).toHaveBeenCalledTimes(4);
   });
 
   it('reports progress to the attempt that is running, not to a caller still waiting', async () => {
@@ -818,6 +856,130 @@ describe('createCatalogRegistrationGate', () => {
       registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
       catalogRefreshRequiresRestart: true,
     });
+  });
+
+  it('does not serialize catalog operations after the snapshot is confirmed', async () => {
+    const gate = createCatalogRegistrationGate(
+      vi.fn(async () => ({ success: true, registeredEps: [], failedEps: [] })),
+      vi.fn(async () => []),
+    );
+    await gate.commit();
+
+    const started = [];
+    let releaseFirst = () => {};
+    let releaseSecond = () => {};
+    const first = gate.read(async () => {
+      started.push('first');
+      await new Promise((resolve) => { releaseFirst = resolve; });
+      return 'first';
+    });
+    const second = gate.read(async () => {
+      started.push('second');
+      await new Promise((resolve) => { releaseSecond = resolve; });
+      return 'second';
+    });
+
+    await Promise.resolve();
+    expect(started).toEqual(['first', 'second']);
+    releaseFirst();
+    releaseSecond();
+    await expect(Promise.all([first, second])).resolves.toEqual(['first', 'second']);
+  });
+
+  it('serializes the first catalog operation behind registration and confirms it', async () => {
+    const events = [];
+    let releaseRegistration = () => {};
+    const gate = createCatalogRegistrationGate(
+      vi.fn(() => new Promise((resolve) => {
+        events.push('registration');
+        releaseRegistration = () => resolve({
+          success: true,
+          registeredEps: ['CUDAExecutionProvider'],
+          failedEps: [],
+        });
+      })),
+      vi.fn(),
+    );
+
+    const read = gate.read(async () => {
+      events.push('read');
+      return 'model';
+    });
+    await Promise.resolve();
+    expect(events).toEqual(['registration']);
+    releaseRegistration();
+    await expect(read).resolves.toBe('model');
+    expect(events).toEqual(['registration', 'read']);
+    expect(gate.isCommitConfirmed()).toBe(true);
+  });
+
+  it('orders confirmed reads behind an in-flight catalog mutation', async () => {
+    const gate = createCatalogRegistrationGate(
+      vi.fn(async () => ({ success: true, registeredEps: [], failedEps: [] })),
+      vi.fn(async () => []),
+    );
+    await gate.commit();
+
+    const events = [];
+    let releaseMutation = () => {};
+    const mutation = gate.mutateAndCommit(
+      async () => {
+        events.push('mutation');
+        await new Promise((resolve) => { releaseMutation = resolve; });
+        return 'updated';
+      },
+      () => {},
+    );
+    const read = gate.read(async () => {
+      events.push('read');
+      return 'model';
+    });
+
+    await vi.waitFor(() => expect(events).toEqual(['mutation']));
+    releaseMutation();
+    await expect(mutation).resolves.toEqual({ result: 'updated', catalogRefreshRequiresRestart: true });
+    await expect(read).resolves.toBe('model');
+    expect(events).toEqual(['mutation', 'read']);
+  });
+
+  it('orders a local mutation behind already-active confirmed reads', async () => {
+    const gate = createCatalogRegistrationGate(
+      vi.fn(async () => ({ success: true, registeredEps: [], failedEps: [] })),
+      vi.fn(async () => []),
+    );
+    await gate.commit();
+
+    const events = [];
+    let releaseRead = () => {};
+    const read = gate.read(async () => {
+      events.push('read');
+      await new Promise((resolve) => { releaseRead = resolve; });
+      return 'model';
+    });
+    await vi.waitFor(() => expect(events).toEqual(['read']));
+
+    const mutation = gate.mutateAndCommit(
+      async () => {
+        events.push('mutation');
+        return 'updated';
+      },
+      () => {},
+    );
+    await Promise.resolve();
+    expect(events).toEqual(['read']);
+
+    releaseRead();
+    await expect(read).resolves.toBe('model');
+    await expect(mutation).resolves.toEqual({
+      result: 'updated',
+      catalogRefreshRequiresRestart: true,
+    });
+    expect(events).toEqual(['read', 'mutation']);
+  });
+
+  it('rejects a non-function catalog operation', async () => {
+    const gate = createCatalogRegistrationGate(vi.fn(), vi.fn());
+    await expect(gate.read(null)).rejects.toThrow('read requires a catalog operation');
   });
 
   it('keeps a queued update behind the actual first catalog read', async () => {
