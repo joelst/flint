@@ -11058,6 +11058,13 @@ Output only the summary text, no preamble.`;
     gap: 4px;
   }
 
+  /* Global `button` is white text on the navy fill. Tiny buttons sit on the
+     panel instead, which is white in light mode — without this the Check and
+     Recheck labels disappear. Danger buttons keep their own color. */
+  button.tiny:not(.danger-btn) {
+    color: var(--fg);
+  }
+
   a.tiny {
     font-size: 0.7rem;
     padding: 1px 6px;
