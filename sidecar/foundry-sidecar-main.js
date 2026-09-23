@@ -3572,6 +3572,12 @@ rl.on('line', async (line) => {
         });
       }
     } else if (cmd === 'poolStatus') {
+      // Independent hardware probes run beside catalog telemetry, not after its
+      // deadline: either can consume 10 seconds within the 20-second IPC budget.
+      const acceleratorMemory = collectAcceleratorMemory().catch((error) => {
+        log('warn', `Accelerator memory probe failed: ${error?.message || error}`);
+        return accelMemCache?.devices ?? [];
+      });
       let loadedIds = new Set();
       const snapshotConfirmed = catalogReadConfirmed();
       let loadedStateKnown = false;
@@ -3585,7 +3591,9 @@ rl.on('line', async (line) => {
           : [];
         for (const m of loaded) loadedIds.add(m.id);
         if (snapshotConfirmed) loadedStateKnown = true;
-      } catch {}
+      } catch (error) {
+        log('warn', `Loaded-model telemetry unavailable: ${error?.message || error}`);
+      }
       const entries = [...pool.entries()].map(([alias, { variantId }]) => {
         const use = usageFor(alias);
         return {
@@ -3604,13 +3612,7 @@ rl.on('line', async (line) => {
       });
       const totalMemMb = Math.round(os.totalmem() / 1024 / 1024);
       const freeMemMb = Math.round(os.freemem() / 1024 / 1024);
-      let accelerators = [];
-      try {
-        accelerators = await collectAcceleratorMemory();
-      } catch (e) {
-        log('warn', `Accelerator memory probe failed: ${e?.message || e}`);
-        accelerators = accelMemCache?.devices ?? [];
-      }
+      const accelerators = await acceleratorMemory;
       reply({
         ok: true,
         result: {

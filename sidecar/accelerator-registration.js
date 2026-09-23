@@ -141,6 +141,7 @@ export async function registerDiscoveredExecutionProviders(manager, onProgress, 
 
 /** Discovery attempts before a catalog read. A failed final fallback gets one additional bounded fallback retry. */
 const CATALOG_REGISTRATION_ATTEMPTS = 3;
+const TELEMETRY_READ_TIMEOUT_MS = 10_000;
 
 /**
  * The bounded attempts are spent. Callers must be able to read the catalog anyway.
@@ -203,7 +204,7 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
   const activeReads = new Set();
   /** @type {Set<Promise<unknown>>} */
   const activeProviderReads = new Set();
-  /** @type {Set<Promise<unknown>>} */
+  /** @type {Set<{ result: Promise<unknown>, expired: boolean, dispatched: boolean }>} */
   const activeTelemetryReads = new Set();
 
   // `report` is the caller that queued this cycle. A later Settings click must not
@@ -292,13 +293,34 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
     return read;
   }
 
-  function trackTelemetryRead(read) {
-    activeTelemetryReads.add(read);
-    void read.then(
-      () => activeTelemetryReads.delete(read),
-      () => activeTelemetryReads.delete(read),
+  function trackTelemetryRead(operation) {
+    const timeoutError = new Error(
+      'Catalog telemetry deadline expired; native completion is unconfirmed. Retry after it settles or restart the runtime.',
     );
-    return trackRead(read);
+    const undispatchedError = new Error(
+      'Catalog telemetry deadline expired before dispatch; no native read was started.',
+    );
+    const entry = { result: null, expired: false, dispatched: false };
+    // The deadline includes waiting for an active mutation. Expiry revokes dispatch,
+    // but cannot cancel a native read that has already started.
+    const read = activeMutationBarrier.then(() => {
+      if (entry.expired) throw undispatchedError;
+      entry.dispatched = true;
+      return operation();
+    });
+    entry.result = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        entry.expired = true;
+        if (!entry.dispatched) activeTelemetryReads.delete(entry);
+        reject(entry.dispatched ? timeoutError : undispatchedError);
+      }, TELEMETRY_READ_TIMEOUT_MS);
+      read.then(resolve, reject).finally(() => {
+        clearTimeout(timer);
+        activeTelemetryReads.delete(entry);
+      });
+    });
+    activeTelemetryReads.add(entry);
+    return entry.result;
   }
 
   function trackProviderRead(read) {
@@ -513,11 +535,16 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
       if (!commitConfirmed) {
         return Promise.reject(new Error('readTelemetry requires a confirmed catalog snapshot'));
       }
+      if ([...activeTelemetryReads].some((entry) => entry.expired)) {
+        return Promise.reject(new Error(
+          'An earlier native telemetry read remains unresolved. Retry after it settles or restart the runtime.',
+        ));
+      }
       // Registration cannot alter the frozen snapshot, but a local mutation can
       // change the native objects being inspected. Wait only while that mutation
       // is active. A mutation queued behind registration will observe and await
       // this read before it begins.
-      return trackTelemetryRead(activeMutationBarrier.then(() => operation()));
+      return trackTelemetryRead(operation);
     },
     readProviders(operation) {
       if (typeof operation !== 'function') {
@@ -550,10 +577,20 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
         });
         activeMutationBarrier = activeMutation.then(() => {}, () => {});
         try {
-          await Promise.allSettled([...new Set([
+          await Promise.allSettled([
             ...readsBeforeMutation,
-            ...telemetryReadsAtStart,
-          ])]);
+            ...telemetryReadsAtStart.map((entry) => entry.result),
+          ]);
+          // A transport/deadline rejection does not establish native cancellation.
+          // Refuse before invoking the mutation rather than racing the live read or
+          // holding the writer lane and the caller's activity fence indefinitely.
+          if (telemetryReadsAtStart.some((entry) =>
+            entry.expired && activeTelemetryReads.has(entry)
+          )) {
+            throw new Error(
+              'Catalog mutation not started: a native telemetry read remains unresolved. Retry after it settles or restart the runtime.',
+            );
+          }
           // Some mutations must resolve their target through native catalog getters
           // before changing it. Treat that first lookup as restart-bound uncertainty:
           // it may establish a stale native snapshot before the mutation completes.

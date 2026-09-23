@@ -24,6 +24,13 @@ Linux is not a release target.
 
 Stop / Stop & Unload withdraws the endpoint. A Stop acknowledgement is not proof the native listener has gone quiet. **Stop service** withdraws HTTP availability only; **Stop & Unload** additionally fences new work and unloads models once admitted work and eviction finish.
 
+Loaded-model telemetry has a 10-second sidecar wait budget. Expired queued reads never
+start. If an already-dispatched asynchronous read remains unresolved, catalog mutations
+are refused before changing files; retry after the read settles or restart the runtime.
+The warning appears in the sidecar log, and unavailable loaded-state telemetry is reported
+as unknown. This deadline does not cancel native work or interrupt a synchronous native
+call that blocks Node's event loop.
+
 ## Packaged vs PATH Node
 
 About shows Node as `bundled` or `PATH`. Release installers include Node 22. PATH Node is a development fallback. If About says Node is missing, the install is incomplete — reinstall from GitHub Releases, do not install Node as a user requirement.

@@ -2013,11 +2013,12 @@ export async function pollPoolStatus(): Promise<void> {
   }
 }
 
-// Residency flags and both lanes are views of one pool: the sidecar's getStatus names
-// pool[0] the chat lane and pool[1] the audio lane. Any local pool update re-derives
-// all of them together, or a lane can keep naming a model that is no longer resident.
+// Keep evicted entries in the monitor, but not in loaded flags or lane selection.
+// Preserve getStatus's legacy lane positions (pool[0]/pool[1]) rather than reassigning them.
+// Unknown telemetry retains the sidecar's last-known residency until confirmed otherwise.
 function projectPool(pool: PoolEntry[], models: ModelInfo[]) {
-  const loadedAliases = new Set(pool.map((entry: any) => entry.alias).filter(Boolean));
+  const resident = pool.filter((entry) => entry.isLoaded !== false);
+  const loadedAliases = new Set(resident.map((entry) => entry.alias).filter(Boolean));
   const projected = models.map((model) => ({
     ...model,
     isLoaded: loadedAliases.has(model.alias),
@@ -2026,8 +2027,8 @@ function projectPool(pool: PoolEntry[], models: ModelInfo[]) {
     pool,
     models: projected,
     loadedModels: projected.filter((model) => model.isLoaded),
-    chatLaneModel: pool[0]?.alias,
-    audioLaneModel: pool[1]?.alias,
+    chatLaneModel: pool[0]?.isLoaded === false ? undefined : pool[0]?.alias,
+    audioLaneModel: pool[1]?.isLoaded === false ? undefined : pool[1]?.alias,
   };
 }
 

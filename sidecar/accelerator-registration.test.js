@@ -733,6 +733,86 @@ describe('createCatalogRegistrationGate', () => {
     expect(events).toEqual(['mutation', 'mutation done', 'telemetry']);
   });
 
+  it.each(['resolve', 'reject'])('bounds stalled telemetry until late native %s without releasing mutation exclusion', async (settlement) => {
+    vi.useFakeTimers();
+    try {
+      const gate = createCatalogRegistrationGate(
+        vi.fn().mockResolvedValue({ success: true }),
+        async () => [],
+      );
+      await gate.commit();
+      let finish;
+      const nativeRead = vi.fn(() => new Promise((resolve, reject) => {
+        finish = () => settlement === 'resolve' ? resolve([]) : reject(new Error('late native failure'));
+      }));
+      const telemetry = gate.readTelemetry(nativeRead).catch((error) => error);
+      await vi.advanceTimersByTimeAsync(0);
+      const write = vi.fn(async () => 'changed');
+      const mutation = gate.mutateAndCommit(write, () => {}).catch((error) => error);
+
+      await vi.advanceTimersByTimeAsync(9999);
+      expect(write).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await telemetry).toMatchObject({ message: expect.stringContaining('telemetry') });
+      expect(await mutation).toMatchObject({ message: expect.stringContaining('not started') });
+      expect(write).not.toHaveBeenCalled();
+
+      const anotherRead = vi.fn();
+      await expect(gate.readTelemetry(anotherRead)).rejects.toThrow('unresolved');
+      expect(anotherRead).not.toHaveBeenCalled();
+      await expect(gate.mutateAndCommit(write, () => {})).rejects.toThrow('not started');
+
+      finish();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(write).not.toHaveBeenCalled();
+      await expect(gate.mutateAndCommit(write, () => {})).resolves.toMatchObject({ result: 'changed' });
+      await expect(gate.readTelemetry(async () => ['new snapshot'])).resolves.toEqual(['new snapshot']);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('never starts telemetry that expired while waiting for a mutation', async () => {
+    vi.useFakeTimers();
+    try {
+      const gate = createCatalogRegistrationGate(vi.fn().mockResolvedValue(null), async () => []);
+      await gate.commit();
+      let finish;
+      const mutation = gate.mutateAndCommit(
+        () => new Promise((resolve) => { finish = resolve; }),
+        () => {},
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      const nativeRead = vi.fn(async () => []);
+      const telemetry = gate.readTelemetry(nativeRead).catch((error) => error);
+      await vi.advanceTimersByTimeAsync(10000);
+      expect(await telemetry).toBeInstanceOf(Error);
+      const laterTelemetry = gate.readTelemetry(async () => ['fresh']);
+      const laterResult = laterTelemetry.catch((error) => error);
+      const nextMutation = gate.mutateAndCommit(async () => 'next', () => {});
+      finish('changed');
+      await mutation;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(nativeRead).not.toHaveBeenCalled();
+      expect(await laterResult).toEqual(['fresh']);
+      await expect(nextMutation).resolves.toMatchObject({ result: 'next' });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('allows mutations after a native telemetry failure has actually settled', async () => {
+    const gate = createCatalogRegistrationGate(vi.fn().mockResolvedValue(null), async () => []);
+    await gate.commit();
+    const telemetry = gate.readTelemetry(async () => { throw new Error('native failure'); });
+    const rejected = expect(telemetry).rejects.toThrow('native failure');
+    await expect(gate.mutateAndCommit(async () => 'changed', () => {}))
+      .resolves.toMatchObject({ result: 'changed' });
+    await rejected;
+  });
+
   it('keeps provider-sensitive lookups behind post-commit registration', async () => {
     let releaseRegistration = () => {};
     const register = vi.fn()

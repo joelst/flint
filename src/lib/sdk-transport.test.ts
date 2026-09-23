@@ -1312,6 +1312,34 @@ describe('one answer per request', () => {
     });
   });
 
+  it('keeps evicted pool entries visible without treating them as loaded models or lanes', async () => {
+    const sdk = await loadSdk();
+    const state = sdkSnapshot(sdk);
+    sdk.sdkState.set({
+      ...state,
+      models: [
+        { alias: 'evicted', isCached: true, isLoaded: true },
+        { alias: 'resident', isCached: true, isLoaded: false },
+        { alias: 'unknown', isCached: true, isLoaded: false },
+      ],
+    });
+    const poll = sdk.pollPoolStatus();
+    const id = await waitForWrite('poolStatus');
+    const pool = [
+      { alias: 'evicted', variantId: 'evicted:1', isLoaded: false },
+      { alias: 'resident', variantId: 'resident:1', isLoaded: true },
+      { alias: 'unknown', variantId: 'unknown:1', isLoaded: null },
+    ];
+    harness.emitStdout({ id, result: { models: pool } });
+    await poll;
+    const snapshot = sdkSnapshot(sdk);
+    expect(snapshot.pool).toEqual(pool);
+    expect(snapshot.models.map((model: any) => model.isLoaded)).toEqual([false, true, true]);
+    expect(snapshot.loadedModels.map((model: any) => model.alias)).toEqual(['resident', 'unknown']);
+    expect(snapshot.chatLaneModel).toBeUndefined();
+    expect(snapshot.audioLaneModel).toBe('resident');
+  });
+
   it('keeps the sidecar reply when a close arrives afterwards', async () => {
     const sdk = await loadSdk();
     const p = sdk.getEps();

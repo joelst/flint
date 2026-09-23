@@ -1684,11 +1684,13 @@ describe('foundry-sidecar gateway variant autoload', () => {
   /** Fake runtime with two cached builds of one alias. The upstream answers a chat request
    * only for the variant the fake SDK most recently loaded, and records every native load
    * and unload, so a test can see which destructive steps actually ran. */
-  async function startVariantGateway() {
+  async function startVariantGateway(stallTelemetry = false) {
     let loadedId: string | null = null;
     const nativeCalls: string[] = [];
     const chatRequests: string[] = [];
     let deleteHeld: (() => void) | null = null;
+    let notifyTelemetryStarted!: () => void;
+    const telemetryStarted = new Promise<void>((resolve) => { notifyTelemetryStarted = resolve; });
     let hold: { arrived: () => void; released: Promise<void> } | null = null;
     /** Holds the next served chat response open until released, like a long generation. */
     const holdNextChat = () => {
@@ -1701,6 +1703,12 @@ describe('foundry-sidecar gateway variant autoload', () => {
     };
     const upstream = createServer((req, res) => {
       const url = new URL(req.url || '/', 'http://127.0.0.1');
+      if (url.pathname === '/telemetry-started') {
+        notifyTelemetryStarted();
+        res.writeHead(200);
+        res.end();
+        return;
+      }
       if (url.pathname === '/loaded' || url.pathname === '/unloaded') {
         const id = url.searchParams.get('id');
         nativeCalls.push(`${url.pathname.slice(1)}:${id}`);
@@ -1793,6 +1801,13 @@ describe('foundry-sidecar gateway variant autoload', () => {
                 alias: 'foo',
                 variants: ['foo-cpu:1', 'foo-gpu:1', 'foo-gone:1'].map(id => ({ id, isCached: true })),
               }],
+              getLoadedModels: async () => {
+                if (${stallTelemetry}) {
+                  await fetch('http://127.0.0.1:${port}/telemetry-started');
+                  await new Promise(() => {});
+                }
+                return [];
+              },
               getModel: async (alias) => {
                 if (alias !== 'foo') throw new Error('model not found');
                 return new FakeModel('foo-cpu:1');
@@ -1860,6 +1875,7 @@ describe('foundry-sidecar gateway variant autoload', () => {
         chatRequests,
         holdNextChat,
         holdNextDelete,
+        telemetryStarted,
         markGone,
         cleanup,
       };
@@ -1960,6 +1976,30 @@ describe('foundry-sidecar gateway variant autoload', () => {
       await gateway.cleanup();
     }
   }, 20000);
+
+  it('refuses deletion blocked by expired telemetry and releases its activity fence', async () => {
+    const gateway = await startVariantGateway(true);
+    try {
+      gateway.proc.stdin.write(`${JSON.stringify({ id: 10, cmd: 'poolStatus' })}\n`);
+      const telemetry = waitForLine(gateway.proc, (msg) => msg.id === 10, 20000)
+        .catch((error) => { throw new Error('poolStatus did not settle within its IPC budget', { cause: error }); });
+      await gateway.telemetryStarted;
+      gateway.proc.stdin.write(`${JSON.stringify({
+        id: 11, cmd: 'deleteModel', alias: 'foo', variantId: 'foo-cpu:1',
+      })}\n`);
+      const deletion = await waitForLine(gateway.proc, (msg) => msg.id === 11, 15000)
+        .catch((error) => { throw new Error('deleteModel did not refuse the unresolved read', { cause: error }); });
+      expect(deletion.ok).not.toBe(true);
+      expect(deletion.error).toContain('not started');
+      const snapshot = await telemetry;
+      expect(snapshot.result.models[0]).toMatchObject({ alias: 'foo', isLoaded: null });
+      expect(gateway.nativeCalls).toEqual(['loaded:foo-cpu:1']);
+      const reply = await postChat(gateway.gatewayPort, 'foo-cpu:1');
+      expect(reply.status, reply.body).toBe(200);
+    } finally {
+      await gateway.cleanup();
+    }
+  }, 30000);
 
   it('keeps tracking a loaded build across a service restart, so deletion cannot run beneath it', async () => {
     // The native core keeps foo-cpu:1 loaded and servable across the listener restart. If the
