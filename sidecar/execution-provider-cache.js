@@ -158,14 +158,21 @@ async function registerProviders (deps, names) {
  */
 export async function rebuildBrokenExecutionProviders (deps) {
   const removed = [];
+  const attempted = [];
   const remove = (name) => {
     if (!deps.removeCache(name)) return false;
     removed.push(name);
     return true;
   };
+  const rememberAttempt = (names) => {
+    for (const name of names) {
+      if (name && !attempted.includes(name)) attempted.push(name);
+    }
+  };
 
   const broken = brokenProviderNames(deps.discover() ?? [], deps.epRoot);
   for (const name of broken) remove(name);
+  rememberAttempt(broken);
   let result = await registerProviders(deps, broken);
 
   const reported = [
@@ -175,10 +182,12 @@ export async function rebuildBrokenExecutionProviders (deps) {
   const retry = brokenProviderNames(deps.discover() ?? [], deps.epRoot, reported);
   if (retry.length) {
     for (const name of retry) remove(name);
+    rememberAttempt(retry);
     result = await registerProviders(deps, retry);
   }
   return {
     removed,
+    attempted,
     result: result ?? null,
   };
 }

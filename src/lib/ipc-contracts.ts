@@ -74,6 +74,8 @@ export interface EpDownloadResult {
   status: string;
   registeredEps: string[];
   failedEps: string[];
+  /** Provider names Flint asked Foundry to rebuild during a provider recheck. */
+  attemptedProviderRebuilds?: string[];
   /** Provider names whose on-disk cache was removed before a rebuild. */
   removedProviderCaches?: string[];
 }

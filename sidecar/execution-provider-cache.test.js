@@ -153,6 +153,22 @@ describe('rebuildBrokenExecutionProviders', () => {
     expect(outcome.result?.success).toBe(true);
   });
 
+  it('reports attempted provider rebuild names when registration fails without naming a provider', async () => {
+    const calls = [];
+    const outcome = await rebuildBrokenExecutionProviders({
+      discover: () => [{ name: 'CUDAExecutionProvider', isRegistered: false }],
+      removeCache: () => false,
+      downloadAndRegister: async (names) => {
+        calls.push(names);
+        return { success: false, failedEps: [], status: 'registration failed' };
+      },
+    });
+    expect(calls).toEqual([['CUDAExecutionProvider'], ['CUDAExecutionProvider']]);
+    expect(outcome.attempted).toEqual(['CUDAExecutionProvider']);
+    expect(outcome.result?.success).toBe(false);
+    expect(outcome.result?.failedEps).toEqual([]);
+  });
+
   it('registers a cached provider that discover does not list', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'flint-ep-'));
     fs.mkdirSync(path.join(root, 'cuda-ep'));
@@ -202,5 +218,9 @@ describe('Recheck Providers button', () => {
     expect(page).toMatch(
       /button\.accel-recheck\s*\{[^}]*background:\s*var\(--panel-bg\);[^}]*color:\s*var\(--fg\);[^}]*border:\s*1px solid var\(--muted\);/s,
     );
+  });
+
+  it('disables accelerator installation during a provider recheck', () => {
+    expect(page).toContain('<button onclick={ensureHardwareAccel} disabled={!state.ready || providerRecheckBusy}>');
   });
 });

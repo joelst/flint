@@ -3602,7 +3602,11 @@ rl.on('line', async (line) => {
           }
           reply({
             ok: true,
-            result: { ...(outcome.result ?? {}), removedProviderCaches: outcome.removed },
+            result: {
+              ...(outcome.result ?? {}),
+              attemptedProviderRebuilds: outcome.attempted,
+              removedProviderCaches: outcome.removed,
+            },
           });
         } else {
           const result = await manager.downloadAndRegisterEps(progress);
