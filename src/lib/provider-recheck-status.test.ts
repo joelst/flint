@@ -46,6 +46,26 @@ describe('providerRecheckStatus', () => {
     );
   });
 
+  it('names every provider the refresh shows as registered, including one whose cache was already gone', () => {
+    const status = providerRecheckStatus(
+      {
+        success: true,
+        failedEps: [],
+        removedProviderCaches: ['CUDAExecutionProvider'],
+        attemptedProviderRebuilds: ['CUDAExecutionProvider', 'QNNExecutionProvider'],
+      },
+      [
+        webgpu,
+        { name: 'CUDAExecutionProvider', isRegistered: true },
+        { name: 'QNNExecutionProvider', isRegistered: true },
+      ],
+    );
+    expect(status).toEqual({
+      failed: false,
+      message: 'Rebuilt CUDAExecutionProvider, QNNExecutionProvider.',
+    });
+  });
+
   it('counts only providers the refresh shows as registered', () => {
     const status = providerRecheckStatus(
       { success: true, status: 'No broken providers', failedEps: [] },

@@ -18,10 +18,11 @@ describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
     expect(hooks).toContain('!macro NSIS_HOOK_PREINSTALL');
     expect(hooks).toContain('CheckIfAppIsRunning "$INSTDIR\\${MAINBINARYNAME}.exe"');
     expect(hooks).toContain('Rename "$INSTDIR\\foundry-local-sdk" "$INSTDIR\\foundry-local-sdk.previous"');
-    expect(hooks).toContain('prebuilds\\win32-${ARCH}\\onnxruntime.dll');
-    expect(hooks).toContain('foundry-local-core\\win32-${ARCH}\\onnxruntime.dll');
-    expect(hooks).not.toContain('prebuilds\\win32-x64\\onnxruntime.dll');
-    expect(hooks).not.toContain('prebuilds\\win32-arm64\\onnxruntime.dll');
+    expect(hooks).toContain('prebuilds\\win32-x64\\onnxruntime.dll');
+    expect(hooks).toContain('prebuilds\\win32-arm64\\onnxruntime.dll');
+    expect(hooks).toContain('foundry-local-core\\win32-x64\\onnxruntime.dll');
+    expect(hooks).toContain('foundry-local-core\\win32-arm64\\onnxruntime.dll');
+    expect(hooks).not.toContain('win32-${ARCH}');
     const preinstall = hooks.slice(hooks.indexOf('NSIS_HOOK_PREINSTALL'), hooks.indexOf('NSIS_HOOK_POSTINSTALL'));
     expect(preinstall).toContain('Call RestoreFoundrySdkBackup');
     expect(preinstall).toContain('foundry-local-sdk.previous-kept');

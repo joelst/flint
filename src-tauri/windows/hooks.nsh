@@ -44,8 +44,10 @@
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
-  IfFileExists "$INSTDIR\foundry-local-sdk\prebuilds\win32-${ARCH}\onnxruntime.dll" foundry_sdk_new_ok
-  IfFileExists "$INSTDIR\foundry-local-sdk\foundry-local-core\win32-${ARCH}\onnxruntime.dll" foundry_sdk_new_ok
+  IfFileExists "$INSTDIR\foundry-local-sdk\prebuilds\win32-x64\onnxruntime.dll" foundry_sdk_new_ok
+  IfFileExists "$INSTDIR\foundry-local-sdk\prebuilds\win32-arm64\onnxruntime.dll" foundry_sdk_new_ok
+  IfFileExists "$INSTDIR\foundry-local-sdk\foundry-local-core\win32-x64\onnxruntime.dll" foundry_sdk_new_ok
+  IfFileExists "$INSTDIR\foundry-local-sdk\foundry-local-core\win32-arm64\onnxruntime.dll" foundry_sdk_new_ok
     Call RestoreFoundrySdkBackup
     Pop $0
     StrCmp $0 "stranded" foundry_sdk_stranded
@@ -61,8 +63,10 @@
 !macroend
 
 Function FoundryLiveRuntimeExists
-  IfFileExists "$INSTDIR\foundry-local-sdk\prebuilds\win32-${ARCH}\onnxruntime.dll" foundry_live_yes
-  IfFileExists "$INSTDIR\foundry-local-sdk\foundry-local-core\win32-${ARCH}\onnxruntime.dll" foundry_live_yes
+  IfFileExists "$INSTDIR\foundry-local-sdk\prebuilds\win32-x64\onnxruntime.dll" foundry_live_yes
+  IfFileExists "$INSTDIR\foundry-local-sdk\prebuilds\win32-arm64\onnxruntime.dll" foundry_live_yes
+  IfFileExists "$INSTDIR\foundry-local-sdk\foundry-local-core\win32-x64\onnxruntime.dll" foundry_live_yes
+  IfFileExists "$INSTDIR\foundry-local-sdk\foundry-local-core\win32-arm64\onnxruntime.dll" foundry_live_yes
   Push "no"
   Return
   foundry_live_yes:
