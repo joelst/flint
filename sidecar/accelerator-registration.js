@@ -143,7 +143,9 @@ function terminalRegistrationResult(previous, error) {
  * `ensureAccelerators` is that same command, and the button calls it again. Before
  * commitment, the result can affect the catalog snapshot. After commitment, the
  * provider update still runs, but callers must treat new catalog variants as
- * restart-bound because the current snapshot cannot gain them.
+ * restart-bound because the current snapshot cannot gain them. If a native listener
+ * was exposed without a confirmed read, updates are deferred instead: the listener
+ * may be freezing the snapshot outside this queue.
  *
  * Work is serialized through the actual first catalog read. A read queued behind
  * an explicit retry waits for it, and an update queued behind that read cannot
@@ -227,6 +229,15 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
       const report = typeof onProgress === 'function' ? onProgress : null;
       return enqueue(async () => {
         const catalogRefreshRequiresRestart = committed;
+        if (committed && !commitConfirmed) {
+          return {
+            ...(settled && typeof settled === 'object' ? settled : {}),
+            success: false,
+            status: 'Accelerator update deferred because Flint cannot confirm whether the model catalog snapshot has already been taken. Restart Flint to apply provider changes.',
+            catalogRefreshRequiresRestart: true,
+            registrationDeferredUntilRestart: true,
+          };
+        }
         settled = preserveRegisteredProviders(settled, await attempts(report));
         if (
           catalogRefreshRequiresRestart &&
@@ -274,10 +285,9 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
       return enqueue(async () => {
         if (!settled) settled = await attempts(report);
         // The native listener can perform the first read outside this process.
-        // Close the provider boundary without contacting the registry so every
-        // later update is conservatively reported as restart-bound. Keep the
-        // read unconfirmed so the first later JS catalog read still runs inside
-        // this queue and cannot race another provider update.
+        // Close the provider boundary without contacting the registry. Until a
+        // later JS read confirms the snapshot, rerun must defer rather than
+        // registering beside a possible listener-owned first read.
         committed = true;
         return settled;
       });

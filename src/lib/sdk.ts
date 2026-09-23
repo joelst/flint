@@ -537,8 +537,15 @@ function reportCatalogProgressStall() {
   );
 }
 
-function registerCatalogProgressHandler(id: number) {
-  registerProgressHandler(id, undefined, reportCatalogProgressStall);
+function reportRuntimeProgressStall(cmd: SidecarCommandName) {
+  appendAppLog(
+    `No progress reported for 60 seconds while running ${cmd}. Still awaiting the runtime; Flint has not cancelled this operation.`,
+    'warn',
+  );
+}
+
+function registerCatalogProgressHandler(id: number, cmd: SidecarCommandName) {
+  registerProgressHandler(id, undefined, () => reportRuntimeProgressStall(cmd));
 }
 
 function updateState(partial: Partial<FlintSDKState>) {
@@ -1097,7 +1104,7 @@ export function sendInternal(
     }
   }
   if (CATALOG_REGISTRATION_COMMANDS.has(cmd) && !progressHandlers.has(id)) {
-    registerCatalogProgressHandler(id);
+    registerCatalogProgressHandler(id, cmd);
   }
 
   /** Settles once. A later close, or a write rejection that lands after a reply, is ignored. */

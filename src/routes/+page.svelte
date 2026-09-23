@@ -5378,7 +5378,10 @@ updateStateFromSdk();
           throw new Error("Runtime changed while refreshing recommendations");
         }
       }
-      if (readiness.registration?.success === false) {
+      if (readiness.registration?.registrationDeferredUntilRestart) {
+        statusMessage = readiness.registration.status || "Restart Flint before updating accelerators.";
+        appendAppLog(statusMessage, "warn");
+      } else if (readiness.registration?.success === false) {
         statusMessage = readiness.registration.status || "Some accelerators could not be registered";
         if (readiness.registration.catalogRefreshRequiresRestart) {
           statusMessage += " Restart Flint to let the model catalog detect any newly available variants.";

@@ -975,6 +975,24 @@ describe('progress stall notices', () => {
     expect(sdkSnapshot(sdk).logs).toHaveLength(notices);
   });
 
+  it('uses a runtime-neutral quiet-period notice for effectful catalog commands', async () => {
+    const sdk = await loadSdk();
+    vi.useFakeTimers();
+
+    const load = capture(sdk.loadModel({ alias: 'large-model' }));
+    await vi.advanceTimersByTimeAsync(0);
+    const loadLine = harness.writes.find((line) => line.includes('"load"'))!;
+    const loadId = JSON.parse(loadLine).id;
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sdkSnapshot(sdk).logs.at(-1)?.message).toBe(
+      'No progress reported for 60 seconds while running load. Still awaiting the runtime; Flint has not cancelled this operation.',
+    );
+
+    harness.emitStdout({ id: loadId, error: 'load failed' });
+    await load.tracked;
+  });
+
   it('starts the download quiet period at dispatch and resets it on progress', async () => {
     const sdk = await loadSdk();
     gateSpawn = true;

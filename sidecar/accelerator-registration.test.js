@@ -285,7 +285,7 @@ describe('createCatalogRegistrationGate', () => {
     expect(readCatalog).not.toHaveBeenCalled();
   });
 
-  it('seals a listener-exposed catalog without reading it and restart-bounds later updates', async () => {
+  it('defers later provider updates after listener exposure until a catalog read is confirmed', async () => {
     const register = vi.fn()
       .mockResolvedValueOnce({ success: true, registeredEps: ['CPUExecutionProvider'] })
       .mockResolvedValueOnce({ success: true, registeredEps: ['CUDAExecutionProvider'] });
@@ -295,9 +295,10 @@ describe('createCatalogRegistrationGate', () => {
     await gate.seal();
     expect(readCatalog).not.toHaveBeenCalled();
     await expect(gate.rerun()).resolves.toMatchObject({
-      registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
       catalogRefreshRequiresRestart: true,
+      registrationDeferredUntilRestart: true,
     });
+    expect(register).toHaveBeenCalledTimes(1);
   });
 
   it('serializes the first confirmed catalog read after a listener-only seal', async () => {
@@ -578,7 +579,7 @@ describe('createCatalogRegistrationGate', () => {
     expect(readCatalog).toHaveBeenCalledTimes(1);
   });
 
-  it('treats a rejected first catalog read as committed because its native outcome is unknown', async () => {
+  it('defers updates after a rejected catalog read until a later read confirms the snapshot', async () => {
     const register = vi.fn()
       .mockResolvedValueOnce({ success: true, registeredEps: ['CPUExecutionProvider'] })
       .mockResolvedValueOnce({ success: true, registeredEps: ['CUDAExecutionProvider'] });
@@ -592,11 +593,16 @@ describe('createCatalogRegistrationGate', () => {
 
     await expect(gate.commit()).rejects.toThrow('catalog failed');
     await expect(gate.rerun()).resolves.toMatchObject({
-      registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+      registeredEps: ['CPUExecutionProvider'],
       catalogRefreshRequiresRestart: true,
+      registrationDeferredUntilRestart: true,
     });
     await expect(gate.commit()).resolves.toMatchObject({
+      registeredEps: ['CPUExecutionProvider'],
+    });
+    await expect(gate.rerun()).resolves.toMatchObject({
       registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+      catalogRefreshRequiresRestart: true,
     });
     expect(readCatalog).toHaveBeenCalledTimes(2);
   });
