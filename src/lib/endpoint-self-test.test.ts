@@ -870,6 +870,44 @@ describe('runEndpointSelfTest', () => {
     expect(report.checks.find((c) => c.id === 'disconnect')?.status).toBe('fail');
     expect(report.checks.find((c) => c.id === 'disconnect')?.detail).toMatch(/disconnect setup failed/);
   });
+
+  it.each([
+    {
+      name: 'HTTP errors',
+      response: () => jsonResponse(503, { error: { message: 'unavailable' } }),
+      detail: /HTTP 503/,
+    },
+    {
+      name: 'bodyless success responses',
+      response: () => new Response(null, { status: 200 }),
+      detail: /no readable body/,
+    },
+  ])('fails disconnect for $name', async ({ response, detail }) => {
+    const fetchMock: typeof fetch = async (input, init) => {
+      if (init?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      if (String(input).endsWith('/models')) {
+        return jsonResponse(200, { data: [{ id: 'tiny-cpu' }] });
+      }
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (body.stream && String(body.messages?.[0]?.content || '').includes('Keep writing')) {
+        return response();
+      }
+      if (body.stream) {
+        return new Response('data: {"choices":[{"delta":{"content":"x"}}]}\n\ndata: [DONE]\n\n', { status: 200 });
+      }
+      return jsonResponse(200, {
+        choices: [{ message: { role: 'assistant', content: 'x' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      });
+    };
+    const report = await runEndpointSelfTest({
+      fetch: fetchMock,
+      endpoint: 'http://127.0.0.1:5272/v1',
+      catalogSupportsToolCalling: false,
+    });
+    expect(report.checks.find((c) => c.id === 'disconnect')?.status).toBe('fail');
+    expect(report.checks.find((c) => c.id === 'disconnect')?.detail).toMatch(detail);
+  });
 });
 
 describe('endpointAliases', () => {

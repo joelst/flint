@@ -710,27 +710,35 @@ async function runDisconnectCheck(
       );
     }
 
-    const reader = started.res.body?.getReader() ?? null;
-    const pendingRead = reader
-      ? reader.read().then(() => 'read' as const, () => 'rejected' as const)
-      : null;
-    if (pendingRead) {
-      await Promise.race([
-        pendingRead,
-        new Promise<void>((resolve) => {
-          setTimeout(resolve, disconnectStartMs);
-        }),
-      ]);
-    }
-    abort.abort();
-    if (!pendingRead) {
+    if (!started.res.ok) {
+      abort.abort();
       return check(
         'disconnect',
         'Aborting a stream settles the caller',
-        'pass',
-        'Stream started and abort was issued. Native generation may still finish.',
+        'fail',
+        `HTTP ${started.res.status}; streaming response did not start.`,
       );
     }
+
+    const reader = started.res.body?.getReader() ?? null;
+    if (!reader) {
+      abort.abort();
+      return check(
+        'disconnect',
+        'Aborting a stream settles the caller',
+        'fail',
+        'Streaming response had no readable body; disconnect was not exercised.',
+      );
+    }
+
+    const pendingRead = reader.read().then(() => 'read' as const, () => 'rejected' as const);
+    await Promise.race([
+      pendingRead,
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, disconnectStartMs);
+      }),
+    ]);
+    abort.abort();
 
     const settled = await Promise.race([
       pendingRead.then(() => 'settled' as const),
