@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { buildEndpointModelClassifier } from './endpoint-model-classification';
 import {
   endpointAliases,
   flintVerifiedFromReport,
@@ -419,6 +420,54 @@ describe('runEndpointSelfTest', () => {
     expect(report.checks.find((c) => c.id === 'chat')?.status).toBe('pass');
   });
 
+  it('routes every opaque embedding model through embeddings from catalog metadata', async () => {
+    const seen: string[] = [];
+    const fetchMock: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith('/models')) {
+        return jsonResponse(200, { data: [
+          { id: 'custom-model-one-generic-cpu', parent: 'vectorizer-one' },
+          { id: 'custom-model-two-generic-cpu', parent: 'semantic-two' },
+        ] });
+      }
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (url.endsWith('/embeddings')) {
+        seen.push(body.model);
+        return jsonResponse(200, { data: [{ embedding: [0.2, 0.3], index: 0 }] });
+      }
+      throw new Error(`unexpected ${url}`);
+    };
+    const classifyModel = buildEndpointModelClassifier([
+      {
+        alias: 'vectorizer-one',
+        task: 'embeddings',
+        variants: [{ id: 'custom-model-one-generic-cpu:1' }],
+      },
+      {
+        alias: 'semantic-two',
+        capabilities: ['embedding'],
+        variants: [{ id: 'custom-model-two-generic-cpu:2' }],
+      },
+    ]);
+
+    const report = await runEndpointSelfTest({
+      fetch: fetchMock,
+      endpoint: 'http://127.0.0.1:5272/v1',
+      classifyModel,
+    });
+
+    expect(report.modelIds).toEqual([]);
+    expect(report.embeddingModelIds).toEqual([
+      'custom-model-one-generic-cpu',
+      'custom-model-two-generic-cpu',
+      'vectorizer-one',
+      'semantic-two',
+    ]);
+    expect(seen).toEqual(report.embeddingModelIds);
+    expect(report.checks.filter((item) => item.id === 'embeddings' && item.status === 'pass'))
+      .toHaveLength(4);
+  });
+
   it('fails embeddings when a later vector element is not finite', async () => {
     const fetchMock: typeof fetch = async (input, init) => {
       if (init?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -755,6 +804,24 @@ describe('endpointAliases', () => {
     ], 'vectorizer')).toEqual({
       chat: [],
       embed: ['custom-model-generic-cpu', 'vectorizer'],
+      speech: [],
+    });
+  });
+
+  it('classifies every opaque embedding model from its own catalog metadata', () => {
+    expect(endpointAliases([
+      { id: 'custom-model-one-generic-cpu', parent: 'vectorizer-one' },
+      { id: 'custom-model-two-generic-cpu', parent: 'semantic-two' },
+    ], null, (_id, parent) => (
+      parent === 'vectorizer-one' || parent === 'semantic-two' ? 'embed' : null
+    ))).toEqual({
+      chat: [],
+      embed: [
+        'custom-model-one-generic-cpu',
+        'custom-model-two-generic-cpu',
+        'vectorizer-one',
+        'semantic-two',
+      ],
       speech: [],
     });
   });

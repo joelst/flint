@@ -4,6 +4,11 @@
  * A catalog tool-calling flag is not a Flint verification.
  */
 
+import type {
+  EndpointModelClassifier,
+  EndpointModelKind,
+} from './endpoint-model-classification';
+
 export type SelfTestStatus = 'pass' | 'fail' | 'blocked';
 
 export interface SelfTestCheck {
@@ -163,7 +168,10 @@ function endpointKind(
   id: string,
   requestedEmbed: string | null,
   parent: string | null = null,
-): 'embed' | 'speech' | 'chat' {
+  classifyModel?: EndpointModelClassifier,
+): EndpointModelKind {
+  const classified = classifyModel?.(id, parent);
+  if (classified) return classified;
   if (
     requestedEmbed
     && (
@@ -183,21 +191,26 @@ function endpointKind(
 export function endpointAliases(
   models: ListedEndpointModel[],
   requestedEmbed: string | null,
+  classifyModel?: EndpointModelClassifier,
 ): { chat: string[]; embed: string[]; speech: string[] } {
   const embed: string[] = [];
   const speech: string[] = [];
   const chat: string[] = [];
   const seen = new Set<string>();
-  const add = (id: string, kind = endpointKind(id, requestedEmbed)) => {
+  const add = (id: string, kind = endpointKind(id, requestedEmbed, null, classifyModel)) => {
     if (!id || seen.has(id)) return;
     seen.add(id);
     if (kind === 'embed') embed.push(id);
     else if (kind === 'speech') speech.push(id);
     else chat.push(id);
   };
-  for (const row of models) add(row.id, endpointKind(row.id, requestedEmbed, row.parent));
   for (const row of models) {
-    if (row.parent) add(row.parent, endpointKind(row.id, requestedEmbed, row.parent));
+    add(row.id, endpointKind(row.id, requestedEmbed, row.parent, classifyModel));
+  }
+  for (const row of models) {
+    if (row.parent) {
+      add(row.parent, endpointKind(row.id, requestedEmbed, row.parent, classifyModel));
+    }
   }
   return { chat, embed, speech };
 }
@@ -726,6 +739,8 @@ export async function runEndpointSelfTest(options: {
   /** Per listed id. When set, it replaces catalogSupportsToolCalling. */
   supportsToolCalling?: (modelId: string) => boolean | null | undefined;
   embeddingModelId?: string | null;
+  /** Per listed model. Catalog metadata should take precedence over name heuristics. */
+  classifyModel?: EndpointModelClassifier;
   /**
    * Explicitly prepares each speech target and returns its canonical loaded variant because
    * multipart requests cannot be gateway-replayed or rewritten.
@@ -795,7 +810,9 @@ export async function runEndpointSelfTest(options: {
 
   const modelsOk = checks.some((item) => item.id === 'models' && item.status === 'pass');
   const requestedEmbed = options.embeddingModelId?.trim() || null;
-  const aliases = modelsOk ? endpointAliases(listedModels(modelsBody), requestedEmbed) : { chat: [], embed: [], speech: [] };
+  const aliases = modelsOk
+    ? endpointAliases(listedModels(modelsBody), requestedEmbed, options.classifyModel)
+    : { chat: [], embed: [], speech: [] };
   const emptyIds = { modelIds: [] as string[], embeddingModelIds: [] as string[], speechModelIds: [] as string[] };
 
   if (!modelsOk) {

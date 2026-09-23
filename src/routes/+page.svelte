@@ -172,6 +172,7 @@
     type FlintVerified,
     type SelfTestReport,
   } from "$lib/endpoint-self-test";
+  import { buildEndpointModelClassifier } from "$lib/endpoint-model-classification";
   import {
     COMPARE_HISTORY_MAX,
     COMPARE_MAX_SLOTS,
@@ -309,14 +310,11 @@
     }
     endpointSelfTestBusy = true;
     try {
-      const embeddingCatalog = state.models.find((m: ModelInfo) => {
-        const blob = [m.alias, (m as any).task, (m as any).info?.task].filter(Boolean).join(' ');
-        return /embed/i.test(blob);
-      });
+      const classifyModel = buildEndpointModelClassifier(state.models);
       endpointSelfTestReport = await runEndpointSelfTest({
         fetch,
         endpoint: state.endpoint || null,
-        embeddingModelId: embeddingCatalog?.alias || null,
+        classifyModel,
         supportsToolCalling: (modelId: string) => {
           const exact = state.models.find((m: ModelInfo) => m.alias === modelId);
           const matched = exact ?? [...state.models]
