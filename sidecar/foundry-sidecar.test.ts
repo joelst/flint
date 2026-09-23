@@ -2,7 +2,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import { createServer, request as httpRequest, type Server } from 'http';
 import type { AddressInfo } from 'net';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
@@ -889,6 +889,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
             this.loaded = true;
           }
           isLoaded() { return this.loaded; }
+          get isCached() { return true; }
           async download() {
             if (${JSON.stringify(holdDownload)}) {
               await fetch('http://127.0.0.1:${upstreamPort}/hold-download');
@@ -1679,6 +1680,261 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
   }, 20000);
 });
 
+describe('foundry-sidecar gateway variant autoload', () => {
+  /** Fake runtime with two cached builds of one alias. The upstream answers a chat request
+   * only for the variant the fake SDK most recently loaded, and records every native load
+   * and unload, so a test can see which destructive steps actually ran. */
+  async function startVariantGateway() {
+    let loadedId: string | null = null;
+    const nativeCalls: string[] = [];
+    let hold: { arrived: () => void; released: Promise<void> } | null = null;
+    /** Holds the next served chat response open until released, like a long generation. */
+    const holdNextChat = () => {
+      let arrived!: () => void;
+      let release!: () => void;
+      const arrival = new Promise<void>((resolve) => { arrived = resolve; });
+      const released = new Promise<void>((resolve) => { release = resolve; });
+      hold = { arrived, released };
+      return { arrival, release };
+    };
+    const upstream = createServer((req, res) => {
+      const url = new URL(req.url || '/', 'http://127.0.0.1');
+      if (url.pathname === '/loaded' || url.pathname === '/unloaded') {
+        const id = url.searchParams.get('id');
+        nativeCalls.push(`${url.pathname.slice(1)}:${id}`);
+        if (url.pathname === '/loaded') loadedId = id;
+        else if (loadedId === id) loadedId = null;
+        res.writeHead(200);
+        res.end();
+        return;
+      }
+      if (url.pathname !== '/v1/chat/completions') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        const model = JSON.parse(body).model;
+        if (model !== loadedId || existsSync(goneMarker(model))) {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: { message: `Model '${model}' is not loaded. Please load the model first.` } }));
+          return;
+        }
+        const held = hold;
+        hold = null;
+        const answer = () => {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: model } }] }));
+        };
+        if (!held) {
+          answer();
+          return;
+        }
+        held.arrived();
+        void held.released.then(answer);
+      });
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+    const { port } = upstream.address() as AddressInfo;
+    const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-variant-autoload-home-'));
+    function goneMarker(id: string) {
+      return join(homeDir, `gone-${id.replace(/[^A-Za-z0-9.-]/g, '_')}`);
+    }
+    const markGone = (id: string) => writeFileSync(goneMarker(id), '');
+    const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
+    const corePath = join(homeDir, 'fake-core.dylib');
+    writeFileSync(corePath, '');
+    writeFileSync(loaderPath, `
+      const sdk = \`
+        import { existsSync } from 'node:fs';
+        const notify = (kind, id) => fetch('http://127.0.0.1:${port}/' + kind + '?id=' + encodeURIComponent(id));
+        // A marker file stands for the runtime having dropped a build and its cache files.
+        const gone = (id) => existsSync('${homeDir.replace(/\\/g, '/')}/gone-' + id.replace(/[^A-Za-z0-9.-]/g, '_'));
+        class FakeModel {
+          constructor(id, cached = true) { this.alias = 'foo'; this.id = id; this.cached = cached; this.loaded = false; }
+          get isCached() { return this.cached && !gone(this.id); }
+          async load() { await notify('loaded', this.id); this.loaded = true; }
+          async unload() { await notify('unloaded', this.id); this.loaded = false; }
+          isLoaded() { return this.loaded && !gone(this.id); }
+          getExecutionProvider() { return 'CPUExecutionProvider'; }
+          selectVariant(variant) { this.id = variant.id; this.cached = variant.cached; }
+        }
+        class FakeManager {
+          constructor() {
+            this.urls = [];
+            this.ep = { name: 'CPUExecutionProvider', isRegistered: true };
+            this.catalog = {
+              // The listing still claims foo-gone:1 is cached: it was deleted after the
+              // gateway last built its index, which is the window a load must re-validate.
+              getModels: async () => [{
+                alias: 'foo',
+                variants: ['foo-cpu:1', 'foo-gpu:1', 'foo-gone:1'].map(id => ({ id, isCached: true })),
+              }],
+              getModel: async (alias) => {
+                if (alias !== 'foo') throw new Error('model not found');
+                return new FakeModel('foo-cpu:1');
+              },
+              getModelVariant: async (id) => {
+                if (!['foo-cpu:1', 'foo-gpu:1', 'foo-gone:1'].includes(id)) throw new Error('variant not found');
+                return new FakeModel(id, id !== 'foo-gone:1');
+              },
+            };
+          }
+          discoverEps() { return [this.ep]; }
+          async downloadAndRegisterEps() {
+            return { success: true, registeredEps: [this.ep.name], failedEps: [] };
+          }
+          startWebService() { this.urls = ['http://127.0.0.1:${port}']; }
+          stopWebService() {}
+          static create() { return new FakeManager(); }
+        }
+        export { FakeManager as FoundryLocalManager };
+      \`;
+      export async function resolve(specifier, context, nextResolve) {
+        if (specifier === 'foundry-local-sdk') {
+          return { url: 'data:text/javascript,' + encodeURIComponent(sdk), shortCircuit: true };
+        }
+        return nextResolve(specifier, context);
+      }
+      export async function load(url, context, nextLoad) {
+        if (url.startsWith('data:text/javascript,')) {
+          return { format: 'module', source: decodeURIComponent(url.slice('data:text/javascript,'.length)), shortCircuit: true };
+        }
+        return nextLoad(url, context);
+      }
+    `);
+    const proc = spawn(process.execPath, [
+      '--experimental-loader', pathToFileURL(loaderPath).href, 'sidecar/foundry-sidecar.js',
+    ], {
+      cwd: process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, HOME: homeDir, USERPROFILE: homeDir, FLINT_FOUNDRY_CORE_PATH: corePath },
+    });
+    const cleanup = async () => {
+      await killAndWait(proc);
+      await closeServer(upstream);
+      rmSync(homeDir, { recursive: true, force: true });
+    };
+    try {
+      await waitForLine(proc, (msg) => msg.ready === true);
+      proc.stdin.write(`${JSON.stringify({ id: 1, cmd: 'init', appName: 'flint-test', logLevel: 'info' })}\n`);
+      const initRes = await waitForLine(proc, (msg) => msg.id === 1);
+      if (!initRes.ok) throw new Error(`init failed: ${initRes.error}`);
+      proc.stdin.write(`${JSON.stringify({ id: 2, cmd: 'startService', port: 0, bindAddress: '127.0.0.1' })}\n`);
+      const started = await waitForLine(proc, (msg) => msg.id === 2, 15000);
+      if (!started.ok) throw new Error(`startService failed: ${started.error}`);
+      proc.stdin.write(`${JSON.stringify({ id: 3, cmd: 'load', alias: 'foo', variantId: 'foo-cpu:1' })}\n`);
+      const loaded = await waitForLine(proc, (msg) => msg.id === 3, 5000);
+      if (!loaded.ok) throw new Error(`load failed: ${loaded.error}`);
+      return {
+        proc,
+        gatewayPort: Number(new URL(started.endpoint).port),
+        nativeCalls,
+        holdNextChat,
+        markGone,
+        cleanup,
+      };
+    } catch (e) {
+      await cleanup();
+      throw e;
+    }
+  }
+
+  function postChat(port: number, model: string): Promise<{ status: number; body: string }> {
+    const body = JSON.stringify({ model, messages: [] });
+    return new Promise((resolve, reject) => {
+      const req = httpRequest({
+        host: '127.0.0.1',
+        port,
+        path: '/v1/chat/completions',
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+      }, (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode || 0, body: data }));
+      });
+      req.on('error', reject);
+      req.end(body);
+    });
+  }
+
+  async function residentVariant(proc: ChildProcessWithoutNullStreams, id: number) {
+    proc.stdin.write(`${JSON.stringify({ id, cmd: 'getStatus' })}\n`);
+    const status = await waitForLine(proc, (msg) => msg.id === id, 5000);
+    return status.result.pool.find((m: { alias: string }) => m.alias === 'foo')?.variantId ?? null;
+  }
+
+  it('switches the resident variant for a gateway request naming another cached build', async () => {
+    // The request's own booking is not using the resident build it replaces, so it must not
+    // count as the in-flight work that forbids the switch.
+    const gateway = await startVariantGateway();
+    try {
+      const reply = await postChat(gateway.gatewayPort, 'foo-gpu:1');
+      expect(reply.status, reply.body).toBe(200);
+      expect(await residentVariant(gateway.proc, 10)).toBe('foo-gpu:1');
+      expect(gateway.nativeCalls).toEqual(['loaded:foo-cpu:1', 'unloaded:foo-cpu:1', 'loaded:foo-gpu:1']);
+    } finally {
+      await gateway.cleanup();
+    }
+  }, 20000);
+
+  it('refuses to autoload a build that is no longer cached, before unloading the resident one', async () => {
+    const gateway = await startVariantGateway();
+    try {
+      const reply = await postChat(gateway.gatewayPort, 'foo-gone:1');
+      expect(reply.status).toBe(400);
+      expect(reply.body).toContain('is not loaded');
+      expect(await residentVariant(gateway.proc, 10)).toBe('foo-cpu:1');
+      expect(gateway.nativeCalls).toEqual(['loaded:foo-cpu:1']);
+    } finally {
+      await gateway.cleanup();
+    }
+  }, 20000);
+
+  it('refuses to reload a resident entry the runtime dropped once its cache is gone', async () => {
+    const gateway = await startVariantGateway();
+    try {
+      gateway.markGone('foo-cpu:1');
+      const reply = await postChat(gateway.gatewayPort, 'foo-cpu:1');
+      expect(reply.status).toBe(400);
+      expect(reply.body).toContain('is not loaded');
+      expect(gateway.nativeCalls).toEqual(['loaded:foo-cpu:1']);
+    } finally {
+      await gateway.cleanup();
+    }
+  }, 20000);
+
+  it('keeps a request served through a version fallback counted against the serving build', async () => {
+    // `foo-cpu:999` is not cached, so the registry serves the same build's cached version and
+    // the gateway forwards `foo-cpu:1`. That build is in use until the response completes.
+    const gateway = await startVariantGateway();
+    const held = gateway.holdNextChat();
+    let released = false;
+    try {
+      const pending = postChat(gateway.gatewayPort, 'foo-cpu:999');
+      pending.catch(() => {}); // cleanup may reset it if an assertion below fails first
+      await held.arrival;
+
+      gateway.proc.stdin.write(`${JSON.stringify({ id: 10, cmd: 'unload', alias: 'foo' })}\n`);
+      const unload = await waitForLine(gateway.proc, (msg) => msg.id === 10, 5000);
+      expect(unload.ok).not.toBe(true);
+      expect(unload.error).toContain('in flight');
+
+      held.release();
+      released = true;
+      const reply = await pending;
+      expect(reply.status, reply.body).toBe(200);
+      expect(gateway.nativeCalls).toEqual(['loaded:foo-cpu:1']);
+    } finally {
+      if (!released) held.release();
+      await gateway.cleanup();
+    }
+  }, 20000);
+});
+
 describe('foundry-sidecar applyMemorySettings ordering guard', () => {
   let proc: ChildProcessWithoutNullStreams;
 
@@ -1691,7 +1947,7 @@ describe('foundry-sidecar applyMemorySettings ordering guard', () => {
   });
 
   afterEach(async () => {
-    if (proc && !proc.killed) await killAndWait(proc);
+    if (proc) await killAndWait(proc);
   });
 
   it('refuses to install a lower seq once a higher seq has already landed', async () => {

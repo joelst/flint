@@ -27,6 +27,7 @@ import { formatPublicEndpoint } from './gateway-http.js';
 import {
   buildCachedModelIndex,
   buildModelIndex,
+  isCachedModel,
   isLocalCatalogEntry,
   resolveModelId,
 } from './model-registry.js';
@@ -520,9 +521,10 @@ const acquireServiceTransition = createServiceTransitionLock();
 const pool = new Map();
 let sharedEndpoint = null;
 
-// Usage bookkeeping that drives eviction, kept beside the pool rather than inside it so a
-// variant switch (which replaces the pool entry) does not reset a model's history.
-/** @type {Map<string, { lastUsedAt: number, inFlight: number }>} */
+// Idle bookkeeping that drives eviction, kept beside the pool rather than inside it so a
+// variant switch (which replaces the pool entry) does not reset a model's history. In-flight
+// requests are counted by `modelActivityFence`, keyed by the name each request asked for.
+/** @type {Map<string, { lastUsedAt: number }>} */
 const usage = new Map();
 /** @type {Map<string, 'pinned'|'low'|'normal'>} set by the UI; absent means 'normal'. */
 const modelPriorities = new Map();
@@ -553,7 +555,7 @@ const EVICTION_SWEEP_MS = 30_000;
 function usageFor (alias) {
   let entry = usage.get(alias);
   if (!entry) {
-    entry = { lastUsedAt: Date.now(), inFlight: 0 };
+    entry = { lastUsedAt: Date.now() };
     usage.set(alias, entry);
   }
   return entry;
@@ -582,62 +584,22 @@ function aliasForModelName (name) {
   return null;
 }
 
-function activityAliasesForModelName(modelName) {
-  const aliases = [];
-  const resident = aliasForModelName(modelName);
-  if (resident) aliases.push(resident);
-  if (modelIndex) {
-    const indexed = resolveModelId(modelIndex, modelName)?.alias;
-    if (indexed && !aliases.includes(indexed)) aliases.push(indexed);
-  }
-  const raw = typeof modelName === 'string' ? modelName.trim() : '';
-  if (raw && !aliases.includes(raw)) aliases.push(raw);
-  return aliases;
-}
-
 const modelActivityFence = createModelActivityFence({
-  resolveAliases: (modelName) => {
-    const aliases = [];
-    const resident = aliasForModelName(modelName);
-    if (resident) aliases.push(resident);
-    if (modelIndex) {
-      const indexed = resolveModelId(modelIndex, modelName)?.alias;
-      if (indexed && !aliases.includes(indexed)) aliases.push(indexed);
-    }
-    return aliases;
-  },
-  inFlightFor: (alias) => inFlightFor(alias),
+  residentAliasFor: aliasForModelName,
+  catalogAliasFor: (modelName) => (modelIndex ? resolveModelId(modelIndex, modelName)?.alias : null),
 });
 
-/** Marks a model busy for the life of a request so eviction cannot unload it mid-flight. */
+/**
+ * Marks a model busy for the life of a request so eviction cannot unload it mid-flight.
+ * A start refused by a destructive fence books nothing and returns false.
+ */
 function noteActivity (modelName, phase) {
-  // Candidate keys, best first: resident pool alias, catalog alias, the raw requested name.
-  // During gateway autoload the model is not resident yet (and the lazy modelIndex may not be
-  // built), so the start phase can only book against a fallback key. Resolution is therefore
-  // state-dependent — by the end of the request the pool may resolve the same string to a
-  // different key — so the end phase must decrement whichever candidate actually holds the
-  // in-flight count, not whatever the current pool state resolves to.
-  const candidates = activityAliasesForModelName(modelName);
-  const resident = aliasForModelName(modelName);
-  if (candidates.length === 0) return false;
-  if (phase === 'start' && !modelActivityFence.allows(modelName)) return false;
-
-  let alias = candidates[0];
-  if (phase !== 'start') {
-    alias = candidates.find(k => (usage.get(k)?.inFlight ?? 0) > 0) ?? alias;
-    // Keep the resident model's idle clock accurate even when the count sat on a fallback key.
-    if (resident && resident !== alias) touchModel(resident);
-  }
-  const entry = usageFor(alias);
-  entry.lastUsedAt = Date.now();
   if (phase === 'start') {
-    entry.inFlight++;
+    if (!modelActivityFence.start(modelName)) return false;
   } else {
-    entry.inFlight = Math.max(0, entry.inFlight - 1);
-    // Bookkeeping for names that never became a resident model must not grow the map without
-    // bound (random names spammed at the gateway).
-    if (entry.inFlight === 0 && !pool.has(alias)) usage.delete(alias);
+    modelActivityFence.end(modelName);
   }
+  touchModel(aliasForModelName(modelName));
   return true;
 }
 
@@ -658,24 +620,9 @@ function stopGatewayAccepting () {
   return current;
 }
 
-/**
- * Total in-flight count for a resident alias, including requests booked under a
- * non-resident key while their model was still autoloading (see noteActivity). Every
- * eviction decision must use this, not the alias's usage entry alone.
- */
+/** Requests served by `alias`'s resident build. Every destructive decision must use this. */
 function inFlightFor (alias) {
-  let count = usage.get(alias)?.inFlight ?? 0;
-  const normalizedAlias = String(alias || '').toLowerCase();
-  for (const [key, use] of usage) {
-    if (key === alias || use.inFlight <= 0 || pool.has(key)) continue;
-    const resolved = aliasForModelName(key) || (
-      modelIndex ? resolveModelId(modelIndex, key)?.alias : null
-    );
-    // An unresolved autoload booking may acquire its canonical alias only after the first
-    // upstream rejection. Until then, conservatively protect every destructive operation.
-    if (!resolved || resolved.toLowerCase() === normalizedAlias) count += use.inFlight;
-  }
-  return count;
+  return modelActivityFence.inFlightFor(alias);
 }
 
 function poolEntriesForEviction () {
@@ -703,10 +650,7 @@ async function unloadAliasLocked (alias) {
     return false;
   }
   pool.delete(alias);
-  // Usage carries inFlight; discarding it while a request is still running would lose that
-  // request's accounting and let the next sweep treat the alias as idle.
-  const use = usage.get(alias);
-  if (!use || use.inFlight <= 0) usage.delete(alias);
+  usage.delete(alias);
   return true;
 }
 
@@ -1011,11 +955,7 @@ function invalidateModelIndex () {
 function cacheModelIndexFromCatalog(models) {
   modelIndex = buildModelIndex((models || []).map(m => ({
     alias: m.alias,
-    variants: (m.variants || []).map(v => {
-      let cached = false;
-      try { cached = !!v.isCached; } catch { cached = !!v.info?.cached; }
-      return { id: v.id, cached };
-    }),
+    variants: (m.variants || []).map(v => ({ id: v.id, cached: isCachedModel(v) })),
   })));
   return modelIndex;
 }
@@ -1961,9 +1901,16 @@ function setModelTemplate(name, promptTemplate) {
   return { name: sanitizeModelName(name), promptTemplate: content.PromptTemplate, warnings: check.warnings };
 }
 
-function ensureModel(alias, variantId, onCatalogProgress) {
+/**
+ * Load `alias` (optionally a specific variant) under its residency scope.
+ *
+ * `requireCached` is for loads that act on an earlier catalog resolution, such as gateway
+ * autoload: the resolution may predate a deletion that finished while this load waited for the
+ * scope, and loading an uncached build would re-download what the user just deleted.
+ */
+function ensureModel(alias, variantId, onCatalogProgress, { requireCached = false } = {}) {
   return serializeModelOperation(alias, ['residency'], async ({ waited, previousResult }) => {
-      const result = await ensureModelLocked(alias, variantId, onCatalogProgress);
+      const result = await ensureModelLocked(alias, variantId, onCatalogProgress, requireCached);
       if (waited && result.loadedNow !== true) {
         // A preceding request may have loaded or reloaded this model while this request waited.
         // Only a preceding known-warm result remains warm; the other cases are unknowable from
@@ -1977,7 +1924,7 @@ function ensureModel(alias, variantId, onCatalogProgress) {
   });
 }
 
-async function ensureModelLocked(alias, variantId, onCatalogProgress) {
+async function ensureModelLocked(alias, variantId, onCatalogProgress, requireCached = false) {
   const existing = pool.get(alias);
   let switchingVariant = false;
   let releaseReplacementFence = null;
@@ -2001,6 +1948,11 @@ async function ensureModelLocked(alias, variantId, onCatalogProgress) {
         loaded = existing.catModel.isLoaded;
       }
       if (loaded === false) {
+        // Reloading reads the build from the cache again. A resolution made before the cache
+        // changed must not turn that into a download.
+        if (requireCached && !isCachedModel(existing.catModel)) {
+          throw new Error(`${variantId || alias} is not in the local cache; refusing to load it.`);
+        }
         await existing.catModel.load();
         log('info', `Model ${alias} reloaded after runtime eviction`);
       }
@@ -2009,6 +1961,25 @@ async function ensureModelLocked(alias, variantId, onCatalogProgress) {
         ...existing,
         loadedNow: loaded === true ? false : loaded === false ? true : null,
       };
+    }
+  }
+  const lookUpBuild = () => readUnconfirmedCatalog(
+    async () => {
+      const model = await manager.catalog.getModel(alias);
+      return {
+        catModel: model,
+        variant: variantId ? await manager.catalog.getModelVariant(variantId) : null,
+      };
+    },
+    onCatalogProgress,
+  );
+  // Validate before admission, which may unload the resident variant this load replaces.
+  // Deletion holds this alias's residency scope, so the build cannot vanish before the load.
+  let build = null;
+  if (requireCached) {
+    build = await lookUpBuild();
+    if (!isCachedModel(variantId ? build.variant : build.catModel)) {
+      throw new Error(`${variantId || alias} is not in the local cache; refusing to load it.`);
     }
   }
   // Reserve a slot (freeing room first) and hold it until the load settles, so a concurrent
@@ -2049,16 +2020,7 @@ async function ensureModelLocked(alias, variantId, onCatalogProgress) {
     },
   } : null);
   try {
-    const { catModel, variant } = await readUnconfirmedCatalog(
-      async () => {
-        const model = await manager.catalog.getModel(alias);
-        return {
-          catModel: model,
-          variant: variantId ? await manager.catalog.getModelVariant(variantId) : null,
-        };
-      },
-      onCatalogProgress,
-    );
+    const { catModel, variant } = build ?? await lookUpBuild();
     if (variantId) {
       const fileSizeMb = variant.info?.fileSizeMb;
       if (fileSizeMb && os.freemem() < fileSizeMb * 1024 * 1024 * 1.15) {
@@ -2991,7 +2953,8 @@ rl.on('line', async (line) => {
             // would abort work the fence is supposed to let complete, not the new work it exists
             // to block.
             load: async (alias, variantId) => {
-              return (await ensureModel(alias, variantId))?.variantId ?? null;
+              return (await ensureModel(alias, variantId, undefined, { requireCached: true }))
+                ?.variantId ?? null;
             },
             // Proxied traffic never reaches this process, so without this hook a model
             // serving a long completion would look idle and could be evicted underneath it.

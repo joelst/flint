@@ -1,9 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildCachedModelIndex,
+  isCachedModel,
   isLocalCatalogEntry,
   resolveModelId,
 } from './model-registry.js';
+
+describe('isCachedModel', () => {
+  it('reads the native getter and falls back to the info snapshot only when it throws', () => {
+    expect(isCachedModel({ isCached: true })).toBe(true);
+    expect(isCachedModel({ isCached: false, info: { cached: true } })).toBe(false);
+    expect(isCachedModel({
+      get isCached() { throw new Error('native getter failed'); },
+      info: { cached: true },
+    })).toBe(true);
+    expect(isCachedModel({ get isCached() { throw new Error('native getter failed'); } })).toBe(false);
+    expect(isCachedModel(null)).toBe(false);
+  });
+});
 
 describe('buildCachedModelIndex', () => {
   it('resolves cached aliases and versioned or bare variant ids', () => {

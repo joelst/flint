@@ -66,7 +66,9 @@ export function classifyGatewayRoute (urlPath) {
  * @param {(model: string, phase: 'start'|'end') => boolean|void} [options.onActivity]
  *        called around every request that names a model, so the owner can keep a model
  *        alive while it is being served and record when it was last used; returning false
- *        from the start phase rejects work while that model is being changed
+ *        from the start phase rejects work while that model is being changed. The name is
+ *        the one forwarded: a request rewritten to a variant id starts that id before it
+ *        ends the previous name, so one exchange may report more than one start/end pair
  * @param {(entry: object) => void} [options.onAccess]
  *        metadata-only access log (no bodies, no headers) after each request finishes
  * @param {() => (() => void)|null} [options.admitRequest]
@@ -217,17 +219,24 @@ export function createGateway (options) {
       // model generating a long completion apart from one sitting idle — and unloading the
       // former would kill a live request.
       if (!notifyActivity(requested, 'start')) {
-        res.writeHead(409, { 'content-type': 'application/json' });
-        res.end(openAiError(
-          'Model work is temporarily blocked while an unload or deletion is in progress. Retry shortly.',
-          'conflict',
-        ));
-        return;
+        return respondActivityConflict(res);
       }
+      // The booking names what is forwarded. Foundry serves only an exact variant id, so a
+      // request rewritten to one is served by that build, not by whatever the client's own
+      // spelling would resolve to. A rebooking starts the new name before ending the old one,
+      // so the exchange is never left unbooked.
+      let booked = requested;
+      const rebook = (name) => {
+        if (name === booked) return true;
+        if (!notifyActivity(name, 'start')) return false;
+        notifyActivity(booked, 'end');
+        booked = name;
+        return true;
+      };
       try {
-        return await route(req, res, buffered, requested);
+        return await route(req, res, buffered, requested, rebook);
       } finally {
-        notifyActivity(requested, 'end');
+        notifyActivity(booked, 'end');
       }
     } finally {
       const completedAt = Date.now();
@@ -250,14 +259,26 @@ export function createGateway (options) {
     }
   }
 
-  async function route (req, res, buffered, requested) {
+  function respondActivityConflict (res) {
+    res.writeHead(409, { 'content-type': 'application/json' });
+    res.end(openAiError(
+      'Model work is temporarily blocked while an unload or deletion is in progress. Retry shortly.',
+      'conflict',
+    ));
+  }
+
+  async function route (req, res, buffered, requested, rebook = () => true) {
 
     // An identifier that needed rewriting once needs it on every later request, and the
     // upstream rejection that teaches us costs a round trip each time. Reuse it, and let
     // the not-loaded path below correct the entry if it has gone stale.
     let outgoing = buffered;
     const known = requested ? rewrites.get(requested) : null;
-    if (known) outgoing = rewriteModelName(buffered, known) ?? buffered;
+    const rewrittenKnown = known ? rewriteModelName(buffered, known) : null;
+    if (rewrittenKnown !== null) {
+      if (!rebook(known)) return respondActivityConflict(res);
+      outgoing = rewrittenKnown;
+    }
 
     const attempt = await forward(req, res, outgoing, { captureNotLoaded: true });
     if (attempt === SENT) return;
@@ -292,6 +313,9 @@ export function createGateway (options) {
         rewrites.set(requested, canonical);
         log('info', `Gateway routing ${requested} → ${canonical}`);
       }
+    }
+    if (!rebook(replayBody === buffered ? requested : canonical)) {
+      return respondActivityConflict(res);
     }
 
     // captureNotLoaded: false — the retry already happened, so a second rejection is the

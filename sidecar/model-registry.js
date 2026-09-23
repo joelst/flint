@@ -29,6 +29,19 @@ export function isLocalCatalogEntry (entry) {
 }
 
 /**
+ * Whether an SDK model or variant has its build in the local cache. The same predicate admits
+ * a variant into the index and re-validates an autoload target, so the two cannot disagree.
+ * The native getter can throw; the info snapshot is the fallback.
+ */
+export function isCachedModel (model) {
+  try {
+    return !!model?.isCached;
+  } catch {
+    return !!model?.info?.cached;
+  }
+}
+
+/**
  * Build a lookup from every identifier form a client might send.
  *
  * Only models that are actually cached are indexed. The catalog also contains models that
