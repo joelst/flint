@@ -1005,6 +1005,22 @@ describe('gateway activity hook', () => {
     expect(res.status).toBe(200);
   });
 
+  it('rejects model work when the activity hook cannot acquire a lease', async () => {
+    upstream.state.loaded.add('phi-4-mini');
+    const events = [];
+    gateway = await startGateway({
+      onActivity: (model, phase) => {
+        events.push([model, phase]);
+        return phase !== 'start';
+      },
+    });
+
+    const res = await post(gateway.publicPort, 'phi-4-mini');
+    expect(res.status).toBe(409);
+    expect(events).toEqual([['phi-4-mini', 'start']]);
+    expect(upstream.state.hits).toHaveLength(0);
+  });
+
   it('holds an admission lease across autoload and replay', async () => {
     const events = [];
     gateway = await startGateway({

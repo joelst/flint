@@ -1093,8 +1093,8 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       await unloadStarted;
 
       const denied = await postToGateway(gatewayPort, JSON.stringify({ model: 'fake-model', messages: [] }));
-      expect(denied.status).toBe(503);
-      expect(denied.body).toContain('model is unloading');
+      expect(denied.status).toBe(409);
+      expect(denied.body).toContain('unload or deletion is in progress');
       expect(forwardedChatRequests).toBe(0);
 
       releaseUnload?.();

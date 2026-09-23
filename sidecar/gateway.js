@@ -63,10 +63,10 @@ export function classifyGatewayRoute (urlPath) {
  * @param {(alias: string, variantId: string|null) => Promise<string|null|void>} options.load
  *        resolves to the variant id actually loaded, which the replay needs to name
  * @param {(level: string, msg: string) => void} [options.log]
- * @param {(model: string, phase: 'start'|'end') => void|boolean} [options.onActivity]
+ * @param {(model: string, phase: 'start'|'end') => boolean|void} [options.onActivity]
  *        called around every request that names a model, so the owner can keep a model
  *        alive while it is being served and record when it was last used; returning false
- *        for a start phase rejects the request before it is forwarded
+ *        from the start phase rejects work while that model is being changed
  * @param {(entry: object) => void} [options.onAccess]
  *        metadata-only access log (no bodies, no headers) after each request finishes
  * @param {() => (() => void)|null} [options.admitRequest]
@@ -217,8 +217,11 @@ export function createGateway (options) {
       // model generating a long completion apart from one sitting idle — and unloading the
       // former would kill a live request.
       if (!notifyActivity(requested, 'start')) {
-        res.writeHead(503, { 'content-type': 'application/json' });
-        res.end(openAiError('The requested model is unloading. Retry once it finishes.', 'server_error'));
+        res.writeHead(409, { 'content-type': 'application/json' });
+        res.end(openAiError(
+          'Model work is temporarily blocked while an unload or deletion is in progress. Retry shortly.',
+          'conflict',
+        ));
         return;
       }
       try {

@@ -102,6 +102,7 @@ export default defineConfig(() => ({
         'sidecar/accelerator-registration.js',
         'sidecar/model-operation-queue.js',
         'sidecar/model-updates.js',
+        'sidecar/model-activity-fence.js',
         'sidecar/byom-import.js',
         'sidecar/prompt-template.js',
         'sidecar/service-lifecycle.js',
