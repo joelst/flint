@@ -792,6 +792,44 @@ describe('createCatalogRegistrationGate', () => {
     expect(register).toHaveBeenCalledTimes(2);
   });
 
+  it('keeps post-commit registration behind a lookup queued during catalog commitment', async () => {
+    let releaseCommit = () => {};
+    let releaseLookup = () => {};
+    let lookupStarted = false;
+    const register = vi.fn()
+      .mockResolvedValueOnce({ success: true, registeredEps: ['CPUExecutionProvider'] })
+      .mockResolvedValueOnce({
+        success: true,
+        registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+      });
+    const commitCatalog = vi.fn(() => new Promise((resolve) => {
+      releaseCommit = () => resolve(['cpu-model']);
+    }));
+    const gate = createCatalogRegistrationGate(register, commitCatalog);
+
+    const commit = gate.commit();
+    await vi.waitFor(() => expect(commitCatalog).toHaveBeenCalledTimes(1));
+    const lookup = gate.readUnconfirmed(() => new Promise((resolve) => {
+      lookupStarted = true;
+      releaseLookup = () => resolve('model');
+    }));
+    releaseCommit();
+    await commit;
+    await vi.waitFor(() => expect(lookupStarted).toBe(true));
+
+    const rerun = gate.rerun();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(register).toHaveBeenCalledTimes(1);
+
+    releaseLookup();
+    await expect(lookup).resolves.toBe('model');
+    await expect(rerun).resolves.toMatchObject({
+      registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+      catalogRefreshRequiresRestart: true,
+    });
+    expect(register).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps lookups behind a rerun queued before commit confirmation', async () => {
     let releaseCommit = () => {};
     let releaseRegistration = () => {};

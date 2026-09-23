@@ -478,7 +478,7 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
         ]).then(() => operation()));
       }
       const report = typeof onProgress === 'function' ? onProgress : null;
-      return enqueue(async () => {
+      return trackProviderRead(enqueue(async () => {
         await ensureSettled(report);
         try {
           return await operation();
@@ -489,7 +489,7 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
           // snapshot read confirms it.
           committed = true;
         }
-      });
+      }));
     },
     readTelemetry(operation) {
       if (typeof operation !== 'function') {
