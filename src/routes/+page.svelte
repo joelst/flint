@@ -372,6 +372,9 @@
       });
       lastFlintVerified = flintVerifiedFromReport(endpointSelfTestReport);
     } catch (error) {
+      // The run said nothing about the endpoint, so an earlier run's badge must not stand in
+      // for it: the details view would show models as verified beside a failed run.
+      lastFlintVerified = null;
       endpointSelfTestReport = {
         ranAt: new Date().toISOString(),
         endpoint: state.endpoint || null,

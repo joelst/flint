@@ -151,6 +151,12 @@ describe('endpoint self-test residency', () => {
     const run = page.slice(page.indexOf('async function runGatewaySelfTest()'), page.indexOf('endpointSelfTestBusy = true;'));
     expect(run).toContain('poolMutationsInFlight > 0');
     expect(run).toContain('isComparing || comparePreparing');
+    // A run that throws leaves no verification behind; the previous run's badge must not stand
+    // beside a failed report.
+    const runBody = page.slice(page.indexOf('async function runGatewaySelfTest()'), page.indexOf('async function refreshUpdateStatus()'));
+    const catchAt = runBody.indexOf('} catch (error) {');
+    expect(catchAt).toBeGreaterThan(-1);
+    expect(runBody.slice(catchAt, runBody.indexOf('endpointSelfTestReport = {', catchAt))).toContain('lastFlintVerified = null;');
     // The Arena checks the same fence, so it cannot start while the self-test runs.
     const arenaStart = page.indexOf('async function runComparison(');
     const arena = page.slice(arenaStart, page.indexOf('compareReviewId = null;', arenaStart));
