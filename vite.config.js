@@ -103,6 +103,7 @@ export default defineConfig(() => ({
         'sidecar/prompt-template.js',
         'sidecar/service-lifecycle.js',
         'sidecar/execution-provider.js',
+        'sidecar/execution-provider-cache.js',
         'sidecar/native-service.js',
         'sidecar/fetch-response.js',
         'src/lib/model-sort.ts',

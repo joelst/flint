@@ -39,4 +39,11 @@ describe('light mode Check and Recheck', () => {
     expect(page).toContain('button.tiny:not(.danger-btn)');
     expect(page).toMatch(/button\.tiny:not\(\.danger-btn\)\s*\{[^}]*color:\s*var\(--fg\)/s);
   });
+
+  it('paints Recheck Providers on the panel fill with a visible border', () => {
+    expect(page).toContain('class="secondary accel-recheck"');
+    expect(page).toMatch(
+      /button\.accel-recheck\s*\{[^}]*background:\s*var\(--panel-bg\);[^}]*color:\s*var\(--fg\);[^}]*border:\s*1px solid var\(--muted\);/s,
+    );
+  });
 });

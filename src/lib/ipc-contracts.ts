@@ -22,7 +22,7 @@ export type SidecarCommand =
   | { cmd: 'transcribeAudio'; audioBase64: string; mimeType: string; fileName: string; model: string; language: string; temperature?: number; preferredEp?: string }
   | { cmd: 'embedTexts'; model: string; inputs: string[] }
   | { cmd: 'getEps' }
-  | { cmd: 'ensureAccelerators' }
+  | { cmd: 'ensureAccelerators'; rebuildBroken?: boolean }
   | { cmd: 'getVisionModels' }
   | { cmd: 'getSTTModels' }
   | { cmd: 'poolStatus' }
@@ -74,6 +74,8 @@ export interface EpDownloadResult {
   status: string;
   registeredEps: string[];
   failedEps: string[];
+  /** Provider names whose on-disk cache was removed before a rebuild. */
+  removedProviderCaches?: string[];
 }
 
 /** The four turn wrappers Foundry substitutes `{Content}` into when building a prompt. */
