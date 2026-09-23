@@ -262,6 +262,92 @@ describe('rebuildBrokenExecutionProviders', () => {
     expect(outcome.result?.success).toBe(true);
   });
 
+  it('stays failed when deleting the cache makes Foundry drop the provider', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'flint-ep-'));
+    const cuda = path.join(root, 'cuda-ep');
+    fs.mkdirSync(cuda);
+    fs.writeFileSync(path.join(cuda, 'onnxruntime_providers_cuda.dll'), 'stale');
+    const calls = [];
+    const outcome = await rebuildBrokenExecutionProviders({
+      epRoot: root,
+      discover: () => fs.existsSync(cuda)
+        ? [
+          { name: 'WebGpuExecutionProvider', isRegistered: true },
+          { name: 'CUDAExecutionProvider', isRegistered: false },
+        ]
+        : [{ name: 'WebGpuExecutionProvider', isRegistered: true }],
+      removeCache: (name) => removeProviderCache(root, name),
+      downloadAndRegister: async (names) => {
+        calls.push(names);
+        throw new Error('registration failed');
+      },
+    });
+    expect(calls).toEqual([['CUDAExecutionProvider'], ['CUDAExecutionProvider']]);
+    expect(outcome.removed).toEqual(['CUDAExecutionProvider']);
+    expect(outcome.result?.success).toBe(false);
+    expect(outcome.result?.failedEps).toEqual(['CUDAExecutionProvider']);
+    expect(outcome.result?.registeredEps).toEqual(['WebGpuExecutionProvider']);
+    expect(fs.existsSync(cuda)).toBe(false);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('registers each broken provider by itself so one failure does not drop the other', async () => {
+    const calls = [];
+    const registered = new Set(['WebGpuExecutionProvider']);
+    const outcome = await rebuildBrokenExecutionProviders({
+      discover: () => [
+        { name: 'WebGpuExecutionProvider', isRegistered: registered.has('WebGpuExecutionProvider') },
+        { name: 'CUDAExecutionProvider', isRegistered: registered.has('CUDAExecutionProvider') },
+        { name: 'QNNExecutionProvider', isRegistered: registered.has('QNNExecutionProvider') },
+      ],
+      removeCache: () => true,
+      downloadAndRegister: async (names) => {
+        calls.push(names);
+        if (names?.includes('CUDAExecutionProvider')) {
+          throw new Error('Native failure registering CUDAExecutionProvider');
+        }
+        for (const name of names ?? []) registered.add(name);
+        return { success: true, failedEps: [], registeredEps: names };
+      },
+    });
+    expect(calls.flat()).not.toContain('WebGpuExecutionProvider');
+    expect(calls.filter((names) => names?.length !== 1)).toEqual([]);
+    expect(calls.some((names) => names?.[0] === 'QNNExecutionProvider')).toBe(true);
+    expect(outcome.result?.success).toBe(false);
+    expect(outcome.result?.failedEps).toEqual(['CUDAExecutionProvider']);
+    expect(outcome.result?.status).toContain('CUDAExecutionProvider');
+    expect(outcome.result?.registeredEps).toEqual([
+      'WebGpuExecutionProvider',
+      'QNNExecutionProvider',
+    ]);
+  });
+
+  it('registers one cache once when discover spells the provider differently', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'flint-ep-'));
+    fs.mkdirSync(path.join(root, 'webgpu-ep'));
+    const calls = [];
+    const removed = [];
+    let registered = false;
+    const outcome = await rebuildBrokenExecutionProviders({
+      epRoot: root,
+      discover: () => [{ name: 'WebGPUExecutionProvider', isRegistered: registered }],
+      removeCache: (name) => {
+        removed.push(name);
+        return true;
+      },
+      downloadAndRegister: async (names) => {
+        calls.push(names);
+        registered = true;
+        return { success: true, failedEps: [] };
+      },
+    });
+    expect(calls).toEqual([['WebGPUExecutionProvider']]);
+    expect(removed).toEqual(['WebGPUExecutionProvider']);
+    expect(outcome.result?.success).toBe(true);
+    expect(outcome.result?.registeredEps).toEqual(['WebGPUExecutionProvider']);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
   it('names a provider that is still unregistered after the retry', async () => {
     const calls = [];
     const outcome = await rebuildBrokenExecutionProviders({
