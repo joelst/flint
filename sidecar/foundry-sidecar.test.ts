@@ -7,6 +7,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { killAndWait } from './test-process.js';
 
 function waitForLine(
   proc: ChildProcessWithoutNullStreams,
@@ -53,19 +54,6 @@ function waitForLine(
 
     proc.stdout.on('data', onData);
     proc.on('exit', onExit);
-  });
-}
-
-/** Kills the child and waits (briefly, best-effort) for it to actually exit, so cleanup that
- * follows (closing an upstream server the child was still talking to, removing its temp home
- * dir) doesn't race a process that is still shutting down. */
-function killAndWait(proc: ChildProcessWithoutNullStreams, timeoutMs = 3000): Promise<void> {
-  if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve();
-  return new Promise((resolve) => {
-    const done = () => { clearTimeout(timer); resolve(); };
-    const timer = setTimeout(done, timeoutMs);
-    proc.once('exit', done);
-    proc.kill();
   });
 }
 
@@ -183,9 +171,7 @@ describe('foundry-sidecar protocol basics', () => {
       const exclusiveOff = await waitForLine(proc, (msg) => msg.id === 7);
       expect(exclusiveOff).toMatchObject({ ok: true, result: { exclusive: false } });
     } finally {
-      if (!proc.killed) {
-        proc.kill();
-      }
+      await killAndWait(proc);
     }
   });
 
@@ -379,7 +365,7 @@ describe('foundry-sidecar protocol basics', () => {
     } finally {
       nonJsonStdout.stop();
       proc.stderr.off('data', onStderr);
-      if (!proc.killed) proc.kill();
+      await killAndWait(proc);
       rmSync(homeDir, { recursive: true, force: true });
     }
   });
@@ -448,7 +434,7 @@ describe('foundry-sidecar protocol basics', () => {
       expect(buffered.result.nativeStreaming).toBe(false);
       expect(buffered.result.servedVariantId).toBe('fake-variant');
     } finally {
-      if (!proc.killed) proc.kill();
+      await killAndWait(proc);
       rmSync(homeDir, { recursive: true, force: true });
     }
   });
@@ -529,7 +515,8 @@ describe('foundry-sidecar protocol basics', () => {
       expect(httpChat.result.nativeStreaming).toBe(false);
       expect(httpChat.result.servedVariantId).toBe('fake-variant');
     } finally {
-      if (!proc.killed) proc.kill();
+      await killAndWait(proc);
+      server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       rmSync(homeDir, { recursive: true, force: true });
     }
@@ -630,7 +617,8 @@ describe('foundry-sidecar protocol basics', () => {
       expect(loaded.ok, JSON.stringify(loaded)).toBe(true);
       expect(loaded.result?.variantId).toBe('other-explicit:1');
     } finally {
-      if (!proc.killed) proc.kill();
+      await killAndWait(proc);
+      server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       rmSync(homeDir, { recursive: true, force: true });
     }
@@ -794,7 +782,7 @@ describe('foundry-sidecar protocol basics', () => {
         maxTokens: 7,
       });
     } finally {
-      if (!proc.killed) proc.kill();
+      await killAndWait(proc);
       rmSync(homeDir, { recursive: true, force: true });
     }
   }, 90000);
@@ -1775,8 +1763,8 @@ describe('foundry-sidecar command schema validation', () => {
     await waitForLine(proc, (msg) => msg.ready === true);
   });
 
-  afterEach(() => {
-    if (!proc.killed) proc.kill();
+  afterEach(async () => {
+    await killAndWait(proc);
   });
 
   it('rejects unknown commands with an error', async () => {
@@ -1927,8 +1915,8 @@ describe('foundry-sidecar error propagation and resilience', () => {
     await waitForLine(proc, (msg) => msg.ready === true);
   });
 
-  afterEach(() => {
-    if (!proc.killed) proc.kill();
+  afterEach(async () => {
+    await killAndWait(proc);
   });
 
   it('getStatus returns initialized:false before init', async () => {
@@ -2105,7 +2093,7 @@ describe('foundry-sidecar packaged resource layout', () => {
       expect(String(res.error ?? '')).not.toContain('require is not defined');
       expect(res.ok).toBe(true);
     } finally {
-      if (!proc.killed) proc.kill();
+      await killAndWait(proc);
     }
   }, 60000);
 });

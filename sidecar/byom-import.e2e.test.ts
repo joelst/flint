@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
+import { killAndWait } from './test-process.js';
 
 const APP = `flint-byom-test-${process.pid}`;
 const appHome = path.join(os.homedir(), `.${APP}`);
@@ -120,11 +121,11 @@ beforeAll(async () => {
   await send('ensureAccelerators');
 }, 0);
 
-afterAll(() => {
-  if (proc && !proc.killed) proc.kill();
+afterAll(async () => {
+  if (proc) await killAndWait(proc);
   for (const d of tempDirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
   try { fs.rmSync(appHome, { recursive: true, force: true }); } catch {}
-});
+}, 15000);
 
 describe('BYOM inspect', () => {
   it('accepts a nested HF-style export and reads its metadata', async () => {
