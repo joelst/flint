@@ -1,6 +1,7 @@
 <script lang="ts">
   // @ts-nocheck  // runes ($state etc.) are handled by Svelte compiler, not raw TS
   import { onMount, untrack } from "svelte";
+  import { isPoolEntryResident } from "$lib/pool-residency";
   import MessageRenderer from "$lib/MessageRenderer.svelte";
   import ConversationSidebar from "$lib/ConversationSidebar.svelte";
   import Icon from "$lib/Icon.svelte";
@@ -840,10 +841,10 @@
   let benchmarkRunError = $state<string | null>(null);
 
   /** Thin wrapper around the pure `computeResidentCapFloor`, supplying this page's live
-   * `state.pool`/`modelPriorities`. See that function's docstring for why it must be called
+   * `loadedPoolEntries`/`modelPriorities`. See that function's docstring for why it must be called
    * fresh on every push rather than cached. */
   function residentCapFloorFor(ownAliases: readonly string[]): number {
-    return computeResidentCapFloor(state.pool, modelPriorities, ownAliases);
+    return computeResidentCapFloor(loadedPoolEntries, modelPriorities, ownAliases);
   }
 
   /** Pins each target alias so pool eviction cannot unload it mid-run. Overlays onto the user's
@@ -1602,9 +1603,9 @@
     state.models.filter((m: any) => m.isLoaded && modelSupportsChat(m)),
   );
 
-  /** All models currently in the runtime pool (alias + exact variant). */
+  /** Resident or last-known resident models, excluding confirmed native eviction. */
   const loadedPoolEntries = $derived(
-    (state.pool || []).filter((e: any) => e?.alias),
+    (state.pool || []).filter((entry) => entry?.alias && isPoolEntryResident(entry)),
   );
 
   function shortPoolVariantLabel(variantId: string | null | undefined): string {
@@ -2652,7 +2653,7 @@
    * is first installed) makes it a standing invariant of every push for as long as a benchmark
    * holds the lease, not a one-time snapshot. The resident cap floor (via `residentCapFloorFor`/
    * `overlayResidentCapFloor`) gets the same treatment and for the same reason, and goes further:
-   * it is *recomputed fresh from live `state.pool`/`modelPriorities` on every push* rather than
+   * it is *recomputed fresh from live `loadedPoolEntries`/`modelPriorities` on every push* rather than
    * cached from whenever the lease was installed, so a priority edit made mid-run — e.g. the user
    * pinning another already-resident alias from Monitor/Settings while a later target is still
    * loading — raises the floor in time for the very next push instead of leaving a stale,
@@ -2784,7 +2785,7 @@
   }
 
   function evaluateWatchdog() {
-    const status = { ...(state.poolStats ?? {}), models: state.pool ?? [] };
+    const status = { ...(state.poolStats ?? {}), models: loadedPoolEntries };
     const result = evaluateWatch(watchState, toWatchSample(status, Date.now()), watchConfig);
     watchState = result.state;
     watchAlerts = result.active;
@@ -2802,7 +2803,7 @@
    * window escalates to an OS notification instead.
    */
   async function notifyHighUsage(raised: any[]) {
-    const body = `${formatAlertSummary(raised)}. ${formatAlertAdvice((state.pool ?? []).length)}`;
+    const body = `${formatAlertSummary(raised)}. ${formatAlertAdvice(loadedPoolEntries.length)}`;
     try {
       const { getCurrentWindow } = await import("@tauri-apps/api/window");
       if (await getCurrentWindow().isFocused()) return;
@@ -3459,9 +3460,7 @@ updateStateFromSdk();
     preferredEp?: string,
     opts?: { convenience?: boolean },
   ): Promise<string | undefined> {
-    // Both branches below can mutate the pool: a not-yet-running service is (re)started (which
-    // clears the sidecar's resident set), and an already-running one may still get a fresh
-    // `alias` loaded into it. Either must be fenced against an active benchmark run.
+    // Either branch may load a fresh alias, so both must be fenced against an active benchmark.
     const blocked = blockedByActiveBenchmark();
     if (blocked) {
       statusMessage = blocked;
@@ -3478,7 +3477,7 @@ updateStateFromSdk();
       );
       if (ensured.started) markNetworkSettingsApplied();
       if (alias) {
-        const resident = (state.pool || []).some((e: any) => e.alias === alias);
+        const resident = loadedPoolEntries.some((e: any) => e.alias === alias);
         if (!resident) await sdkLoadModel({ alias }, "audio");
         if (preferredEp && !ensured.started) {
           appendAppLog(
@@ -3625,7 +3624,7 @@ updateStateFromSdk();
     if (!state.serviceRunning) return;
     if (currentView === 'monitor') return; // the 5s poll above already feeds the watchdog
 
-    const resident = (state.pool ?? []).length > 0;
+    const resident = loadedPoolEntries.length > 0;
     const interval = setInterval(pollResources, resident ? 30000 : 60000);
     return () => clearInterval(interval);
   });
@@ -3688,7 +3687,7 @@ updateStateFromSdk();
   }
 
   function isSlotInPool(slot: CompareSlot): boolean {
-    return state.pool.some(
+    return loadedPoolEntries.some(
       (e: any) =>
         e.alias === slot.alias &&
         (slot.variantId ? e.variantId === slot.variantId : true),
@@ -4101,7 +4100,7 @@ updateStateFromSdk();
   }
 
   async function unloadCompareSlot(slot: CompareSlot, force = false): Promise<void> {
-    if (!force && !state.pool.some((e: any) => e.alias === slot.alias)) return;
+    if (!force && !loadedPoolEntries.some((e: any) => e.alias === slot.alias)) return;
     try {
       comparePrepStatus = `Unloading ${slot.label}…`;
       await sdkUnloadModel({ alias: slot.alias });
@@ -4122,7 +4121,7 @@ updateStateFromSdk();
     ctx: { preloadedAliases: Set<string>; loadedByCompare: Set<string>; allowUnloadPreloaded: boolean },
   ): Promise<boolean> {
     const weLoaded = ctx.loadedByCompare.has(slot.alias);
-    const inPool = state.pool.some((e: any) => e.alias === slot.alias);
+    const inPool = loadedPoolEntries.some((e: any) => e.alias === slot.alias);
     if (!inPool && !weLoaded) return false;
     const wasPreloaded = ctx.preloadedAliases.has(slot.alias);
     if (wasPreloaded && !ctx.allowUnloadPreloaded && !weLoaded) {
@@ -4248,7 +4247,7 @@ updateStateFromSdk();
     oneAtATime: boolean,
   ): { proceed: boolean; allowUnloadPreloaded: boolean } {
     const preloadedAliases = new Set(
-      (state.pool || []).map((e: any) => e.alias).filter(Boolean) as string[],
+      loadedPoolEntries.map((e: any) => e.alias).filter(Boolean) as string[],
     );
     if (preloadedAliases.size === 0) {
       return { proceed: true, allowUnloadPreloaded: false };
@@ -4259,7 +4258,7 @@ updateStateFromSdk();
     ];
     const variantSwaps = slots
       .map((s) => {
-        const entry = (state.pool || []).find((e: any) => e.alias === s.alias);
+        const entry = loadedPoolEntries.find((e: any) => e.alias === s.alias);
         if (!entry?.variantId || !s.variantId || entry.variantId === s.variantId) return null;
         return `${s.alias}: ${shortPoolVariantLabel(entry.variantId)} → ${shortPoolVariantLabel(s.variantId)}`;
       })
@@ -4355,7 +4354,7 @@ updateStateFromSdk();
       }
 
       const preloadedAliases = new Set(
-        (state.pool || []).map((e: any) => e.alias).filter(Boolean) as string[],
+        loadedPoolEntries.map((e: any) => e.alias).filter(Boolean) as string[],
       );
       const unloadCtx = {
         preloadedAliases,
@@ -5922,7 +5921,7 @@ updateStateFromSdk();
     try {
       const nav = beginChatNavigation();
       const alreadyThis =
-        state.pool.some((e: any) => e.alias === model.alias && e.variantId === variantId);
+        loadedPoolEntries.some((e: any) => e.alias === model.alias && e.variantId === variantId);
       if (!alreadyThis) {
         statusMessage = `Loading ${model.alias} (${shortVariantLabel(variantId)})...`;
         appendAppLog(`Load & Chat: ${model.alias} variant ${variantId}`);
@@ -6018,7 +6017,7 @@ updateStateFromSdk();
       const release = beginPoolMutation();
       try {
         statusMessage = `Deleting ${model.alias} (${label})...`;
-        const isLoadedVariant = state.pool.some(
+        const isLoadedVariant = loadedPoolEntries.some(
           (e: any) => e.alias === model.alias && e.variantId === variantId,
         );
         if (isLoadedVariant) {
@@ -6073,7 +6072,7 @@ updateStateFromSdk();
       startupModels = updated;
     } else {
       // Capture the currently loaded variant so the right device type reloads on startup
-      const activeVariantId = state.pool.find((e: any) => e.alias === alias)?.variantId ?? variantId;
+      const activeVariantId = loadedPoolEntries.find((e: any) => e.alias === alias)?.variantId ?? variantId;
       startupModels = { ...startupModels, [alias]: activeVariantId };
     }
     persistChat();
@@ -7336,7 +7335,7 @@ Output only the summary text, no preamble.`;
       <Icon name="monitor" size={16} />
       <div class="memory-alert-text">
         <strong>High memory usage — {formatAlertSummary(watchAlerts)}</strong>
-        <span>{formatAlertAdvice((state.pool ?? []).length)}</span>
+        <span>{formatAlertAdvice(loadedPoolEntries.length)}</span>
       </div>
       <button class="small" onclick={() => (currentView = "monitor")}>Open Monitor</button>
       <button class="small secondary" onclick={dismissWatchAlerts}>Dismiss</button>
@@ -7836,10 +7835,10 @@ Output only the summary text, no preamble.`;
               </div>
             {/if}
 
-            {#if state.pool?.length}
+            {#if loadedPoolEntries.length}
               <div class="pool-panel">
                 <div class="pool-panel-header">
-                  <h3>Running ({state.pool.length} model{state.pool.length !== 1 ? 's' : ''})</h3>
+                  <h3>Running ({loadedPoolEntries.length} model{loadedPoolEntries.length !== 1 ? 's' : ''})</h3>
                   {#if state.poolStats}
                     <span class="pool-mem">
                       {state.poolStats.usedMemMb} MB used &nbsp;·&nbsp; {state.poolStats.freeMemMb} MB free of {state.poolStats.totalMemMb} MB
@@ -7847,7 +7846,7 @@ Output only the summary text, no preamble.`;
                   {/if}
                 </div>
                 <div class="pool-table">
-                  {#each state.pool as entry (entry.alias)}
+                  {#each loadedPoolEntries as entry (entry.alias)}
                     {@const shortVariant = entry.variantId?.split(':')[0]?.split('-').slice(-3).join('-') ?? '—'}
                     {@const tokens = state.poolStats?.tokenTotals?.find((t) => t.alias === entry.alias)}
                     <div class="pool-row">
@@ -7982,7 +7981,7 @@ Output only the summary text, no preamble.`;
                         {#if variantPanelOpen[model.alias]}
                           <div class="variant-list">
                             {#each (model as any).variants as variant (variant.id)}
-                              {@const isCurrentlyLoaded = state.pool.some((e) => e.variantId === variant.id)}
+                              {@const isCurrentlyLoaded = loadedPoolEntries.some((e) => e.variantId === variant.id)}
                               {@const badge = accelBadgeInfo(variant.deviceType, variant.executionProvider)}
                               {@const isCurrentChat =
                                 selectedModelAlias === model.alias && isCurrentlyLoaded}
@@ -10270,7 +10269,7 @@ Output only the summary text, no preamble.`;
                                 {:else}
                                   <span class="badge small">Not downloaded</span>
                                 {/if}
-                                {#if state.pool.some((e) => e.variantId === v.id)}
+                                {#if loadedPoolEntries.some((e) => e.variantId === v.id)}
                                   <span class="badge small loaded">Loaded</span>
                                 {/if}
                               </div>

@@ -58,6 +58,7 @@ export default defineConfig(() => ({
       reporter: ['text', 'html'],
       include: [
         'src/lib/personas.ts',
+        'src/lib/pool-residency.ts',
         'src/lib/message-rendering.ts',
         'src/lib/conversation-sidebar.ts',
         'src/lib/ipc-contracts.ts',

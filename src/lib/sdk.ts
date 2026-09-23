@@ -1,4 +1,5 @@
 import { writable, type Writable } from 'svelte/store';
+import { isPoolEntryResident } from './pool-residency';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { Command } from '@tauri-apps/plugin-shell';
@@ -2017,7 +2018,7 @@ export async function pollPoolStatus(): Promise<void> {
 // Preserve getStatus's legacy lane positions (pool[0]/pool[1]) rather than reassigning them.
 // Unknown telemetry retains the sidecar's last-known residency until confirmed otherwise.
 function projectPool(pool: PoolEntry[], models: ModelInfo[]) {
-  const resident = pool.filter((entry) => entry.isLoaded !== false);
+  const resident = pool.filter(isPoolEntryResident);
   const loadedAliases = new Set(resident.map((entry) => entry.alias).filter(Boolean));
   const projected = models.map((model) => ({
     ...model,
@@ -2027,8 +2028,8 @@ function projectPool(pool: PoolEntry[], models: ModelInfo[]) {
     pool,
     models: projected,
     loadedModels: projected.filter((model) => model.isLoaded),
-    chatLaneModel: pool[0]?.isLoaded === false ? undefined : pool[0]?.alias,
-    audioLaneModel: pool[1]?.isLoaded === false ? undefined : pool[1]?.alias,
+    chatLaneModel: pool[0] && isPoolEntryResident(pool[0]) ? pool[0].alias : undefined,
+    audioLaneModel: pool[1] && isPoolEntryResident(pool[1]) ? pool[1].alias : undefined,
   };
 }
 
