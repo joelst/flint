@@ -16,8 +16,14 @@ export function holdExclusive (file) {
   const exited = new Promise((resolve) => child.on('exit', resolve));
   return new Promise((resolve, reject) => {
     child.on('error', reject);
+    // A pipe read does not keep write boundaries, so the marker can arrive in pieces.
+    let output = '';
+    let locked = false;
     child.stdout.on('data', (chunk) => {
-      if (!String(chunk).includes('locked')) return;
+      if (locked) return;
+      output += String(chunk);
+      if (!output.includes('locked')) return;
+      locked = true;
       resolve(async () => {
         child.stdin.end('\n');
         await exited;
