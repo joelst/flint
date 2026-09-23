@@ -2568,9 +2568,14 @@ rl.on('line', async (line) => {
       const alias = payload.alias;
       // Behind any load of this alias already running, and ahead of any that arrives later, so
       // ensureModel cannot probe or reload the model while catModel.unload() runs. With ifIdle,
-      // the activity check and the fence run synchronously once the lock is held; activity
-      // admitted while waiting for the lock makes the model not idle.
-      await withModelLock(alias, async () => {
+      // the activity check and the fence run synchronously once the locks are held; activity
+      // admitted while waiting makes the model not idle.
+      //
+      // The sweep lock too: eviction and a variant switch unload under it, so holding it here
+      // means no two unloads of this alias ever overlap. Order is model lock then sweep lock,
+      // the same as a load (ensureModel → admitModel); nothing that holds the sweep lock waits
+      // for a model lock.
+      await withModelLock(alias, () => withSweepLock(async () => {
         const releaseIdleFence = payload.ifIdle ? tryBeginIdleUnload(alias) : () => {};
         if (!releaseIdleFence) {
           throw new Error(`Cannot unload ${alias} while requests are in flight. Retry once they finish.`);
@@ -2587,7 +2592,7 @@ rl.on('line', async (line) => {
         } finally {
           releaseIdleFence();
         }
-      });
+      }));
       reply({ ok: true });
     } else if (cmd === 'deleteModel') {
       if (!payload.alias) {

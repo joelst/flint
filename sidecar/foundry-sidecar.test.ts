@@ -1889,9 +1889,9 @@ describe('guarded idle unload against concurrent model use', () => {
     'const note = (event) => fs.appendFileSync(process.env.FLINT_TEST_EVENT_LOG, event + "\\n");',
     'const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));',
     'class FakeModel {',
-    "  constructor() { this.id = 'fake-variant'; this.loaded = false; }",
+    "  constructor(alias) { this.alias = alias; this.id = 'fake-variant'; this.loaded = false; }",
     "  async load() { note('load'); this.loaded = true; }",
-    "  async unload() { note('unload-start'); await sleep(400); this.loaded = false; note('unload-end'); }",
+    "  async unload() { note('unload ' + this.alias); note('unload-start'); await sleep(400); this.loaded = false; note('unload-end'); }",
     "  isLoaded() { note('isLoaded'); return this.loaded; }",
     "  getExecutionProvider() { return 'CPUExecutionProvider'; }",
     '  createAudioClient() {',
@@ -1904,7 +1904,7 @@ describe('guarded idle unload against concurrent model use', () => {
     '  }',
     '}',
     'class FakeManager {',
-    '  constructor() { this.catalog = { getModel: async () => new FakeModel(), getModels: async () => [] }; }',
+    '  constructor() { this.catalog = { getModel: async (alias) => new FakeModel(alias), getModels: async () => [] }; }',
     "  async setPreferredExecutionProvider() { note('prefer-start'); await sleep(400); note('prefer-end'); }",
     '  static create() { return new FakeManager(); }',
     '}',
@@ -1992,6 +1992,26 @@ describe('guarded idle unload against concurrent model use', () => {
     // load must bring it back rather than report the model that is going away.
     expect(log.slice(start + 1, end)).toEqual([]);
     expect(log.slice(end + 1)).toContain('load');
+  }, 30000);
+
+  it('keeps an eviction sweep from unloading a model a guarded unload is already unloading', async () => {
+    const second = reply(10);
+    send({ id: 10, cmd: 'load', alias: 'second-model' });
+    expect((await second).ok).toBe(true);
+
+    const unloaded = reply(11);
+    send({ id: 11, cmd: 'unload', alias: 'fake-model', ifIdle: true });
+    await waitForEvent('unload-start');
+    // A cap of one would evict fake-model, the older of the two, while its unload runs.
+    const capped = reply(12);
+    send({ id: 12, cmd: 'setEvictionConfig', maxResidentEnabled: true, maxResident: 1 });
+    expect((await unloaded).ok).toBe(true);
+    expect((await capped).ok).toBe(true);
+
+    const log = events();
+    expect(log.filter((event) => event === 'unload fake-model')).toHaveLength(1);
+    // With fake-model gone, one resident model is within the cap.
+    expect(log).not.toContain('unload second-model');
   }, 30000);
 
   it('refuses a guarded unload while a transcription is preparing its model', async () => {
