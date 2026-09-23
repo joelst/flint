@@ -209,7 +209,10 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
   // `report` is the caller that queued this cycle. A later Settings click must not
   // steal these events: the UI stall watchdog for the in-flight command only resets
   // when progress arrives on that command's id.
-  async function attempts(report) {
+  // `carried` is the settled result an explicit rerun starts from. Its retryable
+  // failures take part in the retry decision, so a provider that failed in an earlier
+  // cycle and is missing from this cycle's first discovery is still tried again.
+  async function attempts(report, carried = null) {
     const notify = typeof report === 'function' ? report : () => {};
     let last = null;
     for (let attempt = 1; attempt <= CATALOG_REGISTRATION_ATTEMPTS; attempt++) {
@@ -218,7 +221,7 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
           (name, pct) => notify(name, pct),
           { allowLegacyFallback: attempt === CATALOG_REGISTRATION_ATTEMPTS },
         );
-        last = preserveRegisteredProviders(last, current);
+        last = preserveRegisteredProviders(last ?? carried, current);
       } catch (error) {
         if (attempt === CATALOG_REGISTRATION_ATTEMPTS) {
           try {
@@ -338,6 +341,18 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
       registeredEps,
       failedEps,
     };
+    // `retry` is a registrar's claim that a later call may still fix a failure. A
+    // failure carried forward from an earlier retryable attempt keeps that claim when
+    // the current attempt said nothing about the provider (for example, it dropped
+    // out of discovery). A provider the current attempt re-evaluated takes the
+    // current verdict instead.
+    if (
+      !merged.retry &&
+      previous.retry &&
+      [...previousFailed].some((name) => !currentFailed.has(name))
+    ) {
+      merged.retry = true;
+    }
     if (
       typeof current.status === 'string' &&
       (
@@ -406,7 +421,7 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
         registrationDeferredUntilRestart: true,
       };
     }
-    settled = preserveRegisteredProviders(settled, await attempts(report));
+    settled = preserveRegisteredProviders(settled, await attempts(report, settled));
     hasSettled = true;
     if (
       catalogRefreshRequiresRestart &&

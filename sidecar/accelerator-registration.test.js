@@ -1037,6 +1037,87 @@ describe('createCatalogRegistrationGate', () => {
     });
   });
 
+  it('keeps retrying a carried failure that the next attempt did not re-evaluate', async () => {
+    const register = vi.fn()
+      .mockResolvedValueOnce({
+        success: false,
+        retry: true,
+        registeredEps: ['CPUExecutionProvider'],
+        failedEps: ['CUDAExecutionProvider'],
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        registeredEps: ['CPUExecutionProvider'],
+        failedEps: [],
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+        failedEps: [],
+      });
+    const gate = createCatalogRegistrationGate(register);
+
+    await expect(gate.ensure()).resolves.toEqual({
+      success: true,
+      registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+      failedEps: [],
+    });
+    expect(register).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps retrying a carried failure through an explicit rerun whose first discovery omits it', async () => {
+    const register = vi.fn()
+      .mockResolvedValueOnce({ success: false, retry: true, registeredEps: ['CPUExecutionProvider'], failedEps: ['CUDAExecutionProvider'] })
+      .mockResolvedValueOnce({ success: false, retry: true, registeredEps: ['CPUExecutionProvider'], failedEps: ['CUDAExecutionProvider'] })
+      .mockResolvedValueOnce({ success: false, retry: true, registeredEps: ['CPUExecutionProvider'], failedEps: ['CUDAExecutionProvider'] })
+      .mockResolvedValueOnce({ success: true, registeredEps: ['CPUExecutionProvider'], failedEps: [] })
+      .mockResolvedValueOnce({
+        success: true,
+        registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+        failedEps: [],
+      });
+    const gate = createCatalogRegistrationGate(register);
+    await expect(gate.ensure()).resolves.toMatchObject({ failedEps: ['CUDAExecutionProvider'] });
+    expect(register).toHaveBeenCalledTimes(3);
+
+    await expect(gate.rerun()).resolves.toEqual({
+      success: true,
+      registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+      failedEps: [],
+    });
+    expect(register).toHaveBeenCalledTimes(5);
+  });
+
+  it('registers a failed provider that drops out of discovery and then returns', async () => {
+    let attempt = 0;
+    const cpu = { name: 'CPUExecutionProvider', isRegistered: true };
+    const cuda = { name: 'CUDAExecutionProvider', isRegistered: false };
+    const manager = {
+      discoverEps: vi.fn(() => (attempt === 2 ? [cpu] : [cpu, cuda])),
+      downloadAndRegisterEps: vi.fn(async ([name]) => {
+        if (attempt === 1) throw new Error('package unavailable');
+        if (name === cuda.name) cuda.isRegistered = true;
+        return { success: true, registeredEps: [name], failedEps: [] };
+      }),
+    };
+    const register = vi.fn((onProgress, options) => {
+      attempt++;
+      return registerDiscoveredExecutionProviders(manager, onProgress, options);
+    });
+    const gate = createCatalogRegistrationGate(register);
+
+    await expect(gate.ensure()).resolves.toMatchObject({
+      success: true,
+      registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+      failedEps: [],
+    });
+    expect(register).toHaveBeenCalledTimes(3);
+    expect(manager.downloadAndRegisterEps.mock.calls.map(([names]) => names)).toEqual([
+      ['CUDAExecutionProvider'],
+      ['CUDAExecutionProvider'],
+    ]);
+  });
+
   it('keeps prior registration state across a transient null result', async () => {
     const register = vi.fn()
       .mockResolvedValueOnce({
