@@ -247,13 +247,15 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
       });
     },
     mutateAndCommit(operation, onCommitError) {
+      if (typeof onCommitError !== 'function') {
+        return Promise.reject(new TypeError('mutateAndCommit requires an onCommitError handler'));
+      }
       return enqueue(async () => {
         if (!settled) settled = await attempts(null);
         const result = await operation();
         try {
           await confirmCatalogCommit();
         } catch (error) {
-          if (typeof onCommitError !== 'function') throw error;
           onCommitError(error);
         }
         return result;

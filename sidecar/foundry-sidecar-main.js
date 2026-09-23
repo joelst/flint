@@ -445,11 +445,10 @@ async function rerunAcceleratorRegistration(onProgress) {
 
 async function runCatalogMutation(mutate, operation) {
   const gate = acceleratorGate();
-  const result = gate
-    ? await gate.mutateAndCommit(mutate, (error) => {
-        log('warn', `Catalog snapshot read failed after ${operation}: ${error?.message ?? error}`);
-      })
-    : await mutate();
+  if (!gate) throw new Error('Foundry manager is unavailable');
+  const result = await gate.mutateAndCommit(mutate, (error) => {
+    log('warn', `Catalog snapshot read failed after ${operation}: ${error?.message ?? error}`);
+  });
   try {
     manager?.catalog?.invalidateCache?.();
   } catch (error) {

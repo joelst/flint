@@ -322,10 +322,13 @@ describe('createCatalogRegistrationGate', () => {
       readCatalog,
     );
 
-    const mutation = gate.mutateAndCommit(() => new Promise((resolve) => {
-      order.push('mutate');
-      releaseMutation = () => resolve('imported');
-    }));
+    const mutation = gate.mutateAndCommit(
+      () => new Promise((resolve) => {
+        order.push('mutate');
+        releaseMutation = () => resolve('imported');
+      }),
+      vi.fn(),
+    );
     await vi.waitFor(() => expect(order).toEqual(['mutate']));
     const reader = gate.commit();
     await Promise.resolve();
@@ -349,11 +352,11 @@ describe('createCatalogRegistrationGate', () => {
     await expect(gate.mutateAndCommit(() => 'imported', onCommitError)).resolves.toBe('imported');
     expect(onCommitError).toHaveBeenCalledWith(catalogError);
 
-    const uncaughtGate = createCatalogRegistrationGate(
-      vi.fn().mockResolvedValue({ success: true, registeredEps: ['CPUExecutionProvider'] }),
-      vi.fn().mockRejectedValue(catalogError),
+    const mutation = vi.fn(() => 'linked');
+    await expect(gate.mutateAndCommit(mutation)).rejects.toThrow(
+      'mutateAndCommit requires an onCommitError handler',
     );
-    await expect(uncaughtGate.mutateAndCommit(() => 'linked')).rejects.toBe(catalogError);
+    expect(mutation).not.toHaveBeenCalled();
   });
 
   it('retries a thrown registration and a partial failure before the catalog is read', async () => {
