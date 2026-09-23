@@ -652,6 +652,9 @@
         throwOnError: true,
         refreshRecommendations: false,
       });
+      if (!isAcceleratorReadinessCurrent(readiness)) {
+        throw new Error("Runtime changed while rechecking execution providers");
+      }
       const outcome = providerRecheckStatus(readiness.registration, state.eps);
       statusMessage = outcome.message;
       if (outcome.failed) appendAppLog(statusMessage, "warn");
