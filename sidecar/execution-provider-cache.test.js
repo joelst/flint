@@ -218,6 +218,7 @@ describe('rebuildBrokenExecutionProviders', () => {
       },
     });
     expect(removed).toEqual(['CUDAExecutionProvider', 'CUDAExecutionProvider']);
+    expect(outcome.removed).toEqual(['CUDAExecutionProvider']);
     expect(calls.every((names) => !names?.includes('WebGpuExecutionProvider'))).toBe(true);
     expect(outcome.removed).not.toContain('WebGpuExecutionProvider');
   });

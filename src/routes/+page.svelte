@@ -1,6 +1,7 @@
 <script lang="ts">
   // @ts-nocheck  // runes ($state etc.) are handled by Svelte compiler, not raw TS
   import { onMount, untrack } from "svelte";
+  import { providerRecheckStatus } from "$lib/provider-recheck-status";
   import MessageRenderer from "$lib/MessageRenderer.svelte";
   import ConversationSidebar from "$lib/ConversationSidebar.svelte";
   import Icon from "$lib/Icon.svelte";
@@ -651,25 +652,9 @@
         throwOnError: true,
         refreshRecommendations: false,
       });
-      const registration = readiness.registration;
-      const failed = registration?.failedEps ?? [];
-      const removed = registration?.removedProviderCaches ?? [];
-      const attempted = registration?.attemptedProviderRebuilds ?? [];
-      const busy = registration?.busyProviderCaches ?? [];
-      const locked = busy.length
-        ? ` Left in place because a file is in use: ${busy.join(", ")}.`
-        : "";
-      const failureNames = failed.length ? failed : removed.length ? removed : attempted;
-      if (failed.length || registration?.success === false) {
-        statusMessage = (failureNames.length
-          ? `Provider rebuild failed for ${failureNames.join(", ")}.`
-          : (registration?.status || "Provider rebuild failed.")) + locked;
-        appendAppLog(statusMessage, "warn");
-      } else if (removed.length) {
-        statusMessage = `Rebuilt ${removed.join(", ")}.${locked}`;
-      } else {
-        statusMessage = `${state.eps.length} execution providers ready.${locked}`;
-      }
+      const outcome = providerRecheckStatus(readiness.registration, state.eps);
+      statusMessage = outcome.message;
+      if (outcome.failed) appendAppLog(statusMessage, "warn");
     } catch (e: any) {
       statusMessage = `Provider recheck failed: ${e?.message || e}`;
       appendAppLog(statusMessage, "warn");
