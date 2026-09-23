@@ -2,10 +2,11 @@
  * One-shot projection of a finished run's full attempt rows into a results table.
  *
  * Not used by the live progress poll. That path reads attempt summaries so it never
- * clones response text. Response time here is the monotonic transport duration when
- * available, falling back to settledAt - sdkCallStartedAt for older rows — not time to
- * first token. Warmups are listed and excluded from the median. A succeeded row with
- * no timing data suppresses the median rather than averaging a partial set.
+ * clones response text. Response time here requires a finite sdkCallStartedAt proving
+ * the call began, then prefers the monotonic transport duration and falls back to
+ * settledAt - sdkCallStartedAt for older rows — not time to first token. Warmups are
+ * listed and excluded from the median. A succeeded row with no timing data suppresses
+ * the median rather than averaging a partial set.
  */
 
 import { buildAttemptSchedule, type AttemptStatus, type BenchmarkAttempt, type BenchmarkRun } from './benchmark-run';
@@ -14,12 +15,12 @@ import type { BenchmarkSuite } from './benchmark-suite';
 export function responseTimeMs(
   attempt: Pick<BenchmarkAttempt, 'sdkCallStartedAt' | 'sdkCallDurationMs' | 'settledAt'>,
 ): number | null {
+  const started = attempt.sdkCallStartedAt;
+  if (typeof started !== 'number' || !Number.isFinite(started)) return null;
   const duration = attempt.sdkCallDurationMs;
   if (typeof duration === 'number' && Number.isFinite(duration) && duration >= 0) return duration;
-  const started = attempt.sdkCallStartedAt;
   const ended = attempt.settledAt;
-  if (typeof started !== 'number' || typeof ended !== 'number') return null;
-  if (!Number.isFinite(started) || !Number.isFinite(ended)) return null;
+  if (typeof ended !== 'number' || !Number.isFinite(ended)) return null;
   const delta = ended - started;
   if (!Number.isFinite(delta)) return null;
   return delta < 0 ? 0 : delta;

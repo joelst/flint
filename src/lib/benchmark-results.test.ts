@@ -41,6 +41,8 @@ describe('responseTimeMs', () => {
 
   it('does not invent a duration when the start stamp was never written', () => {
     expect(responseTimeMs({ settledAt: 150 })).toBeNull();
+    expect(responseTimeMs({ sdkCallDurationMs: 75, settledAt: 150 })).toBeNull();
+    expect(responseTimeMs({ sdkCallStartedAt: Number.NaN, sdkCallDurationMs: 75, settledAt: 150 })).toBeNull();
     expect(responseTimeMs({ sdkCallStartedAt: 50 })).toBeNull();
   });
 });
@@ -84,7 +86,7 @@ describe('buildRunResultView', () => {
 
   it('omits the median when any succeeded measured row has no start stamp', () => {
     const view = buildRunResultView(run, [
-      attempt({ id: 'm1', logicalAttemptId: 't0:c0:r0', phase: 'measured', caseIndex: 0, sdkCallStartedAt: undefined, settledAt: 30 }),
+      attempt({ id: 'm1', logicalAttemptId: 't0:c0:r0', phase: 'measured', caseIndex: 0, sdkCallStartedAt: undefined, sdkCallDurationMs: 20, settledAt: 30 }),
       attempt({ id: 'm2', logicalAttemptId: 't0:c1:r0', phase: 'measured', caseIndex: 1, sdkCallStartedAt: 40, settledAt: 80 }),
     ]);
     expect(view[0].succeededMeasured).toBe(2);
