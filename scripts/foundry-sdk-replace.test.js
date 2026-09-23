@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import {
   existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs';
@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { holdExclusive } from '../src/test/hold-exclusive.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -31,32 +32,6 @@ function msiCommands (wxs) {
   return commands;
 }
 
-/**
- * Open a file with no sharing, the way a loaded DLL blocks delete and rename.
- * Node opens files with delete sharing, so a child PowerShell holds the lock.
- * @param {string} file
- * @returns {Promise<() => Promise<void>>}
- */
-function holdExclusive (file) {
-  const script = `$f = [IO.File]::Open('${file.replace(/'/g, "''")}', 'Open', 'Read', 'None'); `
-    + "[Console]::Out.WriteLine('locked'); [void][Console]::In.ReadLine(); $f.Close()";
-  const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
-    stdio: ['pipe', 'pipe', 'inherit'],
-  });
-  const exited = new Promise((resolve) => child.on('exit', resolve));
-  return new Promise((resolve, reject) => {
-    child.on('error', reject);
-    child.stdout.on('data', (chunk) => {
-      if (!String(chunk).includes('locked')) return;
-      resolve(async () => {
-        child.stdin.end('\n');
-        await exited;
-      });
-    });
-    exited.then((code) => reject(new Error(`lock holder exited early (${code})`)));
-  });
-}
-
 describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
   const conf = JSON.parse(readFileSync(join(root, 'src-tauri', 'tauri.conf.json'), 'utf8'));
   const hooks = readFileSync(join(root, 'src-tauri', 'windows', 'hooks.nsh'), 'utf8');
@@ -68,7 +43,9 @@ describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
   it('removes the installed SDK tree before NSIS copies this package', () => {
     expect(conf.bundle.windows.nsis.installerHooks).toBe('./windows/hooks.nsh');
     expect(hooks).toContain('!macro NSIS_HOOK_PREINSTALL');
-    expect(hooks).toContain('CheckIfAppIsRunning "$INSTDIR\\${MAINBINARYNAME}.exe"');
+    // FindProcess compares process file names, so a full path never matches.
+    expect(hooks).toContain('CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"');
+    expect(hooks).not.toContain('CheckIfAppIsRunning "$INSTDIR');
     expect(hooks).toContain('Rename "$INSTDIR\\foundry-local-sdk" "$INSTDIR\\foundry-local-sdk.previous"');
     expect(hooks).toContain('prebuilds\\win32-x64\\onnxruntime.dll');
     expect(hooks).toContain('prebuilds\\win32-arm64\\onnxruntime.dll');

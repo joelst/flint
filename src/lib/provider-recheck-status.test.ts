@@ -80,4 +80,12 @@ describe('providerRecheckStatus', () => {
       message: '2 execution providers ready.',
     });
   });
+
+  it('uses the singular when exactly one provider is registered', () => {
+    const status = providerRecheckStatus(
+      { success: true, status: 'No broken providers', failedEps: [] },
+      [{ name: 'CPUExecutionProvider', isRegistered: true }],
+    );
+    expect(status).toEqual({ failed: false, message: '1 execution provider ready.' });
+  });
 });

@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { holdExclusive } from '../src/test/hold-exclusive.js';
 import {
   providerCacheDirectory,
   providerCacheSlug,
@@ -76,6 +77,29 @@ describe('removeProviderCache', () => {
       fs.rmSync(root, { recursive: true, force: true });
     }
   });
+
+  // Windows is where a loaded DLL blocks the delete. A file held open with no
+  // sharing blocks the directory rename the same way, so the whole cache must
+  // stay, not lose its unlocked siblings.
+  it.runIf(process.platform === 'win32')('leaves a cache with a locked file wholly in place on Windows', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'flint-ep-'));
+    const cuda = path.join(root, 'cuda-ep');
+    fs.mkdirSync(cuda);
+    const locked = path.join(cuda, 'onnxruntime_providers_cuda.dll');
+    fs.writeFileSync(locked, 'loaded');
+    fs.writeFileSync(path.join(cuda, 'cublas64_12.dll'), 'sibling');
+    const release = await holdExclusive(locked);
+    try {
+      expect(await removeProviderCache(root, 'CUDAExecutionProvider')).toBe('busy');
+      expect(fs.readdirSync(root)).toEqual(['cuda-ep']);
+      expect(fs.readdirSync(cuda).sort()).toEqual(['cublas64_12.dll', 'onnxruntime_providers_cuda.dll']);
+    } finally {
+      await release();
+    }
+    expect(await removeProviderCache(root, 'CUDAExecutionProvider')).toBe(true);
+    expect(fs.readdirSync(root)).toEqual([]);
+    fs.rmSync(root, { recursive: true, force: true });
+  }, 30_000);
 });
 
 describe('providerNamesInText', () => {

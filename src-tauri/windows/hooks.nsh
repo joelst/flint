@@ -13,9 +13,10 @@
 !define FOUNDRY_SDK_STRANDED_MESSAGE "Flint could not put the previous Foundry SDK back because a file in the new copy is still open. Close that program, then rename foundry-local-sdk.previous to foundry-local-sdk in the Flint install folder."
 Var FoundrySdkMovedAside
 !macro NSIS_HOOK_PREINSTALL
-  ; The macro matches a running process by full path, so a bare file name finds
-  ; nothing and the rename below would fail on the SDK files Flint still holds.
-  !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  ; The macro passes this to nsis_tauri_utils::FindProcess, which walks a
+  ; Toolhelp process snapshot and compares the executable's file name. A full
+  ; path never matches. This is the same call Tauri's installer template makes.
+  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
   Sleep 500
   ; A backup beside a working runtime is a leftover from cleanup, not the
   ; only good SDK. Move that leftover aside. A backup beside a tree with no

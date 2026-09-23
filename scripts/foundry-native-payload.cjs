@@ -43,8 +43,9 @@ function versionMatches(actual, expected) {
 /**
  * Windows records FileVersion as UTF-16 in the version resource. ORT 1.28.0
  * is stored as `1.28.0.20260724...`; the pinned deps_versions value is the
- * prefix. Files with no resource (test fixtures, non-Windows builds) return
- * null and are judged by size only.
+ * prefix. Returns null when the buffer has no FileVersion. Every ONNX Runtime
+ * and GenAI DLL Foundry 1.2.4 and 2.0.1 ship has one, so a Windows runtime
+ * file that returns null is rejected rather than trusted by size.
  */
 function readUtf16FileVersion(buffer) {
   if (!Buffer.isBuffer(buffer) || buffer.length < 4) return null;
@@ -171,9 +172,11 @@ function nativeFileProblem(file, inspected) {
   const { size, linkTarget, fileVersion } = inspected;
   if (linkTarget && file.symlinkTo && linkTarget !== file.symlinkTo) return 'wrong-link';
   if (size < file.minBytes) return size === 0 ? 'missing' : 'truncated';
-  if (file.runtimeVersion && fileVersion && !versionMatches(fileVersion, file.runtimeVersion)) {
-    return 'wrong-version';
-  }
+  if (!file.runtimeVersion || fileVersion === undefined) return null;
+  // null: a Windows file was read and has no readable FileVersion. The SDK
+  // installer skips a name that exists, so an unproven DLL must not stay.
+  if (fileVersion === null) return 'unknown-version';
+  if (!versionMatches(fileVersion, file.runtimeVersion)) return 'wrong-version';
   return null;
 }
 
@@ -184,6 +187,9 @@ function describeInvalidNativeFile(file) {
   }
   if (file.reason === 'wrong-version') {
     return `version ${file.fileVersion}, not ${file.runtimeVersion}`;
+  }
+  if (file.reason === 'unknown-version') {
+    return `missing a readable FileVersion, expected ${file.runtimeVersion}`;
   }
   return `only ${file.size} bytes`;
 }

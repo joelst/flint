@@ -7733,7 +7733,7 @@ Output only the summary text, no preamble.`;
                   class="secondary accel-recheck"
                   onclick={recheckProviders}
                   disabled={!state.ready || providerRecheckBusy}
-                  title="Remove a provider that failed to register and download it again"
+                  title="Register failed providers again. CUDA and WebGPU are removed from the cache and downloaded again first."
                 >
                   {providerRecheckBusy ? "Rechecking…" : "Recheck Providers"}
                 </button>
