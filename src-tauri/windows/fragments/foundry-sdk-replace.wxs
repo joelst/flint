@@ -22,31 +22,46 @@
          has succeeded.
 
          Each action runs with INSTALLDIR as its working directory and names the
-         two folders relative to it. The install location is never substituted
+         folders relative to it. The install location is never substituted
          into the command line, so a value passed on the msiexec command line
-         cannot append another command to a call that runs as SYSTEM. -->
+         cannot append another command to a call that runs as SYSTEM.
+
+         In cmd, everything after `if exist X` on the same line, including
+         later `&` commands, belongs to that `if`. Every conditional below is
+         therefore wrapped in its own parentheses. scripts/foundry-sdk-replace.test.js
+         runs these command lines against folder fixtures.
+
+         foundry-local-sdk.moved marks foundry-local-sdk.previous as the copy
+         this install moved aside. The commit action and a finished rollback
+         delete it. Rollback restores only while the marker is present, so a
+         leftover .previous is never put over the installed SDK. A .previous
+         that still has its marker is from an install that did not commit, so
+         the next install restores it even when the current tree has a
+         runtime. -->
     <CustomAction Id="MoveFoundrySdk"
                   Directory="INSTALLDIR"
-                  ExeCommand="&quot;[SystemFolder]cmd.exe&quot; /c if exist &quot;foundry-local-sdk.failed&quot; (rmdir /s /q &quot;foundry-local-sdk.failed&quot; &amp; if exist &quot;foundry-local-sdk.failed&quot; exit /b 1) &amp; set LIVE=&amp; if exist &quot;foundry-local-sdk\prebuilds\win32-x64\onnxruntime.dll&quot; set LIVE=1&amp; if exist &quot;foundry-local-sdk\prebuilds\win32-arm64\onnxruntime.dll&quot; set LIVE=1&amp; if exist &quot;foundry-local-sdk\foundry-local-core\win32-x64\onnxruntime.dll&quot; set LIVE=1&amp; if exist &quot;foundry-local-sdk\foundry-local-core\win32-arm64\onnxruntime.dll&quot; set LIVE=1&amp; if exist &quot;foundry-local-sdk.previous&quot; (if defined LIVE (rmdir /s /q &quot;foundry-local-sdk.previous&quot; &amp; if exist &quot;foundry-local-sdk.previous&quot; ren &quot;foundry-local-sdk.previous&quot; &quot;foundry-local-sdk.previous-kept&quot; &amp; if exist &quot;foundry-local-sdk.previous&quot; exit /b 1) else (if exist &quot;foundry-local-sdk.failed&quot; rmdir /s /q &quot;foundry-local-sdk.failed&quot; &amp; if exist &quot;foundry-local-sdk&quot; ren &quot;foundry-local-sdk&quot; &quot;foundry-local-sdk.failed&quot; &amp; ren &quot;foundry-local-sdk.previous&quot; &quot;foundry-local-sdk&quot; &amp; if exist &quot;foundry-local-sdk.previous&quot; exit /b 1))&amp; if exist &quot;foundry-local-sdk&quot; (ren &quot;foundry-local-sdk&quot; &quot;foundry-local-sdk.previous&quot; &amp; if exist &quot;foundry-local-sdk&quot; exit /b 1)"
+                  ExeCommand="&quot;[SystemFolder]cmd.exe&quot; /c set LIVE=&amp; set RECOVER=&amp; (if exist &quot;foundry-local-sdk.moved&quot; set RECOVER=1) &amp; (if exist &quot;foundry-local-sdk.failed&quot; rmdir /s /q &quot;foundry-local-sdk.failed&quot;) &amp; (if exist &quot;foundry-local-sdk.failed&quot; exit /b 1) &amp; (if exist &quot;foundry-local-sdk\prebuilds\win32-x64\onnxruntime.dll&quot; set LIVE=1) &amp; (if exist &quot;foundry-local-sdk\prebuilds\win32-arm64\onnxruntime.dll&quot; set LIVE=1) &amp; (if exist &quot;foundry-local-sdk\foundry-local-core\win32-x64\onnxruntime.dll&quot; set LIVE=1) &amp; (if exist &quot;foundry-local-sdk\foundry-local-core\win32-arm64\onnxruntime.dll&quot; set LIVE=1) &amp; (if not defined LIVE set RECOVER=1) &amp; (if exist &quot;foundry-local-sdk.previous&quot; if not defined RECOVER rmdir /s /q &quot;foundry-local-sdk.previous&quot;) &amp; (if exist &quot;foundry-local-sdk.previous&quot; if not defined RECOVER if exist &quot;foundry-local-sdk.previous-kept&quot; rmdir /s /q &quot;foundry-local-sdk.previous-kept&quot;) &amp; (if exist &quot;foundry-local-sdk.previous&quot; if not defined RECOVER ren &quot;foundry-local-sdk.previous&quot; &quot;foundry-local-sdk.previous-kept&quot;) &amp; (if exist &quot;foundry-local-sdk.previous&quot; if not defined RECOVER exit /b 1) &amp; (if exist &quot;foundry-local-sdk.previous&quot; if exist &quot;foundry-local-sdk&quot; ren &quot;foundry-local-sdk&quot; &quot;foundry-local-sdk.failed&quot;) &amp; (if exist &quot;foundry-local-sdk.previous&quot; if not exist &quot;foundry-local-sdk&quot; ren &quot;foundry-local-sdk.previous&quot; &quot;foundry-local-sdk&quot;) &amp; (if exist &quot;foundry-local-sdk.previous&quot; exit /b 1) &amp; (if exist &quot;foundry-local-sdk.moved&quot; del /f /q &quot;foundry-local-sdk.moved&quot;) &amp; (if exist &quot;foundry-local-sdk&quot; ren &quot;foundry-local-sdk&quot; &quot;foundry-local-sdk.previous&quot;) &amp; (if exist &quot;foundry-local-sdk&quot; exit /b 1) &amp; (if exist &quot;foundry-local-sdk.previous&quot; type nul&gt; &quot;foundry-local-sdk.moved&quot;) &amp; exit /b 0"
                   Execute="deferred"
                   Return="check"
                   Impersonate="no" />
     <CustomAction Id="RestoreFoundrySdk"
                   Directory="INSTALLDIR"
-                  ExeCommand="&quot;[SystemFolder]cmd.exe&quot; /c if exist &quot;foundry-local-sdk.previous&quot; (if exist &quot;foundry-local-sdk.failed&quot; rmdir /s /q &quot;foundry-local-sdk.failed&quot; &amp; if exist &quot;foundry-local-sdk&quot; ren &quot;foundry-local-sdk&quot; &quot;foundry-local-sdk.failed&quot; &amp; ren &quot;foundry-local-sdk.previous&quot; &quot;foundry-local-sdk&quot; &amp; if exist &quot;foundry-local-sdk.previous&quot; exit /b 1)"
+                  ExeCommand="&quot;[SystemFolder]cmd.exe&quot; /c (if not exist &quot;foundry-local-sdk.moved&quot; exit /b 0) &amp; (if exist &quot;foundry-local-sdk.previous&quot; if exist &quot;foundry-local-sdk.failed&quot; rmdir /s /q &quot;foundry-local-sdk.failed&quot;) &amp; (if exist &quot;foundry-local-sdk.previous&quot; if exist &quot;foundry-local-sdk&quot; ren &quot;foundry-local-sdk&quot; &quot;foundry-local-sdk.failed&quot;) &amp; (if exist &quot;foundry-local-sdk.previous&quot; if not exist &quot;foundry-local-sdk&quot; ren &quot;foundry-local-sdk.previous&quot; &quot;foundry-local-sdk&quot;) &amp; (if exist &quot;foundry-local-sdk.previous&quot; exit /b 1) &amp; del /f /q &quot;foundry-local-sdk.moved&quot; &amp; exit /b 0"
                   Execute="rollback"
                   Return="check"
                   Impersonate="no" />
     <CustomAction Id="DiscardFoundryBackup"
                   Directory="INSTALLDIR"
-                  ExeCommand="&quot;[SystemFolder]cmd.exe&quot; /c if exist &quot;foundry-local-sdk.previous&quot; rmdir /s /q &quot;foundry-local-sdk.previous&quot;"
+                  ExeCommand="&quot;[SystemFolder]cmd.exe&quot; /c (if exist &quot;foundry-local-sdk.moved&quot; del /f /q &quot;foundry-local-sdk.moved&quot;) &amp; (if exist &quot;foundry-local-sdk.previous-kept&quot; rmdir /s /q &quot;foundry-local-sdk.previous-kept&quot;) &amp; (if exist &quot;foundry-local-sdk.previous&quot; rmdir /s /q &quot;foundry-local-sdk.previous&quot;)"
                   Execute="commit"
                   Return="check"
                   Impersonate="no" />
+    <!-- NOT Installed limits the move to a first install or an upgrade. A
+         repair or feature change of this product does not move the SDK. -->
     <InstallExecuteSequence>
-      <Custom Action="RestoreFoundrySdk" Before="MoveFoundrySdk">NOT REMOVE</Custom>
-      <Custom Action="MoveFoundrySdk" Before="InstallFiles">NOT REMOVE</Custom>
-      <Custom Action="DiscardFoundryBackup" Before="InstallFinalize">NOT REMOVE</Custom>
+      <Custom Action="RestoreFoundrySdk" Before="MoveFoundrySdk">NOT Installed AND NOT REMOVE</Custom>
+      <Custom Action="MoveFoundrySdk" Before="InstallFiles">NOT Installed AND NOT REMOVE</Custom>
+      <Custom Action="DiscardFoundryBackup" Before="InstallFinalize">NOT Installed AND NOT REMOVE</Custom>
     </InstallExecuteSequence>
 
     <DirectoryRef Id="INSTALLDIR">

@@ -129,6 +129,10 @@ export async function removeProviderCache (epRoot, epName) {
   return true;
 }
 
+// Foundry 1.2.4 and 2.0.1 download only cuda-ep and webgpu-ep into epRoot;
+// neither core names another cache folder. The other providers come from the
+// Windows ML catalog or the runtime itself, so their slug finds no folder,
+// removal is a no-op, and Recheck only asks Foundry to register them again.
 const KNOWN_PROVIDERS = [
   'CUDAExecutionProvider',
   'WebGpuExecutionProvider',
