@@ -868,7 +868,15 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
    * `startService` (gateway on by default) proxies real HTTP traffic to a server we control. A
    * short `FLINT_BENCHMARK_EXCLUSIVE_DRAIN_MS` lets the "could not drain in time" path be
    * exercised without a correspondingly slow test. */
-  function spawnGatewaySidecar(upstreamPort: number, drainMs = 200, catalogModels: unknown[] = [], holdLoad = false, secondStartServicePort: number | null = null, holdDownload = false) {
+  function spawnGatewaySidecar(
+    upstreamPort: number,
+    drainMs = 200,
+    catalogModels: unknown[] = [],
+    holdLoad = false,
+    secondStartServicePort: number | null = null,
+    holdDownload = false,
+    holdUnload = false,
+  ) {
     const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-gateway-fence-home-'));
     const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
     const corePath = join(homeDir, 'fake-core.dylib');
@@ -893,6 +901,12 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
             if (${JSON.stringify(holdDownload)}) {
               await fetch('http://127.0.0.1:${upstreamPort}/hold-download');
             }
+          }
+          async unload() {
+            if (${JSON.stringify(holdUnload)}) {
+              await fetch('http://127.0.0.1:${upstreamPort}/hold-unload');
+            }
+            this.loaded = false;
           }
           getExecutionProvider() { return 'CPUExecutionProvider'; }
           createChatClient() {
@@ -966,8 +980,24 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
 
   /** Starts the sidecar and its gateway, returning the process, its temp home dir (for
    * cleanup), and the gateway's bound public port. */
-  async function startedGateway(upstreamPort: number, drainMs = 200, catalogModels: unknown[] = [], holdLoad = false, secondStartServicePort: number | null = null, holdDownload = false) {
-    const { proc, homeDir } = spawnGatewaySidecar(upstreamPort, drainMs, catalogModels, holdLoad, secondStartServicePort, holdDownload);
+  async function startedGateway(
+    upstreamPort: number,
+    drainMs = 200,
+    catalogModels: unknown[] = [],
+    holdLoad = false,
+    secondStartServicePort: number | null = null,
+    holdDownload = false,
+    holdUnload = false,
+  ) {
+    const { proc, homeDir } = spawnGatewaySidecar(
+      upstreamPort,
+      drainMs,
+      catalogModels,
+      holdLoad,
+      secondStartServicePort,
+      holdDownload,
+      holdUnload,
+    );
     await waitForLine(proc, (msg) => msg.ready === true);
     proc.stdin.write(`${JSON.stringify({ id: 1, cmd: 'init', appName: 'flint-test', logLevel: 'info' })}\n`);
     const initRes = await waitForLine(proc, (msg) => msg.id === 1);
@@ -1013,6 +1043,64 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       const allowed = await postToGateway(gatewayPort, JSON.stringify({ model: 'fake-model', messages: [] }));
       expect(allowed.status).toBe(200);
     } finally {
+      if (proc) await killAndWait(proc);
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      if (homeDir) rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects gateway traffic that starts while the requested model is unloading', async () => {
+    let releaseUnload: (() => void) | null = null;
+    const unloadHeld = new Promise<void>((resolve) => { releaseUnload = resolve; });
+    let markUnloadStarted: (() => void) | null = null;
+    const unloadStarted = new Promise<void>((resolve) => { markUnloadStarted = resolve; });
+    let forwardedChatRequests = 0;
+    const upstream = createServer((req, res) => {
+      if (req.url === '/hold-unload') {
+        markUnloadStarted?.();
+        markUnloadStarted = null;
+        void unloadHeld.then(() => {
+          res.writeHead(200, { 'content-type': 'text/plain' });
+          res.end('unloaded');
+        });
+        return;
+      }
+      if (req.url === '/v1/chat/completions') {
+        forwardedChatRequests++;
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{}');
+    });
+    let proc: ChildProcessWithoutNullStreams | undefined;
+    let homeDir: string | undefined;
+    try {
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+      const { port: upstreamPort } = upstream.address() as AddressInfo;
+      const started = await startedGateway(upstreamPort, 10_000, [], false, null, false, true);
+      proc = started.proc;
+      homeDir = started.homeDir;
+      const gatewayPort = started.gatewayPort;
+
+      proc.stdin.write(`${JSON.stringify({ id: 30, cmd: 'load', alias: 'fake-model' })}\n`);
+      const loaded = await waitForLine(proc, (msg) => msg.id === 30, 5000);
+      expect(loaded).toMatchObject({ ok: true });
+
+      proc.stdin.write(`${JSON.stringify({ id: 31, cmd: 'unload', alias: 'fake-model' })}\n`);
+      const unloadReply = waitForLine(proc, (msg) => msg.id === 31, 5000);
+      await unloadStarted;
+
+      const denied = await postToGateway(gatewayPort, JSON.stringify({ model: 'fake-model', messages: [] }));
+      expect(denied.status).toBe(503);
+      expect(denied.body).toContain('model is unloading');
+      expect(forwardedChatRequests).toBe(0);
+
+      releaseUnload?.();
+      await expect(unloadReply).resolves.toMatchObject({ ok: true });
+    } finally {
+      releaseUnload?.();
       if (proc) await killAndWait(proc);
       await new Promise<void>((resolve) => upstream.close(() => resolve()));
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });

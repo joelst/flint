@@ -63,9 +63,10 @@ export function classifyGatewayRoute (urlPath) {
  * @param {(alias: string, variantId: string|null) => Promise<string|null|void>} options.load
  *        resolves to the variant id actually loaded, which the replay needs to name
  * @param {(level: string, msg: string) => void} [options.log]
- * @param {(model: string, phase: 'start'|'end') => void} [options.onActivity]
+ * @param {(model: string, phase: 'start'|'end') => void|boolean} [options.onActivity]
  *        called around every request that names a model, so the owner can keep a model
- *        alive while it is being served and record when it was last used
+ *        alive while it is being served and record when it was last used; returning false
+ *        for a start phase rejects the request before it is forwarded
  * @param {(entry: object) => void} [options.onAccess]
  *        metadata-only access log (no bodies, no headers) after each request finishes
  * @param {() => (() => void)|null} [options.admitRequest]
@@ -170,9 +171,10 @@ export function createGateway (options) {
   /** A hook the owner supplied must never be able to take a request down with it. */
   function notifyActivity (model, phase) {
     try {
-      onActivity(model, phase);
+      return onActivity(model, phase) !== false;
     } catch (err) {
       log('warn', `Gateway activity hook failed: ${err?.message ?? err}`);
+      return true;
     }
   }
 
@@ -214,7 +216,11 @@ export function createGateway (options) {
       // traffic is proxied straight to Foundry, so the sidecar has no other way to tell a
       // model generating a long completion apart from one sitting idle — and unloading the
       // former would kill a live request.
-      notifyActivity(requested, 'start');
+      if (!notifyActivity(requested, 'start')) {
+        res.writeHead(503, { 'content-type': 'application/json' });
+        res.end(openAiError('The requested model is unloading. Retry once it finishes.', 'server_error'));
+        return;
+      }
       try {
         return await route(req, res, buffered, requested);
       } finally {

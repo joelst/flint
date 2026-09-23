@@ -523,6 +523,8 @@ let sharedEndpoint = null;
 // variant switch (which replaces the pool entry) does not reset a model's history.
 /** @type {Map<string, { lastUsedAt: number, inFlight: number }>} */
 const usage = new Map();
+/** @type {Map<string, number>} aliases temporarily refusing new activity while unloading */
+const activityFences = new Map();
 /** @type {Map<string, 'pinned'|'low'|'normal'>} set by the UI; absent means 'normal'. */
 const modelPriorities = new Map();
 let evictionConfig = { ...DEFAULT_EVICTION_CONFIG };
@@ -581,8 +583,7 @@ function aliasForModelName (name) {
   return null;
 }
 
-/** Marks a model busy for the life of a request so eviction cannot unload it mid-flight. */
-function noteActivity (modelName, phase) {
+function activityCandidatesFor (modelName) {
   // Candidate keys, best first: resident pool alias, catalog alias, the raw requested name.
   // During gateway autoload the model is not resident yet (and the lazy modelIndex may not be
   // built), so the start phase can only book against a fallback key. Resolution is therefore
@@ -598,9 +599,48 @@ function noteActivity (modelName, phase) {
   }
   const raw = typeof modelName === 'string' ? modelName.trim() : '';
   if (raw && !candidates.includes(raw)) candidates.push(raw);
+  return { candidates, resident };
+}
+
+function beginActivityFence (alias) {
+  const key = typeof alias === 'string' ? alias.trim() : '';
+  if (!key) return () => {};
+  activityFences.set(key, (activityFences.get(key) ?? 0) + 1);
+  return () => {
+    const count = activityFences.get(key) ?? 0;
+    if (count <= 1) activityFences.delete(key);
+    else activityFences.set(key, count - 1);
+  };
+}
+
+async function withActivityFence (alias, operation) {
+  const release = beginActivityFence(alias);
+  try {
+    return await operation();
+  } finally {
+    release();
+  }
+}
+
+async function unloadAliasWhenIdle (alias, busyMessage, options = {}) {
+  return withActivityFence(alias, async () => {
+    if (inFlightFor(alias) > 0) {
+      if (Object.hasOwn(options, 'busyResult')) return options.busyResult;
+      throw new Error(busyMessage);
+    }
+    return unloadAliasLocked(alias);
+  });
+}
+
+/** Marks a model busy for the life of a request so eviction cannot unload it mid-flight. */
+function noteActivity (modelName, phase) {
+  const { candidates, resident } = activityCandidatesFor(modelName);
   if (candidates.length === 0) return;
 
   let alias = candidates[0];
+  if (phase === 'start' && candidates.some(candidate => activityFences.has(candidate))) {
+    return false;
+  }
   if (phase !== 'start') {
     alias = candidates.find(k => (usage.get(k)?.inFlight ?? 0) > 0) ?? alias;
     // Keep the resident model's idle clock accurate even when the count sat on a fallback key.
@@ -616,6 +656,7 @@ function noteActivity (modelName, phase) {
     // bound (random names spammed at the gateway).
     if (entry.inFlight === 0 && !pool.has(alias)) usage.delete(alias);
   }
+  return true;
 }
 
 function stopGatewayAccepting () {
@@ -714,7 +755,7 @@ async function performRuntimeCleanup (
           const unload = trySerializeModelOperation(
             alias,
             ['residency'],
-            () => unloadAliasLocked(alias),
+            () => unloadAliasWhenIdle(alias, '', { busyResult: false }),
           );
           if (!unload || !(await unload)) unloadFailures.push(alias);
           else modelsUnloaded.push(alias);
@@ -820,17 +861,15 @@ async function runEvictionSweepLocked (options = {}) {
   const plan = selectEvictions(entries, evictionConfig, Date.now(), { ...options, admitting });
   const done = [];
   for (const item of plan) {
-    // Re-check under the current state: sweeps are async, and a request may have arrived
-    // for this model since the plan was drawn up. Use the derived count so requests still
-    // booked under a non-resident key (gateway autoload) are respected here too.
-    if (inFlightFor(item.alias) > 0) continue;
+    // unloadAliasWhenIdle re-checks under an activity fence: sweeps are async, and a request
+    // may have arrived for this model since the plan was drawn up.
     // Priorities can change mid-sweep too, and a model the user just pinned must survive
     // the plan that was drawn before the pin.
     if (normalizePriority(modelPriorities.get(item.alias)) === 'pinned') continue;
     const unload = trySerializeModelOperation(
       item.alias,
       ['residency'],
-      () => unloadAliasLocked(item.alias),
+      () => unloadAliasWhenIdle(item.alias, '', { busyResult: false }),
     );
     if (unload && await unload) {
       log('info', describeEviction(item, evictionConfig));
@@ -1937,12 +1976,6 @@ async function ensureModelLocked(alias, variantId, onCatalogProgress) {
       // A variant switch is an unload of the resident build. Doing that while requests are
       // running against it fails them mid-flight, so the caller must retry rather than be
       // silently served the variant it did not ask for.
-      if (inFlightFor(alias) > 0) {
-        throw new Error(
-          `Cannot switch ${alias} to variant ${variantId} while requests are in flight `
-          + `(currently ${existing.variantId}). Retry once they finish.`,
-        );
-      }
       switchingVariant = true;
     } else {
       let loaded = null;
@@ -1984,15 +2017,12 @@ async function ensureModelLocked(alias, variantId, onCatalogProgress) {
     commit: async () => {
       const current = pool.get(alias);
       if (!current || current.variantId === variantId) return;
-      // Still under the sweep lock, but the pool was re-read after awaits, so re-check.
-      if (inFlightFor(alias) > 0) {
-        throw new Error(
-          `Cannot switch ${alias} to variant ${variantId} while requests are in flight `
-          + `(currently ${current.variantId}). Retry once they finish.`,
-        );
-      }
       log('info', `Variant switch for ${alias}: ${current.variantId} → ${variantId}`);
-      if (!(await unloadAliasLocked(alias))) {
+      if (!(await unloadAliasWhenIdle(
+        alias,
+        `Cannot switch ${alias} to variant ${variantId} while requests are in flight `
+          + `(currently ${current.variantId}). Retry once they finish.`,
+      ))) {
         throw new Error(`Could not unload ${alias} to switch variant to ${variantId}`);
       }
     },
@@ -2682,10 +2712,10 @@ rl.on('line', async (line) => {
     } else if (cmd === 'unload') {
       const alias = payload.alias;
       await serializeModelOperation(alias, ['residency'], async () => {
-        if (inFlightFor(alias) > 0) {
-          throw new Error(`Cannot unload ${alias} while requests are in flight. Retry once they finish.`);
-        }
-        if (await unloadAliasLocked(alias)) {
+        if (await unloadAliasWhenIdle(
+          alias,
+          `Cannot unload ${alias} while requests are in flight. Retry once they finish.`,
+        )) {
           log('info', `Model ${alias} unloaded from pool`);
           audit('unload', { alias });
         }
@@ -2718,7 +2748,7 @@ rl.on('line', async (line) => {
       const deleteResult = await serializeModelOperation(
         payload.alias,
         ['cache', 'residency'],
-        () => {
+        () => withActivityFence(payload.alias, () => {
           if (inFlightFor(payload.alias) > 0) {
             throw new Error(
               `Cannot delete ${payload.alias} while requests are in flight. Retry once they finish.`,
@@ -2795,7 +2825,7 @@ rl.on('line', async (line) => {
             reportCatalogProgress,
             { catalogReadBeforeMutation: true },
           );
-        },
+        }),
       );
       const {
         catalogEntryRemoved,
@@ -3091,10 +3121,14 @@ rl.on('line', async (line) => {
       let chatVariantId = null, chatExecutionProvider = null;
       let chatModelForMetrics = null;
       let chatWarm = null;
+      let chatActivityAdmitted = false;
       activeStreamCount++;
       if (!activeStreamOldest) activeStreamOldest = { type: 'chat', modelAlias, startedAt: chatAccessTs };
-      noteActivity(modelAlias, 'start');
       try {
+        chatActivityAdmitted = noteActivity(modelAlias, 'start') !== false;
+        if (!chatActivityAdmitted) {
+          throw new Error(`Model ${modelAlias} is unloading. Retry once it finishes.`);
+        }
         const loadStartedAt = Date.now();
         const poolEntry = await ensureModel(modelAlias);
         chatLoadMs = poolEntry.loadedNow === true
@@ -3331,7 +3365,7 @@ rl.on('line', async (line) => {
         }
         activeStreamCount = Math.max(0, activeStreamCount - 1);
         if (activeStreamCount === 0) activeStreamOldest = null;
-        noteActivity(modelAlias, 'end');
+        if (chatActivityAdmitted) noteActivity(modelAlias, 'end');
         canceledRequests.delete(id);
         appendAccessLog({
           ts: chatAccessTs,
@@ -3394,10 +3428,14 @@ rl.on('line', async (line) => {
 
       const audioAccessTs = Date.now();
       let audioOk = false;
+      let audioActivityAdmitted = false;
       activeStreamCount++;
       if (!activeStreamOldest) activeStreamOldest = { type: 'audio', modelAlias: requestedAlias, startedAt: audioAccessTs };
-      noteActivity(requestedAlias, 'start');
       try {
+        audioActivityAdmitted = noteActivity(requestedAlias, 'start') !== false;
+        if (!audioActivityAdmitted) {
+          throw new Error(`Model ${requestedAlias} is unloading. Retry once it finishes.`);
+        }
         // Prefer direct AudioClient (like we do for chat) — this avoids relying on the web service HTTP route
         // which may return 404 for /audio/transcriptions even for Whisper models.
         if (typeof audioModel.createAudioClient === 'function') {
@@ -3521,7 +3559,7 @@ rl.on('line', async (line) => {
       } finally {
         activeStreamCount = Math.max(0, activeStreamCount - 1);
         if (activeStreamCount === 0) activeStreamOldest = null;
-        noteActivity(requestedAlias, 'end');
+        if (audioActivityAdmitted) noteActivity(requestedAlias, 'end');
         try { fs.unlinkSync(tempPath); } catch {}
         appendAccessLog({
           ts: audioAccessTs,
@@ -3796,8 +3834,12 @@ rl.on('line', async (line) => {
       const modelAlias = payload.model;
       const embedTs = Date.now();
       let embedOk = false;
-      noteActivity(modelAlias, 'start');
+      let embedActivityAdmitted = false;
       try {
+        embedActivityAdmitted = noteActivity(modelAlias, 'start') !== false;
+        if (!embedActivityAdmitted) {
+          throw new Error(`Model ${modelAlias} is unloading. Retry once it finishes.`);
+        }
         const poolEntry = await ensureModel(modelAlias);
         const embedModel = poolEntry.catModel;
         if (typeof embedModel?.createEmbeddingClient !== 'function') {
@@ -3809,7 +3851,7 @@ rl.on('line', async (line) => {
         audit('embedTexts', { alias: modelAlias, count: inputs.length });
         reply({ ok: true, result });
       } finally {
-        noteActivity(modelAlias, 'end');
+        if (embedActivityAdmitted) noteActivity(modelAlias, 'end');
         appendAccessLog({
           ts: embedTs,
           type: 'embeddings',
