@@ -34,6 +34,7 @@ import {
 import {
   applyPreferredExecutionProvider as applyPreferredExecutionProviderTo,
 } from './execution-provider.js';
+import { rebuildBrokenExecutionProviders, removeProviderCache } from './execution-provider-cache.js';
 import {
   stopNativeWebService as stopNativeWebServiceFor,
   waitForHttpReady,
@@ -189,6 +190,7 @@ const FIELD_TYPES = {
   cancelChatRequest: { requestId: 'number' },
   transcribeAudio:   { audioBase64: 'string', mimeType: 'non-empty-string', fileName: 'non-empty-string', model: 'non-empty-string', language: 'non-empty-string' },
   embedTexts:        { model: 'non-empty-string', inputs: 'array' },
+  ensureAccelerators: { rebuildBroken: 'boolean' },
   fetchUrl:          { url: 'non-empty-string' },
   inspectModelFolder: { folderPath: 'non-empty-string' },
   importModelFolder: { folderPath: 'non-empty-string', name: 'non-empty-string' },
@@ -230,7 +232,7 @@ const COMMAND_SCHEMA = {
   transcribeAudio:    { required: ['audioBase64', 'mimeType', 'fileName', 'model', 'language'], optional: ['temperature', 'preferredEp'] },
   embedTexts:         { required: ['model', 'inputs'], optional: [] },
   getEps:             { required: [], optional: [] },
-  ensureAccelerators: { required: [], optional: [] },
+  ensureAccelerators: { required: [], optional: ['rebuildBroken'] },
   getVisionModels:    { required: [], optional: [] },
   getSTTModels:       { required: [], optional: [] },
   poolStatus:         { required: [], optional: [] },
@@ -3579,13 +3581,33 @@ rl.on('line', async (line) => {
       const eps = typeof manager.discoverEps === 'function' ? manager.discoverEps() : [];
       reply({ ok: true, result: eps });
     } else if (cmd === 'ensureAccelerators') {
-      if (typeof manager.downloadAndRegisterEps === 'function') {
-        const result = await manager.downloadAndRegisterEps((name, pct) => {
-          send({ id, progress: pct, ep: name });
-        });
-        reply({ ok: true, result: result ?? null });
-      } else {
+      if (typeof manager.downloadAndRegisterEps !== 'function') {
         reply({ ok: true, result: null });
+      } else {
+        const progress = (name, pct) => send({ id, progress: pct, ep: name });
+        if (payload.rebuildBroken === true) {
+          const epRoot = path.join(os.homedir(), `.${initConfig?.appName || 'flint'}`, 'ep');
+          const outcome = await rebuildBrokenExecutionProviders({
+            discover: () => (typeof manager.discoverEps === 'function' ? manager.discoverEps() : []),
+            downloadAndRegister: (names, onProgress) => manager.downloadAndRegisterEps(
+              names && names.length ? names : undefined,
+              onProgress,
+            ),
+            removeCache: (name) => removeProviderCache(epRoot, name),
+            onProgress: progress,
+            epRoot,
+          });
+          if (outcome.removed.length) {
+            log('info', `Removed broken execution provider cache: ${outcome.removed.join(', ')}`);
+          }
+          reply({
+            ok: true,
+            result: { ...(outcome.result ?? {}), removedProviderCaches: outcome.removed },
+          });
+        } else {
+          const result = await manager.downloadAndRegisterEps(progress);
+          reply({ ok: true, result: result ?? null });
+        }
       }
     } else if (cmd === 'setLogLevel') {
       if (!LOG_LEVELS.includes(payload.level)) {

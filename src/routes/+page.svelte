@@ -596,6 +596,45 @@
     }
   }
 
+  let providerRecheckBusy = $state(false);
+
+  async function recheckProviders() {
+    if (!state.ready || providerRecheckBusy) return;
+    providerRecheckBusy = true;
+    statusMessage = "Rechecking execution providers...";
+    try {
+      const readiness = await ensureAccelerators(
+        (epName, pct) => {
+          statusMessage = `Provider ${epName}: ${pct.toFixed(0)}%`;
+        },
+        () => {
+          statusMessage = "Provider rebuild: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.";
+        },
+        { rebuildBroken: true },
+      );
+      await refreshExecutionProviders({
+        throwOnError: true,
+        refreshRecommendations: false,
+      });
+      const registration = readiness.registration;
+      const failed = registration?.failedEps ?? [];
+      const removed = registration?.removedProviderCaches ?? [];
+      if (failed.length) {
+        statusMessage = `Provider rebuild failed for ${failed.join(", ")}`;
+        appendAppLog(statusMessage, "warn");
+      } else if (removed.length) {
+        statusMessage = `Rebuilt ${removed.join(", ")}`;
+      } else {
+        statusMessage = `${state.eps.length} execution providers ready`;
+      }
+    } catch (e: any) {
+      statusMessage = `Provider recheck failed: ${e?.message || e}`;
+      appendAppLog(statusMessage, "warn");
+    } finally {
+      providerRecheckBusy = false;
+    }
+  }
+
   async function setAccelerationPreference(nextPreference: string) {
     selectedAccelerationPreference = nextPreference || "auto";
     persistChat();
@@ -7694,8 +7733,13 @@ Output only the summary text, no preamble.`;
                 <button onclick={ensureHardwareAccel} disabled={!state.ready}>
                   Install / Update Accelerators
                 </button>
-                <button class="secondary" onclick={refreshExecutionProviders} disabled={!state.ready}>
-                  Recheck Providers
+                <button
+                  class="secondary accel-recheck"
+                  onclick={recheckProviders}
+                  disabled={!state.ready || providerRecheckBusy}
+                  title="Remove a provider that failed to register and download it again"
+                >
+                  {providerRecheckBusy ? "Rechecking…" : "Recheck Providers"}
                 </button>
               </div>
               {#if state.eps.length}
@@ -11361,6 +11405,14 @@ Output only the summary text, no preamble.`;
     color: var(--fg);
     border: 1px solid var(--border);
     border-radius: 6px;
+  }
+
+  /* The panel fill is --subtle-bg, and a plain secondary button uses that same
+     fill with no border, so Recheck Providers disappears in both themes. */
+  .accel-panel-row button.accel-recheck {
+    background: var(--panel-bg);
+    color: var(--fg);
+    border: 1px solid var(--muted);
   }
 
   .ep-status-list {
