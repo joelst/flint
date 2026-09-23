@@ -41,7 +41,7 @@
     <InstallExecuteSequence>
       <Custom Action="RestoreFoundrySdk" Before="MoveFoundrySdk">NOT REMOVE</Custom>
       <Custom Action="MoveFoundrySdk" Before="InstallFiles">NOT REMOVE</Custom>
-      <Custom Action="DiscardFoundryBackup" Before="InstallFinalize">NOT REMOVE</Custom>
+      <Custom Action="DiscardFoundryBackup" After="InstallFinalize">NOT REMOVE</Custom>
     </InstallExecuteSequence>
 
     <DirectoryRef Id="INSTALLDIR">

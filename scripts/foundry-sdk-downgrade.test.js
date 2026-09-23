@@ -43,6 +43,8 @@ describe('Foundry 1.2.4 install over a newer SDK', () => {
     expect(wxs).toContain('Directory="INSTALLDIR"');
     expect(wxs).not.toContain('[INSTALLDIR]');
     expect(wxs).toContain('Before="InstallFiles"');
+    expect(wxs).toContain('Action="DiscardFoundryBackup" After="InstallFinalize"');
+    expect(wxs).not.toContain('Before="InstallFinalize"');
   });
 });
 
