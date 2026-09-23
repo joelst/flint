@@ -15,13 +15,18 @@ Var FoundrySdkMovedAside
 !macro NSIS_HOOK_PREINSTALL
   !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
   Sleep 500
-  ; A backup beside a working runtime is a leftover from cleanup, not the
-  ; only good SDK. Move that leftover aside. A backup beside a tree with no
-  ; runtime is the recovery copy: put it back, and do not delete it.
+  ; foundry-local-sdk.moved marks .previous as the backup of an install that did
+  ; not finish (the MSI writes the same marker). That backup is put back even
+  ; when the current tree holds a runtime file, because a partial copy can.
+  ; An unmarked backup beside a working runtime is a leftover from cleanup:
+  ; move it aside. An unmarked backup beside a tree with no runtime is the
+  ; recovery copy: put it back, and do not delete it.
   IfFileExists "$INSTDIR\foundry-local-sdk.previous\*" 0 foundry_sdk_move
+    IfFileExists "$INSTDIR\foundry-local-sdk.moved" foundry_sdk_recover
     Call FoundryLiveRuntimeExists
     Pop $0
     StrCmp $0 "yes" foundry_sdk_stale_backup
+  foundry_sdk_recover:
     Call RestoreFoundrySdkBackup
     Pop $0
     StrCmp $0 "stranded" foundry_sdk_keep_backup
@@ -47,9 +52,19 @@ Var FoundrySdkMovedAside
         Abort
     foundry_sdk_failed_clear:
     IfFileExists "$INSTDIR\foundry-local-sdk\*" 0 foundry_sdk_aside_done
+      ; Own the backup before moving anything, so a later run can tell it from
+      ; a leftover even if this installer dies or cannot restore it.
+      ClearErrors
+      FileOpen $1 "$INSTDIR\foundry-local-sdk.moved" w
+      FileClose $1
+      IfFileExists "$INSTDIR\foundry-local-sdk.moved" foundry_sdk_owned
+        MessageBox MB_OK|MB_ICONSTOP "Flint could not write foundry-local-sdk.moved in the install folder. The installed SDK was not changed." /SD IDOK
+        Abort
+    foundry_sdk_owned:
       ClearErrors
       Rename "$INSTDIR\foundry-local-sdk" "$INSTDIR\foundry-local-sdk.previous"
       IfErrors 0 foundry_sdk_moved
+        Delete "$INSTDIR\foundry-local-sdk.moved"
         MessageBox MB_OK|MB_ICONSTOP "Flint could not move the installed Foundry SDK aside. Close Flint, then run this installer again. Continuing would leave an older ONNX Runtime in place." /SD IDOK
         Abort
   foundry_sdk_keep_backup:
@@ -82,6 +97,9 @@ Var FoundrySdkMovedAside
     Abort
   foundry_sdk_new_ok:
     StrCpy $FoundrySdkMovedAside ""
+    ; The install finished, so .previous is no longer a backup to put back. The
+    ; marker goes first: a .previous that cannot be removed is then a leftover.
+    Delete "$INSTDIR\foundry-local-sdk.moved"
     ; .failed only holds a tree that was parked aside; nothing restores from it.
     RMDir /r "$INSTDIR\foundry-local-sdk.failed"
     RMDir /r "$INSTDIR\foundry-local-sdk.previous-kept"
@@ -105,6 +123,8 @@ FunctionEnd
 ; Pushes "none", "restored", or "stranded". The backup is renamed back only
 ; after the partial copy has been renamed aside. A locked file makes that
 ; rename fail as a whole, so foundry-local-sdk.previous stays intact.
+; A stranded restore keeps foundry-local-sdk.moved, so the next run puts that
+; backup back instead of judging it by the partial copy's files.
 Function RestoreFoundrySdkBackup
   IfFileExists "$INSTDIR\foundry-local-sdk.previous\*" 0 restore_foundry_none
     IfFileExists "$INSTDIR\foundry-local-sdk.failed\*" 0 restore_foundry_move_partial
@@ -118,11 +138,14 @@ Function RestoreFoundrySdkBackup
         Rename "$INSTDIR\foundry-local-sdk.previous" "$INSTDIR\foundry-local-sdk"
         IfFileExists "$INSTDIR\foundry-local-sdk.previous\*" restore_foundry_stranded restore_foundry_ok
   restore_foundry_none:
+    ; With no backup, a marker marks nothing.
+    Delete "$INSTDIR\foundry-local-sdk.moved"
     Push "none"
     Return
   restore_foundry_ok:
     ; The backup is back, so the tree parked at .failed is only garbage now.
     ; A stranded restore keeps it, as it changes nothing else on that path.
+    Delete "$INSTDIR\foundry-local-sdk.moved"
     RMDir /r "$INSTDIR\foundry-local-sdk.failed"
     Push "restored"
     Return
