@@ -139,7 +139,7 @@ describe('foundry-sidecar protocol basics', () => {
       ]));
       expect(response.result.entries.some((entry: any) => entry.alias === 'foreign')).toBe(false);
     } finally {
-      proc.kill();
+      await killAndWait(proc);
       rmSync(home, { recursive: true, force: true });
       rmSync(foreign, { recursive: true, force: true });
     }
