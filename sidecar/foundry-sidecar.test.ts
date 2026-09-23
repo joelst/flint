@@ -189,6 +189,28 @@ describe('foundry-sidecar protocol basics', () => {
     }
   });
 
+  it('rejects an appName that is not a single folder name before touching the SDK', async () => {
+    const proc = spawn(process.execPath, ['sidecar/foundry-sidecar.js'], {
+      cwd: process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+    try {
+      await waitForLine(proc, (msg) => msg.ready === true);
+      // appName becomes ~/.<appName>, the root Recheck deletes provider caches under.
+      const bad = ['../../../tmp/x', 'flint/ep', 'flint\\ep', '..', '.hidden', 'a'.repeat(65)];
+      const replies = bad.map((_, i) => waitForLine(proc, (msg) => msg.id === 100 + i));
+      bad.forEach((appName, i) => {
+        proc.stdin.write(`${JSON.stringify({ id: 100 + i, cmd: 'init', appName, logLevel: 'info' })}\n`);
+      });
+      for (const reply of await Promise.all(replies)) {
+        expect(reply.ok).not.toBe(true);
+        expect(String(reply.error)).toContain('"appName" must be a single folder name');
+      }
+    } finally {
+      await killAndWait(proc);
+    }
+  });
+
   it('acknowledges runtime cleanup before exiting on explicit shutdown', async () => {
     const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-home-'));
     const proc = spawn(process.execPath, ['sidecar/foundry-sidecar.js'], {

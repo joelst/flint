@@ -322,6 +322,11 @@ function validateCommand(cmd, payload) {
     }
   }
   if (payload.preferredEp !== undefined && typeof payload.preferredEp !== 'string') return `Command "${cmd}" field "preferredEp" must be a string`;
+  // appName becomes ~/.<appName>: the model cache, the provider caches Recheck deletes, and
+  // Foundry's own data. It must be one folder name, so no path can leave the home directory.
+  if (cmd === 'init' && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(payload.appName)) {
+    return 'Command "init" field "appName" must be a single folder name of letters, digits, ".", "_" or "-"';
+  }
   if (cmd === 'startService' && payload.alias !== undefined && (typeof payload.alias !== 'string' || !payload.alias.trim())) return `Command "startService" field "alias" must be a non-empty string`;
   if ((cmd === 'chatCompletion' || cmd === 'transcribeAudio') && payload.temperature !== undefined && typeof payload.temperature !== 'number') return `Command "${cmd}" field "temperature" must be a number`;
   if (cmd === 'chatCompletion') {

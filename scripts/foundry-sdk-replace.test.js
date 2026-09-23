@@ -93,6 +93,31 @@ describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
     );
   });
 
+  it('keeps NSIS backup ownership on disk, so a later run never judges a marked backup by one DLL', () => {
+    const marker = '"$INSTDIR\\foundry-local-sdk.moved"';
+    const section = (start, end) => hooks.slice(hooks.indexOf(start), hooks.indexOf(end, hooks.indexOf(start)));
+    const preinstall = section('!macro NSIS_HOOK_PREINSTALL', '!macroend');
+    // A marked backup goes to recovery before the one-DLL check runs.
+    expect(preinstall.indexOf(`IfFileExists ${marker} foundry_sdk_recover`))
+      .toBeLessThan(preinstall.indexOf('Call FoundryLiveRuntimeExists'));
+    expect(preinstall.indexOf('foundry_sdk_recover:')).toBeLessThan(preinstall.indexOf('Call RestoreFoundrySdkBackup'));
+    // Ownership is written and checked before the installed SDK moves, and dropped if it does not.
+    const liveRename = preinstall.indexOf('Rename "$INSTDIR\\foundry-local-sdk" "$INSTDIR\\foundry-local-sdk.previous"');
+    expect(preinstall.indexOf(`FileOpen $1 ${marker} w`)).toBeLessThan(liveRename);
+    expect(preinstall.indexOf(`IfFileExists ${marker} foundry_sdk_owned`)).toBeLessThan(liveRename);
+    expect(preinstall.indexOf(`Delete ${marker}`, liveRename)).toBeGreaterThan(liveRename);
+    // A finished install drops it before trying to delete .previous.
+    const postinstall = section('!macro NSIS_HOOK_POSTINSTALL', '!macroend');
+    const ok = postinstall.slice(postinstall.indexOf('foundry_sdk_new_ok:'));
+    expect(ok.indexOf(`Delete ${marker}`)).toBeGreaterThan(-1);
+    expect(ok.indexOf(`Delete ${marker}`)).toBeLessThan(ok.indexOf('RMDir /r "$INSTDIR\\foundry-local-sdk.previous"'));
+    // A restore drops it only once the backup is back; a stranded restore keeps it.
+    const restore = section('Function RestoreFoundrySdkBackup', 'FunctionEnd');
+    expect(restore.slice(restore.indexOf('restore_foundry_none:'), restore.indexOf('restore_foundry_ok:'))).toContain(`Delete ${marker}`);
+    expect(restore.slice(restore.indexOf('restore_foundry_ok:'), restore.indexOf('restore_foundry_stranded:'))).toContain(`Delete ${marker}`);
+    expect(restore.slice(restore.indexOf('restore_foundry_stranded:'))).not.toContain(marker);
+  });
+
   it('removes the parked .failed tree once NSIS has finished or restored', () => {
     const removeFailed = 'RMDir /r "$INSTDIR\\foundry-local-sdk.failed"';
     const postinstall = hooks.slice(hooks.indexOf('!macro NSIS_HOOK_POSTINSTALL'), hooks.indexOf('!macroend', hooks.indexOf('!macro NSIS_HOOK_POSTINSTALL')));
