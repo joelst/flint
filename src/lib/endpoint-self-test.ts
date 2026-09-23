@@ -494,6 +494,7 @@ async function runChatChecks(
   requestTimeoutMs: number,
   disconnectStartMs: number,
   toolsDeclared: boolean | null,
+  runDisconnect: boolean,
 ): Promise<SelfTestCheck[]> {
   const checks: SelfTestCheck[] = [];
   let usageSeen = false;
@@ -580,7 +581,8 @@ async function runChatChecks(
     ));
   }
 
-  try {
+  if (runDisconnect) {
+    try {
     const abort = new AbortController();
     const pending = fetchFn(joinUrl(endpoint, '/chat/completions'), {
       method: 'POST',
@@ -652,14 +654,15 @@ async function runChatChecks(
         ));
       }
     }
-  } catch (error) {
-    checks.push(check(
-      'disconnect',
-      'Aborting a stream settles the caller',
-      'fail',
-      error instanceof Error ? error.message : String(error),
-      modelId,
-    ));
+    } catch (error) {
+      checks.push(check(
+        'disconnect',
+        'Aborting a stream settles the caller',
+        'fail',
+        error instanceof Error ? error.message : String(error),
+        modelId,
+      ));
+    }
   }
 
   if (toolsDeclared === false) {
@@ -845,6 +848,7 @@ export async function runEndpointSelfTest(options: {
   }
 
   let index = 0;
+  const lastChatModelId = aliases.chat[aliases.chat.length - 1] ?? null;
   for (const target of queue) {
     options.onProgress?.({ modelId: target.modelId, index, total: queue.length });
     index += 1;
@@ -858,6 +862,7 @@ export async function runEndpointSelfTest(options: {
         requestTimeoutMs,
         disconnectStartMs,
         declaredToolCalling(target.modelId, options),
+        target.modelId === lastChatModelId,
       ));
     } else {
       checks.push(...await runSpeechChecks(

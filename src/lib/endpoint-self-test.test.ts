@@ -84,6 +84,46 @@ describe('runEndpointSelfTest', () => {
     });
   });
 
+  it('runs the disconnect probe only after every switchable chat target', async () => {
+    const requests: Array<{ model: string; disconnect: boolean }> = [];
+    const fetchMock: typeof fetch = async (input, init) => {
+      if (String(input).endsWith('/models')) {
+        return jsonResponse(200, { data: [
+          { id: 'model-generic-cpu', parent: 'model' },
+          { id: 'model-generic-cuda', parent: 'model' },
+        ] });
+      }
+      const body = JSON.parse(String(init?.body || '{}'));
+      requests.push({
+        model: body.model,
+        disconnect: body.messages?.[0]?.content === 'Keep writing until stopped.',
+      });
+      if (body.tools) return jsonResponse(200, { choices: [{ message: { tool_calls: [] } }] });
+      if (body.stream) {
+        return new Response('data: {"choices":[{"delta":{"content":"ping"}}]}\n\ndata: [DONE]\n\n');
+      }
+      return jsonResponse(200, {
+        choices: [{ message: { content: 'ping' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      });
+    };
+
+    const report = await runEndpointSelfTest({
+      fetch: fetchMock,
+      endpoint: 'http://127.0.0.1:5272/v1',
+      catalogSupportsToolCalling: false,
+    });
+
+    expect(report.modelIds).toEqual(['model-generic-cpu', 'model-generic-cuda', 'model']);
+    expect(requests.filter((request) => request.disconnect).map((request) => request.model))
+      .toEqual(['model']);
+    const disconnectIndex = requests.findIndex((request) => request.disconnect);
+    expect(disconnectIndex).toBeGreaterThan(
+      requests.map((request) => request.model).lastIndexOf('model-generic-cuda'),
+    );
+    expect(requests.slice(disconnectIndex).every((request) => request.model === 'model')).toBe(true);
+  });
+
   it('accepts usage from input_tokens fields and SSE data lines that are not JSON', async () => {
     const fetchMock: typeof fetch = async (input, init) => {
       if (init?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
