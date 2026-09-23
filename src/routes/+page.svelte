@@ -5983,6 +5983,25 @@ updateStateFromSdk();
     }
   }
 
+  /**
+   * A delete result carries the same restart-bound uncertainty as import/link/template
+   * mutations: when `catalogRefreshRequiresRestart` is set, the immutable snapshot still
+   * holds the deleted row, so a refresh would just re-report stale data. Surface restart
+   * guidance and skip the refresh instead; otherwise report success and refresh normally.
+   */
+  function handleDeleteResult(
+    deleteResult: { catalogRefreshRequiresRestart?: boolean } | undefined,
+    successMessage: string,
+  ): boolean {
+    if (deleteResult?.catalogRefreshRequiresRestart) {
+      statusMessage = `${successMessage}. Restart Flint to let the model catalog detect the change.`;
+      appendAppLog(statusMessage, "warn");
+      return true;
+    }
+    statusMessage = successMessage;
+    return false;
+  }
+
   async function deleteVariant(model: any, variantId: string) {
     const blocked = blockedByActiveBenchmark();
     if (blocked) {
@@ -6009,12 +6028,7 @@ updateStateFromSdk();
         }
         const deleteResult = await sdkDeleteModel(model, variantId);
         const deletedMessage = `${model.alias} variant deleted (${label})`;
-        if (deleteResult?.catalogRefreshRequiresRestart) {
-          // The immutable catalog snapshot cannot reflect this deletion yet. Skip the
-          // unreliable refresh (it would just re-report the stale row) and surface the
-          // restart requirement instead, matching the import/link/template mutation flow.
-          statusMessage = `${deletedMessage}. Restart Flint to let the model catalog detect the change.`;
-          appendAppLog(statusMessage, "warn");
+        if (handleDeleteResult(deleteResult, deletedMessage)) {
           return;
         }
         // If no other variants remain cached, clear selection/meta like full delete
@@ -6032,7 +6046,6 @@ updateStateFromSdk();
             persistChat();
           }
         }
-        statusMessage = deletedMessage;
       } finally {
         release();
       }
@@ -6103,13 +6116,7 @@ updateStateFromSdk();
           modelRuntimeMeta = nextMeta;
           persistChat();
         }
-        if (deleteResult?.catalogRefreshRequiresRestart) {
-          // Skip the unreliable refresh: the immutable snapshot still holds this model's
-          // row until Flint restarts. Surface that instead, like import/link/template.
-          statusMessage = `${model.alias} deleted. Restart Flint to let the model catalog detect the change.`;
-          appendAppLog(statusMessage, "warn");
-        } else {
-          statusMessage = `${model.alias} deleted`;
+        if (!handleDeleteResult(deleteResult, `${model.alias} deleted`)) {
           await refreshCatalogModels();
         }
       } finally {
