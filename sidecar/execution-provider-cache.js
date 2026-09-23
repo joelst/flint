@@ -99,11 +99,9 @@ export function providerNamesInText (text) {
 }
 
 /**
- * Known provider caches on disk that discover does not currently mark registered.
- * A broken CUDA install is sometimes absent from discoverEps entirely.
- * @param {string|undefined|null} epRoot
+ * Cache slugs the latest discover marks registered.
  * @param {Array<{ name?: string, isRegistered?: boolean }>|null|undefined} discovered
- * @returns {string[]}
+ * @returns {Set<string>}
  */
 function registeredCacheSlugs (discovered) {
   const slugs = new Set();
@@ -115,6 +113,13 @@ function registeredCacheSlugs (discovered) {
   return slugs;
 }
 
+/**
+ * Known provider caches on disk that discover does not currently mark registered.
+ * A broken CUDA install is sometimes absent from discoverEps entirely.
+ * @param {string|undefined|null} epRoot
+ * @param {Array<{ name?: string, isRegistered?: boolean }>|null|undefined} discovered
+ * @returns {string[]}
+ */
 export function providersWithUnregisteredCache (epRoot, discovered) {
   const registered = registeredCacheSlugs(discovered);
   if (!epRoot || !fs.existsSync(epRoot)) return [];
