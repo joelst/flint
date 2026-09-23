@@ -30,6 +30,8 @@ export function endpointModelKind(model: EndpointCatalogModel): EndpointModelKin
     || task.includes('stt')
     || capabilities.includes('automatic-speech-recognition')
     || alias.includes('whisper')
+    || alias.includes('parakeet')
+    || alias.includes('nemotron-speech')
     || alias.includes('-stt')
     || alias.includes('stt-')
   ) {

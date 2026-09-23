@@ -87,6 +87,7 @@ describe('runEndpointSelfTest', () => {
   it('runs the disconnect probe only after every other endpoint probe', async () => {
     const requests: Array<{ model: string; disconnect: boolean }> = [];
     const progress: Array<{ modelId: string; index: number; total: number }> = [];
+    const restored: string[] = [];
     const fetchMock: typeof fetch = async (input, init) => {
       if (String(input).endsWith('/models')) {
         return jsonResponse(200, { data: [
@@ -122,21 +123,27 @@ describe('runEndpointSelfTest', () => {
       endpoint: 'http://127.0.0.1:5272/v1',
       catalogSupportsToolCalling: true,
       prepareSpeechModel: async (modelId) => modelId,
+      afterModelProbe: async (modelId) => { restored.push(modelId); },
+      disconnectModelId: 'MODEL-GENERIC-CPU',
       onProgress: (event) => progress.push(event),
     });
 
     expect(report.modelIds).toEqual(['model-generic-cpu', 'model-generic-cuda', 'model']);
     expect(requests.filter((request) => request.disconnect).map((request) => request.model))
-      .toEqual(['model']);
+      .toEqual(['model-generic-cpu']);
     const disconnectIndex = requests.findIndex((request) => request.disconnect);
     expect(disconnectIndex).toBe(requests.length - 1);
+    expect(restored).toEqual([
+      'model',
+      'whisper-tiny-generic-cpu',
+    ]);
     expect(report.checks.at(-1)).toMatchObject({ id: 'disconnect' });
     expect(report.checks.at(-1)).not.toHaveProperty('modelId');
     const verified = flintVerifiedFromReport(report);
     expect(verified?.disconnect).toBe(true);
     expect(verified?.aliases.every((alias) => 'disconnect' in alias)).toBe(false);
     expect(progress.at(-1)).toEqual({
-      modelId: 'model',
+      modelId: 'model-generic-cpu',
       index: progress.length - 1,
       total: progress.length,
     });
@@ -164,6 +171,28 @@ describe('runEndpointSelfTest', () => {
     });
     expect(report.checks.find((c) => c.id === 'usage')?.status).toBe('pass');
     expect(report.checks.find((c) => c.id === 'stream')?.status).toBe('pass');
+  });
+
+  it('stops before loading more models when residency restoration fails', async () => {
+    const report = await runEndpointSelfTest({
+      fetch: cooperatingFetch(),
+      endpoint: 'http://127.0.0.1:5272/v1',
+      catalogSupportsToolCalling: false,
+      afterModelProbe: async () => {
+        throw new Error('restore failed');
+      },
+    });
+
+    expect(report.checks).toContainEqual(expect.objectContaining({
+      id: 'residency',
+      status: 'fail',
+      detail: 'restore failed',
+    }));
+    expect(report.checks.at(-1)).toMatchObject({
+      id: 'run',
+      status: 'blocked',
+    });
+    expect(report.checks.some((item) => item.id === 'disconnect')).toBe(false);
   });
 
   it('labels missing usage and missing tool_calls as not-verified rather than failed', async () => {
@@ -517,8 +546,8 @@ describe('runEndpointSelfTest', () => {
     expect(report.modelIds).toEqual([]);
     expect(report.embeddingModelIds).toEqual([
       'custom-model-one-generic-cpu',
-      'custom-model-two-generic-cpu',
       'vectorizer-one',
+      'custom-model-two-generic-cpu',
       'semantic-two',
     ]);
     expect(seen).toEqual(report.embeddingModelIds);

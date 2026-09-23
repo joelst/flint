@@ -174,6 +174,10 @@
   } from "$lib/endpoint-self-test";
   import { buildEndpointModelClassifier } from "$lib/endpoint-model-classification";
   import {
+    createSelfTestResidencyController,
+    preferredResidentChatAlias,
+  } from "$lib/endpoint-self-test-residency";
+  import {
     COMPARE_HISTORY_MAX,
     COMPARE_MAX_SLOTS,
     compareSlotKey,
@@ -310,24 +314,47 @@
     }
     endpointSelfTestBusy = true;
     try {
-      const classifyModel = buildEndpointModelClassifier(state.models);
+      await pollPoolStatus();
+      const catalogModels = [...state.models];
+      const initialPool = [...state.pool];
+      const classifyModel = buildEndpointModelClassifier(catalogModels);
+      const modelForEndpointId = (modelId: string) => {
+        const normalized = modelId.toLowerCase();
+        return catalogModels.find((model: ModelInfo) =>
+          model.alias?.toLowerCase() === normalized
+        || model.variants?.some((variant: any) =>
+          variant.id?.toLowerCase() === normalized
+          || variant.id?.split(":")[0]?.toLowerCase() === normalized),
+        );
+      };
+      const residency = createSelfTestResidencyController({
+        models: catalogModels,
+        initialPool,
+        currentPool: async () => {
+          await pollPoolStatus();
+          return [...state.pool];
+        },
+        load: async (model, variantId) => {
+          await sdkLoadModel(model, undefined, variantId);
+        },
+        unload: async (alias) => {
+          await sdkUnloadModel({ alias });
+        },
+      });
       endpointSelfTestReport = await runEndpointSelfTest({
         fetch,
         endpoint: state.endpoint || null,
         classifyModel,
+        disconnectModelId: preferredResidentChatAlias(initialPool, classifyModel),
         supportsToolCalling: (modelId: string) => {
-          const exact = state.models.find((m: ModelInfo) => m.alias === modelId);
-          const matched = exact ?? [...state.models]
+          const exact = catalogModels.find((m: ModelInfo) => m.alias === modelId);
+          const matched = exact ?? [...catalogModels]
             .filter((m: ModelInfo) => matchesVerifiedModel(modelId, m.alias))
             .sort((a: ModelInfo, b: ModelInfo) => b.alias.length - a.alias.length)[0];
           return matched?.supportsToolCalling ?? null;
         },
         prepareSpeechModel: async (modelId: string) => {
-          const model = state.models.find((m: ModelInfo) =>
-            m.alias === modelId
-            || m.variants?.some((variant: any) =>
-              variant.id === modelId || variant.id?.split(":")[0] === modelId),
-          );
+          const model = modelForEndpointId(modelId);
           const variant = model?.variants?.find((item: any) =>
             item.id === modelId || item.id?.split(":")[0] === modelId);
           if (!model) throw new Error(`Cached speech model ${modelId} is unavailable.`);
@@ -337,6 +364,7 @@
           }
           return loaded.variantId;
         },
+        afterModelProbe: residency.restore,
         onProgress: (event) => {
           statusMessage = `Testing ${event.modelId} (${event.index + 1} of ${event.total})…`;
         },

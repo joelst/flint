@@ -223,6 +223,30 @@ function listedModels(body: { data?: Array<{ id?: string; parent?: string }> } |
   return out;
 }
 
+function groupedTargets(
+  ids: string[],
+  kind: EndpointModelKind,
+  models: ListedEndpointModel[],
+): Array<{ modelId: string; kind: EndpointModelKind; residencyModelId: string; restoreAfter: boolean }> {
+  const groups = new Map<string, Array<{ modelId: string; residencyModelId: string }>>();
+  for (const modelId of ids) {
+    const normalizedId = modelId.toLowerCase();
+    const row = models.find((item) => item.id.toLowerCase() === normalizedId);
+    const parent = row?.parent
+      ?? models.find((item) => item.parent?.toLowerCase() === normalizedId)?.parent
+      ?? modelId;
+    const key = parent.toLowerCase();
+    const group = groups.get(key) ?? [];
+    group.push({ modelId, residencyModelId: parent });
+    groups.set(key, group);
+  }
+  return [...groups.values()].flatMap((group) => group.map((target, index) => ({
+    ...target,
+    kind,
+    restoreAfter: index === group.length - 1,
+  })));
+}
+
 function blockedChatChecks(detail: string): SelfTestCheck[] {
   return [
     check('chat', 'Returned model id round-trips into chat', 'blocked', detail),
@@ -747,6 +771,10 @@ export async function runEndpointSelfTest(options: {
    * multipart requests cannot be gateway-replayed or rewritten.
    */
   prepareSpeechModel?: (modelId: string) => Promise<string>;
+  /** Restores or unloads a model after its ordinary probes complete. */
+  afterModelProbe?: (modelId: string) => Promise<void>;
+  /** Prefer an already-resident chat alias for the terminal disconnect probe. */
+  disconnectModelId?: string | null;
   requestTimeoutMs?: number;
   disconnectStartMs?: number;
   onProgress?: (event: { modelId: string; index: number; total: number }) => void;
@@ -814,8 +842,9 @@ export async function runEndpointSelfTest(options: {
 
   const modelsOk = checks.some((item) => item.id === 'models' && item.status === 'pass');
   const requestedEmbed = options.embeddingModelId?.trim() || null;
+  const listed = modelsOk ? listedModels(modelsBody) : [];
   const aliases = modelsOk
-    ? endpointAliases(listedModels(modelsBody), requestedEmbed, options.classifyModel)
+    ? endpointAliases(listed, requestedEmbed, options.classifyModel)
     : { chat: [], embed: [], speech: [] };
   const emptyIds = { modelIds: [] as string[], embeddingModelIds: [] as string[], speechModelIds: [] as string[] };
 
@@ -834,10 +863,15 @@ export async function runEndpointSelfTest(options: {
   }
 
   const queue = [
-    ...aliases.embed.map((modelId) => ({ modelId, kind: 'embed' as const })),
-    ...aliases.chat.map((modelId) => ({ modelId, kind: 'chat' as const })),
-    ...aliases.speech.map((modelId) => ({ modelId, kind: 'speech' as const })),
+    ...groupedTargets(aliases.embed, 'embed', listed),
+    ...groupedTargets(aliases.chat, 'chat', listed),
+    ...groupedTargets(aliases.speech, 'speech', listed),
   ];
+  const orderedAliases = {
+    embed: queue.filter((target) => target.kind === 'embed').map((target) => target.modelId),
+    chat: queue.filter((target) => target.kind === 'chat').map((target) => target.modelId),
+    speech: queue.filter((target) => target.kind === 'speech').map((target) => target.modelId),
+  };
 
   if (aliases.embed.length === 0) {
     checks.push(check(
@@ -849,8 +883,15 @@ export async function runEndpointSelfTest(options: {
   }
 
   let index = 0;
-  const lastChatModelId = aliases.chat[aliases.chat.length - 1] ?? null;
-  const progressTotal = queue.length + (lastChatModelId ? 1 : 0);
+  const requestedDisconnectModel = options.disconnectModelId?.trim() || null;
+  const matchingDisconnectModel = requestedDisconnectModel
+    ? orderedAliases.chat.find((modelId) => modelId.toLowerCase() === requestedDisconnectModel.toLowerCase())
+    : null;
+  const disconnectModelId = matchingDisconnectModel
+    ? matchingDisconnectModel
+    : orderedAliases.chat[orderedAliases.chat.length - 1] ?? null;
+  const progressTotal = queue.length + (disconnectModelId ? 1 : 0);
+  let residencyRestoreFailed = false;
   for (const target of queue) {
     options.onProgress?.({ modelId: target.modelId, index, total: progressTotal });
     index += 1;
@@ -873,29 +914,50 @@ export async function runEndpointSelfTest(options: {
         options.prepareSpeechModel,
       ));
     }
+    if (target.restoreAfter && options.afterModelProbe) {
+      try {
+        await options.afterModelProbe(target.residencyModelId);
+      } catch (error) {
+        checks.push(check(
+          'residency',
+          'Restore model residency after probe',
+          'fail',
+          error instanceof Error ? error.message : String(error),
+          target.residencyModelId,
+        ));
+        checks.push(check(
+          'run',
+          'Continue endpoint self-test',
+          'blocked',
+          'Stopped after residency restoration failed so additional models are not loaded.',
+        ));
+        residencyRestoreFailed = true;
+        break;
+      }
+    }
   }
 
-  if (lastChatModelId) {
-    options.onProgress?.({ modelId: lastChatModelId, index, total: progressTotal });
+  if (disconnectModelId && !residencyRestoreFailed) {
+    options.onProgress?.({ modelId: disconnectModelId, index, total: progressTotal });
     checks.push(await runDisconnectCheck(
       options.fetch,
       endpoint,
-      lastChatModelId,
+      disconnectModelId,
       disconnectRequestStartMs,
       disconnectStartMs,
     ));
-  } else {
+  } else if (!residencyRestoreFailed) {
     checks.push(...noChatModelChecks());
   }
 
   return {
     ranAt,
     endpoint,
-    modelId: aliases.chat[0] ?? null,
-    modelIds: aliases.chat,
-    embeddingModelId: aliases.embed[0] ?? null,
-    embeddingModelIds: aliases.embed,
-    speechModelIds: aliases.speech,
+    modelId: orderedAliases.chat[0] ?? null,
+    modelIds: orderedAliases.chat,
+    embeddingModelId: orderedAliases.embed[0] ?? null,
+    embeddingModelIds: orderedAliases.embed,
+    speechModelIds: orderedAliases.speech,
     checks,
   };
 }

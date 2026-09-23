@@ -95,6 +95,7 @@ export default defineConfig(() => ({
         'src/lib/chat-request.ts',
         'src/lib/startup-sequence.ts',
         'src/lib/endpoint-model-classification.ts',
+        'src/lib/endpoint-self-test-residency.ts',
         'src/lib/endpoint-self-test.ts',
         'src/lib/sidecar-stderr.ts',
         'src/lib/accelerator-readiness.ts',

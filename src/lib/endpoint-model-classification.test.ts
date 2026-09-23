@@ -35,6 +35,8 @@ describe('endpoint model classification', () => {
       alias: 'opaque-audio-model',
       task: 'stt',
     })).toBe('speech');
+    expect(endpointModelKind({ alias: 'parakeet-tdt-0.6b-v3' })).toBe('speech');
+    expect(endpointModelKind({ alias: 'nemotron-speech-streaming-en-0.6b' })).toBe('speech');
   });
 
   it('ignores blank aliases and parentless lookups instead of creating a shared empty key', () => {
@@ -73,7 +75,11 @@ describe('endpoint model classification', () => {
 
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
-    expect(selfTestFlow).toContain('buildEndpointModelClassifier(state.models)');
+    expect(selfTestFlow).toContain('buildEndpointModelClassifier(catalogModels)');
     expect(selfTestFlow).toContain('classifyModel,');
+    expect(selfTestFlow).toContain('await pollPoolStatus()');
+    expect(selfTestFlow).toContain('createSelfTestResidencyController');
+    expect(selfTestFlow).toContain('afterModelProbe: residency.restore');
+    expect(selfTestFlow).toContain('preferredResidentChatAlias(initialPool, classifyModel)');
   });
 });
