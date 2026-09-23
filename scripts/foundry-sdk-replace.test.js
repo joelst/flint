@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -135,8 +135,10 @@ describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
     expect(wxs).toContain('Action="DiscardFoundryBackup" Before="InstallFinalize"');
     expect(wxs).not.toContain('After="InstallFinalize"');
     expect(wxs).toContain('<CreateFolder />');
+    expect(wxs).toContain('Action="CheckFoundryRuntime" After="InstallFiles"');
+    expect(wxs).toMatch(/Id="CheckFoundryRuntime"[\s\S]*?Execute="deferred"[\s\S]*?Return="check"/);
     expect(Object.keys(msiCommands(wxs)).sort()).toEqual(
-      ['DiscardFoundryBackup', 'MoveFoundrySdk', 'RestoreFoundrySdk'],
+      ['CheckFoundryRuntime', 'DiscardFoundryBackup', 'MoveFoundrySdk', 'RestoreFoundrySdk'],
     );
   });
 
@@ -150,16 +152,46 @@ describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
     beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'flint-msi-')); });
     afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
-    const run = (id) => spawnSync(process.env.ComSpec || 'cmd.exe', [commands[id]], {
-      cwd: dir,
-      windowsVerbatimArguments: true,
-      encoding: 'utf8',
-    }).status;
+    // An on-access scan of a just-written .dll briefly holds it, and `ren`
+    // then reports Access is denied. Wait until each fixture folder can be
+    // renamed before the command runs, so a failure is the command's own.
+    const renameWhenFree = (from, to) => {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          renameSync(from, to);
+          return;
+        } catch (error) {
+          if (attempt >= 100 || !['EPERM', 'EBUSY', 'EACCES'].includes(error.code)) throw error;
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+        }
+      }
+    };
+    // A scan of a new file can start after the first free rename, so wait
+    // for three in a row.
+    const settle = () => {
+      for (let round = 0; round < 3; round++) {
+        for (const name of readdirSync(dir)) {
+          const from = join(dir, name);
+          renameWhenFree(from, `${from}.settle`);
+          renameWhenFree(`${from}.settle`, from);
+        }
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      }
+    };
+    const run = (id, { settled = true } = {}) => {
+      if (settled) settle();
+      return spawnSync(process.env.ComSpec || 'cmd.exe', [commands[id]], {
+        cwd: dir,
+        windowsVerbatimArguments: true,
+        encoding: 'utf8',
+      }).status;
+    };
     const tree = (name, tag, { runtime = true } = {}) => {
       const root = join(dir, name);
       mkdirSync(join(root, 'prebuilds', 'win32-x64'), { recursive: true });
       writeFileSync(join(root, 'tag.txt'), tag);
-      if (runtime) writeFileSync(join(root, 'prebuilds', 'win32-x64', 'onnxruntime.dll'), tag);
+      // Empty, so an on-access scanner has nothing to hold open.
+      if (runtime) writeFileSync(join(root, 'prebuilds', 'win32-x64', 'onnxruntime.dll'), '');
       return root;
     };
     const state = () => Object.fromEntries(readdirSync(dir).sort().map((name) => {
@@ -197,7 +229,7 @@ describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
       });
     });
 
-    it('restores the recovery copy beside a tree with no runtime before moving it aside', () => {
+    it('keeps the recovery copy as the backup and parks a tree with no runtime at .failed', () => {
       tree(SDK, 'broken', { runtime: false });
       tree(`${SDK}.previous`, 'known good');
       expect(run('MoveFoundrySdk')).toBe(0);
@@ -208,7 +240,7 @@ describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
       });
     });
 
-    it('restores a marked backup from an install that did not commit, even beside a runtime', () => {
+    it('keeps a marked backup from an install that did not commit, even beside a runtime', () => {
       tree(SDK, 'partial new');
       tree(`${SDK}.previous`, 'known good');
       writeFileSync(join(dir, `${SDK}.moved`), '');
@@ -226,6 +258,20 @@ describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
       tree(SDK, 'partial new');
       expect(run('RestoreFoundrySdk')).toBe(0);
       expect(state()).toEqual({ [SDK]: 'installed', [`${SDK}.failed`]: 'partial new' });
+    });
+
+    it('fails the install when the new tree has no runtime, so rollback restores the backup', () => {
+      tree(SDK, 'installed');
+      expect(run('MoveFoundrySdk')).toBe(0);
+      tree(SDK, 'no runtime', { runtime: false });
+      expect(run('CheckFoundryRuntime')).toBe(1);
+      expect(run('RestoreFoundrySdk')).toBe(0);
+      expect(state()).toEqual({ [SDK]: 'installed', [`${SDK}.failed`]: 'no runtime' });
+    });
+
+    it('lets the install continue when the new tree has a runtime', () => {
+      tree(SDK, 'new');
+      expect(run('CheckFoundryRuntime')).toBe(0);
     });
 
     it('does not put an unmarked leftover backup over the installed SDK on rollback', () => {
@@ -247,10 +293,11 @@ describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
     it('stops without changing the installed SDK when a leftover backup is locked, and rollback leaves it alone', async () => {
       tree(SDK, 'installed');
       const leftover = tree(`${SDK}.previous`, 'leftover');
+      settle();
       const release = await holdExclusive(join(leftover, 'prebuilds', 'win32-x64', 'onnxruntime.dll'));
       try {
-        expect(run('MoveFoundrySdk')).toBe(1);
-        expect(run('RestoreFoundrySdk')).toBe(0);
+        expect(run('MoveFoundrySdk', { settled: false })).toBe(1);
+        expect(run('RestoreFoundrySdk', { settled: false })).toBe(0);
         expect(state()[SDK]).toBe('installed');
         expect(existsSync(join(dir, `${SDK}.moved`))).toBe(false);
       } finally {
