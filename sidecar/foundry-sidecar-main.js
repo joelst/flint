@@ -945,14 +945,19 @@ async function resolveForGateway (requested) {
   if (!modelIndex) {
     if (!manager) return null;
     try {
-      const models = await readCatalog(() => manager.catalog.getModels());
-      cacheModelIndexFromCatalog(models);
+      return await readCatalog(async () => {
+        const models = await manager.catalog.getModels();
+        cacheModelIndexFromCatalog(models);
+        return resolveModelId(modelIndex, requested);
+      });
     } catch (e) {
       log('warn', `Gateway could not read the catalog: ${e?.message ?? e}`);
       try {
-        const cached = await readCachedCatalog(() => manager.catalog.getCachedModels());
-        cacheModelIndexFromCachedModels(cached);
-        return resolveModelId(modelIndex, requested);
+        return await readCachedCatalog(async () => {
+          const cached = await manager.catalog.getCachedModels();
+          cacheModelIndexFromCachedModels(cached);
+          return resolveModelId(modelIndex, requested);
+        });
       } catch (lookupError) {
         log('warn', `Gateway could not resolve cached model ${requested}: ${lookupError?.message ?? lookupError}`);
         return null;
@@ -2540,90 +2545,102 @@ rl.on('line', async (line) => {
       audit('init', { appName, libraryPath });
       reply({ ok: true, result: 'initialized' });
     } else if (cmd === 'listModels') {
-      const models = await readCatalog(
-        () => manager.catalog.getModels(),
-        reportCatalogProgress,
-      );
-      cacheModelIndexFromCatalog(models);
-      reply({
-        ok: true, result: models.map(m => {
-          // Prefer live isCached getters (query native cache). Catalog snapshot
-          // info.cached is often stale after download until a full catalog refresh.
-          const variantRows = annotateVariantUpdates((m.variants || []).map(v => {
-            let cached = false;
+      const rows = await readCatalog(
+        async () => {
+          const models = await manager.catalog.getModels();
+          cacheModelIndexFromCatalog(models);
+          return models.map(m => {
+            // Prefer live isCached getters (query native cache). Catalog snapshot
+            // info.cached is often stale after download until a full catalog refresh.
+            const variantRows = annotateVariantUpdates((m.variants || []).map(v => {
+              let cached = false;
+              try {
+                cached = !!v.isCached;
+              } catch {
+                cached = !!v.info?.cached;
+              }
+              return {
+                id: v.id,
+                deviceType: v.info?.runtime?.deviceType ?? parseDeviceFromVariantId(v.id),
+                executionProvider: v.info?.runtime?.executionProvider ?? parseEpFromVariantId(v.id),
+                fileSizeMb: v.info?.fileSizeMb ?? null,
+                cached,
+                name: v.info?.name ?? null,
+                version: v.info?.version ?? null,
+              };
+            }));
+            let modelCached = false;
             try {
-              cached = !!v.isCached;
+              modelCached = !!m.isCached;
             } catch {
-              cached = !!v.info?.cached;
+              modelCached = !!m.info?.cached;
             }
-            return {
-              id: v.id,
-              deviceType: v.info?.runtime?.deviceType ?? parseDeviceFromVariantId(v.id),
-              executionProvider: v.info?.runtime?.executionProvider ?? parseEpFromVariantId(v.id),
-              fileSizeMb: v.info?.fileSizeMb ?? null,
-              cached,
-              name: v.info?.name ?? null,
-              version: v.info?.version ?? null,
-            };
-          }));
-          let modelCached = false;
-          try {
-            modelCached = !!m.isCached;
-          } catch {
-            modelCached = !!m.info?.cached;
-          }
-          // Alias is "downloaded" if any variant is on disk (not only the selected one).
-          if (!modelCached) modelCached = variantRows.some(v => v.cached);
+            // Alias is "downloaded" if any variant is on disk (not only the selected one).
+            if (!modelCached) modelCached = variantRows.some(v => v.cached);
 
-          return {
-            alias: m.alias,
-            cached: modelCached,
-            size: m.info?.fileSizeMb,
-            task: m.info?.task,
-            capabilities: m.info?.capabilities,
-            contextLength: m.info?.contextLength ?? m.info?.maxContext ?? null,
-            supportsToolCalling: typeof m.info?.supportsToolCalling === 'boolean'
-              ? m.info.supportsToolCalling
-              : null,
-            family: m.info?.family || null,
-            // Live catalog uses createdAt (unix seconds); older SDK typings said createdAtUnix.
-            createdAt: m.info?.createdAt ?? m.info?.createdAtUnix ?? null,
-            info: m.info || {},
-            variants: variantRows,
-            updates: variantRows
-              .filter(v => v.update)
-              .map(v => ({ sourceVariantId: v.id, ...v.update })),
-          };
-        })
-      });
+            return {
+              alias: m.alias,
+              cached: modelCached,
+              size: m.info?.fileSizeMb,
+              task: m.info?.task,
+              capabilities: m.info?.capabilities,
+              contextLength: m.info?.contextLength ?? m.info?.maxContext ?? null,
+              supportsToolCalling: typeof m.info?.supportsToolCalling === 'boolean'
+                ? m.info.supportsToolCalling
+                : null,
+              family: m.info?.family || null,
+              // Live catalog uses createdAt (unix seconds); older SDK typings said createdAtUnix.
+              createdAt: m.info?.createdAt ?? m.info?.createdAtUnix ?? null,
+              info: m.info || {},
+              variants: variantRows,
+              updates: variantRows
+                .filter(v => v.update)
+                .map(v => ({ sourceVariantId: v.id, ...v.update })),
+            };
+          });
+        },
+        reportCatalogProgress,
+      );
+      reply({ ok: true, result: rows });
     } else if (cmd === 'getSTTModels') {
-      const all = await readCatalog(
-        () => manager.catalog.getModels(),
+      const stt = await readCatalog(
+        async () => {
+          const all = await manager.catalog.getModels();
+          return all
+            .filter(m => {
+              const t = (m.info?.task || '').toLowerCase();
+              const caps = (m.info?.capabilities || '').toLowerCase();
+              return t.includes('automatic-speech-recognition') || t.includes('stt') || caps.includes('automatic-speech-recognition');
+            })
+            .map(m => ({ alias: m.alias, cached: m.isCached }));
+        },
         reportCatalogProgress,
       );
-      const stt = all.filter(m => {
-        const t = (m.info?.task || '').toLowerCase();
-        const caps = (m.info?.capabilities || '').toLowerCase();
-        return t.includes('automatic-speech-recognition') || t.includes('stt') || caps.includes('automatic-speech-recognition');
-      });
-      reply({ ok: true, result: stt.map(m => ({ alias: m.alias, cached: m.isCached })) });
+      reply({ ok: true, result: stt });
     } else if (cmd === 'getVisionModels') {
-      const all = await readCatalog(
-        () => manager.catalog.getModels(),
+      const vision = await readCatalog(
+        async () => {
+          const all = await manager.catalog.getModels();
+          return all
+            .filter(m => {
+              const t = (m.info?.task || '').toLowerCase();
+              const caps = (m.info?.capabilities || '').toLowerCase();
+              const alias = (m.alias || '').toLowerCase();
+              return t.includes('vision') || caps.includes('vision') || caps.includes('image') || alias.includes('vision') || alias.includes('multimodal');
+            })
+            .map(m => ({ alias: m.alias, cached: m.isCached }));
+        },
         reportCatalogProgress,
       );
-      const vision = all.filter(m => {
-        const t = (m.info?.task || '').toLowerCase();
-        const caps = (m.info?.capabilities || '').toLowerCase();
-        const alias = (m.alias || '').toLowerCase();
-        return t.includes('vision') || caps.includes('vision') || caps.includes('image') || alias.includes('vision') || alias.includes('multimodal');
-      });
-      reply({ ok: true, result: vision.map(m => ({ alias: m.alias, cached: m.isCached })) });
+      reply({ ok: true, result: vision });
     } else if (cmd === 'download') {
       await beforeCatalogRead(reportCatalogProgress, { commit: true });
-      const model = payload.variantId
-        ? await manager.catalog.getModelVariant(payload.variantId)
-        : await manager.catalog.getModel(payload.alias);
+      const model = await readCatalog(
+        () => payload.variantId
+          ? manager.catalog.getModelVariant(payload.variantId)
+          : manager.catalog.getModel(payload.alias),
+        reportCatalogProgress,
+      );
       audit('download.start', { alias: payload.alias, variantId: payload.variantId ?? null });
       await model.download((p) => send({ id, progress: p, alias: payload.alias }));
       // Force next catalog access to re-read model list metadata (info.cached, etc.).
@@ -2675,61 +2692,67 @@ rl.on('line', async (line) => {
         return false;
       };
 
-      await beforeCatalogRead(reportCatalogProgress, { commit: true });
-      if (variantId) {
-        // Delete a single variant from the local cache.
-        const variant = await manager.catalog.getModelVariant(variantId);
-        if (!variant) {
-          throw new Error(`Variant not found: ${variantId}`);
-        }
-        const poolEntry = pool.get(payload.alias);
-        if (poolEntry?.variantId === variantId) {
-          if (typeof poolEntry.catModel.unload === 'function') {
-            await poolEntry.catModel.unload();
+      const deleteResult = await runCatalogMutation(
+        async () => {
+          if (variantId) {
+            // Delete a single variant from the local cache.
+            const variant = await manager.catalog.getModelVariant(variantId);
+            if (!variant) {
+              throw new Error(`Variant not found: ${variantId}`);
+            }
+            const poolEntry = pool.get(payload.alias);
+            if (poolEntry?.variantId === variantId) {
+              if (typeof poolEntry.catModel.unload === 'function') {
+                await poolEntry.catModel.unload();
+              }
+              pool.delete(payload.alias);
+              log('info', `Unloaded pool entry for deleted variant ${variantId}`);
+            }
+            const ok = tryRemoveFromCache(variant, variantId);
+            if (!ok) {
+              throw new Error('Runtime does not expose a variant deletion API (removeFromCache)');
+            }
+            invalidateModelIndex();
+            audit('deleteModel', { alias: payload.alias, variantId });
+            return { alias: payload.alias, variantId };
           }
-          pool.delete(payload.alias);
-          log('info', `Unloaded pool entry for deleted variant ${variantId}`);
-        }
-        const ok = tryRemoveFromCache(variant, variantId);
-        if (!ok) {
-          throw new Error('Runtime does not expose a variant deletion API (removeFromCache)');
-        }
-        try { manager.catalog.invalidateCache?.(); } catch {}
-        invalidateModelIndex();
-        audit('deleteModel', { alias: payload.alias, variantId });
-        reply({ ok: true, result: { alias: payload.alias, variantId } });
-      } else {
-        // Delete all cached variants for this alias.
-        const model = await manager.catalog.getModel(payload.alias);
-        if (!model) {
-          throw new Error(`Model not found: ${payload.alias}`);
-        }
-        const poolEntry = pool.get(payload.alias);
-        if (poolEntry && typeof poolEntry.catModel.unload === 'function') {
-          await poolEntry.catModel.unload();
-          pool.delete(payload.alias);
-        }
-        let deleted = 0;
-        const variants = model.variants || [];
-        for (const v of variants) {
-          let cached = false;
-          try { cached = !!v.isCached; } catch { cached = !!v.info?.cached; }
-          if (!cached) continue;
-          if (tryRemoveFromCache(v, v.id || payload.alias)) deleted++;
-        }
-        // Fallback: selected variant / model-level remove
-        if (deleted === 0) {
-          if (tryRemoveFromCache(model, payload.alias)) deleted++;
-        }
-        if (deleted === 0) {
-          throw new Error('No cached variants found to delete (or runtime lacks removeFromCache)');
-        }
-        try { manager.catalog.invalidateCache?.(); } catch {}
-        log('info', `Deleted ${deleted} cached variant(s) for ${payload.alias}`);
-        invalidateModelIndex();
-        audit('deleteModel', { alias: payload.alias, variantId: null, count: deleted });
-        reply({ ok: true, result: { alias: payload.alias, count: deleted } });
-      }
+
+          // Delete all cached variants for this alias.
+          const model = await manager.catalog.getModel(payload.alias);
+          if (!model) {
+            throw new Error(`Model not found: ${payload.alias}`);
+          }
+          const poolEntry = pool.get(payload.alias);
+          if (poolEntry && typeof poolEntry.catModel.unload === 'function') {
+            await poolEntry.catModel.unload();
+            pool.delete(payload.alias);
+          }
+          let deleted = 0;
+          const variants = model.variants || [];
+          for (const v of variants) {
+            let cached = false;
+            try {
+              cached = !!v.isCached;
+            } catch {
+              cached = !!v.info?.cached;
+            }
+            if (!cached) continue;
+            if (tryRemoveFromCache(v, v.id || payload.alias)) deleted++;
+          }
+          // Fallback: selected variant / model-level remove
+          if (deleted === 0 && tryRemoveFromCache(model, payload.alias)) deleted++;
+          if (deleted === 0) {
+            throw new Error('No cached variants found to delete (or runtime lacks removeFromCache)');
+          }
+          log('info', `Deleted ${deleted} cached variant(s) for ${payload.alias}`);
+          invalidateModelIndex();
+          audit('deleteModel', { alias: payload.alias, variantId: null, count: deleted });
+          return { alias: payload.alias, count: deleted };
+        },
+        'model deletion',
+        reportCatalogProgress,
+      );
+      reply({ ok: true, result: deleteResult });
     } else if (cmd === 'inspectModelFolder') {
       reply({ ok: true, result: inspectFolder(payload.folderPath) });
     } else if (cmd === 'importModelFolder') {
@@ -3461,10 +3484,10 @@ rl.on('line', async (line) => {
       try {
         // Automatic telemetry must not become the first catalog access: doing so
         // would freeze the snapshot and disable useful registration retries.
-        // After getModels confirms the snapshot, this read can remain off-queue:
-        // later provider updates are already restart-bound.
+        // After getModels confirms the snapshot, track this native read so local
+        // catalog mutations cannot overlap its scan.
         const loaded = catalogReadConfirmed()
-          ? await manager.catalog.getLoadedModels()
+          ? await readCatalog(() => manager.catalog.getLoadedModels())
           : [];
         for (const m of loaded) loadedIds.add(m.id);
       } catch {}

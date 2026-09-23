@@ -233,6 +233,7 @@ describe('native service startup', () => {
     const rerun = source.indexOf('rerunAcceleratorRegistration(', setup);
     const poolStatus = source.indexOf("} else if (cmd === 'poolStatus') {");
     const poolRead = source.indexOf('catalogReadConfirmed()', poolStatus);
+    const trackedPoolRead = source.indexOf('readCatalog(() => manager.catalog.getLoadedModels())', poolRead);
     const loadedModels = source.indexOf('manager.catalog.getLoadedModels()', poolStatus);
     const listModels = source.indexOf("} else if (cmd === 'listModels') {");
     const listGate = source.indexOf('readCatalog(', listModels);
@@ -254,6 +255,7 @@ describe('native service startup', () => {
     expect(rerun).toBeGreaterThan(setup);
     expect(poolStatus).toBeGreaterThan(-1);
     expect(poolRead).toBeGreaterThan(poolStatus);
+    expect(trackedPoolRead).toBeGreaterThan(poolRead);
     expect(poolRead).toBeLessThan(loadedModels);
     expect(listModels).toBeGreaterThan(-1);
     expect(listGate).toBeGreaterThan(listModels);
@@ -273,7 +275,22 @@ describe('native service startup', () => {
       expect(progress, cmd).toBeGreaterThan(nativeRead);
     }
     const download = source.indexOf("} else if (cmd === 'download') {");
-    expect(source.indexOf('beforeCatalogRead(reportCatalogProgress', download)).toBeGreaterThan(download);
+    const downloadRead = source.indexOf('readCatalog(', download);
+    const downloadVariant = source.indexOf('manager.catalog.getModelVariant(payload.variantId)', download);
+    const downloadAlias = source.indexOf('manager.catalog.getModel(payload.alias)', download);
+    const downloadPreflight = source.indexOf('beforeCatalogRead(reportCatalogProgress', download);
+    expect(downloadPreflight).toBeGreaterThan(download);
+    expect(downloadPreflight).toBeLessThan(downloadRead);
+    expect(downloadRead).toBeGreaterThan(download);
+    expect(downloadRead).toBeLessThan(downloadVariant);
+    expect(downloadRead).toBeLessThan(downloadAlias);
+    const deleteModel = source.indexOf("} else if (cmd === 'deleteModel') {");
+    const deleteMutation = source.indexOf('runCatalogMutation(', deleteModel);
+    const deleteVariant = source.indexOf('manager.catalog.getModelVariant(variantId)', deleteModel);
+    const deleteAlias = source.indexOf('manager.catalog.getModel(payload.alias)', deleteModel);
+    expect(deleteMutation).toBeGreaterThan(deleteModel);
+    expect(deleteMutation).toBeLessThan(deleteVariant);
+    expect(deleteMutation).toBeLessThan(deleteAlias);
     const load = source.indexOf("} else if (cmd === 'load') {");
     expect(source.indexOf('ensureModel(payload.alias, payload.variantId, reportCatalogProgress)', load))
       .toBeGreaterThan(load);
