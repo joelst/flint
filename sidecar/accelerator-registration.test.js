@@ -215,7 +215,7 @@ describe('native service startup', () => {
     const setup = source.indexOf("} else if (cmd === 'ensureAccelerators') {");
     const rerun = source.indexOf('rerunAcceleratorRegistration(', setup);
     const poolStatus = source.indexOf("} else if (cmd === 'poolStatus') {");
-    const poolSeal = source.indexOf('seal: true', poolStatus);
+    const poolRead = source.indexOf('catalogReadConfirmed()', poolStatus);
     const loadedModels = source.indexOf('manager.catalog.getLoadedModels()', poolStatus);
     const listModels = source.indexOf("} else if (cmd === 'listModels') {");
     const listProgress = source.indexOf('beforeCatalogRead(reportCatalogProgress', listModels);
@@ -231,8 +231,8 @@ describe('native service startup', () => {
     expect(setup).toBeGreaterThan(-1);
     expect(rerun).toBeGreaterThan(setup);
     expect(poolStatus).toBeGreaterThan(-1);
-    expect(poolSeal).toBeGreaterThan(poolStatus);
-    expect(poolSeal).toBeLessThan(loadedModels);
+    expect(poolRead).toBeGreaterThan(poolStatus);
+    expect(poolRead).toBeLessThan(loadedModels);
     expect(listModels).toBeGreaterThan(-1);
     expect(listProgress).toBeGreaterThan(listModels);
     expect(listProgress).toBeLessThan(listRead);
@@ -321,6 +321,31 @@ describe('createCatalogRegistrationGate', () => {
     releaseCatalog();
     await commit;
     await expect(rerun).resolves.toMatchObject({
+      registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+      catalogRefreshRequiresRestart: true,
+    });
+  });
+
+  it('exposes confirmed catalog state without queueing telemetry or preventing retries', async () => {
+    const register = vi.fn()
+      .mockResolvedValueOnce({ success: true, registeredEps: ['CPUExecutionProvider'] })
+      .mockResolvedValueOnce({ success: true, registeredEps: ['CUDAExecutionProvider'] })
+      .mockResolvedValueOnce({ success: true, registeredEps: ['CUDAExecutionProvider'] });
+    const readCatalog = vi.fn().mockResolvedValue(['cpu-model']);
+    const telemetry = vi.fn().mockResolvedValue(['loaded-model']);
+    const gate = createCatalogRegistrationGate(register, readCatalog);
+
+    await gate.ensure();
+    expect(gate.isCommitConfirmed()).toBe(false);
+    expect(telemetry).not.toHaveBeenCalled();
+    await expect(gate.rerun()).resolves.toMatchObject({
+      registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+    });
+    await gate.commit();
+    expect(readCatalog).toHaveBeenCalledTimes(1);
+    expect(gate.isCommitConfirmed()).toBe(true);
+    await expect(telemetry()).resolves.toEqual(['loaded-model']);
+    await expect(gate.rerun()).resolves.toMatchObject({
       registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
       catalogRefreshRequiresRestart: true,
     });

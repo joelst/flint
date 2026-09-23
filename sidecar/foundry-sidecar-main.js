@@ -434,6 +434,11 @@ function beforeCatalogRead(onProgress, options = {}) {
   return options.commit ? gate.commit(onProgress) : gate.ensure(onProgress);
 }
 
+function catalogReadConfirmed() {
+  const gate = acceleratorGate();
+  return !gate || gate.isCommitConfirmed();
+}
+
 /** Settings “Install / Update Accelerators” uses the same command as startup.
  * The update still runs after catalog commitment, but new variants remain invisible
  * to the current immutable snapshot and require a runtime restart. */
@@ -3403,10 +3408,13 @@ rl.on('line', async (line) => {
     } else if (cmd === 'poolStatus') {
       let loadedIds = new Set();
       try {
-        // Loaded-model telemetry must serialize behind provider setup without
-        // turning the no-startup-refresh setting into a registry catalog read.
-        await beforeCatalogRead(reportCatalogProgress, { seal: true });
-        const loaded = await manager.catalog.getLoadedModels();
+        // Automatic telemetry must not become the first catalog access: doing so
+        // would freeze the snapshot and disable useful registration retries.
+        // After getModels confirms the snapshot, this read can remain off-queue:
+        // later provider updates are already restart-bound.
+        const loaded = catalogReadConfirmed()
+          ? await manager.catalog.getLoadedModels()
+          : [];
         for (const m of loaded) loadedIds.add(m.id);
       } catch {}
       const entries = [...pool.entries()].map(([alias, { variantId }]) => {

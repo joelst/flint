@@ -257,6 +257,9 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
         return settled;
       });
     },
+    isCommitConfirmed() {
+      return commitConfirmed;
+    },
     mutateAndCommit(operation, onCommitError, onProgress) {
       if (typeof onCommitError !== 'function') {
         return Promise.reject(new TypeError('mutateAndCommit requires an onCommitError handler'));

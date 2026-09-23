@@ -2297,7 +2297,7 @@ describe('cancellation from inside onAssignedId', () => {
 });
 
 describe('catalog mutation results', () => {
-  it('preserves a restart-flagged mutation result when the post-mutation refresh fails', async () => {
+  it('preserves a restart-flagged mutation result without attempting an impossible refresh', async () => {
     const sdk = await loadSdk();
     await completeInitialization(sdk);
 
@@ -2307,13 +2307,12 @@ describe('catalog mutation results', () => {
       id: importId,
       result: { catalogRefreshRequiresRestart: true, name: 'foo' },
     });
-    const listId = await waitForWrite('listModels', 1);
-    harness.emitStdout({ id: listId, error: 'catalog frozen until restart' });
 
     await expect(imported).resolves.toEqual({
       catalogRefreshRequiresRestart: true,
       name: 'foo',
     });
+    expect(harness.writes.filter((line) => line.includes('"listModels"'))).toHaveLength(1);
   }, 15000);
 
   it('still rejects when an unflagged mutation result is followed by a failed refresh', async () => {

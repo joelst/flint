@@ -2622,23 +2622,14 @@ export interface CatalogMutationResult {
   [key: string]: unknown;
 }
 
-/**
- * A mutation flagged `catalogRefreshRequiresRestart` already found the snapshot frozen (or
- * unconfirmed) on the sidecar side. Retrying the read here would just fail again and, since
- * that failure previously propagated, made a durable import/link/template write look like a
- * failed command. Swallow only that expected re-read failure; an unflagged refresh failure is
- * unrelated to the freeze and must still surface.
- */
 async function refreshModelsAfterMutation(result: CatalogMutationResult | undefined): Promise<void> {
-  try {
-    await refreshModels();
-  } catch (e) {
-    if (result?.catalogRefreshRequiresRestart) {
-      console.warn('[sdk] Catalog refresh skipped after mutation pending restart', e);
-      return;
-    }
-    throw e;
+  // A frozen or uncertain immutable snapshot cannot reliably publish this mutation.
+  // Preserve the durable mutation result and let the caller surface restart guidance.
+  if (result?.catalogRefreshRequiresRestart) {
+    console.warn('[sdk] Catalog refresh skipped after mutation pending restart');
+    return;
   }
+  await refreshModels();
 }
 
 export async function importModelFolder(options: {
