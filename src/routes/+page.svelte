@@ -1,6 +1,7 @@
 <script lang="ts">
   // @ts-nocheck  // runes ($state etc.) are handled by Svelte compiler, not raw TS
   import { onMount, untrack } from "svelte";
+  import { providerRecheckStatus } from "$lib/provider-recheck-status";
   import MessageRenderer from "$lib/MessageRenderer.svelte";
   import ConversationSidebar from "$lib/ConversationSidebar.svelte";
   import Icon from "$lib/Icon.svelte";
@@ -593,6 +594,40 @@
     } catch (e: any) {
       statusMessage = `Provider check failed: ${e?.message || e}`;
       if (options?.throwOnError) throw e;
+    }
+  }
+
+  let providerRecheckBusy = $state(false);
+
+  async function recheckProviders() {
+    if (!state.ready || providerRecheckBusy) return;
+    providerRecheckBusy = true;
+    statusMessage = "Rechecking execution providers...";
+    try {
+      const readiness = await ensureAccelerators(
+        (epName, pct) => {
+          statusMessage = `Provider ${epName}: ${pct.toFixed(0)}%`;
+        },
+        () => {
+          statusMessage = "Provider rebuild: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.";
+        },
+        { rebuildBroken: true },
+      );
+      await refreshExecutionProviders({
+        throwOnError: true,
+        refreshRecommendations: false,
+      });
+      if (!isAcceleratorReadinessCurrent(readiness)) {
+        throw new Error("Runtime changed while rechecking execution providers");
+      }
+      const outcome = providerRecheckStatus(readiness.registration, state.eps);
+      statusMessage = outcome.message;
+      if (outcome.failed) appendAppLog(statusMessage, "warn");
+    } catch (e: any) {
+      statusMessage = `Provider recheck failed: ${e?.message || e}`;
+      appendAppLog(statusMessage, "warn");
+    } finally {
+      providerRecheckBusy = false;
     }
   }
 
@@ -7691,11 +7726,16 @@ Output only the summary text, no preamble.`;
                     </option>
                   {/each}
                 </select>
-                <button onclick={ensureHardwareAccel} disabled={!state.ready}>
+                <button onclick={ensureHardwareAccel} disabled={!state.ready || providerRecheckBusy}>
                   Install / Update Accelerators
                 </button>
-                <button class="secondary" onclick={refreshExecutionProviders} disabled={!state.ready}>
-                  Recheck Providers
+                <button
+                  class="secondary accel-recheck"
+                  onclick={recheckProviders}
+                  disabled={!state.ready || providerRecheckBusy}
+                  title="Register failed providers again. CUDA and WebGPU are removed from the cache and downloaded again first."
+                >
+                  {providerRecheckBusy ? "Rechecking…" : "Recheck Providers"}
                 </button>
               </div>
               {#if state.eps.length}
@@ -11361,6 +11401,14 @@ Output only the summary text, no preamble.`;
     color: var(--fg);
     border: 1px solid var(--border);
     border-radius: 6px;
+  }
+
+  /* The panel fill is --subtle-bg, and a plain secondary button uses that same
+     fill with no border, so Recheck Providers disappears in both themes. */
+  .accel-panel-row button.accel-recheck {
+    background: var(--panel-bg);
+    color: var(--fg);
+    border: 1px solid var(--muted);
   }
 
   .ep-status-list {

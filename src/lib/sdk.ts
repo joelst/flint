@@ -2651,11 +2651,12 @@ export async function getEps(): Promise<EpInfo[]> {
 export async function ensureAccelerators(
   onProgress?: (epName: string, percent: number) => void,
   onStall?: () => void,
+  options?: { rebuildBroken?: boolean },
 ): Promise<AcceleratorReadiness> {
   let generation: number | null = null;
   const res = await sendInternal(
     'ensureAccelerators',
-    {},
+    options?.rebuildBroken ? { rebuildBroken: true } : {},
     undefined,
     (id: number) => {
       registerProgressHandler(
