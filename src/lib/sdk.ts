@@ -1111,7 +1111,14 @@ export function sendInternal(
       return promise;
     }
   }
-  if (CATALOG_REGISTRATION_COMMANDS.has(cmd) && !progressHandlers.has(id)) {
+  // Cancellation from inside onAssignedId already settled and retired the request.
+  // Stop here before installing any automatic progress handler or deadline timer.
+  if (pending.get(id) !== entry) return promise;
+  if (
+    pending.get(id) === entry &&
+    CATALOG_REGISTRATION_COMMANDS.has(cmd) &&
+    !progressHandlers.has(id)
+  ) {
     registerCatalogProgressHandler(id, cmd);
   }
 

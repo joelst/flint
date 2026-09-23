@@ -623,6 +623,45 @@ describe('createCatalogRegistrationGate', () => {
     expect(manager.downloadAndRegisterEps).toHaveBeenCalledTimes(2);
   });
 
+  it('retries providers whose first explicit registration follows the fallback', async () => {
+    let discovered = [];
+    let explicitAttempts = 0;
+    const manager = {
+      discoverEps: vi.fn(() => discovered),
+      downloadAndRegisterEps: vi.fn(async (names) => {
+        if (!Array.isArray(names)) {
+          discovered = [{ name: 'CUDAExecutionProvider', isRegistered: false }];
+          return { success: true, registeredEps: [], failedEps: [] };
+        }
+        explicitAttempts++;
+        if (explicitAttempts === 2) {
+          discovered = [{ name: 'CUDAExecutionProvider', isRegistered: true }];
+        }
+        return {
+          success: explicitAttempts === 2,
+          registeredEps: explicitAttempts === 2 ? ['CUDAExecutionProvider'] : [],
+          failedEps: explicitAttempts === 2 ? [] : ['CUDAExecutionProvider'],
+        };
+      }),
+    };
+    const register = vi.fn((onProgress, options) => (
+      registerDiscoveredExecutionProviders(manager, onProgress, options)
+    ));
+    const gate = createCatalogRegistrationGate(register);
+
+    await expect(gate.ensure()).resolves.toMatchObject({
+      success: true,
+      registeredEps: ['CUDAExecutionProvider'],
+      failedEps: [],
+    });
+    expect(register).toHaveBeenCalledTimes(4);
+    expect(manager.downloadAndRegisterEps.mock.calls.map(([names]) => names)).toEqual([
+      expect.any(Function),
+      ['CUDAExecutionProvider'],
+      ['CUDAExecutionProvider'],
+    ]);
+  });
+
   it('keeps a second failed fallback without retrying later readers', async () => {
     const manager = {
       discoverEps: vi.fn(() => []),

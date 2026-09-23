@@ -17,6 +17,12 @@ function providerName(provider) {
 // The register callback must return this result object unchanged.
 const retryLegacyFallback = Symbol('retryLegacyFallback');
 
+function markLegacyFallbackRetry(result) {
+  const retryableFallback = { ...result, retry: true };
+  Object.defineProperty(retryableFallback, retryLegacyFallback, { value: true });
+  return retryableFallback;
+}
+
 /**
  * Register every provider the runtime discovered before the catalog is first read.
  *
@@ -30,6 +36,7 @@ const retryLegacyFallback = Symbol('retryLegacyFallback');
 export async function registerDiscoveredExecutionProviders(manager, onProgress, options = {}) {
   if (typeof manager?.downloadAndRegisterEps !== 'function') return null;
 
+  let usedLegacyFallback = false;
   const initial = discoveredProviders(manager);
   if (initial.length === 0) {
     // An empty list is not proof the machine has no GPU. Discovery can be empty
@@ -49,11 +56,10 @@ export async function registerDiscoveredExecutionProviders(manager, onProgress, 
     // the catalog can be read before any provider that is visible after the call
     // gets an explicit registration.
     const fallback = await manager.downloadAndRegisterEps(onProgress);
+    usedLegacyFallback = true;
     if (!discoveredProviders(manager).some((provider) => providerName(provider))) {
       if (fallback?.success === false) {
-        const retryableFallback = { ...fallback, retry: true };
-        Object.defineProperty(retryableFallback, retryLegacyFallback, { value: true });
-        return retryableFallback;
+        return markLegacyFallbackRetry(fallback);
       }
       return fallback;
     }
@@ -103,7 +109,7 @@ export async function registerDiscoveredExecutionProviders(manager, onProgress, 
   }
 
   const success = failedEps.length === 0;
-  return {
+  const result = {
     success,
     status: success
       ? `Registered ${registeredEps.length} execution provider${registeredEps.length === 1 ? '' : 's'}`
@@ -116,6 +122,7 @@ export async function registerDiscoveredExecutionProviders(manager, onProgress, 
     // is read. After that read the snapshot cannot gain the missing build.
     ...(success ? {} : { retry: true }),
   };
+  return !success && usedLegacyFallback ? markLegacyFallbackRetry(result) : result;
 }
 
 /** Discovery attempts before a catalog read. A failed final fallback gets one additional bounded fallback retry. */

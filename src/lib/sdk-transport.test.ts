@@ -2311,6 +2311,20 @@ describe('accelerator readiness ownership', () => {
 });
 
 describe('cancellation from inside onAssignedId', () => {
+  it('does not install handlers or deadlines after cancellation', async () => {
+    const sdk = await loadSdk();
+    vi.useFakeTimers();
+
+    const request = capture(
+      sdk.sendInternal('poolStatus', {}, undefined, (id) => {
+        sdk.cancelBeforeDispatch(id);
+      }),
+    );
+    await request.tracked;
+    expect(request.box.err.certainty).toBe('cancelled');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('settles the caller rather than leaving a promise nobody can answer', async () => {
     const sdk = await loadSdk();
     gateSpawn = true;
