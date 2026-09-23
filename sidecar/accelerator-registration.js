@@ -177,6 +177,10 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
   let commitConfirmed = false;
   /** @type {Promise<unknown>} */
   let tail = Promise.resolve();
+  /** @type {Promise<unknown>} */
+  let mutationBarrier = Promise.resolve();
+  /** @type {Promise<unknown>} */
+  let postCommitRegistrationBarrier = Promise.resolve();
   /** @type {Set<Promise<unknown>>} */
   const activeReads = new Set();
 
@@ -228,6 +232,16 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
   function enqueue(task) {
     const run = tail.then(() => task());
     tail = run.then(() => {}, () => {});
+    return run;
+  }
+
+  function enqueuePostCommitRegistration(task) {
+    const run = postCommitRegistrationBarrier.then(() => task());
+    return publishRegistration(run);
+  }
+
+  function publishRegistration(run) {
+    postCommitRegistrationBarrier = run.then(() => {}, () => {});
     return run;
   }
 
@@ -320,6 +334,29 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
     }
   }
 
+  async function rerunRegistration(report) {
+    const catalogRefreshRequiresRestart = committed;
+    if (committed && !commitConfirmed) {
+      return {
+        ...(settled && typeof settled === 'object' ? settled : {}),
+        success: false,
+        status: 'Accelerator update deferred because Flint cannot confirm whether the model catalog snapshot has already been taken. Restart Flint to apply provider changes.',
+        catalogRefreshRequiresRestart: true,
+        registrationDeferredUntilRestart: true,
+      };
+    }
+    settled = preserveRegisteredProviders(settled, await attempts(report));
+    hasSettled = true;
+    if (
+      catalogRefreshRequiresRestart &&
+      settled &&
+      typeof settled === 'object'
+    ) {
+      settled = { ...settled, catalogRefreshRequiresRestart: true };
+    }
+    return settled;
+  }
+
   return {
     ensure(onProgress) {
       const report = typeof onProgress === 'function' ? onProgress : null;
@@ -329,28 +366,16 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
     },
     rerun(onProgress) {
       const report = typeof onProgress === 'function' ? onProgress : null;
-      return enqueue(async () => {
-        const catalogRefreshRequiresRestart = committed;
-        if (committed && !commitConfirmed) {
-          return {
-            ...(settled && typeof settled === 'object' ? settled : {}),
-            success: false,
-            status: 'Accelerator update deferred because Flint cannot confirm whether the model catalog snapshot has already been taken. Restart Flint to apply provider changes.',
-            catalogRefreshRequiresRestart: true,
-            registrationDeferredUntilRestart: true,
-          };
-        }
-        settled = preserveRegisteredProviders(settled, await attempts(report));
-        hasSettled = true;
-        if (
-          catalogRefreshRequiresRestart &&
-          settled &&
-          typeof settled === 'object'
-        ) {
-          settled = { ...settled, catalogRefreshRequiresRestart: true };
-        }
-        return settled;
-      });
+      // Once the immutable snapshot is confirmed, provider registration cannot
+      // change it. Keep later registration serialized with itself, but off the
+      // catalog mutation lane so telemetry cannot be held for a long EP download.
+      const rerun = commitConfirmed
+        ? enqueuePostCommitRegistration(() => rerunRegistration(report))
+        : enqueue(() => rerunRegistration(report));
+      // A rerun dispatched before confirmation can still be running after the
+      // commit completes. Publish both lanes so provider-sensitive lookups
+      // cannot slip beside that transition.
+      return commitConfirmed ? rerun : publishRegistration(rerun);
     },
     commit(onProgress) {
       const report = typeof onProgress === 'function' ? onProgress : null;
@@ -366,7 +391,7 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
       }
       // Confirmed reads run concurrently, but remain ordered against local mutations.
       if (commitConfirmed) {
-        return trackRead(tail.then(() => operation()));
+        return trackRead(mutationBarrier.then(() => operation()));
       }
       const report = typeof onProgress === 'function' ? onProgress : null;
       const queued = enqueue(async () => {
@@ -383,7 +408,12 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
         return Promise.reject(new TypeError('readUnconfirmed requires a catalog operation'));
       }
       if (commitConfirmed) {
-        return trackRead(tail.then(() => operation()));
+        // Model lookup can depend on the registered provider set, unlike reads
+        // of the already-frozen public snapshot and loaded-model telemetry.
+        return trackRead(Promise.all([
+          mutationBarrier,
+          postCommitRegistrationBarrier,
+        ]).then(() => operation()));
       }
       const report = typeof onProgress === 'function' ? onProgress : null;
       return enqueue(async () => {
@@ -408,7 +438,7 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
       }
       const report = typeof onProgress === 'function' ? onProgress : null;
       const readsBeforeMutation = [...activeReads];
-      return enqueue(async () => {
+      const mutation = enqueue(async () => {
         await ensureSettled(report);
         await Promise.allSettled(readsBeforeMutation);
         // Some mutations must resolve their target through native catalog getters
@@ -431,6 +461,10 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
           ...(catalogRefreshRequiresRestart ? { catalogRefreshRequiresRestart: true } : {}),
         };
       });
+      // Confirmed reads need to wait for local catalog mutations, but not for
+      // post-commit provider registration that cannot change the frozen snapshot.
+      mutationBarrier = mutation.then(() => {}, () => {});
+      return mutation;
     },
     seal(onProgress) {
       const report = typeof onProgress === 'function' ? onProgress : null;

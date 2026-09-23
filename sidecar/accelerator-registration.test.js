@@ -395,29 +395,132 @@ describe('createCatalogRegistrationGate', () => {
     });
   });
 
-  it('exposes confirmed catalog state without queueing telemetry or preventing retries', async () => {
+  it('does not block confirmed telemetry behind post-commit registration', async () => {
+    let releaseRegistration = () => {};
     const register = vi.fn()
       .mockResolvedValueOnce({ success: true, registeredEps: ['CPUExecutionProvider'] })
-      .mockResolvedValueOnce({ success: true, registeredEps: ['CUDAExecutionProvider'] })
-      .mockResolvedValueOnce({ success: true, registeredEps: ['CUDAExecutionProvider'] });
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        releaseRegistration = () => resolve({
+          success: true,
+          registeredEps: ['CUDAExecutionProvider'],
+        });
+      }));
     const readCatalog = vi.fn().mockResolvedValue(['cpu-model']);
     const telemetry = vi.fn().mockResolvedValue(['loaded-model']);
     const gate = createCatalogRegistrationGate(register, readCatalog);
 
-    await gate.ensure();
-    expect(gate.isCommitConfirmed()).toBe(false);
-    expect(telemetry).not.toHaveBeenCalled();
-    await expect(gate.rerun()).resolves.toMatchObject({
-      registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
-    });
     await gate.commit();
     expect(readCatalog).toHaveBeenCalledTimes(1);
     expect(gate.isCommitConfirmed()).toBe(true);
-    await expect(telemetry()).resolves.toEqual(['loaded-model']);
-    await expect(gate.rerun()).resolves.toMatchObject({
+
+    const rerun = gate.rerun();
+    await vi.waitFor(() => expect(register).toHaveBeenCalledTimes(2));
+    const telemetryRead = gate.read(telemetry);
+    await expect(telemetryRead).resolves.toEqual(['loaded-model']);
+    expect(telemetry).toHaveBeenCalledTimes(1);
+
+    releaseRegistration();
+    await expect(rerun).resolves.toMatchObject({
       registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
       catalogRefreshRequiresRestart: true,
     });
+  });
+
+  it('does not let a queued mutation reconnect telemetry to post-commit registration', async () => {
+    let releaseRegistration = () => {};
+    const register = vi.fn()
+      .mockResolvedValueOnce({ success: true, registeredEps: ['CPUExecutionProvider'] })
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        releaseRegistration = () => resolve({
+          success: true,
+          registeredEps: ['CUDAExecutionProvider'],
+        });
+      }));
+    const gate = createCatalogRegistrationGate(register, vi.fn(async () => []));
+    await gate.commit();
+
+    const rerun = gate.rerun();
+    await vi.waitFor(() => expect(register).toHaveBeenCalledTimes(2));
+    const mutation = gate.mutateAndCommit(async () => 'updated', () => {});
+    const telemetry = gate.read(async () => ['loaded-model']);
+
+    await expect(mutation).resolves.toEqual({
+      result: 'updated',
+      catalogRefreshRequiresRestart: true,
+    });
+    await expect(telemetry).resolves.toEqual(['loaded-model']);
+
+    releaseRegistration();
+    await expect(rerun).resolves.toMatchObject({
+      registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+      catalogRefreshRequiresRestart: true,
+    });
+  });
+
+  it('keeps provider-sensitive lookups behind post-commit registration', async () => {
+    let releaseRegistration = () => {};
+    const register = vi.fn()
+      .mockResolvedValueOnce({ success: true, registeredEps: ['CPUExecutionProvider'] })
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        releaseRegistration = () => resolve({
+          success: true,
+          registeredEps: ['CUDAExecutionProvider'],
+        });
+      }));
+    const gate = createCatalogRegistrationGate(register, vi.fn(async () => []));
+    await gate.commit();
+
+    const events = [];
+    const rerun = gate.rerun();
+    await vi.waitFor(() => expect(register).toHaveBeenCalledTimes(2));
+    const lookup = gate.readUnconfirmed(async () => {
+      events.push('lookup');
+      return 'model';
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(events).toEqual([]);
+
+    releaseRegistration();
+    await rerun;
+    await expect(lookup).resolves.toBe('model');
+    expect(events).toEqual(['lookup']);
+  });
+
+  it('keeps lookups behind a rerun queued before commit confirmation', async () => {
+    let releaseCommit = () => {};
+    let releaseRegistration = () => {};
+    const register = vi.fn()
+      .mockResolvedValueOnce({ success: true, registeredEps: ['CPUExecutionProvider'] })
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        releaseRegistration = () => resolve({
+          success: true,
+          registeredEps: ['CUDAExecutionProvider'],
+        });
+      }));
+    const commitCatalog = vi.fn(() => new Promise((resolve) => {
+      releaseCommit = () => resolve(['cpu-model']);
+    }));
+    const gate = createCatalogRegistrationGate(register, commitCatalog);
+
+    const commit = gate.commit();
+    await vi.waitFor(() => expect(commitCatalog).toHaveBeenCalledTimes(1));
+    const rerun = gate.rerun();
+    releaseCommit();
+    await commit;
+    await vi.waitFor(() => expect(register).toHaveBeenCalledTimes(2));
+
+    const events = [];
+    const lookup = gate.readUnconfirmed(async () => {
+      events.push('lookup');
+      return 'model';
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(events).toEqual([]);
+
+    releaseRegistration();
+    await rerun;
+    await expect(lookup).resolves.toBe('model');
+    expect(events).toEqual(['lookup']);
   });
 
   it('keeps a local mutation and the first catalog read atomic against other readers', async () => {
