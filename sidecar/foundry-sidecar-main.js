@@ -123,10 +123,10 @@ const BENCHMARK_EXCLUSIVE_DRAIN_MS = Number.isFinite(parsedBenchmarkExclusiveDra
 //   - an orphaned `load`/`unload`/`deleteModel` is still mutating pool residency, so the new run
 //     could measure against a model that is still being unloaded, or race a stale load that
 //     hasn't finished consuming its resources yet;
-//   - an orphaned `startService` is still clearing (`pool.clear()`/`usage.clear()`) or
-//     repopulating the pool as part of its destructive restart (see its handler's own comment),
-//     so the new run could begin pinning/loading and measuring its targets while that clear or
-//     the restart's own `ensureModel` call is still in flight, racing residency out from under it.
+//   - an orphaned `startService` is still tearing down the gateway or repopulating the pool as
+//     part of its restart (see its handler's own comment), so the new run could begin
+//     pinning/loading and measuring its targets while the restart's own `ensureModel` call is
+//     still in flight, racing residency out from under it.
 // Deliberately excludes `download` from the timed drain: a download can run for minutes
 // (multi-GB files) and the deadline below is ~10s, so waiting it out would turn "a download
 // is still going" into a generic "could not drain" failure. It is still a fence: acquire
@@ -2890,8 +2890,10 @@ rl.on('line', async (line) => {
       // endpoint behind if the replacement never reaches a usable state.
       clearPublishedService();
 
-      pool.clear();
-      usage.clear();
+      // The pool records what the process-global native core has loaded, and the core keeps
+      // those builds loaded and servable across a listener restart (verified against SDK
+      // 2.0.1). Clearing the record here would hide live builds from destructive operations,
+      // eviction and request accounting while the new listener still serves them.
       try {
         stopNativeWebService();
         // The native listener answers GET /v1/models itself. Register providers before

@@ -8,8 +8,11 @@
  * A destructive operation on an alias (unload, eviction, variant switch, deletion) waits for
  * the requests its resident build serves: bookings of the alias name itself, and bookings
  * whose name the pool resolves to that alias. A name the pool does not resolve is not using
- * anything the operation removes. If it later autoloads, the load serializes behind the
- * operation on the alias's residency scope and must re-validate its target there.
+ * anything the operation removes: the pool records every build the native core has loaded
+ * (each load goes through it, and a listener restart keeps it), and the native router serves
+ * only the exact variant id that is loaded, so such a request can reach only builds the pool
+ * lists. If it later autoloads, the load serializes behind the operation on the alias's
+ * residency scope and must re-validate its target there.
  */
 export function createModelActivityFence({ residentAliasFor, catalogAliasFor }) {
   if (typeof residentAliasFor !== 'function' || typeof catalogAliasFor !== 'function') {

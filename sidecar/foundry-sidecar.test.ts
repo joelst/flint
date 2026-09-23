@@ -1397,8 +1397,8 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
   }, 20000);
 
   it('waits for an already-admitted startService (destructive restart) to finish before acquiring exclusive admission', async () => {
-    // `startService` clears and repopulates the pool as part of its restart (see its handler's
-    // own comment on `pool.clear()`/`usage.clear()`) -- exactly the kind of resident-pool
+    // `startService` tears down the gateway and can repopulate the pool as part of its restart
+    // (its optional `ensureModel` call) -- exactly the kind of resident-pool
     // mutation the previous test covers for load/unload/deleteModel, but dispatched at the
     // top-level command instead of through `ensureModel`. A page reload leaves this sidecar
     // process (and anything it already admitted, including an in-flight `startService`) running,
@@ -1687,6 +1687,8 @@ describe('foundry-sidecar gateway variant autoload', () => {
   async function startVariantGateway() {
     let loadedId: string | null = null;
     const nativeCalls: string[] = [];
+    const chatRequests: string[] = [];
+    const signals = new Map<string, () => void>();
     let hold: { arrived: () => void; released: Promise<void> } | null = null;
     /** Holds the next served chat response open until released, like a long generation. */
     const holdNextChat = () => {
@@ -1708,6 +1710,14 @@ describe('foundry-sidecar gateway variant autoload', () => {
         res.end();
         return;
       }
+      if (url.pathname === '/signal') {
+        const name = url.searchParams.get('name') || '';
+        signals.get(name)?.();
+        signals.delete(name);
+        res.writeHead(200);
+        res.end();
+        return;
+      }
       if (url.pathname !== '/v1/chat/completions') {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end('{}');
@@ -1717,6 +1727,7 @@ describe('foundry-sidecar gateway variant autoload', () => {
       req.on('data', (chunk) => { body += chunk; });
       req.on('end', () => {
         const model = JSON.parse(body).model;
+        chatRequests.push(model);
         if (model !== loadedId || existsSync(goneMarker(model))) {
           res.writeHead(400, { 'content-type': 'application/json' });
           res.end(JSON.stringify({ error: { message: `Model '${model}' is not loaded. Please load the model first.` } }));
@@ -1743,21 +1754,31 @@ describe('foundry-sidecar gateway variant autoload', () => {
       return join(homeDir, `gone-${id.replace(/[^A-Za-z0-9.-]/g, '_')}`);
     }
     const markGone = (id: string) => writeFileSync(goneMarker(id), '');
+    const holdDeleteMarker = join(homeDir, 'hold-delete');
+    /** Parks the next deletion inside its catalog mutation, after it holds the alias fence. */
+    const holdNextDelete = () => {
+      const arrival = new Promise<void>((resolve) => signals.set('delete-held', resolve));
+      writeFileSync(holdDeleteMarker, '');
+      return { arrival, release: () => rmSync(holdDeleteMarker, { force: true }) };
+    };
     const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
     const corePath = join(homeDir, 'fake-core.dylib');
     writeFileSync(corePath, '');
     writeFileSync(loaderPath, `
       const sdk = \`
-        import { existsSync } from 'node:fs';
+        import { existsSync, writeFileSync } from 'node:fs';
         const notify = (kind, id) => fetch('http://127.0.0.1:${port}/' + kind + '?id=' + encodeURIComponent(id));
         // A marker file stands for the runtime having dropped a build and its cache files.
-        const gone = (id) => existsSync('${homeDir.replace(/\\/g, '/')}/gone-' + id.replace(/[^A-Za-z0-9.-]/g, '_'));
+        const goneMarker = (id) => '${homeDir.replace(/\\/g, '/')}/gone-' + id.replace(/[^A-Za-z0-9.-]/g, '_');
+        const gone = (id) => existsSync(goneMarker(id));
+        const holdDelete = '${holdDeleteMarker.replace(/\\/g, '/')}';
         class FakeModel {
           constructor(id, cached = true) { this.alias = 'foo'; this.id = id; this.cached = cached; this.loaded = false; }
           get isCached() { return this.cached && !gone(this.id); }
           async load() { await notify('loaded', this.id); this.loaded = true; }
           async unload() { await notify('unloaded', this.id); this.loaded = false; }
           isLoaded() { return this.loaded && !gone(this.id); }
+          removeFromCache() { writeFileSync(goneMarker(this.id), ''); }
           getExecutionProvider() { return 'CPUExecutionProvider'; }
           selectVariant(variant) { this.id = variant.id; this.cached = variant.cached; }
         }
@@ -1777,6 +1798,10 @@ describe('foundry-sidecar gateway variant autoload', () => {
                 return new FakeModel('foo-cpu:1');
               },
               getModelVariant: async (id) => {
+                if (existsSync(holdDelete)) {
+                  await fetch('http://127.0.0.1:${port}/signal?name=delete-held');
+                  while (existsSync(holdDelete)) await new Promise((resolve) => setTimeout(resolve, 10));
+                }
                 if (!['foo-cpu:1', 'foo-gpu:1', 'foo-gone:1'].includes(id)) throw new Error('variant not found');
                 return new FakeModel(id, id !== 'foo-gone:1');
               },
@@ -1832,7 +1857,9 @@ describe('foundry-sidecar gateway variant autoload', () => {
         proc,
         gatewayPort: Number(new URL(started.endpoint).port),
         nativeCalls,
+        chatRequests,
         holdNextChat,
+        holdNextDelete,
         markGone,
         cleanup,
       };
@@ -1933,6 +1960,81 @@ describe('foundry-sidecar gateway variant autoload', () => {
       await gateway.cleanup();
     }
   }, 20000);
+
+  it('keeps tracking a loaded build across a service restart, so deletion cannot run beneath it', async () => {
+    // The native core keeps foo-cpu:1 loaded and servable across the listener restart. If the
+    // pool forgot it, a request for that exact id would be served but never counted, and the
+    // deletion would remove the build underneath the running stream.
+    const gateway = await startVariantGateway();
+    const held = gateway.holdNextChat();
+    let released = false;
+    try {
+      gateway.proc.stdin.write(
+        `${JSON.stringify({ id: 10, cmd: 'startService', port: 0, bindAddress: '127.0.0.1' })}\n`,
+      );
+      const restarted = await waitForLine(gateway.proc, (msg) => msg.id === 10, 15000);
+      expect(restarted.ok, restarted.error).toBe(true);
+      expect(await residentVariant(gateway.proc, 11)).toBe('foo-cpu:1');
+
+      const pending = postChat(Number(new URL(restarted.endpoint).port), 'foo-cpu:1');
+      pending.catch(() => {});
+      await held.arrival;
+
+      gateway.proc.stdin.write(
+        `${JSON.stringify({ id: 12, cmd: 'deleteModel', alias: 'foo', variantId: 'foo-cpu:1' })}\n`,
+      );
+      const deletion = await waitForLine(gateway.proc, (msg) => msg.id === 12, 5000);
+      expect(deletion.ok).not.toBe(true);
+      expect(deletion.error).toContain('in flight');
+
+      held.release();
+      released = true;
+      const reply = await pending;
+      expect(reply.status, reply.body).toBe(200);
+      expect(gateway.nativeCalls).toEqual(['loaded:foo-cpu:1']);
+    } finally {
+      if (!released) held.release();
+      await gateway.cleanup();
+    }
+  }, 30000);
+
+  it('cannot load a build through an unresolved request admitted while that build is deleted', async () => {
+    // With a cold index and foo-gpu:1 not resident, the fence cannot map the request to `foo`,
+    // so it is admitted while the deletion holds the alias fence. That admission reaches only the
+    // native router, which serves just the loaded foo-cpu:1. Its autoload then waits behind the
+    // deletion's residency scope and re-validates the cache, so it cannot reload what was deleted.
+    const gateway = await startVariantGateway();
+    const held = gateway.holdNextDelete();
+    let released = false;
+    try {
+      const deletion = waitForLine(gateway.proc, (msg) => msg.id === 10, 15000);
+      deletion.catch(() => {});
+      gateway.proc.stdin.write(
+        `${JSON.stringify({ id: 10, cmd: 'deleteModel', alias: 'foo', variantId: 'foo-gpu:1' })}\n`,
+      );
+      await held.arrival;
+
+      const pending = postChat(gateway.gatewayPort, 'foo-gpu:1');
+      pending.catch(() => {});
+      const deadline = Date.now() + 5000;
+      while (!gateway.chatRequests.includes('foo-gpu:1')) {
+        if (Date.now() > deadline) throw new Error('request was not admitted during the deletion');
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      held.release();
+      released = true;
+      const deleted = await deletion;
+      expect(deleted.ok, deleted.error).toBe(true);
+      const reply = await pending;
+      expect(reply.status, reply.body).toBe(400);
+      expect(await residentVariant(gateway.proc, 11)).toBe('foo-cpu:1');
+      expect(gateway.nativeCalls).toEqual(['loaded:foo-cpu:1']);
+    } finally {
+      if (!released) held.release();
+      await gateway.cleanup();
+    }
+  }, 30000);
 });
 
 describe('foundry-sidecar applyMemorySettings ordering guard', () => {
