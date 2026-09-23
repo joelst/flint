@@ -231,6 +231,15 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
     return run;
   }
 
+  function trackRead(read) {
+    activeReads.add(read);
+    void read.then(
+      () => activeReads.delete(read),
+      () => activeReads.delete(read),
+    );
+    return read;
+  }
+
   function runTrackedReadAfter(waitFor, operation) {
     let read;
     read = waitFor.then(() => {
@@ -242,6 +251,10 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
       () => activeReads.delete(read),
     );
     return read;
+  }
+
+  function runTrackedReadNow(operation) {
+    return trackRead(Promise.resolve().then(() => operation()));
   }
 
   function preserveRegisteredProviders(previous, current) {
@@ -376,7 +389,7 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
         if (commitConfirmed) return { runOutsideQueue: true };
         return { runOutsideQueue: false, result: await commitOperation(operation) };
       }).then((outcome) => (
-        outcome.runOutsideQueue ? runTrackedReadAfter(Promise.resolve(), operation) : outcome.result
+        outcome.runOutsideQueue ? runTrackedReadNow(operation) : outcome.result
       ));
     },
     isCommitConfirmed() {
