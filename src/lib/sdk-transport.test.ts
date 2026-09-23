@@ -2750,4 +2750,94 @@ describe('catalog mutation results', () => {
     expect(snapshot.pool).toEqual([]);
     unsubscribe();
   }, 15000);
+
+  it('re-derives both lanes from the reconciled pool when the post-delete refresh fails', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+    sdk.sdkState.set({
+      ...snapshot,
+      models: [
+        { alias: 'foo', isCached: true, isLoaded: true, variants: [{ id: 'foo-cpu:1', cached: true }] },
+        { alias: 'bar', isCached: true, isLoaded: true, variants: [{ id: 'bar-cpu:1', cached: true }] },
+      ],
+      pool: [
+        { alias: 'foo', variantId: 'foo-cpu:1' },
+        { alias: 'bar', variantId: 'bar-cpu:1' },
+      ],
+      chatLaneModel: 'foo',
+      audioLaneModel: 'bar',
+    });
+
+    const deleted = sdk.deleteModel({ alias: 'foo' } as any);
+    const deleteId = await waitForWrite('deleteModel');
+    harness.emitStdout({ id: deleteId, result: { alias: 'foo', count: 1 } });
+    const listId = await waitForWrite('listModels', 1);
+    harness.emitStdout({ id: listId, error: 'catalog unavailable' });
+
+    await expect(deleted).resolves.toMatchObject({ catalogRefreshRequiresRestart: true });
+    expect(snapshot.pool).toEqual([{ alias: 'bar', variantId: 'bar-cpu:1' }]);
+    expect(snapshot.chatLaneModel).toBe('bar');
+    expect(snapshot.audioLaneModel).toBeUndefined();
+    expect(snapshot.loadedModels.map((model: any) => model.alias)).toEqual(['bar']);
+    unsubscribe();
+  }, 15000);
+
+  it('keeps residency consistent when pool telemetry fails during a refresh', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+    sdk.sdkState.set({
+      ...snapshot,
+      pool: [{ alias: 'foo', variantId: 'foo-cpu:1', isLoaded: true, inFlight: 0 }],
+    });
+
+    const refreshed = sdk.refreshModels();
+    const listId = await waitForWrite('listModels', 1);
+    harness.emitStdout({
+      id: listId,
+      result: [
+        { alias: 'foo', cached: true, variants: [{ id: 'foo-cpu:1', cached: true }] },
+        { alias: 'bar', cached: true, variants: [{ id: 'bar-cpu:1', cached: true }] },
+      ],
+    });
+    const statusId = await waitForWrite('getStatus', 2);
+    harness.emitStdout({
+      id: statusId,
+      result: {
+        serviceRunning: false,
+        endpoint: null,
+        pool: [
+          { alias: 'foo', variantId: 'foo-cpu:1' },
+          { alias: 'bar', variantId: 'bar-cpu:1' },
+        ],
+      },
+    });
+    const poolId = await waitForWrite('poolStatus', 1);
+    harness.emitStdout({ id: poolId, error: 'telemetry unavailable' });
+    await refreshed;
+    expect(snapshot.pool).toEqual([
+      { alias: 'foo', variantId: 'foo-cpu:1', isLoaded: true, inFlight: 0 },
+      { alias: 'bar', variantId: 'bar-cpu:1', isLoaded: null },
+    ]);
+    expect(snapshot.chatLaneModel).toBe('foo');
+    expect(snapshot.audioLaneModel).toBe('bar');
+
+    const deleted = sdk.deleteModel({ alias: 'foo' } as any);
+    const deleteId = await waitForWrite('deleteModel');
+    harness.emitStdout({ id: deleteId, result: { alias: 'foo', count: 1 } });
+    const failedListId = await waitForWrite('listModels', 2);
+    harness.emitStdout({ id: failedListId, error: 'catalog unavailable' });
+
+    await expect(deleted).resolves.toMatchObject({ catalogRefreshRequiresRestart: true });
+    expect(snapshot.loadedModels.map((model: any) => model.alias)).toEqual(['bar']);
+    expect(snapshot.chatLaneModel).toBe('bar');
+    unsubscribe();
+  }, 15000);
 });

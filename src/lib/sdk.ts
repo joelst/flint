@@ -1512,7 +1512,7 @@ let initializeSDKPromise: Promise<boolean> | null = null;
  *
  * Single-flighted as a whole, not just around the core init — otherwise a double Retry would
  * share the init but each caller would still run its own autostart, and `startService` is a
- * destructive restart that would clear the pool out from under the first caller.
+ * destructive restart that would tear down the gateway out from under the first caller.
  */
 export async function initializeSDK(config: Partial<any> = {}): Promise<boolean> {
   // This invocation carries the current frontend policy even when it joins initialization that
@@ -1542,7 +1542,7 @@ async function performInitializeSDK(config: Partial<any>): Promise<boolean> {
     // Autostart is a user setting, and the port/bind address belong to the frontend. Starting
     // the service here unconditionally on a hardcoded 5272 both ignored "don't autostart" and
     // opened a port the user had not configured. A repeat call against an already-initialized
-    // manager must not restart the service either — that would clear the pool.
+    // manager must not restart the service either — that would drop the gateway's connections.
     try {
       if (config.autoStartService && !alreadyInitialized) {
         await startService(
@@ -1608,52 +1608,59 @@ export async function refreshModels(
       );
     });
     const list = res.result || [];
-    let currentLoadedAlias: string | undefined;
 
     // Also refresh status first so loaded-model state is accurate for UI + actions
     const status = await send('getStatus');
     if (status.result) {
       currentEndpoint = status.result.endpoint;
-      const chatLaneModel: string | undefined = status.result.chatLane?.model || status.result.currentModel || undefined;
-      const audioLaneModel: string | undefined = status.result.audioLane?.model || undefined;
-      currentLoadedAlias = chatLaneModel;
       updateState({
         endpoint: currentEndpoint || undefined,
         serviceRunning: !!status.result.serviceRunning,
-        chatLaneModel,
-        audioLaneModel,
       });
     }
+    const statusPool: Array<{ alias: string; variantId: string }> = status.result?.pool ?? [];
 
-    const loadedAliases = new Set(
-      (status?.result?.pool ?? []).map((e: any) => e.alias).filter(Boolean)
-    );
-
-    const models = list.map((m: any) => ({
+    const catalog = list.map((m: any) => ({
       ...m,
       alias: m.alias,
       isCached: m.cached,
-      isLoaded: loadedAliases.has(m.alias),
+      isLoaded: false,
       info: m
     } as ModelInfo));
 
-    updateState({
-      catalogStatus: 'ready',
-      catalogError: null,
-      models,
-      cachedModels: models.filter((m: ModelInfo) => m.isCached),
-      loadedModels: models.filter((m: ModelInfo) => m.isLoaded),
+    // Publish the pool together with the flags and lanes derived from it, so a failed
+    // poolStatus below cannot leave `pool` older than those flags. getStatus carries no
+    // telemetry, so an entry keeps the last known telemetry for the same build.
+    let anyLoaded = false;
+    sdkState.update((state) => {
+      const pool: PoolEntry[] = statusPool.map((entry) => {
+        const prior = state.pool.find((known) =>
+          known.alias === entry.alias && known.variantId === entry.variantId
+        );
+        return prior ?? { alias: entry.alias, variantId: entry.variantId, isLoaded: null };
+      });
+      const projected = projectPool(pool, catalog);
+      anyLoaded = projected.loadedModels.length > 0;
+      return {
+        ...state,
+        ...projected,
+        catalogStatus: 'ready',
+        catalogError: null,
+        cachedModels: projected.models.filter((m: ModelInfo) => m.isCached),
+      };
     });
-    updateRuntime({ models: models.some((m: ModelInfo) => m.isLoaded) ? 'ready' : 'empty' });
+    updateRuntime({ models: anyLoaded ? 'ready' : 'empty' });
 
     // Refresh pool detail + memory stats
     try {
       const ps = await send('poolStatus');
       if (ps.result) {
-        updateState({
-          pool: ps.result.models ?? [],
+        const pool = ps.result.models ?? [];
+        sdkState.update((state) => ({
+          ...state,
+          ...projectPool(pool, state.models),
           poolStats: mapPoolStats(ps.result),
-        });
+        }));
       }
     } catch (e) {
       console.warn('[sdk] poolStatus refresh failed', e);
@@ -1998,23 +2005,30 @@ export async function pollPoolStatus(): Promise<void> {
   const ps = await send('poolStatus');
   if (ps?.result) {
     const pool = ps.result.models ?? [];
-    const loadedAliases = new Set(pool.map((entry: any) => entry.alias).filter(Boolean));
-    sdkState.update((state) => {
-      const models = state.models.map((model) => ({
-        ...model,
-        isLoaded: loadedAliases.has(model.alias),
-      }));
-      return {
-        ...state,
-        pool,
-        poolStats: mapPoolStats(ps.result),
-        chatLaneModel: pool[0]?.alias,
-        audioLaneModel: pool[1]?.alias,
-        loadedModels: models.filter((model) => model.isLoaded),
-        models,
-      };
-    });
+    sdkState.update((state) => ({
+      ...state,
+      ...projectPool(pool, state.models),
+      poolStats: mapPoolStats(ps.result),
+    }));
   }
+}
+
+// Residency flags and both lanes are views of one pool: the sidecar's getStatus names
+// pool[0] the chat lane and pool[1] the audio lane. Any local pool update re-derives
+// all of them together, or a lane can keep naming a model that is no longer resident.
+function projectPool(pool: PoolEntry[], models: ModelInfo[]) {
+  const loadedAliases = new Set(pool.map((entry: any) => entry.alias).filter(Boolean));
+  const projected = models.map((model) => ({
+    ...model,
+    isLoaded: loadedAliases.has(model.alias),
+  }));
+  return {
+    pool,
+    models: projected,
+    loadedModels: projected.filter((model) => model.isLoaded),
+    chatLaneModel: pool[0]?.alias,
+    audioLaneModel: pool[1]?.alias,
+  };
 }
 
 export async function getLocalEndpoint(): Promise<string | undefined> {
@@ -2025,8 +2039,9 @@ export async function getLocalEndpoint(): Promise<string | undefined> {
 /**
  * Serializes every service lifecycle transition.
  *
- * The sidecar's `startService` is a *destructive restart*: it tears down the gateway and clears
- * the model pool and usage counters. Overlapping a start with a stop, a settings re-apply or a
+ * The sidecar's `startService` is a *destructive restart*: it tears down the gateway, cutting
+ * proxied requests, and replaces the listener. Loaded models stay resident. Overlapping a start
+ * with a stop, a settings re-apply or a
  * second start strands in-flight work against an endpoint that is being replaced, so all of
  * them queue here rather than each caller guarding itself.
  */
@@ -2062,7 +2077,7 @@ let serviceStopFence = 0;
  * Held here rather than in the UI because the check has to happen *inside* the transition lock.
  * A flag consulted before queuing lets two convenience starts both pass while neither has run,
  * so the first one's uncertainty cannot stop the second. Starting is a destructive restart: it
- * tears down the gateway and clears the pool, so repeating one blindly is the specific harm.
+ * tears down the gateway and its proxied requests, so repeating one blindly is the specific harm.
  *
  * Deliberately **not** clearable from outside. An explicit start is authorized by passing no
  * `convenience` flag, which bypasses the guard for that one attempt; clearing the shared latch
@@ -2695,7 +2710,6 @@ function reconcileDeletedModelState(result: CatalogMutationResult): void {
     const pool = state.pool.filter((entry) =>
       entry.alias !== alias || (deletedVariantId !== null && entry.variantId !== deletedVariantId)
     );
-    const residentAliases = new Set(pool.map((entry) => entry.alias));
     const models = state.models.map((model) => {
       if (model.alias !== alias) return model;
       const variants = Array.isArray((model as any).variants)
@@ -2712,15 +2726,13 @@ function reconcileDeletedModelState(result: CatalogMutationResult): void {
         ...model,
         variants,
         isCached,
-        isLoaded: residentAliases.has(alias),
       };
     });
+    const projected = projectPool(pool, models);
     return {
       ...state,
-      pool,
-      models,
-      cachedModels: models.filter((model) => model.isCached),
-      loadedModels: models.filter((model) => model.isLoaded),
+      ...projected,
+      cachedModels: projected.models.filter((model) => model.isCached),
     };
   });
 }
