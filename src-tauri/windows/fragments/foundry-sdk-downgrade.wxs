@@ -15,7 +15,8 @@
          aside before InstallFiles. If the move fails, the install stops and
          the original tree is still in place. If a later step fails, the
          rollback action puts the tree back. The backup is removed only after
-         the install commits.
+         the install commits; cleanup warnings must not fail the committed
+         install.
 
          Each action runs with INSTALLDIR as its working directory and names the
          two folders relative to it. The install location is never substituted
@@ -34,9 +35,9 @@
                   Impersonate="no" />
     <CustomAction Id="DiscardFoundryBackup"
                   Directory="INSTALLDIR"
-                  ExeCommand="&quot;[SystemFolder]cmd.exe&quot; /c if exist &quot;foundry-local-sdk.previous&quot; rmdir /s /q &quot;foundry-local-sdk.previous&quot;"
+                  ExeCommand="&quot;[SystemFolder]cmd.exe&quot; /c if exist &quot;foundry-local-sdk.previous&quot; (rmdir /s /q &quot;foundry-local-sdk.previous&quot; &amp; if exist &quot;foundry-local-sdk.previous&quot; echo Warning: foundry-local-sdk.previous could not be removed.)"
                   Execute="commit"
-                  Return="check"
+                  Return="ignore"
                   Impersonate="no" />
     <InstallExecuteSequence>
       <Custom Action="RestoreFoundrySdk" Before="MoveFoundrySdk">NOT REMOVE</Custom>

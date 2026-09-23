@@ -2,7 +2,7 @@
 
 ## 0.9.2
 
-Maintenance release built from the 0.9.0 line through #150. It adds the About release link, release icon packaging fix, optional startup catalog check, and benchmark/download admission fix, plus selected #153 visual improvements for control contrast, chat-tool layout, and readable compact actions.
+Maintenance release built from the 0.9.0 line through #150. It adds the About release link, release icon packaging fix, optional startup catalog check, benchmark/download admission fix, Recheck Providers maintenance fixes, and Foundry SDK 1.2.4 downgrade handling, plus selected #153 visual improvements for control contrast, chat-tool layout, and readable compact actions.
 
 ## 0.9.0
 

@@ -47,7 +47,8 @@ describe('Foundry 1.2.4 install over a newer SDK', () => {
     const move = wxs.slice(wxs.indexOf('Id="MoveFoundrySdk"'), wxs.indexOf('Id="RestoreFoundrySdk"'));
     expect(move).toContain('onnxruntime.dll');
     expect(move).toContain('foundry-local-sdk.previous-kept');
-    expect(wxs).toMatch(/Id="DiscardFoundryBackup"[\s\S]*Return="check"/);
+    expect(wxs).toMatch(/Id="DiscardFoundryBackup"[\s\S]*Return="ignore"/);
+    expect(wxs).toContain('Warning: foundry-local-sdk.previous could not be removed.');
     expect(wxs).toContain('Return="check"');
     expect(wxs).toContain('Directory="INSTALLDIR"');
     expect(wxs).not.toContain('[INSTALLDIR]');
