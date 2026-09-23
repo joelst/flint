@@ -21,6 +21,8 @@ describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
     expect(hooks).toContain('prebuilds\\win32-arm64\\onnxruntime.dll');
     expect(hooks).toContain('foundry-local-core\\win32-arm64\\onnxruntime.dll');
     expect(hooks).toContain('!macro NSIS_HOOK_POSTINSTALL');
+    expect(hooks).toContain('foundry-local-sdk.failed');
+    expect(hooks).toContain('rename foundry-local-sdk.previous to foundry-local-sdk');
     expect(hooks).toContain('Function .onInstFailed');
     expect(hooks).toContain('Function .onUserAbort');
     expect(hooks).toContain('Abort');
@@ -35,6 +37,7 @@ describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
     expect(wxs).toContain('foundry-local-sdk.previous');
     expect(wxs).toContain('exit /b 1');
     expect(wxs).toContain('Execute="rollback"');
+    expect(wxs).toContain('if exist &quot;foundry-local-sdk.previous&quot; exit /b 1');
     expect(wxs).toContain('Execute="commit"');
     expect(wxs).toContain('Id="MoveFoundrySdk"');
     expect(wxs).toContain('Return="check"');
