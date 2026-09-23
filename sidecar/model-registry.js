@@ -107,5 +107,10 @@ function compareVersions (a, b) {
 export function resolveModelId (index, requested) {
   if (typeof requested !== 'string' || !requested.trim()) return null;
   const name = requested.trim();
-  return index.get(name) ?? index.get(stripVersion(name)) ?? null;
+  const exact = index.get(name);
+  if (exact) return exact;
+  const bare = stripVersion(name);
+  if (bare === name) return null;
+  const versionless = index.get(bare);
+  return versionless?.variantId ? versionless : null;
 }

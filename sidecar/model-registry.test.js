@@ -28,6 +28,11 @@ describe('buildCachedModelIndex', () => {
     ]);
 
     expect(resolveModelId(index, 'uncached-model')).toBeNull();
+    expect(resolveModelId(index, 'cached-model:999')).toBeNull();
+    expect(resolveModelId(index, 'cached-model-cpu:999')).toEqual({
+      alias: 'cached-model',
+      variantId: 'cached-model-cpu:1',
+    });
   });
 
   it('skips a cached row whose native-backed getters throw', () => {
