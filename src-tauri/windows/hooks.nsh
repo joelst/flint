@@ -85,6 +85,8 @@ Var FoundrySdkMovedAside
     Abort
   foundry_sdk_new_ok:
     StrCpy $FoundrySdkMovedAside ""
+    ; .failed only holds a tree that was parked aside; nothing restores from it.
+    RMDir /r "$INSTDIR\foundry-local-sdk.failed"
     RMDir /r "$INSTDIR\foundry-local-sdk.previous-kept"
     RMDir /r "$INSTDIR\foundry-local-sdk.previous"
     IfFileExists "$INSTDIR\foundry-local-sdk.previous\*" 0 foundry_sdk_backup_gone
@@ -122,6 +124,9 @@ Function RestoreFoundrySdkBackup
     Push "none"
     Return
   restore_foundry_ok:
+    ; The backup is back, so the tree parked at .failed is only garbage now.
+    ; A stranded restore keeps it, as it changes nothing else on that path.
+    RMDir /r "$INSTDIR\foundry-local-sdk.failed"
     Push "restored"
     Return
   restore_foundry_stranded:

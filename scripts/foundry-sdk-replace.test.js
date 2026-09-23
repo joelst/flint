@@ -93,6 +93,24 @@ describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
     );
   });
 
+  it('removes the parked .failed tree once NSIS has finished or restored', () => {
+    const removeFailed = 'RMDir /r "$INSTDIR\\foundry-local-sdk.failed"';
+    const postinstall = hooks.slice(hooks.indexOf('!macro NSIS_HOOK_POSTINSTALL'), hooks.indexOf('!macroend', hooks.indexOf('!macro NSIS_HOOK_POSTINSTALL')));
+    expect(postinstall.slice(postinstall.indexOf('foundry_sdk_new_ok:'))).toContain(removeFailed);
+    const restore = hooks.slice(hooks.indexOf('Function RestoreFoundrySdkBackup'), hooks.indexOf('FunctionEnd', hooks.indexOf('Function RestoreFoundrySdkBackup')));
+    const ok = restore.slice(restore.indexOf('restore_foundry_ok:'), restore.indexOf('restore_foundry_stranded:'));
+    expect(ok).toContain(removeFailed);
+    // A stranded restore changes nothing else, so it keeps the parked tree too.
+    expect(restore.slice(restore.indexOf('restore_foundry_stranded:'))).not.toContain(removeFailed);
+  });
+
+  it('closes every WiX comment where it ends, with no stray text after it', () => {
+    // A `-->` inside a comment still parses as XML: the rest becomes stray text in <Fragment>.
+    for (const [, after] of wxs.matchAll(/-->([^<]*)</g)) {
+      expect(after.trim()).toBe('');
+    }
+  });
+
   it('never waits on a message box in a silent install', () => {
     for (const line of hooks.split('\n').filter((l) => /^\s*MessageBox\b/.test(l))) {
       expect(line).toMatch(/\/SD IDOK\s*$/);
@@ -270,12 +288,12 @@ describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
       });
     });
 
-    it('rolls back to the copy this install moved aside', () => {
+    it('rolls back to the copy this install moved aside and removes the partial copy', () => {
       tree(SDK, 'installed');
       expect(run('MoveFoundrySdk')).toBe(0);
       tree(SDK, 'partial new');
       expect(run('RestoreFoundrySdk')).toBe(0);
-      expect(state()).toEqual({ [SDK]: 'installed', [`${SDK}.failed`]: 'partial new' });
+      expect(state()).toEqual({ [SDK]: 'installed' });
     });
 
     it('fails the install when the new tree has no runtime, so rollback restores the backup', () => {
@@ -284,7 +302,17 @@ describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
       tree(SDK, 'no runtime', { runtime: false });
       expect(run('CheckFoundryRuntime')).toBe(1);
       expect(run('RestoreFoundrySdk')).toBe(0);
-      expect(state()).toEqual({ [SDK]: 'installed', [`${SDK}.failed`]: 'no runtime' });
+      expect(state()).toEqual({ [SDK]: 'installed' });
+    });
+
+    it('removes the tree a recovery parked at .failed once that install commits', () => {
+      tree(SDK, 'broken', { runtime: false });
+      tree(`${SDK}.previous`, 'known good');
+      expect(run('MoveFoundrySdk')).toBe(0);
+      expect(state()[`${SDK}.failed`]).toBe('broken');
+      tree(SDK, 'new');
+      expect(run('DiscardFoundryBackup')).toBe(0);
+      expect(state()).toEqual({ [SDK]: 'new' });
     });
 
     it('lets the install continue when the new tree has a runtime', () => {
