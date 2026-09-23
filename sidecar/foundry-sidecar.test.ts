@@ -1688,7 +1688,7 @@ describe('foundry-sidecar gateway variant autoload', () => {
     let loadedId: string | null = null;
     const nativeCalls: string[] = [];
     const chatRequests: string[] = [];
-    const signals = new Map<string, () => void>();
+    let deleteHeld: (() => void) | null = null;
     let hold: { arrived: () => void; released: Promise<void> } | null = null;
     /** Holds the next served chat response open until released, like a long generation. */
     const holdNextChat = () => {
@@ -1710,10 +1710,10 @@ describe('foundry-sidecar gateway variant autoload', () => {
         res.end();
         return;
       }
-      if (url.pathname === '/signal') {
-        const name = url.searchParams.get('name') || '';
-        signals.get(name)?.();
-        signals.delete(name);
+      if (url.pathname === '/delete-held') {
+        const notifyHeld = deleteHeld;
+        deleteHeld = null;
+        notifyHeld?.();
         res.writeHead(200);
         res.end();
         return;
@@ -1757,7 +1757,7 @@ describe('foundry-sidecar gateway variant autoload', () => {
     const holdDeleteMarker = join(homeDir, 'hold-delete');
     /** Parks the next deletion inside its catalog mutation, after it holds the alias fence. */
     const holdNextDelete = () => {
-      const arrival = new Promise<void>((resolve) => signals.set('delete-held', resolve));
+      const arrival = new Promise<void>((resolve) => { deleteHeld = resolve; });
       writeFileSync(holdDeleteMarker, '');
       return { arrival, release: () => rmSync(holdDeleteMarker, { force: true }) };
     };
@@ -1799,7 +1799,7 @@ describe('foundry-sidecar gateway variant autoload', () => {
               },
               getModelVariant: async (id) => {
                 if (existsSync(holdDelete)) {
-                  await fetch('http://127.0.0.1:${port}/signal?name=delete-held');
+                  await fetch('http://127.0.0.1:${port}/delete-held');
                   while (existsSync(holdDelete)) await new Promise((resolve) => setTimeout(resolve, 10));
                 }
                 if (!['foo-cpu:1', 'foo-gpu:1', 'foo-gone:1'].includes(id)) throw new Error('variant not found');
