@@ -52,25 +52,12 @@ export function providerCacheDirectory (epRoot, epName) {
   return dir;
 }
 
-/**
- * Delete one provider cache. Returns true only when a directory was removed.
- * @param {string} epRoot
- * @param {unknown} epName
- * @returns {boolean}
- */
+/** True when Windows still has the cache file loaded. */
 function isFileBusy (error) {
   const code = error?.code;
   return code === 'EPERM' || code === 'EBUSY' || code === 'EACCES';
 }
 
-/**
- * Delete one provider cache.
- * Returns true when the directory was removed, false when it was already
- * gone, and 'busy' when Windows still has a file in it loaded.
- * @param {string} epRoot
- * @param {unknown} epName
- * @returns {true|false|'busy'}
- */
 /**
  * Delete one provider cache.
  * Returns true when the directory was removed, false when it was already
