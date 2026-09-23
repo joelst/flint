@@ -22,6 +22,7 @@ describe('Foundry 1.2.4 install over a newer SDK', () => {
     expect(preinstall).toContain('Call RestoreFoundrySdkBackup');
     expect(preinstall).toContain('foundry-local-sdk.previous-kept');
     expect(preinstall).toContain('The installed SDK was not changed.');
+    expect(preinstall).toContain('RMDir /r "$INSTDIR\\foundry-local-sdk.failed"');
     expect(hooks).toContain('!define MUI_CUSTOMFUNCTION_ABORT RestoreFoundrySdkOnAbort');
     expect(hooks).toContain('prebuilds\\win32-arm64\\onnxruntime.dll');
     expect(hooks).toContain('foundry-local-core\\win32-arm64\\Microsoft.AI.Foundry.Local.Core.dll');
@@ -47,6 +48,10 @@ describe('Foundry 1.2.4 install over a newer SDK', () => {
     const move = wxs.slice(wxs.indexOf('Id="MoveFoundrySdk"'), wxs.indexOf('Id="RestoreFoundrySdk"'));
     expect(move).toContain('foundry-local-core\\win32-arm64\\Microsoft.AI.Foundry.Local.Core.dll');
     expect(move).toContain('foundry-local-sdk.previous-kept');
+    const failedAt = move.indexOf('if exist &quot;foundry-local-sdk.failed&quot; (rmdir');
+    const liveAt = move.indexOf('set LIVE=');
+    expect(failedAt).toBeGreaterThan(-1);
+    expect(liveAt).toBeGreaterThan(failedAt);
     expect(wxs).toMatch(/Id="DiscardFoundryBackup"[\s\S]*Return="ignore"/);
     expect(wxs).toContain('Warning: foundry-local-sdk.previous could not be removed.');
     expect(wxs).toContain('Return="check"');
