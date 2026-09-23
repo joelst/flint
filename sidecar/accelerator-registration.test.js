@@ -214,6 +214,9 @@ describe('native service startup', () => {
     const web = source.indexOf('manager.startWebService()', start);
     const setup = source.indexOf("} else if (cmd === 'ensureAccelerators') {");
     const rerun = source.indexOf('rerunAcceleratorRegistration(', setup);
+    const poolStatus = source.indexOf("} else if (cmd === 'poolStatus') {");
+    const poolSeal = source.indexOf('seal: true', poolStatus);
+    const loadedModels = source.indexOf('manager.catalog.getLoadedModels()', poolStatus);
     expect(gateStart).toBeGreaterThan(-1);
     expect(forcedRead).toBeGreaterThan(gateStart);
     expect(start).toBeGreaterThan(-1);
@@ -224,6 +227,9 @@ describe('native service startup', () => {
     expect(web).toBeGreaterThan(gate);
     expect(setup).toBeGreaterThan(-1);
     expect(rerun).toBeGreaterThan(setup);
+    expect(poolStatus).toBeGreaterThan(-1);
+    expect(poolSeal).toBeGreaterThan(poolStatus);
+    expect(poolSeal).toBeLessThan(loadedModels);
     for (const cmd of ['importModelFolder', 'linkModelFolder', 'setModelTemplate']) {
       const at = source.indexOf(`} else if (cmd === '${cmd}') {`);
       const ensure = source.indexOf('await beforeCatalogRead();', at);
@@ -276,6 +282,31 @@ describe('createCatalogRegistrationGate', () => {
     await gate.seal();
     expect(readCatalog).not.toHaveBeenCalled();
     await expect(gate.rerun()).resolves.toMatchObject({
+      registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+      catalogRefreshRequiresRestart: true,
+    });
+  });
+
+  it('serializes the first confirmed catalog read after a listener-only seal', async () => {
+    let releaseCatalog = () => {};
+    const register = vi.fn()
+      .mockResolvedValueOnce({ success: true, registeredEps: ['CPUExecutionProvider'] })
+      .mockResolvedValueOnce({ success: true, registeredEps: ['CUDAExecutionProvider'] });
+    const readCatalog = vi.fn(() => new Promise((resolve) => {
+      releaseCatalog = () => resolve(['cpu-model']);
+    }));
+    const gate = createCatalogRegistrationGate(register, readCatalog);
+
+    await gate.seal();
+    const commit = gate.commit();
+    await vi.waitFor(() => expect(readCatalog).toHaveBeenCalledTimes(1));
+    const rerun = gate.rerun();
+    await Promise.resolve();
+    expect(register).toHaveBeenCalledTimes(1);
+
+    releaseCatalog();
+    await commit;
+    await expect(rerun).resolves.toMatchObject({
       registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
       catalogRefreshRequiresRestart: true,
     });

@@ -251,9 +251,10 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
         if (!settled) settled = await attempts(report);
         // The native listener can perform the first read outside this process.
         // Close the provider boundary without contacting the registry so every
-        // later update is conservatively reported as restart-bound.
+        // later update is conservatively reported as restart-bound. Keep the
+        // read unconfirmed so the first later JS catalog read still runs inside
+        // this queue and cannot race another provider update.
         committed = true;
-        commitConfirmed = true;
         return settled;
       });
     },

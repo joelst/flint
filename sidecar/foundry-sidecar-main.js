@@ -3385,7 +3385,9 @@ rl.on('line', async (line) => {
     } else if (cmd === 'poolStatus') {
       let loadedIds = new Set();
       try {
-        await beforeCatalogRead(undefined, { commit: true });
+        // Loaded-model telemetry must serialize behind provider setup without
+        // turning the no-startup-refresh setting into a registry catalog read.
+        await beforeCatalogRead(undefined, { seal: true });
         const loaded = await manager.catalog.getLoadedModels();
         for (const m of loaded) loadedIds.add(m.id);
       } catch {}
