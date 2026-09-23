@@ -97,6 +97,7 @@ export default defineConfig(() => ({
         'src/lib/endpoint-self-test.ts',
         'src/lib/sidecar-stderr.ts',
         'src/lib/accelerator-readiness.ts',
+        'src/lib/provider-recheck-status.ts',
         'src/lib/status-message.ts',
         'sidecar/protocol-stdout.js',
         'sidecar/chat-transport.js',
