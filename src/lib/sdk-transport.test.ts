@@ -2428,4 +2428,22 @@ describe('catalog mutation results', () => {
 
     await expect(imported).rejects.toThrow('catalog unavailable');
   }, 15000);
+
+  it('preserves a restart-flagged deleteModel result without attempting an impossible refresh', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const deleted = sdk.deleteModel({ alias: 'foo' } as any);
+    const deleteId = await waitForWrite('deleteModel');
+    harness.emitStdout({
+      id: deleteId,
+      result: { catalogRefreshRequiresRestart: true, alias: 'foo' },
+    });
+
+    await expect(deleted).resolves.toEqual({
+      catalogRefreshRequiresRestart: true,
+      alias: 'foo',
+    });
+    expect(harness.writes.filter((line) => line.includes('"listModels"'))).toHaveLength(1);
+  }, 15000);
 });

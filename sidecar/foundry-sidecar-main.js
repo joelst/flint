@@ -1978,6 +1978,21 @@ async function ensureModelLocked(alias, variantId, onCatalogProgress) {
     },
   } : null);
   try {
+    // Force the actual immutable-snapshot read (getModels()) ahead of this alias/variant
+    // lookup. Without this, a getModel()/getModelVariant() success below would be the first
+    // catalog access to reach the gate and would wrongly confirm the snapshot on its own —
+    // the same generic-operation confirmation the `download` command guards against. A
+    // failure here (e.g. offline) must not block loading an already-cached model: the gate
+    // has already recorded the attempt as restart-bound uncertainty either way.
+    try {
+      await beforeCatalogRead(onCatalogProgress, { commit: true });
+    } catch (e) {
+      log(
+        'warn',
+        `Catalog snapshot read failed before loading ${alias}: ${e?.message ?? e}. ` +
+          'The catalog snapshot is uncertain; accelerator updates are deferred until restart.',
+      );
+    }
     const { catModel, variant } = await readCatalog(
       async () => {
         const model = await manager.catalog.getModel(alias);

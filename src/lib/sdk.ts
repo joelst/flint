@@ -1912,11 +1912,13 @@ export async function applyMemorySettings(
   return { config: res.result?.config ?? null, stale: res.result?.stale === true };
 }
 
-export async function deleteModel(model: any, variantId?: string) {
+export async function deleteModel(model: any, variantId?: string): Promise<CatalogMutationResult> {
   const payload: any = { alias: model.alias };
   if (variantId) payload.variantId = variantId;
-  await send('deleteModel', payload);
-  await refreshModels();
+  const res = await send('deleteModel', payload);
+  const result = res.result as CatalogMutationResult;
+  await refreshModelsAfterMutation(result);
+  return result;
 }
 
 export async function removeFromCache(alias: string, variantId?: string) {

@@ -6007,7 +6007,16 @@ updateStateFromSdk();
         if (isLoadedVariant) {
           await sdkUnloadModel(model);
         }
-        await sdkDeleteModel(model, variantId);
+        const deleteResult = await sdkDeleteModel(model, variantId);
+        const deletedMessage = `${model.alias} variant deleted (${label})`;
+        if (deleteResult?.catalogRefreshRequiresRestart) {
+          // The immutable catalog snapshot cannot reflect this deletion yet. Skip the
+          // unreliable refresh (it would just re-report the stale row) and surface the
+          // restart requirement instead, matching the import/link/template mutation flow.
+          statusMessage = `${deletedMessage}. Restart Flint to let the model catalog detect the change.`;
+          appendAppLog(statusMessage, "warn");
+          return;
+        }
         // If no other variants remain cached, clear selection/meta like full delete
         await refreshCatalogModels();
         const refreshed = state.models.find((m: ModelInfo) => m.alias === model.alias);
@@ -6023,7 +6032,7 @@ updateStateFromSdk();
             persistChat();
           }
         }
-        statusMessage = `${model.alias} variant deleted (${label})`;
+        statusMessage = deletedMessage;
       } finally {
         release();
       }
@@ -6084,7 +6093,7 @@ updateStateFromSdk();
         if (model.isLoaded) {
           await sdkUnloadModel(model);
         }
-        await sdkDeleteModel(model);
+        const deleteResult = await sdkDeleteModel(model);
         if (selectedModelAlias === model.alias) {
           selectedModelAlias = "";
         }
@@ -6094,8 +6103,15 @@ updateStateFromSdk();
           modelRuntimeMeta = nextMeta;
           persistChat();
         }
-        statusMessage = `${model.alias} deleted`;
-        await refreshCatalogModels();
+        if (deleteResult?.catalogRefreshRequiresRestart) {
+          // Skip the unreliable refresh: the immutable snapshot still holds this model's
+          // row until Flint restarts. Surface that instead, like import/link/template.
+          statusMessage = `${model.alias} deleted. Restart Flint to let the model catalog detect the change.`;
+          appendAppLog(statusMessage, "warn");
+        } else {
+          statusMessage = `${model.alias} deleted`;
+          await refreshCatalogModels();
+        }
       } finally {
         release();
       }
