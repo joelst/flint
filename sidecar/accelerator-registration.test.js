@@ -338,6 +338,24 @@ describe('createCatalogRegistrationGate', () => {
     expect(readCatalog).toHaveBeenCalledTimes(1);
   });
 
+  it('reports a failed post-mutation catalog read without hiding the mutation result', async () => {
+    const catalogError = new Error('catalog unavailable');
+    const onCommitError = vi.fn();
+    const gate = createCatalogRegistrationGate(
+      vi.fn().mockResolvedValue({ success: true, registeredEps: ['CPUExecutionProvider'] }),
+      vi.fn().mockRejectedValue(catalogError),
+    );
+
+    await expect(gate.mutateAndCommit(() => 'imported', onCommitError)).resolves.toBe('imported');
+    expect(onCommitError).toHaveBeenCalledWith(catalogError);
+
+    const uncaughtGate = createCatalogRegistrationGate(
+      vi.fn().mockResolvedValue({ success: true, registeredEps: ['CPUExecutionProvider'] }),
+      vi.fn().mockRejectedValue(catalogError),
+    );
+    await expect(uncaughtGate.mutateAndCommit(() => 'linked')).rejects.toBe(catalogError);
+  });
+
   it('retries a thrown registration and a partial failure before the catalog is read', async () => {
     const seen = [];
     const throwing = vi.fn((onProgress) => {
