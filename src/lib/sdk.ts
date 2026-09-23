@@ -2670,8 +2670,49 @@ async function refreshModelsAfterDeletion(
     return result;
   } catch (error) {
     console.warn('[sdk] Catalog refresh failed after model deletion', error);
+    reconcileDeletedModelState(result);
     return { ...result, catalogRefreshRequiresRestart: true };
   }
+}
+
+function reconcileDeletedModelState(result: CatalogMutationResult): void {
+  const alias = typeof result?.alias === 'string' ? result.alias : null;
+  if (!alias) return;
+  const deletedVariantId =
+    typeof result.variantId === 'string' && result.variantId ? result.variantId : null;
+
+  sdkState.update((state) => {
+    const pool = state.pool.filter((entry) =>
+      entry.alias !== alias || (deletedVariantId !== null && entry.variantId !== deletedVariantId)
+    );
+    const residentAliases = new Set(pool.map((entry) => entry.alias));
+    const models = state.models.map((model) => {
+      if (model.alias !== alias) return model;
+      const variants = Array.isArray((model as any).variants)
+        ? (model as any).variants.map((variant: any) => (
+            deletedVariantId === null || variant.id === deletedVariantId
+              ? { ...variant, cached: false }
+              : variant
+          ))
+        : (model as any).variants;
+      const isCached = deletedVariantId === null
+        ? false
+        : Array.isArray(variants) && variants.some((variant: any) => variant.cached === true);
+      return {
+        ...model,
+        variants,
+        isCached,
+        isLoaded: residentAliases.has(alias),
+      };
+    });
+    return {
+      ...state,
+      pool,
+      models,
+      cachedModels: models.filter((model) => model.isCached),
+      loadedModels: models.filter((model) => model.isLoaded),
+    };
+  });
 }
 
 export async function importModelFolder(options: {
@@ -2754,11 +2795,36 @@ export function resetSDK() {
 /**
  * Discover available execution providers (accelerators like CPU, CUDA, QNN for NPU, etc.)
  */
-export async function getEps(): Promise<EpInfo[]> {
-  const res = await send('getEps');
+async function discoverExecutionProviders(
+  expectedGeneration?: number,
+  replacementMessage = 'Sidecar was replaced while discovering execution providers',
+): Promise<EpInfo[]> {
+  let dispatchedGeneration: number | null = null;
+  const res = await sendInternal(
+    'getEps',
+    {},
+    undefined,
+    undefined,
+    (generation) => {
+      dispatchedGeneration = generation;
+    },
+  );
   const eps = res.result || [];
+  const ownerGeneration = expectedGeneration ?? dispatchedGeneration;
+  if (
+    ownerGeneration === null ||
+    ownerGeneration !== sidecarGeneration ||
+    !sidecarProcess ||
+    !sidecarReady
+  ) {
+    throw new Error(replacementMessage);
+  }
   updateState({ eps, acceleratorsReady: hasRegisteredAccelerator(eps) });
   return eps;
+}
+
+export async function getEps(): Promise<EpInfo[]> {
+  return discoverExecutionProviders();
 }
 
 export async function ensureAccelerators(
@@ -2788,15 +2854,13 @@ export async function ensureAccelerators(
   if (!sidecarProcess || !sidecarReady) {
     throw new Error('Sidecar was lost after accelerator registration');
   }
-  const providers = await getEps();
-  if (
-    generation === null ||
-    generation !== sidecarGeneration ||
-    !sidecarProcess ||
-    !sidecarReady
-  ) {
+  if (generation === null) {
     throw new Error('Sidecar was replaced while confirming accelerator readiness');
   }
+  const providers = await discoverExecutionProviders(
+    generation,
+    'Sidecar was replaced while confirming accelerator readiness',
+  );
   return {
     generation,
     registration: res.result ?? null,

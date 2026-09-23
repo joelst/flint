@@ -2101,6 +2101,7 @@ describe('accelerator readiness ownership', () => {
   it('rejects provider discovery completed by a sidecar that exits before confirmation', async () => {
     const sdk = await loadSdk();
     await completeInitialization(sdk);
+    const originalEps = sdkSnapshot(sdk).eps;
 
     const readiness = sdk.ensureAccelerators();
     const registrationId = await waitForWrite('ensureAccelerators');
@@ -2121,6 +2122,7 @@ describe('accelerator readiness ownership', () => {
     harness.emitClose({ code: 1 });
 
     await expect(readiness).rejects.toThrow('replaced while confirming accelerator readiness');
+    expect(sdkSnapshot(sdk).eps).toEqual(originalEps);
   }, 15000);
 
   it('binds accelerator readiness to the generation that received the registration request', async () => {
@@ -2473,5 +2475,53 @@ describe('catalog mutation results', () => {
       count: 1,
       catalogRefreshRequiresRestart: true,
     });
+  }, 15000);
+
+  it('reconciles known deletion state when the post-delete catalog refresh fails', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+    sdk.sdkState.set({
+      ...snapshot,
+      models: [{
+        alias: 'foo',
+        isCached: true,
+        isLoaded: true,
+        variants: [
+          { id: 'foo-cpu:1', cached: true },
+          { id: 'foo-cuda:1', cached: true },
+        ],
+      }],
+      pool: [{ alias: 'foo', variantId: 'foo-cpu:1' }],
+    });
+
+    const deleted = sdk.deleteModel({ alias: 'foo' } as any, 'foo-cpu:1');
+    const deleteId = await waitForWrite('deleteModel');
+    harness.emitStdout({
+      id: deleteId,
+      result: { alias: 'foo', variantId: 'foo-cpu:1' },
+    });
+    const listId = await waitForWrite('listModels', 1);
+    harness.emitStdout({ id: listId, error: 'catalog unavailable' });
+
+    await expect(deleted).resolves.toMatchObject({
+      alias: 'foo',
+      variantId: 'foo-cpu:1',
+      catalogRefreshRequiresRestart: true,
+    });
+    expect(snapshot.models[0]).toMatchObject({
+      alias: 'foo',
+      isCached: true,
+      isLoaded: false,
+    });
+    expect(snapshot.models[0].variants).toEqual([
+      { id: 'foo-cpu:1', cached: false },
+      { id: 'foo-cuda:1', cached: true },
+    ]);
+    expect(snapshot.pool).toEqual([]);
+    unsubscribe();
   }, 15000);
 });

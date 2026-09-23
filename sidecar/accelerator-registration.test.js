@@ -233,7 +233,10 @@ describe('native service startup', () => {
     const rerun = source.indexOf('rerunAcceleratorRegistration(', setup);
     const poolStatus = source.indexOf("} else if (cmd === 'poolStatus') {");
     const poolRead = source.indexOf('catalogReadConfirmed()', poolStatus);
-    const trackedPoolRead = source.indexOf('readCatalog(() => manager.catalog.getLoadedModels())', poolRead);
+    const trackedPoolRead = source.indexOf(
+      'readCatalogTelemetry(() => manager.catalog.getLoadedModels())',
+      poolRead,
+    );
     const loadedModels = source.indexOf('manager.catalog.getLoadedModels()', poolStatus);
     const listModels = source.indexOf("} else if (cmd === 'listModels') {");
     const listGate = source.indexOf('readCatalog(', listModels);
@@ -426,7 +429,7 @@ describe('createCatalogRegistrationGate', () => {
     });
   });
 
-  it('does not let a queued mutation reconnect telemetry to post-commit registration', async () => {
+  it('keeps confirmed catalog reads ordered behind a mutation queued after registration', async () => {
     let releaseRegistration = () => {};
     const register = vi.fn()
       .mockResolvedValueOnce({ success: true, registeredEps: ['CPUExecutionProvider'] })
@@ -443,18 +446,102 @@ describe('createCatalogRegistrationGate', () => {
     await vi.waitFor(() => expect(register).toHaveBeenCalledTimes(2));
     const mutation = gate.mutateAndCommit(async () => 'updated', () => {});
     const telemetry = gate.read(async () => ['loaded-model']);
-
-    await expect(mutation).resolves.toEqual({
-      result: 'updated',
-      catalogRefreshRequiresRestart: true,
+    let mutationSettled = false;
+    void mutation.then(() => {
+      mutationSettled = true;
     });
-    await expect(telemetry).resolves.toEqual(['loaded-model']);
+    await Promise.resolve();
+    expect(mutationSettled).toBe(false);
 
     releaseRegistration();
     await expect(rerun).resolves.toMatchObject({
       registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
       catalogRefreshRequiresRestart: true,
     });
+    await expect(mutation).resolves.toEqual({
+      result: 'updated',
+      catalogRefreshRequiresRestart: true,
+    });
+    await expect(telemetry).resolves.toEqual(['loaded-model']);
+  });
+
+  it('serializes post-commit registration and catalog mutations without blocking telemetry', async () => {
+    let releaseRegistration = () => {};
+    const events = [];
+    const register = vi.fn()
+      .mockResolvedValueOnce({ success: true, registeredEps: ['CPUExecutionProvider'] })
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        events.push('registration');
+        releaseRegistration = () => {
+          events.push('registration done');
+          resolve({
+            success: true,
+            registeredEps: ['CUDAExecutionProvider'],
+          });
+        };
+      }));
+    const gate = createCatalogRegistrationGate(register, vi.fn(async () => []));
+    await gate.commit();
+
+    const rerun = gate.rerun();
+    await vi.waitFor(() => expect(events).toEqual(['registration']));
+    const mutation = gate.mutateAndCommit(async () => {
+      events.push('mutation');
+      return 'updated';
+    }, () => {});
+    const telemetry = gate.readTelemetry(async () => {
+      events.push('telemetry');
+      return ['loaded-model'];
+    });
+
+    await expect(telemetry).resolves.toEqual(['loaded-model']);
+    expect(events).toEqual(['registration', 'telemetry']);
+
+    releaseRegistration();
+    await rerun;
+    await expect(mutation).resolves.toEqual({
+      result: 'updated',
+      catalogRefreshRequiresRestart: true,
+    });
+    expect(events).toEqual([
+      'registration',
+      'telemetry',
+      'registration done',
+      'mutation',
+    ]);
+  });
+
+  it('holds telemetry only while a catalog mutation is actively running', async () => {
+    let releaseMutation = () => {};
+    const events = [];
+    const gate = createCatalogRegistrationGate(
+      vi.fn().mockResolvedValue({ success: true, registeredEps: ['CPUExecutionProvider'] }),
+      vi.fn(async () => []),
+    );
+    await gate.commit();
+
+    const mutation = gate.mutateAndCommit(
+      () => new Promise((resolve) => {
+        events.push('mutation');
+        releaseMutation = () => {
+          events.push('mutation done');
+          resolve('updated');
+        };
+      }),
+      () => {},
+    );
+    await vi.waitFor(() => expect(events).toEqual(['mutation']));
+    const telemetry = gate.readTelemetry(async () => {
+      events.push('telemetry');
+      return ['loaded-model'];
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(events).toEqual(['mutation']);
+
+    releaseMutation();
+    await mutation;
+    await expect(telemetry).resolves.toEqual(['loaded-model']);
+    expect(events).toEqual(['mutation', 'mutation done', 'telemetry']);
   });
 
   it('keeps provider-sensitive lookups behind post-commit registration', async () => {

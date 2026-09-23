@@ -180,9 +180,13 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
   /** @type {Promise<unknown>} */
   let mutationBarrier = Promise.resolve();
   /** @type {Promise<unknown>} */
-  let postCommitRegistrationBarrier = Promise.resolve();
+  let postCommitWriteBarrier = Promise.resolve();
+  /** @type {Promise<unknown>} */
+  let activeMutationBarrier = Promise.resolve();
   /** @type {Set<Promise<unknown>>} */
   const activeReads = new Set();
+  /** @type {Set<Promise<unknown>>} */
+  const activeTelemetryReads = new Set();
 
   // `report` is the caller that queued this cycle. A later Settings click must not
   // steal these events: the UI stall watchdog for the in-flight command only resets
@@ -235,13 +239,13 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
     return run;
   }
 
-  function enqueuePostCommitRegistration(task) {
-    const run = postCommitRegistrationBarrier.then(() => task());
-    return publishRegistration(run);
+  function enqueuePostCommitWrite(task) {
+    const run = postCommitWriteBarrier.then(() => task());
+    return publishPostCommitWrite(run);
   }
 
-  function publishRegistration(run) {
-    postCommitRegistrationBarrier = run.then(() => {}, () => {});
+  function publishPostCommitWrite(run) {
+    postCommitWriteBarrier = run.then(() => {}, () => {});
     return run;
   }
 
@@ -254,6 +258,15 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
       () => activeReads.delete(read),
     );
     return read;
+  }
+
+  function trackTelemetryRead(read) {
+    activeTelemetryReads.add(read);
+    void read.then(
+      () => activeTelemetryReads.delete(read),
+      () => activeTelemetryReads.delete(read),
+    );
+    return trackRead(read);
   }
 
   function preserveRegisteredProviders(previous, current) {
@@ -367,15 +380,15 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
     rerun(onProgress) {
       const report = typeof onProgress === 'function' ? onProgress : null;
       // Once the immutable snapshot is confirmed, provider registration cannot
-      // change it. Keep later registration serialized with itself, but off the
-      // catalog mutation lane so telemetry cannot be held for a long EP download.
+      // change it. Keep later registration serialized with catalog mutations,
+      // but off the telemetry lane so a long EP download cannot stall monitoring.
       const rerun = commitConfirmed
-        ? enqueuePostCommitRegistration(() => rerunRegistration(report))
+        ? enqueuePostCommitWrite(() => rerunRegistration(report))
         : enqueue(() => rerunRegistration(report));
       // A rerun dispatched before confirmation can still be running after the
       // commit completes. Publish both lanes so provider-sensitive lookups
       // cannot slip beside that transition.
-      return commitConfirmed ? rerun : publishRegistration(rerun);
+      return commitConfirmed ? rerun : publishPostCommitWrite(rerun);
     },
     commit(onProgress) {
       const report = typeof onProgress === 'function' ? onProgress : null;
@@ -412,7 +425,7 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
         // of the already-frozen public snapshot and loaded-model telemetry.
         return trackRead(Promise.all([
           mutationBarrier,
-          postCommitRegistrationBarrier,
+          postCommitWriteBarrier,
         ]).then(() => operation()));
       }
       const report = typeof onProgress === 'function' ? onProgress : null;
@@ -429,6 +442,19 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
         }
       });
     },
+    readTelemetry(operation) {
+      if (typeof operation !== 'function') {
+        return Promise.reject(new TypeError('readTelemetry requires a catalog operation'));
+      }
+      if (!commitConfirmed) {
+        return Promise.reject(new Error('readTelemetry requires a confirmed catalog snapshot'));
+      }
+      // Registration cannot alter the frozen snapshot, but a local mutation can
+      // change the native objects being inspected. Wait only while that mutation
+      // is active. A mutation queued behind registration will observe and await
+      // this read before it begins.
+      return trackTelemetryRead(activeMutationBarrier.then(() => operation()));
+    },
     isCommitConfirmed() {
       return commitConfirmed;
     },
@@ -438,29 +464,45 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
       }
       const report = typeof onProgress === 'function' ? onProgress : null;
       const readsBeforeMutation = [...activeReads];
-      const mutation = enqueue(async () => {
+      const executeMutation = async () => {
         await ensureSettled(report);
-        await Promise.allSettled(readsBeforeMutation);
-        // Some mutations must resolve their target through native catalog getters
-        // before changing it. Treat that first lookup as restart-bound uncertainty:
-        // it may establish a stale native snapshot before the mutation completes.
-        const catalogReadBeforeMutation = options.catalogReadBeforeMutation === true;
-        let catalogRefreshRequiresRestart = committed || catalogReadBeforeMutation;
-        if (catalogReadBeforeMutation) committed = true;
-        const result = await operation();
+        const telemetryReadsAtStart = [...activeTelemetryReads];
+        let releaseActiveMutation = () => {};
+        const activeMutation = new Promise((resolve) => {
+          releaseActiveMutation = resolve;
+        });
+        activeMutationBarrier = activeMutation.then(() => {}, () => {});
         try {
-          await confirmCatalogCommit();
-        } catch (error) {
-          // The local mutation is already durable. Report snapshot uncertainty
-          // separately so callers do not mistake a read failure for a failed mutation.
-          onCommitError(error);
-          catalogRefreshRequiresRestart = true;
+          await Promise.allSettled([...new Set([
+            ...readsBeforeMutation,
+            ...telemetryReadsAtStart,
+          ])]);
+          // Some mutations must resolve their target through native catalog getters
+          // before changing it. Treat that first lookup as restart-bound uncertainty:
+          // it may establish a stale native snapshot before the mutation completes.
+          const catalogReadBeforeMutation = options.catalogReadBeforeMutation === true;
+          let catalogRefreshRequiresRestart = committed || catalogReadBeforeMutation;
+          if (catalogReadBeforeMutation) committed = true;
+          const result = await operation();
+          try {
+            await confirmCatalogCommit();
+          } catch (error) {
+            // The local mutation is already durable. Report snapshot uncertainty
+            // separately so callers do not mistake a read failure for a failed mutation.
+            onCommitError(error);
+            catalogRefreshRequiresRestart = true;
+          }
+          return {
+            result,
+            ...(catalogRefreshRequiresRestart ? { catalogRefreshRequiresRestart: true } : {}),
+          };
+        } finally {
+          releaseActiveMutation();
         }
-        return {
-          result,
-          ...(catalogRefreshRequiresRestart ? { catalogRefreshRequiresRestart: true } : {}),
-        };
-      });
+      };
+      const mutation = commitConfirmed
+        ? enqueuePostCommitWrite(executeMutation)
+        : enqueue(executeMutation);
       // Confirmed reads need to wait for local catalog mutations, but not for
       // post-commit provider registration that cannot change the frozen snapshot.
       mutationBarrier = mutation.then(() => {}, () => {});

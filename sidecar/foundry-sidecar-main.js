@@ -454,6 +454,11 @@ function readUnconfirmedCatalog(operation, onProgress) {
   return gate ? gate.readUnconfirmed(operation, onProgress) : operation();
 }
 
+function readCatalogTelemetry(operation) {
+  const gate = acceleratorGate();
+  return gate ? gate.readTelemetry(operation) : operation();
+}
+
 /** Settings “Install / Update Accelerators” uses the same command as startup.
  * The update still runs after catalog commitment, but new variants remain invisible
  * to the current immutable snapshot and require a runtime restart. */
@@ -3516,7 +3521,7 @@ rl.on('line', async (line) => {
         // After getModels confirms the snapshot, track this native read so local
         // catalog mutations cannot overlap its scan.
         const loaded = snapshotConfirmed
-          ? await readCatalog(() => manager.catalog.getLoadedModels())
+          ? await readCatalogTelemetry(() => manager.catalog.getLoadedModels())
           : [];
         for (const m of loaded) loadedIds.add(m.id);
         if (snapshotConfirmed) loadedStateKnown = true;
