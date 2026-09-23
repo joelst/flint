@@ -444,6 +444,11 @@ function readCatalog(operation, onProgress) {
   return gate ? gate.read(operation, onProgress) : operation();
 }
 
+function readCachedCatalog(operation, onProgress) {
+  const gate = acceleratorGate();
+  return gate ? gate.readCached(operation, onProgress) : operation();
+}
+
 /** Settings “Install / Update Accelerators” uses the same command as startup.
  * The update still runs after catalog commitment, but new variants remain invisible
  * to the current immutable snapshot and require a runtime restart. */
@@ -940,14 +945,12 @@ async function resolveForGateway (requested) {
   if (!modelIndex) {
     if (!manager) return null;
     try {
-      await beforeCatalogRead(undefined, { commit: true });
-      const models = await manager.catalog.getModels();
+      const models = await readCatalog(() => manager.catalog.getModels());
       cacheModelIndexFromCatalog(models);
     } catch (e) {
       log('warn', `Gateway could not read the catalog: ${e?.message ?? e}`);
       try {
-        await beforeCatalogRead();
-        const cached = await manager.catalog.getCachedModels();
+        const cached = await readCachedCatalog(() => manager.catalog.getCachedModels());
         cacheModelIndexFromCachedModels(cached);
         return resolveModelId(modelIndex, requested);
       } catch (lookupError) {
@@ -2537,8 +2540,10 @@ rl.on('line', async (line) => {
       audit('init', { appName, libraryPath });
       reply({ ok: true, result: 'initialized' });
     } else if (cmd === 'listModels') {
-      await beforeCatalogRead(reportCatalogProgress, { commit: true });
-      const models = await manager.catalog.getModels();
+      const models = await readCatalog(
+        () => manager.catalog.getModels(),
+        reportCatalogProgress,
+      );
       cacheModelIndexFromCatalog(models);
       reply({
         ok: true, result: models.map(m => {
@@ -2592,8 +2597,10 @@ rl.on('line', async (line) => {
         })
       });
     } else if (cmd === 'getSTTModels') {
-      await beforeCatalogRead(reportCatalogProgress, { commit: true });
-      const all = await manager.catalog.getModels();
+      const all = await readCatalog(
+        () => manager.catalog.getModels(),
+        reportCatalogProgress,
+      );
       const stt = all.filter(m => {
         const t = (m.info?.task || '').toLowerCase();
         const caps = (m.info?.capabilities || '').toLowerCase();
@@ -2601,8 +2608,10 @@ rl.on('line', async (line) => {
       });
       reply({ ok: true, result: stt.map(m => ({ alias: m.alias, cached: m.isCached })) });
     } else if (cmd === 'getVisionModels') {
-      await beforeCatalogRead(reportCatalogProgress, { commit: true });
-      const all = await manager.catalog.getModels();
+      const all = await readCatalog(
+        () => manager.catalog.getModels(),
+        reportCatalogProgress,
+      );
       const vision = all.filter(m => {
         const t = (m.info?.task || '').toLowerCase();
         const caps = (m.info?.capabilities || '').toLowerCase();

@@ -566,6 +566,7 @@ describe('foundry-sidecar protocol basics', () => {
         class FakeManager {
           constructor() {
             this.urls = [];
+            this.ep = { name: 'CPUExecutionProvider', isRegistered: true };
             this.catalog = {
               getModels: async () => { throw new Error('catalog unreachable'); },
               getCachedModels: async () => [
@@ -581,6 +582,10 @@ describe('foundry-sidecar protocol basics', () => {
                 return new FakeModel('other-model', id);
               },
             };
+          }
+          discoverEps() { return [this.ep]; }
+          async downloadAndRegisterEps() {
+            return { success: true, registeredEps: [this.ep.name], failedEps: [] };
           }
           startWebService() { this.urls = ['http://127.0.0.1:${port}']; }
           stopWebService() {}

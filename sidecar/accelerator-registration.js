@@ -378,6 +378,23 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
         outcome.runOutsideQueue ? operation() : outcome.result
       )));
     },
+    readCached(operation, onProgress) {
+      if (typeof operation !== 'function') {
+        return Promise.reject(new TypeError('readCached requires a catalog operation'));
+      }
+      const report = typeof onProgress === 'function' ? onProgress : null;
+      return enqueue(async () => {
+        await ensureSettled(report);
+        try {
+          return await operation();
+        } finally {
+          // A cached inventory read does not prove that the immutable public
+          // catalog snapshot exists, but it is still a catalog touch. Keep
+          // provider updates restart-bound until a real read confirms it.
+          committed = true;
+        }
+      });
+    },
     isCommitConfirmed() {
       return commitConfirmed;
     },
