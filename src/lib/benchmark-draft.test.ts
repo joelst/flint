@@ -413,6 +413,20 @@ describe('duplicateSuiteDraft', () => {
     expect(copied.endsWith(' copy')).toBe(true);
     expect(copiedSuiteName('   ')).toBe('copy');
   });
+
+  it('does not split a surrogate pair when shortening a copied name', () => {
+    const suffixLength = ' copy'.length;
+    const prefix = 'a'.repeat(BENCHMARK_MAX_NAME_LENGTH - suffixLength - 1);
+    const copied = copiedSuiteName(`${prefix}😀`);
+    expect(copied).toBe(`${prefix} copy`);
+    expect(copied).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/u);
+  });
+
+  it('keeps a complete surrogate pair at the shortening boundary', () => {
+    const suffixLength = ' copy'.length;
+    const prefix = 'a'.repeat(BENCHMARK_MAX_NAME_LENGTH - suffixLength - 2);
+    expect(copiedSuiteName(`${prefix}😀z`)).toBe(`${prefix}😀 copy`);
+  });
 });
 
 describe('draftFromSuite', () => {

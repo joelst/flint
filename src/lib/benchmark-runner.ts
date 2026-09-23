@@ -237,10 +237,11 @@ async function executePositions(
       return haltWith(run, 'stopped', undefined);
     }
 
-    // Stamp the start on the terminal patch, not the write-ahead intent. A crash or Stop
-    // during the call leaves the row `dispatched` with no start time, so a later results
-    // view cannot invent a duration for a call that never settled. This is the full
-    // transport call, not time to first token.
+    // Stamp the start on the terminal patch, not the write-ahead intent. Stop after intent
+    // commit but before dispatch, a crash, a transport halt, or failure to persist the terminal
+    // result leaves the row `dispatched` with no stored start time. Stop does not abort an
+    // in-flight call: if that call settles and its result is persisted, the terminal patch
+    // includes this full-call timing.
     const sdkCallStartedAt = Date.now();
     const sdkCallStartedMonotonicAt = performance.now();
     let transportResult: AttemptTransportResult;

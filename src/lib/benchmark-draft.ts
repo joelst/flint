@@ -165,7 +165,12 @@ export function copiedSuiteName(name: string): string {
   const base = name.trim();
   const combined = base ? `${base}${suffix}` : 'copy';
   if (combined.length <= BENCHMARK_MAX_NAME_LENGTH) return combined;
-  return base.slice(0, BENCHMARK_MAX_NAME_LENGTH - suffix.length) + suffix;
+  let shortened = base.slice(0, BENCHMARK_MAX_NAME_LENGTH - suffix.length);
+  const finalCodeUnit = shortened.charCodeAt(shortened.length - 1);
+  if (finalCodeUnit >= 0xD800 && finalCodeUnit <= 0xDBFF) {
+    shortened = shortened.slice(0, -1);
+  }
+  return shortened + suffix;
 }
 
 /** A new draft: no id and no createdAt, so Save inserts a suite with no run history. */
