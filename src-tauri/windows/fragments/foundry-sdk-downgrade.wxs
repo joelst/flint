@@ -11,23 +11,49 @@
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi" xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
   <Fragment>
     <!-- 0.9.1's Foundry 2.0.1 binaries have a higher file version than 1.2.4.
-         Windows Installer will not replace them. Remove the SDK tree first.
-         WixQuietExec reads the command from the property whose Id matches the
-         deferred action. The action that sets that property has its own Id.
-         A directory that is still there fails the install. -->
-    <SetProperty Id="QtExecRemoveFoundrySdk"
-                 Action="SetQtExecRemoveFoundrySdk"
-                 Before="QtExecRemoveFoundrySdk"
+         Windows Installer will not replace them. Move the installed tree
+         aside before InstallFiles. Each deferred WixQuietExec reads the
+         property whose Id matches that action. If the move fails, the install
+         stops and the original tree is still in place. If a later step fails,
+         the rollback action puts the tree back. The backup is removed only
+         after the install commits. -->
+    <SetProperty Id="QtExecMoveFoundrySdk"
+                 Action="SetQtExecMoveFoundrySdk"
+                 Before="QtExecMoveFoundrySdk"
                  Sequence="execute"
-                 Value="&quot;[SystemFolder]cmd.exe&quot; /c if exist &quot;[INSTALLDIR]foundry-local-sdk&quot; (rmdir /s /q &quot;[INSTALLDIR]foundry-local-sdk&quot; &amp; if exist &quot;[INSTALLDIR]foundry-local-sdk&quot; exit /b 1)">NOT REMOVE</SetProperty>
-    <CustomAction Id="QtExecRemoveFoundrySdk"
+                 Value="&quot;[SystemFolder]cmd.exe&quot; /c if exist &quot;[INSTALLDIR]foundry-local-sdk&quot; (if exist &quot;[INSTALLDIR]foundry-local-sdk.previous&quot; rmdir /s /q &quot;[INSTALLDIR]foundry-local-sdk.previous&quot; &amp; ren &quot;[INSTALLDIR]foundry-local-sdk&quot; &quot;foundry-local-sdk.previous&quot; &amp; if exist &quot;[INSTALLDIR]foundry-local-sdk&quot; exit /b 1)">NOT REMOVE</SetProperty>
+    <CustomAction Id="QtExecMoveFoundrySdk"
                   BinaryKey="WixCA"
                   DllEntry="WixQuietExec"
                   Execute="deferred"
                   Return="check"
                   Impersonate="no" />
+    <SetProperty Id="QtExecRestoreFoundrySdk"
+                 Action="SetQtExecRestoreFoundrySdk"
+                 Before="QtExecRestoreFoundrySdk"
+                 Sequence="execute"
+                 Value="&quot;[SystemFolder]cmd.exe&quot; /c if exist &quot;[INSTALLDIR]foundry-local-sdk.previous&quot; (if exist &quot;[INSTALLDIR]foundry-local-sdk&quot; rmdir /s /q &quot;[INSTALLDIR]foundry-local-sdk&quot; &amp; ren &quot;[INSTALLDIR]foundry-local-sdk.previous&quot; &quot;foundry-local-sdk&quot;)">NOT REMOVE</SetProperty>
+    <CustomAction Id="QtExecRestoreFoundrySdk"
+                  BinaryKey="WixCA"
+                  DllEntry="WixQuietExec"
+                  Execute="rollback"
+                  Return="ignore"
+                  Impersonate="no" />
+    <SetProperty Id="QtExecDiscardFoundryBackup"
+                 Action="SetQtExecDiscardFoundryBackup"
+                 Before="QtExecDiscardFoundryBackup"
+                 Sequence="execute"
+                 Value="&quot;[SystemFolder]cmd.exe&quot; /c if exist &quot;[INSTALLDIR]foundry-local-sdk.previous&quot; rmdir /s /q &quot;[INSTALLDIR]foundry-local-sdk.previous&quot;">NOT REMOVE</SetProperty>
+    <CustomAction Id="QtExecDiscardFoundryBackup"
+                  BinaryKey="WixCA"
+                  DllEntry="WixQuietExec"
+                  Execute="commit"
+                  Return="ignore"
+                  Impersonate="no" />
     <InstallExecuteSequence>
-      <Custom Action="QtExecRemoveFoundrySdk" Before="InstallFiles">NOT REMOVE</Custom>
+      <Custom Action="QtExecRestoreFoundrySdk" Before="QtExecMoveFoundrySdk">NOT REMOVE</Custom>
+      <Custom Action="QtExecMoveFoundrySdk" Before="InstallFiles">NOT REMOVE</Custom>
+      <Custom Action="QtExecDiscardFoundryBackup" Before="InstallFinalize">NOT REMOVE</Custom>
     </InstallExecuteSequence>
 
     <DirectoryRef Id="INSTALLDIR">

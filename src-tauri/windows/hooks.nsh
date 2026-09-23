@@ -1,19 +1,46 @@
 ; 0.9.1 installs Foundry Local 2.0.1. This release installs 1.2.4.
-; The updater does not uninstall first, and Windows keeps a higher file
-; version. The old SDK tree has to be gone before the new files are copied.
-; If a file is still locked, stop. Copying over it would leave ONNX Runtime 1.28.
+; Windows keeps a higher file version, so the old SDK has to move aside
+; before the new files are copied. A locked directory stays where it is and
+; the install stops. If the install does not finish, the moved tree is put
+; back. The backup is removed only after the new ONNX Runtime is on disk.
 !macro NSIS_HOOK_PREINSTALL
   !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
   Sleep 500
-  IfFileExists "$INSTDIR\foundry-local-sdk\*" foundry_sdk_present foundry_sdk_gone
-  foundry_sdk_present:
-    RMDir /r "$INSTDIR\foundry-local-sdk"
-    IfFileExists "$INSTDIR\foundry-local-sdk\prebuilds\win32-x64\onnxruntime.dll" foundry_sdk_locked
-    IfFileExists "$INSTDIR\foundry-local-sdk\foundry-local-core\win32-x64\onnxruntime.dll" foundry_sdk_locked
-    IfFileExists "$INSTDIR\foundry-local-sdk\*" foundry_sdk_locked foundry_sdk_gone
-  foundry_sdk_locked:
-    MessageBox MB_OK|MB_ICONSTOP "Flint could not remove the installed Foundry SDK. Close Flint, then run this installer again. Continuing would leave an older ONNX Runtime in place."
-    Abort
-  foundry_sdk_gone:
+  IfFileExists "$INSTDIR\foundry-local-sdk\*" 0 foundry_sdk_aside_done
+    IfFileExists "$INSTDIR\foundry-local-sdk.previous\*" 0 foundry_sdk_rename
+      RMDir /r "$INSTDIR\foundry-local-sdk.previous"
+    foundry_sdk_rename:
+      ClearErrors
+      Rename "$INSTDIR\foundry-local-sdk" "$INSTDIR\foundry-local-sdk.previous"
+      IfErrors 0 foundry_sdk_aside_done
+        MessageBox MB_OK|MB_ICONSTOP "Flint could not move the installed Foundry SDK aside. Close Flint, then run this installer again. Continuing would leave an older ONNX Runtime in place."
+        Abort
+  foundry_sdk_aside_done:
   SetOverwrite on
 !macroend
+
+!macro NSIS_HOOK_POSTINSTALL
+  IfFileExists "$INSTDIR\foundry-local-sdk\prebuilds\win32-x64\onnxruntime.dll" foundry_sdk_new_ok
+  IfFileExists "$INSTDIR\foundry-local-sdk\foundry-local-core\win32-x64\onnxruntime.dll" foundry_sdk_new_ok
+    RMDir /r "$INSTDIR\foundry-local-sdk"
+    Rename "$INSTDIR\foundry-local-sdk.previous" "$INSTDIR\foundry-local-sdk"
+    MessageBox MB_OK|MB_ICONSTOP "Flint could not install the Foundry SDK that belongs with this version. The previous SDK was put back."
+    Abort
+  foundry_sdk_new_ok:
+    RMDir /r "$INSTDIR\foundry-local-sdk.previous"
+!macroend
+
+Function RestoreFoundrySdkBackup
+  IfFileExists "$INSTDIR\foundry-local-sdk.previous\*" 0 restore_foundry_done
+    RMDir /r "$INSTDIR\foundry-local-sdk"
+    Rename "$INSTDIR\foundry-local-sdk.previous" "$INSTDIR\foundry-local-sdk"
+  restore_foundry_done:
+FunctionEnd
+
+Function .onInstFailed
+  Call RestoreFoundrySdkBackup
+FunctionEnd
+
+Function .onUserAbort
+  Call RestoreFoundrySdkBackup
+FunctionEnd

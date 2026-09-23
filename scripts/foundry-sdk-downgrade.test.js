@@ -17,9 +17,10 @@ describe('Foundry 1.2.4 install over a newer SDK', () => {
     expect(conf.bundle.windows.nsis.installerHooks).toBe('./windows/hooks.nsh');
     expect(hooks).toContain('!macro NSIS_HOOK_PREINSTALL');
     expect(hooks).toContain('CheckIfAppIsRunning');
-    expect(hooks).toContain('RMDir /r "$INSTDIR\\foundry-local-sdk"');
+    expect(hooks).toContain('Rename "$INSTDIR\\foundry-local-sdk" "$INSTDIR\\foundry-local-sdk.previous"');
+    expect(hooks).toContain('!macro NSIS_HOOK_POSTINSTALL');
+    expect(hooks).toContain('Function .onInstFailed');
     expect(hooks).toContain('Abort');
-    expect(hooks).not.toContain('ClearErrors');
     expect(hooks).toContain('SetOverwrite on');
   });
 
@@ -28,12 +29,10 @@ describe('Foundry 1.2.4 install over a newer SDK', () => {
       './windows/fragments/foundry-sdk-downgrade.wxs',
     );
     expect(conf.bundle.windows.wix.componentRefs).toContain('FoundrySdkDowngradeMarker');
-    expect(wxs).toContain('rmdir /s /q');
+    expect(wxs).toContain('foundry-local-sdk.previous');
     expect(wxs).toContain('exit /b 1');
-    expect(wxs).toContain('Action="SetQtExecRemoveFoundrySdk"');
+    expect(wxs).toContain('Execute="rollback"');
     expect(wxs).toContain('Return="check"');
-    expect(wxs).not.toContain('Return="ignore"');
-    expect(wxs).toContain('[INSTALLDIR]foundry-local-sdk');
     expect(wxs).toContain('Before="InstallFiles"');
   });
 });
