@@ -298,7 +298,7 @@ export async function rebuildBrokenExecutionProviders (deps) {
       registeredEps: registeredNames(final),
       status: stillBroken.length
         ? (sdkResult?.status || 'Provider still not registered')
-        : (sdkResult?.status || 'No broken providers'),
+        : 'Providers rebuilt',
     },
   };
 }

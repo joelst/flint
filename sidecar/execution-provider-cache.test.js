@@ -112,6 +112,7 @@ describe('rebuildBrokenExecutionProviders', () => {
     expect(calls).toEqual([['CUDAExecutionProvider'], ['CUDAExecutionProvider']]);
     expect(outcome.removed).toEqual(['CUDAExecutionProvider']);
     expect(outcome.result?.success).toBe(true);
+    expect(outcome.result?.status).toBe('Providers rebuilt');
   });
 
   it('retries a 2.0.1 registration that throws after the cache was already removed', async () => {
