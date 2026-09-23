@@ -75,6 +75,6 @@ export function providerRecheckStatus(
   }
   return {
     failed: false,
-    message: `${providers.length} execution providers ready.${locked}`,
+    message: `${providers.filter((provider) => provider.isRegistered === true).length} execution providers ready.${locked}`,
   };
 }

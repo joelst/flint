@@ -46,10 +46,14 @@ describe('providerRecheckStatus', () => {
     );
   });
 
-  it('counts the refreshed provider list when nothing was rebuilt', () => {
+  it('counts only providers the refresh shows as registered', () => {
     const status = providerRecheckStatus(
       { success: true, status: 'No broken providers', failedEps: [] },
-      [webgpu, { name: 'CPUExecutionProvider', isRegistered: true }],
+      [
+        webgpu,
+        { name: 'CPUExecutionProvider', isRegistered: true },
+        { name: 'FutureExecutionProvider', isRegistered: false },
+      ],
     );
     expect(status).toEqual({
       failed: false,
