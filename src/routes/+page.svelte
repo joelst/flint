@@ -259,6 +259,7 @@
           statusMessage = catalogProgressMessage;
         },
       );
+      setAutomaticCatalogRefreshEnabled(autoRefreshCatalogOnStartup);
     } finally {
       if (statusMessage === catalogProgressMessage) statusMessage = "";
     }
@@ -4912,6 +4913,7 @@ updateStateFromSdk();
       }
 
       let acceleratorReadiness: AcceleratorReadiness;
+      let acceleratorRestartGuidance = "";
       try {
         acceleratorReadiness = await prepareHydratedRuntime({
           applyMemorySettings: async () => {
@@ -4976,6 +4978,24 @@ updateStateFromSdk();
           await loadSTTModels();
           if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
             throw new Error("Runtime changed while refreshing the speech model catalog");
+          }
+        }
+        // Initialization deliberately suppresses its own catalog read until providers are ready.
+        // Recovery after this point must use the hydrated user policy, not that bootstrap override.
+        setAutomaticCatalogRefreshEnabled(autoRefreshCatalogOnStartup);
+        if (acceleratorReadiness.registration?.catalogRefreshRequiresRestart) {
+          if (acceleratorReadiness.registration.registrationDeferredUntilRestart) {
+            acceleratorRestartGuidance =
+              acceleratorReadiness.registration.status ||
+              "Restart Flint before updating accelerators.";
+          } else if (acceleratorReadiness.registration.success === false) {
+            acceleratorRestartGuidance =
+              (acceleratorReadiness.registration.status ||
+                "Some accelerators could not be registered") +
+              " Restart Flint to let the model catalog detect any newly available variants.";
+          } else {
+            acceleratorRestartGuidance =
+              "Accelerator setup finished. Restart Flint to let the model catalog detect any newly available variants.";
           }
         }
       } catch (e: any) {
@@ -5139,6 +5159,9 @@ updateStateFromSdk();
         } else if (startupFailed === 0 && startupBlocked > 0) {
           statusMessage =
             `${startupBlocked} startup model${startupBlocked !== 1 ? "s" : ""} skipped for unavailable acceleration`;
+        }
+        if (acceleratorRestartGuidance) {
+          statusMessage = acceleratorRestartGuidance;
         }
       }
       } finally {

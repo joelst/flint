@@ -38,6 +38,7 @@ describe('IPC command deadlines', () => {
   });
 
   it('leaves headroom beyond nested control-plane probe budgets', () => {
+    expect(deadlineForCommand('poolStatus')).toBeGreaterThan(10_000);
     expect(deadlineForCommand('wslStatus')).toBeGreaterThan(15_000);
   });
 

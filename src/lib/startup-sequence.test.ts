@@ -49,6 +49,20 @@ describe('prepareHydratedRuntime', () => {
     expect(startup).toContain(
       '} else if (autoRefreshCatalogOnStartup && autoStartService) {',
     );
+    const prepared = startup.indexOf('acceleratorReadiness = await prepareHydratedRuntime(');
+    const recoveryPolicy = startup.indexOf(
+      'setAutomaticCatalogRefreshEnabled(autoRefreshCatalogOnStartup);',
+      prepared,
+    );
+    const restartGuidance = startup.indexOf(
+      'if (acceleratorRestartGuidance) {',
+      recoveryPolicy,
+    );
+    const startupSummary = startup.indexOf('if (startupLoaded > 0)', recoveryPolicy);
+    expect(prepared).toBeGreaterThan(-1);
+    expect(recoveryPolicy).toBeGreaterThan(prepared);
+    expect(startupSummary).toBeGreaterThan(recoveryPolicy);
+    expect(restartGuidance).toBeGreaterThan(startupSummary);
     expect(startup).toContain(
       'if (autoRefreshCatalogOnStartup && startupEntries.length > 0) {',
     );
@@ -68,6 +82,9 @@ describe('prepareHydratedRuntime', () => {
     );
     const refreshCatalog = source.slice(refreshCatalogStart, refreshCatalogEnd);
     expect(refreshCatalog).toContain('await sdkRefreshModels(');
+    expect(
+      refreshCatalog.indexOf('setAutomaticCatalogRefreshEnabled(autoRefreshCatalogOnStartup);'),
+    ).toBeGreaterThan(refreshCatalog.indexOf('await sdkRefreshModels('));
     expect(refreshCatalog).not.toContain('catalogRefreshError');
     expect(refreshCatalog.indexOf('is no longer available')).toBeGreaterThan(
       refreshCatalog.indexOf('await sdkRefreshModels('),
