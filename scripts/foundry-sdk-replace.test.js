@@ -18,6 +18,8 @@ describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
     expect(hooks).toContain('!macro NSIS_HOOK_PREINSTALL');
     expect(hooks).toContain('CheckIfAppIsRunning');
     expect(hooks).toContain('RMDir /r "$INSTDIR\\foundry-local-sdk"');
+    expect(hooks).toContain('Abort');
+    expect(hooks).not.toContain('ClearErrors');
     expect(hooks).toContain('SetOverwrite on');
   });
 
@@ -27,6 +29,11 @@ describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
     );
     expect(conf.bundle.windows.wix.componentRefs).toContain('FoundrySdkReplaceMarker');
     expect(wxs).toContain('rmdir /s /q');
+    expect(wxs).toContain('exit /b 1');
+    expect(wxs).toContain('Action="SetQtExecRemoveFoundrySdk"');
+    expect(wxs).toContain('Id="QtExecRemoveFoundrySdk"');
+    expect(wxs).toContain('Return="check"');
+    expect(wxs).not.toContain('Return="ignore"');
     expect(wxs).toContain('[INSTALLDIR]foundry-local-sdk');
     expect(wxs).toContain('Before="InstallFiles"');
   });
