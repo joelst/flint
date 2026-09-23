@@ -22,6 +22,9 @@ describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
     expect(hooks).toContain('foundry-local-core\\win32-${ARCH}\\onnxruntime.dll');
     expect(hooks).not.toContain('prebuilds\\win32-x64\\onnxruntime.dll');
     expect(hooks).not.toContain('prebuilds\\win32-arm64\\onnxruntime.dll');
+    const preinstall = hooks.slice(hooks.indexOf('NSIS_HOOK_PREINSTALL'), hooks.indexOf('NSIS_HOOK_POSTINSTALL'));
+    expect(preinstall).toContain('Call RestoreFoundrySdkBackup');
+    expect(preinstall).not.toContain('RMDir /r "$INSTDIR\\foundry-local-sdk.previous"');
     expect(hooks).toContain('!macro NSIS_HOOK_POSTINSTALL');
     expect(hooks).toContain('foundry-local-sdk.failed');
     expect(hooks).toContain('rename foundry-local-sdk.previous to foundry-local-sdk');
@@ -44,6 +47,8 @@ describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
     expect(wxs).toContain('if exist &quot;foundry-local-sdk.previous&quot; exit /b 1');
     expect(wxs).toContain('Execute="commit"');
     expect(wxs).toContain('Id="MoveFoundrySdk"');
+    const move = wxs.slice(wxs.indexOf('Id="MoveFoundrySdk"'), wxs.indexOf('Id="RestoreFoundrySdk"'));
+    expect(move).not.toContain('rmdir /s /q &quot;foundry-local-sdk.previous&quot;');
     expect(wxs).toContain('Return="check"');
     expect(wxs).toContain('Before="InstallFiles"');
     expect(wxs).toContain('Action="DiscardFoundryBackup" After="InstallFinalize"');
