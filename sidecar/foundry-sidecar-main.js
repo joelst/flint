@@ -495,6 +495,7 @@ function noteActivity (modelName, phase) {
     matchedResidentAlias: matchedResident,
     occupantAlias,
     occupantVariantId: occupant?.variantId || null,
+    modelIndexAvailable: !!modelIndex,
     resolvedAlias: resolved?.alias || null,
     resolvedVariantId: resolved?.variantId || null,
   });

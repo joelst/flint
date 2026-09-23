@@ -459,6 +459,55 @@ describe('runEndpointSelfTest', () => {
     expect(report.checks.find((c) => c.id === 'speech')?.status).toBe('pass');
   });
 
+  it('creates a verified row for a speech-only endpoint with an empty transcript', async () => {
+    const prepared: string[] = [];
+    const report = await runEndpointSelfTest({
+      fetch: async (input) => {
+        if (String(input).endsWith('/models')) {
+          return jsonResponse(200, { data: [{ id: 'whisper-tiny' }] });
+        }
+        if (String(input).endsWith('/audio/transcriptions')) {
+          return jsonResponse(200, { text: '' });
+        }
+        throw new Error(`unexpected ${input}`);
+      },
+      endpoint: 'http://127.0.0.1:5272/v1',
+      prepareSpeechModel: async (modelId) => { prepared.push(modelId); },
+    });
+    expect(prepared).toEqual(['whisper-tiny']);
+    expect(report.modelId).toBeNull();
+    expect(report.speechModelIds).toEqual(['whisper-tiny']);
+    expect(report.checks.find((c) => c.id === 'speech')?.status).toBe('pass');
+    expect(flintVerifiedFromReport(report)).toMatchObject({
+      modelId: 'whisper-tiny',
+      aliases: [{ modelId: 'whisper-tiny', kind: 'speech', speech: true }],
+    });
+  });
+
+  it('uses a speech variant kind for its parent alias', async () => {
+    const seen: string[] = [];
+    const aliases = endpointAliases(
+      [{ id: 'my-asr-stt', parent: 'my-asr' }],
+      null,
+    );
+    expect(aliases).toEqual({ chat: [], embed: [], speech: ['my-asr-stt', 'my-asr'] });
+
+    await runEndpointSelfTest({
+      fetch: async (input) => {
+        if (String(input).endsWith('/models')) {
+          return jsonResponse(200, { data: [{ id: 'my-asr-stt', parent: 'my-asr' }] });
+        }
+        if (String(input).endsWith('/audio/transcriptions')) {
+          return jsonResponse(200, { text: 'ping' });
+        }
+        throw new Error(`unexpected ${input}`);
+      },
+      endpoint: 'http://127.0.0.1:5272/v1',
+      prepareSpeechModel: async (modelId) => { seen.push(modelId); },
+    });
+    expect(seen).toEqual(['my-asr-stt', 'my-asr']);
+  });
+
   it('exercises every listed variant and each parent alias', async () => {
     const seen: string[] = [];
     const fetchMock: typeof fetch = async (input, init) => {

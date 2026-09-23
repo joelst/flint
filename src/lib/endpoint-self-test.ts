@@ -96,7 +96,7 @@ export function flintVerifiedFromReport(report: SelfTestReport): FlintVerified |
   for (const item of report.checks) {
     if (item.modelId && !aliasIds.includes(item.modelId)) aliasIds.push(item.modelId);
   }
-  const id = report.modelId || report.embeddingModelId;
+  const id = report.modelId || report.embeddingModelId || report.speechModelIds[0] || null;
   if (!id) return null;
   const aliases = aliasIds.map((modelId) => ({
     modelId,
@@ -178,17 +178,16 @@ export function endpointAliases(
   const speech: string[] = [];
   const chat: string[] = [];
   const seen = new Set<string>();
-  const add = (id: string) => {
+  const add = (id: string, kind = endpointKind(id, requestedEmbed)) => {
     if (!id || seen.has(id)) return;
     seen.add(id);
-    const kind = endpointKind(id, requestedEmbed);
     if (kind === 'embed') embed.push(id);
     else if (kind === 'speech') speech.push(id);
     else chat.push(id);
   };
   for (const row of models) add(row.id);
   for (const row of models) {
-    if (row.parent) add(row.parent);
+    if (row.parent) add(row.parent, endpointKind(row.id, requestedEmbed));
   }
   return { chat, embed, speech };
 }
@@ -409,8 +408,10 @@ async function runSpeechChecks(
   endpoint: string,
   modelId: string,
   requestTimeoutMs: number,
+  prepareModel?: (modelId: string) => Promise<void>,
 ): Promise<SelfTestCheck[]> {
   try {
+    await prepareModel?.(modelId);
     const form = new FormData();
     form.append('file', tinyWav(), 'ping.wav');
     form.append('model', modelId);
@@ -422,7 +423,7 @@ async function runSpeechChecks(
       'json',
     );
     const text = json && typeof json === 'object' ? (json as { text?: unknown }).text : null;
-    if (!res.ok || typeof text !== 'string' || !text.trim()) {
+    if (!res.ok || typeof text !== 'string') {
       return [check(
         'speech',
         'POST /v1/audio/transcriptions returns text',
@@ -701,6 +702,8 @@ export async function runEndpointSelfTest(options: {
   /** Per listed id. When set, it replaces catalogSupportsToolCalling. */
   supportsToolCalling?: (modelId: string) => boolean | null | undefined;
   embeddingModelId?: string | null;
+  /** Explicitly prepares speech models because multipart requests cannot be gateway-replayed. */
+  prepareSpeechModel?: (modelId: string) => Promise<void>;
   requestTimeoutMs?: number;
   disconnectStartMs?: number;
   onProgress?: (event: { modelId: string; index: number; total: number }) => void;
@@ -813,7 +816,13 @@ export async function runEndpointSelfTest(options: {
         declaredToolCalling(target.modelId, options),
       ));
     } else {
-      checks.push(...await runSpeechChecks(options.fetch, endpoint, target.modelId, requestTimeoutMs));
+      checks.push(...await runSpeechChecks(
+        options.fetch,
+        endpoint,
+        target.modelId,
+        requestTimeoutMs,
+        options.prepareSpeechModel,
+      ));
     }
   }
 

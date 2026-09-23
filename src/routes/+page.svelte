@@ -324,6 +324,17 @@
             .sort((a: ModelInfo, b: ModelInfo) => b.alias.length - a.alias.length)[0];
           return matched?.supportsToolCalling ?? null;
         },
+        prepareSpeechModel: async (modelId: string) => {
+          const model = state.models.find((m: ModelInfo) =>
+            m.alias === modelId
+            || m.variants?.some((variant: any) =>
+              variant.id === modelId || variant.id?.split(":")[0] === modelId),
+          );
+          const variant = model?.variants?.find((item: any) =>
+            item.id === modelId || item.id?.split(":")[0] === modelId);
+          if (!model) throw new Error(`Cached speech model ${modelId} is unavailable.`);
+          await sdkLoadModel(model, undefined, variant?.id);
+        },
         onProgress: (event) => {
           statusMessage = `Testing ${event.modelId} (${event.index + 1} of ${event.total})…`;
         },

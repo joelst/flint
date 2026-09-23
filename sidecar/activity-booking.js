@@ -17,6 +17,7 @@
  *   matchedResidentAlias?: string|null,
  *   occupantAlias?: string|null,
  *   occupantVariantId?: string|null,
+ *   modelIndexAvailable?: boolean,
  *   resolvedAlias?: string|null,
  *   resolvedVariantId?: string|null,
  * }} input
@@ -27,6 +28,7 @@ export function activityCandidateKeys (input) {
   const matchedResidentAlias = input?.matchedResidentAlias || null;
   const occupantAlias = input?.occupantAlias || null;
   const occupantVariantId = input?.occupantVariantId || null;
+  const modelIndexAvailable = input?.modelIndexAvailable !== false;
   const resolvedAlias = input?.resolvedAlias || null;
   const resolvedVariantId = input?.resolvedVariantId || null;
   const switching = !!(
@@ -42,7 +44,13 @@ export function activityCandidateKeys (input) {
     if (key && !keys.includes(key)) keys.push(key);
   };
 
-  if (switching) {
+  if (!modelIndexAvailable && raw && matchedResidentAlias && raw !== matchedResidentAlias) {
+    // A versionless id can spell either the resident variant or a different cached one.
+    // Until the lazy index resolves that ambiguity, do not charge the resident alias: a
+    // requested switch would otherwise reject itself as in-flight.
+    push(raw);
+    push(matchedResidentAlias);
+  } else if (switching) {
     // The raw name is the only key that must not collapse onto the resident alias.
     push(raw || resolvedVariantId);
     push(resolvedAlias);
