@@ -22,7 +22,7 @@
          into the command line. -->
     <CustomAction Id="MoveFoundrySdk"
                   Directory="INSTALLDIR"
-                  ExeCommand="&quot;[SystemFolder]cmd.exe&quot; /c if exist &quot;foundry-local-sdk&quot; (if exist &quot;foundry-local-sdk.previous&quot; rmdir /s /q &quot;foundry-local-sdk.previous&quot; &amp; ren &quot;foundry-local-sdk&quot; &quot;foundry-local-sdk.previous&quot; &amp; if exist &quot;foundry-local-sdk&quot; exit /b 1)"
+                  ExeCommand="&quot;[SystemFolder]cmd.exe&quot; /c if exist &quot;foundry-local-sdk.previous&quot; (if exist &quot;foundry-local-sdk.failed&quot; rmdir /s /q &quot;foundry-local-sdk.failed&quot; &amp; if exist &quot;foundry-local-sdk&quot; ren &quot;foundry-local-sdk&quot; &quot;foundry-local-sdk.failed&quot; &amp; ren &quot;foundry-local-sdk.previous&quot; &quot;foundry-local-sdk&quot; &amp; if exist &quot;foundry-local-sdk.previous&quot; exit /b 1) &amp; if exist &quot;foundry-local-sdk&quot; (ren &quot;foundry-local-sdk&quot; &quot;foundry-local-sdk.previous&quot; &amp; if exist &quot;foundry-local-sdk&quot; exit /b 1)"
                   Execute="deferred"
                   Return="check"
                   Impersonate="no" />
