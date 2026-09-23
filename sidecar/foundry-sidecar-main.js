@@ -2770,7 +2770,14 @@ rl.on('line', async (line) => {
             await beforeCatalogRead(reportCatalogProgress, { commit: true });
           }
         } catch (e) {
-          log('warn', `Catalog snapshot read failed before service start: ${e?.message ?? e}`);
+          // The gate has closed the provider boundary either way, so the update path already
+          // reports this as restart-bound. Say so here too: a read that failed leaves the
+          // snapshot uncertain while the listener is about to be exposed.
+          log(
+            'warn',
+            `Catalog snapshot read failed before service start: ${e?.message ?? e}. ` +
+              'The catalog snapshot is uncertain; accelerator updates are deferred until restart.',
+          );
         }
         // Start service BEFORE loading models so HTTP routing layer initializes with the registry.
         if (typeof manager.startWebService === 'function') {
