@@ -178,10 +178,11 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
     let last = null;
     for (let attempt = 1; attempt <= CATALOG_REGISTRATION_ATTEMPTS; attempt++) {
       try {
-        last = await register(
+        const current = await register(
           (name, pct) => notify(name, pct),
           { allowLegacyFallback: attempt === CATALOG_REGISTRATION_ATTEMPTS },
         );
+        last = preserveRegisteredProviders(last, current);
       } catch (error) {
         if (attempt === CATALOG_REGISTRATION_ATTEMPTS) return terminalRegistrationResult(last, error);
         continue;
@@ -211,19 +212,54 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
   }
 
   function preserveRegisteredProviders(previous, current) {
-    if (!previous || typeof previous !== 'object' || !current || typeof current !== 'object') {
+    if (!current || typeof current !== 'object') {
+      return previous && typeof previous === 'object' ? previous : current;
+    }
+    if (!previous || typeof previous !== 'object') {
       return current;
     }
-    const registeredEps = [...new Set([
-      ...(Array.isArray(previous.registeredEps) ? previous.registeredEps : []),
-      ...(Array.isArray(current.registeredEps) ? current.registeredEps : []),
-    ])];
-    const registered = new Set(registeredEps);
-    const failedEps = [...new Set(
+    const currentRegistered = new Set(
+      Array.isArray(current.registeredEps) ? current.registeredEps : [],
+    );
+    const currentFailed = new Set(
       (Array.isArray(current.failedEps) ? current.failedEps : [])
-        .filter((name) => !registered.has(name)),
-    )];
-    return { ...current, registeredEps, failedEps };
+        .filter((name) => !currentRegistered.has(name)),
+    );
+    const registeredEps = [...new Set([
+      ...(Array.isArray(previous.registeredEps) ? previous.registeredEps : [])
+        .filter((name) => !currentFailed.has(name)),
+      ...currentRegistered,
+    ])];
+    const failedEps = [...currentFailed];
+    const merged = {
+      ...current,
+      registeredEps,
+      failedEps,
+    };
+    if (
+      typeof current.status === 'string' &&
+      (
+        registeredEps.length !== currentRegistered.size ||
+        failedEps.length !== (Array.isArray(current.failedEps) ? current.failedEps.length : 0)
+      )
+    ) {
+      if (current.success === true) {
+        merged.status = `Registered ${registeredEps.length} execution provider${
+          registeredEps.length === 1 ? '' : 's'
+        }`;
+      } else {
+        const generatedFailure = current.status.match(/^Registered \d+; failed \d+:(.*)$/);
+        if (generatedFailure) {
+          merged.status = `Registered ${registeredEps.length}; failed ${failedEps.length}:${
+            generatedFailure[1]
+          }`;
+        }
+      }
+    }
+    if (current[retryLegacyFallback]) {
+      Object.defineProperty(merged, retryLegacyFallback, { value: true });
+    }
+    return merged;
   }
 
   async function confirmCatalogCommit() {

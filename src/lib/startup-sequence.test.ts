@@ -5,9 +5,50 @@ import {
   createSingleFlight,
   createStartupAuthorization,
   prepareHydratedRuntime,
+  resolveAcceleratorRestartGuidance,
   resolveCatalogCheckPresentation,
   resolveStartupAudioAlias,
 } from './startup-sequence';
+
+describe('resolveAcceleratorRestartGuidance', () => {
+  it('keeps deferred, failed, and successful restart guidance consistent', () => {
+    expect(resolveAcceleratorRestartGuidance({
+      success: false,
+      status: 'Provider update deferred',
+      registeredEps: [],
+      failedEps: [],
+      catalogRefreshRequiresRestart: true,
+      registrationDeferredUntilRestart: true,
+    })).toBe('Provider update deferred');
+    expect(resolveAcceleratorRestartGuidance({
+      success: false,
+      status: 'CUDA registration failed',
+      registeredEps: [],
+      failedEps: ['CUDAExecutionProvider'],
+      catalogRefreshRequiresRestart: true,
+    })).toBe(
+      'CUDA registration failed Restart Flint to let the model catalog detect any newly available variants.',
+    );
+    expect(resolveAcceleratorRestartGuidance({
+      success: true,
+      status: 'Registered 1 execution provider',
+      registeredEps: ['CUDAExecutionProvider'],
+      failedEps: [],
+      catalogRefreshRequiresRestart: true,
+    })).toBe(
+      'Accelerator setup finished. Restart Flint to let the model catalog detect any newly available variants.',
+    );
+  });
+
+  it('returns no restart guidance before the catalog boundary', () => {
+    expect(resolveAcceleratorRestartGuidance({
+      success: false,
+      status: 'CUDA registration failed',
+      registeredEps: [],
+      failedEps: ['CUDAExecutionProvider'],
+    })).toBe('');
+  });
+});
 
 describe('prepareHydratedRuntime', () => {
   it('keeps the page wiring from discarding accelerator readiness', () => {
@@ -70,6 +111,9 @@ describe('prepareHydratedRuntime', () => {
     expect(startupCatch).toBeGreaterThan(prepared);
     expect(startupFinally).toBeGreaterThan(startupCatch);
     expect(recoveryPolicy).toBeGreaterThan(startupFinally);
+    expect(startup).toMatch(
+      /if \(autoRefreshCatalogOnStartup && startupEntries\.length > 0\) \{[\s\S]*?\r?\n      \}\r?\n      if \(acceleratorRestartGuidance\) \{/,
+    );
     expect(startup).toContain(
       'if (autoRefreshCatalogOnStartup && startupEntries.length > 0) {',
     );
@@ -161,11 +205,11 @@ describe('prepareHydratedRuntime', () => {
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
     const setup = source.slice(start, end);
-    expect(setup).toContain('readiness.registration?.catalogRefreshRequiresRestart');
-    expect(setup).toContain('readiness.registration.catalogRefreshRequiresRestart');
-    expect(setup.match(/Restart Flint to let the model catalog detect any newly available variants\./g)).toHaveLength(2);
+    expect(setup).toContain(
+      'const restartGuidance = resolveAcceleratorRestartGuidance(readiness.registration);',
+    );
     expect(setup).toMatch(
-      /Accelerator setup finished\. Restart Flint[\s\S]*?appendAppLog\(statusMessage, "warn"\);/,
+      /if \(restartGuidance\) \{[\s\S]*?statusMessage = restartGuidance;[\s\S]*?appendAppLog\(statusMessage, "warn"\);/,
     );
   });
 

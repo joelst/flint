@@ -85,6 +85,7 @@
     createSingleFlight,
     createStartupAuthorization,
     prepareHydratedRuntime,
+    resolveAcceleratorRestartGuidance,
     resolveCatalogCheckPresentation,
     resolveStartupAudioAlias,
   } from "$lib/startup-sequence";
@@ -4980,21 +4981,9 @@ updateStateFromSdk();
             throw new Error("Runtime changed while refreshing the speech model catalog");
           }
         }
-        if (acceleratorReadiness.registration?.catalogRefreshRequiresRestart) {
-          if (acceleratorReadiness.registration.registrationDeferredUntilRestart) {
-            acceleratorRestartGuidance =
-              acceleratorReadiness.registration.status ||
-              "Restart Flint before updating accelerators.";
-          } else if (acceleratorReadiness.registration.success === false) {
-            acceleratorRestartGuidance =
-              (acceleratorReadiness.registration.status ||
-                "Some accelerators could not be registered") +
-              " Restart Flint to let the model catalog detect any newly available variants.";
-          } else {
-            acceleratorRestartGuidance =
-              "Accelerator setup finished. Restart Flint to let the model catalog detect any newly available variants.";
-          }
-        }
+        acceleratorRestartGuidance = resolveAcceleratorRestartGuidance(
+          acceleratorReadiness.registration,
+        );
       } catch (e: any) {
         statusMessage = `Runtime startup stopped before model preload: ${e?.message || e}`;
         appendAppLog(statusMessage, "error");
@@ -5162,9 +5151,9 @@ updateStateFromSdk();
           statusMessage =
             `${startupBlocked} startup model${startupBlocked !== 1 ? "s" : ""} skipped for unavailable acceleration`;
         }
-        if (acceleratorRestartGuidance) {
-          statusMessage = acceleratorRestartGuidance;
-        }
+      }
+      if (acceleratorRestartGuidance) {
+        statusMessage = acceleratorRestartGuidance;
       }
       } finally {
         release();
@@ -5403,17 +5392,12 @@ updateStateFromSdk();
           throw new Error("Runtime changed while refreshing recommendations");
         }
       }
-      if (readiness.registration?.registrationDeferredUntilRestart) {
-        statusMessage = readiness.registration.status || "Restart Flint before updating accelerators.";
+      const restartGuidance = resolveAcceleratorRestartGuidance(readiness.registration);
+      if (restartGuidance) {
+        statusMessage = restartGuidance;
         appendAppLog(statusMessage, "warn");
       } else if (readiness.registration?.success === false) {
         statusMessage = readiness.registration.status || "Some accelerators could not be registered";
-        if (readiness.registration.catalogRefreshRequiresRestart) {
-          statusMessage += " Restart Flint to let the model catalog detect any newly available variants.";
-        }
-        appendAppLog(statusMessage, "warn");
-      } else if (readiness.registration?.catalogRefreshRequiresRestart) {
-        statusMessage = "Accelerator setup finished. Restart Flint to let the model catalog detect any newly available variants.";
         appendAppLog(statusMessage, "warn");
       } else {
         statusMessage =

@@ -469,10 +469,104 @@ describe('createCatalogRegistrationGate', () => {
     await expect(partialGate.ensure()).resolves.toEqual({
       success: true,
       registeredEps: ['CUDAExecutionProvider'],
+      failedEps: [],
     });
     expect(partial).toHaveBeenCalledTimes(2);
     await partialGate.ensure();
     expect(partial).toHaveBeenCalledTimes(2);
+  });
+
+  it('preserves providers confirmed by an earlier retry attempt', async () => {
+    const register = vi.fn()
+      .mockResolvedValueOnce({
+        success: false,
+        retry: true,
+        registeredEps: ['CUDAExecutionProvider'],
+        failedEps: ['WebGpuExecutionProvider'],
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        registeredEps: ['WebGpuExecutionProvider'],
+        failedEps: [],
+      });
+    const gate = createCatalogRegistrationGate(register);
+
+    await expect(gate.ensure()).resolves.toEqual({
+      success: true,
+      registeredEps: ['CUDAExecutionProvider', 'WebGpuExecutionProvider'],
+      failedEps: [],
+    });
+  });
+
+  it('lets a later explicit failure override an earlier registration', async () => {
+    const register = vi.fn()
+      .mockResolvedValueOnce({
+        success: false,
+        retry: true,
+        registeredEps: ['CUDAExecutionProvider'],
+        failedEps: [],
+      })
+      .mockResolvedValueOnce({
+        success: false,
+        registeredEps: ['WebGpuExecutionProvider'],
+        failedEps: ['CUDAExecutionProvider'],
+      });
+    const gate = createCatalogRegistrationGate(register);
+
+    await expect(gate.ensure()).resolves.toEqual({
+      success: false,
+      registeredEps: ['WebGpuExecutionProvider'],
+      failedEps: ['CUDAExecutionProvider'],
+    });
+  });
+
+  it('keeps prior registration state across a transient null result', async () => {
+    const register = vi.fn()
+      .mockResolvedValueOnce({
+        success: false,
+        retry: true,
+        registeredEps: ['CUDAExecutionProvider'],
+        failedEps: [],
+      })
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        success: true,
+        registeredEps: ['WebGpuExecutionProvider'],
+        failedEps: [],
+      });
+    const gate = createCatalogRegistrationGate(register);
+
+    await expect(gate.ensure()).resolves.toEqual({
+      success: true,
+      registeredEps: ['CUDAExecutionProvider', 'WebGpuExecutionProvider'],
+      failedEps: [],
+    });
+    expect(register).toHaveBeenCalledTimes(3);
+  });
+
+  it('updates registration status after preserving an earlier provider', async () => {
+    const register = vi.fn()
+      .mockResolvedValueOnce({
+        success: false,
+        status: 'Registered 1; failed 1: WebGpuExecutionProvider (temporary failure)',
+        retry: true,
+        registeredEps: ['CUDAExecutionProvider'],
+        failedEps: ['WebGpuExecutionProvider'],
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        status: 'Registered 1 execution provider',
+        registeredEps: ['WebGpuExecutionProvider'],
+        failedEps: [],
+      });
+    const gate = createCatalogRegistrationGate(register);
+
+    await expect(gate.ensure()).resolves.toEqual({
+      success: true,
+      status: 'Registered 2 execution providers',
+      registeredEps: ['CUDAExecutionProvider', 'WebGpuExecutionProvider'],
+      failedEps: [],
+    });
   });
 
   it('uses the one-provider fallback only on the last attempt, then keeps that result', async () => {
@@ -484,6 +578,7 @@ describe('createCatalogRegistrationGate', () => {
     await expect(gate.ensure()).resolves.toEqual({
       success: true,
       registeredEps: ['CPUExecutionProvider'],
+      failedEps: [],
     });
     expect(register.mock.calls.map(([, options]) => options.allowLegacyFallback)).toEqual([
       false,
@@ -777,6 +872,27 @@ describe('createCatalogRegistrationGate', () => {
     await gate.commit();
     await gate.rerun();
     expect(register).toHaveBeenCalledTimes(4);
+  });
+
+  it('preserves a thrown post-commit update reason while keeping prior providers', async () => {
+    const register = vi.fn()
+      .mockResolvedValueOnce({
+        success: true,
+        status: 'Registered 1 execution provider',
+        registeredEps: ['CUDAExecutionProvider'],
+        failedEps: [],
+      })
+      .mockRejectedValue(new Error('network down'));
+    const gate = createCatalogRegistrationGate(register, vi.fn());
+
+    await gate.commit();
+    await expect(gate.rerun()).resolves.toEqual({
+      success: false,
+      status: 'network down',
+      registeredEps: ['CUDAExecutionProvider'],
+      failedEps: [],
+      catalogRefreshRequiresRestart: true,
+    });
   });
 
   it('stops retrying a provider that keeps failing so the catalog read is not blocked', async () => {
