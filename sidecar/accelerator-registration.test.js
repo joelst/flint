@@ -329,6 +329,24 @@ describe('native service startup', () => {
 });
 
 describe('createCatalogRegistrationGate', () => {
+  it('keeps the post-commit writer lane behind a mutation crossing confirmation', () => {
+    const source = readFileSync(
+      join(process.cwd(), 'sidecar', 'accelerator-registration.js'),
+      'utf8',
+    );
+    const start = source.indexOf('function enqueuePostCommitWrite(task)');
+    const end = source.indexOf('function publishPostCommitWrite(run)', start);
+    const flow = source.slice(start, end);
+
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(flow).toContain('const priorMutations = mutationBarrier');
+    expect(flow).toContain('const priorWrites = postCommitWriteBarrier');
+    expect(flow).toContain('Promise.all([');
+    expect(flow).toContain('priorMutations');
+    expect(flow).toContain('priorWrites');
+  });
+
   it('runs one registration for concurrent readers and keeps the result', async () => {
     let release;
     const register = vi.fn(() => new Promise((resolve) => {

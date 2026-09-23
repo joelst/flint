@@ -240,7 +240,16 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
   }
 
   function enqueuePostCommitWrite(task) {
-    const run = postCommitWriteBarrier.then(() => task());
+    // A mutation dispatched before commit confirmation runs on `tail`, while a
+    // later write uses this lane. Preserve dispatch order across that boundary
+    // even though the native mutation itself has completed by the time the
+    // confirmation flag becomes observable.
+    const priorMutations = mutationBarrier;
+    const priorWrites = postCommitWriteBarrier;
+    const run = Promise.all([
+      priorMutations,
+      priorWrites,
+    ]).then(() => task());
     return publishPostCommitWrite(run);
   }
 
@@ -503,6 +512,8 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
       const mutation = commitConfirmed
         ? enqueuePostCommitWrite(executeMutation)
         : enqueue(executeMutation);
+      // Keep this assignment after dispatch: enqueuePostCommitWrite snapshots
+      // the prior barrier and must never wait on the mutation being created.
       // Confirmed reads need to wait for local catalog mutations, but not for
       // post-commit provider registration that cannot change the frozen snapshot.
       mutationBarrier = mutation.then(() => {}, () => {});
