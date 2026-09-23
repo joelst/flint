@@ -18,9 +18,8 @@ export const IPC_COMMAND_DEADLINES_MS: Record<SidecarCommandName, number | null>
   // bounded because `refreshModels` awaits it, so an unbounded stalled probe would leave an
   // otherwise successful catalog refresh pending forever.
   poolStatus: 20_000,
-  // Provider discovery waits behind any accelerator registration already in flight. That
-  // registration may download native packages and is intentionally unbounded; timing this
-  // query out would only discard the late, correct provider snapshot.
+  // Provider discovery is ordered behind an active provider installation, which is intentionally
+  // unbounded. Timing this query out would discard a valid late snapshot while setup continues.
   getEps: null,
   // WSL version discovery may use a 15-second subprocess timeout.
   wslStatus: 20_000,

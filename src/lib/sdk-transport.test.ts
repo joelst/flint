@@ -1147,7 +1147,7 @@ describe('progress stall notices', () => {
 });
 
 describe('one answer per request', () => {
-  it('bounds a dispatched read-only query and ignores a late reply', async () => {
+  it('bounds a dispatched finite read-only query and ignores a late reply', async () => {
     const sdk = await loadSdk();
     const warmup = sdk.getEps();
     const warmupId = await waitForWrite('getEps');
@@ -1156,8 +1156,8 @@ describe('one answer per request', () => {
 
     vi.useFakeTimers();
     try {
-      const query = capture(sdk.getEps());
-      const queryLine = harness.writes.filter((w) => w.includes('getEps')).at(-1)!;
+      const query = capture(sdk.getHealthRing());
+      const queryLine = harness.writes.filter((w) => w.includes('getHealthRing')).at(-1)!;
       const queryId = JSON.parse(queryLine).id;
 
       await vi.advanceTimersByTimeAsync(10_000);
@@ -1172,13 +1172,39 @@ describe('one answer per request', () => {
     }
   });
 
+  it('keeps provider discovery unbounded while it can wait for provider installation', async () => {
+    const sdk = await loadSdk();
+    const warmup = sdk.getEps();
+    const warmupId = await waitForWrite('getEps');
+    harness.emitStdout({ id: warmupId, result: [] });
+    await warmup;
+
+    vi.useFakeTimers();
+    try {
+      const query = capture(sdk.getEps());
+      const queryLine = harness.writes.filter((w) => w.includes('getEps')).at(-1)!;
+      const queryId = JSON.parse(queryLine).id;
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(query.box.done).toBe(false);
+      expect(sdkSnapshot(sdk).logs.at(-1)?.message).toBe(
+        'No progress reported for 60 seconds while running getEps. Still awaiting the runtime; Flint has not cancelled this operation.',
+      );
+
+      harness.emitStdout({ id: queryId, result: [] });
+      await query.tracked;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('revokes an undispatched query when its deadline expires during startup', async () => {
     const sdk = await loadSdk();
     gateSpawn = true;
 
     vi.useFakeTimers();
     try {
-      const query = capture(sdk.getEps());
+      const query = capture(sdk.getHealthRing());
       await vi.advanceTimersByTimeAsync(0);
       expect(harness.spawnEntered).toBe(true);
       expect(harness.writes).toHaveLength(0);
@@ -1189,7 +1215,7 @@ describe('one answer per request', () => {
 
       harness.releaseSpawn?.();
       await vi.advanceTimersByTimeAsync(250);
-      expect(harness.writes.filter((w) => w.includes('getEps'))).toHaveLength(0);
+      expect(harness.writes.filter((w) => w.includes('getHealthRing'))).toHaveLength(0);
     } finally {
       vi.useRealTimers();
     }

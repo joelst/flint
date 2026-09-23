@@ -152,6 +152,7 @@ const CATALOG_REGISTRATION_COMMANDS = new Set<SidecarCommandName>([
   'download',
   'load',
   'deleteModel',
+  'getEps',
   'importModelFolder',
   'linkModelFolder',
   'setModelTemplate',

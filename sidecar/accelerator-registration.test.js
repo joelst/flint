@@ -258,6 +258,74 @@ describe('registerDiscoveredExecutionProviders', () => {
     ]);
     expect(result.registeredEps).toEqual(['CPUExecutionProvider', 'CUDAExecutionProvider']);
   });
+
+  it('preserves fallback failures that later discovery does not report', async () => {
+    const providers = [];
+    const manager = {
+      discoverEps: vi.fn(() => providers),
+      downloadAndRegisterEps: vi.fn(async (names) => {
+        if (names === undefined) {
+          providers.push({ name: 'CPUExecutionProvider', isRegistered: true });
+          return {
+            success: false,
+            status: 'CUDA package failed',
+            registeredEps: ['CPUExecutionProvider'],
+            failedEps: ['CUDAExecutionProvider'],
+          };
+        }
+        return {
+          success: true,
+          registeredEps: names,
+          failedEps: [],
+        };
+      }),
+    };
+
+    await expect(registerDiscoveredExecutionProviders(manager)).resolves.toMatchObject({
+      success: false,
+      registeredEps: ['CPUExecutionProvider'],
+      failedEps: ['CUDAExecutionProvider'],
+      retry: true,
+    });
+  });
+
+  it('keeps fallback failures across the gate final retry', async () => {
+    const providers = [];
+    const manager = {
+      discoverEps: () => providers,
+      downloadAndRegisterEps: vi.fn(async (names) => {
+        if (names === undefined) {
+          providers.push({ name: 'CPUExecutionProvider', isRegistered: true });
+          return {
+            success: false,
+            status: 'CUDA package failed',
+            registeredEps: ['CPUExecutionProvider'],
+            failedEps: ['CUDAExecutionProvider'],
+          };
+        }
+        return {
+          success: true,
+          status: 'CPU remains registered',
+          registeredEps: ['CPUExecutionProvider'],
+          failedEps: [],
+        };
+      }),
+    };
+    const gate = createCatalogRegistrationGate(
+      (_progress, options) => registerDiscoveredExecutionProviders(
+        manager,
+        undefined,
+        options,
+      ),
+      vi.fn(),
+    );
+
+    await expect(gate.ensure()).resolves.toMatchObject({
+      success: false,
+      registeredEps: ['CPUExecutionProvider'],
+      failedEps: ['CUDAExecutionProvider'],
+    });
+  });
 });
 
 describe('native service startup', () => {
@@ -300,6 +368,16 @@ describe('native service startup', () => {
     expect(rerun).toBeGreaterThan(setup);
     expect(getEps).toBeGreaterThan(-1);
     expect(providerRead).toBeGreaterThan(getEps);
+    const evictionSweep = source.indexOf('async function runEvictionSweepLocked');
+    const evictionSweepEnd = source.indexOf('async function admitModel', evictionSweep);
+    const sweepFlow = source.slice(evictionSweep, evictionSweepEnd);
+    const cleanup = source.indexOf('async function performRuntimeCleanup');
+    const cleanupEnd = source.indexOf('let runtimeShutdownPromise', cleanup);
+    const cleanupFlow = source.slice(cleanup, cleanupEnd);
+    expect(sweepFlow).toContain('trySerializeModelOperation(');
+    expect(sweepFlow).not.toContain('serializeModelOperation(');
+    expect(cleanupFlow).toContain('trySerializeModelOperation(');
+    expect(cleanupFlow).not.toContain('serializeModelOperation(');
     expect(poolStatus).toBeGreaterThan(-1);
     expect(poolRead).toBeGreaterThan(poolStatus);
     expect(trackedPoolRead).toBeGreaterThan(poolRead);

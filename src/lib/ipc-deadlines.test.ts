@@ -31,6 +31,7 @@ describe('IPC command deadlines', () => {
     expect(deadlineForCommand('listModels')).toBeNull();
     expect(deadlineForCommand('getVisionModels')).toBeNull();
     expect(deadlineForCommand('getSTTModels')).toBeNull();
+    expect(deadlineForCommand('getEps')).toBeNull();
   });
 
   it('bounds pool telemetry, which never waits on accelerator registration', () => {

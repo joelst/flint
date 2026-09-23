@@ -37,7 +37,7 @@ export async function registerDiscoveredExecutionProviders(manager, onProgress, 
   if (typeof manager?.downloadAndRegisterEps !== 'function') return null;
 
   let usedLegacyFallback = false;
-  const fallbackFailures = new Map();
+  let fallbackResult = null;
   const initial = discoveredProviders(manager);
   if (initial.length === 0) {
     // An empty list is not proof the machine has no GPU. Discovery can be empty
@@ -57,6 +57,7 @@ export async function registerDiscoveredExecutionProviders(manager, onProgress, 
     // the catalog can be read before any provider that is visible after the call
     // gets an explicit registration.
     const fallback = await manager.downloadAndRegisterEps(onProgress);
+    fallbackResult = fallback && typeof fallback === 'object' ? fallback : null;
     usedLegacyFallback = true;
     for (const name of Array.isArray(fallback?.failedEps) ? fallback.failedEps : []) {
       const normalized = String(name || '').trim();
@@ -94,6 +95,14 @@ export async function registerDiscoveredExecutionProviders(manager, onProgress, 
 
   const registeredEps = [];
   const failedEps = [];
+  const fallbackFailures = new Set(
+    Array.isArray(fallbackResult?.failedEps) ? fallbackResult.failedEps : [],
+  );
+  for (const name of fallbackFailures) {
+    if (!failures.has(name)) {
+      failures.set(name, fallbackResult?.status || 'fallback registration failed');
+    }
+  }
   const seen = new Set();
   for (const provider of discoveredProviders(manager)) {
     const name = providerName(provider);
@@ -113,10 +122,8 @@ export async function registerDiscoveredExecutionProviders(manager, onProgress, 
     failedEps.push(name);
     if (!failures.has(name)) failures.set(name, 'runtime did not confirm registration');
   }
-  for (const [name, message] of fallbackFailures) {
-    if (seen.has(name)) continue;
-    failedEps.push(name);
-    failures.set(name, message);
+  for (const name of fallbackFailures) {
+    if (!failedEps.includes(name)) failedEps.push(name);
   }
 
   const success = failedEps.length === 0;
@@ -305,14 +312,20 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
       (Array.isArray(current.failedEps) ? current.failedEps : [])
         .filter((name) => !currentRegistered.has(name)),
     );
+    const previousFailed = new Set(
+      (Array.isArray(previous.failedEps) ? previous.failedEps : [])
+        .filter((name) => !currentRegistered.has(name)),
+    );
+    const failedEps = [...new Set([...previousFailed, ...currentFailed])];
+    const failed = new Set(failedEps);
     const registeredEps = [...new Set([
       ...(Array.isArray(previous.registeredEps) ? previous.registeredEps : [])
-        .filter((name) => !currentFailed.has(name)),
+        .filter((name) => !failed.has(name)),
       ...currentRegistered,
     ])];
-    const failedEps = [...currentFailed];
     const merged = {
       ...current,
+      success: current.success === false || failedEps.length > 0 ? false : current.success,
       registeredEps,
       failedEps,
     };
@@ -323,7 +336,11 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
         failedEps.length !== (Array.isArray(current.failedEps) ? current.failedEps.length : 0)
       )
     ) {
-      if (current.success === true) {
+      if (failedEps.length > 0) {
+        merged.status = `Registered ${registeredEps.length}; failed ${failedEps.length}: ${
+          failedEps.join(', ')
+        }`;
+      } else if (current.success === true) {
         merged.status = `Registered ${registeredEps.length} execution provider${
           registeredEps.length === 1 ? '' : 's'
         }`;

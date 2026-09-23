@@ -470,6 +470,10 @@ function serializeModelOperation(alias, scopes, operation) {
   return modelOperationQueue.run(alias, scopes, operation);
 }
 
+function trySerializeModelOperation(alias, scopes, operation) {
+  return modelOperationQueue.tryRun(alias, scopes, operation);
+}
+
 /** Settings “Install / Update Accelerators” uses the same command as startup.
  * The update still runs after catalog commitment, but new variants remain invisible
  * to the current immutable snapshot and require a runtime restart. */
@@ -667,14 +671,6 @@ async function unloadAliasLocked (alias) {
   return true;
 }
 
-function unloadAlias(alias) {
-  return serializeModelOperation(alias, ['residency'], () => unloadAliasLocked(alias));
-}
-
-// Callers that already hold the sweep lock use unloadAliasLocked directly. Taking the
-// model-operation queue from inside the sweep lock can deadlock against an ensureModel
-// operation that already owns the queue and is waiting for that same sweep lock.
-
 /**
  * Stop admitting work, let already-admitted commands finish for a bounded period, then release
  * native resources only when doing so cannot race an operation that still owns a model.
@@ -715,8 +711,13 @@ async function performRuntimeCleanup (
     if (drained) {
       await withSweepLock(async () => {
         for (const alias of [...pool.keys()]) {
-          if (await unloadAliasLocked(alias)) modelsUnloaded.push(alias);
-          else unloadFailures.push(alias);
+          const unload = trySerializeModelOperation(
+            alias,
+            ['residency'],
+            () => unloadAliasLocked(alias),
+          );
+          if (!unload || !(await unload)) unloadFailures.push(alias);
+          else modelsUnloaded.push(alias);
         }
       });
     }
@@ -826,7 +827,12 @@ async function runEvictionSweepLocked (options = {}) {
     // Priorities can change mid-sweep too, and a model the user just pinned must survive
     // the plan that was drawn before the pin.
     if (normalizePriority(modelPriorities.get(item.alias)) === 'pinned') continue;
-    if (await unloadAliasLocked(item.alias)) {
+    const unload = trySerializeModelOperation(
+      item.alias,
+      ['residency'],
+      () => unloadAliasLocked(item.alias),
+    );
+    if (unload && await unload) {
       log('info', describeEviction(item, evictionConfig));
       audit('evict', { alias: item.alias, reason: item.reason });
       done.push(item);
