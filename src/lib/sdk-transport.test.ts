@@ -1942,6 +1942,54 @@ describe('accelerator readiness ownership', () => {
     expect(harness.writes.filter((line) => line.includes('"cmd":"getEps"'))).toHaveLength(0);
   }, 15000);
 
+  it('sends rebuildBroken only for a provider recheck and keeps that result', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const install = sdk.ensureAccelerators();
+    const installId = await waitForWrite('ensureAccelerators');
+    const installPayload = JSON.parse(harness.writes.filter((line) => line.includes('"ensureAccelerators"'))[0]);
+    expect(installPayload.cmd).toBe('ensureAccelerators');
+    expect(installPayload.rebuildBroken).toBeUndefined();
+    harness.emitStdout({
+      id: installId,
+      result: { success: true, status: 'registered', registeredEps: [], failedEps: [] },
+    });
+    const installEps = await waitForWrite('getEps');
+    harness.emitStdout({ id: installEps, result: [] });
+    await install;
+
+    const recheck = sdk.ensureAccelerators(undefined, undefined, { rebuildBroken: true });
+    const recheckId = await waitForWrite('ensureAccelerators', 1);
+    const recheckPayload = JSON.parse(harness.writes.filter((line) => line.includes('"ensureAccelerators"'))[1]);
+    expect(recheckPayload.rebuildBroken).toBe(true);
+    harness.emitStdout({
+      id: recheckId,
+      result: {
+        success: false,
+        status: 'Provider still not registered',
+        registeredEps: ['WebGpuExecutionProvider'],
+        failedEps: ['CUDAExecutionProvider'],
+        removedProviderCaches: ['CUDAExecutionProvider'],
+        attemptedProviderRebuilds: ['CUDAExecutionProvider'],
+        busyProviderCaches: [],
+      },
+    });
+    const recheckEps = await waitForWrite('getEps', 1);
+    harness.emitStdout({
+      id: recheckEps,
+      result: [{ name: 'WebGpuExecutionProvider', isRegistered: true }],
+    });
+    await expect(recheck).resolves.toMatchObject({
+      registration: {
+        success: false,
+        failedEps: ['CUDAExecutionProvider'],
+        registeredEps: ['WebGpuExecutionProvider'],
+        busyProviderCaches: [],
+      },
+    });
+  }, 15000);
+
   it('rejects provider discovery completed by a sidecar that exits before confirmation', async () => {
     const sdk = await loadSdk();
     await completeInitialization(sdk);

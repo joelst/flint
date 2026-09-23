@@ -7,7 +7,9 @@
  *
  * Sequence: extract packages without scripts → restore cache → run install
  * scripts (the SDK installer skips downloading artifacts already present in
- * its prebuilds dir).
+ * its prebuilds dir). An ONNX Runtime DLL whose FileVersion is not the one
+ * pinned in deps_versions.json is removed first, so a leftover from the other
+ * Foundry SDK cannot satisfy that skip.
  */
 'use strict';
 
@@ -56,4 +58,11 @@ run(process.execPath, [path.join(__dirname, 'hydrate-foundry-native.cjs'), '--ba
 // Refuses a cache saved for a different SDK/runtime version and exits non-zero if
 // a matching cache fails to land.
 run(process.execPath, [path.join(__dirname, 'hydrate-foundry-native.cjs'), '--restore']);
+const { removeUnpinnedRuntimeFiles } = require('./foundry-native-payload.cjs');
+const removed = removeUnpinnedRuntimeFiles(path.join(root, 'node_modules', 'foundry-local-sdk'));
+if (removed.length > 0) {
+  console.log(
+    `[ci-npm-ci] removed ${removed.length} ONNX Runtime file(s) that do not match this SDK`,
+  );
+}
 run('npm', ['rebuild']);
