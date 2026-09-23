@@ -29,9 +29,16 @@ export function providerCacheSlug (epName) {
   const raw = String(epName || '').trim();
   const prefix = raw.replace(/ExecutionProvider$/i, '');
   if (!prefix || prefix === raw || !/^[A-Za-z0-9]+$/.test(prefix)) return null;
-  const slug = prefix.toLowerCase();
-  if (slug === 'cpu') return null;
-  return `${slug}-ep`;
+  const slug = `${prefix.toLowerCase()}-ep`;
+  if (!knownProviderCacheSlugs().has(slug)) return null;
+  return slug;
+}
+
+function knownProviderCacheSlugs () {
+  return new Set(KNOWN_PROVIDERS.map((name) => {
+    const prefix = name.replace(/ExecutionProvider$/i, '').toLowerCase();
+    return `${prefix}-ep`;
+  }));
 }
 
 /**

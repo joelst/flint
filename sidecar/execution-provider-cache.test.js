@@ -16,6 +16,7 @@ describe('provider cache paths', () => {
     expect(providerCacheSlug('CUDAExecutionProvider')).toBe('cuda-ep');
     expect(providerCacheSlug('WebGpuExecutionProvider')).toBe('webgpu-ep');
     expect(providerCacheSlug('CPUExecutionProvider')).toBeNull();
+    expect(providerCacheSlug('FooExecutionProvider')).toBeNull();
     expect(providerCacheSlug('../cuda-ep')).toBeNull();
     expect(providerCacheSlug('CUDAExecutionProvider/../../outside')).toBeNull();
   });
