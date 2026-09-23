@@ -18,6 +18,8 @@ describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
     expect(hooks).toContain('!macro NSIS_HOOK_PREINSTALL');
     expect(hooks).toContain('CheckIfAppIsRunning');
     expect(hooks).toContain('Rename "$INSTDIR\\foundry-local-sdk" "$INSTDIR\\foundry-local-sdk.previous"');
+    expect(hooks).toContain('prebuilds\\win32-arm64\\onnxruntime.dll');
+    expect(hooks).toContain('foundry-local-core\\win32-arm64\\onnxruntime.dll');
     expect(hooks).toContain('!macro NSIS_HOOK_POSTINSTALL');
     expect(hooks).toContain('Function .onInstFailed');
     expect(hooks).toContain('Function .onUserAbort');
