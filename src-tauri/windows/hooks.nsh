@@ -7,15 +7,22 @@
 !macro NSIS_HOOK_PREINSTALL
   !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
   Sleep 500
-  IfFileExists "$INSTDIR\foundry-local-sdk\*" 0 foundry_sdk_aside_done
-    IfFileExists "$INSTDIR\foundry-local-sdk.previous\*" 0 foundry_sdk_rename
-      RMDir /r "$INSTDIR\foundry-local-sdk.previous"
-    foundry_sdk_rename:
+  ; A stranded backup is the only known-good SDK after a failed restore.
+  ; Put it back first. If that fails, stop. Do not delete the backup.
+  IfFileExists "$INSTDIR\foundry-local-sdk.previous\*" 0 foundry_sdk_move
+    Call RestoreFoundrySdkBackup
+    Pop $0
+    StrCmp $0 "stranded" foundry_sdk_keep_backup
+  foundry_sdk_move:
+    IfFileExists "$INSTDIR\foundry-local-sdk\*" 0 foundry_sdk_aside_done
       ClearErrors
       Rename "$INSTDIR\foundry-local-sdk" "$INSTDIR\foundry-local-sdk.previous"
       IfErrors 0 foundry_sdk_aside_done
         MessageBox MB_OK|MB_ICONSTOP "Flint could not move the installed Foundry SDK aside. Close Flint, then run this installer again. Continuing would leave an older ONNX Runtime in place."
         Abort
+  foundry_sdk_keep_backup:
+    MessageBox MB_OK|MB_ICONSTOP "Flint could not put the previous Foundry SDK back because a file in the new copy is still open. Close that program, then rename foundry-local-sdk.previous to foundry-local-sdk in the Flint install folder."
+    Abort
   foundry_sdk_aside_done:
   SetOverwrite on
 !macroend
