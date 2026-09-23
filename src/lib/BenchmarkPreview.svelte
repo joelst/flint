@@ -904,7 +904,7 @@
                 </label>
                 <label>
                   Expected (stored, not scored)
-                  <input type="text" bind:value={row.expected} oninput={(e) => setPromptField(row, "expected", e.currentTarget.value)} />
+                  <textarea rows="2" bind:value={row.expected} oninput={(e) => setPromptField(row, "expected", e.currentTarget.value)}></textarea>
                 </label>
                 <label>
                   Tags (JSON array)

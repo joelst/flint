@@ -59,6 +59,15 @@ describe('benchmark editor wiring', () => {
     expect(source).not.toContain('Tags (comma-separated)');
   });
 
+  it('uses a textarea so multiline expected answers round-trip', () => {
+    expect(source).toMatch(
+      /Expected \(stored, not scored\)[\s\S]*?<textarea rows="2" bind:value=\{row\.expected\}/,
+    );
+    expect(source).not.toMatch(
+      /Expected \(stored, not scored\)[\s\S]*?<input type="text" bind:value=\{row\.expected\}/,
+    );
+  });
+
   it('explains when duplicating a legacy suite removes repeated aliases', () => {
     expect(source).toContain('const removedTargets = suite.targets.length - draft.targets.length;');
     expect(source).toContain('Benchmark targets are keyed by alias.');
