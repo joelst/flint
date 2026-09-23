@@ -82,6 +82,23 @@ describe('registerDiscoveredExecutionProviders', () => {
     expect(manager.downloadAndRegisterEps).toHaveBeenCalledWith(onProgress);
   });
 
+  it('marks a failed legacy fallback for one bounded retry', async () => {
+    const fallback = {
+      success: false,
+      status: 'provider package unavailable',
+      registeredEps: [],
+      failedEps: ['CUDAExecutionProvider'],
+    };
+    const manager = {
+      downloadAndRegisterEps: vi.fn().mockResolvedValue(fallback),
+    };
+
+    await expect(registerDiscoveredExecutionProviders(manager)).resolves.toEqual({
+      ...fallback,
+      retry: true,
+    });
+  });
+
   it('registers a provider that shows up only after another registration', async () => {
     let discovered = [{ name: 'CUDAExecutionProvider', isRegistered: false }];
     const manager = {
@@ -475,6 +492,97 @@ describe('createCatalogRegistrationGate', () => {
     ]);
     await gate.ensure();
     expect(register).toHaveBeenCalledTimes(3);
+  });
+
+  it('retries a failed one-provider fallback once before keeping the result', async () => {
+    const manager = {
+      discoverEps: vi.fn(() => []),
+      downloadAndRegisterEps: vi.fn()
+        .mockResolvedValueOnce({
+          success: false,
+          registeredEps: [],
+          failedEps: ['CUDAExecutionProvider'],
+        })
+        .mockResolvedValueOnce({
+          success: true,
+          registeredEps: ['CUDAExecutionProvider'],
+          failedEps: [],
+        }),
+    };
+    const register = vi.fn((onProgress, options) => (
+      registerDiscoveredExecutionProviders(manager, onProgress, options)
+    ));
+    const gate = createCatalogRegistrationGate(register);
+
+    await expect(gate.ensure()).resolves.toEqual({
+      success: true,
+      registeredEps: ['CUDAExecutionProvider'],
+      failedEps: [],
+    });
+    expect(register.mock.calls.map(([, options]) => options.allowLegacyFallback)).toEqual([
+      false,
+      false,
+      true,
+      true,
+    ]);
+    expect(manager.downloadAndRegisterEps).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps a second failed fallback without retrying later readers', async () => {
+    const manager = {
+      discoverEps: vi.fn(() => []),
+      downloadAndRegisterEps: vi.fn()
+        .mockResolvedValueOnce({
+          success: false,
+          registeredEps: ['CPUExecutionProvider'],
+          failedEps: ['CUDAExecutionProvider'],
+        })
+        .mockResolvedValueOnce({
+          success: false,
+          registeredEps: [],
+          failedEps: ['CUDAExecutionProvider'],
+        }),
+    };
+    const register = vi.fn((onProgress, options) => (
+      registerDiscoveredExecutionProviders(manager, onProgress, options)
+    ));
+    const gate = createCatalogRegistrationGate(register);
+
+    const first = await gate.ensure();
+    await expect(gate.ensure()).resolves.toBe(first);
+    expect(first).toMatchObject({
+      success: false,
+      registeredEps: ['CPUExecutionProvider'],
+      failedEps: ['CUDAExecutionProvider'],
+    });
+    expect(register).toHaveBeenCalledTimes(4);
+    expect(manager.downloadAndRegisterEps).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps partial fallback results when the bounded retry throws', async () => {
+    const manager = {
+      discoverEps: vi.fn(() => []),
+      downloadAndRegisterEps: vi.fn()
+        .mockResolvedValueOnce({
+          success: false,
+          registeredEps: ['CPUExecutionProvider'],
+          failedEps: ['CUDAExecutionProvider'],
+        })
+        .mockRejectedValueOnce(new Error('fallback retry failed')),
+    };
+    const register = vi.fn((onProgress, options) => (
+      registerDiscoveredExecutionProviders(manager, onProgress, options)
+    ));
+    const gate = createCatalogRegistrationGate(register);
+
+    await expect(gate.ensure()).resolves.toEqual({
+      success: false,
+      status: 'Registered 1; last attempt failed: fallback retry failed',
+      registeredEps: ['CPUExecutionProvider'],
+      failedEps: ['CUDAExecutionProvider'],
+    });
+    expect(register).toHaveBeenCalledTimes(4);
+    expect(manager.downloadAndRegisterEps).toHaveBeenCalledTimes(2);
   });
 
   it('keeps a terminal failure when the last attempt throws, including providers from an earlier attempt', async () => {

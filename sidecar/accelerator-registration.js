@@ -12,6 +12,11 @@ function providerName(provider) {
   return String(provider?.name || '').trim();
 }
 
+// Module-private and non-enumerable so callers receive the SDK-shaped result while
+// the gate can distinguish an empty-discovery fallback failure from other retries.
+// The register callback must return this result object unchanged.
+const retryLegacyFallback = Symbol('retryLegacyFallback');
+
 /**
  * Register every provider the runtime discovered before the catalog is first read.
  *
@@ -44,7 +49,14 @@ export async function registerDiscoveredExecutionProviders(manager, onProgress, 
     // the catalog can be read before any provider that is visible after the call
     // gets an explicit registration.
     const fallback = await manager.downloadAndRegisterEps(onProgress);
-    if (!discoveredProviders(manager).some((provider) => providerName(provider))) return fallback;
+    if (!discoveredProviders(manager).some((provider) => providerName(provider))) {
+      if (fallback?.success === false) {
+        const retryableFallback = { ...fallback, retry: true };
+        Object.defineProperty(retryableFallback, retryLegacyFallback, { value: true });
+        return retryableFallback;
+      }
+      return fallback;
+    }
   }
 
   const failures = new Map();
@@ -106,13 +118,13 @@ export async function registerDiscoveredExecutionProviders(manager, onProgress, 
   };
 }
 
-/** Attempts before a catalog read, including the first. A provider that keeps failing must not block the catalog forever. */
+/** Discovery attempts before a catalog read. A failed final fallback gets one additional bounded fallback retry. */
 const CATALOG_REGISTRATION_ATTEMPTS = 3;
 
 /**
  * The bounded attempts are spent. Callers must be able to read the catalog anyway.
  * A thrown last attempt used to clear the gate, so every later list, load, and
- * service start ran the same three failures and never got that far. Providers
+ * service start ran the same bounded failures and never got that far. Providers
  * that registered on an earlier attempt stay in the result; another pass cannot
  * add them after this result is kept and the snapshot is taken.
  */
@@ -131,12 +143,12 @@ function terminalRegistrationResult(previous, error) {
 }
 
 /**
- * Registration before the first catalog read, plus one explicit retry before that
- * read is committed.
+ * Registration before the first catalog read, including one final bounded retry
+ * when the delayed no-discovery fallback itself fails.
  *
  * Catalog readers share one cycle: an empty discovery or a failed download is tried
- * again inside that cycle, and a throw on the last attempt is kept so later readers
- * are not sent through the same three failures. Once a catalog read commits, the
+ * again inside that cycle, and a terminal failure is kept so later readers are not
+ * sent through the same failures. Once a catalog read commits, the
  * snapshot cannot gain providers, so `ensure` does not run again.
  *
  * Settings can call `rerun` before or after that commit. Startup's
@@ -175,6 +187,17 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
         continue;
       }
       if (!last?.retry) return last;
+    }
+    if (last?.[retryLegacyFallback]) {
+      try {
+        const fallbackRetry = await register(
+          (name, pct) => notify(name, pct),
+          { allowLegacyFallback: true },
+        );
+        return preserveRegisteredProviders(last, fallbackRetry);
+      } catch (error) {
+        return terminalRegistrationResult(last, error);
+      }
     }
     return last;
   }
