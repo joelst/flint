@@ -28,11 +28,21 @@ describe('killAndWait', () => {
   });
 
   it.skipIf(process.platform === 'win32')('force-kills a child that ignores SIGTERM', async () => {
+    // 'spawn' fires before the child runs any code, so wait until it reports that its
+    // SIGTERM handler is installed; otherwise the first signal kills it by default.
     const proc = spawn(process.execPath, [
       '-e',
-      "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)",
+      "process.on('SIGTERM', () => {}); process.stdout.write('ready\\n'); setInterval(() => {}, 1000)",
     ]);
-    await new Promise<void>((resolve) => proc.once('spawn', resolve));
+    await new Promise<void>((resolve, reject) => {
+      let output = '';
+      proc.once('error', reject);
+      proc.once('exit', (code, signal) => reject(new Error(`Child exited before it was ready (${code ?? signal}).`)));
+      proc.stdout.on('data', (chunk: Buffer) => {
+        output += chunk.toString();
+        if (output.includes('ready')) resolve();
+      });
+    });
     await killAndWait(proc, 50);
     expect(proc.signalCode).toBe('SIGKILL');
   });
