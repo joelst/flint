@@ -247,7 +247,21 @@
   let showFirstRunCoach = $state(false);
 
   async function refreshCatalogModels() {
-    await sdkRefreshModels();
+    let catalogProgressMessage = "";
+    try {
+      await sdkRefreshModels(
+        (epName, pct) => {
+          catalogProgressMessage = `Catalog accelerator ${epName}: ${pct.toFixed(0)}%`;
+          statusMessage = catalogProgressMessage;
+        },
+        () => {
+          catalogProgressMessage = "Catalog refresh: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.";
+          statusMessage = catalogProgressMessage;
+        },
+      );
+    } finally {
+      if (statusMessage === catalogProgressMessage) statusMessage = "";
+    }
     // state.models is empty until this returns. Checking earlier always no-ops, and
     // auto-select will not replace a leftover alias. A conversation's own model stays
     // so the not-installed explanation is not swapped for another model.

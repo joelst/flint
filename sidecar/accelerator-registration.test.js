@@ -217,6 +217,9 @@ describe('native service startup', () => {
     const poolStatus = source.indexOf("} else if (cmd === 'poolStatus') {");
     const poolSeal = source.indexOf('seal: true', poolStatus);
     const loadedModels = source.indexOf('manager.catalog.getLoadedModels()', poolStatus);
+    const listModels = source.indexOf("} else if (cmd === 'listModels') {");
+    const listProgress = source.indexOf('beforeCatalogRead(reportCatalogProgress', listModels);
+    const listRead = source.indexOf('manager.catalog.getModels()', listModels);
     expect(gateStart).toBeGreaterThan(-1);
     expect(forcedRead).toBeGreaterThan(gateStart);
     expect(start).toBeGreaterThan(-1);
@@ -230,6 +233,17 @@ describe('native service startup', () => {
     expect(poolStatus).toBeGreaterThan(-1);
     expect(poolSeal).toBeGreaterThan(poolStatus);
     expect(poolSeal).toBeLessThan(loadedModels);
+    expect(listModels).toBeGreaterThan(-1);
+    expect(listProgress).toBeGreaterThan(listModels);
+    expect(listProgress).toBeLessThan(listRead);
+    for (const cmd of ['getSTTModels', 'getVisionModels', 'download']) {
+      const at = source.indexOf(`} else if (cmd === '${cmd}') {`);
+      const progress = source.indexOf('beforeCatalogRead(reportCatalogProgress', at);
+      expect(progress, cmd).toBeGreaterThan(at);
+    }
+    const load = source.indexOf("} else if (cmd === 'load') {");
+    expect(source.indexOf('ensureModel(payload.alias, payload.variantId, reportCatalogProgress)', load))
+      .toBeGreaterThan(load);
     for (const cmd of ['importModelFolder', 'linkModelFolder', 'setModelTemplate']) {
       const at = source.indexOf(`} else if (cmd === '${cmd}') {`);
       const atomicMutation = source.indexOf('runCatalogMutation(', at);

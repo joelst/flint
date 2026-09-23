@@ -953,6 +953,28 @@ describe('cancellation before dispatch', () => {
 });
 
 describe('progress stall notices', () => {
+  it('reports a quiet catalog-triggered provider registration and retires the notice on failure', async () => {
+    const sdk = await loadSdk();
+    vi.useFakeTimers();
+
+    const refresh = capture(sdk.refreshModels());
+    await vi.advanceTimersByTimeAsync(0);
+    const listLine = harness.writes.find((line) => line.includes('"listModels"'))!;
+    const listId = JSON.parse(listLine).id;
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sdkSnapshot(sdk).logs.at(-1)?.message).toBe(
+      'Catalog refresh: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.',
+    );
+
+    harness.emitStdout({ id: listId, error: 'catalog unavailable' });
+    await refresh.tracked;
+    expect(refresh.box.err.message).toContain('catalog unavailable');
+    const notices = sdkSnapshot(sdk).logs.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sdkSnapshot(sdk).logs).toHaveLength(notices);
+  });
+
   it('starts the download quiet period at dispatch and resets it on progress', async () => {
     const sdk = await loadSdk();
     gateSpawn = true;

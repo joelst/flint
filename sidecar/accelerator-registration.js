@@ -246,12 +246,13 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
         return settled;
       });
     },
-    mutateAndCommit(operation, onCommitError) {
+    mutateAndCommit(operation, onCommitError, onProgress) {
       if (typeof onCommitError !== 'function') {
         return Promise.reject(new TypeError('mutateAndCommit requires an onCommitError handler'));
       }
+      const report = typeof onProgress === 'function' ? onProgress : null;
       return enqueue(async () => {
-        if (!settled) settled = await attempts(null);
+        if (!settled) settled = await attempts(report);
         let catalogRefreshRequiresRestart = committed;
         const result = await operation();
         try {

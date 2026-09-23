@@ -443,14 +443,18 @@ async function rerunAcceleratorRegistration(onProgress) {
   return gate.rerun(onProgress);
 }
 
-async function runCatalogMutation(mutate, operation) {
+async function runCatalogMutation(mutate, operation, onProgress) {
   const gate = acceleratorGate();
   if (!gate) {
     throw new Error(`Cannot perform ${operation}: initialize the Foundry runtime first`);
   }
-  const { result, catalogRefreshRequiresRestart } = await gate.mutateAndCommit(mutate, (error) => {
-    log('warn', `Catalog snapshot read failed after ${operation}: ${error?.message ?? error}`);
-  });
+  const { result, catalogRefreshRequiresRestart } = await gate.mutateAndCommit(
+    mutate,
+    (error) => {
+      log('warn', `Catalog snapshot read failed after ${operation}: ${error?.message ?? error}`);
+    },
+    onProgress,
+  );
   try {
     manager?.catalog?.invalidateCache?.();
   } catch (error) {
@@ -1850,11 +1854,11 @@ function setModelTemplate(name, promptTemplate) {
  */
 const ensureModelLocks = new Map();
 
-function ensureModel(alias, variantId) {
+function ensureModel(alias, variantId, onCatalogProgress) {
   const inFlightLoad = ensureModelLocks.get(alias);
   const previousResult = inFlightLoad ? inFlightLoad.catch(() => null) : Promise.resolve(null);
   const next = previousResult.then(async (previous) => {
-      const result = await ensureModelLocked(alias, variantId);
+      const result = await ensureModelLocked(alias, variantId, onCatalogProgress);
       if (inFlightLoad && result.loadedNow !== true) {
         // A preceding request may have loaded or reloaded this model while this request waited.
         // Only a preceding known-warm result remains warm; the other cases are unknowable from
@@ -1874,7 +1878,7 @@ function ensureModel(alias, variantId) {
   return next;
 }
 
-async function ensureModelLocked(alias, variantId) {
+async function ensureModelLocked(alias, variantId, onCatalogProgress) {
   const existing = pool.get(alias);
   let switchingVariant = false;
   if (existing) {
@@ -1943,7 +1947,7 @@ async function ensureModelLocked(alias, variantId) {
     },
   } : null);
   try {
-    await beforeCatalogRead(undefined, { commit: true });
+    await beforeCatalogRead(onCatalogProgress, { commit: true });
     const catModel = await manager.catalog.getModel(alias);
     if (variantId) {
       const variant = await manager.catalog.getModelVariant(variantId);
@@ -2422,6 +2426,9 @@ rl.on('line', async (line) => {
   const reply = (result, callback) => {
     send({ id, protocolVersion: SIDECAR_PROTOCOL_VERSION, ...result }, callback);
   };
+  const reportCatalogProgress = (epName, percent) => {
+    if (Number.isFinite(percent)) send({ id, progress: percent, ep: epName });
+  };
 
   if (protocolVersion !== undefined && protocolVersion !== SIDECAR_PROTOCOL_VERSION) {
     reply({ error: `Unsupported sidecar protocol version: ${String(protocolVersion)}` });
@@ -2498,7 +2505,7 @@ rl.on('line', async (line) => {
       audit('init', { appName, libraryPath });
       reply({ ok: true, result: 'initialized' });
     } else if (cmd === 'listModels') {
-      await beforeCatalogRead(undefined, { commit: true });
+      await beforeCatalogRead(reportCatalogProgress, { commit: true });
       const models = await manager.catalog.getModels();
       cacheModelIndexFromCatalog(models);
       reply({
@@ -2553,7 +2560,7 @@ rl.on('line', async (line) => {
         })
       });
     } else if (cmd === 'getSTTModels') {
-      await beforeCatalogRead(undefined, { commit: true });
+      await beforeCatalogRead(reportCatalogProgress, { commit: true });
       const all = await manager.catalog.getModels();
       const stt = all.filter(m => {
         const t = (m.info?.task || '').toLowerCase();
@@ -2562,7 +2569,7 @@ rl.on('line', async (line) => {
       });
       reply({ ok: true, result: stt.map(m => ({ alias: m.alias, cached: m.isCached })) });
     } else if (cmd === 'getVisionModels') {
-      await beforeCatalogRead(undefined, { commit: true });
+      await beforeCatalogRead(reportCatalogProgress, { commit: true });
       const all = await manager.catalog.getModels();
       const vision = all.filter(m => {
         const t = (m.info?.task || '').toLowerCase();
@@ -2572,7 +2579,7 @@ rl.on('line', async (line) => {
       });
       reply({ ok: true, result: vision.map(m => ({ alias: m.alias, cached: m.isCached })) });
     } else if (cmd === 'download') {
-      await beforeCatalogRead(undefined, { commit: true });
+      await beforeCatalogRead(reportCatalogProgress, { commit: true });
       const model = payload.variantId
         ? await manager.catalog.getModelVariant(payload.variantId)
         : await manager.catalog.getModel(payload.alias);
@@ -2584,7 +2591,7 @@ rl.on('line', async (line) => {
       audit('download.complete', { alias: payload.alias, variantId: payload.variantId ?? null });
       reply({ ok: true });
     } else if (cmd === 'load') {
-      const entry = await ensureModel(payload.alias, payload.variantId);
+      const entry = await ensureModel(payload.alias, payload.variantId, reportCatalogProgress);
       const acceleration = {
         requested: null,
         active: await detectActiveExecutionProvider(entry.catModel)
@@ -2627,7 +2634,7 @@ rl.on('line', async (line) => {
         return false;
       };
 
-      await beforeCatalogRead(undefined, { commit: true });
+      await beforeCatalogRead(reportCatalogProgress, { commit: true });
       if (variantId) {
         // Delete a single variant from the local cache.
         const variant = await manager.catalog.getModelVariant(variantId);
@@ -2685,13 +2692,21 @@ rl.on('line', async (line) => {
     } else if (cmd === 'inspectModelFolder') {
       reply({ ok: true, result: inspectFolder(payload.folderPath) });
     } else if (cmd === 'importModelFolder') {
-      const result = await runCatalogMutation(() => importModelFolder(payload), 'model import');
+      const result = await runCatalogMutation(
+        () => importModelFolder(payload),
+        'model import',
+        reportCatalogProgress,
+      );
       log('info', `Imported model ${result.name}:${result.version} from ${payload.folderPath}`);
       invalidateModelIndex();
       audit('importModelFolder', { alias: result.name, variantId: `${result.name}:${result.version}`, kind: 'copy' });
       reply({ ok: true, result });
     } else if (cmd === 'linkModelFolder') {
-      const result = await runCatalogMutation(() => linkModelFolder(payload), 'model link');
+      const result = await runCatalogMutation(
+        () => linkModelFolder(payload),
+        'model link',
+        reportCatalogProgress,
+      );
       log('info', `Linked model ${result.name} -> ${result.target}`);
       invalidateModelIndex();
       audit('linkModelFolder', { alias: result.name, variantId: null, kind: 'junction' });
@@ -2702,6 +2717,7 @@ rl.on('line', async (line) => {
       const result = await runCatalogMutation(
         () => setModelTemplate(payload.name, payload.promptTemplate),
         'template update',
+        reportCatalogProgress,
       );
       log('info', `Updated prompt template for ${result.name}`);
       audit('setModelTemplate', { alias: result.name, variantId: null });
@@ -2737,9 +2753,9 @@ rl.on('line', async (line) => {
         // can explicitly defer that network-backed read when the user disabled automatic
         // catalog checks, after its own accelerator setup has completed.
         if (payload.deferCatalogRead) {
-          await beforeCatalogRead(undefined, { seal: true });
+          await beforeCatalogRead(reportCatalogProgress, { seal: true });
         } else {
-          await beforeCatalogRead(undefined, { commit: true });
+          await beforeCatalogRead(reportCatalogProgress, { commit: true });
         }
         // Start service BEFORE loading models so HTTP routing layer initializes with the registry.
         if (typeof manager.startWebService === 'function') {
@@ -3389,7 +3405,7 @@ rl.on('line', async (line) => {
       try {
         // Loaded-model telemetry must serialize behind provider setup without
         // turning the no-startup-refresh setting into a registry catalog read.
-        await beforeCatalogRead(undefined, { seal: true });
+        await beforeCatalogRead(reportCatalogProgress, { seal: true });
         const loaded = await manager.catalog.getLoadedModels();
         for (const m of loaded) loadedIds.add(m.id);
       } catch {}

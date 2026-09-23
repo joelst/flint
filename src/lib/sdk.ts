@@ -134,6 +134,19 @@ type ProgressHandler = {
   watchdog?: ProgressStallWatchdog;
 };
 let progressHandlers = new Map<number, ProgressHandler>();
+const CATALOG_REGISTRATION_COMMANDS = new Set<SidecarCommandName>([
+  'listModels',
+  'getSTTModels',
+  'getVisionModels',
+  'download',
+  'load',
+  'deleteModel',
+  'importModelFolder',
+  'linkModelFolder',
+  'setModelTemplate',
+  'startService',
+  'poolStatus',
+]);
 let msgId = 0;
 let currentStatus: any = { initialized: false, modelLoaded: false, serviceRunning: false };
 let currentRuntimeServiceState: RuntimeServiceState = 'unknown';
@@ -515,6 +528,17 @@ function registerProgressHandler(
         })
       : undefined,
   });
+}
+
+function reportCatalogProgressStall() {
+  appendAppLog(
+    'Catalog refresh: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.',
+    'warn',
+  );
+}
+
+function registerCatalogProgressHandler(id: number) {
+  registerProgressHandler(id, undefined, reportCatalogProgressStall);
 }
 
 function updateState(partial: Partial<FlintSDKState>) {
@@ -1072,6 +1096,9 @@ export function sendInternal(
       return promise;
     }
   }
+  if (CATALOG_REGISTRATION_COMMANDS.has(cmd) && !progressHandlers.has(id)) {
+    registerCatalogProgressHandler(id);
+  }
 
   /** Settles once. A later close, or a write rejection that lands after a reply, is ignored. */
   const settle = (fn: () => void) => {
@@ -1531,11 +1558,22 @@ async function performInitializeSDK(config: Partial<any>): Promise<boolean> {
   }
 }
 
-export async function refreshModels(): Promise<void> {
+export async function refreshModels(
+  onProgress?: (epName: string, percent: number) => void,
+  onStall?: () => void,
+): Promise<void> {
   updateRuntime({ models: 'loading' });
   updateState({ catalogStatus: 'loading', catalogError: null });
   try {
-    const res = await send('listModels');
+    const res = await sendInternal('listModels', {}, undefined, (id: number) => {
+      registerProgressHandler(
+        id,
+        onProgress
+          ? (percent, detail) => onProgress(String(detail?.ep || 'accelerator'), percent)
+          : undefined,
+        onStall ?? reportCatalogProgressStall,
+      );
+    });
     const list = res.result || [];
     let currentLoadedAlias: string | undefined;
 

@@ -67,10 +67,10 @@ describe('prepareHydratedRuntime', () => {
       refreshCatalogStart,
     );
     const refreshCatalog = source.slice(refreshCatalogStart, refreshCatalogEnd);
-    expect(refreshCatalog).toContain('await sdkRefreshModels();');
+    expect(refreshCatalog).toContain('await sdkRefreshModels(');
     expect(refreshCatalog).not.toContain('catalogRefreshError');
     expect(refreshCatalog.indexOf('is no longer available')).toBeGreaterThan(
-      refreshCatalog.indexOf('await sdkRefreshModels();'),
+      refreshCatalog.indexOf('await sdkRefreshModels('),
     );
     expect(startup).toMatch(
       /if \(autoRefreshCatalogOnStartup\) \{\s+await refreshCatalogModels\(\);/,
@@ -161,6 +161,21 @@ describe('prepareHydratedRuntime', () => {
     expect(importFlow).toMatch(/Restart Flint[\s\S]*?appendAppLog\(statusMessage, "warn"\)/);
     expect(templateFlow).toContain('result.catalogRefreshRequiresRestart');
     expect(templateFlow).toMatch(/Restart Flint[\s\S]*?appendAppLog\(statusMessage, "warn"\)/);
+  });
+
+  it('shows progress and quiet-period guidance for manual catalog refresh registration', () => {
+    const source = readFileSync(
+      join(process.cwd(), 'src', 'routes', '+page.svelte'),
+      'utf8',
+    );
+    const start = source.indexOf('async function refreshCatalogModels()');
+    const end = source.indexOf('/** About strip', start);
+    const refresh = source.slice(start, end);
+
+    expect(refresh).toContain('sdkRefreshModels(');
+    expect(refresh).toContain('Catalog accelerator');
+    expect(refresh).toContain('no progress reported for 60 seconds');
+    expect(refresh).toContain('if (statusMessage === catalogProgressMessage) statusMessage = "";');
   });
 
   describe('startup preference resolution', () => {
