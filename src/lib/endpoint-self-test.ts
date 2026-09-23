@@ -149,6 +149,38 @@ export function matchesVerifiedModel(modelId: string, alias: string | null | und
   return id === name || id.startsWith(`${name}-`);
 }
 
+export interface EndpointCatalogModel {
+  alias: string;
+  variants?: ReadonlyArray<{ id?: string | null }> | null;
+}
+
+/**
+ * The catalog model an endpoint id belongs to.
+ *
+ * A listed id is an alias, a variant id, or a variant id without its `:<version>`. A variant
+ * id need not start with its alias (a BYOM import is `vectorizer-one` with a variant
+ * `custom-model-one-generic-cpu`), so those forms are matched exactly first. Only when nothing
+ * matches does the `alias-` prefix heuristic run, longest alias first, so `phi-4-mini-instruct`
+ * beats `phi-4` for `phi-4-mini-instruct-generic-cpu`.
+ */
+export function catalogModelForEndpointId<M extends EndpointCatalogModel>(
+  models: readonly M[],
+  modelId: string,
+): M | null {
+  const id = modelId.trim().toLowerCase();
+  if (!id) return null;
+  for (const model of models) {
+    if (model.alias.toLowerCase() === id) return model;
+    for (const variant of model.variants ?? []) {
+      const variantId = String(variant.id ?? '').toLowerCase();
+      if (variantId && (variantId === id || variantId.split(':')[0] === id)) return model;
+    }
+  }
+  return [...models]
+    .filter((model) => matchesVerifiedModel(id, model.alias))
+    .sort((a, b) => b.alias.length - a.alias.length)[0] ?? null;
+}
+
 export interface ListedEndpointModel {
   id: string;
   parent: string | null;

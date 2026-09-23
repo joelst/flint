@@ -166,9 +166,9 @@
     isEmptyAssistantPlaceholder,
   } from "$lib/chat-request";
   import {
+    catalogModelForEndpointId,
     flintVerifiedFromReport,
     groupSelfTestChecks,
-    matchesVerifiedModel,
     runEndpointSelfTest,
     type FlintVerified,
     type SelfTestReport,
@@ -350,13 +350,8 @@
         endpoint: state.endpoint || null,
         classifyModel,
         disconnectModelId: preferredResidentChatAlias(initialPool, classifyModel),
-        supportsToolCalling: (modelId: string) => {
-          const exact = catalogModels.find((m: ModelInfo) => m.alias === modelId);
-          const matched = exact ?? [...catalogModels]
-            .filter((m: ModelInfo) => matchesVerifiedModel(modelId, m.alias))
-            .sort((a: ModelInfo, b: ModelInfo) => b.alias.length - a.alias.length)[0];
-          return matched?.supportsToolCalling ?? null;
-        },
+        supportsToolCalling: (modelId: string) =>
+          catalogModelForEndpointId(catalogModels, modelId)?.supportsToolCalling ?? null,
         prepareSpeechModel: async (modelId: string) => {
           // The same cached build the gateway routes this id to: highest cached version for
           // a versionless id, never an uncached one.
@@ -8418,7 +8413,7 @@ Output only the summary text, no preamble.`;
                           <strong>Flint-verified:</strong>
                           {#if lastFlintVerified}
                             {@const verifiedRows = (lastFlintVerified.aliases ?? []).filter((row) =>
-                              matchesVerifiedModel(row.modelId, detailModel.alias))}
+                              catalogModelForEndpointId(state.models, row.modelId)?.alias === detailModel.alias)}
                             {#if verifiedRows.length}
                               {#each verifiedRows as row}
                                 <div>

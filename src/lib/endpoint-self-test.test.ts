@@ -4,6 +4,7 @@ import {
   endpointAliases,
   flintVerifiedFromReport,
   groupSelfTestChecks,
+  catalogModelForEndpointId,
   matchesVerifiedModel,
   runEndpointSelfTest,
 } from './endpoint-self-test';
@@ -978,5 +979,38 @@ describe('matchesVerifiedModel', () => {
     expect(matchesVerifiedModel('phi-4-mini-instruct-generic-cpu', 'phi-4-mini-instruct')).toBe(true);
     expect(matchesVerifiedModel('phi-4-mini-instruct', 'phi-4-mini-instruct')).toBe(true);
     expect(matchesVerifiedModel('other-cpu', 'phi-4')).toBe(false);
+  });
+});
+
+describe('catalogModelForEndpointId', () => {
+  const vectorizer = {
+    alias: 'vectorizer-one',
+    variants: [{ id: 'custom-model-one-generic-cpu:1' }],
+    supportsToolCalling: false,
+  };
+  const phi4 = { alias: 'phi-4', variants: [{ id: 'phi-4-generic-cpu:2' }], supportsToolCalling: true };
+  const phi4Mini = {
+    alias: 'phi-4-mini-instruct',
+    variants: [{ id: 'phi-4-mini-instruct-generic-cpu:3' }],
+    supportsToolCalling: true,
+  };
+  const models = [phi4, vectorizer, phi4Mini];
+
+  it('resolves an opaque variant id, with or without its version, to its alias', () => {
+    expect(catalogModelForEndpointId(models, 'custom-model-one-generic-cpu')).toBe(vectorizer);
+    expect(catalogModelForEndpointId(models, 'custom-model-one-generic-cpu:1')).toBe(vectorizer);
+    expect(catalogModelForEndpointId(models, 'Custom-Model-One-Generic-CPU')).toBe(vectorizer);
+  });
+
+  it('resolves an alias exactly', () => {
+    expect(catalogModelForEndpointId(models, 'vectorizer-one')).toBe(vectorizer);
+    expect(catalogModelForEndpointId(models, 'phi-4')).toBe(phi4);
+  });
+
+  it('falls back to the longest alias prefix only when no id matches', () => {
+    // Not a listed variant of either model; the prefix rule prefers the longer alias.
+    expect(catalogModelForEndpointId(models, 'phi-4-mini-instruct-generic-cuda')).toBe(phi4Mini);
+    expect(catalogModelForEndpointId(models, 'phi-4-generic-cuda')).toBe(phi4);
+    expect(catalogModelForEndpointId(models, 'unrelated-model')).toBeNull();
   });
 });
