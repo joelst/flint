@@ -2154,6 +2154,76 @@ describe('accelerator readiness ownership', () => {
     });
   }, 15000);
 
+  it('logs the default quiet-period notice once when any accelerator caller omits one', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const customStall = vi.fn();
+    const automatic = sdk.ensureAccelerators();
+    const joined = sdk.ensureAccelerators(undefined, customStall);
+    const registrationId = await waitForWrite('ensureAccelerators');
+    vi.useFakeTimers();
+    // Rearms the quiet-period watchdog under the fake clock.
+    harness.emitStdout({ id: registrationId, progress: 10, ep: 'CUDAExecutionProvider' });
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    const notices: string[] = sdkSnapshot(sdk).logs
+      .map((entry: { message: string }) => entry.message)
+      .filter((message: string) => message.includes('while running ensureAccelerators'));
+    expect(notices).toEqual([
+      'No progress reported for 60 seconds while running ensureAccelerators. Still awaiting the runtime; Flint has not cancelled this operation.',
+    ]);
+    expect(customStall).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+
+    harness.emitStdout({
+      id: registrationId,
+      result: { success: true, registeredEps: ['CPUExecutionProvider'], failedEps: [] },
+    });
+    const epsId = await waitForWrite('getEps');
+    harness.emitStdout({ id: epsId, result: [{ name: 'CPUExecutionProvider', isRegistered: true }] });
+    await Promise.all([automatic, joined]);
+  }, 15000);
+
+  it('shows a queued explicit rerun the active cycle progress and stall notice', async () => {
+    // Install / Update waits for the active cycle before rerunning; a provider download in that
+    // cycle is exactly what the user is waiting on, so it must not be silent to them.
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const automatic = sdk.ensureAccelerators();
+    const firstRegistrationId = await waitForWrite('ensureAccelerators');
+    const explicitProgress = vi.fn();
+    const explicitStall = vi.fn();
+    const explicit = sdk.ensureAccelerators(explicitProgress, explicitStall, { forceRerun: true });
+    vi.useFakeTimers();
+
+    harness.emitStdout({ id: firstRegistrationId, progress: 40, ep: 'CUDAExecutionProvider' });
+    expect(explicitProgress).toHaveBeenCalledWith('CUDAExecutionProvider', 40);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(explicitStall).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+
+    harness.emitStdout({
+      id: firstRegistrationId,
+      result: { success: true, registeredEps: ['CPUExecutionProvider'], failedEps: [] },
+    });
+    const firstProbeId = await waitForWrite('getEps');
+    harness.emitStdout({ id: firstProbeId, result: [{ name: 'CPUExecutionProvider', isRegistered: true }] });
+    await automatic;
+
+    const secondRegistrationId = await waitForWrite('ensureAccelerators', 1);
+    harness.emitStdout({ id: secondRegistrationId, progress: 70, ep: 'CUDAExecutionProvider' });
+    expect(explicitProgress).toHaveBeenLastCalledWith('CUDAExecutionProvider', 70);
+    harness.emitStdout({
+      id: secondRegistrationId,
+      result: { success: true, registeredEps: ['CPUExecutionProvider'], failedEps: [] },
+    });
+    const secondProbeId = await waitForWrite('getEps', 1);
+    harness.emitStdout({ id: secondProbeId, result: [{ name: 'CPUExecutionProvider', isRegistered: true }] });
+    await explicit;
+  }, 15000);
+
   it('keeps an independent provider probe under its transport deadline during setup', async () => {
     const sdk = await loadSdk();
     await completeInitialization(sdk);

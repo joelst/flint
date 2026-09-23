@@ -2892,9 +2892,16 @@ export function ensureAccelerators(
     acceleratorSetup.generation === currentGeneration &&
     options?.forceRerun
   ) {
-    return acceleratorSetup.promise
+    // The rerun waits for the active cycle, whose provider install is what this caller is
+    // waiting on in the meantime, so it observes that cycle's progress and stall notice too.
+    const active = acceleratorSetup;
+    active.listeners.add(listener);
+    return active.promise
       .catch(() => undefined)
-      .then(() => ensureAccelerators(onProgress, onStall));
+      .then(() => {
+        active.listeners.delete(listener);
+        return ensureAccelerators(onProgress, onStall);
+      });
   }
   if (acceleratorSetup && acceleratorSetup.generation === currentGeneration) {
     acceleratorSetup.listeners.add(listener);
@@ -2909,10 +2916,17 @@ export function ensureAccelerators(
       try { current.onProgress?.(epName, percent); } catch {}
     }
   };
+  // A caller without its own stall handler still gets the durable default notice, once.
   const broadcastStall = () => {
+    let reportDefault = false;
     for (const current of listeners) {
-      try { current.onStall?.(); } catch {}
+      if (!current.onStall) {
+        reportDefault = true;
+        continue;
+      }
+      try { current.onStall(); } catch {}
     }
+    if (reportDefault) reportRuntimeProgressStall('ensureAccelerators');
   };
   let tracked: Promise<AcceleratorReadiness>;
   tracked = performAcceleratorSetup(broadcastProgress, broadcastStall).finally(() => {
