@@ -28,6 +28,7 @@
     loadModel as sdkLoadModel,
     getSidecarGeneration,
     unloadModel as sdkUnloadModel,
+    unloadModelIfIdle as sdkUnloadModelIfIdle,
     deleteModel as sdkDeleteModel,
     chatCompletion,
     chatCompletionStream,
@@ -338,7 +339,7 @@
           await sdkLoadModel(model, undefined, variantId);
         },
         unload: async (alias) => {
-          await sdkUnloadModel({ alias });
+          await sdkUnloadModelIfIdle({ alias });
         },
       });
       endpointSelfTestReport = await runEndpointSelfTest({

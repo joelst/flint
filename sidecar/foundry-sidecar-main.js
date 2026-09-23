@@ -184,7 +184,7 @@ const FIELD_TYPES = {
   shutdownRuntime:   { drainTimeoutMs: 'number' },
   download:          { alias: 'non-empty-string', variantId: 'non-empty-string' },
   load:              { alias: 'non-empty-string', variantId: 'non-empty-string' },
-  unload:            { alias: 'non-empty-string' },
+  unload:            { alias: 'non-empty-string', ifIdle: 'boolean' },
   deleteModel:       { alias: 'non-empty-string', variantId: 'non-empty-string' },
   chatCompletion:    { model: 'non-empty-string', messages: 'array' },
   cancelChatRequest: { requestId: 'number' },
@@ -223,7 +223,7 @@ const COMMAND_SCHEMA = {
   listModels:         { required: [], optional: [] },
   download:           { required: ['alias'], optional: ['variantId'] },
   load:               { required: ['alias'], optional: ['lane', 'variantId'] },
-  unload:             { required: ['alias'], optional: ['lane'] },
+  unload:             { required: ['alias'], optional: ['lane', 'ifIdle'] },
   deleteModel:        { required: ['alias'], optional: ['variantId'] },
   getEndpoint:        { required: [], optional: [] },
   chatCompletion:     { required: ['model', 'messages'], optional: ['maxTokens', 'temperature', 'preferredEp', 'stream'] },
@@ -417,6 +417,8 @@ let sharedEndpoint = null;
 // variant switch (which replaces the pool entry) does not reset a model's history.
 /** @type {Map<string, { lastUsedAt: number, inFlight: number }>} */
 const usage = new Map();
+/** @type {Set<string>} aliases that reject new work while a guarded unload runs */
+const activityFences = new Set();
 /** @type {Map<string, 'pinned'|'low'|'normal'>} set by the UI; absent means 'normal'. */
 const modelPriorities = new Map();
 let evictionConfig = { ...DEFAULT_EVICTION_CONFIG };
@@ -500,6 +502,12 @@ function noteActivity (modelName, phase, bookedKey = null) {
     resolvedVariantId: resolved?.variantId || null,
   });
   if (candidates.length === 0) return;
+  if (
+    phase === 'start'
+    && candidates.some(candidate => activityFences.has(candidate.toLowerCase()))
+  ) {
+    return false;
+  }
 
   let alias = candidates[0];
   if (phase !== 'start') {
@@ -541,6 +549,13 @@ function inFlightFor (alias) {
     if (aliasForModelName(key) === alias) count += use.inFlight;
   }
   return count;
+}
+
+function tryBeginIdleUnload (alias) {
+  const key = String(alias || '').trim().toLowerCase();
+  if (!key || activityFences.has(key) || inFlightFor(alias) > 0) return null;
+  activityFences.add(key);
+  return () => activityFences.delete(key);
 }
 
 function poolEntriesForEviction () {
@@ -2540,13 +2555,21 @@ rl.on('line', async (line) => {
       reply({ ok: true, result: { acceleration, lane: payload.lane || 'chat', variantId: entry.variantId } });
     } else if (cmd === 'unload') {
       const alias = payload.alias;
-      const entry = pool.get(alias);
-      if (entry) {
-        await entry.catModel.unload();
-        pool.delete(alias);
-        usage.delete(alias);
-        log('info', `Model ${alias} unloaded from pool`);
-        audit('unload', { alias });
+      const releaseIdleFence = payload.ifIdle ? tryBeginIdleUnload(alias) : () => {};
+      if (!releaseIdleFence) {
+        throw new Error(`Cannot unload ${alias} while requests are in flight. Retry once they finish.`);
+      }
+      try {
+        const entry = pool.get(alias);
+        if (entry) {
+          await entry.catModel.unload();
+          pool.delete(alias);
+          usage.delete(alias);
+          log('info', `Model ${alias} unloaded from pool`);
+          audit('unload', { alias });
+        }
+      } finally {
+        releaseIdleFence();
       }
       reply({ ok: true });
     } else if (cmd === 'deleteModel') {
@@ -2870,9 +2893,12 @@ rl.on('line', async (line) => {
       let chatVariantId = null, chatExecutionProvider = null;
       let chatModelForMetrics = null;
       let chatWarm = null;
+      const chatActivity = noteActivity(modelAlias, 'start');
+      if (chatActivity === false) {
+        throw new Error(`Model ${modelAlias} is temporarily unavailable while it is unloading.`);
+      }
       activeStreamCount++;
       if (!activeStreamOldest) activeStreamOldest = { type: 'chat', modelAlias, startedAt: chatAccessTs };
-      const chatActivity = noteActivity(modelAlias, 'start');
       try {
         const loadStartedAt = Date.now();
         const poolEntry = await ensureModel(modelAlias);
@@ -3176,6 +3202,12 @@ rl.on('line', async (line) => {
       activeStreamCount++;
       if (!activeStreamOldest) activeStreamOldest = { type: 'audio', modelAlias: requestedAlias, startedAt: audioAccessTs };
       const audioActivity = noteActivity(requestedAlias, 'start');
+      if (audioActivity === false) {
+        activeStreamCount = Math.max(0, activeStreamCount - 1);
+        if (activeStreamCount === 0) activeStreamOldest = null;
+        try { fs.unlinkSync(tempPath); } catch {}
+        throw new Error(`Model ${requestedAlias} is temporarily unavailable while it is unloading.`);
+      }
       try {
         // Prefer direct AudioClient (like we do for chat) — this avoids relying on the web service HTTP route
         // which may return 404 for /audio/transcriptions even for Whisper models.
@@ -3562,6 +3594,9 @@ rl.on('line', async (line) => {
       const embedTs = Date.now();
       let embedOk = false;
       const embedActivity = noteActivity(modelAlias, 'start');
+      if (embedActivity === false) {
+        throw new Error(`Model ${modelAlias} is temporarily unavailable while it is unloading.`);
+      }
       try {
         const poolEntry = await ensureModel(modelAlias);
         const embedModel = poolEntry.catModel;

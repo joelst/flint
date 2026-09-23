@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   createSelfTestResidencyController,
@@ -75,5 +77,19 @@ describe('endpoint self-test residency', () => {
       { alias: 'speech-model', variantId: 'speech-model-generic-cpu:1' },
       { alias: 'Chat-Model', variantId: 'chat-model-generic-cpu:1' },
     ], classify)).toBe('Chat-Model');
+  });
+
+  it('wires cleanup through the sidecar-side atomic idle fence', () => {
+    const sidecar = readFileSync(
+      join(process.cwd(), 'sidecar', 'foundry-sidecar-main.js'),
+      'utf8',
+    );
+    const page = readFileSync(join(process.cwd(), 'src', 'routes', '+page.svelte'), 'utf8');
+
+    expect(sidecar).toContain("unload:             { required: ['alias'], optional: ['lane', 'ifIdle'] }");
+    expect(sidecar).toContain('const releaseIdleFence = payload.ifIdle ? tryBeginIdleUnload(alias)');
+    expect(sidecar).toContain("phase === 'start'");
+    expect(sidecar).toContain('activityFences.has(candidate.toLowerCase())');
+    expect(page).toContain('sdkUnloadModelIfIdle({ alias })');
   });
 });
