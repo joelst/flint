@@ -34,9 +34,16 @@ describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
     expect(wxs).toContain('exit /b 1');
     expect(wxs).toContain('Execute="rollback"');
     expect(wxs).toContain('Execute="commit"');
-    expect(wxs).toContain('Action="SetQtExecMoveFoundrySdk"');
-    expect(wxs).toContain('Id="QtExecMoveFoundrySdk"');
+    expect(wxs).toContain('Id="MoveFoundrySdk"');
     expect(wxs).toContain('Return="check"');
     expect(wxs).toContain('Before="InstallFiles"');
+  });
+
+  it('never puts the install location on a command line', () => {
+    for (const command of wxs.match(/ExeCommand="[^"]*"/g) ?? []) {
+      expect(command.match(/\[[^\]]*\]/g) ?? []).toEqual(['[SystemFolder]']);
+    }
+    expect(wxs).toContain('Directory="INSTALLDIR"');
+    expect(wxs).not.toContain('[INSTALLDIR]');
   });
 });
