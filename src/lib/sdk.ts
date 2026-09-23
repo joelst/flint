@@ -131,6 +131,8 @@ let pending = new Map<number, PendingRequest>();
 let streamHandlers = new Map<number, (delta: string) => void>();
 type ProgressHandler = {
   onProgress?: (p: number, detail?: any) => void;
+  /** Execution-provider registration riding this command's id, never the command's own progress. */
+  onAcceleratorProgress?: (p: number, detail?: any) => void;
   watchdog?: ProgressStallWatchdog;
 };
 let progressHandlers = new Map<number, ProgressHandler>();
@@ -517,10 +519,12 @@ function registerProgressHandler(
   id: number,
   onProgress?: (p: number, detail?: any) => void,
   onStall?: () => void,
+  onAcceleratorProgress?: (p: number, detail?: any) => void,
 ) {
-  if (!onProgress && !onStall) return;
+  if (!onProgress && !onStall && !onAcceleratorProgress) return;
   progressHandlers.set(id, {
     onProgress,
+    onAcceleratorProgress,
     watchdog: onStall
       ? createProgressStallWatchdog(() => {
           try { onStall(); } catch {}
@@ -646,8 +650,13 @@ async function spawnSidecar() {
     if (msg.id && msg.progress !== undefined) {
       const handler = progressHandlers.get(msg.id);
       if (handler) {
+        // Accelerator registration can precede any catalog-gated command, so it shares that
+        // command's id. It is still real runtime progress for the stall watchdog, but it is
+        // not the command's own progress and must not be shown as such.
+        const acceleratorPhase = msg.phase === 'accelerator';
+        const onProgress = acceleratorPhase ? handler.onAcceleratorProgress : handler.onProgress;
         handler.watchdog?.progress();
-        try { handler.onProgress?.(Number(msg.progress), msg); } catch {}
+        try { onProgress?.(Number(msg.progress), msg); } catch {}
       }
       if (msg.alias) {
         console.log(`[sdk] download progress ${msg.alias}: ${msg.progress}%`);
@@ -1574,10 +1583,11 @@ export async function refreshModels(
     const res = await sendInternal('listModels', {}, undefined, (id: number) => {
       registerProgressHandler(
         id,
+        undefined,
+        onStall ?? reportCatalogProgressStall,
         onProgress
           ? (percent, detail) => onProgress(String(detail?.ep || 'accelerator'), percent)
           : undefined,
-        onStall ?? reportCatalogProgressStall,
       );
     });
     const list = res.result || [];

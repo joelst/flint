@@ -1079,6 +1079,53 @@ describe('progress stall notices', () => {
     expect(refresh.box.err).toBeUndefined();
     expect(sdkSnapshot(sdk).catalogStatus).toBe('ready');
   });
+
+  it('keeps accelerator registration progress out of a model download percentage', async () => {
+    const sdk = await loadSdk();
+    const progress: number[] = [];
+    const onStall = vi.fn();
+
+    vi.useFakeTimers();
+    const download = capture(
+      sdk.downloadModel(
+        { alias: 'model-a' },
+        (percent: number) => progress.push(percent),
+        undefined,
+        onStall,
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    const downloadId = JSON.parse(harness.writes.find((line) => line.includes('"download"'))!).id;
+
+    // Registration rides this command's id while it waits for the catalog gate. It is runtime
+    // progress for the stall watchdog, but it is not the model's download progress.
+    harness.emitStdout({ id: downloadId, progress: 73, ep: 'CUDAExecutionProvider', phase: 'accelerator' });
+    expect(progress).toEqual([]);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(onStall).not.toHaveBeenCalled();
+
+    harness.emitStdout({ id: downloadId, progress: 12, alias: 'model-a' });
+    expect(progress).toEqual([12]);
+
+    harness.emitStdout({ id: downloadId, error: 'download failed' });
+    await download.tracked;
+  });
+
+  it('reports accelerator registration progress during a catalog refresh', async () => {
+    const sdk = await loadSdk();
+    const seen: Array<[string, number]> = [];
+
+    const refresh = capture(sdk.refreshModels((epName: string, percent: number) => {
+      seen.push([epName, percent]);
+    }));
+    const listId = await waitForWrite('listModels');
+
+    harness.emitStdout({ id: listId, progress: 40, ep: 'CUDAExecutionProvider', phase: 'accelerator' });
+    expect(seen).toEqual([['CUDAExecutionProvider', 40]]);
+
+    harness.emitStdout({ id: listId, error: 'catalog unavailable' });
+    await refresh.tracked;
+  });
 });
 
 describe('one answer per request', () => {

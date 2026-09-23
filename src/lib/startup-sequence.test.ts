@@ -63,6 +63,13 @@ describe('prepareHydratedRuntime', () => {
     expect(recoveryPolicy).toBeGreaterThan(prepared);
     expect(startupSummary).toBeGreaterThan(recoveryPolicy);
     expect(restartGuidance).toBeGreaterThan(startupSummary);
+    // The bootstrap override must be undone even when startup fails, or recovery keeps
+    // skipping the catalog refresh the user asked for.
+    const startupCatch = startup.indexOf('Runtime startup stopped before model preload');
+    const startupFinally = startup.indexOf('} finally {', startupCatch);
+    expect(startupCatch).toBeGreaterThan(prepared);
+    expect(startupFinally).toBeGreaterThan(startupCatch);
+    expect(recoveryPolicy).toBeGreaterThan(startupFinally);
     expect(startup).toContain(
       'if (autoRefreshCatalogOnStartup && startupEntries.length > 0) {',
     );

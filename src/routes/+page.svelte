@@ -4980,9 +4980,6 @@ updateStateFromSdk();
             throw new Error("Runtime changed while refreshing the speech model catalog");
           }
         }
-        // Initialization deliberately suppresses its own catalog read until providers are ready.
-        // Recovery after this point must use the hydrated user policy, not that bootstrap override.
-        setAutomaticCatalogRefreshEnabled(autoRefreshCatalogOnStartup);
         if (acceleratorReadiness.registration?.catalogRefreshRequiresRestart) {
           if (acceleratorReadiness.registration.registrationDeferredUntilRestart) {
             acceleratorRestartGuidance =
@@ -5002,6 +4999,11 @@ updateStateFromSdk();
         statusMessage = `Runtime startup stopped before model preload: ${e?.message || e}`;
         appendAppLog(statusMessage, "error");
         return;
+      } finally {
+        // Initialization deliberately suppresses its own catalog read until providers are ready.
+        // Recovery after this point must use the hydrated user policy, not that bootstrap
+        // override — including when startup failed, since recovery still runs afterwards.
+        setAutomaticCatalogRefreshEnabled(autoRefreshCatalogOnStartup);
       }
       if (!startupAuthorization.isCurrent(startupAuthorizationToken)) return;
 

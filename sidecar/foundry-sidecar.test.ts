@@ -535,6 +535,77 @@ describe('foundry-sidecar protocol basics', () => {
     }
   });
 
+  it('starts the service when the snapshot-forcing catalog read fails', async () => {
+    // The catalog read before `startWebService` exists only to order provider registration
+    // ahead of the native listener's own `/v1/models` access. That read contacts the remote
+    // catalog, so an offline machine must still get a local service for its cached models.
+    const server = createServer((req, res) => {
+      if (req.url === '/status') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+    const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-offline-catalog-home-'));
+    const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
+    const corePath = join(homeDir, 'fake-core.dylib');
+    writeFileSync(corePath, '');
+    writeFileSync(loaderPath, `
+      const sdk = \`
+        class FakeManager {
+          constructor() {
+            this.urls = [];
+            this.catalog = {
+              getModels: async () => { throw new Error('catalog unreachable'); },
+            };
+          }
+          startWebService() { this.urls = ['http://127.0.0.1:${port}']; }
+          stopWebService() {}
+          static create() { return new FakeManager(); }
+        }
+        export { FakeManager as FoundryLocalManager };
+      \`;
+      export async function resolve(specifier, context, nextResolve) {
+        if (specifier === 'foundry-local-sdk') {
+          return { url: 'data:text/javascript,' + encodeURIComponent(sdk), shortCircuit: true };
+        }
+        return nextResolve(specifier, context);
+      }
+      export async function load(url, context, nextLoad) {
+        if (url.startsWith('data:text/javascript,')) {
+          return { format: 'module', source: decodeURIComponent(url.slice('data:text/javascript,'.length)), shortCircuit: true };
+        }
+        return nextLoad(url, context);
+      }
+    `);
+    const proc = spawn(process.execPath, [
+      '--experimental-loader', pathToFileURL(loaderPath).href, 'sidecar/foundry-sidecar.js'
+    ], {
+      cwd: process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, HOME: homeDir, USERPROFILE: homeDir, FLINT_FOUNDRY_CORE_PATH: corePath },
+    });
+    try {
+      await waitForLine(proc, (msg) => msg.ready === true);
+      proc.stdin.write(`${JSON.stringify({ id: 70, cmd: 'init', appName: 'flint-test', logLevel: 'info' })}\n`);
+      expect((await waitForLine(proc, (msg) => msg.id === 70)).ok).toBe(true);
+      proc.stdin.write(`${JSON.stringify({
+        id: 71, cmd: 'startService', port: 0, bindAddress: '127.0.0.1',
+      })}\n`);
+      const started = await waitForLine(proc, (msg) => msg.id === 71, 15000);
+      expect(started.ok).toBe(true);
+      expect(started.endpoint).toContain('127.0.0.1');
+    } finally {
+      if (!proc.killed) proc.kill();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
   it('applies requested temperature/maxTokens to the SDK chat client before completion', async () => {
     const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-chat-settings-home-'));
     const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');

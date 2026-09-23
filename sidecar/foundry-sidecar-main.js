@@ -2431,8 +2431,10 @@ rl.on('line', async (line) => {
   const reply = (result, callback) => {
     send({ id, protocolVersion: SIDECAR_PROTOCOL_VERSION, ...result }, callback);
   };
+  // Registration progress rides the requesting command's id. Tag it so a model download or
+  // load cannot display execution-provider percentages as its own progress.
   const reportCatalogProgress = (epName, percent) => {
-    if (Number.isFinite(percent)) send({ id, progress: percent, ep: epName });
+    if (Number.isFinite(percent)) send({ id, progress: percent, ep: epName, phase: 'accelerator' });
   };
 
   if (protocolVersion !== undefined && protocolVersion !== SIDECAR_PROTOCOL_VERSION) {
@@ -2757,10 +2759,18 @@ rl.on('line', async (line) => {
         // exposure. Normal starts also force the immutable snapshot under the gate; startup
         // can explicitly defer that network-backed read when the user disabled automatic
         // catalog checks, after its own accelerator setup has completed.
-        if (payload.deferCatalogRead) {
-          await beforeCatalogRead(reportCatalogProgress, { seal: true });
-        } else {
-          await beforeCatalogRead(reportCatalogProgress, { commit: true });
+        // That read is network-backed. Its only job here is to order provider registration
+        // ahead of the listener's own catalog access, and the gate has closed the provider
+        // boundary either way, so a failed read must not stop a service that can still serve
+        // cached models. Snapshot uncertainty is reported by the accelerator update path.
+        try {
+          if (payload.deferCatalogRead) {
+            await beforeCatalogRead(reportCatalogProgress, { seal: true });
+          } else {
+            await beforeCatalogRead(reportCatalogProgress, { commit: true });
+          }
+        } catch (e) {
+          log('warn', `Catalog snapshot read failed before service start: ${e?.message ?? e}`);
         }
         // Start service BEFORE loading models so HTTP routing layer initializes with the registry.
         if (typeof manager.startWebService === 'function') {
