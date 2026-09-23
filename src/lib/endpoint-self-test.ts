@@ -159,10 +159,20 @@ function isSpeechModelId(id: string): boolean {
   return /(whisper|-stt(?:-|$)|(?:^|-)stt-|parakeet|nemotron-speech)/i.test(id);
 }
 
-function endpointKind(id: string, requestedEmbed: string | null): 'embed' | 'speech' | 'chat' {
-  if (requestedEmbed && matchesVerifiedModel(id, requestedEmbed)) return 'embed';
+function endpointKind(
+  id: string,
+  requestedEmbed: string | null,
+  parent: string | null = null,
+): 'embed' | 'speech' | 'chat' {
+  if (
+    requestedEmbed
+    && (
+      matchesVerifiedModel(id, requestedEmbed)
+      || parent?.toLowerCase() === requestedEmbed.toLowerCase()
+    )
+  ) return 'embed';
   if (isEmbeddingModelId(id)) return 'embed';
-  if (isSpeechModelId(id)) return 'speech';
+  if (isSpeechModelId(id) || (parent && isSpeechModelId(parent))) return 'speech';
   return 'chat';
 }
 
@@ -185,9 +195,9 @@ export function endpointAliases(
     else if (kind === 'speech') speech.push(id);
     else chat.push(id);
   };
-  for (const row of models) add(row.id);
+  for (const row of models) add(row.id, endpointKind(row.id, requestedEmbed, row.parent));
   for (const row of models) {
-    if (row.parent) add(row.parent, endpointKind(row.id, requestedEmbed));
+    if (row.parent) add(row.parent, endpointKind(row.id, requestedEmbed, row.parent));
   }
   return { chat, embed, speech };
 }
@@ -408,13 +418,25 @@ async function runSpeechChecks(
   endpoint: string,
   modelId: string,
   requestTimeoutMs: number,
-  prepareModel?: (modelId: string) => Promise<void>,
+  prepareModel?: (modelId: string) => Promise<string>,
 ): Promise<SelfTestCheck[]> {
   try {
-    await prepareModel?.(modelId);
+    if (!prepareModel) {
+      return [check(
+        'speech',
+        'POST /v1/audio/transcriptions returns text',
+        'blocked',
+        'Speech checks require model preparation because multipart requests cannot be gateway-replayed.',
+        modelId,
+      )];
+    }
+    const preparedModelId = await prepareModel(modelId);
+    if (!preparedModelId.trim()) {
+      throw new Error(`Speech model preparation returned no canonical variant for ${modelId}.`);
+    }
     const form = new FormData();
+    form.append('model', preparedModelId);
     form.append('file', tinyWav(), 'ping.wav');
-    form.append('model', modelId);
     const { res, json } = await fetchAndRead(
       fetchFn,
       joinUrl(endpoint, '/audio/transcriptions'),
@@ -436,7 +458,9 @@ async function runSpeechChecks(
       'speech',
       'POST /v1/audio/transcriptions returns text',
       'pass',
-      `${modelId} transcribed audio.`,
+      preparedModelId === modelId
+        ? `${modelId} transcribed audio.`
+        : `${modelId} resolved to ${preparedModelId} and transcribed audio.`,
       modelId,
     )];
   } catch (error) {
@@ -702,8 +726,11 @@ export async function runEndpointSelfTest(options: {
   /** Per listed id. When set, it replaces catalogSupportsToolCalling. */
   supportsToolCalling?: (modelId: string) => boolean | null | undefined;
   embeddingModelId?: string | null;
-  /** Explicitly prepares speech models because multipart requests cannot be gateway-replayed. */
-  prepareSpeechModel?: (modelId: string) => Promise<void>;
+  /**
+   * Explicitly prepares each speech target and returns its canonical loaded variant because
+   * multipart requests cannot be gateway-replayed or rewritten.
+   */
+  prepareSpeechModel?: (modelId: string) => Promise<string>;
   requestTimeoutMs?: number;
   disconnectStartMs?: number;
   onProgress?: (event: { modelId: string; index: number; total: number }) => void;

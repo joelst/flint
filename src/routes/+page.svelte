@@ -333,7 +333,11 @@
           const variant = model?.variants?.find((item: any) =>
             item.id === modelId || item.id?.split(":")[0] === modelId);
           if (!model) throw new Error(`Cached speech model ${modelId} is unavailable.`);
-          await sdkLoadModel(model, undefined, variant?.id);
+          const loaded = await sdkLoadModel(model, undefined, variant?.id);
+          if (typeof loaded?.variantId !== "string" || !loaded.variantId) {
+            throw new Error(`Cached speech model ${modelId} did not report a loaded variant.`);
+          }
+          return loaded.variantId;
         },
         onProgress: (event) => {
           statusMessage = `Testing ${event.modelId} (${event.index + 1} of ${event.total})…`;

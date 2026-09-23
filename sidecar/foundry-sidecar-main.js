@@ -476,7 +476,7 @@ function aliasForModelName (name) {
 }
 
 /** Marks a model busy for the life of a request so eviction cannot unload it mid-flight. */
-function noteActivity (modelName, phase) {
+function noteActivity (modelName, phase, bookedKey = null) {
   // Candidate keys, best first. During gateway autoload the model is not resident yet
   // (and the lazy modelIndex may not be built), so the start phase can only book against
   // a fallback key. A request for a different variant of a resident alias is booked on
@@ -503,7 +503,9 @@ function noteActivity (modelName, phase) {
 
   let alias = candidates[0];
   if (phase !== 'start') {
-    alias = candidates.find(k => (usage.get(k)?.inFlight ?? 0) > 0) ?? alias;
+    alias = typeof bookedKey === 'string' && bookedKey
+      ? bookedKey
+      : candidates.find(k => (usage.get(k)?.inFlight ?? 0) > 0) ?? alias;
     // Keep the resident model's idle clock accurate even when the count sat on a fallback key.
     if (matchedResident && matchedResident !== alias) touchModel(matchedResident);
   }
@@ -517,6 +519,7 @@ function noteActivity (modelName, phase) {
     // bound (random names spammed at the gateway).
     if (entry.inFlight === 0 && !pool.has(alias)) usage.delete(alias);
   }
+  return alias;
 }
 
 function stopGatewayAccepting () {
@@ -2869,7 +2872,7 @@ rl.on('line', async (line) => {
       let chatWarm = null;
       activeStreamCount++;
       if (!activeStreamOldest) activeStreamOldest = { type: 'chat', modelAlias, startedAt: chatAccessTs };
-      noteActivity(modelAlias, 'start');
+      const chatActivity = noteActivity(modelAlias, 'start');
       try {
         const loadStartedAt = Date.now();
         const poolEntry = await ensureModel(modelAlias);
@@ -3107,7 +3110,7 @@ rl.on('line', async (line) => {
         }
         activeStreamCount = Math.max(0, activeStreamCount - 1);
         if (activeStreamCount === 0) activeStreamOldest = null;
-        noteActivity(modelAlias, 'end');
+        noteActivity(modelAlias, 'end', chatActivity);
         canceledRequests.delete(id);
         appendAccessLog({
           ts: chatAccessTs,
@@ -3172,7 +3175,7 @@ rl.on('line', async (line) => {
       let audioOk = false;
       activeStreamCount++;
       if (!activeStreamOldest) activeStreamOldest = { type: 'audio', modelAlias: requestedAlias, startedAt: audioAccessTs };
-      noteActivity(requestedAlias, 'start');
+      const audioActivity = noteActivity(requestedAlias, 'start');
       try {
         // Prefer direct AudioClient (like we do for chat) — this avoids relying on the web service HTTP route
         // which may return 404 for /audio/transcriptions even for Whisper models.
@@ -3297,7 +3300,7 @@ rl.on('line', async (line) => {
       } finally {
         activeStreamCount = Math.max(0, activeStreamCount - 1);
         if (activeStreamCount === 0) activeStreamOldest = null;
-        noteActivity(requestedAlias, 'end');
+        noteActivity(requestedAlias, 'end', audioActivity);
         try { fs.unlinkSync(tempPath); } catch {}
         appendAccessLog({
           ts: audioAccessTs,
@@ -3558,7 +3561,7 @@ rl.on('line', async (line) => {
       const modelAlias = payload.model;
       const embedTs = Date.now();
       let embedOk = false;
-      noteActivity(modelAlias, 'start');
+      const embedActivity = noteActivity(modelAlias, 'start');
       try {
         const poolEntry = await ensureModel(modelAlias);
         const embedModel = poolEntry.catModel;
@@ -3571,7 +3574,7 @@ rl.on('line', async (line) => {
         audit('embedTexts', { alias: modelAlias, count: inputs.length });
         reply({ ok: true, result });
       } finally {
-        noteActivity(modelAlias, 'end');
+        noteActivity(modelAlias, 'end', embedActivity);
         appendAccessLog({
           ts: embedTs,
           type: 'embeddings',

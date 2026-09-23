@@ -39,6 +39,11 @@ import {
 
 /** Upstream is on loopback, so a long timeout only ever means the model is thinking. */
 const UPSTREAM_TIMEOUT_MS = 0; // no timeout: generation can legitimately run for minutes
+const MULTIPART_MODEL_PEEK_BYTES = 16 * 1024;
+const MULTIPART_MODEL_MAX_CHARS = 256;
+const multipartModel = Symbol('multipartModel');
+const multipartPrefix = Symbol('multipartPrefix');
+const multipartEnded = Symbol('multipartEnded');
 
 /**
  * Classify OpenAI-compatible routes for metadata-only access logging.
@@ -50,8 +55,30 @@ export function classifyGatewayRoute (urlPath) {
   const path = String(urlPath || '').split('?')[0];
   if (/(^|\/)chat\/completions(\/|$)/.test(path)) return 'chat';
   if (/(^|\/)embeddings(\/|$)/.test(path)) return 'embeddings';
+  if (/(^|\/)audio\/transcriptions(\/|$)/.test(path)) return 'speech';
   if (/(^|\/)models(\/|$)/.test(path)) return 'models';
   return 'other';
+}
+
+/**
+ * Returns undefined while the leading field is incomplete, null when it is not `model`, or
+ * the submitted model value once its terminating boundary is available.
+ */
+function extractLeadingMultipartModel (body, boundary) {
+  const opening = `--${boundary}\r\n`;
+  if (!body.startsWith(opening)) {
+    return body.length < opening.length && opening.startsWith(body) ? undefined : null;
+  }
+  const headersEnd = body.indexOf('\r\n\r\n', opening.length);
+  if (headersEnd < 0) return undefined;
+  const headers = body.slice(opening.length, headersEnd);
+  if (!/^content-disposition:[^\r\n]*\bname="model"(?:;|\r?$)/im.test(headers)) return null;
+  const valueStart = headersEnd + 4;
+  const valueEnd = body.indexOf(`\r\n--${boundary}`, valueStart);
+  if (valueEnd < 0) return undefined;
+  const value = body.slice(valueStart, valueEnd).trim();
+  if (value.length > MULTIPART_MODEL_MAX_CHARS) return null;
+  return value || null;
 }
 
 /**
@@ -63,9 +90,10 @@ export function classifyGatewayRoute (urlPath) {
  * @param {(alias: string, variantId: string|null) => Promise<string|null|void>} options.load
  *        resolves to the variant id actually loaded, which the replay needs to name
  * @param {(level: string, msg: string) => void} [options.log]
- * @param {(model: string, phase: 'start'|'end') => void} [options.onActivity]
+ * @param {(model: string, phase: 'start'|'end', booking?: unknown) => unknown} [options.onActivity]
  *        called around every request that names a model, so the owner can keep a model
- *        alive while it is being served and record when it was last used
+ *        alive while it is being served and record when it was last used. The value returned
+ *        for start is supplied to its matching end call.
  * @param {(entry: object) => void} [options.onAccess]
  *        metadata-only access log (no bodies, no headers) after each request finishes
  * @param {() => (() => void)|null} [options.admitRequest]
@@ -168,11 +196,12 @@ export function createGateway (options) {
   server.on('upgrade', (_req, socket) => socket.destroy());
 
   /** A hook the owner supplied must never be able to take a request down with it. */
-  function notifyActivity (model, phase) {
+  function notifyActivity (model, phase, booking) {
     try {
-      onActivity(model, phase);
+      return onActivity(model, phase, booking);
     } catch (err) {
       log('warn', `Gateway activity hook failed: ${err?.message ?? err}`);
+      return undefined;
     }
   }
 
@@ -206,8 +235,9 @@ export function createGateway (options) {
     const buffered = await maybeBufferBody(req, res);
     if (buffered === ABORTED) return;
 
-    const requested = buffered === null ? null : extractModelName(buffered);
+    const requested = buffered === null ? req[multipartModel] ?? null : extractModelName(buffered);
     let activeModel = requested;
+    let activeBooking;
     try {
       if (!requested) return await route(req, res, buffered, requested);
 
@@ -215,16 +245,16 @@ export function createGateway (options) {
       // traffic is proxied straight to Foundry, so the sidecar has no other way to tell a
       // model generating a long completion apart from one sitting idle — and unloading the
       // former would kill a live request.
-      notifyActivity(requested, 'start');
+      activeBooking = notifyActivity(requested, 'start');
       try {
         return await route(req, res, buffered, requested, (model) => {
           if (!model || model === activeModel) return;
-          notifyActivity(activeModel, 'end');
+          notifyActivity(activeModel, 'end', activeBooking);
           activeModel = model;
-          notifyActivity(activeModel, 'start');
+          activeBooking = notifyActivity(activeModel, 'start');
         });
       } finally {
-        notifyActivity(activeModel, 'end');
+        notifyActivity(activeModel, 'end', activeBooking);
       }
     } finally {
       const completedAt = Date.now();
@@ -287,6 +317,7 @@ export function createGateway (options) {
     // the very error the load was meant to resolve.
     let replayBody = buffered;
     const canonical = typeof loadedId === 'string' && loadedId ? loadedId : target.variantId;
+    if (canonical && canonical !== target.variantId) setActivityModel(canonical);
     if (canonical && canonical !== requested) {
       const rewritten = rewriteModelName(buffered, canonical);
       if (rewritten !== null) {
@@ -318,6 +349,21 @@ export function createGateway (options) {
       maxBytes: bufferedBodyLimit,
     }) && autoloadAllowedFor(req);
 
+    const contentType = Array.isArray(req.headers['content-type'])
+      ? req.headers['content-type'][0]
+      : req.headers['content-type'];
+    if (
+      !wanted
+      && classifyGatewayRoute(req.url) === 'speech'
+      && typeof contentType === 'string'
+      && /^multipart\/form-data(?:;|$)/i.test(contentType)
+    ) {
+      return peekMultipartModel(req).then(model => {
+        if (model === ABORTED) return ABORTED;
+        req[multipartModel] = model;
+        return null;
+      });
+    }
     if (!wanted) return Promise.resolve(null);
 
     return new Promise(resolve2 => {
@@ -339,6 +385,7 @@ export function createGateway (options) {
             res.writeHead(413, { 'content-type': 'application/json', connection: 'close' });
             res.end(openAiError('Request body too large.', 'invalid_request_error'));
           }
+
           req.resume(); // drain rather than stall; the close header bounds how much arrives
           finish(ABORTED);
           return;
@@ -348,6 +395,63 @@ export function createGateway (options) {
       req.on('end', () => finish(Buffer.concat(chunks).toString('utf8')));
       req.on('error', () => finish(ABORTED));
       req.on('aborted', () => finish(ABORTED));
+    });
+  }
+
+  /**
+   * Peek only the leading multipart field so we can lease known speech work without buffering
+   * or replaying the audio upload. Flint's own probe writes `model` first; requests whose first
+   * part is anything else remain opaque pass-through traffic.
+   */
+  function peekMultipartModel (req) {
+    const contentType = Array.isArray(req.headers['content-type'])
+      ? req.headers['content-type'][0]
+      : req.headers['content-type'];
+    const boundaryMatch = typeof contentType === 'string'
+      ? /multipart\/form-data\s*;\s*boundary=(?:"([^"]+)"|([^;\s]+))/i.exec(contentType)
+      : null;
+    const boundary = boundaryMatch?.[1] || boundaryMatch?.[2];
+    if (!boundary) return Promise.resolve(null);
+
+    return new Promise(resolve2 => {
+      const chunks = [];
+      let size = 0;
+      let settled = false;
+      const finish = model => {
+        if (settled) return;
+        settled = true;
+        req.off('data', onData);
+        req.off('error', onAbort);
+        req.off('aborted', onAbort);
+        req.off('end', onEnd);
+        req.pause();
+        req[multipartPrefix] = Buffer.concat(chunks);
+        resolve2(model);
+      };
+      const onEnd = () => {
+        req[multipartEnded] = true;
+        finish(null);
+      };
+      const onAbort = () => finish(ABORTED);
+      const onData = chunk => {
+        req.pause();
+        chunks.push(chunk);
+        size += chunk.length;
+        const model = extractLeadingMultipartModel(
+          Buffer.concat(chunks).toString('latin1'),
+          boundary,
+        );
+        if (model !== undefined || size >= MULTIPART_MODEL_PEEK_BYTES) {
+          finish(model ?? null);
+          return;
+        }
+        req.resume();
+      };
+      req.on('data', onData);
+      req.once('error', onAbort);
+      req.once('aborted', onAbort);
+      req.once('end', onEnd);
+      req.resume();
     });
   }
 
@@ -525,8 +629,15 @@ export function createGateway (options) {
         }));
       });
 
-      if (buffered !== null) upstream.end(buffered);
-      else pipeline(req, upstream, () => {});
+      if (buffered !== null) {
+        upstream.end(buffered);
+      } else if (req[multipartPrefix]) {
+        upstream.write(req[multipartPrefix]);
+        if (req[multipartEnded]) upstream.end();
+        else pipeline(req, upstream, () => {});
+      } else {
+        pipeline(req, upstream, () => {});
+      }
     });
   }
 

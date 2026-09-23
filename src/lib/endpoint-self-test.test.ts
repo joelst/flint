@@ -452,11 +452,29 @@ describe('runEndpointSelfTest', () => {
         throw new Error(`chat should not run: ${input}`);
       },
       endpoint: 'http://127.0.0.1:5272/v1',
+      prepareSpeechModel: async (modelId) => modelId,
     });
     expect(report.modelId).toBeNull();
     expect(report.checks.find((c) => c.id === 'chat')?.status).toBe('blocked');
     expect(report.checks.find((c) => c.id === 'embeddings')?.status).toBe('pass');
     expect(report.checks.find((c) => c.id === 'speech')?.status).toBe('pass');
+  });
+
+  it('blocks a speech probe when no preparation hook can provide a canonical variant', async () => {
+    const report = await runEndpointSelfTest({
+      fetch: async (input) => {
+        if (String(input).endsWith('/models')) {
+          return jsonResponse(200, { data: [{ id: 'whisper-tiny' }] });
+        }
+        throw new Error(`speech request should not run: ${input}`);
+      },
+      endpoint: 'http://127.0.0.1:5272/v1',
+    });
+
+    expect(report.checks.find((c) => c.id === 'speech')).toMatchObject({
+      status: 'blocked',
+      detail: expect.stringContaining('cannot be gateway-replayed'),
+    });
   });
 
   it('creates a verified row for a speech-only endpoint with an empty transcript', async () => {
@@ -472,7 +490,7 @@ describe('runEndpointSelfTest', () => {
         throw new Error(`unexpected ${input}`);
       },
       endpoint: 'http://127.0.0.1:5272/v1',
-      prepareSpeechModel: async (modelId) => { prepared.push(modelId); },
+      prepareSpeechModel: async (modelId) => { prepared.push(modelId); return modelId; },
     });
     expect(prepared).toEqual(['whisper-tiny']);
     expect(report.modelId).toBeNull();
@@ -503,9 +521,35 @@ describe('runEndpointSelfTest', () => {
         throw new Error(`unexpected ${input}`);
       },
       endpoint: 'http://127.0.0.1:5272/v1',
-      prepareSpeechModel: async (modelId) => { seen.push(modelId); },
+      prepareSpeechModel: async (modelId) => { seen.push(modelId); return `${modelId}:4`; },
     });
     expect(seen).toEqual(['my-asr-stt', 'my-asr']);
+  });
+
+  it('submits the canonical prepared variant for a speech parent alias', async () => {
+    const submitted: string[] = [];
+    const report = await runEndpointSelfTest({
+      fetch: async (input, init) => {
+        if (String(input).endsWith('/models')) {
+          return jsonResponse(200, { data: [{ id: 'my-asr-stt', parent: 'my-asr' }] });
+        }
+        if (String(input).endsWith('/audio/transcriptions')) {
+          const form = init?.body as FormData;
+          submitted.push(String(form.get('model')));
+          return jsonResponse(200, { text: '' });
+        }
+        throw new Error(`unexpected ${input}`);
+      },
+      endpoint: 'http://127.0.0.1:5272/v1',
+      prepareSpeechModel: async () => 'my-asr-stt:4',
+    });
+
+    expect(submitted).toEqual(['my-asr-stt:4', 'my-asr-stt:4']);
+    expect(report.checks.find((item) => item.id === 'speech' && item.modelId === 'my-asr'))
+      .toMatchObject({
+        status: 'pass',
+        detail: 'my-asr resolved to my-asr-stt:4 and transcribed audio.',
+      });
   });
 
   it('exercises every listed variant and each parent alias', async () => {
@@ -702,6 +746,26 @@ describe('endpointAliases', () => {
       chat: ['qwen3.5-9b-cuda-gpu', 'qwen3.5-9b-generic-gpu', 'qwen3.5-9b'],
       embed: [],
       speech: ['whisper-tiny', 'whisper'],
+    });
+  });
+
+  it('uses the known embedding parent to classify an opaque variant id', () => {
+    expect(endpointAliases([
+      { id: 'custom-model-generic-cpu', parent: 'vectorizer' },
+    ], 'vectorizer')).toEqual({
+      chat: [],
+      embed: ['custom-model-generic-cpu', 'vectorizer'],
+      speech: [],
+    });
+  });
+
+  it('uses a speech parent to classify an opaque variant id', () => {
+    expect(endpointAliases([
+      { id: 'custom-model-generic-cpu', parent: 'whisper-custom' },
+    ], null)).toEqual({
+      chat: [],
+      embed: [],
+      speech: ['custom-model-generic-cpu', 'whisper-custom'],
     });
   });
 });
