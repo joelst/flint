@@ -1007,6 +1007,52 @@ describe('gateway activity hook', () => {
     expect(upstream.state.hits.filter(h => h.url === '/v1/audio/transcriptions')).toEqual([]);
   });
 
+  it('does not load a model whose moved lease is refused, and answers 503', async () => {
+    const VARIANT = 'phi-4-mini-generic-cpu:2';
+    const events = [];
+    let loaded = false;
+    gateway = await startGateway({
+      resolve: async () => ({ alias: 'phi-4-mini', variantId: VARIANT }),
+      load: async () => { loaded = true; upstream.state.loaded.add(VARIANT); return VARIANT; },
+      onActivity: (model, phase) => {
+        events.push([model, phase]);
+        return phase === 'start' && model === VARIANT ? false : model;
+      },
+    });
+
+    const res = await post(gateway.publicPort, 'phi-4-mini-generic-cpu');
+
+    expect(res.status).toBe(503);
+    expect(loaded).toBe(false);
+    // The first lease is returned when it moves; the refused one is never ended.
+    expect(events).toEqual([
+      ['phi-4-mini-generic-cpu', 'start'],
+      ['phi-4-mini-generic-cpu', 'end'],
+      [VARIANT, 'start'],
+    ]);
+    expect(upstream.state.hits.filter(h => h.url === '/v1/chat/completions')).toHaveLength(1);
+  });
+
+  it('does not replay onto a loaded variant whose lease is refused', async () => {
+    const CANONICAL = 'phi-4-mini-generic-cpu:3';
+    const events = [];
+    gateway = await startGateway({
+      resolve: async () => ({ alias: 'phi-4-mini', variantId: null }),
+      load: async () => { upstream.state.loaded.add(CANONICAL); return CANONICAL; },
+      onActivity: (model, phase) => {
+        events.push([model, phase]);
+        return phase === 'start' && model === CANONICAL ? false : model;
+      },
+    });
+
+    const res = await post(gateway.publicPort, 'phi-4-mini');
+
+    expect(res.status).toBe(503);
+    expect(events).toEqual([['phi-4-mini', 'start'], ['phi-4-mini', 'end'], [CANONICAL, 'start']]);
+    // Only the first, not-loaded attempt reached the service.
+    expect(upstream.state.hits.filter(h => h.url === '/v1/chat/completions')).toHaveLength(1);
+  });
+
   it('leases a multipart speech request whose leading field names a model', async () => {
     const events = [];
     const boundary = 'flint-test-boundary';

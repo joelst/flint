@@ -252,25 +252,18 @@ export function createGateway (options) {
       // An explicit `false` is the owner refusing the lease because that model is being
       // unloaded. Forwarding anyway would race the teardown, and the unleased request would
       // later decrement an in-flight count it never took.
-      if (activeBooking === false) {
-        res.writeHead(503, { 'content-type': 'application/json', connection: 'close' });
-        res.end(openAiError(
-          `Model ${requested} is unloading and is not accepting new requests.`,
-          'server_error',
-        ));
-        req.resume();
-        return;
-      }
+      if (activeBooking === false) return respondUnloading(req, res, requested);
       booked = true;
       try {
         return await route(req, res, buffered, requested, (model) => {
-          if (!model || model === activeModel) return;
+          if (!model || model === activeModel) return true;
           if (booked) notifyActivity(activeModel, 'end', activeBooking);
           activeModel = model;
           activeBooking = notifyActivity(activeModel, 'start');
-          // A refusal here arrives after the request is already under way; the honest
-          // response is to hold no lease rather than to end one that was never taken.
           booked = activeBooking !== false;
+          // route stops before loading or replaying when this is refused. Nothing has been
+          // sent to the client yet, so it gets the same 503 as a refused first booking.
+          return booked;
         });
       } finally {
         if (booked) notifyActivity(activeModel, 'end', activeBooking);
@@ -296,7 +289,21 @@ export function createGateway (options) {
     }
   }
 
-  async function route (req, res, buffered, requested, setActivityModel = () => {}) {
+  /** The owner refused a lease because the model is being unloaded. */
+  function respondUnloading (req, res, model) {
+    res.writeHead(503, { 'content-type': 'application/json', connection: 'close' });
+    res.end(openAiError(
+      `Model ${model} is unloading and is not accepting new requests.`,
+      'server_error',
+    ));
+    req.resume();
+  }
+
+  /**
+   * @param {(model: string) => boolean} [setActivityModel] moves the request's lease to
+   *        `model`; false means the owner refused it, and the request must not load or replay.
+   */
+  async function route (req, res, buffered, requested, setActivityModel = () => true) {
 
     // An identifier that needed rewriting once needs it on every later request, and the
     // upstream rejection that teaches us costs a round trip each time. Reuse it, and let
@@ -319,7 +326,9 @@ export function createGateway (options) {
     // the catalog resolves it to a different version. Move the activity lease to the exact
     // resolved id before loading so the switch does not mistake this request for work against
     // the build it is replacing.
-    if (target.variantId) setActivityModel(target.variantId);
+    if (target.variantId && !setActivityModel(target.variantId)) {
+      return respondUnloading(req, res, target.variantId);
+    }
 
     const gen = generation;
     let loadedId = null;
@@ -336,7 +345,9 @@ export function createGateway (options) {
     // the very error the load was meant to resolve.
     let replayBody = buffered;
     const canonical = typeof loadedId === 'string' && loadedId ? loadedId : target.variantId;
-    if (canonical && canonical !== target.variantId) setActivityModel(canonical);
+    if (canonical && canonical !== target.variantId && !setActivityModel(canonical)) {
+      return respondUnloading(req, res, canonical);
+    }
     if (canonical && canonical !== requested) {
       const rewritten = rewriteModelName(buffered, canonical);
       if (rewritten !== null) {

@@ -174,6 +174,7 @@
     type SelfTestReport,
   } from "$lib/endpoint-self-test";
   import { buildEndpointModelClassifier } from "$lib/endpoint-model-classification";
+  import { endpointLoadTarget } from "$lib/endpoint-load-target";
   import {
     createSelfTestResidencyController,
     preferredResidentChatAlias,
@@ -319,15 +320,6 @@
       const catalogModels = [...state.models];
       const initialPool = [...state.pool];
       const classifyModel = buildEndpointModelClassifier(catalogModels);
-      const modelForEndpointId = (modelId: string) => {
-        const normalized = modelId.toLowerCase();
-        return catalogModels.find((model: ModelInfo) =>
-          model.alias?.toLowerCase() === normalized
-        || model.variants?.some((variant: any) =>
-          variant.id?.toLowerCase() === normalized
-          || variant.id?.split(":")[0]?.toLowerCase() === normalized),
-        );
-      };
       const residency = createSelfTestResidencyController({
         models: catalogModels,
         initialPool,
@@ -355,11 +347,11 @@
           return matched?.supportsToolCalling ?? null;
         },
         prepareSpeechModel: async (modelId: string) => {
-          const model = modelForEndpointId(modelId);
-          const variant = model?.variants?.find((item: any) =>
-            item.id === modelId || item.id?.split(":")[0] === modelId);
-          if (!model) throw new Error(`Cached speech model ${modelId} is unavailable.`);
-          const loaded = await sdkLoadModel(model, undefined, variant?.id);
+          // The same cached build the gateway routes this id to: highest cached version for
+          // a versionless id, never an uncached one.
+          const target = endpointLoadTarget(catalogModels, modelId);
+          if (!target) throw new Error(`Cached speech model ${modelId} is unavailable.`);
+          const loaded = await sdkLoadModel(target.model, undefined, target.variantId ?? undefined);
           if (typeof loaded?.variantId !== "string" || !loaded.variantId) {
             throw new Error(`Cached speech model ${modelId} did not report a loaded variant.`);
           }

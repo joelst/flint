@@ -1809,35 +1809,46 @@ function setModelTemplate(name, promptTemplate) {
 }
 
 /**
- * Serializes ensureModel per alias. Two concurrent requests for the same alias would otherwise
- * both miss the pool, both run an eviction sweep and both call load() — loading the model
- * twice, or unloading and reloading it underneath the first request.
+ * Serializes loads and IPC unloads per alias. Two concurrent requests for the same alias would
+ * otherwise both miss the pool, both run an eviction sweep and both call load() — loading the
+ * model twice, or unloading and reloading it underneath the first request. An unload shares the
+ * chain so a load cannot probe or reload the model while its native unload is running.
+ * Keyed case-insensitively, like activityFences.
  * @type {Map<string, Promise<any>>}
  */
-const ensureModelLocks = new Map();
+const modelLocks = new Map();
 
-function ensureModel(alias, variantId) {
-  const inFlightLoad = ensureModelLocks.get(alias);
-  const previousResult = inFlightLoad ? inFlightLoad.catch(() => null) : Promise.resolve(null);
-  const next = previousResult.then(async (previous) => {
-      const result = await ensureModelLocked(alias, variantId);
-      if (inFlightLoad && result.loadedNow !== true) {
-        // A preceding request may have loaded or reloaded this model while this request waited.
-        // Only a preceding known-warm result remains warm; the other cases are unknowable from
-        // the current request's serialized probe.
-        return {
-          ...result,
-          loadedNow: previous?.loadedNow === false ? false : null,
-        };
-      }
-      return result;
-    });
-  ensureModelLocks.set(alias, next);
+/**
+ * Runs `fn` after every earlier load or unload of this alias has settled. `fn` receives the
+ * previous holder's result, or null when there was none or it failed.
+ */
+function withModelLock (alias, fn) {
+  const key = String(alias || '').trim().toLowerCase();
+  const previous = modelLocks.get(key);
+  const next = (previous ? previous.catch(() => null) : Promise.resolve(null)).then(fn);
+  modelLocks.set(key, next);
   const release = () => {
-    if (ensureModelLocks.get(alias) === next) ensureModelLocks.delete(alias);
+    if (modelLocks.get(key) === next) modelLocks.delete(key);
   };
   next.then(release, release);
   return next;
+}
+
+function ensureModel(alias, variantId) {
+  const waited = modelLocks.has(String(alias || '').trim().toLowerCase());
+  return withModelLock(alias, async (previous) => {
+    const result = await ensureModelLocked(alias, variantId);
+    if (waited && result.loadedNow !== true) {
+      // A preceding request may have loaded or reloaded this model while this request waited.
+      // Only a preceding known-warm result remains warm; the other cases are unknowable from
+      // the current request's serialized probe.
+      return {
+        ...result,
+        loadedNow: previous?.loadedNow === false ? false : null,
+      };
+    }
+    return result;
+  });
 }
 
 async function ensureModelLocked(alias, variantId) {
@@ -2555,22 +2566,28 @@ rl.on('line', async (line) => {
       reply({ ok: true, result: { acceleration, lane: payload.lane || 'chat', variantId: entry.variantId } });
     } else if (cmd === 'unload') {
       const alias = payload.alias;
-      const releaseIdleFence = payload.ifIdle ? tryBeginIdleUnload(alias) : () => {};
-      if (!releaseIdleFence) {
-        throw new Error(`Cannot unload ${alias} while requests are in flight. Retry once they finish.`);
-      }
-      try {
-        const entry = pool.get(alias);
-        if (entry) {
-          await entry.catModel.unload();
-          pool.delete(alias);
-          usage.delete(alias);
-          log('info', `Model ${alias} unloaded from pool`);
-          audit('unload', { alias });
+      // Behind any load of this alias already running, and ahead of any that arrives later, so
+      // ensureModel cannot probe or reload the model while catModel.unload() runs. With ifIdle,
+      // the activity check and the fence run synchronously once the lock is held; activity
+      // admitted while waiting for the lock makes the model not idle.
+      await withModelLock(alias, async () => {
+        const releaseIdleFence = payload.ifIdle ? tryBeginIdleUnload(alias) : () => {};
+        if (!releaseIdleFence) {
+          throw new Error(`Cannot unload ${alias} while requests are in flight. Retry once they finish.`);
         }
-      } finally {
-        releaseIdleFence();
-      }
+        try {
+          const entry = pool.get(alias);
+          if (entry) {
+            await entry.catModel.unload();
+            pool.delete(alias);
+            usage.delete(alias);
+            log('info', `Model ${alias} unloaded from pool`);
+            audit('unload', { alias });
+          }
+        } finally {
+          releaseIdleFence();
+        }
+      });
       reply({ ok: true });
     } else if (cmd === 'deleteModel') {
       if (!payload.alias) {
@@ -3177,37 +3194,47 @@ rl.on('line', async (line) => {
       log('debug', `Transcription: model=${payload.model} ext=.${fileExt} lang=${payload.language || 'auto'}`);
 
       const requestedAlias = payload.model;
-      if (requestedAlias) {
-        await ensureModel(requestedAlias);
+      // Book before resolving the model, as chat and embeddings do. Everything from
+      // ensureModel to the temp-file write awaits, and an idle unload refuses only a model
+      // that already has activity. The request body's finally ends this booking; a failure
+      // before the body starts ends it here.
+      const audioActivity = noteActivity(requestedAlias, 'start');
+      if (audioActivity === false) {
+        throw new Error(`Model ${requestedAlias} is temporarily unavailable while it is unloading.`);
       }
-      const audioPoolEntry = pool.get(requestedAlias);
-      const audioModel = audioPoolEntry?.catModel;
-      const preferred = await applyPreferredExecutionProvider(payload.preferredEp, audioModel);
+      let audioPoolEntry;
+      let audioModel;
+      let preferred;
+      let bytes;
+      let tempPath;
+      try {
+        if (requestedAlias) {
+          await ensureModel(requestedAlias);
+        }
+        audioPoolEntry = pool.get(requestedAlias);
+        audioModel = audioPoolEntry?.catModel;
+        preferred = await applyPreferredExecutionProvider(payload.preferredEp, audioModel);
 
-      if (!audioModel) {
-        throw new Error('No STT model loaded. Select an STT model on the Audio page first.');
+        if (!audioModel) {
+          throw new Error('No STT model loaded. Select an STT model on the Audio page first.');
+        }
+
+        bytes = Buffer.from(payload.audioBase64, 'base64');
+        // Force .wav extension — the models use a strict AudioDecoder that often
+        // cannot detect WebM/Opus/MP3 etc. We normalize on the client too.
+        let baseName = (payload.fileName || 'audio').replace(/[^a-zA-Z0-9._-]/g, '_');
+        if (!/\.wav$/i.test(baseName)) baseName += '.wav';
+        tempPath = path.join(os.tmpdir(), `flint-audio-${Date.now()}-${baseName}`);
+        await fs.promises.writeFile(tempPath, bytes);
+      } catch (e) {
+        noteActivity(requestedAlias, 'end', audioActivity);
+        throw e;
       }
-
-      const bytes = Buffer.from(payload.audioBase64, 'base64');
-      // Force .wav extension — the models use a strict AudioDecoder that often
-      // cannot detect WebM/Opus/MP3 etc. We normalize on the client too.
-      let baseName = (payload.fileName || 'audio').replace(/[^a-zA-Z0-9._-]/g, '_');
-      if (!/\.wav$/i.test(baseName)) baseName += '.wav';
-      const tempFileName = `flint-audio-${Date.now()}-${baseName}`;
-      const tempPath = path.join(os.tmpdir(), tempFileName);
-      await fs.promises.writeFile(tempPath, bytes);
 
       const audioAccessTs = Date.now();
       let audioOk = false;
       activeStreamCount++;
       if (!activeStreamOldest) activeStreamOldest = { type: 'audio', modelAlias: requestedAlias, startedAt: audioAccessTs };
-      const audioActivity = noteActivity(requestedAlias, 'start');
-      if (audioActivity === false) {
-        activeStreamCount = Math.max(0, activeStreamCount - 1);
-        if (activeStreamCount === 0) activeStreamOldest = null;
-        try { fs.unlinkSync(tempPath); } catch {}
-        throw new Error(`Model ${requestedAlias} is temporarily unavailable while it is unloading.`);
-      }
       try {
         // Prefer direct AudioClient (like we do for chat) — this avoids relying on the web service HTTP route
         // which may return 404 for /audio/transcriptions even for Whisper models.

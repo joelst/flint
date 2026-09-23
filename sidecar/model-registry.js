@@ -19,7 +19,11 @@
 //
 // Pure module: no SDK calls and no I/O, so the mapping rules are unit testable.
 
-/** Variant ids carry a `:<version>` suffix that the /v1/models listing strips. */
+/**
+ * Variant ids carry a `:<version>` suffix that the /v1/models listing strips.
+ * @param {unknown} id
+ * @returns {string}
+ */
 export function stripVersion (id) {
   return String(id || '').replace(/:\d+$/, '');
 }
@@ -68,7 +72,12 @@ export function buildModelIndex (models) {
   return index;
 }
 
-/** Compare the trailing `:<version>` of two variant ids. Missing sorts lowest. */
+/**
+ * Compare the trailing `:<version>` of two variant ids. Missing sorts lowest.
+ * @param {string|null|undefined} a
+ * @param {string|null|undefined} b
+ * @returns {number}
+ */
 function compareVersions (a, b) {
   const va = Number(String(a || '').match(/:(\d+)$/)?.[1] ?? -1);
   const vb = Number(String(b || '').match(/:(\d+)$/)?.[1] ?? -1);

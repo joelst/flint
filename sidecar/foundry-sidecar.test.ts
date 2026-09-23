@@ -1880,3 +1880,145 @@ describe('foundry-sidecar packaged resource layout', () => {
     }
   }, 60000);
 });
+
+describe('guarded idle unload against concurrent model use', () => {
+  // A fake SDK whose unload and preferred-EP setter are slow and whose calls are appended to
+  // an event log, so the tests can see what ran while a native unload was in progress.
+  const FAKE_SDK = [
+    "import fs from 'node:fs';",
+    'const note = (event) => fs.appendFileSync(process.env.FLINT_TEST_EVENT_LOG, event + "\\n");',
+    'const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));',
+    'class FakeModel {',
+    "  constructor() { this.id = 'fake-variant'; this.loaded = false; }",
+    "  async load() { note('load'); this.loaded = true; }",
+    "  async unload() { note('unload-start'); await sleep(400); this.loaded = false; note('unload-end'); }",
+    "  isLoaded() { note('isLoaded'); return this.loaded; }",
+    "  getExecutionProvider() { return 'CPUExecutionProvider'; }",
+    '  createAudioClient() {',
+    '    const model = this;',
+    '    return {',
+    '      settings: {},',
+    "      async *transcribeStreaming() { note('transcribe'); if (!model.loaded) throw new Error('not loaded'); yield { text: 'hello' }; },",
+    "      async transcribe() { note('transcribe'); if (!model.loaded) throw new Error('not loaded'); return { text: 'hello' }; },",
+    '    };',
+    '  }',
+    '}',
+    'class FakeManager {',
+    '  constructor() { this.catalog = { getModel: async () => new FakeModel(), getModels: async () => [] }; }',
+    "  async setPreferredExecutionProvider() { note('prefer-start'); await sleep(400); note('prefer-end'); }",
+    '  static create() { return new FakeManager(); }',
+    '}',
+    'export { FakeManager as FoundryLocalManager };',
+  ].join('\n');
+
+  let homeDir: string;
+  let eventLog: string;
+  let proc: ChildProcessWithoutNullStreams;
+
+  const events = () => {
+    try {
+      return readFileSync(eventLog, 'utf8').split('\n').filter(Boolean);
+    } catch {
+      return [];
+    }
+  };
+  const send = (msg: object) => proc.stdin.write(`${JSON.stringify(msg)}\n`);
+  const reply = (id: number) => waitForLine(proc, (msg) => msg.id === id, 10000);
+  const waitForEvent = async (event: string) => {
+    const deadline = Date.now() + 5000;
+    while (!events().includes(event)) {
+      if (Date.now() > deadline) throw new Error(`Timed out waiting for ${event}`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  };
+
+  beforeEach(async () => {
+    homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-guarded-unload-'));
+    eventLog = join(homeDir, 'events.log');
+    const corePath = join(homeDir, 'fake-core.dylib');
+    writeFileSync(corePath, '');
+    const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
+    writeFileSync(loaderPath, [
+      `const sdk = ${JSON.stringify(FAKE_SDK)};`,
+      'export async function resolve(specifier, context, nextResolve) {',
+      "  if (specifier === 'foundry-local-sdk') return { url: 'data:text/javascript,' + encodeURIComponent(sdk), shortCircuit: true };",
+      '  return nextResolve(specifier, context);',
+      '}',
+      'export async function load(url, context, nextLoad) {',
+      "  if (url.startsWith('data:text/javascript,')) return { format: 'module', source: decodeURIComponent(url.slice('data:text/javascript,'.length)), shortCircuit: true };",
+      '  return nextLoad(url, context);',
+      '}',
+    ].join('\n'));
+    proc = spawn(process.execPath, [
+      '--experimental-loader', pathToFileURL(loaderPath).href, 'sidecar/foundry-sidecar.js',
+    ], {
+      cwd: process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        HOME: homeDir,
+        USERPROFILE: homeDir,
+        FLINT_FOUNDRY_CORE_PATH: corePath,
+        FLINT_TEST_EVENT_LOG: eventLog,
+      },
+    });
+    await waitForLine(proc, (msg) => msg.ready === true);
+    const init = reply(1);
+    send({ id: 1, cmd: 'init', appName: 'flint-test', logLevel: 'info' });
+    expect((await init).ok).toBe(true);
+    const loaded = reply(2);
+    send({ id: 2, cmd: 'load', alias: 'fake-model' });
+    expect((await loaded).ok).toBe(true);
+  });
+
+  afterEach(async () => {
+    await killAndWait(proc);
+    rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  it('holds a load until a guarded unload of the same alias has finished', async () => {
+    const unloaded = reply(3);
+    const reloaded = reply(4);
+    send({ id: 3, cmd: 'unload', alias: 'fake-model', ifIdle: true });
+    send({ id: 4, cmd: 'load', alias: 'fake-model' });
+    expect((await unloaded).ok).toBe(true);
+    expect((await reloaded).ok).toBe(true);
+
+    const log = events();
+    const start = log.indexOf('unload-start');
+    const end = log.indexOf('unload-end');
+    expect(start).toBeGreaterThan(-1);
+    // Nothing may probe or load the model while its native unload runs, and the later
+    // load must bring it back rather than report the model that is going away.
+    expect(log.slice(start + 1, end)).toEqual([]);
+    expect(log.slice(end + 1)).toContain('load');
+  }, 30000);
+
+  it('refuses a guarded unload while a transcription is preparing its model', async () => {
+    const wav = Buffer.alloc(44);
+    wav.write('RIFF', 0, 'ascii');
+    wav.writeUInt32LE(36, 4);
+    wav.write('WAVE', 8, 'ascii');
+    const transcribed = reply(5);
+    send({
+      id: 5,
+      cmd: 'transcribeAudio',
+      audioBase64: wav.toString('base64'),
+      mimeType: 'audio/wav',
+      fileName: 'probe.wav',
+      model: 'fake-model',
+      language: 'en',
+      preferredEp: 'CPUExecutionProvider',
+    });
+    // The request has resolved its model and is inside applyPreferredExecutionProvider.
+    await waitForEvent('prefer-start');
+    const refused = reply(6);
+    send({ id: 6, cmd: 'unload', alias: 'fake-model', ifIdle: true });
+    const unload = await refused;
+    await transcribed;
+
+    expect(unload.ok).not.toBe(true);
+    expect(String(unload.error)).toMatch(/in flight/);
+    expect(events()).not.toContain('unload-start');
+  }, 30000);
+});
