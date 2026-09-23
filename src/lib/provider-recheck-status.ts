@@ -53,6 +53,11 @@ export function providerRecheckStatus(
   );
   const removed = uniqueProviders(registration?.removedProviderCaches ?? []);
   const busy = uniqueProviders(registration?.busyProviderCaches ?? []);
+  const rebuilt = uniqueProviders(
+    [...(registration?.attemptedProviderRebuilds ?? []), ...removed].filter((name) =>
+      registered.has(providerKey(name)),
+    ),
+  );
   const stillFailed = uniqueProviders(
     [
       ...(registration?.failedEps ?? []),
@@ -70,8 +75,8 @@ export function providerRecheckStatus(
       message: `Provider rebuild failed for ${stillFailed.join(', ')}.${locked}`,
     };
   }
-  if (removed.length) {
-    return { failed: false, message: `Rebuilt ${removed.join(', ')}.${locked}` };
+  if (rebuilt.length) {
+    return { failed: false, message: `Rebuilt ${rebuilt.join(', ')}.${locked}` };
   }
   return {
     failed: false,
