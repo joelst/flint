@@ -16,7 +16,7 @@ describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
   it('removes the installed SDK tree before NSIS copies this package', () => {
     expect(conf.bundle.windows.nsis.installerHooks).toBe('./windows/hooks.nsh');
     expect(hooks).toContain('!macro NSIS_HOOK_PREINSTALL');
-    expect(hooks).toContain('CheckIfAppIsRunning');
+    expect(hooks).toContain('CheckIfAppIsRunning "$INSTDIR\\${MAINBINARYNAME}.exe"');
     expect(hooks).toContain('Rename "$INSTDIR\\foundry-local-sdk" "$INSTDIR\\foundry-local-sdk.previous"');
     expect(hooks).toContain('prebuilds\\win32-${ARCH}\\onnxruntime.dll');
     expect(hooks).toContain('foundry-local-core\\win32-${ARCH}\\onnxruntime.dll');
@@ -55,8 +55,9 @@ describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
     expect(wxs).toMatch(/Id="DiscardFoundryBackup"[\s\S]*Return="check"/);
     expect(wxs).toContain('Return="check"');
     expect(wxs).toContain('Before="InstallFiles"');
-    expect(wxs).toContain('Action="DiscardFoundryBackup" After="InstallFinalize"');
-    expect(wxs).not.toContain('Before="InstallFinalize"');
+    expect(wxs).toContain('Action="DiscardFoundryBackup" Before="InstallFinalize"');
+    expect(wxs).not.toContain('After="InstallFinalize"');
+    expect(wxs).toContain('<CreateFolder />');
   });
 
   it('never puts the install location on a command line', () => {

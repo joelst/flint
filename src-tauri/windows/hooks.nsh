@@ -5,7 +5,9 @@
 ; only after the new ONNX Runtime is on disk.
 !define MUI_CUSTOMFUNCTION_ABORT RestoreFoundrySdkOnAbort
 !macro NSIS_HOOK_PREINSTALL
-  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  ; The macro matches a running process by full path, so a bare file name finds
+  ; nothing and the rename below would fail on the SDK files Flint still holds.
+  !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
   Sleep 500
   ; A backup beside a working runtime is a leftover from cleanup, not the
   ; only good SDK. Move that leftover aside. A backup beside a tree with no

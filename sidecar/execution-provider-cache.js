@@ -65,26 +65,68 @@ function isFileBusy (error) {
   return code === 'EPERM' || code === 'EBUSY' || code === 'EACCES';
 }
 
+/** Prefix of a tree that was renamed out of the way before being deleted. */
+function removalPrefix (dir) {
+  return `${path.basename(dir)}.removing-`;
+}
+
+/** Best-effort delete of trees left behind by an interrupted removal. */
+async function sweepAbandonedRemovals (dir) {
+  const parent = path.dirname(dir);
+  const prefix = removalPrefix(dir);
+  let entries = [];
+  try {
+    entries = await fs.promises.readdir(parent);
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.startsWith(prefix)) continue;
+    try {
+      await fs.promises.rm(path.join(parent, entry), { recursive: true, force: true });
+    } catch {
+      // A file in the abandoned tree is still loaded. Try again next time.
+    }
+  }
+}
+
 /**
  * Delete one provider cache.
  * Returns true when the directory was removed, false when it was already
  * gone, and 'busy' when Windows still has a file in it loaded.
  * A loaded DLL cannot be replaced in this process, so the caller must leave
  * that provider out of the registration batch.
+ *
+ * The tree is renamed aside before it is deleted. A recursive delete unlinks
+ * one entry at a time, so a loaded DLL would otherwise refuse after its
+ * siblings are already gone, and the provider would be reported as left in
+ * place while half of it was missing. A rename moves the whole directory or
+ * nothing, so a refused rename is the only busy case. A tree left behind by
+ * an interrupted delete is swept on the next call.
  * @param {string} epRoot
  * @param {unknown} epName
  * @returns {Promise<true|false|'busy'>}
  */
 export async function removeProviderCache (epRoot, epName) {
   const dir = providerCacheDirectory(epRoot, epName);
-  if (!dir || !fs.existsSync(dir)) return false;
+  if (!dir) return false;
+  await sweepAbandonedRemovals(dir);
+  if (!fs.existsSync(dir)) return false;
+  const aside = `${dir}.removing-${process.pid.toString(36)}-${Date.now().toString(36)}`;
   try {
-    await fs.promises.rm(dir, { recursive: true, force: true });
-    return true;
+    await fs.promises.rename(dir, aside);
   } catch (error) {
     if (isFileBusy(error)) return 'busy';
     throw error;
   }
+  try {
+    await fs.promises.rm(aside, { recursive: true, force: true });
+  } catch (error) {
+    if (!isFileBusy(error)) throw error;
+    // The cache is out of the way, so the next download writes a new copy.
+    // The renamed tree is swept on a later call.
+  }
+  return true;
 }
 
 const KNOWN_PROVIDERS = [

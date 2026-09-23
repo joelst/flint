@@ -15,7 +15,11 @@
          version. Move the installed tree aside before InstallFiles. If the move
          fails, the install stops and the original tree is still in place. If a
          later step fails, the rollback action puts the tree back. The backup is
-         removed only after the install commits.
+         removed during the commit phase. A commit action is sequenced before
+         InstallFinalize because Windows Installer only writes deferred,
+         rollback, and commit actions into the execution script between
+         InstallInitialize and InstallFinalize; it still runs after the install
+         has succeeded.
 
          Each action runs with INSTALLDIR as its working directory and names the
          two folders relative to it. The install location is never substituted
@@ -42,7 +46,7 @@
     <InstallExecuteSequence>
       <Custom Action="RestoreFoundrySdk" Before="MoveFoundrySdk">NOT REMOVE</Custom>
       <Custom Action="MoveFoundrySdk" Before="InstallFiles">NOT REMOVE</Custom>
-      <Custom Action="DiscardFoundryBackup" After="InstallFinalize">NOT REMOVE</Custom>
+      <Custom Action="DiscardFoundryBackup" Before="InstallFinalize">NOT REMOVE</Custom>
     </InstallExecuteSequence>
 
     <DirectoryRef Id="INSTALLDIR">
@@ -53,6 +57,11 @@
                        Type="integer"
                        Value="1"
                        KeyPath="yes" />
+        <!-- The three custom actions run with INSTALLDIR as their working
+             directory, and a process cannot start in a directory that does not
+             exist yet. CreateFolders runs before InstallFiles, so a first
+             install has the folder by the time MoveFoundrySdk runs. -->
+        <CreateFolder />
       </Component>
     </DirectoryRef>
   </Fragment>
