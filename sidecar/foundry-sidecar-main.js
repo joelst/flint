@@ -445,7 +445,9 @@ async function rerunAcceleratorRegistration(onProgress) {
 
 async function runCatalogMutation(mutate, operation) {
   const gate = acceleratorGate();
-  if (!gate) throw new Error('Foundry manager is unavailable');
+  if (!gate) {
+    throw new Error(`Cannot perform ${operation}: initialize the Foundry runtime first`);
+  }
   const result = await gate.mutateAndCommit(mutate, (error) => {
     log('warn', `Catalog snapshot read failed after ${operation}: ${error?.message ?? error}`);
   });

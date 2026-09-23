@@ -256,6 +256,8 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
         try {
           await confirmCatalogCommit();
         } catch (error) {
+          // The local mutation is already durable. Report snapshot uncertainty
+          // separately so callers do not mistake a read failure for a failed mutation.
           onCommitError(error);
         }
         return result;

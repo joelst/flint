@@ -235,6 +235,7 @@ describe('native service startup', () => {
       const atomicMutation = source.indexOf('runCatalogMutation(', at);
       const call = source.indexOf(`${cmd}(`, atomicMutation);
       expect(at, cmd).toBeGreaterThan(-1);
+      expect(atomicMutation, cmd).toBeGreaterThan(-1);
       expect(atomicMutation, cmd).toBeGreaterThan(at);
       expect(call, cmd).toBeGreaterThan(atomicMutation);
     }
