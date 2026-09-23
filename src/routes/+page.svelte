@@ -654,12 +654,16 @@
       const registration = readiness.registration;
       const failed = registration?.failedEps ?? [];
       const removed = registration?.removedProviderCaches ?? [];
+      const attempted = registration?.attemptedProviderRebuilds ?? [];
       const busy = registration?.busyProviderCaches ?? [];
       const locked = busy.length
         ? ` Left in place because a file is in use: ${busy.join(", ")}.`
         : "";
-      if (failed.length) {
-        statusMessage = `Provider rebuild failed for ${failed.join(", ")}.${locked}`;
+      const failureNames = failed.length ? failed : removed.length ? removed : attempted;
+      if (failed.length || registration?.success === false) {
+        statusMessage = (failureNames.length
+          ? `Provider rebuild failed for ${failureNames.join(", ")}.`
+          : (registration?.status || "Provider rebuild failed.")) + locked;
         appendAppLog(statusMessage, "warn");
       } else if (removed.length) {
         statusMessage = `Rebuilt ${removed.join(", ")}.${locked}`;
@@ -7742,7 +7746,7 @@ Output only the summary text, no preamble.`;
                     </option>
                   {/each}
                 </select>
-                <button onclick={ensureHardwareAccel} disabled={!state.ready}>
+                <button onclick={ensureHardwareAccel} disabled={!state.ready || providerRecheckBusy}>
                   Install / Update Accelerators
                 </button>
                 <button

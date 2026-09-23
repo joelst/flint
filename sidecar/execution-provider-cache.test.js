@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   providerCacheDirectory,
@@ -28,7 +29,7 @@ describe('provider cache paths', () => {
 });
 
 describe('removeProviderCache', () => {
-  it('removes only the named provider directory', () => {
+  it('removes only the named provider directory', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'flint-ep-'));
     const cuda = path.join(root, 'cuda-ep');
     const webgpu = path.join(root, 'webgpu-ep');
@@ -37,11 +38,11 @@ describe('removeProviderCache', () => {
     fs.mkdirSync(webgpu);
     fs.writeFileSync(path.join(webgpu, 'onnxruntime_providers_webgpu.dll'), 'ok');
 
-    expect(removeProviderCache(root, 'CUDAExecutionProvider')).toBe(true);
+    expect(await removeProviderCache(root, 'CUDAExecutionProvider')).toBe(true);
     expect(fs.existsSync(cuda)).toBe(false);
     expect(fs.existsSync(webgpu)).toBe(true);
-    expect(removeProviderCache(root, 'CUDAExecutionProvider')).toBe(false);
-    expect(removeProviderCache(root, 'CPUExecutionProvider')).toBe(false);
+    expect(await removeProviderCache(root, 'CUDAExecutionProvider')).toBe(false);
+    expect(await removeProviderCache(root, 'CPUExecutionProvider')).toBe(false);
     fs.rmSync(root, { recursive: true, force: true });
   });
 });
@@ -88,7 +89,7 @@ describe('rebuildBrokenExecutionProviders', () => {
     const outcome = await rebuildBrokenExecutionProviders({
       discover: () => [
         { name: 'WebGpuExecutionProvider', isRegistered: true },
-        ...(cudaRegistered ? [{ name: 'CUDAExecutionProvider', isRegistered: true }] : []),
+        { name: 'CUDAExecutionProvider', isRegistered: cudaRegistered },
       ],
       removeCache: (name) => {
         if (name !== 'CUDAExecutionProvider' || !present) return false;
@@ -108,7 +109,7 @@ describe('rebuildBrokenExecutionProviders', () => {
         return { failedEps: [], success: true };
       },
     });
-    expect(calls).toEqual([undefined, ['CUDAExecutionProvider']]);
+    expect(calls).toEqual([['CUDAExecutionProvider'], ['CUDAExecutionProvider']]);
     expect(outcome.removed).toEqual(['CUDAExecutionProvider']);
     expect(outcome.result?.success).toBe(true);
   });
@@ -150,6 +151,22 @@ describe('rebuildBrokenExecutionProviders', () => {
     });
     expect(calls).toEqual([['CUDAExecutionProvider'], ['CUDAExecutionProvider']]);
     expect(outcome.result?.success).toBe(true);
+  });
+
+  it('reports attempted provider rebuild names when registration fails without naming a provider', async () => {
+    const calls = [];
+    const outcome = await rebuildBrokenExecutionProviders({
+      discover: () => [{ name: 'CUDAExecutionProvider', isRegistered: false }],
+      removeCache: () => false,
+      downloadAndRegister: async (names) => {
+        calls.push(names);
+        return { success: false, failedEps: [], status: 'registration failed' };
+      },
+    });
+    expect(calls).toEqual([['CUDAExecutionProvider'], ['CUDAExecutionProvider']]);
+    expect(outcome.attempted).toEqual(['CUDAExecutionProvider']);
+    expect(outcome.result?.success).toBe(false);
+    expect(outcome.result?.failedEps).toEqual(['CUDAExecutionProvider']);
   });
 
   it('registers a cached provider that discover does not list', async () => {
@@ -219,21 +236,62 @@ describe('rebuildBrokenExecutionProviders', () => {
         return { success: true, failedEps: [] };
       },
     });
-    expect(calls[0]).toEqual(['CUDAExecutionProvider']);
+    expect(calls).toEqual([]);
     expect(outcome.busy).toEqual(['CUDAExecutionProvider']);
+    expect(outcome.result?.success).toBe(false);
+    expect(outcome.result?.failedEps).toEqual(['CUDAExecutionProvider']);
   });
 
   it('leaves a registered provider in place when registration succeeds', async () => {
     const removed = [];
+    const calls = [];
     const outcome = await rebuildBrokenExecutionProviders({
       discover: () => [{ name: 'WebGpuExecutionProvider', isRegistered: true }],
       removeCache: (name) => {
         removed.push(name);
         return true;
       },
-      downloadAndRegister: async () => ({ failedEps: [], success: true, status: 'All providers registered' }),
+      downloadAndRegister: async (names) => {
+        calls.push(names);
+        return { failedEps: [], success: true, status: 'All providers registered' };
+      },
     });
+    expect(calls).toEqual([]);
     expect(removed).toEqual([]);
     expect(outcome.removed).toEqual([]);
+    expect(outcome.result?.success).toBe(true);
+  });
+
+  it('names a provider that is still unregistered after the retry', async () => {
+    const calls = [];
+    const outcome = await rebuildBrokenExecutionProviders({
+      discover: () => [{ name: 'CUDAExecutionProvider', isRegistered: false }],
+      removeCache: () => true,
+      downloadAndRegister: async (names) => {
+        calls.push(names);
+        return { success: true, failedEps: [], registeredEps: names };
+      },
+    });
+    expect(calls).toEqual([['CUDAExecutionProvider'], ['CUDAExecutionProvider']]);
+    expect(outcome.result?.success).toBe(false);
+    expect(outcome.result?.failedEps).toEqual(['CUDAExecutionProvider']);
+  });
+});
+
+describe('Recheck Providers button', () => {
+  const page = fs.readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'routes', '+page.svelte'),
+    'utf8',
+  );
+
+  it('paints the button on the panel fill with a visible border', () => {
+    expect(page).toContain('class="secondary accel-recheck"');
+    expect(page).toMatch(
+      /button\.accel-recheck\s*\{[^}]*background:\s*var\(--panel-bg\);[^}]*color:\s*var\(--fg\);[^}]*border:\s*1px solid var\(--muted\);/s,
+    );
+  });
+
+  it('disables accelerator installation during a provider recheck', () => {
+    expect(page).toContain('<button onclick={ensureHardwareAccel} disabled={!state.ready || providerRecheckBusy}>');
   });
 });
