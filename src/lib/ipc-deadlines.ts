@@ -12,13 +12,17 @@ export const IPC_COMMAND_DEADLINES_MS: Record<SidecarCommandName, number | null>
   getAccessLog: 10_000,
   getHealthRing: 10_000,
   getCacheInventory: 30_000,
-  // These catalog readers can wait behind accelerator registration. That work may download
-  // execution providers and is intentionally unbounded, so an outer query deadline would only
-  // discard a valid late reply while the native work continues.
-  poolStatus: null,
+  // Automatic pool telemetry never enters the registration gate: it skips the catalog entirely
+  // until a queued `getModels()` read has confirmed the snapshot, and reads loaded state
+  // off-queue afterwards. It stays bounded because `refreshModels` awaits it, so an unbounded
+  // stalled probe would leave an otherwise successful catalog refresh pending forever.
+  poolStatus: 20_000,
   getEps: 10_000,
   // WSL version discovery may use a 15-second subprocess timeout.
   wslStatus: 20_000,
+  // These catalog readers can wait behind accelerator registration. That work may download
+  // execution providers and is intentionally unbounded, so an outer query deadline would only
+  // discard a valid late reply while the native work continues.
   listModels: null,
   getVisionModels: null,
   getSTTModels: null,

@@ -30,7 +30,11 @@ describe('IPC command deadlines', () => {
     expect(deadlineForCommand('listModels')).toBeNull();
     expect(deadlineForCommand('getVisionModels')).toBeNull();
     expect(deadlineForCommand('getSTTModels')).toBeNull();
-    expect(deadlineForCommand('poolStatus')).toBeNull();
+  });
+
+  it('bounds pool telemetry, which never waits on accelerator registration', () => {
+    expect(deadlineForCommand('poolStatus')).toBeGreaterThan(0);
+    expect(Number.isFinite(deadlineForCommand('poolStatus') as number)).toBe(true);
   });
 
   it('leaves headroom beyond nested control-plane probe budgets', () => {

@@ -1057,6 +1057,28 @@ describe('progress stall notices', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(onStall).not.toHaveBeenCalled();
   });
+
+  it('completes a catalog refresh whose pool telemetry probe never answers', async () => {
+    const sdk = await loadSdk();
+    vi.useFakeTimers();
+
+    const refresh = capture(sdk.refreshModels());
+    await vi.advanceTimersByTimeAsync(0);
+    const listId = JSON.parse(harness.writes.find((line) => line.includes('"listModels"'))!).id;
+    harness.emitStdout({ id: listId, result: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    const statusId = JSON.parse(harness.writes.find((line) => line.includes('"getStatus"'))!).id;
+    harness.emitStdout({ id: statusId, result: { serviceRunning: false, endpoint: null } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(harness.writes.some((line) => line.includes('"poolStatus"'))).toBe(true);
+
+    // Telemetry never waits behind accelerator registration, so a silent probe must not hold a
+    // successful catalog refresh open forever.
+    await vi.advanceTimersByTimeAsync(20_000);
+    await refresh.tracked;
+    expect(refresh.box.err).toBeUndefined();
+    expect(sdkSnapshot(sdk).catalogStatus).toBe('ready');
+  });
 });
 
 describe('one answer per request', () => {

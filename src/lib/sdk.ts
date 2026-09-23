@@ -145,7 +145,6 @@ const CATALOG_REGISTRATION_COMMANDS = new Set<SidecarCommandName>([
   'linkModelFolder',
   'setModelTemplate',
   'startService',
-  'poolStatus',
 ]);
 let msgId = 0;
 let currentStatus: any = { initialized: false, modelLoaded: false, serviceRunning: false };
