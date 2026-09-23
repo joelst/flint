@@ -113,6 +113,7 @@ export interface BenchmarkAttempt {
   /** Committed before the chat call is dispatched — the write-ahead part of the contract. */
   intentCommittedAt: number;
   sdkCallStartedAt?: number;
+  sdkCallDurationMs?: number;
   /** Committed only once a terminal (success or failure) result has been durably recorded. */
   settledAt?: number;
   responseText?: string;
@@ -316,6 +317,8 @@ export function isBenchmarkAttempt(value: unknown): value is BenchmarkAttempt {
   if (v.requestedVariantId !== null && !isNonEmptyString(v.requestedVariantId)) return false;
   if (v.boundVariantId !== undefined && v.boundVariantId !== null && !isNonEmptyString(v.boundVariantId)) return false;
   if (!isFiniteNumber(v.intentCommittedAt)) return false;
+  if (v.sdkCallStartedAt !== undefined && !isFiniteNumber(v.sdkCallStartedAt)) return false;
+  if (v.sdkCallDurationMs !== undefined && (!isFiniteNumber(v.sdkCallDurationMs) || v.sdkCallDurationMs < 0)) return false;
   if (v.status === 'succeeded' && typeof v.responseText !== 'string') return false;
   if (v.status === 'failed' && !isNonEmptyString(v.errorMessage)) return false;
   if ((v.status === 'succeeded' || v.status === 'failed') && !isFiniteNumber(v.settledAt)) return false;

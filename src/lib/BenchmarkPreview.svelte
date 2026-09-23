@@ -14,12 +14,16 @@
   import {
     BENCHMARK_MAX_TARGETS,
     BENCHMARK_MAX_ATTEMPTS,
+    BENCHMARK_MAX_CASES,
+    BENCHMARK_MAX_JSONL_CHARS,
     isBenchmarkSuite,
     type BenchmarkSuite,
     type BenchmarkTarget,
   } from "./benchmark-suite";
-  import { aliasChoicesForTarget, applyTargetAlias, cachedVariantIds, draftEditsSuite, draftFromSuite, buildSuiteFromDraft, estimateDraftAttempts, variantChoicesForTarget, type SuiteDraft } from "./benchmark-draft";
-  import { buildProgressMatrix, isRunInterrupted, isRunResumable, nextRunPollAction, nextRunPollActionAfterReread, type AttemptSummary } from "./benchmark-progress";
+  import { aliasChoicesForTarget, applyTargetAlias, cachedVariantIds, caseRowsFromJsonl, draftEditsSuite, draftFromSuite, duplicateSuiteDraft, jsonlFromCaseRows, jsonlImportCanFitCharacterLimit, newPromptCaseRow, buildSuiteFromDraft, estimateDraftAttempts, tagsJsonError, variantChoicesForTarget, type SuiteCaseRow, type SuiteDraft } from "./benchmark-draft";
+  import { suiteDefinitionView } from "./benchmark-suite-summary";
+  import { buildRunResultView, formatResponseMs, type TargetResultView } from "./benchmark-results";
+  import { buildProgressMatrix, isRunInterrupted, isRunResumable, nextRunPollAction, nextRunPollActionAfterReread, summarizeAttempt, type AttemptSummary } from "./benchmark-progress";
   import { buildBenchmarkExport } from "./benchmark-export";
   import type { BenchmarkRun, BenchmarkRunHeader } from "./benchmark-run";
 
@@ -56,10 +60,23 @@
   let runCountsBySuite: Record<string, number> = Object.create(null);
 
   let editingDraft: SuiteDraft | null = null;
+  let editingCaseRows: SuiteCaseRow[] = [];
+  /** True when the JSONL text does not parse into rows. The textarea is the only editor then. */
+  let casesAdvanced = false;
+  let casesImporting = false;
+  let casesFileInput: HTMLInputElement | null = null;
   let editingErrors: string[] = [];
+  let editingNotices: string[] = [];
   let editingBusy = false;
   /** Held across create/edit/save/delete so Delete cannot race a Save that recreates the suite. */
   let suiteBusy = false;
+  let resultView: TargetResultView[] | null = null;
+  let resultViewRunId: string | null = null;
+  let resultError = "";
+  let resultGeneration = 0;
+  let resultLoadRunId: string | null = null;
+  let resultLoadPromise: Promise<void> | null = null;
+  let expandedResultId: string | null = null;
 
   let selectedRunId: string | null = null;
   let selectedRun: BenchmarkRun | null = null;
@@ -105,7 +122,7 @@
    * there, can start one that `onDestroy`'s single `stopPolling()` call never sees. */
   let destroyed = false;
   /** Editor write in flight — Save/Cancel/New/Edit serialize on this, not on an unrelated run. */
-  $: editorBusy = editingBusy || suiteBusy;
+  $: editorBusy = editingBusy || suiteBusy || casesImporting;
   /** Start/resume handshake or live run. Does not freeze Save/Cancel of an unrelated draft. */
   $: runBusy = lifecycleBusy || runInFlight;
   function suiteHasStoredRuns(suiteId: string): boolean {
@@ -171,8 +188,64 @@
     runsForSelectedSuite = [];
     lifecycleError = "";
     pollError = "";
+    clearRunResults();
     stopPolling();
     await refreshRunsForSelectedSuite(id);
+  }
+
+  function clearRunResults() {
+    resultGeneration += 1;
+    resultView = null;
+    resultViewRunId = null;
+    resultError = "";
+    resultLoadRunId = null;
+    resultLoadPromise = null;
+    expandedResultId = null;
+  }
+
+  /** Full attempt bodies, once, when the run is no longer the live one. The progress poll
+   * stays on summaries so a 1.5s tick never clones response text. */
+  async function loadRunResults(runId: string) {
+    if (runId === activeRunId) return;
+    if (resultViewRunId === runId && resultView) return;
+    if (resultLoadRunId === runId && resultLoadPromise) {
+      return resultLoadPromise;
+    }
+    const generation = ++resultGeneration;
+    const load = (async () => {
+      const res = await getBenchmarkRunWithAttempts(runId);
+      if (destroyed || generation !== resultGeneration || selectedRunId !== runId || runId === activeRunId) return;
+      if (!res.ok || !res.value) {
+        resultView = null;
+        resultViewRunId = null;
+        resultError = !res.ok
+          ? (res.error || "Could not load results")
+          : `Could not load results: run "${runId}" was not found`;
+        return;
+      }
+      resultView = buildRunResultView(res.value.run, res.value.attempts);
+      resultViewRunId = runId;
+      resultError = "";
+      // The summary poll can fail and leave selectedRun null. The full read already
+      // has the run, so the detail and its error have somewhere to render.
+      if (!selectedRun) selectedRun = res.value.run;
+      // An empty summary list with a full read would draw every cell as pending while
+      // the Results table shows the real terminal rows, and Resume would be judged
+      // against that empty matrix.
+      if (selectedRunAttempts.length === 0) {
+        selectedRunAttempts = res.value.attempts.map(summarizeAttempt);
+      }
+    })();
+    resultLoadRunId = runId;
+    resultLoadPromise = load;
+    try {
+      await load;
+    } finally {
+      if (resultLoadPromise === load) {
+        resultLoadRunId = null;
+        resultLoadPromise = null;
+      }
+    }
   }
 
   function newSuiteDraft(): SuiteDraft {
@@ -192,26 +265,153 @@
   // these are a defense-in-depth guard against any other call path.
   function discardDraft() {
     editingDraft = null;
+    editingCaseRows = [];
+    casesAdvanced = false;
     editingErrors = [];
+    editingNotices = [];
+  }
+
+  function openDraft(draft: SuiteDraft, notices: string[] = []) {
+    editingDraft = draft;
+    editingErrors = [];
+    editingNotices = notices;
+    const parsed = caseRowsFromJsonl(draft.casesJsonl);
+    if (parsed.ok) {
+      editingCaseRows = parsed.rows;
+      casesAdvanced = false;
+    } else {
+      // Leave the text in the advanced editor. A partial row list would drop the lines that failed.
+      editingCaseRows = [];
+      casesAdvanced = true;
+      editingErrors = [parsed.error];
+    }
+  }
+
+  function syncJsonlFromRows() {
+    if (!editingDraft || casesAdvanced) return;
+    editingDraft.casesJsonl = jsonlFromCaseRows(editingCaseRows);
+  }
+
+  function setPromptField(row: Extract<SuiteCaseRow, { kind: "prompt" }>, field: "id" | "prompt" | "expected" | "tagsJson", value: string) {
+    if (editorBusy) return;
+    row[field] = value;
+    syncJsonlFromRows();
+  }
+
+  function commitCaseRows(rows: SuiteCaseRow[]) {
+    if (!editingDraft || editorBusy) return;
+    editingCaseRows = rows;
+    casesAdvanced = false;
+    editingDraft.casesJsonl = jsonlFromCaseRows(rows);
+  }
+
+  function setCasesAdvanced(advanced: boolean) {
+    if (!editingDraft || editorBusy) return;
+    if (advanced) {
+      casesAdvanced = true;
+      editingErrors = [];
+      return;
+    }
+    const parsed = caseRowsFromJsonl(editingDraft.casesJsonl);
+    if (!parsed.ok) {
+      casesAdvanced = true;
+      editingErrors = [parsed.error];
+      return;
+    }
+    editingCaseRows = parsed.rows;
+    casesAdvanced = false;
+    editingErrors = [];
+  }
+
+  function addCaseRow() {
+    if (!editingDraft || editorBusy || editingCaseRows.length >= BENCHMARK_MAX_CASES) return;
+    commitCaseRows([...editingCaseRows, newPromptCaseRow(editingCaseRows.map((row) => row.id))]);
+  }
+
+  function removeCaseRow(index: number) {
+    commitCaseRows(editingCaseRows.filter((_, i) => i !== index));
+  }
+
+  function moveCaseRow(index: number, delta: number) {
+    const next = index + delta;
+    if (next < 0 || next >= editingCaseRows.length) return;
+    const rows = [...editingCaseRows];
+    const [row] = rows.splice(index, 1);
+    rows.splice(next, 0, row);
+    commitCaseRows(rows);
+  }
+
+  function setDraftNumber(field: "temperature" | "maxTokens", raw: string) {
+    if (!editingDraft || editorBusy) return;
+    editingDraft = { ...editingDraft, [field]: raw };
+  }
+
+  async function importCasesFile(event: Event) {
+    const input = event.currentTarget;
+    if (!(input instanceof HTMLInputElement) || !editingDraft || editingBusy || suiteBusy || casesImporting) return;
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+    const draftAtImport = editingDraft;
+    casesImporting = true;
+    try {
+      // The parser enforces the exact character limit after decoding. This byte bound only rejects
+      // files that cannot possibly fit, while allowing valid multi-byte UTF-8 JSONL through.
+      if (!jsonlImportCanFitCharacterLimit(file.size)) {
+        editingErrors = [`file cannot fit within ${BENCHMARK_MAX_JSONL_CHARS} characters`];
+        return;
+      }
+      const text = await file.text();
+      if (destroyed || editingDraft !== draftAtImport) return;
+      if (text.length > BENCHMARK_MAX_JSONL_CHARS) {
+        editingErrors = [`file is larger than ${BENCHMARK_MAX_JSONL_CHARS} characters`];
+        return;
+      }
+      editingDraft.casesJsonl = text;
+      const parsed = caseRowsFromJsonl(text);
+      if (!parsed.ok) {
+        editingCaseRows = [];
+        casesAdvanced = true;
+        editingErrors = [parsed.error];
+        return;
+      }
+      editingCaseRows = parsed.rows;
+      casesAdvanced = false;
+      editingErrors = [];
+    } catch {
+      if (!destroyed && editingDraft === draftAtImport) {
+        editingErrors = ["Could not read JSONL file"];
+      }
+    } finally {
+      casesImporting = false;
+    }
   }
 
   function startCreateSuite() {
-    if (editorBusy || lifecycleBusy) return;
-    editingDraft = newSuiteDraft();
-    editingErrors = [];
+    if (editorBusy || lifecycleBusy || editingDraft) return;
+    openDraft(newSuiteDraft());
   }
 
-  async function startEditSuite(suite: BenchmarkSuite) {
-    if (editorBusy || lifecycleBusy) return;
+  function startDuplicateSuite(suite: BenchmarkSuite) {
+    if (editorBusy || lifecycleBusy || editingDraft) return;
+    const draft = duplicateSuiteDraft(suite);
+    const removedTargets = suite.targets.length - draft.targets.length;
+    const notices = removedTargets > 0
+      ? [`Removed ${removedTargets} ${removedTargets === 1 ? "target" : "targets"} that repeated a model alias. Benchmark targets are keyed by alias.`]
+      : [];
+    openDraft(draft, notices);
+  }
+
+  function startEditSuite(suite: BenchmarkSuite) {
+    if (editorBusy || lifecycleBusy || editingDraft) return;
     // Editing is restricted to suites with no runs yet — a suite with runs already has attempts
     // recorded against its frozen snapshot, and silently changing the live suite underneath
     // that history would be misleading even though runs themselves are immutable.
     if ((runCountsBySuite[suite.id] ?? 0) > 0) {
-      loadError = "This suite has runs and can no longer be edited. Create a new suite to make changes.";
+      loadError = "This suite has runs and can no longer be edited. Duplicate it to make changes.";
       return;
     }
-    editingDraft = draftFromSuite(suite);
-    editingErrors = [];
+    openDraft(draftFromSuite(suite));
   }
 
   function cancelEditSuite() {
@@ -267,7 +467,7 @@
         editingErrors = [saved.error || "Could not save suite"];
         return;
       }
-      editingDraft = null;
+      discardDraft();
       await refreshSuites();
     } finally {
       editingBusy = false;
@@ -389,22 +589,38 @@
     }
     if (runId !== activeRunId) {
       stopPolling();
+      if (selectedRun && selectedRun.id === runId) void loadRunResults(runId);
       if (selectedSuiteId) await refreshRunsForSelectedSuite(selectedSuiteId);
     }
   }
 
   async function openRun(runId: string) {
+    const preserveHistoricalResults = selectedRunId === runId && runId !== activeRunId;
     selectedRunId = runId;
-    selectedRun = null;
-    selectedRunAttempts = [];
+    if (!preserveHistoricalResults) {
+      selectedRun = null;
+      selectedRunAttempts = [];
+      clearRunResults();
+    }
     lifecycleError = "";
     pollError = "";
     stopPolling();
     const token = ++openRunToken;
+    const liveAtOpen = runId === activeRunId;
+    // A historical run does not start the summary poll. A failed summary read
+    // returns "keep" and never reaches the full-attempt load, so that load has
+    // to start here. A live run still waits for the poll to stop.
+    if (!liveAtOpen) void loadRunResults(runId);
     await refreshSelectedRun();
     if (token !== openRunToken || selectedRunId !== runId || destroyed) return;
+    // Historical opens already own the full read started above. Only a run that was live when
+    // opened needs a post-refresh decision: keep polling if it is still live, otherwise load its
+    // now-terminal result once.
+    if (!liveAtOpen) return;
     if (runId === activeRunId) {
       schedulePoll(runId);
+    } else {
+      void loadRunResults(runId);
     }
   }
 
@@ -540,7 +756,13 @@
         Early preview.
       </p>
     </div>
-    <button type="button" class="secondary small" onclick={startCreateSuite} disabled={editorBusy || lifecycleBusy}>New suite</button>
+    <button
+      type="button"
+      class="secondary small"
+      onclick={startCreateSuite}
+      disabled={editorBusy || lifecycleBusy || !!editingDraft}
+      title={editingDraft ? "Save or cancel the open draft first." : undefined}
+    >New suite</button>
   </div>
 
   {#if loadError}
@@ -564,11 +786,15 @@
   {#if editingDraft}
     <div class="benchmark-editor">
       <h3>{editingDraft.id ? "Edit suite" : "New suite"}</h3>
+      <p class="muted small">Save or cancel this draft before creating, editing, or duplicating another suite.</p>
       {#if editingErrors.length}
         <ul class="benchmark-errors">
           {#each editingErrors as err}<li>{err}</li>{/each}
         </ul>
       {/if}
+      {#each editingNotices as notice}
+        <div class="warning-banner">{notice}</div>
+      {/each}
       <!-- A save in flight must not let any control here keep mutating `editingDraft` --
            a successful save clears the draft, and any edit made during that window would be
            silently discarded rather than saved or visibly rejected. A native `fieldset` disables
@@ -602,7 +828,7 @@
               aria-label={`Target ${i + 1} variant`}
               onchange={(e) => updateTargetVariant(i, e.currentTarget.value || null)}
             >
-              <option value="">Default variant</option>
+              <option value="">Runtime-selected variant</option>
               {#each variantChoicesForTarget(variantsForAlias(target.alias), target.variantId) as choice (choice.id)}
                 <option value={choice.id}>{choice.id}{choice.available ? "" : " (not downloaded)"}</option>
               {/each}
@@ -633,10 +859,76 @@
         {/if}
       </div>
 
-      <label>
-        Cases (JSONL — one case per line, e.g. {`{"id":"c1","prompt":"..."}`})
-        <textarea bind:value={editingDraft.casesJsonl} rows="6"></textarea>
-      </label>
+      <div class="benchmark-cases">
+        <div class="benchmark-cases-toolbar">
+          <strong>Cases ({casesAdvanced ? "JSONL" : editingCaseRows.length}/{BENCHMARK_MAX_CASES})</strong>
+          <button type="button" class="tiny" onclick={() => casesFileInput?.click()}>Import JSONL</button>
+          <input
+            bind:this={casesFileInput}
+            class="benchmark-file-input"
+            type="file"
+            accept=".jsonl,.txt,application/jsonl,text/plain"
+            onchange={importCasesFile}
+          />
+        </div>
+        <label class="benchmark-check">
+          <input
+            type="checkbox"
+            checked={casesAdvanced}
+            onchange={(e) => setCasesAdvanced(e.currentTarget.checked)}
+          />
+          Edit cases as JSONL
+        </label>
+        {#if casesAdvanced}
+          <label>
+            One case per line, for example {`{"id":"c1","prompt":"..."}`}. A messages array is kept when you return to the form, but that case stays read-only there.
+            <textarea bind:value={editingDraft.casesJsonl} rows="6"></textarea>
+          </label>
+        {:else}
+          {#each editingCaseRows as row, i (i)}
+            <div class="benchmark-case-edit">
+              {#if row.kind === "messages"}
+                <p class="small">
+                  <strong>{row.id}</strong>
+                  <span class="muted"> — {row.messageCount === 1 ? "1 message" : `${row.messageCount} messages`}. Edit this case in JSONL.</span>
+                </p>
+              {:else}
+                {@const tagsError = tagsJsonError(row.tagsJson)}
+                <label>
+                  Id
+                  <input type="text" bind:value={row.id} oninput={(e) => setPromptField(row, "id", e.currentTarget.value)} />
+                </label>
+                <label>
+                  Prompt
+                  <textarea rows="2" bind:value={row.prompt} oninput={(e) => setPromptField(row, "prompt", e.currentTarget.value)}></textarea>
+                </label>
+                <label>
+                  Expected (stored, not scored)
+                  <textarea rows="2" bind:value={row.expected} oninput={(e) => setPromptField(row, "expected", e.currentTarget.value)}></textarea>
+                </label>
+                <label>
+                  Tags (JSON array)
+                  <input
+                    type="text"
+                    placeholder='["math","easy"]'
+                    bind:value={row.tagsJson}
+                    oninput={(e) => setPromptField(row, "tagsJson", e.currentTarget.value)}
+                  />
+                  {#if tagsError}
+                    <span class="field-error">{tagsError}</span>
+                  {/if}
+                </label>
+              {/if}
+              <div class="benchmark-case-edit-actions">
+                <button type="button" class="tiny" disabled={i === 0} onclick={() => moveCaseRow(i, -1)}>Up</button>
+                <button type="button" class="tiny" disabled={i === editingCaseRows.length - 1} onclick={() => moveCaseRow(i, 1)}>Down</button>
+                <button type="button" class="tiny danger-btn" aria-label={`Remove case ${row.id || i + 1}`} onclick={() => removeCaseRow(i)}>Remove</button>
+              </div>
+            </div>
+          {/each}
+          <button type="button" class="tiny" disabled={editingCaseRows.length >= BENCHMARK_MAX_CASES} onclick={addCaseRow}>+ Add case</button>
+        {/if}
+      </div>
 
       <div class="benchmark-form-row">
         <label>
@@ -647,7 +939,26 @@
           Repeats
           <input type="number" min="1" max="3" bind:value={editingDraft.repeatCount} />
         </label>
+        <label>
+          Temperature
+          <input
+            type="text"
+            inputmode="decimal"
+            value={editingDraft.temperature ?? ""}
+            oninput={(e) => setDraftNumber("temperature", e.currentTarget.value)}
+          />
+        </label>
+        <label>
+          Max tokens
+          <input
+            type="text"
+            inputmode="numeric"
+            value={editingDraft.maxTokens ?? ""}
+            oninput={(e) => setDraftNumber("maxTokens", e.currentTarget.value)}
+          />
+        </label>
       </div>
+      <p class="muted small">Blank temperature or max tokens uses the runtime default. Expected answers are stored and not scored.</p>
 
       {#if draftAttemptEstimate !== null}
         <p class="muted small">
@@ -677,11 +988,29 @@
             <strong>{suite.name}</strong>
             <span class="muted small">{suite.targets.length} target(s) · {suite.cases.length} case(s) · {runCountsBySuite[suite.id] ?? 0} run(s)</span>
           </button>
-          <button type="button" class="tiny" disabled={editorBusy || lifecycleBusy || suiteHasStoredRuns(suite.id)} onclick={() => startEditSuite(suite)}>Edit</button>
+          <button
+            type="button"
+            class="tiny"
+            disabled={editorBusy || lifecycleBusy || !!editingDraft || suiteHasStoredRuns(suite.id)}
+            title={editingDraft
+              ? "Save or cancel the open draft first."
+              : suiteHasStoredRuns(suite.id)
+                ? "This suite has runs. Duplicate it to make changes."
+                : undefined}
+            onclick={() => startEditSuite(suite)}
+          >Edit</button>
+          <button
+            type="button"
+            class="tiny"
+            disabled={editorBusy || lifecycleBusy || !!editingDraft}
+            title={editingDraft ? "Save or cancel the open draft first." : undefined}
+            onclick={() => startDuplicateSuite(suite)}
+          >Duplicate</button>
           <button
             type="button"
             class="tiny danger-btn"
             disabled={editorBusy || lifecycleBusy || runInFlight || suiteHasStoredRuns(suite.id) || draftEditsSuite(editingDraft, suite.id)}
+            title={suiteHasStoredRuns(suite.id) ? "Suites with runs cannot be deleted." : undefined}
             onclick={() => removeSuite(suite)}
           >Delete</button>
         </div>
@@ -691,6 +1020,7 @@
     {#if selectedSuiteId}
       {@const suite = suites.find((s) => s.id === selectedSuiteId)}
       {#if suite}
+        {@const definition = suiteDefinitionView(suite)}
         <div class="benchmark-run-panel">
           <div class="benchmark-run-header">
             <h3>{suite.name}</h3>
@@ -718,6 +1048,49 @@
           {/if}
           {#if lifecycleError}<div class="warning-banner">{lifecycleError}</div>{/if}
 
+          <div class="benchmark-definition">
+            <h4>Definition</h4>
+            {#if suiteHasStoredRuns(suite.id)}
+              <p class="muted small">This suite is locked because it has runs. Duplicate it to change the definition.</p>
+            {/if}
+            {#if definition.description}
+              <p class="small">{definition.description}</p>
+            {/if}
+            <p class="muted small">
+              Warmups {definition.warmupCount} · Repeats {definition.repeatCount} ·
+              Temperature {definition.temperatureLabel} · Max tokens {definition.maxTokensLabel}
+            </p>
+            <ul class="benchmark-definition-list">
+              {#each definition.targets as target, i (i)}
+                <li>{target.alias} · {target.variantLabel}</li>
+              {/each}
+            </ul>
+            {#if definition.cases.length === 0}
+              <p class="muted small">No cases yet.</p>
+            {:else}
+              <ul class="benchmark-case-list">
+                {#each definition.cases as entry (entry.id)}
+                  <li class="benchmark-case-row">
+                    <strong>{entry.id}</strong>
+                    {#if entry.tags.length}
+                      <span class="muted small">{entry.tags.join(", ")}</span>
+                    {/if}
+                    {#if entry.messages}
+                      {#each entry.messages as message, messageIndex (messageIndex)}
+                        <p class="small benchmark-case-body"><span class="muted">{message.role}:</span> {message.content}</p>
+                      {/each}
+                    {:else}
+                      <p class="small benchmark-case-body">{entry.prompt}</p>
+                    {/if}
+                    {#if entry.expected}
+                      <p class="muted small">Expected (stored, not scored): {entry.expected}</p>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+          </div>
+
           <h4>Runs</h4>
           {#if runsForSelectedSuite.length === 0}
             <p class="muted small">No runs yet.</p>
@@ -733,6 +1106,11 @@
               </li>
             {/each}
           </ul>
+
+          {#if selectedRunId && !selectedRun}
+            {#if pollError}<div class="warning-banner">{pollError}</div>{/if}
+            {#if resultError}<div class="warning-banner">{resultError}</div>{/if}
+          {/if}
 
           {#if selectedRun}
             {@const currentRun = selectedRun}
@@ -780,6 +1158,82 @@
                   </div>
                 </div>
               {/each}
+
+              {#if !selectedRunIsActive}
+                {#if resultError}<div class="warning-banner">{resultError}</div>{/if}
+                {#if resultView && resultViewRunId === currentRun.id}
+                  <div class="benchmark-results">
+                    <h4>Results</h4>
+                    <p class="muted small">Response time is the full call, not time to first token. Warmups are not included in the median.</p>
+                    {#each resultView as target (target.targetIndex)}
+                      <div class="benchmark-target-progress">
+                        <strong>{target.alias}</strong>
+                        <p class="muted small">
+                          {target.succeededMeasured} measured succeeded
+                          {#if target.medianResponseMs !== null}
+                            · median response time {formatResponseMs(target.medianResponseMs)}
+                          {:else if target.succeededMeasured > 0}
+                            · median response time unavailable because a succeeded attempt has no usable timing
+                          {/if}
+                        </p>
+                        {#if target.measured.length > 0}
+                          <table class="benchmark-results-table">
+                            <thead>
+                              <tr>
+                                <th>Case</th>
+                                <th>Repeat</th>
+                                <th>Status</th>
+                                <th>Response time</th>
+                                <th>Tokens</th>
+                                <th>Served variant</th>
+                                <th></th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {#each target.measured as row (row.logicalAttemptId)}
+                                <tr>
+                                  <td>{row.caseId ?? "—"}</td>
+                                  <td>{row.repeatIndex == null ? "—" : row.repeatIndex + 1}</td>
+                                  <td>{row.status}</td>
+                                  <td>{formatResponseMs(row.responseTimeMs)}</td>
+                                  <td>{row.promptTokens == null && row.completionTokens == null ? "—" : `${row.promptTokens ?? "—"} / ${row.completionTokens ?? "—"}`}</td>
+                                  <td>{row.servedVariantId ?? "—"}</td>
+                                  <td>
+                                    {#if row.responseText !== null && row.attemptId}
+                                      <button
+                                        type="button"
+                                        class="tiny"
+                                        onclick={() => expandedResultId = expandedResultId === row.attemptId ? null : row.attemptId}
+                                      >{expandedResultId === row.attemptId ? "Hide response" : "Show response"}</button>
+                                    {/if}
+                                  </td>
+                                </tr>
+                                {#if row.errorMessage}
+                                  <tr>
+                                    <td colspan="7" class="benchmark-result-error">{row.errorMessage}</td>
+                                  </tr>
+                                {/if}
+                                {#if row.attemptId && expandedResultId === row.attemptId && row.responseText !== null}
+                                  <tr>
+                                    <td colspan="7"><pre class="benchmark-response">{row.responseText}</pre></td>
+                                  </tr>
+                                {/if}
+                              {/each}
+                            </tbody>
+                          </table>
+                        {/if}
+                        {#if target.warmups.length > 0}
+                          <p class="muted small">
+                            Warmups (not measured): {target.warmups.map((row) => row.status).join(", ")}
+                          </p>
+                        {/if}
+                      </div>
+                    {/each}
+                  </div>
+                {:else if !resultError}
+                  <p class="muted small">Loading results…</p>
+                {/if}
+              {/if}
             </div>
           {/if}
         </div>
@@ -817,6 +1271,7 @@
   .benchmark-suite-row {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 0.25rem;
     margin-bottom: 0.25rem;
   }
@@ -859,6 +1314,10 @@
   .benchmark-errors {
     color: var(--danger, #c0392b);
     font-size: 0.85rem;
+  }
+  .field-error {
+    color: var(--danger, #c0392b);
+    font-size: 0.8rem;
   }
   /* Utility classes live in +page.svelte's scoped sheet and do not apply to this child. */
   .muted { color: var(--muted, #888); }
@@ -962,4 +1421,65 @@
   .benchmark-cell.running { background: var(--accent, #3b82f6); }
   .benchmark-cell.uncertain { background: var(--warning, #f39c12); }
   .benchmark-cell.pending { background: var(--muted, #ccc); }
+  .benchmark-preview input,
+  .benchmark-preview textarea,
+  .benchmark-preview select {
+    background: var(--input-bg, transparent);
+    color: var(--fg, inherit);
+    border: 1px solid var(--border, #ccc);
+    border-radius: 4px;
+    padding: 4px 6px;
+  }
+  .benchmark-file-input { display: none; }
+  .benchmark-check {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0.35rem 0;
+  }
+  .benchmark-cases-toolbar,
+  .benchmark-case-edit-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex-wrap: wrap;
+  }
+  .benchmark-case-edit {
+    border-top: 1px solid var(--border, #ccc);
+    padding: 0.5rem 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+  .benchmark-definition-list,
+  .benchmark-case-list {
+    list-style: none;
+    margin: 0.25rem 0 0;
+    padding: 0;
+  }
+  .benchmark-case-row {
+    border-top: 1px solid var(--border, #ccc);
+    padding: 0.35rem 0;
+  }
+  .benchmark-case-body,
+  .benchmark-response {
+    white-space: pre-wrap;
+    margin: 0.2rem 0 0;
+  }
+  .benchmark-results { overflow-x: auto; }
+  .benchmark-results-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+    margin-top: 0.35rem;
+  }
+  .benchmark-results-table th,
+  .benchmark-results-table td {
+    text-align: left;
+    padding: 0.25rem 0.4rem;
+    border-bottom: 1px solid var(--border, #ccc);
+    vertical-align: top;
+    color: var(--fg, inherit);
+  }
+  .benchmark-result-error { color: var(--danger, #c0392b); }
 </style>

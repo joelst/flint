@@ -227,6 +227,17 @@ describe('validateBenchmarkSuite', () => {
     expect(r.errors.join(' ')).toMatch(/duplicate target/);
   });
 
+  it('describes an alias-only duplicate as runtime-selected', () => {
+    const r = validateBenchmarkSuite(validSuite({
+      targets: [
+        { alias: 'model-a', variantId: null },
+        { alias: 'model-a', variantId: null },
+      ],
+    }));
+    expect(r.ok).toBe(false);
+    expect(r.errors.join(' ')).toContain('runtime-selected');
+  });
+
   it('rejects the same alias with different variants as distinct targets (pool is keyed by alias)', () => {
     // The sidecar model pool and the alias-only chat transport are both keyed by alias, not
     // alias+variant — loading a second target with the same alias silently replaces the first
@@ -389,6 +400,12 @@ describe('parseBenchmarkCasesJsonl', () => {
       { id: 'c1', prompt: 'a' },
       { id: 'c2', prompt: 'b' },
     ]);
+  });
+
+  it('accepts a UTF-8 BOM before the first JSONL row', () => {
+    const r = parseBenchmarkCasesJsonl('\uFEFF{"id":"c1","prompt":"a"}');
+    expect(r.ok).toBe(true);
+    expect(r.cases).toEqual([{ id: 'c1', prompt: 'a' }]);
   });
 
   it('generates an id from the line number when one is missing', () => {
