@@ -7,12 +7,26 @@
 !macro NSIS_HOOK_PREINSTALL
   !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
   Sleep 500
-  ; A stranded backup is the only known-good SDK after a failed restore.
-  ; Put it back first. If that fails, stop. Do not delete the backup.
+  ; A backup beside a working runtime is a leftover from cleanup, not the
+  ; only good SDK. Move that leftover aside. A backup beside a tree with no
+  ; runtime is the recovery copy: put it back, and do not delete it.
   IfFileExists "$INSTDIR\foundry-local-sdk.previous\*" 0 foundry_sdk_move
+    Call FoundryLiveRuntimeExists
+    Pop $0
+    StrCmp $0 "yes" foundry_sdk_stale_backup
     Call RestoreFoundrySdkBackup
     Pop $0
     StrCmp $0 "stranded" foundry_sdk_keep_backup
+    Goto foundry_sdk_move
+  foundry_sdk_stale_backup:
+    ClearErrors
+    RMDir /r "$INSTDIR\foundry-local-sdk.previous"
+    IfFileExists "$INSTDIR\foundry-local-sdk.previous\*" 0 foundry_sdk_move
+      ClearErrors
+      Rename "$INSTDIR\foundry-local-sdk.previous" "$INSTDIR\foundry-local-sdk.previous-kept"
+      IfErrors 0 foundry_sdk_move
+        MessageBox MB_OK|MB_ICONSTOP "An older Foundry SDK backup at foundry-local-sdk.previous could not be moved. Close the program using that folder, then run the installer again. The installed SDK was not changed."
+        Abort
   foundry_sdk_move:
     IfFileExists "$INSTDIR\foundry-local-sdk\*" 0 foundry_sdk_aside_done
       ClearErrors
@@ -41,7 +55,21 @@
     Abort
   foundry_sdk_new_ok:
     RMDir /r "$INSTDIR\foundry-local-sdk.previous"
+    IfFileExists "$INSTDIR\foundry-local-sdk.previous\*" 0 foundry_sdk_backup_gone
+      MessageBox MB_OK|MB_ICONEXCLAMATION "Flint installed the new Foundry SDK, but could not remove foundry-local-sdk.previous. The installed SDK is the new one. The next upgrade moves that leftover aside instead of replacing the installed SDK with it."
+    foundry_sdk_backup_gone:
 !macroend
+
+Function FoundryLiveRuntimeExists
+  IfFileExists "$INSTDIR\foundry-local-sdk\prebuilds\win32-x64\onnxruntime.dll" foundry_live_yes
+  IfFileExists "$INSTDIR\foundry-local-sdk\prebuilds\win32-arm64\onnxruntime.dll" foundry_live_yes
+  IfFileExists "$INSTDIR\foundry-local-sdk\foundry-local-core\win32-x64\onnxruntime.dll" foundry_live_yes
+  IfFileExists "$INSTDIR\foundry-local-sdk\foundry-local-core\win32-arm64\onnxruntime.dll" foundry_live_yes
+  Push "no"
+  Return
+  foundry_live_yes:
+    Push "yes"
+FunctionEnd
 
 ; Pushes "none", "restored", or "stranded". The backup is renamed back only
 ; after the partial copy has been renamed aside. A locked file makes that
