@@ -324,11 +324,15 @@ describe('foundry-sidecar protocol basics', () => {
         stream: true,
       })}\n`);
       await waitForLine(proc, (msg) => msg.id === 41 && msg.stream === true);
+      const cancelAckPromise = waitForLine(proc, (msg) => msg.id === 44);
+      const streamedDonePromise = waitForLine(proc, (msg) => msg.id === 41 && msg.ok === true);
+      void cancelAckPromise.catch(() => {});
+      void streamedDonePromise.catch(() => {});
       proc.stdin.write(`${JSON.stringify({
         id: 44, cmd: 'cancelChatRequest', requestId: 41
       })}\n`);
-      expect((await waitForLine(proc, (msg) => msg.id === 44)).ok).toBe(true);
-      const streamed = await waitForLine(proc, (msg) => msg.id === 41 && msg.ok === true);
+      expect((await cancelAckPromise).ok).toBe(true);
+      const streamed = await streamedDonePromise;
       expect(streamed.ok).toBe(true);
       expect(streamed.result.nativeStreaming).toBe(true);
       expect(streamed.result.servedVariantId).toBe('fake-variant');
@@ -638,6 +642,21 @@ describe('foundry-sidecar protocol basics', () => {
       });
 
       // Streaming SDK branch.
+      // Arm both observers before dispatch. A fast child can emit the delta and terminal reply
+      // in one stdout chunk; waiting for the delta first would let that temporary listener parse
+      // and discard the terminal line before the second listener exists.
+      const streamedDeltaPromise = waitForLine(
+        proc,
+        (msg) => msg.id === 52 && msg.stream === true,
+        45000,
+      );
+      const streamedDonePromise = waitForLine(
+        proc,
+        (msg) => msg.id === 52 && msg.ok === true,
+        45000,
+      );
+      void streamedDeltaPromise.catch(() => {});
+      void streamedDonePromise.catch(() => {});
       proc.stdin.write(`${JSON.stringify({
         id: 52,
         cmd: 'chatCompletion',
@@ -647,9 +666,9 @@ describe('foundry-sidecar protocol basics', () => {
         temperature: 0.77,
         maxTokens: 55,
       })}\n`);
-      const streamedDelta = await waitForLine(proc, (msg) => msg.id === 52 && msg.stream === true, 45000);
+      const streamedDelta = await streamedDeltaPromise;
       expect(JSON.parse(streamedDelta.delta)).toEqual({ temperature: 0.77, maxTokens: 55 });
-      expect((await waitForLine(proc, (msg) => msg.id === 52 && msg.ok === true, 45000)).ok).toBe(true);
+      expect((await streamedDonePromise).ok).toBe(true);
 
       // Omitted fields must not clobber the client's own defaults with undefined/NaN.
       proc.stdin.write(`${JSON.stringify({
