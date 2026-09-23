@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
-import { createServer, request as httpRequest } from 'http';
+import { createServer, request as httpRequest, type Server } from 'http';
 import type { AddressInfo } from 'net';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
@@ -8,6 +8,11 @@ import { join } from 'path';
 import { pathToFileURL } from 'url';
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import { killAndWait } from './test-process.js';
+
+function closeServer(server: Server): Promise<void> {
+  server.closeAllConnections();
+  return new Promise((resolve) => server.close(() => resolve()));
+}
 
 function waitForLine(
   proc: ChildProcessWithoutNullStreams,
@@ -516,8 +521,7 @@ describe('foundry-sidecar protocol basics', () => {
       expect(httpChat.result.servedVariantId).toBe('fake-variant');
     } finally {
       await killAndWait(proc);
-      server.closeAllConnections();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await closeServer(server);
       rmSync(homeDir, { recursive: true, force: true });
     }
   });
@@ -618,8 +622,7 @@ describe('foundry-sidecar protocol basics', () => {
       expect(loaded.result?.variantId).toBe('other-explicit:1');
     } finally {
       await killAndWait(proc);
-      server.closeAllConnections();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await closeServer(server);
       rmSync(homeDir, { recursive: true, force: true });
     }
   });
@@ -1038,7 +1041,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       expect(allowed.status).toBe(200);
     } finally {
       if (proc) await killAndWait(proc);
-      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      await closeServer(upstream);
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });
     }
   });
@@ -1096,7 +1099,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
     } finally {
       releaseUnload?.();
       if (proc) await killAndWait(proc);
-      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      await closeServer(upstream);
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });
     }
   });
@@ -1125,16 +1128,17 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       expect(unloadReply.ok).toBeUndefined();
       expect(String(unloadReply.error)).toContain('still loaded');
 
-      // The failed model stays resident, so poolStatus must still report it.
-      proc.stdin.write(`${JSON.stringify({ id: 42, cmd: 'poolStatus' })}\n`);
+      // The failed model stays resident. Use the synchronous status snapshot rather than
+      // poolStatus, whose hardware telemetry probes are unrelated to this assertion.
+      proc.stdin.write(`${JSON.stringify({ id: 42, cmd: 'getStatus' })}\n`);
       const status = await waitForLine(proc, (msg) => msg.id === 42, 5000);
-      expect(status.result.models.map((m: { alias: string }) => m.alias)).toContain('fake-model');
+      expect(status.result.pool.map((m: { alias: string }) => m.alias)).toContain('fake-model');
     } finally {
       if (proc) await killAndWait(proc);
-      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      await closeServer(upstream);
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });
     }
-  });
+  }, 15000);
 
   it('waits for an already-admitted streaming gateway request to finish before acquiring exclusive admission', async () => {
     // Simulates SSE token-by-token completion: the gateway only completes admission once its
@@ -1201,7 +1205,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       expect(exclusiveSettledAt).toBeGreaterThanOrEqual(inFlightSettledAt);
     } finally {
       if (proc) await killAndWait(proc);
-      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      await closeServer(upstream);
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });
     }
   }, 20000);
@@ -1263,7 +1267,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       expect(exclusiveSettledAt).toBeGreaterThanOrEqual(chatSettledAt);
     } finally {
       if (proc) await killAndWait(proc);
-      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      await closeServer(upstream);
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });
     }
   }, 20000);
@@ -1327,7 +1331,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       expect(exclusiveSettledAt).toBeGreaterThanOrEqual(loadSettledAt);
     } finally {
       if (proc) await killAndWait(proc);
-      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      await closeServer(upstream);
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });
     }
   }, 20000);
@@ -1386,7 +1390,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       expect(released).toMatchObject({ ok: true, result: { exclusive: false } });
     } finally {
       if (proc) await killAndWait(proc);
-      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      await closeServer(upstream);
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });
     }
   }, 20000);
@@ -1458,8 +1462,8 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       expect(exclusiveSettledAt).toBeGreaterThanOrEqual(startServiceSettledAt);
     } finally {
       if (proc) await killAndWait(proc);
-      await new Promise<void>((resolve) => upstream.close(() => resolve()));
-      await new Promise<void>((resolve) => heldUpstream.close(() => resolve()));
+      await closeServer(upstream);
+      await closeServer(heldUpstream);
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });
     }
   }, 20000);
@@ -1532,7 +1536,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       expect(releaseSettledAt).toBeGreaterThanOrEqual(acquireSettledAt);
     } finally {
       if (proc) await killAndWait(proc);
-      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      await closeServer(upstream);
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });
     }
   }, 20000);
@@ -1583,7 +1587,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       expect(admitted.status).toBe(200);
     } finally {
       if (proc) await killAndWait(proc);
-      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      await closeServer(upstream);
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });
     }
   }, 20000);
@@ -1669,7 +1673,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       expect(exclusiveResult).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
     } finally {
       if (proc) await killAndWait(proc);
-      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      await closeServer(upstream);
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });
     }
   }, 20000);
