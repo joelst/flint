@@ -453,6 +453,71 @@ describe('foundry-sidecar protocol basics', () => {
     }
   });
 
+  it('rejects execution-provider recheck while a model is resident', async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-ep-recheck-home-'));
+    const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
+    const corePath = join(homeDir, 'fake-core.dylib');
+    writeFileSync(corePath, '');
+    writeFileSync(loaderPath, `
+      const sdk = \`
+        class FakeModel {
+          constructor() { this.id = 'fake-variant'; this.loaded = false; }
+          async load() { this.loaded = true; }
+          isLoaded() { return this.loaded; }
+          getExecutionProvider() { return 'CUDAExecutionProvider'; }
+        }
+        class FakeManager {
+          constructor() {
+            this.catalog = {
+              getModel: async () => new FakeModel(),
+              getModels: async () => [],
+            };
+          }
+          discoverEps() {
+            return [{ name: 'CUDAExecutionProvider', isRegistered: false }];
+          }
+          async downloadAndRegisterEps() {
+            throw new Error('downloadAndRegisterEps should not run while a model is resident');
+          }
+          static create() { return new FakeManager(); }
+        }
+        export { FakeManager as FoundryLocalManager };
+      \`;
+      export async function resolve(specifier, context, nextResolve) {
+        if (specifier === 'foundry-local-sdk') {
+          return { url: 'data:text/javascript,' + encodeURIComponent(sdk), shortCircuit: true };
+        }
+        return nextResolve(specifier, context);
+      }
+      export async function load(url, context, nextLoad) {
+        if (url.startsWith('data:text/javascript,')) {
+          return { format: 'module', source: decodeURIComponent(url.slice('data:text/javascript,'.length)), shortCircuit: true };
+        }
+        return nextLoad(url, context);
+      }
+    `);
+    const proc = spawn(process.execPath, [
+      '--experimental-loader', pathToFileURL(loaderPath).href, 'sidecar/foundry-sidecar.js'
+    ], {
+      cwd: process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, HOME: homeDir, USERPROFILE: homeDir, FLINT_FOUNDRY_CORE_PATH: corePath },
+    });
+    try {
+      await waitForLine(proc, (msg) => msg.ready === true);
+      proc.stdin.write(`${JSON.stringify({ id: 60, cmd: 'init', appName: 'flint-test', logLevel: 'info' })}\n`);
+      expect((await waitForLine(proc, (msg) => msg.id === 60)).ok).toBe(true);
+      proc.stdin.write(`${JSON.stringify({ id: 61, cmd: 'load', alias: 'fake-model' })}\n`);
+      expect((await waitForLine(proc, (msg) => msg.id === 61)).ok).toBe(true);
+      proc.stdin.write(`${JSON.stringify({ id: 62, cmd: 'ensureAccelerators', rebuildBroken: true })}\n`);
+      const recheck = await waitForLine(proc, (msg) => msg.id === 62);
+      expect(String(recheck.error)).toContain('Unload resident models before rechecking execution providers');
+    } finally {
+      if (!proc.killed) proc.kill();
+      rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
   it('reports nativeStreaming false and servedVariantId on the HTTP fallback', async () => {
     const server = createServer((req, res) => {
       if (req.url === '/status') {

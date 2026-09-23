@@ -165,6 +165,7 @@ function serializeAcceleratorRegistration (fn) {
   acceleratorRegistrationChain = result.then(() => {}, () => {});
   return result;
 }
+let acceleratorRecheckDraining = false;
 let explicitShutdownInProgress = false;
 const LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'fatal'];
 let activeLogLevel = 'info';
@@ -2392,6 +2393,7 @@ rl.on('line', async (line) => {
 
   const isRuntimeShutdown = cmd === 'shutdownRuntime';
   const isDrainCommand = cmd === 'stopAndUnload' || isRuntimeShutdown;
+  const isAcceleratorRecheck = cmd === 'ensureAccelerators' && payload.rebuildBroken === true;
   // Before admission, so a rejected download is not itself "in flight". The benchmark never
   // downloads; its own load/chat calls stay admitted.
   if (benchmarkExclusive && cmd === 'download') {
@@ -2402,11 +2404,34 @@ rl.on('line', async (line) => {
     return;
   }
   let operationAdmitted = false;
+  let resumeOperationAdmission = false;
   if (isDrainCommand) {
     // Fence synchronously, before waiting for the service-transition lock. Otherwise commands
     // arriving while shutdown is queued could still be admitted behind it.
     operationAdmission.beginDrain({ terminal: isRuntimeShutdown });
     if (isRuntimeShutdown) explicitShutdownInProgress = true;
+  } else if (isAcceleratorRecheck) {
+    if (acceleratorRecheckDraining) {
+      reply({
+        error: 'Execution-provider recheck is already running',
+        certainty: 'cancelled',
+      });
+      return;
+    }
+    acceleratorRecheckDraining = true;
+    operationAdmission.beginDrain();
+    resumeOperationAdmission = true;
+    const drained = await operationAdmission.waitForDrain(DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS);
+    if (!drained) {
+      operationAdmission.resume();
+      resumeOperationAdmission = false;
+      acceleratorRecheckDraining = false;
+      reply({
+        error: 'Could not drain in-flight runtime work before rechecking execution providers',
+        certainty: 'cancelled',
+      });
+      return;
+    }
   } else {
     operationAdmitted = operationAdmission.admit(id, cmd);
     if (!operationAdmitted) {
@@ -3587,6 +3612,10 @@ rl.on('line', async (line) => {
         }
         const progress = (name, pct) => send({ id, progress: pct, ep: name });
         if (payload.rebuildBroken === true) {
+          await sweepChain;
+          if (pool.size > 0) {
+            throw new Error('Unload resident models before rechecking execution providers.');
+          }
           const epRoot = path.join(os.homedir(), `.${initConfig?.appName || 'flint'}`, 'ep');
           const outcome = await rebuildBrokenExecutionProviders({
             discover: () => (typeof manager.discoverEps === 'function' ? manager.discoverEps() : []),
@@ -3649,6 +3678,10 @@ rl.on('line', async (line) => {
     reply({ error: e.message || String(e) });
   } finally {
     if (operationAdmitted) operationAdmission.complete(id);
+    if (resumeOperationAdmission) {
+      operationAdmission.resume();
+      acceleratorRecheckDraining = false;
+    }
     releaseServiceTransition?.();
   }
 });
