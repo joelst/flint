@@ -314,6 +314,17 @@
       statusMessage = "A benchmark run is active — stop it before changing loaded models.";
       return;
     }
+    // The Arena loads and unloads compare slots against the same pool; see runComparison.
+    if (isComparing || comparePreparing) {
+      statusMessage = "An Arena run is active — wait for it before testing the endpoint.";
+      return;
+    }
+    // The run snapshots the pool and later puts it back. A load or unload already in flight
+    // would land after that snapshot and be mistaken for the run's own work.
+    if (poolMutationsInFlight > 0) {
+      statusMessage = "A model is still loading or unloading — wait for it before testing the endpoint.";
+      return;
+    }
     endpointSelfTestBusy = true;
     try {
       await pollPoolStatus();
@@ -357,6 +368,7 @@
           }
           return loaded.variantId;
         },
+        beforeModelProbe: residency.observe,
         afterModelProbe: residency.restore,
         onProgress: (event) => {
           statusMessage = `Testing ${event.modelId} (${event.index + 1} of ${event.total})…`;
@@ -1155,7 +1167,7 @@
   const otherInferenceActiveForUi = $derived(isStreaming || isDictating || dictationTranscribing || isTranscribing || isSummarizing || endpointSelfTestBusy);
 
   /** Counts explicit model-mutating operations (load/unload/delete/variant-switch/STT-load) and
-   * model downloads in flight from Models/Monitor/chat-model-switch. `blockedByActiveBenchmark()`
+   * model downloads in flight from Models/Monitor/chat-model-switch. `blockedByExclusivePoolRun()`
    * only blocks a
    * *new* mutation from starting once `benchmarkRunInFlight` is already true; it does nothing
    * about a mutation that started the instant before — e.g. the user clicks "Load" (admission
@@ -1170,7 +1182,7 @@
   /** Wraps a model-mutating operation, or a model download, with the fence above: call at the
    * top of every Models/Monitor/chat-model-switch function that directly loads, unloads,
    * deletes, variant-switches, or downloads a pool entry, immediately after its own
-   * `blockedByActiveBenchmark()` check (that check keeps a *new* mutation from starting once a
+   * `blockedByExclusivePoolRun()` check (that check keeps a *new* mutation from starting once a
    * benchmark is already running; this fence is what a benchmark's own admission check reads to
    * catch one already in flight). */
   function beginPoolMutation(): () => void {
@@ -3271,7 +3283,7 @@ function selectBindAddress(next: string) {
   }
 
   async function applyNetworkSettings() {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return;
@@ -3415,7 +3427,7 @@ updateStateFromSdk();
     // path clears its whole in-memory pool before the new listener comes up. That would wipe
     // out a benchmark run's pinned/loaded targets, so this is a pool mutation in its own right
     // — not just a convenience for the caller's own model.
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return { result: "failed", error: new Error(blocked) };
@@ -3464,7 +3476,7 @@ updateStateFromSdk();
     // Both branches below can mutate the pool: a not-yet-running service is (re)started (which
     // clears the sidecar's resident set), and an already-running one may still get a fresh
     // `alias` loaded into it. Either must be fenced against an active benchmark run.
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       throw new Error(blocked);
@@ -3651,7 +3663,7 @@ updateStateFromSdk();
   /** Monitor's Unload button — guarded the same as the Models tab's unload/delete actions so a
    * benchmark run's pinned target can't be unloaded from here either. */
   async function unloadFromMonitor(alias: string) {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return;
@@ -4311,9 +4323,11 @@ updateStateFromSdk();
     if (compareSlots.length < 2 || !comparePrompt.trim() || isComparing || comparePreparing) return;
     // See startBenchmarkPreviewRun: a benchmark run pins and dispatches against the same
     // alias-keyed pool this loads/unloads explicitly (in one-at-a-time mode), so the two
-    // features must never run concurrently in either direction.
-    if (benchmarkRunInFlight) {
-      statusMessage = "A benchmark run is active — stop it before running the Arena.";
+    // features must never run concurrently in either direction. The endpoint self-test
+    // loads and restores pool entries too, and holds the same fence.
+    const blocked = blockedByExclusivePoolRun();
+    if (blocked) {
+      statusMessage = blocked;
       return;
     }
 
@@ -5210,7 +5224,7 @@ updateStateFromSdk();
   }
 
   async function startLocalService() {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return;
@@ -5239,7 +5253,7 @@ updateStateFromSdk();
   }
 
   async function stopLocalService() {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return;
@@ -5264,7 +5278,7 @@ updateStateFromSdk();
   }
 
   async function stopAndUnloadModels() {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return;
@@ -5503,7 +5517,7 @@ updateStateFromSdk();
   // Dedicated path for audio/STT: loads the model in the audio lane without
   // affecting the chat lane or the running chat service endpoint.
   async function useSTTModelForAudio(model: any) {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return;
@@ -5688,7 +5702,7 @@ updateStateFromSdk();
   });
 
   async function downloadAndTrack(model: any) {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       throw new Error(blocked);
@@ -5745,7 +5759,7 @@ updateStateFromSdk();
    * `failed` was simply lost; it is surfaced in the status line instead, where it is read.
    */
   async function loadModelAndMaybeStart(model: any): Promise<ServiceStartAttempt> {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       throw new Error(blocked);
@@ -5816,7 +5830,7 @@ updateStateFromSdk();
     // allowed, but loading a new one would race the benchmark's own load, so it must not proceed
     // — and must not leave selectedModelAlias pointing at a model that was never loaded.
     if (!model.isLoaded) {
-      const blocked = blockedByActiveBenchmark();
+      const blocked = blockedByExclusivePoolRun();
       if (blocked) {
         statusMessage = blocked;
         return;
@@ -5855,15 +5869,19 @@ updateStateFromSdk();
    * globally (not scoped to the run's specific target aliases) to match the coarse-grained
    * benchmark/Arena mutex above — the page doesn't otherwise track per-run target aliases, and
    * per-alias scoping would add a new class of staleness bugs for a feature already accepted as
-   * coarse elsewhere in this PR. */
-  function blockedByActiveBenchmark(): string | null {
-    return benchmarkRunInFlight
-      ? "A benchmark run is active — stop it before changing loaded models."
-      : null;
+   * coarse elsewhere in this PR.
+   *
+   * The endpoint self-test holds the same fence. It loads models through the gateway and
+   * afterwards puts the pool back the way it found it, so a user load or unload in the middle
+   * would be undone by that cleanup, or mistaken for the run's own work. */
+  function blockedByExclusivePoolRun(): string | null {
+    if (benchmarkRunInFlight) return "A benchmark run is active — stop it before changing loaded models.";
+    if (endpointSelfTestBusy) return "The endpoint self-test is running — wait for it before changing loaded models.";
+    return null;
   }
 
   async function unloadModel(model: any) {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return;
@@ -5888,7 +5906,7 @@ updateStateFromSdk();
   }
 
   async function loadVariant(model: any, variantId: string) {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return;
@@ -5914,7 +5932,7 @@ updateStateFromSdk();
       statusMessage = `${model.alias} is not a chat model.`;
       return;
     }
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return;
@@ -5953,7 +5971,7 @@ updateStateFromSdk();
   }
 
   async function downloadVariant(model: any, variantId: string) {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return;
@@ -5986,7 +6004,7 @@ updateStateFromSdk();
   }
 
   async function deleteVariant(model: any, variantId: string) {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return;
@@ -6064,7 +6082,7 @@ updateStateFromSdk();
   }
 
   async function deleteCachedModel(model: any) {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return;
@@ -10159,7 +10177,7 @@ Output only the summary text, no preamble.`;
                             class="tiny"
                             disabled={isComparing || comparePreparing || benchmarkRunInFlight}
                             onclick={async () => {
-                              const blocked = blockedByActiveBenchmark();
+                              const blocked = blockedByExclusivePoolRun();
                               if (blocked) {
                                 statusMessage = blocked;
                                 return;

@@ -88,6 +88,8 @@ describe('runEndpointSelfTest', () => {
     const requests: Array<{ model: string; disconnect: boolean }> = [];
     const progress: Array<{ modelId: string; index: number; total: number }> = [];
     const restored: string[] = [];
+    // Each observation records how many model requests had gone out when it was taken.
+    const observed: Array<{ modelId: string; requestsSoFar: number }> = [];
     const fetchMock: typeof fetch = async (input, init) => {
       if (String(input).endsWith('/models')) {
         return jsonResponse(200, { data: [
@@ -123,12 +125,21 @@ describe('runEndpointSelfTest', () => {
       endpoint: 'http://127.0.0.1:5272/v1',
       catalogSupportsToolCalling: true,
       prepareSpeechModel: async (modelId) => modelId,
+      beforeModelProbe: async (modelId) => { observed.push({ modelId, requestsSoFar: requests.length }); },
       afterModelProbe: async (modelId) => { restored.push(modelId); },
       disconnectModelId: 'MODEL-GENERIC-CPU',
       onProgress: (event) => progress.push(event),
     });
 
     expect(report.modelIds).toEqual(['model-generic-cpu', 'model-generic-cuda', 'model']);
+    // One observation per alias group, taken before that group's first request and before
+    // its restore. The whisper observation comes after every request of the model group.
+    const firstWhisperRequest = requests.findIndex((request) => request.model.startsWith('whisper'));
+    expect(observed).toEqual([
+      { modelId: 'model', requestsSoFar: 0 },
+      { modelId: 'whisper-tiny-generic-cpu', requestsSoFar: firstWhisperRequest },
+    ]);
+    expect(firstWhisperRequest).toBeGreaterThan(0);
     expect(requests.filter((request) => request.disconnect).map((request) => request.model))
       .toEqual(['model-generic-cpu']);
     const disconnectIndex = requests.findIndex((request) => request.disconnect);

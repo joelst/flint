@@ -50,6 +50,50 @@ describe('endpoint self-test residency', () => {
     expect(unload).toHaveBeenCalledWith('speech-model');
   });
 
+  it('keeps a model the user loaded after the run started, restoring the variant they chose', async () => {
+    const load = vi.fn().mockResolvedValue(undefined);
+    const unload = vi.fn().mockResolvedValue(undefined);
+    // Not resident at the start; the user loads the CUDA build before this alias's probes.
+    let pool: Array<{ alias: string; variantId: string }> = [];
+    const controller = createSelfTestResidencyController({
+      models,
+      initialPool: [],
+      currentPool: async () => pool,
+      load,
+      unload,
+    });
+
+    pool = [{ alias: 'chat-model', variantId: 'chat-model-generic-cuda:2' }];
+    await controller.observe('chat-model-generic-cpu');
+    // The gateway probe switched the alias to the listed CPU build.
+    pool = [{ alias: 'chat-model', variantId: 'chat-model-generic-cpu:1' }];
+    await controller.restore('chat-model-generic-cpu');
+
+    expect(load).toHaveBeenCalledWith(models[0], 'chat-model-generic-cuda:2');
+    expect(unload).not.toHaveBeenCalled();
+  });
+
+  it('unloads a model that was absent just before its probe, even if it was resident at the start', async () => {
+    const load = vi.fn().mockResolvedValue(undefined);
+    const unload = vi.fn().mockResolvedValue(undefined);
+    let pool: Array<{ alias: string; variantId: string }> = [];
+    const controller = createSelfTestResidencyController({
+      models,
+      // Resident at the start, then unloaded (by eviction, say) before this group's probes.
+      initialPool: [{ alias: 'speech-model', variantId: 'speech-model-generic-cpu:1' }],
+      currentPool: async () => pool,
+      load,
+      unload,
+    });
+
+    await controller.observe('speech-model');
+    pool = [{ alias: 'speech-model', variantId: 'speech-model-generic-cpu:1' }];
+    await controller.restore('speech-model');
+
+    expect(unload).toHaveBeenCalledWith('speech-model');
+    expect(load).not.toHaveBeenCalled();
+  });
+
   it('refuses to unload activity that arrived during the self-test', async () => {
     const unload = vi.fn();
     const controller = createSelfTestResidencyController({
@@ -91,5 +135,25 @@ describe('endpoint self-test residency', () => {
     expect(sidecar).toContain("phase === 'start'");
     expect(sidecar).toContain('activityFences.has(candidate.toLowerCase())');
     expect(page).toContain('sdkUnloadModelIfIdle({ alias })');
+  });
+
+  it('fences the page against user pool changes while the self-test runs', () => {
+    const page = readFileSync(join(process.cwd(), 'src', 'routes', '+page.svelte'), 'utf8');
+
+    expect(page).toContain('beforeModelProbe: residency.observe,');
+    expect(page).toContain('afterModelProbe: residency.restore,');
+    // The one fence every Models/Monitor/chat-model-switch mutation checks covers the run.
+    const fence = page.slice(page.indexOf('function blockedByExclusivePoolRun()'), page.indexOf('\n  }', page.indexOf('function blockedByExclusivePoolRun()')));
+    expect(fence).toContain('benchmarkRunInFlight');
+    expect(fence).toContain('endpointSelfTestBusy');
+    expect(page).not.toContain('blockedByActiveBenchmark');
+    // And the run does not start over a mutation that is already in flight, or an Arena run.
+    const run = page.slice(page.indexOf('async function runGatewaySelfTest()'), page.indexOf('endpointSelfTestBusy = true;'));
+    expect(run).toContain('poolMutationsInFlight > 0');
+    expect(run).toContain('isComparing || comparePreparing');
+    // The Arena checks the same fence, so it cannot start while the self-test runs.
+    const arenaStart = page.indexOf('async function runComparison(');
+    const arena = page.slice(arenaStart, page.indexOf('compareReviewId = null;', arenaStart));
+    expect(arena).toContain('blockedByExclusivePoolRun()');
   });
 });

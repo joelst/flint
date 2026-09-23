@@ -227,7 +227,13 @@ function groupedTargets(
   ids: string[],
   kind: EndpointModelKind,
   models: ListedEndpointModel[],
-): Array<{ modelId: string; kind: EndpointModelKind; residencyModelId: string; restoreAfter: boolean }> {
+): Array<{
+  modelId: string;
+  kind: EndpointModelKind;
+  residencyModelId: string;
+  observeBefore: boolean;
+  restoreAfter: boolean;
+}> {
   const groups = new Map<string, Array<{ modelId: string; residencyModelId: string }>>();
   for (const modelId of ids) {
     const normalizedId = modelId.toLowerCase();
@@ -243,6 +249,7 @@ function groupedTargets(
   return [...groups.values()].flatMap((group) => group.map((target, index) => ({
     ...target,
     kind,
+    observeBefore: index === 0,
     restoreAfter: index === group.length - 1,
   })));
 }
@@ -779,6 +786,8 @@ export async function runEndpointSelfTest(options: {
    * multipart requests cannot be gateway-replayed or rewritten.
    */
   prepareSpeechModel?: (modelId: string) => Promise<string>;
+  /** Records what is resident for a model just before its group's first probe. */
+  beforeModelProbe?: (modelId: string) => Promise<void>;
   /** Restores or unloads a model after its ordinary probes complete. */
   afterModelProbe?: (modelId: string) => Promise<void>;
   /** Prefer an already-resident chat alias for the terminal disconnect probe. */
@@ -903,6 +912,9 @@ export async function runEndpointSelfTest(options: {
   for (const target of queue) {
     options.onProgress?.({ modelId: target.modelId, index, total: progressTotal });
     index += 1;
+    if (target.observeBefore && options.beforeModelProbe) {
+      await options.beforeModelProbe(target.residencyModelId);
+    }
     if (target.kind === 'embed') {
       checks.push(...await runEmbeddingChecks(options.fetch, endpoint, target.modelId, requestTimeoutMs));
     } else if (target.kind === 'chat') {
