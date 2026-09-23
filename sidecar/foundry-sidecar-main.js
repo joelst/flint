@@ -463,7 +463,7 @@ async function rerunAcceleratorRegistration(onProgress) {
   return gate.rerun(onProgress);
 }
 
-async function runCatalogMutation(mutate, operation, onProgress) {
+async function runCatalogMutation(mutate, operation, onProgress, options) {
   const gate = acceleratorGate();
   if (!gate) {
     throw new Error(`Cannot perform ${operation}: initialize the Foundry runtime first`);
@@ -474,6 +474,7 @@ async function runCatalogMutation(mutate, operation, onProgress) {
       log('warn', `Catalog snapshot read failed after ${operation}: ${error?.message ?? error}`);
     },
     onProgress,
+    options,
   );
   try {
     manager?.catalog?.invalidateCache?.();
@@ -2766,6 +2767,7 @@ rl.on('line', async (line) => {
         },
         'model deletion',
         reportCatalogProgress,
+        { catalogReadBeforeMutation: true },
       );
       const {
         catalogEntryRemoved,

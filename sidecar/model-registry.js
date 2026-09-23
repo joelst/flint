@@ -63,6 +63,10 @@ export function buildModelIndex (models) {
       // keep the choice deterministic rather than dependent on catalog order.
       const bare = stripVersion(variant.id);
       if (bare === variant.id) continue;
+      // BYOM commonly uses `alias:version` as the variant id. Its bare form is the
+      // friendly alias, which must keep variantId:null so an unknown `alias:999`
+      // cannot silently fall back to a different cached version.
+      if (bare === alias) continue;
       const existing = index.get(bare);
       if (!existing || compareVersions(variant.id, existing.variantId) > 0) {
         index.set(bare, { alias, variantId: variant.id });

@@ -49,6 +49,22 @@ describe('buildCachedModelIndex', () => {
     });
   });
 
+  it('keeps a BYOM alias distinct from its same-named versioned variant', () => {
+    const index = buildCachedModelIndex([
+      { alias: 'local-model', id: 'local-model:1' },
+    ]);
+
+    expect(resolveModelId(index, 'local-model')).toEqual({
+      alias: 'local-model',
+      variantId: null,
+    });
+    expect(resolveModelId(index, 'local-model:1')).toEqual({
+      alias: 'local-model',
+      variantId: 'local-model:1',
+    });
+    expect(resolveModelId(index, 'local-model:999')).toBeNull();
+  });
+
   it('skips a cached row whose native-backed getters throw', () => {
     const unreadable = {
       get alias() {

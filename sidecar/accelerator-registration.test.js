@@ -298,6 +298,7 @@ describe('native service startup', () => {
     expect(deleteFlow).toContain('catalogEntryRemoved:');
     expect(deleteFlow).toContain('isLocalCatalogEntry(');
     expect(deleteFlow).toContain('catalogEntryRemoved && catalogRefreshRequiresRestart');
+    expect(deleteFlow).toContain('catalogReadBeforeMutation: true');
     const load = source.indexOf("} else if (cmd === 'load') {");
     const ensureModel = source.indexOf('async function ensureModelLocked(');
     const ensureModelEnd = source.indexOf(
@@ -482,6 +483,24 @@ describe('createCatalogRegistrationGate', () => {
       result: 'imported',
       catalogRefreshRequiresRestart: true,
     });
+  });
+
+  it('restart-bounds a first mutation whose callback reads the catalog before changing it', async () => {
+    const gate = createCatalogRegistrationGate(
+      vi.fn(async () => ({ success: true, registeredEps: [], failedEps: [] })),
+      vi.fn(async () => []),
+    );
+
+    await expect(gate.mutateAndCommit(
+      async () => 'deleted',
+      () => {},
+      undefined,
+      { catalogReadBeforeMutation: true },
+    )).resolves.toEqual({
+      result: 'deleted',
+      catalogRefreshRequiresRestart: true,
+    });
+    expect(gate.isCommitConfirmed()).toBe(true);
   });
 
   it('does not read or commit the catalog when the local mutation fails', async () => {

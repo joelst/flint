@@ -402,7 +402,7 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
     isCommitConfirmed() {
       return commitConfirmed;
     },
-    mutateAndCommit(operation, onCommitError, onProgress) {
+    mutateAndCommit(operation, onCommitError, onProgress, options = {}) {
       if (typeof onCommitError !== 'function') {
         return Promise.reject(new TypeError('mutateAndCommit requires an onCommitError handler'));
       }
@@ -411,7 +411,12 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
       return enqueue(async () => {
         await ensureSettled(report);
         await Promise.allSettled(readsBeforeMutation);
-        let catalogRefreshRequiresRestart = committed;
+        // Some mutations must resolve their target through native catalog getters
+        // before changing it. Treat that first lookup as restart-bound uncertainty:
+        // it may establish a stale native snapshot before the mutation completes.
+        const catalogReadBeforeMutation = options.catalogReadBeforeMutation === true;
+        let catalogRefreshRequiresRestart = committed || catalogReadBeforeMutation;
+        if (catalogReadBeforeMutation) committed = true;
         const result = await operation();
         try {
           await confirmCatalogCommit();
