@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { buildCachedModelIndex, resolveModelId } from './model-registry.js';
+import {
+  buildCachedModelIndex,
+  isLocalCatalogEntry,
+  resolveModelId,
+} from './model-registry.js';
 
 describe('buildCachedModelIndex', () => {
   it('resolves cached aliases and versioned or bare variant ids', () => {
@@ -12,6 +16,7 @@ describe('buildCachedModelIndex', () => {
       alias: 'gemma-4-e2b-it',
       variantId: null,
     });
+
     expect(resolveModelId(index, 'gemma-4-e2b-it-cuda-gpu:3')).toEqual({
       alias: 'gemma-4-e2b-it',
       variantId: 'gemma-4-e2b-it-cuda-gpu:3',
@@ -19,6 +24,15 @@ describe('buildCachedModelIndex', () => {
     expect(resolveModelId(index, 'gemma-4-e2b-it-cuda-gpu')).toEqual({
       alias: 'gemma-4-e2b-it',
       variantId: 'gemma-4-e2b-it-cuda-gpu:3',
+    });
+  });
+
+  describe('isLocalCatalogEntry', () => {
+    it('recognizes only local catalog URIs', () => {
+      expect(isLocalCatalogEntry({ info: { uri: 'local://custom-model' } })).toBe(true);
+      expect(isLocalCatalogEntry({ info: { uri: 'azureml://registry/model' } })).toBe(false);
+      expect(isLocalCatalogEntry({ info: {} })).toBe(false);
+      expect(isLocalCatalogEntry(null)).toBe(false);
     });
   });
 

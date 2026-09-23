@@ -5984,22 +5984,19 @@ updateStateFromSdk();
   }
 
   /**
-   * A delete result carries the same restart-bound uncertainty as import/link/template
-   * mutations: when `catalogRefreshRequiresRestart` is set, the immutable snapshot still
-   * holds the deleted row, so a refresh would just re-report stale data. Surface restart
-   * guidance and skip the refresh instead; otherwise report success and refresh normally.
+   * The SDK refreshes live cache and pool state after deletion. A restart flag means a local
+   * catalog row cannot disappear until restart, or that the post-delete refresh itself failed.
    */
   function handleDeleteResult(
     deleteResult: { catalogRefreshRequiresRestart?: boolean } | undefined,
     successMessage: string,
-  ): boolean {
+  ) {
     if (deleteResult?.catalogRefreshRequiresRestart) {
-      statusMessage = `${successMessage}. Restart Flint to let the model catalog detect the change.`;
+      statusMessage = `${successMessage}. Restart Flint to refresh the model catalog.`;
       appendAppLog(statusMessage, "warn");
-      return true;
+    } else {
+      statusMessage = successMessage;
     }
-    statusMessage = successMessage;
-    return false;
   }
 
   async function deleteVariant(model: any, variantId: string) {
@@ -6026,13 +6023,10 @@ updateStateFromSdk();
         if (isLoadedVariant) {
           await sdkUnloadModel(model);
         }
-        const deleteResult = await sdkDeleteModel(model, variantId);
+        const result = await sdkDeleteModel(model, variantId);
         const deletedMessage = `${model.alias} variant deleted (${label})`;
-        if (handleDeleteResult(deleteResult, deletedMessage)) {
-          return;
-        }
-        // If no other variants remain cached, clear selection/meta like full delete
-        await refreshCatalogModels();
+        // If no other variants remain cached, clear selection/meta like full delete.
+        // sdkDeleteModel has already refreshed the catalog before it resolves.
         const refreshed = state.models.find((m: ModelInfo) => m.alias === model.alias);
         const anyCached =
           refreshed?.isCached ||
@@ -6046,6 +6040,7 @@ updateStateFromSdk();
             persistChat();
           }
         }
+        handleDeleteResult(result, deletedMessage);
       } finally {
         release();
       }
@@ -6106,7 +6101,7 @@ updateStateFromSdk();
         if (model.isLoaded) {
           await sdkUnloadModel(model);
         }
-        const deleteResult = await sdkDeleteModel(model);
+        const result = await sdkDeleteModel(model);
         if (selectedModelAlias === model.alias) {
           selectedModelAlias = "";
         }
@@ -6116,9 +6111,7 @@ updateStateFromSdk();
           modelRuntimeMeta = nextMeta;
           persistChat();
         }
-        if (!handleDeleteResult(deleteResult, `${model.alias} deleted`)) {
-          await refreshCatalogModels();
-        }
+        handleDeleteResult(result, `${model.alias} deleted`);
       } finally {
         release();
       }

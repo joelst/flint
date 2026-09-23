@@ -24,6 +24,10 @@ export function stripVersion (id) {
   return String(id || '').replace(/:\d+$/, '');
 }
 
+export function isLocalCatalogEntry (entry) {
+  return typeof entry?.info?.uri === 'string' && entry.info.uri.startsWith('local://');
+}
+
 /**
  * Build a lookup from every identifier form a client might send.
  *

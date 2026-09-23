@@ -24,7 +24,12 @@ import { selectChatTransport } from './chat-transport.js';
 import { assertWavBuffer } from './audio-format.js';
 import { createGateway } from './gateway.js';
 import { formatPublicEndpoint } from './gateway-http.js';
-import { buildCachedModelIndex, buildModelIndex, resolveModelId } from './model-registry.js';
+import {
+  buildCachedModelIndex,
+  buildModelIndex,
+  isLocalCatalogEntry,
+  resolveModelId,
+} from './model-registry.js';
 import { waitUntilIdle } from './monotonic-wait.js';
 import {
   createOperationAdmission,
@@ -444,9 +449,9 @@ function readCatalog(operation, onProgress) {
   return gate ? gate.read(operation, onProgress) : operation();
 }
 
-function readCachedCatalog(operation, onProgress) {
+function readUnconfirmedCatalog(operation, onProgress) {
   const gate = acceleratorGate();
-  return gate ? gate.readCached(operation, onProgress) : operation();
+  return gate ? gate.readUnconfirmed(operation, onProgress) : operation();
 }
 
 /** Settings “Install / Update Accelerators” uses the same command as startup.
@@ -953,7 +958,7 @@ async function resolveForGateway (requested) {
     } catch (e) {
       log('warn', `Gateway could not read the catalog: ${e?.message ?? e}`);
       try {
-        return await readCachedCatalog(async () => {
+        return await readUnconfirmedCatalog(async () => {
           const cached = await manager.catalog.getCachedModels();
           cacheModelIndexFromCachedModels(cached);
           return resolveModelId(modelIndex, requested);
@@ -1978,22 +1983,7 @@ async function ensureModelLocked(alias, variantId, onCatalogProgress) {
     },
   } : null);
   try {
-    // Force the actual immutable-snapshot read (getModels()) ahead of this alias/variant
-    // lookup. Without this, a getModel()/getModelVariant() success below would be the first
-    // catalog access to reach the gate and would wrongly confirm the snapshot on its own —
-    // the same generic-operation confirmation the `download` command guards against. A
-    // failure here (e.g. offline) must not block loading an already-cached model: the gate
-    // has already recorded the attempt as restart-bound uncertainty either way.
-    try {
-      await beforeCatalogRead(onCatalogProgress, { commit: true });
-    } catch (e) {
-      log(
-        'warn',
-        `Catalog snapshot read failed before loading ${alias}: ${e?.message ?? e}. ` +
-          'The catalog snapshot is uncertain; accelerator updates are deferred until restart.',
-      );
-    }
-    const { catModel, variant } = await readCatalog(
+    const { catModel, variant } = await readUnconfirmedCatalog(
       async () => {
         const model = await manager.catalog.getModel(alias);
         return {
@@ -2650,7 +2640,7 @@ rl.on('line', async (line) => {
       reply({ ok: true, result: vision });
     } else if (cmd === 'download') {
       await beforeCatalogRead(reportCatalogProgress, { commit: true });
-      const model = await readCatalog(
+      const model = await readUnconfirmedCatalog(
         () => payload.variantId
           ? manager.catalog.getModelVariant(payload.variantId)
           : manager.catalog.getModel(payload.alias),
@@ -2715,6 +2705,7 @@ rl.on('line', async (line) => {
             if (!variant) {
               throw new Error(`Variant not found: ${variantId}`);
             }
+            const parentModel = await manager.catalog.getModel(payload.alias);
             const poolEntry = pool.get(payload.alias);
             if (poolEntry?.variantId === variantId) {
               if (typeof poolEntry.catModel.unload === 'function') {
@@ -2729,7 +2720,12 @@ rl.on('line', async (line) => {
             }
             invalidateModelIndex();
             audit('deleteModel', { alias: payload.alias, variantId });
-            return { alias: payload.alias, variantId };
+            return {
+              alias: payload.alias,
+              variantId,
+              catalogEntryRemoved:
+                isLocalCatalogEntry(variant) || isLocalCatalogEntry(parentModel),
+            };
           }
 
           // Delete all cached variants for this alias.
@@ -2762,12 +2758,26 @@ rl.on('line', async (line) => {
           log('info', `Deleted ${deleted} cached variant(s) for ${payload.alias}`);
           invalidateModelIndex();
           audit('deleteModel', { alias: payload.alias, variantId: null, count: deleted });
-          return { alias: payload.alias, count: deleted };
+          return {
+            alias: payload.alias,
+            count: deleted,
+            catalogEntryRemoved: isLocalCatalogEntry(model),
+          };
         },
         'model deletion',
         reportCatalogProgress,
       );
-      reply({ ok: true, result: deleteResult });
+      const {
+        catalogEntryRemoved,
+        catalogRefreshRequiresRestart,
+        ...publicDeleteResult
+      } = deleteResult;
+      reply({
+        ok: true,
+        result: catalogEntryRemoved && catalogRefreshRequiresRestart
+          ? { ...publicDeleteResult, catalogRefreshRequiresRestart: true }
+          : publicDeleteResult,
+      });
     } else if (cmd === 'inspectModelFolder') {
       reply({ ok: true, result: inspectFolder(payload.folderPath) });
     } else if (cmd === 'importModelFolder') {
@@ -3496,22 +3506,30 @@ rl.on('line', async (line) => {
       }
     } else if (cmd === 'poolStatus') {
       let loadedIds = new Set();
+      const snapshotConfirmed = catalogReadConfirmed();
+      let loadedStateKnown = false;
       try {
         // Automatic telemetry must not become the first catalog access: doing so
         // would freeze the snapshot and disable useful registration retries.
         // After getModels confirms the snapshot, track this native read so local
         // catalog mutations cannot overlap its scan.
-        const loaded = catalogReadConfirmed()
+        const loaded = snapshotConfirmed
           ? await readCatalog(() => manager.catalog.getLoadedModels())
           : [];
         for (const m of loaded) loadedIds.add(m.id);
+        if (snapshotConfirmed) loadedStateKnown = true;
       } catch {}
       const entries = [...pool.entries()].map(([alias, { variantId }]) => {
         const use = usageFor(alias);
         return {
           alias,
           variantId,
-          isLoaded: loadedIds.size > 0 ? loadedIds.has(variantId) : null,
+          // Pool entries are created only after load succeeds and removed on
+          // unload. Before the public snapshot is confirmed, avoid a native
+          // catalog read but still report the state this sidecar owns.
+          isLoaded: snapshotConfirmed
+            ? (loadedStateKnown ? loadedIds.has(variantId) : null)
+            : true,
           lastUsedAt: use.lastUsedAt,
           inFlight: inFlightFor(alias),
           priority: normalizePriority(modelPriorities.get(alias)),

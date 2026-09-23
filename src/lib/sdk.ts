@@ -1912,17 +1912,22 @@ export async function applyMemorySettings(
   return { config: res.result?.config ?? null, stale: res.result?.stale === true };
 }
 
-export async function deleteModel(model: any, variantId?: string): Promise<CatalogMutationResult> {
+export async function deleteModel(
+  model: any,
+  variantId?: string,
+): Promise<CatalogMutationResult> {
   const payload: any = { alias: model.alias };
   if (variantId) payload.variantId = variantId;
   const res = await send('deleteModel', payload);
   const result = res.result as CatalogMutationResult;
-  await refreshModelsAfterMutation(result);
-  return result;
+  return refreshModelsAfterDeletion(result);
 }
 
-export async function removeFromCache(alias: string, variantId?: string) {
-  await deleteModel({ alias }, variantId);
+export async function removeFromCache(
+  alias: string,
+  variantId?: string,
+): Promise<CatalogMutationResult> {
+  return deleteModel({ alias }, variantId);
 }
 
 export async function getAccessLog(): Promise<any[]> {
@@ -2652,6 +2657,21 @@ async function refreshModelsAfterMutation(result: CatalogMutationResult | undefi
     return;
   }
   await refreshModels();
+}
+
+async function refreshModelsAfterDeletion(
+  result: CatalogMutationResult,
+): Promise<CatalogMutationResult> {
+  // Deletion changes live cache state even when an immutable local catalog row
+  // cannot disappear until restart. Refresh those live flags, but never turn a
+  // durable deletion into a reported failure solely because the refresh failed.
+  try {
+    await refreshModels();
+    return result;
+  } catch (error) {
+    console.warn('[sdk] Catalog refresh failed after model deletion', error);
+    return { ...result, catalogRefreshRequiresRestart: true };
+  }
 }
 
 export async function importModelFolder(options: {

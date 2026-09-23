@@ -378,9 +378,12 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
         outcome.runOutsideQueue ? operation() : outcome.result
       )));
     },
-    readCached(operation, onProgress) {
+    readUnconfirmed(operation, onProgress) {
       if (typeof operation !== 'function') {
-        return Promise.reject(new TypeError('readCached requires a catalog operation'));
+        return Promise.reject(new TypeError('readUnconfirmed requires a catalog operation'));
+      }
+      if (commitConfirmed) {
+        return trackRead(tail.then(() => operation()));
       }
       const report = typeof onProgress === 'function' ? onProgress : null;
       return enqueue(async () => {
@@ -388,9 +391,10 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
         try {
           return await operation();
         } finally {
-          // A cached inventory read does not prove that the immutable public
-          // catalog snapshot exists, but it is still a catalog touch. Keep
-          // provider updates restart-bound until a real read confirms it.
+          // Model lookups and cached inventory reads do not prove that the
+          // immutable public catalog snapshot exists, but they are still
+          // catalog touches. Keep provider updates restart-bound until a real
+          // snapshot read confirms it.
           committed = true;
         }
       });

@@ -2429,21 +2429,49 @@ describe('catalog mutation results', () => {
     await expect(imported).rejects.toThrow('catalog unavailable');
   }, 15000);
 
-  it('preserves a restart-flagged deleteModel result without attempting an impossible refresh', async () => {
+  it('refreshes live deletion state while preserving catalog restart guidance', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const deleted = sdk.deleteModel({ alias: 'foo' } as any, 'foo-cpu:1');
+    const deleteId = await waitForWrite('deleteModel');
+    harness.emitStdout({
+      id: deleteId,
+      result: {
+        alias: 'foo',
+        variantId: 'foo-cpu:1',
+        catalogRefreshRequiresRestart: true,
+      },
+    });
+    const listId = await waitForWrite('listModels', 1);
+    harness.emitStdout({ id: listId, result: [] });
+    const statusId = await waitForWrite('getStatus', 2);
+    harness.emitStdout({ id: statusId, result: { serviceRunning: false, endpoint: null } });
+    const poolId = await waitForWrite('poolStatus', 1);
+    harness.emitStdout({ id: poolId, result: { models: [] } });
+
+    await expect(deleted).resolves.toEqual({
+      alias: 'foo',
+      variantId: 'foo-cpu:1',
+      catalogRefreshRequiresRestart: true,
+    });
+    expect(harness.writes.filter((line) => line.includes('"listModels"'))).toHaveLength(2);
+  }, 15000);
+
+  it('turns a failed post-deletion refresh into explicit restart guidance', async () => {
     const sdk = await loadSdk();
     await completeInitialization(sdk);
 
     const deleted = sdk.deleteModel({ alias: 'foo' } as any);
     const deleteId = await waitForWrite('deleteModel');
-    harness.emitStdout({
-      id: deleteId,
-      result: { catalogRefreshRequiresRestart: true, alias: 'foo' },
-    });
+    harness.emitStdout({ id: deleteId, result: { alias: 'foo', count: 1 } });
+    const listId = await waitForWrite('listModels', 1);
+    harness.emitStdout({ id: listId, error: 'catalog unavailable' });
 
     await expect(deleted).resolves.toEqual({
-      catalogRefreshRequiresRestart: true,
       alias: 'foo',
+      count: 1,
+      catalogRefreshRequiresRestart: true,
     });
-    expect(harness.writes.filter((line) => line.includes('"listModels"'))).toHaveLength(1);
   }, 15000);
 });

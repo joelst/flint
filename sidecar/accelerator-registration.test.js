@@ -240,9 +240,8 @@ describe('native service startup', () => {
     const listProgress = source.indexOf('reportCatalogProgress', listGate);
     const listRead = source.indexOf('manager.catalog.getModels()', listModels);
     const gatewayFallback = source.indexOf('Gateway could not read the catalog');
-    const fallbackEnsure = source.indexOf('await beforeCatalogRead();', gatewayFallback);
-    const fallbackCached = source.indexOf('manager.catalog.getCachedModels()', gatewayFallback);
-    const fallbackCommit = source.indexOf('readCatalog(() => manager.catalog.getCachedModels())', gatewayFallback);
+    const gatewayFallbackEnd = source.indexOf('} catch (lookupError)', gatewayFallback);
+    const gatewayFallbackFlow = source.slice(gatewayFallback, gatewayFallbackEnd);
     expect(gateStart).toBeGreaterThan(-1);
     expect(forcedRead).toBeGreaterThan(gateStart);
     expect(start).toBeGreaterThan(-1);
@@ -262,9 +261,11 @@ describe('native service startup', () => {
     expect(listRead).toBeGreaterThan(listGate);
     expect(listProgress).toBeGreaterThan(listRead);
     expect(gatewayFallback).toBeGreaterThan(-1);
-    expect(fallbackEnsure).toBe(-1);
-    expect(fallbackCached).toBeGreaterThan(gatewayFallback);
-    expect(fallbackCommit).toBe(-1);
+    expect(gatewayFallbackEnd).toBeGreaterThan(gatewayFallback);
+    expect(gatewayFallbackFlow).not.toContain('await beforeCatalogRead();');
+    expect(gatewayFallbackFlow).toContain('readUnconfirmedCatalog(');
+    expect(gatewayFallbackFlow).not.toContain('readCatalog(');
+    expect(gatewayFallbackFlow).toContain('manager.catalog.getCachedModels()');
     for (const cmd of ['getSTTModels', 'getVisionModels']) {
       const at = source.indexOf(`} else if (cmd === '${cmd}') {`);
       const trackedRead = source.indexOf('readCatalog(', at);
@@ -275,7 +276,7 @@ describe('native service startup', () => {
       expect(progress, cmd).toBeGreaterThan(nativeRead);
     }
     const download = source.indexOf("} else if (cmd === 'download') {");
-    const downloadRead = source.indexOf('readCatalog(', download);
+    const downloadRead = source.indexOf('readUnconfirmedCatalog(', download);
     const downloadVariant = source.indexOf('manager.catalog.getModelVariant(payload.variantId)', download);
     const downloadAlias = source.indexOf('manager.catalog.getModel(payload.alias)', download);
     const downloadPreflight = source.indexOf('beforeCatalogRead(reportCatalogProgress', download);
@@ -288,10 +289,27 @@ describe('native service startup', () => {
     const deleteMutation = source.indexOf('runCatalogMutation(', deleteModel);
     const deleteVariant = source.indexOf('manager.catalog.getModelVariant(variantId)', deleteModel);
     const deleteAlias = source.indexOf('manager.catalog.getModel(payload.alias)', deleteModel);
+    const deleteEnd = source.indexOf("} else if (cmd === 'inspectModelFolder')", deleteModel);
+    const deleteFlow = source.slice(deleteModel, deleteEnd);
     expect(deleteMutation).toBeGreaterThan(deleteModel);
     expect(deleteMutation).toBeLessThan(deleteVariant);
     expect(deleteMutation).toBeLessThan(deleteAlias);
+    expect(deleteEnd).toBeGreaterThan(deleteModel);
+    expect(deleteFlow).toContain('catalogEntryRemoved:');
+    expect(deleteFlow).toContain('isLocalCatalogEntry(');
+    expect(deleteFlow).toContain('catalogEntryRemoved && catalogRefreshRequiresRestart');
     const load = source.indexOf("} else if (cmd === 'load') {");
+    const ensureModel = source.indexOf('async function ensureModelLocked(');
+    const ensureModelEnd = source.indexOf(
+      'async function applyPreferredExecutionProvider',
+      ensureModel,
+    );
+    const ensureModelFlow = source.slice(ensureModel, ensureModelEnd);
+    expect(ensureModel).toBeGreaterThan(-1);
+    expect(ensureModelEnd).toBeGreaterThan(ensureModel);
+    expect(ensureModelFlow).toContain('readUnconfirmedCatalog(');
+    expect(ensureModelFlow).not.toContain('readCatalog(');
+    expect(ensureModelFlow).toContain('manager.catalog.getModel(alias)');
     expect(source.indexOf('ensureModel(payload.alias, payload.variantId, reportCatalogProgress)', load))
       .toBeGreaterThan(load);
     for (const cmd of ['importModelFolder', 'linkModelFolder', 'setModelTemplate']) {
@@ -988,7 +1006,7 @@ describe('createCatalogRegistrationGate', () => {
     expect(events).toEqual(['first', 'second', 'mutation']);
   });
 
-  it('does not confirm the catalog from a cached-only read after a failed snapshot read', async () => {
+  it('does not confirm the catalog from an unconfirmed read after a failed snapshot read', async () => {
     const register = vi.fn(async () => ({
       success: true,
       registeredEps: ['CPUExecutionProvider'],
@@ -1000,7 +1018,7 @@ describe('createCatalogRegistrationGate', () => {
     );
 
     await expect(gate.commit()).rejects.toThrow('catalog unavailable');
-    await expect(gate.readCached(async () => ['cached-model'])).resolves.toEqual(['cached-model']);
+    await expect(gate.readUnconfirmed(async () => ['cached-model'])).resolves.toEqual(['cached-model']);
     expect(gate.isCommitConfirmed()).toBe(false);
     await expect(gate.rerun()).resolves.toMatchObject({
       registrationDeferredUntilRestart: true,
@@ -1009,7 +1027,7 @@ describe('createCatalogRegistrationGate', () => {
     expect(register).toHaveBeenCalledTimes(1);
   });
 
-  it('treats a cached-only first read as uncertain and defers provider updates', async () => {
+  it('treats a successful model lookup as uncertain and defers provider updates', async () => {
     const register = vi.fn(async () => ({
       success: true,
       registeredEps: ['CPUExecutionProvider'],
@@ -1017,13 +1035,39 @@ describe('createCatalogRegistrationGate', () => {
     }));
     const gate = createCatalogRegistrationGate(register, vi.fn());
 
-    await expect(gate.readCached(async () => ['cached-model'])).resolves.toEqual(['cached-model']);
+    await expect(gate.readUnconfirmed(async () => ({ alias: 'cached-model' }))).resolves.toEqual({
+      alias: 'cached-model',
+    });
     expect(gate.isCommitConfirmed()).toBe(false);
     await expect(gate.rerun()).resolves.toMatchObject({
       registrationDeferredUntilRestart: true,
       catalogRefreshRequiresRestart: true,
     });
     expect(register).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets unconfirmed lookup operations remain concurrent after snapshot confirmation', async () => {
+    const gate = createCatalogRegistrationGate(
+      vi.fn(async () => ({ success: true, registeredEps: [], failedEps: [] })),
+      vi.fn(async () => []),
+    );
+    await gate.commit();
+
+    const events = [];
+    let releaseFirst = () => {};
+    const first = gate.readUnconfirmed(async () => {
+      events.push('first');
+      await new Promise((resolve) => { releaseFirst = resolve; });
+      return 'first';
+    });
+    const second = gate.readUnconfirmed(async () => {
+      events.push('second');
+      return 'second';
+    });
+
+    await vi.waitFor(() => expect(events).toEqual(['first', 'second']));
+    releaseFirst();
+    await expect(Promise.all([first, second])).resolves.toEqual(['first', 'second']);
   });
 
   it('orders confirmed reads behind an in-flight catalog mutation', async () => {
@@ -1093,7 +1137,9 @@ describe('createCatalogRegistrationGate', () => {
   it('rejects a non-function catalog operation', async () => {
     const gate = createCatalogRegistrationGate(vi.fn(), vi.fn());
     await expect(gate.read(null)).rejects.toThrow('read requires a catalog operation');
-    await expect(gate.readCached(null)).rejects.toThrow('readCached requires a catalog operation');
+    await expect(gate.readUnconfirmed(null)).rejects.toThrow(
+      'readUnconfirmed requires a catalog operation',
+    );
   });
 
   it('keeps a queued update behind the actual first catalog read', async () => {

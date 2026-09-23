@@ -636,79 +636,6 @@ describe('foundry-sidecar protocol basics', () => {
     }
   });
 
-  it('forces a full getModels() snapshot read before a load\'s getModel() can confirm the catalog', async () => {
-    // A `load` reaching the catalog gate first (before `startService`/`download`) must not let
-    // getModel()/getModelVariant() alone confirm the immutable snapshot: only the full listing
-    // read establishes what the catalog contains. getModel() below throws until getModels() has
-    // been called at least once, so an out-of-order call fails this test loudly.
-    const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-load-order-home-'));
-    const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
-    const corePath = join(homeDir, 'fake-core.dylib');
-    writeFileSync(corePath, '');
-    writeFileSync(loaderPath, `
-      const sdk = \`
-        let getModelsCalls = 0;
-        class FakeModel {
-          constructor(alias, id) { this.alias = alias; this.id = id; this.loaded = false; }
-          async load() { this.loaded = true; }
-          isLoaded() { return this.loaded; }
-          getExecutionProvider() { return 'CPUExecutionProvider'; }
-          selectVariant(variant) { this.id = variant.id; }
-        }
-        class FakeManager {
-          constructor() {
-            this.urls = [];
-            this.ep = { name: 'CPUExecutionProvider', isRegistered: true };
-            this.catalog = {
-              getModels: async () => { getModelsCalls++; return []; },
-              getModel: async (alias) => {
-                if (getModelsCalls < 1) throw new Error('getModel called before getModels() confirmed the snapshot');
-                return new FakeModel(alias, 'fake-model-cpu:1');
-              },
-              getModelVariant: async (id) => new FakeModel('fake-model', id),
-            };
-          }
-          discoverEps() { return [this.ep]; }
-          async downloadAndRegisterEps() {
-            return { success: true, registeredEps: [this.ep.name], failedEps: [] };
-          }
-          static create() { return new FakeManager(); }
-        }
-        export { FakeManager as FoundryLocalManager };
-      \`;
-      export async function resolve(specifier, context, nextResolve) {
-        if (specifier === 'foundry-local-sdk') {
-          return { url: 'data:text/javascript,' + encodeURIComponent(sdk), shortCircuit: true };
-        }
-        return nextResolve(specifier, context);
-      }
-      export async function load(url, context, nextLoad) {
-        if (url.startsWith('data:text/javascript,')) {
-          return { format: 'module', source: decodeURIComponent(url.slice('data:text/javascript,'.length)), shortCircuit: true };
-        }
-        return nextLoad(url, context);
-      }
-    `);
-    const proc = spawn(process.execPath, [
-      '--experimental-loader', pathToFileURL(loaderPath).href, 'sidecar/foundry-sidecar.js'
-    ], {
-      cwd: process.cwd(),
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, HOME: homeDir, USERPROFILE: homeDir, FLINT_FOUNDRY_CORE_PATH: corePath },
-    });
-    try {
-      await waitForLine(proc, (msg) => msg.ready === true);
-      proc.stdin.write(`${JSON.stringify({ id: 80, cmd: 'init', appName: 'flint-test', logLevel: 'info' })}\n`);
-      expect((await waitForLine(proc, (msg) => msg.id === 80)).ok).toBe(true);
-      proc.stdin.write(`${JSON.stringify({ id: 81, cmd: 'load', alias: 'fake-model' })}\n`);
-      const loaded = await waitForLine(proc, (msg) => msg.id === 81, 15000);
-      expect(loaded.ok, JSON.stringify(loaded)).toBe(true);
-    } finally {
-      if (!proc.killed) proc.kill();
-      rmSync(homeDir, { recursive: true, force: true });
-    }
-  });
-
   it('applies requested temperature/maxTokens to the SDK chat client before completion', async () => {
     const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-chat-settings-home-'));
     const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
@@ -812,6 +739,16 @@ describe('foundry-sidecar protocol basics', () => {
       });
 
       // Streaming SDK branch.
+      const streamedDeltaPromise = waitForLine(
+        proc,
+        (msg) => msg.id === 52 && msg.stream === true,
+        45000,
+      );
+      const streamedDonePromise = waitForLine(
+        proc,
+        (msg) => msg.id === 52 && msg.ok === true,
+        45000,
+      );
       proc.stdin.write(`${JSON.stringify({
         id: 52,
         cmd: 'chatCompletion',
@@ -821,9 +758,12 @@ describe('foundry-sidecar protocol basics', () => {
         temperature: 0.77,
         maxTokens: 55,
       })}\n`);
-      const streamedDelta = await waitForLine(proc, (msg) => msg.id === 52 && msg.stream === true, 45000);
+      const [streamedDelta, streamedDone] = await Promise.all([
+        streamedDeltaPromise,
+        streamedDonePromise,
+      ]);
       expect(JSON.parse(streamedDelta.delta)).toEqual({ temperature: 0.77, maxTokens: 55 });
-      expect((await waitForLine(proc, (msg) => msg.id === 52 && msg.ok === true, 45000)).ok).toBe(true);
+      expect(streamedDone.ok).toBe(true);
 
       // Omitted fields must not clobber the client's own defaults with undefined/NaN.
       proc.stdin.write(`${JSON.stringify({
