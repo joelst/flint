@@ -620,16 +620,20 @@
       const failed = registration?.failedEps ?? [];
       const removed = registration?.removedProviderCaches ?? [];
       const attempted = registration?.attemptedProviderRebuilds ?? [];
+      const busy = registration?.busyProviderCaches ?? [];
+      const locked = busy.length
+        ? ` Left in place because a file is in use: ${busy.join(", ")}.`
+        : "";
       const failureNames = failed.length ? failed : removed.length ? removed : attempted;
       if (failed.length || registration?.success === false) {
-        statusMessage = failureNames.length
-          ? `Provider rebuild failed for ${failureNames.join(", ")}`
-          : (registration?.status || "Provider rebuild failed");
+        statusMessage = (failureNames.length
+          ? `Provider rebuild failed for ${failureNames.join(", ")}.`
+          : (registration?.status || "Provider rebuild failed.")) + locked;
         appendAppLog(statusMessage, "warn");
       } else if (removed.length) {
-        statusMessage = `Rebuilt ${removed.join(", ")}`;
+        statusMessage = `Rebuilt ${removed.join(", ")}.${locked}`;
       } else {
-        statusMessage = `${state.eps.length} execution providers ready`;
+        statusMessage = `${state.eps.length} execution providers ready.${locked}`;
       }
     } catch (e: any) {
       statusMessage = `Provider recheck failed: ${e?.message || e}`;

@@ -3606,6 +3606,7 @@ rl.on('line', async (line) => {
               ...(outcome.result ?? {}),
               attemptedProviderRebuilds: outcome.attempted,
               removedProviderCaches: outcome.removed,
+              busyProviderCaches: outcome.busy,
             },
           });
         } else {

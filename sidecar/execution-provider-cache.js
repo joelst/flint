@@ -55,11 +55,29 @@ export function providerCacheDirectory (epRoot, epName) {
  * @param {unknown} epName
  * @returns {boolean}
  */
+function isFileBusy (error) {
+  const code = error?.code;
+  return code === 'EPERM' || code === 'EBUSY' || code === 'EACCES';
+}
+
+/**
+ * Delete one provider cache.
+ * Returns true when the directory was removed, false when it was already
+ * gone, and 'busy' when Windows still has a file in it loaded.
+ * @param {string} epRoot
+ * @param {unknown} epName
+ * @returns {true|false|'busy'}
+ */
 export function removeProviderCache (epRoot, epName) {
   const dir = providerCacheDirectory(epRoot, epName);
   if (!dir || !fs.existsSync(dir)) return false;
-  fs.rmSync(dir, { recursive: true, force: true });
-  return true;
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+    return true;
+  } catch (error) {
+    if (isFileBusy(error)) return 'busy';
+    throw error;
+  }
 }
 
 const KNOWN_PROVIDERS = [
@@ -87,10 +105,18 @@ export function providerNamesInText (text) {
  * @param {Array<{ name?: string, isRegistered?: boolean }>|null|undefined} discovered
  * @returns {string[]}
  */
+function registeredCacheSlugs (discovered) {
+  const slugs = new Set();
+  for (const ep of discovered ?? []) {
+    if (!ep?.isRegistered || !ep.name) continue;
+    const slug = providerCacheSlug(ep.name);
+    if (slug) slugs.add(slug);
+  }
+  return slugs;
+}
+
 export function providersWithUnregisteredCache (epRoot, discovered) {
-  const registered = new Set(
-    (discovered ?? []).filter((ep) => ep?.isRegistered && ep.name).map((ep) => ep.name),
-  );
+  const registered = registeredCacheSlugs(discovered);
   if (!epRoot || !fs.existsSync(epRoot)) return [];
   let entries = [];
   try {
@@ -102,7 +128,7 @@ export function providersWithUnregisteredCache (epRoot, discovered) {
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const match = KNOWN_PROVIDERS.find((name) => providerCacheSlug(name) === entry.name);
-    if (match && !registered.has(match)) names.push(match);
+    if (match && !registered.has(entry.name)) names.push(match);
   }
   return names;
 }
@@ -114,12 +140,26 @@ export function providersWithUnregisteredCache (epRoot, discovered) {
  * @returns {string[]}
  */
 function brokenProviderNames (discovered, epRoot, extraNames = []) {
-  const names = new Set(extraNames.filter(Boolean));
+  const registered = registeredCacheSlugs(discovered);
+  const names = new Set();
+  const add = (name) => {
+    const slug = providerCacheSlug(name);
+    if (!slug || registered.has(slug)) return;
+    names.add(name);
+  };
   for (const ep of discovered ?? []) {
-    if (ep && ep.isRegistered === false && ep.name) names.add(ep.name);
+    if (ep && ep.isRegistered === false && ep.name) add(ep.name);
   }
-  for (const name of providersWithUnregisteredCache(epRoot, discovered)) names.add(name);
-  return [...names].filter((name) => providerCacheSlug(name));
+  for (const name of providersWithUnregisteredCache(epRoot, discovered)) add(name);
+  for (const name of extraNames) add(name);
+  return [...names];
+}
+
+function reportedFailures (result) {
+  const failed = Array.isArray(result?.failedEps) ? result.failedEps.filter(Boolean) : [];
+  if (failed.length > 0) return failed;
+  if (result?.success === false) return providerNamesInText(result?.status);
+  return [];
 }
 
 /**
@@ -159,10 +199,24 @@ async function registerProviders (deps, names) {
 export async function rebuildBrokenExecutionProviders (deps) {
   const removed = [];
   const attempted = [];
+  const busy = [];
   const remove = (name) => {
-    if (!deps.removeCache(name)) return false;
-    removed.push(name);
-    return true;
+    let outcome;
+    try {
+      outcome = deps.removeCache(name);
+    } catch (error) {
+      if (!isFileBusy(error)) throw error;
+      outcome = 'busy';
+    }
+    if (outcome === 'busy') {
+      if (!busy.includes(name)) busy.push(name);
+      return false;
+    }
+    if (outcome) {
+      removed.push(name);
+      return true;
+    }
+    return false;
   };
   const rememberAttempt = (names) => {
     for (const name of names) {
@@ -175,11 +229,7 @@ export async function rebuildBrokenExecutionProviders (deps) {
   rememberAttempt(broken);
   let result = await registerProviders(deps, broken);
 
-  const reported = [
-    ...(Array.isArray(result?.failedEps) ? result.failedEps : []),
-    ...providerNamesInText(result?.status),
-  ];
-  const retry = brokenProviderNames(deps.discover() ?? [], deps.epRoot, reported);
+  const retry = brokenProviderNames(deps.discover() ?? [], deps.epRoot, reportedFailures(result));
   if (retry.length) {
     for (const name of retry) remove(name);
     rememberAttempt(retry);
@@ -188,6 +238,7 @@ export async function rebuildBrokenExecutionProviders (deps) {
   return {
     removed,
     attempted,
+    busy,
     result: result ?? null,
   };
 }
