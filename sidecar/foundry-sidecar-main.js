@@ -155,6 +155,16 @@ function serializeBenchmarkExclusiveTransition(fn) {
   benchmarkExclusiveTransitionChain = result.then(() => {}, () => {});
   return result;
 }
+// Startup registration, Install / Update Accelerators, and Recheck Providers
+// all call downloadAndRegisterEps. The readline loop runs those handlers at
+// the same time, so one must finish before the next deletes a cache or starts
+// another native registration. A disabled button cannot see the other callers.
+let acceleratorRegistrationChain = Promise.resolve();
+function serializeAcceleratorRegistration (fn) {
+  const result = acceleratorRegistrationChain.then(fn, fn);
+  acceleratorRegistrationChain = result.then(() => {}, () => {});
+  return result;
+}
 let explicitShutdownInProgress = false;
 const LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'fatal'];
 let activeLogLevel = 'info';
@@ -3581,24 +3591,26 @@ rl.on('line', async (line) => {
       const eps = typeof manager.discoverEps === 'function' ? manager.discoverEps() : [];
       reply({ ok: true, result: eps });
     } else if (cmd === 'ensureAccelerators') {
-      if (typeof manager.downloadAndRegisterEps !== 'function') {
-        reply({ ok: true, result: null });
-      } else {
+      await serializeAcceleratorRegistration(async () => {
+        if (typeof manager.downloadAndRegisterEps !== 'function') {
+          reply({ ok: true, result: null });
+          return;
+        }
         const progress = (name, pct) => send({ id, progress: pct, ep: name });
         if (payload.rebuildBroken === true) {
           const epRoot = path.join(os.homedir(), `.${initConfig?.appName || 'flint'}`, 'ep');
           const outcome = await rebuildBrokenExecutionProviders({
             discover: () => (typeof manager.discoverEps === 'function' ? manager.discoverEps() : []),
-            downloadAndRegister: (names, onProgress) => manager.downloadAndRegisterEps(
-              names && names.length ? names : undefined,
-              onProgress,
-            ),
+            downloadAndRegister: (names, onProgress) => manager.downloadAndRegisterEps(names, onProgress),
             removeCache: (name) => removeProviderCache(epRoot, name),
             onProgress: progress,
             epRoot,
           });
           if (outcome.removed.length) {
             log('info', `Removed broken execution provider cache: ${outcome.removed.join(', ')}`);
+          }
+          if (outcome.busy.length) {
+            log('warn', `Left execution provider cache in place because a file is in use: ${outcome.busy.join(', ')}`);
           }
           reply({
             ok: true,
@@ -3609,11 +3621,11 @@ rl.on('line', async (line) => {
               busyProviderCaches: outcome.busy,
             },
           });
-        } else {
-          const result = await manager.downloadAndRegisterEps(progress);
-          reply({ ok: true, result: result ?? null });
+          return;
         }
-      }
+        const result = await manager.downloadAndRegisterEps(progress);
+        reply({ ok: true, result: result ?? null });
+      });
     } else if (cmd === 'setLogLevel') {
       if (!LOG_LEVELS.includes(payload.level)) {
         throw new Error(`Unsupported log level "${payload.level}". Expected one of: ${LOG_LEVELS.join(', ')}`);
