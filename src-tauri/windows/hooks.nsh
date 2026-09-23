@@ -30,6 +30,13 @@
         MessageBox MB_OK|MB_ICONSTOP "An older Foundry SDK backup at foundry-local-sdk.previous could not be moved. Close the program using that folder, then run the installer again. The installed SDK was not changed."
         Abort
   foundry_sdk_move:
+    IfFileExists "$INSTDIR\foundry-local-sdk.failed\*" 0 foundry_sdk_failed_clear
+      ClearErrors
+      RMDir /r "$INSTDIR\foundry-local-sdk.failed"
+      IfFileExists "$INSTDIR\foundry-local-sdk.failed\*" 0 foundry_sdk_failed_clear
+        MessageBox MB_OK|MB_ICONSTOP "Flint could not remove foundry-local-sdk.failed. Close the program using that folder, then run the installer again. The installed SDK was not changed."
+        Abort
+    foundry_sdk_failed_clear:
     IfFileExists "$INSTDIR\foundry-local-sdk\*" 0 foundry_sdk_aside_done
       ClearErrors
       Rename "$INSTDIR\foundry-local-sdk" "$INSTDIR\foundry-local-sdk.previous"

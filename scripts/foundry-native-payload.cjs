@@ -197,7 +197,7 @@ function validateNativePayload(sdkRoot, platformKey) {
   for (const file of files) {
     const filePath = path.join(platformDir, file.name);
     const inspected = inspectNativeFile(filePath);
-    if (file.runtimeVersion && inspected.size > 0 && !inspected.linkTarget) {
+    if (platformKey.startsWith('win32-') && file.runtimeVersion && inspected.size > 0 && !inspected.linkTarget) {
       try {
         inspected.fileVersion = readUtf16FileVersion(fs.readFileSync(filePath));
       } catch {
@@ -234,7 +234,7 @@ function removeUnpinnedRuntimeFiles(sdkRoot) {
       if (!file.runtimeVersion) continue;
       const filePath = path.join(platformDir, file.name);
       const inspected = inspectNativeFile(filePath);
-      if (inspected.size > 0 && !inspected.linkTarget) {
+      if (platformKey.startsWith('win32-') && inspected.size > 0 && !inspected.linkTarget) {
         try {
           inspected.fileVersion = readUtf16FileVersion(fs.readFileSync(filePath));
         } catch {

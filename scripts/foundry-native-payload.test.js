@@ -131,6 +131,14 @@ describe('Foundry native payload manifest', () => {
     expect(validateNativePayload(sdkRoot, 'win32-x64').invalid).toEqual([]);
   });
 
+  it('does not read a Windows FileVersion resource from a macOS runtime', () => {
+    const sdkRoot = makeSdk('darwin-arm64');
+    const runtime = join(sdkRoot, 'prebuilds', 'darwin-arm64', 'libonnxruntime.1.dylib');
+    writeFileSync(runtime, fileVersionBytes('1.26.0', 1_000_000));
+    expect(validateNativePayload(sdkRoot, 'darwin-arm64').invalid).toEqual([]);
+    rmSync(sdkRoot, { recursive: true, force: true });
+  });
+
   it('rejects a truncated core that is present but cannot be a real runtime', () => {
     const sdkRoot = makeSdk('win32-x64');
     writeFileSync(join(sdkRoot, 'prebuilds', 'win32-x64', 'foundry_local.dll'), 'truncated');
