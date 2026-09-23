@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { holdExclusive } from '../src/test/hold-exclusive.js';
 import {
   providerCacheDirectory,
   providerCacheSlug,
@@ -46,6 +47,59 @@ describe('removeProviderCache', () => {
     expect(await removeProviderCache(root, 'CPUExecutionProvider')).toBe(false);
     fs.rmSync(root, { recursive: true, force: true });
   });
+
+  // A recursive delete unlinks one entry at a time, so an undeletable file
+  // would leave the cache half gone while the caller was told it was left in
+  // place. The tree is renamed aside instead, and the leftover is swept later.
+  const undeletable = process.platform === 'win32' || process.getuid?.() === 0 ? it.skip : it;
+  undeletable('moves the cache aside when a file in it cannot be deleted', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'flint-ep-'));
+    const cuda = path.join(root, 'cuda-ep');
+    const held = path.join(cuda, 'held');
+    fs.mkdirSync(held, { recursive: true });
+    fs.writeFileSync(path.join(held, 'onnxruntime_providers_cuda.dll'), 'stale');
+    fs.writeFileSync(path.join(cuda, 'sibling.dll'), 'stale');
+    fs.chmodSync(held, 0o555);
+
+    try {
+      expect(await removeProviderCache(root, 'CUDAExecutionProvider')).toBe(true);
+      expect(fs.existsSync(cuda)).toBe(false);
+      const leftovers = fs.readdirSync(root).filter((entry) => entry.startsWith('cuda-ep.removing-'));
+      expect(leftovers).toHaveLength(1);
+
+      fs.chmodSync(path.join(root, leftovers[0], 'held'), 0o755);
+      expect(await removeProviderCache(root, 'CUDAExecutionProvider')).toBe(false);
+      expect(fs.readdirSync(root)).toEqual([]);
+    } finally {
+      for (const entry of fs.readdirSync(root)) {
+        fs.chmodSync(path.join(root, entry, 'held'), 0o755);
+      }
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // Windows is where a loaded DLL blocks the delete. A file held open with no
+  // sharing blocks the directory rename the same way, so the whole cache must
+  // stay, not lose its unlocked siblings.
+  it.runIf(process.platform === 'win32')('leaves a cache with a locked file wholly in place on Windows', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'flint-ep-'));
+    const cuda = path.join(root, 'cuda-ep');
+    fs.mkdirSync(cuda);
+    const locked = path.join(cuda, 'onnxruntime_providers_cuda.dll');
+    fs.writeFileSync(locked, 'loaded');
+    fs.writeFileSync(path.join(cuda, 'cublas64_12.dll'), 'sibling');
+    const release = await holdExclusive(locked);
+    try {
+      expect(await removeProviderCache(root, 'CUDAExecutionProvider')).toBe('busy');
+      expect(fs.readdirSync(root)).toEqual(['cuda-ep']);
+      expect(fs.readdirSync(cuda).sort()).toEqual(['cublas64_12.dll', 'onnxruntime_providers_cuda.dll']);
+    } finally {
+      await release();
+    }
+    expect(await removeProviderCache(root, 'CUDAExecutionProvider')).toBe(true);
+    expect(fs.readdirSync(root)).toEqual([]);
+    fs.rmSync(root, { recursive: true, force: true });
+  }, 30_000);
 });
 
 describe('providerNamesInText', () => {

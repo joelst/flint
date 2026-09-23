@@ -1926,3 +1926,87 @@ describe('foundry-sidecar packaged resource layout', () => {
     }
   }, 60000);
 });
+
+describe('accelerator registration queue', () => {
+  // Startup, Install / Update Accelerators, and Recheck Providers all reach
+  // downloadAndRegisterEps. The fake logs each native call so the test can see
+  // whether a second one started before the first settled.
+  const FAKE_SDK = [
+    "import fs from 'node:fs';",
+    'const note = (event) => fs.appendFileSync(process.env.FLINT_TEST_EVENT_LOG, event + "\\n");',
+    'let calls = 0;',
+    'class FakeManager {',
+    '  constructor() { this.catalog = { getModel: async () => null, getModels: async () => [] }; }',
+    "  discoverEps() { return [{ name: 'CUDAExecutionProvider', isRegistered: false }]; }",
+    '  async downloadAndRegisterEps() {',
+    '    const call = ++calls;',
+    "    note('start ' + call);",
+    '    await new Promise((resolve) => setTimeout(resolve, 300));',
+    "    note('end ' + call);",
+    '    return { success: true, failedEps: [], registeredEps: [] };',
+    '  }',
+    '  static create() { return new FakeManager(); }',
+    '}',
+    'export { FakeManager as FoundryLocalManager };',
+  ].join('\n');
+
+  it('runs one native registration at a time across install and recheck', async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-accel-queue-'));
+    const eventLog = join(homeDir, 'events.log');
+    const corePath = join(homeDir, 'fake-core.dylib');
+    writeFileSync(corePath, '');
+    const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
+    writeFileSync(loaderPath, [
+      `const sdk = ${JSON.stringify(FAKE_SDK)};`,
+      'export async function resolve(specifier, context, nextResolve) {',
+      "  if (specifier === 'foundry-local-sdk') return { url: 'data:text/javascript,' + encodeURIComponent(sdk), shortCircuit: true };",
+      '  return nextResolve(specifier, context);',
+      '}',
+      'export async function load(url, context, nextLoad) {',
+      "  if (url.startsWith('data:text/javascript,')) return { format: 'module', source: decodeURIComponent(url.slice('data:text/javascript,'.length)), shortCircuit: true };",
+      '  return nextLoad(url, context);',
+      '}',
+    ].join('\n'));
+    const proc = spawn(process.execPath, [
+      '--experimental-loader', pathToFileURL(loaderPath).href, 'sidecar/foundry-sidecar.js',
+    ], {
+      cwd: process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        HOME: homeDir,
+        USERPROFILE: homeDir,
+        FLINT_FOUNDRY_CORE_PATH: corePath,
+        FLINT_TEST_EVENT_LOG: eventLog,
+      },
+    });
+    const send = (msg: object) => proc.stdin.write(`${JSON.stringify(msg)}\n`);
+    try {
+      await waitForLine(proc, (msg) => msg.ready === true);
+      const init = waitForLine(proc, (msg) => msg.id === 1);
+      send({ id: 1, cmd: 'init', appName: 'flint-test', logLevel: 'info' });
+      expect((await init).ok).toBe(true);
+
+      // Arm every reply before sending, so two replies in one stdout chunk are not lost.
+      const replies = [2, 3, 4].map((id) => waitForLine(proc, (msg) => msg.id === id && !('progress' in msg), 15000));
+      // Recheck drains admitted runtime work before it starts (and refuses commands while it
+      // runs), so it goes last; the two installs rely on the registration queue alone.
+      send({ id: 2, cmd: 'ensureAccelerators' });
+      send({ id: 3, cmd: 'ensureAccelerators' });
+      send({ id: 4, cmd: 'ensureAccelerators', rebuildBroken: true });
+      for (const reply of await Promise.all(replies)) expect(reply.error).toBeUndefined();
+
+      const events = readFileSync(eventLog, 'utf8').split('\n').filter(Boolean);
+      expect(events.length).toBeGreaterThanOrEqual(6);
+      // Every start is followed by its own end before the next start.
+      for (let i = 0; i < events.length; i += 2) {
+        const call = events[i].split(' ')[1];
+        expect(events[i]).toBe(`start ${call}`);
+        expect(events[i + 1]).toBe(`end ${call}`);
+      }
+    } finally {
+      await killAndWait(proc);
+      rmSync(homeDir, { recursive: true, force: true });
+    }
+  }, 30000);
+});

@@ -78,8 +78,9 @@ export function providerRecheckStatus(
   if (rebuilt.length) {
     return { failed: false, message: `Rebuilt ${rebuilt.join(', ')}.${locked}` };
   }
+  const ready = providers.filter((provider) => provider.isRegistered === true).length;
   return {
     failed: false,
-    message: `${providers.filter((provider) => provider.isRegistered === true).length} execution providers ready.${locked}`,
+    message: `${ready} execution provider${ready === 1 ? '' : 's'} ready.${locked}`,
   };
 }
