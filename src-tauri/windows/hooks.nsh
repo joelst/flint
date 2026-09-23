@@ -3,6 +3,7 @@
 ; copied. A locked directory stays where it is and the install stops. If the
 ; install does not finish, the moved tree is put back. The backup is removed
 ; only after the new ONNX Runtime is on disk.
+!define MUI_CUSTOMFUNCTION_ABORT RestoreFoundrySdkOnAbort
 !macro NSIS_HOOK_PREINSTALL
   !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
   Sleep 500
@@ -68,7 +69,7 @@ Function .onInstFailed
   inst_failed_done:
 FunctionEnd
 
-Function .onUserAbort
+Function RestoreFoundrySdkOnAbort
   Call RestoreFoundrySdkBackup
   Pop $0
   StrCmp $0 "restored" user_abort_restored

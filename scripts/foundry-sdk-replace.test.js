@@ -24,7 +24,9 @@ describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
     expect(hooks).toContain('foundry-local-sdk.failed');
     expect(hooks).toContain('rename foundry-local-sdk.previous to foundry-local-sdk');
     expect(hooks).toContain('Function .onInstFailed');
-    expect(hooks).toContain('Function .onUserAbort');
+    expect(hooks).toContain('!define MUI_CUSTOMFUNCTION_ABORT RestoreFoundrySdkOnAbort');
+    expect(hooks).toContain('Function RestoreFoundrySdkOnAbort');
+    expect(hooks).not.toContain('Function .onUserAbort');
     expect(hooks).toContain('Abort');
     expect(hooks).toContain('SetOverwrite on');
   });
