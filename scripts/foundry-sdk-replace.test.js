@@ -42,6 +42,8 @@ describe('Foundry SDK install replaces the previous ONNX Runtime', () => {
     expect(wxs).toContain('Id="MoveFoundrySdk"');
     expect(wxs).toContain('Return="check"');
     expect(wxs).toContain('Before="InstallFiles"');
+    expect(wxs).toContain('Action="DiscardFoundryBackup" After="InstallFinalize"');
+    expect(wxs).not.toContain('Before="InstallFinalize"');
   });
 
   it('never puts the install location on a command line', () => {
