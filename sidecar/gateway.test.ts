@@ -986,6 +986,23 @@ describe('gateway activity hook', () => {
     expect(events).toEqual([['qwen3-0.6b', 'start'], ['qwen3-0.6b', 'end']]);
   });
 
+  it('moves activity to the resolved version before loading a variant switch', async () => {
+    const events = [];
+    gateway = await startGateway({
+      resolve: async () => ({ alias: 'qwen3-0.6b', variantId: 'qwen3-0.6b-generic-cpu:2' }),
+      load: async () => { upstream.state.loaded.add('qwen3-0.6b-generic-cpu:2'); },
+      onActivity: (model, phase) => events.push([model, phase]),
+    });
+    const res = await post(gateway.publicPort, 'qwen3-0.6b-generic-cpu');
+    expect(res.status).toBe(200);
+    expect(events).toEqual([
+      ['qwen3-0.6b-generic-cpu', 'start'],
+      ['qwen3-0.6b-generic-cpu', 'end'],
+      ['qwen3-0.6b-generic-cpu:2', 'start'],
+      ['qwen3-0.6b-generic-cpu:2', 'end'],
+    ]);
+  });
+
   it('closes the bracket when the request fails', async () => {
     // Without this an in-flight counter would leak and the model could never be evicted.
     const events = [];

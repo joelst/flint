@@ -207,6 +207,7 @@ export function createGateway (options) {
     if (buffered === ABORTED) return;
 
     const requested = buffered === null ? null : extractModelName(buffered);
+    let activeModel = requested;
     try {
       if (!requested) return await route(req, res, buffered, requested);
 
@@ -216,9 +217,14 @@ export function createGateway (options) {
       // former would kill a live request.
       notifyActivity(requested, 'start');
       try {
-        return await route(req, res, buffered, requested);
+        return await route(req, res, buffered, requested, (model) => {
+          if (!model || model === activeModel) return;
+          notifyActivity(activeModel, 'end');
+          activeModel = model;
+          notifyActivity(activeModel, 'start');
+        });
       } finally {
-        notifyActivity(requested, 'end');
+        notifyActivity(activeModel, 'end');
       }
     } finally {
       const completedAt = Date.now();
@@ -241,7 +247,7 @@ export function createGateway (options) {
     }
   }
 
-  async function route (req, res, buffered, requested) {
+  async function route (req, res, buffered, requested, setActivityModel = () => {}) {
 
     // An identifier that needed rewriting once needs it on every later request, and the
     // upstream rejection that teaches us costs a round trip each time. Reuse it, and let
@@ -260,6 +266,11 @@ export function createGateway (options) {
       // Nothing to load: hand back what upstream said rather than inventing an error.
       return respondBuffered(res, attempt.status, attempt.headers, attempt.body);
     }
+    // `requested` can be a versionless variant id that aliases a resident model even when
+    // the catalog resolves it to a different version. Move the activity lease to the exact
+    // resolved id before loading so the switch does not mistake this request for work against
+    // the build it is replacing.
+    if (target.variantId) setActivityModel(target.variantId);
 
     const gen = generation;
     let loadedId = null;
