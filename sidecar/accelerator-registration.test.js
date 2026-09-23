@@ -237,6 +237,10 @@ describe('native service startup', () => {
     const listModels = source.indexOf("} else if (cmd === 'listModels') {");
     const listProgress = source.indexOf('beforeCatalogRead(reportCatalogProgress', listModels);
     const listRead = source.indexOf('manager.catalog.getModels()', listModels);
+    const gatewayFallback = source.indexOf('Gateway could not read the catalog');
+    const fallbackEnsure = source.indexOf('await beforeCatalogRead();', gatewayFallback);
+    const fallbackCached = source.indexOf('manager.catalog.getCachedModels()', gatewayFallback);
+    const fallbackCommit = source.indexOf('readCatalog(() => manager.catalog.getCachedModels())', gatewayFallback);
     expect(gateStart).toBeGreaterThan(-1);
     expect(forcedRead).toBeGreaterThan(gateStart);
     expect(start).toBeGreaterThan(-1);
@@ -253,6 +257,11 @@ describe('native service startup', () => {
     expect(listModels).toBeGreaterThan(-1);
     expect(listProgress).toBeGreaterThan(listModels);
     expect(listProgress).toBeLessThan(listRead);
+    expect(gatewayFallback).toBeGreaterThan(-1);
+    expect(fallbackEnsure).toBeGreaterThan(gatewayFallback);
+    expect(fallbackCached).toBeGreaterThan(fallbackEnsure);
+    expect(fallbackEnsure).toBeLessThan(fallbackCached);
+    expect(fallbackCommit).toBe(-1);
     for (const cmd of ['getSTTModels', 'getVisionModels', 'download']) {
       const at = source.indexOf(`} else if (cmd === '${cmd}') {`);
       const progress = source.indexOf('beforeCatalogRead(reportCatalogProgress', at);
@@ -1006,6 +1015,48 @@ describe('createCatalogRegistrationGate', () => {
     });
     expect(register).toHaveBeenCalledTimes(2);
     expect(readCatalog).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps transition readers queued until they finish', async () => {
+    const gate = createCatalogRegistrationGate(
+      vi.fn(async () => ({ success: true, registeredEps: [], failedEps: [] })),
+      vi.fn(async () => []),
+    );
+    const events = [];
+    let releaseFirst = () => {};
+    let releaseSecond = () => {};
+    const first = gate.read(async () => {
+      events.push('first-read');
+      await new Promise((resolve) => { releaseFirst = resolve; });
+      return 'first';
+    });
+    const second = gate.read(async () => {
+      events.push('second-read');
+      await new Promise((resolve) => { releaseSecond = resolve; });
+      return 'second';
+    });
+    const mutation = gate.mutateAndCommit(
+      async () => {
+        events.push('mutation');
+        return 'updated';
+      },
+      () => {},
+    );
+
+    await vi.waitFor(() => expect(events).toEqual(['first-read']));
+    releaseFirst();
+    await vi.waitFor(() => expect(events).toEqual(['first-read', 'second-read']));
+    await Promise.resolve();
+    expect(events).toEqual(['first-read', 'second-read']);
+    releaseSecond();
+
+    await expect(first).resolves.toBe('first');
+    await expect(second).resolves.toBe('second');
+    await expect(mutation).resolves.toEqual({
+      result: 'updated',
+      catalogRefreshRequiresRestart: true,
+    });
+    expect(events).toEqual(['first-read', 'second-read', 'mutation']);
   });
 
   it('defers updates after a rejected catalog read until a later read confirms the snapshot', async () => {

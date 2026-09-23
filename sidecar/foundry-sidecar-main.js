@@ -946,7 +946,8 @@ async function resolveForGateway (requested) {
     } catch (e) {
       log('warn', `Gateway could not read the catalog: ${e?.message ?? e}`);
       try {
-        const cached = await readCatalog(() => manager.catalog.getCachedModels());
+        await beforeCatalogRead();
+        const cached = await manager.catalog.getCachedModels();
         cacheModelIndexFromCachedModels(cached);
         return resolveModelId(modelIndex, requested);
       } catch (lookupError) {

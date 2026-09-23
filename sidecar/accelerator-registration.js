@@ -366,11 +366,9 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
       const report = typeof onProgress === 'function' ? onProgress : null;
       return enqueue(async () => {
         await ensureSettled(report);
-        if (commitConfirmed) return { runOutsideQueue: true };
-        return { runOutsideQueue: false, result: await commitOperation(operation) };
-      }).then((outcome) => (
-        outcome.runOutsideQueue ? operation() : outcome.result
-      ));
+        if (commitConfirmed) return operation();
+        return commitOperation(operation);
+      });
     },
     isCommitConfirmed() {
       return commitConfirmed;
