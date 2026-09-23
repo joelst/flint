@@ -136,6 +136,15 @@ type ProgressHandler = {
   watchdog?: ProgressStallWatchdog;
 };
 let progressHandlers = new Map<number, ProgressHandler>();
+type AcceleratorSetupListener = {
+  onProgress?: (epName: string, percent: number) => void;
+  onStall?: () => void;
+};
+let acceleratorSetup: {
+  promise: Promise<AcceleratorReadiness>;
+  listeners: Set<AcceleratorSetupListener>;
+  generation: number;
+} | null = null;
 const CATALOG_REGISTRATION_COMMANDS = new Set<SidecarCommandName>([
   'listModels',
   'getSTTModels',
@@ -2789,6 +2798,8 @@ export function resetSDK() {
   runtimeQuitPromise = null;
   expectedShutdownGeneration = null;
   closeObservers.clear();
+  acceleratorSetup?.listeners.clear();
+  acceleratorSetup = null;
   sdkState.set(initialState);
 }
 
@@ -2827,7 +2838,7 @@ export async function getEps(): Promise<EpInfo[]> {
   return discoverExecutionProviders();
 }
 
-export async function ensureAccelerators(
+async function performAcceleratorSetup(
   onProgress?: (epName: string, percent: number) => void,
   onStall?: () => void,
 ): Promise<AcceleratorReadiness> {
@@ -2866,6 +2877,49 @@ export async function ensureAccelerators(
     registration: res.result ?? null,
     providers,
   };
+}
+
+export function ensureAccelerators(
+  onProgress?: (epName: string, percent: number) => void,
+  onStall?: () => void,
+  options?: { forceRerun?: boolean },
+): Promise<AcceleratorReadiness> {
+  const listener = { onProgress, onStall };
+  const currentGeneration = sidecarGeneration;
+  if (
+    acceleratorSetup &&
+    acceleratorSetup.generation === currentGeneration &&
+    options?.forceRerun
+  ) {
+    return acceleratorSetup.promise
+      .catch(() => undefined)
+      .then(() => ensureAccelerators(onProgress, onStall));
+  }
+  if (acceleratorSetup && acceleratorSetup.generation === currentGeneration) {
+    acceleratorSetup.listeners.add(listener);
+    return acceleratorSetup.promise.finally(() => {
+      acceleratorSetup?.listeners.delete(listener);
+    });
+  }
+
+  const listeners = new Set<AcceleratorSetupListener>([listener]);
+  const broadcastProgress = (epName: string, percent: number) => {
+    for (const current of listeners) {
+      try { current.onProgress?.(epName, percent); } catch {}
+    }
+  };
+  const broadcastStall = () => {
+    for (const current of listeners) {
+      try { current.onStall?.(); } catch {}
+    }
+  };
+  let tracked: Promise<AcceleratorReadiness>;
+  tracked = performAcceleratorSetup(broadcastProgress, broadcastStall).finally(() => {
+    if (acceleratorSetup?.promise === tracked) acceleratorSetup = null;
+    listeners.clear();
+  });
+  acceleratorSetup = { promise: tracked, listeners, generation: currentGeneration };
+  return tracked;
 }
 
 export function isAcceleratorReadinessCurrent(

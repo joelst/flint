@@ -5360,7 +5360,7 @@ updateStateFromSdk();
   }
 
   async function ensureHardwareAccel(
-    options?: { throwOnError?: boolean; refreshCatalog?: boolean },
+    options?: { throwOnError?: boolean; refreshCatalog?: boolean; forceRerun?: boolean },
   ): Promise<AcceleratorReadiness> {
     if (!state.ready) {
       return { generation: -1, registration: null, providers: [] };
@@ -5374,6 +5374,7 @@ updateStateFromSdk();
         () => {
           statusMessage = "Accelerator setup: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.";
         },
+        { forceRerun: options?.forceRerun },
       );
       if (options?.refreshCatalog !== false) {
         await refreshExecutionProviders({
@@ -7749,7 +7750,7 @@ Output only the summary text, no preamble.`;
                     </option>
                   {/each}
                 </select>
-                <button onclick={ensureHardwareAccel} disabled={!state.ready}>
+                <button onclick={() => ensureHardwareAccel({ forceRerun: true })} disabled={!state.ready}>
                   Install / Update Accelerators
                 </button>
                 <button class="secondary" onclick={refreshExecutionProviders} disabled={!state.ready}>

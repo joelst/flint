@@ -2077,6 +2077,136 @@ describe('initialization readiness recovery', () => {
 });
 
 describe('accelerator readiness ownership', () => {
+  it('shares one registration and watchdog across concurrent accelerator setup callers', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const firstProgress = vi.fn();
+    const secondProgress = vi.fn();
+    const firstStall = vi.fn();
+    const secondStall = vi.fn();
+    const first = sdk.ensureAccelerators(firstProgress, firstStall);
+    const second = sdk.ensureAccelerators(secondProgress, secondStall);
+    const registrationId = await waitForWrite('ensureAccelerators');
+    vi.useFakeTimers();
+    expect(harness.writes.filter((line) => line.includes('"cmd":"ensureAccelerators"')))
+      .toHaveLength(1);
+
+    harness.emitStdout({
+      id: registrationId,
+      progress: 35,
+      ep: 'CUDAExecutionProvider',
+    });
+    expect(firstProgress).toHaveBeenCalledWith('CUDAExecutionProvider', 35);
+    expect(secondProgress).toHaveBeenCalledWith('CUDAExecutionProvider', 35);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(firstStall).toHaveBeenCalledTimes(1);
+    expect(secondStall).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+
+    harness.emitStdout({
+      id: registrationId,
+      result: {
+        success: true,
+        status: 'registered',
+        registeredEps: ['CUDAExecutionProvider'],
+        failedEps: [],
+      },
+    });
+    const epsId = await waitForWrite('getEps');
+    harness.emitStdout({
+      id: epsId,
+      result: [{ name: 'CUDAExecutionProvider', isRegistered: true }],
+    });
+
+    await expect(first).resolves.toMatchObject({
+      providers: [{ name: 'CUDAExecutionProvider', isRegistered: true }],
+    });
+    await expect(second).resolves.toMatchObject({
+      providers: [{ name: 'CUDAExecutionProvider', isRegistered: true }],
+    });
+  }, 15000);
+
+  it('keeps an independent provider probe under its transport deadline during setup', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const readiness = sdk.ensureAccelerators();
+    const registrationId = await waitForWrite('ensureAccelerators');
+    const providers = sdk.getEps();
+    const independentId = await waitForWrite('getEps');
+    harness.emitStdout({
+      id: independentId,
+      result: [{ name: 'CPUExecutionProvider', isRegistered: true }],
+    });
+    await expect(providers).resolves.toEqual([
+      { name: 'CPUExecutionProvider', isRegistered: true },
+    ]);
+
+    harness.emitStdout({
+      id: registrationId,
+      result: {
+        success: true,
+        status: 'registered',
+        registeredEps: ['CUDAExecutionProvider'],
+        failedEps: [],
+      },
+    });
+    const confirmationId = await waitForWrite('getEps', 1);
+    harness.emitStdout({
+      id: confirmationId,
+      result: [{ name: 'CUDAExecutionProvider', isRegistered: true }],
+    });
+    await readiness;
+  }, 15000);
+
+  it('queues an explicit accelerator rerun after an active setup cycle', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const automatic = sdk.ensureAccelerators();
+    const firstRegistrationId = await waitForWrite('ensureAccelerators');
+    const explicit = sdk.ensureAccelerators(undefined, undefined, { forceRerun: true });
+    expect(harness.writes.filter((line) => line.includes('"cmd":"ensureAccelerators"')))
+      .toHaveLength(1);
+
+    harness.emitStdout({
+      id: firstRegistrationId,
+      result: { success: true, registeredEps: ['CPUExecutionProvider'], failedEps: [] },
+    });
+    const firstProbeId = await waitForWrite('getEps');
+    harness.emitStdout({
+      id: firstProbeId,
+      result: [{ name: 'CPUExecutionProvider', isRegistered: true }],
+    });
+    await automatic;
+
+    const secondRegistrationId = await waitForWrite('ensureAccelerators', 1);
+    harness.emitStdout({
+      id: secondRegistrationId,
+      result: {
+        success: true,
+        registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+        failedEps: [],
+      },
+    });
+    const secondProbeId = await waitForWrite('getEps', 1);
+    harness.emitStdout({
+      id: secondProbeId,
+      result: [
+        { name: 'CPUExecutionProvider', isRegistered: true },
+        { name: 'CUDAExecutionProvider', isRegistered: true },
+      ],
+    });
+    await expect(explicit).resolves.toMatchObject({
+      providers: [
+        { name: 'CPUExecutionProvider', isRegistered: true },
+        { name: 'CUDAExecutionProvider', isRegistered: true },
+      ],
+    });
+  }, 15000);
+
   it('rejects a registration result when its sidecar exits before provider discovery', async () => {
     const sdk = await loadSdk();
     await completeInitialization(sdk);

@@ -231,6 +231,8 @@ describe('native service startup', () => {
     const web = source.indexOf('manager.startWebService()', start);
     const setup = source.indexOf("} else if (cmd === 'ensureAccelerators') {");
     const rerun = source.indexOf('rerunAcceleratorRegistration(', setup);
+    const getEps = source.indexOf("} else if (cmd === 'getEps') {");
+    const providerRead = source.indexOf('readExecutionProviders(', getEps);
     const poolStatus = source.indexOf("} else if (cmd === 'poolStatus') {");
     const poolRead = source.indexOf('catalogReadConfirmed()', poolStatus);
     const trackedPoolRead = source.indexOf(
@@ -255,6 +257,8 @@ describe('native service startup', () => {
     expect(web).toBeGreaterThan(gate);
     expect(setup).toBeGreaterThan(-1);
     expect(rerun).toBeGreaterThan(setup);
+    expect(getEps).toBeGreaterThan(-1);
+    expect(providerRead).toBeGreaterThan(getEps);
     expect(poolStatus).toBeGreaterThan(-1);
     expect(poolRead).toBeGreaterThan(poolStatus);
     expect(trackedPoolRead).toBeGreaterThan(poolRead);
@@ -279,22 +283,31 @@ describe('native service startup', () => {
       expect(progress, cmd).toBeGreaterThan(nativeRead);
     }
     const download = source.indexOf("} else if (cmd === 'download') {");
+    const downloadSerialized = source.indexOf(
+      "serializeModelOperation(payload.alias, ['cache']",
+      download,
+    );
     const downloadRead = source.indexOf('readUnconfirmedCatalog(', download);
     const downloadVariant = source.indexOf('manager.catalog.getModelVariant(payload.variantId)', download);
     const downloadAlias = source.indexOf('manager.catalog.getModel(payload.alias)', download);
     const downloadPreflight = source.indexOf('beforeCatalogRead(reportCatalogProgress', download);
     expect(downloadPreflight).toBeGreaterThan(download);
+    expect(downloadSerialized).toBeGreaterThan(download);
+    expect(downloadSerialized).toBeLessThan(downloadPreflight);
     expect(downloadPreflight).toBeLessThan(downloadRead);
     expect(downloadRead).toBeGreaterThan(download);
     expect(downloadRead).toBeLessThan(downloadVariant);
     expect(downloadRead).toBeLessThan(downloadAlias);
     const deleteModel = source.indexOf("} else if (cmd === 'deleteModel') {");
+    const deleteSerialized = source.indexOf('serializeModelOperation(', deleteModel);
     const deleteMutation = source.indexOf('runCatalogMutation(', deleteModel);
     const deleteVariant = source.indexOf('manager.catalog.getModelVariant(variantId)', deleteModel);
     const deleteAlias = source.indexOf('manager.catalog.getModel(payload.alias)', deleteModel);
     const deleteEnd = source.indexOf("} else if (cmd === 'inspectModelFolder')", deleteModel);
     const deleteFlow = source.slice(deleteModel, deleteEnd);
     expect(deleteMutation).toBeGreaterThan(deleteModel);
+    expect(deleteSerialized).toBeGreaterThan(deleteModel);
+    expect(deleteSerialized).toBeLessThan(deleteMutation);
     expect(deleteMutation).toBeLessThan(deleteVariant);
     expect(deleteMutation).toBeLessThan(deleteAlias);
     expect(deleteEnd).toBeGreaterThan(deleteModel);
@@ -303,6 +316,7 @@ describe('native service startup', () => {
     expect(deleteFlow).toContain('catalogEntryRemoved && catalogRefreshRequiresRestart');
     expect(deleteFlow).toContain('catalogReadBeforeMutation: true');
     const load = source.indexOf("} else if (cmd === 'load') {");
+    const ensureModelEntry = source.indexOf('function ensureModel(');
     const ensureModel = source.indexOf('async function ensureModelLocked(');
     const ensureModelEnd = source.indexOf(
       'async function applyPreferredExecutionProvider',
@@ -310,6 +324,10 @@ describe('native service startup', () => {
     );
     const ensureModelFlow = source.slice(ensureModel, ensureModelEnd);
     expect(ensureModel).toBeGreaterThan(-1);
+    expect(ensureModelEntry).toBeGreaterThan(-1);
+    expect(source.slice(ensureModelEntry, ensureModel)).toContain(
+      "serializeModelOperation(alias, ['residency']",
+    );
     expect(ensureModelEnd).toBeGreaterThan(ensureModel);
     expect(ensureModelFlow).toContain('readUnconfirmedCatalog(');
     expect(ensureModelFlow).not.toContain('readCatalog(');
@@ -445,6 +463,40 @@ describe('createCatalogRegistrationGate', () => {
       registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
       catalogRefreshRequiresRestart: true,
     });
+  });
+
+  it('does not publish provider discovery while a provider update is active', async () => {
+    let releaseRegistration = () => {};
+    const register = vi.fn()
+      .mockResolvedValueOnce({
+        success: true,
+        registeredEps: ['CPUExecutionProvider'],
+        failedEps: [],
+      })
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        releaseRegistration = () => resolve({
+          success: true,
+          registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+          failedEps: [],
+        });
+      }));
+    const gate = createCatalogRegistrationGate(register, vi.fn(async () => []));
+    await gate.commit();
+
+    const update = gate.rerun();
+    await vi.waitFor(() => expect(register).toHaveBeenCalledTimes(2));
+    const discover = vi.fn(() => ['CPUExecutionProvider', 'CUDAExecutionProvider']);
+    const snapshot = gate.readProviders(discover);
+    await Promise.resolve();
+    expect(discover).not.toHaveBeenCalled();
+
+    releaseRegistration();
+    await update;
+    await expect(snapshot).resolves.toEqual([
+      'CPUExecutionProvider',
+      'CUDAExecutionProvider',
+    ]);
+    expect(discover).toHaveBeenCalledTimes(1);
   });
 
   it('keeps confirmed catalog reads ordered behind a mutation queued after registration', async () => {

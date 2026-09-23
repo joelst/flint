@@ -100,6 +100,7 @@ export default defineConfig(() => ({
         'sidecar/chat-transport.js',
         'sidecar/audio-format.js',
         'sidecar/accelerator-registration.js',
+        'sidecar/model-operation-queue.js',
         'sidecar/model-updates.js',
         'sidecar/byom-import.js',
         'sidecar/prompt-template.js',

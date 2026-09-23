@@ -85,6 +85,7 @@ import { summarizeCacheInventory } from './cache-inventory.js';
 import { createHealthRing } from './health-ring.js';
 import { foundryRuntimePinWarning } from './foundry-runtime-pin.js';
 import { writeProtocolLine } from './protocol-stdout.js';
+import { createModelOperationQueue } from './model-operation-queue.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -95,6 +96,7 @@ const rl = readline.createInterface({ input: process.stdin, terminal: false });
 const SIDECAR_PROTOCOL_VERSION = 1;
 const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS = 5_000;
 const operationAdmission = createOperationAdmission();
+const modelOperationQueue = createModelOperationQueue();
 /** Gateway-only exclusive lease for a measured benchmark. IPC chat/load still run (the
  * Preview uses those). Pinning does not stop a gateway autoload from switching variants. */
 let benchmarkExclusive = false;
@@ -459,6 +461,15 @@ function readCatalogTelemetry(operation) {
   return gate ? gate.readTelemetry(operation) : operation();
 }
 
+function readExecutionProviders(operation) {
+  const gate = acceleratorGate();
+  return gate ? gate.readProviders(operation) : operation();
+}
+
+function serializeModelOperation(alias, scopes, operation) {
+  return modelOperationQueue.run(alias, scopes, operation);
+}
+
 /** Settings “Install / Update Accelerators” uses the same command as startup.
  * The update still runs after catalog commitment, but new variants remain invisible
  * to the current immutable snapshot and require a runtime restart. */
@@ -636,7 +647,7 @@ function poolEntriesForEviction () {
   });
 }
 
-async function unloadAlias (alias) {
+async function unloadAliasLocked (alias) {
   const entry = pool.get(alias);
   if (!entry) return false;
   try {
@@ -654,6 +665,10 @@ async function unloadAlias (alias) {
   const use = usage.get(alias);
   if (!use || use.inFlight <= 0) usage.delete(alias);
   return true;
+}
+
+function unloadAlias(alias) {
+  return serializeModelOperation(alias, ['residency'], () => unloadAliasLocked(alias));
 }
 
 /**
@@ -1888,36 +1903,20 @@ function setModelTemplate(name, promptTemplate) {
   return { name: sanitizeModelName(name), promptTemplate: content.PromptTemplate, warnings: check.warnings };
 }
 
-/**
- * Serializes ensureModel per alias. Two concurrent requests for the same alias would otherwise
- * both miss the pool, both run an eviction sweep and both call load() — loading the model
- * twice, or unloading and reloading it underneath the first request.
- * @type {Map<string, Promise<any>>}
- */
-const ensureModelLocks = new Map();
-
 function ensureModel(alias, variantId, onCatalogProgress) {
-  const inFlightLoad = ensureModelLocks.get(alias);
-  const previousResult = inFlightLoad ? inFlightLoad.catch(() => null) : Promise.resolve(null);
-  const next = previousResult.then(async (previous) => {
+  return serializeModelOperation(alias, ['residency'], async ({ waited, previousResult }) => {
       const result = await ensureModelLocked(alias, variantId, onCatalogProgress);
-      if (inFlightLoad && result.loadedNow !== true) {
+      if (waited && result.loadedNow !== true) {
         // A preceding request may have loaded or reloaded this model while this request waited.
         // Only a preceding known-warm result remains warm; the other cases are unknowable from
         // the current request's serialized probe.
         return {
           ...result,
-          loadedNow: previous?.loadedNow === false ? false : null,
+          loadedNow: previousResult?.loadedNow === false ? false : null,
         };
       }
       return result;
-    });
-  ensureModelLocks.set(alias, next);
-  const release = () => {
-    if (ensureModelLocks.get(alias) === next) ensureModelLocks.delete(alias);
-  };
-  next.then(release, release);
-  return next;
+  });
 }
 
 async function ensureModelLocked(alias, variantId, onCatalogProgress) {
@@ -1983,7 +1982,7 @@ async function ensureModelLocked(alias, variantId, onCatalogProgress) {
         );
       }
       log('info', `Variant switch for ${alias}: ${current.variantId} → ${variantId}`);
-      if (!(await unloadAlias(alias))) {
+      if (!(await unloadAliasLocked(alias))) {
         throw new Error(`Could not unload ${alias} to switch variant to ${variantId}`);
       }
     },
@@ -2645,19 +2644,21 @@ rl.on('line', async (line) => {
       );
       reply({ ok: true, result: vision });
     } else if (cmd === 'download') {
-      await beforeCatalogRead(reportCatalogProgress, { commit: true });
-      const model = await readUnconfirmedCatalog(
-        () => payload.variantId
-          ? manager.catalog.getModelVariant(payload.variantId)
-          : manager.catalog.getModel(payload.alias),
-        reportCatalogProgress,
-      );
-      audit('download.start', { alias: payload.alias, variantId: payload.variantId ?? null });
-      await model.download((p) => send({ id, progress: p, alias: payload.alias }));
-      // Force next catalog access to re-read model list metadata (info.cached, etc.).
-      try { manager.catalog.invalidateCache?.(); } catch {}
-      invalidateModelIndex();
-      audit('download.complete', { alias: payload.alias, variantId: payload.variantId ?? null });
+      await serializeModelOperation(payload.alias, ['cache'], async () => {
+        await beforeCatalogRead(reportCatalogProgress, { commit: true });
+        const model = await readUnconfirmedCatalog(
+          () => payload.variantId
+            ? manager.catalog.getModelVariant(payload.variantId)
+            : manager.catalog.getModel(payload.alias),
+          reportCatalogProgress,
+        );
+        audit('download.start', { alias: payload.alias, variantId: payload.variantId ?? null });
+        await model.download((p) => send({ id, progress: p, alias: payload.alias }));
+        // Force next catalog access to re-read model list metadata (info.cached, etc.).
+        try { manager.catalog.invalidateCache?.(); } catch {}
+        invalidateModelIndex();
+        audit('download.complete', { alias: payload.alias, variantId: payload.variantId ?? null });
+      });
       reply({ ok: true });
     } else if (cmd === 'load') {
       const entry = await ensureModel(payload.alias, payload.variantId, reportCatalogProgress);
@@ -2670,14 +2671,15 @@ rl.on('line', async (line) => {
       reply({ ok: true, result: { acceleration, lane: payload.lane || 'chat', variantId: entry.variantId } });
     } else if (cmd === 'unload') {
       const alias = payload.alias;
-      const entry = pool.get(alias);
-      if (entry) {
-        await entry.catModel.unload();
-        pool.delete(alias);
-        usage.delete(alias);
-        log('info', `Model ${alias} unloaded from pool`);
-        audit('unload', { alias });
-      }
+      await serializeModelOperation(alias, ['residency'], async () => {
+        if (inFlightFor(alias) > 0) {
+          throw new Error(`Cannot unload ${alias} while requests are in flight. Retry once they finish.`);
+        }
+        if (await unloadAliasLocked(alias)) {
+          log('info', `Model ${alias} unloaded from pool`);
+          audit('unload', { alias });
+        }
+      });
       reply({ ok: true });
     } else if (cmd === 'deleteModel') {
       if (!payload.alias) {
@@ -2703,76 +2705,87 @@ rl.on('line', async (line) => {
         return false;
       };
 
-      const deleteResult = await runCatalogMutation(
-        async () => {
-          if (variantId) {
-            // Delete a single variant from the local cache.
-            const variant = await manager.catalog.getModelVariant(variantId);
-            if (!variant) {
-              throw new Error(`Variant not found: ${variantId}`);
-            }
-            const parentModel = await manager.catalog.getModel(payload.alias);
-            const poolEntry = pool.get(payload.alias);
-            if (poolEntry?.variantId === variantId) {
-              if (typeof poolEntry.catModel.unload === 'function') {
-                await poolEntry.catModel.unload();
+      const deleteResult = await serializeModelOperation(
+        payload.alias,
+        ['cache', 'residency'],
+        () => {
+          if (inFlightFor(payload.alias) > 0) {
+            throw new Error(
+              `Cannot delete ${payload.alias} while requests are in flight. Retry once they finish.`,
+            );
+          }
+          return runCatalogMutation(
+            async () => {
+              if (variantId) {
+                // Delete a single variant from the local cache.
+                const variant = await manager.catalog.getModelVariant(variantId);
+                if (!variant) {
+                  throw new Error(`Variant not found: ${variantId}`);
+                }
+                const parentModel = await manager.catalog.getModel(payload.alias);
+                const poolEntry = pool.get(payload.alias);
+                if (poolEntry?.variantId === variantId) {
+                  if (typeof poolEntry.catModel.unload === 'function') {
+                    await poolEntry.catModel.unload();
+                  }
+                  pool.delete(payload.alias);
+                  log('info', `Unloaded pool entry for deleted variant ${variantId}`);
+                }
+                const ok = tryRemoveFromCache(variant, variantId);
+                if (!ok) {
+                  throw new Error('Runtime does not expose a variant deletion API (removeFromCache)');
+                }
+                invalidateModelIndex();
+                audit('deleteModel', { alias: payload.alias, variantId });
+                return {
+                  alias: payload.alias,
+                  variantId,
+                  catalogEntryRemoved:
+                    isLocalCatalogEntry(variant) || isLocalCatalogEntry(parentModel),
+                };
               }
-              pool.delete(payload.alias);
-              log('info', `Unloaded pool entry for deleted variant ${variantId}`);
-            }
-            const ok = tryRemoveFromCache(variant, variantId);
-            if (!ok) {
-              throw new Error('Runtime does not expose a variant deletion API (removeFromCache)');
-            }
-            invalidateModelIndex();
-            audit('deleteModel', { alias: payload.alias, variantId });
-            return {
-              alias: payload.alias,
-              variantId,
-              catalogEntryRemoved:
-                isLocalCatalogEntry(variant) || isLocalCatalogEntry(parentModel),
-            };
-          }
 
-          // Delete all cached variants for this alias.
-          const model = await manager.catalog.getModel(payload.alias);
-          if (!model) {
-            throw new Error(`Model not found: ${payload.alias}`);
-          }
-          const poolEntry = pool.get(payload.alias);
-          if (poolEntry && typeof poolEntry.catModel.unload === 'function') {
-            await poolEntry.catModel.unload();
-            pool.delete(payload.alias);
-          }
-          let deleted = 0;
-          const variants = model.variants || [];
-          for (const v of variants) {
-            let cached = false;
-            try {
-              cached = !!v.isCached;
-            } catch {
-              cached = !!v.info?.cached;
-            }
-            if (!cached) continue;
-            if (tryRemoveFromCache(v, v.id || payload.alias)) deleted++;
-          }
-          // Fallback: selected variant / model-level remove
-          if (deleted === 0 && tryRemoveFromCache(model, payload.alias)) deleted++;
-          if (deleted === 0) {
-            throw new Error('No cached variants found to delete (or runtime lacks removeFromCache)');
-          }
-          log('info', `Deleted ${deleted} cached variant(s) for ${payload.alias}`);
-          invalidateModelIndex();
-          audit('deleteModel', { alias: payload.alias, variantId: null, count: deleted });
-          return {
-            alias: payload.alias,
-            count: deleted,
-            catalogEntryRemoved: isLocalCatalogEntry(model),
-          };
+              // Delete all cached variants for this alias.
+              const model = await manager.catalog.getModel(payload.alias);
+              if (!model) {
+                throw new Error(`Model not found: ${payload.alias}`);
+              }
+              const poolEntry = pool.get(payload.alias);
+              if (poolEntry && typeof poolEntry.catModel.unload === 'function') {
+                await poolEntry.catModel.unload();
+                pool.delete(payload.alias);
+              }
+              let deleted = 0;
+              const variants = model.variants || [];
+              for (const v of variants) {
+                let cached = false;
+                try {
+                  cached = !!v.isCached;
+                } catch {
+                  cached = !!v.info?.cached;
+                }
+                if (!cached) continue;
+                if (tryRemoveFromCache(v, v.id || payload.alias)) deleted++;
+              }
+              // Fallback: selected variant / model-level remove
+              if (deleted === 0 && tryRemoveFromCache(model, payload.alias)) deleted++;
+              if (deleted === 0) {
+                throw new Error('No cached variants found to delete (or runtime lacks removeFromCache)');
+              }
+              log('info', `Deleted ${deleted} cached variant(s) for ${payload.alias}`);
+              invalidateModelIndex();
+              audit('deleteModel', { alias: payload.alias, variantId: null, count: deleted });
+              return {
+                alias: payload.alias,
+                count: deleted,
+                catalogEntryRemoved: isLocalCatalogEntry(model),
+              };
+            },
+            'model deletion',
+            reportCatalogProgress,
+            { catalogReadBeforeMutation: true },
+          );
         },
-        'model deletion',
-        reportCatalogProgress,
-        { catalogReadBeforeMutation: true },
       );
       const {
         catalogEntryRemoved,
@@ -3799,7 +3812,9 @@ rl.on('line', async (line) => {
         });
       }
     } else if (cmd === 'getEps') {
-      const eps = typeof manager.discoverEps === 'function' ? manager.discoverEps() : [];
+      const eps = await readExecutionProviders(
+        () => typeof manager.discoverEps === 'function' ? manager.discoverEps() : [],
+      );
       reply({ ok: true, result: eps });
     } else if (cmd === 'ensureAccelerators') {
       if (typeof manager.downloadAndRegisterEps === 'function') {

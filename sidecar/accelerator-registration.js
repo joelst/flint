@@ -182,6 +182,8 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
   /** @type {Promise<unknown>} */
   let postCommitWriteBarrier = Promise.resolve();
   /** @type {Promise<unknown>} */
+  let providerWriteBarrier = Promise.resolve();
+  /** @type {Promise<unknown>} */
   let activeMutationBarrier = Promise.resolve();
   /** @type {Set<Promise<unknown>>} */
   const activeReads = new Set();
@@ -394,6 +396,7 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
       const rerun = commitConfirmed
         ? enqueuePostCommitWrite(() => rerunRegistration(report))
         : enqueue(() => rerunRegistration(report));
+      providerWriteBarrier = rerun.then(() => {}, () => {});
       // A rerun dispatched before confirmation can still be running after the
       // commit completes. Publish both lanes so provider-sensitive lookups
       // cannot slip beside that transition.
@@ -463,6 +466,19 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
       // is active. A mutation queued behind registration will observe and await
       // this read before it begins.
       return trackTelemetryRead(activeMutationBarrier.then(() => operation()));
+    },
+    readProviders(operation) {
+      if (typeof operation !== 'function') {
+        return Promise.reject(new TypeError('readProviders requires an operation'));
+      }
+      // Provider discovery must reflect every update dispatched before it. Unlike
+      // catalog telemetry, discoverEps reports mutable registration state, so it
+      // cannot run beside either the pre-commit queue or post-commit writer lane.
+      // Before initial registration settles, the queue owns that first cycle.
+      // Afterwards only explicit provider updates can change discoverEps state;
+      // imports, deletion, and other catalog writes must not delay this query.
+      const priorRegistration = hasSettled ? providerWriteBarrier : tail;
+      return priorRegistration.then(() => operation());
     },
     isCommitConfirmed() {
       return commitConfirmed;
