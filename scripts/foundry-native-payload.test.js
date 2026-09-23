@@ -10,12 +10,20 @@ const require = createRequire(import.meta.url);
 const {
   describeInvalidNativeFile,
   platformKeyForTriple,
+  readUtf16FileVersion,
   requiredNativeFiles,
   validateNativePayload,
 } = require('./foundry-native-payload.cjs');
 const ensureScript = join(process.cwd(), 'scripts', 'ensure-foundry-native.cjs');
 
 const dependencies = { ortVersion: '1.28.0', genaiVersion: '0.15.2' };
+
+function fileVersionBytes(version, minBytes) {
+  const payload = Buffer.from(`FileVersion\0${version}`, 'utf16le');
+  const buffer = Buffer.alloc(Math.max(minBytes, payload.length));
+  payload.copy(buffer);
+  return buffer;
+}
 
 function makeSdk(platformKey, omitted = null) {
   const sdkRoot = mkdtempSync(join(tmpdir(), 'flint-native-payload-'));
@@ -94,6 +102,35 @@ describe('Foundry native payload manifest', () => {
     );
   });
 
+  it('reads the Windows FileVersion resource, including the ORT build suffix', () => {
+    const buffer = fileVersionBytes('1.28.0.20260724.14.da9b5e3', 64);
+    expect(readUtf16FileVersion(buffer)).toBe('1.28.0.20260724.14.da9b5e3');
+  });
+
+  it('rejects an ONNX Runtime DLL built for a different Foundry SDK', () => {
+    const sdkRoot = makeSdk('win32-x64');
+    const dll = join(sdkRoot, 'prebuilds', 'win32-x64', 'onnxruntime.dll');
+    writeFileSync(dll, fileVersionBytes('1.26.0.20260520.2', 1_000_000));
+
+    const invalid = validateNativePayload(sdkRoot, 'win32-x64').invalid;
+    expect(invalid.map((file) => file.name)).toEqual(['onnxruntime.dll']);
+    expect(describeInvalidNativeFile(invalid[0])).toBe('version 1.26.0.20260520.2, not 1.28.0');
+  });
+
+  it('accepts the 2.0.1 ONNX Runtime file version pinned as 1.28.0', () => {
+    const sdkRoot = makeSdk('win32-x64');
+    writeFileSync(
+      join(sdkRoot, 'prebuilds', 'win32-x64', 'onnxruntime.dll'),
+      fileVersionBytes('1.28.0.20260724.14.da9b5e3', 1_000_000),
+    );
+    writeFileSync(
+      join(sdkRoot, 'prebuilds', 'win32-x64', 'onnxruntime-genai.dll'),
+      fileVersionBytes('0.15.2', 1_000_000),
+    );
+
+    expect(validateNativePayload(sdkRoot, 'win32-x64').invalid).toEqual([]);
+  });
+
   it('rejects a truncated core that is present but cannot be a real runtime', () => {
     const sdkRoot = makeSdk('win32-x64');
     writeFileSync(join(sdkRoot, 'prebuilds', 'win32-x64', 'foundry_local.dll'), 'truncated');
@@ -156,5 +193,54 @@ if (require.main === module) main().then((code) => { process.exitCode = code; })
 
     expect(result.status, result.stderr || result.stdout).toBe(0);
     expect(readFileSync(join(sdkRoot, 'installed-platform.txt'), 'utf8')).toBe('linux-arm64');
+  });
+
+  it('deletes a leftover ONNX Runtime DLL before the SDK installer can skip it', () => {
+    const sdkRoot = mkdtempSync(join(tmpdir(), 'flint-ort-replace-'));
+    const platformDir = join(sdkRoot, 'prebuilds', 'win32-x64');
+    const scriptDir = join(sdkRoot, 'script');
+    mkdirSync(platformDir, { recursive: true });
+    mkdirSync(scriptDir, { recursive: true });
+    writeFileSync(
+      join(sdkRoot, 'deps_versions.json'),
+      JSON.stringify({
+        onnxruntime: { version: dependencies.ortVersion },
+        'onnxruntime-genai': { version: dependencies.genaiVersion },
+      }),
+    );
+    for (const file of requiredNativeFiles('win32-x64', dependencies)) {
+      const body = file.name === 'onnxruntime.dll'
+        ? fileVersionBytes('1.26.0.20260520.2', file.minBytes)
+        : Buffer.alloc(file.minBytes);
+      writeFileSync(join(platformDir, file.name), body);
+    }
+    writeFileSync(
+      join(scriptDir, 'install-native.cjs'),
+      `const fs = require('node:fs');
+const path = require('node:path');
+async function main() {
+  const dll = path.join(__dirname, '..', 'prebuilds', 'win32-x64', 'onnxruntime.dll');
+  fs.writeFileSync(path.join(__dirname, '..', 'dll-present-at-install.txt'), fs.existsSync(dll) ? 'present' : 'absent');
+  fs.writeFileSync(dll, Buffer.alloc(${1_000_000}));
+  return 0;
+}
+module.exports = { main };
+if (require.main === module) {
+  main().then((code) => { process.exitCode = code; });
+}
+`,
+    );
+
+    const result = spawnSync(process.execPath, [ensureScript], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        FLINT_FOUNDRY_SDK_DIR: sdkRoot,
+        FOUNDRY_PLATFORM_KEY: 'win32-x64',
+      },
+    });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    expect(readFileSync(join(sdkRoot, 'dll-present-at-install.txt'), 'utf8')).toBe('absent');
   });
 });

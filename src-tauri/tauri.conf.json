@@ -61,7 +61,12 @@
       },
       "nsis": {
         "installerIcon": "icons/icon.ico",
-        "uninstallerIcon": "icons/icon.ico"
+        "uninstallerIcon": "icons/icon.ico",
+        "installerHooks": "./windows/hooks.nsh"
+      },
+      "wix": {
+        "fragmentPaths": ["./windows/fragments/foundry-sdk-replace.wxs"],
+        "componentRefs": ["FoundrySdkReplaceMarker"]
       }
     }
   },
