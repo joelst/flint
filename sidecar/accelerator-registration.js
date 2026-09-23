@@ -231,6 +231,19 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
     return run;
   }
 
+  function runTrackedReadAfter(waitFor, operation) {
+    let read;
+    read = waitFor.then(() => {
+      activeReads.add(read);
+      return operation();
+    });
+    void read.then(
+      () => activeReads.delete(read),
+      () => activeReads.delete(read),
+    );
+    return read;
+  }
+
   function preserveRegisteredProviders(previous, current) {
     if (!current || typeof current !== 'object') {
       return previous && typeof previous === 'object' ? previous : current;
@@ -355,20 +368,16 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
       }
       // Confirmed reads run concurrently, but remain ordered against local mutations.
       if (commitConfirmed) {
-        const read = tail.then(() => operation());
-        activeReads.add(read);
-        void read.then(
-          () => activeReads.delete(read),
-          () => activeReads.delete(read),
-        );
-        return read;
+        return runTrackedReadAfter(tail, operation);
       }
       const report = typeof onProgress === 'function' ? onProgress : null;
       return enqueue(async () => {
         await ensureSettled(report);
-        if (commitConfirmed) return operation();
-        return commitOperation(operation);
-      });
+        if (commitConfirmed) return { runOutsideQueue: true };
+        return { runOutsideQueue: false, result: await commitOperation(operation) };
+      }).then((outcome) => (
+        outcome.runOutsideQueue ? runTrackedReadAfter(Promise.resolve(), operation) : outcome.result
+      ));
     },
     isCommitConfirmed() {
       return commitConfirmed;
@@ -378,9 +387,9 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
         return Promise.reject(new TypeError('mutateAndCommit requires an onCommitError handler'));
       }
       const report = typeof onProgress === 'function' ? onProgress : null;
-      const readsBeforeMutation = [...activeReads];
       return enqueue(async () => {
         await ensureSettled(report);
+        const readsBeforeMutation = [...activeReads];
         await Promise.allSettled(readsBeforeMutation);
         let catalogRefreshRequiresRestart = committed;
         const result = await operation();

@@ -260,7 +260,6 @@ describe('native service startup', () => {
     expect(gatewayFallback).toBeGreaterThan(-1);
     expect(fallbackEnsure).toBeGreaterThan(gatewayFallback);
     expect(fallbackCached).toBeGreaterThan(fallbackEnsure);
-    expect(fallbackEnsure).toBeLessThan(fallbackCached);
     expect(fallbackCommit).toBe(-1);
     for (const cmd of ['getSTTModels', 'getVisionModels', 'download']) {
       const at = source.indexOf(`} else if (cmd === '${cmd}') {`);
