@@ -255,7 +255,9 @@ export async function rebuildBrokenExecutionProviders (deps) {
       result: {
         success: true,
         failedEps: [],
-        registeredEps: [],
+        registeredEps: (deps.discover() ?? [])
+          .filter((ep) => ep?.isRegistered && ep.name)
+          .map((ep) => ep.name),
         status: 'No broken providers',
       },
     };
@@ -278,7 +280,11 @@ export async function rebuildBrokenExecutionProviders (deps) {
     rememberAttempt(retry);
   }
 
-  const stillBroken = brokenProviderNames(deps.discover() ?? [], deps.epRoot);
+  const final = deps.discover() ?? [];
+  const stillBroken = brokenProviderNames(final, deps.epRoot);
+  const registeredEps = final
+    .filter((ep) => ep?.isRegistered && ep.name)
+    .map((ep) => ep.name);
   return {
     removed,
     attempted,
@@ -286,7 +292,7 @@ export async function rebuildBrokenExecutionProviders (deps) {
     result: {
       success: stillBroken.length === 0,
       failedEps: stillBroken,
-      registeredEps: [],
+      registeredEps,
       status: stillBroken.length
         ? (sdkResult?.status || 'Provider still not registered')
         : (sdkResult?.status || 'No broken providers'),
