@@ -654,13 +654,17 @@
       const registration = readiness.registration;
       const failed = registration?.failedEps ?? [];
       const removed = registration?.removedProviderCaches ?? [];
+      const busy = registration?.busyProviderCaches ?? [];
+      const locked = busy.length
+        ? ` Left in place because a file is in use: ${busy.join(", ")}.`
+        : "";
       if (failed.length) {
-        statusMessage = `Provider rebuild failed for ${failed.join(", ")}`;
+        statusMessage = `Provider rebuild failed for ${failed.join(", ")}.${locked}`;
         appendAppLog(statusMessage, "warn");
       } else if (removed.length) {
-        statusMessage = `Rebuilt ${removed.join(", ")}`;
+        statusMessage = `Rebuilt ${removed.join(", ")}.${locked}`;
       } else {
-        statusMessage = `${state.eps.length} execution providers ready`;
+        statusMessage = `${state.eps.length} execution providers ready.${locked}`;
       }
     } catch (e: any) {
       statusMessage = `Provider recheck failed: ${e?.message || e}`;

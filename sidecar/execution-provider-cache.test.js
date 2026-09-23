@@ -175,6 +175,54 @@ describe('rebuildBrokenExecutionProviders', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
+  it('does not delete a provider that the status text only lists as available', async () => {
+    const removed = [];
+    const calls = [];
+    let cudaRegistered = false;
+    const outcome = await rebuildBrokenExecutionProviders({
+      discover: () => [
+        { name: 'WebGpuExecutionProvider', isRegistered: true },
+        { name: 'CUDAExecutionProvider', isRegistered: cudaRegistered },
+      ],
+      removeCache: (name) => {
+        removed.push(name);
+        return true;
+      },
+      downloadAndRegister: async (names) => {
+        calls.push(names);
+        if (names?.includes('CUDAExecutionProvider') && calls.length > 1) cudaRegistered = true;
+        return {
+          success: cudaRegistered,
+          failedEps: cudaRegistered ? [] : ['CUDAExecutionProvider'],
+          status: cudaRegistered
+            ? 'EP registration complete'
+            : '1 failed (CUDAExecutionProvider). Available EPs: CPUExecutionProvider, WebGpuExecutionProvider',
+        };
+      },
+    });
+    expect(removed).toEqual(['CUDAExecutionProvider', 'CUDAExecutionProvider']);
+    expect(calls.every((names) => !names?.includes('WebGpuExecutionProvider'))).toBe(true);
+    expect(outcome.removed).not.toContain('WebGpuExecutionProvider');
+  });
+
+  it('keeps going when a provider DLL is locked', async () => {
+    const calls = [];
+    const outcome = await rebuildBrokenExecutionProviders({
+      discover: () => [{ name: 'CUDAExecutionProvider', isRegistered: calls.length > 0 }],
+      removeCache: () => {
+        const error = new Error('EPERM: operation not permitted, unlink webgpu.dll');
+        error.code = 'EPERM';
+        throw error;
+      },
+      downloadAndRegister: async (names) => {
+        calls.push(names);
+        return { success: true, failedEps: [] };
+      },
+    });
+    expect(calls[0]).toEqual(['CUDAExecutionProvider']);
+    expect(outcome.busy).toEqual(['CUDAExecutionProvider']);
+  });
+
   it('leaves a registered provider in place when registration succeeds', async () => {
     const removed = [];
     const outcome = await rebuildBrokenExecutionProviders({
