@@ -86,7 +86,7 @@ The sidebar is grouped by workflow:
 
 ### Diagnostics self-test
 
-**Diagnostics → Test local endpoint** checks the local gateway's envelope, chat round-trip, streaming `[DONE]` termination, `usage`, disconnect handling, and tool-call behavior, plus an embeddings check. The embeddings check is blocked when no embedding-capable model is cached — a blocked check is not evidence embeddings work end to end (see BYOM above).
+**Diagnostics → Test local endpoint** checks the local gateway's envelope, then runs a chat round-trip, streaming `[DONE]` termination, `usage`, disconnect handling, and tool-call behavior for every listed chat id and parent alias. Each listed embedding id gets an embeddings check, and each listed speech id gets a transcription check. The embeddings check is blocked when no embedding-capable model is cached — a blocked check is not evidence embeddings work end to end (see BYOM above).
 
 ### Tray and quitting
 

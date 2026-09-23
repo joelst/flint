@@ -24,6 +24,7 @@ import { selectChatTransport } from './chat-transport.js';
 import { assertWavBuffer } from './audio-format.js';
 import { createGateway } from './gateway.js';
 import { formatPublicEndpoint } from './gateway-http.js';
+import { activityCandidateKeys } from './activity-booking.js';
 import { buildModelIndex, resolveModelId } from './model-registry.js';
 import { waitUntilIdle } from './monotonic-wait.js';
 import {
@@ -476,28 +477,34 @@ function aliasForModelName (name) {
 
 /** Marks a model busy for the life of a request so eviction cannot unload it mid-flight. */
 function noteActivity (modelName, phase) {
-  // Candidate keys, best first: resident pool alias, catalog alias, the raw requested name.
-  // During gateway autoload the model is not resident yet (and the lazy modelIndex may not be
-  // built), so the start phase can only book against a fallback key. Resolution is therefore
-  // state-dependent — by the end of the request the pool may resolve the same string to a
-  // different key — so the end phase must decrement whichever candidate actually holds the
-  // in-flight count, not whatever the current pool state resolves to.
-  const candidates = [];
-  const resident = aliasForModelName(modelName);
-  if (resident) candidates.push(resident);
-  if (modelIndex) {
-    const fromIndex = resolveModelId(modelIndex, modelName)?.alias;
-    if (fromIndex && !candidates.includes(fromIndex)) candidates.push(fromIndex);
-  }
+  // Candidate keys, best first. During gateway autoload the model is not resident yet
+  // (and the lazy modelIndex may not be built), so the start phase can only book against
+  // a fallback key. A request for a different variant of a resident alias is booked on
+  // the raw name: charging the alias would make that switch refuse itself. Resolution
+  // is state-dependent — by the end of the request the pool may resolve the same string
+  // to a different key — so the end phase must decrement whichever candidate actually
+  // holds the in-flight count, not whatever the current pool state resolves to.
   const raw = typeof modelName === 'string' ? modelName.trim() : '';
-  if (raw && !candidates.includes(raw)) candidates.push(raw);
+  const matchedResident = aliasForModelName(modelName);
+  const resolved = modelIndex ? resolveModelId(modelIndex, modelName) : null;
+  const occupantAlias = matchedResident
+    || (resolved?.alias && pool.has(resolved.alias) ? resolved.alias : null);
+  const occupant = occupantAlias ? pool.get(occupantAlias) : null;
+  const candidates = activityCandidateKeys({
+    requested: raw,
+    matchedResidentAlias: matchedResident,
+    occupantAlias,
+    occupantVariantId: occupant?.variantId || null,
+    resolvedAlias: resolved?.alias || null,
+    resolvedVariantId: resolved?.variantId || null,
+  });
   if (candidates.length === 0) return;
 
   let alias = candidates[0];
   if (phase !== 'start') {
     alias = candidates.find(k => (usage.get(k)?.inFlight ?? 0) > 0) ?? alias;
     // Keep the resident model's idle clock accurate even when the count sat on a fallback key.
-    if (resident && resident !== alias) touchModel(resident);
+    if (matchedResident && matchedResident !== alias) touchModel(matchedResident);
   }
   const entry = usageFor(alias);
   entry.lastUsedAt = Date.now();

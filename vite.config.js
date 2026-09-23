@@ -111,6 +111,7 @@ export default defineConfig(() => ({
         'src/lib/model-sort.ts',
         'sidecar/gateway-http.js',
         'sidecar/model-registry.js',
+        'sidecar/activity-booking.js',
         'sidecar/gateway.js',
         'src/lib/memory-watchdog.ts',
         'sidecar/pool-eviction.js',

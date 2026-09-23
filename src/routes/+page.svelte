@@ -166,6 +166,7 @@
   } from "$lib/chat-request";
   import {
     flintVerifiedFromReport,
+    groupSelfTestChecks,
     matchesVerifiedModel,
     runEndpointSelfTest,
     type FlintVerified,
@@ -308,18 +309,24 @@
     }
     endpointSelfTestBusy = true;
     try {
-      const catalogModel = state.models.find((m: ModelInfo) => m.alias === selectedModelAlias);
       const embeddingCatalog = state.models.find((m: ModelInfo) => {
         const blob = [m.alias, (m as any).task, (m as any).info?.task].filter(Boolean).join(' ');
         return /embed/i.test(blob);
       });
-      const chatAlias = selectedModelAlias && !/embed/i.test(selectedModelAlias) ? selectedModelAlias : null;
       endpointSelfTestReport = await runEndpointSelfTest({
         fetch,
         endpoint: state.endpoint || null,
-        modelId: chatAlias,
         embeddingModelId: embeddingCatalog?.alias || null,
-        catalogSupportsToolCalling: catalogModel?.supportsToolCalling ?? null,
+        supportsToolCalling: (modelId: string) => {
+          const exact = state.models.find((m: ModelInfo) => m.alias === modelId);
+          const matched = exact ?? [...state.models]
+            .filter((m: ModelInfo) => matchesVerifiedModel(modelId, m.alias))
+            .sort((a: ModelInfo, b: ModelInfo) => b.alias.length - a.alias.length)[0];
+          return matched?.supportsToolCalling ?? null;
+        },
+        onProgress: (event) => {
+          statusMessage = `Testing ${event.modelId} (${event.index + 1} of ${event.total})…`;
+        },
       });
       lastFlintVerified = flintVerifiedFromReport(endpointSelfTestReport);
     } catch (error) {
@@ -327,7 +334,10 @@
         ranAt: new Date().toISOString(),
         endpoint: state.endpoint || null,
         modelId: selectedModelAlias || null,
+        modelIds: [],
         embeddingModelId: null,
+        embeddingModelIds: [],
+        speechModelIds: [],
         checks: [{
           id: "run",
           title: "Self-test runner",
@@ -8355,21 +8365,24 @@ Output only the summary text, no preamble.`;
                         <div>
                           <strong>Flint-verified:</strong>
                           {#if lastFlintVerified}
-                            {@const chatMatch = matchesVerifiedModel(lastFlintVerified.modelId, detailModel.alias)
-                              && lastFlintVerified.modelId !== lastFlintVerified.embeddingModelId}
-                            {@const embedMatch = !!(lastFlintVerified.embeddingModelId
-                              && matchesVerifiedModel(lastFlintVerified.embeddingModelId, detailModel.alias))}
-                            {#if chatMatch || embedMatch}
-                              {#if chatMatch}
-                                chat {lastFlintVerified.chat ? "yes" : "no"} ·
-                                stream {lastFlintVerified.stream ? "yes" : "no"} ·
-                                tools {lastFlintVerified.tools}
-                              {/if}
-                              {#if chatMatch && embedMatch} · {/if}
-                              {#if embedMatch}
-                                embeddings {lastFlintVerified.embeddings ? "yes" : "no"}
-                              {/if}
-                              <span class="muted small"> · {new Date(lastFlintVerified.ranAt).toLocaleString()}</span>
+                            {@const verifiedRows = (lastFlintVerified.aliases ?? []).filter((row) =>
+                              matchesVerifiedModel(row.modelId, detailModel.alias))}
+                            {#if verifiedRows.length}
+                              {#each verifiedRows as row}
+                                <div>
+                                  {row.modelId}:
+                                  {#if row.kind === "embed"}
+                                    embeddings {row.embeddings ? "yes" : "no"}
+                                  {:else if row.kind === "speech"}
+                                    speech {row.speech ? "yes" : "no"}
+                                  {:else}
+                                    chat {row.chat ? "yes" : "no"} ·
+                                    stream {row.stream ? "yes" : "no"} ·
+                                    tools {row.tools}
+                                  {/if}
+                                </div>
+                              {/each}
+                              <span class="muted small">{new Date(lastFlintVerified.ranAt).toLocaleString()}</span>
                             {:else}
                               Not verified in this session — Diagnostics → Test local endpoint
                             {/if}
@@ -9111,21 +9124,23 @@ Output only the summary text, no preamble.`;
                   {#if endpointSelfTestReport.endpoint}
                     · {endpointSelfTestReport.endpoint}
                   {/if}
-                  {#if endpointSelfTestReport.modelId}
-                    · {endpointSelfTestReport.modelId}
-                  {/if}
-                  {#if endpointSelfTestReport.embeddingModelId}
-                    · embed {endpointSelfTestReport.embeddingModelId}
+                  {#if (endpointSelfTestReport.modelIds?.length ?? 0) + (endpointSelfTestReport.embeddingModelIds?.length ?? 0) + (endpointSelfTestReport.speechModelIds?.length ?? 0) > 0}
+                    · {(endpointSelfTestReport.modelIds?.length ?? 0) + (endpointSelfTestReport.embeddingModelIds?.length ?? 0) + (endpointSelfTestReport.speechModelIds?.length ?? 0)} aliases
                   {/if}
                 </p>
-                <ul class="diagnostic-list">
-                  {#each endpointSelfTestReport.checks as item}
-                    <li>
-                      {item.status === "pass" ? "✓" : item.status === "blocked" ? "•" : "✗"}
-                      {item.title}: {item.detail}
-                    </li>
-                  {/each}
-                </ul>
+                {#each groupSelfTestChecks(endpointSelfTestReport.checks) as group}
+                  {#if group.modelId}
+                    <p class="setting-note">{group.modelId}</p>
+                  {/if}
+                  <ul class="diagnostic-list">
+                    {#each group.checks as item}
+                      <li>
+                        {item.status === "pass" ? "✓" : item.status === "blocked" ? "•" : "✗"}
+                        {item.title}: {item.detail}
+                      </li>
+                    {/each}
+                  </ul>
+                {/each}
               </div>
             {/if}
             {#if state.endpoint}

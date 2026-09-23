@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  endpointAliases,
   flintVerifiedFromReport,
+  groupSelfTestChecks,
   matchesVerifiedModel,
   runEndpointSelfTest,
 } from './endpoint-self-test';
@@ -444,6 +446,9 @@ describe('runEndpointSelfTest', () => {
         if (String(input).endsWith('/embeddings')) {
           return jsonResponse(200, { data: [{ embedding: [0.1], index: 0 }] });
         }
+        if (String(input).endsWith('/audio/transcriptions')) {
+          return jsonResponse(200, { text: 'ping' });
+        }
         throw new Error(`chat should not run: ${input}`);
       },
       endpoint: 'http://127.0.0.1:5272/v1',
@@ -451,6 +456,65 @@ describe('runEndpointSelfTest', () => {
     expect(report.modelId).toBeNull();
     expect(report.checks.find((c) => c.id === 'chat')?.status).toBe('blocked');
     expect(report.checks.find((c) => c.id === 'embeddings')?.status).toBe('pass');
+    expect(report.checks.find((c) => c.id === 'speech')?.status).toBe('pass');
+  });
+
+  it('exercises every listed variant and each parent alias', async () => {
+    const seen: string[] = [];
+    const fetchMock: typeof fetch = async (input, init) => {
+      if (init?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      const url = String(input);
+      if (url.endsWith('/models')) {
+        return jsonResponse(200, { data: [
+          { id: 'qwen3.5-9b-cuda-gpu', parent: 'qwen3.5-9b' },
+          { id: 'qwen3.5-9b-generic-gpu', parent: 'qwen3.5-9b' },
+          { id: 'bge-embed-cpu', parent: 'bge-embed' },
+        ] });
+      }
+      if (url.endsWith('/embeddings')) {
+        const body = JSON.parse(String(init?.body || '{}'));
+        seen.push(`embed:${body.model}`);
+        return jsonResponse(200, { data: [{ embedding: [0.2], index: 0 }] });
+      }
+      const body = JSON.parse(String(init?.body || '{}'));
+      if (body.model && !body.tools && !body.stream) seen.push(`chat:${body.model}`);
+      if (body.stream) {
+        return new Response('data: {"choices":[{"delta":{"content":"ping"}}]}\n\ndata: [DONE]\n\n', { status: 200 });
+      }
+      return jsonResponse(200, {
+        choices: [{ message: { role: 'assistant', content: 'ping' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      });
+    };
+    const report = await runEndpointSelfTest({
+      fetch: fetchMock,
+      endpoint: 'http://127.0.0.1:5272/v1',
+      catalogSupportsToolCalling: false,
+    });
+    expect(seen).toEqual([
+      'embed:bge-embed-cpu',
+      'embed:bge-embed',
+      'chat:qwen3.5-9b-cuda-gpu',
+      'chat:qwen3.5-9b-generic-gpu',
+      'chat:qwen3.5-9b',
+    ]);
+    expect(report.modelIds).toEqual([
+      'qwen3.5-9b-cuda-gpu',
+      'qwen3.5-9b-generic-gpu',
+      'qwen3.5-9b',
+    ]);
+    expect(report.checks.filter((item) => item.id === 'chat').map((item) => item.modelId)).toEqual(report.modelIds);
+    expect(groupSelfTestChecks(report.checks).map((group) => group.modelId)).toContain('qwen3.5-9b-generic-gpu');
+    const verified = flintVerifiedFromReport(report);
+    expect(verified?.aliases.map((row) => row.modelId)).toEqual([
+      'bge-embed-cpu',
+      'bge-embed',
+      'qwen3.5-9b-cuda-gpu',
+      'qwen3.5-9b-generic-gpu',
+      'qwen3.5-9b',
+    ]);
+    expect(verified?.aliases.find((row) => row.modelId === 'bge-embed')?.kind).toBe('embed');
+    expect(verified?.aliases.find((row) => row.modelId === 'qwen3.5-9b-generic-gpu')?.chat).toBe(true);
   });
 
   it('does not treat HTTP-error usage or tool_calls as verified', async () => {
@@ -478,6 +542,7 @@ describe('runEndpointSelfTest', () => {
       endpoint: 'http://127.0.0.1:5272/v1',
       catalogSupportsToolCalling: true,
     });
+    expect(report.checks.find((c) => c.id === 'chat')?.detail).toBe('HTTP 500; nope');
     expect(report.checks.find((c) => c.id === 'usage')?.status).toBe('blocked');
     expect(report.checks.find((c) => c.id === 'tools')?.status).toBe('blocked');
     expect(report.checks.find((c) => c.id === 'tools')?.detail).toMatch(/HTTP 500/);
@@ -575,6 +640,20 @@ describe('runEndpointSelfTest', () => {
     });
     expect(report.checks.find((c) => c.id === 'disconnect')?.status).toBe('fail');
     expect(report.checks.find((c) => c.id === 'disconnect')?.detail).toMatch(/disconnect setup failed/);
+  });
+});
+
+describe('endpointAliases', () => {
+  it('keeps every variant id and adds each parent alias once', () => {
+    expect(endpointAliases([
+      { id: 'qwen3.5-9b-cuda-gpu', parent: 'qwen3.5-9b' },
+      { id: 'qwen3.5-9b-generic-gpu', parent: 'qwen3.5-9b' },
+      { id: 'whisper-tiny', parent: 'whisper' },
+    ], null)).toEqual({
+      chat: ['qwen3.5-9b-cuda-gpu', 'qwen3.5-9b-generic-gpu', 'qwen3.5-9b'],
+      embed: [],
+      speech: ['whisper-tiny', 'whisper'],
+    });
   });
 });
 
