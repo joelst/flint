@@ -12,48 +12,36 @@
   <Fragment>
     <!-- 0.9.1's Foundry 2.0.1 binaries have a higher file version than 1.2.4.
          Windows Installer will not replace them. Move the installed tree
-         aside before InstallFiles. Each deferred WixQuietExec reads the
-         property whose Id matches that action. If the move fails, the install
-         stops and the original tree is still in place. If a later step fails,
-         the rollback action puts the tree back. The backup is removed only
-         after the install commits. -->
-    <SetProperty Id="QtExecMoveFoundrySdk"
-                 Action="SetQtExecMoveFoundrySdk"
-                 Before="QtExecMoveFoundrySdk"
-                 Sequence="execute"
-                 Value="&quot;[SystemFolder]cmd.exe&quot; /c if exist &quot;[INSTALLDIR]foundry-local-sdk&quot; (if exist &quot;[INSTALLDIR]foundry-local-sdk.previous&quot; rmdir /s /q &quot;[INSTALLDIR]foundry-local-sdk.previous&quot; &amp; ren &quot;[INSTALLDIR]foundry-local-sdk&quot; &quot;foundry-local-sdk.previous&quot; &amp; if exist &quot;[INSTALLDIR]foundry-local-sdk&quot; exit /b 1)">NOT REMOVE</SetProperty>
-    <CustomAction Id="QtExecMoveFoundrySdk"
-                  BinaryKey="WixCA"
-                  DllEntry="WixQuietExec"
+         aside before InstallFiles. If the move fails, the install stops and
+         the original tree is still in place. If a later step fails, the
+         rollback action puts the tree back. The backup is removed only after
+         the install commits.
+
+         Each action runs with INSTALLDIR as its working directory and names the
+         two folders relative to it. The install location is never substituted
+         into the command line. -->
+    <CustomAction Id="MoveFoundrySdk"
+                  Directory="INSTALLDIR"
+                  ExeCommand="&quot;[SystemFolder]cmd.exe&quot; /c if exist &quot;foundry-local-sdk&quot; (if exist &quot;foundry-local-sdk.previous&quot; rmdir /s /q &quot;foundry-local-sdk.previous&quot; &amp; ren &quot;foundry-local-sdk&quot; &quot;foundry-local-sdk.previous&quot; &amp; if exist &quot;foundry-local-sdk&quot; exit /b 1)"
                   Execute="deferred"
                   Return="check"
                   Impersonate="no" />
-    <SetProperty Id="QtExecRestoreFoundrySdk"
-                 Action="SetQtExecRestoreFoundrySdk"
-                 Before="QtExecRestoreFoundrySdk"
-                 Sequence="execute"
-                 Value="&quot;[SystemFolder]cmd.exe&quot; /c if exist &quot;[INSTALLDIR]foundry-local-sdk.previous&quot; (if exist &quot;[INSTALLDIR]foundry-local-sdk&quot; rmdir /s /q &quot;[INSTALLDIR]foundry-local-sdk&quot; &amp; ren &quot;[INSTALLDIR]foundry-local-sdk.previous&quot; &quot;foundry-local-sdk&quot;)">NOT REMOVE</SetProperty>
-    <CustomAction Id="QtExecRestoreFoundrySdk"
-                  BinaryKey="WixCA"
-                  DllEntry="WixQuietExec"
+    <CustomAction Id="RestoreFoundrySdk"
+                  Directory="INSTALLDIR"
+                  ExeCommand="&quot;[SystemFolder]cmd.exe&quot; /c if exist &quot;foundry-local-sdk.previous&quot; (if exist &quot;foundry-local-sdk&quot; rmdir /s /q &quot;foundry-local-sdk&quot; &amp; ren &quot;foundry-local-sdk.previous&quot; &quot;foundry-local-sdk&quot;)"
                   Execute="rollback"
                   Return="ignore"
                   Impersonate="no" />
-    <SetProperty Id="QtExecDiscardFoundryBackup"
-                 Action="SetQtExecDiscardFoundryBackup"
-                 Before="QtExecDiscardFoundryBackup"
-                 Sequence="execute"
-                 Value="&quot;[SystemFolder]cmd.exe&quot; /c if exist &quot;[INSTALLDIR]foundry-local-sdk.previous&quot; rmdir /s /q &quot;[INSTALLDIR]foundry-local-sdk.previous&quot;">NOT REMOVE</SetProperty>
-    <CustomAction Id="QtExecDiscardFoundryBackup"
-                  BinaryKey="WixCA"
-                  DllEntry="WixQuietExec"
+    <CustomAction Id="DiscardFoundryBackup"
+                  Directory="INSTALLDIR"
+                  ExeCommand="&quot;[SystemFolder]cmd.exe&quot; /c if exist &quot;foundry-local-sdk.previous&quot; rmdir /s /q &quot;foundry-local-sdk.previous&quot;"
                   Execute="commit"
                   Return="ignore"
                   Impersonate="no" />
     <InstallExecuteSequence>
-      <Custom Action="QtExecRestoreFoundrySdk" Before="QtExecMoveFoundrySdk">NOT REMOVE</Custom>
-      <Custom Action="QtExecMoveFoundrySdk" Before="InstallFiles">NOT REMOVE</Custom>
-      <Custom Action="QtExecDiscardFoundryBackup" Before="InstallFinalize">NOT REMOVE</Custom>
+      <Custom Action="RestoreFoundrySdk" Before="MoveFoundrySdk">NOT REMOVE</Custom>
+      <Custom Action="MoveFoundrySdk" Before="InstallFiles">NOT REMOVE</Custom>
+      <Custom Action="DiscardFoundryBackup" Before="InstallFinalize">NOT REMOVE</Custom>
     </InstallExecuteSequence>
 
     <DirectoryRef Id="INSTALLDIR">

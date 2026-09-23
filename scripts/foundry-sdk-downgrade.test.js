@@ -18,6 +18,8 @@ describe('Foundry 1.2.4 install over a newer SDK', () => {
     expect(hooks).toContain('!macro NSIS_HOOK_PREINSTALL');
     expect(hooks).toContain('CheckIfAppIsRunning');
     expect(hooks).toContain('Rename "$INSTDIR\\foundry-local-sdk" "$INSTDIR\\foundry-local-sdk.previous"');
+    expect(hooks).toContain('prebuilds\\win32-arm64\\onnxruntime.dll');
+    expect(hooks).toContain('foundry-local-core\\win32-arm64\\onnxruntime.dll');
     expect(hooks).toContain('!macro NSIS_HOOK_POSTINSTALL');
     expect(hooks).toContain('Function .onInstFailed');
     expect(hooks).toContain('Abort');
@@ -32,7 +34,10 @@ describe('Foundry 1.2.4 install over a newer SDK', () => {
     expect(wxs).toContain('foundry-local-sdk.previous');
     expect(wxs).toContain('exit /b 1');
     expect(wxs).toContain('Execute="rollback"');
+    expect(wxs).toContain('Id="MoveFoundrySdk"');
     expect(wxs).toContain('Return="check"');
+    expect(wxs).toContain('Directory="INSTALLDIR"');
+    expect(wxs).not.toContain('[INSTALLDIR]');
     expect(wxs).toContain('Before="InstallFiles"');
   });
 });
