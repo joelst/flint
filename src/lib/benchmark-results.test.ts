@@ -36,7 +36,7 @@ describe('responseTimeMs', () => {
   it('prefers the monotonic duration and falls back to wall-clock stamps for older rows', () => {
     expect(responseTimeMs({ sdkCallStartedAt: 200, sdkCallDurationMs: 75, settledAt: 150 })).toBe(75);
     expect(responseTimeMs({ sdkCallStartedAt: 50, settledAt: 150 })).toBe(100);
-    expect(responseTimeMs({ sdkCallStartedAt: 200, settledAt: 150 })).toBe(0);
+    expect(responseTimeMs({ sdkCallStartedAt: 200, settledAt: 150 })).toBeNull();
   });
 
   it('does not invent a duration when the start stamp was never written', () => {
@@ -90,6 +90,15 @@ describe('buildRunResultView', () => {
       attempt({ id: 'm2', logicalAttemptId: 't0:c1:r0', phase: 'measured', caseIndex: 1, sdkCallStartedAt: 40, settledAt: 80 }),
     ]);
     expect(view[0].succeededMeasured).toBe(2);
+    expect(view[0].medianResponseMs).toBeNull();
+  });
+
+  it('omits the median when a legacy wall-clock duration moved backward', () => {
+    const view = buildRunResultView(run, [
+      attempt({ id: 'm1', logicalAttemptId: 't0:c0:r0', phase: 'measured', caseIndex: 0, sdkCallStartedAt: 50, settledAt: 30 }),
+      attempt({ id: 'm2', logicalAttemptId: 't0:c1:r0', phase: 'measured', caseIndex: 1, sdkCallStartedAt: 40, settledAt: 80 }),
+    ]);
+    expect(view[0].measured[0].responseTimeMs).toBeNull();
     expect(view[0].medianResponseMs).toBeNull();
   });
 

@@ -4,9 +4,9 @@
  * Not used by the live progress poll. That path reads attempt summaries so it never
  * clones response text. Response time here requires a finite sdkCallStartedAt proving
  * the call began, then prefers the monotonic transport duration and falls back to
- * settledAt - sdkCallStartedAt for older rows — not time to first token. Warmups are
- * listed and excluded from the median. A succeeded row with no timing data suppresses
- * the median rather than averaging a partial set.
+ * a non-negative settledAt - sdkCallStartedAt for older rows — not time to first token.
+ * Warmups are listed and excluded from the median. A succeeded row with no usable
+ * timing suppresses the median rather than averaging a partial set.
  */
 
 import { buildAttemptSchedule, type AttemptStatus, type BenchmarkAttempt, type BenchmarkRun } from './benchmark-run';
@@ -22,8 +22,7 @@ export function responseTimeMs(
   const ended = attempt.settledAt;
   if (typeof ended !== 'number' || !Number.isFinite(ended)) return null;
   const delta = ended - started;
-  if (!Number.isFinite(delta)) return null;
-  return delta < 0 ? 0 : delta;
+  return Number.isFinite(delta) && delta >= 0 ? delta : null;
 }
 
 export function medianMs(values: readonly number[]): number | null {
@@ -62,7 +61,7 @@ export interface TargetResultView {
   measured: AttemptResultRow[];
   warmups: AttemptResultRow[];
   succeededMeasured: number;
-  /** Null when nothing succeeded, or any success lacks a start stamp. */
+  /** Null when nothing succeeded, or any success lacks usable timing. */
   medianResponseMs: number | null;
 }
 

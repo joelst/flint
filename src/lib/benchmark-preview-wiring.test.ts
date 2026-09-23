@@ -68,6 +68,15 @@ describe('benchmark editor wiring', () => {
     );
   });
 
+  it('describes unavailable medians without assuming timing was never started', () => {
+    expect(source).toContain(
+      'median response time unavailable because a succeeded attempt has no usable timing',
+    );
+    expect(source).not.toContain(
+      'median response time unavailable because a succeeded attempt has no start time',
+    );
+  });
+
   it('explains when duplicating a legacy suite removes repeated aliases', () => {
     expect(source).toContain('const removedTargets = suite.targets.length - draft.targets.length;');
     expect(source).toContain('Benchmark targets are keyed by alias.');

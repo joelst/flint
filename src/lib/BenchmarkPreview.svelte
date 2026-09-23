@@ -1173,7 +1173,7 @@
                           {#if target.medianResponseMs !== null}
                             · median response time {formatResponseMs(target.medianResponseMs)}
                           {:else if target.succeededMeasured > 0}
-                            · median response time unavailable because a succeeded attempt has no start time
+                            · median response time unavailable because a succeeded attempt has no usable timing
                           {/if}
                         </p>
                         {#if target.measured.length > 0}
