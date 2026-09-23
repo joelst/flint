@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<?if $(sys.BUILDARCH)="x86"?>
+    <?define Win64 = "no" ?>
+<?elseif $(sys.BUILDARCH)="x64"?>
+    <?define Win64 = "yes" ?>
+<?elseif $(sys.BUILDARCH)="arm64"?>
+    <?define Win64 = "yes" ?>
+<?else?>
+    <?error Unsupported value of sys.BUILDARCH=$(sys.BUILDARCH)?>
+<?endif?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi" xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+  <Fragment>
+    <!-- 0.9.1's Foundry 2.0.1 binaries have a higher file version than 1.2.4.
+         Windows Installer will not replace them. Remove the SDK tree first. -->
+    <SetProperty Id="QtExecRemoveFoundrySdk"
+                 Before="QtExecRemoveFoundrySdk"
+                 Sequence="execute"
+                 Value="&quot;[SystemFolder]cmd.exe&quot; /c if exist &quot;[INSTALLDIR]foundry-local-sdk&quot; rmdir /s /q &quot;[INSTALLDIR]foundry-local-sdk&quot;" />
+    <CustomAction Id="QtExecRemoveFoundrySdk"
+                  BinaryKey="WixCA"
+                  DllEntry="WixQuietExec"
+                  Execute="deferred"
+                  Return="ignore"
+                  Impersonate="no" />
+    <InstallExecuteSequence>
+      <Custom Action="QtExecRemoveFoundrySdk" Before="InstallFiles">NOT REMOVE</Custom>
+    </InstallExecuteSequence>
+
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="FoundrySdkDowngradeMarker" Guid="b7e2c4a1-6d58-4f0e-9c3a-1a8e5d2f70b4" Win64="$(var.Win64)">
+        <RegistryValue Root="HKCU"
+                       Key="Software\flint\Flint"
+                       Name="FoundrySdkDowngrade"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+</Wix>
