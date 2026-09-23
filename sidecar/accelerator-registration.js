@@ -252,6 +252,7 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
       }
       return enqueue(async () => {
         if (!settled) settled = await attempts(null);
+        let catalogRefreshRequiresRestart = committed;
         const result = await operation();
         try {
           await confirmCatalogCommit();
@@ -259,8 +260,12 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
           // The local mutation is already durable. Report snapshot uncertainty
           // separately so callers do not mistake a read failure for a failed mutation.
           onCommitError(error);
+          catalogRefreshRequiresRestart = true;
         }
-        return result;
+        return {
+          result,
+          ...(catalogRefreshRequiresRestart ? { catalogRefreshRequiresRestart: true } : {}),
+        };
       });
     },
     seal(onProgress) {

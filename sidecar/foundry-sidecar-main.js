@@ -448,7 +448,7 @@ async function runCatalogMutation(mutate, operation) {
   if (!gate) {
     throw new Error(`Cannot perform ${operation}: initialize the Foundry runtime first`);
   }
-  const result = await gate.mutateAndCommit(mutate, (error) => {
+  const { result, catalogRefreshRequiresRestart } = await gate.mutateAndCommit(mutate, (error) => {
     log('warn', `Catalog snapshot read failed after ${operation}: ${error?.message ?? error}`);
   });
   try {
@@ -456,7 +456,9 @@ async function runCatalogMutation(mutate, operation) {
   } catch (error) {
     log('warn', `Catalog cache invalidation failed after ${operation}: ${error?.message ?? error}`);
   }
-  return result;
+  return catalogRefreshRequiresRestart && result && typeof result === 'object'
+    ? { ...result, catalogRefreshRequiresRestart: true }
+    : result;
 }
 
 let FoundryLocalManager = null;

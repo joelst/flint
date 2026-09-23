@@ -145,6 +145,24 @@ describe('prepareHydratedRuntime', () => {
     );
   });
 
+  it('persists restart guidance for local catalog mutations after snapshot commitment', () => {
+    const source = readFileSync(
+      join(process.cwd(), 'src', 'routes', '+page.svelte'),
+      'utf8',
+    );
+    const importStart = source.indexOf('async function runByomImport(');
+    const importEnd = source.indexOf('function byomTemplateDirty()', importStart);
+    const templateStart = source.indexOf('async function saveTemplateEdit()');
+    const templateEnd = source.indexOf('// Persistence for chat history', templateStart);
+    const importFlow = source.slice(importStart, importEnd);
+    const templateFlow = source.slice(templateStart, templateEnd);
+
+    expect(importFlow).toContain('result.catalogRefreshRequiresRestart');
+    expect(importFlow).toMatch(/Restart Flint[\s\S]*?appendAppLog\(statusMessage, "warn"\)/);
+    expect(templateFlow).toContain('result.catalogRefreshRequiresRestart');
+    expect(templateFlow).toMatch(/Restart Flint[\s\S]*?appendAppLog\(statusMessage, "warn"\)/);
+  });
+
   describe('startup preference resolution', () => {
     it('distinguishes disabled, pending, loading, failed, and completed catalog checks', () => {
       expect(resolveCatalogCheckPresentation({

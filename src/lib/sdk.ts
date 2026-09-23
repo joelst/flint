@@ -2570,26 +2570,31 @@ export async function inspectModelFolder(folderPath: string): Promise<InspectFol
   return res.result as InspectFolderResult;
 }
 
+export interface CatalogMutationResult {
+  catalogRefreshRequiresRestart?: boolean;
+  [key: string]: unknown;
+}
+
 export async function importModelFolder(options: {
   folderPath: string;
   name: string;
   publisher?: string;
   version?: number;
   promptTemplate?: PromptTemplate;
-}): Promise<any> {
+}): Promise<CatalogMutationResult> {
   const res = await send('importModelFolder', options);
   await refreshModels();
-  return res.result;
+  return res.result as CatalogMutationResult;
 }
 
 export async function linkModelFolder(options: {
   folderPath: string;
   name: string;
   publisher?: string;
-}): Promise<any> {
+}): Promise<CatalogMutationResult> {
   const res = await send('linkModelFolder', options);
   await refreshModels();
-  return res.result;
+  return res.result as CatalogMutationResult;
 }
 
 export interface ModelTemplateResult {
@@ -2606,10 +2611,13 @@ export async function getModelTemplate(name: string): Promise<ModelTemplateResul
   return res.result as ModelTemplateResult;
 }
 
-export async function setModelTemplate(name: string, promptTemplate: PromptTemplate): Promise<any> {
+export async function setModelTemplate(
+  name: string,
+  promptTemplate: PromptTemplate,
+): Promise<CatalogMutationResult> {
   const res = await send('setModelTemplate', { name, promptTemplate });
   await refreshModels();
-  return res.result;
+  return res.result as CatalogMutationResult;
 }
 
 export function appendAppLog(message: string, level: LogEntry['level'] = 'info') {

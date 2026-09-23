@@ -336,7 +336,7 @@ describe('createCatalogRegistrationGate', () => {
     expect(readCatalog).not.toHaveBeenCalled();
 
     releaseMutation();
-    await expect(mutation).resolves.toBe('imported');
+    await expect(mutation).resolves.toEqual({ result: 'imported' });
     await reader;
     expect(order).toEqual(['mutate', 'read']);
     expect(readCatalog).toHaveBeenCalledTimes(1);
@@ -350,7 +350,10 @@ describe('createCatalogRegistrationGate', () => {
       vi.fn().mockRejectedValue(catalogError),
     );
 
-    await expect(gate.mutateAndCommit(() => 'imported', onCommitError)).resolves.toBe('imported');
+    await expect(gate.mutateAndCommit(() => 'imported', onCommitError)).resolves.toEqual({
+      result: 'imported',
+      catalogRefreshRequiresRestart: true,
+    });
     expect(onCommitError).toHaveBeenCalledWith(catalogError);
 
     const mutation = vi.fn(() => 'linked');
@@ -358,6 +361,31 @@ describe('createCatalogRegistrationGate', () => {
       'mutateAndCommit requires an onCommitError handler',
     );
     expect(mutation).not.toHaveBeenCalled();
+  });
+
+  it('restart-bounds a local mutation after the catalog was already committed', async () => {
+    const gate = createCatalogRegistrationGate(
+      vi.fn().mockResolvedValue({ success: true, registeredEps: ['CPUExecutionProvider'] }),
+      vi.fn().mockResolvedValue(['cpu-model']),
+    );
+
+    await gate.commit();
+    await expect(gate.mutateAndCommit(async () => 'imported', vi.fn())).resolves.toEqual({
+      result: 'imported',
+      catalogRefreshRequiresRestart: true,
+    });
+  });
+
+  it('does not read or commit the catalog when the local mutation fails', async () => {
+    const readCatalog = vi.fn();
+    const gate = createCatalogRegistrationGate(
+      vi.fn().mockResolvedValue({ success: true, registeredEps: ['CPUExecutionProvider'] }),
+      readCatalog,
+    );
+    await expect(gate.mutateAndCommit(async () => {
+      throw new Error('copy failed');
+    }, vi.fn())).rejects.toThrow('copy failed');
+    expect(readCatalog).not.toHaveBeenCalled();
   });
 
   it('retries a thrown registration and a partial failure before the catalog is read', async () => {

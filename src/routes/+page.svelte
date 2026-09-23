@@ -2908,17 +2908,24 @@
     byomBusy = mode;
     byomError = "";
     try {
+      let result;
       if (mode === "link") {
-        await linkModelFolder({ folderPath: byomFolder, name: byomName.trim() });
+        result = await linkModelFolder({ folderPath: byomFolder, name: byomName.trim() });
       } else {
-        await importModelFolder({
+        result = await importModelFolder({
           folderPath: byomFolder,
           name: byomName.trim(),
           // Only send a template when it differs from what the sidecar would pick anyway.
           promptTemplate: byomTemplateDirty() ? (byomTemplate as any) : undefined,
         });
       }
-      appendAppLog(`Added model "${byomName.trim()}" (${mode === "link" ? "linked" : "copied"})`, "info");
+      const addedMessage = `Added model "${byomName.trim()}" (${mode === "link" ? "linked" : "copied"})`;
+      if (result.catalogRefreshRequiresRestart) {
+        statusMessage = `${addedMessage}. Restart Flint to let the model catalog detect the change.`;
+        appendAppLog(statusMessage, "warn");
+      } else {
+        appendAppLog(addedMessage, "info");
+      }
       byomOpen = false;
       resetByom();
     } catch (e: any) {
@@ -2966,8 +2973,14 @@
     templateEditSaving = true;
     templateEditError = "";
     try {
-      await setModelTemplate(templateEditAlias, templateEdit as any);
-      appendAppLog(`Updated prompt template for "${templateEditAlias}"`, "info");
+      const result = await setModelTemplate(templateEditAlias, templateEdit as any);
+      const updatedMessage = `Updated prompt template for "${templateEditAlias}"`;
+      if (result.catalogRefreshRequiresRestart) {
+        statusMessage = `${updatedMessage}. Restart Flint to let the model catalog detect the change.`;
+        appendAppLog(statusMessage, "warn");
+      } else {
+        appendAppLog(updatedMessage, "info");
+      }
       templateEditAlias = null;
       templateEdit = null;
     } catch (e: any) {
