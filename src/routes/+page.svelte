@@ -178,6 +178,8 @@
   } from "$lib/endpoint-self-test";
   import { buildEndpointModelClassifier } from "$lib/endpoint-model-classification";
   import { endpointLoadTarget } from "$lib/endpoint-load-target";
+  import { decodeWavPcm } from "$lib/audio-pcm-decode";
+  import { sniffAudioFormat } from "../../sidecar/audio-format.js";
   import {
     createSelfTestResidencyController,
     preferredResidentChatAlias,
@@ -6987,12 +6989,42 @@ Output only the summary text, no preamble.`;
   // The ONNX Runtime GenAI decoder used by many Foundry Local Whisper models
   // is strict and commonly fails with "Cannot detect audio stream format"
   // on WebM/Opus, MP3, etc.
+  //
+  // A canonical WAV file needs no real codec — it is raw PCM in a RIFF container — so we parse
+  // it ourselves first. Some WebView2/Chromium builds reject WAV bytes that other players (and
+  // even a differently-versioned browser on the same machine) decode without complaint; our own
+  // parser sidesteps that instead of surfacing the browser's opaque "Unable to decode audio
+  // data" for a file that is not actually malformed. `decodeAudioData` remains the path for
+  // every other container (WebM/Opus, MP3, ...), which we cannot parse ourselves.
   async function getMono16kBuffer(blob: Blob): Promise<AudioBuffer> {
     const AudioContextClass = (window.AudioContext || (window as any).webkitAudioContext);
     const audioCtx = new AudioContextClass();
     try {
       const arrayBuffer = await blob.arrayBuffer();
-      const decoded = await audioCtx.decodeAudioData(arrayBuffer);
+      const format = sniffAudioFormat(new Uint8Array(arrayBuffer));
+      let decoded: AudioBuffer;
+
+      if (format === 'wav') {
+        try {
+          const pcm = decodeWavPcm(arrayBuffer);
+          decoded = audioCtx.createBuffer(pcm.channelData.length, pcm.channelData[0].length, pcm.sampleRate);
+          pcm.channelData.forEach((channel, i) => decoded.copyToChannel(channel, i));
+        } catch (parseError) {
+          // A WAV-sniffed file our own parser could not read (unsupported sample format, or
+          // genuinely corrupt) — fall back to the browser decoder rather than failing outright.
+          decoded = await audioCtx.decodeAudioData(arrayBuffer);
+        }
+      } else {
+        try {
+          decoded = await audioCtx.decodeAudioData(arrayBuffer);
+        } catch (decodeError) {
+          const label = format === 'unknown' || format === 'empty' ? 'this audio file' : `${format.toUpperCase()} audio`;
+          throw new Error(
+            `Unable to decode ${label}: the browser's audio decoder rejected it. ` +
+              'Convert it to 16-bit PCM WAV (e.g. `ffmpeg -acodec pcm_s16le`) and try again.',
+          );
+        }
+      }
 
       const targetRate = 16000;
       const targetLength = Math.max(1, Math.ceil(decoded.duration * targetRate));
@@ -7193,6 +7225,16 @@ Output only the summary text, no preamble.`;
     const ctx = new AudioContextClass();
     try {
       const buf = await blob.arrayBuffer();
+      // Prefer our own WAV parser: it does not depend on the browser decoder, which some
+      // WebView2/Chromium builds reject WAV bytes for that other players decode fine.
+      if (sniffAudioFormat(new Uint8Array(buf)) === 'wav') {
+        try {
+          const pcm = decodeWavPcm(buf);
+          return pcm.channelData[0].length / pcm.sampleRate;
+        } catch {
+          // Fall through to the browser decoder below.
+        }
+      }
       const decoded = await ctx.decodeAudioData(buf);
       return decoded.duration;
     } catch (error) {

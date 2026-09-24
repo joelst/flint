@@ -8,6 +8,12 @@
 /** Bytes needed before a verdict is possible. */
 const MIN_SNIFF_BYTES = 12;
 
+/**
+ * @param {Buffer|Uint8Array} buffer
+ * @param {number} offset
+ * @param {string} text
+ * @returns {boolean}
+ */
 function hasAscii(buffer, offset, text) {
   if (buffer.length < offset + text.length) return false;
   for (let i = 0; i < text.length; i += 1) {

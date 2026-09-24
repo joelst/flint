@@ -97,6 +97,7 @@ export default defineConfig(() => ({
         'src/lib/startup-sequence.ts',
         'src/lib/endpoint-model-classification.ts',
         'src/lib/endpoint-load-target.ts',
+        'src/lib/audio-pcm-decode.ts',
         'src/lib/endpoint-self-test-residency.ts',
         'src/lib/endpoint-self-test.ts',
         'src/lib/sidecar-stderr.ts',
