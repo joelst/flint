@@ -143,11 +143,8 @@ function compareVersions (a, b) {
  */
 export function resolveModelId (index, requested) {
   if (typeof requested !== 'string' || !requested.trim()) return null;
-  const name = requested.trim();
-  const exact = index.get(indexKey(name));
-  if (exact) return exact;
-  const bare = stripVersion(name);
-  if (bare === name) return null;
-  const versionless = index.get(indexKey(bare));
-  return versionless?.variantId ? versionless : null;
+  // Exact only. An alias and a versionless id are keys in their own right, so they resolve
+  // here; an explicit `:<version>` that is not cached resolves to nothing rather than to
+  // another version, so a client that asked for version 999 is not quietly served version 1.
+  return index.get(indexKey(requested)) ?? null;
 }

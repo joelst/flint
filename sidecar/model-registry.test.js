@@ -59,7 +59,10 @@ describe('buildCachedModelIndex', () => {
 
     expect(resolveModelId(index, 'uncached-model')).toBeNull();
     expect(resolveModelId(index, 'cached-model:999')).toBeNull();
-    expect(resolveModelId(index, 'cached-model-cpu:999')).toEqual({
+    // An explicit version that is not cached is not served by another version; only the
+    // versionless id falls back to the highest cached one.
+    expect(resolveModelId(index, 'cached-model-cpu:999')).toBeNull();
+    expect(resolveModelId(index, 'cached-model-cpu')).toEqual({
       alias: 'cached-model',
       variantId: 'cached-model-cpu:1',
     });

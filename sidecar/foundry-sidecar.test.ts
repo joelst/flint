@@ -1973,14 +1973,14 @@ describe('foundry-sidecar gateway variant autoload', () => {
     }
   }, 20000);
 
-  it('keeps a request served through a version fallback counted against the serving build', async () => {
-    // `foo-cpu:999` is not cached, so the registry serves the same build's cached version and
-    // the gateway forwards `foo-cpu:1`. That build is in use until the response completes.
+  it('keeps a request served through a versionless fallback counted against the serving build', async () => {
+    // A versionless `foo-cpu` resolves to the highest cached version, so the gateway forwards
+    // `foo-cpu:1`. That build is in use until the response completes.
     const gateway = await startVariantGateway();
     const held = gateway.holdNextChat();
     let released = false;
     try {
-      const pending = postChat(gateway.gatewayPort, 'foo-cpu:999');
+      const pending = postChat(gateway.gatewayPort, 'foo-cpu');
       pending.catch(() => {}); // cleanup may reset it if an assertion below fails first
       await held.arrival;
 
@@ -1996,6 +1996,18 @@ describe('foundry-sidecar gateway variant autoload', () => {
       expect(gateway.nativeCalls).toEqual(['loaded:foo-cpu:1']);
     } finally {
       if (!released) held.release();
+      await gateway.cleanup();
+    }
+  }, 20000);
+
+  it('does not serve an uncached explicit version from another cached version', async () => {
+    const gateway = await startVariantGateway();
+    try {
+      const reply = await postChat(gateway.gatewayPort, 'foo-cpu:999');
+      expect(reply.status, reply.body).toBe(400);
+      expect(reply.body).toContain("foo-cpu:999");
+      expect(gateway.nativeCalls).toEqual(['loaded:foo-cpu:1']);
+    } finally {
       await gateway.cleanup();
     }
   }, 20000);
