@@ -1,11 +1,33 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { isPoolEntryResident } from './pool-residency';
+import { isPoolEntryResident, retainKnownResidency } from './pool-residency';
 import { computeResidentCapFloor } from './benchmark-priority-lease';
 import { toWatchSample } from './memory-watchdog';
 
 describe('pool residency consumers', () => {
+  it('retains known residency only for an unchanged identity and an unknown new sample', () => {
+    const previous = [
+      { alias: 'evicted', variantId: 'old:1', isLoaded: false },
+      { alias: 'loaded', variantId: 'loaded:1', isLoaded: true },
+    ];
+    expect(retainKnownResidency([
+      { alias: 'evicted', variantId: 'old:1', isLoaded: null },
+      { alias: 'loaded', variantId: 'loaded:1', isLoaded: undefined },
+      { alias: 'evicted', variantId: 'new:1', isLoaded: null },
+      { alias: 'different', variantId: 'old:1', isLoaded: null },
+    ], previous).map((entry) => entry.isLoaded)).toEqual([false, true, null, null]);
+    expect(retainKnownResidency([
+      { alias: 'evicted', variantId: 'old:1', isLoaded: true },
+      { alias: 'loaded', variantId: 'loaded:1', isLoaded: false },
+    ], previous).map((entry) => entry.isLoaded)).toEqual([true, false]);
+    expect(retainKnownResidency([], previous)).toEqual([]);
+    expect(retainKnownResidency(
+      [{ alias: 'unknown', variantId: 'unknown:1', isLoaded: null }],
+      [{ alias: 'unknown', variantId: 'unknown:1' }],
+    )[0].isLoaded).toBeNull();
+  });
+
   it.each([true, null, undefined])('preserves last-known residency for %s', (isLoaded) => {
     expect(isPoolEntryResident({ isLoaded })).toBe(true);
   });

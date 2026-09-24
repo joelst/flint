@@ -1340,6 +1340,63 @@ describe('one answer per request', () => {
     expect(snapshot.audioLaneModel).toBe('resident');
   });
 
+  it.each(['poll', 'refresh'])('does not resurrect confirmed eviction after unknown telemetry from %s', async (source) => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    const state = sdkSnapshot(sdk);
+    sdk.sdkState.set({
+      ...state,
+      models: [{ alias: 'evicted', isCached: true, isLoaded: false }],
+      pool: [{ alias: 'evicted', variantId: 'evicted:1', isLoaded: false }],
+    });
+    const pending = source === 'poll' ? sdk.pollPoolStatus() : sdk.refreshModels();
+    if (source === 'refresh') {
+      const listId = await waitForWrite('listModels', 1);
+      harness.emitStdout({ id: listId, result: [{ alias: 'evicted', cached: true }] });
+      const statusId = await waitForWrite('getStatus', 2);
+      harness.emitStdout({ id: statusId, result: { pool: [{ alias: 'evicted', variantId: 'evicted:1' }] } });
+    }
+    const poolId = await waitForWrite('poolStatus', 1);
+    harness.emitStdout({ id: poolId, result: {
+      models: [{ alias: 'evicted', variantId: 'evicted:1', isLoaded: null }],
+    } });
+    await pending;
+    expect(sdkSnapshot(sdk)).toMatchObject({
+      pool: [{ alias: 'evicted', variantId: 'evicted:1', isLoaded: false }],
+      models: [{ alias: 'evicted', isLoaded: false }],
+      loadedModels: [],
+      chatLaneModel: undefined,
+    });
+  });
+
+  it('uses a confirmed load to replace remembered eviction even when later telemetry is unknown', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    sdk.sdkState.set({
+      ...sdkSnapshot(sdk),
+      models: [{ alias: 'evicted', isCached: true, isLoaded: false }],
+      pool: [{ alias: 'evicted', variantId: 'evicted:1', isLoaded: false }],
+    });
+    const load = sdk.loadModel({ alias: 'evicted' }, 'chat', 'evicted:1');
+    const loadId = await waitForWrite('load');
+    harness.emitStdout({ id: loadId, result: { variantId: 'evicted:1' } });
+    const listId = await waitForWrite('listModels', 1);
+    expect(sdkSnapshot(sdk).pool[0].isLoaded).toBe(true);
+    harness.emitStdout({ id: listId, result: [{ alias: 'evicted', cached: true }] });
+    const statusId = await waitForWrite('getStatus', 2);
+    harness.emitStdout({ id: statusId, result: { pool: [{ alias: 'evicted', variantId: 'evicted:1' }] } });
+    const poolId = await waitForWrite('poolStatus', 1);
+    harness.emitStdout({ id: poolId, result: {
+      models: [{ alias: 'evicted', variantId: 'evicted:1', isLoaded: null }],
+    } });
+    await load;
+    expect(sdkSnapshot(sdk)).toMatchObject({
+      pool: [{ alias: 'evicted', variantId: 'evicted:1', isLoaded: true }],
+      models: [{ alias: 'evicted', isLoaded: true }],
+      chatLaneModel: 'evicted',
+    });
+  });
+
   it('keeps the sidecar reply when a close arrives afterwards', async () => {
     const sdk = await loadSdk();
     const p = sdk.getEps();

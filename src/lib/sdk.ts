@@ -1,5 +1,5 @@
 import { writable, type Writable } from 'svelte/store';
-import { isPoolEntryResident } from './pool-residency';
+import { isPoolEntryResident, retainKnownResidency } from './pool-residency';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { Command } from '@tauri-apps/plugin-shell';
@@ -1659,7 +1659,7 @@ export async function refreshModels(
         const pool = ps.result.models ?? [];
         sdkState.update((state) => ({
           ...state,
-          ...projectPool(pool, state.models),
+          ...projectPool(retainKnownResidency(pool, state.pool), state.models),
           poolStats: mapPoolStats(ps.result),
         }));
       }
@@ -1759,8 +1759,23 @@ export async function loadModel(
       generation = dispatchedGeneration;
     },
   );
-  if (!sidecarProcess || !sidecarReady) {
+  if (
+    generation === null ||
+    generation !== sidecarGeneration ||
+    !sidecarProcess ||
+    !sidecarReady
+  ) {
     throw new Error('Sidecar was lost after loading the model');
+  }
+  const loadedVariantId = res.result?.variantId;
+  if (typeof loadedVariantId === 'string' && loadedVariantId) {
+    sdkState.update((state) => {
+      const loaded: PoolEntry = { alias: model.alias, variantId: loadedVariantId, isLoaded: true };
+      const pool = state.pool.some((entry) => entry.alias === model.alias)
+        ? state.pool.map((entry) => entry.alias === model.alias ? loaded : entry)
+        : [...state.pool, loaded];
+      return { ...state, ...projectPool(pool, state.models) };
+    });
   }
   onAcknowledged?.();
   await refreshModels();
@@ -2008,7 +2023,7 @@ export async function pollPoolStatus(): Promise<void> {
     const pool = ps.result.models ?? [];
     sdkState.update((state) => ({
       ...state,
-      ...projectPool(pool, state.models),
+      ...projectPool(retainKnownResidency(pool, state.pool), state.models),
       poolStats: mapPoolStats(ps.result),
     }));
   }
