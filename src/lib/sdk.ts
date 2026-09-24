@@ -1797,6 +1797,11 @@ export async function unloadModel(model: any, lane?: LaneName) {
   await refreshModels();
 }
 
+export async function unloadModelIfIdle(model: any) {
+  await send('unload', { alias: model.alias, ifIdle: true });
+  await refreshModels();
+}
+
 /**
  * Pushes the eviction rules to the sidecar, which owns the sweep. The UI is the source of
  * truth for the settings; the sidecar holds them only while it runs.

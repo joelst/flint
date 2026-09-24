@@ -167,7 +167,7 @@ describe('gateway pass-through', () => {
     });
     gateway = await startGateway({ maxBufferedResponse: 64 });
 
-    const res = await new Promise((resolve, reject) => {
+    const res: any = await new Promise((resolve, reject) => {
       const req = http.request({
         host: '127.0.0.1',
         port: gateway.publicPort,
@@ -1235,6 +1235,223 @@ describe('gateway activity hook', () => {
     expect(events).toEqual([]);
   });
 
+  it('rejects a request whose lease the owner refuses', async () => {
+    const events = [];
+    upstream.state.loaded.add('phi-4-mini');
+    gateway = await startGateway({
+      onActivity: (model, phase) => { events.push([model, phase]); return phase === 'start' ? false : undefined; },
+    });
+
+    const res = await post(gateway.publicPort, 'phi-4-mini');
+
+    expect(res.status).toBe(409);
+    // No end for a start that was refused, and nothing reached the service.
+    expect(events).toEqual([['phi-4-mini', 'start']]);
+    expect(upstream.state.hits.filter(h => h.url === '/v1/chat/completions')).toEqual([]);
+  });
+
+  it('rejects a refused multipart speech lease without forwarding the upload', async () => {
+    const events = [];
+    const boundary = 'flint-refused-boundary';
+    gateway = await startGateway({
+      onActivity: (model, phase) => { events.push([model, phase]); return phase === 'start' ? false : undefined; },
+    });
+
+    const res = await request(gateway.publicPort, '/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+      body: `--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-tiny:1\r\n`
+        + `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="ping.wav"\r\n`
+        + `Content-Type: audio/wav\r\n\r\nRIFF\r\n--${boundary}--\r\n`,
+    });
+
+    expect(res.status).toBe(409);
+    expect(events).toEqual([['whisper-tiny:1', 'start']]);
+    expect(upstream.state.hits.filter(h => h.url === '/v1/audio/transcriptions')).toEqual([]);
+  });
+
+  it('does not load a model whose moved lease is refused, and answers 409', async () => {
+    const VARIANT = 'phi-4-mini-generic-cpu:2';
+    const events = [];
+    let loaded = false;
+    gateway = await startGateway({
+      resolve: async () => ({ alias: 'phi-4-mini', variantId: VARIANT }),
+      load: async () => { loaded = true; upstream.state.loaded.add(VARIANT); return VARIANT; },
+      onActivity: (model, phase) => {
+        events.push([model, phase]);
+        return phase === 'start' && model === VARIANT ? false : model;
+      },
+    });
+
+    const res = await post(gateway.publicPort, 'phi-4-mini-generic-cpu');
+
+    expect(res.status).toBe(409);
+    expect(loaded).toBe(false);
+    // The source stays leased when the destination refuses the handoff.
+    expect(events).toEqual([
+      ['phi-4-mini-generic-cpu', 'start'],
+      [VARIANT, 'start'],
+      ['phi-4-mini-generic-cpu', 'end'],
+    ]);
+    expect(upstream.state.hits.filter(h => h.url === '/v1/chat/completions')).toHaveLength(1);
+  });
+
+  it('does not replay onto a loaded variant whose lease is refused', async () => {
+    const CANONICAL = 'phi-4-mini-generic-cpu:3';
+    const events = [];
+    gateway = await startGateway({
+      resolve: async () => ({ alias: 'phi-4-mini', variantId: null }),
+      load: async () => { upstream.state.loaded.add(CANONICAL); return CANONICAL; },
+      onActivity: (model, phase) => {
+        events.push([model, phase]);
+        return phase === 'start' && model === CANONICAL ? false : model;
+      },
+    });
+
+    const res = await post(gateway.publicPort, 'phi-4-mini');
+
+    expect(res.status).toBe(409);
+    expect(events).toEqual([['phi-4-mini', 'start'], [CANONICAL, 'start'], ['phi-4-mini', 'end']]);
+    // Only the first, not-loaded attempt reached the service.
+    expect(upstream.state.hits.filter(h => h.url === '/v1/chat/completions')).toHaveLength(1);
+  });
+
+  it('leases a multipart speech request with a reordered quoted boundary parameter', async () => {
+    const events = [];
+    const boundary = 'flint-test-boundary';
+    const body = `--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n`
+      + 'whisper-tiny:1\r\n'
+      + `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="ping.wav"\r\n`
+      + 'Content-Type: audio/wav\r\n\r\nRIFF\r\n'
+      + `--${boundary}--\r\n`;
+    gateway = await startGateway({ onActivity: (model, phase) => events.push([model, phase]) });
+
+    const res = await request(gateway.publicPort, '/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { 'content-type': `multipart/form-data; charset=utf-8; BOUNDARY = "${boundary}"` },
+      body,
+    });
+
+    expect(res.status).toBe(200);
+    expect(events).toEqual([['whisper-tiny:1', 'start'], ['whisper-tiny:1', 'end']]);
+    expect(upstream.state.hits.at(-1).body).toBe(body);
+  });
+
+  it('does not inspect multipart bodies on unrelated upload routes', async () => {
+    const events = [];
+    const boundary = 'flint-test-boundary';
+    gateway = await startGateway({ onActivity: (...event) => events.push(event) });
+
+    const res = await request(gateway.publicPort, '/v1/files', {
+      method: 'POST',
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+      body: `--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n`
+        + `whisper-tiny:1\r\n--${boundary}--\r\n`,
+    });
+
+    expect(res.status).toBe(200);
+    expect(events).toEqual([]);
+  });
+
+  it('preserves a speech multipart body when the model field spans chunks', async () => {
+    const events = [];
+    const boundary = 'flint-split-boundary';
+    const chunks = [
+      '--flint',
+      '-split-boundary\r\nContent-Disposition: form-data; na',
+      'me="model"\r\n\r\nwhisper-tiny:1\r\n',
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="ping.wav"\r\n`
+        + `Content-Type: audio/wav\r\n\r\nRIFF\r\n--${boundary}--\r\n`,
+    ];
+    gateway = await startGateway({ onActivity: (model, phase) => events.push([model, phase]) });
+
+    const res = await new Promise((resolve, reject) => {
+      const req = http.request({
+        host: '127.0.0.1',
+        port: gateway.publicPort,
+        path: '/v1/audio/transcriptions',
+        method: 'POST',
+        headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+      }, response => {
+        response.resume();
+        response.on('end', () => resolve(response));
+      });
+      req.on('error', reject);
+      for (const chunk of chunks) req.write(chunk);
+      req.end();
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(events).toEqual([['whisper-tiny:1', 'start'], ['whisper-tiny:1', 'end']]);
+    expect(upstream.state.hits.at(-1).body).toBe(chunks.join(''));
+  });
+
+  it('forwards a complete speech multipart body with no leading model without leasing', async () => {
+    const events = [];
+    const boundary = 'flint-no-model-boundary';
+    const body = `--${boundary}\r\nContent-Disposition: form-data; name="language"\r\n\r\nen\r\n`
+      + `--${boundary}--\r\n`;
+    gateway = await startGateway({ onActivity: (...event) => events.push(event) });
+
+    const res = await request(gateway.publicPort, '/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+      body,
+    });
+
+    expect(res.status).toBe(200);
+    expect(events).toEqual([]);
+    expect(upstream.state.hits.at(-1).body).toBe(body);
+  });
+
+  it('does not book an oversized multipart model value', async () => {
+    const events = [];
+    const boundary = 'flint-long-model-boundary';
+    const body = `--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n`
+      + `${'m'.repeat(300)}\r\n--${boundary}--\r\n`;
+    gateway = await startGateway({ onActivity: (...event) => events.push(event) });
+
+    const res = await request(gateway.publicPort, '/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+      body,
+    });
+
+    expect(res.status).toBe(200);
+    expect(events).toEqual([]);
+    expect(upstream.state.hits.at(-1).body).toBe(body);
+  });
+
+  it('does not forward a speech multipart body when the client aborts during the peek', async () => {
+    const boundary = 'flint-abort-boundary';
+    gateway = await startGateway();
+
+    await new Promise((resolve) => {
+      const req = http.request({
+        host: '127.0.0.1',
+        port: gateway.publicPort,
+        path: '/v1/audio/transcriptions',
+        method: 'POST',
+        headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+      });
+      req.on('error', resolve);
+      req.on('socket', socket => {
+        socket.once('connect', () => {
+          req.write(`--${boundary}\r\nContent-Disposition: form-data; name="mod`);
+          setTimeout(() => req.destroy(), 10);
+        });
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(upstream.state.hits).toEqual([]);
+  });
+
+  it('classifies speech routes without matching neighboring paths', () => {
+    expect(classifyGatewayRoute('/v1/audio/transcriptions?format=json')).toBe('speech');
+    expect(classifyGatewayRoute('/v1/audio/transcription-preview')).toBe('other');
+  });
+
   it('stays open across an autoload and replay rather than reporting twice', async () => {
     // The whole exchange is one request; ending after the first attempt would leave the
     // model evictable during its own replay.
@@ -1247,6 +1464,74 @@ describe('gateway activity hook', () => {
     expect(res.status).toBe(200);
     expect(upstream.state.hits).toHaveLength(2);
     expect(events).toEqual([['qwen3-0.6b', 'start'], ['qwen3-0.6b', 'end']]);
+  });
+
+  it('moves activity to the resolved version before loading a variant switch', async () => {
+    const events = [];
+    gateway = await startGateway({
+      resolve: async () => ({ alias: 'qwen3-0.6b', variantId: 'qwen3-0.6b-generic-cpu:2' }),
+      load: async () => { upstream.state.loaded.add('qwen3-0.6b-generic-cpu:2'); },
+      onActivity: (model, phase) => events.push([model, phase]),
+    });
+    const res = await post(gateway.publicPort, 'qwen3-0.6b-generic-cpu');
+    expect(res.status).toBe(200);
+    expect(events).toEqual([
+      ['qwen3-0.6b-generic-cpu', 'start'],
+      ['qwen3-0.6b-generic-cpu:2', 'start'],
+      ['qwen3-0.6b-generic-cpu', 'end'],
+      ['qwen3-0.6b-generic-cpu:2', 'end'],
+    ]);
+  });
+
+  it('moves activity again when loading returns a different canonical variant', async () => {
+    const events = [];
+    gateway = await startGateway({
+      resolve: async () => ({ alias: 'qwen3-0.6b', variantId: 'qwen3-0.6b-generic-cpu:1' }),
+      load: async () => {
+        upstream.state.loaded.add('qwen3-0.6b-generic-cpu:2');
+        return 'qwen3-0.6b-generic-cpu:2';
+      },
+      onActivity: (model, phase) => events.push([model, phase]),
+    });
+
+    const res = await post(gateway.publicPort, 'qwen3-0.6b');
+
+    expect(res.status).toBe(200);
+    expect(events).toEqual([
+      ['qwen3-0.6b', 'start'],
+      ['qwen3-0.6b-generic-cpu:1', 'start'],
+      ['qwen3-0.6b', 'end'],
+      ['qwen3-0.6b-generic-cpu:2', 'start'],
+      ['qwen3-0.6b-generic-cpu:1', 'end'],
+      ['qwen3-0.6b-generic-cpu:2', 'end'],
+    ]);
+  });
+
+  it('ends each rebooked activity with the key returned by its matching start', async () => {
+    const starts = new Map();
+    const ends = [];
+    let sequence = 0;
+    gateway = await startGateway({
+      resolve: async () => ({ alias: 'qwen3-0.6b', variantId: 'qwen3-0.6b-generic-cpu:2' }),
+      load: async () => { upstream.state.loaded.add('qwen3-0.6b-generic-cpu:2'); },
+      onActivity: (model, phase, booking) => {
+        if (phase === 'start') {
+          const key = `${model}:${++sequence}`;
+          starts.set(key, model);
+          return key;
+        }
+        ends.push([model, booking]);
+      },
+    });
+
+    const res = await post(gateway.publicPort, 'qwen3-0.6b-generic-cpu');
+
+    expect(res.status).toBe(200);
+    expect(ends).toEqual([
+      ['qwen3-0.6b-generic-cpu', 'qwen3-0.6b-generic-cpu:1'],
+      ['qwen3-0.6b-generic-cpu:2', 'qwen3-0.6b-generic-cpu:2:2'],
+    ]);
+    expect(ends.every(([model, booking]) => starts.get(booking) === model)).toBe(true);
   });
 
   it('closes the bracket when the request fails', async () => {

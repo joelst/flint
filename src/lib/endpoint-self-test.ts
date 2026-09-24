@@ -4,6 +4,11 @@
  * A catalog tool-calling flag is not a Flint verification.
  */
 
+import type {
+  EndpointModelClassifier,
+  EndpointModelKind,
+} from './endpoint-model-classification';
+
 export type SelfTestStatus = 'pass' | 'fail' | 'blocked';
 
 export interface SelfTestCheck {
@@ -11,14 +16,31 @@ export interface SelfTestCheck {
   title: string;
   status: SelfTestStatus;
   detail: string;
+  /** Endpoint model name this check called. Envelope-level checks omit it. */
+  modelId?: string;
 }
 
 export interface SelfTestReport {
   ranAt: string;
   endpoint: string | null;
+  /** First chat id, kept so a one-model report still names its target. */
   modelId: string | null;
+  modelIds: string[];
   embeddingModelId: string | null;
+  embeddingModelIds: string[];
+  speechModelIds: string[];
   checks: SelfTestCheck[];
+}
+
+export interface FlintVerifiedAlias {
+  modelId: string;
+  kind: 'chat' | 'embed' | 'speech';
+  chat: boolean;
+  stream: boolean;
+  usage: boolean;
+  embeddings: boolean;
+  speech: boolean;
+  tools: 'verified' | 'not-verified';
 }
 
 export interface FlintVerified {
@@ -31,9 +53,14 @@ export interface FlintVerified {
   disconnect: boolean;
   embeddings: boolean;
   tools: 'verified' | 'not-verified';
+  /** One row per endpoint name the run actually called. */
+  aliases: FlintVerifiedAlias[];
 }
 
-const REQUEST_TIMEOUT_MS = 8_000;
+// Gateway autoload runs inside the chat request. A cold load of a cached
+// multi-gigabyte model has to finish, then produce the completion, inside this
+// deadline.
+const REQUEST_TIMEOUT_MS = 60_000;
 const DISCONNECT_START_MS = 2_000;
 const ABORT_SETTLE_TIMEOUT_MS = 1_000;
 
@@ -42,8 +69,9 @@ function check(
   title: string,
   status: SelfTestStatus,
   detail: string,
+  modelId?: string,
 ): SelfTestCheck {
-  return { id, title, status, detail };
+  return modelId ? { id, title, status, detail, modelId } : { id, title, status, detail };
 }
 
 function joinUrl(base: string, path: string): string {
@@ -54,24 +82,64 @@ function passed(report: SelfTestReport, id: string): boolean {
   return report.checks.some((item) => item.id === id && item.status === 'pass');
 }
 
+function passedFor(report: SelfTestReport, id: string, modelId: string): boolean {
+  return report.checks.some((item) => item.id === id && item.modelId === modelId && item.status === 'pass');
+}
+
+function toolsLabel(report: SelfTestReport, modelId: string | null): 'verified' | 'not-verified' {
+  const toolsCheck = report.checks.find((item) => item.id === 'tools'
+    && (modelId == null || item.modelId === modelId));
+  return toolsCheck?.status === 'pass' ? 'verified' : 'not-verified';
+}
+
 export function flintVerifiedFromReport(report: SelfTestReport): FlintVerified | null {
   // A failed /v1/models envelope is not a verified endpoint. Chat/stream can still
   // have run against a UI alias; do not mint a badge from that.
   if (!passed(report, 'models')) return null;
-  const id = report.modelId || report.embeddingModelId;
+  const aliasIds: string[] = [];
+  for (const item of report.checks) {
+    if (item.modelId && !aliasIds.includes(item.modelId)) aliasIds.push(item.modelId);
+  }
+  const id = report.modelId || report.embeddingModelId || report.speechModelIds[0] || null;
   if (!id) return null;
-  const toolsCheck = report.checks.find((item) => item.id === 'tools');
+  const aliases = aliasIds.map((modelId) => ({
+    modelId,
+    kind: (report.checks.some((item) => item.modelId === modelId && item.id === 'embeddings')
+      ? 'embed'
+      : report.checks.some((item) => item.modelId === modelId && item.id === 'speech')
+        ? 'speech'
+        : 'chat') as 'chat' | 'embed' | 'speech',
+    chat: passedFor(report, 'chat', modelId),
+    stream: passedFor(report, 'stream', modelId),
+    usage: passedFor(report, 'usage', modelId),
+    embeddings: passedFor(report, 'embeddings', modelId),
+    speech: passedFor(report, 'speech', modelId),
+    tools: toolsLabel(report, modelId),
+  }));
   return {
     modelId: id,
     embeddingModelId: report.embeddingModelId,
     ranAt: report.ranAt,
-    chat: passed(report, 'chat'),
-    stream: passed(report, 'stream'),
-    usage: passed(report, 'usage'),
+    chat: report.modelId ? passedFor(report, 'chat', report.modelId) : passed(report, 'chat'),
+    stream: report.modelId ? passedFor(report, 'stream', report.modelId) : passed(report, 'stream'),
+    usage: report.modelId ? passedFor(report, 'usage', report.modelId) : passed(report, 'usage'),
     disconnect: passed(report, 'disconnect'),
     embeddings: passed(report, 'embeddings'),
-    tools: toolsCheck?.status === 'pass' ? 'verified' : 'not-verified',
+    tools: toolsLabel(report, report.modelId),
+    aliases,
   };
+}
+
+/** Groups checks in list order, splitting when the endpoint name changes. */
+export function groupSelfTestChecks(checks: SelfTestCheck[]): Array<{ modelId: string | null; checks: SelfTestCheck[] }> {
+  const groups: Array<{ modelId: string | null; checks: SelfTestCheck[] }> = [];
+  for (const item of checks) {
+    const modelId = item.modelId ?? null;
+    const last = groups[groups.length - 1];
+    if (last && last.modelId === modelId) last.checks.push(item);
+    else groups.push({ modelId, checks: [item] });
+  }
+  return groups;
 }
 
 export function matchesVerifiedModel(modelId: string, alias: string | null | undefined): boolean {
@@ -81,35 +149,177 @@ export function matchesVerifiedModel(modelId: string, alias: string | null | und
   return id === name || id.startsWith(`${name}-`);
 }
 
-function listedIds(body: { data?: Array<{ id?: string }> } | null): string[] {
-  return (body?.data ?? [])
-    .map((row) => row.id)
-    .filter((id): id is string => typeof id === 'string' && id.length > 0);
+export interface EndpointCatalogModel {
+  alias: string;
+  variants?: ReadonlyArray<{ id?: string | null }> | null;
+}
+
+/**
+ * The catalog model an endpoint id belongs to.
+ *
+ * A listed id is an alias, a variant id, or a variant id without its `:<version>`. A variant
+ * id need not start with its alias (a BYOM import is `vectorizer-one` with a variant
+ * `custom-model-one-generic-cpu`), so those forms are matched exactly first. Only when nothing
+ * matches does the `alias-` prefix heuristic run, longest alias first, so `phi-4-mini-instruct`
+ * beats `phi-4` for `phi-4-mini-instruct-generic-cpu`.
+ */
+export function catalogModelForEndpointId<M extends EndpointCatalogModel>(
+  models: readonly M[],
+  modelId: string,
+): M | null {
+  const id = modelId.trim().toLowerCase();
+  if (!id) return null;
+  for (const model of models) {
+    if (model.alias.toLowerCase() === id) return model;
+    for (const variant of model.variants ?? []) {
+      const variantId = String(variant.id ?? '').toLowerCase();
+      if (variantId && (variantId === id || variantId.split(':')[0] === id)) return model;
+    }
+  }
+  return [...models]
+    .filter((model) => matchesVerifiedModel(id, model.alias))
+    .sort((a, b) => b.alias.length - a.alias.length)[0] ?? null;
+}
+
+export interface ListedEndpointModel {
+  id: string;
+  parent: string | null;
 }
 
 function isEmbeddingModelId(id: string): boolean {
   return /embed/i.test(id);
 }
 
-function isChatModelId(id: string): boolean {
-  const name = id.toLowerCase();
-  if (isEmbeddingModelId(name)) return false;
-  if (/(whisper|-stt(?:-|$)|(?:^|-)stt-|parakeet|nemotron-speech)/i.test(name)) return false;
-  return true;
+function isSpeechModelId(id: string): boolean {
+  return /(whisper|-stt(?:-|$)|(?:^|-)stt-|parakeet|nemotron-speech)/i.test(id);
 }
 
-function pickListedId(listed: string[], requested: string | null): string | null {
-  if (requested) {
-    const match = listed.find((id) => matchesVerifiedModel(id, requested));
-    if (match) return match;
+function endpointKind(
+  id: string,
+  requestedEmbed: string | null,
+  parent: string | null = null,
+  classifyModel?: EndpointModelClassifier,
+): EndpointModelKind {
+  const classified = classifyModel?.(id, parent);
+  if (classified) return classified;
+  if (
+    requestedEmbed
+    && (
+      matchesVerifiedModel(id, requestedEmbed)
+      || parent?.toLowerCase() === requestedEmbed.toLowerCase()
+    )
+  ) return 'embed';
+  // The parent alias is evidence for the variant too, for embeddings as for speech: a BYOM
+  // variant id is often opaque while its alias says what it is.
+  if (isEmbeddingModelId(id) || (parent && isEmbeddingModelId(parent))) return 'embed';
+  if (isSpeechModelId(id) || (parent && isSpeechModelId(parent))) return 'speech';
+  return 'chat';
+}
+
+/**
+ * Every name a client can send: each listed variant id, then each distinct
+ * parent alias that is not already one of those ids.
+ */
+export function endpointAliases(
+  models: ListedEndpointModel[],
+  requestedEmbed: string | null,
+  classifyModel?: EndpointModelClassifier,
+): { chat: string[]; embed: string[]; speech: string[] } {
+  const embed: string[] = [];
+  const speech: string[] = [];
+  const chat: string[] = [];
+  const seen = new Set<string>();
+  const add = (id: string, kind = endpointKind(id, requestedEmbed, null, classifyModel)) => {
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    if (kind === 'embed') embed.push(id);
+    else if (kind === 'speech') speech.push(id);
+    else chat.push(id);
+  };
+  for (const row of models) {
+    add(row.id, endpointKind(row.id, requestedEmbed, row.parent, classifyModel));
   }
-  return listed[0] ?? null;
+  for (const row of models) {
+    if (row.parent) {
+      add(row.parent, endpointKind(row.id, requestedEmbed, row.parent, classifyModel));
+    }
+  }
+  return { chat, embed, speech };
+}
+
+function listedModels(body: { data?: Array<{ id?: string; parent?: string }> } | null): ListedEndpointModel[] {
+  const out: ListedEndpointModel[] = [];
+  for (const row of body?.data ?? []) {
+    if (typeof row?.id !== 'string' || !row.id) continue;
+    const parent = typeof row.parent === 'string' && row.parent.trim() ? row.parent.trim() : null;
+    out.push({ id: row.id, parent });
+  }
+  return out;
+}
+
+function groupedTargets(
+  ids: string[],
+  kind: EndpointModelKind,
+  models: ListedEndpointModel[],
+): Array<{
+  modelId: string;
+  kind: EndpointModelKind;
+  residencyModelId: string;
+  observeBefore: boolean;
+  restoreAfter: boolean;
+}> {
+  const groups = new Map<string, Array<{ modelId: string; residencyModelId: string }>>();
+  for (const modelId of ids) {
+    const normalizedId = modelId.toLowerCase();
+    const row = models.find((item) => item.id.toLowerCase() === normalizedId);
+    const parent = row?.parent
+      ?? models.find((item) => item.parent?.toLowerCase() === normalizedId)?.parent
+      ?? modelId;
+    const key = parent.toLowerCase();
+    const group = groups.get(key) ?? [];
+    group.push({ modelId, residencyModelId: parent });
+    groups.set(key, group);
+  }
+  return [...groups.values()].flatMap((group) => group.map((target, index) => ({
+    ...target,
+    kind,
+    observeBefore: index === 0,
+    restoreAfter: index === group.length - 1,
+  })));
+}
+
+function blockedChatChecks(detail: string): SelfTestCheck[] {
+  return [
+    check('chat', 'Returned model id round-trips into chat', 'blocked', detail),
+    check('stream', 'Streaming delivers a token and [DONE]', 'blocked', detail),
+    check('usage', 'usage is present when the model emits it', 'blocked', detail),
+    check('disconnect', 'Aborting a stream settles the caller', 'blocked', detail),
+    check('tools', 'tool_calls when prompted', 'blocked', detail),
+  ];
+}
+
+function noChatModelChecks(): SelfTestCheck[] {
+  return [
+    check('chat', 'Returned model id round-trips into chat', 'blocked', 'Download a chat model, then run the test again.'),
+    check('stream', 'Streaming delivers a token and [DONE]', 'blocked', 'Needs a cached chat model.'),
+    check('usage', 'usage is present when the model emits it', 'blocked', 'Needs a cached chat model.'),
+    check('disconnect', 'Aborting a stream settles the caller', 'blocked', 'Needs a cached chat model.'),
+    check('tools', 'tool_calls when prompted', 'blocked', 'Needs a cached chat model.'),
+  ];
 }
 
 function modelsEnvelopeData(json: unknown): unknown[] | null {
   if (!json || typeof json !== 'object') return null;
   const data = (json as { data?: unknown }).data;
   return Array.isArray(data) ? data : null;
+}
+
+function failureDetail(status: number, json: unknown, fallback: string): string {
+  const message = json && typeof json === 'object'
+    ? (json as { error?: { message?: unknown } }).error?.message
+    : null;
+  const reason = typeof message === 'string' && message.trim() ? message.trim() : fallback;
+  return `HTTP ${status}; ${reason}`;
 }
 
 function isNumericVector(value: unknown): value is number[] {
@@ -189,156 +399,185 @@ async function fetchAndRead(
   }
 }
 
-export async function runEndpointSelfTest(options: {
-  fetch: typeof fetch;
-  endpoint: string | null;
-  modelId?: string | null;
-  catalogSupportsToolCalling?: boolean | null;
-  embeddingModelId?: string | null;
-  requestTimeoutMs?: number;
-  disconnectStartMs?: number;
-}): Promise<SelfTestReport> {
-  const ranAt = new Date().toISOString();
-  const endpoint = options.endpoint?.trim() || null;
-  const requestedModel = options.modelId?.trim() || null;
-  const requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
-  const disconnectStartMs = options.disconnectStartMs ?? DISCONNECT_START_MS;
+/** Sample rate Flint's own recorder transcodes to; the input the sidecar documents accepting. */
+export const SELF_TEST_WAV_SAMPLE_RATE = 16_000;
+const SELF_TEST_WAV_SECONDS = 1;
 
-  if (!endpoint) {
-    return {
-      ranAt,
-      endpoint: null,
-      modelId: requestedModel,
-      embeddingModelId: null,
-      checks: [
-        check('endpoint', 'Local gateway reachable', 'blocked', 'Start the local service first.'),
-      ],
-    };
+/**
+ * One second of 16 kHz mono 16-bit PCM silence, the same shape Flint sends from its own
+ * recorder, so a speech model that rejects the probe is rejecting input Flint would send.
+ * Silence keeps the probe about a successful response shape; an empty transcript passes.
+ */
+export function selfTestWav(): Blob {
+  return new Blob([selfTestWavBytes()], { type: 'audio/wav' });
+}
+
+export function selfTestWavBytes(): ArrayBuffer {
+  const channels = 1;
+  const bytesPerSample = 2;
+  const blockAlign = channels * bytesPerSample;
+  const samples = SELF_TEST_WAV_SAMPLE_RATE * SELF_TEST_WAV_SECONDS;
+  const dataSize = samples * blockAlign;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+  const write = (offset: number, text: string) => {
+    for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i));
+  };
+  write(0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  write(8, 'WAVE');
+  write(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, channels, true);
+  view.setUint32(24, SELF_TEST_WAV_SAMPLE_RATE, true);
+  view.setUint32(28, SELF_TEST_WAV_SAMPLE_RATE * blockAlign, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bytesPerSample * 8, true);
+  write(36, 'data');
+  view.setUint32(40, dataSize, true);
+  return buffer;
+}
+
+function declaredToolCalling(
+  modelId: string,
+  options: {
+    catalogSupportsToolCalling?: boolean | null;
+    supportsToolCalling?: (modelId: string) => boolean | null | undefined;
+  },
+): boolean | null {
+  if (options.supportsToolCalling) {
+    const specific = options.supportsToolCalling(modelId);
+    if (specific === true || specific === false) return specific;
+    return null;
   }
+  if (options.catalogSupportsToolCalling === false) return false;
+  if (options.catalogSupportsToolCalling === true) return true;
+  return null;
+}
 
-  const checks: SelfTestCheck[] = [];
-  let modelsBody: { data?: Array<{ id?: string }> } | null = null;
-
+async function runEmbeddingChecks(
+  fetchFn: typeof fetch,
+  endpoint: string,
+  modelId: string,
+  requestTimeoutMs: number,
+): Promise<SelfTestCheck[]> {
   try {
     const { res, json } = await fetchAndRead(
-      options.fetch,
-      joinUrl(endpoint, '/models'),
-      { method: 'GET', headers: { Accept: 'application/json' } },
+      fetchFn,
+      joinUrl(endpoint, '/embeddings'),
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: modelId, input: 'ping' }),
+      },
       requestTimeoutMs,
       'json',
     );
-    const data = modelsEnvelopeData(json);
-    if (!res.ok || !data) {
-      checks.push(check(
-        'models',
-        'GET /v1/models returns an OpenAI envelope',
-        'fail',
-        `HTTP ${res.status}; expected { data: [...] }.`,
-      ));
-    } else {
-      modelsBody = json as { data?: Array<{ id?: string }> };
-      checks.push(check(
-        'models',
-        'GET /v1/models returns an OpenAI envelope',
-        'pass',
-        `${data.length} model id(s).`,
-      ));
-    }
-  } catch (error) {
-    checks.push(check(
-      'models',
-      'GET /v1/models returns an OpenAI envelope',
-      'fail',
-      error instanceof Error ? error.message : String(error),
-    ));
-  }
-
-  const modelsOk = checks.some((item) => item.id === 'models' && item.status === 'pass');
-  const ids = modelsOk ? listedIds(modelsBody) : [];
-  const requestedEmbed = options.embeddingModelId?.trim() || null;
-  // A BYOM embedding imported as `my-model` has no `embed` substring. Prefer the
-  // UI-supplied embedding alias against the full listed set, then drop it from chat.
-  const embeddingModelId = (
-    requestedEmbed
-      ? ids.find((id) => matchesVerifiedModel(id, requestedEmbed))
-      : undefined
-  ) ?? ids.find(isEmbeddingModelId) ?? null;
-  const chatIds = ids.filter((id) => isChatModelId(id) && id !== embeddingModelId);
-  const modelId = pickListedId(chatIds, requestedModel);
-
-  if (!modelsOk) {
-    const blocked = 'GET /v1/models did not return an OpenAI envelope.';
-    checks.push(check('embeddings', 'POST /v1/embeddings returns a vector', 'blocked', blocked));
-    checks.push(check('chat', 'Returned model id round-trips into chat', 'blocked', blocked));
-    checks.push(check('stream', 'Streaming delivers a token and [DONE]', 'blocked', blocked));
-    checks.push(check('usage', 'usage is present when the model emits it', 'blocked', blocked));
-    checks.push(check('disconnect', 'Aborting a stream settles the caller', 'blocked', blocked));
-    checks.push(check('tools', 'tool_calls when prompted', 'blocked', blocked));
-    return { ranAt, endpoint, modelId: null, embeddingModelId: null, checks };
-  }
-
-  if (!embeddingModelId) {
-    checks.push(check(
-      'embeddings',
-      'POST /v1/embeddings returns a vector',
-      'blocked',
-      'Import a BYOM embedding model, then run the test again.',
-    ));
-  } else {
-    try {
-      const { res, json } = await fetchAndRead(
-        options.fetch,
-        joinUrl(endpoint, '/embeddings'),
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: embeddingModelId, input: 'ping' }),
-        },
-        requestTimeoutMs,
-        'json',
-      );
-      const embeddingJson = json && typeof json === 'object'
-        ? json as { data?: Array<{ embedding?: unknown }> }
-        : null;
-      const vector = embeddingJson?.data?.[0]?.embedding;
-      if (!res.ok || !isNumericVector(vector)) {
-        checks.push(check(
-          'embeddings',
-          'POST /v1/embeddings returns a vector',
-          'fail',
-          `HTTP ${res.status}; expected data[0].embedding number[].`,
-        ));
-      } else {
-        checks.push(check(
-          'embeddings',
-          'POST /v1/embeddings returns a vector',
-          'pass',
-          `${vector.length}-d vector from ${embeddingModelId}.`,
-        ));
-      }
-    } catch (error) {
-      checks.push(check(
+    const embeddingJson = json && typeof json === 'object'
+      ? json as { data?: Array<{ embedding?: unknown }> }
+      : null;
+    const vector = embeddingJson?.data?.[0]?.embedding;
+    if (!res.ok || !isNumericVector(vector)) {
+      return [check(
         'embeddings',
         'POST /v1/embeddings returns a vector',
         'fail',
-        error instanceof Error ? error.message : String(error),
-      ));
+        failureDetail(res.status, json, 'expected data[0].embedding number[].'),
+        modelId,
+      )];
     }
+    return [check(
+      'embeddings',
+      'POST /v1/embeddings returns a vector',
+      'pass',
+      `${vector.length}-d vector from ${modelId}.`,
+      modelId,
+    )];
+  } catch (error) {
+    return [check(
+      'embeddings',
+      'POST /v1/embeddings returns a vector',
+      'fail',
+      error instanceof Error ? error.message : String(error),
+      modelId,
+    )];
   }
+}
 
-  if (!modelId) {
-    checks.push(check('chat', 'Returned model id round-trips into chat', 'blocked', 'Download a chat model, then run the test again.'));
-    checks.push(check('stream', 'Streaming delivers a token and [DONE]', 'blocked', 'Needs a cached chat model.'));
-    checks.push(check('usage', 'usage is present when the model emits it', 'blocked', 'Needs a cached chat model.'));
-    checks.push(check('disconnect', 'Aborting a stream settles the caller', 'blocked', 'Needs a cached chat model.'));
-    checks.push(check('tools', 'tool_calls when prompted', 'blocked', 'Needs a cached chat model.'));
-    return { ranAt, endpoint, modelId: null, embeddingModelId, checks };
+async function runSpeechChecks(
+  fetchFn: typeof fetch,
+  endpoint: string,
+  modelId: string,
+  requestTimeoutMs: number,
+  prepareModel?: (modelId: string) => Promise<string>,
+): Promise<SelfTestCheck[]> {
+  try {
+    if (!prepareModel) {
+      return [check(
+        'speech',
+        'POST /v1/audio/transcriptions returns text',
+        'blocked',
+        'Speech checks require model preparation because multipart requests cannot be gateway-replayed.',
+        modelId,
+      )];
+    }
+    const preparedModelId = await prepareModel(modelId);
+    if (!preparedModelId.trim()) {
+      throw new Error(`Speech model preparation returned no canonical variant for ${modelId}.`);
+    }
+    const form = new FormData();
+    form.append('model', preparedModelId);
+    form.append('file', selfTestWav(), 'ping.wav');
+    const { res, json } = await fetchAndRead(
+      fetchFn,
+      joinUrl(endpoint, '/audio/transcriptions'),
+      { method: 'POST', body: form },
+      requestTimeoutMs,
+      'json',
+    );
+    const text = json && typeof json === 'object' ? (json as { text?: unknown }).text : null;
+    if (!res.ok || typeof text !== 'string') {
+      return [check(
+        'speech',
+        'POST /v1/audio/transcriptions returns text',
+        'fail',
+        failureDetail(res.status, json, 'no transcript.'),
+        modelId,
+      )];
+    }
+    return [check(
+      'speech',
+      'POST /v1/audio/transcriptions returns text',
+      'pass',
+      preparedModelId === modelId
+        ? `${modelId} transcribed audio.`
+        : `${modelId} resolved to ${preparedModelId} and transcribed audio.`,
+      modelId,
+    )];
+  } catch (error) {
+    return [check(
+      'speech',
+      'POST /v1/audio/transcriptions returns text',
+      'fail',
+      error instanceof Error ? error.message : String(error),
+      modelId,
+    )];
   }
+}
 
+async function runChatChecks(
+  fetchFn: typeof fetch,
+  endpoint: string,
+  modelId: string,
+  requestTimeoutMs: number,
+  toolsDeclared: boolean | null,
+): Promise<SelfTestCheck[]> {
+  const checks: SelfTestCheck[] = [];
   let usageSeen = false;
   try {
     const { res, json } = await fetchAndRead(
-      options.fetch,
+      fetchFn,
       joinUrl(endpoint, '/chat/completions'),
       {
         method: 'POST',
@@ -357,11 +596,11 @@ export async function runEndpointSelfTest(options: {
     const content = payload?.choices?.[0]?.message?.content;
     const usage = payload?.usage;
     if (!res.ok || typeof content !== 'string' || !content.trim()) {
-      checks.push(check('chat', 'Returned model id round-trips into chat', 'fail', `HTTP ${res.status}; no assistant message.`));
+      checks.push(check('chat', 'Returned model id round-trips into chat', 'fail', failureDetail(res.status, json, 'no assistant message.'), modelId));
     } else {
       usageSeen = !!(usage && (usage.prompt_tokens != null || usage.completion_tokens != null
         || usage.input_tokens != null || usage.output_tokens != null));
-      checks.push(check('chat', 'Returned model id round-trips into chat', 'pass', `id ${modelId} produced a completion.`));
+      checks.push(check('chat', 'Returned model id round-trips into chat', 'pass', `id ${modelId} produced a completion.`, modelId));
     }
   } catch (error) {
     checks.push(check(
@@ -369,23 +608,25 @@ export async function runEndpointSelfTest(options: {
       'Returned model id round-trips into chat',
       'fail',
       error instanceof Error ? error.message : String(error),
+      modelId,
     ));
   }
 
   if (usageSeen) {
-    checks.push(check('usage', 'usage is present when the model emits it', 'pass', 'Non-streamed completion included usage.'));
+    checks.push(check('usage', 'usage is present when the model emits it', 'pass', 'Non-streamed completion included usage.', modelId));
   } else {
     checks.push(check(
       'usage',
       'usage is present when the model emits it',
       'blocked',
       'This model did not emit usage; not treated as a failure.',
+      modelId,
     ));
   }
 
   try {
     const { res, text } = await fetchAndRead(
-      options.fetch,
+      fetchFn,
       joinUrl(endpoint, '/chat/completions'),
       {
         method: 'POST',
@@ -403,9 +644,9 @@ export async function runEndpointSelfTest(options: {
     const hasDone = text.includes('[DONE]');
     const hasToken = streamHasToken(text);
     if (!res.ok || !hasDone || !hasToken) {
-      checks.push(check('stream', 'Streaming delivers a token and [DONE]', 'fail', `HTTP ${res.status}; done=${hasDone} token=${hasToken}.`));
+      checks.push(check('stream', 'Streaming delivers a token and [DONE]', 'fail', `HTTP ${res.status}; done=${hasDone} token=${hasToken}.`, modelId));
     } else {
-      checks.push(check('stream', 'Streaming delivers a token and [DONE]', 'pass', 'SSE stream terminated with [DONE].'));
+      checks.push(check('stream', 'Streaming delivers a token and [DONE]', 'pass', 'SSE stream terminated with [DONE].', modelId));
     }
   } catch (error) {
     checks.push(check(
@@ -413,98 +654,22 @@ export async function runEndpointSelfTest(options: {
       'Streaming delivers a token and [DONE]',
       'fail',
       error instanceof Error ? error.message : String(error),
+      modelId,
     ));
   }
 
-  try {
-    const abort = new AbortController();
-    const pending = options.fetch(joinUrl(endpoint, '/chat/completions'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: modelId,
-        messages: [{ role: 'user', content: 'Keep writing until stopped.' }],
-        stream: true,
-        max_tokens: 64,
-      }),
-      signal: abort.signal,
-    });
-    // Wait until headers (and a first body chunk, if any) so this is a disconnect of
-    // an in-flight stream, not a cancel of a request that never left the client.
-    const started = await Promise.race([
-      pending.then((res) => ({ kind: 'headers' as const, res })).catch((error) => ({ kind: 'error' as const, error })),
-      new Promise<{ kind: 'slow' }>((resolve) => {
-        setTimeout(() => resolve({ kind: 'slow' }), disconnectStartMs);
-      }),
-    ]);
-    if (started.kind !== 'headers') {
-      abort.abort();
-      checks.push(check(
-        'disconnect',
-        'Aborting a stream settles the caller',
-        'fail',
-        started.kind === 'error'
-          ? (started.error instanceof Error ? started.error.message : String(started.error))
-          : `Streaming response did not start within ${disconnectStartMs} ms; disconnect was not exercised.`,
-      ));
-    } else {
-      const reader = started.res.body?.getReader() ?? null;
-      const pendingRead = reader
-        ? reader.read().then(() => 'read' as const, () => 'rejected' as const)
-        : null;
-      if (pendingRead) {
-        await Promise.race([
-          pendingRead,
-          new Promise<void>((resolve) => {
-            setTimeout(resolve, disconnectStartMs);
-          }),
-        ]);
-      }
-      abort.abort();
-      if (pendingRead) {
-        const settled = await Promise.race([
-          pendingRead.then(() => 'settled' as const),
-          new Promise<'timeout'>((resolve) => {
-            setTimeout(() => resolve('timeout'), ABORT_SETTLE_TIMEOUT_MS);
-          }),
-        ]);
-        checks.push(check(
-          'disconnect',
-          'Aborting a stream settles the caller',
-          settled === 'timeout' ? 'fail' : 'pass',
-          settled === 'timeout'
-            ? `Abort did not settle the stream body within ${ABORT_SETTLE_TIMEOUT_MS} ms.`
-            : 'Stream started and abort settled the body reader. Native generation may still finish.',
-        ));
-      } else {
-        checks.push(check(
-          'disconnect',
-          'Aborting a stream settles the caller',
-          'pass',
-          'Stream started and abort was issued. Native generation may still finish.',
-        ));
-      }
-    }
-  } catch (error) {
-    checks.push(check(
-      'disconnect',
-      'Aborting a stream settles the caller',
-      'fail',
-      error instanceof Error ? error.message : String(error),
-    ));
-  }
-
-  if (options.catalogSupportsToolCalling === false) {
+  if (toolsDeclared === false) {
     checks.push(check(
       'tools',
       'tool_calls when prompted',
       'blocked',
       'Catalog declares no tool calling; Flint-verified remains not-verified.',
+      modelId,
     ));
   } else {
     try {
       const { res, json } = await fetchAndRead(
-        options.fetch,
+        fetchFn,
         joinUrl(endpoint, '/chat/completions'),
         {
           method: 'POST',
@@ -536,7 +701,7 @@ export async function runEndpointSelfTest(options: {
       const toolCalls = payload?.choices?.[0]?.message?.tool_calls
         ?? payload?.choices?.[0]?.delta?.tool_calls;
       if (res.ok && Array.isArray(toolCalls) && toolCalls.length > 0) {
-        checks.push(check('tools', 'tool_calls when prompted', 'pass', 'Model emitted OpenAI-style tool_calls.'));
+        checks.push(check('tools', 'tool_calls when prompted', 'pass', 'Model emitted OpenAI-style tool_calls.', modelId));
       } else {
         checks.push(check(
           'tools',
@@ -545,6 +710,7 @@ export async function runEndpointSelfTest(options: {
           res.ok
             ? 'No tool_calls in the response; labeled not-verified rather than failed.'
             : `HTTP ${res.status}; labeled not-verified rather than failed.`,
+          modelId,
         ));
       }
     } catch (error) {
@@ -553,9 +719,315 @@ export async function runEndpointSelfTest(options: {
         'tool_calls when prompted',
         'blocked',
         `Could not verify tools (${error instanceof Error ? error.message : String(error)}).`,
+        modelId,
       ));
     }
   }
 
-  return { ranAt, endpoint, modelId, embeddingModelId, checks };
+  return checks;
+}
+
+async function runDisconnectCheck(
+  fetchFn: typeof fetch,
+  endpoint: string,
+  modelId: string,
+  requestStartMs: number,
+  disconnectStartMs: number,
+): Promise<SelfTestCheck> {
+  try {
+    const abort = new AbortController();
+    const pending = fetchFn(joinUrl(endpoint, '/chat/completions'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: modelId,
+        messages: [{ role: 'user', content: 'Keep writing until stopped.' }],
+        stream: true,
+        max_tokens: 64,
+      }),
+      signal: abort.signal,
+    });
+    // Wait until headers (and a first body chunk, if any) so this is a disconnect of
+    // an in-flight stream, not a cancel of a request that never left the client.
+    const started = await Promise.race([
+      pending.then((res) => ({ kind: 'headers' as const, res })).catch((error) => ({ kind: 'error' as const, error })),
+      new Promise<{ kind: 'slow' }>((resolve) => {
+        setTimeout(() => resolve({ kind: 'slow' }), requestStartMs);
+      }),
+    ]);
+    if (started.kind !== 'headers') {
+      abort.abort();
+      return check(
+        'disconnect',
+        'Aborting a stream settles the caller',
+        'fail',
+        started.kind === 'error'
+          ? (started.error instanceof Error ? started.error.message : String(started.error))
+          : `Streaming response did not start within ${requestStartMs} ms; disconnect was not exercised.`,
+      );
+    }
+
+    if (!started.res.ok) {
+      abort.abort();
+      return check(
+        'disconnect',
+        'Aborting a stream settles the caller',
+        'fail',
+        `HTTP ${started.res.status}; streaming response did not start.`,
+      );
+    }
+
+    const reader = started.res.body?.getReader() ?? null;
+    if (!reader) {
+      abort.abort();
+      return check(
+        'disconnect',
+        'Aborting a stream settles the caller',
+        'fail',
+        'Streaming response had no readable body; disconnect was not exercised.',
+      );
+    }
+
+    const pendingRead = reader.read().then(() => 'read' as const, () => 'rejected' as const);
+    await Promise.race([
+      pendingRead,
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, disconnectStartMs);
+      }),
+    ]);
+    abort.abort();
+
+    const settled = await Promise.race([
+      pendingRead.then(() => 'settled' as const),
+      new Promise<'timeout'>((resolve) => {
+        setTimeout(() => resolve('timeout'), ABORT_SETTLE_TIMEOUT_MS);
+      }),
+    ]);
+    return check(
+      'disconnect',
+      'Aborting a stream settles the caller',
+      settled === 'timeout' ? 'fail' : 'pass',
+      settled === 'timeout'
+        ? `Abort did not settle the stream body within ${ABORT_SETTLE_TIMEOUT_MS} ms.`
+        : 'Stream started and abort settled the body reader. Native generation may still finish.',
+    );
+  } catch (error) {
+    return check(
+      'disconnect',
+      'Aborting a stream settles the caller',
+      'fail',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
+export async function runEndpointSelfTest(options: {
+  fetch: typeof fetch;
+  endpoint: string | null;
+  modelId?: string | null;
+  catalogSupportsToolCalling?: boolean | null;
+  /** Per listed id. When set, it replaces catalogSupportsToolCalling. */
+  supportsToolCalling?: (modelId: string) => boolean | null | undefined;
+  embeddingModelId?: string | null;
+  /** Per listed model. Catalog metadata should take precedence over name heuristics. */
+  classifyModel?: EndpointModelClassifier;
+  /**
+   * Explicitly prepares each speech target and returns its canonical loaded variant because
+   * multipart requests cannot be gateway-replayed or rewritten.
+   */
+  prepareSpeechModel?: (modelId: string) => Promise<string>;
+  /** Records what is resident for a model just before its group's first probe. */
+  beforeModelProbe?: (modelId: string) => Promise<void>;
+  /** Restores or unloads a model after its ordinary probes complete. */
+  afterModelProbe?: (modelId: string) => Promise<void>;
+  /** Prefer an already-resident chat alias for the terminal disconnect probe. */
+  disconnectModelId?: string | null;
+  requestTimeoutMs?: number;
+  disconnectStartMs?: number;
+  onProgress?: (event: { modelId: string; index: number; total: number }) => void;
+}): Promise<SelfTestReport> {
+  const ranAt = new Date().toISOString();
+  const endpoint = options.endpoint?.trim() || null;
+  const requestedModel = options.modelId?.trim() || null;
+  const requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
+  const disconnectStartMs = options.disconnectStartMs ?? DISCONNECT_START_MS;
+  const disconnectRequestStartMs = options.disconnectStartMs == null
+    ? requestTimeoutMs
+    : disconnectStartMs;
+
+  if (!endpoint) {
+    return {
+      ranAt,
+      endpoint: null,
+      modelId: requestedModel,
+      modelIds: [],
+      embeddingModelId: null,
+      embeddingModelIds: [],
+      speechModelIds: [],
+      checks: [
+        check('endpoint', 'Local gateway reachable', 'blocked', 'Start the local service first.'),
+      ],
+    };
+  }
+
+  const checks: SelfTestCheck[] = [];
+  let modelsBody: { data?: Array<{ id?: string; parent?: string }> } | null = null;
+
+  try {
+    const { res, json } = await fetchAndRead(
+      options.fetch,
+      joinUrl(endpoint, '/models'),
+      { method: 'GET', headers: { Accept: 'application/json' } },
+      requestTimeoutMs,
+      'json',
+    );
+    const data = modelsEnvelopeData(json);
+    if (!res.ok || !data) {
+      checks.push(check(
+        'models',
+        'GET /v1/models returns an OpenAI envelope',
+        'fail',
+        `HTTP ${res.status}; expected { data: [...] }.`,
+      ));
+    } else {
+      modelsBody = json as { data?: Array<{ id?: string; parent?: string }> };
+      checks.push(check(
+        'models',
+        'GET /v1/models returns an OpenAI envelope',
+        'pass',
+        `${data.length} model id(s).`,
+      ));
+    }
+  } catch (error) {
+    checks.push(check(
+      'models',
+      'GET /v1/models returns an OpenAI envelope',
+      'fail',
+      error instanceof Error ? error.message : String(error),
+    ));
+  }
+
+  const modelsOk = checks.some((item) => item.id === 'models' && item.status === 'pass');
+  const requestedEmbed = options.embeddingModelId?.trim() || null;
+  const listed = modelsOk ? listedModels(modelsBody) : [];
+  const aliases = modelsOk
+    ? endpointAliases(listed, requestedEmbed, options.classifyModel)
+    : { chat: [], embed: [], speech: [] };
+  const emptyIds = { modelIds: [] as string[], embeddingModelIds: [] as string[], speechModelIds: [] as string[] };
+
+  if (!modelsOk) {
+    const blocked = 'GET /v1/models did not return an OpenAI envelope.';
+    checks.push(check('embeddings', 'POST /v1/embeddings returns a vector', 'blocked', blocked));
+    checks.push(...blockedChatChecks(blocked));
+    return {
+      ranAt,
+      endpoint,
+      modelId: null,
+      embeddingModelId: null,
+      ...emptyIds,
+      checks,
+    };
+  }
+
+  const queue = [
+    ...groupedTargets(aliases.embed, 'embed', listed),
+    ...groupedTargets(aliases.chat, 'chat', listed),
+    ...groupedTargets(aliases.speech, 'speech', listed),
+  ];
+  const orderedAliases = {
+    embed: queue.filter((target) => target.kind === 'embed').map((target) => target.modelId),
+    chat: queue.filter((target) => target.kind === 'chat').map((target) => target.modelId),
+    speech: queue.filter((target) => target.kind === 'speech').map((target) => target.modelId),
+  };
+
+  if (aliases.embed.length === 0) {
+    checks.push(check(
+      'embeddings',
+      'POST /v1/embeddings returns a vector',
+      'blocked',
+      'Import a BYOM embedding model, then run the test again.',
+    ));
+  }
+
+  let index = 0;
+  const requestedDisconnectModel = options.disconnectModelId?.trim() || null;
+  const matchingDisconnectModel = requestedDisconnectModel
+    ? orderedAliases.chat.find((modelId) => modelId.toLowerCase() === requestedDisconnectModel.toLowerCase())
+    : null;
+  const disconnectModelId = matchingDisconnectModel
+    ? matchingDisconnectModel
+    : orderedAliases.chat[orderedAliases.chat.length - 1] ?? null;
+  const progressTotal = queue.length + (disconnectModelId ? 1 : 0);
+  let residencyRestoreFailed = false;
+  for (const target of queue) {
+    options.onProgress?.({ modelId: target.modelId, index, total: progressTotal });
+    index += 1;
+    if (target.observeBefore && options.beforeModelProbe) {
+      await options.beforeModelProbe(target.residencyModelId);
+    }
+    if (target.kind === 'embed') {
+      checks.push(...await runEmbeddingChecks(options.fetch, endpoint, target.modelId, requestTimeoutMs));
+    } else if (target.kind === 'chat') {
+      checks.push(...await runChatChecks(
+        options.fetch,
+        endpoint,
+        target.modelId,
+        requestTimeoutMs,
+        declaredToolCalling(target.modelId, options),
+      ));
+    } else {
+      checks.push(...await runSpeechChecks(
+        options.fetch,
+        endpoint,
+        target.modelId,
+        requestTimeoutMs,
+        options.prepareSpeechModel,
+      ));
+    }
+    if (target.restoreAfter && options.afterModelProbe) {
+      try {
+        await options.afterModelProbe(target.residencyModelId);
+      } catch (error) {
+        checks.push(check(
+          'residency',
+          'Restore model residency after probe',
+          'fail',
+          error instanceof Error ? error.message : String(error),
+          target.residencyModelId,
+        ));
+        checks.push(check(
+          'run',
+          'Continue endpoint self-test',
+          'blocked',
+          'Stopped after residency restoration failed so additional models are not loaded.',
+        ));
+        residencyRestoreFailed = true;
+        break;
+      }
+    }
+  }
+
+  if (disconnectModelId && !residencyRestoreFailed) {
+    options.onProgress?.({ modelId: disconnectModelId, index, total: progressTotal });
+    checks.push(await runDisconnectCheck(
+      options.fetch,
+      endpoint,
+      disconnectModelId,
+      disconnectRequestStartMs,
+      disconnectStartMs,
+    ));
+  } else if (!residencyRestoreFailed) {
+    checks.push(...noChatModelChecks());
+  }
+
+  return {
+    ranAt,
+    endpoint,
+    modelId: orderedAliases.chat[0] ?? null,
+    modelIds: orderedAliases.chat,
+    embeddingModelId: orderedAliases.embed[0] ?? null,
+    embeddingModelIds: orderedAliases.embed,
+    speechModelIds: orderedAliases.speech,
+    checks,
+  };
 }

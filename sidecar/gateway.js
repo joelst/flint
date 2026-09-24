@@ -46,6 +46,11 @@ import {
 
 /** Upstream is on loopback, so a long timeout only ever means the model is thinking. */
 const UPSTREAM_TIMEOUT_MS = 0; // no timeout: generation can legitimately run for minutes
+const MULTIPART_MODEL_PEEK_BYTES = 16 * 1024;
+const MULTIPART_MODEL_MAX_CHARS = 256;
+const multipartModel = Symbol('multipartModel');
+const multipartPrefix = Symbol('multipartPrefix');
+const multipartEnded = Symbol('multipartEnded');
 
 /**
  * Classify OpenAI-compatible routes for metadata-only access logging.
@@ -57,8 +62,30 @@ export function classifyGatewayRoute (urlPath) {
   const path = String(urlPath || '').split('?')[0];
   if (/(^|\/)chat\/completions(\/|$)/.test(path)) return 'chat';
   if (/(^|\/)embeddings(\/|$)/.test(path)) return 'embeddings';
+  if (/(^|\/)audio\/transcriptions(\/|$)/.test(path)) return 'speech';
   if (/(^|\/)models(\/|$)/.test(path)) return 'models';
   return 'other';
+}
+
+/**
+ * Returns undefined while the leading field is incomplete, null when it is not `model`, or
+ * the submitted model value once its terminating boundary is available.
+ */
+function extractLeadingMultipartModel (body, boundary) {
+  const opening = `--${boundary}\r\n`;
+  if (!body.startsWith(opening)) {
+    return body.length < opening.length && opening.startsWith(body) ? undefined : null;
+  }
+  const headersEnd = body.indexOf('\r\n\r\n', opening.length);
+  if (headersEnd < 0) return undefined;
+  const headers = body.slice(opening.length, headersEnd);
+  if (!/^content-disposition:[^\r\n]*\bname="model"(?:;|\r?$)/im.test(headers)) return null;
+  const valueStart = headersEnd + 4;
+  const valueEnd = body.indexOf(`\r\n--${boundary}`, valueStart);
+  if (valueEnd < 0) return undefined;
+  const value = body.slice(valueStart, valueEnd).trim();
+  if (value.length > MULTIPART_MODEL_MAX_CHARS) return null;
+  return value || null;
 }
 
 /**
@@ -70,12 +97,12 @@ export function classifyGatewayRoute (urlPath) {
  * @param {(alias: string, variantId: string|null) => Promise<string|null|void>} options.load
  *        resolves to the variant id actually loaded, which the replay needs to name
  * @param {(level: string, msg: string) => void} [options.log]
- * @param {(model: string, phase: 'start'|'end') => boolean|void} [options.onActivity]
+ * @param {(model: string, phase: 'start'|'end', booking?: unknown) => unknown} [options.onActivity]
  *        called around every request that names a model, so the owner can keep a model
- *        alive while it is being served and record when it was last used; returning false
- *        from the start phase rejects work while that model is being changed. The name is
- *        the one forwarded: a request rewritten to a variant id starts that id before it
- *        ends the previous name, so one exchange may report more than one start/end pair
+ *        alive while it is being served and record when it was last used. The value returned
+ *        for start is supplied to its matching end call; returning exactly `false` refuses the
+ *        lease (the model is being unloaded), which rejects the request with 409 and books
+ *        no matching end.
  * @param {(entry: object) => void} [options.onAccess]
  *        metadata-only access log (no bodies, no headers) after each request finishes
  * @param {() => (() => void)|null} [options.admitRequest]
@@ -180,12 +207,12 @@ export function createGateway (options) {
   server.on('upgrade', (_req, socket) => socket.destroy());
 
   /** A hook the owner supplied must never be able to take a request down with it. */
-  function notifyActivity (model, phase) {
+  function notifyActivity (model, phase, booking) {
     try {
-      return onActivity(model, phase) !== false;
+      return onActivity(model, phase, booking);
     } catch (err) {
       log('warn', `Gateway activity hook failed: ${err?.message ?? err}`);
-      return true;
+      return undefined;
     }
   }
 
@@ -219,7 +246,10 @@ export function createGateway (options) {
     const buffered = await maybeBufferBody(req, res);
     if (buffered === ABORTED) return;
 
-    const requested = buffered === null ? null : extractModelName(buffered);
+    const requested = buffered === null ? req[multipartModel] ?? null : extractModelName(buffered);
+    let activeModel = requested;
+    let activeBooking;
+    let booked = false;
     try {
       if (!requested) return await route(req, res, buffered, requested);
 
@@ -227,25 +257,27 @@ export function createGateway (options) {
       // traffic is proxied straight to Foundry, so the sidecar has no other way to tell a
       // model generating a long completion apart from one sitting idle — and unloading the
       // former would kill a live request.
-      if (!notifyActivity(requested, 'start')) {
-        return respondActivityConflict(res);
-      }
-      // The booking names what is forwarded. Foundry serves only an exact variant id, so a
-      // request rewritten to one is served by that build, not by whatever the client's own
-      // spelling would resolve to. A rebooking starts the new name before ending the old one,
-      // so the exchange is never left unbooked.
-      let booked = requested;
-      const rebook = (name) => {
-        if (name === booked) return true;
-        if (!notifyActivity(name, 'start')) return false;
-        notifyActivity(booked, 'end');
-        booked = name;
-        return true;
-      };
+      activeBooking = notifyActivity(requested, 'start');
+      // An explicit `false` is the owner refusing the lease because that model is being
+      // unloaded. Forwarding anyway would race the teardown, and the unleased request would
+      // later decrement an in-flight count it never took.
+      if (activeBooking === false) return respondUnloading(req, res, requested);
+      booked = true;
       try {
-        return await route(req, res, buffered, requested, rebook);
+        return await route(req, res, buffered, requested, (model) => {
+          if (!model || model === activeModel) return true;
+          const nextBooking = notifyActivity(model, 'start');
+          // route stops before loading or replaying when this is refused. Nothing has been
+          // sent to the client yet, so it gets the same 409 as a refused first booking.
+          if (nextBooking === false) return false;
+          if (booked) notifyActivity(activeModel, 'end', activeBooking);
+          activeModel = model;
+          activeBooking = nextBooking;
+          booked = true;
+          return true;
+        });
       } finally {
-        notifyActivity(booked, 'end');
+        if (booked) notifyActivity(activeModel, 'end', activeBooking);
       }
     } finally {
       const completedAt = Date.now();
@@ -268,25 +300,30 @@ export function createGateway (options) {
     }
   }
 
-  function respondActivityConflict (res) {
-    res.writeHead(409, { 'content-type': 'application/json' });
+  /** The owner refused a lease because the model is being unloaded. */
+  function respondUnloading (req, res, model) {
+    res.writeHead(409, { 'content-type': 'application/json', connection: 'close' });
     res.end(openAiError(
-      'Model work is temporarily blocked while an unload or deletion is in progress. Retry shortly.',
-      'conflict',
+      `Model ${model} is unavailable because an unload or deletion is in progress.`,
+      'server_error',
     ));
+    req.resume();
   }
 
-  async function route (req, res, buffered, requested, rebook = () => true) {
+  /**
+   * @param {(model: string) => boolean} [setActivityModel] moves the request's lease to
+   *        `model`; false means the owner refused it, and the request must not load or replay.
+   */
+  async function route (req, res, buffered, requested, setActivityModel = () => true) {
 
     // An identifier that needed rewriting once needs it on every later request, and the
     // upstream rejection that teaches us costs a round trip each time. Reuse it, and let
     // the not-loaded path below correct the entry if it has gone stale.
     let outgoing = buffered;
     const known = requested ? rewrites.get(rewriteKey(requested)) : null;
-    const rewrittenKnown = known ? rewriteModelName(buffered, known) : null;
-    if (rewrittenKnown !== null) {
-      if (!rebook(known)) return respondActivityConflict(res);
-      outgoing = rewrittenKnown;
+    if (known) {
+      outgoing = rewriteModelName(buffered, known) ?? buffered;
+      if (!setActivityModel(known)) return respondUnloading(req, res, known);
     }
 
     // Upstream's rejection must name the model we sent, which is the rewritten id when a
@@ -304,6 +341,13 @@ export function createGateway (options) {
       // Nothing to load: hand back what upstream said rather than inventing an error.
       return respondBuffered(res, attempt.status, attempt.headers, attempt.body);
     }
+    // `requested` can be a versionless variant id that aliases a resident model even when
+    // the catalog resolves it to a different version. Move the activity lease to the exact
+    // resolved id before loading so the switch does not mistake this request for work against
+    // the build it is replacing.
+    if (target.variantId && !setActivityModel(target.variantId)) {
+      return respondUnloading(req, res, target.variantId);
+    }
 
     const gen = generation;
     let loadedId = null;
@@ -320,7 +364,9 @@ export function createGateway (options) {
     // own wording would reproduce the very error the load was meant to resolve.
     let replayBody = buffered;
     const canonical = typeof loadedId === 'string' && loadedId ? loadedId : target.variantId;
-    // `requested` is trimmed for resolution; the buffered body's model may still differ.
+    if (canonical && canonical !== target.variantId && !setActivityModel(canonical)) {
+      return respondUnloading(req, res, canonical);
+    }
     if (canonical) {
       const rewritten = rewriteModelName(buffered, canonical);
       if (rewritten !== null) {
@@ -328,9 +374,6 @@ export function createGateway (options) {
         rewrites.set(rewriteKey(requested), canonical);
         log('info', `Gateway routing ${requested} → ${canonical}`);
       }
-    }
-    if (!rebook(replayBody === buffered ? requested : canonical)) {
-      return respondActivityConflict(res);
     }
 
     // captureNotLoaded: false — the retry already happened, so a second rejection is the
@@ -355,6 +398,21 @@ export function createGateway (options) {
       maxBytes: bufferedBodyLimit,
     }) && autoloadAllowedFor(req);
 
+    const contentType = Array.isArray(req.headers['content-type'])
+      ? req.headers['content-type'][0]
+      : req.headers['content-type'];
+    if (
+      !wanted
+      && classifyGatewayRoute(req.url) === 'speech'
+      && typeof contentType === 'string'
+      && /^multipart\/form-data(?:;|$)/i.test(contentType)
+    ) {
+      return peekMultipartModel(req).then(model => {
+        if (model === ABORTED) return ABORTED;
+        req[multipartModel] = model;
+        return null;
+      });
+    }
     if (!wanted) return Promise.resolve(null);
 
     return new Promise(resolve2 => {
@@ -376,6 +434,7 @@ export function createGateway (options) {
             res.writeHead(413, { 'content-type': 'application/json', connection: 'close' });
             res.end(openAiError('Request body too large.', 'invalid_request_error'));
           }
+
           req.resume(); // drain rather than stall; the close header bounds how much arrives
           finish(ABORTED);
           return;
@@ -385,6 +444,63 @@ export function createGateway (options) {
       req.on('end', () => finish(Buffer.concat(chunks).toString('utf8')));
       req.on('error', () => finish(ABORTED));
       req.on('aborted', () => finish(ABORTED));
+    });
+  }
+
+  /**
+   * Peek only the leading multipart field so we can lease known speech work without buffering
+   * or replaying the audio upload. Flint's own probe writes `model` first; requests whose first
+   * part is anything else remain opaque pass-through traffic.
+   */
+  function peekMultipartModel (req) {
+    const contentType = Array.isArray(req.headers['content-type'])
+      ? req.headers['content-type'][0]
+      : req.headers['content-type'];
+    const boundaryMatch = typeof contentType === 'string'
+      ? /(?:^|;)\s*boundary\s*=\s*(?:"([^"]+)"|([^;\s]+))/i.exec(contentType)
+      : null;
+    const boundary = boundaryMatch?.[1] || boundaryMatch?.[2];
+    if (!boundary) return Promise.resolve(null);
+
+    return new Promise(resolve2 => {
+      const chunks = [];
+      let size = 0;
+      let settled = false;
+      const finish = model => {
+        if (settled) return;
+        settled = true;
+        req.off('data', onData);
+        req.off('error', onAbort);
+        req.off('aborted', onAbort);
+        req.off('end', onEnd);
+        req.pause();
+        req[multipartPrefix] = Buffer.concat(chunks);
+        resolve2(model);
+      };
+      const onEnd = () => {
+        req[multipartEnded] = true;
+        finish(null);
+      };
+      const onAbort = () => finish(ABORTED);
+      const onData = chunk => {
+        req.pause();
+        chunks.push(chunk);
+        size += chunk.length;
+        const model = extractLeadingMultipartModel(
+          Buffer.concat(chunks).toString('latin1'),
+          boundary,
+        );
+        if (model !== undefined || size >= MULTIPART_MODEL_PEEK_BYTES) {
+          finish(model ?? null);
+          return;
+        }
+        req.resume();
+      };
+      req.on('data', onData);
+      req.once('error', onAbort);
+      req.once('aborted', onAbort);
+      req.once('end', onEnd);
+      req.resume();
     });
   }
 
@@ -565,8 +681,15 @@ export function createGateway (options) {
         }));
       });
 
-      if (buffered !== null) upstream.end(buffered);
-      else pipeline(req, upstream, () => {});
+      if (buffered !== null) {
+        upstream.end(buffered);
+      } else if (req[multipartPrefix]) {
+        upstream.write(req[multipartPrefix]);
+        if (req[multipartEnded]) upstream.end();
+        else pipeline(req, upstream, () => {});
+      } else {
+        pipeline(req, upstream, () => {});
+      }
     });
   }
 

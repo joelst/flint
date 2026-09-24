@@ -30,6 +30,7 @@
     loadModel as sdkLoadModel,
     getSidecarGeneration,
     unloadModel as sdkUnloadModel,
+    unloadModelIfIdle as sdkUnloadModelIfIdle,
     deleteModel as sdkDeleteModel,
     chatCompletion,
     chatCompletionStream,
@@ -168,12 +169,19 @@
     isEmptyAssistantPlaceholder,
   } from "$lib/chat-request";
   import {
+    catalogModelForEndpointId,
     flintVerifiedFromReport,
-    matchesVerifiedModel,
+    groupSelfTestChecks,
     runEndpointSelfTest,
     type FlintVerified,
     type SelfTestReport,
   } from "$lib/endpoint-self-test";
+  import { buildEndpointModelClassifier } from "$lib/endpoint-model-classification";
+  import { endpointLoadTarget } from "$lib/endpoint-load-target";
+  import {
+    createSelfTestResidencyController,
+    preferredResidentChatAlias,
+  } from "$lib/endpoint-self-test-residency";
   import {
     COMPARE_HISTORY_MAX,
     COMPARE_MAX_SLOTS,
@@ -266,9 +274,6 @@
     } finally {
       if (statusMessage === catalogProgressMessage) statusMessage = "";
     }
-    // state.models is empty until this returns. Checking earlier always no-ops, and
-    // auto-select will not replace a leftover alias. A conversation's own model stays
-    // so the not-installed explanation is not swapped for another model.
     if (
       selectedModelAlias &&
       selectedModelAlias !== activeConversationModelAlias() &&
@@ -333,32 +338,82 @@
 
   async function runGatewaySelfTest() {
     if (endpointSelfTestBusy) return;
+    if (state.models.length === 0) {
+      statusMessage = "Refresh the catalog before testing the endpoint.";
+      return;
+    }
     if (benchmarkRunInFlight) {
       statusMessage = "A benchmark run is active — stop it before changing loaded models.";
       return;
     }
+    // The Arena loads and unloads compare slots against the same pool; see runComparison.
+    if (isComparing || comparePreparing) {
+      statusMessage = "An Arena run is active — wait for it before testing the endpoint.";
+      return;
+    }
+    // The run snapshots the pool and later puts it back. A load or unload already in flight
+    // would land after that snapshot and be mistaken for the run's own work.
+    if (poolMutationsInFlight > 0) {
+      statusMessage = "A model is still loading or unloading — wait for it before testing the endpoint.";
+      return;
+    }
     endpointSelfTestBusy = true;
     try {
-      const catalogModel = state.models.find((m: ModelInfo) => m.alias === selectedModelAlias);
-      const embeddingCatalog = state.models.find((m: ModelInfo) => {
-        const blob = [m.alias, (m as any).task, (m as any).info?.task].filter(Boolean).join(' ');
-        return /embed/i.test(blob);
+      await pollPoolStatus();
+      const catalogModels = [...state.models];
+      const initialPool = [...loadedPoolEntries];
+      const classifyModel = buildEndpointModelClassifier(catalogModels);
+      const residency = createSelfTestResidencyController({
+        models: catalogModels,
+        initialPool,
+        currentPool: async () => {
+          await pollPoolStatus();
+          return [...loadedPoolEntries];
+        },
+        load: async (model, variantId) => {
+          await sdkLoadModel(model, undefined, variantId);
+        },
+        unload: async (alias) => {
+          await sdkUnloadModelIfIdle({ alias });
+        },
       });
-      const chatAlias = selectedModelAlias && !/embed/i.test(selectedModelAlias) ? selectedModelAlias : null;
       endpointSelfTestReport = await runEndpointSelfTest({
         fetch,
         endpoint: state.endpoint || null,
-        modelId: chatAlias,
-        embeddingModelId: embeddingCatalog?.alias || null,
-        catalogSupportsToolCalling: catalogModel?.supportsToolCalling ?? null,
+        classifyModel,
+        disconnectModelId: preferredResidentChatAlias(initialPool, classifyModel),
+        supportsToolCalling: (modelId: string) =>
+          catalogModelForEndpointId(catalogModels, modelId)?.supportsToolCalling ?? null,
+        prepareSpeechModel: async (modelId: string) => {
+          // The same cached build the gateway routes this id to: highest cached version for
+          // a versionless id, never an uncached one.
+          const target = endpointLoadTarget(catalogModels, modelId);
+          if (!target) throw new Error(`Cached speech model ${modelId} is unavailable.`);
+          const loaded = await sdkLoadModel(target.model, undefined, target.variantId ?? undefined);
+          if (typeof loaded?.variantId !== "string" || !loaded.variantId) {
+            throw new Error(`Cached speech model ${modelId} did not report a loaded variant.`);
+          }
+          return loaded.variantId;
+        },
+        beforeModelProbe: residency.observe,
+        afterModelProbe: residency.restore,
+        onProgress: (event) => {
+          statusMessage = `Testing ${event.modelId} (${event.index + 1} of ${event.total})…`;
+        },
       });
       lastFlintVerified = flintVerifiedFromReport(endpointSelfTestReport);
     } catch (error) {
+      // The run said nothing about the endpoint, so an earlier run's badge must not stand in
+      // for it: the details view would show models as verified beside a failed run.
+      lastFlintVerified = null;
       endpointSelfTestReport = {
         ranAt: new Date().toISOString(),
         endpoint: state.endpoint || null,
         modelId: selectedModelAlias || null,
+        modelIds: [],
         embeddingModelId: null,
+        embeddingModelIds: [],
+        speechModelIds: [],
         checks: [{
           id: "run",
           title: "Self-test runner",
@@ -367,6 +422,9 @@
         }],
       };
     } finally {
+      // The run loaded and unloaded models on its way through; show the pool as it is now
+      // rather than as the last poll before the run saw it.
+      await pollPoolStatus().catch(() => {});
       endpointSelfTestBusy = false;
     }
   }
@@ -876,8 +934,8 @@
   let benchmarkRunError = $state<string | null>(null);
 
   /** Thin wrapper around the pure `computeResidentCapFloor`, supplying this page's live
-   * `loadedPoolEntries`/`modelPriorities`. See that function's docstring for why it must be called
-   * fresh on every push rather than cached. */
+   * filtered resident pool entries and `modelPriorities`. See that function's docstring for why
+   * it must be called fresh on every push rather than cached. */
   function residentCapFloorFor(ownAliases: readonly string[]): number {
     return computeResidentCapFloor(loadedPoolEntries, modelPriorities, ownAliases);
   }
@@ -1176,7 +1234,7 @@
   const otherInferenceActiveForUi = $derived(isStreaming || isDictating || dictationTranscribing || isTranscribing || isSummarizing || endpointSelfTestBusy);
 
   /** Counts explicit model-mutating operations (load/unload/delete/variant-switch/STT-load) and
-   * model downloads in flight from Models/Monitor/chat-model-switch. `blockedByActiveBenchmark()`
+   * model downloads in flight from Models/Monitor/chat-model-switch. `blockedByExclusivePoolRun()`
    * only blocks a
    * *new* mutation from starting once `benchmarkRunInFlight` is already true; it does nothing
    * about a mutation that started the instant before — e.g. the user clicks "Load" (admission
@@ -1191,7 +1249,7 @@
   /** Wraps a model-mutating operation, or a model download, with the fence above: call at the
    * top of every Models/Monitor/chat-model-switch function that directly loads, unloads,
    * deletes, variant-switches, or downloads a pool entry, immediately after its own
-   * `blockedByActiveBenchmark()` check (that check keeps a *new* mutation from starting once a
+   * `blockedByExclusivePoolRun()` check (that check keeps a *new* mutation from starting once a
    * benchmark is already running; this fence is what a benchmark's own admission check reads to
    * catch one already in flight). */
   function beginPoolMutation(): () => void {
@@ -1638,7 +1696,7 @@
     state.models.filter((m: any) => m.isLoaded && modelSupportsChat(m)),
   );
 
-  /** Resident or last-known resident models, excluding confirmed native eviction. */
+  /** All models currently in the runtime pool (alias + exact variant). */
   const loadedPoolEntries = $derived(
     (state.pool || []).filter((entry) => entry?.alias && isPoolEntryResident(entry)),
   );
@@ -2688,7 +2746,7 @@
    * is first installed) makes it a standing invariant of every push for as long as a benchmark
    * holds the lease, not a one-time snapshot. The resident cap floor (via `residentCapFloorFor`/
    * `overlayResidentCapFloor`) gets the same treatment and for the same reason, and goes further:
-   * it is *recomputed fresh from live `loadedPoolEntries`/`modelPriorities` on every push* rather than
+   * it is *recomputed fresh from live filtered resident entries/`modelPriorities` on every push* rather than
    * cached from whenever the lease was installed, so a priority edit made mid-run — e.g. the user
    * pinning another already-resident alias from Monitor/Settings while a later target is still
    * loading — raises the floor in time for the very next push instead of leaving a stale,
@@ -3305,7 +3363,7 @@ function selectBindAddress(next: string) {
   }
 
   async function applyNetworkSettings() {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return;
@@ -3449,7 +3507,7 @@ updateStateFromSdk();
     // path clears its whole in-memory pool before the new listener comes up. That would wipe
     // out a benchmark run's pinned/loaded targets, so this is a pool mutation in its own right
     // — not just a convenience for the caller's own model.
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return { result: "failed", error: new Error(blocked) };
@@ -3495,8 +3553,10 @@ updateStateFromSdk();
     preferredEp?: string,
     opts?: { convenience?: boolean },
   ): Promise<string | undefined> {
-    // Either branch may load a fresh alias, so both must be fenced against an active benchmark.
-    const blocked = blockedByActiveBenchmark();
+    // Both branches below can mutate the pool: a not-yet-running service is (re)started (which
+    // clears the sidecar's resident set), and an already-running one may still get a fresh
+    // `alias` loaded into it. Either must be fenced against an active benchmark run.
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       throw new Error(blocked);
@@ -3683,7 +3743,7 @@ updateStateFromSdk();
   /** Monitor's Unload button — guarded the same as the Models tab's unload/delete actions so a
    * benchmark run's pinned target can't be unloaded from here either. */
   async function unloadFromMonitor(alias: string) {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return;
@@ -4343,9 +4403,11 @@ updateStateFromSdk();
     if (compareSlots.length < 2 || !comparePrompt.trim() || isComparing || comparePreparing) return;
     // See startBenchmarkPreviewRun: a benchmark run pins and dispatches against the same
     // alias-keyed pool this loads/unloads explicitly (in one-at-a-time mode), so the two
-    // features must never run concurrently in either direction.
-    if (benchmarkRunInFlight) {
-      statusMessage = "A benchmark run is active — stop it before running the Arena.";
+    // features must never run concurrently in either direction. The endpoint self-test
+    // loads and restores pool entries too, and holds the same fence.
+    const blocked = blockedByExclusivePoolRun();
+    if (blocked) {
+      statusMessage = blocked;
       return;
     }
 
@@ -4886,10 +4948,10 @@ updateStateFromSdk();
     const ok = await initializeSDK({
       appName: "flint",
       // Hydrated runtime policy and accelerator registration must land before HTTP startup or
-      // any catalog read or model preload. The native catalog is fixed on first access, so reading
-      // it before provider registration permanently omits those provider-specific variants.
+      // any model preload. Autostart is performed below after those prerequisites complete.
       autoStartService: false,
       refreshCatalog: false,
+      deferCatalogRead: !autoRefreshCatalogOnStartup,
       servicePort: networkPort,
       bindAddress: networkBindAddress || undefined,
     });
@@ -4947,6 +5009,25 @@ updateStateFromSdk();
         );
       }
 
+      // A restored alias for a model that is no longer in the catalog would otherwise pin the
+      // selection forever, because the auto-select effect bails out whenever an alias is set.
+      //
+      // Not applied to an alias the active conversation asked for explicitly. That is a stored
+      // choice rather than a stale global fallback, so clearing it would replace the "not
+      // installed" explanation with a silently auto-selected substitute — and the conversation
+      // would still be storing the model it is no longer shown as using. Read live rather than
+      // from the startup snapshot, because the user may already have switched conversations.
+      if (
+        selectedModelAlias &&
+        selectedModelAlias !== activeConversationModelAlias() &&
+        state.models.length > 0 &&
+        !state.models.some((m: ModelInfo) => m.alias === selectedModelAlias)
+      ) {
+        appendAppLog(`Previously selected model "${selectedModelAlias}" is no longer available`, 'warn');
+        selectedModelAlias = "";
+        selectedModel = null;
+      }
+
       let acceleratorReadiness: AcceleratorReadiness;
       let acceleratorRestartGuidance = "";
       try {
@@ -5002,7 +5083,6 @@ updateStateFromSdk();
         }
         if (autoRefreshCatalogOnStartup) {
           await refreshCatalogModels();
-          statusMessage = `${state.models.length} models available`;
           if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
             throw new Error("Runtime changed while refreshing the model catalog");
           }
@@ -5023,9 +5103,6 @@ updateStateFromSdk();
         appendAppLog(statusMessage, "error");
         return;
       } finally {
-        // Initialization deliberately suppresses its own catalog read until providers are ready.
-        // Recovery after this point must use the hydrated user policy, not that bootstrap
-        // override — including when startup failed, since recovery still runs afterwards.
         setAutomaticCatalogRefreshEnabled(autoRefreshCatalogOnStartup);
       }
       if (!startupAuthorization.isCurrent(startupAuthorizationToken)) return;
@@ -5238,7 +5315,7 @@ updateStateFromSdk();
   }
 
   async function startLocalService() {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return;
@@ -5267,7 +5344,7 @@ updateStateFromSdk();
   }
 
   async function stopLocalService() {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return;
@@ -5292,7 +5369,7 @@ updateStateFromSdk();
   }
 
   async function stopAndUnloadModels() {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return;
@@ -5536,7 +5613,7 @@ updateStateFromSdk();
   // Dedicated path for audio/STT: loads the model in the audio lane without
   // affecting the chat lane or the running chat service endpoint.
   async function useSTTModelForAudio(model: any) {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return;
@@ -5721,7 +5798,7 @@ updateStateFromSdk();
   });
 
   async function downloadAndTrack(model: any) {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       throw new Error(blocked);
@@ -5778,7 +5855,7 @@ updateStateFromSdk();
    * `failed` was simply lost; it is surfaced in the status line instead, where it is read.
    */
   async function loadModelAndMaybeStart(model: any): Promise<ServiceStartAttempt> {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       throw new Error(blocked);
@@ -5849,7 +5926,7 @@ updateStateFromSdk();
     // allowed, but loading a new one would race the benchmark's own load, so it must not proceed
     // — and must not leave selectedModelAlias pointing at a model that was never loaded.
     if (!model.isLoaded) {
-      const blocked = blockedByActiveBenchmark();
+      const blocked = blockedByExclusivePoolRun();
       if (blocked) {
         statusMessage = blocked;
         return;
@@ -5888,15 +5965,19 @@ updateStateFromSdk();
    * globally (not scoped to the run's specific target aliases) to match the coarse-grained
    * benchmark/Arena mutex above — the page doesn't otherwise track per-run target aliases, and
    * per-alias scoping would add a new class of staleness bugs for a feature already accepted as
-   * coarse elsewhere in this PR. */
-  function blockedByActiveBenchmark(): string | null {
-    return benchmarkRunInFlight
-      ? "A benchmark run is active — stop it before changing loaded models."
-      : null;
+   * coarse elsewhere in this PR.
+   *
+   * The endpoint self-test holds the same fence. It loads models through the gateway and
+   * afterwards puts the pool back the way it found it, so a user load or unload in the middle
+   * would be undone by that cleanup, or mistaken for the run's own work. */
+  function blockedByExclusivePoolRun(): string | null {
+    if (benchmarkRunInFlight) return "A benchmark run is active — stop it before changing loaded models.";
+    if (endpointSelfTestBusy) return "The endpoint self-test is running — wait for it before changing loaded models.";
+    return null;
   }
 
   async function unloadModel(model: any) {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return;
@@ -5921,7 +6002,7 @@ updateStateFromSdk();
   }
 
   async function loadVariant(model: any, variantId: string) {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return;
@@ -5947,7 +6028,7 @@ updateStateFromSdk();
       statusMessage = `${model.alias} is not a chat model.`;
       return;
     }
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return;
@@ -5986,7 +6067,7 @@ updateStateFromSdk();
   }
 
   async function downloadVariant(model: any, variantId: string) {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return;
@@ -6018,10 +6099,6 @@ updateStateFromSdk();
     }
   }
 
-  /**
-   * The SDK refreshes live cache and pool state after deletion. A restart flag means a local
-   * catalog row cannot disappear until restart, or that the post-delete refresh itself failed.
-   */
   function handleDeleteResult(
     deleteResult: { catalogRefreshRequiresRestart?: boolean } | undefined,
     successMessage: string,
@@ -6035,7 +6112,7 @@ updateStateFromSdk();
   }
 
   async function deleteVariant(model: any, variantId: string) {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return;
@@ -6060,8 +6137,7 @@ updateStateFromSdk();
         }
         const result = await sdkDeleteModel(model, variantId);
         const deletedMessage = `${model.alias} variant deleted (${label})`;
-        // If no other variants remain cached, clear selection/meta like full delete.
-        // sdkDeleteModel has already refreshed the catalog before it resolves.
+        // If no other variants remain cached, clear selection/meta like full delete
         const refreshed = state.models.find((m: ModelInfo) => m.alias === model.alias);
         const anyCached =
           refreshed?.isCached ||
@@ -6079,6 +6155,7 @@ updateStateFromSdk();
       } finally {
         release();
       }
+
     } catch (e: any) {
       statusMessage = `Delete variant failed: ${e?.message || e}`;
     }
@@ -6114,7 +6191,7 @@ updateStateFromSdk();
   }
 
   async function deleteCachedModel(model: any) {
-    const blocked = blockedByActiveBenchmark();
+    const blocked = blockedByExclusivePoolRun();
     if (blocked) {
       statusMessage = blocked;
       return;
@@ -8453,21 +8530,24 @@ Output only the summary text, no preamble.`;
                         <div>
                           <strong>Flint-verified:</strong>
                           {#if lastFlintVerified}
-                            {@const chatMatch = matchesVerifiedModel(lastFlintVerified.modelId, detailModel.alias)
-                              && lastFlintVerified.modelId !== lastFlintVerified.embeddingModelId}
-                            {@const embedMatch = !!(lastFlintVerified.embeddingModelId
-                              && matchesVerifiedModel(lastFlintVerified.embeddingModelId, detailModel.alias))}
-                            {#if chatMatch || embedMatch}
-                              {#if chatMatch}
-                                chat {lastFlintVerified.chat ? "yes" : "no"} ·
-                                stream {lastFlintVerified.stream ? "yes" : "no"} ·
-                                tools {lastFlintVerified.tools}
-                              {/if}
-                              {#if chatMatch && embedMatch} · {/if}
-                              {#if embedMatch}
-                                embeddings {lastFlintVerified.embeddings ? "yes" : "no"}
-                              {/if}
-                              <span class="muted small"> · {new Date(lastFlintVerified.ranAt).toLocaleString()}</span>
+                            {@const verifiedRows = (lastFlintVerified.aliases ?? []).filter((row) =>
+                              catalogModelForEndpointId(state.models, row.modelId)?.alias === detailModel.alias)}
+                            {#if verifiedRows.length}
+                              {#each verifiedRows as row}
+                                <div>
+                                  {row.modelId}:
+                                  {#if row.kind === "embed"}
+                                    embeddings {row.embeddings ? "yes" : "no"}
+                                  {:else if row.kind === "speech"}
+                                    speech {row.speech ? "yes" : "no"}
+                                  {:else}
+                                    chat {row.chat ? "yes" : "no"} ·
+                                    stream {row.stream ? "yes" : "no"} ·
+                                    tools {row.tools}
+                                  {/if}
+                                </div>
+                              {/each}
+                              <span class="muted small">{new Date(lastFlintVerified.ranAt).toLocaleString()}</span>
                             {:else}
                               Not verified in this session — Diagnostics → Test local endpoint
                             {/if}
@@ -9209,21 +9289,23 @@ Output only the summary text, no preamble.`;
                   {#if endpointSelfTestReport.endpoint}
                     · {endpointSelfTestReport.endpoint}
                   {/if}
-                  {#if endpointSelfTestReport.modelId}
-                    · {endpointSelfTestReport.modelId}
-                  {/if}
-                  {#if endpointSelfTestReport.embeddingModelId}
-                    · embed {endpointSelfTestReport.embeddingModelId}
+                  {#if (endpointSelfTestReport.modelIds?.length ?? 0) + (endpointSelfTestReport.embeddingModelIds?.length ?? 0) + (endpointSelfTestReport.speechModelIds?.length ?? 0) > 0}
+                    · {(endpointSelfTestReport.modelIds?.length ?? 0) + (endpointSelfTestReport.embeddingModelIds?.length ?? 0) + (endpointSelfTestReport.speechModelIds?.length ?? 0)} aliases
                   {/if}
                 </p>
-                <ul class="diagnostic-list">
-                  {#each endpointSelfTestReport.checks as item}
-                    <li>
-                      {item.status === "pass" ? "✓" : item.status === "blocked" ? "•" : "✗"}
-                      {item.title}: {item.detail}
-                    </li>
-                  {/each}
-                </ul>
+                {#each groupSelfTestChecks(endpointSelfTestReport.checks) as group}
+                  {#if group.modelId}
+                    <p class="setting-note">{group.modelId}</p>
+                  {/if}
+                  <ul class="diagnostic-list">
+                    {#each group.checks as item}
+                      <li>
+                        {item.status === "pass" ? "✓" : item.status === "blocked" ? "•" : "✗"}
+                        {item.title}: {item.detail}
+                      </li>
+                    {/each}
+                  </ul>
+                {/each}
               </div>
             {/if}
             {#if state.endpoint}
@@ -9266,7 +9348,11 @@ Output only the summary text, no preamble.`;
               <button onclick={copyDiagnosticsToClipboard}>
                 Copy All Diagnostics
               </button>
-              <button onclick={runGatewaySelfTest} disabled={endpointSelfTestBusy || benchmarkRunInFlight}>
+              <button
+                onclick={runGatewaySelfTest}
+                disabled={endpointSelfTestBusy || benchmarkRunInFlight || state.models.length === 0}
+                title={state.models.length === 0 ? "Refresh the catalog before testing the endpoint." : undefined}
+              >
                 {endpointSelfTestBusy ? "Testing endpoint…" : "Test local endpoint"}
               </button>
               <button onclick={scanCacheInventory} disabled={!state.ready || cacheInventoryLoading}>
@@ -10208,7 +10294,7 @@ Output only the summary text, no preamble.`;
                             class="tiny"
                             disabled={isComparing || comparePreparing || benchmarkRunInFlight}
                             onclick={async () => {
-                              const blocked = blockedByActiveBenchmark();
+                              const blocked = blockedByExclusivePoolRun();
                               if (blocked) {
                                 statusMessage = blocked;
                                 return;

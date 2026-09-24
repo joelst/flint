@@ -42,15 +42,16 @@ describe('model activity fence', () => {
     release();
     release();
     expect(gate.allows('model-a')).toBe(true);
-    expect(gate.start('model-a')).toBe(true);
+    expect(gate.start('model-a')).toBeTypeOf('string');
   });
 
   it('refuses a fence while a request named for the alias is in flight', () => {
     const { gate } = createLedger();
 
-    expect(gate.start('model-a')).toBe(true);
+    const booking = gate.start('model-a');
+    expect(booking).toBeTypeOf('string');
     expect(gate.tryAcquire('model-a')).toBeNull();
-    gate.end('model-a');
+    gate.end(booking);
     expect(gate.tryAcquire('model-a')).toBeTypeOf('function');
   });
 
@@ -58,9 +59,9 @@ describe('model activity fence', () => {
     const { gate, pool } = createLedger();
     pool.set('model-a', 'model-a-cpu:1');
 
-    gate.start('model-a-cpu:1');
-    gate.start('model-a-cpu');
-    gate.start('MODEL-A');
+    expect(gate.start('model-a-cpu:1')).toBeTypeOf('string');
+    expect(gate.start('model-a-cpu')).toBeTypeOf('string');
+    expect(gate.start('MODEL-A')).toBeTypeOf('string');
     expect(gate.inFlightFor('model-a')).toBe(3);
     expect(gate.tryAcquire('model-a')).toBeNull();
   });
@@ -71,7 +72,7 @@ describe('model activity fence', () => {
     const { gate, pool } = createLedger({ index: { 'model-a-gpu:1': 'model-a' } });
     pool.set('model-a', 'model-a-cpu:1');
 
-    expect(gate.start('model-a-gpu:1')).toBe(true);
+    expect(gate.start('model-a-gpu:1')).toBeTypeOf('string');
     expect(gate.inFlightFor('model-a')).toBe(0);
 
     pool.set('model-a', 'model-a-gpu:1');
@@ -83,15 +84,54 @@ describe('model activity fence', () => {
     // after its model became resident; it must release its own booking, not the alias one.
     const { gate, pool } = createLedger();
 
-    gate.start('model-a-cpu:1');
-    gate.start('model-a');
+    const variantBooking = gate.start('model-a-cpu:1');
+    const aliasBooking = gate.start('model-a');
+    expect(variantBooking).toBeTypeOf('string');
+    expect(aliasBooking).toBeTypeOf('string');
     pool.set('model-a', 'model-a-cpu:1');
-    gate.end('model-a-cpu:1');
+    gate.end(variantBooking);
 
     expect(gate.inFlightFor('model-a')).toBe(1);
-    gate.end('model-a');
+    gate.end(aliasBooking);
     expect(gate.inFlightFor('model-a')).toBe(0);
     expect(gate.tryAcquire('model-a')).toBeTypeOf('function');
+  });
+
+  it('does not count a lazy-index versionless switch against the resident build', () => {
+    const pool = new Map([['model-a', 'model-a-cpu:3']]);
+    const gate = createModelActivityFence({
+      residentAliasFor: (name) => pool.has('model-a') && name.toLowerCase().includes('model-a-cpu')
+        ? 'model-a'
+        : null,
+      residentVariantFor: (alias) => pool.get(alias) ?? null,
+      catalogAliasFor: () => 'model-a',
+      catalogResolutionFor: () => ({ alias: 'model-a', variantId: 'model-a-cpu:4' }),
+    });
+    const booking = gate.start('model-a-cpu', { deferResidentAlias: true });
+    expect(booking).toBeTypeOf('string');
+    expect(gate.inFlightFor('model-a')).toBe(0);
+    pool.set('model-a', 'model-a-cpu:4');
+    expect(gate.inFlightFor('model-a')).toBe(1);
+    gate.end(booking);
+  });
+
+  it('keeps an exact resident booking counted when catalog resolution is unavailable', () => {
+    const pool = new Map([['model-a', 'model-a-cpu:4']]);
+    const gate = createModelActivityFence({
+      residentAliasFor: (name) => pool.has('model-a')
+        && name.toLowerCase() === 'model-a-cpu:4'
+        ? 'model-a'
+        : null,
+      residentVariantFor: (alias) => pool.get(alias) ?? null,
+      catalogAliasFor: () => null,
+      catalogResolutionFor: () => null,
+    });
+
+    const booking = gate.start('model-a-cpu:4', { deferResidentAlias: true });
+    expect(booking).toBeTypeOf('string');
+    expect(gate.inFlightFor('model-a')).toBe(1);
+
+    gate.end(booking);
   });
 
   it('admits unrelated unresolved models while another alias is fenced', () => {
@@ -99,7 +139,7 @@ describe('model activity fence', () => {
 
     const release = gate.tryAcquire('model-a');
     expect(gate.allows('unknown-variant:1')).toBe(true);
-    expect(gate.start('unknown-variant:1')).toBe(true);
+    expect(gate.start('unknown-variant:1')).toBeTypeOf('string');
     expect(gate.inFlightFor('model-a')).toBe(0);
     release();
   });
@@ -131,10 +171,12 @@ describe('model activity fence', () => {
     expect(gate.start(undefined)).toBe(false);
     expect(gate.inFlightFor('')).toBe(0);
     gate.end('never-started');
-    gate.start('model-a');
-    gate.end('model-a');
-    gate.end('model-a');
-    gate.start('model-a');
+    const booking = gate.start('model-a');
+    expect(booking).toBeTypeOf('string');
+    gate.end(booking);
+    gate.end(booking);
+    const secondBooking = gate.start('model-a');
+    expect(secondBooking).toBeTypeOf('string');
     expect(gate.inFlightFor('model-a')).toBe(1);
     expect(() => gate.tryAcquire('  ')).toThrow(TypeError);
   });
@@ -159,7 +201,7 @@ describe('model activity fence', () => {
     const audioEnd = source.indexOf("} else if (cmd === 'poolStatus') {", audioStart);
     const audioFlow = source.slice(audioStart, audioEnd);
 
-    expect(unloadFlow).toContain('withModelActivityFence(alias');
+    expect(unloadFlow).toContain('tryBeginIdleUnload(alias)');
     expect(deleteFlow).toContain('modelActivityFence.tryAcquire(payload.alias)');
     expect(sweepFlow).toContain('withModelActivityFence(');
     expect(switchFlow).toContain('modelActivityFence.tryAcquire(alias)');

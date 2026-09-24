@@ -25,11 +25,19 @@
 //
 // Pure module: no SDK calls and no I/O, so the mapping rules are unit testable.
 
-/** Variant ids carry a `:<version>` suffix that the /v1/models listing strips. */
+/**
+ * Variant ids carry a `:<version>` suffix that the /v1/models listing strips.
+ * @param {unknown} id
+ * @returns {string}
+ */
 export function stripVersion (id) {
   return String(id || '').replace(/:\d+$/, '');
 }
 
+/**
+ * @param {{info?: {uri?: unknown}}|null|undefined} entry
+ * @returns {boolean}
+ */
 export function isLocalCatalogEntry (entry) {
   return typeof entry?.info?.uri === 'string' && entry.info.uri.startsWith('local://');
 }
@@ -38,6 +46,10 @@ export function isLocalCatalogEntry (entry) {
  * Whether an SDK model or variant has its build in the local cache. The same predicate admits
  * a variant into the index and re-validates an autoload target, so the two cannot disagree.
  * The native getter can throw; the info snapshot is the fallback.
+ */
+/**
+ * @param {{isCached?: boolean, info?: {cached?: boolean}}|null|undefined} model
+ * @returns {boolean}
  */
 export function isCachedModel (model) {
   try {
@@ -121,11 +133,17 @@ export function buildCachedModelIndex (models) {
 }
 
 /** Index keys ignore case; the values keep the catalog's own spelling. */
+/** @param {unknown} name */
 function indexKey (name) {
   return String(name || '').trim().toLowerCase();
 }
 
-/** Compare the trailing `:<version>` of two variant ids. Missing sorts lowest. */
+/**
+ * Compare the trailing `:<version>` of two variant ids. Missing sorts lowest.
+ * @param {string|null|undefined} a
+ * @param {string|null|undefined} b
+ * @returns {number}
+ */
 function compareVersions (a, b) {
   const va = Number(String(a || '').match(/:(\d+)$/)?.[1] ?? -1);
   const vb = Number(String(b || '').match(/:(\d+)$/)?.[1] ?? -1);

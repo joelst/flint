@@ -14,7 +14,12 @@
  * lists. If it later autoloads, the load serializes behind the operation on the alias's
  * residency scope and must re-validate its target there.
  */
-export function createModelActivityFence({ residentAliasFor, catalogAliasFor }) {
+export function createModelActivityFence({
+  residentAliasFor,
+  residentVariantFor,
+  catalogAliasFor,
+  catalogResolutionFor,
+}) {
   if (typeof residentAliasFor !== 'function' || typeof catalogAliasFor !== 'function') {
     throw new TypeError('model activity fence requires resident and catalog alias resolution');
   }
@@ -27,8 +32,37 @@ export function createModelActivityFence({ residentAliasFor, catalogAliasFor }) 
     const target = keyOf(alias);
     if (!target) return 0;
     let count = 0;
-    for (const [name, requests] of active) {
-      if (name === target || keyOf(residentAliasFor(name)) === target) count += requests;
+    for (const [name, booking] of active) {
+      if (name === target) {
+        count += booking.count;
+        continue;
+      }
+      if (keyOf(residentAliasFor(name)) !== target) continue;
+      let residentCount = booking.count;
+      if (booking.deferredCount > 0 && typeof residentVariantFor === 'function') {
+        const resolution = typeof catalogResolutionFor === 'function'
+          ? catalogResolutionFor(name)
+          : null;
+        const residentVariant = residentVariantFor(target);
+        const exactResidentVariant = residentVariant
+          && keyOf(name) === keyOf(residentVariant);
+        if (
+          !exactResidentVariant
+          && (
+            !resolution
+            || (
+              resolution.alias
+              && keyOf(resolution.alias) === target
+              && resolution.variantId
+              && residentVariant
+              && keyOf(resolution.variantId) !== keyOf(residentVariant)
+            )
+          )
+        ) {
+          residentCount -= booking.deferredCount;
+        }
+      }
+      count += Math.max(0, residentCount);
     }
     return count;
   }
@@ -44,17 +78,23 @@ export function createModelActivityFence({ residentAliasFor, catalogAliasFor }) 
   return {
     allows,
     inFlightFor,
-    /** Books one request. Returns false, booking nothing, when a fence excludes it. */
-    start(modelName) {
+    /** Books one request. Returns its exact token, or false when a fence excludes it. */
+    start(modelName, { deferResidentAlias = false } = {}) {
       const key = keyOf(modelName);
       if (!key || !allows(modelName)) return false;
-      active.set(key, (active.get(key) ?? 0) + 1);
-      return true;
+      const booking = active.get(key) ?? { count: 0, deferredCount: 0 };
+      booking.count += 1;
+      if (deferResidentAlias) booking.deferredCount += 1;
+      active.set(key, booking);
+      return key;
     },
-    end(modelName) {
-      const key = keyOf(modelName);
-      const remaining = (active.get(key) ?? 0) - 1;
-      if (remaining > 0) active.set(key, remaining);
+    end(token) {
+      const key = keyOf(token);
+      const booking = active.get(key);
+      if (!booking) return;
+      booking.count -= 1;
+      if (booking.deferredCount > booking.count) booking.deferredCount = booking.count;
+      if (booking.count > 0) active.set(key, booking);
       else active.delete(key);
     },
     tryAcquire(alias) {

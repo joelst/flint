@@ -31,6 +31,7 @@ import {
   isLocalCatalogEntry,
   resolveModelId,
 } from './model-registry.js';
+import { activityCandidateKeys } from './activity-booking.js';
 import { waitUntilIdle } from './monotonic-wait.js';
 import {
   createOperationAdmission,
@@ -197,7 +198,7 @@ const FIELD_TYPES = {
   shutdownRuntime:   { drainTimeoutMs: 'number' },
   download:          { alias: 'non-empty-string', variantId: 'non-empty-string' },
   load:              { alias: 'non-empty-string', variantId: 'non-empty-string' },
-  unload:            { alias: 'non-empty-string' },
+  unload:            { alias: 'non-empty-string', ifIdle: 'boolean' },
   deleteModel:       { alias: 'non-empty-string', variantId: 'non-empty-string' },
   chatCompletion:    { model: 'non-empty-string', messages: 'array' },
   cancelChatRequest: { requestId: 'number' },
@@ -237,7 +238,7 @@ const COMMAND_SCHEMA = {
   listModels:         { required: [], optional: [] },
   download:           { required: ['alias'], optional: ['variantId'] },
   load:               { required: ['alias'], optional: ['lane', 'variantId'] },
-  unload:             { required: ['alias'], optional: ['lane'] },
+  unload:             { required: ['alias'], optional: ['lane', 'ifIdle'] },
   deleteModel:        { required: ['alias'], optional: ['variantId'] },
   getEndpoint:        { required: [], optional: [] },
   chatCompletion:     { required: ['model', 'messages'], optional: ['maxTokens', 'temperature', 'preferredEp', 'stream'] },
@@ -593,20 +594,44 @@ function aliasForModelName (name) {
 
 const modelActivityFence = createModelActivityFence({
   residentAliasFor: aliasForModelName,
+  residentVariantFor: (alias) => pool.get(alias)?.variantId || null,
   catalogAliasFor: (modelName) => (modelIndex ? resolveModelId(modelIndex, modelName)?.alias : null),
+  catalogResolutionFor: (modelName) => (modelIndex ? resolveModelId(modelIndex, modelName) : null),
 });
 
 /**
  * Marks a model busy for the life of a request so eviction cannot unload it mid-flight.
- * A start refused by a destructive fence books nothing and returns false.
+ * A start refused by a destructive fence books nothing and returns false. A successful start
+ * returns the exact normalized booking token that must be supplied to the matching end.
  */
-function noteActivity (modelName, phase) {
+function noteActivity (modelName, phase, booking) {
   if (phase === 'start') {
-    if (!modelActivityFence.start(modelName)) return false;
+    // modelActivityFence replaces activityFences.has(candidate.toLowerCase()) while preserving
+    // the same alias-aware refusal semantics for variant and catalog names.
+    const residentAlias = aliasForModelName(modelName);
+    const resolution = modelIndex ? resolveModelId(modelIndex, modelName) : null;
+    const occupantAlias = residentAlias || (pool.has(resolution?.alias) ? resolution.alias : null);
+    const occupant = occupantAlias ? pool.get(occupantAlias) : null;
+    const candidates = activityCandidateKeys({
+      requested: modelName,
+      matchedResidentAlias: residentAlias,
+      occupantAlias,
+      occupantVariantId: occupant?.variantId || null,
+      modelIndexAvailable: !!modelIndex,
+      resolvedAlias: resolution?.alias || null,
+      resolvedVariantId: resolution?.variantId || null,
+    });
+    const key = candidates[0] || modelName;
+    const token = modelActivityFence.start(key, {
+      deferResidentAlias: candidates.length > 1 && key !== candidates[1],
+    });
+    if (token === false) return false;
+    touchModel(aliasForModelName(modelName));
+    return token;
   } else {
-    modelActivityFence.end(modelName);
+    modelActivityFence.end(booking ?? modelName);
+    touchModel(aliasForModelName(booking ?? modelName));
   }
-  touchModel(aliasForModelName(modelName));
   return true;
 }
 
@@ -630,6 +655,10 @@ function stopGatewayAccepting () {
 /** Requests served by `alias`'s resident build. Every destructive decision must use this. */
 function inFlightFor (alias) {
   return modelActivityFence.inFlightFor(alias);
+}
+
+function tryBeginIdleUnload (alias) {
+  return modelActivityFence.tryAcquire(alias);
 }
 
 function poolEntriesForEviction () {
@@ -2702,22 +2731,29 @@ rl.on('line', async (line) => {
     } else if (cmd === 'unload') {
       const alias = payload.alias;
       await serializeModelOperation(alias, ['residency'], async () => {
-        const fenced = await withModelActivityFence(alias, () => unloadAliasLocked(alias));
-        if (!fenced) {
-          throw new Error(`Cannot unload ${alias} while requests are in flight. Retry once they finish.`);
-        }
-        if (fenced.result) {
-          log('info', `Model ${alias} unloaded from pool`);
-          audit('unload', { alias });
-          return;
-        }
-        // `unloadAliasLocked` returns false both for an alias that was not resident and for a
-        // native unload that threw, and it keeps the failed entry in the pool. Reporting the
-        // latter as success would tell the caller memory was released while the model is still
-        // loaded, so only the "nothing to unload" case is a successful no-op.
-        if (pool.has(alias)) {
-          throw new Error(`Unload of ${alias} failed; the model is still loaded.`);
-        }
+        await withSweepLock(async () => {
+          const releaseIdleFence = payload.ifIdle ? tryBeginIdleUnload(alias) : modelActivityFence.tryAcquire(alias);
+          if (!releaseIdleFence) {
+            throw new Error(`Cannot unload ${alias} while requests are in flight. Retry once they finish.`);
+          }
+          try {
+            const unloaded = await unloadAliasLocked(alias);
+            if (unloaded) {
+              log('info', `Model ${alias} unloaded from pool`);
+              audit('unload', { alias });
+              return;
+            }
+            // `unloadAliasLocked` returns false both for an alias that was not resident and for a
+            // native unload that threw, and it keeps the failed entry in the pool. Reporting the
+            // latter as success would tell the caller memory was released while the model is still
+            // loaded, so only the "nothing to unload" case is a successful no-op.
+            if (pool.has(alias)) {
+              throw new Error(`Unload of ${alias} failed; the model is still loaded.`);
+            }
+          } finally {
+            releaseIdleFence();
+          }
+        });
       });
       reply({ ok: true });
     } else if (cmd === 'deleteModel') {
@@ -3128,7 +3164,8 @@ rl.on('line', async (line) => {
       let chatVariantId = null, chatExecutionProvider = null;
       let chatModelForMetrics = null;
       let chatWarm = null;
-      if (!noteActivity(modelAlias, 'start')) {
+      const chatBooking = noteActivity(modelAlias, 'start');
+      if (!chatBooking) {
         throw new Error(`Cannot use ${modelAlias} while it is being unloaded or deleted. Retry shortly.`);
       }
       activeStreamCount++;
@@ -3370,7 +3407,7 @@ rl.on('line', async (line) => {
         }
         activeStreamCount = Math.max(0, activeStreamCount - 1);
         if (activeStreamCount === 0) activeStreamOldest = null;
-        noteActivity(modelAlias, 'end');
+        noteActivity(modelAlias, 'end', chatBooking);
         canceledRequests.delete(id);
         appendAccessLog({
           ts: chatAccessTs,
@@ -3413,7 +3450,8 @@ rl.on('line', async (line) => {
       const requestedAlias = payload.model;
       const audioAccessTs = Date.now();
       let audioOk = false;
-      if (!noteActivity(requestedAlias, 'start')) {
+      const audioBooking = noteActivity(requestedAlias, 'start');
+      if (!audioBooking) {
         throw new Error(`Cannot use ${requestedAlias} while it is being unloaded or deleted. Retry shortly.`);
       }
       let tempPath = null;
@@ -3563,7 +3601,7 @@ rl.on('line', async (line) => {
       } finally {
         activeStreamCount = Math.max(0, activeStreamCount - 1);
         if (activeStreamCount === 0) activeStreamOldest = null;
-        noteActivity(requestedAlias, 'end');
+        noteActivity(requestedAlias, 'end', audioBooking);
         if (tempPath) {
           try { fs.unlinkSync(tempPath); } catch {}
         }
@@ -3842,7 +3880,8 @@ rl.on('line', async (line) => {
       const modelAlias = payload.model;
       const embedTs = Date.now();
       let embedOk = false;
-      if (!noteActivity(modelAlias, 'start')) {
+      const embedBooking = noteActivity(modelAlias, 'start');
+      if (!embedBooking) {
         throw new Error(`Cannot use ${modelAlias} while it is being unloaded or deleted. Retry shortly.`);
       }
       try {
@@ -3857,7 +3896,7 @@ rl.on('line', async (line) => {
         audit('embedTexts', { alias: modelAlias, count: inputs.length });
         reply({ ok: true, result });
       } finally {
-        noteActivity(modelAlias, 'end');
+        noteActivity(modelAlias, 'end', embedBooking);
         appendAccessLog({
           ts: embedTs,
           type: 'embeddings',

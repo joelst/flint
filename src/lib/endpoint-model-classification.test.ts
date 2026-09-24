@@ -1,0 +1,109 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { describe, expect, it } from 'vitest';
+import {
+  buildEndpointModelClassifier,
+  endpointModelKind,
+} from './endpoint-model-classification';
+
+describe('endpoint model classification', () => {
+  it('classifies metadata independently for every catalog model', () => {
+    const classify = buildEndpointModelClassifier([
+      {
+        alias: 'vectorizer-one',
+        task: 'embeddings',
+        info: {},
+        variants: [{ id: 'custom-model-one-generic-cpu:1' }],
+      },
+      {
+        alias: 'semantic-two',
+        capabilities: ['embedding'],
+        variants: [{ id: 'custom-model-two-generic-cpu:2' }],
+      },
+    ]);
+
+    expect(classify('custom-model-one-generic-cpu', 'vectorizer-one')).toBe('embed');
+    expect(classify('custom-model-two-generic-cpu:2', 'semantic-two')).toBe('embed');
+  });
+
+  it('uses narrow speech metadata without treating generic speech capability text as STT', () => {
+    // Generic speech-input capability is not STT, and with no other marker the model is
+    // unknown rather than chat, so the listed id's own heuristics get to decide.
+    expect(endpointModelKind({
+      alias: 'audio-chat',
+      capabilities: ['speech-input'],
+    })).toBeNull();
+    expect(endpointModelKind({ alias: 'assistant', task: 'chat-completion' })).toBe('chat');
+    expect(endpointModelKind({
+      alias: 'opaque-audio-model',
+      task: 'stt',
+    })).toBe('speech');
+    expect(endpointModelKind({ alias: 'parakeet-tdt-0.6b-v3' })).toBe('speech');
+    expect(endpointModelKind({ alias: 'nemotron-speech-streaming-en-0.6b' })).toBe('speech');
+  });
+
+  it('reads the kind from a variant id when the alias and metadata say nothing', () => {
+    const classify = buildEndpointModelClassifier([
+      { alias: 'opaque-speech', variants: [{ id: 'whisper-tiny-generic-cpu:1' }] },
+      { alias: 'opaque-vectors', variants: [{ id: 'bge-embed-generic-cpu:2' }] },
+    ]);
+
+    expect(endpointModelKind({ alias: 'opaque-speech', variants: [{ id: 'whisper-tiny-generic-cpu:1' }] })).toBe('speech');
+    expect(classify('whisper-tiny-generic-cpu', 'opaque-speech')).toBe('speech');
+    expect(classify('bge-embed-generic-cpu', null)).toBe('embed');
+  });
+
+  it('answers null for a model with no marker anywhere, so the listed id can decide', () => {
+    const classify = buildEndpointModelClassifier([
+      { alias: 'opaque-model', variants: [{ id: 'zzz-generic-cpu:1' }] },
+    ]);
+
+    expect(endpointModelKind({ alias: 'opaque-model', variants: [{ id: 'zzz-generic-cpu:1' }] })).toBeNull();
+    expect(classify('zzz-generic-cpu', 'opaque-model')).toBeNull();
+    expect(classify('opaque-model', null)).toBeNull();
+  });
+
+  it('ignores blank aliases and parentless lookups instead of creating a shared empty key', () => {
+    const classify = buildEndpointModelClassifier([
+      { alias: '', task: 'embeddings' },
+      { alias: 'chat-model', task: 'chat-completion' },
+    ]);
+
+    expect(classify('opaque-parentless-model', null)).toBeNull();
+    expect(classify('chat-model', null)).toBe('chat');
+  });
+
+  it('lets an exact parent identify an opaque variant before its own id lookup', () => {
+    const classify = buildEndpointModelClassifier([
+      {
+        alias: 'vectorizer',
+        task: 'embeddings',
+        variants: [{ id: 'shared-id:1' }],
+      },
+      {
+        alias: 'chat-model',
+        task: 'chat-completion',
+        variants: [{ id: 'shared-id:2' }],
+      },
+    ]);
+
+    expect(classify('shared-id', 'vectorizer')).toBe('embed');
+    expect(classify('shared-id', 'chat-model')).toBe('chat');
+  });
+
+  it('wires the covered catalog classifier into the page self-test call', () => {
+    const source = readFileSync(join(process.cwd(), 'src', 'routes', '+page.svelte'), 'utf8');
+    const start = source.indexOf('async function runGatewaySelfTest()');
+    const end = source.indexOf('endpointSelfTestBusy = false;', start);
+    const selfTestFlow = source.slice(start, end);
+
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(selfTestFlow).toContain('buildEndpointModelClassifier(catalogModels)');
+    expect(selfTestFlow).toContain('classifyModel,');
+    expect(selfTestFlow).toContain('await pollPoolStatus()');
+    expect(selfTestFlow).toContain('createSelfTestResidencyController');
+    expect(selfTestFlow).toContain('afterModelProbe: residency.restore');
+    expect(selfTestFlow).toContain('preferredResidentChatAlias(initialPool, classifyModel)');
+  });
+});
