@@ -68,6 +68,9 @@ export function buildModelIndex (models) {
       const bare = stripVersion(variant.id);
       if (bare === variant.id) continue;
       const bareKey = indexKey(bare);
+      // BYOM commonly uses `alias:version` as the variant id. Its bare form is the alias,
+      // which keeps variantId:null so the alias still means "whatever the service picks".
+      if (bareKey === aliasKey) continue;
       const existing = index.get(bareKey);
       if (!existing || compareVersions(variant.id, existing.variantId) > 0) {
         index.set(bareKey, { alias, variantId: variant.id });

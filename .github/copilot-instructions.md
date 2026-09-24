@@ -110,7 +110,7 @@ Facts only — no history. Record what is true now; `git log` and `CHANGELOG.md`
 - CI and release both run `verify:bundle` and `smoke:node`. Keep them passing — packaging bugs are invisible to unit tests.
 - Updater endpoint is `releases/latest/download/latest.json`. Never use a `{{current_version}}` URL (it resolves to the version already installed). Drafts and pre-releases are invisible to `releases/latest`.
 
-## Endpoint / models (probed 2026-08-30, SDK 1.2.4, CLI 0.10.3)
+## Endpoint / models (probed 2026-08-30 on SDK 1.2.4, CLI 0.10.3; model routing and not-loaded replies re-probed 2026-09-23 on SDK 2.0.1, #162)
 - The service **does** serve OpenAI-shaped `GET /v1/models` (200). `/openai/models` and `/foundry/list` are **404** — docs referencing them are stale.
 - `/v1/models` lists **cached models only**, with no loaded/unloaded state. `id` is the variant *without* the version suffix (`qwen3-0.6b-generic-cpu`); `parent` is the friendly alias.
 - **Only the exact loaded variant id routes** (SDK 2.0.1, probed live): `model: "qwen3-0.6b-generic-cpu:4"` succeeds while loaded; the alias `qwen3-0.6b`, the versionless `qwen3-0.6b-generic-cpu`, another version, and another casing all get `404 Model not found: No model matching ...`. The gateway's autoload and alias-to-variant rewrite are what make alias requests work for clients.

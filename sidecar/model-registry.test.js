@@ -14,6 +14,17 @@ const models = [
   { alias: 'not-downloaded', variants: [{ id: 'not-downloaded-generic-cpu:1', cached: false }] },
 ];
 
+describe('model registry BYOM', () => {
+  it('keeps an alias distinct from its same-named versioned variant, in any casing', () => {
+    const index = buildModelIndex([
+      { alias: 'Local-Model', variants: [{ id: 'local-model:1', cached: true }] },
+    ]);
+    expect(resolveModelId(index, 'local-model')).toEqual({ alias: 'Local-Model', variantId: null });
+    expect(resolveModelId(index, 'LOCAL-MODEL:1')).toEqual({ alias: 'Local-Model', variantId: 'local-model:1' });
+    expect(resolveModelId(index, 'local-model:999')).toBeNull();
+  });
+});
+
 describe('model registry', () => {
   const index = buildModelIndex(models);
 

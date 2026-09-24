@@ -412,9 +412,10 @@ describe('gateway autoload', () => {
   });
 });
 
-// Foundry routes variant ids but rejects the friendly alias outright, even while that model
-// is resident. The alias is exactly what Flint's own integration snippets tell users to
-// configure, so without a rewrite the gateway loads the model and still returns 400.
+// Foundry routes only the exact loaded variant id and answers 404 to the friendly alias, even
+// while that model is resident (SDK 2.0.1; 1.x answered 400 "is not loaded"). The alias is
+// exactly what Flint's own integration snippets tell users to configure, so without a rewrite
+// the gateway would load the model and the replay would still be rejected.
 describe('gateway model-name routing', () => {
   const ALIAS = 'qwen2.5-0.5b';
   const VARIANT = 'qwen2.5-0.5b-instruct-generic-cpu:4';
@@ -484,6 +485,30 @@ describe('gateway model-name routing', () => {
     expect((await send()).status).toBe(200);
 
     expect(upstream.state.hits.length - afterFirst).toBe(1); // rewritten up front
+    expect(loads).toBe(1);
+  });
+
+  it('shares one learned rewrite across every spelling of a name', async () => {
+    await startVariantOnlyUpstream();
+    let loads = 0;
+    gateway = await startGateway({
+      resolve: async id => (id.toLowerCase() === ALIAS ? { alias: ALIAS, variantId: null } : null),
+      load: async () => { loads += 1; upstream.state.loaded.add(VARIANT); return VARIANT; },
+    });
+    const send = (model) => request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model }),
+    });
+
+    expect((await send(ALIAS)).status).toBe(200); // 404 + load + replay
+    const afterFirst = upstream.state.hits.length;
+    expect((await send(ALIAS.toUpperCase())).status).toBe(200);
+
+    // The other spelling reused the entry: rewritten up front, no second load, and the map
+    // holds one key, so casing variants cannot grow it.
+    expect(upstream.state.hits.length - afterFirst).toBe(1);
+    expect(JSON.parse(upstream.state.hits.at(-1).body).model).toBe(VARIANT);
     expect(loads).toBe(1);
   });
 

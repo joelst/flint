@@ -18,7 +18,10 @@
 // it fails. Checking "is this loaded?" up front would put an SDK call on every hot-path
 // request, and would happily spend five seconds loading a multi-gigabyte model for a
 // request that was going to be rejected for a bad route or malformed body anyway. Letting
-// Foundry validate first means we only ever load in response to a request it accepted.
+// Foundry answer first means we load only after it rejected the request for naming a model
+// that is not loaded. SDK 1.x sent that rejection after body validation; SDK 2.0.1 routes by
+// name first and answers 404 to an alias before reading the rest of the body, so an alias
+// request with an otherwise invalid body can cost one load before Foundry rejects the body.
 
 import http from 'node:http';
 import { Transform, pipeline } from 'node:stream';
@@ -132,9 +135,11 @@ export function createGateway (options) {
   let boundPort = null; // actual port, which differs from publicPort when 0 was requested
 
   // Identifiers we have learned need rewriting before Foundry will route them, mapped to
-  // the variant id that works. Bounded by the catalog, since a key is only recorded after
-  // resolving against the cached-model index.
+  // the variant id that works. Keyed case-insensitively, like the registry, so the map is
+  // bounded by the catalog: a key is only recorded after resolving against the cached-model
+  // index, and every spelling of one name shares an entry.
   const rewrites = new Map();
+  const rewriteKey = (name) => String(name).trim().toLowerCase();
 
   function loadOnce (alias, variantId) {
     const key = `${alias}::${variantId ?? ''}`;
@@ -251,7 +256,7 @@ export function createGateway (options) {
     // upstream rejection that teaches us costs a round trip each time. Reuse it, and let
     // the not-loaded path below correct the entry if it has gone stale.
     let outgoing = buffered;
-    const known = requested ? rewrites.get(requested) : null;
+    const known = requested ? rewrites.get(rewriteKey(requested)) : null;
     if (known) outgoing = rewriteModelName(buffered, known) ?? buffered;
 
     // Upstream's rejection must name the model we sent, which is the rewritten id when a
@@ -289,7 +294,7 @@ export function createGateway (options) {
       const rewritten = rewriteModelName(buffered, canonical);
       if (rewritten !== null) {
         replayBody = rewritten;
-        rewrites.set(requested, canonical);
+        rewrites.set(rewriteKey(requested), canonical);
         log('info', `Gateway routing ${requested} → ${canonical}`);
       }
     }

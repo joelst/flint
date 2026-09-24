@@ -93,7 +93,9 @@ export function modelRejection (status, body) {
     const match = /\bModel '([^']+)' (?:is not loaded|must be loaded before inference)\b/i.exec(message);
     return match ? { kind: 'not-loaded', model: match[1] } : null;
   }
-  const match = /\bNo model matching '([^']+)'/i.exec(message);
+  // The whole router phrase, not just the quoted name: a 404 can come from anything behind
+  // the proxy, and only this one means "the router does not know that model".
+  const match = /\bModel not found: No model matching '([^']+)'/i.exec(message);
   return match ? { kind: 'not-found', model: match[1] } : null;
 }
 

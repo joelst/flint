@@ -119,6 +119,9 @@ describe('modelRejection', () => {
     expect(modelRejection(400, 'Model validation failed because it is not loaded')).toBeNull();
     expect(modelRejection(400, 'The model is not loaded')).toBeNull();
     expect(modelRejection(400, '')).toBeNull();
+    // Only the router's own phrase means it does not know the model; a bare fragment does not.
+    expect(modelRejection(404, "No model matching 'qwen3-0.6b'")).toBeNull();
+    expect(modelRejection(404, "Adapter not found: No model matching 'qwen3-0.6b'")).toBeNull();
     expect(modelRejection(404, 'Not Found')).toBeNull();
     expect(modelRejection(404, JSON.stringify({ error: { message: "Route '/v1/nope' not found" } }))).toBeNull();
   });
