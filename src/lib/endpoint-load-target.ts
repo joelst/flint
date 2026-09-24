@@ -6,7 +6,7 @@
 // cached variants count, a versionless id names its highest cached version, and an alias
 // pins no variant.
 
-import { buildModelIndex, resolveModelId } from '../../sidecar/model-registry.js';
+import { buildModelIndex, resolveModelId, stripVersion } from '../../sidecar/model-registry.js';
 
 export interface EndpointLoadModel {
   alias: string;
@@ -23,13 +23,11 @@ export function endpointLoadTarget<M extends EndpointLoadModel> (
   models: readonly M[],
   modelId: string,
 ): EndpointLoadTarget<M> | null {
-  const target = resolveModelId(
-    buildModelIndex(models.map((model) => ({
+  const index = buildModelIndex(models.map((model) => ({
       alias: model.alias,
       variants: (model.variants ?? []).map((variant) => ({ id: variant.id, cached: !!variant.cached })),
-    }))),
-    modelId,
-  );
+    })));
+  const target = resolveModelId(index, modelId) ?? resolveModelId(index, stripVersion(modelId));
   if (!target) return null;
   const model = models.find((candidate) => candidate.alias === target.alias);
   return model ? { model, variantId: target.variantId } : null;

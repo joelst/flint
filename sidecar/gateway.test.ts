@@ -1244,7 +1244,7 @@ describe('gateway activity hook', () => {
 
     const res = await post(gateway.publicPort, 'phi-4-mini');
 
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(409);
     // No end for a start that was refused, and nothing reached the service.
     expect(events).toEqual([['phi-4-mini', 'start']]);
     expect(upstream.state.hits.filter(h => h.url === '/v1/chat/completions')).toEqual([]);
@@ -1265,12 +1265,12 @@ describe('gateway activity hook', () => {
         + `Content-Type: audio/wav\r\n\r\nRIFF\r\n--${boundary}--\r\n`,
     });
 
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(409);
     expect(events).toEqual([['whisper-tiny:1', 'start']]);
     expect(upstream.state.hits.filter(h => h.url === '/v1/audio/transcriptions')).toEqual([]);
   });
 
-  it('does not load a model whose moved lease is refused, and answers 503', async () => {
+  it('does not load a model whose moved lease is refused, and answers 409', async () => {
     const VARIANT = 'phi-4-mini-generic-cpu:2';
     const events = [];
     let loaded = false;
@@ -1285,13 +1285,13 @@ describe('gateway activity hook', () => {
 
     const res = await post(gateway.publicPort, 'phi-4-mini-generic-cpu');
 
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(409);
     expect(loaded).toBe(false);
-    // The first lease is returned when it moves; the refused one is never ended.
+    // The source stays leased when the destination refuses the handoff.
     expect(events).toEqual([
       ['phi-4-mini-generic-cpu', 'start'],
-      ['phi-4-mini-generic-cpu', 'end'],
       [VARIANT, 'start'],
+      ['phi-4-mini-generic-cpu', 'end'],
     ]);
     expect(upstream.state.hits.filter(h => h.url === '/v1/chat/completions')).toHaveLength(1);
   });
@@ -1310,13 +1310,13 @@ describe('gateway activity hook', () => {
 
     const res = await post(gateway.publicPort, 'phi-4-mini');
 
-    expect(res.status).toBe(503);
-    expect(events).toEqual([['phi-4-mini', 'start'], ['phi-4-mini', 'end'], [CANONICAL, 'start']]);
+    expect(res.status).toBe(409);
+    expect(events).toEqual([['phi-4-mini', 'start'], [CANONICAL, 'start'], ['phi-4-mini', 'end']]);
     // Only the first, not-loaded attempt reached the service.
     expect(upstream.state.hits.filter(h => h.url === '/v1/chat/completions')).toHaveLength(1);
   });
 
-  it('leases a multipart speech request whose leading field names a model', async () => {
+  it('leases a multipart speech request with a reordered quoted boundary parameter', async () => {
     const events = [];
     const boundary = 'flint-test-boundary';
     const body = `--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n`
@@ -1328,7 +1328,7 @@ describe('gateway activity hook', () => {
 
     const res = await request(gateway.publicPort, '/v1/audio/transcriptions', {
       method: 'POST',
-      headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+      headers: { 'content-type': `multipart/form-data; charset=utf-8; BOUNDARY = "${boundary}"` },
       body,
     });
 
@@ -1477,8 +1477,8 @@ describe('gateway activity hook', () => {
     expect(res.status).toBe(200);
     expect(events).toEqual([
       ['qwen3-0.6b-generic-cpu', 'start'],
-      ['qwen3-0.6b-generic-cpu', 'end'],
       ['qwen3-0.6b-generic-cpu:2', 'start'],
+      ['qwen3-0.6b-generic-cpu', 'end'],
       ['qwen3-0.6b-generic-cpu:2', 'end'],
     ]);
   });
@@ -1499,10 +1499,10 @@ describe('gateway activity hook', () => {
     expect(res.status).toBe(200);
     expect(events).toEqual([
       ['qwen3-0.6b', 'start'],
-      ['qwen3-0.6b', 'end'],
       ['qwen3-0.6b-generic-cpu:1', 'start'],
-      ['qwen3-0.6b-generic-cpu:1', 'end'],
+      ['qwen3-0.6b', 'end'],
       ['qwen3-0.6b-generic-cpu:2', 'start'],
+      ['qwen3-0.6b-generic-cpu:1', 'end'],
       ['qwen3-0.6b-generic-cpu:2', 'end'],
     ]);
   });

@@ -266,13 +266,15 @@ export function createGateway (options) {
       try {
         return await route(req, res, buffered, requested, (model) => {
           if (!model || model === activeModel) return true;
+          const nextBooking = notifyActivity(model, 'start');
+          // route stops before loading or replaying when this is refused. Nothing has been
+          // sent to the client yet, so it gets the same 409 as a refused first booking.
+          if (nextBooking === false) return false;
           if (booked) notifyActivity(activeModel, 'end', activeBooking);
           activeModel = model;
-          activeBooking = notifyActivity(activeModel, 'start');
-          booked = activeBooking !== false;
-          // route stops before loading or replaying when this is refused. Nothing has been
-          // sent to the client yet, so it gets the same 503 as a refused first booking.
-          return booked;
+          activeBooking = nextBooking;
+          booked = true;
+          return true;
         });
       } finally {
         if (booked) notifyActivity(activeModel, 'end', activeBooking);
@@ -300,9 +302,9 @@ export function createGateway (options) {
 
   /** The owner refused a lease because the model is being unloaded. */
   function respondUnloading (req, res, model) {
-    res.writeHead(503, { 'content-type': 'application/json', connection: 'close' });
+    res.writeHead(409, { 'content-type': 'application/json', connection: 'close' });
     res.end(openAiError(
-      `Model ${model} is unloading and is not accepting new requests.`,
+      `Model ${model} is unavailable because an unload or deletion is in progress.`,
       'server_error',
     ));
     req.resume();
@@ -319,7 +321,10 @@ export function createGateway (options) {
     // the not-loaded path below correct the entry if it has gone stale.
     let outgoing = buffered;
     const known = requested ? rewrites.get(rewriteKey(requested)) : null;
-    if (known) outgoing = rewriteModelName(buffered, known) ?? buffered;
+    if (known) {
+      outgoing = rewriteModelName(buffered, known) ?? buffered;
+      if (!setActivityModel(known)) return respondUnloading(req, res, known);
+    }
 
     // Upstream's rejection must name the model we sent, which is the rewritten id when a
     // rewrite was applied, not the client's own wording.
@@ -362,7 +367,7 @@ export function createGateway (options) {
     if (canonical && canonical !== target.variantId && !setActivityModel(canonical)) {
       return respondUnloading(req, res, canonical);
     }
-    if (canonical && canonical !== requested) {
+    if (canonical) {
       const rewritten = rewriteModelName(buffered, canonical);
       if (rewritten !== null) {
         replayBody = rewritten;
@@ -452,7 +457,7 @@ export function createGateway (options) {
       ? req.headers['content-type'][0]
       : req.headers['content-type'];
     const boundaryMatch = typeof contentType === 'string'
-      ? /multipart\/form-data\s*;\s*boundary=(?:"([^"]+)"|([^;\s]+))/i.exec(contentType)
+      ? /(?:^|;)\s*boundary\s*=\s*(?:"([^"]+)"|([^;\s]+))/i.exec(contentType)
       : null;
     const boundary = boundaryMatch?.[1] || boundaryMatch?.[2];
     if (!boundary) return Promise.resolve(null);

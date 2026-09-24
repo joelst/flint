@@ -197,7 +197,7 @@ const FIELD_TYPES = {
   shutdownRuntime:   { drainTimeoutMs: 'number' },
   download:          { alias: 'non-empty-string', variantId: 'non-empty-string' },
   load:              { alias: 'non-empty-string', variantId: 'non-empty-string' },
-  unload:            { alias: 'non-empty-string' },
+  unload:            { alias: 'non-empty-string', ifIdle: 'boolean' },
   deleteModel:       { alias: 'non-empty-string', variantId: 'non-empty-string' },
   chatCompletion:    { model: 'non-empty-string', messages: 'array' },
   cancelChatRequest: { requestId: 'number' },
@@ -237,7 +237,7 @@ const COMMAND_SCHEMA = {
   listModels:         { required: [], optional: [] },
   download:           { required: ['alias'], optional: ['variantId'] },
   load:               { required: ['alias'], optional: ['lane', 'variantId'] },
-  unload:             { required: ['alias'], optional: ['lane'] },
+  unload:             { required: ['alias'], optional: ['lane', 'ifIdle'] },
   deleteModel:        { required: ['alias'], optional: ['variantId'] },
   getEndpoint:        { required: [], optional: [] },
   chatCompletion:     { required: ['model', 'messages'], optional: ['maxTokens', 'temperature', 'preferredEp', 'stream'] },
@@ -2702,22 +2702,24 @@ rl.on('line', async (line) => {
     } else if (cmd === 'unload') {
       const alias = payload.alias;
       await serializeModelOperation(alias, ['residency'], async () => {
-        const fenced = await withModelActivityFence(alias, () => unloadAliasLocked(alias));
-        if (!fenced) {
-          throw new Error(`Cannot unload ${alias} while requests are in flight. Retry once they finish.`);
-        }
-        if (fenced.result) {
-          log('info', `Model ${alias} unloaded from pool`);
-          audit('unload', { alias });
-          return;
-        }
-        // `unloadAliasLocked` returns false both for an alias that was not resident and for a
-        // native unload that threw, and it keeps the failed entry in the pool. Reporting the
-        // latter as success would tell the caller memory was released while the model is still
-        // loaded, so only the "nothing to unload" case is a successful no-op.
-        if (pool.has(alias)) {
-          throw new Error(`Unload of ${alias} failed; the model is still loaded.`);
-        }
+        await withSweepLock(async () => {
+          const fenced = await withModelActivityFence(alias, () => unloadAliasLocked(alias));
+          if (!fenced) {
+            throw new Error(`Cannot unload ${alias} while requests are in flight. Retry once they finish.`);
+          }
+          if (fenced.result) {
+            log('info', `Model ${alias} unloaded from pool`);
+            audit('unload', { alias });
+            return;
+          }
+          // `unloadAliasLocked` returns false both for an alias that was not resident and for a
+          // native unload that threw, and it keeps the failed entry in the pool. Reporting the
+          // latter as success would tell the caller memory was released while the model is still
+          // loaded, so only the "nothing to unload" case is a successful no-op.
+          if (pool.has(alias)) {
+            throw new Error(`Unload of ${alias} failed; the model is still loaded.`);
+          }
+        });
       });
       reply({ ok: true });
     } else if (cmd === 'deleteModel') {
