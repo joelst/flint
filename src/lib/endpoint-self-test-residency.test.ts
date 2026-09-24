@@ -157,6 +157,10 @@ describe('endpoint self-test residency', () => {
     const catchAt = runBody.indexOf('} catch (error) {');
     expect(catchAt).toBeGreaterThan(-1);
     expect(runBody.slice(catchAt, runBody.indexOf('endpointSelfTestReport = {', catchAt))).toContain('lastFlintVerified = null;');
+    // The run changed residency; the pool shown afterwards must be polled, not the pre-run one.
+    const finallyAt = runBody.indexOf('} finally {', catchAt);
+    expect(finallyAt).toBeGreaterThan(-1);
+    expect(runBody.slice(finallyAt)).toContain('await pollPoolStatus()');
     // The Arena checks the same fence, so it cannot start while the self-test runs.
     const arenaStart = page.indexOf('async function runComparison(');
     const arena = page.slice(arenaStart, page.indexOf('compareReviewId = null;', arenaStart));

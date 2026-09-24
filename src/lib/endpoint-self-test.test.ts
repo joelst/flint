@@ -966,6 +966,16 @@ describe('endpointAliases', () => {
     });
   });
 
+  it('uses an embedding parent to classify an opaque variant id, with no classifier or requested embed', () => {
+    expect(endpointAliases([
+      { id: 'custom-model-generic-cpu', parent: 'my-embedder' },
+    ], null)).toEqual({
+      chat: [],
+      embed: ['custom-model-generic-cpu', 'my-embedder'],
+      speech: [],
+    });
+  });
+
   it('uses a speech parent to classify an opaque variant id', () => {
     expect(endpointAliases([
       { id: 'custom-model-generic-cpu', parent: 'whisper-custom' },

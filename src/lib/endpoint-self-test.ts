@@ -209,7 +209,9 @@ function endpointKind(
       || parent?.toLowerCase() === requestedEmbed.toLowerCase()
     )
   ) return 'embed';
-  if (isEmbeddingModelId(id)) return 'embed';
+  // The parent alias is evidence for the variant too, for embeddings as for speech: a BYOM
+  // variant id is often opaque while its alias says what it is.
+  if (isEmbeddingModelId(id) || (parent && isEmbeddingModelId(parent))) return 'embed';
   if (isSpeechModelId(id) || (parent && isSpeechModelId(parent))) return 'speech';
   return 'chat';
 }

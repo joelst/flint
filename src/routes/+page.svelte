@@ -391,6 +391,9 @@
         }],
       };
     } finally {
+      // The run loaded and unloaded models on its way through; show the pool as it is now
+      // rather than as the last poll before the run saw it.
+      await pollPoolStatus().catch(() => {});
       endpointSelfTestBusy = false;
     }
   }
