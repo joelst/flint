@@ -12,6 +12,27 @@ import {
   removeProviderCache,
 } from './execution-provider-cache.js';
 
+/**
+ * Write a fixture DLL and wait until it can be renamed. On Windows an on-access scanner
+ * briefly holds a just-written .dll, and removeProviderCache's rename then reports the
+ * cache as busy, which is the product behaviour for a loaded DLL but not what these
+ * fixtures mean. Waiting here keeps each assertion about the code, not the scanner.
+ */
+function writeDll (file, content) {
+  fs.writeFileSync(file, content);
+  const probe = `${file}.settle`;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      fs.renameSync(file, probe);
+      fs.renameSync(probe, file);
+      return;
+    } catch (error) {
+      if (attempt >= 100 || !['EPERM', 'EBUSY', 'EACCES'].includes(error.code)) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+  }
+}
+
 describe('provider cache paths', () => {
   it('maps downloadable providers onto Foundry cache folders', () => {
     expect(providerCacheSlug('CUDAExecutionProvider')).toBe('cuda-ep');
@@ -36,9 +57,9 @@ describe('removeProviderCache', () => {
     const cuda = path.join(root, 'cuda-ep');
     const webgpu = path.join(root, 'webgpu-ep');
     fs.mkdirSync(cuda);
-    fs.writeFileSync(path.join(cuda, 'onnxruntime_providers_cuda.dll'), 'stale');
+    writeDll(path.join(cuda, 'onnxruntime_providers_cuda.dll'), 'stale');
     fs.mkdirSync(webgpu);
-    fs.writeFileSync(path.join(webgpu, 'onnxruntime_providers_webgpu.dll'), 'ok');
+    writeDll(path.join(webgpu, 'onnxruntime_providers_webgpu.dll'), 'ok');
 
     expect(await removeProviderCache(root, 'CUDAExecutionProvider')).toBe(true);
     expect(fs.existsSync(cuda)).toBe(false);
@@ -57,8 +78,8 @@ describe('removeProviderCache', () => {
     const cuda = path.join(root, 'cuda-ep');
     const held = path.join(cuda, 'held');
     fs.mkdirSync(held, { recursive: true });
-    fs.writeFileSync(path.join(held, 'onnxruntime_providers_cuda.dll'), 'stale');
-    fs.writeFileSync(path.join(cuda, 'sibling.dll'), 'stale');
+    writeDll(path.join(held, 'onnxruntime_providers_cuda.dll'), 'stale');
+    writeDll(path.join(cuda, 'sibling.dll'), 'stale');
     fs.chmodSync(held, 0o555);
 
     try {
@@ -86,8 +107,8 @@ describe('removeProviderCache', () => {
     const cuda = path.join(root, 'cuda-ep');
     fs.mkdirSync(cuda);
     const locked = path.join(cuda, 'onnxruntime_providers_cuda.dll');
-    fs.writeFileSync(locked, 'loaded');
-    fs.writeFileSync(path.join(cuda, 'cublas64_12.dll'), 'sibling');
+    writeDll(locked, 'loaded');
+    writeDll(path.join(cuda, 'cublas64_12.dll'), 'sibling');
     const release = await holdExclusive(locked);
     try {
       expect(await removeProviderCache(root, 'CUDAExecutionProvider')).toBe('busy');
@@ -323,7 +344,7 @@ describe('rebuildBrokenExecutionProviders', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'flint-ep-'));
     const cuda = path.join(root, 'cuda-ep');
     fs.mkdirSync(cuda);
-    fs.writeFileSync(path.join(cuda, 'onnxruntime_providers_cuda.dll'), 'stale');
+    writeDll(path.join(cuda, 'onnxruntime_providers_cuda.dll'), 'stale');
     const calls = [];
     const outcome = await rebuildBrokenExecutionProviders({
       epRoot: root,
