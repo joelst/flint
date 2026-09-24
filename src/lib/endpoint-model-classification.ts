@@ -20,7 +20,10 @@ function looksLikeEmbedding(name: string): boolean {
 }
 
 function looksLikeSpeech(name: string): boolean {
-  return /(whisper|parakeet|nemotron-speech|-stt(?:-|$)|(?:^|-)stt-)/.test(name);
+  // `nemotron-speech-...` is the original English-only Nemotron ASR family; newer generations
+  // (e.g. `nemotron-3.5-asr-streaming-0.6b`) use an `-asr-` marker instead of `-speech-`, so
+  // match either rather than only the original naming.
+  return /(whisper|parakeet|-stt(?:-|$)|(?:^|-)stt-|nemotron.*(?:speech|asr))/.test(name);
 }
 
 /**

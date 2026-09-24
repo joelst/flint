@@ -985,6 +985,16 @@ describe('endpointAliases', () => {
       speech: ['custom-model-generic-cpu', 'whisper-custom'],
     });
   });
+
+  it('classifies newer Nemotron ASR ids (an -asr- marker, not -speech-) as speech by name alone', () => {
+    expect(endpointAliases([
+      { id: 'nemotron-3.5-asr-streaming-0.6b', parent: null },
+    ], null)).toEqual({
+      chat: [],
+      embed: [],
+      speech: ['nemotron-3.5-asr-streaming-0.6b'],
+    });
+  });
 });
 
 describe('opaque catalog aliases', () => {

@@ -40,6 +40,8 @@ describe('endpoint model classification', () => {
     })).toBe('speech');
     expect(endpointModelKind({ alias: 'parakeet-tdt-0.6b-v3' })).toBe('speech');
     expect(endpointModelKind({ alias: 'nemotron-speech-streaming-en-0.6b' })).toBe('speech');
+    // Newer Nemotron ASR generations use an `-asr-` marker instead of `-speech-`.
+    expect(endpointModelKind({ alias: 'nemotron-3.5-asr-streaming-0.6b' })).toBe('speech');
   });
 
   it('reads the kind from a variant id when the alias and metadata say nothing', () => {
