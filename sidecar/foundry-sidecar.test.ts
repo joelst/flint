@@ -1,12 +1,18 @@
 // @vitest-environment node
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
-import { createServer, request as httpRequest } from 'http';
+import { createServer, request as httpRequest, type Server } from 'http';
 import type { AddressInfo } from 'net';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { killAndWait } from './test-process.js';
+
+function closeServer(server: Server): Promise<void> {
+  server.closeAllConnections();
+  return new Promise((resolve) => server.close(() => resolve()));
+}
 
 function waitForLine(
   proc: ChildProcessWithoutNullStreams,
@@ -53,19 +59,6 @@ function waitForLine(
 
     proc.stdout.on('data', onData);
     proc.on('exit', onExit);
-  });
-}
-
-/** Kills the child and waits (briefly, best-effort) for it to actually exit, so cleanup that
- * follows (closing an upstream server the child was still talking to, removing its temp home
- * dir) doesn't race a process that is still shutting down. */
-function killAndWait(proc: ChildProcessWithoutNullStreams, timeoutMs = 3000): Promise<void> {
-  if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve();
-  return new Promise((resolve) => {
-    const done = () => { clearTimeout(timer); resolve(); };
-    const timer = setTimeout(done, timeoutMs);
-    proc.once('exit', done);
-    proc.kill();
   });
 }
 
@@ -139,7 +132,7 @@ describe('foundry-sidecar protocol basics', () => {
       ]));
       expect(response.result.entries.some((entry: any) => entry.alias === 'foreign')).toBe(false);
     } finally {
-      proc.kill();
+      await killAndWait(proc);
       rmSync(home, { recursive: true, force: true });
       rmSync(foreign, { recursive: true, force: true });
     }
@@ -183,9 +176,7 @@ describe('foundry-sidecar protocol basics', () => {
       const exclusiveOff = await waitForLine(proc, (msg) => msg.id === 7);
       expect(exclusiveOff).toMatchObject({ ok: true, result: { exclusive: false } });
     } finally {
-      if (!proc.killed) {
-        proc.kill();
-      }
+      await killAndWait(proc);
     }
   });
 
@@ -405,7 +396,7 @@ describe('foundry-sidecar protocol basics', () => {
     } finally {
       nonJsonStdout.stop();
       proc.stderr.off('data', onStderr);
-      if (!proc.killed) proc.kill();
+      await killAndWait(proc);
       rmSync(homeDir, { recursive: true, force: true });
     }
   });
@@ -474,7 +465,7 @@ describe('foundry-sidecar protocol basics', () => {
       expect(buffered.result.nativeStreaming).toBe(false);
       expect(buffered.result.servedVariantId).toBe('fake-variant');
     } finally {
-      if (!proc.killed) proc.kill();
+      await killAndWait(proc);
       rmSync(homeDir, { recursive: true, force: true });
     }
   });
@@ -555,8 +546,109 @@ describe('foundry-sidecar protocol basics', () => {
       expect(httpChat.result.nativeStreaming).toBe(false);
       expect(httpChat.result.servedVariantId).toBe('fake-variant');
     } finally {
-      if (!proc.killed) proc.kill();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await killAndWait(proc);
+      await closeServer(server);
+      rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('starts the service when the snapshot-forcing catalog read fails', async () => {
+    // The catalog read before `startWebService` exists only to order provider registration
+    // ahead of the native listener's own `/v1/models` access. That read contacts the remote
+    // catalog, so an offline machine must still get a local service for its cached models.
+    const server = createServer((req, res) => {
+      if (req.url === '/status') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+    const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-offline-catalog-home-'));
+    const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
+    const corePath = join(homeDir, 'fake-core.dylib');
+    writeFileSync(corePath, '');
+    writeFileSync(loaderPath, `
+      const sdk = \`
+        class FakeModel {
+          constructor(alias, id) { this.alias = alias; this.id = id; this.loaded = false; }
+          async load() { this.loaded = true; }
+          isLoaded() { return this.loaded; }
+          getExecutionProvider() { return 'CPUExecutionProvider'; }
+          selectVariant(variant) { this.id = variant.id; }
+        }
+        class FakeManager {
+          constructor() {
+            this.urls = [];
+            this.ep = { name: 'CPUExecutionProvider', isRegistered: true };
+            this.catalog = {
+              getModels: async () => { throw new Error('catalog unreachable'); },
+              getCachedModels: async () => [
+                new FakeModel('cached-model', 'cached-variant:1'),
+                new FakeModel('other-model', 'other-explicit:1'),
+              ],
+              getModel: async (alias) => {
+                if (alias !== 'cached-model' && alias !== 'other-model') throw new Error('model not cached');
+                return new FakeModel(alias, alias === 'cached-model' ? 'cached-variant:1' : 'other-default:1');
+              },
+              getModelVariant: async (id) => {
+                if (id !== 'other-explicit:1') throw new Error('variant not cached');
+                return new FakeModel('other-model', id);
+              },
+            };
+          }
+          discoverEps() { return [this.ep]; }
+          async downloadAndRegisterEps() {
+            return { success: true, registeredEps: [this.ep.name], failedEps: [] };
+          }
+          startWebService() { this.urls = ['http://127.0.0.1:${port}']; }
+          stopWebService() {}
+          static create() { return new FakeManager(); }
+        }
+        export { FakeManager as FoundryLocalManager };
+      \`;
+      export async function resolve(specifier, context, nextResolve) {
+        if (specifier === 'foundry-local-sdk') {
+          return { url: 'data:text/javascript,' + encodeURIComponent(sdk), shortCircuit: true };
+        }
+        return nextResolve(specifier, context);
+      }
+      export async function load(url, context, nextLoad) {
+        if (url.startsWith('data:text/javascript,')) {
+          return { format: 'module', source: decodeURIComponent(url.slice('data:text/javascript,'.length)), shortCircuit: true };
+        }
+        return nextLoad(url, context);
+      }
+    `);
+    const proc = spawn(process.execPath, [
+      '--experimental-loader', pathToFileURL(loaderPath).href, 'sidecar/foundry-sidecar.js'
+    ], {
+      cwd: process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, HOME: homeDir, USERPROFILE: homeDir, FLINT_FOUNDRY_CORE_PATH: corePath },
+    });
+    try {
+      await waitForLine(proc, (msg) => msg.ready === true);
+      proc.stdin.write(`${JSON.stringify({ id: 70, cmd: 'init', appName: 'flint-test', logLevel: 'info' })}\n`);
+      expect((await waitForLine(proc, (msg) => msg.id === 70)).ok).toBe(true);
+      proc.stdin.write(`${JSON.stringify({
+        id: 71, cmd: 'startService', port: 0, bindAddress: '127.0.0.1', alias: 'cached-model',
+      })}\n`);
+      const started = await waitForLine(proc, (msg) => msg.id === 71, 15000);
+      expect(started.ok).toBe(true);
+      expect(started.endpoint).toContain('127.0.0.1');
+      proc.stdin.write(`${JSON.stringify({
+        id: 72, cmd: 'load', alias: 'other-model', variantId: 'other-explicit:1',
+      })}\n`);
+      const loaded = await waitForLine(proc, (msg) => msg.id === 72, 15000);
+      expect(loaded.ok, JSON.stringify(loaded)).toBe(true);
+      expect(loaded.result?.variantId).toBe('other-explicit:1');
+    } finally {
+      await killAndWait(proc);
+      await closeServer(server);
       rmSync(homeDir, { recursive: true, force: true });
     }
   });
@@ -688,9 +780,12 @@ describe('foundry-sidecar protocol basics', () => {
         temperature: 0.77,
         maxTokens: 55,
       })}\n`);
-      const streamedDelta = await streamedDeltaPromise;
+      const [streamedDelta, streamedDone] = await Promise.all([
+        streamedDeltaPromise,
+        streamedDonePromise,
+      ]);
       expect(JSON.parse(streamedDelta.delta)).toEqual({ temperature: 0.77, maxTokens: 55 });
-      expect((await streamedDonePromise).ok).toBe(true);
+      expect(streamedDone.ok).toBe(true);
 
       // Omitted fields must not clobber the client's own defaults with undefined/NaN.
       proc.stdin.write(`${JSON.stringify({
@@ -721,7 +816,7 @@ describe('foundry-sidecar protocol basics', () => {
         maxTokens: 7,
       });
     } finally {
-      if (!proc.killed) proc.kill();
+      await killAndWait(proc);
       rmSync(homeDir, { recursive: true, force: true });
     }
   }, 90000);
@@ -795,7 +890,16 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
    * `startService` (gateway on by default) proxies real HTTP traffic to a server we control. A
    * short `FLINT_BENCHMARK_EXCLUSIVE_DRAIN_MS` lets the "could not drain in time" path be
    * exercised without a correspondingly slow test. */
-  function spawnGatewaySidecar(upstreamPort: number, drainMs = 200, catalogModels: unknown[] = [], holdLoad = false, secondStartServicePort: number | null = null, holdDownload = false) {
+  function spawnGatewaySidecar(
+    upstreamPort: number,
+    drainMs = 200,
+    catalogModels: unknown[] = [],
+    holdLoad = false,
+    secondStartServicePort: number | null = null,
+    holdDownload = false,
+    holdUnload = false,
+    failUnload = false,
+  ) {
     const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-gateway-fence-home-'));
     const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
     const corePath = join(homeDir, 'fake-core.dylib');
@@ -816,10 +920,20 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
             this.loaded = true;
           }
           isLoaded() { return this.loaded; }
+          get isCached() { return true; }
           async download() {
             if (${JSON.stringify(holdDownload)}) {
               await fetch('http://127.0.0.1:${upstreamPort}/hold-download');
             }
+          }
+          async unload() {
+            if (${JSON.stringify(holdUnload)}) {
+              await fetch('http://127.0.0.1:${upstreamPort}/hold-unload');
+            }
+            if (${JSON.stringify(failUnload)}) {
+              throw new Error('native unload refused');
+            }
+            this.loaded = false;
           }
           getExecutionProvider() { return 'CPUExecutionProvider'; }
           createChatClient() {
@@ -893,8 +1007,26 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
 
   /** Starts the sidecar and its gateway, returning the process, its temp home dir (for
    * cleanup), and the gateway's bound public port. */
-  async function startedGateway(upstreamPort: number, drainMs = 200, catalogModels: unknown[] = [], holdLoad = false, secondStartServicePort: number | null = null, holdDownload = false) {
-    const { proc, homeDir } = spawnGatewaySidecar(upstreamPort, drainMs, catalogModels, holdLoad, secondStartServicePort, holdDownload);
+  async function startedGateway(
+    upstreamPort: number,
+    drainMs = 200,
+    catalogModels: unknown[] = [],
+    holdLoad = false,
+    secondStartServicePort: number | null = null,
+    holdDownload = false,
+    holdUnload = false,
+    failUnload = false,
+  ) {
+    const { proc, homeDir } = spawnGatewaySidecar(
+      upstreamPort,
+      drainMs,
+      catalogModels,
+      holdLoad,
+      secondStartServicePort,
+      holdDownload,
+      holdUnload,
+      failUnload,
+    );
     await waitForLine(proc, (msg) => msg.ready === true);
     proc.stdin.write(`${JSON.stringify({ id: 1, cmd: 'init', appName: 'flint-test', logLevel: 'info' })}\n`);
     const initRes = await waitForLine(proc, (msg) => msg.id === 1);
@@ -941,10 +1073,104 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       expect(allowed.status).toBe(200);
     } finally {
       if (proc) await killAndWait(proc);
-      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      await closeServer(upstream);
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });
     }
   });
+
+  it('rejects gateway traffic that starts while the requested model is unloading', async () => {
+    let releaseUnload: (() => void) | null = null;
+    const unloadHeld = new Promise<void>((resolve) => { releaseUnload = resolve; });
+    let markUnloadStarted: (() => void) | null = null;
+    const unloadStarted = new Promise<void>((resolve) => { markUnloadStarted = resolve; });
+    let forwardedChatRequests = 0;
+    const upstream = createServer((req, res) => {
+      if (req.url === '/hold-unload') {
+        markUnloadStarted?.();
+        markUnloadStarted = null;
+        void unloadHeld.then(() => {
+          res.writeHead(200, { 'content-type': 'text/plain' });
+          res.end('unloaded');
+        });
+        return;
+      }
+      if (req.url === '/v1/chat/completions') {
+        forwardedChatRequests++;
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{}');
+    });
+    let proc: ChildProcessWithoutNullStreams | undefined;
+    let homeDir: string | undefined;
+    try {
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+      const { port: upstreamPort } = upstream.address() as AddressInfo;
+      const started = await startedGateway(upstreamPort, 10_000, [], false, null, false, true);
+      proc = started.proc;
+      homeDir = started.homeDir;
+      const gatewayPort = started.gatewayPort;
+
+      proc.stdin.write(`${JSON.stringify({ id: 30, cmd: 'load', alias: 'fake-model' })}\n`);
+      const loaded = await waitForLine(proc, (msg) => msg.id === 30, 5000);
+      expect(loaded).toMatchObject({ ok: true });
+
+      proc.stdin.write(`${JSON.stringify({ id: 31, cmd: 'unload', alias: 'fake-model' })}\n`);
+      const unloadReply = waitForLine(proc, (msg) => msg.id === 31, 5000);
+      await unloadStarted;
+
+      const denied = await postToGateway(gatewayPort, JSON.stringify({ model: 'fake-model', messages: [] }));
+      expect(denied.status).toBe(409);
+      expect(denied.body).toContain('unload or deletion is in progress');
+      expect(forwardedChatRequests).toBe(0);
+
+      releaseUnload?.();
+      await expect(unloadReply).resolves.toMatchObject({ ok: true });
+    } finally {
+      releaseUnload?.();
+      if (proc) await killAndWait(proc);
+      await closeServer(upstream);
+      if (homeDir) rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports an error when the native unload fails and the model is still loaded', async () => {
+    // `unloadAliasLocked` keeps a model it could not unload in the pool, so replying ok would
+    // tell the caller the memory was released while the model is still resident.
+    const upstream = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{}');
+    });
+    let proc: ChildProcessWithoutNullStreams | undefined;
+    let homeDir: string | undefined;
+    try {
+      await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+      const { port: upstreamPort } = upstream.address() as AddressInfo;
+      const started = await startedGateway(upstreamPort, 200, [], false, null, false, false, true);
+      proc = started.proc;
+      homeDir = started.homeDir;
+
+      proc.stdin.write(`${JSON.stringify({ id: 40, cmd: 'load', alias: 'fake-model' })}\n`);
+      expect(await waitForLine(proc, (msg) => msg.id === 40, 5000)).toMatchObject({ ok: true });
+
+      proc.stdin.write(`${JSON.stringify({ id: 41, cmd: 'unload', alias: 'fake-model' })}\n`);
+      const unloadReply = await waitForLine(proc, (msg) => msg.id === 41, 5000);
+      expect(unloadReply.ok).toBeUndefined();
+      expect(String(unloadReply.error)).toContain('still loaded');
+
+      // The failed model stays resident. Use the synchronous status snapshot rather than
+      // poolStatus, whose hardware telemetry probes are unrelated to this assertion.
+      proc.stdin.write(`${JSON.stringify({ id: 42, cmd: 'getStatus' })}\n`);
+      const status = await waitForLine(proc, (msg) => msg.id === 42, 5000);
+      expect(status.result.pool.map((m: { alias: string }) => m.alias)).toContain('fake-model');
+    } finally {
+      if (proc) await killAndWait(proc);
+      await closeServer(upstream);
+      if (homeDir) rmSync(homeDir, { recursive: true, force: true });
+    }
+  }, 15000);
 
   it('waits for an already-admitted streaming gateway request to finish before acquiring exclusive admission', async () => {
     // Simulates SSE token-by-token completion: the gateway only completes admission once its
@@ -1011,7 +1237,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       expect(exclusiveSettledAt).toBeGreaterThanOrEqual(inFlightSettledAt);
     } finally {
       if (proc) await killAndWait(proc);
-      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      await closeServer(upstream);
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });
     }
   }, 20000);
@@ -1073,7 +1299,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       expect(exclusiveSettledAt).toBeGreaterThanOrEqual(chatSettledAt);
     } finally {
       if (proc) await killAndWait(proc);
-      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      await closeServer(upstream);
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });
     }
   }, 20000);
@@ -1137,7 +1363,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       expect(exclusiveSettledAt).toBeGreaterThanOrEqual(loadSettledAt);
     } finally {
       if (proc) await killAndWait(proc);
-      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      await closeServer(upstream);
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });
     }
   }, 20000);
@@ -1196,14 +1422,14 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       expect(released).toMatchObject({ ok: true, result: { exclusive: false } });
     } finally {
       if (proc) await killAndWait(proc);
-      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      await closeServer(upstream);
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });
     }
   }, 20000);
 
   it('waits for an already-admitted startService (destructive restart) to finish before acquiring exclusive admission', async () => {
-    // `startService` clears and repopulates the pool as part of its restart (see its handler's
-    // own comment on `pool.clear()`/`usage.clear()`) -- exactly the kind of resident-pool
+    // `startService` tears down the gateway and can repopulate the pool as part of its restart
+    // (its optional `ensureModel` call) -- exactly the kind of resident-pool
     // mutation the previous test covers for load/unload/deleteModel, but dispatched at the
     // top-level command instead of through `ensureModel`. A page reload leaves this sidecar
     // process (and anything it already admitted, including an in-flight `startService`) running,
@@ -1268,8 +1494,8 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       expect(exclusiveSettledAt).toBeGreaterThanOrEqual(startServiceSettledAt);
     } finally {
       if (proc) await killAndWait(proc);
-      await new Promise<void>((resolve) => upstream.close(() => resolve()));
-      await new Promise<void>((resolve) => heldUpstream.close(() => resolve()));
+      await closeServer(upstream);
+      await closeServer(heldUpstream);
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });
     }
   }, 20000);
@@ -1342,14 +1568,19 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       expect(releaseSettledAt).toBeGreaterThanOrEqual(acquireSettledAt);
     } finally {
       if (proc) await killAndWait(proc);
-      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      await closeServer(upstream);
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });
     }
   }, 20000);
 
   it('clears the fence and reports failure when in-flight gateway work does not drain in time, without leaving the endpoint blocked', async () => {
+    let resolveStuckRequestReceived: (() => void) | null = null;
+    const stuckRequestReceived = new Promise<void>((resolve) => {
+      resolveStuckRequestReceived = resolve;
+    });
     const upstream = createServer((req, res) => {
       if (req.headers['x-test-stuck']) {
+        resolveStuckRequestReceived?.();
         // Never respond: simulates a stuck/never-completing gateway request so the (short,
         // test-overridden) drain deadline is guaranteed to be reached.
         return;
@@ -1374,7 +1605,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       // A rejection here (e.g. from the socket being destroyed during cleanup) is expected and
       // is not what this test asserts on — only the sidecar's own behavior is under test.
       stuck.catch(() => {});
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      await stuckRequestReceived;
 
       proc.stdin.write(`${JSON.stringify({ id: 30, cmd: 'setBenchmarkExclusive', exclusive: true })}\n`);
       const failed = await waitForLine(proc, (msg) => msg.id === 30, 5000);
@@ -1388,7 +1619,7 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       expect(admitted.status).toBe(200);
     } finally {
       if (proc) await killAndWait(proc);
-      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      await closeServer(upstream);
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });
     }
   }, 20000);
@@ -1475,10 +1706,419 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
       expect(exclusiveResult).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
     } finally {
       if (proc) await killAndWait(proc);
-      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      await closeServer(upstream);
       if (homeDir) rmSync(homeDir, { recursive: true, force: true });
     }
   }, 20000);
+});
+
+describe('foundry-sidecar gateway variant autoload', () => {
+  /** Fake runtime with two cached builds of one alias. The upstream answers a chat request
+   * only for the variant the fake SDK most recently loaded, and records every native load
+   * and unload, so a test can see which destructive steps actually ran. */
+  async function startVariantGateway(stallTelemetry = false) {
+    let loadedId: string | null = null;
+    const nativeCalls: string[] = [];
+    const chatRequests: string[] = [];
+    let deleteHeld: (() => void) | null = null;
+    let notifyTelemetryStarted!: () => void;
+    const telemetryStarted = new Promise<void>((resolve) => { notifyTelemetryStarted = resolve; });
+    let hold: { arrived: () => void; released: Promise<void> } | null = null;
+    /** Holds the next served chat response open until released, like a long generation. */
+    const holdNextChat = () => {
+      let arrived!: () => void;
+      let release!: () => void;
+      const arrival = new Promise<void>((resolve) => { arrived = resolve; });
+      const released = new Promise<void>((resolve) => { release = resolve; });
+      hold = { arrived, released };
+      return { arrival, release };
+    };
+    const upstream = createServer((req, res) => {
+      const url = new URL(req.url || '/', 'http://127.0.0.1');
+      if (url.pathname === '/telemetry-started') {
+        notifyTelemetryStarted();
+        res.writeHead(200);
+        res.end();
+        return;
+      }
+      if (url.pathname === '/loaded' || url.pathname === '/unloaded') {
+        const id = url.searchParams.get('id');
+        nativeCalls.push(`${url.pathname.slice(1)}:${id}`);
+        if (url.pathname === '/loaded') loadedId = id;
+        else if (loadedId === id) loadedId = null;
+        res.writeHead(200);
+        res.end();
+        return;
+      }
+      if (url.pathname === '/delete-held') {
+        const notifyHeld = deleteHeld;
+        deleteHeld = null;
+        notifyHeld?.();
+        res.writeHead(200);
+        res.end();
+        return;
+      }
+      if (url.pathname !== '/v1/chat/completions') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        const model = JSON.parse(body).model;
+        chatRequests.push(model);
+        if (model !== loadedId || existsSync(goneMarker(model))) {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: { message: `Model '${model}' is not loaded. Please load the model first.` } }));
+          return;
+        }
+        const held = hold;
+        hold = null;
+        const answer = () => {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: model } }] }));
+        };
+        if (!held) {
+          answer();
+          return;
+        }
+        held.arrived();
+        void held.released.then(answer);
+      });
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+    const { port } = upstream.address() as AddressInfo;
+    const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-variant-autoload-home-'));
+    function goneMarker(id: string) {
+      return join(homeDir, `gone-${id.replace(/[^A-Za-z0-9.-]/g, '_')}`);
+    }
+    const markGone = (id: string) => writeFileSync(goneMarker(id), '');
+    const holdDeleteMarker = join(homeDir, 'hold-delete');
+    /** Parks the next deletion inside its catalog mutation, after it holds the alias fence. */
+    const holdNextDelete = () => {
+      const arrival = new Promise<void>((resolve) => { deleteHeld = resolve; });
+      writeFileSync(holdDeleteMarker, '');
+      return { arrival, release: () => rmSync(holdDeleteMarker, { force: true }) };
+    };
+    const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
+    const corePath = join(homeDir, 'fake-core.dylib');
+    writeFileSync(corePath, '');
+    writeFileSync(loaderPath, `
+      const sdk = \`
+        import { existsSync, writeFileSync } from 'node:fs';
+        const notify = (kind, id) => fetch('http://127.0.0.1:${port}/' + kind + '?id=' + encodeURIComponent(id));
+        // A marker file stands for the runtime having dropped a build and its cache files.
+        const goneMarker = (id) => '${homeDir.replace(/\\/g, '/')}/gone-' + id.replace(/[^A-Za-z0-9.-]/g, '_');
+        const gone = (id) => existsSync(goneMarker(id));
+        const holdDelete = '${holdDeleteMarker.replace(/\\/g, '/')}';
+        class FakeModel {
+          constructor(id, cached = true) { this.alias = 'foo'; this.id = id; this.cached = cached; this.loaded = false; }
+          get isCached() { return this.cached && !gone(this.id); }
+          async load() { await notify('loaded', this.id); this.loaded = true; }
+          async unload() { await notify('unloaded', this.id); this.loaded = false; }
+          isLoaded() { return this.loaded && !gone(this.id); }
+          removeFromCache() { writeFileSync(goneMarker(this.id), ''); }
+          getExecutionProvider() { return 'CPUExecutionProvider'; }
+          selectVariant(variant) { this.id = variant.id; this.cached = variant.cached; }
+        }
+        class FakeManager {
+          constructor() {
+            this.urls = [];
+            this.ep = { name: 'CPUExecutionProvider', isRegistered: true };
+            this.catalog = {
+              // The listing still claims foo-gone:1 is cached: it was deleted after the
+              // gateway last built its index, which is the window a load must re-validate.
+              getModels: async () => [{
+                alias: 'foo',
+                variants: ['foo-cpu:1', 'foo-gpu:1', 'foo-gone:1'].map(id => ({ id, isCached: true })),
+              }],
+              getLoadedModels: async () => {
+                if (${stallTelemetry}) {
+                  await fetch('http://127.0.0.1:${port}/telemetry-started');
+                  await new Promise(() => {});
+                }
+                return [];
+              },
+              getModel: async (alias) => {
+                if (alias !== 'foo') throw new Error('model not found');
+                return new FakeModel('foo-cpu:1');
+              },
+              getModelVariant: async (id) => {
+                if (existsSync(holdDelete)) {
+                  await fetch('http://127.0.0.1:${port}/delete-held');
+                  while (existsSync(holdDelete)) await new Promise((resolve) => setTimeout(resolve, 10));
+                }
+                if (!['foo-cpu:1', 'foo-gpu:1', 'foo-gone:1'].includes(id)) throw new Error('variant not found');
+                return new FakeModel(id, id !== 'foo-gone:1');
+              },
+            };
+          }
+          discoverEps() { return [this.ep]; }
+          async downloadAndRegisterEps() {
+            return { success: true, registeredEps: [this.ep.name], failedEps: [] };
+          }
+          startWebService() { this.urls = ['http://127.0.0.1:${port}']; }
+          stopWebService() {}
+          static create() { return new FakeManager(); }
+        }
+        export { FakeManager as FoundryLocalManager };
+      \`;
+      export async function resolve(specifier, context, nextResolve) {
+        if (specifier === 'foundry-local-sdk') {
+          return { url: 'data:text/javascript,' + encodeURIComponent(sdk), shortCircuit: true };
+        }
+        return nextResolve(specifier, context);
+      }
+      export async function load(url, context, nextLoad) {
+        if (url.startsWith('data:text/javascript,')) {
+          return { format: 'module', source: decodeURIComponent(url.slice('data:text/javascript,'.length)), shortCircuit: true };
+        }
+        return nextLoad(url, context);
+      }
+    `);
+    const proc = spawn(process.execPath, [
+      '--experimental-loader', pathToFileURL(loaderPath).href, 'sidecar/foundry-sidecar.js',
+    ], {
+      cwd: process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, HOME: homeDir, USERPROFILE: homeDir, FLINT_FOUNDRY_CORE_PATH: corePath },
+    });
+    const cleanup = async () => {
+      await killAndWait(proc);
+      await closeServer(upstream);
+      rmSync(homeDir, { recursive: true, force: true });
+    };
+    try {
+      await waitForLine(proc, (msg) => msg.ready === true);
+      proc.stdin.write(`${JSON.stringify({ id: 1, cmd: 'init', appName: 'flint-test', logLevel: 'info' })}\n`);
+      const initRes = await waitForLine(proc, (msg) => msg.id === 1);
+      if (!initRes.ok) throw new Error(`init failed: ${initRes.error}`);
+      proc.stdin.write(`${JSON.stringify({ id: 2, cmd: 'startService', port: 0, bindAddress: '127.0.0.1' })}\n`);
+      const started = await waitForLine(proc, (msg) => msg.id === 2, 15000);
+      if (!started.ok) throw new Error(`startService failed: ${started.error}`);
+      proc.stdin.write(`${JSON.stringify({ id: 3, cmd: 'load', alias: 'foo', variantId: 'foo-cpu:1' })}\n`);
+      const loaded = await waitForLine(proc, (msg) => msg.id === 3, 5000);
+      if (!loaded.ok) throw new Error(`load failed: ${loaded.error}`);
+      return {
+        proc,
+        gatewayPort: Number(new URL(started.endpoint).port),
+        nativeCalls,
+        chatRequests,
+        holdNextChat,
+        holdNextDelete,
+        telemetryStarted,
+        markGone,
+        cleanup,
+      };
+    } catch (e) {
+      await cleanup();
+      throw e;
+    }
+  }
+
+  function postChat(port: number, model: string): Promise<{ status: number; body: string }> {
+    const body = JSON.stringify({ model, messages: [] });
+    return new Promise((resolve, reject) => {
+      const req = httpRequest({
+        host: '127.0.0.1',
+        port,
+        path: '/v1/chat/completions',
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+      }, (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode || 0, body: data }));
+      });
+      req.on('error', reject);
+      req.end(body);
+    });
+  }
+
+  async function residentVariant(proc: ChildProcessWithoutNullStreams, id: number) {
+    proc.stdin.write(`${JSON.stringify({ id, cmd: 'getStatus' })}\n`);
+    const status = await waitForLine(proc, (msg) => msg.id === id, 5000);
+    return status.result.pool.find((m: { alias: string }) => m.alias === 'foo')?.variantId ?? null;
+  }
+
+  it('switches the resident variant for a gateway request naming another cached build', async () => {
+    // The request's own booking is not using the resident build it replaces, so it must not
+    // count as the in-flight work that forbids the switch.
+    const gateway = await startVariantGateway();
+    try {
+      const reply = await postChat(gateway.gatewayPort, 'foo-gpu:1');
+      expect(reply.status, reply.body).toBe(200);
+      expect(await residentVariant(gateway.proc, 10)).toBe('foo-gpu:1');
+      expect(gateway.nativeCalls).toEqual(['loaded:foo-cpu:1', 'unloaded:foo-cpu:1', 'loaded:foo-gpu:1']);
+    } finally {
+      await gateway.cleanup();
+    }
+  }, 20000);
+
+  it('refuses to autoload a build that is no longer cached, before unloading the resident one', async () => {
+    const gateway = await startVariantGateway();
+    try {
+      const reply = await postChat(gateway.gatewayPort, 'foo-gone:1');
+      expect(reply.status).toBe(400);
+      expect(reply.body).toContain('is not loaded');
+      expect(await residentVariant(gateway.proc, 10)).toBe('foo-cpu:1');
+      expect(gateway.nativeCalls).toEqual(['loaded:foo-cpu:1']);
+    } finally {
+      await gateway.cleanup();
+    }
+  }, 20000);
+
+  it('refuses to reload a resident entry the runtime dropped once its cache is gone', async () => {
+    const gateway = await startVariantGateway();
+    try {
+      gateway.markGone('foo-cpu:1');
+      const reply = await postChat(gateway.gatewayPort, 'foo-cpu:1');
+      expect(reply.status).toBe(400);
+      expect(reply.body).toContain('is not loaded');
+      expect(gateway.nativeCalls).toEqual(['loaded:foo-cpu:1']);
+    } finally {
+      await gateway.cleanup();
+    }
+  }, 20000);
+
+  it('keeps a request served through a versionless fallback counted against the serving build', async () => {
+    // A versionless `foo-cpu` resolves to the highest cached version, so the gateway forwards
+    // `foo-cpu:1`. That build is in use until the response completes.
+    const gateway = await startVariantGateway();
+    const held = gateway.holdNextChat();
+    let released = false;
+    try {
+      const pending = postChat(gateway.gatewayPort, 'foo-cpu');
+      pending.catch(() => {}); // cleanup may reset it if an assertion below fails first
+      await held.arrival;
+
+      gateway.proc.stdin.write(`${JSON.stringify({ id: 10, cmd: 'unload', alias: 'foo' })}\n`);
+      const unload = await waitForLine(gateway.proc, (msg) => msg.id === 10, 5000);
+      expect(unload.ok).not.toBe(true);
+      expect(unload.error).toContain('in flight');
+
+      held.release();
+      released = true;
+      const reply = await pending;
+      expect(reply.status, reply.body).toBe(200);
+      expect(gateway.nativeCalls).toEqual(['loaded:foo-cpu:1']);
+    } finally {
+      if (!released) held.release();
+      await gateway.cleanup();
+    }
+  }, 20000);
+
+  it('does not serve an uncached explicit version from another cached version', async () => {
+    const gateway = await startVariantGateway();
+    try {
+      const reply = await postChat(gateway.gatewayPort, 'foo-cpu:999');
+      expect(reply.status, reply.body).toBe(400);
+      expect(reply.body).toContain("foo-cpu:999");
+      expect(gateway.nativeCalls).toEqual(['loaded:foo-cpu:1']);
+    } finally {
+      await gateway.cleanup();
+    }
+  }, 20000);
+
+  it('refuses deletion blocked by expired telemetry and releases its activity fence', async () => {
+    const gateway = await startVariantGateway(true);
+    try {
+      gateway.proc.stdin.write(`${JSON.stringify({ id: 10, cmd: 'poolStatus' })}\n`);
+      const telemetry = waitForLine(gateway.proc, (msg) => msg.id === 10, 20000)
+        .catch((error) => { throw new Error('poolStatus did not settle within its IPC budget', { cause: error }); });
+      await gateway.telemetryStarted;
+      gateway.proc.stdin.write(`${JSON.stringify({
+        id: 11, cmd: 'deleteModel', alias: 'foo', variantId: 'foo-cpu:1',
+      })}\n`);
+      const deletion = await waitForLine(gateway.proc, (msg) => msg.id === 11, 15000)
+        .catch((error) => { throw new Error('deleteModel did not refuse the unresolved read', { cause: error }); });
+      expect(deletion.ok).not.toBe(true);
+      expect(deletion.error).toContain('not started');
+      const snapshot = await telemetry;
+      expect(snapshot.result.models[0]).toMatchObject({ alias: 'foo', isLoaded: null });
+      expect(gateway.nativeCalls).toEqual(['loaded:foo-cpu:1']);
+      const reply = await postChat(gateway.gatewayPort, 'foo-cpu:1');
+      expect(reply.status, reply.body).toBe(200);
+    } finally {
+      await gateway.cleanup();
+    }
+  }, 30000);
+
+  it('keeps tracking a loaded build across a service restart, so deletion cannot run beneath it', async () => {
+    // The native core keeps foo-cpu:1 loaded and servable across the listener restart. If the
+    // pool forgot it, a request for that exact id would be served but never counted, and the
+    // deletion would remove the build underneath the running stream.
+    const gateway = await startVariantGateway();
+    const held = gateway.holdNextChat();
+    let released = false;
+    try {
+      gateway.proc.stdin.write(
+        `${JSON.stringify({ id: 10, cmd: 'startService', port: 0, bindAddress: '127.0.0.1' })}\n`,
+      );
+      const restarted = await waitForLine(gateway.proc, (msg) => msg.id === 10, 15000);
+      expect(restarted.ok, restarted.error).toBe(true);
+      expect(await residentVariant(gateway.proc, 11)).toBe('foo-cpu:1');
+
+      const pending = postChat(Number(new URL(restarted.endpoint).port), 'foo-cpu:1');
+      pending.catch(() => {});
+      await held.arrival;
+
+      gateway.proc.stdin.write(
+        `${JSON.stringify({ id: 12, cmd: 'deleteModel', alias: 'foo', variantId: 'foo-cpu:1' })}\n`,
+      );
+      const deletion = await waitForLine(gateway.proc, (msg) => msg.id === 12, 5000);
+      expect(deletion.ok).not.toBe(true);
+      expect(deletion.error).toContain('in flight');
+
+      held.release();
+      released = true;
+      const reply = await pending;
+      expect(reply.status, reply.body).toBe(200);
+      expect(gateway.nativeCalls).toEqual(['loaded:foo-cpu:1']);
+    } finally {
+      if (!released) held.release();
+      await gateway.cleanup();
+    }
+  }, 30000);
+
+  it('cannot load a build through an unresolved request admitted while that build is deleted', async () => {
+    // With a cold index and foo-gpu:1 not resident, the fence cannot map the request to `foo`,
+    // so it is admitted while the deletion holds the alias fence. That admission reaches only the
+    // native router, which serves just the loaded foo-cpu:1. Its autoload then waits behind the
+    // deletion's residency scope and re-validates the cache, so it cannot reload what was deleted.
+    const gateway = await startVariantGateway();
+    const held = gateway.holdNextDelete();
+    let released = false;
+    try {
+      const deletion = waitForLine(gateway.proc, (msg) => msg.id === 10, 15000);
+      deletion.catch(() => {});
+      gateway.proc.stdin.write(
+        `${JSON.stringify({ id: 10, cmd: 'deleteModel', alias: 'foo', variantId: 'foo-gpu:1' })}\n`,
+      );
+      await held.arrival;
+
+      const pending = postChat(gateway.gatewayPort, 'foo-gpu:1');
+      pending.catch(() => {});
+      const deadline = Date.now() + 5000;
+      while (!gateway.chatRequests.includes('foo-gpu:1')) {
+        if (Date.now() > deadline) throw new Error('request was not admitted during the deletion');
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      held.release();
+      released = true;
+      const deleted = await deletion;
+      expect(deleted.ok, deleted.error).toBe(true);
+      const reply = await pending;
+      expect(reply.status, reply.body).toBe(400);
+      expect(await residentVariant(gateway.proc, 11)).toBe('foo-cpu:1');
+      expect(gateway.nativeCalls).toEqual(['loaded:foo-cpu:1']);
+    } finally {
+      if (!released) held.release();
+      await gateway.cleanup();
+    }
+  }, 30000);
 });
 
 describe('foundry-sidecar applyMemorySettings ordering guard', () => {
@@ -1493,7 +2133,7 @@ describe('foundry-sidecar applyMemorySettings ordering guard', () => {
   });
 
   afterEach(async () => {
-    if (proc && !proc.killed) await killAndWait(proc);
+    if (proc) await killAndWait(proc);
   });
 
   it('refuses to install a lower seq once a higher seq has already landed', async () => {
@@ -1569,8 +2209,8 @@ describe('foundry-sidecar command schema validation', () => {
     await waitForLine(proc, (msg) => msg.ready === true);
   });
 
-  afterEach(() => {
-    if (!proc.killed) proc.kill();
+  afterEach(async () => {
+    await killAndWait(proc);
   });
 
   it('rejects unknown commands with an error', async () => {
@@ -1721,8 +2361,8 @@ describe('foundry-sidecar error propagation and resilience', () => {
     await waitForLine(proc, (msg) => msg.ready === true);
   });
 
-  afterEach(() => {
-    if (!proc.killed) proc.kill();
+  afterEach(async () => {
+    await killAndWait(proc);
   });
 
   it('getStatus returns initialized:false before init', async () => {
@@ -1899,7 +2539,7 @@ describe('foundry-sidecar packaged resource layout', () => {
       expect(String(res.error ?? '')).not.toContain('require is not defined');
       expect(res.ok).toBe(true);
     } finally {
-      if (!proc.killed) proc.kill();
+      await killAndWait(proc);
     }
   }, 60000);
 });
@@ -2077,7 +2717,8 @@ describe('accelerator registration queue', () => {
     'class FakeManager {',
     '  constructor() { this.catalog = { getModel: async () => null, getModels: async () => [] }; }',
     "  discoverEps() { return [{ name: 'CUDAExecutionProvider', isRegistered: false }]; }",
-    '  async downloadAndRegisterEps() {',
+    '  async downloadAndRegisterEps(_names, onProgress) {',
+    "    onProgress?.('CUDAExecutionProvider', undefined);",
     '    const call = ++calls;',
     "    note('start ' + call);",
     '    await new Promise((resolve) => setTimeout(resolve, 300));',
@@ -2131,7 +2772,10 @@ describe('accelerator registration queue', () => {
       send({ id: 2, cmd: 'ensureAccelerators' });
       send({ id: 3, cmd: 'ensureAccelerators', rebuildBroken: true });
       send({ id: 4, cmd: 'ensureAccelerators' });
-      for (const reply of await Promise.all(replies)) expect(reply.error).toBeUndefined();
+      for (const reply of await Promise.all(replies)) {
+        expect(reply.error).toBeUndefined();
+        expect(reply.result).toBeDefined();
+      }
 
       const events = readFileSync(eventLog, 'utf8').split('\n').filter(Boolean);
       expect(events.length).toBeGreaterThanOrEqual(6);

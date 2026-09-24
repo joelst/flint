@@ -58,6 +58,7 @@ export default defineConfig(() => ({
       reporter: ['text', 'html'],
       include: [
         'src/lib/personas.ts',
+        'src/lib/pool-residency.ts',
         'src/lib/message-rendering.ts',
         'src/lib/conversation-sidebar.ts',
         'src/lib/ipc-contracts.ts',
@@ -105,7 +106,10 @@ export default defineConfig(() => ({
         'sidecar/protocol-stdout.js',
         'sidecar/chat-transport.js',
         'sidecar/audio-format.js',
+        'sidecar/accelerator-registration.js',
+        'sidecar/model-operation-queue.js',
         'sidecar/model-updates.js',
+        'sidecar/model-activity-fence.js',
         'sidecar/byom-import.js',
         'sidecar/prompt-template.js',
         'sidecar/service-lifecycle.js',

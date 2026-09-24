@@ -1,3 +1,5 @@
+import type { EpDownloadResult } from './ipc-contracts';
+
 export interface HydratedStartupStages<TAccelerators = void> {
   applyMemorySettings(): Promise<void>;
   prepareAccelerators(): Promise<TAccelerators>;
@@ -72,4 +74,20 @@ export function resolveCatalogCheckPresentation(options: {
   if (options.status === 'ready') return 'checked';
   if (!options.automaticCheckEnabled) return 'disabled';
   return 'pending';
+}
+
+export function resolveAcceleratorRestartGuidance(
+  registration: EpDownloadResult | null | undefined,
+): string {
+  if (!registration) return '';
+  if (registration.registrationDeferredUntilRestart) {
+    return registration.status || 'Restart Flint before updating accelerators.';
+  }
+  if (!registration.catalogRefreshRequiresRestart) return '';
+  if (registration.success === false) {
+    const status = (registration.status || 'Some accelerators could not be registered').trim();
+    const punctuation = /[.!?]$/.test(status) ? '' : '.';
+    return `${status}${punctuation} Restart Flint to let the model catalog detect any newly available variants.`;
+  }
+  return 'Accelerator setup finished. Restart Flint to let the model catalog detect any newly available variants.';
 }

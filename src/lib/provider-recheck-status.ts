@@ -26,6 +26,8 @@ export interface ProviderRecheckRegistration {
   removedProviderCaches?: string[];
   attemptedProviderRebuilds?: string[];
   busyProviderCaches?: string[];
+  catalogRefreshRequiresRestart?: boolean;
+  registrationDeferredUntilRestart?: boolean;
 }
 
 export interface ProviderRecheckRow {
@@ -46,6 +48,15 @@ export function providerRecheckStatus(
   registration: ProviderRecheckRegistration | null | undefined,
   providers: readonly ProviderRecheckRow[],
 ): ProviderRecheckStatus {
+  if (registration?.registrationDeferredUntilRestart) {
+    return {
+      failed: true,
+      message: 'Provider rebuild was deferred because the catalog snapshot is unconfirmed. Restart Flint before rechecking providers.',
+    };
+  }
+  const restart = registration?.catalogRefreshRequiresRestart
+    ? ' Restart Flint to refresh the model catalog.'
+    : '';
   const registered = new Set(
     providers
       .filter((provider) => provider.isRegistered && provider.name)
@@ -70,17 +81,27 @@ export function providerRecheckStatus(
     ? ` Left in place because a file is in use: ${busy.join(', ')}.`
     : '';
   if (stillFailed.length) {
+    const considered = new Set(
+      [...(registration?.attemptedProviderRebuilds ?? []), ...removed, ...busy].map(providerKey),
+    );
+    const repairFailed = stillFailed.filter((name) => considered.has(providerKey(name)));
+    const unavailable = stillFailed.filter((name) => !considered.has(providerKey(name)));
+    const details = [
+      ...(rebuilt.length ? [`Rebuilt ${rebuilt.join(', ')}.`] : []),
+      ...(repairFailed.length ? [`Provider rebuild failed for ${repairFailed.join(', ')}.`] : []),
+      ...(unavailable.length ? [`Providers still unavailable: ${unavailable.join(', ')}.`] : []),
+    ].join(' ');
     return {
       failed: true,
-      message: `Provider rebuild failed for ${stillFailed.join(', ')}.${locked}`,
+      message: `${details}${locked}${restart}`,
     };
   }
   if (rebuilt.length) {
-    return { failed: false, message: `Rebuilt ${rebuilt.join(', ')}.${locked}` };
+    return { failed: false, message: `Rebuilt ${rebuilt.join(', ')}.${locked}${restart}` };
   }
   const ready = providers.filter((provider) => provider.isRegistered === true).length;
   return {
     failed: false,
-    message: `${ready} execution provider${ready === 1 ? '' : 's'} ready.${locked}`,
+    message: `${ready} execution provider${ready === 1 ? '' : 's'} ready.${locked}${restart}`,
   };
 }

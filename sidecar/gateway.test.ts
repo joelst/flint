@@ -556,6 +556,63 @@ describe('gateway model-name routing', () => {
     expect((await send()).status).toBe(200);
   });
 
+  it('books the variant it forwards, so the served build is the one kept busy', async () => {
+    // Foundry serves only the exact variant id. A request the gateway rewrote is served by
+    // that build, and only a booking under that id tells the owner which build is in use.
+    await startVariantOnlyUpstream();
+    const events: Array<[string, string]> = [];
+    gateway = await startGateway({
+      resolve: async id => (id === ALIAS ? { alias: ALIAS, variantId: null } : null),
+      load: async () => { upstream.state.loaded.add(VARIANT); return VARIANT; },
+      onActivity: (model, phase) => { events.push([model, phase]); },
+    });
+    const send = () => request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: ALIAS }),
+    });
+
+    expect((await send()).status).toBe(200);
+    expect(events).toEqual([
+      [ALIAS, 'start'], [VARIANT, 'start'], [ALIAS, 'end'], [VARIANT, 'end'],
+    ]);
+
+    events.length = 0;
+    expect((await send()).status).toBe(200); // learned routing, forwarded up front
+    expect(events).toEqual([
+      [ALIAS, 'start'], [VARIANT, 'start'], [ALIAS, 'end'], [VARIANT, 'end'],
+    ]);
+  });
+
+  it('refuses a rewritten request whose variant is being changed', async () => {
+    await startVariantOnlyUpstream();
+    const events: Array<[string, string]> = [];
+    let fenced = false;
+    gateway = await startGateway({
+      resolve: async id => (id === ALIAS ? { alias: ALIAS, variantId: null } : null),
+      load: async () => { upstream.state.loaded.add(VARIANT); return VARIANT; },
+      onActivity: (model, phase) => {
+        events.push([model, phase]);
+        return !(fenced && phase === 'start' && model === VARIANT);
+      },
+    });
+    const send = () => request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: ALIAS }),
+    });
+
+    expect((await send()).status).toBe(200);
+    const hits = upstream.state.hits.length;
+    fenced = true;
+    events.length = 0;
+
+    const refused = await send();
+    expect(refused.status).toBe(409);
+    expect(upstream.state.hits).toHaveLength(hits);
+    expect(events).toEqual([[ALIAS, 'start'], [VARIANT, 'start'], [ALIAS, 'end']]);
+  });
+
   it('serves an alias while the model is resident by learning the variant id from the 404', async () => {
     await startVariantOnlyUpstream();
     upstream.state.loaded.add(VARIANT);
@@ -1494,6 +1551,22 @@ describe('gateway activity hook', () => {
     gateway = await startGateway({ onActivity: () => { throw new Error('hook exploded'); } });
     const res = await post(gateway.publicPort, 'phi-4-mini');
     expect(res.status).toBe(200);
+  });
+
+  it('rejects model work when the activity hook cannot acquire a lease', async () => {
+    upstream.state.loaded.add('phi-4-mini');
+    const events = [];
+    gateway = await startGateway({
+      onActivity: (model, phase) => {
+        events.push([model, phase]);
+        return phase !== 'start';
+      },
+    });
+
+    const res = await post(gateway.publicPort, 'phi-4-mini');
+    expect(res.status).toBe(409);
+    expect(events).toEqual([['phi-4-mini', 'start']]);
+    expect(upstream.state.hits).toHaveLength(0);
   });
 
   it('holds an admission lease across autoload and replay', async () => {

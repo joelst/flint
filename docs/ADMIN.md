@@ -24,6 +24,13 @@ Linux is not a release target.
 
 Stop / Stop & Unload withdraws the endpoint. A Stop acknowledgement is not proof the native listener has gone quiet. **Stop service** withdraws HTTP availability only; **Stop & Unload** additionally fences new work and unloads models once admitted work and eviction finish.
 
+Loaded-model telemetry has a 10-second sidecar wait budget. Expired queued reads never
+start. If an already-dispatched asynchronous read remains unresolved, catalog mutations
+are refused before changing files; retry after the read settles or restart the runtime.
+The warning appears in the sidecar log, and unavailable loaded-state telemetry is reported
+as unknown. This deadline does not cancel native work or interrupt a synchronous native
+call that blocks Node's event loop.
+
 ## Packaged vs PATH Node
 
 About shows Node as `bundled` or `PATH`. Release installers include Node 22. PATH Node is a development fallback. If About says Node is missing, the install is incomplete — reinstall from GitHub Releases, do not install Node as a user requirement.
@@ -46,10 +53,18 @@ also refresh the catalog to show their results.
 
 Accelerator setup is separate from the catalog setting. Flint runs it automatically at startup,
 and Foundry Local may download and register execution-provider components when the machine needs
-them. Turning off the startup catalog check does not disable accelerator setup. Model downloads
+them. Flint completes that registration before its first catalog read so the SDK includes every
+compatible provider-specific variant in the snapshot. Turning off the startup catalog check does
+not disable accelerator setup. Model downloads
 and other explicitly requested model-management operations can also require network access.
 There is currently no separate switch for startup accelerator setup, so prepare the required
 components before disconnecting if the machine must launch fully offline.
+
+**Recheck Providers** uses the same registration/catalog queue as startup and
+**Install / Update Accelerators**. It waits for active setup before attempting
+cache repair. If the catalog snapshot is unconfirmed, repair is deferred without
+removing provider caches. After a confirmed snapshot, provider repair can proceed,
+but Flint must restart before newly available variants enter the model catalog.
 
 ## Uninstall leftovers
 
