@@ -44,14 +44,19 @@ export function createModelActivityFence({
           ? catalogResolutionFor(name)
           : null;
         const residentVariant = residentVariantFor(target);
+        const exactResidentVariant = residentVariant
+          && keyOf(name) === keyOf(residentVariant);
         if (
-          !resolution
-          || (
-            resolution.alias
-            && keyOf(resolution.alias) === target
-            && resolution.variantId
-            && residentVariant
-            && keyOf(resolution.variantId) !== keyOf(residentVariant)
+          !exactResidentVariant
+          && (
+            !resolution
+            || (
+              resolution.alias
+              && keyOf(resolution.alias) === target
+              && resolution.variantId
+              && residentVariant
+              && keyOf(resolution.variantId) !== keyOf(residentVariant)
+            )
           )
         ) {
           residentCount -= booking.deferredCount;

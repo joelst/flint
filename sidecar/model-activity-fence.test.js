@@ -115,6 +115,25 @@ describe('model activity fence', () => {
     gate.end(booking);
   });
 
+  it('keeps an exact resident booking counted when catalog resolution is unavailable', () => {
+    const pool = new Map([['model-a', 'model-a-cpu:4']]);
+    const gate = createModelActivityFence({
+      residentAliasFor: (name) => pool.has('model-a')
+        && name.toLowerCase() === 'model-a-cpu:4'
+        ? 'model-a'
+        : null,
+      residentVariantFor: (alias) => pool.get(alias) ?? null,
+      catalogAliasFor: () => null,
+      catalogResolutionFor: () => null,
+    });
+
+    const booking = gate.start('model-a-cpu:4', { deferResidentAlias: true });
+    expect(booking).toBeTypeOf('string');
+    expect(gate.inFlightFor('model-a')).toBe(1);
+
+    gate.end(booking);
+  });
+
   it('admits unrelated unresolved models while another alias is fenced', () => {
     const { gate } = createLedger();
 

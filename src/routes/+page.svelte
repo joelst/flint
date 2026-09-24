@@ -6134,7 +6134,6 @@ updateStateFromSdk();
         const result = await sdkDeleteModel(model, variantId);
         const deletedMessage = `${model.alias} variant deleted (${label})`;
         // If no other variants remain cached, clear selection/meta like full delete
-        await refreshCatalogModels();
         const refreshed = state.models.find((m: ModelInfo) => m.alias === model.alias);
         const anyCached =
           refreshed?.isCached ||
