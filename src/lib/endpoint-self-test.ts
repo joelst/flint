@@ -397,9 +397,25 @@ async function fetchAndRead(
   }
 }
 
-function tinyWav(): Blob {
-  const samples = 160;
-  const dataSize = samples * 2;
+/** Sample rate Flint's own recorder transcodes to; the input the sidecar documents accepting. */
+export const SELF_TEST_WAV_SAMPLE_RATE = 16_000;
+const SELF_TEST_WAV_SECONDS = 1;
+
+/**
+ * One second of 16 kHz mono 16-bit PCM silence, the same shape Flint sends from its own
+ * recorder, so a speech model that rejects the probe is rejecting input Flint would send.
+ * Silence keeps the probe about a successful response shape; an empty transcript passes.
+ */
+export function selfTestWav(): Blob {
+  return new Blob([selfTestWavBytes()], { type: 'audio/wav' });
+}
+
+export function selfTestWavBytes(): ArrayBuffer {
+  const channels = 1;
+  const bytesPerSample = 2;
+  const blockAlign = channels * bytesPerSample;
+  const samples = SELF_TEST_WAV_SAMPLE_RATE * SELF_TEST_WAV_SECONDS;
+  const dataSize = samples * blockAlign;
   const buffer = new ArrayBuffer(44 + dataSize);
   const view = new DataView(buffer);
   const write = (offset: number, text: string) => {
@@ -410,15 +426,15 @@ function tinyWav(): Blob {
   write(8, 'WAVE');
   write(12, 'fmt ');
   view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, 8000, true);
-  view.setUint32(28, 16000, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, channels, true);
+  view.setUint32(24, SELF_TEST_WAV_SAMPLE_RATE, true);
+  view.setUint32(28, SELF_TEST_WAV_SAMPLE_RATE * blockAlign, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bytesPerSample * 8, true);
   write(36, 'data');
   view.setUint32(40, dataSize, true);
-  return new Blob([buffer], { type: 'audio/wav' });
+  return buffer;
 }
 
 function declaredToolCalling(
@@ -510,7 +526,7 @@ async function runSpeechChecks(
     }
     const form = new FormData();
     form.append('model', preparedModelId);
-    form.append('file', tinyWav(), 'ping.wav');
+    form.append('file', selfTestWav(), 'ping.wav');
     const { res, json } = await fetchAndRead(
       fetchFn,
       joinUrl(endpoint, '/audio/transcriptions'),

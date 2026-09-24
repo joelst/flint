@@ -4,8 +4,11 @@ import {
   endpointAliases,
   flintVerifiedFromReport,
   groupSelfTestChecks,
+  SELF_TEST_WAV_SAMPLE_RATE,
   catalogModelForEndpointId,
   matchesVerifiedModel,
+  selfTestWav,
+  selfTestWavBytes,
   runEndpointSelfTest,
 } from './endpoint-self-test';
 
@@ -971,6 +974,31 @@ describe('endpointAliases', () => {
       embed: [],
       speech: ['custom-model-generic-cpu', 'whisper-custom'],
     });
+  });
+});
+
+describe('selfTestWav', () => {
+  it('is one second of 16 kHz mono 16-bit PCM with a consistent header', () => {
+    const view = new DataView(selfTestWavBytes());
+    expect(selfTestWav().type).toBe('audio/wav');
+    const ascii = (offset: number, length: number) =>
+      String.fromCharCode(...new Uint8Array(view.buffer, offset, length));
+    const dataSize = view.getUint32(40, true);
+
+    expect(ascii(0, 4)).toBe('RIFF');
+    expect(ascii(8, 4)).toBe('WAVE');
+    expect(ascii(12, 4)).toBe('fmt ');
+    expect(ascii(36, 4)).toBe('data');
+    expect(view.getUint16(20, true)).toBe(1); // PCM
+    expect(view.getUint16(22, true)).toBe(1); // mono
+    expect(view.getUint32(24, true)).toBe(SELF_TEST_WAV_SAMPLE_RATE);
+    expect(SELF_TEST_WAV_SAMPLE_RATE).toBe(16_000);
+    expect(view.getUint16(34, true)).toBe(16);
+    expect(view.getUint16(32, true)).toBe(2);
+    expect(view.getUint32(28, true)).toBe(16_000 * 2);
+    expect(dataSize).toBe(16_000 * 2);
+    expect(view.getUint32(4, true)).toBe(36 + dataSize);
+    expect(view.byteLength).toBe(44 + dataSize);
   });
 });
 
