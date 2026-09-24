@@ -930,8 +930,8 @@
   let benchmarkRunError = $state<string | null>(null);
 
   /** Thin wrapper around the pure `computeResidentCapFloor`, supplying this page's live
-   * `state.pool`/`modelPriorities`. See that function's docstring for why it must be called
-   * fresh on every push rather than cached. */
+   * filtered resident pool entries and `modelPriorities`. See that function's docstring for why
+   * it must be called fresh on every push rather than cached. */
   function residentCapFloorFor(ownAliases: readonly string[]): number {
     return computeResidentCapFloor(loadedPoolEntries, modelPriorities, ownAliases);
   }
@@ -2742,7 +2742,7 @@
    * is first installed) makes it a standing invariant of every push for as long as a benchmark
    * holds the lease, not a one-time snapshot. The resident cap floor (via `residentCapFloorFor`/
    * `overlayResidentCapFloor`) gets the same treatment and for the same reason, and goes further:
-   * it is *recomputed fresh from live `state.pool`/`modelPriorities` on every push* rather than
+   * it is *recomputed fresh from live filtered resident entries/`modelPriorities` on every push* rather than
    * cached from whenever the lease was installed, so a priority edit made mid-run — e.g. the user
    * pinning another already-resident alias from Monitor/Settings while a later target is still
    * loading — raises the floor in time for the very next push instead of leaving a stale,
