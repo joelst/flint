@@ -1636,7 +1636,8 @@ describe('foundry-sidecar benchmark exclusive gateway fence', () => {
         resolveFirstRequestReceived?.();
         await firstResponseHeld;
         res.writeHead(400, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ error: { message: "Model 'fake-model' is not loaded. Please load the model first." } }));
+        // SDK 2.0.1 wording. The 1.x wording ("Model 'X' is not loaded") is covered in gateway.test.ts.
+        res.end(JSON.stringify({ error: { message: "Model not loaded: Model 'fake-model' must be loaded before inference" } }));
         return;
       }
       res.writeHead(200, { 'content-type': 'application/json' });

@@ -3,7 +3,8 @@ import {
   DEFAULT_BUFFERED_RESPONSE_TIMEOUT_MS,
   stripHopByHopHeaders,
   isJsonContentType,
-  isModelNotLoadedError,
+  modelRejection,
+  rejectionNames,
   shouldBufferBody,
   extractModelName,
   rewriteModelName,
@@ -59,46 +60,81 @@ describe('isJsonContentType', () => {
   });
 });
 
-describe('isModelNotLoadedError', () => {
-  const real = "Failed to handle OpenAI completion: Model 'qwen3-0.6b' is not loaded. "
+describe('modelRejection', () => {
+  const legacy = "Failed to handle OpenAI completion: Model 'qwen3-0.6b' is not loaded. "
     + 'Please load the model before getting a ChatClient.';
+  // SDK 2.0.1, probed live (#162).
+  const notLoaded = "Model not loaded: Model 'qwen3-0.6b-generic-cpu:4' must be loaded before inference";
+  const notFound = "Model not found: No model matching 'qwen3-0.6b'";
 
-  it('matches the Foundry rejection on 400', () => {
-    expect(isModelNotLoadedError(400, real)).toBe(true);
-    expect(isModelNotLoadedError(400, JSON.stringify({ error: { message: real } }))).toBe(true);
+  it('classifies the SDK 2.0.1 not-loaded 400 with its model name', () => {
+    expect(modelRejection(400, notLoaded)).toEqual({ kind: 'not-loaded', model: 'qwen3-0.6b-generic-cpu:4' });
+    expect(modelRejection(400, JSON.stringify({ error: { message: notLoaded } })))
+      .toEqual({ kind: 'not-loaded', model: 'qwen3-0.6b-generic-cpu:4' });
   });
 
-  // Captured verbatim from a live Foundry service, apostrophes escaped as it sends them.
-  it('matches the exact body the service returns', () => {
+  it('classifies the SDK 2.0.1 not-found 404 with its model name', () => {
+    expect(modelRejection(404, notFound)).toEqual({ kind: 'not-found', model: 'qwen3-0.6b' });
+    expect(modelRejection(404, JSON.stringify({ error: { message: notFound } })))
+      .toEqual({ kind: 'not-found', model: 'qwen3-0.6b' });
+  });
+
+  it('still classifies the SDK 1.x wording', () => {
+    expect(modelRejection(400, legacy)).toEqual({ kind: 'not-loaded', model: 'qwen3-0.6b' });
+    expect(modelRejection(400, JSON.stringify({ error: { message: legacy } })))
+      .toEqual({ kind: 'not-loaded', model: 'qwen3-0.6b' });
+  });
+
+  // Captured verbatim from a live SDK 1.x service, apostrophes escaped as it sends them.
+  it('reads the exact body the service returns', () => {
     const wire = '{"error":{"message":"Failed to handle OpenAI completion: Model '
       + '\\u0027qwen3.5-4b-generic-cpu:3\\u0027 is not loaded. Please load the model '
       + 'before getting a ChatClient.","type":"invalid_request_error","code":null}}';
-    expect(isModelNotLoadedError(400, wire)).toBe(true);
+    expect(modelRejection(400, wire)?.model).toBe('qwen3.5-4b-generic-cpu:3');
   });
 
   // Autoload must not silently stop working the first time Foundry rewords the sentence
   // around the model name.
   it('survives rewording around the quoted model name', () => {
-    expect(isModelNotLoadedError(400, "Model 'phi-4' is not loaded.")).toBe(true);
-    expect(isModelNotLoadedError(400, "Request failed: Model 'phi-4' is not loaded yet, sorry.")).toBe(true);
+    expect(modelRejection(400, "Model 'phi-4' is not loaded.")?.model).toBe('phi-4');
+    expect(modelRejection(400, "Request failed: Model 'phi-4' is not loaded yet, sorry.")?.model).toBe('phi-4');
+    expect(modelRejection(400, "Model 'phi-4' must be loaded before inference (hint)")?.model).toBe('phi-4');
   });
 
   // A JSON body of some other shape must fall back to the raw text, not be discarded.
   it('reads the raw body when the JSON is not the expected shape', () => {
-    expect(isModelNotLoadedError(400, JSON.stringify({ detail: real }))).toBe(true);
-    expect(isModelNotLoadedError(400, JSON.stringify({ error: { message: 'bad request' } }))).toBe(false);
+    expect(modelRejection(400, JSON.stringify({ detail: legacy }))?.model).toBe('qwen3-0.6b');
+    expect(modelRejection(400, JSON.stringify({ error: { message: 'bad request' } }))).toBeNull();
   });
 
-  it('ignores the same text on other statuses', () => {
-    expect(isModelNotLoadedError(500, real)).toBe(false);
-    expect(isModelNotLoadedError(404, real)).toBe(false);
+  it('does not cross statuses', () => {
+    expect(modelRejection(500, legacy)).toBeNull();
+    expect(modelRejection(404, legacy)).toBeNull();
+    expect(modelRejection(404, notLoaded)).toBeNull();
+    expect(modelRejection(400, notFound)).toBeNull();
   });
 
-  it('ignores unrelated 400s', () => {
-    expect(isModelNotLoadedError(400, 'model field is required')).toBe(false);
-    expect(isModelNotLoadedError(400, 'Model validation failed because it is not loaded')).toBe(false);
-    expect(isModelNotLoadedError(400, 'The model is not loaded')).toBe(false);
-    expect(isModelNotLoadedError(400, '')).toBe(false);
+  it('ignores unrelated 400s and 404s', () => {
+    expect(modelRejection(400, 'model field is required')).toBeNull();
+    expect(modelRejection(400, 'Model validation failed because it is not loaded')).toBeNull();
+    expect(modelRejection(400, 'The model is not loaded')).toBeNull();
+    expect(modelRejection(400, '')).toBeNull();
+    // Only the router's own phrase means it does not know the model; a bare fragment does not.
+    expect(modelRejection(404, "No model matching 'qwen3-0.6b'")).toBeNull();
+    expect(modelRejection(404, "Adapter not found: No model matching 'qwen3-0.6b'")).toBeNull();
+    expect(modelRejection(404, 'Not Found')).toBeNull();
+    expect(modelRejection(404, JSON.stringify({ error: { message: "Route '/v1/nope' not found" } }))).toBeNull();
+  });
+});
+
+describe('rejectionNames', () => {
+  it('requires the quoted model to be the one this request sent, ignoring case', () => {
+    const rejection = modelRejection(404, "Model not found: No model matching 'Qwen3-0.6b'");
+    expect(rejectionNames(rejection, 'qwen3-0.6b')).toBe(true);
+    expect(rejectionNames(rejection, ' QWEN3-0.6B ')).toBe(true);
+    expect(rejectionNames(rejection, 'qwen3-0.6b-generic-cpu:4')).toBe(false);
+    expect(rejectionNames(rejection, null)).toBe(false);
+    expect(rejectionNames(null, 'qwen3-0.6b')).toBe(false);
   });
 });
 
