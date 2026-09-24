@@ -1979,7 +1979,7 @@ describe('foundry-sidecar gateway variant autoload', () => {
     const held = gateway.holdNextChat();
     let released = false;
     try {
-      const pending = postChat(gateway.gatewayPort, 'foo-cpu:999');
+      const pending = postChat(gateway.gatewayPort, 'foo-cpu');
       pending.catch(() => {}); // cleanup may reset it if an assertion below fails first
       await held.arrival;
 
@@ -1995,6 +1995,18 @@ describe('foundry-sidecar gateway variant autoload', () => {
       expect(gateway.nativeCalls).toEqual(['loaded:foo-cpu:1']);
     } finally {
       if (!released) held.release();
+      await gateway.cleanup();
+    }
+  }, 20000);
+
+  it('does not serve an uncached explicit version from another cached version', async () => {
+    const gateway = await startVariantGateway();
+    try {
+      const reply = await postChat(gateway.gatewayPort, 'foo-cpu:999');
+      expect(reply.status, reply.body).toBe(400);
+      expect(reply.body).toContain("foo-cpu:999");
+      expect(gateway.nativeCalls).toEqual(['loaded:foo-cpu:1']);
+    } finally {
       await gateway.cleanup();
     }
   }, 20000);
