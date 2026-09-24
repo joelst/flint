@@ -41,14 +41,20 @@ export function activityCandidateKeys (input) {
 
   const keys = [];
   const push = (key) => {
-    if (key && !keys.includes(key)) keys.push(key);
+    if (key && !keys.some((existing) => existing.toLowerCase() === key.toLowerCase())) keys.push(key);
   };
+
+  const rawMatchesResidentAlias = !!(
+    raw
+    && matchedResidentAlias
+    && raw.toLowerCase() === matchedResidentAlias.toLowerCase()
+  );
 
   if (
     !modelIndexAvailable
     && raw
     && matchedResidentAlias
-    && raw !== matchedResidentAlias
+    && !rawMatchesResidentAlias
     && !raw.includes(':')
   ) {
     // A versionless id can spell either the resident variant or a different cached one.

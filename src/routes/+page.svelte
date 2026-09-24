@@ -338,6 +338,10 @@
 
   async function runGatewaySelfTest() {
     if (endpointSelfTestBusy) return;
+    if (state.models.length === 0) {
+      statusMessage = "Refresh the catalog before testing the endpoint.";
+      return;
+    }
     if (benchmarkRunInFlight) {
       statusMessage = "A benchmark run is active — stop it before changing loaded models.";
       return;
@@ -9344,7 +9348,11 @@ Output only the summary text, no preamble.`;
               <button onclick={copyDiagnosticsToClipboard}>
                 Copy All Diagnostics
               </button>
-              <button onclick={runGatewaySelfTest} disabled={endpointSelfTestBusy || benchmarkRunInFlight}>
+              <button
+                onclick={runGatewaySelfTest}
+                disabled={endpointSelfTestBusy || benchmarkRunInFlight || state.models.length === 0}
+                title={state.models.length === 0 ? "Refresh the catalog before testing the endpoint." : undefined}
+              >
                 {endpointSelfTestBusy ? "Testing endpoint…" : "Test local endpoint"}
               </button>
               <button onclick={scanCacheInventory} disabled={!state.ready || cacheInventoryLoading}>
