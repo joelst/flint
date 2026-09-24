@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { decodeWavPcm } from './audio-pcm-decode.js';
+import { decodeWavPcm, getWavDurationSeconds } from './audio-pcm-decode.js';
 
 function writeAscii(view: DataView, offset: number, text: string) {
   for (let i = 0; i < text.length; i += 1) view.setUint8(offset + i, text.charCodeAt(i));
@@ -237,5 +237,25 @@ describe('decodeWavPcm', () => {
     const samples = new Int16Array([1]);
     const wav = buildWav({ formatCode: 6, bitsPerSample: 16, data: samples.buffer });
     expect(() => decodeWavPcm(wav)).toThrow(/Unsupported WAV sample format/);
+  });
+});
+
+describe('getWavDurationSeconds', () => {
+  it('computes duration from the header without decoding samples', () => {
+    const samples = new Int16Array(22000 * 2); // 2 seconds at 22000 Hz, mono, 16-bit
+    const wav = buildWav({ bitsPerSample: 16, sampleRate: 22000, data: samples.buffer });
+    expect(getWavDurationSeconds(wav)).toBeCloseTo(2, 5);
+  });
+
+  it('accounts for channel count and bit depth when computing frame count', () => {
+    const frameCount = 1000;
+    const samples = new Int32Array(frameCount * 2); // stereo, 32-bit
+    const wav = buildWav({ bitsPerSample: 32, numChannels: 2, sampleRate: 8000, data: samples.buffer });
+    expect(getWavDurationSeconds(wav)).toBeCloseTo(frameCount / 8000, 5);
+  });
+
+  it('throws for a non-RIFF buffer, same as decodeWavPcm', () => {
+    const buffer = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]).buffer;
+    expect(() => getWavDurationSeconds(buffer)).toThrow(/RIFF\/WAVE/);
   });
 });

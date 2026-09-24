@@ -178,7 +178,7 @@
   } from "$lib/endpoint-self-test";
   import { buildEndpointModelClassifier } from "$lib/endpoint-model-classification";
   import { endpointLoadTarget } from "$lib/endpoint-load-target";
-  import { decodeWavPcm } from "$lib/audio-pcm-decode";
+  import { decodeWavPcm, getWavDurationSeconds } from "$lib/audio-pcm-decode";
   import { sniffAudioFormat } from "../../sidecar/audio-format.js";
   import {
     createSelfTestResidencyController,
@@ -7229,8 +7229,7 @@ Output only the summary text, no preamble.`;
       // WebView2/Chromium builds reject WAV bytes for that other players decode fine.
       if (sniffAudioFormat(new Uint8Array(buf)) === 'wav') {
         try {
-          const pcm = decodeWavPcm(buf);
-          return pcm.channelData[0].length / pcm.sampleRate;
+          return getWavDurationSeconds(buf);
         } catch {
           // Fall through to the browser decoder below.
         }

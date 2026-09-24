@@ -22,18 +22,29 @@ function readAscii(view: DataView, offset: number, length: number): string {
   return out;
 }
 
+interface WavHeader {
+  view: DataView;
+  formatCode: number;
+  numChannels: number;
+  sampleRate: number;
+  bitsPerSample: number;
+  bytesPerSample: number;
+  frameSize: number;
+  frameCount: number;
+  dataOffset: number;
+  isFloat: boolean;
+  isInt: boolean;
+}
+
 /**
- * Parse a canonical RIFF/WAVE buffer into per-channel Float32 PCM.
- *
- * Supports the common `fmt ` layouts written by real encoders (ffmpeg included):
- * 8/16/24/32-bit signed integer PCM, 32-bit IEEE float, and WAVE_FORMAT_EXTENSIBLE wrapping
- * either of those. Unknown chunks (e.g. ffmpeg's `LIST`/`fact`) are skipped rather than
- * rejected, since they carry no sample data.
+ * Walk a RIFF/WAVE buffer's chunks and validate its `fmt `/`data` chunks, without reading or
+ * allocating any sample data. Shared by {@link decodeWavPcm} (which also materializes samples)
+ * and {@link getWavDurationSeconds} (which only needs the frame count and sample rate).
  *
  * @throws {Error} if the buffer is not RIFF/WAVE, the format is unsupported, or no `data`
  *   chunk is present.
  */
-export function decodeWavPcm(buffer: ArrayBuffer): DecodedPcm {
+function parseWavHeader(buffer: ArrayBuffer): WavHeader {
   const view = new DataView(buffer);
   if (buffer.byteLength < 12 || readAscii(view, 0, 4) !== 'RIFF' || readAscii(view, 8, 4) !== 'WAVE') {
     throw new Error('Not a RIFF/WAVE buffer.');
@@ -101,6 +112,36 @@ export function decodeWavPcm(buffer: ArrayBuffer): DecodedPcm {
   const bytesPerSample = bitsPerSample / 8;
   const frameSize = bytesPerSample * numChannels;
   const frameCount = Math.floor(dataLength / frameSize);
+
+  return {
+    view,
+    formatCode,
+    numChannels,
+    sampleRate,
+    bitsPerSample,
+    bytesPerSample,
+    frameSize,
+    frameCount,
+    dataOffset,
+    isFloat,
+    isInt,
+  };
+}
+
+/**
+ * Parse a canonical RIFF/WAVE buffer into per-channel Float32 PCM.
+ *
+ * Supports the common `fmt ` layouts written by real encoders (ffmpeg included):
+ * 8/16/24/32-bit signed integer PCM, 32-bit IEEE float, and WAVE_FORMAT_EXTENSIBLE wrapping
+ * either of those. Unknown chunks (e.g. ffmpeg's `LIST`/`fact`) are skipped rather than
+ * rejected, since they carry no sample data.
+ *
+ * @throws {Error} if the buffer is not RIFF/WAVE, the format is unsupported, or no `data`
+ *   chunk is present.
+ */
+export function decodeWavPcm(buffer: ArrayBuffer): DecodedPcm {
+  const { view, formatCode, numChannels, sampleRate, bitsPerSample, bytesPerSample, frameSize, frameCount, dataOffset, isFloat, isInt } =
+    parseWavHeader(buffer);
   const channelData: Float32Array[] = Array.from({ length: numChannels }, () => new Float32Array(frameCount));
 
   for (let frame = 0; frame < frameCount; frame += 1) {
@@ -132,4 +173,18 @@ export function decodeWavPcm(buffer: ArrayBuffer): DecodedPcm {
   }
 
   return { sampleRate, channelData };
+}
+
+/**
+ * Compute a WAV file's duration in seconds from its header alone, without decoding or
+ * allocating any sample data. Prefer this over `decodeWavPcm(...).channelData[0].length /
+ * sampleRate` when only the duration is needed — a large file's full per-channel Float32
+ * decode is otherwise unnecessary memory/CPU work just to divide two header fields.
+ *
+ * @throws {Error} if the buffer is not RIFF/WAVE, the format is unsupported, or no `data`
+ *   chunk is present.
+ */
+export function getWavDurationSeconds(buffer: ArrayBuffer): number {
+  const { frameCount, sampleRate } = parseWavHeader(buffer);
+  return frameCount / sampleRate;
 }
