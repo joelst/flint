@@ -1942,15 +1942,21 @@ describe('foundry-sidecar gateway variant autoload', () => {
     return status.result.pool.find((m: { alias: string }) => m.alias === 'foo')?.variantId ?? null;
   }
 
-  it('switches the resident variant for a gateway request naming another cached build', async () => {
+  it.each(['foo-gpu:1', 'foo-gpu'])('switches the resident variant for a gateway request naming %s', async (model) => {
     // The request's own booking is not using the resident build it replaces, so it must not
     // count as the in-flight work that forbids the switch.
     const gateway = await startVariantGateway();
     try {
-      const reply = await postChat(gateway.gatewayPort, 'foo-gpu:1');
+      const reply = await postChat(gateway.gatewayPort, model);
       expect(reply.status, reply.body).toBe(200);
       expect(await residentVariant(gateway.proc, 10)).toBe('foo-gpu:1');
       expect(gateway.nativeCalls).toEqual(['loaded:foo-cpu:1', 'unloaded:foo-cpu:1', 'loaded:foo-gpu:1']);
+      expect(gateway.chatRequests).toEqual([model, 'foo-gpu:1']);
+
+      gateway.proc.stdin.write(`${JSON.stringify({ id: 11, cmd: 'unload', alias: 'foo', ifIdle: true })}\n`);
+      const unloaded = await waitForLine(gateway.proc, (msg) => msg.id === 11);
+      expect(unloaded.ok, unloaded.error).toBe(true);
+      expect(await residentVariant(gateway.proc, 12)).toBeNull();
     } finally {
       await gateway.cleanup();
     }

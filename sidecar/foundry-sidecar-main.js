@@ -609,12 +609,13 @@ function noteActivity (modelName, phase, booking) {
     // modelActivityFence replaces activityFences.has(candidate.toLowerCase()) while preserving
     // the same alias-aware refusal semantics for variant and catalog names.
     const residentAlias = aliasForModelName(modelName);
-    const occupant = residentAlias ? pool.get(residentAlias) : null;
     const resolution = modelIndex ? resolveModelId(modelIndex, modelName) : null;
+    const occupantAlias = residentAlias || (pool.has(resolution?.alias) ? resolution.alias : null);
+    const occupant = occupantAlias ? pool.get(occupantAlias) : null;
     const candidates = activityCandidateKeys({
       requested: modelName,
       matchedResidentAlias: residentAlias,
-      occupantAlias: residentAlias,
+      occupantAlias,
       occupantVariantId: occupant?.variantId || null,
       modelIndexAvailable: !!modelIndex,
       resolvedAlias: resolution?.alias || null,
