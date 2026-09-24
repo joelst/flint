@@ -93,9 +93,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: runtime/foundry-native-cache
-          key: foundry-native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
-          restore-keys: |
-            foundry-native-${{ runner.os }}-${{ runner.arch }}-
+          # Exact lockfile only. A prefix fallback once restored another SDK's runtime into the
+          # core folder, and the installer skipped the download because the file names existed.
+          # v2 retires the caches that fallback produced.
+          key: foundry-native-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
 
       - name: Install dependencies
         run: npm run ci:deps

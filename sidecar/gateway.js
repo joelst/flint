@@ -1,21 +1,27 @@
 // Flint's reverse proxy in front of Foundry Local's HTTP server.
 //
-// Why this exists: Foundry only serves a model that is already resident in memory. Any
-// other OpenAI-compatible client — a coding agent, an IDE plugin, a curl one-liner — reads
-// `GET /v1/models`, posts to a model it found there, and gets back
-// `400 Model 'X' is not loaded`. There is no HTTP route to load a model (probed: every
-// plausible load path 404s), so a client has no way to recover on its own. Loading is only
-// reachable through the SDK, in this process.
+// Why this exists: Foundry only serves a model that is already resident in memory, and only
+// under its exact loaded variant id. Any other OpenAI-compatible client — a coding agent, an
+// IDE plugin, a curl one-liner — reads `GET /v1/models`, posts to a name it found there, and
+// gets back `400 Model 'X' must be loaded before inference` for a known variant that is not
+// resident, or `404 Model not found: No model matching 'X'` for an alias or a versionless id
+// (SDK 1.x said `400 Model 'X' is not loaded` for both). There is no HTTP route to load a
+// model (probed: every plausible load path 404s), so a client has no way to recover on its
+// own. Loading is only reachable through the SDK, in this process.
 //
 // So Flint listens on the port the user configured, forwards everything to Foundry on an
-// internal loopback port, and when — and only when — that exact rejection comes back, it
-// loads the model through the SDK and replays the request once.
+// internal loopback port, and when — and only when — one of those two rejections comes back
+// naming the model this request sent, and the cached-model registry knows that name, it
+// loads the model through the SDK and replays the request once under the loaded variant id.
 //
 // Reactive rather than proactive: the request is forwarded first and inspected only after
 // it fails. Checking "is this loaded?" up front would put an SDK call on every hot-path
 // request, and would happily spend five seconds loading a multi-gigabyte model for a
 // request that was going to be rejected for a bad route or malformed body anyway. Letting
-// Foundry validate first means we only ever load in response to a request it accepted.
+// Foundry answer first means we load only after it rejected the request for naming a model
+// that is not loaded. SDK 1.x sent that rejection after body validation; SDK 2.0.1 routes by
+// name first and answers 404 to an alias before reading the rest of the body, so an alias
+// request with an otherwise invalid body can cost one load before Foundry rejects the body.
 
 import http from 'node:http';
 import { Transform, pipeline } from 'node:stream';
@@ -23,7 +29,8 @@ import { StringDecoder } from 'node:string_decoder';
 import { normalizeChatResponse } from './chat-response.js';
 import {
   stripHopByHopHeaders,
-  isModelNotLoadedError,
+  modelRejection,
+  rejectionNames,
   shouldBufferBody,
   extractModelName,
   openAiError,
@@ -158,9 +165,11 @@ export function createGateway (options) {
   let boundPort = null; // actual port, which differs from publicPort when 0 was requested
 
   // Identifiers we have learned need rewriting before Foundry will route them, mapped to
-  // the variant id that works. Bounded by the catalog, since a key is only recorded after
-  // resolving against the cached-model index.
+  // the variant id that works. Keyed case-insensitively, like the registry, so the map is
+  // bounded by the catalog: a key is only recorded after resolving against the cached-model
+  // index, and every spelling of one name shares an entry.
   const rewrites = new Map();
+  const rewriteKey = (name) => String(name).trim().toLowerCase();
 
   function loadOnce (alias, variantId) {
     const key = `${alias}::${variantId ?? ''}`;
@@ -309,14 +318,19 @@ export function createGateway (options) {
     // upstream rejection that teaches us costs a round trip each time. Reuse it, and let
     // the not-loaded path below correct the entry if it has gone stale.
     let outgoing = buffered;
-    const known = requested ? rewrites.get(requested) : null;
+    const known = requested ? rewrites.get(rewriteKey(requested)) : null;
     if (known) outgoing = rewriteModelName(buffered, known) ?? buffered;
 
-    const attempt = await forward(req, res, outgoing, { captureNotLoaded: true });
+    // Upstream's rejection must name the model we sent, which is the rewritten id when a
+    // rewrite was applied, not the client's own wording.
+    const sentModel = known ?? requested;
+    const attempt = await forward(req, res, outgoing, { captureNotLoaded: true, sentModel });
     if (attempt === SENT) return;
 
-    // Only reached when upstream returned the exact not-loaded rejection and the body was
-    // buffered, so replaying it is safe.
+    // Only reached when upstream rejected the model we named as not loaded or not found, and
+    // the body was buffered, so replaying it is safe. The registry indexes cached models
+    // only, so a name it does not know is handed back as upstream answered it: a stray
+    // identifier must never start a download.
     const target = requested ? await resolve(requested) : null;
     if (!target) {
       // Nothing to load: hand back what upstream said rather than inventing an error.
@@ -340,9 +354,9 @@ export function createGateway (options) {
     }
     if (gen !== generation || res.writableEnded || res.destroyed) return;
 
-    // Name the variant that was actually loaded. Foundry rejects the friendly alias even
-    // when that model is resident, so replaying the client's own wording would reproduce
-    // the very error the load was meant to resolve.
+    // Name the variant that was actually loaded. Foundry routes only that exact id and
+    // answers 404 to the alias even when the model is resident, so replaying the client's
+    // own wording would reproduce the very error the load was meant to resolve.
     let replayBody = buffered;
     const canonical = typeof loadedId === 'string' && loadedId ? loadedId : target.variantId;
     if (canonical && canonical !== target.variantId && !setActivityModel(canonical)) {
@@ -352,7 +366,7 @@ export function createGateway (options) {
       const rewritten = rewriteModelName(buffered, canonical);
       if (rewritten !== null) {
         replayBody = rewritten;
-        rewrites.set(requested, canonical);
+        rewrites.set(rewriteKey(requested), canonical);
         log('info', `Gateway routing ${requested} → ${canonical}`);
       }
     }
@@ -502,7 +516,7 @@ export function createGateway (options) {
    * Returns SENT when the client response has already been written; otherwise a
    * `{ status, headers, body }` record the caller may replay after loading.
    */
-  function forward (req, res, buffered, { captureNotLoaded }) {
+  function forward (req, res, buffered, { captureNotLoaded, sentModel = null }) {
     return new Promise(resolve2 => {
       const headers = stripHopByHopHeaders(req.headers);
       // Upstream is addressed by us, never derived from the client's Host header — that
@@ -548,7 +562,10 @@ export function createGateway (options) {
         // retry (the client must never see the error we intend to paper over) and /status
         // (whose contents we rewrite). Everything else streams, which keeps SSE tokens
         // flowing as they are produced.
-        const mayRetry = captureNotLoaded && buffered !== null && status === 400;
+        // 400 is a known variant that is not resident; 404 is a name the router does not
+        // route (alias, versionless id, other casing). Both are tiny JSON bodies, and only a
+        // rejection that names the model we sent is acted on below.
+        const mayRetry = captureNotLoaded && buffered !== null && (status === 400 || status === 404);
         const isStatus = isStatusPath(req.url);
 
         const isChatJson = isChatCompletionPath(req.url) && isJsonContentType(upRes.headers['content-type']);
@@ -646,7 +663,7 @@ export function createGateway (options) {
         upRes.on('end', () => finish(() => {
           const body = Buffer.concat(chunks).toString('utf8');
 
-          if (mayRetry && isModelNotLoadedError(status, body)) {
+          if (mayRetry && rejectionNames(modelRejection(status, body), sentModel)) {
             resolve2({ status, headers: outHeaders, body });
             return;
           }
