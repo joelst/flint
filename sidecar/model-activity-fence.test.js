@@ -97,6 +97,24 @@ describe('model activity fence', () => {
     expect(gate.tryAcquire('model-a')).toBeTypeOf('function');
   });
 
+  it('does not count a lazy-index versionless switch against the resident build', () => {
+    const pool = new Map([['model-a', 'model-a-cpu:3']]);
+    const gate = createModelActivityFence({
+      residentAliasFor: (name) => pool.has('model-a') && name.toLowerCase().includes('model-a-cpu')
+        ? 'model-a'
+        : null,
+      residentVariantFor: (alias) => pool.get(alias) ?? null,
+      catalogAliasFor: () => 'model-a',
+      catalogResolutionFor: () => ({ alias: 'model-a', variantId: 'model-a-cpu:4' }),
+    });
+    const booking = gate.start('model-a-cpu', { deferResidentAlias: true });
+    expect(booking).toBeTypeOf('string');
+    expect(gate.inFlightFor('model-a')).toBe(0);
+    pool.set('model-a', 'model-a-cpu:4');
+    expect(gate.inFlightFor('model-a')).toBe(1);
+    gate.end(booking);
+  });
+
   it('admits unrelated unresolved models while another alias is fenced', () => {
     const { gate } = createLedger();
 

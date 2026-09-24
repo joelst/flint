@@ -31,6 +31,7 @@ import {
   isLocalCatalogEntry,
   resolveModelId,
 } from './model-registry.js';
+import { activityCandidateKeys } from './activity-booking.js';
 import { waitUntilIdle } from './monotonic-wait.js';
 import {
   createOperationAdmission,
@@ -593,7 +594,9 @@ function aliasForModelName (name) {
 
 const modelActivityFence = createModelActivityFence({
   residentAliasFor: aliasForModelName,
+  residentVariantFor: (alias) => pool.get(alias)?.variantId || null,
   catalogAliasFor: (modelName) => (modelIndex ? resolveModelId(modelIndex, modelName)?.alias : null),
+  catalogResolutionFor: (modelName) => (modelIndex ? resolveModelId(modelIndex, modelName) : null),
 });
 
 /**
@@ -605,7 +608,22 @@ function noteActivity (modelName, phase, booking) {
   if (phase === 'start') {
     // modelActivityFence replaces activityFences.has(candidate.toLowerCase()) while preserving
     // the same alias-aware refusal semantics for variant and catalog names.
-    const token = modelActivityFence.start(modelName);
+    const residentAlias = aliasForModelName(modelName);
+    const occupant = residentAlias ? pool.get(residentAlias) : null;
+    const resolution = modelIndex ? resolveModelId(modelIndex, modelName) : null;
+    const candidates = activityCandidateKeys({
+      requested: modelName,
+      matchedResidentAlias: residentAlias,
+      occupantAlias: residentAlias,
+      occupantVariantId: occupant?.variantId || null,
+      modelIndexAvailable: !!modelIndex,
+      resolvedAlias: resolution?.alias || null,
+      resolvedVariantId: resolution?.variantId || null,
+    });
+    const key = candidates[0] || modelName;
+    const token = modelActivityFence.start(key, {
+      deferResidentAlias: candidates.length > 1 && key !== candidates[1],
+    });
     if (token === false) return false;
     touchModel(aliasForModelName(modelName));
     return token;

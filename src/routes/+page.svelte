@@ -5061,6 +5061,7 @@ updateStateFromSdk();
               {
                 convenience: true,
                 expectedGeneration: readiness.generation,
+                deferCatalogRead: !autoRefreshCatalogOnStartup,
               },
             );
             if (ensured.started) markNetworkSettingsApplied();

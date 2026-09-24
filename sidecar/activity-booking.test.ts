@@ -53,6 +53,19 @@ describe('activityCandidateKeys', () => {
     expect(keys).toContain('qwen3.5-9b');
   });
 
+  it('keeps an explicit version tied to the resident alias when the index is cold', () => {
+    const keys = activityCandidateKeys({
+      requested: 'qwen3.5-9b-generic-gpu:4',
+      matchedResidentAlias: 'qwen3.5-9b',
+      occupantAlias: 'qwen3.5-9b',
+      occupantVariantId: 'qwen3.5-9b-generic-gpu:4',
+      modelIndexAvailable: false,
+      resolvedAlias: null,
+      resolvedVariantId: null,
+    });
+    expect(keys[0]).toBe('qwen3.5-9b');
+  });
+
   it('charges the catalog alias for a cold load', () => {
     const keys = activityCandidateKeys({
       requested: 'qwen3.5-9b-generic-gpu',

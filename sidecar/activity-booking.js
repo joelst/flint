@@ -44,7 +44,13 @@ export function activityCandidateKeys (input) {
     if (key && !keys.includes(key)) keys.push(key);
   };
 
-  if (!modelIndexAvailable && raw && matchedResidentAlias && raw !== matchedResidentAlias) {
+  if (
+    !modelIndexAvailable
+    && raw
+    && matchedResidentAlias
+    && raw !== matchedResidentAlias
+    && !raw.includes(':')
+  ) {
     // A versionless id can spell either the resident variant or a different cached one.
     // Until the lazy index resolves that ambiguity, do not charge the resident alias: a
     // requested switch would otherwise reject itself as in-flight.
