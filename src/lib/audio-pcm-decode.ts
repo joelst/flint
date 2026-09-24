@@ -83,16 +83,25 @@ export function decodeWavPcm(buffer: ArrayBuffer): DecodedPcm {
     throw new Error('WAV file has no data chunk.');
   }
 
-  const bytesPerSample = bitsPerSample / 8;
-  const frameSize = bytesPerSample * numChannels;
-  const frameCount = Math.floor(dataLength / frameSize);
-  const channelData: Float32Array[] = Array.from({ length: numChannels }, () => new Float32Array(frameCount));
-
   const isFloat = formatCode === 3;
   const isInt = formatCode === 1;
   if (!isFloat && !isInt) {
     throw new Error(`Unsupported WAV sample format code ${formatCode}.`);
   }
+  // Validate the bit depth — and reject anything not byte-aligned (e.g. 1-bit/4-bit ADPCM-style
+  // depths) — before computing frameSize/frameCount, so a crafted header can't make bytesPerSample
+  // shrink toward zero and inflate frameCount into a runaway allocation.
+  const supportedIntDepths = [8, 16, 24, 32];
+  const supportedFloatDepths = [32];
+  const supportedDepths = isFloat ? supportedFloatDepths : supportedIntDepths;
+  if (bitsPerSample % 8 !== 0 || !supportedDepths.includes(bitsPerSample)) {
+    throw new Error(`Unsupported WAV bit depth ${bitsPerSample} for format code ${formatCode}.`);
+  }
+
+  const bytesPerSample = bitsPerSample / 8;
+  const frameSize = bytesPerSample * numChannels;
+  const frameCount = Math.floor(dataLength / frameSize);
+  const channelData: Float32Array[] = Array.from({ length: numChannels }, () => new Float32Array(frameCount));
 
   for (let frame = 0; frame < frameCount; frame += 1) {
     const frameOffset = dataOffset + frame * frameSize;

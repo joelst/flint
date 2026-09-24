@@ -185,6 +185,32 @@ describe('decodeWavPcm', () => {
     expect(() => decodeWavPcm(buffer)).toThrow(/Unsupported WAV sample format/);
   });
 
+  it('rejects an unsupported bit depth before allocating channel buffers', () => {
+    // A non-byte-aligned bit depth (4 here) would make bytesPerSample 0 and frameCount
+    // effectively infinite if allocation happened before validation; assert it throws instead
+    // of attempting a runaway Float32Array allocation.
+    const dataLength = 8;
+    const fmtBodyLen = 16;
+    const dataOffset = 12 + 8 + fmtBodyLen + 8;
+    const buffer = new ArrayBuffer(dataOffset + dataLength);
+    const view = new DataView(buffer);
+    writeAscii(view, 0, 'RIFF');
+    view.setUint32(4, buffer.byteLength - 8, true);
+    writeAscii(view, 8, 'WAVE');
+    writeAscii(view, 12, 'fmt ');
+    view.setUint32(16, fmtBodyLen, true);
+    const fmtBody = 20;
+    view.setUint16(fmtBody, 1, true); // PCM
+    view.setUint16(fmtBody + 2, 1, true); // mono
+    view.setUint32(fmtBody + 4, 22000, true);
+    view.setUint32(fmtBody + 8, 22000, true);
+    view.setUint16(fmtBody + 12, 1, true);
+    view.setUint16(fmtBody + 14, 4, true); // bitsPerSample: unsupported, non-byte-aligned
+    writeAscii(view, 12 + 8 + fmtBodyLen, 'data');
+    view.setUint32(12 + 8 + fmtBodyLen + 4, dataLength, true);
+    expect(() => decodeWavPcm(buffer)).toThrow(/Unsupported WAV bit depth/);
+  });
+
   it('throws for a non-RIFF buffer', () => {
     const buffer = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]).buffer;
     expect(() => decodeWavPcm(buffer)).toThrow(/RIFF\/WAVE/);
