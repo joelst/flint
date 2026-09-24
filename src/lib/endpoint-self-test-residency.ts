@@ -17,7 +17,7 @@ export function preferredResidentChatAlias(
   initialPool: SelfTestPoolEntry[],
   classifyModel: (id: string, parent: string | null) => 'embed' | 'speech' | 'chat' | null,
 ): string | null {
-  return initialPool.find((entry) => classifyModel(entry.alias, null) === 'chat')?.alias ?? null;
+  return initialPool.find((entry) => (classifyModel(entry.alias, null) ?? 'chat') === 'chat')?.alias ?? null;
 }
 
 /**

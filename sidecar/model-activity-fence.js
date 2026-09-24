@@ -44,15 +44,15 @@ export function createModelActivityFence({ residentAliasFor, catalogAliasFor }) 
   return {
     allows,
     inFlightFor,
-    /** Books one request. Returns false, booking nothing, when a fence excludes it. */
+    /** Books one request. Returns its exact token, or false when a fence excludes it. */
     start(modelName) {
       const key = keyOf(modelName);
       if (!key || !allows(modelName)) return false;
       active.set(key, (active.get(key) ?? 0) + 1);
-      return true;
+      return key;
     },
-    end(modelName) {
-      const key = keyOf(modelName);
+    end(token) {
+      const key = keyOf(token);
       const remaining = (active.get(key) ?? 0) - 1;
       if (remaining > 0) active.set(key, remaining);
       else active.delete(key);

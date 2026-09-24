@@ -598,17 +598,21 @@ const modelActivityFence = createModelActivityFence({
 
 /**
  * Marks a model busy for the life of a request so eviction cannot unload it mid-flight.
- * A start refused by a destructive fence books nothing and returns false.
+ * A start refused by a destructive fence books nothing and returns false. A successful start
+ * returns the exact normalized booking token that must be supplied to the matching end.
  */
-function noteActivity (modelName, phase) {
+function noteActivity (modelName, phase, booking) {
   if (phase === 'start') {
     // modelActivityFence replaces activityFences.has(candidate.toLowerCase()) while preserving
     // the same alias-aware refusal semantics for variant and catalog names.
-    if (!modelActivityFence.start(modelName)) return false;
+    const token = modelActivityFence.start(modelName);
+    if (token === false) return false;
+    touchModel(aliasForModelName(modelName));
+    return token;
   } else {
-    modelActivityFence.end(modelName);
+    modelActivityFence.end(booking ?? modelName);
+    touchModel(aliasForModelName(booking ?? modelName));
   }
-  touchModel(aliasForModelName(modelName));
   return true;
 }
 
@@ -3141,7 +3145,8 @@ rl.on('line', async (line) => {
       let chatVariantId = null, chatExecutionProvider = null;
       let chatModelForMetrics = null;
       let chatWarm = null;
-      if (!noteActivity(modelAlias, 'start')) {
+      const chatBooking = noteActivity(modelAlias, 'start');
+      if (!chatBooking) {
         throw new Error(`Cannot use ${modelAlias} while it is being unloaded or deleted. Retry shortly.`);
       }
       activeStreamCount++;
@@ -3383,7 +3388,7 @@ rl.on('line', async (line) => {
         }
         activeStreamCount = Math.max(0, activeStreamCount - 1);
         if (activeStreamCount === 0) activeStreamOldest = null;
-        noteActivity(modelAlias, 'end');
+        noteActivity(modelAlias, 'end', chatBooking);
         canceledRequests.delete(id);
         appendAccessLog({
           ts: chatAccessTs,
@@ -3426,7 +3431,8 @@ rl.on('line', async (line) => {
       const requestedAlias = payload.model;
       const audioAccessTs = Date.now();
       let audioOk = false;
-      if (!noteActivity(requestedAlias, 'start')) {
+      const audioBooking = noteActivity(requestedAlias, 'start');
+      if (!audioBooking) {
         throw new Error(`Cannot use ${requestedAlias} while it is being unloaded or deleted. Retry shortly.`);
       }
       let tempPath = null;
@@ -3576,7 +3582,7 @@ rl.on('line', async (line) => {
       } finally {
         activeStreamCount = Math.max(0, activeStreamCount - 1);
         if (activeStreamCount === 0) activeStreamOldest = null;
-        noteActivity(requestedAlias, 'end');
+        noteActivity(requestedAlias, 'end', audioBooking);
         if (tempPath) {
           try { fs.unlinkSync(tempPath); } catch {}
         }
@@ -3855,7 +3861,8 @@ rl.on('line', async (line) => {
       const modelAlias = payload.model;
       const embedTs = Date.now();
       let embedOk = false;
-      if (!noteActivity(modelAlias, 'start')) {
+      const embedBooking = noteActivity(modelAlias, 'start');
+      if (!embedBooking) {
         throw new Error(`Cannot use ${modelAlias} while it is being unloaded or deleted. Retry shortly.`);
       }
       try {
@@ -3870,7 +3877,7 @@ rl.on('line', async (line) => {
         audit('embedTexts', { alias: modelAlias, count: inputs.length });
         reply({ ok: true, result });
       } finally {
-        noteActivity(modelAlias, 'end');
+        noteActivity(modelAlias, 'end', embedBooking);
         appendAccessLog({
           ts: embedTs,
           type: 'embeddings',

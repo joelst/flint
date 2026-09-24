@@ -29,7 +29,7 @@ describe('endpointLoadTarget', () => {
 
   it('never selects an uncached build', () => {
     expect(endpointLoadTarget([whisper], 'openai-whisper-tiny-generic-cpu:3')?.variantId)
-      .toBe('openai-whisper-tiny-generic-cpu:2');
+      .toBeUndefined();
     expect(endpointLoadTarget([uncached], 'openai-whisper-large-generic-cpu')).toBeNull();
     expect(endpointLoadTarget([uncached], 'whisper-large')).toBeNull();
   });

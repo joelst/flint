@@ -101,7 +101,7 @@ function extractLeadingMultipartModel (body, boundary) {
  *        called around every request that names a model, so the owner can keep a model
  *        alive while it is being served and record when it was last used. The value returned
  *        for start is supplied to its matching end call; returning exactly `false` refuses the
- *        lease (the model is being unloaded), which rejects the request with 503 and books
+ *        lease (the model is being unloaded), which rejects the request with 409 and books
  *        no matching end.
  * @param {(entry: object) => void} [options.onAccess]
  *        metadata-only access log (no bodies, no headers) after each request finishes
