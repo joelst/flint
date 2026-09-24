@@ -27,16 +27,40 @@ describe('endpoint model classification', () => {
   });
 
   it('uses narrow speech metadata without treating generic speech capability text as STT', () => {
+    // Generic speech-input capability is not STT, and with no other marker the model is
+    // unknown rather than chat, so the listed id's own heuristics get to decide.
     expect(endpointModelKind({
       alias: 'audio-chat',
       capabilities: ['speech-input'],
-    })).toBe('chat');
+    })).toBeNull();
+    expect(endpointModelKind({ alias: 'assistant', task: 'chat-completion' })).toBe('chat');
     expect(endpointModelKind({
       alias: 'opaque-audio-model',
       task: 'stt',
     })).toBe('speech');
     expect(endpointModelKind({ alias: 'parakeet-tdt-0.6b-v3' })).toBe('speech');
     expect(endpointModelKind({ alias: 'nemotron-speech-streaming-en-0.6b' })).toBe('speech');
+  });
+
+  it('reads the kind from a variant id when the alias and metadata say nothing', () => {
+    const classify = buildEndpointModelClassifier([
+      { alias: 'opaque-speech', variants: [{ id: 'whisper-tiny-generic-cpu:1' }] },
+      { alias: 'opaque-vectors', variants: [{ id: 'bge-embed-generic-cpu:2' }] },
+    ]);
+
+    expect(endpointModelKind({ alias: 'opaque-speech', variants: [{ id: 'whisper-tiny-generic-cpu:1' }] })).toBe('speech');
+    expect(classify('whisper-tiny-generic-cpu', 'opaque-speech')).toBe('speech');
+    expect(classify('bge-embed-generic-cpu', null)).toBe('embed');
+  });
+
+  it('answers null for a model with no marker anywhere, so the listed id can decide', () => {
+    const classify = buildEndpointModelClassifier([
+      { alias: 'opaque-model', variants: [{ id: 'zzz-generic-cpu:1' }] },
+    ]);
+
+    expect(endpointModelKind({ alias: 'opaque-model', variants: [{ id: 'zzz-generic-cpu:1' }] })).toBeNull();
+    expect(classify('zzz-generic-cpu', 'opaque-model')).toBeNull();
+    expect(classify('opaque-model', null)).toBeNull();
   });
 
   it('ignores blank aliases and parentless lookups instead of creating a shared empty key', () => {

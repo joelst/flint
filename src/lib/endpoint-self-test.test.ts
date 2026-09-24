@@ -977,6 +977,53 @@ describe('endpointAliases', () => {
   });
 });
 
+describe('opaque catalog aliases', () => {
+  // A cached BYOM model can have an alias that says nothing, with a variant that does.
+  // The catalog classifier must not label it chat and send speech to /chat/completions.
+  const requestsByRoute = () => {
+    const routes: string[] = [];
+    const fetchMock: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (init?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      if (url.endsWith('/models')) {
+        return jsonResponse(200, { data: [{ id: 'whisper-tiny-generic-cpu' }] });
+      }
+      routes.push(url.slice(url.lastIndexOf('/v1/') + 3));
+      if (init?.body instanceof FormData) return jsonResponse(200, { text: '' });
+      return jsonResponse(200, { choices: [{ message: { content: 'x' } }] });
+    };
+    return { routes, fetchMock };
+  };
+
+  it('sends a whisper variant under an opaque alias to transcription', async () => {
+    const { routes, fetchMock } = requestsByRoute();
+    await runEndpointSelfTest({
+      fetch: fetchMock,
+      endpoint: 'http://127.0.0.1:5272/v1',
+      classifyModel: buildEndpointModelClassifier([
+        { alias: 'opaque-speech', variants: [{ id: 'whisper-tiny-generic-cpu:1' }] },
+      ]),
+      prepareSpeechModel: async (modelId) => modelId,
+    });
+    expect(routes).toContain('/audio/transcriptions');
+    expect(routes).not.toContain('/chat/completions');
+  });
+
+  it('falls back to the listed id when the catalog has no marker for the model at all', async () => {
+    const { routes, fetchMock } = requestsByRoute();
+    await runEndpointSelfTest({
+      fetch: fetchMock,
+      endpoint: 'http://127.0.0.1:5272/v1',
+      classifyModel: buildEndpointModelClassifier([
+        { alias: 'opaque-model', variants: [{ id: 'zzz-generic-cpu:1' }] },
+      ]),
+      prepareSpeechModel: async (modelId) => modelId,
+    });
+    expect(routes).toContain('/audio/transcriptions');
+    expect(routes).not.toContain('/chat/completions');
+  });
+});
+
 describe('selfTestWav', () => {
   it('is one second of 16 kHz mono 16-bit PCM with a consistent header', () => {
     const view = new DataView(selfTestWavBytes());
