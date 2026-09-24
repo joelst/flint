@@ -7021,7 +7021,7 @@ Output only the summary text, no preamble.`;
           const label = format === 'unknown' || format === 'empty' ? 'this audio file' : `${format.toUpperCase()} audio`;
           throw new Error(
             `Unable to decode ${label}: the browser's audio decoder rejected it. ` +
-              'Convert it to 16-bit PCM WAV (e.g. `ffmpeg -acodec pcm_s16le`) and try again.',
+              'Convert it to 16-bit PCM WAV (e.g. `ffmpeg -i input.mp3 -acodec pcm_s16le output.wav`) and try again.',
           );
         }
       }

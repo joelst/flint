@@ -93,6 +93,16 @@ describe('decodeWavPcm', () => {
     expect(decoded.channelData[0][1]).toBeCloseTo(-1, 5);
   });
 
+  it('decodes 32-bit signed integer PCM', () => {
+    const samples = new Int32Array([0, 1073741824, -2147483648, 2147483647]);
+    const wav = buildWav({ bitsPerSample: 32, data: samples.buffer });
+    const decoded = decodeWavPcm(wav);
+    expect(decoded.channelData[0][0]).toBeCloseTo(0, 6);
+    expect(decoded.channelData[0][1]).toBeCloseTo(0.5, 6);
+    expect(decoded.channelData[0][2]).toBeCloseTo(-1, 6);
+    expect(decoded.channelData[0][3]).toBeCloseTo(1, 6);
+  });
+
   it('deinterleaves stereo frames per channel', () => {
     const samples = new Int16Array([100, -100, 200, -200]);
     const wav = buildWav({ numChannels: 2, data: samples.buffer });
