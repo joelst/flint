@@ -41,8 +41,9 @@ interface WavHeader {
  * allocating any sample data. Shared by {@link decodeWavPcm} (which also materializes samples)
  * and {@link getWavDurationSeconds} (which only needs the frame count and sample rate).
  *
- * @throws {Error} if the buffer is not RIFF/WAVE, the format is unsupported, or no `data`
- *   chunk is present.
+ * @throws {Error} if the buffer is not RIFF/WAVE, the format is unsupported, the `data` chunk
+ *   is truncated (declares more bytes than the buffer actually has), or no `data` chunk is
+ *   present.
  */
 function parseWavHeader(buffer: ArrayBuffer): WavHeader {
   const view = new DataView(buffer);
@@ -56,13 +57,18 @@ function parseWavHeader(buffer: ArrayBuffer): WavHeader {
   let bitsPerSample = 0;
   let dataOffset = -1;
   let dataLength = 0;
+  let dataDeclaredSize = 0;
+  let dataAvailable = 0;
 
   let offset = 12;
   while (offset + 8 <= buffer.byteLength) {
     const chunkId = readAscii(view, offset, 4);
     const declaredSize = view.getUint32(offset + 4, true);
     const bodyOffset = offset + 8;
-    // A truncated/misreported trailing chunk still lets us read what actually fits.
+    // A truncated/misreported trailing chunk still lets us read what actually fits. This is
+    // acceptable for chunks we merely skip (e.g. a mis-sized `LIST`), but the `data` chunk is
+    // checked separately below: silently clamping it would decode a truncated upload as if it
+    // were a complete, shorter file, with no indication anything was cut off.
     const chunkSize = Math.min(declaredSize, Math.max(0, buffer.byteLength - bodyOffset));
 
     if (chunkId === 'fmt ') {
@@ -81,10 +87,18 @@ function parseWavHeader(buffer: ArrayBuffer): WavHeader {
     } else if (chunkId === 'data') {
       dataOffset = bodyOffset;
       dataLength = chunkSize;
+      dataDeclaredSize = declaredSize;
+      dataAvailable = Math.max(0, buffer.byteLength - bodyOffset);
     }
 
     // Chunks are word-aligned; an odd declared size has one pad byte after it.
     offset = bodyOffset + declaredSize + (declaredSize % 2);
+  }
+
+  if (dataOffset >= 0 && dataDeclaredSize > dataAvailable) {
+    throw new Error(
+      `WAV data chunk is truncated: declared ${dataDeclaredSize} bytes but only ${dataAvailable} are present.`,
+    );
   }
 
   if (!numChannels || !sampleRate || !bitsPerSample) {
@@ -136,8 +150,8 @@ function parseWavHeader(buffer: ArrayBuffer): WavHeader {
  * either of those. Unknown chunks (e.g. ffmpeg's `LIST`/`fact`) are skipped rather than
  * rejected, since they carry no sample data.
  *
- * @throws {Error} if the buffer is not RIFF/WAVE, the format is unsupported, or no `data`
- *   chunk is present.
+ * @throws {Error} if the buffer is not RIFF/WAVE, the format is unsupported, the `data` chunk
+ *   is truncated, or no `data` chunk is present.
  */
 export function decodeWavPcm(buffer: ArrayBuffer): DecodedPcm {
   const { view, formatCode, numChannels, sampleRate, bitsPerSample, bytesPerSample, frameSize, frameCount, dataOffset, isFloat, isInt } =
@@ -181,8 +195,8 @@ export function decodeWavPcm(buffer: ArrayBuffer): DecodedPcm {
  * sampleRate` when only the duration is needed — a large file's full per-channel Float32
  * decode is otherwise unnecessary memory/CPU work just to divide two header fields.
  *
- * @throws {Error} if the buffer is not RIFF/WAVE, the format is unsupported, or no `data`
- *   chunk is present.
+ * @throws {Error} if the buffer is not RIFF/WAVE, the format is unsupported, the `data` chunk
+ *   is truncated, or no `data` chunk is present.
  */
 export function getWavDurationSeconds(buffer: ArrayBuffer): number {
   const { frameCount, sampleRate } = parseWavHeader(buffer);

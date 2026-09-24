@@ -238,6 +238,18 @@ describe('decodeWavPcm', () => {
     const wav = buildWav({ formatCode: 6, bitsPerSample: 16, data: samples.buffer });
     expect(() => decodeWavPcm(wav)).toThrow(/Unsupported WAV sample format/);
   });
+
+  it('rejects a data chunk that declares more bytes than the buffer actually has', () => {
+    const samples = new Int16Array([1, 2, 3, 4]);
+    const wav = buildWav({ bitsPerSample: 16, data: samples.buffer });
+    // Overstate the data chunk's declared size beyond the buffer's actual end, simulating a
+    // truncated/incomplete upload, without adding more bytes for it to (falsely) read.
+    const dataChunkSizeOffset = wav.byteLength - samples.byteLength - 4;
+    const view = new DataView(wav);
+    view.setUint32(dataChunkSizeOffset, samples.byteLength + 100, true);
+    expect(() => decodeWavPcm(wav)).toThrow(/truncated/i);
+    expect(() => getWavDurationSeconds(wav)).toThrow(/truncated/i);
+  });
 });
 
 describe('getWavDurationSeconds', () => {
