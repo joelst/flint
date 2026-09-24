@@ -217,8 +217,10 @@ describe('gateway pass-through', () => {
 
   it.each([
     ['HEAD', 200],
+    ['HEAD', 404],
+    ['GET', 204],
     ['GET', 304],
-  ])('does not reject bodyless %s /status responses by declared length', async (method, status) => {
+  ])('does not reject bodyless %s /status responses (%s) by declared length', async (method, status) => {
     await new Promise(r => upstream.server.close(r));
     upstream = await startUpstream((_req, res) => {
       res.writeHead(status, {
@@ -233,6 +235,31 @@ describe('gateway pass-through', () => {
 
     expect(res.status).toBe(status);
     expect(res.body).toBe('');
+  });
+
+  it('passes a bodyless HEAD 404 through without inspecting or loading a model', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(404, {
+        'content-type': 'application/json',
+        'content-length': '1000',
+        'x-upstream': 'bodyless',
+      });
+      res.end();
+    });
+    const load = vi.fn();
+    const resolve = vi.fn();
+    gateway = await startGateway({ maxBufferedResponse: 64, load, resolve });
+
+    const res = await request(gateway.publicPort, '/v1/models/missing', { method: 'HEAD' });
+
+    expect(res.status).toBe(404);
+    expect(res.body).toBe('');
+    expect(res.headers['content-length']).toBe('1000');
+    expect(res.headers['x-upstream']).toBe('bodyless');
+    expect(load).not.toHaveBeenCalled();
+    expect(resolve).not.toHaveBeenCalled();
+    expect(upstream.state.hits).toHaveLength(1);
   });
 });
 
@@ -566,6 +593,31 @@ describe('gateway model-name routing', () => {
 
     expect(res.status).toBe(200);
     expect(upstream.state.hits).toHaveLength(2);
+  });
+
+  it.each([false, true])('canonicalizes whitespace around an exact variant id (resident: %s)', async resident => {
+    await startVariantOnlyUpstream();
+    if (resident) upstream.state.loaded.add(VARIANT);
+    const load = vi.fn(async () => {
+      upstream.state.loaded.add(VARIANT);
+      return VARIANT;
+    });
+    gateway = await startGateway({
+      resolve: async id => (id === VARIANT ? { alias: ALIAS, variantId: VARIANT } : null),
+      load,
+    });
+    const messages = [{ role: 'user', content: 'hi' }];
+    const send = () => request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: `  ${VARIANT}  `, messages }),
+    });
+
+    expect((await send()).status).toBe(200);
+    expect(JSON.parse(upstream.state.hits[1].body)).toEqual({ model: VARIANT, messages });
+    expect((await send()).status).toBe(200);
+    expect(upstream.state.hits).toHaveLength(3);
+    expect(load).toHaveBeenCalledTimes(1);
   });
 
   it('still autoloads against the SDK 1.x not-loaded wording', async () => {

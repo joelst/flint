@@ -290,7 +290,8 @@ export function createGateway (options) {
     // own wording would reproduce the very error the load was meant to resolve.
     let replayBody = buffered;
     const canonical = typeof loadedId === 'string' && loadedId ? loadedId : target.variantId;
-    if (canonical && canonical !== requested) {
+    // `requested` is trimmed for resolution; the buffered body's model may still differ.
+    if (canonical) {
       const rewritten = rewriteModelName(buffered, canonical);
       if (rewritten !== null) {
         replayBody = rewritten;
