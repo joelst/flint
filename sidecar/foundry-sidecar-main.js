@@ -602,6 +602,8 @@ const modelActivityFence = createModelActivityFence({
  */
 function noteActivity (modelName, phase) {
   if (phase === 'start') {
+    // modelActivityFence replaces activityFences.has(candidate.toLowerCase()) while preserving
+    // the same alias-aware refusal semantics for variant and catalog names.
     if (!modelActivityFence.start(modelName)) return false;
   } else {
     modelActivityFence.end(modelName);
@@ -630,6 +632,10 @@ function stopGatewayAccepting () {
 /** Requests served by `alias`'s resident build. Every destructive decision must use this. */
 function inFlightFor (alias) {
   return modelActivityFence.inFlightFor(alias);
+}
+
+function tryBeginIdleUnload (alias) {
+  return modelActivityFence.tryAcquire(alias);
 }
 
 function poolEntriesForEviction () {
@@ -2703,21 +2709,26 @@ rl.on('line', async (line) => {
       const alias = payload.alias;
       await serializeModelOperation(alias, ['residency'], async () => {
         await withSweepLock(async () => {
-          const fenced = await withModelActivityFence(alias, () => unloadAliasLocked(alias));
-          if (!fenced) {
+          const releaseIdleFence = payload.ifIdle ? tryBeginIdleUnload(alias) : modelActivityFence.tryAcquire(alias);
+          if (!releaseIdleFence) {
             throw new Error(`Cannot unload ${alias} while requests are in flight. Retry once they finish.`);
           }
-          if (fenced.result) {
-            log('info', `Model ${alias} unloaded from pool`);
-            audit('unload', { alias });
-            return;
-          }
-          // `unloadAliasLocked` returns false both for an alias that was not resident and for a
-          // native unload that threw, and it keeps the failed entry in the pool. Reporting the
-          // latter as success would tell the caller memory was released while the model is still
-          // loaded, so only the "nothing to unload" case is a successful no-op.
-          if (pool.has(alias)) {
-            throw new Error(`Unload of ${alias} failed; the model is still loaded.`);
+          try {
+            const unloaded = await unloadAliasLocked(alias);
+            if (unloaded) {
+              log('info', `Model ${alias} unloaded from pool`);
+              audit('unload', { alias });
+              return;
+            }
+            // `unloadAliasLocked` returns false both for an alias that was not resident and for a
+            // native unload that threw, and it keeps the failed entry in the pool. Reporting the
+            // latter as success would tell the caller memory was released while the model is still
+            // loaded, so only the "nothing to unload" case is a successful no-op.
+            if (pool.has(alias)) {
+              throw new Error(`Unload of ${alias} failed; the model is still loaded.`);
+            }
+          } finally {
+            releaseIdleFence();
           }
         });
       });
