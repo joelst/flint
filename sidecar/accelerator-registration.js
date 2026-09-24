@@ -432,7 +432,7 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
     }
   }
 
-  async function rerunRegistration(report) {
+  async function rerunRegistration(report, registerOnce) {
     const catalogRefreshRequiresRestart = committed;
     if (committed && !commitConfirmed) {
       return {
@@ -443,7 +443,11 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
         registrationDeferredUntilRestart: true,
       };
     }
-    settled = preserveRegisteredProviders(settled, await attempts(report, settled));
+    if (registerOnce) await ensureSettled(report);
+    // Cache rebuilds are effectful: run once under this gate, never through the
+    // discovery retry loop that could delete the same provider cache repeatedly.
+    const current = registerOnce ? await registerOnce(report) : await attempts(report, settled);
+    settled = preserveRegisteredProviders(settled, current);
     hasSettled = true;
     if (
       catalogRefreshRequiresRestart &&
@@ -462,14 +466,17 @@ export function createCatalogRegistrationGate(register, commitCatalog) {
         return ensureSettled(report);
       });
     },
-    rerun(onProgress) {
+    rerun(onProgress, registerOnce) {
+      if (registerOnce !== undefined && typeof registerOnce !== 'function') {
+        return Promise.reject(new TypeError('rerun requires a registration operation'));
+      }
       const report = typeof onProgress === 'function' ? onProgress : null;
       // Once the immutable snapshot is confirmed, provider registration cannot
       // change it. Keep later registration serialized with catalog mutations,
       // but off the telemetry lane so a long EP download cannot stall monitoring.
       const rerun = commitConfirmed
-        ? enqueuePostCommitWrite(() => rerunRegistration(report))
-        : enqueue(() => rerunRegistration(report));
+        ? enqueuePostCommitWrite(() => rerunRegistration(report, registerOnce))
+        : enqueue(() => rerunRegistration(report, registerOnce));
       providerWriteBarrier = rerun.then(() => {}, () => {});
       // A rerun dispatched before confirmation can still be running after the
       // commit completes. Publish both lanes so provider-sensitive lookups

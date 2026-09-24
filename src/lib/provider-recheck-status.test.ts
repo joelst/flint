@@ -1,0 +1,119 @@
+import { describe, expect, it } from 'vitest';
+import { providerRecheckStatus } from './provider-recheck-status';
+
+const webgpu = { name: 'WebGpuExecutionProvider', isRegistered: true };
+
+describe('providerRecheckStatus', () => {
+  it('does not claim that a carried failure was rebuilt and preserves partial repair success', () => {
+    const status = providerRecheckStatus({
+      failedEps: ['CPUExecutionProvider'],
+      attemptedProviderRebuilds: [webgpu.name],
+    }, [webgpu]);
+    expect(status.failed).toBe(true);
+    expect(status.message).toContain('Rebuilt WebGpuExecutionProvider.');
+    expect(status.message).toContain('Providers still unavailable: CPUExecutionProvider.');
+    expect(status.message).not.toContain('rebuild failed for CPU');
+  });
+
+  it('does not report ready when provider repair was deferred by the catalog gate', () => {
+    const status = providerRecheckStatus({ registrationDeferredUntilRestart: true }, [webgpu]);
+    expect(status.failed).toBe(true);
+    expect(status.message).toContain('deferred');
+    expect(status.message).toContain('Restart Flint');
+  });
+
+  it('retains catalog restart guidance after a successful repair', () => {
+    const status = providerRecheckStatus({
+      attemptedProviderRebuilds: [webgpu.name],
+      catalogRefreshRequiresRestart: true,
+    }, [webgpu]);
+    expect(status.failed).toBe(false);
+    expect(status.message).toContain('Rebuilt WebGpuExecutionProvider');
+    expect(status.message).toContain('Restart Flint');
+  });
+
+  it('names a provider the refreshed list still does not show as registered', () => {
+    const status = providerRecheckStatus(
+      {
+        success: false,
+        failedEps: ['CUDAExecutionProvider'],
+        removedProviderCaches: ['CUDAExecutionProvider', 'CUDAExecutionProvider'],
+        attemptedProviderRebuilds: ['CUDAExecutionProvider'],
+      },
+      [webgpu, { name: 'CUDAExecutionProvider', isRegistered: false }],
+    );
+    expect(status.failed).toBe(true);
+    expect(status.message).toBe('Provider rebuild failed for CUDAExecutionProvider.');
+  });
+
+  it('treats a refreshed registration as success even when the envelope said failed', () => {
+    const status = providerRecheckStatus(
+      {
+        success: false,
+        status: 'Native failure registering CUDAExecutionProvider',
+        failedEps: ['CUDAExecutionProvider'],
+        removedProviderCaches: ['CUDAExecutionProvider'],
+      },
+      [webgpu, { name: 'CUDAExecutionProvider', isRegistered: true }],
+    );
+    expect(status.failed).toBe(false);
+    expect(status.message).toBe('Rebuilt CUDAExecutionProvider.');
+  });
+
+  it('keeps a locked provider in the message without listing it twice', () => {
+    const status = providerRecheckStatus(
+      {
+        success: false,
+        failedEps: ['CUDAExecutionProvider'],
+        busyProviderCaches: ['CUDAExecutionProvider', 'CUDAExecutionProvider'],
+      },
+      [webgpu],
+    );
+    expect(status.message).toBe(
+      'Provider rebuild failed for CUDAExecutionProvider. Left in place because a file is in use: CUDAExecutionProvider.',
+    );
+  });
+
+  it('names every provider the refresh shows as registered, including one whose cache was already gone', () => {
+    const status = providerRecheckStatus(
+      {
+        success: true,
+        failedEps: [],
+        removedProviderCaches: ['CUDAExecutionProvider'],
+        attemptedProviderRebuilds: ['CUDAExecutionProvider', 'QNNExecutionProvider'],
+      },
+      [
+        webgpu,
+        { name: 'CUDAExecutionProvider', isRegistered: true },
+        { name: 'QNNExecutionProvider', isRegistered: true },
+      ],
+    );
+    expect(status).toEqual({
+      failed: false,
+      message: 'Rebuilt CUDAExecutionProvider, QNNExecutionProvider.',
+    });
+  });
+
+  it('counts only providers the refresh shows as registered', () => {
+    const status = providerRecheckStatus(
+      { success: true, status: 'No broken providers', failedEps: [] },
+      [
+        webgpu,
+        { name: 'CPUExecutionProvider', isRegistered: true },
+        { name: 'FutureExecutionProvider', isRegistered: false },
+      ],
+    );
+    expect(status).toEqual({
+      failed: false,
+      message: '2 execution providers ready.',
+    });
+  });
+
+  it('uses the singular when exactly one provider is registered', () => {
+    const status = providerRecheckStatus(
+      { success: true, status: 'No broken providers', failedEps: [] },
+      [{ name: 'CPUExecutionProvider', isRegistered: true }],
+    );
+    expect(status).toEqual({ failed: false, message: '1 execution provider ready.' });
+  });
+});

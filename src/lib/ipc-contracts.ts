@@ -22,7 +22,7 @@ export type SidecarCommand =
   | { cmd: 'transcribeAudio'; audioBase64: string; mimeType: string; fileName: string; model: string; language: string; temperature?: number; preferredEp?: string }
   | { cmd: 'embedTexts'; model: string; inputs: string[] }
   | { cmd: 'getEps' }
-  | { cmd: 'ensureAccelerators' }
+  | { cmd: 'ensureAccelerators'; rebuildBroken?: boolean }
   | { cmd: 'getVisionModels' }
   | { cmd: 'getSTTModels' }
   | { cmd: 'poolStatus' }
@@ -78,6 +78,12 @@ export interface EpDownloadResult {
   catalogRefreshRequiresRestart?: boolean;
   /** Provider setup was not started because a listener may be taking the first catalog snapshot. */
   registrationDeferredUntilRestart?: boolean;
+  /** Provider names Flint asked Foundry to rebuild during a provider recheck. */
+  attemptedProviderRebuilds?: string[];
+  /** Provider names whose on-disk cache was removed before a rebuild. */
+  removedProviderCaches?: string[];
+  /** Provider names left in place because a file in the cache was still loaded. */
+  busyProviderCaches?: string[];
 }
 
 /** The four turn wrappers Foundry substitutes `{Content}` into when building a prompt. */

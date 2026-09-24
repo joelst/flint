@@ -352,6 +352,7 @@ describe('startBenchmarkRun', () => {
     const attempts = await listAttemptsForRun(outcome.run!.id);
     expect(attempts.value).toHaveLength(1);
     expect(attempts.value![0].status).toBe('dispatched');
+    expect(attempts.value![0].sdkCallStartedAt).toBeUndefined();
   });
 
   it('freezes a snapshot of the suite at call time, immune to later mutation of the caller\'s object', async () => {
@@ -366,6 +367,48 @@ describe('startBenchmarkRun', () => {
     expect(runs.value![0].suite.cases[0].prompt).toBe('What is 2+2?');
     expect(runs.value![0].suite.targets[0].alias).toBe('model-a');
     expect(outcome.run!.suite.cases[0].prompt).toBe('What is 2+2?');
+  });
+
+  it('stamps sdkCallStartedAt on the terminal row for both a failure and a success', async () => {
+    const s = suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }, { id: 'c2', prompt: 'y' }] });
+    const { transport } = scriptedTransport([
+      { ok: false, errorMessage: 'model unavailable' },
+      { ok: true, responseText: 'ok' },
+    ]);
+    const outcome = await startStored(s, transport);
+    expect(outcome.result).toEqual({ status: 'completed' });
+    const attempts = await listAttemptsForRun(outcome.run!.id);
+    expect(attempts.value).toHaveLength(2);
+    for (const row of attempts.value!) {
+      expect(row.sdkCallStartedAt).toEqual(expect.any(Number));
+      expect(row.settledAt).toBeGreaterThanOrEqual(row.sdkCallStartedAt!);
+    }
+  });
+
+  it('records response duration with a monotonic clock when the wall clock moves backward', async () => {
+    let wallClock = 1_000;
+    let monotonicClock = 100;
+    const dateNow = vi.spyOn(Date, 'now').mockImplementation(() => wallClock);
+    const performanceNow = vi.spyOn(performance, 'now').mockImplementation(() => monotonicClock);
+    try {
+      const outcome = await startStored(
+        suite({ warmupCount: 0, repeatCount: 1, cases: [{ id: 'c1', prompt: 'x' }] }),
+        async () => {
+          wallClock = 500;
+          monotonicClock = 175;
+          return { ok: true, responseText: 'ok' };
+        },
+      );
+      const attempts = await listAttemptsForRun(outcome.run!.id);
+      expect(attempts.value![0]).toMatchObject({
+        sdkCallStartedAt: 1_000,
+        sdkCallDurationMs: 75,
+        settledAt: 500,
+      });
+    } finally {
+      dateNow.mockRestore();
+      performanceNow.mockRestore();
+    }
   });
 
   it('records a failed attempt without halting the run when the transport reports failure', async () => {
@@ -418,6 +461,9 @@ describe('startBenchmarkRun', () => {
       expect(attempts.ok).toBe(true);
       expect(attempts.value).toHaveLength(1);
       expect(attempts.value![0].status).toBe('dispatched');
+      // The start stamp is part of the terminal patch. Writing it on the intent would make
+      // a call that never settles look timed.
+      expect(attempts.value![0].sdkCallStartedAt).toBeUndefined();
       checkedInsideTransport = true;
       return { ok: true, responseText: 'ok' };
     });

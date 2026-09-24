@@ -5,7 +5,7 @@
  * Pure orchestration over an injected `AttemptTransport` — this module never imports `sdk.ts`
  * and never calls the SDK directly. The actual chat dispatch (through `chatCompletion`, model
  * load/preflight, memory/unload consent) is real, effectful, UI-adjacent policy that belongs to
- * whatever wires this runner up to the app (a later PR); this module only needs *a* function
+ * whatever wires this runner up to the app (`benchmark-lifecycle.ts`); this module only needs *a* function
  * shaped like `AttemptTransport` to be fully testable with a fake one.
  *
  * Durability contract (this is the part a benchmark runner cannot get wrong):
@@ -237,6 +237,13 @@ async function executePositions(
       return haltWith(run, 'stopped', undefined);
     }
 
+    // Stamp the start on the terminal patch, not the write-ahead intent. Stop after intent
+    // commit but before dispatch, a crash, a transport halt, or failure to persist the terminal
+    // result leaves the row `dispatched` with no stored start time. Stop does not abort an
+    // in-flight call: if that call settles and its result is persisted, the terminal patch
+    // includes this full-call timing.
+    const sdkCallStartedAt = Date.now();
+    const sdkCallStartedMonotonicAt = performance.now();
     let transportResult: AttemptTransportResult;
     try {
       transportResult = await transport({
@@ -259,8 +266,8 @@ async function executePositions(
       // of both looking identical.
       return haltWith(run, 'stopped', undefined, transportResult.errorMessage);
     }
-
     const settledAt = Date.now();
+    const sdkCallDurationMs = Math.max(0, performance.now() - sdkCallStartedMonotonicAt);
     const terminalWrite = transportResult.ok
       ? await recordAttemptTerminal(intent.id, {
           status: 'succeeded',
@@ -268,11 +275,15 @@ async function executePositions(
           servedVariantId: transportResult.servedVariantId ?? null,
           usage: transportResult.usage,
           ttftMs: transportResult.ttftMs,
+          sdkCallStartedAt,
+          sdkCallDurationMs,
           settledAt,
         })
       : await recordAttemptTerminal(intent.id, {
           status: 'failed',
           errorMessage: transportResult.errorMessage,
+          sdkCallStartedAt,
+          sdkCallDurationMs,
           settledAt,
         });
 
@@ -290,8 +301,8 @@ async function executePositions(
     attemptsSoFar[attemptsSoFar.length - 1] = {
       ...intent,
       ...(transportResult.ok
-        ? { status: 'succeeded' as const, responseText: transportResult.responseText, settledAt }
-        : { status: 'failed' as const, errorMessage: transportResult.errorMessage, settledAt }),
+        ? { status: 'succeeded' as const, responseText: transportResult.responseText, sdkCallStartedAt, sdkCallDurationMs, settledAt }
+        : { status: 'failed' as const, errorMessage: transportResult.errorMessage, sdkCallStartedAt, sdkCallDurationMs, settledAt }),
     };
   }
 

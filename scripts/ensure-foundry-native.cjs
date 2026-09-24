@@ -17,6 +17,7 @@ const {
   describeInvalidNativeFile,
   INSTALLABLE_PLATFORM_KEYS,
   platformKeyForTriple,
+  removeUnpinnedRuntimeFiles,
   validateNativePayload,
 } = require('./foundry-native-payload.cjs');
 
@@ -161,6 +162,10 @@ try {
 }
 
 if (validation.invalid.length > 0) {
+  const removed = removeUnpinnedRuntimeFiles(sdkRoot);
+  for (const filePath of removed) {
+    log(`Removed ${path.relative(root, filePath)} because it is not the ONNX Runtime pinned for this SDK.`);
+  }
   log(`Native payload is incomplete for ${platformKey}; running the SDK installer.`);
   try {
     if (!runInstallForPlatformKey(sdkRoot, platformKey)) {

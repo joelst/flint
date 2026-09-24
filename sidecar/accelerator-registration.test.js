@@ -466,6 +466,78 @@ describe('native service startup', () => {
 });
 
 describe('createCatalogRegistrationGate', () => {
+  it('does not let an early no-op repair replace initial provider registration', async () => {
+    const order = [];
+    const gate = createCatalogRegistrationGate(
+      async () => { order.push('register'); return { success: true }; },
+      async () => { order.push('catalog'); return []; },
+    );
+    await gate.rerun(undefined, async () => { order.push('repair'); return { success: true }; });
+    await gate.commit();
+    expect(order).toEqual(['register', 'repair', 'catalog']);
+  });
+
+  it('serializes provider repair with lookups and catalog reads, preserving restart and repair results', async () => {
+    const gate = createCatalogRegistrationGate(
+      vi.fn().mockResolvedValue({ success: true, registeredEps: ['CPUExecutionProvider'] }),
+      async () => [],
+    );
+    await gate.commit();
+    let releaseLookup;
+    const lookup = gate.readUnconfirmed(() => new Promise((resolve) => { releaseLookup = resolve; }));
+    await vi.waitFor(() => expect(releaseLookup).toBeTypeOf('function'));
+    let releaseRepair;
+    const report = vi.fn();
+    const repair = vi.fn((progress) => {
+      progress('CUDAExecutionProvider', 50);
+      return new Promise((resolve) => { releaseRepair = resolve; });
+    });
+    const rerun = gate.rerun(report, repair);
+    await Promise.resolve();
+    expect(repair).not.toHaveBeenCalled();
+    releaseLookup('model');
+    await lookup;
+    await vi.waitFor(() => expect(repair).toHaveBeenCalledTimes(1));
+    const laterLookup = vi.fn(async () => 'repaired model');
+    const read = gate.readUnconfirmed(laterLookup);
+    await Promise.resolve();
+    expect(laterLookup).not.toHaveBeenCalled();
+    releaseRepair({
+      success: true,
+      registeredEps: ['CUDAExecutionProvider'],
+      attemptedProviderRebuilds: ['CUDAExecutionProvider'],
+      removedProviderCaches: ['CUDAExecutionProvider'],
+    });
+    await expect(rerun).resolves.toMatchObject({
+      registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+      attemptedProviderRebuilds: ['CUDAExecutionProvider'],
+      removedProviderCaches: ['CUDAExecutionProvider'],
+      catalogRefreshRequiresRestart: true,
+    });
+    expect(report).toHaveBeenCalledWith('CUDAExecutionProvider', 50);
+    await expect(read).resolves.toBe('repaired model');
+  });
+
+  it('defers provider cache repair when listener exposure left the catalog unconfirmed', async () => {
+    const gate = createCatalogRegistrationGate(vi.fn().mockResolvedValue(null), async () => []);
+    await gate.seal();
+    const repair = vi.fn();
+    await expect(gate.rerun(undefined, repair)).resolves.toMatchObject({
+      registrationDeferredUntilRestart: true,
+    });
+    expect(repair).not.toHaveBeenCalled();
+  });
+
+  it('never retries a failed effectful provider repair and leaves the queue usable', async () => {
+    const register = vi.fn().mockResolvedValue({ success: true });
+    const gate = createCatalogRegistrationGate(register, async () => []);
+    const repair = vi.fn(async () => { throw new Error('cache busy'); });
+    await expect(gate.rerun(undefined, repair)).rejects.toThrow('cache busy');
+    expect(repair).toHaveBeenCalledTimes(1);
+    await expect(gate.rerun()).resolves.toMatchObject({ success: true });
+    await expect(gate.rerun(undefined, {})).rejects.toThrow('registration operation');
+  });
+
   it('keeps the post-commit writer lane behind a mutation crossing confirmation', () => {
     const source = readFileSync(
       join(process.cwd(), 'sidecar', 'accelerator-registration.js'),

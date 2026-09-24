@@ -41,6 +41,7 @@ import { createModelActivityFence } from './model-activity-fence.js';
 import {
   applyPreferredExecutionProvider as applyPreferredExecutionProviderTo,
 } from './execution-provider.js';
+import { rebuildBrokenExecutionProviders, removeProviderCache } from './execution-provider-cache.js';
 import {
   createCatalogRegistrationGate,
   registerDiscoveredExecutionProviders,
@@ -202,6 +203,7 @@ const FIELD_TYPES = {
   cancelChatRequest: { requestId: 'number' },
   transcribeAudio:   { audioBase64: 'string', mimeType: 'non-empty-string', fileName: 'non-empty-string', model: 'non-empty-string', language: 'non-empty-string' },
   embedTexts:        { model: 'non-empty-string', inputs: 'array' },
+  ensureAccelerators: { rebuildBroken: 'boolean' },
   fetchUrl:          { url: 'non-empty-string' },
   inspectModelFolder: { folderPath: 'non-empty-string' },
   importModelFolder: { folderPath: 'non-empty-string', name: 'non-empty-string' },
@@ -243,7 +245,7 @@ const COMMAND_SCHEMA = {
   transcribeAudio:    { required: ['audioBase64', 'mimeType', 'fileName', 'model', 'language'], optional: ['temperature', 'preferredEp'] },
   embedTexts:         { required: ['model', 'inputs'], optional: [] },
   getEps:             { required: [], optional: [] },
-  ensureAccelerators: { required: [], optional: [] },
+  ensureAccelerators: { required: [], optional: ['rebuildBroken'] },
   getVisionModels:    { required: [], optional: [] },
   getSTTModels:       { required: [], optional: [] },
   poolStatus:         { required: [], optional: [] },
@@ -323,6 +325,11 @@ function validateCommand(cmd, payload) {
     }
   }
   if (payload.preferredEp !== undefined && typeof payload.preferredEp !== 'string') return `Command "${cmd}" field "preferredEp" must be a string`;
+  // appName becomes ~/.<appName>: the model cache, the provider caches Recheck deletes, and
+  // Foundry's own data. It must be one folder name, so no path can leave the home directory.
+  if (cmd === 'init' && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(payload.appName)) {
+    return 'Command "init" field "appName" must be a single folder name of letters, digits, ".", "_" or "-"';
+  }
   if (cmd === 'startService' && payload.alias !== undefined && (typeof payload.alias !== 'string' || !payload.alias.trim())) return `Command "startService" field "alias" must be a non-empty string`;
   if ((cmd === 'chatCompletion' || cmd === 'transcribeAudio') && payload.temperature !== undefined && typeof payload.temperature !== 'number') return `Command "${cmd}" field "temperature" must be a number`;
   if (cmd === 'chatCompletion') {
@@ -479,10 +486,10 @@ function trySerializeModelOperation(alias, scopes, operation) {
 /** Settings “Install / Update Accelerators” uses the same command as startup.
  * The update still runs after catalog commitment, but new variants remain invisible
  * to the current immutable snapshot and require a runtime restart. */
-async function rerunAcceleratorRegistration(onProgress) {
+async function rerunAcceleratorRegistration(onProgress, registerOnce) {
   const gate = acceleratorGate();
   if (!gate) return Promise.resolve(null);
-  return gate.rerun(onProgress);
+  return gate.rerun(onProgress, registerOnce);
 }
 
 async function runCatalogMutation(mutate, operation, onProgress, options) {
@@ -3869,9 +3876,30 @@ rl.on('line', async (line) => {
       reply({ ok: true, result: eps });
     } else if (cmd === 'ensureAccelerators') {
       if (typeof manager.downloadAndRegisterEps === 'function') {
-        const result = await rerunAcceleratorRegistration((name, pct) => {
-          send({ id, progress: pct, ep: name });
-        });
+        const progress = reportCatalogProgress;
+        const rebuild = payload.rebuildBroken === true ? async (onProgress) => {
+          const epRoot = path.join(os.homedir(), `.${initConfig?.appName || 'flint'}`, 'ep');
+          const outcome = await rebuildBrokenExecutionProviders({
+            discover: () => (typeof manager.discoverEps === 'function' ? manager.discoverEps() : []),
+            downloadAndRegister: (names, onProgress) => manager.downloadAndRegisterEps(names, onProgress),
+            removeCache: (name) => removeProviderCache(epRoot, name),
+            onProgress,
+            epRoot,
+          });
+          if (outcome.removed.length) {
+            log('info', `Removed broken execution provider cache: ${outcome.removed.join(', ')}`);
+          }
+          if (outcome.busy.length) {
+            log('warn', `Left execution provider cache in place because a file is in use: ${outcome.busy.join(', ')}`);
+          }
+          return {
+            ...(outcome.result ?? {}),
+            attemptedProviderRebuilds: outcome.attempted,
+            removedProviderCaches: outcome.removed,
+            busyProviderCaches: outcome.busy,
+          };
+        } : undefined;
+        const result = await rerunAcceleratorRegistration(progress, rebuild);
         reply({ ok: true, result: result ?? null });
       } else {
         reply({ ok: true, result: null });

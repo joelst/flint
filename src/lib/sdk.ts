@@ -2871,11 +2871,12 @@ export async function getEps(): Promise<EpInfo[]> {
 async function performAcceleratorSetup(
   onProgress?: (epName: string, percent: number) => void,
   onStall?: () => void,
+  options?: { rebuildBroken?: boolean },
 ): Promise<AcceleratorReadiness> {
   let generation: number | null = null;
   const res = await sendInternal(
     'ensureAccelerators',
-    {},
+    options?.rebuildBroken ? { rebuildBroken: true } : {},
     undefined,
     (id: number) => {
       registerProgressHandler(
@@ -2912,14 +2913,14 @@ async function performAcceleratorSetup(
 export function ensureAccelerators(
   onProgress?: (epName: string, percent: number) => void,
   onStall?: () => void,
-  options?: { forceRerun?: boolean },
+  options?: { forceRerun?: boolean; rebuildBroken?: boolean },
 ): Promise<AcceleratorReadiness> {
   const listener = { onProgress, onStall };
   const currentGeneration = sidecarGeneration;
   if (
     acceleratorSetup &&
     acceleratorSetup.generation === currentGeneration &&
-    options?.forceRerun
+    (options?.forceRerun || options?.rebuildBroken)
   ) {
     // The rerun waits for the active cycle, whose provider install is what this caller is
     // waiting on in the meantime, so it observes that cycle's progress and stall notice too.
@@ -2929,7 +2930,7 @@ export function ensureAccelerators(
       .catch(() => undefined)
       .then(() => {
         active.listeners.delete(listener);
-        return ensureAccelerators(onProgress, onStall);
+        return ensureAccelerators(onProgress, onStall, options);
       });
   }
   if (acceleratorSetup && acceleratorSetup.generation === currentGeneration) {
@@ -2958,7 +2959,7 @@ export function ensureAccelerators(
     if (reportDefault) reportRuntimeProgressStall('ensureAccelerators');
   };
   let tracked: Promise<AcceleratorReadiness>;
-  tracked = performAcceleratorSetup(broadcastProgress, broadcastStall).finally(() => {
+  tracked = performAcceleratorSetup(broadcastProgress, broadcastStall, options).finally(() => {
     if (acceleratorSetup?.promise === tracked) acceleratorSetup = null;
     listeners.clear();
   });

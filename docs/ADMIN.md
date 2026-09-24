@@ -60,6 +60,12 @@ and other explicitly requested model-management operations can also require netw
 There is currently no separate switch for startup accelerator setup, so prepare the required
 components before disconnecting if the machine must launch fully offline.
 
+**Recheck Providers** uses the same registration/catalog queue as startup and
+**Install / Update Accelerators**. It waits for active setup before attempting
+cache repair. If the catalog snapshot is unconfirmed, repair is deferred without
+removing provider caches. After a confirmed snapshot, provider repair can proceed,
+but Flint must restart before newly available variants enter the model catalog.
+
 ## Uninstall leftovers
 
 Removing the app does not delete:

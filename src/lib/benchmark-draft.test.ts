@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { aliasChoicesForTarget, applyTargetAlias, buildSuiteFromDraft, cachedVariantIds, draftEditsSuite, draftFromSuite, estimateDraftAttempts, variantChoicesForTarget, type SuiteDraft } from './benchmark-draft';
-import { BENCHMARK_MAX_ATTEMPTS, BENCHMARK_MAX_JSONL_CHARS } from './benchmark-suite';
+import { aliasChoicesForTarget, applyTargetAlias, buildSuiteFromDraft, cachedVariantIds, caseRowsFromJsonl, copiedSuiteName, draftEditsSuite, draftFromSuite, duplicateSuiteDraft, estimateDraftAttempts, jsonlFromCaseRows, jsonlImportCanFitCharacterLimit, newPromptCaseRow, optionalDraftNumber, tagsJsonError, variantChoicesForTarget, type SuiteDraft } from './benchmark-draft';
+import { BENCHMARK_MAX_ATTEMPTS, BENCHMARK_MAX_JSONL_CHARS, BENCHMARK_MAX_NAME_LENGTH } from './benchmark-suite';
 import type { BenchmarkSuite } from './benchmark-suite';
 
 const baseDraft = (over: Partial<SuiteDraft> = {}): SuiteDraft => ({
@@ -51,6 +51,24 @@ describe('buildSuiteFromDraft', () => {
     const result = buildSuiteFromDraft(baseDraft({ description: '   ' }));
     expect(result.ok).toBe(true);
     expect(result.value!.description).toBeUndefined();
+  });
+
+  it('omits a cleared temperature or max tokens instead of storing a runtime default as a number', () => {
+    const cleared = buildSuiteFromDraft(baseDraft({ temperature: null, maxTokens: null }));
+    expect(cleared.ok).toBe(true);
+    expect(cleared.value!.temperature).toBeUndefined();
+    expect(cleared.value!.maxTokens).toBeUndefined();
+    const invalid = buildSuiteFromDraft(baseDraft({ temperature: Number.NaN }));
+    expect(invalid.ok).toBe(false);
+  });
+
+  it('keeps numeric input text parseable until save', () => {
+    const intermediate = baseDraft({ temperature: '0.', maxTokens: '256' });
+    expect(intermediate.temperature).toBe('0.');
+    const result = buildSuiteFromDraft(intermediate);
+    expect(result.ok).toBe(true);
+    expect(result.value!.temperature).toBe(0);
+    expect(result.value!.maxTokens).toBe(256);
   });
 
   it('rejects a draft with no targets, matching validateBenchmarkSuite\'s own target-count rule', () => {
@@ -170,6 +188,244 @@ describe('applyTargetAlias', () => {
       alias: 'model-a',
       variantId: 'v1',
     });
+  });
+});
+
+describe('optionalDraftNumber', () => {
+  it('treats an empty input as omitted and parses a typed number', () => {
+    expect(optionalDraftNumber(null)).toBeUndefined();
+    expect(optionalDraftNumber('')).toBeUndefined();
+    expect(optionalDraftNumber('  ')).toBeUndefined();
+    expect(optionalDraftNumber('0.2')).toBe(0.2);
+    expect(optionalDraftNumber(0)).toBe(0);
+    expect(optionalDraftNumber('nope')).toBeNaN();
+  });
+});
+
+describe('jsonlImportCanFitCharacterLimit', () => {
+  it('allows multibyte UTF-8 files that can still fit the character cap', () => {
+    expect(jsonlImportCanFitCharacterLimit(BENCHMARK_MAX_JSONL_CHARS * 2)).toBe(true);
+  });
+
+  it('allows the three-byte UTF-8 BOM in addition to a max-length multibyte payload', () => {
+    expect(jsonlImportCanFitCharacterLimit(BENCHMARK_MAX_JSONL_CHARS * 3 + 3)).toBe(true);
+  });
+
+  it('rejects only byte sizes that cannot fit the character cap', () => {
+    expect(jsonlImportCanFitCharacterLimit(BENCHMARK_MAX_JSONL_CHARS * 3 + 4)).toBe(false);
+  });
+});
+
+describe('case rows', () => {
+  it('treats a blank case list as no rows, not a parse failure', () => {
+    expect(caseRowsFromJsonl('')).toEqual({ ok: true, rows: [] });
+    expect(caseRowsFromJsonl('  \n')).toEqual({ ok: true, rows: [] });
+    expect(jsonlFromCaseRows([])).toBe('');
+  });
+
+  it('round-trips prompt rows, including expected and tags, through the suite validator', () => {
+    const rows = caseRowsFromJsonl('{"id":"c1","prompt":"2+2","expected":"4","tags":["math"]}');
+    expect(rows.ok).toBe(true);
+    if (!rows.ok) return;
+    expect(rows.rows).toEqual([{ kind: 'prompt', id: 'c1', prompt: '2+2', expected: '4', tagsJson: '["math"]' }]);
+    const rebuilt = buildSuiteFromDraft(baseDraft({ casesJsonl: jsonlFromCaseRows(rows.rows) }));
+    expect(rebuilt.ok).toBe(true);
+    expect(rebuilt.value!.cases).toEqual([{ id: 'c1', prompt: '2+2', expected: '4', tags: ['math'] }]);
+  });
+
+  it('keeps a messages case verbatim when prompt rows around it are edited', () => {
+    const text = [
+      '{"id":"c1","prompt":"hi"}',
+      '{"id":"c2","messages":[{"role":"user","content":"hello"}]}',
+    ].join('\n');
+    const parsed = caseRowsFromJsonl(text);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const messages = parsed.rows[1];
+    expect(messages).toMatchObject({ kind: 'messages', id: 'c2', messageCount: 1 });
+    const reordered = [messages, { kind: 'prompt' as const, id: 'c1', prompt: 'edited', expected: '', tagsJson: '' }];
+    const rebuilt = buildSuiteFromDraft(baseDraft({ casesJsonl: jsonlFromCaseRows(reordered) }));
+    expect(rebuilt.ok).toBe(true);
+    expect(rebuilt.value!.cases.map((entry) => entry.id)).toEqual(['c2', 'c1']);
+    expect(rebuilt.value!.cases[0].messages).toEqual([{ role: 'user', content: 'hello' }]);
+    expect(rebuilt.value!.cases[1].prompt).toBe('edited');
+  });
+
+  it('round-trips tags containing commas without changing their identity', () => {
+    const parsed = caseRowsFromJsonl('{"id":"c1","prompt":"hi","tags":["a,b","plain"]}');
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.rows[0]).toMatchObject({ tagsJson: '["a,b","plain"]' });
+    const rebuilt = buildSuiteFromDraft(baseDraft({ casesJsonl: jsonlFromCaseRows(parsed.rows) }));
+    expect(rebuilt.ok).toBe(true);
+    expect(rebuilt.value!.cases[0].tags).toEqual(['a,b', 'plain']);
+  });
+
+  it('does not add an empty tags array to a tagless case', () => {
+    const parsed = caseRowsFromJsonl('{"id":"c1","prompt":"hi"}');
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.rows[0]).toMatchObject({ tagsJson: '' });
+    const rebuilt = buildSuiteFromDraft(baseDraft({ casesJsonl: jsonlFromCaseRows(parsed.rows) }));
+    expect(rebuilt.ok).toBe(true);
+    expect(rebuilt.value!.cases[0]).toEqual({ id: 'c1', prompt: 'hi' });
+  });
+
+  it('preserves an explicit empty tags array', () => {
+    const parsed = caseRowsFromJsonl('{"id":"c1","prompt":"hi","tags":[]}');
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const rebuilt = buildSuiteFromDraft(baseDraft({ casesJsonl: jsonlFromCaseRows(parsed.rows) }));
+    expect(rebuilt.ok).toBe(true);
+    expect(rebuilt.value!.cases[0]).toEqual({ id: 'c1', prompt: 'hi', tags: [] });
+  });
+
+  it('keeps invalid tag JSON as a validation error instead of throwing during editing', () => {
+    const rows = [{
+      kind: 'prompt' as const,
+      id: 'c1',
+      prompt: 'hi',
+      expected: '',
+      tagsJson: '[',
+    }];
+    expect(() => jsonlFromCaseRows(rows)).not.toThrow();
+    const rebuilt = buildSuiteFromDraft(baseDraft({ casesJsonl: jsonlFromCaseRows(rows) }));
+    expect(rebuilt.ok).toBe(false);
+    expect(rebuilt.errors.join(' ')).toContain('tags must be an array');
+  });
+
+  it('explains tag JSON errors using the suite tag validator', () => {
+    expect(tagsJsonError('')).toBeNull();
+    expect(tagsJsonError('[')).toBe('Tags must be valid JSON.');
+    expect(tagsJsonError('"math"')).toBe('tags must be an array');
+    expect(tagsJsonError('["math"]')).toBeNull();
+  });
+
+  it('accepts a UTF-8 BOM through the form row conversion path', () => {
+    expect(caseRowsFromJsonl('\uFEFF{"id":"c1","prompt":"hi"}')).toEqual({
+      ok: true,
+      rows: [{ kind: 'prompt', id: 'c1', prompt: 'hi', expected: '', tagsJson: '' }],
+    });
+  });
+
+  it('surfaces the JSONL parser error instead of a partial row list', () => {
+    const parsed = caseRowsFromJsonl('not json');
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.error).toMatch(/not valid JSON/);
+  });
+
+  it('picks a case id that does not collide with rows already on the form', () => {
+    expect(newPromptCaseRow(['c1'])).toMatchObject({ kind: 'prompt', id: 'c2' });
+    expect(newPromptCaseRow(['c1', 'c2'])).toMatchObject({ id: 'c3' });
+    expect(newPromptCaseRow(['c1', 'c3'])).toMatchObject({ id: 'c4' });
+    expect(newPromptCaseRow([' c2 '])).toMatchObject({ id: 'c3' });
+  });
+});
+
+describe('duplicateSuiteDraft', () => {
+  it('drops the stored id so Save creates a suite with no runs', () => {
+    const stored: BenchmarkSuite = {
+      id: 'suite-1',
+      name: 'Arithmetic',
+      description: 'basic math',
+      createdAt: 5,
+      targets: [{ alias: 'model-a', variantId: 'v1' }],
+      cases: [{ id: 'c1', prompt: 'What is 2+2?' }],
+      temperature: 0.5,
+      maxTokens: 256,
+      warmupCount: 1,
+      repeatCount: 2,
+    };
+    const draft = duplicateSuiteDraft(stored);
+    expect(draft.id).toBeUndefined();
+    expect(draft.createdAt).toBeUndefined();
+    expect(draft.name).toBe('Arithmetic copy');
+    expect(draft.temperature).toBe(0.5);
+    expect(draft.casesJsonl).toContain('"prompt":"What is 2+2?"');
+    const rebuilt = buildSuiteFromDraft(draft, 99);
+    expect(rebuilt.ok).toBe(true);
+    expect(rebuilt.value!.id).not.toBe('suite-1');
+    expect(rebuilt.value!.createdAt).toBe(99);
+    expect(rebuilt.value!.cases).toEqual(stored.cases);
+  });
+
+  it('makes a legacy duplicate-alias suite saveable by keeping the first target per alias', () => {
+    const stored: BenchmarkSuite = {
+      id: 'suite-legacy',
+      name: 'Legacy variants',
+      createdAt: 5,
+      targets: [
+        { alias: 'model-a', variantId: 'v1' },
+        { alias: 'model-a', variantId: 'v2' },
+        { alias: 'model-b', variantId: null },
+      ],
+      cases: [{ id: 'c1', prompt: 'hello' }],
+      warmupCount: 0,
+      repeatCount: 1,
+    };
+    const draft = duplicateSuiteDraft(stored);
+    expect(draft.targets).toEqual([
+      { alias: 'model-a', variantId: 'v1' },
+      { alias: 'model-b', variantId: null },
+    ]);
+    expect(buildSuiteFromDraft(draft).ok).toBe(true);
+  });
+
+  it('uses trimmed alias identity when repairing a legacy duplicate', () => {
+    const stored: BenchmarkSuite = {
+      id: 'suite-legacy-whitespace',
+      name: 'Legacy whitespace',
+      createdAt: 5,
+      targets: [
+        { alias: 'model-a', variantId: 'v1' },
+        { alias: ' model-a ', variantId: 'v2' },
+      ],
+      cases: [{ id: 'c1', prompt: 'hello' }],
+      warmupCount: 0,
+      repeatCount: 1,
+    };
+    const draft = duplicateSuiteDraft(stored);
+    expect(draft.targets).toEqual([{ alias: 'model-a', variantId: 'v1' }]);
+    expect(buildSuiteFromDraft(draft).ok).toBe(true);
+  });
+
+  it('preserves every target when their aliases are distinct', () => {
+    const stored: BenchmarkSuite = {
+      id: 'suite-distinct',
+      name: 'Distinct models',
+      createdAt: 5,
+      targets: [
+        { alias: 'model-a', variantId: 'v1' },
+        { alias: 'model-b', variantId: 'v2' },
+      ],
+      cases: [{ id: 'c1', prompt: 'hello' }],
+      warmupCount: 0,
+      repeatCount: 1,
+    };
+    expect(duplicateSuiteDraft(stored).targets).toEqual(stored.targets);
+  });
+
+  it('shortens a max-length name so the copy suffix still fits', () => {
+    const name = 'a'.repeat(BENCHMARK_MAX_NAME_LENGTH);
+    const copied = copiedSuiteName(name);
+    expect(copied.length).toBe(BENCHMARK_MAX_NAME_LENGTH);
+    expect(copied.endsWith(' copy')).toBe(true);
+    expect(copiedSuiteName('   ')).toBe('copy');
+  });
+
+  it('does not split a surrogate pair when shortening a copied name', () => {
+    const suffixLength = ' copy'.length;
+    const prefix = 'a'.repeat(BENCHMARK_MAX_NAME_LENGTH - suffixLength - 1);
+    const copied = copiedSuiteName(`${prefix}😀`);
+    expect(copied).toBe(`${prefix} copy`);
+    expect(copied).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/u);
+  });
+
+  it('keeps a complete surrogate pair at the shortening boundary', () => {
+    const suffixLength = ' copy'.length;
+    const prefix = 'a'.repeat(BENCHMARK_MAX_NAME_LENGTH - suffixLength - 2);
+    expect(copiedSuiteName(`${prefix}😀z`)).toBe(`${prefix}😀 copy`);
   });
 });
 
