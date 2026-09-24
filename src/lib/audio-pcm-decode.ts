@@ -60,8 +60,11 @@ export function decodeWavPcm(buffer: ArrayBuffer): DecodedPcm {
       sampleRate = view.getUint32(bodyOffset + 4, true);
       bitsPerSample = view.getUint16(bodyOffset + 14, true);
       // WAVE_FORMAT_EXTENSIBLE (0xFFFE): the real sample type lives in the sub-format GUID's
-      // first two bytes, which reuse the same codes as `formatCode` (1 = PCM, 3 = float).
-      if (formatCode === 0xfffe && chunkSize >= 24) {
+      // first two bytes, which reuse the same codes as `formatCode` (1 = PCM, 3 = float). The
+      // GUID starts at body offset 24 (18-byte WAVEFORMATEX + 2-byte validBits + 4-byte
+      // channelMask), so reading its first uint16 needs the chunk to extend through offset 25,
+      // not merely up to 24 — a chunk that stops exactly at 24 has no sub-format bytes at all.
+      if (formatCode === 0xfffe && chunkSize >= 26) {
         formatCode = view.getUint16(bodyOffset + 24, true);
       }
     } else if (chunkId === 'data') {

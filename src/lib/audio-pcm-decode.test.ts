@@ -155,6 +155,36 @@ describe('decodeWavPcm', () => {
     expect(decoded.channelData[0][0]).toBeCloseTo(500 / 32768, 4);
   });
 
+  it('falls through to the base format code when an EXTENSIBLE fmt chunk is truncated before the sub-format bytes', () => {
+    // A 24-byte fmt body (16-byte base + cbSize + validBits + channelMask, but no sub-format
+    // GUID at all) must not be treated as having a readable sub-format code.
+    const samples = new Int16Array([500]);
+    const fmtBodyLen = 24;
+    const dataOffset = 12 + 8 + fmtBodyLen + 8;
+    const buffer = new ArrayBuffer(dataOffset + samples.byteLength);
+    const view = new DataView(buffer);
+    writeAscii(view, 0, 'RIFF');
+    view.setUint32(4, buffer.byteLength - 8, true);
+    writeAscii(view, 8, 'WAVE');
+    writeAscii(view, 12, 'fmt ');
+    view.setUint32(16, fmtBodyLen, true);
+    const fmtBody = 20;
+    view.setUint16(fmtBody, 0xfffe, true);
+    view.setUint16(fmtBody + 2, 1, true);
+    view.setUint32(fmtBody + 4, 22000, true);
+    view.setUint32(fmtBody + 8, 22000 * 2, true);
+    view.setUint16(fmtBody + 12, 2, true);
+    view.setUint16(fmtBody + 14, 16, true);
+    view.setUint16(fmtBody + 16, 22, true); // cbSize (claims 22, but the chunk itself is truncated)
+    view.setUint16(fmtBody + 18, 16, true); // valid bits per sample
+    view.setUint32(fmtBody + 20, 0, true); // channel mask — chunk ends here, no GUID bytes follow
+    writeAscii(view, 12 + 8 + fmtBodyLen, 'data');
+    view.setUint32(12 + 8 + fmtBodyLen + 4, samples.byteLength, true);
+    new Uint8Array(buffer, dataOffset, samples.byteLength).set(new Uint8Array(samples.buffer));
+    // formatCode stays 0xfffe (unsupported), since there is no sub-format code to read.
+    expect(() => decodeWavPcm(buffer)).toThrow(/Unsupported WAV sample format/);
+  });
+
   it('throws for a non-RIFF buffer', () => {
     const buffer = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]).buffer;
     expect(() => decodeWavPcm(buffer)).toThrow(/RIFF\/WAVE/);
