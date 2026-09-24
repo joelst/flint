@@ -21,10 +21,21 @@ import {
 function writeDll (file, content) {
   fs.writeFileSync(file, content);
   const probe = `${file}.settle`;
+  // Each rename retries on its own: the first can succeed and the second be held, and
+  // retrying the pair from the top would then fail with ENOENT and leave the probe name.
+  // A rename back recreates the .dll and can start another scan, so several quiet rounds
+  // in a row are needed before the file counts as settled.
+  for (let round = 0; round < 3; round++) {
+    renameWhenFree(file, probe);
+    renameWhenFree(probe, file);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  }
+}
+
+function renameWhenFree (from, to) {
   for (let attempt = 0; ; attempt++) {
     try {
-      fs.renameSync(file, probe);
-      fs.renameSync(probe, file);
+      fs.renameSync(from, to);
       return;
     } catch (error) {
       if (attempt >= 100 || !['EPERM', 'EBUSY', 'EACCES'].includes(error.code)) throw error;
