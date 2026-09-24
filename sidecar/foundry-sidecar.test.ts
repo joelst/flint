@@ -1972,9 +1972,9 @@ describe('foundry-sidecar gateway variant autoload', () => {
     }
   }, 20000);
 
-  it('keeps a request served through a version fallback counted against the serving build', async () => {
-    // `foo-cpu:999` is not cached, so the registry serves the same build's cached version and
-    // the gateway forwards `foo-cpu:1`. That build is in use until the response completes.
+  it('keeps a request served through a versionless fallback counted against the serving build', async () => {
+    // A versionless `foo-cpu` resolves to the highest cached version, so the gateway forwards
+    // `foo-cpu:1`. That build is in use until the response completes.
     const gateway = await startVariantGateway();
     const held = gateway.holdNextChat();
     let released = false;
