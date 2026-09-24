@@ -159,7 +159,7 @@ describe('model activity fence', () => {
     const audioEnd = source.indexOf("} else if (cmd === 'poolStatus') {", audioStart);
     const audioFlow = source.slice(audioStart, audioEnd);
 
-    expect(unloadFlow).toContain('withModelActivityFence(alias');
+    expect(unloadFlow).toContain('tryBeginIdleUnload(alias)');
     expect(deleteFlow).toContain('modelActivityFence.tryAcquire(payload.alias)');
     expect(sweepFlow).toContain('withModelActivityFence(');
     expect(switchFlow).toContain('modelActivityFence.tryAcquire(alias)');
