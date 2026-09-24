@@ -58,16 +58,27 @@ export function isJsonContentType (contentType) {
 }
 
 /**
- * Foundry's "not loaded" rejection, which is the whole reason this proxy exists.
+ * Foundry's rejection of the model a request named, which is the whole reason this proxy
+ * exists. Two shapes, both carrying the quoted name:
  *
- * Matched narrowly and only on 400: a retry is a second execution of the client's request,
- * so it must not be triggered by an unrelated failure that happens to mention a model.
+ * - `400`: the router knows the exact variant id but it is not resident. SDK 1.x says
+ *   `Model 'X' is not loaded`; SDK 2.0.1 says `Model not loaded: Model 'X' must be loaded
+ *   before inference`.
+ * - `404 Model not found: No model matching 'X'` (SDK 2.0.1): the router does not know the
+ *   name at all. It routes only the exact, case-sensitive loaded variant id, so this is what
+ *   an alias, a versionless id, or a differently cased id gets, resident or not.
+ *
+ * Matched narrowly and keyed to the quoted name, the one part of the sentence that cannot
+ * appear by accident: a retry is a second execution of the client's request, so it must not
+ * be triggered by an unrelated failure that happens to mention a model. The caller checks
+ * that the quoted name is the one it sent.
  *
  * @param {number} status
  * @param {string} body
+ * @returns {{ kind: 'not-loaded'|'not-found', model: string }|null}
  */
-export function isModelNotLoadedError (status, body) {
-  if (status !== 400) return false;
+export function modelRejection (status, body) {
+  if (status !== 400 && status !== 404) return null;
   const text = String(body || '');
   // Foundry wraps the message as {"error":{"message":...}}, but some callers pass the
   // extracted message on its own. Fall back to the raw text unless a message is found.
@@ -78,10 +89,18 @@ export function isModelNotLoadedError (status, body) {
   } catch {
     // Not JSON: treat the body as the message itself.
   }
-  // Keyed to the quoted model name, the one part of the sentence that cannot appear by
-  // accident. Anchoring the whole sentence instead would silently disable autoload the
-  // first time Foundry reworded the surrounding text.
-  return /\bModel '[^']+' is not loaded\b/i.test(message);
+  if (status === 400) {
+    const match = /\bModel '([^']+)' (?:is not loaded|must be loaded before inference)\b/i.exec(message);
+    return match ? { kind: 'not-loaded', model: match[1] } : null;
+  }
+  const match = /\bNo model matching '([^']+)'/i.exec(message);
+  return match ? { kind: 'not-found', model: match[1] } : null;
+}
+
+/** True when Foundry's rejection names the model this request sent, ignoring case. */
+export function rejectionNames (rejection, sentModel) {
+  if (!rejection || typeof sentModel !== 'string') return false;
+  return rejection.model.trim().toLowerCase() === sentModel.trim().toLowerCase();
 }
 
 /** Bodies are only buffered so a request can be replayed; a giant upload is streamed. */
@@ -132,11 +151,12 @@ export function openAiError (message, type = 'server_error', code = null) {
 /**
  * Replace the `model` field of a buffered JSON body.
  *
- * Foundry routes by variant id (`qwen2.5-0.5b-instruct-generic-cpu`, with or without the
- * `:<version>` suffix) and refuses the friendly alias (`qwen2.5-0.5b`) outright, returning
- * "is not loaded" even while that very model is resident. A replay after an autoload must
- * therefore name the variant that was actually loaded, or it fails exactly as the first
- * attempt did — having spent the memory to load the model.
+ * Foundry routes only the exact, case-sensitive loaded variant id
+ * (`qwen2.5-0.5b-instruct-generic-cpu:4`). The friendly alias, the versionless id, and any
+ * other casing get `404 Model not found` even while that very model is resident (SDK 1.x
+ * accepted the versionless form and answered "is not loaded" for the alias). A replay after
+ * an autoload must therefore name the variant that was actually loaded, or it fails exactly
+ * as the first attempt did — having spent the memory to load the model.
  *
  * Returns null when the body is not a JSON object, so the caller can send it untouched.
  *

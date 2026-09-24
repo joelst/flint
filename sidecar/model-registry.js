@@ -1,12 +1,18 @@
 // Resolving the model identifier an OpenAI client sends into something loadable.
 //
-// The Foundry service advertises variant ids in `GET /v1/models` (`qwen3-0.6b-generic-cpu`)
-// and routes on that form, with or without the `:<version>` suffix. It does **not** route
-// the friendly alias: a request naming `qwen2.5-0.5b` is rejected with "is not loaded" even
-// while that exact model is resident (verified against a live service). The SDK loader is
-// the mirror image — `catalog.getModel()` accepts **only** the alias and throws on a variant
-// id. So the two halves of the job disagree about what a model is called, and neither
-// accepts the other's vocabulary.
+// The Foundry service advertises versionless variant ids in `GET /v1/models`
+// (`qwen3-0.6b-generic-cpu`) but routes only the exact, case-sensitive loaded variant id
+// (`qwen3-0.6b-generic-cpu:4`). The friendly alias, the versionless id, and any other casing
+// get `404 Model not found` even while that exact model is resident (SDK 2.0.1, verified
+// against a live service; SDK 1.x accepted the versionless form). The SDK loader is the
+// mirror image — `catalog.getModel()` accepts **only** the alias and throws on a variant id.
+// So the two halves of the job disagree about what a model is called, and neither accepts
+// the other's vocabulary.
+//
+// Lookups here ignore case, since the replay always sends the canonical id the loader
+// reports. An explicit `:<version>` resolves exactly or not at all: a client that asked for
+// version 999 is not quietly served version 4. A versionless id resolves to the highest
+// cached version, the one a fresh install would have.
 //
 // Resolution therefore has to yield both parts: the alias to load, and the specific variant
 // that was asked for. Dropping the variant would silently load a different one (a CPU build
@@ -48,24 +54,32 @@ export function buildModelIndex (models) {
     if (cachedVariants.length === 0) continue;
 
     // The alias alone means "whatever the service would pick", so no variant is pinned.
-    if (!index.has(alias)) index.set(alias, { alias, variantId: null });
+    const aliasKey = indexKey(alias);
+    if (!index.has(aliasKey)) index.set(aliasKey, { alias, variantId: null });
 
     for (const variant of cachedVariants) {
       // Exact, versioned id: load precisely this one.
-      if (!index.has(variant.id)) index.set(variant.id, { alias, variantId: variant.id });
+      const exactKey = indexKey(variant.id);
+      if (!index.has(exactKey)) index.set(exactKey, { alias, variantId: variant.id });
 
       // Versionless id is what /v1/models advertises. Several cached versions can share
       // it; the highest version is the one a fresh install would have, so prefer it and
       // keep the choice deterministic rather than dependent on catalog order.
       const bare = stripVersion(variant.id);
       if (bare === variant.id) continue;
-      const existing = index.get(bare);
+      const bareKey = indexKey(bare);
+      const existing = index.get(bareKey);
       if (!existing || compareVersions(variant.id, existing.variantId) > 0) {
-        index.set(bare, { alias, variantId: variant.id });
+        index.set(bareKey, { alias, variantId: variant.id });
       }
     }
   }
   return index;
+}
+
+/** Index keys ignore case; the values keep the catalog's own spelling. */
+function indexKey (name) {
+  return String(name || '').trim().toLowerCase();
 }
 
 /** Compare the trailing `:<version>` of two variant ids. Missing sorts lowest. */
@@ -76,7 +90,9 @@ function compareVersions (a, b) {
 }
 
 /**
- * Look up one identifier.
+ * Look up one identifier: an alias, an exact variant id, or a versionless variant id, in
+ * any casing. An explicit `:<version>` that is not cached resolves to nothing rather than
+ * to another version.
  *
  * @param {Map<string, { alias: string, variantId: string|null }>} index
  * @param {unknown} requested
@@ -84,6 +100,5 @@ function compareVersions (a, b) {
  */
 export function resolveModelId (index, requested) {
   if (typeof requested !== 'string' || !requested.trim()) return null;
-  const name = requested.trim();
-  return index.get(name) ?? index.get(stripVersion(name)) ?? null;
+  return index.get(indexKey(requested)) ?? null;
 }

@@ -14,7 +14,19 @@ import { createGateway, classifyGatewayRoute, respondBuffered } from './gateway.
 let upstream;
 let gateway;
 
+// SDK 2.0.1 wording, probed live (#162): a known variant that is not resident.
 const NOT_LOADED = (model) => JSON.stringify({
+  error: {
+    message: `Model not loaded: Model '${model}' must be loaded before inference`,
+    type: 'invalid_request_error',
+  },
+});
+// SDK 2.0.1: a name the router does not route at all (alias, versionless id, other casing).
+const NOT_FOUND = (model) => JSON.stringify({
+  error: { message: `Model not found: No model matching '${model}'`, type: 'invalid_request_error' },
+});
+// SDK 1.x wording, kept so the gateway keeps working against an older service.
+const NOT_LOADED_LEGACY = (model) => JSON.stringify({
   error: {
     message: `Failed to handle OpenAI completion: Model '${model}' is not loaded. `
       + 'Please load the model before getting a ChatClient.',
@@ -23,7 +35,9 @@ const NOT_LOADED = (model) => JSON.stringify({
 });
 
 async function startUpstream (handler) {
-  const state = { loaded: new Set(), hits: [] };
+  // `known` is the set of variant ids the router can route; null means every name, so
+  // tests that only care about the not-loaded shape need no setup.
+  const state = { loaded: new Set(), known: null, hits: [] };
   const server = http.createServer((req, res) => {
     const chunks = [];
     req.on('data', c => chunks.push(c));
@@ -47,6 +61,11 @@ function defaultHandler (req, res, body, state) {
     let model = null;
     try { model = JSON.parse(body).model; } catch { /* streamed body */ }
     if (model && !state.loaded.has(model)) {
+      if (state.known && !state.known.has(model)) {
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end(NOT_FOUND(model));
+        return;
+      }
       res.writeHead(400, { 'content-type': 'application/json' });
       res.end(NOT_LOADED(model));
       return;
@@ -242,7 +261,7 @@ describe('gateway autoload', () => {
       body: JSON.stringify({ model: 'qwen3-0.6b' }),
     });
     expect(res.status).toBe(400);
-    expect(res.body).toContain('is not loaded');
+    expect(res.body).toContain('must be loaded before inference');
     expect(upstream.state.hits).toHaveLength(2);
   });
 
@@ -333,7 +352,7 @@ describe('gateway autoload', () => {
       body: JSON.stringify({ model: 'qwen3-0.6b' }),
     });
     expect(res.status).toBe(400);
-    expect(res.body).toContain('is not loaded');
+    expect(res.body).toContain('must be loaded before inference');
   });
 
   it('collapses concurrent requests for the same model into one load', async () => {
@@ -400,15 +419,24 @@ describe('gateway model-name routing', () => {
   const ALIAS = 'qwen2.5-0.5b';
   const VARIANT = 'qwen2.5-0.5b-instruct-generic-cpu:4';
 
-  /** Upstream that behaves like the real service: only the variant id ever routes. */
-  async function startVariantOnlyUpstream () {
+  /**
+   * Upstream that behaves like the real SDK 2.0.1 service: only the exact loaded variant id
+   * routes. That variant answers 400 while not resident; every other name, the alias
+   * included, answers 404 whether or not the model is resident.
+   */
+  async function startVariantOnlyUpstream (notLoaded = NOT_LOADED) {
     await new Promise(r => upstream.server.close(r));
     upstream = await startUpstream((req, res, body, state) => {
       let model = null;
       try { model = JSON.parse(body).model; } catch { /* not JSON */ }
-      if (!model || !state.loaded.has(model)) {
+      if (model !== VARIANT) {
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end(NOT_FOUND(model));
+        return;
+      }
+      if (!state.loaded.has(model)) {
         res.writeHead(400, { 'content-type': 'application/json' });
-        res.end(NOT_LOADED(model));
+        res.end(notLoaded(model));
         return;
       }
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -476,8 +504,109 @@ describe('gateway model-name routing', () => {
     expect((await send()).status).toBe(200);
   });
 
-  it('leaves the body alone when the loader reports no variant', async () => {
+  it('serves an alias while the model is resident by learning the variant id from the 404', async () => {
     await startVariantOnlyUpstream();
+    upstream.state.loaded.add(VARIANT);
+    const loads = [];
+    gateway = await startGateway({
+      resolve: async id => (id === ALIAS ? { alias: ALIAS, variantId: null } : null),
+      // Mirrors ensureModel for a resident model: nothing to load, report what is there.
+      load: async (alias) => { loads.push(alias); return VARIANT; },
+    });
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: ALIAS }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body).model).toBe(VARIANT);
+    expect(loads).toEqual([ALIAS]);
+    expect(upstream.state.hits.map(h => JSON.parse(h.body).model)).toEqual([ALIAS, VARIANT]);
+  });
+
+  it('autoloads a cold variant id from the SDK 2.0.1 not-loaded 400', async () => {
+    await startVariantOnlyUpstream();
+    gateway = await startGateway({
+      resolve: async id => (id === VARIANT ? { alias: ALIAS, variantId: VARIANT } : null),
+      load: async () => { upstream.state.loaded.add(VARIANT); return VARIANT; },
+    });
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: VARIANT }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(upstream.state.hits).toHaveLength(2);
+  });
+
+  it('still autoloads against the SDK 1.x not-loaded wording', async () => {
+    await startVariantOnlyUpstream(NOT_LOADED_LEGACY);
+    gateway = await startGateway({
+      resolve: async id => (id === VARIANT ? { alias: ALIAS, variantId: VARIANT } : null),
+      load: async () => { upstream.state.loaded.add(VARIANT); return VARIANT; },
+    });
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: VARIANT }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(upstream.state.hits).toHaveLength(2);
+  });
+
+  it('passes a 404 for a name the registry does not know through unchanged, without loading', async () => {
+    await startVariantOnlyUpstream();
+    let loaded = false;
+    gateway = await startGateway({
+      resolve: async () => null, // not cached, or not a model at all
+      load: async () => { loaded = true; },
+    });
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'not-a-cached-model' }),
+    });
+
+    expect(res.status).toBe(404);
+    expect(res.body).toContain("No model matching 'not-a-cached-model'");
+    expect(loaded).toBe(false);
+    expect(upstream.state.hits).toHaveLength(1);
+  });
+
+  it('ignores a rejection that names a model other than the one it sent', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((req, res) => {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(NOT_FOUND('some-other-model'));
+    });
+    let loaded = false;
+    gateway = await startGateway({
+      resolve: async id => ({ alias: id, variantId: null }),
+      load: async () => { loaded = true; },
+    });
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: ALIAS }),
+    });
+
+    expect(res.status).toBe(404);
+    expect(loaded).toBe(false);
+    expect(upstream.state.hits).toHaveLength(1);
+  });
+
+  it('leaves the body alone when the loader reports no variant', async () => {
+    // The default fake routes any name once it is loaded (an SDK 1.x trait); on 2.0.1 an
+    // unrewritten alias would 404 again, which is why the loader normally reports the
+    // variant. This pins that a null report never invents a rewrite.
     gateway = await startGateway({
       resolve: async id => ({ alias: id, variantId: null }),
       load: async alias => { upstream.state.loaded.add(alias); },
