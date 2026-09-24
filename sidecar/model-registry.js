@@ -30,6 +30,23 @@ export function stripVersion (id) {
   return String(id || '').replace(/:\d+$/, '');
 }
 
+export function isLocalCatalogEntry (entry) {
+  return typeof entry?.info?.uri === 'string' && entry.info.uri.startsWith('local://');
+}
+
+/**
+ * Whether an SDK model or variant has its build in the local cache. The same predicate admits
+ * a variant into the index and re-validates an autoload target, so the two cannot disagree.
+ * The native getter can throw; the info snapshot is the fallback.
+ */
+export function isCachedModel (model) {
+  try {
+    return !!model?.isCached;
+  } catch {
+    return !!model?.info?.cached;
+  }
+}
+
 /**
  * Build a lookup from every identifier form a client might send.
  *
@@ -67,9 +84,10 @@ export function buildModelIndex (models) {
       // keep the choice deterministic rather than dependent on catalog order.
       const bare = stripVersion(variant.id);
       if (bare === variant.id) continue;
+      // BYOM commonly uses `alias:version` as the variant id. Its bare form is the
+      // friendly alias, which must keep variantId:null so an unknown `alias:999`
+      // cannot silently fall back to a different cached version.
       const bareKey = indexKey(bare);
-      // BYOM commonly uses `alias:version` as the variant id. Its bare form is the alias,
-      // which keeps variantId:null so the alias still means "whatever the service picks".
       if (bareKey === aliasKey) continue;
       const existing = index.get(bareKey);
       if (!existing || compareVersions(variant.id, existing.variantId) > 0) {
@@ -78,6 +96,28 @@ export function buildModelIndex (models) {
     }
   }
   return index;
+}
+
+/**
+ * Build the same lookup from the SDK's cached-only inventory, whose rows are
+ * individual variants rather than aliases containing a variants array.
+ *
+ * @param {Array<{alias?: string, id?: string}>} models
+ * @returns {Map<string, { alias: string, variantId: string|null }>}
+ */
+export function buildCachedModelIndex (models) {
+  const normalized = [];
+  for (const model of Array.isArray(models) ? models : []) {
+    try {
+      normalized.push({
+        alias: model?.alias,
+        variants: [{ id: model?.id, cached: true }],
+      });
+    } catch {
+      // Native-backed SDK getters can fail independently; keep usable cached rows.
+    }
+  }
+  return buildModelIndex(normalized);
 }
 
 /** Index keys ignore case; the values keep the catalog's own spelling. */
@@ -103,5 +143,8 @@ function compareVersions (a, b) {
  */
 export function resolveModelId (index, requested) {
   if (typeof requested !== 'string' || !requested.trim()) return null;
+  // Exact only. An alias and a versionless id are keys in their own right, so they resolve
+  // here; an explicit `:<version>` that is not cached resolves to nothing rather than to
+  // another version, so a client that asked for version 999 is not quietly served version 1.
   return index.get(indexKey(requested)) ?? null;
 }

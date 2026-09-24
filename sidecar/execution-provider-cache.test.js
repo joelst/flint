@@ -471,7 +471,7 @@ describe('Recheck Providers button', () => {
   });
 
   it('disables accelerator installation during a provider recheck', () => {
-    expect(page).toContain('<button onclick={ensureHardwareAccel} disabled={!state.ready || providerRecheckBusy}>');
+    expect(page).toContain('<button onclick={() => ensureHardwareAccel({ forceRerun: true })} disabled={!state.ready || providerRecheckBusy}>');
     expect(page).toContain('{ rebuildBroken: true }');
     expect(page).toContain('Runtime changed while rechecking execution providers');
   });

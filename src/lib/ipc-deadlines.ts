@@ -12,14 +12,23 @@ export const IPC_COMMAND_DEADLINES_MS: Record<SidecarCommandName, number | null>
   getAccessLog: 10_000,
   getHealthRing: 10_000,
   getCacheInventory: 30_000,
-  // Windows accelerator telemetry has its own 10-second fallback budget.
+  // Automatic pool telemetry skips the catalog entirely until a queued `getModels()` read has
+  // confirmed the snapshot. Afterwards it uses the gate's telemetry lane, which bypasses
+  // accelerator registration but waits for an actively running local catalog mutation. It stays
+  // bounded because `refreshModels` awaits it, so an unbounded stalled probe would leave an
+  // otherwise successful catalog refresh pending forever.
   poolStatus: 20_000,
-  getEps: 10_000,
+  // Provider discovery is ordered behind an active provider installation, which is intentionally
+  // unbounded. Timing this query out would discard a valid late snapshot while setup continues.
+  getEps: null,
   // WSL version discovery may use a 15-second subprocess timeout.
   wslStatus: 20_000,
-  listModels: 30_000,
-  getVisionModels: 30_000,
-  getSTTModels: 30_000,
+  // These catalog readers can wait behind accelerator registration. That work may download
+  // execution providers and is intentionally unbounded, so an outer query deadline would only
+  // discard a valid late reply while the native work continues.
+  listModels: null,
+  getVisionModels: null,
+  getSTTModels: null,
   inspectModelFolder: 30_000,
   getModelTemplate: 30_000,
 

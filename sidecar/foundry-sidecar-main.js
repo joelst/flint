@@ -24,17 +24,28 @@ import { selectChatTransport } from './chat-transport.js';
 import { assertWavBuffer } from './audio-format.js';
 import { createGateway } from './gateway.js';
 import { formatPublicEndpoint } from './gateway-http.js';
-import { buildModelIndex, resolveModelId } from './model-registry.js';
+import {
+  buildCachedModelIndex,
+  buildModelIndex,
+  isCachedModel,
+  isLocalCatalogEntry,
+  resolveModelId,
+} from './model-registry.js';
 import { waitUntilIdle } from './monotonic-wait.js';
 import {
   createOperationAdmission,
   createServiceTransitionLock,
   stopPartiallyStartedService,
 } from './service-lifecycle.js';
+import { createModelActivityFence } from './model-activity-fence.js';
 import {
   applyPreferredExecutionProvider as applyPreferredExecutionProviderTo,
 } from './execution-provider.js';
 import { rebuildBrokenExecutionProviders, removeProviderCache } from './execution-provider-cache.js';
+import {
+  createCatalogRegistrationGate,
+  registerDiscoveredExecutionProviders,
+} from './accelerator-registration.js';
 import {
   stopNativeWebService as stopNativeWebServiceFor,
   waitForHttpReady,
@@ -77,6 +88,7 @@ import { summarizeCacheInventory } from './cache-inventory.js';
 import { createHealthRing } from './health-ring.js';
 import { foundryRuntimePinWarning } from './foundry-runtime-pin.js';
 import { writeProtocolLine } from './protocol-stdout.js';
+import { createModelOperationQueue } from './model-operation-queue.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -87,6 +99,7 @@ const rl = readline.createInterface({ input: process.stdin, terminal: false });
 const SIDECAR_PROTOCOL_VERSION = 1;
 const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS = 5_000;
 const operationAdmission = createOperationAdmission();
+const modelOperationQueue = createModelOperationQueue();
 /** Gateway-only exclusive lease for a measured benchmark. IPC chat/load still run (the
  * Preview uses those). Pinning does not stop a gateway autoload from switching variants. */
 let benchmarkExclusive = false;
@@ -111,10 +124,10 @@ const BENCHMARK_EXCLUSIVE_DRAIN_MS = Number.isFinite(parsedBenchmarkExclusiveDra
 //   - an orphaned `load`/`unload`/`deleteModel` is still mutating pool residency, so the new run
 //     could measure against a model that is still being unloaded, or race a stale load that
 //     hasn't finished consuming its resources yet;
-//   - an orphaned `startService` is still clearing (`pool.clear()`/`usage.clear()`) or
-//     repopulating the pool as part of its destructive restart (see its handler's own comment),
-//     so the new run could begin pinning/loading and measuring its targets while that clear or
-//     the restart's own `ensureModel` call is still in flight, racing residency out from under it.
+//   - an orphaned `startService` is still tearing down the gateway or repopulating the pool as
+//     part of its restart (see its handler's own comment), so the new run could begin
+//     pinning/loading and measuring its targets while the restart's own `ensureModel` call is
+//     still in flight, racing residency out from under it.
 // Deliberately excludes `download` from the timed drain: a download can run for minutes
 // (multi-GB files) and the deadline below is ~10s, so waiting it out would turn "a download
 // is still going" into a generic "could not drain" failure. It is still a fence: acquire
@@ -155,16 +168,6 @@ function serializeBenchmarkExclusiveTransition(fn) {
   benchmarkExclusiveTransitionChain = result.then(() => {}, () => {});
   return result;
 }
-// Startup registration, Install / Update Accelerators, and Recheck Providers
-// all call downloadAndRegisterEps. The readline loop runs those handlers at
-// the same time, so one must finish before the next deletes a cache or starts
-// another native registration. A disabled button cannot see the other callers.
-let acceleratorRegistrationChain = Promise.resolve();
-function serializeAcceleratorRegistration (fn) {
-  const result = acceleratorRegistrationChain.then(fn, fn);
-  acceleratorRegistrationChain = result.then(() => {}, () => {});
-  return result;
-}
 let explicitShutdownInProgress = false;
 const LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'fatal'];
 let activeLogLevel = 'info';
@@ -189,7 +192,7 @@ const KNOWN_COMMANDS = new Set([
 const FIELD_TYPES = {
   init:              { appName: 'non-empty-string', logLevel: 'non-empty-string' },
   setLogLevel:       { level: 'non-empty-string' },
-  startService:      { port: 'number', bindAddress: 'string', gateway: 'boolean' },
+  startService:      { port: 'number', bindAddress: 'string', gateway: 'boolean', deferCatalogRead: 'boolean' },
   stopAndUnload:     { drainTimeoutMs: 'number' },
   shutdownRuntime:   { drainTimeoutMs: 'number' },
   download:          { alias: 'non-empty-string', variantId: 'non-empty-string' },
@@ -226,7 +229,7 @@ const VALID_LANES = new Set(['chat', 'audio']);
 const COMMAND_SCHEMA = {
   init:               { required: ['appName', 'logLevel'], optional: [] },
   setLogLevel:        { required: ['level'], optional: [] },
-  startService:       { required: ['port'], optional: ['alias', 'preferredEp', 'bindAddress', 'gateway'] },
+  startService:       { required: ['port'], optional: ['alias', 'preferredEp', 'bindAddress', 'gateway', 'deferCatalogRead'] },
   stopService:        { required: [], optional: [] },
   stopAndUnload:      { required: [], optional: ['drainTimeoutMs'] },
   shutdownRuntime:    { required: [], optional: ['drainTimeoutMs'] },
@@ -416,6 +419,102 @@ function validateCommand(cmd, payload) {
 // --- end allowlist ---
 
 let manager = null;
+// One registration for this process. SDK 2.0.1 freezes the catalog on first read,
+// and the IPC handler does not serialize commands, so a list, load, gateway resolve,
+// or pool status can arrive while startup is still registering providers.
+let catalogRegistrationGate = null;
+
+function acceleratorGate() {
+  if (!manager) return null;
+  if (!catalogRegistrationGate) {
+    catalogRegistrationGate = createCatalogRegistrationGate((progress, options) => {
+      if (!manager || typeof manager.downloadAndRegisterEps !== 'function') return null;
+      return registerDiscoveredExecutionProviders(manager, progress, options);
+    }, () => {
+      const catalog = manager?.catalog;
+      if (!catalog || typeof catalog.getModels !== 'function') {
+        throw new Error('Foundry catalog is unavailable');
+      }
+      return catalog.getModels();
+    });
+  }
+  return catalogRegistrationGate;
+}
+
+function beforeCatalogRead(onProgress, options = {}) {
+  const gate = acceleratorGate();
+  if (!gate) return Promise.resolve(null);
+  if (options.seal) return gate.seal(onProgress);
+  // `commit` performs the actual first catalog read inside the same queue as
+  // registration. An explicit update cannot register beside snapshot creation.
+  return options.commit ? gate.commit(onProgress) : gate.ensure(onProgress);
+}
+
+function catalogReadConfirmed() {
+  const gate = acceleratorGate();
+  return !gate || gate.isCommitConfirmed();
+}
+
+function readCatalog(operation, onProgress) {
+  const gate = acceleratorGate();
+  return gate ? gate.read(operation, onProgress) : operation();
+}
+
+function readUnconfirmedCatalog(operation, onProgress) {
+  const gate = acceleratorGate();
+  return gate ? gate.readUnconfirmed(operation, onProgress) : operation();
+}
+
+function readCatalogTelemetry(operation) {
+  const gate = acceleratorGate();
+  return gate ? gate.readTelemetry(operation) : operation();
+}
+
+function readExecutionProviders(operation) {
+  const gate = acceleratorGate();
+  return gate ? gate.readProviders(operation) : operation();
+}
+
+function serializeModelOperation(alias, scopes, operation) {
+  return modelOperationQueue.run(alias, scopes, operation);
+}
+
+function trySerializeModelOperation(alias, scopes, operation) {
+  return modelOperationQueue.tryRun(alias, scopes, operation);
+}
+
+/** Settings “Install / Update Accelerators” uses the same command as startup.
+ * The update still runs after catalog commitment, but new variants remain invisible
+ * to the current immutable snapshot and require a runtime restart. */
+async function rerunAcceleratorRegistration(onProgress, registerOnce) {
+  const gate = acceleratorGate();
+  if (!gate) return Promise.resolve(null);
+  return gate.rerun(onProgress, registerOnce);
+}
+
+async function runCatalogMutation(mutate, operation, onProgress, options) {
+  const gate = acceleratorGate();
+  if (!gate) {
+    throw new Error(`Cannot perform ${operation}: initialize the Foundry runtime first`);
+  }
+  const { result, catalogRefreshRequiresRestart } = await gate.mutateAndCommit(
+    mutate,
+    (error) => {
+      log('warn', `Catalog snapshot read failed after ${operation}: ${error?.message ?? error}`);
+    },
+    onProgress,
+    options,
+  );
+  try {
+    manager?.catalog?.invalidateCache?.();
+  } catch (error) {
+    log('warn', `Catalog cache invalidation failed after ${operation}: ${error?.message ?? error}`);
+  }
+  return catalogRefreshRequiresRestart && result && typeof result === 'object'
+    ? { ...result, catalogRefreshRequiresRestart: true }
+    : result;
+}
+
 let FoundryLocalManager = null;
 let initConfig = null; // { appName, logLevel } — kept so startService can re-create manager with webServiceUrls
 let nativeServiceStartAttempted = false;
@@ -429,9 +528,10 @@ const acquireServiceTransition = createServiceTransitionLock();
 const pool = new Map();
 let sharedEndpoint = null;
 
-// Usage bookkeeping that drives eviction, kept beside the pool rather than inside it so a
-// variant switch (which replaces the pool entry) does not reset a model's history.
-/** @type {Map<string, { lastUsedAt: number, inFlight: number }>} */
+// Idle bookkeeping that drives eviction, kept beside the pool rather than inside it so a
+// variant switch (which replaces the pool entry) does not reset a model's history. In-flight
+// requests are counted by `modelActivityFence`, keyed by the name each request asked for.
+/** @type {Map<string, { lastUsedAt: number }>} */
 const usage = new Map();
 /** @type {Map<string, 'pinned'|'low'|'normal'>} set by the UI; absent means 'normal'. */
 const modelPriorities = new Map();
@@ -462,7 +562,7 @@ const EVICTION_SWEEP_MS = 30_000;
 function usageFor (alias) {
   let entry = usage.get(alias);
   if (!entry) {
-    entry = { lastUsedAt: Date.now(), inFlight: 0 };
+    entry = { lastUsedAt: Date.now() };
     usage.set(alias, entry);
   }
   return entry;
@@ -491,40 +591,32 @@ function aliasForModelName (name) {
   return null;
 }
 
-/** Marks a model busy for the life of a request so eviction cannot unload it mid-flight. */
-function noteActivity (modelName, phase) {
-  // Candidate keys, best first: resident pool alias, catalog alias, the raw requested name.
-  // During gateway autoload the model is not resident yet (and the lazy modelIndex may not be
-  // built), so the start phase can only book against a fallback key. Resolution is therefore
-  // state-dependent — by the end of the request the pool may resolve the same string to a
-  // different key — so the end phase must decrement whichever candidate actually holds the
-  // in-flight count, not whatever the current pool state resolves to.
-  const candidates = [];
-  const resident = aliasForModelName(modelName);
-  if (resident) candidates.push(resident);
-  if (modelIndex) {
-    const fromIndex = resolveModelId(modelIndex, modelName)?.alias;
-    if (fromIndex && !candidates.includes(fromIndex)) candidates.push(fromIndex);
-  }
-  const raw = typeof modelName === 'string' ? modelName.trim() : '';
-  if (raw && !candidates.includes(raw)) candidates.push(raw);
-  if (candidates.length === 0) return;
+const modelActivityFence = createModelActivityFence({
+  residentAliasFor: aliasForModelName,
+  catalogAliasFor: (modelName) => (modelIndex ? resolveModelId(modelIndex, modelName)?.alias : null),
+});
 
-  let alias = candidates[0];
-  if (phase !== 'start') {
-    alias = candidates.find(k => (usage.get(k)?.inFlight ?? 0) > 0) ?? alias;
-    // Keep the resident model's idle clock accurate even when the count sat on a fallback key.
-    if (resident && resident !== alias) touchModel(resident);
-  }
-  const entry = usageFor(alias);
-  entry.lastUsedAt = Date.now();
+/**
+ * Marks a model busy for the life of a request so eviction cannot unload it mid-flight.
+ * A start refused by a destructive fence books nothing and returns false.
+ */
+function noteActivity (modelName, phase) {
   if (phase === 'start') {
-    entry.inFlight++;
+    if (!modelActivityFence.start(modelName)) return false;
   } else {
-    entry.inFlight = Math.max(0, entry.inFlight - 1);
-    // Bookkeeping for names that never became a resident model must not grow the map without
-    // bound (random names spammed at the gateway).
-    if (entry.inFlight === 0 && !pool.has(alias)) usage.delete(alias);
+    modelActivityFence.end(modelName);
+  }
+  touchModel(aliasForModelName(modelName));
+  return true;
+}
+
+async function withModelActivityFence(alias, operation) {
+  const release = modelActivityFence.tryAcquire(alias);
+  if (!release) return null;
+  try {
+    return { result: await operation() };
+  } finally {
+    release();
   }
 }
 
@@ -535,18 +627,9 @@ function stopGatewayAccepting () {
   return current;
 }
 
-/**
- * Total in-flight count for a resident alias, including requests booked under a
- * non-resident key while their model was still autoloading (see noteActivity). Every
- * eviction decision must use this, not the alias's usage entry alone.
- */
+/** Requests served by `alias`'s resident build. Every destructive decision must use this. */
 function inFlightFor (alias) {
-  let count = usage.get(alias)?.inFlight ?? 0;
-  for (const [key, use] of usage) {
-    if (key === alias || use.inFlight <= 0 || pool.has(key)) continue;
-    if (aliasForModelName(key) === alias) count += use.inFlight;
-  }
-  return count;
+  return modelActivityFence.inFlightFor(alias);
 }
 
 function poolEntriesForEviction () {
@@ -561,7 +644,7 @@ function poolEntriesForEviction () {
   });
 }
 
-async function unloadAlias (alias) {
+async function unloadAliasLocked (alias) {
   const entry = pool.get(alias);
   if (!entry) return false;
   try {
@@ -574,10 +657,7 @@ async function unloadAlias (alias) {
     return false;
   }
   pool.delete(alias);
-  // Usage carries inFlight; discarding it while a request is still running would lose that
-  // request's accounting and let the next sweep treat the alias as idle.
-  const use = usage.get(alias);
-  if (!use || use.inFlight <= 0) usage.delete(alias);
+  usage.delete(alias);
   return true;
 }
 
@@ -621,8 +701,13 @@ async function performRuntimeCleanup (
     if (drained) {
       await withSweepLock(async () => {
         for (const alias of [...pool.keys()]) {
-          if (await unloadAlias(alias)) modelsUnloaded.push(alias);
-          else unloadFailures.push(alias);
+          const unload = trySerializeModelOperation(
+            alias,
+            ['residency'],
+            () => unloadAliasLocked(alias),
+          );
+          if (!unload || !(await unload)) unloadFailures.push(alias);
+          else modelsUnloaded.push(alias);
         }
       });
     }
@@ -732,7 +817,18 @@ async function runEvictionSweepLocked (options = {}) {
     // Priorities can change mid-sweep too, and a model the user just pinned must survive
     // the plan that was drawn before the pin.
     if (normalizePriority(modelPriorities.get(item.alias)) === 'pinned') continue;
-    if (await unloadAlias(item.alias)) {
+    const unload = trySerializeModelOperation(
+      item.alias,
+      ['residency'],
+      async () => {
+        const fenced = await withModelActivityFence(
+          item.alias,
+          () => unloadAliasLocked(item.alias),
+        );
+        return fenced?.result === true;
+      },
+    );
+    if (unload && await unload) {
       log('info', describeEviction(item, evictionConfig));
       audit('evict', { alias: item.alias, reason: item.reason });
       done.push(item);
@@ -782,6 +878,9 @@ async function admitModel (alias, replacement = null) {
       // under the sweep lock, so no other admission can claim the slot it frees.
       if (replacement) await replacement.commit();
     } catch (e) {
+      try {
+        await replacement?.abort?.();
+      } catch {}
       // The reservation never becomes a load, so it must not linger in the count. The
       // caller's `release()` is unreachable when admission throws.
       pendingAdmissions = Math.max(0, pendingAdmissions - 1);
@@ -863,12 +962,13 @@ function invalidateModelIndex () {
 function cacheModelIndexFromCatalog(models) {
   modelIndex = buildModelIndex((models || []).map(m => ({
     alias: m.alias,
-    variants: (m.variants || []).map(v => {
-      let cached = false;
-      try { cached = !!v.isCached; } catch { cached = !!v.info?.cached; }
-      return { id: v.id, cached };
-    }),
+    variants: (m.variants || []).map(v => ({ id: v.id, cached: isCachedModel(v) })),
   })));
+  return modelIndex;
+}
+
+function cacheModelIndexFromCachedModels(models) {
+  modelIndex = buildCachedModelIndex(models);
   return modelIndex;
 }
 
@@ -876,11 +976,23 @@ async function resolveForGateway (requested) {
   if (!modelIndex) {
     if (!manager) return null;
     try {
-      const models = await manager.catalog.getModels();
-      cacheModelIndexFromCatalog(models);
+      return await readCatalog(async () => {
+        const models = await manager.catalog.getModels();
+        cacheModelIndexFromCatalog(models);
+        return resolveModelId(modelIndex, requested);
+      });
     } catch (e) {
       log('warn', `Gateway could not read the catalog: ${e?.message ?? e}`);
-      return null;
+      try {
+        return await readUnconfirmedCatalog(async () => {
+          const cached = await manager.catalog.getCachedModels();
+          cacheModelIndexFromCachedModels(cached);
+          return resolveModelId(modelIndex, requested);
+        });
+      } catch (lookupError) {
+        log('warn', `Gateway could not resolve cached model ${requested}: ${lookupError?.message ?? lookupError}`);
+        return null;
+      }
     }
   }
   return resolveModelId(modelIndex, requested);
@@ -1652,7 +1764,6 @@ function importModelFolder(payload) {
     throw e;
   }
 
-  try { manager?.catalog?.invalidateCache?.(); } catch {}
   return {
     name, version, publisher,
     path: finalDir,
@@ -1700,7 +1811,6 @@ function linkModelFolder(payload) {
   fs.mkdirSync(path.dirname(linkPath), { recursive: true });
   fs.symlinkSync(target, linkPath, 'junction');
 
-  try { manager?.catalog?.invalidateCache?.(); } catch {}
   return { name, publisher, linkPath, target, warnings: inspection.warnings };
 }
 
@@ -1795,45 +1905,36 @@ function setModelTemplate(name, promptTemplate) {
     fs.writeFileSync(markerPath, `${JSON.stringify(marker, null, 2)}\n`, 'utf8');
   } catch {}
 
-  try { manager?.catalog?.invalidateCache?.(); } catch {}
   return { name: sanitizeModelName(name), promptTemplate: content.PromptTemplate, warnings: check.warnings };
 }
 
 /**
- * Serializes ensureModel per alias. Two concurrent requests for the same alias would otherwise
- * both miss the pool, both run an eviction sweep and both call load() — loading the model
- * twice, or unloading and reloading it underneath the first request.
- * @type {Map<string, Promise<any>>}
+ * Load `alias` (optionally a specific variant) under its residency scope.
+ *
+ * `requireCached` is for loads that act on an earlier catalog resolution, such as gateway
+ * autoload: the resolution may predate a deletion that finished while this load waited for the
+ * scope, and loading an uncached build would re-download what the user just deleted.
  */
-const ensureModelLocks = new Map();
-
-function ensureModel(alias, variantId) {
-  const inFlightLoad = ensureModelLocks.get(alias);
-  const previousResult = inFlightLoad ? inFlightLoad.catch(() => null) : Promise.resolve(null);
-  const next = previousResult.then(async (previous) => {
-      const result = await ensureModelLocked(alias, variantId);
-      if (inFlightLoad && result.loadedNow !== true) {
+function ensureModel(alias, variantId, onCatalogProgress, { requireCached = false } = {}) {
+  return serializeModelOperation(alias, ['residency'], async ({ waited, previousResult }) => {
+      const result = await ensureModelLocked(alias, variantId, onCatalogProgress, requireCached);
+      if (waited && result.loadedNow !== true) {
         // A preceding request may have loaded or reloaded this model while this request waited.
         // Only a preceding known-warm result remains warm; the other cases are unknowable from
         // the current request's serialized probe.
         return {
           ...result,
-          loadedNow: previous?.loadedNow === false ? false : null,
+          loadedNow: previousResult?.loadedNow === false ? false : null,
         };
       }
       return result;
-    });
-  ensureModelLocks.set(alias, next);
-  const release = () => {
-    if (ensureModelLocks.get(alias) === next) ensureModelLocks.delete(alias);
-  };
-  next.then(release, release);
-  return next;
+  });
 }
 
-async function ensureModelLocked(alias, variantId) {
+async function ensureModelLocked(alias, variantId, onCatalogProgress, requireCached = false) {
   const existing = pool.get(alias);
   let switchingVariant = false;
+  let releaseReplacementFence = null;
   if (existing) {
     if (variantId && existing.variantId !== variantId) {
       // A variant switch is an unload of the resident build. Doing that while requests are
@@ -1854,6 +1955,11 @@ async function ensureModelLocked(alias, variantId) {
         loaded = existing.catModel.isLoaded;
       }
       if (loaded === false) {
+        // Reloading reads the build from the cache again. A resolution made before the cache
+        // changed must not turn that into a download.
+        if (requireCached && !isCachedModel(existing.catModel)) {
+          throw new Error(`${variantId || alias} is not in the local cache; refusing to load it.`);
+        }
         await existing.catModel.load();
         log('info', `Model ${alias} reloaded after runtime eviction`);
       }
@@ -1862,6 +1968,25 @@ async function ensureModelLocked(alias, variantId) {
         ...existing,
         loadedNow: loaded === true ? false : loaded === false ? true : null,
       };
+    }
+  }
+  const lookUpBuild = () => readUnconfirmedCatalog(
+    async () => {
+      const model = await manager.catalog.getModel(alias);
+      return {
+        catModel: model,
+        variant: variantId ? await manager.catalog.getModelVariant(variantId) : null,
+      };
+    },
+    onCatalogProgress,
+  );
+  // Validate before admission, which may unload the resident variant this load replaces.
+  // Deletion holds this alias's residency scope, so the build cannot vanish before the load.
+  let build = null;
+  if (requireCached) {
+    build = await lookUpBuild();
+    if (!isCachedModel(variantId ? build.variant : build.catModel)) {
+      throw new Error(`${variantId || alias} is not in the local cache; refusing to load it.`);
     }
   }
   // Reserve a slot (freeing room first) and hold it until the load settles, so a concurrent
@@ -1875,8 +2000,8 @@ async function ensureModelLocked(alias, variantId) {
       const current = pool.get(alias);
       // A concurrent sweep may already have unloaded it, which is the outcome we wanted.
       if (!current || current.variantId === variantId) return;
-      // Re-check in-flight: acquiring the sweep lock awaited, and a request may have arrived.
-      if (inFlightFor(alias) > 0) {
+      releaseReplacementFence = modelActivityFence.tryAcquire(alias);
+      if (!releaseReplacementFence) {
         throw new Error(
           `Cannot switch ${alias} to variant ${variantId} while requests are in flight `
           + `(currently ${current.variantId}). Retry once they finish.`,
@@ -1884,25 +2009,26 @@ async function ensureModelLocked(alias, variantId) {
       }
     },
     commit: async () => {
-      const current = pool.get(alias);
-      if (!current || current.variantId === variantId) return;
-      // Still under the sweep lock, but the pool was re-read after awaits, so re-check.
-      if (inFlightFor(alias) > 0) {
-        throw new Error(
-          `Cannot switch ${alias} to variant ${variantId} while requests are in flight `
-          + `(currently ${current.variantId}). Retry once they finish.`,
-        );
+      try {
+        const current = pool.get(alias);
+        if (!current || current.variantId === variantId) return;
+        log('info', `Variant switch for ${alias}: ${current.variantId} → ${variantId}`);
+        if (!(await unloadAliasLocked(alias))) {
+          throw new Error(`Could not unload ${alias} to switch variant to ${variantId}`);
+        }
+      } finally {
+        releaseReplacementFence?.();
+        releaseReplacementFence = null;
       }
-      log('info', `Variant switch for ${alias}: ${current.variantId} → ${variantId}`);
-      if (!(await unloadAlias(alias))) {
-        throw new Error(`Could not unload ${alias} to switch variant to ${variantId}`);
-      }
+    },
+    abort: async () => {
+      releaseReplacementFence?.();
+      releaseReplacementFence = null;
     },
   } : null);
   try {
-    const catModel = await manager.catalog.getModel(alias);
+    const { catModel, variant } = build ?? await lookUpBuild();
     if (variantId) {
-      const variant = await manager.catalog.getModelVariant(variantId);
       const fileSizeMb = variant.info?.fileSizeMb;
       if (fileSizeMb && os.freemem() < fileSizeMb * 1024 * 1024 * 1.15) {
         log('warn', `Low memory: loading ${alias} (${fileSizeMb} MB) but only ${Math.round(os.freemem() / 1024 / 1024)} MB free`);
@@ -2378,6 +2504,11 @@ rl.on('line', async (line) => {
   const reply = (result, callback) => {
     send({ id, protocolVersion: SIDECAR_PROTOCOL_VERSION, ...result }, callback);
   };
+  // Registration progress rides the requesting command's id. Tag it so a model download or
+  // load cannot display execution-provider percentages as its own progress.
+  const reportCatalogProgress = (epName, percent) => {
+    if (Number.isFinite(percent)) send({ id, progress: percent, ep: epName, phase: 'accelerator' });
+  };
 
   if (protocolVersion !== undefined && protocolVersion !== SIDECAR_PROTOCOL_VERSION) {
     reply({ error: `Unsupported sidecar protocol version: ${String(protocolVersion)}` });
@@ -2454,89 +2585,113 @@ rl.on('line', async (line) => {
       audit('init', { appName, libraryPath });
       reply({ ok: true, result: 'initialized' });
     } else if (cmd === 'listModels') {
-      const models = await manager.catalog.getModels();
-      cacheModelIndexFromCatalog(models);
-      reply({
-        ok: true, result: models.map(m => {
-          // Prefer live isCached getters (query native cache). Catalog snapshot
-          // info.cached is often stale after download until a full catalog refresh.
-          const variantRows = annotateVariantUpdates((m.variants || []).map(v => {
-            let cached = false;
+      const rows = await readCatalog(
+        async () => {
+          const models = await manager.catalog.getModels();
+          cacheModelIndexFromCatalog(models);
+          return models.map(m => {
+            // Prefer live isCached getters (query native cache). Catalog snapshot
+            // info.cached is often stale after download until a full catalog refresh.
+            const variantRows = annotateVariantUpdates((m.variants || []).map(v => {
+              let cached = false;
+              try {
+                cached = !!v.isCached;
+              } catch {
+                cached = !!v.info?.cached;
+              }
+              return {
+                id: v.id,
+                deviceType: v.info?.runtime?.deviceType ?? parseDeviceFromVariantId(v.id),
+                executionProvider: v.info?.runtime?.executionProvider ?? parseEpFromVariantId(v.id),
+                fileSizeMb: v.info?.fileSizeMb ?? null,
+                cached,
+                name: v.info?.name ?? null,
+                version: v.info?.version ?? null,
+              };
+            }));
+            let modelCached = false;
             try {
-              cached = !!v.isCached;
+              modelCached = !!m.isCached;
             } catch {
-              cached = !!v.info?.cached;
+              modelCached = !!m.info?.cached;
             }
-            return {
-              id: v.id,
-              deviceType: v.info?.runtime?.deviceType ?? parseDeviceFromVariantId(v.id),
-              executionProvider: v.info?.runtime?.executionProvider ?? parseEpFromVariantId(v.id),
-              fileSizeMb: v.info?.fileSizeMb ?? null,
-              cached,
-              name: v.info?.name ?? null,
-              version: v.info?.version ?? null,
-            };
-          }));
-          let modelCached = false;
-          try {
-            modelCached = !!m.isCached;
-          } catch {
-            modelCached = !!m.info?.cached;
-          }
-          // Alias is "downloaded" if any variant is on disk (not only the selected one).
-          if (!modelCached) modelCached = variantRows.some(v => v.cached);
+            // Alias is "downloaded" if any variant is on disk (not only the selected one).
+            if (!modelCached) modelCached = variantRows.some(v => v.cached);
 
-          return {
-            alias: m.alias,
-            cached: modelCached,
-            size: m.info?.fileSizeMb,
-            task: m.info?.task,
-            capabilities: m.info?.capabilities,
-            contextLength: m.info?.contextLength ?? m.info?.maxContext ?? null,
-            supportsToolCalling: typeof m.info?.supportsToolCalling === 'boolean'
-              ? m.info.supportsToolCalling
-              : null,
-            family: m.info?.family || null,
-            // Live catalog uses createdAt (unix seconds); older SDK typings said createdAtUnix.
-            createdAt: m.info?.createdAt ?? m.info?.createdAtUnix ?? null,
-            info: m.info || {},
-            variants: variantRows,
-            updates: variantRows
-              .filter(v => v.update)
-              .map(v => ({ sourceVariantId: v.id, ...v.update })),
-          };
-        })
-      });
+            return {
+              alias: m.alias,
+              cached: modelCached,
+              size: m.info?.fileSizeMb,
+              task: m.info?.task,
+              capabilities: m.info?.capabilities,
+              contextLength: m.info?.contextLength ?? m.info?.maxContext ?? null,
+              supportsToolCalling: typeof m.info?.supportsToolCalling === 'boolean'
+                ? m.info.supportsToolCalling
+                : null,
+              family: m.info?.family || null,
+              // Live catalog uses createdAt (unix seconds); older SDK typings said createdAtUnix.
+              createdAt: m.info?.createdAt ?? m.info?.createdAtUnix ?? null,
+              info: m.info || {},
+              variants: variantRows,
+              updates: variantRows
+                .filter(v => v.update)
+                .map(v => ({ sourceVariantId: v.id, ...v.update })),
+            };
+          });
+        },
+        reportCatalogProgress,
+      );
+      reply({ ok: true, result: rows });
     } else if (cmd === 'getSTTModels') {
-      const all = await manager.catalog.getModels();
-      const stt = all.filter(m => {
-        const t = (m.info?.task || '').toLowerCase();
-        const caps = (m.info?.capabilities || '').toLowerCase();
-        return t.includes('automatic-speech-recognition') || t.includes('stt') || caps.includes('automatic-speech-recognition');
-      });
-      reply({ ok: true, result: stt.map(m => ({ alias: m.alias, cached: m.isCached })) });
+      const stt = await readCatalog(
+        async () => {
+          const all = await manager.catalog.getModels();
+          return all
+            .filter(m => {
+              const t = (m.info?.task || '').toLowerCase();
+              const caps = (m.info?.capabilities || '').toLowerCase();
+              return t.includes('automatic-speech-recognition') || t.includes('stt') || caps.includes('automatic-speech-recognition');
+            })
+            .map(m => ({ alias: m.alias, cached: m.isCached }));
+        },
+        reportCatalogProgress,
+      );
+      reply({ ok: true, result: stt });
     } else if (cmd === 'getVisionModels') {
-      const all = await manager.catalog.getModels();
-      const vision = all.filter(m => {
-        const t = (m.info?.task || '').toLowerCase();
-        const caps = (m.info?.capabilities || '').toLowerCase();
-        const alias = (m.alias || '').toLowerCase();
-        return t.includes('vision') || caps.includes('vision') || caps.includes('image') || alias.includes('vision') || alias.includes('multimodal');
-      });
-      reply({ ok: true, result: vision.map(m => ({ alias: m.alias, cached: m.isCached })) });
+      const vision = await readCatalog(
+        async () => {
+          const all = await manager.catalog.getModels();
+          return all
+            .filter(m => {
+              const t = (m.info?.task || '').toLowerCase();
+              const caps = (m.info?.capabilities || '').toLowerCase();
+              const alias = (m.alias || '').toLowerCase();
+              return t.includes('vision') || caps.includes('vision') || caps.includes('image') || alias.includes('vision') || alias.includes('multimodal');
+            })
+            .map(m => ({ alias: m.alias, cached: m.isCached }));
+        },
+        reportCatalogProgress,
+      );
+      reply({ ok: true, result: vision });
     } else if (cmd === 'download') {
-      const model = payload.variantId
-        ? await manager.catalog.getModelVariant(payload.variantId)
-        : await manager.catalog.getModel(payload.alias);
-      audit('download.start', { alias: payload.alias, variantId: payload.variantId ?? null });
-      await model.download((p) => send({ id, progress: p, alias: payload.alias }));
-      // Force next catalog access to re-read model list metadata (info.cached, etc.).
-      try { manager.catalog.invalidateCache?.(); } catch {}
-      invalidateModelIndex();
-      audit('download.complete', { alias: payload.alias, variantId: payload.variantId ?? null });
+      await serializeModelOperation(payload.alias, ['cache'], async () => {
+        await beforeCatalogRead(reportCatalogProgress, { commit: true });
+        const model = await readUnconfirmedCatalog(
+          () => payload.variantId
+            ? manager.catalog.getModelVariant(payload.variantId)
+            : manager.catalog.getModel(payload.alias),
+          reportCatalogProgress,
+        );
+        audit('download.start', { alias: payload.alias, variantId: payload.variantId ?? null });
+        await model.download((p) => send({ id, progress: p, alias: payload.alias }));
+        // Force next catalog access to re-read model list metadata (info.cached, etc.).
+        try { manager.catalog.invalidateCache?.(); } catch {}
+        invalidateModelIndex();
+        audit('download.complete', { alias: payload.alias, variantId: payload.variantId ?? null });
+      });
       reply({ ok: true });
     } else if (cmd === 'load') {
-      const entry = await ensureModel(payload.alias, payload.variantId);
+      const entry = await ensureModel(payload.alias, payload.variantId, reportCatalogProgress);
       const acceleration = {
         requested: null,
         active: await detectActiveExecutionProvider(entry.catModel)
@@ -2546,14 +2701,24 @@ rl.on('line', async (line) => {
       reply({ ok: true, result: { acceleration, lane: payload.lane || 'chat', variantId: entry.variantId } });
     } else if (cmd === 'unload') {
       const alias = payload.alias;
-      const entry = pool.get(alias);
-      if (entry) {
-        await entry.catModel.unload();
-        pool.delete(alias);
-        usage.delete(alias);
-        log('info', `Model ${alias} unloaded from pool`);
-        audit('unload', { alias });
-      }
+      await serializeModelOperation(alias, ['residency'], async () => {
+        const fenced = await withModelActivityFence(alias, () => unloadAliasLocked(alias));
+        if (!fenced) {
+          throw new Error(`Cannot unload ${alias} while requests are in flight. Retry once they finish.`);
+        }
+        if (fenced.result) {
+          log('info', `Model ${alias} unloaded from pool`);
+          audit('unload', { alias });
+          return;
+        }
+        // `unloadAliasLocked` returns false both for an alias that was not resident and for a
+        // native unload that threw, and it keeps the failed entry in the pool. Reporting the
+        // latter as success would tell the caller memory was released while the model is still
+        // loaded, so only the "nothing to unload" case is a successful no-op.
+        if (pool.has(alias)) {
+          throw new Error(`Unload of ${alias} failed; the model is still loaded.`);
+        }
+      });
       reply({ ok: true });
     } else if (cmd === 'deleteModel') {
       if (!payload.alias) {
@@ -2579,70 +2744,122 @@ rl.on('line', async (line) => {
         return false;
       };
 
-      if (variantId) {
-        // Delete a single variant from the local cache.
-        const variant = await manager.catalog.getModelVariant(variantId);
-        if (!variant) {
-          throw new Error(`Variant not found: ${variantId}`);
-        }
-        const poolEntry = pool.get(payload.alias);
-        if (poolEntry?.variantId === variantId) {
-          if (typeof poolEntry.catModel.unload === 'function') {
-            await poolEntry.catModel.unload();
+      const deleteResult = await serializeModelOperation(
+        payload.alias,
+        ['cache', 'residency'],
+        async () => {
+          const releaseActivityFence = modelActivityFence.tryAcquire(payload.alias);
+          if (!releaseActivityFence) {
+            throw new Error(
+              `Cannot delete ${payload.alias} while requests are in flight. Retry once they finish.`,
+            );
           }
-          pool.delete(payload.alias);
-          log('info', `Unloaded pool entry for deleted variant ${variantId}`);
-        }
-        const ok = tryRemoveFromCache(variant, variantId);
-        if (!ok) {
-          throw new Error('Runtime does not expose a variant deletion API (removeFromCache)');
-        }
-        try { manager.catalog.invalidateCache?.(); } catch {}
-        invalidateModelIndex();
-        audit('deleteModel', { alias: payload.alias, variantId });
-        reply({ ok: true, result: { alias: payload.alias, variantId } });
-      } else {
-        // Delete all cached variants for this alias.
-        const model = await manager.catalog.getModel(payload.alias);
-        if (!model) {
-          throw new Error(`Model not found: ${payload.alias}`);
-        }
-        const poolEntry = pool.get(payload.alias);
-        if (poolEntry && typeof poolEntry.catModel.unload === 'function') {
-          await poolEntry.catModel.unload();
-          pool.delete(payload.alias);
-        }
-        let deleted = 0;
-        const variants = model.variants || [];
-        for (const v of variants) {
-          let cached = false;
-          try { cached = !!v.isCached; } catch { cached = !!v.info?.cached; }
-          if (!cached) continue;
-          if (tryRemoveFromCache(v, v.id || payload.alias)) deleted++;
-        }
-        // Fallback: selected variant / model-level remove
-        if (deleted === 0) {
-          if (tryRemoveFromCache(model, payload.alias)) deleted++;
-        }
-        if (deleted === 0) {
-          throw new Error('No cached variants found to delete (or runtime lacks removeFromCache)');
-        }
-        try { manager.catalog.invalidateCache?.(); } catch {}
-        log('info', `Deleted ${deleted} cached variant(s) for ${payload.alias}`);
-        invalidateModelIndex();
-        audit('deleteModel', { alias: payload.alias, variantId: null, count: deleted });
-        reply({ ok: true, result: { alias: payload.alias, count: deleted } });
-      }
+          try {
+            return await runCatalogMutation(
+              async () => {
+              if (variantId) {
+                // Delete a single variant from the local cache.
+                const variant = await manager.catalog.getModelVariant(variantId);
+                if (!variant) {
+                  throw new Error(`Variant not found: ${variantId}`);
+                }
+                const parentModel = await manager.catalog.getModel(payload.alias);
+                const poolEntry = pool.get(payload.alias);
+                if (poolEntry?.variantId === variantId) {
+                  if (typeof poolEntry.catModel.unload === 'function') {
+                    await poolEntry.catModel.unload();
+                  }
+                  pool.delete(payload.alias);
+                  log('info', `Unloaded pool entry for deleted variant ${variantId}`);
+                }
+                const ok = tryRemoveFromCache(variant, variantId);
+                if (!ok) {
+                  throw new Error('Runtime does not expose a variant deletion API (removeFromCache)');
+                }
+                invalidateModelIndex();
+                audit('deleteModel', { alias: payload.alias, variantId });
+                return {
+                  alias: payload.alias,
+                  variantId,
+                  catalogEntryRemoved:
+                    isLocalCatalogEntry(variant) || isLocalCatalogEntry(parentModel),
+                };
+              }
+
+              // Delete all cached variants for this alias.
+              const model = await manager.catalog.getModel(payload.alias);
+              if (!model) {
+                throw new Error(`Model not found: ${payload.alias}`);
+              }
+              const poolEntry = pool.get(payload.alias);
+              if (poolEntry && typeof poolEntry.catModel.unload === 'function') {
+                await poolEntry.catModel.unload();
+                pool.delete(payload.alias);
+              }
+              let deleted = 0;
+              const variants = model.variants || [];
+              for (const v of variants) {
+                let cached = false;
+                try {
+                  cached = !!v.isCached;
+                } catch {
+                  cached = !!v.info?.cached;
+                }
+                if (!cached) continue;
+                if (tryRemoveFromCache(v, v.id || payload.alias)) deleted++;
+              }
+              // Fallback: selected variant / model-level remove
+              if (deleted === 0 && tryRemoveFromCache(model, payload.alias)) deleted++;
+              if (deleted === 0) {
+                throw new Error('No cached variants found to delete (or runtime lacks removeFromCache)');
+              }
+              log('info', `Deleted ${deleted} cached variant(s) for ${payload.alias}`);
+              invalidateModelIndex();
+              audit('deleteModel', { alias: payload.alias, variantId: null, count: deleted });
+              return {
+                alias: payload.alias,
+                count: deleted,
+                catalogEntryRemoved: isLocalCatalogEntry(model),
+              };
+              },
+              'model deletion',
+              reportCatalogProgress,
+              { catalogReadBeforeMutation: true },
+            );
+          } finally {
+            releaseActivityFence();
+          }
+        },
+      );
+      const {
+        catalogEntryRemoved,
+        catalogRefreshRequiresRestart,
+        ...publicDeleteResult
+      } = deleteResult;
+      reply({
+        ok: true,
+        result: catalogEntryRemoved && catalogRefreshRequiresRestart
+          ? { ...publicDeleteResult, catalogRefreshRequiresRestart: true }
+          : publicDeleteResult,
+      });
     } else if (cmd === 'inspectModelFolder') {
       reply({ ok: true, result: inspectFolder(payload.folderPath) });
     } else if (cmd === 'importModelFolder') {
-      const result = importModelFolder(payload);
+      const result = await runCatalogMutation(
+        () => importModelFolder(payload),
+        'model import',
+        reportCatalogProgress,
+      );
       log('info', `Imported model ${result.name}:${result.version} from ${payload.folderPath}`);
       invalidateModelIndex();
       audit('importModelFolder', { alias: result.name, variantId: `${result.name}:${result.version}`, kind: 'copy' });
       reply({ ok: true, result });
     } else if (cmd === 'linkModelFolder') {
-      const result = linkModelFolder(payload);
+      const result = await runCatalogMutation(
+        () => linkModelFolder(payload),
+        'model link',
+        reportCatalogProgress,
+      );
       log('info', `Linked model ${result.name} -> ${result.target}`);
       invalidateModelIndex();
       audit('linkModelFolder', { alias: result.name, variantId: null, kind: 'junction' });
@@ -2650,7 +2867,11 @@ rl.on('line', async (line) => {
     } else if (cmd === 'getModelTemplate') {
       reply({ ok: true, result: getModelTemplate(payload.name) });
     } else if (cmd === 'setModelTemplate') {
-      const result = setModelTemplate(payload.name, payload.promptTemplate);
+      const result = await runCatalogMutation(
+        () => setModelTemplate(payload.name, payload.promptTemplate),
+        'template update',
+        reportCatalogProgress,
+      );
       log('info', `Updated prompt template for ${result.name}`);
       audit('setModelTemplate', { alias: result.name, variantId: null });
       reply({ ok: true, result });
@@ -2676,10 +2897,36 @@ rl.on('line', async (line) => {
       // endpoint behind if the replacement never reaches a usable state.
       clearPublishedService();
 
-      pool.clear();
-      usage.clear();
+      // The pool records what the process-global native core has loaded, and the core keeps
+      // those builds loaded and servable across a listener restart (verified against SDK
+      // 2.0.1). Clearing the record here would hide live builds from destructive operations,
+      // eviction and request accounting while the new listener still serves them.
       try {
         stopNativeWebService();
+        // The native listener answers GET /v1/models itself. Register providers before
+        // exposure. Normal starts also force the immutable snapshot under the gate; startup
+        // can explicitly defer that network-backed read when the user disabled automatic
+        // catalog checks, after its own accelerator setup has completed.
+        // That read is network-backed. Its only job here is to order provider registration
+        // ahead of the listener's own catalog access, and the gate has closed the provider
+        // boundary either way, so a failed read must not stop a service that can still serve
+        // cached models. Snapshot uncertainty is reported by the accelerator update path.
+        try {
+          if (payload.deferCatalogRead) {
+            await beforeCatalogRead(reportCatalogProgress, { seal: true });
+          } else {
+            await beforeCatalogRead(reportCatalogProgress, { commit: true });
+          }
+        } catch (e) {
+          // The gate has closed the provider boundary either way, so the update path already
+          // reports this as restart-bound. Say so here too: a read that failed leaves the
+          // snapshot uncertain while the listener is about to be exposed.
+          log(
+            'warn',
+            `Catalog snapshot read failed before service start: ${e?.message ?? e}. ` +
+              'The catalog snapshot is uncertain; accelerator updates are deferred until restart.',
+          );
+        }
         // Start service BEFORE loading models so HTTP routing layer initializes with the registry.
         if (typeof manager.startWebService === 'function') {
           nativeServiceStartAttempted = true;
@@ -2715,7 +2962,8 @@ rl.on('line', async (line) => {
             // would abort work the fence is supposed to let complete, not the new work it exists
             // to block.
             load: async (alias, variantId) => {
-              return (await ensureModel(alias, variantId))?.variantId ?? null;
+              return (await ensureModel(alias, variantId, undefined, { requireCached: true }))
+                ?.variantId ?? null;
             },
             // Proxied traffic never reaches this process, so without this hook a model
             // serving a long completion would look idle and could be evicted underneath it.
@@ -2758,7 +3006,11 @@ rl.on('line', async (line) => {
           ok: true,
         });
         audit('startService', {
-          port: payload.port, bindAddress: bindAddr, endpoint: sharedEndpoint, gateway: useGateway,
+          port: payload.port,
+          bindAddress: bindAddr,
+          endpoint: sharedEndpoint,
+          gateway: useGateway,
+          deferCatalogRead: payload.deferCatalogRead === true,
         });
         const desired = payload.alias;
         if (desired) {
@@ -2876,9 +3128,11 @@ rl.on('line', async (line) => {
       let chatVariantId = null, chatExecutionProvider = null;
       let chatModelForMetrics = null;
       let chatWarm = null;
+      if (!noteActivity(modelAlias, 'start')) {
+        throw new Error(`Cannot use ${modelAlias} while it is being unloaded or deleted. Retry shortly.`);
+      }
       activeStreamCount++;
       if (!activeStreamOldest) activeStreamOldest = { type: 'chat', modelAlias, startedAt: chatAccessTs };
-      noteActivity(modelAlias, 'start');
       try {
         const loadStartedAt = Date.now();
         const poolEntry = await ensureModel(modelAlias);
@@ -3157,32 +3411,35 @@ rl.on('line', async (line) => {
       log('debug', `Transcription: model=${payload.model} ext=.${fileExt} lang=${payload.language || 'auto'}`);
 
       const requestedAlias = payload.model;
-      if (requestedAlias) {
-        await ensureModel(requestedAlias);
-      }
-      const audioPoolEntry = pool.get(requestedAlias);
-      const audioModel = audioPoolEntry?.catModel;
-      const preferred = await applyPreferredExecutionProvider(payload.preferredEp, audioModel);
-
-      if (!audioModel) {
-        throw new Error('No STT model loaded. Select an STT model on the Audio page first.');
-      }
-
-      const bytes = Buffer.from(payload.audioBase64, 'base64');
-      // Force .wav extension — the models use a strict AudioDecoder that often
-      // cannot detect WebM/Opus/MP3 etc. We normalize on the client too.
-      let baseName = (payload.fileName || 'audio').replace(/[^a-zA-Z0-9._-]/g, '_');
-      if (!/\.wav$/i.test(baseName)) baseName += '.wav';
-      const tempFileName = `flint-audio-${Date.now()}-${baseName}`;
-      const tempPath = path.join(os.tmpdir(), tempFileName);
-      await fs.promises.writeFile(tempPath, bytes);
-
       const audioAccessTs = Date.now();
       let audioOk = false;
+      if (!noteActivity(requestedAlias, 'start')) {
+        throw new Error(`Cannot use ${requestedAlias} while it is being unloaded or deleted. Retry shortly.`);
+      }
+      let tempPath = null;
       activeStreamCount++;
       if (!activeStreamOldest) activeStreamOldest = { type: 'audio', modelAlias: requestedAlias, startedAt: audioAccessTs };
-      noteActivity(requestedAlias, 'start');
       try {
+        if (requestedAlias) {
+          await ensureModel(requestedAlias);
+        }
+        const audioPoolEntry = pool.get(requestedAlias);
+        const audioModel = audioPoolEntry?.catModel;
+        const preferred = await applyPreferredExecutionProvider(payload.preferredEp, audioModel);
+
+        if (!audioModel) {
+          throw new Error('No STT model loaded. Select an STT model on the Audio page first.');
+        }
+
+        const bytes = Buffer.from(payload.audioBase64, 'base64');
+        // Force .wav extension — the models use a strict AudioDecoder that often
+        // cannot detect WebM/Opus/MP3 etc. We normalize on the client too.
+        let baseName = (payload.fileName || 'audio').replace(/[^a-zA-Z0-9._-]/g, '_');
+        if (!/\.wav$/i.test(baseName)) baseName += '.wav';
+        const tempFileName = `flint-audio-${Date.now()}-${baseName}`;
+        tempPath = path.join(os.tmpdir(), tempFileName);
+        await fs.promises.writeFile(tempPath, bytes);
+
         // Prefer direct AudioClient (like we do for chat) — this avoids relying on the web service HTTP route
         // which may return 404 for /audio/transcriptions even for Whisper models.
         if (typeof audioModel.createAudioClient === 'function') {
@@ -3307,7 +3564,9 @@ rl.on('line', async (line) => {
         activeStreamCount = Math.max(0, activeStreamCount - 1);
         if (activeStreamCount === 0) activeStreamOldest = null;
         noteActivity(requestedAlias, 'end');
-        try { fs.unlinkSync(tempPath); } catch {}
+        if (tempPath) {
+          try { fs.unlinkSync(tempPath); } catch {}
+        }
         appendAccessLog({
           ts: audioAccessTs,
           type: 'audio',
@@ -3320,17 +3579,39 @@ rl.on('line', async (line) => {
         });
       }
     } else if (cmd === 'poolStatus') {
+      // Independent hardware probes run beside catalog telemetry, not after its
+      // deadline: either can consume 10 seconds within the 20-second IPC budget.
+      const acceleratorMemory = collectAcceleratorMemory().catch((error) => {
+        log('warn', `Accelerator memory probe failed: ${error?.message || error}`);
+        return accelMemCache?.devices ?? [];
+      });
       let loadedIds = new Set();
+      const snapshotConfirmed = catalogReadConfirmed();
+      let loadedStateKnown = false;
       try {
-        const loaded = await manager.catalog.getLoadedModels();
+        // Automatic telemetry must not become the first catalog access: doing so
+        // would freeze the snapshot and disable useful registration retries.
+        // After getModels confirms the snapshot, track this native read so local
+        // catalog mutations cannot overlap its scan.
+        const loaded = snapshotConfirmed
+          ? await readCatalogTelemetry(() => manager.catalog.getLoadedModels())
+          : [];
         for (const m of loaded) loadedIds.add(m.id);
-      } catch {}
+        if (snapshotConfirmed) loadedStateKnown = true;
+      } catch (error) {
+        log('warn', `Loaded-model telemetry unavailable: ${error?.message || error}`);
+      }
       const entries = [...pool.entries()].map(([alias, { variantId }]) => {
         const use = usageFor(alias);
         return {
           alias,
           variantId,
-          isLoaded: loadedIds.size > 0 ? loadedIds.has(variantId) : null,
+          // Pool entries are created only after load succeeds and removed on
+          // unload. Before the public snapshot is confirmed, avoid a native
+          // catalog read but still report the state this sidecar owns.
+          isLoaded: snapshotConfirmed
+            ? (loadedStateKnown ? loadedIds.has(variantId) : null)
+            : true,
           lastUsedAt: use.lastUsedAt,
           inFlight: inFlightFor(alias),
           priority: normalizePriority(modelPriorities.get(alias)),
@@ -3338,13 +3619,7 @@ rl.on('line', async (line) => {
       });
       const totalMemMb = Math.round(os.totalmem() / 1024 / 1024);
       const freeMemMb = Math.round(os.freemem() / 1024 / 1024);
-      let accelerators = [];
-      try {
-        accelerators = await collectAcceleratorMemory();
-      } catch (e) {
-        log('warn', `Accelerator memory probe failed: ${e?.message || e}`);
-        accelerators = accelMemCache?.devices ?? [];
-      }
+      const accelerators = await acceleratorMemory;
       reply({
         ok: true,
         result: {
@@ -3567,7 +3842,9 @@ rl.on('line', async (line) => {
       const modelAlias = payload.model;
       const embedTs = Date.now();
       let embedOk = false;
-      noteActivity(modelAlias, 'start');
+      if (!noteActivity(modelAlias, 'start')) {
+        throw new Error(`Cannot use ${modelAlias} while it is being unloaded or deleted. Retry shortly.`);
+      }
       try {
         const poolEntry = await ensureModel(modelAlias);
         const embedModel = poolEntry.catModel;
@@ -3593,22 +3870,20 @@ rl.on('line', async (line) => {
         });
       }
     } else if (cmd === 'getEps') {
-      const eps = typeof manager.discoverEps === 'function' ? manager.discoverEps() : [];
+      const eps = await readExecutionProviders(
+        () => typeof manager.discoverEps === 'function' ? manager.discoverEps() : [],
+      );
       reply({ ok: true, result: eps });
     } else if (cmd === 'ensureAccelerators') {
-      await serializeAcceleratorRegistration(async () => {
-        if (typeof manager.downloadAndRegisterEps !== 'function') {
-          reply({ ok: true, result: null });
-          return;
-        }
-        const progress = (name, pct) => send({ id, progress: pct, ep: name });
-        if (payload.rebuildBroken === true) {
+      if (typeof manager.downloadAndRegisterEps === 'function') {
+        const progress = reportCatalogProgress;
+        const rebuild = payload.rebuildBroken === true ? async (onProgress) => {
           const epRoot = path.join(os.homedir(), `.${initConfig?.appName || 'flint'}`, 'ep');
           const outcome = await rebuildBrokenExecutionProviders({
             discover: () => (typeof manager.discoverEps === 'function' ? manager.discoverEps() : []),
             downloadAndRegister: (names, onProgress) => manager.downloadAndRegisterEps(names, onProgress),
             removeCache: (name) => removeProviderCache(epRoot, name),
-            onProgress: progress,
+            onProgress,
             epRoot,
           });
           if (outcome.removed.length) {
@@ -3617,20 +3892,18 @@ rl.on('line', async (line) => {
           if (outcome.busy.length) {
             log('warn', `Left execution provider cache in place because a file is in use: ${outcome.busy.join(', ')}`);
           }
-          reply({
-            ok: true,
-            result: {
-              ...(outcome.result ?? {}),
-              attemptedProviderRebuilds: outcome.attempted,
-              removedProviderCaches: outcome.removed,
-              busyProviderCaches: outcome.busy,
-            },
-          });
-          return;
-        }
-        const result = await manager.downloadAndRegisterEps(progress);
+          return {
+            ...(outcome.result ?? {}),
+            attemptedProviderRebuilds: outcome.attempted,
+            removedProviderCaches: outcome.removed,
+            busyProviderCaches: outcome.busy,
+          };
+        } : undefined;
+        const result = await rerunAcceleratorRegistration(progress, rebuild);
         reply({ ok: true, result: result ?? null });
-      });
+      } else {
+        reply({ ok: true, result: null });
+      }
     } else if (cmd === 'setLogLevel') {
       if (!LOG_LEVELS.includes(payload.level)) {
         throw new Error(`Unsupported log level "${payload.level}". Expected one of: ${LOG_LEVELS.join(', ')}`);

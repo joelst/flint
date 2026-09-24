@@ -5,9 +5,68 @@ import {
   createSingleFlight,
   createStartupAuthorization,
   prepareHydratedRuntime,
+  resolveAcceleratorRestartGuidance,
   resolveCatalogCheckPresentation,
   resolveStartupAudioAlias,
 } from './startup-sequence';
+
+describe('resolveAcceleratorRestartGuidance', () => {
+  it('keeps deferred, failed, and successful restart guidance consistent', () => {
+    expect(resolveAcceleratorRestartGuidance({
+      success: false,
+      status: 'Provider update deferred',
+      registeredEps: [],
+      failedEps: [],
+      catalogRefreshRequiresRestart: true,
+      registrationDeferredUntilRestart: true,
+    })).toBe('Provider update deferred');
+    expect(resolveAcceleratorRestartGuidance({
+      success: false,
+      status: 'CUDA registration failed',
+      registeredEps: [],
+      failedEps: ['CUDAExecutionProvider'],
+      catalogRefreshRequiresRestart: true,
+    })).toBe(
+      'CUDA registration failed. Restart Flint to let the model catalog detect any newly available variants.',
+    );
+    expect(resolveAcceleratorRestartGuidance({
+      success: false,
+      status: 'CUDA registration failed!',
+      registeredEps: [],
+      failedEps: ['CUDAExecutionProvider'],
+      catalogRefreshRequiresRestart: true,
+    })).toBe(
+      'CUDA registration failed! Restart Flint to let the model catalog detect any newly available variants.',
+    );
+    expect(resolveAcceleratorRestartGuidance({
+      success: false,
+      status: 'CUDA registration failed. ',
+      registeredEps: [],
+      failedEps: ['CUDAExecutionProvider'],
+      catalogRefreshRequiresRestart: true,
+    })).toBe(
+      'CUDA registration failed. Restart Flint to let the model catalog detect any newly available variants.',
+    );
+    expect(resolveAcceleratorRestartGuidance({
+      success: true,
+      status: 'Registered 1 execution provider',
+      registeredEps: ['CUDAExecutionProvider'],
+      failedEps: [],
+      catalogRefreshRequiresRestart: true,
+    })).toBe(
+      'Accelerator setup finished. Restart Flint to let the model catalog detect any newly available variants.',
+    );
+  });
+
+  it('returns no restart guidance before the catalog boundary', () => {
+    expect(resolveAcceleratorRestartGuidance({
+      success: false,
+      status: 'CUDA registration failed',
+      registeredEps: [],
+      failedEps: ['CUDAExecutionProvider'],
+    })).toBe('');
+  });
+});
 
 describe('prepareHydratedRuntime', () => {
   it('keeps the page wiring from discarding accelerator readiness', () => {
@@ -21,6 +80,9 @@ describe('prepareHydratedRuntime', () => {
     expect(startupEnd, 'startup sequence end marker not found').toBeGreaterThan(startupStart);
     const startup = source.slice(startupStart, startupEnd);
 
+    expect(startup).toContain('refreshCatalog: false');
+    expect(startup).not.toContain('refreshCatalog: autoRefreshCatalogOnStartup');
+
     const prepareStart = startup.indexOf('prepareAccelerators:');
     const prepareEnd = startup.indexOf('validateAccelerators:');
     expect(prepareStart, 'accelerator stage marker not found').toBeGreaterThan(-1);
@@ -29,6 +91,9 @@ describe('prepareHydratedRuntime', () => {
     expect(prepareAccelerators).toContain('return');
     expect(prepareAccelerators).toContain('ensureHardwareAccel({');
     expect(prepareAccelerators).toContain('refreshCatalog: false');
+    expect(startup).toContain(
+      'deferCatalogRead: !autoRefreshCatalogOnStartup',
+    );
 
     const fenceStart = startup.indexOf('startupInterrupted ||');
     const fenceEnd = startup.indexOf('if (startupLoaded > 0)');
@@ -42,6 +107,30 @@ describe('prepareHydratedRuntime', () => {
 
     expect(startup).toContain(
       '} else if (autoRefreshCatalogOnStartup && autoStartService) {',
+    );
+    const prepared = startup.indexOf('acceleratorReadiness = await prepareHydratedRuntime(');
+    const recoveryPolicy = startup.indexOf(
+      'setAutomaticCatalogRefreshEnabled(autoRefreshCatalogOnStartup);',
+      prepared,
+    );
+    const restartGuidance = startup.indexOf(
+      'if (acceleratorRestartGuidance) {',
+      recoveryPolicy,
+    );
+    const startupSummary = startup.indexOf('if (startupLoaded > 0)', recoveryPolicy);
+    expect(prepared).toBeGreaterThan(-1);
+    expect(recoveryPolicy).toBeGreaterThan(prepared);
+    expect(startupSummary).toBeGreaterThan(recoveryPolicy);
+    expect(restartGuidance).toBeGreaterThan(startupSummary);
+    // The bootstrap override must be undone even when startup fails, or recovery keeps
+    // skipping the catalog refresh the user asked for.
+    const startupCatch = startup.indexOf('Runtime startup stopped before model preload');
+    const startupFinally = startup.indexOf('} finally {', startupCatch);
+    expect(startupCatch).toBeGreaterThan(prepared);
+    expect(startupFinally).toBeGreaterThan(startupCatch);
+    expect(recoveryPolicy).toBeGreaterThan(startupFinally);
+    expect(startup).toMatch(
+      /if \(autoRefreshCatalogOnStartup && startupEntries\.length > 0\) \{[\s\S]*?\r?\n      \}\r?\n      if \(acceleratorRestartGuidance\) \{/,
     );
     expect(startup).toContain(
       'if (autoRefreshCatalogOnStartup && startupEntries.length > 0) {',
@@ -61,11 +150,18 @@ describe('prepareHydratedRuntime', () => {
       refreshCatalogStart,
     );
     const refreshCatalog = source.slice(refreshCatalogStart, refreshCatalogEnd);
-    expect(refreshCatalog).toContain('await sdkRefreshModels();');
+    expect(refreshCatalog).toContain('await sdkRefreshModels(');
+    expect(
+      refreshCatalog.indexOf('setAutomaticCatalogRefreshEnabled(autoRefreshCatalogOnStartup);'),
+    ).toBeGreaterThan(refreshCatalog.indexOf('await sdkRefreshModels('));
     expect(refreshCatalog).not.toContain('catalogRefreshError');
+    expect(refreshCatalog.indexOf('is no longer available')).toBeGreaterThan(
+      refreshCatalog.indexOf('await sdkRefreshModels('),
+    );
     expect(startup).toMatch(
       /if \(autoRefreshCatalogOnStartup\) \{\s+await refreshCatalogModels\(\);/,
     );
+    expect(startup.indexOf('await refreshCatalogModels();')).toBeGreaterThan(prepareEnd);
     expect(startup).toContain(
       'state.catalogStatus === "ready"',
     );
@@ -115,6 +211,69 @@ describe('prepareHydratedRuntime', () => {
     const syncFromStore = source.slice(syncStart, syncEnd);
     expect(syncFromStore).toContain('state.catalogStatus = s.catalogStatus ?? "not-checked";');
     expect(syncFromStore).toContain('state.catalogError = s.catalogError ?? null;');
+  });
+
+  it('explains the catalog restart boundary after a post-commit accelerator update', () => {
+    const source = readFileSync(
+      join(process.cwd(), 'src', 'routes', '+page.svelte'),
+      'utf8',
+    );
+    const start = source.indexOf('async function ensureHardwareAccel(');
+    const end = source.indexOf('\n  async function useStarterModel', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const setup = source.slice(start, end);
+    expect(setup).toContain(
+      'const restartGuidance = resolveAcceleratorRestartGuidance(readiness.registration);',
+    );
+    expect(setup).toMatch(
+      /if \(restartGuidance\) \{[\s\S]*?statusMessage = restartGuidance;[\s\S]*?appendAppLog\(statusMessage, "warn"\);/,
+    );
+  });
+
+  it('persists restart guidance for local catalog mutations after snapshot commitment', () => {
+    const source = readFileSync(
+      join(process.cwd(), 'src', 'routes', '+page.svelte'),
+      'utf8',
+    );
+    const importStart = source.indexOf('async function runByomImport(');
+    const importEnd = source.indexOf('function byomTemplateDirty()', importStart);
+    const templateStart = source.indexOf('async function saveTemplateEdit()');
+    const templateEnd = source.indexOf('// Persistence for chat history', templateStart);
+    const deleteHandlerStart = source.indexOf('function handleDeleteResult(');
+    const variantDeleteStart = source.indexOf('async function deleteVariant(');
+    const variantDeleteEnd = source.indexOf('function accelBadgeInfo(', variantDeleteStart);
+    const modelDeleteStart = source.indexOf('async function deleteCachedModel(');
+    const modelDeleteEnd = source.indexOf('async function sendMessage(', modelDeleteStart);
+    const importFlow = source.slice(importStart, importEnd);
+    const templateFlow = source.slice(templateStart, templateEnd);
+    const deleteHandler = source.slice(deleteHandlerStart, variantDeleteStart);
+    const variantDeleteFlow = source.slice(variantDeleteStart, variantDeleteEnd);
+    const modelDeleteFlow = source.slice(modelDeleteStart, modelDeleteEnd);
+
+    expect(importFlow).toContain('result.catalogRefreshRequiresRestart');
+    expect(importFlow).toMatch(/Restart Flint[\s\S]*?appendAppLog\(statusMessage, "warn"\)/);
+    expect(templateFlow).toContain('result.catalogRefreshRequiresRestart');
+    expect(templateFlow).toMatch(/Restart Flint[\s\S]*?appendAppLog\(statusMessage, "warn"\)/);
+    expect(deleteHandler).toContain('deleteResult?.catalogRefreshRequiresRestart');
+    expect(deleteHandler).toMatch(/Restart Flint[\s\S]*?appendAppLog\(statusMessage, "warn"\)/);
+    expect(variantDeleteFlow).toContain('handleDeleteResult(result, deletedMessage)');
+    expect(modelDeleteFlow).toContain('handleDeleteResult(result, `${model.alias} deleted`)');
+  });
+
+  it('shows progress and quiet-period guidance for manual catalog refresh registration', () => {
+    const source = readFileSync(
+      join(process.cwd(), 'src', 'routes', '+page.svelte'),
+      'utf8',
+    );
+    const start = source.indexOf('async function refreshCatalogModels()');
+    const end = source.indexOf('/** About strip', start);
+    const refresh = source.slice(start, end);
+
+    expect(refresh).toContain('sdkRefreshModels(');
+    expect(refresh).toContain('Catalog accelerator');
+    expect(refresh).toContain('no progress reported for 60 seconds');
+    expect(refresh).toContain('if (statusMessage === catalogProgressMessage) statusMessage = "";');
   });
 
   describe('startup preference resolution', () => {

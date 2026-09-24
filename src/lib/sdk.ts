@@ -1,4 +1,5 @@
 import { writable, type Writable } from 'svelte/store';
+import { isPoolEntryResident, retainKnownResidency } from './pool-residency';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { Command } from '@tauri-apps/plugin-shell';
@@ -131,9 +132,33 @@ let pending = new Map<number, PendingRequest>();
 let streamHandlers = new Map<number, (delta: string) => void>();
 type ProgressHandler = {
   onProgress?: (p: number, detail?: any) => void;
+  /** Execution-provider registration riding this command's id, never the command's own progress. */
+  onAcceleratorProgress?: (p: number, detail?: any) => void;
   watchdog?: ProgressStallWatchdog;
 };
 let progressHandlers = new Map<number, ProgressHandler>();
+type AcceleratorSetupListener = {
+  onProgress?: (epName: string, percent: number) => void;
+  onStall?: () => void;
+};
+let acceleratorSetup: {
+  promise: Promise<AcceleratorReadiness>;
+  listeners: Set<AcceleratorSetupListener>;
+  generation: number;
+} | null = null;
+const CATALOG_REGISTRATION_COMMANDS = new Set<SidecarCommandName>([
+  'listModels',
+  'getSTTModels',
+  'getVisionModels',
+  'download',
+  'load',
+  'deleteModel',
+  'getEps',
+  'importModelFolder',
+  'linkModelFolder',
+  'setModelTemplate',
+  'startService',
+]);
 let msgId = 0;
 let currentStatus: any = { initialized: false, modelLoaded: false, serviceRunning: false };
 let currentRuntimeServiceState: RuntimeServiceState = 'unknown';
@@ -505,16 +530,36 @@ function registerProgressHandler(
   id: number,
   onProgress?: (p: number, detail?: any) => void,
   onStall?: () => void,
+  onAcceleratorProgress?: (p: number, detail?: any) => void,
 ) {
-  if (!onProgress && !onStall) return;
+  if (!onProgress && !onStall && !onAcceleratorProgress) return;
   progressHandlers.set(id, {
     onProgress,
+    onAcceleratorProgress,
     watchdog: onStall
       ? createProgressStallWatchdog(() => {
           try { onStall(); } catch {}
         })
       : undefined,
   });
+}
+
+function reportCatalogProgressStall() {
+  appendAppLog(
+    'Catalog refresh: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.',
+    'warn',
+  );
+}
+
+function reportRuntimeProgressStall(cmd: SidecarCommandName) {
+  appendAppLog(
+    `No progress reported for 60 seconds while running ${cmd}. Still awaiting the runtime; Flint has not cancelled this operation.`,
+    'warn',
+  );
+}
+
+function registerCatalogProgressHandler(id: number, cmd: SidecarCommandName) {
+  registerProgressHandler(id, undefined, () => reportRuntimeProgressStall(cmd));
 }
 
 function updateState(partial: Partial<FlintSDKState>) {
@@ -616,8 +661,13 @@ async function spawnSidecar() {
     if (msg.id && msg.progress !== undefined) {
       const handler = progressHandlers.get(msg.id);
       if (handler) {
+        // Accelerator registration can precede any catalog-gated command, so it shares that
+        // command's id. It is still real runtime progress for the stall watchdog, but it is
+        // not the command's own progress and must not be shown as such.
+        const acceleratorPhase = msg.phase === 'accelerator';
+        const onProgress = acceleratorPhase ? handler.onAcceleratorProgress : handler.onProgress;
         handler.watchdog?.progress();
-        try { handler.onProgress?.(Number(msg.progress), msg); } catch {}
+        try { onProgress?.(Number(msg.progress), msg); } catch {}
       }
       if (msg.alias) {
         console.log(`[sdk] download progress ${msg.alias}: ${msg.progress}%`);
@@ -1072,6 +1122,16 @@ export function sendInternal(
       return promise;
     }
   }
+  // Cancellation from inside onAssignedId already settled and retired the request.
+  // Stop here before installing any automatic progress handler or deadline timer.
+  if (pending.get(id) !== entry) return promise;
+  if (
+    pending.get(id) === entry &&
+    CATALOG_REGISTRATION_COMMANDS.has(cmd) &&
+    !progressHandlers.has(id)
+  ) {
+    registerCatalogProgressHandler(id, cmd);
+  }
 
   /** Settles once. A later close, or a write rejection that lands after a reply, is ignored. */
   const settle = (fn: () => void) => {
@@ -1453,7 +1513,7 @@ let initializeSDKPromise: Promise<boolean> | null = null;
  *
  * Single-flighted as a whole, not just around the core init — otherwise a double Retry would
  * share the init but each caller would still run its own autostart, and `startService` is a
- * destructive restart that would clear the pool out from under the first caller.
+ * destructive restart that would tear down the gateway out from under the first caller.
  */
 export async function initializeSDK(config: Partial<any> = {}): Promise<boolean> {
   // This invocation carries the current frontend policy even when it joins initialization that
@@ -1483,7 +1543,7 @@ async function performInitializeSDK(config: Partial<any>): Promise<boolean> {
     // Autostart is a user setting, and the port/bind address belong to the frontend. Starting
     // the service here unconditionally on a hardcoded 5272 both ignored "don't autostart" and
     // opened a port the user had not configured. A repeat call against an already-initialized
-    // manager must not restart the service either — that would clear the pool.
+    // manager must not restart the service either — that would drop the gateway's connections.
     try {
       if (config.autoStartService && !alreadyInitialized) {
         await startService(
@@ -1492,8 +1552,10 @@ async function performInitializeSDK(config: Partial<any>): Promise<boolean> {
           undefined,
           config.bindAddress || undefined,
           // Automatic, not user-driven: it must both respect an earlier unestablished outcome
-          // and record its own, since the error is swallowed just below.
-          { convenience: true },
+          // and record its own, since the error is swallowed just below. The no-refresh policy
+          // must also carry through to this automatic start, or a disabled startup catalog
+          // check would still be violated by the service's own preflight catalog read.
+          { convenience: true, deferCatalogRead: !refreshCatalog },
         );
       } else {
         // Adopt whatever is actually running — including a service started before this init.
@@ -1529,58 +1591,77 @@ async function performInitializeSDK(config: Partial<any>): Promise<boolean> {
   }
 }
 
-export async function refreshModels(): Promise<void> {
+export async function refreshModels(
+  onProgress?: (epName: string, percent: number) => void,
+  onStall?: () => void,
+): Promise<void> {
   updateRuntime({ models: 'loading' });
   updateState({ catalogStatus: 'loading', catalogError: null });
   try {
-    const res = await send('listModels');
+    const res = await sendInternal('listModels', {}, undefined, (id: number) => {
+      registerProgressHandler(
+        id,
+        undefined,
+        onStall ?? reportCatalogProgressStall,
+        onProgress
+          ? (percent, detail) => onProgress(String(detail?.ep || 'accelerator'), percent)
+          : undefined,
+      );
+    });
     const list = res.result || [];
-    let currentLoadedAlias: string | undefined;
 
     // Also refresh status first so loaded-model state is accurate for UI + actions
     const status = await send('getStatus');
     if (status.result) {
       currentEndpoint = status.result.endpoint;
-      const chatLaneModel: string | undefined = status.result.chatLane?.model || status.result.currentModel || undefined;
-      const audioLaneModel: string | undefined = status.result.audioLane?.model || undefined;
-      currentLoadedAlias = chatLaneModel;
       updateState({
         endpoint: currentEndpoint || undefined,
         serviceRunning: !!status.result.serviceRunning,
-        chatLaneModel,
-        audioLaneModel,
       });
     }
+    const statusPool: Array<{ alias: string; variantId: string }> = status.result?.pool ?? [];
 
-    const loadedAliases = new Set(
-      (status?.result?.pool ?? []).map((e: any) => e.alias).filter(Boolean)
-    );
-
-    const models = list.map((m: any) => ({
+    const catalog = list.map((m: any) => ({
       ...m,
       alias: m.alias,
       isCached: m.cached,
-      isLoaded: loadedAliases.has(m.alias),
+      isLoaded: false,
       info: m
     } as ModelInfo));
 
-    updateState({
-      catalogStatus: 'ready',
-      catalogError: null,
-      models,
-      cachedModels: models.filter((m: ModelInfo) => m.isCached),
-      loadedModels: models.filter((m: ModelInfo) => m.isLoaded),
+    // Publish the pool together with the flags and lanes derived from it, so a failed
+    // poolStatus below cannot leave `pool` older than those flags. getStatus carries no
+    // telemetry, so an entry keeps the last known telemetry for the same build.
+    let anyLoaded = false;
+    sdkState.update((state) => {
+      const pool: PoolEntry[] = statusPool.map((entry) => {
+        const prior = state.pool.find((known) =>
+          known.alias === entry.alias && known.variantId === entry.variantId
+        );
+        return prior ?? { alias: entry.alias, variantId: entry.variantId, isLoaded: null };
+      });
+      const projected = projectPool(pool, catalog);
+      anyLoaded = projected.loadedModels.length > 0;
+      return {
+        ...state,
+        ...projected,
+        catalogStatus: 'ready',
+        catalogError: null,
+        cachedModels: projected.models.filter((m: ModelInfo) => m.isCached),
+      };
     });
-    updateRuntime({ models: models.some((m: ModelInfo) => m.isLoaded) ? 'ready' : 'empty' });
+    updateRuntime({ models: anyLoaded ? 'ready' : 'empty' });
 
     // Refresh pool detail + memory stats
     try {
       const ps = await send('poolStatus');
       if (ps.result) {
-        updateState({
-          pool: ps.result.models ?? [],
+        const pool = ps.result.models ?? [];
+        sdkState.update((state) => ({
+          ...state,
+          ...projectPool(retainKnownResidency(pool, state.pool), state.models),
           poolStats: mapPoolStats(ps.result),
-        });
+        }));
       }
     } catch (e) {
       console.warn('[sdk] poolStatus refresh failed', e);
@@ -1648,7 +1729,11 @@ export async function downloadModel(
   const payload: any = { alias: model.alias };
   if (variantId) payload.variantId = variantId;
   await sendInternal('download', payload, undefined, (id: number) => {
-    registerProgressHandler(id, onProgress, onStall);
+    registerProgressHandler(
+      id,
+      onProgress,
+      onStall ?? (() => reportRuntimeProgressStall('download')),
+    );
   });
   // Sidecar sends progress messages via stdout; onAssignedId registers the handler above.
   // The pending promise resolves only on the final reply (see stdout processing).
@@ -1674,8 +1759,23 @@ export async function loadModel(
       generation = dispatchedGeneration;
     },
   );
-  if (!sidecarProcess || !sidecarReady) {
+  if (
+    generation === null ||
+    generation !== sidecarGeneration ||
+    !sidecarProcess ||
+    !sidecarReady
+  ) {
     throw new Error('Sidecar was lost after loading the model');
+  }
+  const loadedVariantId = res.result?.variantId;
+  if (typeof loadedVariantId === 'string' && loadedVariantId) {
+    sdkState.update((state) => {
+      const loaded: PoolEntry = { alias: model.alias, variantId: loadedVariantId, isLoaded: true };
+      const pool = state.pool.some((entry) => entry.alias === model.alias)
+        ? state.pool.map((entry) => entry.alias === model.alias ? loaded : entry)
+        : [...state.pool, loaded];
+      return { ...state, ...projectPool(pool, state.models) };
+    });
   }
   onAcknowledged?.();
   await refreshModels();
@@ -1845,15 +1945,22 @@ export async function applyMemorySettings(
   return { config: res.result?.config ?? null, stale: res.result?.stale === true };
 }
 
-export async function deleteModel(model: any, variantId?: string) {
+export async function deleteModel(
+  model: any,
+  variantId?: string,
+): Promise<CatalogMutationResult> {
   const payload: any = { alias: model.alias };
   if (variantId) payload.variantId = variantId;
-  await send('deleteModel', payload);
-  await refreshModels();
+  const res = await send('deleteModel', payload);
+  const result = res.result as CatalogMutationResult;
+  return refreshModelsAfterDeletion(result);
 }
 
-export async function removeFromCache(alias: string, variantId?: string) {
-  await deleteModel({ alias }, variantId);
+export async function removeFromCache(
+  alias: string,
+  variantId?: string,
+): Promise<CatalogMutationResult> {
+  return deleteModel({ alias }, variantId);
 }
 
 export async function getAccessLog(): Promise<any[]> {
@@ -1914,23 +2021,31 @@ export async function pollPoolStatus(): Promise<void> {
   const ps = await send('poolStatus');
   if (ps?.result) {
     const pool = ps.result.models ?? [];
-    const loadedAliases = new Set(pool.map((entry: any) => entry.alias).filter(Boolean));
-    sdkState.update((state) => {
-      const models = state.models.map((model) => ({
-        ...model,
-        isLoaded: loadedAliases.has(model.alias),
-      }));
-      return {
-        ...state,
-        pool,
-        poolStats: mapPoolStats(ps.result),
-        chatLaneModel: pool[0]?.alias,
-        audioLaneModel: pool[1]?.alias,
-        loadedModels: models.filter((model) => model.isLoaded),
-        models,
-      };
-    });
+    sdkState.update((state) => ({
+      ...state,
+      ...projectPool(retainKnownResidency(pool, state.pool), state.models),
+      poolStats: mapPoolStats(ps.result),
+    }));
   }
+}
+
+// Keep evicted entries in the monitor, but not in loaded flags or lane selection.
+// Preserve getStatus's legacy lane positions (pool[0]/pool[1]) rather than reassigning them.
+// Unknown telemetry retains the sidecar's last-known residency until confirmed otherwise.
+function projectPool(pool: PoolEntry[], models: ModelInfo[]) {
+  const resident = pool.filter(isPoolEntryResident);
+  const loadedAliases = new Set(resident.map((entry) => entry.alias).filter(Boolean));
+  const projected = models.map((model) => ({
+    ...model,
+    isLoaded: loadedAliases.has(model.alias),
+  }));
+  return {
+    pool,
+    models: projected,
+    loadedModels: projected.filter((model) => model.isLoaded),
+    chatLaneModel: pool[0] && isPoolEntryResident(pool[0]) ? pool[0].alias : undefined,
+    audioLaneModel: pool[1] && isPoolEntryResident(pool[1]) ? pool[1].alias : undefined,
+  };
 }
 
 export async function getLocalEndpoint(): Promise<string | undefined> {
@@ -1941,8 +2056,9 @@ export async function getLocalEndpoint(): Promise<string | undefined> {
 /**
  * Serializes every service lifecycle transition.
  *
- * The sidecar's `startService` is a *destructive restart*: it tears down the gateway and clears
- * the model pool and usage counters. Overlapping a start with a stop, a settings re-apply or a
+ * The sidecar's `startService` is a *destructive restart*: it tears down the gateway, cutting
+ * proxied requests, and replaces the listener. Loaded models stay resident. Overlapping a start
+ * with a stop, a settings re-apply or a
  * second start strands in-flight work against an endpoint that is being replaced, so all of
  * them queue here rather than each caller guarding itself.
  */
@@ -1978,7 +2094,7 @@ let serviceStopFence = 0;
  * Held here rather than in the UI because the check has to happen *inside* the transition lock.
  * A flag consulted before queuing lets two convenience starts both pass while neither has run,
  * so the first one's uncertainty cannot stop the second. Starting is a destructive restart: it
- * tears down the gateway and clears the pool, so repeating one blindly is the specific harm.
+ * tears down the gateway and its proxied requests, so repeating one blindly is the specific harm.
  *
  * Deliberately **not** clearable from outside. An explicit start is authorized by passing no
  * `convenience` flag, which bypasses the guard for that one attempt; clearing the shared latch
@@ -2003,7 +2119,7 @@ async function startServiceLocked(
   alias?: string,
   preferredEp?: string,
   bindAddress?: string,
-  opts?: { convenience?: boolean },
+  opts?: { convenience?: boolean; deferCatalogRead?: boolean },
   fence?: number,
 ): Promise<string> {
   if (fence !== undefined && fence !== serviceStopFence) {
@@ -2031,6 +2147,9 @@ async function startServiceLocked(
   }
   if (bindAddress) {
     payload.bindAddress = bindAddress;
+  }
+  if (opts?.deferCatalogRead) {
+    payload.deferCatalogRead = true;
   }
   let res: any;
   let generation: number | null = null;
@@ -2084,7 +2203,7 @@ export async function startService(
   alias?: string,
   preferredEp?: string,
   bindAddress?: string,
-  opts?: { convenience?: boolean }
+  opts?: { convenience?: boolean; deferCatalogRead?: boolean }
 ): Promise<string> {
   const fence = serviceStopFence;
   return withServiceTransition(() =>
@@ -2103,7 +2222,7 @@ export async function ensureServiceRunning(
   alias?: string,
   preferredEp?: string,
   bindAddress?: string,
-  opts?: { convenience?: boolean; expectedGeneration?: number },
+  opts?: { convenience?: boolean; expectedGeneration?: number; deferCatalogRead?: boolean },
 ): Promise<{ endpoint: string; started: boolean }> {
   const authorizationFence = serviceStopFence;
   return withServiceTransition(async ({ startNow }) => {
@@ -2567,26 +2686,96 @@ export async function inspectModelFolder(folderPath: string): Promise<InspectFol
   return res.result as InspectFolderResult;
 }
 
+export interface CatalogMutationResult {
+  catalogRefreshRequiresRestart?: boolean;
+  [key: string]: unknown;
+}
+
+async function refreshModelsAfterMutation(result: CatalogMutationResult | undefined): Promise<void> {
+  // A frozen or uncertain immutable snapshot cannot reliably publish this mutation.
+  // Preserve the durable mutation result and let the caller surface restart guidance.
+  if (result?.catalogRefreshRequiresRestart) {
+    console.warn('[sdk] Catalog refresh skipped after mutation pending restart');
+    return;
+  }
+  await refreshModels();
+}
+
+async function refreshModelsAfterDeletion(
+  result: CatalogMutationResult,
+): Promise<CatalogMutationResult> {
+  // Deletion changes live cache state even when an immutable local catalog row
+  // cannot disappear until restart. Refresh those live flags, but never turn a
+  // durable deletion into a reported failure solely because the refresh failed.
+  try {
+    await refreshModels();
+    return result;
+  } catch (error) {
+    console.warn('[sdk] Catalog refresh failed after model deletion', error);
+    reconcileDeletedModelState(result);
+    return { ...result, catalogRefreshRequiresRestart: true };
+  }
+}
+
+function reconcileDeletedModelState(result: CatalogMutationResult): void {
+  const alias = typeof result?.alias === 'string' ? result.alias : null;
+  if (!alias) return;
+  const deletedVariantId =
+    typeof result.variantId === 'string' && result.variantId ? result.variantId : null;
+
+  sdkState.update((state) => {
+    const pool = state.pool.filter((entry) =>
+      entry.alias !== alias || (deletedVariantId !== null && entry.variantId !== deletedVariantId)
+    );
+    const models = state.models.map((model) => {
+      if (model.alias !== alias) return model;
+      const variants = Array.isArray((model as any).variants)
+        ? (model as any).variants.map((variant: any) => (
+            deletedVariantId === null || variant.id === deletedVariantId
+              ? { ...variant, cached: false }
+              : variant
+          ))
+        : (model as any).variants;
+      const isCached = deletedVariantId === null
+        ? false
+        : Array.isArray(variants) && variants.some((variant: any) => variant.cached === true);
+      return {
+        ...model,
+        variants,
+        isCached,
+      };
+    });
+    const projected = projectPool(pool, models);
+    return {
+      ...state,
+      ...projected,
+      cachedModels: projected.models.filter((model) => model.isCached),
+    };
+  });
+}
+
 export async function importModelFolder(options: {
   folderPath: string;
   name: string;
   publisher?: string;
   version?: number;
   promptTemplate?: PromptTemplate;
-}): Promise<any> {
+}): Promise<CatalogMutationResult> {
   const res = await send('importModelFolder', options);
-  await refreshModels();
-  return res.result;
+  const result = res.result as CatalogMutationResult;
+  await refreshModelsAfterMutation(result);
+  return result;
 }
 
 export async function linkModelFolder(options: {
   folderPath: string;
   name: string;
   publisher?: string;
-}): Promise<any> {
+}): Promise<CatalogMutationResult> {
   const res = await send('linkModelFolder', options);
-  await refreshModels();
-  return res.result;
+  const result = res.result as CatalogMutationResult;
+  await refreshModelsAfterMutation(result);
+  return result;
 }
 
 export interface ModelTemplateResult {
@@ -2603,10 +2792,14 @@ export async function getModelTemplate(name: string): Promise<ModelTemplateResul
   return res.result as ModelTemplateResult;
 }
 
-export async function setModelTemplate(name: string, promptTemplate: PromptTemplate): Promise<any> {
+export async function setModelTemplate(
+  name: string,
+  promptTemplate: PromptTemplate,
+): Promise<CatalogMutationResult> {
   const res = await send('setModelTemplate', { name, promptTemplate });
-  await refreshModels();
-  return res.result;
+  const result = res.result as CatalogMutationResult;
+  await refreshModelsAfterMutation(result);
+  return result;
 }
 
 export function appendAppLog(message: string, level: LogEntry['level'] = 'info') {
@@ -2635,20 +2828,47 @@ export function resetSDK() {
   runtimeQuitPromise = null;
   expectedShutdownGeneration = null;
   closeObservers.clear();
+  acceleratorSetup?.listeners.clear();
+  acceleratorSetup = null;
   sdkState.set(initialState);
 }
 
 /**
  * Discover available execution providers (accelerators like CPU, CUDA, QNN for NPU, etc.)
  */
-export async function getEps(): Promise<EpInfo[]> {
-  const res = await send('getEps');
+async function discoverExecutionProviders(
+  expectedGeneration?: number,
+  replacementMessage = 'Sidecar was replaced while discovering execution providers',
+): Promise<EpInfo[]> {
+  let dispatchedGeneration: number | null = null;
+  const res = await sendInternal(
+    'getEps',
+    {},
+    undefined,
+    undefined,
+    (generation) => {
+      dispatchedGeneration = generation;
+    },
+  );
   const eps = res.result || [];
+  const ownerGeneration = expectedGeneration ?? dispatchedGeneration;
+  if (
+    ownerGeneration === null ||
+    ownerGeneration !== sidecarGeneration ||
+    !sidecarProcess ||
+    !sidecarReady
+  ) {
+    throw new Error(replacementMessage);
+  }
   updateState({ eps, acceleratorsReady: hasRegisteredAccelerator(eps) });
   return eps;
 }
 
-export async function ensureAccelerators(
+export async function getEps(): Promise<EpInfo[]> {
+  return discoverExecutionProviders();
+}
+
+async function performAcceleratorSetup(
   onProgress?: (epName: string, percent: number) => void,
   onStall?: () => void,
   options?: { rebuildBroken?: boolean },
@@ -2676,20 +2896,75 @@ export async function ensureAccelerators(
   if (!sidecarProcess || !sidecarReady) {
     throw new Error('Sidecar was lost after accelerator registration');
   }
-  const providers = await getEps();
-  if (
-    generation === null ||
-    generation !== sidecarGeneration ||
-    !sidecarProcess ||
-    !sidecarReady
-  ) {
+  if (generation === null) {
     throw new Error('Sidecar was replaced while confirming accelerator readiness');
   }
+  const providers = await discoverExecutionProviders(
+    generation,
+    'Sidecar was replaced while confirming accelerator readiness',
+  );
   return {
     generation,
     registration: res.result ?? null,
     providers,
   };
+}
+
+export function ensureAccelerators(
+  onProgress?: (epName: string, percent: number) => void,
+  onStall?: () => void,
+  options?: { forceRerun?: boolean; rebuildBroken?: boolean },
+): Promise<AcceleratorReadiness> {
+  const listener = { onProgress, onStall };
+  const currentGeneration = sidecarGeneration;
+  if (
+    acceleratorSetup &&
+    acceleratorSetup.generation === currentGeneration &&
+    (options?.forceRerun || options?.rebuildBroken)
+  ) {
+    // The rerun waits for the active cycle, whose provider install is what this caller is
+    // waiting on in the meantime, so it observes that cycle's progress and stall notice too.
+    const active = acceleratorSetup;
+    active.listeners.add(listener);
+    return active.promise
+      .catch(() => undefined)
+      .then(() => {
+        active.listeners.delete(listener);
+        return ensureAccelerators(onProgress, onStall, options);
+      });
+  }
+  if (acceleratorSetup && acceleratorSetup.generation === currentGeneration) {
+    acceleratorSetup.listeners.add(listener);
+    return acceleratorSetup.promise.finally(() => {
+      acceleratorSetup?.listeners.delete(listener);
+    });
+  }
+
+  const listeners = new Set<AcceleratorSetupListener>([listener]);
+  const broadcastProgress = (epName: string, percent: number) => {
+    for (const current of listeners) {
+      try { current.onProgress?.(epName, percent); } catch {}
+    }
+  };
+  // A caller without its own stall handler still gets the durable default notice, once.
+  const broadcastStall = () => {
+    let reportDefault = false;
+    for (const current of listeners) {
+      if (!current.onStall) {
+        reportDefault = true;
+        continue;
+      }
+      try { current.onStall(); } catch {}
+    }
+    if (reportDefault) reportRuntimeProgressStall('ensureAccelerators');
+  };
+  let tracked: Promise<AcceleratorReadiness>;
+  tracked = performAcceleratorSetup(broadcastProgress, broadcastStall, options).finally(() => {
+    if (acceleratorSetup?.promise === tracked) acceleratorSetup = null;
+    listeners.clear();
+  });
+  acceleratorSetup = { promise: tracked, listeners, generation: currentGeneration };
+  return tracked;
 }
 
 export function isAcceleratorReadinessCurrent(

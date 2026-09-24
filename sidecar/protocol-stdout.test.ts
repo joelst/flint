@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'url';
 import { Writable } from 'stream';
 import { describe, expect, it, vi } from 'vitest';
 import { DIAGNOSTIC_PREFIX, protectProtocolStdout, writeProtocolLine } from './protocol-stdout.js';
+import { killAndWait } from './test-process.js';
 
 function captureStream() {
   let output = '';
@@ -114,7 +115,7 @@ describe('protocol stdout protection', () => {
       expect(stdout).toBe('{"ready":true}\n');
       expect(stderr).toBe(`${DIAGNOSTIC_PREFIX} info import noise\n`);
     } finally {
-      if (!proc.killed) proc.kill();
+      await killAndWait(proc);
       rmSync(dir, { recursive: true, force: true });
     }
   });

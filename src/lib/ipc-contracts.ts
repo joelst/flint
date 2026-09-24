@@ -6,7 +6,7 @@ export const SIDECAR_PROTOCOL_VERSION = 1;
 export type SidecarCommand =
   | { cmd: 'init'; appName: string; logLevel: string }
   | { cmd: 'setLogLevel'; level: string }
-  | { cmd: 'startService'; port: number; alias?: string; preferredEp?: string; bindAddress?: string; gateway?: boolean }
+  | { cmd: 'startService'; port: number; alias?: string; preferredEp?: string; bindAddress?: string; gateway?: boolean; deferCatalogRead?: boolean }
   | { cmd: 'stopService' }
   | { cmd: 'stopAndUnload'; drainTimeoutMs?: number }
   | { cmd: 'shutdownRuntime'; drainTimeoutMs?: number }
@@ -74,6 +74,10 @@ export interface EpDownloadResult {
   status: string;
   registeredEps: string[];
   failedEps: string[];
+  /** Provider setup ran after the immutable catalog snapshot was committed. */
+  catalogRefreshRequiresRestart?: boolean;
+  /** Provider setup was not started because a listener may be taking the first catalog snapshot. */
+  registrationDeferredUntilRestart?: boolean;
   /** Provider names Flint asked Foundry to rebuild during a provider recheck. */
   attemptedProviderRebuilds?: string[];
   /** Provider names whose on-disk cache was removed before a rebuild. */

@@ -953,6 +953,46 @@ describe('cancellation before dispatch', () => {
 });
 
 describe('progress stall notices', () => {
+  it('reports a quiet catalog-triggered provider registration and retires the notice on failure', async () => {
+    const sdk = await loadSdk();
+    vi.useFakeTimers();
+
+    const refresh = capture(sdk.refreshModels());
+    await vi.advanceTimersByTimeAsync(0);
+    const listLine = harness.writes.find((line) => line.includes('"listModels"'))!;
+    const listId = JSON.parse(listLine).id;
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sdkSnapshot(sdk).logs.at(-1)?.message).toBe(
+      'Catalog refresh: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.',
+    );
+
+    harness.emitStdout({ id: listId, error: 'catalog unavailable' });
+    await refresh.tracked;
+    expect(refresh.box.err.message).toContain('catalog unavailable');
+    const notices = sdkSnapshot(sdk).logs.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sdkSnapshot(sdk).logs).toHaveLength(notices);
+  });
+
+  it('uses a runtime-neutral quiet-period notice for effectful catalog commands', async () => {
+    const sdk = await loadSdk();
+    vi.useFakeTimers();
+
+    const load = capture(sdk.loadModel({ alias: 'large-model' }));
+    await vi.advanceTimersByTimeAsync(0);
+    const loadLine = harness.writes.find((line) => line.includes('"load"'))!;
+    const loadId = JSON.parse(loadLine).id;
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sdkSnapshot(sdk).logs.at(-1)?.message).toBe(
+      'No progress reported for 60 seconds while running load. Still awaiting the runtime; Flint has not cancelled this operation.',
+    );
+
+    harness.emitStdout({ id: loadId, error: 'load failed' });
+    await load.tracked;
+  });
+
   it('starts the download quiet period at dispatch and resets it on progress', async () => {
     const sdk = await loadSdk();
     gateSpawn = true;
@@ -1000,6 +1040,24 @@ describe('progress stall notices', () => {
     expect(onStall).toHaveBeenCalledTimes(2);
   });
 
+  it('uses a default quiet-period notice when download callers omit one', async () => {
+    const sdk = await loadSdk();
+    vi.useFakeTimers();
+
+    const download = capture(sdk.downloadModel({ alias: 'model-a' }));
+    await vi.advanceTimersByTimeAsync(0);
+    const downloadLine = harness.writes.find((line) => line.includes('"download"'))!;
+    const downloadId = JSON.parse(downloadLine).id;
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sdkSnapshot(sdk).logs.at(-1)?.message).toBe(
+      'No progress reported for 60 seconds while running download. Still awaiting the runtime; Flint has not cancelled this operation.',
+    );
+
+    harness.emitStdout({ id: downloadId, error: 'download failed' });
+    await download.tracked;
+  });
+
   it('retires accelerator stall notices when reset makes the outcome unknown', async () => {
     const sdk = await loadSdk();
     await completeInitialization(sdk);
@@ -1017,10 +1075,79 @@ describe('progress stall notices', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(onStall).not.toHaveBeenCalled();
   });
+
+  it('completes a catalog refresh whose pool telemetry probe never answers', async () => {
+    const sdk = await loadSdk();
+    vi.useFakeTimers();
+
+    const refresh = capture(sdk.refreshModels());
+    await vi.advanceTimersByTimeAsync(0);
+    const listId = JSON.parse(harness.writes.find((line) => line.includes('"listModels"'))!).id;
+    harness.emitStdout({ id: listId, result: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    const statusId = JSON.parse(harness.writes.find((line) => line.includes('"getStatus"'))!).id;
+    harness.emitStdout({ id: statusId, result: { serviceRunning: false, endpoint: null } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(harness.writes.some((line) => line.includes('"poolStatus"'))).toBe(true);
+
+    // Telemetry never waits behind accelerator registration, so a silent probe must not hold a
+    // successful catalog refresh open forever.
+    await vi.advanceTimersByTimeAsync(20_000);
+    await refresh.tracked;
+    expect(refresh.box.err).toBeUndefined();
+    expect(sdkSnapshot(sdk).catalogStatus).toBe('ready');
+  });
+
+  it('keeps accelerator registration progress out of a model download percentage', async () => {
+    const sdk = await loadSdk();
+    const progress: number[] = [];
+    const onStall = vi.fn();
+
+    vi.useFakeTimers();
+    const download = capture(
+      sdk.downloadModel(
+        { alias: 'model-a' },
+        (percent: number) => progress.push(percent),
+        undefined,
+        onStall,
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    const downloadId = JSON.parse(harness.writes.find((line) => line.includes('"download"'))!).id;
+
+    // Registration rides this command's id while it waits for the catalog gate. It is runtime
+    // progress for the stall watchdog, but it is not the model's download progress.
+    harness.emitStdout({ id: downloadId, progress: 73, ep: 'CUDAExecutionProvider', phase: 'accelerator' });
+    expect(progress).toEqual([]);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(onStall).not.toHaveBeenCalled();
+
+    harness.emitStdout({ id: downloadId, progress: 12, alias: 'model-a' });
+    expect(progress).toEqual([12]);
+
+    harness.emitStdout({ id: downloadId, error: 'download failed' });
+    await download.tracked;
+  });
+
+  it('reports accelerator registration progress during a catalog refresh', async () => {
+    const sdk = await loadSdk();
+    const seen: Array<[string, number]> = [];
+
+    const refresh = capture(sdk.refreshModels((epName: string, percent: number) => {
+      seen.push([epName, percent]);
+    }));
+    const listId = await waitForWrite('listModels');
+
+    harness.emitStdout({ id: listId, progress: 40, ep: 'CUDAExecutionProvider', phase: 'accelerator' });
+    expect(seen).toEqual([['CUDAExecutionProvider', 40]]);
+
+    harness.emitStdout({ id: listId, error: 'catalog unavailable' });
+    await refresh.tracked;
+  });
 });
 
 describe('one answer per request', () => {
-  it('bounds a dispatched read-only query and ignores a late reply', async () => {
+  it('bounds a dispatched finite read-only query and ignores a late reply', async () => {
     const sdk = await loadSdk();
     const warmup = sdk.getEps();
     const warmupId = await waitForWrite('getEps');
@@ -1029,8 +1156,8 @@ describe('one answer per request', () => {
 
     vi.useFakeTimers();
     try {
-      const query = capture(sdk.getEps());
-      const queryLine = harness.writes.filter((w) => w.includes('getEps')).at(-1)!;
+      const query = capture(sdk.getHealthRing());
+      const queryLine = harness.writes.filter((w) => w.includes('getHealthRing')).at(-1)!;
       const queryId = JSON.parse(queryLine).id;
 
       await vi.advanceTimersByTimeAsync(10_000);
@@ -1045,13 +1172,39 @@ describe('one answer per request', () => {
     }
   });
 
+  it('keeps provider discovery unbounded while it can wait for provider installation', async () => {
+    const sdk = await loadSdk();
+    const warmup = sdk.getEps();
+    const warmupId = await waitForWrite('getEps');
+    harness.emitStdout({ id: warmupId, result: [] });
+    await warmup;
+
+    vi.useFakeTimers();
+    try {
+      const query = capture(sdk.getEps());
+      const queryLine = harness.writes.filter((w) => w.includes('getEps')).at(-1)!;
+      const queryId = JSON.parse(queryLine).id;
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(query.box.done).toBe(false);
+      expect(sdkSnapshot(sdk).logs.at(-1)?.message).toBe(
+        'No progress reported for 60 seconds while running getEps. Still awaiting the runtime; Flint has not cancelled this operation.',
+      );
+
+      harness.emitStdout({ id: queryId, result: [] });
+      await query.tracked;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('revokes an undispatched query when its deadline expires during startup', async () => {
     const sdk = await loadSdk();
     gateSpawn = true;
 
     vi.useFakeTimers();
     try {
-      const query = capture(sdk.getEps());
+      const query = capture(sdk.getHealthRing());
       await vi.advanceTimersByTimeAsync(0);
       expect(harness.spawnEntered).toBe(true);
       expect(harness.writes).toHaveLength(0);
@@ -1062,7 +1215,7 @@ describe('one answer per request', () => {
 
       harness.releaseSpawn?.();
       await vi.advanceTimersByTimeAsync(250);
-      expect(harness.writes.filter((w) => w.includes('getEps'))).toHaveLength(0);
+      expect(harness.writes.filter((w) => w.includes('getHealthRing'))).toHaveLength(0);
     } finally {
       vi.useRealTimers();
     }
@@ -1156,6 +1309,91 @@ describe('one answer per request', () => {
     expect(sdkSnapshot(sdk)).toMatchObject({
       chatLaneModel: 'audio-model',
       audioLaneModel: undefined,
+    });
+  });
+
+  it('keeps evicted pool entries visible without treating them as loaded models or lanes', async () => {
+    const sdk = await loadSdk();
+    const state = sdkSnapshot(sdk);
+    sdk.sdkState.set({
+      ...state,
+      models: [
+        { alias: 'evicted', isCached: true, isLoaded: true },
+        { alias: 'resident', isCached: true, isLoaded: false },
+        { alias: 'unknown', isCached: true, isLoaded: false },
+      ],
+    });
+    const poll = sdk.pollPoolStatus();
+    const id = await waitForWrite('poolStatus');
+    const pool = [
+      { alias: 'evicted', variantId: 'evicted:1', isLoaded: false },
+      { alias: 'resident', variantId: 'resident:1', isLoaded: true },
+      { alias: 'unknown', variantId: 'unknown:1', isLoaded: null },
+    ];
+    harness.emitStdout({ id, result: { models: pool } });
+    await poll;
+    const snapshot = sdkSnapshot(sdk);
+    expect(snapshot.pool).toEqual(pool);
+    expect(snapshot.models.map((model: any) => model.isLoaded)).toEqual([false, true, true]);
+    expect(snapshot.loadedModels.map((model: any) => model.alias)).toEqual(['resident', 'unknown']);
+    expect(snapshot.chatLaneModel).toBeUndefined();
+    expect(snapshot.audioLaneModel).toBe('resident');
+  });
+
+  it.each(['poll', 'refresh'])('does not resurrect confirmed eviction after unknown telemetry from %s', async (source) => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    const state = sdkSnapshot(sdk);
+    sdk.sdkState.set({
+      ...state,
+      models: [{ alias: 'evicted', isCached: true, isLoaded: false }],
+      pool: [{ alias: 'evicted', variantId: 'evicted:1', isLoaded: false }],
+    });
+    const pending = source === 'poll' ? sdk.pollPoolStatus() : sdk.refreshModels();
+    if (source === 'refresh') {
+      const listId = await waitForWrite('listModels', 1);
+      harness.emitStdout({ id: listId, result: [{ alias: 'evicted', cached: true }] });
+      const statusId = await waitForWrite('getStatus', 2);
+      harness.emitStdout({ id: statusId, result: { pool: [{ alias: 'evicted', variantId: 'evicted:1' }] } });
+    }
+    const poolId = await waitForWrite('poolStatus', 1);
+    harness.emitStdout({ id: poolId, result: {
+      models: [{ alias: 'evicted', variantId: 'evicted:1', isLoaded: null }],
+    } });
+    await pending;
+    expect(sdkSnapshot(sdk)).toMatchObject({
+      pool: [{ alias: 'evicted', variantId: 'evicted:1', isLoaded: false }],
+      models: [{ alias: 'evicted', isLoaded: false }],
+      loadedModels: [],
+      chatLaneModel: undefined,
+    });
+  });
+
+  it('uses a confirmed load to replace remembered eviction even when later telemetry is unknown', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    sdk.sdkState.set({
+      ...sdkSnapshot(sdk),
+      models: [{ alias: 'evicted', isCached: true, isLoaded: false }],
+      pool: [{ alias: 'evicted', variantId: 'evicted:1', isLoaded: false }],
+    });
+    const load = sdk.loadModel({ alias: 'evicted' }, 'chat', 'evicted:1');
+    const loadId = await waitForWrite('load');
+    harness.emitStdout({ id: loadId, result: { variantId: 'evicted:1' } });
+    const listId = await waitForWrite('listModels', 1);
+    expect(sdkSnapshot(sdk).pool[0].isLoaded).toBe(true);
+    harness.emitStdout({ id: listId, result: [{ alias: 'evicted', cached: true }] });
+    const statusId = await waitForWrite('getStatus', 2);
+    harness.emitStdout({ id: statusId, result: { pool: [{ alias: 'evicted', variantId: 'evicted:1' }] } });
+    const poolId = await waitForWrite('poolStatus', 1);
+    harness.emitStdout({ id: poolId, result: {
+      models: [{ alias: 'evicted', variantId: 'evicted:1', isLoaded: null }],
+    } });
+    await load;
+    expect(sdkSnapshot(sdk)).toMatchObject({
+      pool: [{ alias: 'evicted', variantId: 'evicted:1', isLoaded: true }],
+      models: [{ alias: 'evicted', isLoaded: true }],
+      chatLaneModel: 'evicted',
     });
   });
 
@@ -1709,6 +1947,35 @@ describe('initialization readiness recovery', () => {
     expect(sdkSnapshot(sdk).catalogStatus).toBe('not-checked');
   }, 15000);
 
+  it('defers the catalog read for an automatic startup service start with refresh disabled', async () => {
+    const sdk = await loadSdk();
+    const initialized = sdk.initializeSDK({
+      autoStartService: true,
+      refreshCatalog: false,
+    });
+
+    const initId = await waitForWrite('init');
+    harness.emitStdout({ id: initId, result: 'initialized' });
+    const logId = await waitForWrite('setLogLevel');
+    harness.emitStdout({ id: logId, result: {} });
+    const readinessStatusId = await waitForWrite('getStatus');
+    harness.emitStdout({
+      id: readinessStatusId,
+      result: { serviceRunning: false, endpoint: null },
+    });
+    const startId = await waitForWrite('startService');
+    const startRequest = harness.writes
+      .map((line) => JSON.parse(line))
+      .find((request) => request.id === startId);
+    expect(startRequest).toMatchObject({
+      cmd: 'startService',
+      deferCatalogRead: true,
+    });
+    harness.emitStdout({ id: startId, endpoint: 'http://127.0.0.1:5272' });
+
+    await expect(initialized).resolves.toBe(true);
+  }, 15000);
+
   it('preserves an explicit disabled policy when a later initialization omits the option', async () => {
     const sdk = await loadSdk();
     sdk.setAutomaticCatalogRefreshEnabled(false);
@@ -1921,6 +2188,206 @@ describe('initialization readiness recovery', () => {
 });
 
 describe('accelerator readiness ownership', () => {
+  it('shares one registration and watchdog across concurrent accelerator setup callers', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const firstProgress = vi.fn();
+    const secondProgress = vi.fn();
+    const firstStall = vi.fn();
+    const secondStall = vi.fn();
+    const first = sdk.ensureAccelerators(firstProgress, firstStall);
+    const second = sdk.ensureAccelerators(secondProgress, secondStall);
+    const registrationId = await waitForWrite('ensureAccelerators');
+    vi.useFakeTimers();
+    expect(harness.writes.filter((line) => line.includes('"cmd":"ensureAccelerators"')))
+      .toHaveLength(1);
+
+    harness.emitStdout({
+      id: registrationId,
+      progress: 35,
+      ep: 'CUDAExecutionProvider',
+    });
+    expect(firstProgress).toHaveBeenCalledWith('CUDAExecutionProvider', 35);
+    expect(secondProgress).toHaveBeenCalledWith('CUDAExecutionProvider', 35);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(firstStall).toHaveBeenCalledTimes(1);
+    expect(secondStall).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+
+    harness.emitStdout({
+      id: registrationId,
+      result: {
+        success: true,
+        status: 'registered',
+        registeredEps: ['CUDAExecutionProvider'],
+        failedEps: [],
+      },
+    });
+    const epsId = await waitForWrite('getEps');
+    harness.emitStdout({
+      id: epsId,
+      result: [{ name: 'CUDAExecutionProvider', isRegistered: true }],
+    });
+
+    await expect(first).resolves.toMatchObject({
+      providers: [{ name: 'CUDAExecutionProvider', isRegistered: true }],
+    });
+    await expect(second).resolves.toMatchObject({
+      providers: [{ name: 'CUDAExecutionProvider', isRegistered: true }],
+    });
+  }, 15000);
+
+  it('logs the default quiet-period notice once when any accelerator caller omits one', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const customStall = vi.fn();
+    const automatic = sdk.ensureAccelerators();
+    const joined = sdk.ensureAccelerators(undefined, customStall);
+    const registrationId = await waitForWrite('ensureAccelerators');
+    vi.useFakeTimers();
+    // Rearms the quiet-period watchdog under the fake clock.
+    harness.emitStdout({ id: registrationId, progress: 10, ep: 'CUDAExecutionProvider' });
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    const notices: string[] = sdkSnapshot(sdk).logs
+      .map((entry: { message: string }) => entry.message)
+      .filter((message: string) => message.includes('while running ensureAccelerators'));
+    expect(notices).toEqual([
+      'No progress reported for 60 seconds while running ensureAccelerators. Still awaiting the runtime; Flint has not cancelled this operation.',
+    ]);
+    expect(customStall).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+
+    harness.emitStdout({
+      id: registrationId,
+      result: { success: true, registeredEps: ['CPUExecutionProvider'], failedEps: [] },
+    });
+    const epsId = await waitForWrite('getEps');
+    harness.emitStdout({ id: epsId, result: [{ name: 'CPUExecutionProvider', isRegistered: true }] });
+    await Promise.all([automatic, joined]);
+  }, 15000);
+
+  it('shows a queued explicit rerun the active cycle progress and stall notice', async () => {
+    // Install / Update waits for the active cycle before rerunning; a provider download in that
+    // cycle is exactly what the user is waiting on, so it must not be silent to them.
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const automatic = sdk.ensureAccelerators();
+    const firstRegistrationId = await waitForWrite('ensureAccelerators');
+    const explicitProgress = vi.fn();
+    const explicitStall = vi.fn();
+    const explicit = sdk.ensureAccelerators(explicitProgress, explicitStall, { forceRerun: true });
+    vi.useFakeTimers();
+
+    harness.emitStdout({ id: firstRegistrationId, progress: 40, ep: 'CUDAExecutionProvider' });
+    expect(explicitProgress).toHaveBeenCalledWith('CUDAExecutionProvider', 40);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(explicitStall).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+
+    harness.emitStdout({
+      id: firstRegistrationId,
+      result: { success: true, registeredEps: ['CPUExecutionProvider'], failedEps: [] },
+    });
+    const firstProbeId = await waitForWrite('getEps');
+    harness.emitStdout({ id: firstProbeId, result: [{ name: 'CPUExecutionProvider', isRegistered: true }] });
+    await automatic;
+
+    const secondRegistrationId = await waitForWrite('ensureAccelerators', 1);
+    harness.emitStdout({ id: secondRegistrationId, progress: 70, ep: 'CUDAExecutionProvider' });
+    expect(explicitProgress).toHaveBeenLastCalledWith('CUDAExecutionProvider', 70);
+    harness.emitStdout({
+      id: secondRegistrationId,
+      result: { success: true, registeredEps: ['CPUExecutionProvider'], failedEps: [] },
+    });
+    const secondProbeId = await waitForWrite('getEps', 1);
+    harness.emitStdout({ id: secondProbeId, result: [{ name: 'CPUExecutionProvider', isRegistered: true }] });
+    await explicit;
+  }, 15000);
+
+  it('keeps an independent provider probe under its transport deadline during setup', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const readiness = sdk.ensureAccelerators();
+    const registrationId = await waitForWrite('ensureAccelerators');
+    const providers = sdk.getEps();
+    const independentId = await waitForWrite('getEps');
+    harness.emitStdout({
+      id: independentId,
+      result: [{ name: 'CPUExecutionProvider', isRegistered: true }],
+    });
+    await expect(providers).resolves.toEqual([
+      { name: 'CPUExecutionProvider', isRegistered: true },
+    ]);
+
+    harness.emitStdout({
+      id: registrationId,
+      result: {
+        success: true,
+        status: 'registered',
+        registeredEps: ['CUDAExecutionProvider'],
+        failedEps: [],
+      },
+    });
+    const confirmationId = await waitForWrite('getEps', 1);
+    harness.emitStdout({
+      id: confirmationId,
+      result: [{ name: 'CUDAExecutionProvider', isRegistered: true }],
+    });
+    await readiness;
+  }, 15000);
+
+  it('queues an explicit accelerator rerun after an active setup cycle', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const automatic = sdk.ensureAccelerators();
+    const firstRegistrationId = await waitForWrite('ensureAccelerators');
+    const explicit = sdk.ensureAccelerators(undefined, undefined, { forceRerun: true });
+    expect(harness.writes.filter((line) => line.includes('"cmd":"ensureAccelerators"')))
+      .toHaveLength(1);
+
+    harness.emitStdout({
+      id: firstRegistrationId,
+      result: { success: true, registeredEps: ['CPUExecutionProvider'], failedEps: [] },
+    });
+    const firstProbeId = await waitForWrite('getEps');
+    harness.emitStdout({
+      id: firstProbeId,
+      result: [{ name: 'CPUExecutionProvider', isRegistered: true }],
+    });
+    await automatic;
+
+    const secondRegistrationId = await waitForWrite('ensureAccelerators', 1);
+    harness.emitStdout({
+      id: secondRegistrationId,
+      result: {
+        success: true,
+        registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+        failedEps: [],
+      },
+    });
+    const secondProbeId = await waitForWrite('getEps', 1);
+    harness.emitStdout({
+      id: secondProbeId,
+      result: [
+        { name: 'CPUExecutionProvider', isRegistered: true },
+        { name: 'CUDAExecutionProvider', isRegistered: true },
+      ],
+    });
+    await expect(explicit).resolves.toMatchObject({
+      providers: [
+        { name: 'CPUExecutionProvider', isRegistered: true },
+        { name: 'CUDAExecutionProvider', isRegistered: true },
+      ],
+    });
+  }, 15000);
+
   it('rejects a registration result when its sidecar exits before provider discovery', async () => {
     const sdk = await loadSdk();
     await completeInitialization(sdk);
@@ -1942,6 +2409,22 @@ describe('accelerator readiness ownership', () => {
     expect(harness.writes.filter((line) => line.includes('"cmd":"getEps"'))).toHaveLength(0);
   }, 15000);
 
+  it('preserves each explicit rerun when multiple callers queue behind setup', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    const automatic = sdk.ensureAccelerators();
+    await waitForWrite('ensureAccelerators');
+    const first = sdk.ensureAccelerators(undefined, undefined, { forceRerun: true });
+    const second = sdk.ensureAccelerators(undefined, undefined, { forceRerun: true });
+    for (let cycle = 0; cycle < 3; cycle++) {
+      const id = await waitForWrite('ensureAccelerators', cycle);
+      harness.emitStdout({ id, result: { success: true } });
+      const probe = await waitForWrite('getEps', cycle);
+      harness.emitStdout({ id: probe, result: [] });
+    }
+    await Promise.all([automatic, first, second]);
+  }, 15000);
+
   it('sends rebuildBroken only for a provider recheck and keeps that result', async () => {
     const sdk = await loadSdk();
     await completeInitialization(sdk);
@@ -1951,6 +2434,8 @@ describe('accelerator readiness ownership', () => {
     const installPayload = JSON.parse(harness.writes.filter((line) => line.includes('"ensureAccelerators"'))[0]);
     expect(installPayload.cmd).toBe('ensureAccelerators');
     expect(installPayload.rebuildBroken).toBeUndefined();
+    const recheck = sdk.ensureAccelerators(undefined, undefined, { rebuildBroken: true });
+    expect(harness.writes.filter((line) => line.includes('"ensureAccelerators"'))).toHaveLength(1);
     harness.emitStdout({
       id: installId,
       result: { success: true, status: 'registered', registeredEps: [], failedEps: [] },
@@ -1959,7 +2444,6 @@ describe('accelerator readiness ownership', () => {
     harness.emitStdout({ id: installEps, result: [] });
     await install;
 
-    const recheck = sdk.ensureAccelerators(undefined, undefined, { rebuildBroken: true });
     const recheckId = await waitForWrite('ensureAccelerators', 1);
     const recheckPayload = JSON.parse(harness.writes.filter((line) => line.includes('"ensureAccelerators"'))[1]);
     expect(recheckPayload.rebuildBroken).toBe(true);
@@ -1993,6 +2477,7 @@ describe('accelerator readiness ownership', () => {
   it('rejects provider discovery completed by a sidecar that exits before confirmation', async () => {
     const sdk = await loadSdk();
     await completeInitialization(sdk);
+    const originalEps = sdkSnapshot(sdk).eps;
 
     const readiness = sdk.ensureAccelerators();
     const registrationId = await waitForWrite('ensureAccelerators');
@@ -2013,6 +2498,7 @@ describe('accelerator readiness ownership', () => {
     harness.emitClose({ code: 1 });
 
     await expect(readiness).rejects.toThrow('replaced while confirming accelerator readiness');
+    expect(sdkSnapshot(sdk).eps).toEqual(originalEps);
   }, 15000);
 
   it('binds accelerator readiness to the generation that received the registration request', async () => {
@@ -2135,6 +2621,44 @@ describe('accelerator readiness ownership', () => {
     unsubscribe();
   }, 15000);
 
+  it('forwards deferred catalog reads for offline startup service starts', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+
+    const ensured = sdk.ensureServiceRunning(
+      5272,
+      undefined,
+      undefined,
+      undefined,
+      {
+        convenience: true,
+        expectedGeneration: snapshot.runtime.generation,
+        deferCatalogRead: true,
+      },
+    );
+    const statusId = await waitForWrite('getStatus', 2);
+    harness.emitStdout({ id: statusId, result: { serviceRunning: false, endpoint: null } });
+    const startId = await waitForWrite('startService');
+    const startRequest = harness.writes
+      .map((line) => JSON.parse(line))
+      .find((request) => request.id === startId);
+    expect(startRequest).toMatchObject({
+      cmd: 'startService',
+      deferCatalogRead: true,
+    });
+    harness.emitStdout({ id: startId, endpoint: 'http://127.0.0.1:5272' });
+
+    await expect(ensured).resolves.toEqual({
+      endpoint: 'http://127.0.0.1:5272',
+      started: true,
+    });
+    unsubscribe();
+  }, 15000);
+
   it('does not report a model load after its sidecar exits before refresh', async () => {
     const sdk = await loadSdk();
     await completeInitialization(sdk);
@@ -2183,6 +2707,20 @@ describe('accelerator readiness ownership', () => {
 });
 
 describe('cancellation from inside onAssignedId', () => {
+  it('does not install handlers or deadlines after cancellation', async () => {
+    const sdk = await loadSdk();
+    vi.useFakeTimers();
+
+    const request = capture(
+      sdk.sendInternal('poolStatus', {}, undefined, (id) => {
+        sdk.cancelBeforeDispatch(id);
+      }),
+    );
+    await request.tracked;
+    expect(request.box.err.certainty).toBe('cancelled');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('settles the caller rather than leaving a promise nobody can answer', async () => {
     const sdk = await loadSdk();
     gateSpawn = true;
@@ -2235,4 +2773,221 @@ describe('cancellation from inside onAssignedId', () => {
     harness.emitStdout({ id: stopId, result: {} });
     await stop;
   });
+});
+
+describe('catalog mutation results', () => {
+  it('preserves a restart-flagged mutation result without attempting an impossible refresh', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const imported = sdk.importModelFolder({ folderPath: '/models/foo', name: 'foo' });
+    const importId = await waitForWrite('importModelFolder');
+    harness.emitStdout({
+      id: importId,
+      result: { catalogRefreshRequiresRestart: true, name: 'foo' },
+    });
+
+    await expect(imported).resolves.toEqual({
+      catalogRefreshRequiresRestart: true,
+      name: 'foo',
+    });
+    expect(harness.writes.filter((line) => line.includes('"listModels"'))).toHaveLength(1);
+  }, 15000);
+
+  it('still rejects when an unflagged mutation result is followed by a failed refresh', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const imported = sdk.importModelFolder({ folderPath: '/models/foo', name: 'foo' });
+    const importId = await waitForWrite('importModelFolder');
+    harness.emitStdout({ id: importId, result: { name: 'foo' } });
+    const listId = await waitForWrite('listModels', 1);
+    harness.emitStdout({ id: listId, error: 'catalog unavailable' });
+
+    await expect(imported).rejects.toThrow('catalog unavailable');
+  }, 15000);
+
+  it('refreshes live deletion state while preserving catalog restart guidance', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const deleted = sdk.deleteModel({ alias: 'foo' } as any, 'foo-cpu:1');
+    const deleteId = await waitForWrite('deleteModel');
+    harness.emitStdout({
+      id: deleteId,
+      result: {
+        alias: 'foo',
+        variantId: 'foo-cpu:1',
+        catalogRefreshRequiresRestart: true,
+      },
+    });
+    const listId = await waitForWrite('listModels', 1);
+    harness.emitStdout({ id: listId, result: [] });
+    const statusId = await waitForWrite('getStatus', 2);
+    harness.emitStdout({ id: statusId, result: { serviceRunning: false, endpoint: null } });
+    const poolId = await waitForWrite('poolStatus', 1);
+    harness.emitStdout({ id: poolId, result: { models: [] } });
+
+    await expect(deleted).resolves.toEqual({
+      alias: 'foo',
+      variantId: 'foo-cpu:1',
+      catalogRefreshRequiresRestart: true,
+    });
+    expect(harness.writes.filter((line) => line.includes('"listModels"'))).toHaveLength(2);
+  }, 15000);
+
+  it('turns a failed post-deletion refresh into explicit restart guidance', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const deleted = sdk.deleteModel({ alias: 'foo' } as any);
+    const deleteId = await waitForWrite('deleteModel');
+    harness.emitStdout({ id: deleteId, result: { alias: 'foo', count: 1 } });
+    const listId = await waitForWrite('listModels', 1);
+    harness.emitStdout({ id: listId, error: 'catalog unavailable' });
+
+    await expect(deleted).resolves.toEqual({
+      alias: 'foo',
+      count: 1,
+      catalogRefreshRequiresRestart: true,
+    });
+  }, 15000);
+
+  it('reconciles known deletion state when the post-delete catalog refresh fails', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+    sdk.sdkState.set({
+      ...snapshot,
+      models: [{
+        alias: 'foo',
+        isCached: true,
+        isLoaded: true,
+        variants: [
+          { id: 'foo-cpu:1', cached: true },
+          { id: 'foo-cuda:1', cached: true },
+        ],
+      }],
+      pool: [{ alias: 'foo', variantId: 'foo-cpu:1' }],
+    });
+
+    const deleted = sdk.deleteModel({ alias: 'foo' } as any, 'foo-cpu:1');
+    const deleteId = await waitForWrite('deleteModel');
+    harness.emitStdout({
+      id: deleteId,
+      result: { alias: 'foo', variantId: 'foo-cpu:1' },
+    });
+    const listId = await waitForWrite('listModels', 1);
+    harness.emitStdout({ id: listId, error: 'catalog unavailable' });
+
+    await expect(deleted).resolves.toMatchObject({
+      alias: 'foo',
+      variantId: 'foo-cpu:1',
+      catalogRefreshRequiresRestart: true,
+    });
+    expect(snapshot.models[0]).toMatchObject({
+      alias: 'foo',
+      isCached: true,
+      isLoaded: false,
+    });
+    expect(snapshot.models[0].variants).toEqual([
+      { id: 'foo-cpu:1', cached: false },
+      { id: 'foo-cuda:1', cached: true },
+    ]);
+    expect(snapshot.pool).toEqual([]);
+    unsubscribe();
+  }, 15000);
+
+  it('re-derives both lanes from the reconciled pool when the post-delete refresh fails', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+    sdk.sdkState.set({
+      ...snapshot,
+      models: [
+        { alias: 'foo', isCached: true, isLoaded: true, variants: [{ id: 'foo-cpu:1', cached: true }] },
+        { alias: 'bar', isCached: true, isLoaded: true, variants: [{ id: 'bar-cpu:1', cached: true }] },
+      ],
+      pool: [
+        { alias: 'foo', variantId: 'foo-cpu:1' },
+        { alias: 'bar', variantId: 'bar-cpu:1' },
+      ],
+      chatLaneModel: 'foo',
+      audioLaneModel: 'bar',
+    });
+
+    const deleted = sdk.deleteModel({ alias: 'foo' } as any);
+    const deleteId = await waitForWrite('deleteModel');
+    harness.emitStdout({ id: deleteId, result: { alias: 'foo', count: 1 } });
+    const listId = await waitForWrite('listModels', 1);
+    harness.emitStdout({ id: listId, error: 'catalog unavailable' });
+
+    await expect(deleted).resolves.toMatchObject({ catalogRefreshRequiresRestart: true });
+    expect(snapshot.pool).toEqual([{ alias: 'bar', variantId: 'bar-cpu:1' }]);
+    expect(snapshot.chatLaneModel).toBe('bar');
+    expect(snapshot.audioLaneModel).toBeUndefined();
+    expect(snapshot.loadedModels.map((model: any) => model.alias)).toEqual(['bar']);
+    unsubscribe();
+  }, 15000);
+
+  it('keeps residency consistent when pool telemetry fails during a refresh', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+    sdk.sdkState.set({
+      ...snapshot,
+      pool: [{ alias: 'foo', variantId: 'foo-cpu:1', isLoaded: true, inFlight: 0 }],
+    });
+
+    const refreshed = sdk.refreshModels();
+    const listId = await waitForWrite('listModels', 1);
+    harness.emitStdout({
+      id: listId,
+      result: [
+        { alias: 'foo', cached: true, variants: [{ id: 'foo-cpu:1', cached: true }] },
+        { alias: 'bar', cached: true, variants: [{ id: 'bar-cpu:1', cached: true }] },
+      ],
+    });
+    const statusId = await waitForWrite('getStatus', 2);
+    harness.emitStdout({
+      id: statusId,
+      result: {
+        serviceRunning: false,
+        endpoint: null,
+        pool: [
+          { alias: 'foo', variantId: 'foo-cpu:1' },
+          { alias: 'bar', variantId: 'bar-cpu:1' },
+        ],
+      },
+    });
+    const poolId = await waitForWrite('poolStatus', 1);
+    harness.emitStdout({ id: poolId, error: 'telemetry unavailable' });
+    await refreshed;
+    expect(snapshot.pool).toEqual([
+      { alias: 'foo', variantId: 'foo-cpu:1', isLoaded: true, inFlight: 0 },
+      { alias: 'bar', variantId: 'bar-cpu:1', isLoaded: null },
+    ]);
+    expect(snapshot.chatLaneModel).toBe('foo');
+    expect(snapshot.audioLaneModel).toBe('bar');
+
+    const deleted = sdk.deleteModel({ alias: 'foo' } as any);
+    const deleteId = await waitForWrite('deleteModel');
+    harness.emitStdout({ id: deleteId, result: { alias: 'foo', count: 1 } });
+    const failedListId = await waitForWrite('listModels', 2);
+    harness.emitStdout({ id: failedListId, error: 'catalog unavailable' });
+
+    await expect(deleted).resolves.toMatchObject({ catalogRefreshRequiresRestart: true });
+    expect(snapshot.loadedModels.map((model: any) => model.alias)).toEqual(['bar']);
+    expect(snapshot.chatLaneModel).toBe('bar');
+    unsubscribe();
+  }, 15000);
 });

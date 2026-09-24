@@ -4,6 +4,34 @@ import { providerRecheckStatus } from './provider-recheck-status';
 const webgpu = { name: 'WebGpuExecutionProvider', isRegistered: true };
 
 describe('providerRecheckStatus', () => {
+  it('does not claim that a carried failure was rebuilt and preserves partial repair success', () => {
+    const status = providerRecheckStatus({
+      failedEps: ['CPUExecutionProvider'],
+      attemptedProviderRebuilds: [webgpu.name],
+    }, [webgpu]);
+    expect(status.failed).toBe(true);
+    expect(status.message).toContain('Rebuilt WebGpuExecutionProvider.');
+    expect(status.message).toContain('Providers still unavailable: CPUExecutionProvider.');
+    expect(status.message).not.toContain('rebuild failed for CPU');
+  });
+
+  it('does not report ready when provider repair was deferred by the catalog gate', () => {
+    const status = providerRecheckStatus({ registrationDeferredUntilRestart: true }, [webgpu]);
+    expect(status.failed).toBe(true);
+    expect(status.message).toContain('deferred');
+    expect(status.message).toContain('Restart Flint');
+  });
+
+  it('retains catalog restart guidance after a successful repair', () => {
+    const status = providerRecheckStatus({
+      attemptedProviderRebuilds: [webgpu.name],
+      catalogRefreshRequiresRestart: true,
+    }, [webgpu]);
+    expect(status.failed).toBe(false);
+    expect(status.message).toContain('Rebuilt WebGpuExecutionProvider');
+    expect(status.message).toContain('Restart Flint');
+  });
+
   it('names a provider the refreshed list still does not show as registered', () => {
     const status = providerRecheckStatus(
       {

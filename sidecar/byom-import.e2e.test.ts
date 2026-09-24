@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
+import { killAndWait } from './test-process.js';
 
 const APP = `flint-byom-test-${process.pid}`;
 const appHome = path.join(os.homedir(), `.${APP}`);
@@ -114,13 +115,17 @@ beforeAll(async () => {
   });
   // init binds the cache root to our throwaway appName.
   await send('init', { appName: APP, logLevel: 'error' });
-}, 60000);
+  // Catalog mutations are gated behind accelerator registration so they cannot commit an
+  // incomplete SDK snapshot. Establish provider setup once; the first mutation below still
+  // owns the initial native catalog scan and has a matching timeout.
+  await send('ensureAccelerators');
+}, 0);
 
-afterAll(() => {
-  if (proc && !proc.killed) proc.kill();
+afterAll(async () => {
+  if (proc) await killAndWait(proc);
   for (const d of tempDirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
   try { fs.rmSync(appHome, { recursive: true, force: true }); } catch {}
-});
+}, 15000);
 
 describe('BYOM inspect', () => {
   it('accepts a nested HF-style export and reads its metadata', async () => {
@@ -166,7 +171,7 @@ describe('BYOM import', () => {
 
     // Ownership marker is what lets Flint know it may delete this directory later.
     expect(fs.existsSync(path.join(dir, '.flint-import.json'))).toBe(true);
-  });
+  }, 120000);
 
   it('refuses to overwrite an existing model', async () => {
     const src = track(makeSourceRepo());

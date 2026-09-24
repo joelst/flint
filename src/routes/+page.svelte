@@ -1,6 +1,7 @@
 <script lang="ts">
   // @ts-nocheck  // runes ($state etc.) are handled by Svelte compiler, not raw TS
   import { onMount, untrack } from "svelte";
+  import { isPoolEntryResident } from "$lib/pool-residency";
   import { providerRecheckStatus } from "$lib/provider-recheck-status";
   import MessageRenderer from "$lib/MessageRenderer.svelte";
   import ConversationSidebar from "$lib/ConversationSidebar.svelte";
@@ -86,6 +87,7 @@
     createSingleFlight,
     createStartupAuthorization,
     prepareHydratedRuntime,
+    resolveAcceleratorRestartGuidance,
     resolveCatalogCheckPresentation,
     resolveStartupAudioAlias,
   } from "$lib/startup-sequence";
@@ -248,7 +250,35 @@
   let showFirstRunCoach = $state(false);
 
   async function refreshCatalogModels() {
-    await sdkRefreshModels();
+    let catalogProgressMessage = "";
+    try {
+      await sdkRefreshModels(
+        (epName, pct) => {
+          catalogProgressMessage = `Catalog accelerator ${epName}: ${pct.toFixed(0)}%`;
+          statusMessage = catalogProgressMessage;
+        },
+        () => {
+          catalogProgressMessage = "Catalog refresh: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.";
+          statusMessage = catalogProgressMessage;
+        },
+      );
+      setAutomaticCatalogRefreshEnabled(autoRefreshCatalogOnStartup);
+    } finally {
+      if (statusMessage === catalogProgressMessage) statusMessage = "";
+    }
+    // state.models is empty until this returns. Checking earlier always no-ops, and
+    // auto-select will not replace a leftover alias. A conversation's own model stays
+    // so the not-installed explanation is not swapped for another model.
+    if (
+      selectedModelAlias &&
+      selectedModelAlias !== activeConversationModelAlias() &&
+      state.models.length > 0 &&
+      !state.models.some((m: ModelInfo) => m.alias === selectedModelAlias)
+    ) {
+      appendAppLog(`Previously selected model "${selectedModelAlias}" is no longer available`, 'warn');
+      selectedModelAlias = "";
+      selectedModel = null;
+    }
   }
 
   /** About strip — app + Node + service (Help + Settings). */
@@ -846,10 +876,10 @@
   let benchmarkRunError = $state<string | null>(null);
 
   /** Thin wrapper around the pure `computeResidentCapFloor`, supplying this page's live
-   * `state.pool`/`modelPriorities`. See that function's docstring for why it must be called
+   * `loadedPoolEntries`/`modelPriorities`. See that function's docstring for why it must be called
    * fresh on every push rather than cached. */
   function residentCapFloorFor(ownAliases: readonly string[]): number {
-    return computeResidentCapFloor(state.pool, modelPriorities, ownAliases);
+    return computeResidentCapFloor(loadedPoolEntries, modelPriorities, ownAliases);
   }
 
   /** Pins each target alias so pool eviction cannot unload it mid-run. Overlays onto the user's
@@ -1608,9 +1638,9 @@
     state.models.filter((m: any) => m.isLoaded && modelSupportsChat(m)),
   );
 
-  /** All models currently in the runtime pool (alias + exact variant). */
+  /** Resident or last-known resident models, excluding confirmed native eviction. */
   const loadedPoolEntries = $derived(
-    (state.pool || []).filter((e: any) => e?.alias),
+    (state.pool || []).filter((entry) => entry?.alias && isPoolEntryResident(entry)),
   );
 
   function shortPoolVariantLabel(variantId: string | null | undefined): string {
@@ -2658,7 +2688,7 @@
    * is first installed) makes it a standing invariant of every push for as long as a benchmark
    * holds the lease, not a one-time snapshot. The resident cap floor (via `residentCapFloorFor`/
    * `overlayResidentCapFloor`) gets the same treatment and for the same reason, and goes further:
-   * it is *recomputed fresh from live `state.pool`/`modelPriorities` on every push* rather than
+   * it is *recomputed fresh from live `loadedPoolEntries`/`modelPriorities` on every push* rather than
    * cached from whenever the lease was installed, so a priority edit made mid-run — e.g. the user
    * pinning another already-resident alias from Monitor/Settings while a later target is still
    * loading — raises the floor in time for the very next push instead of leaving a stale,
@@ -2790,7 +2820,7 @@
   }
 
   function evaluateWatchdog() {
-    const status = { ...(state.poolStats ?? {}), models: state.pool ?? [] };
+    const status = { ...(state.poolStats ?? {}), models: loadedPoolEntries };
     const result = evaluateWatch(watchState, toWatchSample(status, Date.now()), watchConfig);
     watchState = result.state;
     watchAlerts = result.active;
@@ -2808,7 +2838,7 @@
    * window escalates to an OS notification instead.
    */
   async function notifyHighUsage(raised: any[]) {
-    const body = `${formatAlertSummary(raised)}. ${formatAlertAdvice((state.pool ?? []).length)}`;
+    const body = `${formatAlertSummary(raised)}. ${formatAlertAdvice(loadedPoolEntries.length)}`;
     try {
       const { getCurrentWindow } = await import("@tauri-apps/api/window");
       if (await getCurrentWindow().isFocused()) return;
@@ -2930,17 +2960,24 @@
     byomBusy = mode;
     byomError = "";
     try {
+      let result;
       if (mode === "link") {
-        await linkModelFolder({ folderPath: byomFolder, name: byomName.trim() });
+        result = await linkModelFolder({ folderPath: byomFolder, name: byomName.trim() });
       } else {
-        await importModelFolder({
+        result = await importModelFolder({
           folderPath: byomFolder,
           name: byomName.trim(),
           // Only send a template when it differs from what the sidecar would pick anyway.
           promptTemplate: byomTemplateDirty() ? (byomTemplate as any) : undefined,
         });
       }
-      appendAppLog(`Added model "${byomName.trim()}" (${mode === "link" ? "linked" : "copied"})`, "info");
+      const addedMessage = `Added model "${byomName.trim()}" (${mode === "link" ? "linked" : "copied"})`;
+      if (result.catalogRefreshRequiresRestart) {
+        statusMessage = `${addedMessage}. Restart Flint to let the model catalog detect the change.`;
+        appendAppLog(statusMessage, "warn");
+      } else {
+        appendAppLog(addedMessage, "info");
+      }
       byomOpen = false;
       resetByom();
     } catch (e: any) {
@@ -2988,8 +3025,14 @@
     templateEditSaving = true;
     templateEditError = "";
     try {
-      await setModelTemplate(templateEditAlias, templateEdit as any);
-      appendAppLog(`Updated prompt template for "${templateEditAlias}"`, "info");
+      const result = await setModelTemplate(templateEditAlias, templateEdit as any);
+      const updatedMessage = `Updated prompt template for "${templateEditAlias}"`;
+      if (result.catalogRefreshRequiresRestart) {
+        statusMessage = `${updatedMessage}. Restart Flint to let the model catalog detect the change.`;
+        appendAppLog(statusMessage, "warn");
+      } else {
+        appendAppLog(updatedMessage, "info");
+      }
       templateEditAlias = null;
       templateEdit = null;
     } catch (e: any) {
@@ -3452,9 +3495,7 @@ updateStateFromSdk();
     preferredEp?: string,
     opts?: { convenience?: boolean },
   ): Promise<string | undefined> {
-    // Both branches below can mutate the pool: a not-yet-running service is (re)started (which
-    // clears the sidecar's resident set), and an already-running one may still get a fresh
-    // `alias` loaded into it. Either must be fenced against an active benchmark run.
+    // Either branch may load a fresh alias, so both must be fenced against an active benchmark.
     const blocked = blockedByActiveBenchmark();
     if (blocked) {
       statusMessage = blocked;
@@ -3471,7 +3512,7 @@ updateStateFromSdk();
       );
       if (ensured.started) markNetworkSettingsApplied();
       if (alias) {
-        const resident = (state.pool || []).some((e: any) => e.alias === alias);
+        const resident = loadedPoolEntries.some((e: any) => e.alias === alias);
         if (!resident) await sdkLoadModel({ alias }, "audio");
         if (preferredEp && !ensured.started) {
           appendAppLog(
@@ -3618,7 +3659,7 @@ updateStateFromSdk();
     if (!state.serviceRunning) return;
     if (currentView === 'monitor') return; // the 5s poll above already feeds the watchdog
 
-    const resident = (state.pool ?? []).length > 0;
+    const resident = loadedPoolEntries.length > 0;
     const interval = setInterval(pollResources, resident ? 30000 : 60000);
     return () => clearInterval(interval);
   });
@@ -3681,7 +3722,7 @@ updateStateFromSdk();
   }
 
   function isSlotInPool(slot: CompareSlot): boolean {
-    return state.pool.some(
+    return loadedPoolEntries.some(
       (e: any) =>
         e.alias === slot.alias &&
         (slot.variantId ? e.variantId === slot.variantId : true),
@@ -4094,7 +4135,7 @@ updateStateFromSdk();
   }
 
   async function unloadCompareSlot(slot: CompareSlot, force = false): Promise<void> {
-    if (!force && !state.pool.some((e: any) => e.alias === slot.alias)) return;
+    if (!force && !loadedPoolEntries.some((e: any) => e.alias === slot.alias)) return;
     try {
       comparePrepStatus = `Unloading ${slot.label}…`;
       await sdkUnloadModel({ alias: slot.alias });
@@ -4115,7 +4156,7 @@ updateStateFromSdk();
     ctx: { preloadedAliases: Set<string>; loadedByCompare: Set<string>; allowUnloadPreloaded: boolean },
   ): Promise<boolean> {
     const weLoaded = ctx.loadedByCompare.has(slot.alias);
-    const inPool = state.pool.some((e: any) => e.alias === slot.alias);
+    const inPool = loadedPoolEntries.some((e: any) => e.alias === slot.alias);
     if (!inPool && !weLoaded) return false;
     const wasPreloaded = ctx.preloadedAliases.has(slot.alias);
     if (wasPreloaded && !ctx.allowUnloadPreloaded && !weLoaded) {
@@ -4241,7 +4282,7 @@ updateStateFromSdk();
     oneAtATime: boolean,
   ): { proceed: boolean; allowUnloadPreloaded: boolean } {
     const preloadedAliases = new Set(
-      (state.pool || []).map((e: any) => e.alias).filter(Boolean) as string[],
+      loadedPoolEntries.map((e: any) => e.alias).filter(Boolean) as string[],
     );
     if (preloadedAliases.size === 0) {
       return { proceed: true, allowUnloadPreloaded: false };
@@ -4252,7 +4293,7 @@ updateStateFromSdk();
     ];
     const variantSwaps = slots
       .map((s) => {
-        const entry = (state.pool || []).find((e: any) => e.alias === s.alias);
+        const entry = loadedPoolEntries.find((e: any) => e.alias === s.alias);
         if (!entry?.variantId || !s.variantId || entry.variantId === s.variantId) return null;
         return `${s.alias}: ${shortPoolVariantLabel(entry.variantId)} → ${shortPoolVariantLabel(s.variantId)}`;
       })
@@ -4348,7 +4389,7 @@ updateStateFromSdk();
       }
 
       const preloadedAliases = new Set(
-        (state.pool || []).map((e: any) => e.alias).filter(Boolean) as string[],
+        loadedPoolEntries.map((e: any) => e.alias).filter(Boolean) as string[],
       );
       const unloadCtx = {
         preloadedAliases,
@@ -4845,9 +4886,10 @@ updateStateFromSdk();
     const ok = await initializeSDK({
       appName: "flint",
       // Hydrated runtime policy and accelerator registration must land before HTTP startup or
-      // any model preload. Autostart is performed below after those prerequisites complete.
+      // any catalog read or model preload. The native catalog is fixed on first access, so reading
+      // it before provider registration permanently omits those provider-specific variants.
       autoStartService: false,
-      refreshCatalog: autoRefreshCatalogOnStartup,
+      refreshCatalog: false,
       servicePort: networkPort,
       bindAddress: networkBindAddress || undefined,
     });
@@ -4898,37 +4940,15 @@ updateStateFromSdk();
       const release = beginPoolMutation();
       try {
       statusMessage = "Connected to Foundry Local";
-      if (autoRefreshCatalogOnStartup) {
-        await loadModels();
-        await loadRecommendations();
-        await loadSTTModels();
-      } else {
+      if (!autoRefreshCatalogOnStartup) {
         appendAppLog(
           "Automatic startup catalog check is off; recommendations and configured startup preloads are skipped for this launch. Use Refresh catalog to browse models.",
           "info",
         );
       }
 
-      // A restored alias for a model that is no longer in the catalog would otherwise pin the
-      // selection forever, because the auto-select effect bails out whenever an alias is set.
-      //
-      // Not applied to an alias the active conversation asked for explicitly. That is a stored
-      // choice rather than a stale global fallback, so clearing it would replace the "not
-      // installed" explanation with a silently auto-selected substitute — and the conversation
-      // would still be storing the model it is no longer shown as using. Read live rather than
-      // from the startup snapshot, because the user may already have switched conversations.
-      if (
-        selectedModelAlias &&
-        selectedModelAlias !== activeConversationModelAlias() &&
-        state.models.length > 0 &&
-        !state.models.some((m: ModelInfo) => m.alias === selectedModelAlias)
-      ) {
-        appendAppLog(`Previously selected model "${selectedModelAlias}" is no longer available`, 'warn');
-        selectedModelAlias = "";
-        selectedModel = null;
-      }
-
       let acceleratorReadiness: AcceleratorReadiness;
+      let acceleratorRestartGuidance = "";
       try {
         acceleratorReadiness = await prepareHydratedRuntime({
           applyMemorySettings: async () => {
@@ -4964,6 +4984,7 @@ updateStateFromSdk();
               {
                 convenience: true,
                 expectedGeneration: readiness.generation,
+                deferCatalogRead: !autoRefreshCatalogOnStartup,
               },
             );
             if (ensured.started) markNetworkSettingsApplied();
@@ -4981,6 +5002,7 @@ updateStateFromSdk();
         }
         if (autoRefreshCatalogOnStartup) {
           await refreshCatalogModels();
+          statusMessage = `${state.models.length} models available`;
           if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
             throw new Error("Runtime changed while refreshing the model catalog");
           }
@@ -4988,11 +5010,23 @@ updateStateFromSdk();
           if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
             throw new Error("Runtime changed while refreshing recommendations");
           }
+          await loadSTTModels();
+          if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
+            throw new Error("Runtime changed while refreshing the speech model catalog");
+          }
         }
+        acceleratorRestartGuidance = resolveAcceleratorRestartGuidance(
+          acceleratorReadiness.registration,
+        );
       } catch (e: any) {
         statusMessage = `Runtime startup stopped before model preload: ${e?.message || e}`;
         appendAppLog(statusMessage, "error");
         return;
+      } finally {
+        // Initialization deliberately suppresses its own catalog read until providers are ready.
+        // Recovery after this point must use the hydrated user policy, not that bootstrap
+        // override — including when startup failed, since recovery still runs afterwards.
+        setAutomaticCatalogRefreshEnabled(autoRefreshCatalogOnStartup);
       }
       if (!startupAuthorization.isCurrent(startupAuthorizationToken)) return;
 
@@ -5151,6 +5185,9 @@ updateStateFromSdk();
           statusMessage =
             `${startupBlocked} startup model${startupBlocked !== 1 ? "s" : ""} skipped for unavailable acceleration`;
         }
+      }
+      if (acceleratorRestartGuidance) {
+        statusMessage = acceleratorRestartGuidance;
       }
       } finally {
         release();
@@ -5357,7 +5394,7 @@ updateStateFromSdk();
   }
 
   async function ensureHardwareAccel(
-    options?: { throwOnError?: boolean; refreshCatalog?: boolean },
+    options?: { throwOnError?: boolean; refreshCatalog?: boolean; forceRerun?: boolean },
   ): Promise<AcceleratorReadiness> {
     if (!state.ready) {
       return { generation: -1, registration: null, providers: [] };
@@ -5371,6 +5408,7 @@ updateStateFromSdk();
         () => {
           statusMessage = "Accelerator setup: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.";
         },
+        { forceRerun: options?.forceRerun },
       );
       if (options?.refreshCatalog !== false) {
         await refreshExecutionProviders({
@@ -5389,7 +5427,11 @@ updateStateFromSdk();
           throw new Error("Runtime changed while refreshing recommendations");
         }
       }
-      if (readiness.registration?.success === false) {
+      const restartGuidance = resolveAcceleratorRestartGuidance(readiness.registration);
+      if (restartGuidance) {
+        statusMessage = restartGuidance;
+        appendAppLog(statusMessage, "warn");
+      } else if (readiness.registration?.success === false) {
         statusMessage = readiness.registration.status || "Some accelerators could not be registered";
         appendAppLog(statusMessage, "warn");
       } else {
@@ -5914,7 +5956,7 @@ updateStateFromSdk();
     try {
       const nav = beginChatNavigation();
       const alreadyThis =
-        state.pool.some((e: any) => e.alias === model.alias && e.variantId === variantId);
+        loadedPoolEntries.some((e: any) => e.alias === model.alias && e.variantId === variantId);
       if (!alreadyThis) {
         statusMessage = `Loading ${model.alias} (${shortVariantLabel(variantId)})...`;
         appendAppLog(`Load & Chat: ${model.alias} variant ${variantId}`);
@@ -5976,6 +6018,22 @@ updateStateFromSdk();
     }
   }
 
+  /**
+   * The SDK refreshes live cache and pool state after deletion. A restart flag means a local
+   * catalog row cannot disappear until restart, or that the post-delete refresh itself failed.
+   */
+  function handleDeleteResult(
+    deleteResult: { catalogRefreshRequiresRestart?: boolean } | undefined,
+    successMessage: string,
+  ) {
+    if (deleteResult?.catalogRefreshRequiresRestart) {
+      statusMessage = `${successMessage}. Restart Flint to refresh the model catalog.`;
+      appendAppLog(statusMessage, "warn");
+    } else {
+      statusMessage = successMessage;
+    }
+  }
+
   async function deleteVariant(model: any, variantId: string) {
     const blocked = blockedByActiveBenchmark();
     if (blocked) {
@@ -5994,15 +6052,16 @@ updateStateFromSdk();
       const release = beginPoolMutation();
       try {
         statusMessage = `Deleting ${model.alias} (${label})...`;
-        const isLoadedVariant = state.pool.some(
+        const isLoadedVariant = loadedPoolEntries.some(
           (e: any) => e.alias === model.alias && e.variantId === variantId,
         );
         if (isLoadedVariant) {
           await sdkUnloadModel(model);
         }
-        await sdkDeleteModel(model, variantId);
-        // If no other variants remain cached, clear selection/meta like full delete
-        await refreshCatalogModels();
+        const result = await sdkDeleteModel(model, variantId);
+        const deletedMessage = `${model.alias} variant deleted (${label})`;
+        // If no other variants remain cached, clear selection/meta like full delete.
+        // sdkDeleteModel has already refreshed the catalog before it resolves.
         const refreshed = state.models.find((m: ModelInfo) => m.alias === model.alias);
         const anyCached =
           refreshed?.isCached ||
@@ -6016,7 +6075,7 @@ updateStateFromSdk();
             persistChat();
           }
         }
-        statusMessage = `${model.alias} variant deleted (${label})`;
+        handleDeleteResult(result, deletedMessage);
       } finally {
         release();
       }
@@ -6048,7 +6107,7 @@ updateStateFromSdk();
       startupModels = updated;
     } else {
       // Capture the currently loaded variant so the right device type reloads on startup
-      const activeVariantId = state.pool.find((e: any) => e.alias === alias)?.variantId ?? variantId;
+      const activeVariantId = loadedPoolEntries.find((e: any) => e.alias === alias)?.variantId ?? variantId;
       startupModels = { ...startupModels, [alias]: activeVariantId };
     }
     persistChat();
@@ -6077,7 +6136,7 @@ updateStateFromSdk();
         if (model.isLoaded) {
           await sdkUnloadModel(model);
         }
-        await sdkDeleteModel(model);
+        const result = await sdkDeleteModel(model);
         if (selectedModelAlias === model.alias) {
           selectedModelAlias = "";
         }
@@ -6087,8 +6146,7 @@ updateStateFromSdk();
           modelRuntimeMeta = nextMeta;
           persistChat();
         }
-        statusMessage = `${model.alias} deleted`;
-        await refreshCatalogModels();
+        handleDeleteResult(result, `${model.alias} deleted`);
       } finally {
         release();
       }
@@ -7312,7 +7370,7 @@ Output only the summary text, no preamble.`;
       <Icon name="monitor" size={16} />
       <div class="memory-alert-text">
         <strong>High memory usage — {formatAlertSummary(watchAlerts)}</strong>
-        <span>{formatAlertAdvice((state.pool ?? []).length)}</span>
+        <span>{formatAlertAdvice(loadedPoolEntries.length)}</span>
       </div>
       <button class="small" onclick={() => (currentView = "monitor")}>Open Monitor</button>
       <button class="small secondary" onclick={dismissWatchAlerts}>Dismiss</button>
@@ -7726,7 +7784,7 @@ Output only the summary text, no preamble.`;
                     </option>
                   {/each}
                 </select>
-                <button onclick={ensureHardwareAccel} disabled={!state.ready || providerRecheckBusy}>
+                <button onclick={() => ensureHardwareAccel({ forceRerun: true })} disabled={!state.ready || providerRecheckBusy}>
                   Install / Update Accelerators
                 </button>
                 <button
@@ -7817,10 +7875,10 @@ Output only the summary text, no preamble.`;
               </div>
             {/if}
 
-            {#if state.pool?.length}
+            {#if loadedPoolEntries.length}
               <div class="pool-panel">
                 <div class="pool-panel-header">
-                  <h3>Running ({state.pool.length} model{state.pool.length !== 1 ? 's' : ''})</h3>
+                  <h3>Running ({loadedPoolEntries.length} model{loadedPoolEntries.length !== 1 ? 's' : ''})</h3>
                   {#if state.poolStats}
                     <span class="pool-mem">
                       {state.poolStats.usedMemMb} MB used &nbsp;·&nbsp; {state.poolStats.freeMemMb} MB free of {state.poolStats.totalMemMb} MB
@@ -7828,7 +7886,7 @@ Output only the summary text, no preamble.`;
                   {/if}
                 </div>
                 <div class="pool-table">
-                  {#each state.pool as entry (entry.alias)}
+                  {#each loadedPoolEntries as entry (entry.alias)}
                     {@const shortVariant = entry.variantId?.split(':')[0]?.split('-').slice(-3).join('-') ?? '—'}
                     {@const tokens = state.poolStats?.tokenTotals?.find((t) => t.alias === entry.alias)}
                     <div class="pool-row">
@@ -7963,7 +8021,7 @@ Output only the summary text, no preamble.`;
                         {#if variantPanelOpen[model.alias]}
                           <div class="variant-list">
                             {#each (model as any).variants as variant (variant.id)}
-                              {@const isCurrentlyLoaded = state.pool.some((e) => e.variantId === variant.id)}
+                              {@const isCurrentlyLoaded = loadedPoolEntries.some((e) => e.variantId === variant.id)}
                               {@const badge = accelBadgeInfo(variant.deviceType, variant.executionProvider)}
                               {@const isCurrentChat =
                                 selectedModelAlias === model.alias && isCurrentlyLoaded}
@@ -10251,7 +10309,7 @@ Output only the summary text, no preamble.`;
                                 {:else}
                                   <span class="badge small">Not downloaded</span>
                                 {/if}
-                                {#if state.pool.some((e) => e.variantId === v.id)}
+                                {#if loadedPoolEntries.some((e) => e.variantId === v.id)}
                                   <span class="badge small loaded">Loaded</span>
                                 {/if}
                               </div>
