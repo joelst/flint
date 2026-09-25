@@ -51,7 +51,7 @@ const MULTIPART_MODEL_PEEK_BYTES = 16 * 1024;
 const MULTIPART_MODEL_MAX_CHARS = 256;
 // Usage is a small top-level object in OpenAI chat responses. Keep its independent
 // inspection bounded when the response itself is too large to normalize.
-const MAX_USAGE_METRICS_BYTES = 64 * 1024;
+const MAX_USAGE_METRICS_CHARS = 64 * 1024;
 const multipartModel = Symbol('multipartModel');
 const multipartPrefix = Symbol('multipartPrefix');
 const multipartEnded = Symbol('multipartEnded');
@@ -757,26 +757,94 @@ export function createGateway (options) {
 
   function createChatUsageInspector (metrics) {
     const decoder = new StringDecoder('utf8');
-    let pending = '';
     let captured = false;
+    let depth = 0;
+    let quoted = false;
+    let escaped = false;
+    let collectingKey = false;
+    let key = '';
+    let topLevelKey = null;
+    let waitingForUsage = false;
+    let usage = null;
+    let usageDepth = 0;
+    let usageQuoted = false;
+    let usageEscaped = false;
 
     function inspectText (text) {
       if (captured) return;
-      pending += text;
-      if (pending.length > MAX_USAGE_METRICS_BYTES) {
-        pending = pending.slice(-MAX_USAGE_METRICS_BYTES);
-      }
-      const match = /(?:^|[,{])\s*"usage"\s*:\s*\{/.exec(pending);
-      if (!match) return;
+      for (const char of text) {
+        if (usage !== null) {
+          if (usage.length === MAX_USAGE_METRICS_CHARS) {
+            usage = null;
+          } else {
+            usage += char;
+            if (usageQuoted) {
+              if (usageEscaped) usageEscaped = false;
+              else if (char === '\\') usageEscaped = true;
+              else if (char === '"') usageQuoted = false;
+            } else if (char === '"') {
+              usageQuoted = true;
+            } else if (char === '{') {
+              usageDepth++;
+            } else if (char === '}' && --usageDepth === 0) {
+              try {
+                captureChatUsageMetrics(JSON.parse(usage), metrics);
+                captured = true;
+                return;
+              } catch {
+                usage = null;
+              }
+            }
+          }
+        }
 
-      const start = pending.indexOf('{', match.index);
-      const end = findJsonObjectEnd(pending, start);
-      if (end === -1) return;
-      try {
-        captureChatUsageMetrics(JSON.parse(pending.slice(start, end + 1)), metrics);
-        captured = true;
-      } catch {
-        // The body remains a pass-through response; invalid usage is simply not metrics.
+        if (quoted) {
+          if (escaped) {
+            escaped = false;
+            if (collectingKey) key += char;
+          } else if (char === '\\') {
+            escaped = true;
+          } else if (char === '"') {
+            quoted = false;
+            if (collectingKey) {
+              topLevelKey = key;
+              collectingKey = false;
+            }
+          } else if (collectingKey) {
+            key += char;
+          }
+          continue;
+        }
+
+        if (waitingForUsage) {
+          if (/\s/.test(char)) continue;
+          waitingForUsage = false;
+          if (char === '{') {
+            usage = '{';
+            usageDepth = 1;
+            usageQuoted = false;
+            usageEscaped = false;
+          }
+        }
+
+        if (char === '{') {
+          depth++;
+          if (depth === 1) collectingKey = true;
+        } else if (char === '}') {
+          depth--;
+          if (depth < 1) topLevelKey = null;
+        } else if (char === ',' && depth === 1) {
+          collectingKey = true;
+          topLevelKey = null;
+        } else if (char === '"' && depth === 1) {
+          quoted = true;
+          if (collectingKey) {
+            key = '';
+          }
+        } else if (char === ':' && depth === 1) {
+          waitingForUsage = topLevelKey === 'usage';
+          topLevelKey = null;
+        }
       }
     }
 
@@ -788,25 +856,6 @@ export function createGateway (options) {
       if (!captured) inspectText(decoder.end());
     };
     return inspect;
-  }
-
-  function findJsonObjectEnd (text, start) {
-    let depth = 0;
-    let quoted = false;
-    let escaped = false;
-    for (let index = start; index < text.length; index++) {
-      const char = text[index];
-      if (quoted) {
-        if (escaped) escaped = false;
-        else if (char === '\\') escaped = true;
-        else if (char === '"') quoted = false;
-        continue;
-      }
-      if (char === '"') quoted = true;
-      else if (char === '{') depth++;
-      else if (char === '}' && --depth === 0) return index;
-    }
-    return -1;
   }
 
   function normalizeChatStream (metrics) {

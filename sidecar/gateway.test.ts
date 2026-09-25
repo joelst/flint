@@ -987,7 +987,13 @@ describe('gateway streaming', () => {
     upstream = await startUpstream((_req, res) => {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({
-        choices: [{ message: { role: 'assistant', content: 'x'.repeat(128) } }],
+        choices: [{
+          message: {
+            role: 'assistant',
+            content: 'x'.repeat(128),
+            usage: { prompt_tokens: 99, completion_tokens: 99 },
+          },
+        }],
         usage: { prompt_tokens: 9, completion_tokens: 4 },
       }));
     });
