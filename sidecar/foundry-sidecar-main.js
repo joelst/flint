@@ -2249,6 +2249,27 @@ function normalizeText (value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+function mergeSessionCleanupFailure (primaryFailure, cleanupFailure) {
+  if (!primaryFailure) return cleanupFailure;
+  const primaryMessage = primaryFailure?.message || String(primaryFailure);
+  const cleanupMessage = cleanupFailure?.message || String(cleanupFailure);
+  return new AggregateError(
+    [primaryFailure, cleanupFailure],
+    `${primaryMessage}; session disposal failed: ${cleanupMessage}`,
+    { cause: primaryFailure },
+  );
+}
+
+function disposeSession (session, primaryFailure = null) {
+  if (!session) return primaryFailure;
+  try {
+    session.dispose();
+    return primaryFailure;
+  } catch (cleanupFailure) {
+    return mergeSessionCleanupFailure(primaryFailure, cleanupFailure);
+  }
+}
+
 function mergeToolCallDeltas (target, deltas) {
   for (const delta of Array.isArray(deltas) ? deltas : []) {
     const index = Number.isInteger(delta?.index) ? delta.index : target.length;
@@ -2456,6 +2477,8 @@ function createSessionChatClient (chatModel, sdkModule) {
         ...serializeSettings(),
       };
       let session;
+      let result;
+      let failure = null;
       try {
         const request = new Request();
         request.addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
@@ -2465,15 +2488,16 @@ function createSessionChatClient (chatModel, sdkModule) {
         if (text === undefined) {
           throw new Error(`Chat completion for model '${chatModel.id}' returned no openai-json text item.`);
         }
-        return JSON.parse(text);
+        result = JSON.parse(text);
       } catch (err) {
-        throw new Error(
+        failure = new Error(
           `Chat completion failed for model '${chatModel.id}': ${err?.message || err}`,
           { cause: err },
         );
-      } finally {
-        session?.dispose();
       }
+      failure = disposeSession(session, failure);
+      if (failure) throw failure;
+      return result;
     },
     completeStreamingChat (messages, tools, options = {}) {
       const requestJson = {
@@ -2488,6 +2512,7 @@ function createSessionChatClient (chatModel, sdkModule) {
       return {
         async * [Symbol.asyncIterator] () {
           let session;
+          let failure = null;
           try {
             const request = new Request();
             request.addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
@@ -2497,14 +2522,15 @@ function createSessionChatClient (chatModel, sdkModule) {
               yield JSON.parse(item.text);
             }
           } catch (err) {
-            if (err?.name === 'AbortError') throw err;
-            throw new Error(
-              `Streaming chat completion failed for model '${chatModel.id}': ${err?.message || err}`,
-              { cause: err },
-            );
-          } finally {
-            session?.dispose();
+            failure = err?.name === 'AbortError'
+              ? err
+              : new Error(
+                  `Streaming chat completion failed for model '${chatModel.id}': ${err?.message || err}`,
+                  { cause: err },
+                );
           }
+          failure = disposeSession(session, failure);
+          if (failure) throw failure;
         }
       };
     },
@@ -2533,6 +2559,8 @@ function createSessionEmbeddingClient (embedModel, sdkModule) {
     async generateEmbeddings (inputs) {
       const requestJson = { model: embedModel.id, input: inputs };
       let session;
+      let result;
+      let failure = null;
       try {
         const request = new Request();
         request.addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
@@ -2542,15 +2570,16 @@ function createSessionEmbeddingClient (embedModel, sdkModule) {
         if (text === undefined) {
           throw new Error(`Embedding generation for model '${embedModel.id}' returned no openai-json text item.`);
         }
-        return JSON.parse(text);
+        result = JSON.parse(text);
       } catch (err) {
-        throw new Error(
+        failure = new Error(
           `Embedding generation failed for model '${embedModel.id}': ${err?.message || err}`,
           { cause: err },
         );
-      } finally {
-        session?.dispose();
       }
+      failure = disposeSession(session, failure);
+      if (failure) throw failure;
+      return result;
     },
   };
 }
@@ -3579,6 +3608,7 @@ rl.on('line', async (line) => {
           if (shouldStream && typeof client?.completeStreamingChat === 'function') {
             let content = '';
             const toolCalls = [];
+            let chatFinishReason = null;
             for await (const chunk of client.completeStreamingChat(
               sdkMessages,
               payload.tools,
@@ -3587,6 +3617,8 @@ rl.on('line', async (line) => {
               const usage = chunk?.usage;
               chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
               chatTokensOut = usage?.completion_tokens ?? usage?.output_tokens ?? chatTokensOut;
+              const finishReason = chunk?.choices?.[0]?.finish_reason;
+              if (finishReason != null) chatFinishReason = finishReason;
               if (canceledRequests.has(id)) continue;
               mergeToolCallDeltas(toolCalls, chunk?.choices?.[0]?.delta?.tool_calls);
               const deltaText = chunk?.choices?.[0]?.delta?.content;
@@ -3620,6 +3652,7 @@ rl.on('line', async (line) => {
               result: {
                 ...normalizeChatResponse({
                   choices: [{
+                    finish_reason: chatFinishReason,
                     message: {
                       role: 'assistant',
                       content,
@@ -3689,6 +3722,7 @@ rl.on('line', async (line) => {
           } else if (typeof client?.completeStreamingChat === 'function') {
             let content = '';
             const toolCalls = [];
+            let chatFinishReason = null;
             for await (const chunk of client.completeStreamingChat(
               sdkMessages,
               payload.tools,
@@ -3697,6 +3731,8 @@ rl.on('line', async (line) => {
               const usage = chunk?.usage;
               chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
               chatTokensOut = usage?.completion_tokens ?? usage?.output_tokens ?? chatTokensOut;
+              const finishReason = chunk?.choices?.[0]?.finish_reason;
+              if (finishReason != null) chatFinishReason = finishReason;
               if (canceledRequests.has(id)) continue;
               mergeToolCallDeltas(toolCalls, chunk?.choices?.[0]?.delta?.tool_calls);
               const delta = chunk?.choices?.[0]?.delta?.content || '';
@@ -3712,6 +3748,7 @@ rl.on('line', async (line) => {
               result: {
                 ...normalizeChatResponse({
                   choices: [{
+                    finish_reason: chatFinishReason,
                     message: {
                       role: 'assistant',
                       content,

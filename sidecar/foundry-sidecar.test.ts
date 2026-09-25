@@ -3107,7 +3107,7 @@ describe('chatCompletion ChatSession path', () => {
   //                           is not valid JSON, to verify JSON.parse failures are wrapped too.
   //   'session-constructor-error' - the ChatSession constructor itself throws, to verify that
   //                           failure is wrapped too (construction happens inside the try/catch).
-  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-abort' | 'session-empty-output' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error' | 'session-stream-tool';
+  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-error-dispose' | 'session-abort' | 'session-empty-output' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error' | 'session-stream-tool';
   function fakeSdk(sdkMode: ChatFakeSdkMode) {
     const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only';
     const hasSession = sdkMode !== 'legacy-only';
@@ -3138,10 +3138,10 @@ describe('chatCompletion ChatSession path', () => {
       `    if (${JSON.stringify(sdkMode)} === 'session-constructor-error') throw new Error('native ChatSession construction failed');`,
       '    this.model = model;',
       '  }',
-      `  dispose() { note('session-chat-disposed'); if (${JSON.stringify(sdkMode)} === 'session-dispose-error') throw new Error('native ChatSession disposal failed'); }`,
+      `  dispose() { note('session-chat-disposed'); if (['session-dispose-error', 'session-error-dispose'].includes(${JSON.stringify(sdkMode)})) throw new Error('native ChatSession disposal failed'); }`,
       '  async processRequest(req) {',
       "    note('session-chat');",
-      `    if (${JSON.stringify(sdkMode)} === 'session-error') throw new Error('native processRequest failed');`,
+      `    if (['session-error', 'session-error-dispose'].includes(${JSON.stringify(sdkMode)})) throw new Error('native processRequest failed');`,
       `    if (${JSON.stringify(sdkMode)} === 'session-empty-output') return { output: [] };`,
       `    if (${JSON.stringify(sdkMode)} === 'session-malformed-json') return { output: [{ type: 'text', textType: 'openai-json', text: 'not json' }] };`,
       '    const requestJson = JSON.parse(req.items[0].text);',
@@ -3160,12 +3160,12 @@ describe('chatCompletion ChatSession path', () => {
       '    return {',
       '      async *[Symbol.asyncIterator]() {',
       "        note('session-chat');",
-      `        if (${JSON.stringify(sdkMode)} === 'session-error') throw new Error('native stream failed');`,
+      `        if (['session-error', 'session-error-dispose'].includes(${JSON.stringify(sdkMode)})) throw new Error('native stream failed');`,
       `        if (${JSON.stringify(sdkMode)} === 'session-abort') { const e = new Error('native stream aborted'); e.name = 'AbortError'; throw e; }`,
       "        yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { content: 'session ' } }] }) };",
       `        if (${JSON.stringify(sdkMode)} === 'session-stream-tool') yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-1', type: 'function', function: { name: 'read_status', arguments: '{' } }] } }] }) };`,
       `        if (${JSON.stringify(sdkMode)} === 'session-stream-tool') yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '}' } }] } }] }) };`,
-      "        yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { content: 'reply' } }], usage: { prompt_tokens: 5, completion_tokens: 6 } }) };",
+      `        yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { content: 'reply' }, finish_reason: ${JSON.stringify(sdkMode === 'session-stream-tool' ? 'tool_calls' : 'stop')} }], usage: { prompt_tokens: 5, completion_tokens: 6 } }) };`,
       '      },',
       '    };',
       '  }',
@@ -3311,6 +3311,7 @@ describe('chatCompletion ChatSession path', () => {
     const res = await chatted;
     expect(res.ok).toBe(true);
     expect(res.result.choices[0].message.content).toBe('session reply');
+    expect(res.result.choices[0].finish_reason).toBe('stop');
     expect(events()).toContain('session-chat');
     expect(events()).toContain('session-chat-disposed');
     expect(events()).not.toContain('legacy-chat');
@@ -3333,6 +3334,7 @@ describe('chatCompletion ChatSession path', () => {
       type: 'function',
       function: { name: 'read_status', arguments: '{}' },
     }]);
+    expect(res.result.choices[0].finish_reason).toBe('tool_calls');
   }, 30000);
 
 
@@ -3398,6 +3400,23 @@ describe('chatCompletion ChatSession path', () => {
     expect(events()).toContain('session-chat-disposed');
   }, 30000);
 
+  it('preserves the primary buffered chat failure when disposal also fails', async () => {
+    await startSidecar('session-error-dispose');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Chat completion failed for model 'fake-variant'");
+    expect(String(res.error)).toContain('native processRequest failed');
+    expect(String(res.error)).toContain('session disposal failed');
+    expect(String(res.error)).toContain('native ChatSession disposal failed');
+  }, 30000);
+
   it('wraps a streaming ChatSession failure the same way the deprecated ChatClient does', async () => {
     await startSidecar('session-error');
     const chatted = waitForLine(proc, (msg) => msg.id === 3 && msg.ok !== true, 10000);
@@ -3430,6 +3449,24 @@ describe('chatCompletion ChatSession path', () => {
     expect(String(res.error)).not.toContain('Streaming chat completion failed');
     expect(String(res.error)).toContain('native stream aborted');
     expect(events()).toContain('session-chat-disposed');
+  }, 30000);
+
+  it('preserves the primary streaming chat failure when disposal also fails', async () => {
+    await startSidecar('session-error-dispose');
+    const chatted = waitForLine(proc, (msg) => msg.id === 3 && msg.ok !== true, 10000);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+      stream: true,
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Streaming chat completion failed for model 'fake-variant'");
+    expect(String(res.error)).toContain('native stream failed');
+    expect(String(res.error)).toContain('session disposal failed');
+    expect(String(res.error)).toContain('native ChatSession disposal failed');
   }, 30000);
 
   it('wraps a buffered ChatSession constructor failure the same way a processRequest failure is wrapped', async () => {
@@ -3529,7 +3566,7 @@ describe('embedTexts EmbeddingsSession path', () => {
   //                           is not valid JSON, to verify JSON.parse failures are wrapped too.
   //   'session-constructor-error' - the EmbeddingsSession constructor itself throws, to verify
   //                           that failure is wrapped too (construction happens inside try/catch).
-  type EmbedFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-empty-output' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error';
+  type EmbedFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-error-dispose' | 'session-empty-output' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error';
   function fakeSdk(sdkMode: EmbedFakeSdkMode) {
     const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only';
     const hasSession = sdkMode !== 'legacy-only';
@@ -3555,10 +3592,10 @@ describe('embedTexts EmbeddingsSession path', () => {
       `    if (${JSON.stringify(sdkMode)} === 'session-constructor-error') throw new Error('native EmbeddingsSession construction failed');`,
       '    this.model = model;',
       '  }',
-      `  dispose() { note('session-embed-disposed'); if (${JSON.stringify(sdkMode)} === 'session-dispose-error') throw new Error('native EmbeddingsSession disposal failed'); }`,
+      `  dispose() { note('session-embed-disposed'); if (['session-dispose-error', 'session-error-dispose'].includes(${JSON.stringify(sdkMode)})) throw new Error('native EmbeddingsSession disposal failed'); }`,
       '  async processRequest(req) {',
       "    note('session-embed');",
-      `    if (${JSON.stringify(sdkMode)} === 'session-error') throw new Error('native embedding request failed');`,
+      `    if (['session-error', 'session-error-dispose'].includes(${JSON.stringify(sdkMode)})) throw new Error('native embedding request failed');`,
       `    if (${JSON.stringify(sdkMode)} === 'session-empty-output') return { output: [] };`,
       `    if (${JSON.stringify(sdkMode)} === 'session-malformed-json') return { output: [{ type: 'text', textType: 'openai-json', text: 'not json' }] };`,
       '    const requestJson = JSON.parse(req.items[0].text);',
@@ -3676,6 +3713,18 @@ describe('embedTexts EmbeddingsSession path', () => {
     expect(String(res.error)).toContain("Embedding generation failed for model 'fake-embed-variant'");
     expect(String(res.error)).toContain('native embedding request failed');
     expect(events()).toContain('session-embed-disposed');
+  }, 30000);
+
+  it('preserves the primary embedding failure when disposal also fails', async () => {
+    await startSidecar('session-error-dispose');
+    const embedded = reply(3);
+    send({ id: 3, cmd: 'embedTexts', model: 'fake-model', inputs: ['hello'] });
+    const res = await embedded;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Embedding generation failed for model 'fake-embed-variant'");
+    expect(String(res.error)).toContain('native embedding request failed');
+    expect(String(res.error)).toContain('session disposal failed');
+    expect(String(res.error)).toContain('native EmbeddingsSession disposal failed');
   }, 30000);
 
   it('wraps a resolved response with no openai-json output the same way a thrown failure is wrapped', async () => {
