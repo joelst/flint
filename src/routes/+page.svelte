@@ -9199,9 +9199,11 @@ Output only the summary text, no preamble.`;
           <h2>Audio Transcription</h2>
 
           <p class="notice">
-            Selecting an audio model from the list here will (re)start the service with that model.
-            Chat and audio share one playground endpoint, so only one model is active at a time.
-            <br><small>For best results on long/complex audio (e.g. Text readings with names), use the largest STT model your hardware supports.</small>
+            Audio uses STT models (Whisper etc.) via the sidecar + local service.
+            Selecting one here will (re)start the service with that model.
+            Chat and audio share one endpoint, so only one model is active at a time.
+            New STT families appear automatically from catalog metadata (task/capabilities).
+            <br><small>For best results on long/complex audio (e.g. Text readings with names), use the largest STT model your hardware supports. Tiny models often hallucinate or repeat words.</small>
           </p>
 
           <!-- STT model selector (independent of chat selectedModelAlias) -->
