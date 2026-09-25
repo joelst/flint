@@ -518,6 +518,7 @@ async function runCatalogMutation(mutate, operation, onProgress, options) {
 }
 
 let FoundryLocalManager = null;
+let cachedSdkModule = null;
 let initConfig = null; // { appName, logLevel } — kept so startService can re-create manager with webServiceUrls
 let nativeServiceStartAttempted = false;
 const canceledRequests = new Set();
@@ -2229,6 +2230,61 @@ function buildTranscriptResult (candidate, extras = {}) {
   return { ...base, ...extras };
 }
 
+// Attempt transcription via the new Session/Request/Item AudioSession API (foundry-local-sdk
+// 2.0.1+), which will replace the deprecated AudioClient before its end-of-2026 removal.
+//
+// This is intentionally defensive/best-effort for the first rollout: AudioSession construction
+// succeeds for any automatic-speech-recognition model (task validation only, per session.js),
+// but a one-shot Item.audioFromUri() request only actually works today for Whisper-family models.
+// Nemotron streaming-audio models require raw 16kHz mono PCM pushed via ItemQueue instead (a
+// different, not-yet-implemented request shape — tracked separately), and Parakeet has no working
+// AudioSession request shape at all yet (confirmed via manual testing against SDK 2.0.1). Both
+// reject this one-shot request with a native "does not support audio processing" error, so any
+// failure here — construction or the request itself — falls back to the legacy AudioClient path
+// unchanged, rather than surfacing an error to the user.
+//
+// Returns `{ ok: true, candidate }` on success, or `{ ok: false, reason }` on any failure (reason
+// is a short string for debug logging only, never surfaced to the user).
+async function tryAudioSessionTranscription (sdkModule, audioModel, tempPath, payload) {
+  const { AudioSession, Request, Item } = sdkModule || {};
+  if (typeof AudioSession !== 'function' || typeof Request !== 'function' || !Item) {
+    return { ok: false, reason: 'AudioSession not exported by this SDK build' };
+  }
+
+  let session;
+  try {
+    session = new AudioSession(audioModel);
+  } catch (err) {
+    return { ok: false, reason: `AudioSession construction failed: ${err?.message || err}` };
+  }
+
+  try {
+    const search = {};
+    if (typeof payload.temperature === 'number') search.temperature = payload.temperature;
+    const additionalOptions = (payload.language && payload.language !== 'auto')
+      ? { language: payload.language }
+      : undefined;
+
+    const request = new Request().addItem(Item.audioFromUri(tempPath));
+    request.setOptions({
+      ...(Object.keys(search).length ? { search } : {}),
+      ...(additionalOptions ? { additionalOptions } : {})
+    });
+
+    const response = await session.processRequest(request);
+    const speechResult = response.output.find((item) => item.type === 'speechResult');
+    if (!speechResult || !normalizeText(speechResult.text)) {
+      return { ok: false, reason: 'AudioSession produced no speechResult text' };
+    }
+
+    return { ok: true, candidate: extractTranscriptCandidate(speechResult) };
+  } catch (err) {
+    return { ok: false, reason: `AudioSession request failed: ${err?.message || err}` };
+  } finally {
+    try { session.dispose(); } catch {}
+  }
+}
+
 // --- Disk log ---
 // Date is computed once at startup; a sidecar running past midnight continues to the same file.
 // The bounded async writer keeps logging off the request path without allowing an unbounded queue.
@@ -2479,6 +2535,7 @@ async function getFoundryManager () {
     // Try normal module resolution (works in dev when node_modules is present)
     const mod = await import('foundry-local-sdk');
     FoundryLocalManager = mod.FoundryLocalManager;
+    cachedSdkModule = mod;
     return FoundryLocalManager;
   } catch (err) {
     log('warn', `Normal SDK import failed (${err?.message || err}), trying bundled resource paths`);
@@ -2500,6 +2557,7 @@ async function getFoundryManager () {
       log('info', `Loading Foundry SDK from ${sdkEntry}`);
       const mod = await import(toFileUrl(sdkEntry));
       FoundryLocalManager = mod.FoundryLocalManager;
+      cachedSdkModule = mod;
       return FoundryLocalManager;
     } catch (e) {
       lastErr = e;
@@ -2510,6 +2568,14 @@ async function getFoundryManager () {
     'Could not load foundry-local-sdk from packaged resources. ' +
     'Expected foundry-local-sdk next to the sidecar or under node_modules.'
   );
+}
+
+// Returns the full foundry-local-sdk module namespace (AudioSession, Request, Item, ...),
+// reusing whichever load path getFoundryManager() already resolved. Callers that only need
+// FoundryLocalManager should keep using getFoundryManager() directly.
+async function getFoundrySdkModule () {
+  await getFoundryManager();
+  return cachedSdkModule;
 }
 
 rl.on('line', async (line) => {
@@ -3482,6 +3548,38 @@ rl.on('line', async (line) => {
         const tempFileName = `flint-audio-${Date.now()}-${baseName}`;
         tempPath = path.join(os.tmpdir(), tempFileName);
         await fs.promises.writeFile(tempPath, bytes);
+
+        // Try the new Session/Request/Item AudioSession API first (see tryAudioSessionTranscription
+        // for scope/limitations); any failure falls back to the legacy AudioClient/HTTP paths below
+        // unchanged, so this is purely additive for models where it already works (Whisper family).
+        let sdkModule = null;
+        try {
+          sdkModule = await getFoundrySdkModule();
+        } catch (err) {
+          log('debug', `AudioSession: could not resolve SDK module (${err?.message || err})`);
+        }
+        if (sdkModule) {
+          const attempt = await tryAudioSessionTranscription(sdkModule, audioModel, tempPath, payload);
+          if (attempt.ok) {
+            const result = buildTranscriptResult(attempt.candidate, {
+              transcriptionPath: 'audioSession'
+            });
+            audioOk = true;
+            reply({
+              ok: true,
+              result: {
+                ...result,
+                acceleration: {
+                  requested: preferred?.requested ?? null,
+                  preferredApplied: preferred?.applied ?? null,
+                  active: await detectActiveExecutionProvider(audioModel)
+                }
+              }
+            });
+            return;
+          }
+          log('debug', `AudioSession transcription unavailable, using legacy path: ${attempt.reason}`);
+        }
 
         // Prefer direct AudioClient (like we do for chat) — this avoids relying on the web service HTTP route
         // which may return 404 for /audio/transcriptions even for Whisper models.

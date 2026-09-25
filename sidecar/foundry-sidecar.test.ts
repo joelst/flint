@@ -2712,6 +2712,184 @@ describe('guarded idle unload against concurrent model use', () => {
   }, 30000);
 });
 
+describe('transcribeAudio AudioSession path', () => {
+  // A minimal fake foundry-local-sdk exposing the Session/Request/Item surface alongside the
+  // legacy AudioClient, so both the new and old transcription paths are reachable from the same
+  // fake model. `audioSessionMode` controls whether AudioSession behaves like it does for a
+  // Whisper model today (real transcription) or like Nemotron/Parakeet (construction or the
+  // request itself throws), to exercise the defensive fallback in tryAudioSessionTranscription.
+  function fakeSdk(audioSessionMode: 'success' | 'construction-throws' | 'request-throws') {
+    return [
+      "import fs from 'node:fs';",
+      'const note = (event) => fs.appendFileSync(process.env.FLINT_TEST_EVENT_LOG, event + "\\n");',
+      'class FakeModel {',
+      "  constructor(alias) { this.alias = alias; this.id = 'fake-variant'; this.loaded = false; }",
+      "  async load() { this.loaded = true; }",
+      '  isLoaded() { return this.loaded; }',
+      "  getExecutionProvider() { return 'CPUExecutionProvider'; }",
+      '  createAudioClient() {',
+      '    return {',
+      '      settings: {},',
+      "      async *transcribeStreaming() { note('legacy-transcribe'); yield { text: 'legacy hello world transcript' }; },",
+      "      async transcribe() { note('legacy-transcribe'); return { text: 'legacy hello world transcript' }; },",
+      '    };',
+      '  }',
+      '}',
+      'class FakeAudioSession {',
+      '  constructor(model) {',
+      `    if (${JSON.stringify(audioSessionMode)} === 'construction-throws') throw new TypeError('unsupported task');`,
+      '    this.model = model;',
+      '  }',
+      '  dispose() {}',
+      '  async processRequest(req) {',
+      `    if (${JSON.stringify(audioSessionMode)} === 'request-throws') throw new Error('does not support audio processing');`,
+      "    note('audioSession-processRequest');",
+      '    return {',
+      "      output: [{ type: 'speechResult', text: 'timed hello world transcript', segments: [{ type: 'speechSegment', kind: 'final', text: 'timed hello world transcript', startTimeMs: 0, endTimeMs: 1200 }] }],",
+      "      finishReason: 'stop',",
+      '      usage: { promptTokens: 1, completionTokens: 4, totalTokens: 5 },',
+      '    };',
+      '  }',
+      '}',
+      'class FakeRequest {',
+      '  addItem() { return this; }',
+      '  setOptions() { return this; }',
+      '}',
+      "const Item = { audioFromUri: (uri) => ({ type: 'audio', uri }) };",
+      'class FakeManager {',
+      '  constructor() { this.catalog = { getModel: async (alias) => new FakeModel(alias), getModels: async () => [] }; }',
+      '  static create() { return new FakeManager(); }',
+      '}',
+      'export { FakeManager as FoundryLocalManager, FakeAudioSession as AudioSession, FakeRequest as Request, Item };',
+    ].join('\n');
+  }
+
+  let homeDir: string;
+  let eventLog: string;
+  let proc: ChildProcessWithoutNullStreams;
+
+  const events = () => {
+    try {
+      return readFileSync(eventLog, 'utf8').split('\n').filter(Boolean);
+    } catch {
+      return [];
+    }
+  };
+  const send = (msg: object) => proc.stdin.write(`${JSON.stringify(msg)}\n`);
+  const reply = (id: number) => waitForLine(proc, (msg) => msg.id === id, 10000);
+
+  async function startSidecar(audioSessionMode: 'success' | 'construction-throws' | 'request-throws') {
+    homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-audiosession-'));
+    eventLog = join(homeDir, 'events.log');
+    const corePath = join(homeDir, 'fake-core.dylib');
+    writeFileSync(corePath, '');
+    const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
+    const sdk = fakeSdk(audioSessionMode);
+    writeFileSync(loaderPath, [
+      `const sdk = ${JSON.stringify(sdk)};`,
+      'export async function resolve(specifier, context, nextResolve) {',
+      "  if (specifier === 'foundry-local-sdk') return { url: 'data:text/javascript,' + encodeURIComponent(sdk), shortCircuit: true };",
+      '  return nextResolve(specifier, context);',
+      '}',
+      'export async function load(url, context, nextLoad) {',
+      "  if (url.startsWith('data:text/javascript,')) return { format: 'module', source: decodeURIComponent(url.slice('data:text/javascript,'.length)), shortCircuit: true };",
+      '  return nextLoad(url, context);',
+      '}',
+    ].join('\n'));
+    proc = spawn(process.execPath, [
+      '--experimental-loader', pathToFileURL(loaderPath).href, 'sidecar/foundry-sidecar.js',
+    ], {
+      cwd: process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        HOME: homeDir,
+        USERPROFILE: homeDir,
+        FLINT_FOUNDRY_CORE_PATH: corePath,
+        FLINT_TEST_EVENT_LOG: eventLog,
+      },
+    });
+    await waitForLine(proc, (msg) => msg.ready === true);
+    const init = reply(1);
+    send({ id: 1, cmd: 'init', appName: 'flint-test', logLevel: 'info' });
+    expect((await init).ok).toBe(true);
+    const loaded = reply(2);
+    send({ id: 2, cmd: 'load', alias: 'fake-model' });
+    expect((await loaded).ok).toBe(true);
+  }
+
+  afterEach(async () => {
+    await killAndWait(proc);
+    rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  function wavBase64(): string {
+    const wav = Buffer.alloc(44);
+    wav.write('RIFF', 0, 'ascii');
+    wav.writeUInt32LE(36, 4);
+    wav.write('WAVE', 8, 'ascii');
+    return wav.toString('base64');
+  }
+
+  it('uses the AudioSession result when the model supports it (Whisper-like)', async () => {
+    await startSidecar('success');
+    const transcribed = reply(3);
+    send({
+      id: 3,
+      cmd: 'transcribeAudio',
+      audioBase64: wavBase64(),
+      mimeType: 'audio/wav',
+      fileName: 'probe.wav',
+      model: 'fake-model',
+      language: 'en',
+    });
+    const res = await transcribed;
+    expect(res.ok).toBe(true);
+    expect(res.result.text).toBe('timed hello world transcript');
+    expect(res.result.transcriptionPath).toBe('audioSession');
+    expect(events()).toContain('audioSession-processRequest');
+    expect(events()).not.toContain('legacy-transcribe');
+  }, 30000);
+
+  it('falls back to the legacy AudioClient path when AudioSession construction throws (Nemotron/Parakeet-like)', async () => {
+    await startSidecar('construction-throws');
+    const transcribed = reply(3);
+    send({
+      id: 3,
+      cmd: 'transcribeAudio',
+      audioBase64: wavBase64(),
+      mimeType: 'audio/wav',
+      fileName: 'probe.wav',
+      model: 'fake-model',
+      language: 'en',
+    });
+    const res = await transcribed;
+    expect(res.ok).toBe(true);
+    expect(res.result.text).toContain('legacy hello world transcript');
+    expect(res.result.transcriptionPath).not.toBe('audioSession');
+    expect(events()).toContain('legacy-transcribe');
+  }, 30000);
+
+  it('falls back to the legacy AudioClient path when the AudioSession request itself fails (Nemotron/Parakeet-like)', async () => {
+    await startSidecar('request-throws');
+    const transcribed = reply(3);
+    send({
+      id: 3,
+      cmd: 'transcribeAudio',
+      audioBase64: wavBase64(),
+      mimeType: 'audio/wav',
+      fileName: 'probe.wav',
+      model: 'fake-model',
+      language: 'en',
+    });
+    const res = await transcribed;
+    expect(res.ok).toBe(true);
+    expect(res.result.text).toContain('legacy hello world transcript');
+    expect(res.result.transcriptionPath).not.toBe('audioSession');
+    expect(events()).toContain('legacy-transcribe');
+  }, 30000);
+});
+
 describe('accelerator registration queue', () => {
   // Startup, Install / Update Accelerators, and Recheck Providers all reach
   // downloadAndRegisterEps. The fake logs each native call so the test can see
