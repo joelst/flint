@@ -96,7 +96,12 @@ describe('planTranscriptionWindows', () => {
   it('returns a single window for short audio', () => {
     const windows = planTranscriptionWindows(20, []);
     expect(windows).toHaveLength(1);
-    expect(windows[0]).toMatchObject({ startSec: 0, endSec: 20, overlapsPrevious: false });
+    expect(windows[0]).toMatchObject({
+      startSec: 0,
+      endSec: 20,
+      snappedEnd: false,
+      overlapsPrevious: false,
+    });
   });
 
   it('returns nothing for empty or invalid audio', () => {
@@ -119,9 +124,11 @@ describe('planTranscriptionWindows', () => {
     const windows = planTranscriptionWindows(120, runs);
     expect(windows[0].endSec).toBe(27);
     expect(windows[0].hardSplitEnd).toBe(false);
+    expect(windows[0].snappedEnd).toBe(true);
     // A silence cut loses no words, so the next window starts exactly at the cut.
     expect(windows[1].startSec).toBe(27);
     expect(windows[1].overlapsPrevious).toBe(false);
+    expect(windows[windows.length - 1].snappedEnd).toBe(false);
   });
 
   it('ignores silence runs outside the search window', () => {
@@ -131,6 +138,7 @@ describe('planTranscriptionWindows', () => {
       { startSec: 89, endSec: 91, centerSec: 90 },
     ]);
     expect(windows[0].hardSplitEnd).toBe(true);
+    expect(windows[0].snappedEnd).toBe(false);
     expect(windows[0].endSec).toBe(28);
   });
 

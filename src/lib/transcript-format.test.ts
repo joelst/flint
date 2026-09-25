@@ -4,6 +4,7 @@ import {
   formatVttTime,
   formatClockTime,
   buildSrt,
+  buildSrtTimingMetadata,
   buildVtt,
   buildTimestampedText,
   TIMESTAMP_DISCLAIMER,
@@ -60,6 +61,14 @@ describe('buildSrt', () => {
   it('returns empty string when there is nothing to export', () => {
     expect(buildSrt([])).toBe('');
     expect(buildSrt([{ index: 0, startSec: 0, endSec: 1, text: '' }])).toBe('');
+  });
+
+  it('provides truthful timing-source metadata to accompany SRT exports', () => {
+    const note = buildSrtTimingMetadata();
+    expect(note).toContain('Flint');
+    expect(note).toContain('silence detection is used when available');
+    expect(note).toContain('fixed-length windows as a fallback');
+    expect(note.endsWith('\n')).toBe(true);
   });
 
   it('guarantees a non-zero cue duration so players accept the file', () => {

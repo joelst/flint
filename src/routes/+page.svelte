@@ -8,6 +8,7 @@
   import { planSegmentation } from "$lib/audio-segmentation";
   import {
     buildSrt,
+    buildSrtTimingMetadata,
     buildVtt,
     buildTimestampedText,
     formatClockTime,
@@ -3789,7 +3790,7 @@ Output only the summary text, no preamble.`;
           startSec: segStartSec,
           endSec: Math.max(win.endSec, segStartSec + 0.05),
           text: t,
-          snapped: !win.hardSplitEnd,
+          snapped: win.snappedEnd,
         });
       } catch (e) {
         console.warn('Chunk transcription failed', e);
@@ -3981,6 +3982,20 @@ Output only the summary text, no preamble.`;
     anchor.click();
     URL.revokeObjectURL(url);
     statusMessage = `Captions downloaded: ${fileName}`;
+  }
+
+  function downloadCaptionTimingNote() {
+    if (!transcriptionSegments.length) return;
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const fileName = `flint-transcription-${stamp}.timing.txt`;
+    const blob = new Blob([buildSrtTimingMetadata()], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = fileName;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    statusMessage = `Timing note downloaded: ${fileName}`;
   }
 </script>
 
@@ -5421,6 +5436,7 @@ Output only the summary text, no preamble.`;
                 {#if transcriptionSegments.length > 0}
                   <button onclick={copyTimestampedTranscript}>Copy with times</button>
                   <button onclick={() => downloadCaptions("srt")}>Download .srt</button>
+                  <button onclick={downloadCaptionTimingNote}>Download timing note</button>
                   <button onclick={() => downloadCaptions("vtt")}>Download .vtt</button>
                 {/if}
                 <button

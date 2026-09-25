@@ -16,7 +16,7 @@ export interface TranscriptSegment {
 }
 
 export const TIMESTAMP_DISCLAIMER =
-  'Timestamps are approximate. They are derived from silence detection in the audio, not reported by the model.';
+  "Timestamps are approximate. They are based on Flint's audio segmentation; silence detection is used when available, with fixed-length windows as a fallback. They are not reported by the model.";
 
 function clampSeconds(value: number): number {
   return Number.isFinite(value) && value > 0 ? value : 0;
@@ -93,6 +93,11 @@ export function buildSrt(segments: readonly TranscriptSegment[]): string {
       )
       .join('\n\n') + '\n'
   );
+}
+
+/** Plain-text companion metadata for SRT, which has no portable comment header. */
+export function buildSrtTimingMetadata(): string {
+  return `${TIMESTAMP_DISCLAIMER}\n`;
 }
 
 export function buildVtt(segments: readonly TranscriptSegment[]): string {

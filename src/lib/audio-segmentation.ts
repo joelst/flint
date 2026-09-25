@@ -30,8 +30,10 @@ export interface TranscriptionWindow {
   index: number;
   startSec: number;
   endSec: number;
-  /** True when this window's END was cut at an arbitrary point, not a silence run. */
+  /** True when this window ends at an arbitrary chunk boundary, not a pause or recording end. */
   hardSplitEnd: boolean;
+  /** True only when the end boundary is an interior detected pause. */
+  snappedEnd: boolean;
   /** True when this window's START overlaps the previous window and needs dedupe. */
   overlapsPrevious: boolean;
 }
@@ -174,6 +176,7 @@ export function planTranscriptionWindows(
         startSec: pos,
         endSec: duration,
         hardSplitEnd: false,
+        snappedEnd: false,
         overlapsPrevious,
       });
       break;
@@ -198,6 +201,7 @@ export function planTranscriptionWindows(
       startSec: pos,
       endSec,
       hardSplitEnd,
+      snappedEnd: !hardSplitEnd,
       overlapsPrevious,
     });
 
