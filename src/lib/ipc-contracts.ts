@@ -37,7 +37,23 @@ export type SidecarCommand =
   | { cmd: 'unload'; alias: string; lane?: LaneName; ifIdle?: boolean }
   | { cmd: 'deleteModel'; alias: string; variantId?: string }
   | { cmd: 'getEndpoint' }
-  | { cmd: 'chatCompletion'; model: string; messages: unknown[]; maxTokens?: number; temperature?: number; preferredEp?: string; stream?: boolean; tools?: ChatToolDefinition[]; toolChoice?: ChatToolChoice; responseFormat?: ChatResponseFormat }
+  | {
+      cmd: 'chatCompletion';
+      model: string;
+      messages: unknown[];
+      maxTokens?: number;
+      temperature?: number;
+      preferredEp?: string;
+      stream?: boolean;
+      tools?: ChatToolDefinition[];
+      toolChoice?: ChatToolChoice;
+      responseFormat?: ChatResponseFormat;
+      topP?: number;
+      topK?: number;
+      frequencyPenalty?: number;
+      presencePenalty?: number;
+      randomSeed?: number;
+    }
   | { cmd: 'cancelChatRequest'; requestId: number }
   | { cmd: 'transcribeAudio'; audioBase64: string; mimeType: string; fileName: string; model: string; language: string; temperature?: number; preferredEp?: string }
   | { cmd: 'embedTexts'; model: string; inputs: string[] }

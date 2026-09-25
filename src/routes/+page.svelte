@@ -1439,6 +1439,17 @@
   // Whether to show the complete uncondensed thread (for reading full history)
   let showFullHistory = $state(false);
 
+  // Generation parameters (Playground: learning how sampling settings affect model output).
+  // Foundry Local's catalog reports no per-model defaults today, so these are Flint's own.
+  let temperature = $state(0.7);
+  let maxTokens = $state(2048);
+  let topP = $state(1);
+  let topK = $state(50);
+  let frequencyPenalty = $state(0);
+  let presencePenalty = $state(0);
+  // `null` means "no seed" (non-deterministic generation) -- see conversation-settings.ts.
+  let randomSeed: number | null = $state(null);
+
   /**
    * The application-level baseline a conversation inherits from when it stores no override.
    *
@@ -1500,6 +1511,9 @@
   let managerNewName = $state("");
   let managerNewPrompt = $state("");
   let editingPersona: Persona | null = $state(null);
+
+  // Playground generation-parameters panel (temperature/maxTokens/topP/topK/penalties/seed), collapsed by default
+  let showGenParamsPanel = $state(false);
 
   // For positioning the persona dropdown (fixed to escape scrollers)
   let personaBtnEl: HTMLButtonElement | null = $state(null);
@@ -2076,13 +2090,20 @@
     return readConversationSettings(active?.settings).settings.modelAlias || "";
   }
 
-  /** The four settings as they currently apply to the loaded chat. */
+  /** The settings as they currently apply to the loaded chat. */
   function currentChatSettings(): AppSettingDefaults {
     return {
       modelAlias: selectedModelAlias,
       systemPrompt,
       contextTurns,
       showFullHistory,
+      temperature,
+      maxTokens,
+      topP,
+      topK,
+      frequencyPenalty,
+      presencePenalty,
+      randomSeed,
     };
   }
 
@@ -2104,6 +2125,13 @@
     // the real context window silently disagree. The archived raw value is never rewritten here.
     contextTurns = clampContextTurns(effective.contextTurns);
     showFullHistory = effective.showFullHistory;
+    temperature = effective.temperature;
+    maxTokens = effective.maxTokens;
+    topP = effective.topP;
+    topK = effective.topK;
+    frequencyPenalty = effective.frequencyPenalty;
+    presencePenalty = effective.presencePenalty;
+    randomSeed = effective.randomSeed;
     // A plain assignment, not `setChatModel`. That function is async: it loads the model and can
     // start the service, so driving it from a synchronous switch would let two overlapping
     // switches each decide the service was stopped and queue a restart, tearing down the
@@ -2136,6 +2164,13 @@
     if ('systemPrompt' in patch) systemPrompt = patch.systemPrompt;
     if ('contextTurns' in patch) contextTurns = patch.contextTurns;
     if ('showFullHistory' in patch) showFullHistory = patch.showFullHistory;
+    if ('temperature' in patch) temperature = patch.temperature;
+    if ('maxTokens' in patch) maxTokens = patch.maxTokens;
+    if ('topP' in patch) topP = patch.topP;
+    if ('topK' in patch) topK = patch.topK;
+    if ('frequencyPenalty' in patch) frequencyPenalty = patch.frequencyPenalty;
+    if ('presencePenalty' in patch) presencePenalty = patch.presencePenalty;
+    if ('randomSeed' in patch) randomSeed = patch.randomSeed;
     if (!threadLoadedFor) return;
     const result = captureThread(sessionState(), { now: Date.now(), settings: patch as any });
     if (!result.changed) return;
@@ -3283,6 +3318,13 @@
         systemPrompt = appSettingDefaults.systemPrompt;
         contextTurns = clampContextTurns(appSettingDefaults.contextTurns);
         showFullHistory = appSettingDefaults.showFullHistory;
+        temperature = appSettingDefaults.temperature;
+        maxTokens = appSettingDefaults.maxTokens;
+        topP = appSettingDefaults.topP;
+        topK = appSettingDefaults.topK;
+        frequencyPenalty = appSettingDefaults.frequencyPenalty;
+        presencePenalty = appSettingDefaults.presencePenalty;
+        randomSeed = appSettingDefaults.randomSeed;
         if (typeof data.sidebarCollapsed === 'boolean') {
           sidebarCollapsed = data.sidebarCollapsed;
         }
@@ -6344,6 +6386,13 @@ updateStateFromSdk();
           },
           {
             preferredEp: selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+            temperature,
+            maxTokens,
+            topP,
+            topK,
+            frequencyPenalty,
+            presencePenalty,
+            randomSeed: randomSeed ?? undefined,
           },
           (requestId: number) => {
             const stream = streamsByConversation.get(originId);
@@ -6365,7 +6414,19 @@ updateStateFromSdk();
             messagesContainer.scrollTop = messagesContainer.scrollHeight;
         }, 5);
       } else if (chatClient) {
-        // Fallback to direct client (dev only)
+        // Fallback to direct client (dev only). This transport reads generation params from
+        // client.settings, not completion args -- see the sidecar's identical pattern in
+        // createSessionChatClient/createChatClient. Apply them before completion so this path
+        // does not silently ignore the Playground's settings when the endpoint is unavailable.
+        if (chatClient.settings) {
+          chatClient.settings.temperature = temperature;
+          chatClient.settings.maxTokens = maxTokens;
+          chatClient.settings.topP = topP;
+          chatClient.settings.topK = topK;
+          chatClient.settings.frequencyPenalty = frequencyPenalty;
+          chatClient.settings.presencePenalty = presencePenalty;
+          chatClient.settings.randomSeed = randomSeed ?? undefined;
+        }
         const inferenceMessages = getMessagesForInference();
         for await (const chunk of chatClient.completeStreamingChat(inferenceMessages)) {
           if (requestController.signal.aborted) break;
@@ -8978,6 +9039,168 @@ Output only the summary text, no preamble.`;
                         <Icon name="warning" size={13} /> High
                       </span>
                     {/if}
+                  {/if}
+                </div>
+
+                <!-- Generation parameters: how sampling settings affect model output -->
+                <div class="genparams-control">
+                  <button
+                    type="button"
+                    class="genparams-toggle"
+                    onclick={() => (showGenParamsPanel = !showGenParamsPanel)}
+                    title="Temperature, max tokens, top-p, top-k"
+                    aria-expanded={showGenParamsPanel}
+                  >
+                    <Icon name="settings" size={13} /> Generation
+                  </button>
+                  {#if showGenParamsPanel}
+                    <div class="genparams-panel">
+                      <label for="genparams-temperature" title="Higher = more varied output (0-2)">Temperature</label>
+                      <input
+                        type="range"
+                        id="genparams-temperature"
+                        min="0"
+                        max="2"
+                        step="0.05"
+                        value={temperature}
+                        oninput={(e) => {
+                          temperature = Number((e.currentTarget as HTMLInputElement).value);
+                        }}
+                        onchange={(e) =>
+                          commitChatSettings({
+                            temperature: Number((e.currentTarget as HTMLInputElement).value),
+                          })}
+                        disabled={isStreaming}
+                      />
+                      <span class="genparams-value">{temperature.toFixed(2)}</span>
+
+                      <label for="genparams-maxtokens" title="Maximum tokens generated per reply">Max tokens</label>
+                      <input
+                        type="number"
+                        id="genparams-maxtokens"
+                        min="1"
+                        step="1"
+                        value={maxTokens}
+                        oninput={(e) => {
+                          const value = Number((e.currentTarget as HTMLInputElement).value);
+                          if (Number.isInteger(value) && value > 0) maxTokens = value;
+                        }}
+                        onchange={(e) => {
+                          const value = Number((e.currentTarget as HTMLInputElement).value);
+                          if (Number.isInteger(value) && value > 0) {
+                            commitChatSettings({ maxTokens: value });
+                          } else {
+                            e.currentTarget.value = String(maxTokens);
+                          }
+                        }}
+                        disabled={isStreaming}
+                      />
+
+                      <label for="genparams-topp" title="Nucleus sampling threshold (0-1]">Top-p</label>
+                      <input
+                        type="range"
+                        id="genparams-topp"
+                        min="0.01"
+                        max="1"
+                        step="0.01"
+                        value={topP}
+                        oninput={(e) => {
+                          topP = Number((e.currentTarget as HTMLInputElement).value);
+                        }}
+                        onchange={(e) =>
+                          commitChatSettings({
+                            topP: Number((e.currentTarget as HTMLInputElement).value),
+                          })}
+                        disabled={isStreaming}
+                      />
+                      <span class="genparams-value">{topP.toFixed(2)}</span>
+
+                      <label for="genparams-topk" title="Restrict sampling to the top K candidate tokens">Top-k</label>
+                      <input
+                        type="number"
+                        id="genparams-topk"
+                        min="1"
+                        step="1"
+                        value={topK}
+                        oninput={(e) => {
+                          const value = Number((e.currentTarget as HTMLInputElement).value);
+                          if (Number.isInteger(value) && value > 0) topK = value;
+                        }}
+                        onchange={(e) => {
+                          const value = Number((e.currentTarget as HTMLInputElement).value);
+                          if (Number.isInteger(value) && value > 0) {
+                            commitChatSettings({ topK: value });
+                          } else {
+                            e.currentTarget.value = String(topK);
+                          }
+                        }}
+                        disabled={isStreaming}
+                      />
+
+                      <label for="genparams-freqpenalty" title="Penalize tokens by how often they've already appeared (-2 to 2)">Frequency penalty</label>
+                      <input
+                        type="range"
+                        id="genparams-freqpenalty"
+                        min="-2"
+                        max="2"
+                        step="0.1"
+                        value={frequencyPenalty}
+                        oninput={(e) => {
+                          frequencyPenalty = Number((e.currentTarget as HTMLInputElement).value);
+                        }}
+                        onchange={(e) =>
+                          commitChatSettings({
+                            frequencyPenalty: Number((e.currentTarget as HTMLInputElement).value),
+                          })}
+                        disabled={isStreaming}
+                      />
+                      <span class="genparams-value">{frequencyPenalty.toFixed(1)}</span>
+
+                      <label for="genparams-prespenalty" title="Penalize tokens that have already appeared at all (-2 to 2)">Presence penalty</label>
+                      <input
+                        type="range"
+                        id="genparams-prespenalty"
+                        min="-2"
+                        max="2"
+                        step="0.1"
+                        value={presencePenalty}
+                        oninput={(e) => {
+                          presencePenalty = Number((e.currentTarget as HTMLInputElement).value);
+                        }}
+                        onchange={(e) =>
+                          commitChatSettings({
+                            presencePenalty: Number((e.currentTarget as HTMLInputElement).value),
+                          })}
+                        disabled={isStreaming}
+                      />
+                      <span class="genparams-value">{presencePenalty.toFixed(1)}</span>
+
+                      <label for="genparams-seed" title="Fixed sampling seed for reproducible output; leave blank for non-deterministic generation">Seed</label>
+                      <input
+                        type="number"
+                        id="genparams-seed"
+                        step="1"
+                        placeholder="random"
+                        value={randomSeed ?? ''}
+                        oninput={(e) => {
+                          const raw = (e.currentTarget as HTMLInputElement).value.trim();
+                          if (raw === '') { randomSeed = null; return; }
+                          const value = Number(raw);
+                          if (Number.isSafeInteger(value)) randomSeed = value;
+                        }}
+                        onchange={(e) => {
+                          const raw = (e.currentTarget as HTMLInputElement).value.trim();
+                          if (raw === '') { commitChatSettings({ randomSeed: null }); return; }
+                          const value = Number(raw);
+                          if (Number.isSafeInteger(value)) {
+                            commitChatSettings({ randomSeed: value });
+                          } else {
+                            e.currentTarget.value = randomSeed == null ? '' : String(randomSeed);
+                          }
+                        }}
+                        disabled={isStreaming}
+                      />
+                    </div>
                   {/if}
                 </div>
 
@@ -13765,6 +13988,55 @@ Output only the summary text, no preamble.`;
   .usage-pct.high {
     color: var(--warning);
     font-weight: 600;
+  }
+
+  .genparams-control {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.8125rem;
+    color: var(--muted);
+  }
+  .genparams-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    background: var(--input-bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    font-size: 0.8125rem;
+  }
+  .genparams-panel {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+  .genparams-panel label {
+    line-height: 1;
+  }
+  .genparams-panel input[type="range"] {
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    padding: 0 8px;
+    width: 100px;
+    min-width: 70px;
+  }
+  .genparams-panel input[type="number"] {
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    padding: 0 6px;
+    width: 70px;
+  }
+  .genparams-value {
+    font-variant-numeric: tabular-nums;
+    font-size: 0.8125rem;
+    white-space: nowrap;
   }
 
   .recommend-btn {

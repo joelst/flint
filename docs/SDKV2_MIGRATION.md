@@ -22,13 +22,13 @@ contracts. They create a fresh session for each operation, so the migration does
 not implicitly change Flint's conversation-history ownership or streaming
 cancellation behavior.
 
-The current audio code attempts the `AudioSession` URI shape for every loaded
-speech model and falls back when construction or processing fails. The adapter is
-only proven for the one-shot URI request shape used by
-Whisper-family models. Nemotron requires a different raw-PCM `ItemQueue` shape,
-and Parakeet has no working `AudioSession` request shape in the pinned SDK.
-Audio selection therefore must remain model-family-aware; a single global
-`AudioSession` availability flag is insufficient.
+The current audio code classifies the loaded model before attempting the
+`AudioSession` URI shape. Whisper-family models use the proven one-shot URI
+request; known Nemotron and Parakeet families skip that unsupported shape and
+use the existing legacy fallback. Unknown speech families still probe the
+session path and fall back if the runtime rejects it. Nemotron requires a
+different raw-PCM `ItemQueue` shape, and Parakeet has no working `AudioSession`
+request shape in the pinned SDK.
 
 Flint's `sidecar/prompt-template.js` is not the SDK's deprecated
 `PromptTemplate` type. It is a Node-free Flint module that validates and authors
@@ -83,9 +83,8 @@ continues to use `src/lib/sdk.ts` and IPC contracts.
    - Add model-family capability classification before attempting
      `AudioSession`; do not use constructor availability as proof that a request
      shape is supported.
-   - Until that classification is implemented, preserve the current
-     attempt-then-fallback behavior; it is intentionally defensive but can add a
-     failed session attempt before the working legacy path.
+   - Keep the classifier conservative: skip only known unsupported families,
+     probe unknown families, and retain the legacy fallback for every failure.
    - Implement and test the Whisper URI path independently.
    - Track Nemotron raw-PCM `ItemQueue` support as a separate adapter because it
      changes input preparation and completion signaling.

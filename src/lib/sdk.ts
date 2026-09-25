@@ -2564,17 +2564,24 @@ export async function withServiceTransition<T>(
   });
 }
 
+export interface ChatCompletionOptions {
+  maxTokens?: number;
+  temperature?: number;
+  preferredEp?: string;
+  topP?: number;
+  topK?: number;
+  frequencyPenalty?: number;
+  presencePenalty?: number;
+  randomSeed?: number;
+  tools?: import('./ipc-contracts').ChatToolDefinition[];
+  toolChoice?: import('./ipc-contracts').ChatToolChoice;
+  responseFormat?: import('./ipc-contracts').ChatResponseFormat;
+}
+
 export async function chatCompletion(
   model: string,
   messages: Array<{ role: string; content: any }>,
-  options?: {
-    maxTokens?: number;
-    temperature?: number;
-    preferredEp?: string;
-    tools?: import('./ipc-contracts').ChatToolDefinition[];
-    toolChoice?: import('./ipc-contracts').ChatToolChoice;
-    responseFormat?: import('./ipc-contracts').ChatResponseFormat;
-  }
+  options?: ChatCompletionOptions
 ): Promise<any> {
   const res = await send('chatCompletion', {
     model,
@@ -2585,6 +2592,11 @@ export async function chatCompletion(
     tools: options?.tools,
     toolChoice: options?.toolChoice,
     responseFormat: options?.responseFormat,
+    topP: options?.topP,
+    topK: options?.topK,
+    frequencyPenalty: options?.frequencyPenalty,
+    presencePenalty: options?.presencePenalty,
+    randomSeed: options?.randomSeed
   });
   return res.result;
 }
@@ -2593,14 +2605,7 @@ export async function chatCompletionStream(
   model: string,
   messages: Array<{ role: string; content: any }>,
   onDelta: (delta: string) => void,
-  options?: {
-    maxTokens?: number;
-    temperature?: number;
-    preferredEp?: string;
-    tools?: import('./ipc-contracts').ChatToolDefinition[];
-    toolChoice?: import('./ipc-contracts').ChatToolChoice;
-    responseFormat?: import('./ipc-contracts').ChatResponseFormat;
-  },
+  options?: ChatCompletionOptions,
   onAssignedId?: (id: number) => void
 ): Promise<any> {
   const res = await sendInternal(
@@ -2614,6 +2619,11 @@ export async function chatCompletionStream(
       tools: options?.tools,
       toolChoice: options?.toolChoice,
       responseFormat: options?.responseFormat,
+      topP: options?.topP,
+      topK: options?.topK,
+      frequencyPenalty: options?.frequencyPenalty,
+      presencePenalty: options?.presencePenalty,
+      randomSeed: options?.randomSeed,
       stream: true
     },
     onDelta,

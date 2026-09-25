@@ -201,7 +201,16 @@ const FIELD_TYPES = {
   load:              { alias: 'non-empty-string', variantId: 'non-empty-string' },
   unload:            { alias: 'non-empty-string', ifIdle: 'boolean' },
   deleteModel:       { alias: 'non-empty-string', variantId: 'non-empty-string' },
-  chatCompletion:    { model: 'non-empty-string', messages: 'array', tools: 'array' },
+  chatCompletion:    {
+    model: 'non-empty-string',
+    messages: 'array',
+    tools: 'array',
+    topP: 'number',
+    topK: 'number',
+    frequencyPenalty: 'number',
+    presencePenalty: 'number',
+    randomSeed: 'number',
+  },
   cancelChatRequest: { requestId: 'number' },
   transcribeAudio:   { audioBase64: 'string', mimeType: 'non-empty-string', fileName: 'non-empty-string', model: 'non-empty-string', language: 'non-empty-string' },
   embedTexts:        { model: 'non-empty-string', inputs: 'array' },
@@ -242,7 +251,14 @@ const COMMAND_SCHEMA = {
   unload:             { required: ['alias'], optional: ['lane', 'ifIdle'] },
   deleteModel:        { required: ['alias'], optional: ['variantId'] },
   getEndpoint:        { required: [], optional: [] },
-  chatCompletion:     { required: ['model', 'messages'], optional: ['maxTokens', 'temperature', 'preferredEp', 'stream', 'tools', 'toolChoice', 'responseFormat'] },
+  chatCompletion:     {
+    required: ['model', 'messages'],
+    optional: [
+      'maxTokens', 'temperature', 'preferredEp', 'stream',
+      'tools', 'toolChoice', 'responseFormat',
+      'topP', 'topK', 'frequencyPenalty', 'presencePenalty', 'randomSeed',
+    ],
+  },
   cancelChatRequest:  { required: ['requestId'], optional: [] },
   transcribeAudio:    { required: ['audioBase64', 'mimeType', 'fileName', 'model', 'language'], optional: ['temperature', 'preferredEp'] },
   embedTexts:         { required: ['model', 'inputs'], optional: [] },
@@ -334,6 +350,11 @@ function validateCommand(cmd, payload) {
   }
   if (cmd === 'startService' && payload.alias !== undefined && (typeof payload.alias !== 'string' || !payload.alias.trim())) return `Command "startService" field "alias" must be a non-empty string`;
   if ((cmd === 'chatCompletion' || cmd === 'transcribeAudio') && payload.temperature !== undefined && typeof payload.temperature !== 'number') return `Command "${cmd}" field "temperature" must be a number`;
+  // OpenAI's documented range; conversation-store.ts enforces the same bounds on the stored
+  // setting, so an out-of-range value here is one this build could never have written itself.
+  if (cmd === 'chatCompletion' && typeof payload.temperature === 'number' && (payload.temperature < 0 || payload.temperature > 2)) {
+    return `Command "${cmd}" field "temperature" must be between 0 and 2`;
+  }
   if (cmd === 'chatCompletion') {
     if (payload.stream !== undefined && typeof payload.stream !== 'boolean') return `Command "chatCompletion" field "stream" must be a boolean`;
     if (payload.maxTokens !== undefined && typeof payload.maxTokens !== 'number') return `Command "chatCompletion" field "maxTokens" must be a number`;
@@ -376,6 +397,7 @@ function validateCommand(cmd, payload) {
         && payload.toolChoice.type === 'function'
         && payload.toolChoice.function
         && typeof payload.toolChoice.function.name === 'string'
+        && payload.toolChoice.function.name.trim().length > 0
         && payload.toolChoice.function.name.length <= 128
       )
     )) {
@@ -395,6 +417,25 @@ function validateCommand(cmd, payload) {
       || Array.isArray(payload.responseFormat.json_schema)
     )) {
       return 'Command "chatCompletion" json_schema response format requires a JSON object';
+    }
+    if (typeof payload.maxTokens === 'number' && (!Number.isInteger(payload.maxTokens) || payload.maxTokens <= 0)) {
+      return `Command "chatCompletion" field "maxTokens" must be a positive integer`;
+    }
+    if (typeof payload.topP === 'number' && (!Number.isFinite(payload.topP) || payload.topP <= 0 || payload.topP > 1)) {
+      return `Command "chatCompletion" field "topP" must be greater than 0 and at most 1`;
+    }
+    if (typeof payload.topK === 'number' && (!Number.isInteger(payload.topK) || payload.topK <= 0)) {
+      return `Command "chatCompletion" field "topK" must be a positive integer`;
+    }
+    // OpenAI's documented range for both penalty parameters.
+    if (typeof payload.frequencyPenalty === 'number' && (!Number.isFinite(payload.frequencyPenalty) || payload.frequencyPenalty < -2 || payload.frequencyPenalty > 2)) {
+      return `Command "chatCompletion" field "frequencyPenalty" must be between -2 and 2`;
+    }
+    if (typeof payload.presencePenalty === 'number' && (!Number.isFinite(payload.presencePenalty) || payload.presencePenalty < -2 || payload.presencePenalty > 2)) {
+      return `Command "chatCompletion" field "presencePenalty" must be between -2 and 2`;
+    }
+    if (typeof payload.randomSeed === 'number' && !Number.isSafeInteger(payload.randomSeed)) {
+      return `Command "chatCompletion" field "randomSeed" must be a safe integer`;
     }
   }
   if (cmd === 'applyMemorySettings' && payload.eviction !== undefined) {
@@ -2216,7 +2257,8 @@ function mergeToolCallDeltas (target, deltas) {
     const nextFunction = delta?.function || {};
     target[index] = {
       ...current,
-      ...delta,
+      ...(delta?.id !== undefined ? { id: delta.id } : {}),
+      ...(delta?.type !== undefined ? { type: delta.type } : {}),
       function: {
         ...currentFunction,
         ...nextFunction,
@@ -3512,6 +3554,21 @@ rl.on('line', async (line) => {
           if (client?.settings && Number.isFinite(payload.maxTokens)) {
             client.settings.maxTokens = payload.maxTokens;
           }
+          if (client?.settings && Number.isFinite(payload.topP)) {
+            client.settings.topP = payload.topP;
+          }
+          if (client?.settings && Number.isFinite(payload.topK)) {
+            client.settings.topK = payload.topK;
+          }
+          if (client?.settings && Number.isFinite(payload.frequencyPenalty)) {
+            client.settings.frequencyPenalty = payload.frequencyPenalty;
+          }
+          if (client?.settings && Number.isFinite(payload.presencePenalty)) {
+            client.settings.presencePenalty = payload.presencePenalty;
+          }
+          if (client?.settings && Number.isFinite(payload.randomSeed)) {
+            client.settings.randomSeed = payload.randomSeed;
+          }
           if (shouldStream && typeof client?.completeStreamingChat === 'function') {
             let content = '';
             const toolCalls = [];
@@ -3523,8 +3580,8 @@ rl.on('line', async (line) => {
               const usage = chunk?.usage;
               chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
               chatTokensOut = usage?.completion_tokens ?? usage?.output_tokens ?? chatTokensOut;
-              mergeToolCallDeltas(toolCalls, chunk?.choices?.[0]?.delta?.tool_calls);
               if (canceledRequests.has(id)) continue;
+              mergeToolCallDeltas(toolCalls, chunk?.choices?.[0]?.delta?.tool_calls);
               const deltaText = chunk?.choices?.[0]?.delta?.content;
               const messageText = chunk?.choices?.[0]?.message?.content ?? chunk?.message?.content;
               let delta = '';
@@ -3633,8 +3690,8 @@ rl.on('line', async (line) => {
               const usage = chunk?.usage;
               chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
               chatTokensOut = usage?.completion_tokens ?? usage?.output_tokens ?? chatTokensOut;
-              mergeToolCallDeltas(toolCalls, chunk?.choices?.[0]?.delta?.tool_calls);
               if (canceledRequests.has(id)) continue;
+              mergeToolCallDeltas(toolCalls, chunk?.choices?.[0]?.delta?.tool_calls);
               const delta = chunk?.choices?.[0]?.delta?.content || '';
               if (delta) {
                 chatFirstTokenAt ??= Date.now();
@@ -3689,6 +3746,19 @@ rl.on('line', async (line) => {
               ...(payload.tools ? { tools: payload.tools } : {}),
               ...(payload.toolChoice !== undefined ? { tool_choice: payload.toolChoice } : {}),
               ...(payload.responseFormat !== undefined ? { response_format: payload.responseFormat } : {}),
+              top_p: payload.topP,
+              frequency_penalty: payload.frequencyPenalty,
+              presence_penalty: payload.presencePenalty,
+              // The native web service mirrors the SDK client's own serialization, which sends
+              // top_k/random_seed as stringified metadata fields rather than top-level numbers.
+              ...(payload.topK !== undefined || payload.randomSeed !== undefined
+                ? {
+                    metadata: {
+                      ...(payload.topK !== undefined ? { top_k: String(payload.topK) } : {}),
+                      ...(payload.randomSeed !== undefined ? { random_seed: String(payload.randomSeed) } : {}),
+                    },
+                  }
+                : {})
             })
           });
           if (!resp.ok) {
