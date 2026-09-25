@@ -2406,10 +2406,10 @@ function createSessionChatClient (chatModel, sdkModule) {
         ...(options.responseFormat !== undefined ? { response_format: options.responseFormat } : {}),
         ...serializeSettings(),
       };
-      const request = new Request();
-      request.addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
       let session;
       try {
+        const request = new Request();
+        request.addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
         session = new ChatSession(chatModel);
         const response = await session.processRequest(request);
         const text = findOpenAiJsonText(response?.output);
@@ -2438,10 +2438,10 @@ function createSessionChatClient (chatModel, sdkModule) {
       };
       return {
         async * [Symbol.asyncIterator] () {
-          const request = new Request();
-          request.addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
           let session;
           try {
+            const request = new Request();
+            request.addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
             session = new ChatSession(chatModel);
             for await (const item of session.processStreamingRequest(request)) {
               if (item?.type !== 'text' || item.textType !== 'openai-json' || !item.text) continue;
@@ -2483,10 +2483,10 @@ function createSessionEmbeddingClient (embedModel, sdkModule) {
   return {
     async generateEmbeddings (inputs) {
       const requestJson = { model: embedModel.id, input: inputs };
-      const request = new Request();
-      request.addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
       let session;
       try {
+        const request = new Request();
+        request.addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
         session = new EmbeddingsSession(embedModel);
         const response = await session.processRequest(request);
         const text = findOpenAiJsonText(response?.output);

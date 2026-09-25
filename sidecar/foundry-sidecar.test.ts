@@ -2910,7 +2910,7 @@ describe('chatCompletion ChatSession path', () => {
   //                           is not valid JSON, to verify JSON.parse failures are wrapped too.
   //   'session-constructor-error' - the ChatSession constructor itself throws, to verify that
   //                           failure is wrapped too (construction happens inside the try/catch).
-  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-abort' | 'session-empty-output' | 'session-malformed-json' | 'session-constructor-error';
+  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-abort' | 'session-empty-output' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error';
   function fakeSdk(sdkMode: ChatFakeSdkMode) {
     const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only';
     const hasSession = sdkMode !== 'legacy-only';
@@ -2972,7 +2972,7 @@ describe('chatCompletion ChatSession path', () => {
       '  }',
       '}',
       'class FakeRequest {',
-      '  constructor() { this.items = []; }',
+      `  constructor() { if (${JSON.stringify(sdkMode)} === 'request-constructor-error') throw new Error('native Request construction failed'); this.items = []; }`,
       '  addItem(item) { this.items.push(item); return this; }',
       '  setOptions() { return this; }',
       '}',
@@ -3239,6 +3239,21 @@ describe('chatCompletion ChatSession path', () => {
     expect(events()).not.toContain('session-chat-disposed');
   }, 30000);
 
+  it('wraps request construction failures the same way other ChatSession failures are wrapped', async () => {
+    await startSidecar('request-constructor-error');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Chat completion failed for model 'fake-variant'");
+    expect(String(res.error)).toContain('native Request construction failed');
+  }, 30000);
+
   it('falls back to createChatClient() when the SDK build does not export ChatSession', async () => {
     await startSidecar('legacy-only');
     const chatted = reply(3);
@@ -3273,7 +3288,7 @@ describe('embedTexts EmbeddingsSession path', () => {
   //                           is not valid JSON, to verify JSON.parse failures are wrapped too.
   //   'session-constructor-error' - the EmbeddingsSession constructor itself throws, to verify
   //                           that failure is wrapped too (construction happens inside try/catch).
-  type EmbedFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-empty-output' | 'session-malformed-json' | 'session-constructor-error';
+  type EmbedFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-empty-output' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error';
   function fakeSdk(sdkMode: EmbedFakeSdkMode) {
     const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only';
     const hasSession = sdkMode !== 'legacy-only';
@@ -3317,7 +3332,7 @@ describe('embedTexts EmbeddingsSession path', () => {
       '  }',
       '}',
       'class FakeRequest {',
-      '  constructor() { this.items = []; }',
+      `  constructor() { if (${JSON.stringify(sdkMode)} === 'request-constructor-error') throw new Error('native Request construction failed'); this.items = []; }`,
       '  addItem(item) { this.items.push(item); return this; }',
       '  setOptions() { return this; }',
       '}',
@@ -3453,6 +3468,16 @@ describe('embedTexts EmbeddingsSession path', () => {
     expect(String(res.error)).toContain('native EmbeddingsSession construction failed');
     // The constructor threw, so there is no session instance to dispose.
     expect(events()).not.toContain('session-embed-disposed');
+  }, 30000);
+
+  it('wraps embedding request construction failures the same way other session failures are wrapped', async () => {
+    await startSidecar('request-constructor-error');
+    const embedded = reply(3);
+    send({ id: 3, cmd: 'embedTexts', model: 'fake-model', inputs: ['hello'] });
+    const res = await embedded;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Embedding generation failed for model 'fake-embed-variant'");
+    expect(String(res.error)).toContain('native Request construction failed');
   }, 30000);
 
   it('falls back to createEmbeddingClient() when the SDK build does not export EmbeddingsSession', async () => {
