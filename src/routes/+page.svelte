@@ -3322,6 +3322,9 @@
         maxTokens = appSettingDefaults.maxTokens;
         topP = appSettingDefaults.topP;
         topK = appSettingDefaults.topK;
+        frequencyPenalty = appSettingDefaults.frequencyPenalty;
+        presencePenalty = appSettingDefaults.presencePenalty;
+        randomSeed = appSettingDefaults.randomSeed;
         if (typeof data.sidebarCollapsed === 'boolean') {
           sidebarCollapsed = data.sidebarCollapsed;
         }

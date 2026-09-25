@@ -336,7 +336,7 @@ function validateCommand(cmd, payload) {
   if ((cmd === 'chatCompletion' || cmd === 'transcribeAudio') && payload.temperature !== undefined && typeof payload.temperature !== 'number') return `Command "${cmd}" field "temperature" must be a number`;
   // OpenAI's documented range; conversation-store.ts enforces the same bounds on the stored
   // setting, so an out-of-range value here is one this build could never have written itself.
-  if ((cmd === 'chatCompletion' || cmd === 'transcribeAudio') && typeof payload.temperature === 'number' && (payload.temperature < 0 || payload.temperature > 2)) {
+  if (cmd === 'chatCompletion' && typeof payload.temperature === 'number' && (payload.temperature < 0 || payload.temperature > 2)) {
     return `Command "${cmd}" field "temperature" must be between 0 and 2`;
   }
   if (cmd === 'chatCompletion') {
