@@ -35,7 +35,9 @@ function looksLikeSpeech(name) {
  * remain `unknown` so a new model can still probe the additive path and fall
  * back safely if the runtime rejects it.
  *
- * @param {object|null|undefined} model
+ * @param {{ alias?: unknown, id?: unknown, info?: {
+ *   alias?: unknown, id?: unknown, modelType?: unknown, task?: unknown, capabilities?: unknown
+ * } }|null|undefined} model
  * @returns {'supported'|'unsupported'|'unknown'}
  */
 function audioSessionUriSupport(model) {
