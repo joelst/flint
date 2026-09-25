@@ -52,71 +52,7 @@ does not remove:
 The sidecar remains the only place that imports the Foundry SDK. The frontend
 continues to use `src/lib/sdk.ts` and IPC contracts.
 
-## Sequencing
-
-1. **Chat completion**
-   - Keep the existing `ChatSession` adapter as the primary path. It preserves
-     the deprecated client's OpenAI-shaped request/response bridge, while Flint
-     deliberately wraps setup, native, and response-parsing failures under the
-     same model-specific error family.
-   - Move generation settings into the session/request adapter as the SDK
-     exposes stable request options, while preserving omitted-setting behavior.
-   - Exercise buffered, streaming, tool payload pass-through, usage extraction,
-     malformed output, constructor failure, and disposal failure.
-   - Remove the `createChatClient()` fallback only after a runtime probe confirms
-     the minimum supported SDK no longer exports it and all supported Flint
-     transports use the session path.
-
-2. **Embeddings**
-   - Keep the existing stateless `EmbeddingsSession` adapter. It preserves
-     the deprecated client's OpenAI-shaped request/response bridge, while Flint
-     deliberately wraps setup, native, and response-parsing failures under the
-     same model-specific error family.
-   - Prefer native tensor output when the SDK contract is stable; retain the
-     OpenAI-shaped result conversion at the sidecar boundary.
-   - Validate empty input, multiple inputs, output dimensions, malformed output,
-     constructor failure, and disposal.
-   - Remove `createEmbeddingClient()` only after the supported SDK floor no
-     longer exports it.
-
-3. **Audio**
-   - Add model-family capability classification before attempting
-     `AudioSession`; do not use constructor availability as proof that a request
-     shape is supported.
-   - Keep the classifier conservative: skip only known unsupported families,
-     probe unknown families, and retain the legacy fallback for every failure.
-   - Implement and test the Whisper URI path independently.
-   - Track Nemotron raw-PCM `ItemQueue` support as a separate adapter because it
-     changes input preparation and completion signaling.
-   - Keep the legacy client and HTTP fallbacks for Parakeet and any family whose
-     session path is not proven.
-   - Remove the legacy audio path only after each supported family has a
-     passing session integration test and a truthful capability decision.
-
-4. **Prompt metadata**
-   - Keep Flint's BYOM template authoring and validation independent of SDK
-     `PromptTemplate` types.
-   - Treat model metadata as input to catalog/import behavior, not as a runtime
-     construction dependency.
-   - Revisit the stored `PromptTemplate` field only if a future Foundry scanner
-     format replaces it; that is a BYOM format migration, not a ChatSession
-     migration.
-
-## Completion criteria
-
-The migration is complete when:
-
-- chat and embeddings execute without calling their deprecated model client
-  constructors;
-- audio chooses a proven session request shape per model family and retains an
-  explicit fallback where no session shape exists;
-- all three operations preserve Flint's existing IPC, gateway, logging,
-  activity-fence, error, and cancellation semantics;
-- the migration test matrix covers SDK builds with session exports, legacy
-  exports only, and neither path where applicable;
-- the supported SDK floor is documented and the legacy fallback removal is
-  separately reviewable rather than coupled to the first session adapter.
-
-This scope deliberately treats the end-of-2026 removal as a near-term
-compatibility deadline, while avoiding a risky all-at-once rewrite of the audio
-path.
+Implementation sequencing and release acceptance gates for this migration are
+owned by `docs/PRODUCT_PLAN.md`. This document remains the technical boundary:
+the session adapters, legacy fallbacks, model-family checks, request shapes, and
+error/cancellation contracts described above are the current behavior.

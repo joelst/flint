@@ -2513,13 +2513,18 @@ function createSessionChatClient (chatModel, sdkModule) {
         async * [Symbol.asyncIterator] () {
           let session;
           let failure = null;
+          let receivedOutput = false;
           try {
             const request = new Request();
             request.addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
             session = new ChatSession(chatModel);
             for await (const item of session.processStreamingRequest(request)) {
               if (item?.type !== 'text' || item.textType !== 'openai-json' || !item.text) continue;
+              receivedOutput = true;
               yield JSON.parse(item.text);
+            }
+            if (!receivedOutput) {
+              throw new Error(`Chat completion for model '${chatModel.id}' returned no openai-json text item.`);
             }
           } catch (err) {
             failure = err?.name === 'AbortError'
@@ -3575,10 +3580,20 @@ rl.on('line', async (line) => {
           log('debug', `ChatSession client unavailable, using createChatClient(): ${err?.message || err}`);
         }
         const hasChatClient = sessionChatClient || typeof chatModel?.createChatClient === 'function';
-        const { transport, reason: transportReason } = selectChatTransport(sdkMessages, {
+        let { transport, reason: transportReason } = selectChatTransport(sdkMessages, {
           chatClient: hasChatClient ? 'available' : 'unsupported',
           serviceEndpoint: sharedEndpoint ? 'available' : 'unavailable',
         });
+        const legacyControlsRequested = !sessionChatClient
+          && (payload.toolChoice !== undefined || payload.responseFormat !== undefined);
+        if (transport === 'sdk' && legacyControlsRequested) {
+          if (sharedEndpoint) {
+            transport = 'http';
+          } else {
+            transport = null;
+            transportReason = 'Tool choice and response format require the ChatSession path or a local service endpoint.';
+          }
+        }
         if (!transport) throw new Error(transportReason);
         if (transport === 'sdk') {
           const client = sessionChatClient || chatModel.createChatClient();

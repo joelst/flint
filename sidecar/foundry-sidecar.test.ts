@@ -3107,7 +3107,7 @@ describe('chatCompletion ChatSession path', () => {
   //                           is not valid JSON, to verify JSON.parse failures are wrapped too.
   //   'session-constructor-error' - the ChatSession constructor itself throws, to verify that
   //                           failure is wrapped too (construction happens inside the try/catch).
-  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-error-dispose' | 'session-abort' | 'session-empty-output' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error' | 'session-stream-tool';
+  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-error-dispose' | 'session-abort' | 'session-empty-output' | 'session-stream-empty' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error' | 'session-stream-tool';
   function fakeSdk(sdkMode: ChatFakeSdkMode) {
     const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only';
     const hasSession = sdkMode !== 'legacy-only';
@@ -3162,6 +3162,7 @@ describe('chatCompletion ChatSession path', () => {
       "        note('session-chat');",
       `        if (['session-error', 'session-error-dispose'].includes(${JSON.stringify(sdkMode)})) throw new Error('native stream failed');`,
       `        if (${JSON.stringify(sdkMode)} === 'session-abort') { const e = new Error('native stream aborted'); e.name = 'AbortError'; throw e; }`,
+      `        if (${JSON.stringify(sdkMode)} === 'session-stream-empty') return;`,
       "        yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { content: 'session ' } }] }) };",
       `        if (${JSON.stringify(sdkMode)} === 'session-stream-tool') yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-1', type: 'function', function: { name: 'read_status', arguments: '{' } }] } }] }) };`,
       `        if (${JSON.stringify(sdkMode)} === 'session-stream-tool') yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '}' } }] } }] }) };`,
@@ -3337,6 +3338,21 @@ describe('chatCompletion ChatSession path', () => {
     expect(res.result.choices[0].finish_reason).toBe('tool_calls');
   }, 30000);
 
+  it('fails a streaming ChatSession that emits no openai-json output', async () => {
+    await startSidecar('session-stream-empty');
+    const chatted = waitForLine(proc, (msg) => msg.id === 3 && msg.ok !== true, 10000);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+      stream: true,
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Streaming chat completion failed for model 'fake-variant'");
+    expect(String(res.error)).toContain('returned no openai-json text item');
+  }, 30000);
 
   it('uses the ChatSession client even when createChatClient() does not exist at all (post-removal shape)', async () => {
     await startSidecar('session-no-legacy');
@@ -3546,6 +3562,22 @@ describe('chatCompletion ChatSession path', () => {
     expect(res.result.choices[0].message.content).toBe('legacy reply');
     expect(events()).toContain('legacy-chat');
     expect(events()).not.toContain('session-chat');
+  }, 30000);
+
+  it('rejects response controls when only the legacy client is available without HTTP', async () => {
+    await startSidecar('legacy-only');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+      toolChoice: 'required',
+      responseFormat: { type: 'json_object' },
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain('Tool choice and response format require');
   }, 30000);
 });
 
