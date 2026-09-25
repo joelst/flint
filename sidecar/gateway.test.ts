@@ -990,7 +990,7 @@ describe('gateway streaming', () => {
         choices: [{
           message: {
             role: 'assistant',
-            content: 'x'.repeat(128),
+            content: `${'x'.repeat(120)}}`,
             usage: { prompt_tokens: 99, completion_tokens: 99 },
           },
         }],

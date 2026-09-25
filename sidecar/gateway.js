@@ -782,6 +782,8 @@ export function createGateway (options) {
         if (usage !== null) {
           if (usageLength === MAX_USAGE_METRICS_CHARS) {
             usage = null;
+            captured = true;
+            return;
           } else {
             usage.push(char);
             usageLength++;
@@ -844,10 +846,12 @@ export function createGateway (options) {
         } else if (char === ',' && depth === 1) {
           collectingKey = true;
           topLevelKey = null;
-        } else if (char === '"' && depth === 1) {
+        } else if (char === '"') {
           quoted = true;
-          if (collectingKey) {
+          if (depth === 1 && collectingKey) {
             key = '';
+          } else {
+            collectingKey = false;
           }
         } else if (char === ':' && depth === 1) {
           waitingForUsage = topLevelKey === 'usage';
