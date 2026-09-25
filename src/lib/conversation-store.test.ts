@@ -1022,6 +1022,30 @@ describe('readConversationSettings', () => {
     expect(readConversationSettings({ showFullHistory: false }).settings).toEqual({ showFullHistory: false });
   });
 
+  it('accepts generation parameters within their documented ranges', () => {
+    const r = readConversationSettings({ temperature: 1.5, maxTokens: 512, topP: 0.5, topK: 20 });
+    expect(r.settings).toEqual({ temperature: 1.5, maxTokens: 512, topP: 0.5, topK: 20 });
+    expect(r.invalidKeys).toEqual([]);
+  });
+
+  it('accepts the documented boundary values for generation parameters', () => {
+    for (const value of [{ temperature: 0 }, { temperature: 2 }, { topP: 1 }]) {
+      expect(readConversationSettings(value).invalidKeys).toEqual([]);
+    }
+  });
+
+  it('rejects out-of-range or wrongly typed generation parameters', () => {
+    for (const raw of [
+      { temperature: -0.1 }, { temperature: 2.1 }, { temperature: NaN }, { temperature: '1' },
+      { maxTokens: 0 }, { maxTokens: -1 }, { maxTokens: 1.5 }, { maxTokens: '512' },
+      { topP: 0 }, { topP: 1.1 }, { topP: -1 }, { topP: '0.5' },
+      { topK: 0 }, { topK: -1 }, { topK: 1.5 }, { topK: '20' },
+    ]) {
+      const key = Object.keys(raw)[0];
+      expect(readConversationSettings(raw).invalidKeys).toEqual([key]);
+    }
+  });
+
   it('returns empty results for a missing or non-object bag', () => {
     for (const raw of [undefined, null, 'x', 7, ['a'], true]) {
       const r = readConversationSettings(raw);

@@ -552,6 +552,101 @@ describe('foundry-sidecar protocol basics', () => {
     }
   });
 
+  it('serializes topK and randomSeed as stringified metadata on the HTTP fallback, matching the SDK client', async () => {
+    let capturedBody: any = null;
+    const server = createServer((req, res) => {
+      if (req.url === '/status') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      if (req.url === '/v1/chat/completions') {
+        let raw = '';
+        req.on('data', (chunk) => { raw += chunk; });
+        req.on('end', () => {
+          capturedBody = JSON.parse(raw);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            choices: [{ message: { role: 'assistant', content: 'http-hello' } }],
+          }));
+        });
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+    const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-http-chat-metadata-home-'));
+    const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
+    const corePath = join(homeDir, 'fake-core.dylib');
+    writeFileSync(corePath, '');
+    writeFileSync(loaderPath, `
+      const sdk = \`
+        class FakeModel {
+          constructor() { this.id = 'fake-variant'; this.loaded = false; }
+          async load() { this.loaded = true; }
+          isLoaded() { return this.loaded; }
+          getExecutionProvider() { return 'CPUExecutionProvider'; }
+        }
+        class FakeManager {
+          constructor() { this.urls = []; this.catalog = { getModel: async () => new FakeModel(), getModels: async () => [] }; }
+          startWebService() { this.urls = ['http://127.0.0.1:${port}']; }
+          stopWebService() {}
+          static create() { return new FakeManager(); }
+        }
+        export { FakeManager as FoundryLocalManager };
+      \`;
+      export async function resolve(specifier, context, nextResolve) {
+        if (specifier === 'foundry-local-sdk') {
+          return { url: 'data:text/javascript,' + encodeURIComponent(sdk), shortCircuit: true };
+        }
+        return nextResolve(specifier, context);
+      }
+      export async function load(url, context, nextLoad) {
+        if (url.startsWith('data:text/javascript,')) {
+          return { format: 'module', source: decodeURIComponent(url.slice('data:text/javascript,'.length)), shortCircuit: true };
+        }
+        return nextLoad(url, context);
+      }
+    `);
+    const proc = spawn(process.execPath, [
+      '--experimental-loader', pathToFileURL(loaderPath).href, 'sidecar/foundry-sidecar.js'
+    ], {
+      cwd: process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, HOME: homeDir, USERPROFILE: homeDir, FLINT_FOUNDRY_CORE_PATH: corePath },
+    });
+    try {
+      await waitForLine(proc, (msg) => msg.ready === true);
+      proc.stdin.write(`${JSON.stringify({ id: 46, cmd: 'init', appName: 'flint-test', logLevel: 'info' })}\n`);
+      expect((await waitForLine(proc, (msg) => msg.id === 46)).ok).toBe(true);
+      proc.stdin.write(`${JSON.stringify({
+        id: 47, cmd: 'startService', port: 18766, bindAddress: '127.0.0.1', gateway: false,
+      })}\n`);
+      expect((await waitForLine(proc, (msg) => msg.id === 47, 15000)).ok).toBe(true);
+      proc.stdin.write(`${JSON.stringify({
+        id: 48, cmd: 'chatCompletion', model: 'fake-model',
+        messages: [{ role: 'user', content: 'hello' }], stream: false,
+        temperature: 0.4, maxTokens: 128, topP: 0.8, topK: 20, randomSeed: 7,
+      })}\n`);
+      const httpChat = await waitForLine(proc, (msg) => msg.id === 48, 15000);
+      expect(httpChat.ok).toBe(true);
+      expect(capturedBody.temperature).toBe(0.4);
+      expect(capturedBody.max_tokens).toBe(128);
+      expect(capturedBody.top_p).toBe(0.8);
+      // The SDK's own OpenAI request serializer sends these as stringified metadata fields, not
+      // top-level numbers -- the native web service only recognizes that shape.
+      expect(capturedBody.top_k).toBeUndefined();
+      expect(capturedBody.seed).toBeUndefined();
+      expect(capturedBody.metadata).toEqual({ top_k: '20', random_seed: '7' });
+    } finally {
+      await killAndWait(proc);
+      await closeServer(server);
+      rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
   it('starts the service when the snapshot-forcing catalog read fails', async () => {
     // The catalog read before `startWebService` exists only to order provider registration
     // ahead of the native listener's own `/v1/models` access. That read contacts the remote
@@ -2262,6 +2357,42 @@ describe('foundry-sidecar command schema validation', () => {
     const res = await waitForLine(proc, (msg) => msg.id === 13);
     expect(res.error).toBeTruthy();
     expect(String(res.error)).toContain('missing required field');
+  });
+
+  it('rejects chatCompletion generation parameters of the wrong type', async () => {
+    const cases: [string, unknown][] = [
+      ['topP', 'high'], ['topK', 'ten'], ['frequencyPenalty', 'none'],
+      ['presencePenalty', 'none'], ['randomSeed', 'x'],
+    ];
+    let id = 4600;
+    for (const [field, value] of cases) {
+      const reqId = id++;
+      proc.stdin.write(`${JSON.stringify({ id: reqId, cmd: 'chatCompletion', model: 'm', messages: [], [field]: value })}\n`);
+      const res = await waitForLine(proc, (msg) => msg.id === reqId);
+      expect(res.error).toBeTruthy();
+      expect(String(res.error)).toContain(`field "${field}" must be a number`);
+    }
+  });
+
+  it('rejects chatCompletion generation parameters outside their documented ranges', async () => {
+    const cases: [Record<string, unknown>, RegExp][] = [
+      [{ temperature: -0.1 }, /temperature.*between 0 and 2/],
+      [{ temperature: 2.1 }, /temperature.*between 0 and 2/],
+      [{ maxTokens: 0 }, /maxTokens.*positive integer/],
+      [{ maxTokens: 1.5 }, /maxTokens.*positive integer/],
+      [{ topP: 0 }, /topP.*greater than 0 and at most 1/],
+      [{ topP: 1.1 }, /topP.*greater than 0 and at most 1/],
+      [{ topK: 0 }, /topK.*positive integer/],
+      [{ topK: 1.5 }, /topK.*positive integer/],
+    ];
+    let id = 4700;
+    for (const [fields, expected] of cases) {
+      const reqId = id++;
+      proc.stdin.write(`${JSON.stringify({ id: reqId, cmd: 'chatCompletion', model: 'm', messages: [], ...fields })}\n`);
+      const res = await waitForLine(proc, (msg) => msg.id === reqId);
+      expect(res.error).toBeTruthy();
+      expect(String(res.error)).toMatch(expected);
+    }
   });
 
   it('rejects embedTexts with empty or oversized inputs before init', async () => {

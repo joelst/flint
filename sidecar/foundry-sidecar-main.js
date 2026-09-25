@@ -201,7 +201,7 @@ const FIELD_TYPES = {
   load:              { alias: 'non-empty-string', variantId: 'non-empty-string' },
   unload:            { alias: 'non-empty-string', ifIdle: 'boolean' },
   deleteModel:       { alias: 'non-empty-string', variantId: 'non-empty-string' },
-  chatCompletion:    { model: 'non-empty-string', messages: 'array' },
+  chatCompletion:    { model: 'non-empty-string', messages: 'array', topP: 'number', topK: 'number', frequencyPenalty: 'number', presencePenalty: 'number', randomSeed: 'number' },
   cancelChatRequest: { requestId: 'number' },
   transcribeAudio:   { audioBase64: 'string', mimeType: 'non-empty-string', fileName: 'non-empty-string', model: 'non-empty-string', language: 'non-empty-string' },
   embedTexts:        { model: 'non-empty-string', inputs: 'array' },
@@ -242,7 +242,7 @@ const COMMAND_SCHEMA = {
   unload:             { required: ['alias'], optional: ['lane', 'ifIdle'] },
   deleteModel:        { required: ['alias'], optional: ['variantId'] },
   getEndpoint:        { required: [], optional: [] },
-  chatCompletion:     { required: ['model', 'messages'], optional: ['maxTokens', 'temperature', 'preferredEp', 'stream'] },
+  chatCompletion:     { required: ['model', 'messages'], optional: ['maxTokens', 'temperature', 'preferredEp', 'stream', 'topP', 'topK', 'frequencyPenalty', 'presencePenalty', 'randomSeed'] },
   cancelChatRequest:  { required: ['requestId'], optional: [] },
   transcribeAudio:    { required: ['audioBase64', 'mimeType', 'fileName', 'model', 'language'], optional: ['temperature', 'preferredEp'] },
   embedTexts:         { required: ['model', 'inputs'], optional: [] },
@@ -334,9 +334,23 @@ function validateCommand(cmd, payload) {
   }
   if (cmd === 'startService' && payload.alias !== undefined && (typeof payload.alias !== 'string' || !payload.alias.trim())) return `Command "startService" field "alias" must be a non-empty string`;
   if ((cmd === 'chatCompletion' || cmd === 'transcribeAudio') && payload.temperature !== undefined && typeof payload.temperature !== 'number') return `Command "${cmd}" field "temperature" must be a number`;
+  // OpenAI's documented range; conversation-store.ts enforces the same bounds on the stored
+  // setting, so an out-of-range value here is one this build could never have written itself.
+  if ((cmd === 'chatCompletion' || cmd === 'transcribeAudio') && typeof payload.temperature === 'number' && (payload.temperature < 0 || payload.temperature > 2)) {
+    return `Command "${cmd}" field "temperature" must be between 0 and 2`;
+  }
   if (cmd === 'chatCompletion') {
     if (payload.stream !== undefined && typeof payload.stream !== 'boolean') return `Command "chatCompletion" field "stream" must be a boolean`;
     if (payload.maxTokens !== undefined && typeof payload.maxTokens !== 'number') return `Command "chatCompletion" field "maxTokens" must be a number`;
+    if (typeof payload.maxTokens === 'number' && (!Number.isInteger(payload.maxTokens) || payload.maxTokens <= 0)) {
+      return `Command "chatCompletion" field "maxTokens" must be a positive integer`;
+    }
+    if (typeof payload.topP === 'number' && (!Number.isFinite(payload.topP) || payload.topP <= 0 || payload.topP > 1)) {
+      return `Command "chatCompletion" field "topP" must be greater than 0 and at most 1`;
+    }
+    if (typeof payload.topK === 'number' && (!Number.isInteger(payload.topK) || payload.topK <= 0)) {
+      return `Command "chatCompletion" field "topK" must be a positive integer`;
+    }
   }
   if (cmd === 'applyMemorySettings' && payload.eviction !== undefined) {
     const ev = payload.eviction;
@@ -3213,6 +3227,21 @@ rl.on('line', async (line) => {
           if (client?.settings && Number.isFinite(payload.maxTokens)) {
             client.settings.maxTokens = payload.maxTokens;
           }
+          if (client?.settings && Number.isFinite(payload.topP)) {
+            client.settings.topP = payload.topP;
+          }
+          if (client?.settings && Number.isFinite(payload.topK)) {
+            client.settings.topK = payload.topK;
+          }
+          if (client?.settings && Number.isFinite(payload.frequencyPenalty)) {
+            client.settings.frequencyPenalty = payload.frequencyPenalty;
+          }
+          if (client?.settings && Number.isFinite(payload.presencePenalty)) {
+            client.settings.presencePenalty = payload.presencePenalty;
+          }
+          if (client?.settings && Number.isFinite(payload.randomSeed)) {
+            client.settings.randomSeed = payload.randomSeed;
+          }
           if (shouldStream && typeof client?.completeStreamingChat === 'function') {
             let content = '';
             for await (const chunk of client.completeStreamingChat(sdkMessages)) {
@@ -3358,7 +3387,20 @@ rl.on('line', async (line) => {
               messages: sdkMessages,
               stream: false,
               max_tokens: payload.maxTokens,
-              temperature: payload.temperature
+              temperature: payload.temperature,
+              top_p: payload.topP,
+              frequency_penalty: payload.frequencyPenalty,
+              presence_penalty: payload.presencePenalty,
+              // The native web service mirrors the SDK client's own serialization, which sends
+              // top_k/random_seed as stringified metadata fields rather than top-level numbers.
+              ...(payload.topK !== undefined || payload.randomSeed !== undefined
+                ? {
+                    metadata: {
+                      ...(payload.topK !== undefined ? { top_k: String(payload.topK) } : {}),
+                      ...(payload.randomSeed !== undefined ? { random_seed: String(payload.randomSeed) } : {}),
+                    },
+                  }
+                : {})
             })
           });
           if (!resp.ok) {

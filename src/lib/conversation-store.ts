@@ -226,12 +226,22 @@ export interface ConversationSettings {
   contextTurns?: number;
   /** Whether the UI shows the full thread rather than the condensed one. */
   showFullHistory?: boolean;
+  /** Sampling temperature, OpenAI's documented 0-2 range. */
+  temperature?: number;
+  /** Maximum tokens the model may generate in a single reply. */
+  maxTokens?: number;
+  /** Nucleus sampling cutoff, (0, 1]. */
+  topP?: number;
+  /** Top-k sampling cutoff. */
+  topK?: number;
 }
 
 /** Keys `ConversationSettings` owns. Anything else is passthrough. */
 export const CONVERSATION_SETTING_KEYS = [
   'modelAlias', 'systemPrompt', 'contextTurns', 'showFullHistory',
+  'temperature', 'maxTokens', 'topP', 'topK',
 ] as const;
+
 
 export interface ConversationSettingsRead {
   /** Known keys that held a usable value. */
@@ -278,6 +288,28 @@ export function readConversationSettings(raw: unknown): ConversationSettingsRead
       case 'showFullHistory':
         if (typeof value === 'boolean') settings.showFullHistory = value;
         else invalidKeys.push(key);
+        break;
+      case 'temperature':
+        // OpenAI's documented range; the sidecar rejects anything outside it too, so an
+        // out-of-range stored value is a setting this build could never actually apply.
+        if (typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 2) {
+          settings.temperature = value;
+        } else invalidKeys.push(key);
+        break;
+      case 'maxTokens':
+        if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
+          settings.maxTokens = value;
+        } else invalidKeys.push(key);
+        break;
+      case 'topP':
+        if (typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 1) {
+          settings.topP = value;
+        } else invalidKeys.push(key);
+        break;
+      case 'topK':
+        if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
+          settings.topK = value;
+        } else invalidKeys.push(key);
         break;
       default:
         // `key` is arbitrary stored input, so it cannot be assigned directly.

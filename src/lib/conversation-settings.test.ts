@@ -13,6 +13,10 @@ const baseline: AppSettingDefaults = {
   systemPrompt: 'You are terse.',
   contextTurns: 8,
   showFullHistory: false,
+  temperature: 0.5,
+  maxTokens: 1024,
+  topP: 0.9,
+  topK: 40,
 };
 
 describe('readAppSettingDefaults', () => {
@@ -24,7 +28,10 @@ describe('readAppSettingDefaults', () => {
 
   it('reads the persisted key names, not the field names', () => {
     const read = readAppSettingDefaults(
-      { selectedModelAlias: 'qwen3-0.6b', systemPrompt: 'hi', contextTurns: 20, showFullHistory: true },
+      {
+        selectedModelAlias: 'qwen3-0.6b', systemPrompt: 'hi', contextTurns: 20, showFullHistory: true,
+        temperature: 1.1, maxTokens: 512, topP: 0.8, topK: 10,
+      },
       baseline,
     );
     expect(read).toEqual({
@@ -32,6 +39,10 @@ describe('readAppSettingDefaults', () => {
       systemPrompt: 'hi',
       contextTurns: 20,
       showFullHistory: true,
+      temperature: 1.1,
+      maxTokens: 512,
+      topP: 0.8,
+      topK: 10,
     });
   });
 
@@ -82,9 +93,13 @@ describe('resolveConversationSettings', () => {
     expect(resolved.effective).toEqual(baseline);
     expect(resolved.fromDefault.sort()).toEqual([
       'contextTurns',
+      'maxTokens',
       'modelAlias',
       'showFullHistory',
       'systemPrompt',
+      'temperature',
+      'topK',
+      'topP',
     ]);
   });
 
@@ -122,6 +137,32 @@ describe('resolveConversationSettings', () => {
     expect(resolved.fromDefault).toContain('contextTurns');
   });
 
+  it('resolves stored generation parameters, key by key', () => {
+    const resolved = resolveConversationSettings(
+      { temperature: 1.2, maxTokens: 256, topP: 0.5, topK: 20 },
+      baseline,
+    );
+    expect(resolved.effective.temperature).toBe(1.2);
+    expect(resolved.effective.maxTokens).toBe(256);
+    expect(resolved.effective.topP).toBe(0.5);
+    expect(resolved.effective.topK).toBe(20);
+    expect(resolved.fromDefault).toEqual(
+      expect.not.arrayContaining(['temperature', 'maxTokens', 'topP', 'topK']),
+    );
+  });
+
+  it('falls back to the baseline for out-of-range generation parameters', () => {
+    const resolved = resolveConversationSettings(
+      { temperature: 3, maxTokens: 0, topP: 1.5, topK: -1 },
+      baseline,
+    );
+    expect(resolved.effective.temperature).toBe(baseline.temperature);
+    expect(resolved.effective.maxTokens).toBe(baseline.maxTokens);
+    expect(resolved.effective.topP).toBe(baseline.topP);
+    expect(resolved.effective.topK).toBe(baseline.topK);
+    expect(resolved.invalidKeys.sort()).toEqual(['maxTokens', 'temperature', 'topK', 'topP']);
+  });
+
   it('ignores unknown keys without disturbing resolution', () => {
     const resolved = resolveConversationSettings(
       { systemPrompt: 'x', somethingNewerBuildsUse: { deep: true } },
@@ -145,6 +186,10 @@ describe('seedSettingsFor', () => {
       systemPrompt: 'You are terse.',
       contextTurns: 8,
       showFullHistory: false,
+      temperature: 0.5,
+      maxTokens: 1024,
+      topP: 0.9,
+      topK: 40,
     });
   });
 

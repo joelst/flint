@@ -30,6 +30,14 @@ export interface AppSettingDefaults {
   systemPrompt: string;
   contextTurns: number;
   showFullHistory: boolean;
+  /** Sampling temperature, OpenAI's documented 0-2 range. */
+  temperature: number;
+  /** Maximum tokens the model may generate in a single reply. */
+  maxTokens: number;
+  /** Nucleus sampling cutoff, (0, 1]. */
+  topP: number;
+  /** Top-k sampling cutoff. */
+  topK: number;
 }
 
 /** The baseline used before anything has been persisted. Mirrors the component's initial state. */
@@ -38,6 +46,12 @@ export const DEFAULT_APP_SETTINGS: AppSettingDefaults = Object.freeze({
   systemPrompt: 'You are a helpful assistant.',
   contextTurns: 12,
   showFullHistory: false,
+  // Foundry Local's model catalog reports no default sampling parameters today, so these are
+  // Flint's own sensible starting point rather than anything sourced from the catalog.
+  temperature: 0.7,
+  maxTokens: 2048,
+  topP: 1,
+  topK: 50,
 });
 
 /** The persisted key each default is stored under in the application settings blob. */
@@ -46,6 +60,10 @@ const PERSISTED_KEYS: Record<keyof AppSettingDefaults, string> = {
   systemPrompt: 'systemPrompt',
   contextTurns: 'contextTurns',
   showFullHistory: 'showFullHistory',
+  temperature: 'temperature',
+  maxTokens: 'maxTokens',
+  topP: 'topP',
+  topK: 'topK',
 };
 
 /**
@@ -80,6 +98,26 @@ export function readAppSettingDefaults(
   const full = source[PERSISTED_KEYS.showFullHistory];
   if (typeof full === 'boolean') defaults.showFullHistory = full;
 
+  const temperature = source[PERSISTED_KEYS.temperature];
+  if (typeof temperature === 'number' && Number.isFinite(temperature) && temperature >= 0 && temperature <= 2) {
+    defaults.temperature = temperature;
+  }
+
+  const maxTokens = source[PERSISTED_KEYS.maxTokens];
+  if (typeof maxTokens === 'number' && Number.isInteger(maxTokens) && maxTokens > 0) {
+    defaults.maxTokens = maxTokens;
+  }
+
+  const topP = source[PERSISTED_KEYS.topP];
+  if (typeof topP === 'number' && Number.isFinite(topP) && topP > 0 && topP <= 1) {
+    defaults.topP = topP;
+  }
+
+  const topK = source[PERSISTED_KEYS.topK];
+  if (typeof topK === 'number' && Number.isInteger(topK) && topK > 0) {
+    defaults.topK = topK;
+  }
+
   return defaults;
 }
 
@@ -100,6 +138,10 @@ export function appSettingDefaultsToPersisted(
     [PERSISTED_KEYS.systemPrompt]: defaults.systemPrompt,
     [PERSISTED_KEYS.contextTurns]: defaults.contextTurns,
     [PERSISTED_KEYS.showFullHistory]: defaults.showFullHistory,
+    [PERSISTED_KEYS.temperature]: defaults.temperature,
+    [PERSISTED_KEYS.maxTokens]: defaults.maxTokens,
+    [PERSISTED_KEYS.topP]: defaults.topP,
+    [PERSISTED_KEYS.topK]: defaults.topK,
   };
 }
 
@@ -143,6 +185,10 @@ export function resolveConversationSettings(
   take('systemPrompt', settings.systemPrompt);
   take('contextTurns', settings.contextTurns);
   take('showFullHistory', settings.showFullHistory);
+  take('temperature', settings.temperature);
+  take('maxTokens', settings.maxTokens);
+  take('topP', settings.topP);
+  take('topK', settings.topK);
 
   return { effective, fromDefault, invalidKeys };
 }
@@ -163,6 +209,10 @@ export function seedSettingsFor(
     systemPrompt: effective.systemPrompt,
     contextTurns: effective.contextTurns,
     showFullHistory: effective.showFullHistory,
+    temperature: effective.temperature,
+    maxTokens: effective.maxTokens,
+    topP: effective.topP,
+    topK: effective.topK,
   };
   // An empty alias is not a choice, it is the absence of one — on a fresh install no model has
   // been picked yet, and the component's auto-selector fills it in at runtime. Seeding `''`

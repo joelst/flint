@@ -2564,17 +2564,33 @@ export async function withServiceTransition<T>(
   });
 }
 
+export interface ChatCompletionOptions {
+  maxTokens?: number;
+  temperature?: number;
+  preferredEp?: string;
+  topP?: number;
+  topK?: number;
+  frequencyPenalty?: number;
+  presencePenalty?: number;
+  randomSeed?: number;
+}
+
 export async function chatCompletion(
   model: string,
   messages: Array<{ role: string; content: any }>,
-  options?: { maxTokens?: number; temperature?: number; preferredEp?: string }
+  options?: ChatCompletionOptions
 ): Promise<any> {
   const res = await send('chatCompletion', {
     model,
     messages,
     maxTokens: options?.maxTokens,
     temperature: options?.temperature,
-    preferredEp: options?.preferredEp
+    preferredEp: options?.preferredEp,
+    topP: options?.topP,
+    topK: options?.topK,
+    frequencyPenalty: options?.frequencyPenalty,
+    presencePenalty: options?.presencePenalty,
+    randomSeed: options?.randomSeed
   });
   return res.result;
 }
@@ -2583,7 +2599,7 @@ export async function chatCompletionStream(
   model: string,
   messages: Array<{ role: string; content: any }>,
   onDelta: (delta: string) => void,
-  options?: { maxTokens?: number; temperature?: number; preferredEp?: string },
+  options?: ChatCompletionOptions,
   onAssignedId?: (id: number) => void
 ): Promise<any> {
   const res = await sendInternal(
@@ -2594,6 +2610,11 @@ export async function chatCompletionStream(
       maxTokens: options?.maxTokens,
       temperature: options?.temperature,
       preferredEp: options?.preferredEp,
+      topP: options?.topP,
+      topK: options?.topK,
+      frequencyPenalty: options?.frequencyPenalty,
+      presencePenalty: options?.presencePenalty,
+      randomSeed: options?.randomSeed,
       stream: true
     },
     onDelta,
