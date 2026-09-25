@@ -894,18 +894,24 @@ export function createGateway (options) {
     try {
       const parsed = JSON.parse(payload);
       captureChatUsageMetrics(parsed?.usage, metrics);
-      // A streamed chunk that carries no delta/message text (e.g. a trailing usage-only
-      // chunk) never counts as the first token — only actual assistant content does. With
-      // `n > 1` the first choice can be a role/empty delta while a later choice carries the
-      // first content, so every choice must be checked, not just choices[0].
-      if (metrics && metrics.firstTokenAt == null && Array.isArray(parsed?.choices)) {
-        const hasContent = parsed.choices.some(choice => {
-          const delta = choice?.delta?.content ?? choice?.message?.content;
-          return typeof delta === 'string' && delta;
-        });
+      const normalized = normalizeChatResponse(parsed, { stream: true });
+      // A streamed chunk that carries no delta text (e.g. a trailing usage-only chunk)
+      // never counts as the first token — only actual assistant content does. With
+      // `n > 1` the first choice can be a role/empty delta while a later choice carries
+      // the first content, so every choice must be checked, not just choices[0].
+      // Detection is done on `normalized`, not the raw `parsed` payload: Foundry's native
+      // runtime duplicates content into both `delta` and `message` on one chunk, and
+      // `normalizeChoice` (chat-response.js) resolves that duplication into the single
+      // `delta.content` the client actually receives — whichever field owns the `content`
+      // key wins, even if its value is an empty string. Checking the same merged value
+      // keeps the metric truthful to what was streamed, rather than reporting a token that
+      // was never delivered.
+      if (metrics && metrics.firstTokenAt == null && Array.isArray(normalized?.choices)) {
+        const hasContent = normalized.choices.some(choice =>
+          typeof choice?.delta?.content === 'string' && choice.delta.content.length > 0);
         if (hasContent) metrics.firstTokenAt = Date.now();
       }
-      return `data: ${JSON.stringify(normalizeChatResponse(parsed, { stream: true }))}`;
+      return `data: ${JSON.stringify(normalized)}`;
     } catch {
       return line;
     }
