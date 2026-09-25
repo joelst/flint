@@ -1,5 +1,30 @@
 # Flint Changelog
 
+## 0.10.0
+
+### Minor Changes
+
+- f2b187d: Show benchmark suite definitions and case editing, and record full-call response time on finished runs.
+- 770ba47: A local endpoint request for a cached build can load that build when another build of the same model is idle. Diagnostics → Test local endpoint runs the chat, embedding, and speech checks against every model id and parent alias the endpoint lists.
+- b2be59c: Playground now exposes generation parameters — temperature, max tokens, top-p, top-k, frequency penalty, presence penalty, and a fixed sampling seed — in a collapsible panel next to the Context control, persisted per conversation the same way the model and system prompt are.
+- 0cbd257: **Recheck Providers** on the Models page repairs execution providers that are not registered: it replaces a broken CUDA or WebGPU download, registers the others again, and names any provider that is still not registered. The button is visible in light and dark mode.
+
+### Patch Changes
+
+- aede9a3: Try the new Session/Request/Item AudioSession API first when transcribing audio, falling back to the deprecated AudioClient automatically for models it doesn't yet support (Nemotron, Parakeet). No user-visible change for those models; Whisper-family models now transcribe via the API that will replace AudioClient before its end-of-2026 removal.
+- 9cc7044: Populate the model catalog after registering every discovered accelerator so compatible GPU variants are available.
+  Keep loaded-model tracking accurate across restarts and eviction, and safely refuse catalog changes blocked by expired telemetry.
+- d3f363b: Clarify the "catalog not yet checked" notice so it doesn't imply a check is already running.
+- 26c1e1c: Replace the fixed-option Context turns dropdown with a continuous slider (4-40), fixing a bug where a model's recommended turn count often fell outside the preset list and left the control showing blank.
+- 54190a5: Requests through the local endpoint that name a model alias, or a model that is not loaded yet, work again on Foundry Local 2.0.1: the gateway recognizes its not-loaded and not-found replies, loads the cached model, and replays under the loaded variant id. An explicit `:<version>` that is not cached is no longer served by another version.
+- 54190a5: Canonicalize whitespace-padded model IDs before replaying local endpoint requests, including IDs that already match the loaded variant after trimming.
+- 3edda9a: Gateway (OpenAI-compatible endpoint) rows in the Access Log now report token counts, time-to-first-token, and decode throughput for chat completions, instead of always showing "—". Captured from the response the proxy already parses for normalization, with no extra buffering of streamed responses.
+- 6f77c24: Accept the macOS ONNX Runtime alias after Tauri copies release resources. The staged `libonnxruntime.dylib` is a regular file, not the symlink the SDK installer created, and the bundle check was failing the release on that copy.
+- 99d9c9f: Builds no longer reuse a cached Foundry native runtime from a different SDK version; the CI cache is keyed to the exact lockfile.
+- 56aa5d7: Recognize newer Nemotron ASR model names (e.g. `nemotron-3.5-asr-streaming-0.6b`) as speech models instead of chat, matching an `-asr-` marker in addition to the original `-speech-` naming.
+- 0cbd257: Windows installs now replace the Foundry SDK and its ONNX Runtime instead of keeping the previous version's DLLs, and put the previous SDK back if the install fails or is cancelled. Builds no longer package an ONNX Runtime DLL that is not the pinned version.
+- 2cf6b79: Transcription no longer fails with "Unable to decode audio data" for WAV files some WebView2/Chromium builds reject: Flint parses standard PCM WAV itself instead of relying solely on the browser decoder. Other formats (MP3, etc.) that still fail to decode now report which container was detected and suggest converting to WAV.
+
 ## 0.9.1
 
 ### Patch Changes
