@@ -895,10 +895,15 @@ export function createGateway (options) {
       const parsed = JSON.parse(payload);
       captureChatUsageMetrics(parsed?.usage, metrics);
       // A streamed chunk that carries no delta/message text (e.g. a trailing usage-only
-      // chunk) never counts as the first token — only actual assistant content does.
-      if (metrics && metrics.firstTokenAt == null) {
-        const delta = parsed?.choices?.[0]?.delta?.content ?? parsed?.choices?.[0]?.message?.content;
-        if (typeof delta === 'string' && delta) metrics.firstTokenAt = Date.now();
+      // chunk) never counts as the first token — only actual assistant content does. With
+      // `n > 1` the first choice can be a role/empty delta while a later choice carries the
+      // first content, so every choice must be checked, not just choices[0].
+      if (metrics && metrics.firstTokenAt == null && Array.isArray(parsed?.choices)) {
+        const hasContent = parsed.choices.some(choice => {
+          const delta = choice?.delta?.content ?? choice?.message?.content;
+          return typeof delta === 'string' && delta;
+        });
+        if (hasContent) metrics.firstTokenAt = Date.now();
       }
       return `data: ${JSON.stringify(normalizeChatResponse(parsed, { stream: true }))}`;
     } catch {

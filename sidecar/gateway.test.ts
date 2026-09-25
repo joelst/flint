@@ -952,6 +952,30 @@ describe('gateway streaming', () => {
     expect(entry.decodeTokensPerSecond).toBeGreaterThan(0);
   });
 
+  it('detects first-token time from a later choice when choices[0] carries no content', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      // With n > 1, the first choice can be a role-only/empty delta while another
+      // choice carries the actual first content chunk.
+      res.write('data: {"choices":[{"index":0,"delta":{"role":"assistant"}},{"index":1,"delta":{"content":"hi"}}]}\n\n');
+      res.write('data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"},{"index":1,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1}}\n\n');
+      res.end('data: [DONE]\n\n');
+    });
+    const access = [];
+    gateway = await startGateway({ onAccess: (entry) => access.push(entry) });
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3-0.6b', stream: true, n: 2 }),
+    });
+
+    expect(res.status).toBe(200);
+    const entry = access.find(e => e.routeClass === 'chat');
+    expect(entry.ttftMs).toBeGreaterThanOrEqual(0);
+  });
+
   it('reports token usage for buffered (non-streamed) chat completions', async () => {
     await new Promise(r => upstream.server.close(r));
     upstream = await startUpstream((_req, res) => {
