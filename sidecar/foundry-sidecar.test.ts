@@ -3111,6 +3111,8 @@ describe('chatCompletion ChatSession path', () => {
   //                           tool-call deltas arrive index 1 before index 0, to verify the
   //                           final tool_calls array is compacted rather than sparse (a hole
   //                           serializes as `null`, which is invalid per the tool_calls schema).
+  //   'session-stream-tool-high-index' - emits one tool call at a very high index to verify
+  //                           assembly does not allocate a correspondingly sparse array.
   //   'session-stream-tool-cancel' - yields a text delta, then polls FLINT_TEST_CANCEL_SIGNAL
   //                           (written by the test only after it has received the
   //                           cancelChatRequest ack) before yielding a tool_calls delta and a
@@ -3119,7 +3121,7 @@ describe('chatCompletion ChatSession path', () => {
   //                           already are. Gating on the signal file (rather than a fixed
   //                           delay) makes the ordering deterministic instead of depending on
   //                           IPC round-trip speed on a loaded CI runner.
-  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-error-dispose' | 'session-abort' | 'session-empty-output' | 'session-stream-empty' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error' | 'session-stream-tool' | 'session-stream-tool-outoforder' | 'session-stream-tool-cancel';
+  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-error-dispose' | 'session-abort' | 'session-empty-output' | 'session-stream-empty' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error' | 'session-stream-tool' | 'session-stream-tool-outoforder' | 'session-stream-tool-high-index' | 'session-stream-tool-cancel';
   function fakeSdk(sdkMode: ChatFakeSdkMode) {
     const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only';
     const hasSession = sdkMode !== 'legacy-only';
@@ -3179,6 +3181,7 @@ describe('chatCompletion ChatSession path', () => {
       `        if (${JSON.stringify(sdkMode)} === 'session-stream-tool') yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-1', type: 'function', function: { name: 'read_status', arguments: '{' } }] } }] }) };`,
       `        if (${JSON.stringify(sdkMode)} === 'session-stream-tool') yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '}' } }] } }] }) };`,
       `        if (${JSON.stringify(sdkMode)} === 'session-stream-tool-outoforder') yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 1, id: 'call-2', type: 'function', function: { name: 'second_tool', arguments: '{}' } }] } }] }) };`,
+      `        if (${JSON.stringify(sdkMode)} === 'session-stream-tool-high-index') yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 1000000000, id: 'call-high', type: 'function', function: { name: 'high_index_tool', arguments: '{}' } }] } }] }) };`,
       `        if (${JSON.stringify(sdkMode)} === 'session-stream-tool-cancel') { while (!fs.existsSync(process.env.FLINT_TEST_CANCEL_SIGNAL)) { await new Promise((resolve) => setTimeout(resolve, 5)); } yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-1', type: 'function', function: { name: 'read_status', arguments: '{}' } }] } }] }) }; }`,
       `        yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { content: 'reply' }, finish_reason: ${JSON.stringify(['session-stream-tool', 'session-stream-tool-outoforder', 'session-stream-tool-cancel'].includes(sdkMode) ? 'tool_calls' : 'stop')} }], usage: { prompt_tokens: 5, completion_tokens: 6 } }) };`,
       '      },',
@@ -3376,6 +3379,25 @@ describe('chatCompletion ChatSession path', () => {
     expect(res.result.choices[0].message.tool_calls).toEqual([
       { id: 'call-2', type: 'function', function: { name: 'second_tool', arguments: '{}' } },
     ]);
+  }, 30000);
+
+  it('assembles a high-index tool call without allocating a sparse array', async () => {
+    await startSidecar('session-stream-tool-high-index');
+    const chatted = waitForLine(proc, (msg) => msg.id === 3 && msg.ok === true, 10000);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use the tool' }],
+      stream: true,
+    });
+    const res = await chatted;
+    expect(res.ok).toBe(true);
+    expect(res.result.choices[0].message.tool_calls).toEqual([{
+      id: 'call-high',
+      type: 'function',
+      function: { name: 'high_index_tool', arguments: '{}' },
+    }]);
   }, 30000);
 
   it('suppresses tool-call deltas that arrive after the stream is canceled', async () => {

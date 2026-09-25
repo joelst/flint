@@ -2252,11 +2252,24 @@ function normalizeText (value) {
 
 function mergeToolCallDeltas (target, deltas) {
   for (const delta of Array.isArray(deltas) ? deltas : []) {
-    const index = Number.isInteger(delta?.index) ? delta.index : target.length;
-    const current = target[index] || {};
+    let index;
+    if (delta?.index === undefined) {
+      if (target.nextIndex >= Number.MAX_SAFE_INTEGER) {
+        throw new Error('Invalid tool-call delta index');
+      }
+      index = target.nextIndex;
+      target.nextIndex += 1;
+    } else {
+      index = delta.index;
+      if (!Number.isSafeInteger(index) || index < 0 || index >= Number.MAX_SAFE_INTEGER) {
+        throw new Error('Invalid tool-call delta index');
+      }
+      target.nextIndex = Math.max(target.nextIndex, index + 1);
+    }
+    const current = target.calls.get(index) || {};
     const currentFunction = current.function || {};
     const nextFunction = delta?.function || {};
-    target[index] = {
+    target.calls.set(index, {
       ...current,
       ...(delta?.id !== undefined ? { id: delta.id } : {}),
       ...(delta?.type !== undefined ? { type: delta.type } : {}),
@@ -2270,9 +2283,15 @@ function mergeToolCallDeltas (target, deltas) {
           ? { arguments: currentFunction.arguments + nextFunction.arguments }
           : {}),
       },
-    };
+    });
   }
-  return target.filter(Boolean);
+  return target;
+}
+
+function compactToolCallDeltas (target) {
+  return Array.from(target.calls.entries())
+    .sort(([left], [right]) => left - right)
+    .map(([, call]) => call);
 }
 
 function segmentTextsFromValue (segments) {
@@ -3444,7 +3463,7 @@ rl.on('line', async (line) => {
           }
           if (shouldStream && typeof client?.completeStreamingChat === 'function') {
             let content = '';
-            const toolCalls = [];
+            const toolCalls = { calls: new Map(), nextIndex: 0 };
             let chatFinishReason = null;
             for await (const chunk of client.completeStreamingChat(
               sdkMessages,
@@ -3463,11 +3482,8 @@ rl.on('line', async (line) => {
               // metadata even for a canceled request, not user-visible generation output.
               const finishReason = chunk?.choices?.[0]?.finish_reason;
               if (finishReason != null) chatFinishReason = finishReason;
-              // mergeToolCallDeltas mutates `toolCalls` in place, keyed by the delta's own
-              // `index`, so out-of-order parallel tool calls land at the right position
-              // across chunks. Its filtered return value is intentionally discarded here;
-              // reassigning it per-chunk would renumber positions mid-stream and corrupt a
-              // later delta's index lookup. Compaction happens once, after the loop.
+              // Keep sparse model-provided indexes in a Map so an unexpectedly large index
+              // cannot allocate or traverse a correspondingly large sparse array.
               mergeToolCallDeltas(toolCalls, chunk?.choices?.[0]?.delta?.tool_calls);
               const deltaText = chunk?.choices?.[0]?.delta?.content;
               const messageText = chunk?.choices?.[0]?.message?.content ?? chunk?.message?.content;
@@ -3497,7 +3513,7 @@ rl.on('line', async (line) => {
             chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
             // Compact once, after the loop: see the in-loop comment for why compaction
             // must not happen per-chunk.
-            const compactedToolCalls = toolCalls.filter(Boolean);
+            const compactedToolCalls = compactToolCallDeltas(toolCalls);
             reply({
               ok: true,
               result: {
@@ -3572,7 +3588,7 @@ rl.on('line', async (line) => {
             });
           } else if (typeof client?.completeStreamingChat === 'function') {
             let content = '';
-            const toolCalls = [];
+            const toolCalls = { calls: new Map(), nextIndex: 0 };
             let chatFinishReason = null;
             for await (const chunk of client.completeStreamingChat(
               sdkMessages,
@@ -3598,11 +3614,7 @@ rl.on('line', async (line) => {
             }
             chatOk = true;
             chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
-            // Compact once, after the loop: unset indexes (a lower index that never
-            // arrived while a higher parallel index did) are removed here rather than
-            // reassigning toolCalls mid-stream, which would otherwise renumber positions
-            // and corrupt subsequent index-keyed merges.
-            const compactedToolCalls = toolCalls.filter(Boolean);
+            const compactedToolCalls = compactToolCallDeltas(toolCalls);
             reply({
               ok: true,
               result: {
