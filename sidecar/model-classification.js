@@ -25,4 +25,36 @@ function looksLikeSpeech(name) {
   );
 }
 
-export { looksLikeSpeech };
+/**
+ * Classify whether the currently proven AudioSession URI request shape should
+ * be attempted for a speech model.
+ *
+ * `supported` is intentionally narrow: only Whisper has been verified with
+ * Item.audioFromUri() in the pinned SDK. Nemotron needs an ItemQueue/raw-PCM
+ * request and Parakeet has no working AudioSession shape yet. Unknown families
+ * remain `unknown` so a new model can still probe the additive path and fall
+ * back safely if the runtime rejects it.
+ *
+ * @param {object|null|undefined} model
+ * @returns {'supported'|'unsupported'|'unknown'}
+ */
+function audioSessionUriSupport(model) {
+  const info = model?.info || {};
+  const names = [
+    model?.alias,
+    model?.id,
+    info.alias,
+    info.id,
+    info.modelType,
+    info.task,
+    info.capabilities,
+  ].filter((value) => typeof value === 'string').join(' ').toLowerCase();
+
+  if (/parakeet/.test(names) || /nemotron.*(?:speech|asr)/.test(names)) {
+    return 'unsupported';
+  }
+  if (/whisper/.test(names)) return 'supported';
+  return 'unknown';
+}
+
+export { looksLikeSpeech, audioSessionUriSupport };

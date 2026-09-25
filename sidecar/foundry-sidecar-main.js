@@ -32,7 +32,7 @@ import {
   resolveModelId,
 } from './model-registry.js';
 import { activityCandidateKeys } from './activity-booking.js';
-import { looksLikeSpeech } from './model-classification.js';
+import { audioSessionUriSupport, looksLikeSpeech } from './model-classification.js';
 import { waitUntilIdle } from './monotonic-wait.js';
 import {
   createOperationAdmission,
@@ -3704,7 +3704,8 @@ rl.on('line', async (line) => {
         } catch (err) {
           log('debug', `AudioSession: could not resolve SDK module (${err?.message || err})`);
         }
-        if (sdkModule) {
+        const audioSessionSupport = audioSessionUriSupport(audioModel);
+        if (sdkModule && audioSessionSupport !== 'unsupported') {
           const attempt = await tryAudioSessionTranscription(sdkModule, audioModel, tempPath, payload);
           if (attempt.ok) {
             const result = buildTranscriptResult(attempt.candidate, {
@@ -3725,6 +3726,8 @@ rl.on('line', async (line) => {
             return;
           }
           log('debug', `AudioSession transcription unavailable, using legacy path: ${attempt.reason}`);
+        } else if (audioSessionSupport === 'unsupported') {
+          log('debug', 'AudioSession URI path is not supported for this speech model family; using legacy path');
         }
 
         // Prefer direct AudioClient (like we do for chat) — this avoids relying on the web service HTTP route
