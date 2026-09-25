@@ -748,7 +748,7 @@ describe('foundry-sidecar protocol basics', () => {
     }
   });
 
-  it('applies requested temperature/maxTokens to the SDK chat client before completion', async () => {
+  it('applies requested generation parameters to the SDK chat client before completion', async () => {
     const homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-chat-settings-home-'));
     const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
     const corePath = join(homeDir, 'fake-core.dylib');
@@ -759,7 +759,10 @@ describe('foundry-sidecar protocol basics', () => {
     writeFileSync(loaderPath, `
       const sdk = \`
         class FakeChatClientSettings {
-          constructor() { this.temperature = 0.11; this.maxTokens = 7; }
+          constructor() {
+            this.temperature = 0.11; this.maxTokens = 7; this.topP = 0.9; this.topK = 40;
+            this.frequencyPenalty = 0.1; this.presencePenalty = 0.2; this.randomSeed = 99;
+          }
         }
         class FakeChatClient {
           constructor() { this.settings = new FakeChatClientSettings(); }
@@ -767,13 +770,23 @@ describe('foundry-sidecar protocol basics', () => {
             return {
               choices: [{ message: {
                 role: 'assistant',
-                content: JSON.stringify({ temperature: this.settings.temperature, maxTokens: this.settings.maxTokens }),
+                content: JSON.stringify({
+                  temperature: this.settings.temperature, maxTokens: this.settings.maxTokens,
+                  topP: this.settings.topP, topK: this.settings.topK,
+                  frequencyPenalty: this.settings.frequencyPenalty,
+                  presencePenalty: this.settings.presencePenalty, randomSeed: this.settings.randomSeed,
+                }),
               } }],
             };
           }
           async *completeStreamingChat() {
             yield { choices: [{ delta: {
-              content: JSON.stringify({ temperature: this.settings.temperature, maxTokens: this.settings.maxTokens }),
+              content: JSON.stringify({
+                temperature: this.settings.temperature, maxTokens: this.settings.maxTokens,
+                topP: this.settings.topP, topK: this.settings.topK,
+                frequencyPenalty: this.settings.frequencyPenalty,
+                presencePenalty: this.settings.presencePenalty, randomSeed: this.settings.randomSeed,
+              }),
             } }] };
           }
         }
@@ -842,12 +855,22 @@ describe('foundry-sidecar protocol basics', () => {
         stream: false,
         temperature: 0.42,
         maxTokens: 123,
+        topP: 0.6,
+        topK: 30,
+        frequencyPenalty: 0.4,
+        presencePenalty: -0.4,
+        randomSeed: 12,
       })}\n`);
       const buffered = await waitForLine(proc, (msg) => msg.id === 51, 45000);
       expect(buffered.ok).toBe(true);
       expect(JSON.parse(buffered.result.choices[0].message.content)).toEqual({
         temperature: 0.42,
         maxTokens: 123,
+        topP: 0.6,
+        topK: 30,
+        frequencyPenalty: 0.4,
+        presencePenalty: -0.4,
+        randomSeed: 12,
       });
 
       // Streaming SDK branch.
@@ -874,12 +897,25 @@ describe('foundry-sidecar protocol basics', () => {
         stream: true,
         temperature: 0.77,
         maxTokens: 55,
+        topP: 0.5,
+        topK: 10,
+        frequencyPenalty: -0.5,
+        presencePenalty: 0.5,
+        randomSeed: 3,
       })}\n`);
       const [streamedDelta, streamedDone] = await Promise.all([
         streamedDeltaPromise,
         streamedDonePromise,
       ]);
-      expect(JSON.parse(streamedDelta.delta)).toEqual({ temperature: 0.77, maxTokens: 55 });
+      expect(JSON.parse(streamedDelta.delta)).toEqual({
+        temperature: 0.77,
+        maxTokens: 55,
+        topP: 0.5,
+        topK: 10,
+        frequencyPenalty: -0.5,
+        presencePenalty: 0.5,
+        randomSeed: 3,
+      });
       expect(streamedDone.ok).toBe(true);
 
       // Omitted fields must not clobber the client's own defaults with undefined/NaN.
@@ -894,9 +930,14 @@ describe('foundry-sidecar protocol basics', () => {
       expect(JSON.parse(defaulted.result.choices[0].message.content)).toEqual({
         temperature: 0.11,
         maxTokens: 7,
+        topP: 0.9,
+        topK: 40,
+        frequencyPenalty: 0.1,
+        presencePenalty: 0.2,
+        randomSeed: 99,
       });
 
-      // Setting only one field must leave the other at the client default.
+      // Setting only one field must leave the others at the client default.
       proc.stdin.write(`${JSON.stringify({
         id: 54,
         cmd: 'chatCompletion',
@@ -909,6 +950,11 @@ describe('foundry-sidecar protocol basics', () => {
       expect(JSON.parse(partial.result.choices[0].message.content)).toEqual({
         temperature: 0.5,
         maxTokens: 7,
+        topP: 0.9,
+        topK: 40,
+        frequencyPenalty: 0.1,
+        presencePenalty: 0.2,
+        randomSeed: 99,
       });
     } finally {
       await killAndWait(proc);

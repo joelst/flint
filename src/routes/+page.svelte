@@ -9052,6 +9052,10 @@ Output only the summary text, no preamble.`;
                         value={maxTokens}
                         oninput={(e) => {
                           const value = Number((e.currentTarget as HTMLInputElement).value);
+                          if (Number.isInteger(value) && value > 0) maxTokens = value;
+                        }}
+                        onchange={(e) => {
+                          const value = Number((e.currentTarget as HTMLInputElement).value);
                           if (Number.isInteger(value) && value > 0) commitChatSettings({ maxTokens: value });
                         }}
                         disabled={isStreaming}
@@ -9084,6 +9088,10 @@ Output only the summary text, no preamble.`;
                         step="1"
                         value={topK}
                         oninput={(e) => {
+                          const value = Number((e.currentTarget as HTMLInputElement).value);
+                          if (Number.isInteger(value) && value > 0) topK = value;
+                        }}
+                        onchange={(e) => {
                           const value = Number((e.currentTarget as HTMLInputElement).value);
                           if (Number.isInteger(value) && value > 0) commitChatSettings({ topK: value });
                         }}
