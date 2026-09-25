@@ -9032,7 +9032,10 @@ Output only the summary text, no preamble.`;
                         max="2"
                         step="0.05"
                         value={temperature}
-                        oninput={(e) =>
+                        oninput={(e) => {
+                          temperature = Number((e.currentTarget as HTMLInputElement).value);
+                        }}
+                        onchange={(e) =>
                           commitChatSettings({
                             temperature: Number((e.currentTarget as HTMLInputElement).value),
                           })}
@@ -9062,7 +9065,10 @@ Output only the summary text, no preamble.`;
                         max="1"
                         step="0.01"
                         value={topP}
-                        oninput={(e) =>
+                        oninput={(e) => {
+                          topP = Number((e.currentTarget as HTMLInputElement).value);
+                        }}
+                        onchange={(e) =>
                           commitChatSettings({
                             topP: Number((e.currentTarget as HTMLInputElement).value),
                           })}

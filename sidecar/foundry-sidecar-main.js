@@ -351,6 +351,16 @@ function validateCommand(cmd, payload) {
     if (typeof payload.topK === 'number' && (!Number.isInteger(payload.topK) || payload.topK <= 0)) {
       return `Command "chatCompletion" field "topK" must be a positive integer`;
     }
+    // OpenAI's documented range for both penalty parameters.
+    if (typeof payload.frequencyPenalty === 'number' && (!Number.isFinite(payload.frequencyPenalty) || payload.frequencyPenalty < -2 || payload.frequencyPenalty > 2)) {
+      return `Command "chatCompletion" field "frequencyPenalty" must be between -2 and 2`;
+    }
+    if (typeof payload.presencePenalty === 'number' && (!Number.isFinite(payload.presencePenalty) || payload.presencePenalty < -2 || payload.presencePenalty > 2)) {
+      return `Command "chatCompletion" field "presencePenalty" must be between -2 and 2`;
+    }
+    if (typeof payload.randomSeed === 'number' && !Number.isSafeInteger(payload.randomSeed)) {
+      return `Command "chatCompletion" field "randomSeed" must be a safe integer`;
+    }
   }
   if (cmd === 'applyMemorySettings' && payload.eviction !== undefined) {
     const ev = payload.eviction;

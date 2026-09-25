@@ -2384,6 +2384,12 @@ describe('foundry-sidecar command schema validation', () => {
       [{ topP: 1.1 }, /topP.*greater than 0 and at most 1/],
       [{ topK: 0 }, /topK.*positive integer/],
       [{ topK: 1.5 }, /topK.*positive integer/],
+      [{ frequencyPenalty: -2.1 }, /frequencyPenalty.*between -2 and 2/],
+      [{ frequencyPenalty: 2.1 }, /frequencyPenalty.*between -2 and 2/],
+      [{ presencePenalty: -2.1 }, /presencePenalty.*between -2 and 2/],
+      [{ presencePenalty: 2.1 }, /presencePenalty.*between -2 and 2/],
+      [{ randomSeed: 1.5 }, /randomSeed.*safe integer/],
+      [{ randomSeed: Number.MAX_SAFE_INTEGER + 2 }, /randomSeed.*safe integer/],
     ];
     let id = 4700;
     for (const [fields, expected] of cases) {
