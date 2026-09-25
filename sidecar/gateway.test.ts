@@ -982,6 +982,33 @@ describe('gateway streaming', () => {
     expect(entry.decodeTokensPerSecond).toBeNull();
   });
 
+  it.each([0, 32])('reports token usage when the non-streamed response limit is %i bytes', async maxBufferedResponse => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        choices: [{ message: { role: 'assistant', content: 'x'.repeat(128) } }],
+        usage: { prompt_tokens: 9, completion_tokens: 4 },
+      }));
+    });
+    const access = [];
+    gateway = await startGateway({
+      maxBufferedResponse,
+      onAccess: (entry) => access.push(entry),
+    });
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3-0.6b' }),
+    });
+
+    expect(res.status).toBe(200);
+    const entry = access.find(e => e.routeClass === 'chat');
+    expect(entry.tokensIn).toBe(9);
+    expect(entry.tokensOut).toBe(4);
+  });
+
   it('normalizes split UTF-8 SSE payloads and removes stale content length', async () => {
     await new Promise(r => upstream.server.close(r));
     upstream = await startUpstream((_req, res) => {

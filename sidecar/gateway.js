@@ -49,6 +49,9 @@ import {
 const UPSTREAM_TIMEOUT_MS = 0; // no timeout: generation can legitimately run for minutes
 const MULTIPART_MODEL_PEEK_BYTES = 16 * 1024;
 const MULTIPART_MODEL_MAX_CHARS = 256;
+// Usage is a small top-level object in OpenAI chat responses. Keep its independent
+// inspection bounded when the response itself is too large to normalize.
+const MAX_USAGE_METRICS_BYTES = 64 * 1024;
 const multipartModel = Symbol('multipartModel');
 const multipartPrefix = Symbol('multipartPrefix');
 const multipartEnded = Symbol('multipartEnded');
@@ -716,8 +719,10 @@ export function createGateway (options) {
     let chunks = [];
     let size = 0;
     let passthrough = normalizationLimit === 0;
+    const inspectUsage = createChatUsageInspector(metrics);
     return new Transform({
       transform (chunk, _encoding, callback) {
+        inspectUsage(chunk);
         if (passthrough) {
           callback(null, chunk);
           return;
@@ -733,6 +738,7 @@ export function createGateway (options) {
         callback();
       },
       flush (callback) {
+        inspectUsage.end();
         if (passthrough) {
           callback();
           return;
@@ -747,6 +753,60 @@ export function createGateway (options) {
         }
       },
     });
+  }
+
+  function createChatUsageInspector (metrics) {
+    const decoder = new StringDecoder('utf8');
+    let pending = '';
+    let captured = false;
+
+    function inspectText (text) {
+      if (captured) return;
+      pending += text;
+      if (pending.length > MAX_USAGE_METRICS_BYTES) {
+        pending = pending.slice(-MAX_USAGE_METRICS_BYTES);
+      }
+      const match = /(?:^|[,{])\s*"usage"\s*:\s*\{/.exec(pending);
+      if (!match) return;
+
+      const start = pending.indexOf('{', match.index);
+      const end = findJsonObjectEnd(pending, start);
+      if (end === -1) return;
+      try {
+        captureChatUsageMetrics(JSON.parse(pending.slice(start, end + 1)), metrics);
+        captured = true;
+      } catch {
+        // The body remains a pass-through response; invalid usage is simply not metrics.
+      }
+    }
+
+    function inspect (chunk) {
+      inspectText(decoder.write(chunk));
+    }
+
+    inspect.end = () => {
+      if (!captured) inspectText(decoder.end());
+    };
+    return inspect;
+  }
+
+  function findJsonObjectEnd (text, start) {
+    let depth = 0;
+    let quoted = false;
+    let escaped = false;
+    for (let index = start; index < text.length; index++) {
+      const char = text[index];
+      if (quoted) {
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (char === '"') quoted = false;
+        continue;
+      }
+      if (char === '"') quoted = true;
+      else if (char === '{') depth++;
+      else if (char === '}' && --depth === 0) return index;
+    }
+    return -1;
   }
 
   function normalizeChatStream (metrics) {
