@@ -9084,7 +9084,11 @@ Output only the summary text, no preamble.`;
                         }}
                         onchange={(e) => {
                           const value = Number((e.currentTarget as HTMLInputElement).value);
-                          if (Number.isInteger(value) && value > 0) commitChatSettings({ maxTokens: value });
+                          if (Number.isInteger(value) && value > 0) {
+                            commitChatSettings({ maxTokens: value });
+                          } else {
+                            e.currentTarget.value = String(maxTokens);
+                          }
                         }}
                         disabled={isStreaming}
                       />
@@ -9121,7 +9125,11 @@ Output only the summary text, no preamble.`;
                         }}
                         onchange={(e) => {
                           const value = Number((e.currentTarget as HTMLInputElement).value);
-                          if (Number.isInteger(value) && value > 0) commitChatSettings({ topK: value });
+                          if (Number.isInteger(value) && value > 0) {
+                            commitChatSettings({ topK: value });
+                          } else {
+                            e.currentTarget.value = String(topK);
+                          }
                         }}
                         disabled={isStreaming}
                       />
@@ -9181,7 +9189,11 @@ Output only the summary text, no preamble.`;
                           const raw = (e.currentTarget as HTMLInputElement).value.trim();
                           if (raw === '') { commitChatSettings({ randomSeed: null }); return; }
                           const value = Number(raw);
-                          if (Number.isSafeInteger(value)) commitChatSettings({ randomSeed: value });
+                          if (Number.isSafeInteger(value)) {
+                            commitChatSettings({ randomSeed: value });
+                          } else {
+                            e.currentTarget.value = randomSeed == null ? '' : String(randomSeed);
+                          }
                         }}
                         disabled={isStreaming}
                       />
