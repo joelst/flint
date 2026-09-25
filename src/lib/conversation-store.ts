@@ -234,12 +234,24 @@ export interface ConversationSettings {
   topP?: number;
   /** Top-k sampling cutoff. */
   topK?: number;
+  /** Repetition penalty by raw frequency, OpenAI's documented -2 to 2 range. */
+  frequencyPenalty?: number;
+  /** Repetition penalty by presence, OpenAI's documented -2 to 2 range. */
+  presencePenalty?: number;
+  /**
+   * Deterministic sampling seed, when the model supports it. `null` is a real stored override
+   * meaning "this conversation explicitly uses no seed" (distinct from the key being absent,
+   * which means "inherit whatever the baseline says") -- no number can represent "off" since the
+   * sidecar treats any finite number, including 0, as a seed to send.
+   */
+  randomSeed?: number | null;
 }
 
 /** Keys `ConversationSettings` owns. Anything else is passthrough. */
 export const CONVERSATION_SETTING_KEYS = [
   'modelAlias', 'systemPrompt', 'contextTurns', 'showFullHistory',
   'temperature', 'maxTokens', 'topP', 'topK',
+  'frequencyPenalty', 'presencePenalty', 'randomSeed',
 ] as const;
 
 
@@ -309,6 +321,24 @@ export function readConversationSettings(raw: unknown): ConversationSettingsRead
       case 'topK':
         if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
           settings.topK = value;
+        } else invalidKeys.push(key);
+        break;
+      case 'frequencyPenalty':
+        // OpenAI's documented range; the sidecar rejects anything outside it too.
+        if (typeof value === 'number' && Number.isFinite(value) && value >= -2 && value <= 2) {
+          settings.frequencyPenalty = value;
+        } else invalidKeys.push(key);
+        break;
+      case 'presencePenalty':
+        if (typeof value === 'number' && Number.isFinite(value) && value >= -2 && value <= 2) {
+          settings.presencePenalty = value;
+        } else invalidKeys.push(key);
+        break;
+      case 'randomSeed':
+        if (value === null) {
+          settings.randomSeed = null;
+        } else if (typeof value === 'number' && Number.isSafeInteger(value)) {
+          settings.randomSeed = value;
         } else invalidKeys.push(key);
         break;
       default:

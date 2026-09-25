@@ -38,6 +38,16 @@ export interface AppSettingDefaults {
   topP: number;
   /** Top-k sampling cutoff. */
   topK: number;
+  /** Repetition penalty by raw frequency, OpenAI's documented -2 to 2 range. */
+  frequencyPenalty: number;
+  /** Repetition penalty by presence, OpenAI's documented -2 to 2 range. */
+  presencePenalty: number;
+  /**
+   * Deterministic sampling seed, when the model supports it. `null` means "no seed" — generation
+   * stays non-deterministic — which no number can represent, since the sidecar treats any finite
+   * number (including 0) as a seed to send. Mirrors the `modelAlias`-absence convention below.
+   */
+  randomSeed: number | null;
 }
 
 /** The baseline used before anything has been persisted. Mirrors the component's initial state. */
@@ -52,6 +62,9 @@ export const DEFAULT_APP_SETTINGS: AppSettingDefaults = Object.freeze({
   maxTokens: 2048,
   topP: 1,
   topK: 50,
+  frequencyPenalty: 0,
+  presencePenalty: 0,
+  randomSeed: null,
 });
 
 /** The persisted key each default is stored under in the application settings blob. */
@@ -64,6 +77,9 @@ const PERSISTED_KEYS: Record<keyof AppSettingDefaults, string> = {
   maxTokens: 'maxTokens',
   topP: 'topP',
   topK: 'topK',
+  frequencyPenalty: 'frequencyPenalty',
+  presencePenalty: 'presencePenalty',
+  randomSeed: 'randomSeed',
 };
 
 /**
@@ -118,6 +134,25 @@ export function readAppSettingDefaults(
     defaults.topK = topK;
   }
 
+  const frequencyPenalty = source[PERSISTED_KEYS.frequencyPenalty];
+  if (typeof frequencyPenalty === 'number' && Number.isFinite(frequencyPenalty) && frequencyPenalty >= -2 && frequencyPenalty <= 2) {
+    defaults.frequencyPenalty = frequencyPenalty;
+  }
+
+  const presencePenalty = source[PERSISTED_KEYS.presencePenalty];
+  if (typeof presencePenalty === 'number' && Number.isFinite(presencePenalty) && presencePenalty >= -2 && presencePenalty <= 2) {
+    defaults.presencePenalty = presencePenalty;
+  }
+
+  // `null` is a valid stored value here (it means "no seed"), unlike every other field where an
+  // absent/wrong-type value simply falls through to the existing default.
+  const randomSeed = source[PERSISTED_KEYS.randomSeed];
+  if (randomSeed === null) {
+    defaults.randomSeed = null;
+  } else if (typeof randomSeed === 'number' && Number.isSafeInteger(randomSeed)) {
+    defaults.randomSeed = randomSeed;
+  }
+
   return defaults;
 }
 
@@ -142,6 +177,9 @@ export function appSettingDefaultsToPersisted(
     [PERSISTED_KEYS.maxTokens]: defaults.maxTokens,
     [PERSISTED_KEYS.topP]: defaults.topP,
     [PERSISTED_KEYS.topK]: defaults.topK,
+    [PERSISTED_KEYS.frequencyPenalty]: defaults.frequencyPenalty,
+    [PERSISTED_KEYS.presencePenalty]: defaults.presencePenalty,
+    [PERSISTED_KEYS.randomSeed]: defaults.randomSeed,
   };
 }
 
@@ -189,6 +227,9 @@ export function resolveConversationSettings(
   take('maxTokens', settings.maxTokens);
   take('topP', settings.topP);
   take('topK', settings.topK);
+  take('frequencyPenalty', settings.frequencyPenalty);
+  take('presencePenalty', settings.presencePenalty);
+  take('randomSeed', settings.randomSeed);
 
   return { effective, fromDefault, invalidKeys };
 }
@@ -213,6 +254,9 @@ export function seedSettingsFor(
     maxTokens: effective.maxTokens,
     topP: effective.topP,
     topK: effective.topK,
+    frequencyPenalty: effective.frequencyPenalty,
+    presencePenalty: effective.presencePenalty,
+    randomSeed: effective.randomSeed,
   };
   // An empty alias is not a choice, it is the absence of one — on a fresh install no model has
   // been picked yet, and the component's auto-selector fills it in at runtime. Seeding `''`

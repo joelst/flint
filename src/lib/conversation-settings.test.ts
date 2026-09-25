@@ -17,6 +17,9 @@ const baseline: AppSettingDefaults = {
   maxTokens: 1024,
   topP: 0.9,
   topK: 40,
+  frequencyPenalty: 0.2,
+  presencePenalty: -0.2,
+  randomSeed: 7,
 };
 
 describe('readAppSettingDefaults', () => {
@@ -31,6 +34,7 @@ describe('readAppSettingDefaults', () => {
       {
         selectedModelAlias: 'qwen3-0.6b', systemPrompt: 'hi', contextTurns: 20, showFullHistory: true,
         temperature: 1.1, maxTokens: 512, topP: 0.8, topK: 10,
+        frequencyPenalty: 1.5, presencePenalty: -1.5, randomSeed: 42,
       },
       baseline,
     );
@@ -43,7 +47,15 @@ describe('readAppSettingDefaults', () => {
       maxTokens: 512,
       topP: 0.8,
       topK: 10,
+      frequencyPenalty: 1.5,
+      presencePenalty: -1.5,
+      randomSeed: 42,
     });
+  });
+
+  it('reads a stored null randomSeed as an explicit "no seed" override, not as absent', () => {
+    const read = readAppSettingDefaults({ randomSeed: null }, { ...baseline, randomSeed: 99 });
+    expect(read.randomSeed).toBeNull();
   });
 
   it('keeps a stored empty alias and a stored false rather than treating them as absent', () => {
@@ -93,8 +105,11 @@ describe('resolveConversationSettings', () => {
     expect(resolved.effective).toEqual(baseline);
     expect(resolved.fromDefault.sort()).toEqual([
       'contextTurns',
+      'frequencyPenalty',
       'maxTokens',
       'modelAlias',
+      'presencePenalty',
+      'randomSeed',
       'showFullHistory',
       'systemPrompt',
       'temperature',
@@ -139,28 +154,45 @@ describe('resolveConversationSettings', () => {
 
   it('resolves stored generation parameters, key by key', () => {
     const resolved = resolveConversationSettings(
-      { temperature: 1.2, maxTokens: 256, topP: 0.5, topK: 20 },
+      { temperature: 1.2, maxTokens: 256, topP: 0.5, topK: 20, frequencyPenalty: 0.4, presencePenalty: -0.4, randomSeed: 3 },
       baseline,
     );
     expect(resolved.effective.temperature).toBe(1.2);
     expect(resolved.effective.maxTokens).toBe(256);
     expect(resolved.effective.topP).toBe(0.5);
     expect(resolved.effective.topK).toBe(20);
+    expect(resolved.effective.frequencyPenalty).toBe(0.4);
+    expect(resolved.effective.presencePenalty).toBe(-0.4);
+    expect(resolved.effective.randomSeed).toBe(3);
     expect(resolved.fromDefault).toEqual(
-      expect.not.arrayContaining(['temperature', 'maxTokens', 'topP', 'topK']),
+      expect.not.arrayContaining([
+        'temperature', 'maxTokens', 'topP', 'topK', 'frequencyPenalty', 'presencePenalty', 'randomSeed',
+      ]),
     );
+  });
+
+  it('resolves a stored null randomSeed as an explicit override, not as inherited', () => {
+    const resolved = resolveConversationSettings({ randomSeed: null }, { ...baseline, randomSeed: 99 });
+    expect(resolved.effective.randomSeed).toBeNull();
+    expect(resolved.fromDefault).not.toContain('randomSeed');
+    expect(resolved.invalidKeys).toEqual([]);
   });
 
   it('falls back to the baseline for out-of-range generation parameters', () => {
     const resolved = resolveConversationSettings(
-      { temperature: 3, maxTokens: 0, topP: 1.5, topK: -1 },
+      { temperature: 3, maxTokens: 0, topP: 1.5, topK: -1, frequencyPenalty: 3, presencePenalty: -3, randomSeed: 1.5 },
       baseline,
     );
     expect(resolved.effective.temperature).toBe(baseline.temperature);
     expect(resolved.effective.maxTokens).toBe(baseline.maxTokens);
     expect(resolved.effective.topP).toBe(baseline.topP);
     expect(resolved.effective.topK).toBe(baseline.topK);
-    expect(resolved.invalidKeys.sort()).toEqual(['maxTokens', 'temperature', 'topK', 'topP']);
+    expect(resolved.effective.frequencyPenalty).toBe(baseline.frequencyPenalty);
+    expect(resolved.effective.presencePenalty).toBe(baseline.presencePenalty);
+    expect(resolved.effective.randomSeed).toBe(baseline.randomSeed);
+    expect(resolved.invalidKeys.sort()).toEqual([
+      'frequencyPenalty', 'maxTokens', 'presencePenalty', 'randomSeed', 'temperature', 'topK', 'topP',
+    ]);
   });
 
   it('ignores unknown keys without disturbing resolution', () => {
@@ -190,7 +222,15 @@ describe('seedSettingsFor', () => {
       maxTokens: 1024,
       topP: 0.9,
       topK: 40,
+      frequencyPenalty: 0.2,
+      presencePenalty: -0.2,
+      randomSeed: 7,
     });
+  });
+
+  it('stamps an explicit null randomSeed rather than leaving it absent', () => {
+    const seed = seedSettingsFor({ ...baseline, randomSeed: null });
+    expect(seed.randomSeed).toBeNull();
   });
 
   it('leaves an empty alias absent rather than recording "explicitly no model"', () => {

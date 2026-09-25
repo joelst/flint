@@ -1445,6 +1445,10 @@
   let maxTokens = $state(2048);
   let topP = $state(1);
   let topK = $state(50);
+  let frequencyPenalty = $state(0);
+  let presencePenalty = $state(0);
+  // `null` means "no seed" (non-deterministic generation) -- see conversation-settings.ts.
+  let randomSeed: number | null = $state(null);
 
   /**
    * The application-level baseline a conversation inherits from when it stores no override.
@@ -1508,7 +1512,7 @@
   let managerNewPrompt = $state("");
   let editingPersona: Persona | null = $state(null);
 
-  // Playground generation-parameters panel (temperature/maxTokens/topP/topK), collapsed by default
+  // Playground generation-parameters panel (temperature/maxTokens/topP/topK/penalties/seed), collapsed by default
   let showGenParamsPanel = $state(false);
 
   // For positioning the persona dropdown (fixed to escape scrollers)
@@ -2086,7 +2090,7 @@
     return readConversationSettings(active?.settings).settings.modelAlias || "";
   }
 
-  /** The four settings as they currently apply to the loaded chat. */
+  /** The settings as they currently apply to the loaded chat. */
   function currentChatSettings(): AppSettingDefaults {
     return {
       modelAlias: selectedModelAlias,
@@ -2097,6 +2101,9 @@
       maxTokens,
       topP,
       topK,
+      frequencyPenalty,
+      presencePenalty,
+      randomSeed,
     };
   }
 
@@ -2122,6 +2129,9 @@
     maxTokens = effective.maxTokens;
     topP = effective.topP;
     topK = effective.topK;
+    frequencyPenalty = effective.frequencyPenalty;
+    presencePenalty = effective.presencePenalty;
+    randomSeed = effective.randomSeed;
     // A plain assignment, not `setChatModel`. That function is async: it loads the model and can
     // start the service, so driving it from a synchronous switch would let two overlapping
     // switches each decide the service was stopped and queue a restart, tearing down the
@@ -2158,6 +2168,9 @@
     if ('maxTokens' in patch) maxTokens = patch.maxTokens;
     if ('topP' in patch) topP = patch.topP;
     if ('topK' in patch) topK = patch.topK;
+    if ('frequencyPenalty' in patch) frequencyPenalty = patch.frequencyPenalty;
+    if ('presencePenalty' in patch) presencePenalty = patch.presencePenalty;
+    if ('randomSeed' in patch) randomSeed = patch.randomSeed;
     if (!threadLoadedFor) return;
     const result = captureThread(sessionState(), { now: Date.now(), settings: patch as any });
     if (!result.changed) return;
@@ -6374,6 +6387,9 @@ updateStateFromSdk();
             maxTokens,
             topP,
             topK,
+            frequencyPenalty,
+            presencePenalty,
+            randomSeed: randomSeed ?? undefined,
           },
           (requestId: number) => {
             const stream = streamsByConversation.get(originId);
@@ -6395,7 +6411,19 @@ updateStateFromSdk();
             messagesContainer.scrollTop = messagesContainer.scrollHeight;
         }, 5);
       } else if (chatClient) {
-        // Fallback to direct client (dev only)
+        // Fallback to direct client (dev only). This transport reads generation params from
+        // client.settings, not completion args -- see the sidecar's identical pattern in
+        // createSessionChatClient/createChatClient. Apply them before completion so this path
+        // does not silently ignore the Playground's settings when the endpoint is unavailable.
+        if (chatClient.settings) {
+          chatClient.settings.temperature = temperature;
+          chatClient.settings.maxTokens = maxTokens;
+          chatClient.settings.topP = topP;
+          chatClient.settings.topK = topK;
+          chatClient.settings.frequencyPenalty = frequencyPenalty;
+          chatClient.settings.presencePenalty = presencePenalty;
+          chatClient.settings.randomSeed = randomSeed ?? undefined;
+        }
         const inferenceMessages = getMessagesForInference();
         for await (const chunk of chatClient.completeStreamingChat(inferenceMessages)) {
           if (requestController.signal.aborted) break;
@@ -9094,6 +9122,66 @@ Output only the summary text, no preamble.`;
                         onchange={(e) => {
                           const value = Number((e.currentTarget as HTMLInputElement).value);
                           if (Number.isInteger(value) && value > 0) commitChatSettings({ topK: value });
+                        }}
+                        disabled={isStreaming}
+                      />
+
+                      <label for="genparams-freqpenalty" title="Penalize tokens by how often they've already appeared (-2 to 2)">Frequency penalty</label>
+                      <input
+                        type="range"
+                        id="genparams-freqpenalty"
+                        min="-2"
+                        max="2"
+                        step="0.1"
+                        value={frequencyPenalty}
+                        oninput={(e) => {
+                          frequencyPenalty = Number((e.currentTarget as HTMLInputElement).value);
+                        }}
+                        onchange={(e) =>
+                          commitChatSettings({
+                            frequencyPenalty: Number((e.currentTarget as HTMLInputElement).value),
+                          })}
+                        disabled={isStreaming}
+                      />
+                      <span class="genparams-value">{frequencyPenalty.toFixed(1)}</span>
+
+                      <label for="genparams-prespenalty" title="Penalize tokens that have already appeared at all (-2 to 2)">Presence penalty</label>
+                      <input
+                        type="range"
+                        id="genparams-prespenalty"
+                        min="-2"
+                        max="2"
+                        step="0.1"
+                        value={presencePenalty}
+                        oninput={(e) => {
+                          presencePenalty = Number((e.currentTarget as HTMLInputElement).value);
+                        }}
+                        onchange={(e) =>
+                          commitChatSettings({
+                            presencePenalty: Number((e.currentTarget as HTMLInputElement).value),
+                          })}
+                        disabled={isStreaming}
+                      />
+                      <span class="genparams-value">{presencePenalty.toFixed(1)}</span>
+
+                      <label for="genparams-seed" title="Fixed sampling seed for reproducible output; leave blank for non-deterministic generation">Seed</label>
+                      <input
+                        type="number"
+                        id="genparams-seed"
+                        step="1"
+                        placeholder="random"
+                        value={randomSeed ?? ''}
+                        oninput={(e) => {
+                          const raw = (e.currentTarget as HTMLInputElement).value.trim();
+                          if (raw === '') { randomSeed = null; return; }
+                          const value = Number(raw);
+                          if (Number.isSafeInteger(value)) randomSeed = value;
+                        }}
+                        onchange={(e) => {
+                          const raw = (e.currentTarget as HTMLInputElement).value.trim();
+                          if (raw === '') { commitChatSettings({ randomSeed: null }); return; }
+                          const value = Number(raw);
+                          if (Number.isSafeInteger(value)) commitChatSettings({ randomSeed: value });
                         }}
                         disabled={isStreaming}
                       />
