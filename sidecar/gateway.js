@@ -27,6 +27,7 @@ import http from 'node:http';
 import { Transform, pipeline } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
 import { normalizeChatResponse } from './chat-response.js';
+import { buildInferenceMetrics } from './inference-metrics.js';
 import {
   stripHopByHopHeaders,
   modelRejection,
@@ -246,12 +247,15 @@ export function createGateway (options) {
     const buffered = await maybeBufferBody(req, res);
     if (buffered === ABORTED) return;
 
+    // Populated only for chat completions, streamed or not, by parsing the response the
+    // proxy is already decoding for SSE/JSON normalization — never a separate buffering pass.
+    const metrics = { firstTokenAt: null, tokensIn: null, tokensOut: null };
     const requested = buffered === null ? req[multipartModel] ?? null : extractModelName(buffered);
     let activeModel = requested;
     let activeBooking;
     let booked = false;
     try {
-      if (!requested) return await route(req, res, buffered, requested);
+      if (!requested) return await route(req, res, buffered, requested, undefined, metrics);
 
       // Mark the model busy for the whole life of the request, not just the load. Gateway
       // traffic is proxied straight to Foundry, so the sidecar has no other way to tell a
@@ -275,12 +279,19 @@ export function createGateway (options) {
           activeBooking = nextBooking;
           booked = true;
           return true;
-        });
+        }, metrics);
       } finally {
         if (booked) notifyActivity(activeModel, 'end', activeBooking);
       }
     } finally {
       const completedAt = Date.now();
+      const built = buildInferenceMetrics({
+        startedAt,
+        firstTokenAt: metrics.firstTokenAt,
+        completedAt,
+        tokensIn: metrics.tokensIn,
+        tokensOut: metrics.tokensOut,
+      });
       notifyAccess({
         ts: startedAt,
         type: 'gateway',
@@ -290,12 +301,12 @@ export function createGateway (options) {
         status: res.statusCode || null,
         source: 'gateway',
         ok: typeof res.statusCode === 'number' ? res.statusCode < 400 : null,
-        durationMs: completedAt >= startedAt ? completedAt - startedAt : null,
-        ttftMs: null,
-        promptTokensPerSecond: null,
-        decodeTokensPerSecond: null,
-        tokensIn: null,
-        tokensOut: null,
+        durationMs: built.durationMs,
+        ttftMs: built.ttftMs,
+        promptTokensPerSecond: built.promptTokensPerSecond,
+        decodeTokensPerSecond: built.decodeTokensPerSecond,
+        tokensIn: built.tokensIn,
+        tokensOut: built.tokensOut,
       });
     }
   }
@@ -314,7 +325,7 @@ export function createGateway (options) {
    * @param {(model: string) => boolean} [setActivityModel] moves the request's lease to
    *        `model`; false means the owner refused it, and the request must not load or replay.
    */
-  async function route (req, res, buffered, requested, setActivityModel = () => true) {
+  async function route (req, res, buffered, requested, setActivityModel = () => true, metrics) {
 
     // An identifier that needed rewriting once needs it on every later request, and the
     // upstream rejection that teaches us costs a round trip each time. Reuse it, and let
@@ -329,7 +340,7 @@ export function createGateway (options) {
     // Upstream's rejection must name the model we sent, which is the rewritten id when a
     // rewrite was applied, not the client's own wording.
     const sentModel = known ?? requested;
-    const attempt = await forward(req, res, outgoing, { captureNotLoaded: true, sentModel });
+    const attempt = await forward(req, res, outgoing, { captureNotLoaded: true, sentModel, metrics });
     if (attempt === SENT) return;
 
     // Only reached when upstream rejected the model we named as not loaded or not found, and
@@ -378,7 +389,7 @@ export function createGateway (options) {
 
     // captureNotLoaded: false — the retry already happened, so a second rejection is the
     // real answer and belongs to the client rather than being swallowed again.
-    const second = await forward(req, res, replayBody, { captureNotLoaded: false });
+    const second = await forward(req, res, replayBody, { captureNotLoaded: false, metrics });
     if (second !== SENT) {
       respondBuffered(res, attempt.status, attempt.headers, attempt.body);
     }
@@ -521,7 +532,7 @@ export function createGateway (options) {
    * Returns SENT when the client response has already been written; otherwise a
    * `{ status, headers, body }` record the caller may replay after loading.
    */
-  function forward (req, res, buffered, { captureNotLoaded, sentModel = null }) {
+  function forward (req, res, buffered, { captureNotLoaded, sentModel = null, metrics = null }) {
     return new Promise(resolve2 => {
       const headers = stripHopByHopHeaders(req.headers);
       // Upstream is addressed by us, never derived from the client's Host header — that
@@ -589,7 +600,7 @@ export function createGateway (options) {
             res.off('close', onClientClose);
             resolve2(SENT);
           };
-          if (isChatStream) pipeline(upRes, normalizeChatStream(), res, done);
+          if (isChatStream) pipeline(upRes, normalizeChatStream(metrics), res, done);
           else pipeline(upRes, res, done);
           return;
         }
@@ -598,7 +609,7 @@ export function createGateway (options) {
           delete outHeaders['content-length'];
           delete outHeaders['Content-Length'];
           res.writeHead(status, outHeaders);
-          pipeline(upRes, normalizeChatJsonStream(bufferedResponseLimit), res, () => {
+          pipeline(upRes, normalizeChatJsonStream(bufferedResponseLimit, metrics), res, () => {
             res.off('close', onClientClose);
             resolve2(SENT);
           });
@@ -701,7 +712,7 @@ export function createGateway (options) {
     return String(contentType || '').split(';')[0].trim().toLowerCase() === 'text/event-stream';
   }
 
-  function normalizeChatJsonStream (normalizationLimit) {
+  function normalizeChatJsonStream (normalizationLimit, metrics) {
     let chunks = [];
     let size = 0;
     let passthrough = normalizationLimit === 0;
@@ -728,7 +739,9 @@ export function createGateway (options) {
         }
         const body = Buffer.concat(chunks).toString('utf8');
         try {
-          callback(null, JSON.stringify(normalizeChatResponse(JSON.parse(body))));
+          const parsed = JSON.parse(body);
+          captureChatUsageMetrics(parsed?.usage, metrics);
+          callback(null, JSON.stringify(normalizeChatResponse(parsed)));
         } catch {
           callback(null, body);
         }
@@ -736,7 +749,7 @@ export function createGateway (options) {
     });
   }
 
-  function normalizeChatStream () {
+  function normalizeChatStream (metrics) {
     const decoder = new StringDecoder('utf8');
     let pending = '';
     return new Transform({
@@ -744,24 +757,41 @@ export function createGateway (options) {
         pending += decoder.write(chunk);
         const lines = pending.split(/\r?\n/);
         pending = lines.pop() || '';
-        callback(null, lines.map(normalizeSseLine).join('\n') + (lines.length ? '\n' : ''));
+        callback(null, lines.map(line => normalizeSseLine(line, metrics)).join('\n') + (lines.length ? '\n' : ''));
       },
       flush (callback) {
         pending += decoder.end();
-        callback(null, pending ? normalizeSseLine(pending) : null);
+        callback(null, pending ? normalizeSseLine(pending, metrics) : null);
       },
     });
   }
 
-  function normalizeSseLine (line) {
+  function normalizeSseLine (line, metrics) {
     if (!line.startsWith('data:')) return line;
     const payload = line.slice(5).trimStart();
     if (payload === '[DONE]') return line;
     try {
-      return `data: ${JSON.stringify(normalizeChatResponse(JSON.parse(payload), { stream: true }))}`;
+      const parsed = JSON.parse(payload);
+      captureChatUsageMetrics(parsed?.usage, metrics);
+      // A streamed chunk that carries no delta/message text (e.g. a trailing usage-only
+      // chunk) never counts as the first token — only actual assistant content does.
+      if (metrics && metrics.firstTokenAt == null) {
+        const delta = parsed?.choices?.[0]?.delta?.content ?? parsed?.choices?.[0]?.message?.content;
+        if (typeof delta === 'string' && delta) metrics.firstTokenAt = Date.now();
+      }
+      return `data: ${JSON.stringify(normalizeChatResponse(parsed, { stream: true }))}`;
     } catch {
       return line;
     }
+  }
+
+  /** Record token counts the moment they are observed; a later, absent usage must not erase them. */
+  function captureChatUsageMetrics (usage, metrics) {
+    if (!metrics || !usage || typeof usage !== 'object') return;
+    const tokensIn = usage.prompt_tokens ?? usage.input_tokens;
+    const tokensOut = usage.completion_tokens ?? usage.output_tokens;
+    if (Number.isFinite(tokensIn)) metrics.tokensIn = tokensIn;
+    if (Number.isFinite(tokensOut)) metrics.tokensOut = tokensOut;
   }
 
   let closePromise = null;

@@ -921,6 +921,67 @@ describe('gateway streaming', () => {
     expect(events[2]).toBe('data: [DONE]');
   });
 
+  it('reports token usage and time-to-first-token for streamed chat completions', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('data: {"choices":[{"delta":{"role":"assistant","content":"hi"}}]}\n\n');
+      setTimeout(() => {
+        res.write('data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":3}}\n\n');
+        res.end('data: [DONE]\n\n');
+      }, 30);
+    });
+    const access = [];
+    gateway = await startGateway({ onAccess: (entry) => access.push(entry) });
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3-0.6b', stream: true }),
+    });
+
+    expect(res.status).toBe(200);
+    const entry = access.find(e => e.routeClass === 'chat');
+    expect(entry.tokensIn).toBe(12);
+    expect(entry.tokensOut).toBe(3);
+    expect(entry.ttftMs).toBeGreaterThanOrEqual(0);
+    expect(entry.ttftMs).toBeLessThan(entry.durationMs + 1);
+    // The gateway has no equivalent of the IPC path's separately-observed load time,
+    // so prompt throughput can never be computed from it — only decode throughput can.
+    expect(entry.promptTokensPerSecond).toBeNull();
+    expect(entry.decodeTokensPerSecond).toBeGreaterThan(0);
+  });
+
+  it('reports token usage for buffered (non-streamed) chat completions', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        choices: [{ message: { role: 'assistant', content: 'hello' } }],
+        usage: { prompt_tokens: 7, completion_tokens: 2 },
+      }));
+    });
+    const access = [];
+    gateway = await startGateway({ onAccess: (entry) => access.push(entry) });
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3-0.6b' }),
+    });
+
+    expect(res.status).toBe(200);
+    const entry = access.find(e => e.routeClass === 'chat');
+    expect(entry.tokensIn).toBe(7);
+    expect(entry.tokensOut).toBe(2);
+    // Non-streaming responses arrive as one block: there is no observable moment
+    // distinct from completion, so time-to-first-token is truthfully unknown, and
+    // both derived rates (which require it) stay null too.
+    expect(entry.ttftMs).toBeNull();
+    expect(entry.promptTokensPerSecond).toBeNull();
+    expect(entry.decodeTokensPerSecond).toBeNull();
+  });
+
   it('normalizes split UTF-8 SSE payloads and removes stale content length', async () => {
     await new Promise(r => upstream.server.close(r));
     upstream = await startUpstream((_req, res) => {
