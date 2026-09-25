@@ -180,6 +180,7 @@
   import { endpointLoadTarget } from "$lib/endpoint-load-target";
   import { decodeWavPcm, getWavDurationSeconds } from "$lib/audio-pcm-decode";
   import { sniffAudioFormat } from "../../sidecar/audio-format.js";
+  import { looksLikeSpeech } from "../../sidecar/model-classification.js";
   import {
     createSelfTestResidencyController,
     preferredResidentChatAlias,
@@ -498,7 +499,7 @@
       caps = String(info.capabilities || '').toLowerCase();
     }
     if (task.includes('automatic-speech-recognition') || task.includes('stt') || caps.includes('automatic-speech-recognition')) return false;
-    if (alias.includes('whisper') || alias.includes('-stt') || alias.includes('stt-')) return false;
+    if (looksLikeSpeech(alias)) return false;
     if (task.includes('embedding') || alias.includes('embed')) return false;
     return true;
   }
@@ -741,7 +742,7 @@
       task = String(info.task || '').toLowerCase();
       caps = String(info.capabilities || '').toLowerCase();
     }
-    return task.includes('automatic-speech-recognition') || task.includes('stt') || caps.includes('automatic-speech-recognition') || alias.includes('whisper');
+    return task.includes('automatic-speech-recognition') || task.includes('stt') || caps.includes('automatic-speech-recognition') || looksLikeSpeech(alias);
   }
 
   const sdkStateStore = getSDKState();

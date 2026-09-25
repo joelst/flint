@@ -8,6 +8,7 @@ import type {
   EndpointModelClassifier,
   EndpointModelKind,
 } from './endpoint-model-classification';
+import { looksLikeSpeech } from '../../sidecar/model-classification.js';
 
 export type SelfTestStatus = 'pass' | 'fail' | 'blocked';
 
@@ -191,7 +192,7 @@ function isEmbeddingModelId(id: string): boolean {
 }
 
 function isSpeechModelId(id: string): boolean {
-  return /(whisper|-stt(?:-|$)|(?:^|-)stt-|parakeet|nemotron-speech)/i.test(id);
+  return looksLikeSpeech(id);
 }
 
 function endpointKind(

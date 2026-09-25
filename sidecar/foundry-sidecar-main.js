@@ -32,6 +32,7 @@ import {
   resolveModelId,
 } from './model-registry.js';
 import { activityCandidateKeys } from './activity-booking.js';
+import { looksLikeSpeech } from './model-classification.js';
 import { waitUntilIdle } from './monotonic-wait.js';
 import {
   createOperationAdmission,
@@ -2679,7 +2680,11 @@ rl.on('line', async (line) => {
             .filter(m => {
               const t = (m.info?.task || '').toLowerCase();
               const caps = (m.info?.capabilities || '').toLowerCase();
-              return t.includes('automatic-speech-recognition') || t.includes('stt') || caps.includes('automatic-speech-recognition');
+              if (t.includes('automatic-speech-recognition') || t.includes('stt') || caps.includes('automatic-speech-recognition')) {
+                return true;
+              }
+              const names = [m.alias, ...(m.variants || []).map(v => v?.id)];
+              return names.some(looksLikeSpeech);
             })
             .map(m => ({ alias: m.alias, cached: m.isCached }));
         },

@@ -1,3 +1,8 @@
+// Re-exported from the sidecar's Node-free classification module (mirrors how
+// `prompt-template.js` is shared) so the two independent call sites -- the sidecar's
+// `getSTTModels` IPC query and this frontend classifier -- can never drift apart.
+import { looksLikeSpeech } from '../../sidecar/model-classification.js';
+
 export type EndpointModelKind = 'embed' | 'speech' | 'chat';
 export type EndpointModelClassifier = (
   id: string,
@@ -17,10 +22,6 @@ export interface EndpointCatalogModel {
 
 function looksLikeEmbedding(name: string): boolean {
   return name.includes('embed');
-}
-
-function looksLikeSpeech(name: string): boolean {
-  return /(whisper|parakeet|nemotron-speech|-stt(?:-|$)|(?:^|-)stt-)/.test(name);
 }
 
 /**
