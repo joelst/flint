@@ -2890,6 +2890,431 @@ describe('transcribeAudio AudioSession path', () => {
   }, 30000);
 });
 
+describe('chatCompletion ChatSession path', () => {
+  // A minimal fake foundry-local-sdk exposing the Session/Request/Item surface alongside the
+  // legacy createChatClient(), mirroring the real SDK's own ChatClient internals: the request is
+  // serialized as a single openai-json text item, and the response is recovered by JSON-parsing
+  // the first openai-json text item back out.
+  //   'session'             - both ChatSession and createChatClient() present (precedence tests).
+  //   'legacy-only'         - omits ChatSession entirely (createSessionChatClient fallback).
+  //   'session-no-legacy'   - omits createChatClient() entirely (proves transport selection
+  //                           does not gate solely on the deprecated method once it is removed).
+  //   'session-error'       - ChatSession.processRequest/processStreamingRequest throw, to verify
+  //                           error-message wrapping matches the deprecated ChatClient's wrapping.
+  //   'session-abort'       - the streaming iterator throws an Error named "AbortError", which
+  //                           must pass through unwrapped instead of getting the generic wrapper.
+  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-abort';
+  function fakeSdk(sdkMode: ChatFakeSdkMode) {
+    const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only';
+    const hasSession = sdkMode !== 'legacy-only';
+    return [
+      "import fs from 'node:fs';",
+      'const note = (event) => fs.appendFileSync(process.env.FLINT_TEST_EVENT_LOG, event + "\\n");',
+      'class FakeModel {',
+      "  constructor() { this.id = 'fake-variant'; this.loaded = false; }",
+      '  async load() { this.loaded = true; }',
+      '  isLoaded() { return this.loaded; }',
+      "  getExecutionProvider() { return 'CPUExecutionProvider'; }",
+      hasLegacy ? '  createChatClient() {' : '  // no createChatClient() in this mode',
+      hasLegacy ? '    return {' : '',
+      hasLegacy ? '      settings: {},' : '',
+      hasLegacy ? '      async completeChat() {' : '',
+      hasLegacy ? "        note('legacy-chat');" : '',
+      hasLegacy ? "        return { choices: [{ message: { role: 'assistant', content: 'legacy reply' } }], usage: { prompt_tokens: 1, completion_tokens: 2 } };" : '',
+      hasLegacy ? '      },' : '',
+      hasLegacy ? '      async *completeStreamingChat() {' : '',
+      hasLegacy ? "        note('legacy-chat');" : '',
+      hasLegacy ? "        yield { choices: [{ delta: { content: 'legacy reply' } }] };" : '',
+      hasLegacy ? '      },' : '',
+      hasLegacy ? '    };' : '',
+      hasLegacy ? '  }' : '',
+      '}',
+      'class FakeChatSession {',
+      '  constructor(model) { this.model = model; }',
+      '  dispose() { note(\'session-chat-disposed\'); }',
+      '  async processRequest(req) {',
+      "    note('session-chat');",
+      `    if (${JSON.stringify(sdkMode)} === 'session-error') throw new Error('native processRequest failed');`,
+      '    const requestJson = JSON.parse(req.items[0].text);',
+      '    return {',
+      '      output: [{',
+      "        type: 'text', textType: 'openai-json',",
+      '        text: JSON.stringify({',
+      "          choices: [{ message: { role: 'assistant', content: `session reply, temp=${requestJson.temperature}` } }],",
+      '          usage: { prompt_tokens: 5, completion_tokens: 6 },',
+      '        }),',
+      '      }],',
+      '    };',
+      '  }',
+      '  processStreamingRequest() {',
+      '    return {',
+      '      async *[Symbol.asyncIterator]() {',
+      "        note('session-chat');",
+      `        if (${JSON.stringify(sdkMode)} === 'session-error') throw new Error('native stream failed');`,
+      `        if (${JSON.stringify(sdkMode)} === 'session-abort') { const e = new Error('native stream aborted'); e.name = 'AbortError'; throw e; }`,
+      "        yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { content: 'session ' } }] }) };",
+      "        yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { content: 'reply' } }], usage: { prompt_tokens: 5, completion_tokens: 6 } }) };",
+      '      },',
+      '    };',
+      '  }',
+      '}',
+      'class FakeRequest {',
+      '  constructor() { this.items = []; }',
+      '  addItem(item) { this.items.push(item); return this; }',
+      '  setOptions() { return this; }',
+      '}',
+      "const Item = { text: (text, textType) => ({ type: 'text', textType, text }) };",
+      'class FakeManager {',
+      '  constructor() { this.catalog = { getModel: async () => new FakeModel(), getModels: async () => [] }; }',
+      '  static create() { return new FakeManager(); }',
+      '}',
+      `export { FakeManager as FoundryLocalManager, ${hasSession ? 'FakeChatSession as ChatSession, ' : ''}FakeRequest as Request, Item };`,
+    ].join('\n');
+  }
+
+  let homeDir: string;
+  let eventLog: string;
+  let proc: ChildProcessWithoutNullStreams;
+
+  const events = () => {
+    try {
+      return readFileSync(eventLog, 'utf8').split('\n').filter(Boolean);
+    } catch {
+      return [];
+    }
+  };
+  const send = (msg: object) => proc.stdin.write(`${JSON.stringify(msg)}\n`);
+  const reply = (id: number) => waitForLine(proc, (msg) => msg.id === id, 10000);
+
+  async function startSidecar(sdkMode: ChatFakeSdkMode) {
+    homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-chatsession-'));
+    eventLog = join(homeDir, 'events.log');
+    const corePath = join(homeDir, 'fake-core.dylib');
+    writeFileSync(corePath, '');
+    const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
+    const sdk = fakeSdk(sdkMode);
+    writeFileSync(loaderPath, [
+      `const sdk = ${JSON.stringify(sdk)};`,
+      'export async function resolve(specifier, context, nextResolve) {',
+      "  if (specifier === 'foundry-local-sdk') return { url: 'data:text/javascript,' + encodeURIComponent(sdk), shortCircuit: true };",
+      '  return nextResolve(specifier, context);',
+      '}',
+      'export async function load(url, context, nextLoad) {',
+      "  if (url.startsWith('data:text/javascript,')) return { format: 'module', source: decodeURIComponent(url.slice('data:text/javascript,'.length)), shortCircuit: true };",
+      '  return nextLoad(url, context);',
+      '}',
+    ].join('\n'));
+    proc = spawn(process.execPath, [
+      '--experimental-loader', pathToFileURL(loaderPath).href, 'sidecar/foundry-sidecar.js',
+    ], {
+      cwd: process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        HOME: homeDir,
+        USERPROFILE: homeDir,
+        FLINT_FOUNDRY_CORE_PATH: corePath,
+        FLINT_TEST_EVENT_LOG: eventLog,
+      },
+    });
+    await waitForLine(proc, (msg) => msg.ready === true);
+    const init = reply(1);
+    send({ id: 1, cmd: 'init', appName: 'flint-test', logLevel: 'info' });
+    expect((await init).ok).toBe(true);
+    const loaded = reply(2);
+    send({ id: 2, cmd: 'load', alias: 'fake-model' });
+    expect((await loaded).ok).toBe(true);
+  }
+
+  afterEach(async () => {
+    await killAndWait(proc);
+    rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  it('prefers the ChatSession-backed client over createChatClient() when the SDK exports it (buffered)', async () => {
+    await startSidecar('session');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+      temperature: 0.4,
+    });
+    const res = await chatted;
+    expect(res.ok).toBe(true);
+    expect(res.result.choices[0].message.content).toBe('session reply, temp=0.4');
+    expect(events()).toContain('session-chat');
+    expect(events()).toContain('session-chat-disposed');
+    expect(events()).not.toContain('legacy-chat');
+  }, 30000);
+
+  it('prefers the ChatSession-backed client over createChatClient() when the SDK exports it (streaming)', async () => {
+    await startSidecar('session');
+    const chatted = waitForLine(proc, (msg) => msg.id === 3 && msg.ok === true, 10000);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+      stream: true,
+    });
+    const res = await chatted;
+    expect(res.ok).toBe(true);
+    expect(res.result.choices[0].message.content).toBe('session reply');
+    expect(events()).toContain('session-chat');
+    expect(events()).toContain('session-chat-disposed');
+    expect(events()).not.toContain('legacy-chat');
+  }, 30000);
+
+  it('uses the ChatSession client even when createChatClient() does not exist at all (post-removal shape)', async () => {
+    await startSidecar('session-no-legacy');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    const res = await chatted;
+    expect(res.ok).toBe(true);
+    expect(res.result.choices[0].message.content).toContain('session reply');
+    expect(events()).toContain('session-chat');
+  }, 30000);
+
+  it('wraps a buffered ChatSession failure the same way the deprecated ChatClient does', async () => {
+    await startSidecar('session-error');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Chat completion failed for model 'fake-variant'");
+    expect(String(res.error)).toContain('native processRequest failed');
+    expect(events()).toContain('session-chat-disposed');
+  }, 30000);
+
+  it('wraps a streaming ChatSession failure the same way the deprecated ChatClient does', async () => {
+    await startSidecar('session-error');
+    const chatted = waitForLine(proc, (msg) => msg.id === 3 && msg.ok !== true, 10000);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+      stream: true,
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Streaming chat completion failed for model 'fake-variant'");
+    expect(String(res.error)).toContain('native stream failed');
+    expect(events()).toContain('session-chat-disposed');
+  }, 30000);
+
+  it('passes through an AbortError from a streaming ChatSession unwrapped, unlike other failures', async () => {
+    await startSidecar('session-abort');
+    const chatted = waitForLine(proc, (msg) => msg.id === 3 && msg.ok !== true, 10000);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+      stream: true,
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).not.toContain('Streaming chat completion failed');
+    expect(String(res.error)).toContain('native stream aborted');
+    expect(events()).toContain('session-chat-disposed');
+  }, 30000);
+
+  it('falls back to createChatClient() when the SDK build does not export ChatSession', async () => {
+    await startSidecar('legacy-only');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    const res = await chatted;
+    expect(res.ok).toBe(true);
+    expect(res.result.choices[0].message.content).toBe('legacy reply');
+    expect(events()).toContain('legacy-chat');
+    expect(events()).not.toContain('session-chat');
+  }, 30000);
+});
+
+describe('embedTexts EmbeddingsSession path', () => {
+  // Same pass-through pattern as ChatSession above, mirroring the SDK's own EmbeddingClient
+  // internals: {model, input} serialized as a single openai-json text item, response recovered
+  // from the first openai-json text item in the output.
+  //   'session'             - both EmbeddingsSession and createEmbeddingClient() present.
+  //   'legacy-only'         - omits EmbeddingsSession entirely (fallback for older SDK builds).
+  //   'session-no-legacy'   - omits createEmbeddingClient() entirely (proves embedTexts does not
+  //                           depend on the deprecated method once it is removed).
+  //   'session-error'       - EmbeddingsSession.processRequest throws, to verify error-message
+  //                           wrapping matches the deprecated EmbeddingClient's wrapping.
+  type EmbedFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error';
+  function fakeSdk(sdkMode: EmbedFakeSdkMode) {
+    const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only';
+    const hasSession = sdkMode !== 'legacy-only';
+    return [
+      "import fs from 'node:fs';",
+      'const note = (event) => fs.appendFileSync(process.env.FLINT_TEST_EVENT_LOG, event + "\\n");',
+      'class FakeModel {',
+      "  constructor() { this.id = 'fake-embed-variant'; this.loaded = false; }",
+      '  async load() { this.loaded = true; }',
+      '  isLoaded() { return this.loaded; }',
+      "  getExecutionProvider() { return 'CPUExecutionProvider'; }",
+      hasLegacy ? '  createEmbeddingClient() {' : '  // no createEmbeddingClient() in this mode',
+      hasLegacy ? '    return {' : '',
+      hasLegacy ? '      async generateEmbeddings(inputs) {' : '',
+      hasLegacy ? "        note('legacy-embed');" : '',
+      hasLegacy ? "        return { data: inputs.map((_, index) => ({ index, embedding: [0, 0, 0] })) };" : '',
+      hasLegacy ? '      },' : '',
+      hasLegacy ? '    };' : '',
+      hasLegacy ? '  }' : '',
+      '}',
+      'class FakeEmbeddingsSession {',
+      '  constructor(model) { this.model = model; }',
+      '  dispose() { note(\'session-embed-disposed\'); }',
+      '  async processRequest(req) {',
+      "    note('session-embed');",
+      `    if (${JSON.stringify(sdkMode)} === 'session-error') throw new Error('native embedding request failed');`,
+      '    const requestJson = JSON.parse(req.items[0].text);',
+      '    return {',
+      '      output: [{',
+      "        type: 'text', textType: 'openai-json',",
+      '        text: JSON.stringify({',
+      '          data: requestJson.input.map((_, index) => ({ index, embedding: [1, 2, 3] })),',
+      '        }),',
+      '      }],',
+      '    };',
+      '  }',
+      '}',
+      'class FakeRequest {',
+      '  constructor() { this.items = []; }',
+      '  addItem(item) { this.items.push(item); return this; }',
+      '  setOptions() { return this; }',
+      '}',
+      "const Item = { text: (text, textType) => ({ type: 'text', textType, text }) };",
+      'class FakeManager {',
+      '  constructor() { this.catalog = { getModel: async () => new FakeModel(), getModels: async () => [] }; }',
+      '  static create() { return new FakeManager(); }',
+      '}',
+      `export { FakeManager as FoundryLocalManager, ${sdkMode !== 'legacy-only' ? 'FakeEmbeddingsSession as EmbeddingsSession, ' : ''}FakeRequest as Request, Item };`,
+    ].join('\n');
+  }
+
+  let homeDir: string;
+  let eventLog: string;
+  let proc: ChildProcessWithoutNullStreams;
+
+  const events = () => {
+    try {
+      return readFileSync(eventLog, 'utf8').split('\n').filter(Boolean);
+    } catch {
+      return [];
+    }
+  };
+  const send = (msg: object) => proc.stdin.write(`${JSON.stringify(msg)}\n`);
+  const reply = (id: number) => waitForLine(proc, (msg) => msg.id === id, 10000);
+
+  async function startSidecar(sdkMode: EmbedFakeSdkMode) {
+    homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-embedsession-'));
+    eventLog = join(homeDir, 'events.log');
+    const corePath = join(homeDir, 'fake-core.dylib');
+    writeFileSync(corePath, '');
+    const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
+    const sdk = fakeSdk(sdkMode);
+    writeFileSync(loaderPath, [
+      `const sdk = ${JSON.stringify(sdk)};`,
+      'export async function resolve(specifier, context, nextResolve) {',
+      "  if (specifier === 'foundry-local-sdk') return { url: 'data:text/javascript,' + encodeURIComponent(sdk), shortCircuit: true };",
+      '  return nextResolve(specifier, context);',
+      '}',
+      'export async function load(url, context, nextLoad) {',
+      "  if (url.startsWith('data:text/javascript,')) return { format: 'module', source: decodeURIComponent(url.slice('data:text/javascript,'.length)), shortCircuit: true };",
+      '  return nextLoad(url, context);',
+      '}',
+    ].join('\n'));
+    proc = spawn(process.execPath, [
+      '--experimental-loader', pathToFileURL(loaderPath).href, 'sidecar/foundry-sidecar.js',
+    ], {
+      cwd: process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        HOME: homeDir,
+        USERPROFILE: homeDir,
+        FLINT_FOUNDRY_CORE_PATH: corePath,
+        FLINT_TEST_EVENT_LOG: eventLog,
+      },
+    });
+    await waitForLine(proc, (msg) => msg.ready === true);
+    const init = reply(1);
+    send({ id: 1, cmd: 'init', appName: 'flint-test', logLevel: 'info' });
+    expect((await init).ok).toBe(true);
+    const loaded = reply(2);
+    send({ id: 2, cmd: 'load', alias: 'fake-model' });
+    expect((await loaded).ok).toBe(true);
+  }
+
+  afterEach(async () => {
+    await killAndWait(proc);
+    rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  it('prefers the EmbeddingsSession-backed client over createEmbeddingClient() when the SDK exports it', async () => {
+    await startSidecar('session');
+    const embedded = reply(3);
+    send({ id: 3, cmd: 'embedTexts', model: 'fake-model', inputs: ['hello', 'world'] });
+    const res = await embedded;
+    expect(res.ok).toBe(true);
+    expect(res.result.data).toEqual([{ index: 0, embedding: [1, 2, 3] }, { index: 1, embedding: [1, 2, 3] }]);
+    expect(events()).toContain('session-embed');
+    expect(events()).toContain('session-embed-disposed');
+    expect(events()).not.toContain('legacy-embed');
+  }, 30000);
+
+  it('uses the EmbeddingsSession client even when createEmbeddingClient() does not exist at all (post-removal shape)', async () => {
+    await startSidecar('session-no-legacy');
+    const embedded = reply(3);
+    send({ id: 3, cmd: 'embedTexts', model: 'fake-model', inputs: ['hello'] });
+    const res = await embedded;
+    expect(res.ok).toBe(true);
+    expect(res.result.data).toEqual([{ index: 0, embedding: [1, 2, 3] }]);
+    expect(events()).toContain('session-embed');
+  }, 30000);
+
+  it('wraps an EmbeddingsSession failure the same way the deprecated EmbeddingClient does', async () => {
+    await startSidecar('session-error');
+    const embedded = reply(3);
+    send({ id: 3, cmd: 'embedTexts', model: 'fake-model', inputs: ['hello'] });
+    const res = await embedded;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Embedding generation failed for model 'fake-embed-variant'");
+    expect(String(res.error)).toContain('native embedding request failed');
+    expect(events()).toContain('session-embed-disposed');
+  }, 30000);
+
+  it('falls back to createEmbeddingClient() when the SDK build does not export EmbeddingsSession', async () => {
+    await startSidecar('legacy-only');
+    const embedded = reply(3);
+    send({ id: 3, cmd: 'embedTexts', model: 'fake-model', inputs: ['hello'] });
+    const res = await embedded;
+    expect(res.ok).toBe(true);
+    expect(res.result.data).toEqual([{ index: 0, embedding: [0, 0, 0] }]);
+    expect(events()).toContain('legacy-embed');
+    expect(events()).not.toContain('session-embed');
+  }, 30000);
+});
+
 describe('accelerator registration queue', () => {
   // Startup, Install / Update Accelerators, and Recheck Providers all reach
   // downloadAndRegisterEps. The fake logs each native call so the test can see

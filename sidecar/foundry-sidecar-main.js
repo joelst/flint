@@ -2285,6 +2285,139 @@ async function tryAudioSessionTranscription (sdkModule, audioModel, tempPath, pa
   }
 }
 
+// Builds a ChatSession-backed replacement for `chatModel.createChatClient()` (the
+// deprecated OpenAI-shaped wrapper, removed end of 2026). Mirrors the SDK's own
+// ChatClient internals exactly: each call serializes an OpenAI Chat Completion
+// request into a single `Item.text(json, "openai-json")`, runs it through a
+// fresh ChatSession, and recovers the response by JSON-parsing the first
+// "openai-json" text item in the output. This keeps the wire shape (and every
+// downstream consumer of it) byte-identical to the deprecated client while
+// dropping the dependency on the class itself. Returns null if this SDK build
+// does not export ChatSession/Request/Item (falls back to createChatClient()).
+function createSessionChatClient (chatModel, sdkModule) {
+  const { ChatSession, Request, Item } = sdkModule || {};
+  if (typeof ChatSession !== 'function' || typeof Request !== 'function' || typeof Item?.text !== 'function') {
+    return null;
+  }
+  const settings = {};
+  const serializeSettings = () => {
+    const out = {};
+    if (Number.isFinite(settings.temperature)) out.temperature = settings.temperature;
+    if (Number.isFinite(settings.maxTokens)) out.max_tokens = settings.maxTokens;
+    return out;
+  };
+  const findOpenAiJsonText = (output) => {
+    for (const item of output || []) {
+      if (item?.type === 'text' && item.textType === 'openai-json') return item.text;
+    }
+    return undefined;
+  };
+  return {
+    settings,
+    async completeChat (messages, tools) {
+      const requestJson = {
+        model: chatModel.id,
+        messages,
+        ...(tools ? { tools } : {}),
+        ...serializeSettings(),
+      };
+      const request = new Request();
+      request.addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
+      const session = new ChatSession(chatModel);
+      let response;
+      try {
+        response = await session.processRequest(request);
+      } catch (err) {
+        throw new Error(
+          `Chat completion failed for model '${chatModel.id}': ${err?.message || err}`,
+          { cause: err },
+        );
+      } finally {
+        try { session.dispose(); } catch {}
+      }
+      const text = findOpenAiJsonText(response?.output);
+      if (text === undefined) {
+        throw new Error(`Chat completion for model '${chatModel.id}' returned no openai-json text item.`);
+      }
+      return JSON.parse(text);
+    },
+    completeStreamingChat (messages, tools) {
+      const requestJson = {
+        model: chatModel.id,
+        messages,
+        ...(tools ? { tools } : {}),
+        stream: true,
+        ...serializeSettings(),
+      };
+      return {
+        async * [Symbol.asyncIterator] () {
+          const request = new Request();
+          request.addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
+          const session = new ChatSession(chatModel);
+          try {
+            for await (const item of session.processStreamingRequest(request)) {
+              if (item?.type !== 'text' || item.textType !== 'openai-json' || !item.text) continue;
+              yield JSON.parse(item.text);
+            }
+          } catch (err) {
+            if (err?.name === 'AbortError') throw err;
+            throw new Error(
+              `Streaming chat completion failed for model '${chatModel.id}': ${err?.message || err}`,
+              { cause: err },
+            );
+          } finally {
+            try { session.dispose(); } catch {}
+          }
+        }
+      };
+    },
+  };
+}
+
+// Builds an EmbeddingsSession-backed replacement for `embedModel.createEmbeddingClient()`
+// (the deprecated OpenAI-shaped wrapper, removed end of 2026). Mirrors the SDK's own
+// EmbeddingClient internals: serializes {model, input} into a single
+// `Item.text(json, "openai-json")`, runs it through a fresh EmbeddingsSession, and
+// recovers the response from the first "openai-json" text item in the output — keeping
+// the wire shape identical to the deprecated client. Returns null if this SDK build does
+// not export EmbeddingsSession/Request/Item (falls back to createEmbeddingClient()).
+function createSessionEmbeddingClient (embedModel, sdkModule) {
+  const { EmbeddingsSession, Request, Item } = sdkModule || {};
+  if (typeof EmbeddingsSession !== 'function' || typeof Request !== 'function' || typeof Item?.text !== 'function') {
+    return null;
+  }
+  const findOpenAiJsonText = (output) => {
+    for (const item of output || []) {
+      if (item?.type === 'text' && item.textType === 'openai-json') return item.text;
+    }
+    return undefined;
+  };
+  return {
+    async generateEmbeddings (inputs) {
+      const requestJson = { model: embedModel.id, input: inputs };
+      const request = new Request();
+      request.addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
+      const session = new EmbeddingsSession(embedModel);
+      let response;
+      try {
+        response = await session.processRequest(request);
+      } catch (err) {
+        throw new Error(
+          `Embedding generation failed for model '${embedModel.id}': ${err?.message || err}`,
+          { cause: err },
+        );
+      } finally {
+        try { session.dispose(); } catch {}
+      }
+      const text = findOpenAiJsonText(response?.output);
+      if (text === undefined) {
+        throw new Error(`Embedding generation for model '${embedModel.id}' returned no openai-json text item.`);
+      }
+      return JSON.parse(text);
+    },
+  };
+}
+
 // --- Disk log ---
 // Date is computed once at startup; a sidecar running past midnight continues to the same file.
 // The bounded async writer keeps logging off the request path without allowing an unbounded queue.
@@ -3264,13 +3397,25 @@ rl.on('line', async (line) => {
         // Prefer direct SDK inference to avoid web-service schema/version mismatch issues.
         // Vision is the exception: the SDK client rejects non-string content outright, so a
         // multipart request has to take the HTTP endpoint or it cannot be served at all.
+        // Resolve the ChatSession-backed replacement (see createSessionChatClient) before
+        // transport selection: this SDK build may no longer export createChatClient() at all
+        // (removed end of 2026), so transport availability must reflect either path, not just
+        // the deprecated one.
+        let sessionChatClient = null;
+        try {
+          const sdkModule = await getFoundrySdkModule();
+          sessionChatClient = createSessionChatClient(chatModel, sdkModule);
+        } catch (err) {
+          log('debug', `ChatSession client unavailable, using createChatClient(): ${err?.message || err}`);
+        }
+        const hasChatClient = sessionChatClient || typeof chatModel?.createChatClient === 'function';
         const { transport, reason: transportReason } = selectChatTransport(sdkMessages, {
-          chatClient: typeof chatModel?.createChatClient === 'function' ? 'available' : 'unsupported',
+          chatClient: hasChatClient ? 'available' : 'unsupported',
           serviceEndpoint: sharedEndpoint ? 'available' : 'unavailable',
         });
         if (!transport) throw new Error(transportReason);
         if (transport === 'sdk') {
-          const client = chatModel.createChatClient();
+          const client = sessionChatClient || chatModel.createChatClient();
           // SDK reads generation params from client.settings, not completeChat args.
           // Omit unset fields so the model's own defaults are not overwritten.
           if (client?.settings && Number.isFinite(payload.temperature)) {
@@ -3990,10 +4135,23 @@ rl.on('line', async (line) => {
       try {
         const poolEntry = await ensureModel(modelAlias);
         const embedModel = poolEntry.catModel;
-        if (typeof embedModel?.createEmbeddingClient !== 'function') {
-          throw new Error(`Model ${modelAlias} does not expose createEmbeddingClient`);
+        // Prefer the EmbeddingsSession-backed replacement (see createSessionEmbeddingClient)
+        // over the deprecated createEmbeddingClient() wrapper it mirrors, removed end of 2026.
+        // Falls back to createEmbeddingClient() unchanged on any SDK build that doesn't export
+        // EmbeddingsSession/Request/Item.
+        let client = null;
+        try {
+          const sdkModule = await getFoundrySdkModule();
+          client = createSessionEmbeddingClient(embedModel, sdkModule);
+        } catch (err) {
+          log('debug', `EmbeddingsSession client unavailable, using createEmbeddingClient(): ${err?.message || err}`);
         }
-        const client = embedModel.createEmbeddingClient();
+        if (!client) {
+          if (typeof embedModel?.createEmbeddingClient !== 'function') {
+            throw new Error(`Model ${modelAlias} does not expose createEmbeddingClient`);
+          }
+          client = embedModel.createEmbeddingClient();
+        }
         const result = await client.generateEmbeddings(inputs);
         embedOk = true;
         audit('embedTexts', { alias: modelAlias, count: inputs.length });
