@@ -1015,6 +1015,37 @@ describe('gateway streaming', () => {
     expect(entry.tokensOut).toBe(4);
   });
 
+  it('does not retain an oversized usage object while passing through chat JSON', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        choices: [{ message: { role: 'assistant', content: 'ok' } }],
+        usage: {
+          prompt_tokens: 9,
+          completion_tokens: 4,
+          ignored: 'x'.repeat(64 * 1024),
+        },
+      }));
+    });
+    const access = [];
+    gateway = await startGateway({
+      maxBufferedResponse: 0,
+      onAccess: (entry) => access.push(entry),
+    });
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3-0.6b' }),
+    });
+
+    expect(res.status).toBe(200);
+    const entry = access.find(e => e.routeClass === 'chat');
+    expect(entry.tokensIn).toBeNull();
+    expect(entry.tokensOut).toBeNull();
+  });
+
   it('normalizes split UTF-8 SSE payloads and removes stale content length', async () => {
     await new Promise(r => upstream.server.close(r));
     upstream = await startUpstream((_req, res) => {

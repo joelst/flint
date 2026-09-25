@@ -327,6 +327,8 @@ export function createGateway (options) {
   /**
    * @param {(model: string) => boolean} [setActivityModel] moves the request's lease to
    *        `model`; false means the owner refused it, and the request must not load or replay.
+   * @param {{firstTokenAt: number|null, tokensIn: number|null, tokensOut: number|null}} [metrics]
+   *        mutable response metrics accumulator, populated while decoding chat responses.
    */
   async function route (req, res, buffered, requested, setActivityModel = () => true, metrics) {
 
@@ -719,11 +721,11 @@ export function createGateway (options) {
     let chunks = [];
     let size = 0;
     let passthrough = normalizationLimit === 0;
-    const inspectUsage = createChatUsageInspector(metrics);
+    let inspectUsage = passthrough ? createChatUsageInspector(metrics) : null;
     return new Transform({
       transform (chunk, _encoding, callback) {
-        inspectUsage(chunk);
         if (passthrough) {
+          inspectUsage(chunk);
           callback(null, chunk);
           return;
         }
@@ -731,15 +733,18 @@ export function createGateway (options) {
         chunks.push(chunk);
         if (size > normalizationLimit) {
           passthrough = true;
-          callback(null, Buffer.concat(chunks));
+          inspectUsage = createChatUsageInspector(metrics);
+          const buffered = Buffer.concat(chunks);
+          inspectUsage(buffered);
+          callback(null, buffered);
           chunks = [];
           return;
         }
         callback();
       },
       flush (callback) {
-        inspectUsage.end();
         if (passthrough) {
+          inspectUsage.end();
           callback();
           return;
         }
@@ -766,6 +771,7 @@ export function createGateway (options) {
     let topLevelKey = null;
     let waitingForUsage = false;
     let usage = null;
+    let usageLength = 0;
     let usageDepth = 0;
     let usageQuoted = false;
     let usageEscaped = false;
@@ -774,10 +780,11 @@ export function createGateway (options) {
       if (captured) return;
       for (const char of text) {
         if (usage !== null) {
-          if (usage.length === MAX_USAGE_METRICS_CHARS) {
+          if (usageLength === MAX_USAGE_METRICS_CHARS) {
             usage = null;
           } else {
-            usage += char;
+            usage.push(char);
+            usageLength++;
             if (usageQuoted) {
               if (usageEscaped) usageEscaped = false;
               else if (char === '\\') usageEscaped = true;
@@ -788,7 +795,7 @@ export function createGateway (options) {
               usageDepth++;
             } else if (char === '}' && --usageDepth === 0) {
               try {
-                captureChatUsageMetrics(JSON.parse(usage), metrics);
+                captureChatUsageMetrics(JSON.parse(usage.join('')), metrics);
                 captured = true;
                 return;
               } catch {
@@ -820,7 +827,8 @@ export function createGateway (options) {
           if (/\s/.test(char)) continue;
           waitingForUsage = false;
           if (char === '{') {
-            usage = '{';
+            usage = ['{'];
+            usageLength = 1;
             usageDepth = 1;
             usageQuoted = false;
             usageEscaped = false;
