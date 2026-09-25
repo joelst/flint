@@ -2338,7 +2338,7 @@ function createSessionChatClient (chatModel, sdkModule) {
           { cause: err },
         );
       } finally {
-        try { session.dispose(); } catch {}
+        try { session?.dispose(); } catch {}
       }
     },
     completeStreamingChat (messages, tools) {
@@ -2353,8 +2353,9 @@ function createSessionChatClient (chatModel, sdkModule) {
         async * [Symbol.asyncIterator] () {
           const request = new Request();
           request.addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
-          const session = new ChatSession(chatModel);
+          let session;
           try {
+            session = new ChatSession(chatModel);
             for await (const item of session.processStreamingRequest(request)) {
               if (item?.type !== 'text' || item.textType !== 'openai-json' || !item.text) continue;
               yield JSON.parse(item.text);
@@ -2366,7 +2367,7 @@ function createSessionChatClient (chatModel, sdkModule) {
               { cause: err },
             );
           } finally {
-            try { session.dispose(); } catch {}
+            try { session?.dispose(); } catch {}
           }
         }
       };
@@ -2397,8 +2398,9 @@ function createSessionEmbeddingClient (embedModel, sdkModule) {
       const requestJson = { model: embedModel.id, input: inputs };
       const request = new Request();
       request.addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
-      const session = new EmbeddingsSession(embedModel);
+      let session;
       try {
+        session = new EmbeddingsSession(embedModel);
         const response = await session.processRequest(request);
         const text = findOpenAiJsonText(response?.output);
         if (text === undefined) {
@@ -2411,7 +2413,7 @@ function createSessionEmbeddingClient (embedModel, sdkModule) {
           { cause: err },
         );
       } finally {
-        try { session.dispose(); } catch {}
+        try { session?.dispose(); } catch {}
       }
     },
   };

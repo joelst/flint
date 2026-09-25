@@ -2908,7 +2908,9 @@ describe('chatCompletion ChatSession path', () => {
   //                           native error (extraction/parsing happens inside the try/catch).
   //   'session-malformed-json' - processRequest resolves with an openai-json item whose text
   //                           is not valid JSON, to verify JSON.parse failures are wrapped too.
-  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-abort' | 'session-empty-output' | 'session-malformed-json';
+  //   'session-constructor-error' - the ChatSession constructor itself throws, to verify that
+  //                           failure is wrapped too (construction happens inside the try/catch).
+  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-abort' | 'session-empty-output' | 'session-malformed-json' | 'session-constructor-error';
   function fakeSdk(sdkMode: ChatFakeSdkMode) {
     const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only';
     const hasSession = sdkMode !== 'legacy-only';
@@ -2935,7 +2937,10 @@ describe('chatCompletion ChatSession path', () => {
       hasLegacy ? '  }' : '',
       '}',
       'class FakeChatSession {',
-      '  constructor(model) { this.model = model; }',
+      '  constructor(model) {',
+      `    if (${JSON.stringify(sdkMode)} === 'session-constructor-error') throw new Error('native ChatSession construction failed');`,
+      '    this.model = model;',
+      '  }',
       '  dispose() { note(\'session-chat-disposed\'); }',
       '  async processRequest(req) {',
       "    note('session-chat');",
@@ -3170,6 +3175,40 @@ describe('chatCompletion ChatSession path', () => {
     expect(events()).toContain('session-chat-disposed');
   }, 30000);
 
+  it('wraps a buffered ChatSession constructor failure the same way a processRequest failure is wrapped', async () => {
+    await startSidecar('session-constructor-error');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Chat completion failed for model 'fake-variant'");
+    expect(String(res.error)).toContain('native ChatSession construction failed');
+    // The constructor threw, so there is no session instance to dispose.
+    expect(events()).not.toContain('session-chat-disposed');
+  }, 30000);
+
+  it('wraps a streaming ChatSession constructor failure the same way a stream failure is wrapped', async () => {
+    await startSidecar('session-constructor-error');
+    const chatted = waitForLine(proc, (msg) => msg.id === 3 && msg.ok !== true, 10000);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+      stream: true,
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Streaming chat completion failed for model 'fake-variant'");
+    expect(String(res.error)).toContain('native ChatSession construction failed');
+    expect(events()).not.toContain('session-chat-disposed');
+  }, 30000);
+
   it('falls back to createChatClient() when the SDK build does not export ChatSession', async () => {
     await startSidecar('legacy-only');
     const chatted = reply(3);
@@ -3202,7 +3241,9 @@ describe('embedTexts EmbeddingsSession path', () => {
   //                           happens inside the try/catch).
   //   'session-malformed-json' - processRequest resolves with an openai-json item whose text
   //                           is not valid JSON, to verify JSON.parse failures are wrapped too.
-  type EmbedFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-empty-output' | 'session-malformed-json';
+  //   'session-constructor-error' - the EmbeddingsSession constructor itself throws, to verify
+  //                           that failure is wrapped too (construction happens inside try/catch).
+  type EmbedFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-empty-output' | 'session-malformed-json' | 'session-constructor-error';
   function fakeSdk(sdkMode: EmbedFakeSdkMode) {
     const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only';
     const hasSession = sdkMode !== 'legacy-only';
@@ -3224,7 +3265,10 @@ describe('embedTexts EmbeddingsSession path', () => {
       hasLegacy ? '  }' : '',
       '}',
       'class FakeEmbeddingsSession {',
-      '  constructor(model) { this.model = model; }',
+      '  constructor(model) {',
+      `    if (${JSON.stringify(sdkMode)} === 'session-constructor-error') throw new Error('native EmbeddingsSession construction failed');`,
+      '    this.model = model;',
+      '  }',
       '  dispose() { note(\'session-embed-disposed\'); }',
       '  async processRequest(req) {',
       "    note('session-embed');",
@@ -3367,6 +3411,18 @@ describe('embedTexts EmbeddingsSession path', () => {
     expect(res.ok).not.toBe(true);
     expect(String(res.error)).toContain("Embedding generation failed for model 'fake-embed-variant'");
     expect(events()).toContain('session-embed-disposed');
+  }, 30000);
+
+  it('wraps an EmbeddingsSession constructor failure the same way a processRequest failure is wrapped', async () => {
+    await startSidecar('session-constructor-error');
+    const embedded = reply(3);
+    send({ id: 3, cmd: 'embedTexts', model: 'fake-model', inputs: ['hello'] });
+    const res = await embedded;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Embedding generation failed for model 'fake-embed-variant'");
+    expect(String(res.error)).toContain('native EmbeddingsSession construction failed');
+    // The constructor threw, so there is no session instance to dispose.
+    expect(events()).not.toContain('session-embed-disposed');
   }, 30000);
 
   it('falls back to createEmbeddingClient() when the SDK build does not export EmbeddingsSession', async () => {
