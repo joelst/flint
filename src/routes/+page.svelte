@@ -8036,8 +8036,8 @@ Output only the summary text, no preamble.`;
                   <p>{state.catalogError || "The catalog request did not complete."}</p>
                   <button type="button" onclick={() => loadModels()}>Retry catalog</button>
                 {:else if state.models.length === 0 && catalogCheckPresentation === "pending"}
-                  <h3>Model catalog check has not completed</h3>
-                  <p>Retry to browse models or check for updates.</p>
+                  <h3>Model catalog has not been checked yet</h3>
+                  <p>Retry to contact Microsoft's Foundry Local model catalog.</p>
                   <button type="button" onclick={() => loadModels()}>Retry catalog</button>
                 {:else if state.models.length === 0}
                   <h3>No models in the catalog yet</h3>
