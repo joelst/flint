@@ -2903,7 +2903,12 @@ describe('chatCompletion ChatSession path', () => {
   //                           error-message wrapping matches the deprecated ChatClient's wrapping.
   //   'session-abort'       - the streaming iterator throws an Error named "AbortError", which
   //                           must pass through unwrapped instead of getting the generic wrapper.
-  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-abort';
+  //   'session-empty-output' - processRequest resolves but its output has no openai-json text
+  //                           item, to verify that failure is wrapped the same way as a thrown
+  //                           native error (extraction/parsing happens inside the try/catch).
+  //   'session-malformed-json' - processRequest resolves with an openai-json item whose text
+  //                           is not valid JSON, to verify JSON.parse failures are wrapped too.
+  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-abort' | 'session-empty-output' | 'session-malformed-json';
   function fakeSdk(sdkMode: ChatFakeSdkMode) {
     const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only';
     const hasSession = sdkMode !== 'legacy-only';
@@ -2935,6 +2940,8 @@ describe('chatCompletion ChatSession path', () => {
       '  async processRequest(req) {',
       "    note('session-chat');",
       `    if (${JSON.stringify(sdkMode)} === 'session-error') throw new Error('native processRequest failed');`,
+      `    if (${JSON.stringify(sdkMode)} === 'session-empty-output') return { output: [] };`,
+      `    if (${JSON.stringify(sdkMode)} === 'session-malformed-json') return { output: [{ type: 'text', textType: 'openai-json', text: 'not json' }] };`,
       '    const requestJson = JSON.parse(req.items[0].text);',
       '    return {',
       '      output: [{',
@@ -3082,6 +3089,37 @@ describe('chatCompletion ChatSession path', () => {
     expect(events()).toContain('session-chat');
   }, 30000);
 
+  it('wraps a resolved response with no openai-json output the same way a thrown failure is wrapped', async () => {
+    await startSidecar('session-empty-output');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Chat completion failed for model 'fake-variant'");
+    expect(String(res.error)).toContain('returned no openai-json text item');
+    expect(events()).toContain('session-chat-disposed');
+  }, 30000);
+
+  it('wraps a malformed openai-json response the same way a thrown failure is wrapped', async () => {
+    await startSidecar('session-malformed-json');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Chat completion failed for model 'fake-variant'");
+    expect(events()).toContain('session-chat-disposed');
+  }, 30000);
+
   it('wraps a buffered ChatSession failure the same way the deprecated ChatClient does', async () => {
     await startSidecar('session-error');
     const chatted = reply(3);
@@ -3159,7 +3197,12 @@ describe('embedTexts EmbeddingsSession path', () => {
   //                           depend on the deprecated method once it is removed).
   //   'session-error'       - EmbeddingsSession.processRequest throws, to verify error-message
   //                           wrapping matches the deprecated EmbeddingClient's wrapping.
-  type EmbedFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error';
+  //   'session-empty-output' - processRequest resolves but its output has no openai-json text
+  //                           item, to verify that failure is wrapped too (extraction/parsing
+  //                           happens inside the try/catch).
+  //   'session-malformed-json' - processRequest resolves with an openai-json item whose text
+  //                           is not valid JSON, to verify JSON.parse failures are wrapped too.
+  type EmbedFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-empty-output' | 'session-malformed-json';
   function fakeSdk(sdkMode: EmbedFakeSdkMode) {
     const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only';
     const hasSession = sdkMode !== 'legacy-only';
@@ -3186,6 +3229,8 @@ describe('embedTexts EmbeddingsSession path', () => {
       '  async processRequest(req) {',
       "    note('session-embed');",
       `    if (${JSON.stringify(sdkMode)} === 'session-error') throw new Error('native embedding request failed');`,
+      `    if (${JSON.stringify(sdkMode)} === 'session-empty-output') return { output: [] };`,
+      `    if (${JSON.stringify(sdkMode)} === 'session-malformed-json') return { output: [{ type: 'text', textType: 'openai-json', text: 'not json' }] };`,
       '    const requestJson = JSON.parse(req.items[0].text);',
       '    return {',
       '      output: [{',
@@ -3300,6 +3345,27 @@ describe('embedTexts EmbeddingsSession path', () => {
     expect(res.ok).not.toBe(true);
     expect(String(res.error)).toContain("Embedding generation failed for model 'fake-embed-variant'");
     expect(String(res.error)).toContain('native embedding request failed');
+    expect(events()).toContain('session-embed-disposed');
+  }, 30000);
+
+  it('wraps a resolved response with no openai-json output the same way a thrown failure is wrapped', async () => {
+    await startSidecar('session-empty-output');
+    const embedded = reply(3);
+    send({ id: 3, cmd: 'embedTexts', model: 'fake-model', inputs: ['hello'] });
+    const res = await embedded;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Embedding generation failed for model 'fake-embed-variant'");
+    expect(String(res.error)).toContain('returned no openai-json text item');
+    expect(events()).toContain('session-embed-disposed');
+  }, 30000);
+
+  it('wraps a malformed openai-json response the same way a thrown failure is wrapped', async () => {
+    await startSidecar('session-malformed-json');
+    const embedded = reply(3);
+    send({ id: 3, cmd: 'embedTexts', model: 'fake-model', inputs: ['hello'] });
+    const res = await embedded;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Embedding generation failed for model 'fake-embed-variant'");
     expect(events()).toContain('session-embed-disposed');
   }, 30000);
 

@@ -2324,9 +2324,13 @@ function createSessionChatClient (chatModel, sdkModule) {
       const request = new Request();
       request.addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
       const session = new ChatSession(chatModel);
-      let response;
       try {
-        response = await session.processRequest(request);
+        const response = await session.processRequest(request);
+        const text = findOpenAiJsonText(response?.output);
+        if (text === undefined) {
+          throw new Error(`Chat completion for model '${chatModel.id}' returned no openai-json text item.`);
+        }
+        return JSON.parse(text);
       } catch (err) {
         throw new Error(
           `Chat completion failed for model '${chatModel.id}': ${err?.message || err}`,
@@ -2335,11 +2339,6 @@ function createSessionChatClient (chatModel, sdkModule) {
       } finally {
         try { session.dispose(); } catch {}
       }
-      const text = findOpenAiJsonText(response?.output);
-      if (text === undefined) {
-        throw new Error(`Chat completion for model '${chatModel.id}' returned no openai-json text item.`);
-      }
-      return JSON.parse(text);
     },
     completeStreamingChat (messages, tools) {
       const requestJson = {
@@ -2398,9 +2397,13 @@ function createSessionEmbeddingClient (embedModel, sdkModule) {
       const request = new Request();
       request.addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
       const session = new EmbeddingsSession(embedModel);
-      let response;
       try {
-        response = await session.processRequest(request);
+        const response = await session.processRequest(request);
+        const text = findOpenAiJsonText(response?.output);
+        if (text === undefined) {
+          throw new Error(`Embedding generation for model '${embedModel.id}' returned no openai-json text item.`);
+        }
+        return JSON.parse(text);
       } catch (err) {
         throw new Error(
           `Embedding generation failed for model '${embedModel.id}': ${err?.message || err}`,
@@ -2409,11 +2412,6 @@ function createSessionEmbeddingClient (embedModel, sdkModule) {
       } finally {
         try { session.dispose(); } catch {}
       }
-      const text = findOpenAiJsonText(response?.output);
-      if (text === undefined) {
-        throw new Error(`Embedding generation for model '${embedModel.id}' returned no openai-json text item.`);
-      }
-      return JSON.parse(text);
     },
   };
 }
