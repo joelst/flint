@@ -1,3 +1,8 @@
+// Re-exported from the sidecar's Node-free classification module (mirrors how
+// `prompt-template.js` is shared) so the two independent call sites -- the sidecar's
+// `getSTTModels` IPC query and this frontend classifier -- can never drift apart.
+import { looksLikeSpeech } from '../../sidecar/model-classification.js';
+
 export type EndpointModelKind = 'embed' | 'speech' | 'chat';
 export type EndpointModelClassifier = (
   id: string,
@@ -17,13 +22,6 @@ export interface EndpointCatalogModel {
 
 function looksLikeEmbedding(name: string): boolean {
   return name.includes('embed');
-}
-
-function looksLikeSpeech(name: string): boolean {
-  // `nemotron-speech-...` is the original English-only Nemotron ASR family; newer generations
-  // (e.g. `nemotron-3.5-asr-streaming-0.6b`) use an `-asr-` marker instead of `-speech-`, so
-  // match either rather than only the original naming.
-  return /(whisper|parakeet|-stt(?:-|$)|(?:^|-)stt-|nemotron.*(?:speech|asr))/.test(name);
 }
 
 /**

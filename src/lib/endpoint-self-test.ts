@@ -8,6 +8,7 @@ import type {
   EndpointModelClassifier,
   EndpointModelKind,
 } from './endpoint-model-classification';
+import { looksLikeSpeech } from '../../sidecar/model-classification.js';
 
 export type SelfTestStatus = 'pass' | 'fail' | 'blocked';
 
@@ -191,10 +192,7 @@ function isEmbeddingModelId(id: string): boolean {
 }
 
 function isSpeechModelId(id: string): boolean {
-  // `nemotron-speech-...` is the original English-only Nemotron ASR family; newer generations
-  // (e.g. `nemotron-3.5-asr-streaming-0.6b`) use an `-asr-` marker instead of `-speech-`, so
-  // match either rather than only the original naming.
-  return /(whisper|-stt(?:-|$)|(?:^|-)stt-|parakeet|nemotron.*(?:speech|asr))/i.test(id);
+  return looksLikeSpeech(id);
 }
 
 function endpointKind(

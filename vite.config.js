@@ -113,6 +113,7 @@ export default defineConfig(() => ({
         'sidecar/model-activity-fence.js',
         'sidecar/byom-import.js',
         'sidecar/prompt-template.js',
+        'sidecar/model-classification.js',
         'sidecar/service-lifecycle.js',
         'sidecar/execution-provider.js',
         'sidecar/execution-provider-cache.js',

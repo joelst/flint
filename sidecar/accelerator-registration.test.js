@@ -401,6 +401,14 @@ describe('native service startup', () => {
       expect(nativeRead, cmd).toBeGreaterThan(trackedRead);
       expect(progress, cmd).toBeGreaterThan(nativeRead);
     }
+    // getSTTModels must fall back to shared name-based classification for opaque ASR
+    // models missing task/capabilities metadata (e.g. `nemotron-3.5-asr-streaming-0.6b`),
+    // using the same looksLikeSpeech() the frontend classifier imports -- see the
+    // behavioral test below -- so getSTTModels and endpointModelKind() can never drift.
+    const sttAt = source.indexOf("} else if (cmd === 'getSTTModels') {");
+    const sttEnd = source.indexOf("} else if (cmd === 'getVisionModels') {");
+    const sttFlow = source.slice(sttAt, sttEnd);
+    expect(sttFlow).toContain('looksLikeSpeech');
     const download = source.indexOf("} else if (cmd === 'download') {");
     const downloadSerialized = source.indexOf(
       "serializeModelOperation(payload.alias, ['cache']",
@@ -462,6 +470,15 @@ describe('native service startup', () => {
       expect(atomicMutation, cmd).toBeGreaterThan(at);
       expect(call, cmd).toBeGreaterThan(atomicMutation);
     }
+  });
+
+  it('classifies ASR model names the same way the endpoint classifier does', async () => {
+    const { looksLikeSpeech } = await import('./model-classification.js');
+    expect(looksLikeSpeech('nemotron-3.5-asr-streaming-0.6b')).toBe(true);
+    expect(looksLikeSpeech('nemotron-speech-en-0.6b')).toBe(true);
+    expect(looksLikeSpeech('whisper-tiny-generic-cpu')).toBe(true);
+    expect(looksLikeSpeech('parakeet-tdt-generic-cpu')).toBe(true);
+    expect(looksLikeSpeech('qwen3-0.6b-generic-cpu')).toBe(false);
   });
 });
 
