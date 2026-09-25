@@ -15,10 +15,10 @@ export type ChatToolChoice =
   | 'required'
   | { type: 'function'; function: { name: string } };
 
-export interface ChatResponseFormat {
-  type: 'text' | 'json_object' | 'json_schema';
-  json_schema?: Record<string, unknown>;
-}
+export type ChatResponseFormat =
+  | { type: 'text' }
+  | { type: 'json_object' }
+  | { type: 'json_schema'; json_schema: Record<string, unknown> };
 
 /** Version of the JSON-lines transport handshake shared with the sidecar. */
 export const SIDECAR_PROTOCOL_VERSION = 1;
