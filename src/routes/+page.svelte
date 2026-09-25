@@ -181,6 +181,7 @@
   import { decodeWavPcm, getWavDurationSeconds } from "$lib/audio-pcm-decode";
   import { sniffAudioFormat } from "../../sidecar/audio-format.js";
   import { looksLikeSpeech } from "../../sidecar/model-classification.js";
+  import { recommendedMaxTurns as recommendedMaxTurnsFor, clampContextTurns, MIN_CONTEXT_TURNS, MAX_CONTEXT_TURNS } from "$lib/context-turns";
   import {
     createSelfTestResidencyController,
     preferredResidentChatAlias,
@@ -1547,14 +1548,9 @@
   );
   const currentModelFamily: string | null = $derived(currentModelInfo?.family ?? null);
 
-  // Rough recommended turns based on context length (very conservative)
-  const recommendedMaxTurns: number = $derived.by(() => {
-    if (!currentModelContextLength) return 12;
-    // Very rough: assume ~250-350 tokens per turn (user + assistant avg)
-    const estTokensPerTurn = 300;
-    const safeBudget = Math.floor(currentModelContextLength * 0.6); // leave headroom for system + generation
-    return Math.max(4, Math.min(40, Math.floor(safeBudget / estTokensPerTurn)));
-  });
+  // Rough recommended turns based on context length (very conservative); see
+  // src/lib/context-turns.ts for the extracted, unit-tested math.
+  const recommendedMaxTurns: number = $derived.by(() => recommendedMaxTurnsFor(currentModelContextLength));
 
   // === Step 4: Per-model defaults ===
   // When model changes, optionally suggest or apply a good default
@@ -2102,7 +2098,11 @@
   function applyConversationSettings(raw: unknown) {
     const { effective } = resolveConversationSettings(raw, appSettingDefaults);
     systemPrompt = effective.systemPrompt;
-    contextTurns = effective.contextTurns;
+    // Clamped: a stored value can be any positive integer (conversation-store.ts only rejects
+    // non-integers and values <= 0), but the live/effective context window must stay within what
+    // the Context slider and downstream trimming actually support -- otherwise the control and
+    // the real context window silently disagree. The archived raw value is never rewritten here.
+    contextTurns = clampContextTurns(effective.contextTurns);
     showFullHistory = effective.showFullHistory;
     // A plain assignment, not `setChatModel`. That function is async: it loads the model and can
     // start the service, so driving it from a synchronous switch would let two overlapping
@@ -3281,7 +3281,7 @@
         // for the live values until a conversation is loaded over them.
         appSettingDefaults = readAppSettingDefaults(data, DEFAULT_APP_SETTINGS);
         systemPrompt = appSettingDefaults.systemPrompt;
-        contextTurns = appSettingDefaults.contextTurns;
+        contextTurns = clampContextTurns(appSettingDefaults.contextTurns);
         showFullHistory = appSettingDefaults.showFullHistory;
         if (typeof data.sidebarCollapsed === 'boolean') {
           sidebarCollapsed = data.sidebarCollapsed;
@@ -8917,23 +8917,24 @@ Output only the summary text, no preamble.`;
 
                 <!-- Context management -->
                 <div class="context-control">
-                  <label for="ctx-select" title="How many recent turns are sent with the next message">Context</label>
-                  <select
+                  <label for="ctx-select" title={`How many recent turns are sent with the next message (${MIN_CONTEXT_TURNS}-${MAX_CONTEXT_TURNS})`}>Context</label>
+                  <span class="context-range-bound">{MIN_CONTEXT_TURNS}</span>
+                  <input
+                    type="range"
                     id="ctx-select"
-                    value={contextTurns}
-                    onchange={(e) =>
+                    min={MIN_CONTEXT_TURNS}
+                    max={MAX_CONTEXT_TURNS}
+                    step="1"
+                    value={clampContextTurns(contextTurns)}
+                    oninput={(e) =>
                       commitChatSettings({
-                        contextTurns: Number((e.currentTarget as HTMLSelectElement).value),
+                        contextTurns: Number((e.currentTarget as HTMLInputElement).value),
                       })}
-                    title={`Keep last N turns. Model context: ${currentModelContextLength ? currentModelContextLength + ' tokens' : 'unknown'}. Lower = faster & lower energy.`}
+                    title={`Keep last N turns (${MIN_CONTEXT_TURNS}-${MAX_CONTEXT_TURNS}). Model context: ${currentModelContextLength ? currentModelContextLength + ' tokens' : 'unknown'}. Lower = faster & lower energy.`}
                     disabled={isStreaming}
-                  >
-                    <option value={4}>4 turns</option>
-                    <option value={8}>8 turns</option>
-                    <option value={12}>12 turns</option>
-                    <option value={20}>20 turns</option>
-                    <option value={30}>30 turns</option>
-                  </select>
+                  />
+                  <span class="context-range-bound">{MAX_CONTEXT_TURNS}</span>
+                  <span class="context-turns-value">{clampContextTurns(contextTurns)} turns</span>
                   <span
                     class="context-estimate"
                     title="Rough token count for this turn. Smaller means a faster, cheaper reply."
@@ -8953,7 +8954,7 @@ Output only the summary text, no preamble.`;
                         class="recommend-btn"
                         onclick={applyRecommendedContext}
                         title={`Use recommended ${recommendedMaxTurns} turns for this model`}
-                      >Recommended</button>
+                      >Recommended: {recommendedMaxTurns}</button>
                     {/if}
                   {/if}
 
@@ -12673,7 +12674,7 @@ Output only the summary text, no preamble.`;
      button otherwise inherits the tall primary fill and the select stays a
      native stub beside it. */
   .chat-controls .persona-btn,
-  .chat-controls .context-control select,
+  .chat-controls .context-control input[type="range"],
   .chat-controls .vision-attach > button:not(.mini),
   .chat-controls .recommend-btn {
     box-sizing: border-box;
@@ -13721,11 +13722,24 @@ Output only the summary text, no preamble.`;
   .context-control label {
     line-height: 1;
   }
-  .context-control select {
+  .context-control input[type="range"] {
     background: var(--input-bg);
     border: 1px solid var(--border);
     color: var(--fg);
     padding: 0 8px;
+    width: 120px;
+    min-width: 80px;
+    flex: 0 1 120px;
+  }
+  .context-range-bound {
+    font-size: 0.6875rem;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .context-turns-value {
+    font-variant-numeric: tabular-nums;
+    font-size: 0.8125rem;
+    white-space: nowrap;
   }
   .context-estimate {
     font-variant-numeric: tabular-nums;

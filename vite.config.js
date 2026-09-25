@@ -120,6 +120,7 @@ export default defineConfig(() => ({
         'sidecar/native-service.js',
         'sidecar/fetch-response.js',
         'src/lib/model-sort.ts',
+        'src/lib/context-turns.ts',
         'sidecar/gateway-http.js',
         'sidecar/model-registry.js',
         'sidecar/activity-booking.js',
