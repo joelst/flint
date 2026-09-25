@@ -2323,8 +2323,9 @@ function createSessionChatClient (chatModel, sdkModule) {
       };
       const request = new Request();
       request.addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
-      const session = new ChatSession(chatModel);
+      let session;
       try {
+        session = new ChatSession(chatModel);
         const response = await session.processRequest(request);
         const text = findOpenAiJsonText(response?.output);
         if (text === undefined) {
