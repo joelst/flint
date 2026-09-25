@@ -106,6 +106,7 @@ export default defineConfig(() => ({
         'src/lib/status-message.ts',
         'sidecar/protocol-stdout.js',
         'sidecar/chat-transport.js',
+        'sidecar/session-clients.js',
         'sidecar/audio-format.js',
         'sidecar/accelerator-registration.js',
         'sidecar/model-operation-queue.js',
