@@ -2,4 +2,4 @@
 "flint": patch
 ---
 
-Clarify the catalog check pending notice to say the check is pending and to wait before retrying.
+Clarify the "catalog not yet checked" notice so it doesn't imply a check is already running.
