@@ -2427,8 +2427,15 @@ function createSessionChatClient (chatModel, sdkModule) {
   const settings = {};
   const serializeSettings = () => {
     const out = {};
-    if (Number.isFinite(settings.temperature)) out.temperature = settings.temperature;
+    if (Number.isFinite(settings.frequencyPenalty)) out.frequency_penalty = settings.frequencyPenalty;
     if (Number.isFinite(settings.maxTokens)) out.max_tokens = settings.maxTokens;
+    if (Number.isFinite(settings.presencePenalty)) out.presence_penalty = settings.presencePenalty;
+    if (Number.isFinite(settings.temperature)) out.temperature = settings.temperature;
+    if (Number.isFinite(settings.topP)) out.top_p = settings.topP;
+    const metadata = {};
+    if (Number.isFinite(settings.topK)) metadata.top_k = String(settings.topK);
+    if (Number.isFinite(settings.randomSeed)) metadata.random_seed = String(settings.randomSeed);
+    if (Object.keys(metadata).length > 0) out.metadata = metadata;
     return out;
   };
   const findOpenAiJsonText = (output) => {

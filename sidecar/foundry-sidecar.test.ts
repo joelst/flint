@@ -3269,6 +3269,11 @@ describe('chatCompletion ChatSession path', () => {
       cmd: 'chatCompletion',
       model: 'fake-model',
       messages: [{ role: 'user', content: 'use the tool' }],
+      frequencyPenalty: 0.25,
+      presencePenalty: -0.5,
+      topP: 0.8,
+      topK: 12,
+      randomSeed: 17,
       tools: [{
         type: 'function',
         function: {
@@ -3287,6 +3292,10 @@ describe('chatCompletion ChatSession path', () => {
     expect(request.tools[0].function.name).toBe('read_status');
     expect(request.tool_choice).toEqual({ type: 'function', function: { name: 'read_status' } });
     expect(request.response_format).toEqual({ type: 'json_object' });
+    expect(request.frequency_penalty).toBe(0.25);
+    expect(request.presence_penalty).toBe(-0.5);
+    expect(request.top_p).toBe(0.8);
+    expect(request.metadata).toEqual({ top_k: '12', random_seed: '17' });
   }, 30000);
 
   it('prefers the ChatSession-backed client over createChatClient() when the SDK exports it (streaming)', async () => {
