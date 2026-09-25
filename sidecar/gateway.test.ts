@@ -921,6 +921,205 @@ describe('gateway streaming', () => {
     expect(events[2]).toBe('data: [DONE]');
   });
 
+  it('reports token usage and time-to-first-token for streamed chat completions', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('data: {"choices":[{"delta":{"role":"assistant","content":"hi"}}]}\n\n');
+      setTimeout(() => {
+        res.write('data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":3}}\n\n');
+        res.end('data: [DONE]\n\n');
+      }, 30);
+    });
+    const access = [];
+    gateway = await startGateway({ onAccess: (entry) => access.push(entry) });
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3-0.6b', stream: true }),
+    });
+
+    expect(res.status).toBe(200);
+    const entry = access.find(e => e.routeClass === 'chat');
+    expect(entry.tokensIn).toBe(12);
+    expect(entry.tokensOut).toBe(3);
+    expect(entry.ttftMs).toBeGreaterThanOrEqual(0);
+    expect(entry.ttftMs).toBeLessThan(entry.durationMs + 1);
+    // The gateway has no equivalent of the IPC path's separately-observed load time,
+    // so prompt throughput can never be computed from it — only decode throughput can.
+    expect(entry.promptTokensPerSecond).toBeNull();
+    expect(entry.decodeTokensPerSecond).toBeGreaterThan(0);
+  });
+
+  it('detects first-token time from a later choice when choices[0] carries no content', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      // With n > 1, the first choice can be a role-only/empty delta while another
+      // choice carries the actual first content chunk.
+      res.write('data: {"choices":[{"index":0,"delta":{"role":"assistant"}},{"index":1,"delta":{"content":"hi"}}]}\n\n');
+      res.write('data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"},{"index":1,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1}}\n\n');
+      res.end('data: [DONE]\n\n');
+    });
+    const access = [];
+    gateway = await startGateway({ onAccess: (entry) => access.push(entry) });
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3-0.6b', stream: true, n: 2 }),
+    });
+
+    expect(res.status).toBe(200);
+    const entry = access.find(e => e.routeClass === 'chat');
+    expect(entry.ttftMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('does not report a first token when a duplicated delta carries an empty string', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      // Foundry's native runtime duplicates content into both `delta` and `message` on the
+      // same chunk, but normalizeChoice's merge lets `delta` win whichever key it owns —
+      // even an empty string. So this chunk actually delivers content: '' to the client,
+      // not the 'hi' sitting in message; TTFT must not fire on it.
+      res.write('data: {"choices":[{"index":0,"delta":{"content":""},"message":{"content":"hi"}}]}\n\n');
+      res.write('data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1}}\n\n');
+      res.end('data: [DONE]\n\n');
+    });
+    const access = [];
+    gateway = await startGateway({ onAccess: (entry) => access.push(entry) });
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3-0.6b', stream: true }),
+    });
+
+    expect(res.status).toBe(200);
+    const entry = access.find(e => e.routeClass === 'chat');
+    expect(entry.ttftMs).toBeNull();
+  });
+
+  it('falls back to message content for first-token time when delta omits the content key', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      // A delta with no `content` key at all (only role) does not win that key in the
+      // merge, so the client actually receives message.content — TTFT should fire here.
+      res.write('data: {"choices":[{"index":0,"delta":{"role":"assistant"},"message":{"content":"hi"}}]}\n\n');
+      res.write('data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1}}\n\n');
+      res.end('data: [DONE]\n\n');
+    });
+    const access = [];
+    gateway = await startGateway({ onAccess: (entry) => access.push(entry) });
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3-0.6b', stream: true }),
+    });
+
+    expect(res.status).toBe(200);
+    const entry = access.find(e => e.routeClass === 'chat');
+    expect(entry.ttftMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('reports token usage for buffered (non-streamed) chat completions', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        choices: [{ message: { role: 'assistant', content: 'hello' } }],
+        usage: { prompt_tokens: 7, completion_tokens: 2 },
+      }));
+    });
+    const access = [];
+    gateway = await startGateway({ onAccess: (entry) => access.push(entry) });
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3-0.6b' }),
+    });
+
+    expect(res.status).toBe(200);
+    const entry = access.find(e => e.routeClass === 'chat');
+    expect(entry.tokensIn).toBe(7);
+    expect(entry.tokensOut).toBe(2);
+    // Non-streaming responses arrive as one block: there is no observable moment
+    // distinct from completion, so time-to-first-token is truthfully unknown, and
+    // both derived rates (which require it) stay null too.
+    expect(entry.ttftMs).toBeNull();
+    expect(entry.promptTokensPerSecond).toBeNull();
+    expect(entry.decodeTokensPerSecond).toBeNull();
+  });
+
+  it.each([0, 32])('reports token usage when the non-streamed response limit is %i bytes', async maxBufferedResponse => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        choices: [{
+          message: {
+            role: 'assistant',
+            content: `${'x'.repeat(120)}}`,
+            usage: { prompt_tokens: 99, completion_tokens: 99 },
+          },
+        }],
+        usage: { prompt_tokens: 9, completion_tokens: 4 },
+      }));
+    });
+    const access = [];
+    gateway = await startGateway({
+      maxBufferedResponse,
+      onAccess: (entry) => access.push(entry),
+    });
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3-0.6b' }),
+    });
+
+    expect(res.status).toBe(200);
+    const entry = access.find(e => e.routeClass === 'chat');
+    expect(entry.tokensIn).toBe(9);
+    expect(entry.tokensOut).toBe(4);
+  });
+
+  it('does not retain an oversized usage object while passing through chat JSON', async () => {
+    await new Promise(r => upstream.server.close(r));
+    upstream = await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        choices: [{ message: { role: 'assistant', content: 'ok' } }],
+        usage: {
+          prompt_tokens: 9,
+          completion_tokens: 4,
+          ignored: 'x'.repeat(64 * 1024),
+        },
+      }));
+    });
+    const access = [];
+    gateway = await startGateway({
+      maxBufferedResponse: 0,
+      onAccess: (entry) => access.push(entry),
+    });
+
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3-0.6b' }),
+    });
+
+    expect(res.status).toBe(200);
+    const entry = access.find(e => e.routeClass === 'chat');
+    expect(entry.tokensIn).toBeNull();
+    expect(entry.tokensOut).toBeNull();
+  });
+
   it('normalizes split UTF-8 SSE payloads and removes stale content length', async () => {
     await new Promise(r => upstream.server.close(r));
     upstream = await startUpstream((_req, res) => {
