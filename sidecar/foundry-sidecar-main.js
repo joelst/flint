@@ -3457,6 +3457,11 @@ rl.on('line', async (line) => {
               const finishReason = chunk?.choices?.[0]?.finish_reason;
               if (finishReason != null) chatFinishReason = finishReason;
               if (canceledRequests.has(id)) continue;
+              // mergeToolCallDeltas mutates `toolCalls` in place, keyed by the delta's own
+              // `index`, so out-of-order parallel tool calls land at the right position
+              // across chunks. Its filtered return value is intentionally discarded here;
+              // reassigning it per-chunk would renumber positions mid-stream and corrupt a
+              // later delta's index lookup. Compaction happens once, after the loop.
               mergeToolCallDeltas(toolCalls, chunk?.choices?.[0]?.delta?.tool_calls);
               const deltaText = chunk?.choices?.[0]?.delta?.content;
               const messageText = chunk?.choices?.[0]?.message?.content ?? chunk?.message?.content;
@@ -3484,6 +3489,9 @@ rl.on('line', async (line) => {
             }
             chatOk = true;
             chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
+            // Compact once, after the loop: see the in-loop comment for why compaction
+            // must not happen per-chunk.
+            const compactedToolCalls = toolCalls.filter(Boolean);
             reply({
               ok: true,
               result: {
@@ -3493,7 +3501,7 @@ rl.on('line', async (line) => {
                     message: {
                       role: 'assistant',
                       content,
-                      ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
+                      ...(compactedToolCalls.length ? { tool_calls: compactedToolCalls } : {}),
                     },
                   }],
                   ...(typeof chatTokensIn === 'number' || typeof chatTokensOut === 'number'
@@ -3571,6 +3579,8 @@ rl.on('line', async (line) => {
               const finishReason = chunk?.choices?.[0]?.finish_reason;
               if (finishReason != null) chatFinishReason = finishReason;
               if (canceledRequests.has(id)) continue;
+              // See the equivalent SDK-path comment above: keep the in-place mutation and
+              // compact once after the loop rather than reassigning per-chunk.
               mergeToolCallDeltas(toolCalls, chunk?.choices?.[0]?.delta?.tool_calls);
               const delta = chunk?.choices?.[0]?.delta?.content || '';
               if (delta) {
@@ -3580,6 +3590,11 @@ rl.on('line', async (line) => {
             }
             chatOk = true;
             chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
+            // Compact once, after the loop: unset indexes (a lower index that never
+            // arrived while a higher parallel index did) are removed here rather than
+            // reassigning toolCalls mid-stream, which would otherwise renumber positions
+            // and corrupt subsequent index-keyed merges.
+            const compactedToolCalls = toolCalls.filter(Boolean);
             reply({
               ok: true,
               result: {
@@ -3589,7 +3604,7 @@ rl.on('line', async (line) => {
                     message: {
                       role: 'assistant',
                       content,
-                      ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
+                      ...(compactedToolCalls.length ? { tool_calls: compactedToolCalls } : {}),
                     },
                   }],
                   ...(typeof chatTokensIn === 'number' || typeof chatTokensOut === 'number'

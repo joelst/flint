@@ -3107,7 +3107,19 @@ describe('chatCompletion ChatSession path', () => {
   //                           is not valid JSON, to verify JSON.parse failures are wrapped too.
   //   'session-constructor-error' - the ChatSession constructor itself throws, to verify that
   //                           failure is wrapped too (construction happens inside the try/catch).
-  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-error-dispose' | 'session-abort' | 'session-empty-output' | 'session-stream-empty' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error' | 'session-stream-tool';
+  //   'session-stream-tool-outoforder' - like 'session-stream-tool' but the parallel
+  //                           tool-call deltas arrive index 1 before index 0, to verify the
+  //                           final tool_calls array is compacted rather than sparse (a hole
+  //                           serializes as `null`, which is invalid per the tool_calls schema).
+  //   'session-stream-tool-cancel' - yields a text delta, then polls FLINT_TEST_CANCEL_SIGNAL
+  //                           (written by the test only after it has received the
+  //                           cancelChatRequest ack) before yielding a tool_calls delta and a
+  //                           finish_reason, to verify a canceled stream's tool-call deltas are
+  //                           suppressed from the final message just like its text deltas
+  //                           already are. Gating on the signal file (rather than a fixed
+  //                           delay) makes the ordering deterministic instead of depending on
+  //                           IPC round-trip speed on a loaded CI runner.
+  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-error-dispose' | 'session-abort' | 'session-empty-output' | 'session-stream-empty' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error' | 'session-stream-tool' | 'session-stream-tool-outoforder' | 'session-stream-tool-cancel';
   function fakeSdk(sdkMode: ChatFakeSdkMode) {
     const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only';
     const hasSession = sdkMode !== 'legacy-only';
@@ -3166,7 +3178,9 @@ describe('chatCompletion ChatSession path', () => {
       "        yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { content: 'session ' } }] }) };",
       `        if (${JSON.stringify(sdkMode)} === 'session-stream-tool') yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-1', type: 'function', function: { name: 'read_status', arguments: '{' } }] } }] }) };`,
       `        if (${JSON.stringify(sdkMode)} === 'session-stream-tool') yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '}' } }] } }] }) };`,
-      `        yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { content: 'reply' }, finish_reason: ${JSON.stringify(sdkMode === 'session-stream-tool' ? 'tool_calls' : 'stop')} }], usage: { prompt_tokens: 5, completion_tokens: 6 } }) };`,
+      `        if (${JSON.stringify(sdkMode)} === 'session-stream-tool-outoforder') yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 1, id: 'call-2', type: 'function', function: { name: 'second_tool', arguments: '{}' } }] } }] }) };`,
+      `        if (${JSON.stringify(sdkMode)} === 'session-stream-tool-cancel') { while (!fs.existsSync(process.env.FLINT_TEST_CANCEL_SIGNAL)) { await new Promise((resolve) => setTimeout(resolve, 5)); } yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-1', type: 'function', function: { name: 'read_status', arguments: '{}' } }] } }] }) }; }`,
+      `        yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { content: 'reply' }, finish_reason: ${JSON.stringify(['session-stream-tool', 'session-stream-tool-outoforder', 'session-stream-tool-cancel'].includes(sdkMode) ? 'tool_calls' : 'stop')} }], usage: { prompt_tokens: 5, completion_tokens: 6 } }) };`,
       '      },',
       '    };',
       '  }',
@@ -3187,6 +3201,7 @@ describe('chatCompletion ChatSession path', () => {
 
   let homeDir: string;
   let eventLog: string;
+  let cancelSignalPath: string;
   let proc: ChildProcessWithoutNullStreams;
 
   const events = () => {
@@ -3202,6 +3217,7 @@ describe('chatCompletion ChatSession path', () => {
   async function startSidecar(sdkMode: ChatFakeSdkMode) {
     homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-chatsession-'));
     eventLog = join(homeDir, 'events.log');
+    cancelSignalPath = join(homeDir, 'cancel.signal');
     const corePath = join(homeDir, 'fake-core.dylib');
     writeFileSync(corePath, '');
     const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
@@ -3228,6 +3244,7 @@ describe('chatCompletion ChatSession path', () => {
         USERPROFILE: homeDir,
         FLINT_FOUNDRY_CORE_PATH: corePath,
         FLINT_TEST_EVENT_LOG: eventLog,
+        FLINT_TEST_CANCEL_SIGNAL: cancelSignalPath,
       },
     });
     await waitForLine(proc, (msg) => msg.ready === true);
@@ -3336,6 +3353,53 @@ describe('chatCompletion ChatSession path', () => {
       function: { name: 'read_status', arguments: '{}' },
     }]);
     expect(res.result.choices[0].finish_reason).toBe('tool_calls');
+  }, 30000);
+
+  it('compacts a tool-call delta stream that never fills a lower parallel index', async () => {
+    await startSidecar('session-stream-tool-outoforder');
+    const chatted = waitForLine(proc, (msg) => msg.id === 3 && msg.ok === true, 10000);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use a parallel tool' }],
+      stream: true,
+    });
+    const res = await chatted;
+    expect(res.ok).toBe(true);
+    // Only index 1 is ever emitted; index 0 never arrives, leaving a genuine hole in
+    // the underlying sparse array. A caller that skips mergeToolCallDeltas's compacted
+    // return/result would serialize that hole as a literal `null`, which is invalid per
+    // the tool_calls schema.
+    const rawWire = JSON.stringify(res.result.choices[0].message.tool_calls);
+    expect(rawWire).not.toContain('null');
+    expect(res.result.choices[0].message.tool_calls).toEqual([
+      { id: 'call-2', type: 'function', function: { name: 'second_tool', arguments: '{}' } },
+    ]);
+  }, 30000);
+
+  it('suppresses tool-call deltas that arrive after the stream is canceled', async () => {
+    await startSidecar('session-stream-tool-cancel');
+    const chatted = waitForLine(proc, (msg) => msg.id === 3 && msg.ok === true, 10000);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use the tool' }],
+      stream: true,
+    });
+    // The fake session yields an initial text delta immediately, then blocks (polling
+    // cancelSignalPath) until this test writes the signal file below. Gating on that
+    // file rather than a fixed delay makes the ordering deterministic: the tool_calls
+    // delta cannot be produced until cancellation has already been acknowledged, so
+    // there is no IPC-round-trip race to lose on a slow/loaded runner.
+    await waitForLine(proc, (msg) => msg.id === 3 && msg.stream === true, 10000);
+    send({ id: 4, cmd: 'cancelChatRequest', requestId: 3 });
+    await reply(4);
+    writeFileSync(cancelSignalPath, '');
+    const res = await chatted;
+    expect(res.ok).toBe(true);
+    expect(res.result.choices[0].message.tool_calls).toBeUndefined();
   }, 30000);
 
   it('fails a streaming ChatSession that emits no openai-json output', async () => {

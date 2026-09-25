@@ -76,7 +76,7 @@ Embedding-model path, not RAG. Ships in 0.9.0 with the rest of the post-0.7.0 wa
 
 - Gateway classifies `/v1/embeddings` and autoloads like chat (proven in tests). Chat JSON/SSE normalization stays chat-only.
 - BYOM import detects embedding folders and does not require a chat prompt template.
-- Sidecar `embedTexts` uses `createEmbeddingClient()` with the same pool inFlight fencing as chat. Batches are bounded (32 strings, 8k chars each).
+- Sidecar `embedTexts` uses the `EmbeddingsSession` adapter (falling back to `createEmbeddingClient()` on SDK builds without it) with the same pool inFlight fencing as chat. Batches are bounded (32 strings, 8k chars each).
 - Diagnostics self-test **blocks** embeddings when no embedding model is present; **passes** when `POST /v1/embeddings` returns a numeric vector.
 - One recorded BYOM recipe is still a spike: do not fake a Continue indexer verification.
 
