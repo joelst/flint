@@ -2948,11 +2948,12 @@ describe('chatCompletion ChatSession path', () => {
       `    if (${JSON.stringify(sdkMode)} === 'session-empty-output') return { output: [] };`,
       `    if (${JSON.stringify(sdkMode)} === 'session-malformed-json') return { output: [{ type: 'text', textType: 'openai-json', text: 'not json' }] };`,
       '    const requestJson = JSON.parse(req.items[0].text);',
+      '    note(`request:${JSON.stringify(requestJson)}`);',
       '    return {',
       '      output: [{',
       "        type: 'text', textType: 'openai-json',",
       '        text: JSON.stringify({',
-      "          choices: [{ message: { role: 'assistant', content: `session reply, temp=${requestJson.temperature}` } }],",
+      "          choices: [{ message: { role: 'assistant', content: `session reply, temp=${requestJson.temperature}`, ...(requestJson.tools ? { tool_calls: [{ id: 'call-1', type: 'function', function: { name: requestJson.tools[0].function.name, arguments: '{}' } }] } : {}) } }],",
       '          usage: { prompt_tokens: 5, completion_tokens: 6 },',
       '        }),',
       '      }],',
@@ -3061,6 +3062,34 @@ describe('chatCompletion ChatSession path', () => {
     expect(events()).not.toContain('legacy-chat');
   }, 30000);
 
+  it('passes tool definitions and response controls through ChatSession and preserves tool_calls', async () => {
+    await startSidecar('session');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use the tool' }],
+      tools: [{
+        type: 'function',
+        function: {
+          name: 'read_status',
+          description: 'Read local status',
+          parameters: { type: 'object', properties: {} },
+        },
+      }],
+      toolChoice: { type: 'function', function: { name: 'read_status' } },
+      responseFormat: { type: 'json_object' },
+    });
+    const res = await chatted;
+    expect(res.ok).toBe(true);
+    expect(res.result.choices[0].message.tool_calls[0].function.name).toBe('read_status');
+    const request = JSON.parse(events().find((event) => event.startsWith('request:')).slice(8));
+    expect(request.tools[0].function.name).toBe('read_status');
+    expect(request.tool_choice).toEqual({ type: 'function', function: { name: 'read_status' } });
+    expect(request.response_format).toEqual({ type: 'json_object' });
+  }, 30000);
+
   it('prefers the ChatSession-backed client over createChatClient() when the SDK exports it (streaming)', async () => {
     await startSidecar('session');
     const chatted = waitForLine(proc, (msg) => msg.id === 3 && msg.ok === true, 10000);
@@ -3078,6 +3107,7 @@ describe('chatCompletion ChatSession path', () => {
     expect(events()).toContain('session-chat-disposed');
     expect(events()).not.toContain('legacy-chat');
   }, 30000);
+
 
   it('uses the ChatSession client even when createChatClient() does not exist at all (post-removal shape)', async () => {
     await startSidecar('session-no-legacy');

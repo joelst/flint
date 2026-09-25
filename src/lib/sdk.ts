@@ -2567,14 +2567,24 @@ export async function withServiceTransition<T>(
 export async function chatCompletion(
   model: string,
   messages: Array<{ role: string; content: any }>,
-  options?: { maxTokens?: number; temperature?: number; preferredEp?: string }
+  options?: {
+    maxTokens?: number;
+    temperature?: number;
+    preferredEp?: string;
+    tools?: import('./ipc-contracts').ChatToolDefinition[];
+    toolChoice?: import('./ipc-contracts').ChatToolChoice;
+    responseFormat?: import('./ipc-contracts').ChatResponseFormat;
+  }
 ): Promise<any> {
   const res = await send('chatCompletion', {
     model,
     messages,
     maxTokens: options?.maxTokens,
     temperature: options?.temperature,
-    preferredEp: options?.preferredEp
+    preferredEp: options?.preferredEp,
+    tools: options?.tools,
+    toolChoice: options?.toolChoice,
+    responseFormat: options?.responseFormat,
   });
   return res.result;
 }
@@ -2583,7 +2593,14 @@ export async function chatCompletionStream(
   model: string,
   messages: Array<{ role: string; content: any }>,
   onDelta: (delta: string) => void,
-  options?: { maxTokens?: number; temperature?: number; preferredEp?: string },
+  options?: {
+    maxTokens?: number;
+    temperature?: number;
+    preferredEp?: string;
+    tools?: import('./ipc-contracts').ChatToolDefinition[];
+    toolChoice?: import('./ipc-contracts').ChatToolChoice;
+    responseFormat?: import('./ipc-contracts').ChatResponseFormat;
+  },
   onAssignedId?: (id: number) => void
 ): Promise<any> {
   const res = await sendInternal(
@@ -2594,6 +2611,9 @@ export async function chatCompletionStream(
       maxTokens: options?.maxTokens,
       temperature: options?.temperature,
       preferredEp: options?.preferredEp,
+      tools: options?.tools,
+      toolChoice: options?.toolChoice,
+      responseFormat: options?.responseFormat,
       stream: true
     },
     onDelta,

@@ -201,7 +201,7 @@ const FIELD_TYPES = {
   load:              { alias: 'non-empty-string', variantId: 'non-empty-string' },
   unload:            { alias: 'non-empty-string', ifIdle: 'boolean' },
   deleteModel:       { alias: 'non-empty-string', variantId: 'non-empty-string' },
-  chatCompletion:    { model: 'non-empty-string', messages: 'array' },
+  chatCompletion:    { model: 'non-empty-string', messages: 'array', tools: 'array' },
   cancelChatRequest: { requestId: 'number' },
   transcribeAudio:   { audioBase64: 'string', mimeType: 'non-empty-string', fileName: 'non-empty-string', model: 'non-empty-string', language: 'non-empty-string' },
   embedTexts:        { model: 'non-empty-string', inputs: 'array' },
@@ -242,7 +242,7 @@ const COMMAND_SCHEMA = {
   unload:             { required: ['alias'], optional: ['lane', 'ifIdle'] },
   deleteModel:        { required: ['alias'], optional: ['variantId'] },
   getEndpoint:        { required: [], optional: [] },
-  chatCompletion:     { required: ['model', 'messages'], optional: ['maxTokens', 'temperature', 'preferredEp', 'stream'] },
+  chatCompletion:     { required: ['model', 'messages'], optional: ['maxTokens', 'temperature', 'preferredEp', 'stream', 'tools', 'toolChoice', 'responseFormat'] },
   cancelChatRequest:  { required: ['requestId'], optional: [] },
   transcribeAudio:    { required: ['audioBase64', 'mimeType', 'fileName', 'model', 'language'], optional: ['temperature', 'preferredEp'] },
   embedTexts:         { required: ['model', 'inputs'], optional: [] },
@@ -337,6 +337,65 @@ function validateCommand(cmd, payload) {
   if (cmd === 'chatCompletion') {
     if (payload.stream !== undefined && typeof payload.stream !== 'boolean') return `Command "chatCompletion" field "stream" must be a boolean`;
     if (payload.maxTokens !== undefined && typeof payload.maxTokens !== 'number') return `Command "chatCompletion" field "maxTokens" must be a number`;
+    if (payload.tools !== undefined) {
+      if (!Array.isArray(payload.tools) || payload.tools.length > 64) {
+        return 'Command "chatCompletion" field "tools" must contain at most 64 definitions';
+      }
+      let serializedBytes = 0;
+      for (const tool of payload.tools) {
+        if (!tool || typeof tool !== 'object' || Array.isArray(tool) || tool.type !== 'function') {
+          return 'Command "chatCompletion" tool definitions must use type "function"';
+        }
+        const fn = tool.function;
+        if (!fn || typeof fn !== 'object' || Array.isArray(fn)
+          || typeof fn.name !== 'string' || !fn.name.trim() || fn.name.length > 128) {
+          return 'Command "chatCompletion" tool function names must be non-empty strings of at most 128 characters';
+        }
+        if (fn.description !== undefined && (typeof fn.description !== 'string' || fn.description.length > 4096)) {
+          return 'Command "chatCompletion" tool descriptions must be strings of at most 4096 characters';
+        }
+        if (fn.parameters !== undefined && (
+          typeof fn.parameters !== 'object' || fn.parameters === null || Array.isArray(fn.parameters)
+        )) {
+          return 'Command "chatCompletion" tool parameters must be a JSON object';
+        }
+        serializedBytes += Buffer.byteLength(JSON.stringify(tool));
+      }
+      if (serializedBytes > 64 * 1024) {
+        return 'Command "chatCompletion" tool definitions exceed the 64 KiB limit';
+      }
+    }
+    if (payload.toolChoice !== undefined && !(
+      payload.toolChoice === 'none'
+      || payload.toolChoice === 'auto'
+      || payload.toolChoice === 'required'
+      || (
+        payload.toolChoice
+        && typeof payload.toolChoice === 'object'
+        && !Array.isArray(payload.toolChoice)
+        && payload.toolChoice.type === 'function'
+        && payload.toolChoice.function
+        && typeof payload.toolChoice.function.name === 'string'
+        && payload.toolChoice.function.name.length <= 128
+      )
+    )) {
+      return 'Command "chatCompletion" field "toolChoice" is invalid';
+    }
+    if (payload.responseFormat !== undefined && (
+      !payload.responseFormat
+      || typeof payload.responseFormat !== 'object'
+      || Array.isArray(payload.responseFormat)
+      || !['text', 'json_object', 'json_schema'].includes(payload.responseFormat.type)
+    )) {
+      return 'Command "chatCompletion" field "responseFormat" is invalid';
+    }
+    if (payload.responseFormat?.type === 'json_schema' && (
+      !payload.responseFormat.json_schema
+      || typeof payload.responseFormat.json_schema !== 'object'
+      || Array.isArray(payload.responseFormat.json_schema)
+    )) {
+      return 'Command "chatCompletion" json_schema response format requires a JSON object';
+    }
   }
   if (cmd === 'applyMemorySettings' && payload.eviction !== undefined) {
     const ev = payload.eviction;
@@ -2149,6 +2208,30 @@ function normalizeText (value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+function mergeToolCallDeltas (target, deltas) {
+  for (const delta of Array.isArray(deltas) ? deltas : []) {
+    const index = Number.isInteger(delta?.index) ? delta.index : target.length;
+    const current = target[index] || {};
+    const currentFunction = current.function || {};
+    const nextFunction = delta?.function || {};
+    target[index] = {
+      ...current,
+      ...delta,
+      function: {
+        ...currentFunction,
+        ...nextFunction,
+        ...(typeof nextFunction.name === 'string' && typeof currentFunction.name === 'string'
+          ? { name: currentFunction.name + nextFunction.name }
+          : {}),
+        ...(typeof nextFunction.arguments === 'string' && typeof currentFunction.arguments === 'string'
+          ? { arguments: currentFunction.arguments + nextFunction.arguments }
+          : {}),
+      },
+    };
+  }
+  return target.filter(Boolean);
+}
+
 function segmentTextsFromValue (segments) {
   if (!Array.isArray(segments)) return [];
   const values = [];
@@ -2314,11 +2397,13 @@ function createSessionChatClient (chatModel, sdkModule) {
   };
   return {
     settings,
-    async completeChat (messages, tools) {
+    async completeChat (messages, tools, options = {}) {
       const requestJson = {
         model: chatModel.id,
         messages,
         ...(tools ? { tools } : {}),
+        ...(options.toolChoice !== undefined ? { tool_choice: options.toolChoice } : {}),
+        ...(options.responseFormat !== undefined ? { response_format: options.responseFormat } : {}),
         ...serializeSettings(),
       };
       const request = new Request();
@@ -2341,11 +2426,13 @@ function createSessionChatClient (chatModel, sdkModule) {
         try { session?.dispose(); } catch {}
       }
     },
-    completeStreamingChat (messages, tools) {
+    completeStreamingChat (messages, tools, options = {}) {
       const requestJson = {
         model: chatModel.id,
         messages,
         ...(tools ? { tools } : {}),
+        ...(options.toolChoice !== undefined ? { tool_choice: options.toolChoice } : {}),
+        ...(options.responseFormat !== undefined ? { response_format: options.responseFormat } : {}),
         stream: true,
         ...serializeSettings(),
       };
@@ -3427,10 +3514,16 @@ rl.on('line', async (line) => {
           }
           if (shouldStream && typeof client?.completeStreamingChat === 'function') {
             let content = '';
-            for await (const chunk of client.completeStreamingChat(sdkMessages)) {
+            const toolCalls = [];
+            for await (const chunk of client.completeStreamingChat(
+              sdkMessages,
+              payload.tools,
+              { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
+            )) {
               const usage = chunk?.usage;
               chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
               chatTokensOut = usage?.completion_tokens ?? usage?.output_tokens ?? chatTokensOut;
+              mergeToolCallDeltas(toolCalls, chunk?.choices?.[0]?.delta?.tool_calls);
               if (canceledRequests.has(id)) continue;
               const deltaText = chunk?.choices?.[0]?.delta?.content;
               const messageText = chunk?.choices?.[0]?.message?.content ?? chunk?.message?.content;
@@ -3462,7 +3555,13 @@ rl.on('line', async (line) => {
               ok: true,
               result: {
                 ...normalizeChatResponse({
-                  choices: [{ message: { role: 'assistant', content } }],
+                  choices: [{
+                    message: {
+                      role: 'assistant',
+                      content,
+                      ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
+                    },
+                  }],
                   ...(typeof chatTokensIn === 'number' || typeof chatTokensOut === 'number'
                     ? {
                         usage: {
@@ -3484,7 +3583,11 @@ rl.on('line', async (line) => {
               }
             });
           } else if (typeof client?.completeChat === 'function') {
-            const result = await client.completeChat(sdkMessages);
+            const result = await client.completeChat(
+              sdkMessages,
+              payload.tools,
+              { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
+            );
             const normalizedResult = normalizeChatResponse(result);
             chatTokensIn = normalizedResult?.usage?.prompt_tokens
               ?? normalizedResult?.usage?.input_tokens ?? null;
@@ -3521,10 +3624,16 @@ rl.on('line', async (line) => {
             });
           } else if (typeof client?.completeStreamingChat === 'function') {
             let content = '';
-            for await (const chunk of client.completeStreamingChat(sdkMessages)) {
+            const toolCalls = [];
+            for await (const chunk of client.completeStreamingChat(
+              sdkMessages,
+              payload.tools,
+              { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
+            )) {
               const usage = chunk?.usage;
               chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
               chatTokensOut = usage?.completion_tokens ?? usage?.output_tokens ?? chatTokensOut;
+              mergeToolCallDeltas(toolCalls, chunk?.choices?.[0]?.delta?.tool_calls);
               if (canceledRequests.has(id)) continue;
               const delta = chunk?.choices?.[0]?.delta?.content || '';
               if (delta) {
@@ -3538,7 +3647,13 @@ rl.on('line', async (line) => {
               ok: true,
               result: {
                 ...normalizeChatResponse({
-                  choices: [{ message: { role: 'assistant', content } }],
+                  choices: [{
+                    message: {
+                      role: 'assistant',
+                      content,
+                      ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
+                    },
+                  }],
                   ...(typeof chatTokensIn === 'number' || typeof chatTokensOut === 'number'
                     ? {
                         usage: {
@@ -3570,7 +3685,10 @@ rl.on('line', async (line) => {
               messages: sdkMessages,
               stream: false,
               max_tokens: payload.maxTokens,
-              temperature: payload.temperature
+              temperature: payload.temperature,
+              ...(payload.tools ? { tools: payload.tools } : {}),
+              ...(payload.toolChoice !== undefined ? { tool_choice: payload.toolChoice } : {}),
+              ...(payload.responseFormat !== undefined ? { response_format: payload.responseFormat } : {}),
             })
           });
           if (!resp.ok) {
