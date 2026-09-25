@@ -8926,7 +8926,10 @@ Output only the summary text, no preamble.`;
                     max={MAX_CONTEXT_TURNS}
                     step="1"
                     value={clampContextTurns(contextTurns)}
-                    oninput={(e) =>
+                    oninput={(e) => {
+                      contextTurns = Number((e.currentTarget as HTMLInputElement).value);
+                    }}
+                    onchange={(e) =>
                       commitChatSettings({
                         contextTurns: Number((e.currentTarget as HTMLInputElement).value),
                       })}

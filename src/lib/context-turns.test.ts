@@ -52,6 +52,26 @@ describe('context-turns', () => {
     expect(controlFlow).toContain('{clampContextTurns(contextTurns)} turns');
   });
 
+  it('updates the Context slider label on input but persists only on change', () => {
+    const source = readFileSync(join(process.cwd(), 'src', 'routes', '+page.svelte'), 'utf8');
+    const start = source.indexOf('id="ctx-select"');
+    const end = source.indexOf('context-estimate', start);
+    const controlFlow = source.slice(start, end);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(controlFlow).toContain('oninput={(e) => {');
+    expect(controlFlow).toContain(
+      'contextTurns = Number((e.currentTarget as HTMLInputElement).value);',
+    );
+    expect(controlFlow).toContain('onchange={(e) =>');
+    const inputStart = controlFlow.indexOf('oninput={(e) => {');
+    const changeStart = controlFlow.indexOf('onchange={(e) =>');
+    expect(inputStart).toBeGreaterThan(-1);
+    expect(changeStart).toBeGreaterThan(inputStart);
+    expect(controlFlow.slice(inputStart, changeStart)).not.toContain('commitChatSettings');
+    expect(controlFlow.slice(changeStart)).toContain('commitChatSettings({');
+  });
+
   it('clamps contextTurns at both points a legacy/persisted value enters live state', () => {
     // A display-only clamp is not enough on its own: the actual context-window trimming (e.g.
     // `maxRecent = contextTurns * 2`) reads the live `contextTurns` variable directly, so if the
