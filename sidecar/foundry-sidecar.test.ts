@@ -3400,6 +3400,12 @@ describe('chatCompletion ChatSession path', () => {
     const res = await chatted;
     expect(res.ok).toBe(true);
     expect(res.result.choices[0].message.tool_calls).toBeUndefined();
+    // The fixture's only finish_reason-bearing chunk ('tool_calls') is yielded after the
+    // cancel signal, alongside the suppressed tool_calls delta. Recording finish_reason
+    // from that drained chunk would report finish_reason: 'tool_calls' on a message with
+    // no tool_calls -- a self-contradictory result. Nothing legitimate arrived before
+    // cancellation, so finish_reason must stay unset.
+    expect(res.result.choices[0].finish_reason).toBeNull();
   }, 30000);
 
   it('fails a streaming ChatSession that emits no openai-json output', async () => {

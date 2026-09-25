@@ -3454,9 +3454,15 @@ rl.on('line', async (line) => {
               const usage = chunk?.usage;
               chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
               chatTokensOut = usage?.completion_tokens ?? usage?.output_tokens ?? chatTokensOut;
+              if (canceledRequests.has(id)) continue;
+              // finish_reason (like tool_calls below) is only recorded from chunks that
+              // arrive before cancellation is observed. Capturing it unconditionally would
+              // let a drained post-cancel chunk report e.g. finish_reason: 'tool_calls'
+              // while tool_calls itself stays suppressed -- a self-contradictory result.
+              // Usage stays unguarded above: the trailing usage-only chunk is expected
+              // metadata even for a canceled request, not user-visible generation output.
               const finishReason = chunk?.choices?.[0]?.finish_reason;
               if (finishReason != null) chatFinishReason = finishReason;
-              if (canceledRequests.has(id)) continue;
               // mergeToolCallDeltas mutates `toolCalls` in place, keyed by the delta's own
               // `index`, so out-of-order parallel tool calls land at the right position
               // across chunks. Its filtered return value is intentionally discarded here;
@@ -3576,9 +3582,11 @@ rl.on('line', async (line) => {
               const usage = chunk?.usage;
               chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
               chatTokensOut = usage?.completion_tokens ?? usage?.output_tokens ?? chatTokensOut;
+              if (canceledRequests.has(id)) continue;
+              // See the equivalent SDK-path comment above: finish_reason must not be
+              // captured from a drained post-cancel chunk.
               const finishReason = chunk?.choices?.[0]?.finish_reason;
               if (finishReason != null) chatFinishReason = finishReason;
-              if (canceledRequests.has(id)) continue;
               // See the equivalent SDK-path comment above: keep the in-place mutation and
               // compact once after the loop rather than reassigning per-chunk.
               mergeToolCallDeltas(toolCalls, chunk?.choices?.[0]?.delta?.tool_calls);
