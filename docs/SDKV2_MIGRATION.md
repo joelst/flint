@@ -55,7 +55,10 @@ continues to use `src/lib/sdk.ts` and IPC contracts.
 ## Sequencing
 
 1. **Chat completion**
-   - Keep the existing `ChatSession` adapter as the primary path.
+   - Keep the existing `ChatSession` adapter as the primary path. It preserves
+     the deprecated client's OpenAI-shaped request/response bridge, while Flint
+     deliberately wraps setup, native, and response-parsing failures under the
+     same model-specific error family.
    - Move generation settings into the session/request adapter as the SDK
      exposes stable request options, while preserving omitted-setting behavior.
    - Exercise buffered, streaming, tool payload pass-through, usage extraction,
@@ -65,7 +68,10 @@ continues to use `src/lib/sdk.ts` and IPC contracts.
      transports use the session path.
 
 2. **Embeddings**
-   - Keep the existing stateless `EmbeddingsSession` adapter.
+   - Keep the existing stateless `EmbeddingsSession` adapter. It preserves
+     the deprecated client's OpenAI-shaped request/response bridge, while Flint
+     deliberately wraps setup, native, and response-parsing failures under the
+     same model-specific error family.
    - Prefer native tensor output when the SDK contract is stable; retain the
      OpenAI-shaped result conversion at the sidecar boundary.
    - Validate empty input, multiple inputs, output dimensions, malformed output,

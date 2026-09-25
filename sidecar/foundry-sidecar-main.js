@@ -2369,8 +2369,8 @@ async function tryAudioSessionTranscription (sdkModule, audioModel, tempPath, pa
 }
 
 // Builds a ChatSession-backed replacement for `chatModel.createChatClient()` (the
-// deprecated OpenAI-shaped wrapper, removed end of 2026). Mirrors the SDK's own
-// ChatClient internals exactly: each call serializes an OpenAI Chat Completion
+// deprecated OpenAI-shaped wrapper, removed end of 2026). Preserves the SDK's
+// OpenAI-shaped request/response bridge: each call serializes an OpenAI Chat Completion
 // request into a single `Item.text(json, "openai-json")`, runs it through a
 // fresh ChatSession, and recovers the response by JSON-parsing the first
 // "openai-json" text item in the output. This keeps the wire shape (and every
@@ -2423,7 +2423,7 @@ function createSessionChatClient (chatModel, sdkModule) {
           { cause: err },
         );
       } finally {
-        try { session?.dispose(); } catch {}
+        session?.dispose();
       }
     },
     completeStreamingChat (messages, tools, options = {}) {
@@ -2454,7 +2454,7 @@ function createSessionChatClient (chatModel, sdkModule) {
               { cause: err },
             );
           } finally {
-            try { session?.dispose(); } catch {}
+            session?.dispose();
           }
         }
       };
@@ -2464,7 +2464,7 @@ function createSessionChatClient (chatModel, sdkModule) {
 
 // Builds an EmbeddingsSession-backed replacement for `embedModel.createEmbeddingClient()`
 // (the deprecated OpenAI-shaped wrapper, removed end of 2026). Mirrors the SDK's own
-// EmbeddingClient internals: serializes {model, input} into a single
+// EmbeddingClient wire format: serializes {model, input} into a single
 // `Item.text(json, "openai-json")`, runs it through a fresh EmbeddingsSession, and
 // recovers the response from the first "openai-json" text item in the output — keeping
 // the wire shape identical to the deprecated client. Returns null if this SDK build does
@@ -2500,7 +2500,7 @@ function createSessionEmbeddingClient (embedModel, sdkModule) {
           { cause: err },
         );
       } finally {
-        try { session?.dispose(); } catch {}
+        session?.dispose();
       }
     },
   };
