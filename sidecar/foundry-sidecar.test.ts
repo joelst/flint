@@ -2741,7 +2741,7 @@ describe('guarded idle unload against concurrent model use', () => {
     'const note = (event) => fs.appendFileSync(process.env.FLINT_TEST_EVENT_LOG, event + "\\n");',
     'const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));',
     'class FakeModel {',
-    "  constructor(alias) { this.alias = alias; this.id = 'fake-variant'; this.loaded = false; }",
+    "  constructor(alias) { this.alias = alias; this.id = 'whisper-tiny-generic-cpu:1'; this.loaded = false; }",
     "  async load() { note('load'); this.loaded = true; }",
     "  async unload() { note('unload ' + this.alias); note('unload-start'); await sleep(400); this.loaded = false; note('unload-end'); }",
     "  isLoaded() { note('isLoaded'); return this.loaded; }",
@@ -2896,18 +2896,16 @@ describe('guarded idle unload against concurrent model use', () => {
 });
 
 describe('transcribeAudio AudioSession path', () => {
-  // A minimal fake foundry-local-sdk exposing the Session/Request/Item surface alongside the
-  // legacy AudioClient, so both the new and old transcription paths are reachable from the same
-  // fake model. `audioSessionMode` controls whether AudioSession behaves like it does for a
-  // Whisper model today (real transcription) or like Nemotron/Parakeet (construction or the
-  // request itself throws), to exercise the defensive fallback in tryAudioSessionTranscription.
+  // A minimal fake foundry-local-sdk exposing the Session/Request/Item surface alongside an
+  // AudioClient, so tests can verify that a failed AudioSession request is not retried through
+  // the deprecated client.
   function fakeSdk(audioSessionMode: 'success' | 'construction-throws' | 'request-throws') {
     return [
       "import fs from 'node:fs';",
       'const note = (event) => fs.appendFileSync(process.env.FLINT_TEST_EVENT_LOG, event + "\\n");',
       'class FakeModel {',
-      "  constructor(alias) { this.alias = alias; this.id = 'fake-variant'; this.loaded = false; }",
-      "  async load() { this.loaded = true; }",
+      "  constructor(alias) { this.alias = alias; this.id = 'whisper-tiny-generic-cpu:1'; this.loaded = false; }",
+      "  async load() { this.loaded = true; note('model-load:' + this.alias); }",
       '  isLoaded() { return this.loaded; }',
       "  getExecutionProvider() { return 'CPUExecutionProvider'; }",
       '  createAudioClient() {',
@@ -3034,7 +3032,7 @@ describe('transcribeAudio AudioSession path', () => {
     expect(events()).not.toContain('legacy-transcribe');
   }, 30000);
 
-  it('falls back to the legacy AudioClient path when AudioSession construction throws (Nemotron/Parakeet-like)', async () => {
+  it('does not retry with the legacy AudioClient when AudioSession construction fails', async () => {
     await startSidecar('construction-throws');
     const transcribed = reply(3);
     send({
@@ -3047,13 +3045,11 @@ describe('transcribeAudio AudioSession path', () => {
       language: 'en',
     });
     const res = await transcribed;
-    expect(res.ok).toBe(true);
-    expect(res.result.text).toContain('legacy hello world transcript');
-    expect(res.result.transcriptionPath).not.toBe('audioSession');
-    expect(events()).toContain('legacy-transcribe');
+    expect(res.error).toContain('unsupported task');
+    expect(events()).not.toContain('legacy-transcribe');
   }, 30000);
 
-  it('falls back to the legacy AudioClient path when the AudioSession request itself fails (Nemotron/Parakeet-like)', async () => {
+  it('maps unsupported AudioSession requests without retrying the deprecated client', async () => {
     await startSidecar('request-throws');
     const transcribed = reply(3);
     send({
@@ -3066,10 +3062,28 @@ describe('transcribeAudio AudioSession path', () => {
       language: 'en',
     });
     const res = await transcribed;
-    expect(res.ok).toBe(true);
-    expect(res.result.text).toContain('legacy hello world transcript');
-    expect(res.result.transcriptionPath).not.toBe('audioSession');
-    expect(events()).toContain('legacy-transcribe');
+    expect(res.error).toContain('Foundry Local SDK 2.0.1');
+    expect(res.error).toContain('does not support audio processing');
+    expect(events()).not.toContain('legacy-transcribe');
+  }, 30000);
+
+  it('refuses Parakeet before loading or starting inference', async () => {
+    await startSidecar('success');
+    const loadCount = events().filter((event) => event === 'model-load:fake-model').length;
+    const transcribed = reply(3);
+    send({
+      id: 3,
+      cmd: 'transcribeAudio',
+      audioBase64: wavBase64(),
+      mimeType: 'audio/wav',
+      fileName: 'probe.wav',
+      model: 'parakeet-tdt-0.6b-v2',
+      language: 'en',
+    });
+    const res = await transcribed;
+    expect(res.error).toContain('Parakeet transcription is not supported');
+    expect(events().filter((event) => event.startsWith('model-load:'))).toHaveLength(loadCount);
+    expect(events()).not.toContain('audioSession-processRequest');
   }, 30000);
 });
 

@@ -105,6 +105,7 @@ Facts only — no history. Record what is true now; `git log` and `CHANGELOG.md`
 - Long audio is chunked in `transcribeLongAudio` (`+page.svelte`) into fixed **28 s windows with 4 s overlap**, stitched by longest word-overlap between a chunk's tail and the next chunk's head. The overlap exists because the ONNX/GenAI backend only reliably processes a limited prefix of a long file; short clips make Whisper hallucinate, so do not transcribe per-utterance.
 - That merge is text-only heuristic recovery: it counts failed and uncertain chunks and the caller must qualify the transcript rather than report an unqualified success.
 - Audio reaching `transcribeAudio` must be **real WAV**. The sidecar renames uploads to `.wav` (the decoder is strict) but renaming does not convert, so `sidecar/audio-format.js` sniffs magic bytes before a model loads.
+- With `foundry-local-sdk` 2.0.1, the sidecar routes Whisper through `AudioSession` + `Item.audioFromUri`, and Nemotron through `AudioSession` + `ItemQueue` of 16 kHz mono 16-bit PCM. It uses only the final `speechResult.text` (stripping Nemotron language tags); never retry through deprecated `AudioClient` or join streaming tokens. Parakeet has no supported path in this runtime and is refused before loading.
 
 ## Packaging / release
 - Release builds run `tauri build --target <triple>` → output is `src-tauri/target/<triple>/release`, not `target/release`. Pass `npm run verify:bundle -- --target <triple>`; add `--require-build` to fail on a missing output tree instead of skipping.

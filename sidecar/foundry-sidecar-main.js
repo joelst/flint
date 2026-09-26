@@ -33,6 +33,8 @@ import {
 } from './model-registry.js';
 import { activityCandidateKeys } from './activity-booking.js';
 import { looksLikeSpeech } from './model-classification.js';
+import { assertSpeechModelSupported, transcribeSpeech } from './speech-engine.js';
+import { extractNemotronPcm } from './wav-pcm.js';
 import { waitUntilIdle } from './monotonic-wait.js';
 import {
   createOperationAdmission,
@@ -2169,146 +2171,6 @@ function toSdkMessages (messages) {
     .map((m) => ({ role: m.role, content: m.content }));
 }
 
-function normalizeText (value) {
-  return String(value || '').replace(/\s+/g, ' ').trim();
-}
-
-function segmentTextsFromValue (segments) {
-  if (!Array.isArray(segments)) return [];
-  const values = [];
-  for (const segment of segments) {
-    const text = normalizeText(segment?.text ?? segment?.transcript ?? '');
-    if (!text) continue;
-    values.push(text);
-  }
-  return values;
-}
-
-function extractTranscriptCandidate (value) {
-  const text = normalizeText(value?.text ?? '');
-  const segmentTexts = segmentTextsFromValue(value?.segments);
-  const segmentText = normalizeText(segmentTexts.join(' '));
-  const combined = text && segmentText
-    ? (text.length >= segmentText.length ? text : segmentText)
-    : (text || segmentText);
-  return {
-    text: combined,
-    segmentTexts
-  };
-}
-
-function dedupeAdjacentSegments (segmentTexts) {
-  const cleaned = [];
-  for (const text of segmentTexts) {
-    const normalized = normalizeText(text);
-    if (!normalized) continue;
-    const last = cleaned[cleaned.length - 1];
-    if (last === normalized) continue;
-    cleaned.push(normalized);
-  }
-  return cleaned;
-}
-
-function scoreTranscriptCandidate (candidate) {
-  const text = normalizeText(candidate?.text ?? '');
-  const segmentTexts = dedupeAdjacentSegments(candidate?.segmentTexts || []);
-  const charCount = text.length;
-  const wordCount = text ? text.split(/\s+/).length : 0;
-  const avgWordLen = wordCount ? charCount / wordCount : 0;
-  let score = charCount + (wordCount * 4);
-  if (segmentTexts.length > 0) score += segmentTexts.length * 2;
-  if (wordCount <= 3) score -= 100;
-  if (avgWordLen > 12) score -= 40;
-  if (avgWordLen < 2 && wordCount > 3) score -= 20;
-  return {
-    text,
-    segmentTexts,
-    charCount,
-    wordCount,
-    score
-  };
-}
-
-function isLikelyIncompleteTranscript (candidate) {
-  const stats = scoreTranscriptCandidate(candidate);
-  return stats.wordCount <= 3 || stats.charCount < 24;
-}
-
-function pickBetterTranscript (a, b) {
-  if (!a && !b) return null;
-  if (!a) return b;
-  if (!b) return a;
-
-  const scoreA = scoreTranscriptCandidate(a);
-  const scoreB = scoreTranscriptCandidate(b);
-  if (scoreB.score > scoreA.score) return b;
-  return a;
-}
-
-function buildTranscriptResult (candidate, extras = {}) {
-  const stats = scoreTranscriptCandidate(candidate || {});
-  const base = {
-    text: stats.text,
-    segments: stats.segmentTexts.map((text) => ({ text }))
-  };
-  return { ...base, ...extras };
-}
-
-// Attempt transcription via the new Session/Request/Item AudioSession API (foundry-local-sdk
-// 2.0.1+), which will replace the deprecated AudioClient before its end-of-2026 removal.
-//
-// This is intentionally defensive/best-effort for the first rollout: AudioSession construction
-// succeeds for any automatic-speech-recognition model (task validation only, per session.js),
-// but a one-shot Item.audioFromUri() request only actually works today for Whisper-family models.
-// Nemotron streaming-audio models require raw 16kHz mono PCM pushed via ItemQueue instead (a
-// different, not-yet-implemented request shape — tracked separately), and Parakeet has no working
-// AudioSession request shape at all yet (confirmed via manual testing against SDK 2.0.1). Both
-// reject this one-shot request with a native "does not support audio processing" error, so any
-// failure here — construction or the request itself — falls back to the legacy AudioClient path
-// unchanged, rather than surfacing an error to the user.
-//
-// Returns `{ ok: true, candidate }` on success, or `{ ok: false, reason }` on any failure (reason
-// is a short string for debug logging only, never surfaced to the user).
-async function tryAudioSessionTranscription (sdkModule, audioModel, tempPath, payload) {
-  const { AudioSession, Request, Item } = sdkModule || {};
-  if (typeof AudioSession !== 'function' || typeof Request !== 'function' || !Item) {
-    return { ok: false, reason: 'AudioSession not exported by this SDK build' };
-  }
-
-  let session;
-  try {
-    session = new AudioSession(audioModel);
-  } catch (err) {
-    return { ok: false, reason: `AudioSession construction failed: ${err?.message || err}` };
-  }
-
-  try {
-    const search = {};
-    if (typeof payload.temperature === 'number') search.temperature = payload.temperature;
-    const additionalOptions = (payload.language && payload.language !== 'auto')
-      ? { language: payload.language }
-      : undefined;
-
-    const request = new Request().addItem(Item.audioFromUri(tempPath));
-    request.setOptions({
-      ...(Object.keys(search).length ? { search } : {}),
-      ...(additionalOptions ? { additionalOptions } : {})
-    });
-
-    const response = await session.processRequest(request);
-    const speechResult = response.output.find((item) => item.type === 'speechResult');
-    if (!speechResult || !normalizeText(speechResult.text)) {
-      return { ok: false, reason: 'AudioSession produced no speechResult text' };
-    }
-
-    return { ok: true, candidate: extractTranscriptCandidate(speechResult) };
-  } catch (err) {
-    return { ok: false, reason: `AudioSession request failed: ${err?.message || err}` };
-  } finally {
-    try { session.dispose(); } catch {}
-  }
-}
-
 // --- Disk log ---
 // Date is computed once at startup; a sidecar running past midnight continues to the same file.
 // The bounded async writer keeps logging off the request path without allowing an unbounded queue.
@@ -3566,7 +3428,8 @@ rl.on('line', async (line) => {
       // Validate before touching a model: renaming to .wav does not convert, and
       // loading a multi-GB STT model for undecodable bytes wastes minutes before
       // failing with an opaque native decoder error.
-      assertWavBuffer(Buffer.from(payload.audioBase64, 'base64'), payload.fileName);
+      const bytes = Buffer.from(payload.audioBase64, 'base64');
+      assertWavBuffer(bytes, payload.fileName);
       const fileExt = (payload.fileName?.split('.').pop() ?? 'unknown').toLowerCase();
       log('debug', `Transcription: model=${payload.model} ext=.${fileExt} lang=${payload.language || 'auto'}`);
 
@@ -3581,166 +3444,38 @@ rl.on('line', async (line) => {
       activeStreamCount++;
       if (!activeStreamOldest) activeStreamOldest = { type: 'audio', modelAlias: requestedAlias, startedAt: audioAccessTs };
       try {
+        const requestedStrategy = assertSpeechModelSupported(requestedAlias);
+        if (requestedStrategy.strategy === 'itemQueue') extractNemotronPcm(bytes);
         if (requestedAlias) {
           await ensureModel(requestedAlias);
         }
         const audioPoolEntry = pool.get(requestedAlias);
         const audioModel = audioPoolEntry?.catModel;
-        const preferred = await applyPreferredExecutionProvider(payload.preferredEp, audioModel);
 
         if (!audioModel) {
           throw new Error('No STT model loaded. Select an STT model on the Audio page first.');
         }
 
-        const bytes = Buffer.from(payload.audioBase64, 'base64');
-        // Force .wav extension — the models use a strict AudioDecoder that often
-        // cannot detect WebM/Opus/MP3 etc. We normalize on the client too.
-        let baseName = (payload.fileName || 'audio').replace(/[^a-zA-Z0-9._-]/g, '_');
-        if (!/\.wav$/i.test(baseName)) baseName += '.wav';
-        const tempFileName = `flint-audio-${Date.now()}-${baseName}`;
-        tempPath = path.join(os.tmpdir(), tempFileName);
-        await fs.promises.writeFile(tempPath, bytes);
-
-        // Try the new Session/Request/Item AudioSession API first (see tryAudioSessionTranscription
-        // for scope/limitations); any failure falls back to the legacy AudioClient/HTTP paths below
-        // unchanged, so this is purely additive for models where it already works (Whisper family).
-        let sdkModule = null;
-        try {
-          sdkModule = await getFoundrySdkModule();
-        } catch (err) {
-          log('debug', `AudioSession: could not resolve SDK module (${err?.message || err})`);
+        const strategy = assertSpeechModelSupported(requestedAlias, audioPoolEntry?.variantId);
+        if (strategy.strategy === 'itemQueue') extractNemotronPcm(bytes);
+        const preferred = await applyPreferredExecutionProvider(payload.preferredEp, audioModel);
+        if (strategy.strategy === 'audioUri') {
+          let baseName = (payload.fileName || 'audio').replace(/[^a-zA-Z0-9._-]/g, '_');
+          if (!/\.wav$/i.test(baseName)) baseName += '.wav';
+          tempPath = path.join(os.tmpdir(), `flint-audio-${Date.now()}-${baseName}`);
+          await fs.promises.writeFile(tempPath, bytes);
         }
-        if (sdkModule) {
-          const attempt = await tryAudioSessionTranscription(sdkModule, audioModel, tempPath, payload);
-          if (attempt.ok) {
-            const result = buildTranscriptResult(attempt.candidate, {
-              transcriptionPath: 'audioSession'
-            });
-            audioOk = true;
-            reply({
-              ok: true,
-              result: {
-                ...result,
-                acceleration: {
-                  requested: preferred?.requested ?? null,
-                  preferredApplied: preferred?.applied ?? null,
-                  active: await detectActiveExecutionProvider(audioModel)
-                }
-              }
-            });
-            return;
-          }
-          log('debug', `AudioSession transcription unavailable, using legacy path: ${attempt.reason}`);
-        }
-
-        // Prefer direct AudioClient (like we do for chat) — this avoids relying on the web service HTTP route
-        // which may return 404 for /audio/transcriptions even for Whisper models.
-        if (typeof audioModel.createAudioClient === 'function') {
-          const audioClient = audioModel.createAudioClient();
-          if (payload.language && payload.language !== 'auto') {
-            audioClient.settings.language = payload.language;
-          }
-          if (typeof payload.temperature === 'number') {
-            audioClient.settings.temperature = payload.temperature;
-          }
-
-          const debugEnabled = process.env.FLINT_TRANSCRIBE_DEBUG === '1';
-          let streamingCandidate = null;
-          let streamingError = null;
-          let streamingChunkCount = 0;
-
-          try {
-            const chunkCandidates = [];
-            let aggregatedSegments = [];
-            for await (const chunk of audioClient.transcribeStreaming(tempPath)) {
-              streamingChunkCount += 1;
-              const candidate = extractTranscriptCandidate(chunk);
-              if (candidate.text || candidate.segmentTexts.length) {
-                chunkCandidates.push(candidate);
-              }
-              if (candidate.segmentTexts.length > 0) {
-                aggregatedSegments = dedupeAdjacentSegments(aggregatedSegments.concat(candidate.segmentTexts));
-              }
-
-              if (debugEnabled && streamingChunkCount <= 8) {
-                log('debug', `[transcribe] stream chunk ${streamingChunkCount} text=${candidate.text.length} chars segments=${candidate.segmentTexts.length}`);
-              }
-            }
-            const segmentAggregateCandidate = {
-              text: normalizeText(aggregatedSegments.join(' ')),
-              segmentTexts: aggregatedSegments
-            };
-            let bestStream = segmentAggregateCandidate;
-            for (const candidate of chunkCandidates) {
-              bestStream = pickBetterTranscript(bestStream, candidate);
-            }
-            streamingCandidate = bestStream;
-          } catch (streamErr) {
-            streamingError = streamErr;
-            console.error('[sidecar] streaming transcribe failed, evaluating sync fallback:', streamErr);
-          }
-
-          let syncCandidate = null;
-          const needsSyncFallback = !streamingCandidate || isLikelyIncompleteTranscript(streamingCandidate);
-          if (needsSyncFallback) {
-            const syncResult = await audioClient.transcribe(tempPath);
-            syncCandidate = extractTranscriptCandidate(syncResult);
-          }
-
-          let chosen = pickBetterTranscript(streamingCandidate, syncCandidate);
-          let transcriptPath = 'streaming';
-          if (chosen === syncCandidate && syncCandidate) transcriptPath = 'sync';
-          if (streamingCandidate && syncCandidate) transcriptPath = 'hybrid';
-
-          if (!chosen || !normalizeText(chosen.text)) {
-            if (streamingError) throw streamingError;
-            throw new Error('Transcription produced an empty result');
-          }
-
-          const result = buildTranscriptResult(chosen, {
-            transcriptionPath: transcriptPath,
-            diagnostics: {
-              streamingChunks: streamingChunkCount,
-              fallbackSyncUsed: needsSyncFallback
-            }
-          });
-
-          audioOk = true;
-          reply({
-            ok: true,
-            result: {
-              ...result,
-              acceleration: {
-                requested: preferred?.requested ?? null,
-                preferredApplied: preferred?.applied ?? null,
-                active: await detectActiveExecutionProvider(audioModel)
-              }
-            }
-          });
-          return;
-        }
-
-        // Fallback to OpenAI-compatible HTTP if direct client not available for this model
-        if (!sharedEndpoint) {
-          throw new Error('Service endpoint unavailable and model has no direct audio client.');
-        }
-        const apiBase = getNativeOpenAiApiBase();
-        const blob = new Blob([bytes], { type: payload.mimeType || 'application/octet-stream' });
-        const form = new FormData();
-        form.append('file', blob, payload.fileName || 'audio.webm');
-        form.append('model', audioPoolEntry?.variantId || payload.model);
-        if (payload.language && payload.language !== 'auto') {
-          form.append('language', payload.language);
-        }
-        const resp = await fetch(`${apiBase}/audio/transcriptions`, {
-          method: 'POST',
-          body: form
+        const sdkModule = await getFoundrySdkModule();
+        const transcriptionResult = await transcribeSpeech({
+          sdkModule,
+          model: audioModel,
+          modelAlias: requestedAlias,
+          variantId: audioPoolEntry?.variantId,
+          filePath: tempPath,
+          audioBytes: bytes,
+          language: payload.language,
+          temperature: payload.temperature,
         });
-        if (!resp.ok) {
-          const details = await readErrorBody(resp);
-          throw new Error(`Transcription failed (${resp.status} ${resp.statusText}): ${details}`);
-        }
-        const transcriptionResult = await resp.json();
         audioOk = true;
         reply({
           ok: true,
