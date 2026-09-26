@@ -233,7 +233,10 @@ export function findSilenceRuns(
  * Plan transcription windows over `totalSec`, snapping boundaries to silence runs
  * where possible and hard-splitting (with overlap) where not.
  *
- * Passing an empty `silenceRuns` array yields the original fixed-chunk behaviour.
+ * Passing an empty `silenceRuns` array disables pause snapping, so every cut is a
+ * hard split. Tail handling still applies: the final window may run to `maxSec`, and
+ * the cut before it is shortened when needed to avoid leaving a stub shorter than
+ * `minSec`. Window geometry therefore differs from plain fixed-size chunking.
  */
 export function planTranscriptionWindows(
   totalSec: number,
