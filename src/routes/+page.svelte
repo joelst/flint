@@ -7,6 +7,7 @@
   import ConversationSidebar from "$lib/ConversationSidebar.svelte";
   import Icon from "$lib/Icon.svelte";
   import TranscriptViewToggle from "$lib/TranscriptViewToggle.svelte";
+  import TranscriptSegmentTime from "$lib/TranscriptSegmentTime.svelte";
   import type { Conversation } from "$lib/ConversationSidebar.svelte";
   import {
     initializeSDK,
@@ -186,7 +187,7 @@
   import { buildEndpointModelClassifier } from "$lib/endpoint-model-classification";
   import { endpointLoadTarget } from "$lib/endpoint-load-target";
   import { decodeWavPcm, getWavDurationSeconds } from "$lib/audio-pcm-decode";
-  import { planSegmentation } from "$lib/audio-segmentation";
+  import { planSegmentationAsync } from "$lib/audio-segmentation";
   import {
     assembleLongAudioTranscript,
     buildLongAudioCompletionStatus,
@@ -7212,7 +7213,7 @@ Output only the summary text, no preamble.`;
     const mono = await getMono16kBuffer(audioBlob);
     const sr = 16000;
     const total = mono.length;
-    const plan = planSegmentation(mono.getChannelData(0), sr);
+    const plan = await planSegmentationAsync(mono.getChannelData(0), sr);
     const windows = plan.windows;
     const totalChunks = windows.length;
     const outcomes: TranscriptionWindowOutcome[] = [];
@@ -9592,17 +9593,11 @@ Output only the summary text, no preamble.`;
                 <ol class="transcript-segments">
                   {#each transcriptionSegments as segment (segment.index)}
                     <li class="transcript-segment">
-                      <span
-                        class="segment-time"
-                        class:snapped={segment.endBoundary === "pause-snapped"}
-                        title={segment.endBoundary === "pause-snapped"
-                          ? "This ending boundary was snapped to a detected pause."
-                          : segment.endBoundary === "recording-edge"
-                            ? "This boundary is the recording edge."
-                            : "This ending boundary is an approximate fixed-window cut."}
-                      >
-                        {formatClockTime(segment.startSec)} – {formatClockTime(segment.endSec)}
-                      </span>
+                      <TranscriptSegmentTime
+                        startSec={segment.startSec}
+                        endSec={segment.endSec}
+                        endBoundary={segment.endBoundary}
+                      />
                       <span class="segment-text">{segment.text}</span>
                     </li>
                   {/each}
@@ -14082,7 +14077,7 @@ Output only the summary text, no preamble.`;
 
   .transcript-segment {
     display: grid;
-    grid-template-columns: 108px 1fr;
+    grid-template-columns: 140px 1fr;
     gap: 10px;
     padding: 4px 0;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 40%, transparent);
@@ -14092,18 +14087,6 @@ Output only the summary text, no preamble.`;
 
   .transcript-segment:last-child {
     border-bottom: none;
-  }
-
-  .segment-time {
-    padding-top: 2px;
-    color: var(--muted);
-    font-family: monospace;
-    font-size: 0.75rem;
-    white-space: nowrap;
-  }
-
-  .segment-time.snapped {
-    color: var(--accent);
   }
 
   .segment-text {

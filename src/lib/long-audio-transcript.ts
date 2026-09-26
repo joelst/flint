@@ -160,12 +160,17 @@ export function buildLongAudioCompletionStatus(
   const totalChunks = Number(result.totalChunks || 0);
   const segmentLabel = totalChunks === 1 ? 'segment' : 'segments';
   if (failed > 0) {
+    const clauses: string[] = [];
+    if (uncertain > 0) {
+      clauses.push(`${uncertain} had ${uncertain === 1 ? 'an uncertain outcome' : 'uncertain outcomes'}`);
+    }
+    if (unprocessed > 0) {
+      clauses.push(`${unprocessed} ${unprocessed === 1 ? 'was' : 'were'} not processed`);
+    }
     const detail =
-      uncertain > 0
-        ? `${failed} of ${totalChunks} ${segmentLabel} did not complete (${uncertain} had uncertain outcomes and ${unprocessed} were not processed)`
-        : unprocessed > 0
-          ? `${failed} of ${totalChunks} ${segmentLabel} did not complete (${unprocessed} were not processed)`
-          : `${failed} of ${totalChunks} ${segmentLabel} failed`;
+      clauses.length > 0
+        ? `${failed} of ${totalChunks} ${segmentLabel} did not complete (${clauses.join(' and ')})`
+        : `${failed} of ${totalChunks} ${segmentLabel} failed`;
     return `Transcription incomplete: ${detail}. The text below is missing those parts.${path}`;
   }
 

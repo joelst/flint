@@ -1,10 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import {
   computeFrameEnergies,
+  computeFrameEnergiesAsync,
   estimateSilenceThreshold,
   findSilenceRuns,
   planTranscriptionWindows,
   planSegmentation,
+  planSegmentationAsync,
   FRAME_MS,
 } from './audio-segmentation';
 
@@ -404,5 +406,75 @@ describe('planSegmentation', () => {
     const plan = planSegmentation(new Float32Array(0), SR);
     expect(plan.windows).toEqual([]);
     expect(plan.usedSilenceDetection).toBe(false);
+  });
+});
+
+describe('computeFrameEnergiesAsync', () => {
+  it('matches the synchronous computation exactly', async () => {
+    const wave = buildWaveform([
+      { sec: 1, loud: true },
+      { sec: 0.5, loud: false },
+      { sec: 1, loud: true },
+    ]);
+    const sync = computeFrameEnergies(wave, SR);
+    const async = await computeFrameEnergiesAsync(wave, SR);
+    expect(Array.from(async)).toEqual(Array.from(sync));
+  });
+
+  it('handles an empty buffer without throwing', async () => {
+    const async = await computeFrameEnergiesAsync(new Float32Array(0), SR);
+    expect(async.length).toBe(0);
+  });
+
+  it('rejects a non-positive-integer framesPerChunk instead of hanging or corrupting output', async () => {
+    const wave = new Float32Array(SR).fill(0.1);
+    await expect(computeFrameEnergiesAsync(wave, SR, FRAME_MS, 0)).rejects.toThrow(RangeError);
+    await expect(computeFrameEnergiesAsync(wave, SR, FRAME_MS, -5)).rejects.toThrow(RangeError);
+    await expect(computeFrameEnergiesAsync(wave, SR, FRAME_MS, 2.5)).rejects.toThrow(RangeError);
+    await expect(computeFrameEnergiesAsync(wave, SR, FRAME_MS, NaN)).rejects.toThrow(RangeError);
+  });
+
+  it('yields to the event loop instead of consuming all samples before its first pause', async () => {
+    // A pending promise or a timer-call count alone doesn't prove cooperative
+    // computation — an implementation could finish all the work before its
+    // first timer fires and still pass those assertions. So instead: prove a
+    // bounded prefix of samples was read by the time the async call *returns
+    // control* (i.e. before the caller even awaits it), not the whole buffer.
+    const frameLen = Math.floor((SR * FRAME_MS) / 1000);
+    const framesPerChunk = 50;
+    const totalFrames = framesPerChunk * 3;
+    const totalSamples = totalFrames * frameLen;
+    let maxIndexRead = -1;
+    const raw = new Float32Array(totalSamples).fill(0.1);
+    const samples = new Proxy(raw, {
+      get(target, prop, receiver) {
+        if (typeof prop === 'string' && /^\d+$/.test(prop)) {
+          const idx = Number(prop);
+          if (idx > maxIndexRead) maxIndexRead = idx;
+        }
+        return Reflect.get(target, prop, target);
+      },
+    });
+
+    const promise = computeFrameEnergiesAsync(samples, SR, FRAME_MS, framesPerChunk);
+    // Synchronous continuation up to the first `await` has already run.
+    expect(maxIndexRead).toBeGreaterThanOrEqual(0);
+    expect(maxIndexRead).toBeLessThan(totalSamples - 1);
+
+    await promise;
+    expect(maxIndexRead).toBe(totalSamples - 1);
+  });
+});
+
+describe('planSegmentationAsync', () => {
+  it('matches the synchronous plan exactly', async () => {
+    const wave = buildWaveform([
+      { sec: 5, loud: true },
+      { sec: 1, loud: false },
+      { sec: 20, loud: true },
+    ]);
+    const sync = planSegmentation(wave, SR);
+    const async = await planSegmentationAsync(wave, SR);
+    expect(async).toEqual(sync);
   });
 });

@@ -107,6 +107,25 @@ function validateWindowPlanOptions(options: WindowPlanOptions): ValidatedWindowP
   return values;
 }
 
+/** Computes RMS energy for frames [startFrame, endFrame) into `out`, in place. */
+function fillFrameEnergies(
+  samples: Float32Array | ArrayLike<number>,
+  frameLen: number,
+  startFrame: number,
+  endFrame: number,
+  out: Float32Array,
+): void {
+  for (let f = startFrame; f < endFrame; f++) {
+    const base = f * frameLen;
+    let sum = 0;
+    for (let i = 0; i < frameLen; i++) {
+      const v = samples[base + i] || 0;
+      sum += v * v;
+    }
+    out[f] = Math.sqrt(sum / frameLen);
+  }
+}
+
 /** Root-mean-square energy per fixed-length frame. */
 export function computeFrameEnergies(
   samples: Float32Array | ArrayLike<number>,
@@ -116,14 +135,39 @@ export function computeFrameEnergies(
   const frameLen = Math.max(1, Math.floor((sampleRate * frameMs) / 1000));
   const count = Math.floor(samples.length / frameLen);
   const out = new Float32Array(Math.max(0, count));
-  for (let f = 0; f < count; f++) {
-    const base = f * frameLen;
-    let sum = 0;
-    for (let i = 0; i < frameLen; i++) {
-      const v = samples[base + i] || 0;
-      sum += v * v;
+  fillFrameEnergies(samples, frameLen, 0, count, out);
+  return out;
+}
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/**
+ * Same computation as {@link computeFrameEnergies}, but processes frames in
+ * bounded batches and yields to the event loop between batches. A one-hour
+ * recording is ~57.6M samples; scanning it synchronously blocks the renderer
+ * thread (and its UI) for the whole scan. Output is identical to the sync
+ * version — this only changes *when* the work happens, not the result.
+ */
+export async function computeFrameEnergiesAsync(
+  samples: Float32Array | ArrayLike<number>,
+  sampleRate: number,
+  frameMs: number = FRAME_MS,
+  framesPerChunk = 4000,
+): Promise<Float32Array> {
+  if (!Number.isInteger(framesPerChunk) || framesPerChunk < 1) {
+    throw new RangeError('framesPerChunk must be a positive integer');
+  }
+  const frameLen = Math.max(1, Math.floor((sampleRate * frameMs) / 1000));
+  const count = Math.floor(samples.length / frameLen);
+  const out = new Float32Array(Math.max(0, count));
+  for (let start = 0; start < count; start += framesPerChunk) {
+    const end = Math.min(count, start + framesPerChunk);
+    fillFrameEnergies(samples, frameLen, start, end, out);
+    if (end < count) {
+      await yieldToEventLoop();
     }
-    out[f] = Math.sqrt(sum / frameLen);
   }
   return out;
 }
@@ -275,6 +319,29 @@ export function planSegmentation(
 ): SegmentationPlan {
   const totalSec = sampleRate > 0 ? samples.length / sampleRate : 0;
   const energies = computeFrameEnergies(samples, sampleRate);
+  return buildSegmentationPlan(totalSec, energies, options);
+}
+
+/**
+ * Same pipeline as {@link planSegmentation}, but analyses the waveform with
+ * {@link computeFrameEnergiesAsync} so the scan yields to the event loop
+ * instead of blocking the renderer thread for the whole recording's length.
+ */
+export async function planSegmentationAsync(
+  samples: Float32Array | ArrayLike<number>,
+  sampleRate: number,
+  options: WindowPlanOptions = {},
+): Promise<SegmentationPlan> {
+  const totalSec = sampleRate > 0 ? samples.length / sampleRate : 0;
+  const energies = await computeFrameEnergiesAsync(samples, sampleRate);
+  return buildSegmentationPlan(totalSec, energies, options);
+}
+
+function buildSegmentationPlan(
+  totalSec: number,
+  energies: Float32Array,
+  options: WindowPlanOptions,
+): SegmentationPlan {
   const threshold = estimateSilenceThreshold(energies);
   const runs = threshold === null ? [] : findSilenceRuns(energies, threshold);
 

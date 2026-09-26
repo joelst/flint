@@ -251,7 +251,7 @@ describe('assembleLongAudioTranscript', () => {
         { window: window(0, 0, 20, { hardSplitEnd: false }), status: 'failed', uncertain: true },
       ]),
       expected:
-        'Transcription incomplete: 1 of 1 segment did not complete (1 had uncertain outcomes and 0 were not processed). The text below is missing those parts. via native audio session',
+        'Transcription incomplete: 1 of 1 segment did not complete (1 had an uncertain outcome). The text below is missing those parts. via native audio session',
     },
     {
       name: 'one unprocessed source window among multiple windows',
@@ -261,7 +261,18 @@ describe('assembleLongAudioTranscript', () => {
         { window: window(1, 24, 40, { hardSplitEnd: false }), status: 'unprocessed' },
       ]),
       expected:
-        'Transcription incomplete: 1 of 2 segments did not complete (1 were not processed). The text below is missing those parts. via native audio session',
+        'Transcription incomplete: 1 of 2 segments did not complete (1 was not processed). The text below is missing those parts. via native audio session',
+    },
+    {
+      name: 'multiple uncertain and unprocessed source windows together',
+      totalChunks: 3,
+      result: assembleLongAudioTranscript([
+        { window: window(0, 0, 28, { hardSplitEnd: false }), status: 'failed', uncertain: true },
+        { window: window(1, 24, 52, { hardSplitEnd: false }), status: 'failed', uncertain: true },
+        { window: window(2, 48, 76, { hardSplitEnd: false }), status: 'unprocessed' },
+      ]),
+      expected:
+        'Transcription incomplete: 3 of 3 segments did not complete (2 had uncertain outcomes and 1 was not processed). The text below is missing those parts. via native audio session',
     },
   ])('reports $name with path wording and source-window plurality', ({
     result,

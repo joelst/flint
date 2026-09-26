@@ -17,6 +17,25 @@ export interface TranscriptSegment {
 
 export type TranscriptBoundary = 'recording-edge' | 'pause-snapped' | 'fixed-window';
 
+/**
+ * Human-readable description of a segment's end boundary, for display next to
+ * the timestamp. Always visible text (not color- or hover-only) so keyboard
+ * users, screen readers, and colorblind users all get the same information
+ * sighted mouse users get from color + tooltip alone.
+ */
+export function endBoundaryLabel(boundary: TranscriptBoundary | undefined): string | null {
+  switch (boundary) {
+    case 'pause-snapped':
+      return 'End: detected pause';
+    case 'recording-edge':
+      return 'End: recording edge';
+    case 'fixed-window':
+      return 'End: fixed cut';
+    default:
+      return null;
+  }
+}
+
 export interface TranscriptRange {
   startSec: number;
   endSec: number;
