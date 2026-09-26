@@ -267,6 +267,340 @@ describe('streamed tool-call accumulation', () => {
     expect(finalizeStreamingToolCalls(target)[0].id).toBe('call-a');
   });
 
+  it('does not treat an exact delta id match as ambiguous merely because another snapshot id is a superstring', () => {
+    const target = createToolCallAccumulator();
+    mergeStreamingToolCalls(target, {
+      deltas: [{ index: 0, id: 'call-a', type: 'function', function: { name: 'lookup', arguments: '{}' } }],
+      snapshot: [
+        call('{}', { id: 'call-a', function: { name: 'lookup', arguments: '{}' } }),
+        call('{}', { id: 'call-ab', function: { name: 'lookup', arguments: '{}' } }),
+      ],
+    });
+    expect(target.failure).toBeNull();
+    expect(finalizeStreamingToolCalls(target)[0].id).toBe('call-a');
+  });
+
+  it('resolves a transient prefix collision between two deltas once more of each identity streams in', () => {
+    const target = createToolCallAccumulator();
+    mergeStreamingToolCalls(target, {
+      snapshot: [
+        call('{}', { id: 'call-a', function: { name: 'lookup', arguments: '{}' } }),
+        call('{}', { id: 'call-b', function: { name: 'lookup', arguments: '{}' } }),
+      ],
+    });
+    // Both deltas currently match the single snapshot 'call-a' (a prefix collision), which
+    // must not be treated as a hard error mid-stream since later fragments can disambiguate.
+    mergeStreamingToolCalls(target, {
+      deltas: [
+        { index: 0, id: 'call-a', type: 'function', function: { name: 'lookup', arguments: '{}' } },
+      ],
+    });
+    expect(target.failure).toBeNull();
+    mergeStreamingToolCalls(target, {
+      deltas: [
+        { index: 1, id: 'call-b', type: 'function', function: { name: 'lookup', arguments: '{}' } },
+      ],
+    });
+    expect(target.failure).toBeNull();
+    expect(finalizeStreamingToolCalls(target).map((c) => c.id).sort()).toEqual(['call-a', 'call-b']);
+  });
+
+  it('reconciles a mixed delta/snapshot pair without quadratic-time re-validation on every fragment', () => {
+    const bigObj = Object.fromEntries(Array.from({ length: 4000 }, (_, i) => [`k${i}`, 1]));
+    const bigArguments = JSON.stringify(bigObj);
+    const target = createToolCallAccumulator();
+    mergeStreamingToolCalls(target, {
+      snapshot: [call(bigArguments, { id: 'call-a', function: { name: 'lookup', arguments: bigArguments } })],
+    });
+    const start = Date.now();
+    for (let i = 0; i < bigArguments.length; i += 4) {
+      mergeStreamingToolCalls(target, {
+        deltas: [{
+          index: 0,
+          id: i === 0 ? 'call-a' : undefined,
+          type: i === 0 ? 'function' : undefined,
+          function: {
+            name: i === 0 ? 'lookup' : undefined,
+            arguments: bigArguments.slice(i, i + 4),
+          },
+        }],
+      });
+      expect(target.failure).toBeNull();
+    }
+    // Not a strict big-O assertion (timing is inherently noisy), but the un-fixed
+    // behavior (re-running JSON.parse-based validation against the full accumulated
+    // string on every fragment) took multiple seconds for an input this size; a
+    // generous ceiling here still catches a regression back to that behavior.
+    expect(Date.now() - start).toBeLessThan(2000);
+    expect(finalizeStreamingToolCalls(target)[0].function.arguments).toBe(bigArguments);
+  });
+
+  it('reconciles a delta extending a snapshot even when an earlier, differently-shaped delta already exists for that call', () => {
+    const target = createToolCallAccumulator();
+    mergeStreamingToolCalls(target, {
+      deltas: [{ index: 0, id: 'call-a', type: 'function', function: { name: 'lookup', arguments: '{"a":1}' } }],
+    });
+    mergeStreamingToolCalls(target, {
+      snapshot: [call('{"a":1,"b":2}', { id: 'call-a', function: { name: 'lookup', arguments: '{"a":1,"b":2}' } })],
+    });
+    expect(target.failure).toBeNull();
+    expect(finalizeStreamingToolCalls(target)[0].function.arguments).toBe('{"a":1,"b":2}');
+  });
+
+  it('recognizes a snapshot extension that only adds a new field alongside an unchanged array value', () => {
+    const target = createToolCallAccumulator();
+    mergeStreamingToolCalls(target, {
+      snapshot: [call('{"items":[1]}', { id: 'call-a', function: { name: 'lookup', arguments: '{"items":[1]}' } })],
+    });
+    mergeStreamingToolCalls(target, {
+      snapshot: [call('{"items":[1],"b":2}', { id: 'call-a', function: { name: 'lookup', arguments: '{"items":[1],"b":2}' } })],
+    });
+    expect(target.failure).toBeNull();
+    expect(finalizeStreamingToolCalls(target)[0].function.arguments).toBe('{"items":[1],"b":2}');
+  });
+
+  it('does not eagerly reject an exact-looking id match while the delta identity is still growing', () => {
+    // A follow-up adversarial pass found that preferring an exact id match too early
+    // (before the delta's id/name have fully arrived) could validate the delta's
+    // arguments against the wrong snapshot and fail a stream that later disambiguates
+    // correctly, since a currently-exact id can still grow into a different snapshot's id.
+    const target = createToolCallAccumulator();
+    mergeStreamingToolCalls(target, {
+      snapshot: [
+        call('{"a":1}', { id: 'call-a', function: { name: 'lookup_a', arguments: '{"a":1}' } }),
+        call('{"b":2}', { id: 'call-ab', function: { name: 'lookup_b', arguments: '{"b":2}' } }),
+      ],
+    });
+    mergeStreamingToolCalls(target, {
+      deltas: [{ index: 0, id: 'call-a', type: 'function', function: { name: 'lookup_', arguments: '{"b":2}' } }],
+    });
+    expect(target.failure).toBeNull();
+    mergeStreamingToolCalls(target, {
+      deltas: [{ index: 0, id: 'b', function: { name: 'b' } }],
+    });
+    expect(target.failure).toBeNull();
+    const calls = finalizeStreamingToolCalls(target);
+    expect(calls.map((c) => c.id).sort()).toEqual(['call-a', 'call-ab']);
+  });
+
+  it('does not treat a currently-unmatched delta as a complete-snapshot conflict while a contested snapshot remains unresolved', () => {
+    const target = createToolCallAccumulator();
+    mergeStreamingToolCalls(target, {
+      snapshot: [
+        call('{}', { id: 'call-a', function: { name: 'lookup_a', arguments: '{}' } }),
+        call('{}', { id: 'call-ab', function: { name: 'lookup_b', arguments: '{}' } }),
+      ],
+    });
+    mergeStreamingToolCalls(target, {
+      deltas: [
+        { index: 0, id: 'call-a', type: 'function', function: { name: 'lookup_', arguments: '{}' } },
+        { index: 1, id: 'call-c', type: 'function', function: { name: 'third', arguments: '{}' } },
+      ],
+    });
+    expect(target.failure).toBeNull();
+    mergeStreamingToolCalls(target, {
+      snapshot: [call('{}', { id: 'call-c', function: { name: 'third', arguments: '{}' } })],
+    });
+    expect(target.failure).toBeNull();
+    mergeStreamingToolCalls(target, { deltas: [{ index: 0, function: { name: 'a' } }] });
+    expect(target.failure).toBeNull();
+    const calls = finalizeStreamingToolCalls(target);
+    expect(calls.map((c) => c.id).sort()).toEqual(['call-a', 'call-ab', 'call-c']);
+  });
+
+  it('does not validate the first of two contending deltas against a snapshot neither may end up owning', () => {
+    const target = createToolCallAccumulator();
+    mergeStreamingToolCalls(target, {
+      snapshot: [call('{"b":2}', { id: 'call-ab', function: { name: 'lookup', arguments: '{"b":2}' } })],
+    });
+    // Both deltas currently prefix-match the single snapshot 'call-ab'; the first one's
+    // (genuinely different) arguments must not be validated against it before the
+    // collision is recognized, since delta 0 may turn out to own a different snapshot.
+    mergeStreamingToolCalls(target, {
+      deltas: [
+        { index: 0, id: 'call-a', type: 'function', function: { name: 'lookup', arguments: '{"c":3}' } },
+        { index: 1, id: 'call-a', type: 'function', function: { name: 'lookup', arguments: '{"b":2}' } },
+      ],
+    });
+    expect(target.failure).toBeNull();
+  });
+
+  it('does not prematurely validate a single sole-current-match delta whose id can still grow away from it, across separate chunks', () => {
+    // A follow-up pass found that being the *only* current claimant is not enough to
+    // eagerly validate content: a delta whose id is a strict prefix of the sole
+    // candidate snapshot's id can still grow (on a later, separate chunk) into an id
+    // that no longer matches that snapshot at all, so validating against it eagerly
+    // may reject a call that ultimately belongs to a different snapshot entirely.
+    const target = createToolCallAccumulator();
+    mergeStreamingToolCalls(target, {
+      snapshot: [call('{"b":2}', { id: 'call-ab', function: { name: 'lookup', arguments: '{"b":2}' } })],
+    });
+    mergeStreamingToolCalls(target, {
+      deltas: [{ index: 0, id: 'call-a', type: 'function', function: { name: 'lookup', arguments: '{"c":3}' } }],
+    });
+    expect(target.failure).toBeNull();
+    mergeStreamingToolCalls(target, {
+      deltas: [{ index: 1, id: 'call-a', type: 'function', function: { name: 'lookup', arguments: '{"b":2}' } }],
+    });
+    expect(target.failure).toBeNull();
+    mergeStreamingToolCalls(target, {
+      snapshot: [call('{"c":3}', { id: 'call-ac', function: { name: 'lookup', arguments: '{"c":3}' } })],
+    });
+    expect(target.failure).toBeNull();
+    mergeStreamingToolCalls(target, { deltas: [{ index: 0, id: 'c' }] });
+    mergeStreamingToolCalls(target, { deltas: [{ index: 1, id: 'b' }] });
+    expect(target.failure).toBeNull();
+    expect(finalizeStreamingToolCalls(target).map((c) => c.id).sort()).toEqual(['call-ab', 'call-ac']);
+  });
+
+  it('keeps a failed finalize deterministic instead of caching a stale, partially-updated argument state', () => {
+    // A follow-up pass found that `reconcileArgumentsWithCache` could commit part of its
+    // next cache state (the new `incoming` reference) before the reconciliation it was
+    // guarding actually succeeded, so a thrown conflict left `currentRef`/`result` stale;
+    // calling finalize a second time with the identical pair could then incorrectly
+    // return the earlier (unrelated) cached success instead of re-throwing.
+    const target = createToolCallAccumulator();
+    mergeStreamingToolCalls(target, {
+      snapshot: [call('{"a":1}', { id: 'call-ab', function: { name: 'lookup', arguments: '{"a":1}' } })],
+    });
+    mergeStreamingToolCalls(target, {
+      deltas: [{ index: 0, id: 'call-a', type: 'function', function: { name: 'lookup', arguments: '{"a":1}' } }],
+    });
+    expect(target.failure).toBeNull();
+    mergeStreamingToolCalls(target, {
+      snapshot: [call('{"b":2}', { id: 'call-a', function: { name: 'lookup', arguments: '{"b":2}' } })],
+    });
+    expect(target.failure).toBeNull();
+    expect(() => finalizeStreamingToolCalls(target)).toThrow(/conflicts/i);
+    expect(() => finalizeStreamingToolCalls(target)).toThrow(/conflicts/i);
+  });
+
+  it('does not eagerly validate a name-only match while the deciding id has not arrived yet', () => {
+    // A follow-up pass found that a missing `delta.id` satisfied the eager "exact match"
+    // check by vacuous truth (`undefined` treated as "no constraint"), so a delta that
+    // has only streamed its function name so far could be validated against whichever
+    // snapshot currently shares that name — even though its id, once it arrives, may
+    // identify a completely different snapshot. Only a *present and equal* id may permit
+    // eager validation; name equality alone must always wait for `final`.
+    const target = createToolCallAccumulator();
+    mergeStreamingToolCalls(target, {
+      snapshot: [call('{"a":1}', { id: 'call-a', function: { name: 'lookup', arguments: '{"a":1}' } })],
+    });
+    mergeStreamingToolCalls(target, {
+      deltas: [{ index: 0, type: 'function', function: { name: 'lookup', arguments: '{"b":2}' } }],
+    });
+    expect(target.failure).toBeNull();
+    mergeStreamingToolCalls(target, {
+      snapshot: [
+        call('{"a":1}', { id: 'call-a', function: { name: 'lookup', arguments: '{"a":1}' } }),
+        call('{"b":2}', { id: 'call-b', function: { name: 'lookup', arguments: '{"b":2}' } }),
+      ],
+    });
+    expect(target.failure).toBeNull();
+    mergeStreamingToolCalls(target, { deltas: [{ index: 0, id: 'call-b' }] });
+    expect(target.failure).toBeNull();
+    expect(finalizeStreamingToolCalls(target).map((c) => c.id).sort()).toEqual(['call-a', 'call-b']);
+  });
+
+  it('defers an unparseable in-progress argument fragment instead of treating it as a permanent conflict', () => {
+    // A follow-up pass found that a syntactically-incomplete argument fragment (still
+    // missing a closing brace) fails both the structural JSON-subset check and the
+    // textual-prefix fallback identically to a genuine conflict, even though completing
+    // the fragment can still make it a valid subset of the snapshot. Mid-stream, this
+    // must be deferred rather than latched as a permanent failure.
+    const target = createToolCallAccumulator();
+    mergeStreamingToolCalls(target, {
+      snapshot: [call('{"a":{"x":1}}', { id: 'call-a', function: { name: 'lookup', arguments: '{"a":{"x":1}}' } })],
+    });
+    mergeStreamingToolCalls(target, {
+      deltas: [{ index: 0, id: 'call-a', type: 'function', function: { name: 'lookup', arguments: '{"a":{}' } }],
+    });
+    expect(target.failure).toBeNull();
+    mergeStreamingToolCalls(target, {
+      deltas: [{ index: 0, function: { arguments: '}' } }],
+    });
+    expect(target.failure).toBeNull();
+    expect(finalizeStreamingToolCalls(target)).toEqual([
+      { id: 'call-a', type: 'function', function: { name: 'lookup', arguments: '{"a":{"x":1}}' } },
+    ]);
+  });
+
+  it('defers a still-growable bare numeric argument fragment instead of a permanent textual mismatch', () => {
+    // A follow-up pass found that a successfully-parsed JSON *number* fragment (unlike
+    // objects/arrays/strings, which are closed by a delimiter) is not necessarily
+    // finished growing — '1' parses today but could still become '1e-1' on a later
+    // fragment, which is numerically (and thus JSON-subset) equal to a snapshot's
+    // '0.1'. Treating "parses successfully" as "complete" for a bare number rejected
+    // this case via the textual-prefix fallback before the exponent arrived.
+    const target = createToolCallAccumulator();
+    mergeStreamingToolCalls(target, {
+      snapshot: [call('0.1', { id: 'call-a', function: { name: 'lookup', arguments: '0.1' } })],
+    });
+    mergeStreamingToolCalls(target, {
+      deltas: [{ index: 0, id: 'call-a', type: 'function', function: { name: 'lookup', arguments: '1' } }],
+    });
+    expect(target.failure).toBeNull();
+    mergeStreamingToolCalls(target, {
+      deltas: [{ index: 0, function: { arguments: 'e-1' } }],
+    });
+    expect(target.failure).toBeNull();
+    expect(finalizeStreamingToolCalls(target)).toEqual([
+      { id: 'call-a', type: 'function', function: { name: 'lookup', arguments: '0.1' } },
+    ]);
+  });
+
+  it('still rejects a genuinely conflicting bare numeric argument once the stream finalizes', () => {
+    // Deferring incomplete numeric fragments must not weaken the final, strict check:
+    // a delta that completes to a number genuinely different from the snapshot's
+    // number must still fail at finalize.
+    const target = createToolCallAccumulator();
+    mergeStreamingToolCalls(target, {
+      snapshot: [call('0.1', { id: 'call-a', function: { name: 'lookup', arguments: '0.1' } })],
+    });
+    mergeStreamingToolCalls(target, {
+      deltas: [{ index: 0, id: 'call-a', type: 'function', function: { name: 'lookup', arguments: '2' } }],
+    });
+    expect(target.failure).toBeNull();
+    expect(() => finalizeStreamingToolCalls(target)).toThrow(/conflicts/i);
+  });
+
+  it('does not overflow the call stack comparing deeply nested but valid array extensions', () => {
+    const nested = '['.repeat(5000) + '0' + ']'.repeat(5000);
+    const target = createToolCallAccumulator();
+    mergeStreamingToolCalls(target, {
+      snapshot: [call(`{"items":${nested}}`, { id: 'call-a', function: { name: 'lookup', arguments: `{"items":${nested}}` } })],
+    });
+    mergeStreamingToolCalls(target, {
+      snapshot: [call(`{"items":${nested},"b":2}`, { id: 'call-a', function: { name: 'lookup', arguments: `{"items":${nested},"b":2}` } })],
+    });
+    expect(target.failure).toBeNull();
+  });
+
+  it('does not repeat argument reconciliation work for an unchanged call while unrelated calls stream', () => {
+    const bigObj = Object.fromEntries(Array.from({ length: 6000 }, (_, i) => [`k${i}`, 1]));
+    const bigArguments = JSON.stringify(bigObj);
+    const target = createToolCallAccumulator();
+    mergeStreamingToolCalls(target, {
+      snapshot: [call(bigArguments, { id: 'call-a', function: { name: 'lookup', arguments: bigArguments } })],
+    });
+    mergeStreamingToolCalls(target, {
+      deltas: [{ index: 0, id: 'call-a', type: 'function', function: { name: 'lookup', arguments: '{"k0":1}' } }],
+    });
+    expect(target.failure).toBeNull();
+    const start = Date.now();
+    for (let i = 0; i < 5000; i += 1) {
+      mergeStreamingToolCalls(target, {
+        deltas: [{
+          index: 1,
+          id: i === 0 ? 'noop' : undefined,
+          function: { name: i === 0 ? 'noop' : undefined },
+        }],
+      });
+    }
+    expect(Date.now() - start).toBeLessThan(1000);
+    expect(target.failure).toBeNull();
+  });
+
   it('rejects duplicate completed identities across distinct sparse indexes', () => {
     const target = createToolCallAccumulator();
     mergeStreamingToolCalls(target, {
