@@ -22,8 +22,17 @@
   } from "./benchmark-suite";
   import { aliasChoicesForTarget, applyTargetAlias, cachedVariantIds, caseRowsFromJsonl, draftEditsSuite, draftFromSuite, duplicateSuiteDraft, jsonlFromCaseRows, jsonlImportCanFitCharacterLimit, newPromptCaseRow, buildSuiteFromDraft, estimateDraftAttempts, tagsJsonError, variantChoicesForTarget, type SuiteCaseRow, type SuiteDraft } from "./benchmark-draft";
   import { suiteDefinitionView } from "./benchmark-suite-summary";
-  import { buildRunResultView, formatResponseMs, type TargetResultView } from "./benchmark-results";
-  import { buildProgressMatrix, isRunInterrupted, isRunResumable, nextRunPollAction, nextRunPollActionAfterReread, summarizeAttempt, type AttemptSummary } from "./benchmark-progress";
+  import { formatResponseMs, type TargetResultView } from "./benchmark-results";
+  import { buildProgressMatrix, isRunInterrupted, isRunResumable, nextRunPollAction, nextRunPollActionAfterReread, type AttemptSummary } from "./benchmark-progress";
+  import {
+    applyHistoricalSnapshot,
+    applyHistoricalSnapshotError,
+    applySummarySnapshot,
+    applySummarySnapshotError,
+    claimPreviewOwnership,
+    createPreviewOwnership,
+    type BenchmarkPreviewSnapshot,
+  } from "./benchmark-preview-snapshot";
   import { buildBenchmarkExport } from "./benchmark-export";
   import type { BenchmarkRun, BenchmarkRunHeader } from "./benchmark-run";
 
@@ -99,6 +108,7 @@
    * handle (the new chain's) and wrongly conclude it is still the active chain. */
   let pollGeneration = 0;
   let refreshGeneration = 0;
+  let snapshotOwnership = createPreviewOwnership();
   /** Guards `refreshSuites()` the same way `refreshGeneration` guards a run refresh: a slower,
    * now-stale call (e.g. the initial `onMount` load racing a create/edit/delete) must not
    * overwrite the newer suite list/run counts once it finally resolves. */
@@ -181,6 +191,7 @@
 
   async function selectSuite(id: string) {
     if (lifecycleBusy) return;
+    snapshotOwnership = claimPreviewOwnership(snapshotOwnership, null, "none");
     selectedSuiteId = id;
     selectedRunId = null;
     selectedRun = null;
@@ -203,10 +214,32 @@
     expandedResultId = null;
   }
 
+  function currentPreviewSnapshot(): BenchmarkPreviewSnapshot {
+    return {
+      run: selectedRun,
+      attempts: selectedRunAttempts,
+      results: resultView,
+      resultsRunId: resultViewRunId,
+      pollError,
+      resultError,
+    };
+  }
+
+  function publishPreviewSnapshot(snapshot: BenchmarkPreviewSnapshot) {
+    selectedRun = snapshot.run;
+    selectedRunAttempts = snapshot.attempts;
+    resultView = snapshot.results;
+    resultViewRunId = snapshot.resultsRunId;
+    pollError = snapshot.pollError;
+    resultError = snapshot.resultError;
+  }
+
   /** Full attempt bodies, once, when the run is no longer the live one. The progress poll
    * stays on summaries so a 1.5s tick never clones response text. */
   async function loadRunResults(runId: string) {
     if (runId === activeRunId) return;
+    snapshotOwnership = claimPreviewOwnership(snapshotOwnership, runId, "historical-full");
+    const ownership = snapshotOwnership;
     if (resultViewRunId === runId && resultView) return;
     if (resultLoadRunId === runId && resultLoadPromise) {
       return resultLoadPromise;
@@ -216,25 +249,24 @@
       const res = await getBenchmarkRunWithAttempts(runId);
       if (destroyed || generation !== resultGeneration || selectedRunId !== runId || runId === activeRunId) return;
       if (!res.ok || !res.value) {
-        resultView = null;
-        resultViewRunId = null;
-        resultError = !res.ok
+        const error = !res.ok
           ? (res.error || "Could not load results")
           : `Could not load results: run "${runId}" was not found`;
+        publishPreviewSnapshot(applyHistoricalSnapshotError(
+          currentPreviewSnapshot(),
+          snapshotOwnership,
+          ownership,
+          error,
+        ));
         return;
       }
-      resultView = buildRunResultView(res.value.run, res.value.attempts);
-      resultViewRunId = runId;
-      resultError = "";
-      // The summary poll can fail and leave selectedRun null. The full read already
-      // has the run, so the detail and its error have somewhere to render.
-      if (!selectedRun) selectedRun = res.value.run;
-      // An empty summary list with a full read would draw every cell as pending while
-      // the Results table shows the real terminal rows, and Resume would be judged
-      // against that empty matrix.
-      if (selectedRunAttempts.length === 0) {
-        selectedRunAttempts = res.value.attempts.map(summarizeAttempt);
-      }
+      publishPreviewSnapshot(applyHistoricalSnapshot(
+        currentPreviewSnapshot(),
+        snapshotOwnership,
+        ownership,
+        res.value.run,
+        res.value.attempts,
+      ));
     })();
     resultLoadRunId = runId;
     resultLoadPromise = load;
@@ -538,25 +570,39 @@
   /** Run row and attempt summaries are one snapshot. Partial success must not update either
    * field or clear pollError — that would stop as completed with a stale matrix and no banner. */
   function applyPollPair(
+    ownership: typeof snapshotOwnership,
     runRes: { ok: boolean; value?: BenchmarkRun | null; error?: string },
     summariesRes: { ok: boolean; value?: AttemptSummary[] | null; error?: string },
-  ): boolean {
-    if (runRes.ok && summariesRes.ok) {
-      selectedRun = runRes.value ?? null;
-      selectedRunAttempts = summariesRes.value ?? [];
-      pollError = "";
-      return true;
+  ): { confirmed: boolean; status: BenchmarkRun["status"] | undefined } {
+    if (runRes.ok && summariesRes.ok && runRes.value) {
+      publishPreviewSnapshot(applySummarySnapshot(
+        currentPreviewSnapshot(),
+        snapshotOwnership,
+        ownership,
+        runRes.value,
+        summariesRes.value ?? [],
+      ));
+      return { confirmed: true, status: runRes.value.status };
     }
-    pollError = !runRes.ok
+    const error = !runRes.ok
       ? `Could not refresh run status: ${runRes.error}`
-      : `Could not refresh run attempts: ${summariesRes.error}`;
-    return false;
+      : !summariesRes.ok
+        ? `Could not refresh run attempts: ${summariesRes.error}`
+        : `Could not refresh run status: run "${ownership.runId}" was not found`;
+    publishPreviewSnapshot(applySummarySnapshotError(
+      currentPreviewSnapshot(),
+      snapshotOwnership,
+      ownership,
+      error,
+    ));
+    return { confirmed: false, status: undefined };
   }
 
   async function refreshSelectedRun() {
     const runId = selectedRunId;
     if (!runId) return;
     const generation = ++refreshGeneration;
+    const ownership = snapshotOwnership;
     const ownedAtStart = runId === activeRunId;
     const runRes = await getBenchmarkRun(runId);
     if (generation !== refreshGeneration || selectedRunId !== runId) return;
@@ -564,13 +610,13 @@
     if (generation !== refreshGeneration || selectedRunId !== runId) return;
     // Apply run + summaries as one snapshot. A completed row with a failed summaries read
     // must not paint as done with the previous attempt list (last result missing, no error).
-    const confirmed = applyPollPair(runRes, summariesRes);
+    const first = applyPollPair(ownership, runRes, summariesRes);
     const ownedNow = runId === activeRunId;
     const poll = nextRunPollAction({
-      confirmed,
+      confirmed: first.confirmed,
       ownedNow,
       ownedAtStart,
-      status: confirmed ? selectedRun?.status : undefined,
+      status: first.status,
     });
     if (poll === 'keep') return;
     if (poll === 'reread') {
@@ -578,12 +624,12 @@
       if (generation !== refreshGeneration || selectedRunId !== runId) return;
       const finalSummaries = await listAttemptSummariesForRun(runId);
       if (generation !== refreshGeneration || selectedRunId !== runId) return;
-      const rereadConfirmed = applyPollPair(finalRun, finalSummaries);
+      const reread = applyPollPair(ownership, finalRun, finalSummaries);
       const after = nextRunPollActionAfterReread({
-        confirmed: rereadConfirmed,
+        confirmed: reread.confirmed,
         ownedNow: runId === activeRunId,
         ownedAtStart,
-        status: rereadConfirmed ? selectedRun?.status : undefined,
+        status: reread.status,
       });
       if (after === 'keep') return;
     }
@@ -595,6 +641,12 @@
   }
 
   async function openRun(runId: string) {
+    const liveAtOpen = runId === activeRunId;
+    snapshotOwnership = claimPreviewOwnership(
+      snapshotOwnership,
+      runId,
+      liveAtOpen ? "live-summary" : "historical-full",
+    );
     const preserveHistoricalResults = selectedRunId === runId && runId !== activeRunId;
     selectedRunId = runId;
     if (!preserveHistoricalResults) {
@@ -606,7 +658,6 @@
     pollError = "";
     stopPolling();
     const token = ++openRunToken;
-    const liveAtOpen = runId === activeRunId;
     // A historical run does not start the summary poll. A failed summary read
     // returns "keep" and never reaches the full-attempt load, so that load has
     // to start here. A live run still waits for the poll to stop.
@@ -734,6 +785,7 @@
 
   onDestroy(() => {
     destroyed = true;
+    snapshotOwnership = claimPreviewOwnership(snapshotOwnership, null, "none");
     stopPolling();
     // Also invalidate any in-flight openRun()/refreshSelectedRun()/refreshSuites() calls: none
     // of them checks for component teardown, only staleness relative to a later call of the
