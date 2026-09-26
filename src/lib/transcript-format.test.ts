@@ -267,6 +267,7 @@ describe('buildTimestampedText', () => {
         'they are not failures, empty recognition, or detected silence.',
       );
       expect(source).toContain('"Download timing note"');
+      expect(source).toContain('downloadCaptionFiles(files)');
     });
   });
 });

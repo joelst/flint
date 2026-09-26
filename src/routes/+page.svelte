@@ -203,6 +203,7 @@
     type TranscriptExportState,
     type TranscriptSegment,
   } from "$lib/transcript-format";
+  import { downloadCaptionFiles } from "$lib/caption-download";
   import { sniffAudioFormat } from "../../sidecar/audio-format.js";
   import { looksLikeSpeech } from "../../sidecar/model-classification.js";
   import { recommendedMaxTurns as recommendedMaxTurnsFor, clampContextTurns, MIN_CONTEXT_TURNS, MAX_CONTEXT_TURNS } from "$lib/context-turns";
@@ -7479,15 +7480,7 @@ Output only the summary text, no preamble.`;
       statusMessage = "No timed transcript text is available to export";
       return;
     }
-    for (const file of files) {
-      const blob = new Blob([file.body], { type: "text/plain;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = file.fileName;
-      anchor.click();
-      URL.revokeObjectURL(url);
-    }
+    downloadCaptionFiles(files);
     statusMessage =
       format === "srt"
         ? files.some((file) => file.fileName.endsWith(".srt"))
