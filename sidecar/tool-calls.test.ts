@@ -66,6 +66,26 @@ describe('completed tool-call validation', () => {
     expect(() => sanitizeToolCalls([call('😀'.repeat(MAX_TOOL_CALL_ARGUMENT_BYTES / 4))])).not.toThrow();
     expect(() => sanitizeToolCalls([call(`${'😀'.repeat(MAX_TOOL_CALL_ARGUMENT_BYTES / 4)}a`)])).toThrow(/65536|64 KiB/i);
   });
+
+  it('rejects duplicate IDs within a call list while scoping uniqueness to each choice', () => {
+    const repeatedId = call('{}', { id: 'call-repeated' });
+    expect(() => sanitizeToolCalls([repeatedId, call('{}', { id: 'call-repeated' })]))
+      .toThrow(/duplicate call IDs/i);
+
+    expect(() => validateCompletedChatResponse({
+      choices: [
+        { finish_reason: 'stop', message: { content: 'safe' } },
+        { finish_reason: 'tool_calls', message: { tool_calls: [repeatedId, call('{}', { id: 'call-repeated' })] } },
+      ],
+    })).toThrow(/Invalid completed assistant tool_calls/i);
+
+    expect(() => validateCompletedChatResponse({
+      choices: [
+        { finish_reason: 'tool_calls', message: { tool_calls: [repeatedId] } },
+        { finish_reason: 'tool_calls', message: { tool_calls: [repeatedId] } },
+      ],
+    })).not.toThrow();
+  });
 });
 
 describe('streamed tool-call accumulation', () => {
@@ -265,6 +285,69 @@ describe('streamed tool-call accumulation', () => {
       deltas: [{ index: 4, id: 'a', function: { name: 'a' } }],
     });
     expect(finalizeStreamingToolCalls(target)[0].id).toBe('call-a');
+  });
+
+  it('defers a conflicting exact-prefix content match until a later ID extension and snapshot resolve it', () => {
+    for (const arrival of ['snapshot-first', 'identity-first', 'same-chunk']) {
+      const target = createToolCallAccumulator();
+      mergeStreamingToolCalls(target, {
+        snapshot: [call('{"a":1}', { id: 'call-a', function: { name: 'lookup', arguments: '{"a":1}' } })],
+      });
+      mergeStreamingToolCalls(target, {
+        deltas: [{ index: 0, id: 'call-a', type: 'function', function: { name: 'lookup', arguments: '{"b":2}' } }],
+      });
+      expect(target.failure).toBeNull();
+
+      const extendedId = { deltas: [{ index: 0, id: 'b' }] };
+      const matchingSnapshot = {
+        snapshot: [call('{"b":2}', { id: 'call-ab', function: { name: 'lookup', arguments: '{"b":2}' } })],
+      };
+      if (arrival === 'snapshot-first') {
+        mergeStreamingToolCalls(target, matchingSnapshot);
+        mergeStreamingToolCalls(target, extendedId);
+      } else if (arrival === 'identity-first') {
+        mergeStreamingToolCalls(target, extendedId);
+        mergeStreamingToolCalls(target, matchingSnapshot);
+      } else {
+        mergeStreamingToolCalls(target, { ...extendedId, ...matchingSnapshot });
+      }
+
+      expect(target.failure).toBeNull();
+      expect(finalizeStreamingToolCalls(target)).toEqual([
+        call('{"b":2}', { id: 'call-ab', function: { name: 'lookup', arguments: '{"b":2}' } }),
+        call('{"a":1}', { id: 'call-a', function: { name: 'lookup', arguments: '{"a":1}' } }),
+      ]);
+    }
+  });
+
+  it('defers an unmatched delta identity until its snapshot arrives in a later chunk', () => {
+    const target = createToolCallAccumulator();
+    mergeStreamingToolCalls(target, {
+      snapshot: [call('{"a":1}', { id: 'call-a', function: { name: 'first', arguments: '{"a":1}' } })],
+    });
+    mergeStreamingToolCalls(target, {
+      deltas: [{ index: 0, id: 'call-b', type: 'function', function: { name: 'second', arguments: '{"b":2}' } }],
+    });
+    expect(target.failure).toBeNull();
+
+    mergeStreamingToolCalls(target, {
+      snapshot: [call('{"b":2}', { id: 'call-b', function: { name: 'second', arguments: '{"b":2}' } })],
+    });
+    expect(target.failure).toBeNull();
+    expect(finalizeStreamingToolCalls(target)).toEqual([
+      call('{"b":2}', { id: 'call-b', function: { name: 'second', arguments: '{"b":2}' } }),
+      call('{"a":1}', { id: 'call-a', function: { name: 'first', arguments: '{"a":1}' } }),
+    ]);
+  });
+
+  it('rejects duplicate IDs in a streaming snapshot immediately', () => {
+    const target = createToolCallAccumulator();
+    mergeStreamingToolCalls(target, {
+      snapshot: [call('{}', { id: 'call-a' }), call('{}', { id: 'call-a' })],
+    });
+    expect(target.failure).toBeInstanceOf(Error);
+    expect(target.failure?.message).toMatch(/duplicate call IDs/i);
+    expect(target.failure?.message).not.toContain('call-a');
   });
 
   it('does not treat an exact delta id match as ambiguous merely because another snapshot id is a superstring', () => {
@@ -637,7 +720,19 @@ describe('streamed tool-call accumulation', () => {
         return target;
       },
     ];
-    for (const build of conflicts) expect(build().failure).toBeInstanceOf(Error);
+    for (const build of conflicts) {
+      const target = build();
+      expect(target.failure).toBeNull();
+      expect(() => finalizeStreamingToolCalls(target)).toThrow(/arguments|identity conflicts/i);
+    }
+  });
+
+  it('rejects contradictory cumulative snapshots as soon as the contradiction arrives', () => {
+    const target = createToolCallAccumulator();
+    mergeStreamingToolCalls(target, { snapshot: [call('{"a":1}')] });
+    expect(target.failure).toBeNull();
+    mergeStreamingToolCalls(target, { snapshot: [call('{"b":2}')] });
+    expect(target.failure).toBeInstanceOf(Error);
   });
 
   it('preserves a latched failure and the 64-call sparse-index cap', () => {

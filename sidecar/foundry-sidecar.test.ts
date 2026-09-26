@@ -2661,6 +2661,17 @@ describe('foundry-sidecar command schema validation', () => {
         expected: /arguments/,
       },
       {
+        messages: [{
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            { id: 'call-duplicate', type: 'function', function: { name: 'read_status', arguments: '{}' } },
+            { id: 'call-duplicate', type: 'function', function: { name: 'read_config', arguments: '{}' } },
+          ],
+        }],
+        expected: /duplicate call IDs/i,
+      },
+      {
         messages: [{ role: 'assistant', content: null }],
         expected: /content or tool_calls/,
       },

@@ -19,6 +19,7 @@ export function sanitizeToolCalls (toolCalls, field = 'assistant.tool_calls') {
   if (!Array.isArray(toolCalls) || toolCalls.length === 0 || toolCalls.length > MAX_TOOL_CALLS) {
     throw new Error(`${field} must contain 1 to ${MAX_TOOL_CALLS} calls`);
   }
+  const ids = new Set();
   return toolCalls.map((toolCall, index) => {
     const callField = `${field}[${index}]`;
     if (!isPlainObject(toolCall)
@@ -27,6 +28,10 @@ export function sanitizeToolCalls (toolCalls, field = 'assistant.tool_calls') {
       || toolCall.id.length > MAX_TOOL_CALL_ID_LENGTH) {
       throw new Error(`${callField}.id must be a non-empty string of at most ${MAX_TOOL_CALL_ID_LENGTH} characters`);
     }
+    if (ids.has(toolCall.id)) {
+      throw new Error(`${field} must not contain duplicate call IDs`);
+    }
+    ids.add(toolCall.id);
     if (toolCall.type !== 'function') {
       throw new Error(`${callField}.type must be "function"`);
     }
@@ -441,44 +446,16 @@ function getArgumentCache (cacheMap, key) {
   return cache;
 }
 
-// Runs on every incoming chunk (mid-stream, `final: false`) as well as once at the end
-// (`final: true`). Identity ambiguity/conflicts between deltas and snapshots are only
-// hard errors once every delta and snapshot has arrived — a transient collision (two
-// deltas that currently match the same single snapshot) can still resolve once more of
-// each identity streams in, as covered by the fragmented-identity recovery test.
-//
-// A delta is only validated against a candidate snapshot's content (`mergeDeltaSnapshot`,
-// which fails fast on genuine conflicts) once that snapshot is claimed by exactly one
-// delta so far (`claimCounts`) — a snapshot currently prefix-matched by two different
-// deltas is contested and must not be used to validate either one's content yet, since
-// only one of them (determined once identities finish streaming) actually owns it;
-// validating the "wrong" contender eagerly would reject a stream that later turns out
-// to be entirely valid.
-//
-// Being the sole current claimant is not enough on its own, though: a delta's id/name
-// can keep growing on later fragments, and growth can turn what is currently the *only*
-// compatible snapshot into an *incompatible* one (e.g. delta id `call-a` matching only
-// snapshot `call-ab` right now can grow into `call-ac`, which matches neither `call-ab`
-// nor anything else). Validating content against a snapshot the delta might not end up
-// paired with at all would be just as wrong as validating against the wrong contender in
-// an actual collision. So mid-stream, content is only checked eagerly when the delta's
-// id and name (whichever are already present) are an *exact* match for the candidate —
-// not merely prefix-compatible — since exact-length fields cannot be invalidated by
-// further growth of a *different*, currently-unrelated snapshot the same way partial
-// prefix matches can. Non-exact partial matches are simply deferred to `final`, where
-// every identity is complete and `finalizeStreamingToolCalls` validates every pairing
-// unconditionally.
-//
-// The content validation that does run is backed by `reconcileArgumentsWithCache`,
-// which keeps its per-fragment cost proportional to new bytes, not the full
-// accumulated string, so calling it on every uncontested exact match remains linear
-// overall.
+// Delta/snapshot pairing is provisional until finalization: a streamed identity can
+// still grow, and later snapshots can supply the true partner. Keep cross-record
+// identity and content checks here final-only; input shape, size, and conflicts between
+// cumulative snapshots are validated as they arrive.
 function assertReconciliationIsUnambiguous (target, { final = false } = {}) {
-  if (target.snapshots.size === 0 || target.calls.size === 0) return;
+  if (!final || target.snapshots.size === 0 || target.calls.size === 0) return;
   const deltaCandidates = new Map();
   const claimCounts = new Map();
   for (const [index, delta] of target.calls.entries()) {
-    const candidates = finalCandidates(matchingSnapshots(target, delta), delta, final);
+    const candidates = finalCandidates(matchingSnapshots(target, delta), delta, true);
     deltaCandidates.set(index, candidates);
     if (candidates.length === 1) {
       const id = candidates[0].id;
@@ -490,44 +467,20 @@ function assertReconciliationIsUnambiguous (target, { final = false } = {}) {
   for (const [index, delta] of target.calls.entries()) {
     const candidates = deltaCandidates.get(index);
     if (candidates.length > 1) {
-      if (final) throw new Error('Streamed tool-call identity is ambiguous');
-      continue;
+      throw new Error('Streamed tool-call identity is ambiguous');
     }
     if (candidates.length === 1) {
       const snapshot = candidates[0];
       const id = snapshot.id;
       if (claimCounts.get(id) > 1) {
-        if (final) throw new Error('Streamed tool-call identity conflicts with another call');
-        continue;
+        throw new Error('Streamed tool-call identity conflicts with another call');
       }
-      // A missing `delta.id` is not "compatible with anything" — it is simply unknown
-      // yet, and the delta could still turn out (once its id streams in) to identify a
-      // completely different call than the one `function.name` alone currently happens
-      // to fuzzy-match. Only a delta whose id has *actually arrived* and is byte-for-byte
-      // equal to the candidate's is safe to validate eagerly; name equality alone (with
-      // id still undefined) is withheld until final, same as any other non-exact match.
-      const isExactMatch = delta.id !== undefined && delta.id === snapshot.id
-        && (delta.function?.name === undefined || delta.function.name === snapshot.function.name);
-      if (final || isExactMatch) {
-        mergeDeltaSnapshot(delta, snapshot, getArgumentCache(target.deltaArgumentCache, index), { final });
-      }
+      mergeDeltaSnapshot(delta, snapshot, getArgumentCache(target.deltaArgumentCache, index), { final: true });
       matchedSnapshotIds.add(id);
     } else if (delta.id !== undefined && delta.function?.name !== undefined) {
       unmatchedDeltas += 1;
     }
   }
-  // A pre-existing, deliberately fail-fast test requires this exact shape (one
-  // known-complete delta identity, one snapshot, matching counts, no fuzzy-match at
-  // all) to throw immediately, without waiting for `final` — and there is no signal
-  // available at this point that distinguishes that intentional case from a stream that
-  // will legitimately add a second, actually-matching snapshot on a later chunk (a
-  // round-4 adversarial pass demonstrated exactly that: a delta arriving before its
-  // true snapshot partner hits this identical shape and is wrongly rejected). Both
-  // scenarios are indistinguishable from *inside* a single synchronous check — the only
-  // difference is what arrives afterward, which isn't yet known. Given the existing
-  // test's contract, this residual risk is accepted rather than deferred, in the same
-  // spirit as the exact-id-match residual risk documented on `finalCandidates` above:
-  // fail-fast wins over deferral when the two goals cannot both be satisfied.
   if (unmatchedDeltas > 0
     && target.calls.size === target.snapshots.size
     && matchedSnapshotIds.size + unmatchedDeltas === target.calls.size) {
@@ -622,12 +575,7 @@ function mergeDeltas (target, deltas) {
 function mergeSnapshot (target, snapshot) {
   if (snapshot === undefined) return;
   const validated = sanitizeToolCalls(snapshot, 'streamed assistant tool_calls');
-  const ids = new Set();
   for (const call of validated) {
-    if (ids.has(call.id)) {
-      throw new Error('Streamed tool-call snapshot contains conflicting identities');
-    }
-    ids.add(call.id);
     if (!target.snapshots.has(call.id)) {
       if (target.snapshots.size >= MAX_TOOL_CALLS) {
         throw new Error(`Streamed tool_calls cannot contain more than ${MAX_TOOL_CALLS} snapshot calls`);
