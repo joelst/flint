@@ -131,6 +131,7 @@ export default defineConfig(() => ({
         'sidecar/async-log-writer.js',
         'sidecar/monotonic-wait.js',
         'sidecar/chat-response.js',
+        'sidecar/tool-calls.js',
         'sidecar/inference-metrics.js',
         'sidecar/foundry-runtime-pin.js',
         'sidecar/health-ring.js',

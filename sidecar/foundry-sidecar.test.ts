@@ -497,7 +497,24 @@ describe('foundry-sidecar protocol basics', () => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(requestNumber === 2
               ? { choices: [{ message: { role: 'assistant', content: 'http-complete' } }] }
-              : {
+              : requestNumber === 4
+                ? {
+                    choices: [
+                      { finish_reason: 'stop', message: { role: 'assistant', content: 'must not emit' } },
+                      {
+                        finish_reason: 'tool_calls',
+                        message: {
+                          role: 'assistant',
+                          tool_calls: [{
+                            id: 'call-secret',
+                            type: 'function',
+                            function: { arguments: 'TOP_SECRET_HTTP' },
+                          }],
+                        },
+                      },
+                    ],
+                  }
+                : {
                   choices: [{
                     finish_reason: 'tool_calls',
                     message: {
@@ -639,6 +656,42 @@ describe('foundry-sidecar protocol basics', () => {
       expect(cancelledResult.certainty).toBe('cancelled');
       expect(cancelledResult.result).toBeUndefined();
       expect(String(cancelledResult.error)).toMatch(/discarded after cancellation/);
+
+      const malformedMessages: any[] = [];
+      let malformedBuffer = '';
+      const collectMalformed = (chunk: Buffer | string) => {
+        malformedBuffer += chunk.toString();
+        const lines = malformedBuffer.split(/\r?\n/);
+        malformedBuffer = lines.pop() || '';
+        for (const line of lines) {
+          try {
+            const message = JSON.parse(line);
+            if (message.id === 46) malformedMessages.push(message);
+          } catch {}
+        }
+      };
+      proc.stdout.on('data', collectMalformed);
+      proc.stdin.write(`${JSON.stringify({
+        id: 46,
+        cmd: 'chatCompletion',
+        model: 'fake-model',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: 'validate every HTTP choice' },
+            { type: 'image_url', image_url: { url: 'data:image/png;base64,AA==' } },
+          ],
+        }],
+        stream: true,
+      })}\n`);
+      const malformed = await waitForLine(proc, (msg) => msg.id === 46 && !msg.stream, 15000);
+      proc.stdout.off('data', collectMalformed);
+      expect(malformed.ok).not.toBe(true);
+      expect(malformed.result).toBeUndefined();
+      expect(String(malformed.error)).toMatch(/tool.calls/i);
+      expect(JSON.stringify(malformed)).not.toContain('call-secret');
+      expect(JSON.stringify(malformed)).not.toContain('TOP_SECRET_HTTP');
+      expect(malformedMessages.some((message) => message.stream === true)).toBe(false);
     } finally {
       await killAndWait(proc);
       await closeServer(server);
@@ -3254,11 +3307,12 @@ describe('chatCompletion ChatSession path', () => {
   //                           already are. Gating on the signal file (rather than a fixed
   //                           delay) makes the ordering deterministic instead of depending on
   //                           IPC round-trip speed on a loaded CI runner.
-  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'legacy-stream-only-fixture' | 'session-no-legacy' | 'session-error' | 'session-error-with-legacy' | 'session-error-dispose' | 'session-abort' | 'session-empty-output' | 'session-stream-empty' | 'session-stream-fixture' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error' | 'session-buffered-tool-cancel' | 'session-stream-tool' | 'session-stream-tool-outoforder' | 'session-stream-tool-high-index' | 'session-stream-tool-cancel';
+  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'legacy-buffered-fixture' | 'legacy-buffered-only-fixture' | 'legacy-stream-only-fixture' | 'session-no-legacy' | 'session-error' | 'session-error-with-legacy' | 'session-error-dispose' | 'session-abort' | 'session-empty-output' | 'session-stream-empty' | 'session-stream-fixture' | 'session-stream-fixture-dispose-error' | 'session-buffered-fixture' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error' | 'session-buffered-tool-cancel' | 'session-stream-tool' | 'session-stream-tool-outoforder' | 'session-stream-tool-high-index' | 'session-stream-tool-cancel';
   function fakeSdk(sdkMode: ChatFakeSdkMode) {
-    const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only' || sdkMode === 'legacy-stream-only-fixture' || sdkMode === 'session-error-with-legacy';
+    const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only' || sdkMode === 'legacy-buffered-fixture' || sdkMode === 'legacy-buffered-only-fixture' || sdkMode === 'legacy-stream-only-fixture' || sdkMode === 'session-error-with-legacy';
     const legacyStreamOnly = sdkMode === 'legacy-stream-only-fixture';
-    const hasSession = sdkMode !== 'legacy-only' && !legacyStreamOnly;
+    const hasLegacyStreaming = hasLegacy && sdkMode !== 'legacy-buffered-only-fixture';
+    const hasSession = sdkMode !== 'legacy-only' && sdkMode !== 'legacy-buffered-fixture' && sdkMode !== 'legacy-buffered-only-fixture' && !legacyStreamOnly;
     return [
       "import fs from 'node:fs';",
       'const note = (event) => fs.appendFileSync(process.env.FLINT_TEST_EVENT_LOG, event + "\\n");',
@@ -3274,13 +3328,13 @@ describe('chatCompletion ChatSession path', () => {
       hasLegacy ? '      settings: {},' : '',
       hasLegacy && !legacyStreamOnly ? '      async completeChat() {' : '',
       hasLegacy && !legacyStreamOnly ? "        note('legacy-chat');" : '',
-      hasLegacy && !legacyStreamOnly ? "        return { choices: [{ message: { role: 'assistant', content: 'legacy reply' } }], usage: { prompt_tokens: 1, completion_tokens: 2 } };" : '',
+      hasLegacy && !legacyStreamOnly ? `        return ${JSON.stringify(['legacy-buffered-fixture', 'legacy-buffered-only-fixture'].includes(sdkMode))} ? streamSteps()[0].chunk : { choices: [{ message: { role: 'assistant', content: 'legacy reply' } }], usage: { prompt_tokens: 1, completion_tokens: 2 } };` : '',
       hasLegacy && !legacyStreamOnly ? '      },' : '',
-      hasLegacy ? '      async *completeStreamingChat() {' : '',
-      hasLegacy ? "        note('legacy-chat');" : '',
+      hasLegacyStreaming ? '      async *completeStreamingChat() {' : '',
+      hasLegacyStreaming ? "        note('legacy-chat');" : '',
       legacyStreamOnly ? "        for (const step of streamSteps()) { if (step.note) note(step.note); if (step.waitForSignal) await awaitSignal(); if (step.chunk) yield step.chunk; }" : '',
-      hasLegacy && !legacyStreamOnly ? "        yield { choices: [{ delta: { content: 'legacy reply' } }] };" : '',
-      hasLegacy ? '      },' : '',
+      hasLegacyStreaming && !legacyStreamOnly ? "        yield { choices: [{ delta: { content: 'legacy reply' } }] };" : '',
+      hasLegacyStreaming ? '      },' : '',
       hasLegacy ? '    };' : '',
       hasLegacy ? '  }' : '',
       '}',
@@ -3289,12 +3343,13 @@ describe('chatCompletion ChatSession path', () => {
       `    if (${JSON.stringify(sdkMode)} === 'session-constructor-error') throw new Error('native ChatSession construction failed');`,
       '    this.model = model;',
       '  }',
-      `  dispose() { note('session-chat-disposed'); if (['session-dispose-error', 'session-error-dispose'].includes(${JSON.stringify(sdkMode)})) throw new Error('native ChatSession disposal failed'); }`,
+      `  dispose() { note('session-chat-disposed'); if (['session-dispose-error', 'session-error-dispose', 'session-stream-fixture-dispose-error'].includes(${JSON.stringify(sdkMode)})) throw new Error('native ChatSession disposal failed'); }`,
       '  async processRequest(req) {',
       "    note('session-chat');",
       `    if (['session-error', 'session-error-with-legacy', 'session-error-dispose'].includes(${JSON.stringify(sdkMode)})) throw new Error('native processRequest failed');`,
       `    if (${JSON.stringify(sdkMode)} === 'session-empty-output') return { output: [] };`,
       `    if (${JSON.stringify(sdkMode)} === 'session-malformed-json') return { output: [{ type: 'text', textType: 'openai-json', text: 'not json' }] };`,
+      `    if (${JSON.stringify(sdkMode)} === 'session-buffered-fixture') return { output: [{ type: 'text', textType: 'openai-json', text: JSON.stringify(streamSteps()[0].chunk) }] };`,
       '    const requestJson = JSON.parse(req.items[0].text);',
       '    note(`request:${JSON.stringify(requestJson)}`);',
       `    if (${JSON.stringify(sdkMode)} === 'session-buffered-tool-cancel') { while (!fs.existsSync(process.env.FLINT_TEST_CANCEL_SIGNAL)) { await new Promise((resolve) => setTimeout(resolve, 5)); } }`,
@@ -3317,7 +3372,7 @@ describe('chatCompletion ChatSession path', () => {
       `        if (['session-error', 'session-error-with-legacy', 'session-error-dispose'].includes(${JSON.stringify(sdkMode)})) throw new Error('native stream failed');`,
       `        if (${JSON.stringify(sdkMode)} === 'session-abort') { const e = new Error('native stream aborted'); e.name = 'AbortError'; throw e; }`,
       `        if (${JSON.stringify(sdkMode)} === 'session-stream-empty') return;`,
-      `        if (${JSON.stringify(sdkMode)} === 'session-stream-fixture') { for (const step of streamSteps()) { if (step.note) note(step.note); if (step.waitForSignal) await awaitSignal(); if (step.chunk) yield { type: 'text', textType: 'openai-json', text: JSON.stringify(step.chunk) }; } return; }`,
+      `        if (['session-stream-fixture', 'session-stream-fixture-dispose-error'].includes(${JSON.stringify(sdkMode)})) { for (const step of streamSteps()) { if (step.note) note(step.note); if (step.waitForSignal) await awaitSignal(); if (step.chunk) yield { type: 'text', textType: 'openai-json', text: JSON.stringify(step.chunk) }; } return; }`,
       "        yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { content: 'session ' } }] }) };",
       `        if (${JSON.stringify(sdkMode)} === 'session-stream-tool') yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-1', type: 'function', function: { name: 'read_status', arguments: '{' } }] } }] }) };`,
       `        if (${JSON.stringify(sdkMode)} === 'session-stream-tool') yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '}' } }] } }] }) };`,
@@ -3465,6 +3520,105 @@ describe('chatCompletion ChatSession path', () => {
     expect(request.metadata).toEqual({ top_k: '12', random_seed: '17' });
   }, 30000);
 
+  it.each([
+    ['session-buffered-fixture', 'ChatSession'],
+    ['legacy-buffered-fixture', 'legacy client'],
+  ] as const)('rejects malformed completed tool calls in every buffered %s choice', async (mode) => {
+    await startSidecar(mode);
+    const cases = [
+      {
+        choices: [
+          { finish_reason: 'stop', message: { role: 'assistant', content: 'safe' } },
+          {
+            finish_reason: 'tool_calls',
+            message: {
+              role: 'assistant',
+              tool_calls: [{
+                id: 'call-secret',
+                type: 'function',
+                function: { arguments: 'TOP_SECRET_ARGUMENTS' },
+              }],
+            },
+          },
+        ],
+      },
+      {
+        choices: [{
+          finish_reason: 'tool_calls',
+          message: { role: 'assistant', content: null, tool_calls: [] },
+        }],
+      },
+    ];
+    for (const [offset, chunk] of cases.entries()) {
+      setStreamSteps([{ chunk }]);
+      const id = 60 + offset;
+      const chatted = reply(id);
+      send({
+        id,
+        cmd: 'chatCompletion',
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'use a tool' }],
+      });
+      const res = await chatted;
+      expect(res.ok).not.toBe(true);
+      expect(res.result).toBeUndefined();
+      expect(String(res.error)).toMatch(/tool.calls/i);
+      expect(JSON.stringify(res)).not.toContain('call-secret');
+      expect(JSON.stringify(res)).not.toContain('TOP_SECRET_ARGUMENTS');
+    }
+  }, 30000);
+
+  it('validates a buffered legacy result before emitting its synthetic stream delta', async () => {
+    await startSidecar('legacy-buffered-only-fixture');
+    setStreamSteps([{
+      chunk: {
+        choices: [
+          { finish_reason: 'stop', message: { role: 'assistant', content: 'must not emit' } },
+          {
+            finish_reason: 'tool_calls',
+            message: {
+              role: 'assistant',
+              tool_calls: [{
+                id: 'call-secret',
+                type: 'function',
+                function: { arguments: 'TOP_SECRET_BUFFERED' },
+              }],
+            },
+          },
+        ],
+      },
+    }]);
+    const protocolMessages: any[] = [];
+    let protocolBuffer = '';
+    const collectProtocol = (chunk: Buffer | string) => {
+      protocolBuffer += chunk.toString();
+      const lines = protocolBuffer.split(/\r?\n/);
+      protocolBuffer = lines.pop() || '';
+      for (const line of lines) {
+        try {
+          const message = JSON.parse(line);
+          if (message.id === 67) protocolMessages.push(message);
+        } catch {}
+      }
+    };
+    proc.stdout.on('data', collectProtocol);
+    const chatted = reply(67);
+    send({
+      id: 67,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use a tool' }],
+      stream: true,
+    });
+    const res = await chatted;
+    proc.stdout.off('data', collectProtocol);
+    expect(res.ok).not.toBe(true);
+    expect(res.result).toBeUndefined();
+    expect(protocolMessages.some((message) => message.stream === true)).toBe(false);
+    expect(JSON.stringify(res)).not.toContain('call-secret');
+    expect(JSON.stringify(res)).not.toContain('TOP_SECRET_BUFFERED');
+  }, 30000);
+
   it('preserves a parallel tool loop through buffered and streaming ChatSession requests', async () => {
     await startSidecar('session');
     const tools = [
@@ -3547,6 +3701,36 @@ describe('chatCompletion ChatSession path', () => {
     expect(res.ok).not.toBe(true);
     expect(String(res.error)).toContain('tool_call_id');
     expect(events()).not.toContain('session-chat');
+  }, 30000);
+
+  it('enforces the per-call UTF-8 argument limit in inbound history', async () => {
+    await startSidecar('session');
+    const run = async (id: number, argumentsText: string) => {
+      const chatted = reply(id);
+      send({
+        id,
+        cmd: 'chatCompletion',
+        model: 'fake-model',
+        messages: [
+          {
+            role: 'assistant',
+            tool_calls: [{
+              id: 'call-1',
+              type: 'function',
+              function: { name: 'read_status', arguments: argumentsText },
+            }],
+          },
+          { role: 'tool', tool_call_id: 'call-1', content: '{"ok":true}' },
+        ],
+      });
+      return chatted;
+    };
+    expect((await run(65, '😀'.repeat(16_384))).ok).toBe(true);
+    const callsBeforeOverflow = events().filter((event) => event === 'session-chat').length;
+    const overflow = await run(66, `${'😀'.repeat(16_384)}a`);
+    expect(overflow.ok).not.toBe(true);
+    expect(String(overflow.error)).toMatch(/65536 UTF-8 bytes|64 KiB/i);
+    expect(events().filter((event) => event === 'session-chat')).toHaveLength(callsBeforeOverflow);
   }, 30000);
 
   it('suppresses a buffered terminal tool result that arrives after cancellation', async () => {
@@ -3681,6 +3865,106 @@ describe('chatCompletion ChatSession path', () => {
     expect(requests.at(-1).messages[1].tool_calls).toEqual(first.result.choices[0].message.tool_calls);
   }, 30000);
 
+  it('reconciles full message.tool_calls snapshots with deltas without duplication', async () => {
+    await startSidecar('session-stream-fixture');
+    const complete = [{
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'read_status', arguments: '{"scope":"all"}' },
+    }];
+    const cases = [
+      [{ chunk: { choices: [{ message: { tool_calls: complete }, finish_reason: 'tool_calls' }] } }],
+      [
+        { chunk: { choices: [{ message: { tool_calls: complete } }] } },
+        { chunk: { choices: [{ delta: { tool_calls: [] }, message: { tool_calls: complete }, finish_reason: 'tool_calls' }] } },
+      ],
+      [
+        {
+          chunk: {
+            choices: [{
+              delta: {
+                tool_calls: [{
+                  index: 0,
+                  id: 'call-',
+                  type: 'function',
+                  function: { name: 'read_', arguments: '{"scope":' },
+                }],
+              },
+            }],
+          },
+        },
+        {
+          chunk: {
+            choices: [{
+              delta: {
+                tool_calls: [{
+                  index: 0,
+                  id: '1',
+                  function: { name: 'status', arguments: '"all"}' },
+                }],
+              },
+              message: { tool_calls: complete },
+              finish_reason: 'tool_calls',
+            }],
+          },
+        },
+      ],
+    ];
+    for (const [offset, steps] of cases.entries()) {
+      setStreamSteps(steps);
+      const id = 70 + offset;
+      const chatted = reply(id);
+      send({
+        id,
+        cmd: 'chatCompletion',
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'use a tool' }],
+        stream: true,
+      });
+      const res = await chatted;
+      expect(res.ok).toBe(true);
+      expect(res.result.choices[0].message.tool_calls).toEqual(complete);
+    }
+  }, 30000);
+
+  it('rejects conflicting delta and full-snapshot tool calls', async () => {
+    await startSidecar('session-stream-fixture');
+    setStreamSteps([{
+      chunk: {
+        choices: [{
+          delta: {
+            tool_calls: [{
+              index: 0,
+              id: 'call-1',
+              type: 'function',
+              function: { name: 'read_status', arguments: '{"safe":true}' },
+            }],
+          },
+          message: {
+            tool_calls: [{
+              id: 'call-2',
+              type: 'function',
+              function: { name: 'read_status', arguments: 'TOP_SECRET_CONFLICT' },
+            }],
+          },
+          finish_reason: 'tool_calls',
+        }],
+      },
+    }]);
+    const chatted = reply(80);
+    send({
+      id: 80,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use a tool' }],
+      stream: true,
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toMatch(/conflict/i);
+    expect(JSON.stringify(res)).not.toContain('TOP_SECRET_CONFLICT');
+  }, 30000);
+
   it('rejects completed streamed tool calls with missing or invalid required fields', async () => {
     await startSidecar('session-stream-fixture');
     const malformedDeltas = [
@@ -3764,20 +4048,31 @@ describe('chatCompletion ChatSession path', () => {
   it('drains after a latched structural failure while retaining leases, disposing, probing, and logging failure', async () => {
     await startSidecar('session-stream-fixture');
     const probesBefore = events().filter((event) => event === 'provider-probe').length;
+    const protocolMessages: any[] = [];
+    let protocolBuffer = '';
+    const collectProtocol = (chunk: Buffer | string) => {
+      protocolBuffer += chunk.toString();
+      const lines = protocolBuffer.split(/\r?\n/);
+      protocolBuffer = lines.pop() || '';
+      for (const line of lines) {
+        try {
+          protocolMessages.push(JSON.parse(line));
+        } catch {}
+      }
+    };
+    proc.stdout.on('data', collectProtocol);
     setStreamSteps([
       {
         chunk: {
           choices: [{
             delta: {
-              tool_calls: [{
-                index: 0,
-                type: 'function',
-                function: { name: 'redacted_secret', arguments: 'TOP_SECRET' },
-              }],
+              content: 'must not emit',
+              tool_calls: 'TOP_SECRET_NOT_AN_ARRAY',
             },
           }],
         },
       },
+      { chunk: { choices: [{ delta: { content: 'ignored before gate' } }] } },
       { note: 'drain-waiting', waitForSignal: true },
       { note: 'drain-finished', chunk: { choices: [{ delta: { content: 'ignored tail' }, finish_reason: 'stop' }] } },
     ]);
@@ -3807,10 +4102,12 @@ describe('chatCompletion ChatSession path', () => {
     writeFileSync(cancelSignalPath, '');
 
     const res = await chatted;
+    proc.stdout.off('data', collectProtocol);
     expect(res.ok).not.toBe(true);
     expect(res.result).toBeUndefined();
     expect(String(res.error)).toMatch(/tool.call/i);
-    expect(JSON.stringify(res)).not.toContain('TOP_SECRET');
+    expect(JSON.stringify(res)).not.toContain('TOP_SECRET_NOT_AN_ARRAY');
+    expect(protocolMessages.filter((message) => message.id === 30 && message.stream === true)).toEqual([]);
     expect(events()).toContain('drain-finished');
     expect(events()).toContain('session-chat-disposed');
     expect(events().filter((event) => event === 'provider-probe').length).toBeGreaterThan(probesBefore);
@@ -3827,7 +4124,36 @@ describe('chatCompletion ChatSession path', () => {
     expect(chats.at(-1)).toMatchObject({ source: 'ipc', ok: false });
   }, 30000);
 
-  it('does not publish a partial tool call or tool_calls finish reason after cancellation', async () => {
+  it('preserves an early validation failure when ChatSession disposal also fails', async () => {
+    await startSidecar('session-stream-fixture-dispose-error');
+    setStreamSteps([
+      {
+        chunk: {
+          choices: [{
+            delta: { tool_calls: 'TOP_SECRET_NOT_AN_ARRAY' },
+          }],
+        },
+      },
+      { note: 'dispose-drain-finished' },
+    ]);
+    const chatted = reply(35);
+    send({
+      id: 35,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use a tool' }],
+      stream: true,
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toMatch(/tool.calls must be an array/i);
+    expect(String(res.error)).toContain('stream cleanup also failed');
+    expect(JSON.stringify(res)).not.toContain('TOP_SECRET_NOT_AN_ARRAY');
+    expect(events()).toContain('dispose-drain-finished');
+    expect(events()).toContain('session-chat-disposed');
+  }, 30000);
+
+  it('does not publish a partial tool call or terminal snapshot after cancellation', async () => {
     await startSidecar('session-stream-fixture');
     setStreamSteps([
       {
@@ -3850,7 +4176,14 @@ describe('chatCompletion ChatSession path', () => {
       {
         chunk: {
           choices: [{
-            delta: { tool_calls: [{ index: 0, function: { name: 'late_name', arguments: 'true}' } }] },
+            message: {
+              tool_calls: [{
+                id: 'call-1',
+                type: 'function',
+                function: { name: 'late_name', arguments: '{"partial":true}' },
+              }],
+            },
+            finish_reason: 'tool_calls',
           }],
         },
       },
@@ -3909,6 +4242,80 @@ describe('chatCompletion ChatSession path', () => {
     expect(res.ok).not.toBe(true);
     expect(res.result).toBeUndefined();
     expect(events()).toContain('legacy-stream-drained');
+  }, 30000);
+
+  it('rejects tool_calls finish_reason contradictions in the buffered stream-derived fallback branch', async () => {
+    await startSidecar('legacy-stream-only-fixture');
+    setStreamSteps([
+      {
+        chunk: {
+          choices: [{ delta: { content: 'must not survive' }, finish_reason: 'tool_calls' }],
+        },
+      },
+      { note: 'legacy-contradiction-drained' },
+    ]);
+    const chatted = reply(51);
+    send({
+      id: 51,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use a tool' }],
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(res.result).toBeUndefined();
+    expect(String(res.error)).toMatch(/without valid nonempty calls/i);
+    expect(events()).toContain('legacy-contradiction-drained');
+  }, 30000);
+
+  it('reconciles full tool-call snapshots in the buffered legacy stream path', async () => {
+    await startSidecar('legacy-stream-only-fixture');
+    const complete = [{
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'read_status', arguments: '{"scope":"all"}' },
+    }];
+    setStreamSteps([
+      {
+        chunk: {
+          choices: [{
+            delta: {
+              tool_calls: [{
+                index: 0,
+                id: 'call-',
+                type: 'function',
+                function: { name: 'read_', arguments: '{"scope":' },
+              }],
+            },
+          }],
+        },
+      },
+      {
+        chunk: {
+          choices: [{
+            delta: {
+              tool_calls: [{
+                index: 0,
+                id: '1',
+                function: { name: 'status', arguments: '"all"}' },
+              }],
+            },
+            message: { tool_calls: complete },
+            finish_reason: 'tool_calls',
+          }],
+        },
+      },
+    ]);
+    const chatted = reply(52);
+    send({
+      id: 52,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use a tool' }],
+    });
+    const res = await chatted;
+    expect(res.ok).toBe(true);
+    expect(res.result.choices[0].message.tool_calls).toEqual(complete);
   }, 30000);
 
   it('compacts a tool-call delta stream that never fills a lower parallel index', async () => {

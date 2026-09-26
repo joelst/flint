@@ -86,6 +86,13 @@ import {
 } from './byom-import.js';
 import { createAsyncLogWriter } from './async-log-writer.js';
 import { normalizeChatResponse } from './chat-response.js';
+import {
+  createToolCallAccumulator,
+  finalizeStreamingToolCalls,
+  mergeStreamingToolCalls,
+  sanitizeToolCalls,
+  validateCompletedChatResponse,
+} from './tool-calls.js';
 import { buildInferenceMetrics } from './inference-metrics.js';
 import { summarizeCacheInventory } from './cache-inventory.js';
 import { createHealthRing } from './health-ring.js';
@@ -2294,41 +2301,6 @@ function sanitizeChatContent (content, field, { nullable = false, optional = fal
   });
 }
 
-function sanitizeToolCalls (toolCalls, messageIndex) {
-  if (!Array.isArray(toolCalls) || toolCalls.length === 0 || toolCalls.length > 64) {
-    throw new Error(`messages[${messageIndex}].tool_calls must contain 1 to 64 calls`);
-  }
-  return toolCalls.map((toolCall, toolIndex) => {
-    const field = `messages[${messageIndex}].tool_calls[${toolIndex}]`;
-    if (!isPlainObject(toolCall)
-      || typeof toolCall.id !== 'string'
-      || !toolCall.id.trim()
-      || toolCall.id.length > 256) {
-      throw new Error(`${field}.id must be a non-empty string of at most 256 characters`);
-    }
-    if (toolCall.type !== 'function') {
-      throw new Error(`${field}.type must be "function"`);
-    }
-    if (!isPlainObject(toolCall.function)
-      || typeof toolCall.function.name !== 'string'
-      || !toolCall.function.name.trim()
-      || toolCall.function.name.length > 128) {
-      throw new Error(`${field}.function.name must be a non-empty string of at most 128 characters`);
-    }
-    if (typeof toolCall.function.arguments !== 'string') {
-      throw new Error(`${field}.function.arguments must be a string`);
-    }
-    return {
-      id: toolCall.id,
-      type: 'function',
-      function: {
-        name: toolCall.function.name,
-        arguments: toolCall.function.arguments,
-      },
-    };
-  });
-}
-
 function toSdkMessages (messages) {
   return messages.map((message, index) => {
     if (!isPlainObject(message)) {
@@ -2350,7 +2322,7 @@ function toSdkMessages (messages) {
       );
       const toolCalls = message.tool_calls === undefined
         ? undefined
-        : sanitizeToolCalls(message.tool_calls, index);
+        : sanitizeToolCalls(message.tool_calls, `messages[${index}].tool_calls`);
       if ((content === undefined || content === null) && toolCalls === undefined) {
         throw new Error(`messages[${index}] assistant message requires content or tool_calls`);
       }
@@ -2389,113 +2361,62 @@ function normalizeText (value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
-const MAX_STREAMED_TOOL_CALLS = 64;
-
-function latchToolCallDeltaFailure (target, error) {
-  target.failure ??= error instanceof Error ? error : new Error(String(error));
-}
-
-function appendToolCallDeltaString (current, fragment, field) {
-  if (fragment === undefined) return current;
-  if (typeof fragment !== 'string') {
-    throw new Error(`Streamed tool-call ${field} must be a string`);
-  }
-  return typeof current === 'string' ? current + fragment : fragment;
-}
-
-function mergeToolCallDeltas (target, deltas) {
-  if (target.failure) return target;
-  if (deltas === undefined) return target;
-  if (!Array.isArray(deltas)) {
-    latchToolCallDeltaFailure(target, new Error('Streamed tool_calls must be an array'));
-    return target;
-  }
-  for (const delta of deltas) {
-    try {
-      if (!isPlainObject(delta)) {
-        throw new Error('Streamed tool-call delta must be an object');
-      }
-      let index;
-      if (delta.index === undefined) {
-        if (target.nextIndex >= Number.MAX_SAFE_INTEGER) {
-          throw new Error('Invalid streamed tool-call index');
-        }
-        index = target.nextIndex;
-        target.nextIndex += 1;
-      } else {
-        index = delta.index;
-        if (!Number.isSafeInteger(index) || index < 0 || index >= Number.MAX_SAFE_INTEGER) {
-          throw new Error('Invalid streamed tool-call index');
-        }
-        target.nextIndex = Math.max(target.nextIndex, index + 1);
-      }
-      const existing = target.calls.get(index);
-      if (!existing && target.calls.size >= MAX_STREAMED_TOOL_CALLS) {
-        throw new Error(`Streamed tool_calls cannot contain more than ${MAX_STREAMED_TOOL_CALLS} distinct call indexes`);
-      }
-      const current = existing || {};
-      if (delta.type !== undefined && typeof delta.type !== 'string') {
-        throw new Error('Streamed tool-call type must be a string');
-      }
-      if (current.type !== undefined && delta.type !== undefined && current.type !== delta.type) {
-        throw new Error('Streamed tool-call type fragments must not conflict');
-      }
-      if (delta.function !== undefined && !isPlainObject(delta.function)) {
-        throw new Error('Streamed tool-call function must be an object');
-      }
-      const currentFunction = current.function || {};
-      const nextFunction = delta.function || {};
-      target.calls.set(index, {
-        ...(current.id !== undefined || delta.id !== undefined
-          ? { id: appendToolCallDeltaString(current.id, delta.id, 'id') }
-          : {}),
-        ...(current.type !== undefined || delta.type !== undefined
-          ? { type: current.type ?? delta.type }
-          : {}),
-        ...(current.function !== undefined || delta.function !== undefined
-          ? {
-              function: {
-                ...(currentFunction.name !== undefined || nextFunction.name !== undefined
-                  ? {
-                      name: appendToolCallDeltaString(
-                        currentFunction.name,
-                        nextFunction.name,
-                        'function.name',
-                      ),
-                    }
-                  : {}),
-                ...(currentFunction.arguments !== undefined || nextFunction.arguments !== undefined
-                  ? {
-                      arguments: appendToolCallDeltaString(
-                        currentFunction.arguments,
-                        nextFunction.arguments,
-                        'function.arguments',
-                      ),
-                    }
-                  : {}),
-              },
-            }
-          : {}),
-      });
-    } catch (error) {
-      latchToolCallDeltaFailure(target, error);
-      break;
+function mergeChunkToolCalls (targets, chunk) {
+  const choices = Array.isArray(chunk?.choices) ? chunk.choices : [];
+  for (const [position, choice] of choices.entries()) {
+    const choiceIndex = Number.isSafeInteger(choice?.index) && choice.index >= 0
+      ? choice.index
+      : position;
+    let target = targets.get(choiceIndex);
+    if (!target) {
+      target = createToolCallAccumulator();
+      targets.set(choiceIndex, target);
     }
+    mergeStreamingToolCalls(target, {
+      deltas: choice?.delta?.tool_calls,
+      snapshot: choice?.message?.tool_calls,
+    });
   }
-  return target;
+  if (chunk?.message?.tool_calls !== undefined) {
+    let target = targets.get(0);
+    if (!target) {
+      target = createToolCallAccumulator();
+      targets.set(0, target);
+    }
+    mergeStreamingToolCalls(target, { snapshot: chunk.message.tool_calls });
+  }
 }
 
-function finalizeToolCallDeltas (target) {
-  if (target.failure) throw target.failure;
-  const calls = Array.from(target.calls.entries())
-    .sort(([left], [right]) => left - right)
-    .map(([, call]) => call);
-  if (calls.length === 0) return [];
-  try {
-    return sanitizeToolCalls(calls, 'streamed');
-  } catch (error) {
-    throw new Error(`Invalid streamed assistant tool_calls: ${error?.message || error}`, { cause: error });
+function firstToolCallFailure (targets) {
+  for (const target of targets.values()) {
+    if (target.failure) return target.failure;
   }
+  return null;
+}
+
+function finalizeToolCallChoices (targets, finishReasons) {
+  let primaryCalls = [];
+  for (const [choiceIndex, target] of targets) {
+    const calls = finalizeStreamingToolCalls(target);
+    if (finishReasons.get(choiceIndex) === 'tool_calls' && calls.length === 0) {
+      throw new Error(`Invalid completed assistant tool_calls: choice ${choiceIndex} finished with tool_calls without valid nonempty calls`);
+    }
+    if (choiceIndex === 0) primaryCalls = calls;
+  }
+  if (finishReasons.get(0) === 'tool_calls' && !targets.has(0)) {
+    throw new Error('Invalid completed assistant tool_calls: choice 0 finished with tool_calls without valid nonempty calls');
+  }
+  return primaryCalls;
+}
+
+function mergeStreamFailure (primaryFailure, streamFailure) {
+  if (!primaryFailure) return streamFailure;
+  if (!streamFailure) return primaryFailure;
+  return new AggregateError(
+    [primaryFailure, streamFailure],
+    `${primaryFailure.message}; stream cleanup also failed`,
+    { cause: primaryFailure },
+  );
 }
 
 function segmentTextsFromValue (segments) {
@@ -3673,84 +3594,94 @@ rl.on('line', async (line) => {
           }
           if (shouldStream && typeof client?.completeStreamingChat === 'function') {
             let content = '';
-            const toolCalls = { calls: new Map(), nextIndex: 0 };
-            let chatFinishReason = null;
-            for await (const chunk of client.completeStreamingChat(
-              sdkMessages,
-              payload.tools,
-              { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
-            )) {
-              const usage = chunk?.usage;
-              chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
-              chatTokensOut = usage?.completion_tokens ?? usage?.output_tokens ?? chatTokensOut;
-              if (canceledRequests.has(id)) continue;
-              // finish_reason (like tool_calls below) is only recorded from chunks that
-              // arrive before cancellation is observed. Capturing it unconditionally would
-              // let a drained post-cancel chunk report e.g. finish_reason: 'tool_calls'
-              // while tool_calls itself stays suppressed -- a self-contradictory result.
-              // Usage stays unguarded above: the trailing usage-only chunk is expected
-              // metadata even for a canceled request, not user-visible generation output.
-              // A malformed tool-call fragment latches failure without breaking iteration:
-              // native inference is not canceled, so keep draining until the provider closes
-              // the stream and the session/fencing cleanup has run.
-              mergeToolCallDeltas(toolCalls, chunk?.choices?.[0]?.delta?.tool_calls);
-              if (toolCalls.failure) continue;
-              const finishReason = chunk?.choices?.[0]?.finish_reason;
-              if (finishReason != null) chatFinishReason = finishReason;
-              const deltaText = chunk?.choices?.[0]?.delta?.content;
-              const messageText = chunk?.choices?.[0]?.message?.content ?? chunk?.message?.content;
-              let delta = '';
-              if (typeof deltaText === 'string' && deltaText) {
-                delta = deltaText;
-              } else if (typeof messageText === 'string' && messageText) {
-                // Some runtimes emit cumulative message text instead of token deltas.
-                delta = messageText.startsWith(content)
-                  ? messageText.slice(content.length)
-                  : messageText;
+            const toolCallsByChoice = new Map();
+            const finishReasons = new Map();
+            let streamFailure = null;
+            try {
+              for await (const chunk of client.completeStreamingChat(
+                sdkMessages,
+                payload.tools,
+                { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
+              )) {
+                const usage = chunk?.usage;
+                chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
+                chatTokensOut = usage?.completion_tokens ?? usage?.output_tokens ?? chatTokensOut;
+                if (canceledRequests.has(id)) continue;
+                if (firstToolCallFailure(toolCallsByChoice)) continue;
+                // Completed snapshots and incremental deltas share one bounded accumulator.
+                // A malformed fragment latches failure without breaking iteration: native
+                // inference is not canceled, so keep draining until provider/session cleanup.
+                mergeChunkToolCalls(toolCallsByChoice, chunk);
+                if (firstToolCallFailure(toolCallsByChoice)) continue;
+                const choices = Array.isArray(chunk?.choices) ? chunk.choices : [];
+                for (const [position, choice] of choices.entries()) {
+                  const choiceIndex = Number.isSafeInteger(choice?.index) && choice.index >= 0
+                    ? choice.index
+                    : position;
+                  if (choice?.finish_reason != null) finishReasons.set(choiceIndex, choice.finish_reason);
+                }
+                const deltaText = chunk?.choices?.[0]?.delta?.content;
+                const messageText = chunk?.choices?.[0]?.message?.content ?? chunk?.message?.content;
+                let delta = '';
+                if (typeof deltaText === 'string' && deltaText) {
+                  delta = deltaText;
+                } else if (typeof messageText === 'string' && messageText) {
+                  // Some runtimes emit cumulative message text instead of token deltas.
+                  delta = messageText.startsWith(content)
+                    ? messageText.slice(content.length)
+                    : messageText;
+                }
+                if (delta) {
+                  chatFirstTokenAt ??= Date.now();
+                  content += delta;
+                  send({
+                    id,
+                    stream: true,
+                    delta,
+                    chunk: {
+                      choices: [{ delta: { role: 'assistant', content: delta } }]
+                    }
+                  });
+                }
               }
-              if (delta) {
-                chatFirstTokenAt ??= Date.now();
-                content += delta;
-                send({
-                  id,
-                  stream: true,
-                  delta,
-                  chunk: {
-                    choices: [{ delta: { role: 'assistant', content: delta } }]
-                  }
-                });
-              }
+            } catch (error) {
+              streamFailure = error;
             }
+            const latchedFailure = firstToolCallFailure(toolCallsByChoice);
+            const combinedFailure = mergeStreamFailure(latchedFailure, streamFailure);
+            if (combinedFailure) throw combinedFailure;
             const wasCanceled = canceledRequests.has(id);
-            const compactedToolCalls = wasCanceled && !toolCalls.failure
+            const compactedToolCalls = wasCanceled
               ? []
-              : finalizeToolCallDeltas(toolCalls);
+              : finalizeToolCallChoices(toolCallsByChoice, finishReasons);
+            const chatFinishReason = finishReasons.get(0) ?? null;
             const publishedFinishReason = wasCanceled && chatFinishReason === 'tool_calls'
               ? null
               : chatFinishReason;
             chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
+            const normalizedStreamResult = validateCompletedChatResponse(normalizeChatResponse({
+              choices: [{
+                finish_reason: publishedFinishReason,
+                message: {
+                  role: 'assistant',
+                  content,
+                  ...(compactedToolCalls.length ? { tool_calls: compactedToolCalls } : {}),
+                },
+              }],
+              ...(typeof chatTokensIn === 'number' || typeof chatTokensOut === 'number'
+                ? {
+                    usage: {
+                      ...(typeof chatTokensIn === 'number' ? { prompt_tokens: chatTokensIn } : {}),
+                      ...(typeof chatTokensOut === 'number' ? { completion_tokens: chatTokensOut } : {}),
+                    },
+                  }
+                : {}),
+            }));
             chatOk = true;
             reply({
               ok: true,
               result: {
-                ...normalizeChatResponse({
-                  choices: [{
-                    finish_reason: publishedFinishReason,
-                    message: {
-                      role: 'assistant',
-                      content,
-                      ...(compactedToolCalls.length ? { tool_calls: compactedToolCalls } : {}),
-                    },
-                  }],
-                  ...(typeof chatTokensIn === 'number' || typeof chatTokensOut === 'number'
-                    ? {
-                        usage: {
-                          ...(typeof chatTokensIn === 'number' ? { prompt_tokens: chatTokensIn } : {}),
-                          ...(typeof chatTokensOut === 'number' ? { completion_tokens: chatTokensOut } : {}),
-                        },
-                      }
-                    : {}),
-                }),
+                ...normalizedStreamResult,
                 acceleration: {
                   requested: preferred?.requested ?? null,
                   preferredApplied: preferred?.applied ?? null,
@@ -3775,7 +3706,7 @@ rl.on('line', async (line) => {
               });
               return;
             }
-            const normalizedResult = normalizeChatResponse(result);
+            const normalizedResult = validateCompletedChatResponse(normalizeChatResponse(result));
             chatTokensIn = normalizedResult?.usage?.prompt_tokens
               ?? normalizedResult?.usage?.input_tokens ?? null;
             chatTokensOut = normalizedResult?.usage?.completion_tokens
@@ -3819,29 +3750,50 @@ rl.on('line', async (line) => {
             });
           } else if (typeof client?.completeStreamingChat === 'function') {
             let content = '';
-            const toolCalls = { calls: new Map(), nextIndex: 0 };
-            let chatFinishReason = null;
-            for await (const chunk of client.completeStreamingChat(
-              sdkMessages,
-              payload.tools,
-              { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
-            )) {
-              const usage = chunk?.usage;
-              chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
-              chatTokensOut = usage?.completion_tokens ?? usage?.output_tokens ?? chatTokensOut;
-              if (canceledRequests.has(id)) continue;
-              // See the equivalent SDK-path comment above: finish_reason must not be
-              // captured from a drained post-cancel chunk.
-              mergeToolCallDeltas(toolCalls, chunk?.choices?.[0]?.delta?.tool_calls);
-              if (toolCalls.failure) continue;
-              const finishReason = chunk?.choices?.[0]?.finish_reason;
-              if (finishReason != null) chatFinishReason = finishReason;
-              const delta = chunk?.choices?.[0]?.delta?.content || '';
-              if (delta) {
-                chatFirstTokenAt ??= Date.now();
-                content += delta;
+            const toolCallsByChoice = new Map();
+            const finishReasons = new Map();
+            let streamFailure = null;
+            try {
+              for await (const chunk of client.completeStreamingChat(
+                sdkMessages,
+                payload.tools,
+                { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
+              )) {
+                const usage = chunk?.usage;
+                chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
+                chatTokensOut = usage?.completion_tokens ?? usage?.output_tokens ?? chatTokensOut;
+                if (canceledRequests.has(id)) continue;
+                if (firstToolCallFailure(toolCallsByChoice)) continue;
+                mergeChunkToolCalls(toolCallsByChoice, chunk);
+                if (firstToolCallFailure(toolCallsByChoice)) continue;
+                const choices = Array.isArray(chunk?.choices) ? chunk.choices : [];
+                for (const [position, choice] of choices.entries()) {
+                  const choiceIndex = Number.isSafeInteger(choice?.index) && choice.index >= 0
+                    ? choice.index
+                    : position;
+                  if (choice?.finish_reason != null) finishReasons.set(choiceIndex, choice.finish_reason);
+                }
+                const deltaText = chunk?.choices?.[0]?.delta?.content;
+                const messageText = chunk?.choices?.[0]?.message?.content ?? chunk?.message?.content;
+                let delta = '';
+                if (typeof deltaText === 'string' && deltaText) {
+                  delta = deltaText;
+                } else if (typeof messageText === 'string' && messageText) {
+                  delta = messageText.startsWith(content)
+                    ? messageText.slice(content.length)
+                    : messageText;
+                }
+                if (delta) {
+                  chatFirstTokenAt ??= Date.now();
+                  content += delta;
+                }
               }
+            } catch (error) {
+              streamFailure = error;
             }
+            const latchedFailure = firstToolCallFailure(toolCallsByChoice);
+            const combinedFailure = mergeStreamFailure(latchedFailure, streamFailure);
+            if (combinedFailure) throw combinedFailure;
             if (canceledRequests.has(id)) {
               reply({
                 error: 'The chat response was discarded after cancellation; native inference may have continued.',
@@ -3849,7 +3801,8 @@ rl.on('line', async (line) => {
               });
               return;
             }
-            const compactedToolCalls = finalizeToolCallDeltas(toolCalls);
+            const compactedToolCalls = finalizeToolCallChoices(toolCallsByChoice, finishReasons);
+            const chatFinishReason = finishReasons.get(0) ?? null;
             chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
             if (canceledRequests.has(id)) {
               reply({
@@ -3858,28 +3811,29 @@ rl.on('line', async (line) => {
               });
               return;
             }
+            const normalizedStreamResult = validateCompletedChatResponse(normalizeChatResponse({
+              choices: [{
+                finish_reason: chatFinishReason,
+                message: {
+                  role: 'assistant',
+                  content,
+                  ...(compactedToolCalls.length ? { tool_calls: compactedToolCalls } : {}),
+                },
+              }],
+              ...(typeof chatTokensIn === 'number' || typeof chatTokensOut === 'number'
+                ? {
+                    usage: {
+                      ...(typeof chatTokensIn === 'number' ? { prompt_tokens: chatTokensIn } : {}),
+                      ...(typeof chatTokensOut === 'number' ? { completion_tokens: chatTokensOut } : {}),
+                    },
+                  }
+                : {}),
+            }));
             chatOk = true;
             reply({
               ok: true,
               result: {
-                ...normalizeChatResponse({
-                  choices: [{
-                    finish_reason: chatFinishReason,
-                    message: {
-                      role: 'assistant',
-                      content,
-                      ...(compactedToolCalls.length ? { tool_calls: compactedToolCalls } : {}),
-                    },
-                  }],
-                  ...(typeof chatTokensIn === 'number' || typeof chatTokensOut === 'number'
-                    ? {
-                        usage: {
-                          ...(typeof chatTokensIn === 'number' ? { prompt_tokens: chatTokensIn } : {}),
-                          ...(typeof chatTokensOut === 'number' ? { completion_tokens: chatTokensOut } : {}),
-                        },
-                      }
-                    : {}),
-                }),
+                ...normalizedStreamResult,
                 acceleration: {
                   requested: preferred?.requested ?? null,
                   preferredApplied: preferred?.applied ?? null,
@@ -3933,7 +3887,7 @@ rl.on('line', async (line) => {
             });
             return;
           }
-          const normalizedHttpResult = normalizeChatResponse(httpResult);
+          const normalizedHttpResult = validateCompletedChatResponse(normalizeChatResponse(httpResult));
           chatTokensIn = normalizedHttpResult?.usage?.prompt_tokens
             ?? normalizedHttpResult?.usage?.input_tokens ?? null;
           chatTokensOut = normalizedHttpResult?.usage?.completion_tokens

@@ -22,6 +22,14 @@ contracts. They create a fresh session for each operation, so the migration does
 not implicitly change Flint's conversation-history ownership or streaming
 cancellation behavior.
 
+Completed assistant tool calls are structurally validated on every chat
+transport before Flint reports success or emits a synthetic buffered delta.
+Streaming accepts incremental `delta.tool_calls` and cumulative
+`message.tool_calls` snapshots, reconciles compatible representations, and
+rejects conflicts. Each call is limited to 256 ID characters, 128 function-name
+characters, and 64 KiB of UTF-8 function arguments; a response may contain at
+most 64 distinct calls.
+
 The current audio code classifies the loaded model before attempting the
 `AudioSession` URI shape. Whisper-family models use the proven one-shot URI
 request; known Nemotron and Parakeet families skip that unsupported shape and
