@@ -168,15 +168,110 @@ describe('assembleLongAudioTranscript', () => {
     expect(status).not.toContain('silent');
   });
 
-  it('reports a clean completion without qualification wording', () => {
-    const status = buildLongAudioCompletionStatus({
-      ...assembleLongAudioTranscript([
+  it.each([
+    {
+      name: 'one clean source window',
+      totalChunks: 1,
+      result: assembleLongAudioTranscript([
         { window: window(0, 0, 20, { hardSplitEnd: false }), status: 'success', text: 'clean' },
       ]),
+      expected: 'Transcription complete (1 segment via native audio session)',
+    },
+    {
+      name: 'multiple clean source windows',
+      totalChunks: 2,
+      result: assembleLongAudioTranscript([
+        { window: window(0, 0, 28), status: 'success', text: 'first' },
+        { window: window(1, 24, 40, { hardSplitEnd: false }), status: 'success', text: 'second' },
+      ]),
+      expected: 'Transcription complete (2 segments via native audio session)',
+    },
+    {
+      name: 'one overlap-only source window',
       totalChunks: 1,
-    });
-    expect(status).toBe('Transcription complete (1 segments)');
-    expect(status).not.toContain('incomplete');
-    expect(status).not.toContain('qualification');
+      result: {
+        ...assembleLongAudioTranscript([]),
+        overlapOnlyRanges: [{ startSec: 0, endSec: 28 }],
+      },
+      expected:
+        'Transcription complete with qualifications: 1 overlap-only window added no new text after deduplication (1 segment via native audio session)',
+    },
+    {
+      name: 'multiple source windows with overlap-only recognition',
+      totalChunks: 2,
+      result: assembleLongAudioTranscript([
+        { window: window(0, 0, 28), status: 'success', text: 'repeat phrase' },
+        { window: window(1, 24, 52, { hardSplitEnd: false }), status: 'success', text: 'repeat phrase' },
+      ]),
+      expected:
+        'Transcription complete with qualifications: 1 overlap-only window added no new text after deduplication (2 segments via native audio session)',
+    },
+    {
+      name: 'one empty-recognition source window',
+      totalChunks: 1,
+      result: assembleLongAudioTranscript([
+        { window: window(0, 0, 20, { hardSplitEnd: false }), status: 'success', text: '' },
+      ]),
+      expected:
+        'Transcription complete with qualifications: 1 successfully processed window recognized no text (1 segment via native audio session)',
+    },
+    {
+      name: 'multiple source windows with empty recognition',
+      totalChunks: 2,
+      result: assembleLongAudioTranscript([
+        { window: window(0, 0, 28), status: 'success', text: 'recognized' },
+        { window: window(1, 24, 40, { hardSplitEnd: false }), status: 'success', text: '' },
+      ]),
+      expected:
+        'Transcription complete with qualifications: 1 successfully processed window recognized no text (2 segments via native audio session)',
+    },
+    {
+      name: 'one failed source window',
+      totalChunks: 1,
+      result: assembleLongAudioTranscript([
+        { window: window(0, 0, 20, { hardSplitEnd: false }), status: 'failed', uncertain: false },
+      ]),
+      expected:
+        'Transcription incomplete: 1 of 1 segment failed. The text below is missing those parts. via native audio session',
+    },
+    {
+      name: 'one failure among multiple source windows',
+      totalChunks: 2,
+      result: assembleLongAudioTranscript([
+        { window: window(0, 0, 28), status: 'success', text: 'recognized' },
+        { window: window(1, 24, 40, { hardSplitEnd: false }), status: 'failed', uncertain: false },
+      ]),
+      expected:
+        'Transcription incomplete: 1 of 2 segments failed. The text below is missing those parts. via native audio session',
+    },
+    {
+      name: 'one uncertain failed source window',
+      totalChunks: 1,
+      result: assembleLongAudioTranscript([
+        { window: window(0, 0, 20, { hardSplitEnd: false }), status: 'failed', uncertain: true },
+      ]),
+      expected:
+        'Transcription incomplete: 1 of 1 segment did not complete (1 had uncertain outcomes and 0 were not processed). The text below is missing those parts. via native audio session',
+    },
+    {
+      name: 'one unprocessed source window among multiple windows',
+      totalChunks: 2,
+      result: assembleLongAudioTranscript([
+        { window: window(0, 0, 28), status: 'success', text: 'recognized' },
+        { window: window(1, 24, 40, { hardSplitEnd: false }), status: 'unprocessed' },
+      ]),
+      expected:
+        'Transcription incomplete: 1 of 2 segments did not complete (1 were not processed). The text below is missing those parts. via native audio session',
+    },
+  ])('reports $name with path wording and source-window plurality', ({
+    result,
+    totalChunks,
+    expected,
+  }) => {
+    const status = buildLongAudioCompletionStatus(
+      { ...result, totalChunks },
+      ' via native audio session',
+    );
+    expect(status).toBe(expected);
   });
 });

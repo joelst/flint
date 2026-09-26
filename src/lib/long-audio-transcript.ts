@@ -157,14 +157,15 @@ export function buildLongAudioCompletionStatus(
   const failed = Number(result.failedChunks || 0);
   const uncertain = Number(result.uncertainChunks || 0);
   const unprocessed = Number(result.unprocessedChunks || 0);
-  const totalSegments = Number(result.totalChunks || 0);
+  const totalChunks = Number(result.totalChunks || 0);
+  const segmentLabel = totalChunks === 1 ? 'segment' : 'segments';
   if (failed > 0) {
     const detail =
       uncertain > 0
-        ? `${failed} of ${totalSegments} segments did not complete (${uncertain} had uncertain outcomes and ${unprocessed} were not processed)`
+        ? `${failed} of ${totalChunks} ${segmentLabel} did not complete (${uncertain} had uncertain outcomes and ${unprocessed} were not processed)`
         : unprocessed > 0
-          ? `${failed} of ${totalSegments} segments did not complete (${unprocessed} were not processed)`
-          : `${failed} of ${totalSegments} segments failed`;
+          ? `${failed} of ${totalChunks} ${segmentLabel} did not complete (${unprocessed} were not processed)`
+          : `${failed} of ${totalChunks} ${segmentLabel} failed`;
     return `Transcription incomplete: ${detail}. The text below is missing those parts.${path}`;
   }
 
@@ -182,7 +183,7 @@ export function buildLongAudioCompletionStatus(
     );
   }
   if (qualifications.length > 0) {
-    return `Transcription complete with qualifications: ${qualifications.join('; ')} (${totalSegments} segments${path})`;
+    return `Transcription complete with qualifications: ${qualifications.join('; ')} (${totalChunks} ${segmentLabel}${path})`;
   }
-  return `Transcription complete (${totalSegments} segments${path})`;
+  return `Transcription complete (${totalChunks} ${segmentLabel}${path})`;
 }

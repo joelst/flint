@@ -6,6 +6,9 @@ const host = process.env.TAURI_DEV_HOST;
 // https://vite.dev/config/
 export default defineConfig(() => ({
   plugins: [sveltekit()],
+  resolve: {
+    conditions: ['browser'],
+  },
 
   // Externalize the Foundry SDK to avoid browser/Node builtin issues during build.
   // Real usage should move to Tauri commands or sidecar for production.

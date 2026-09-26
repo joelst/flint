@@ -6,6 +6,7 @@
   import MessageRenderer from "$lib/MessageRenderer.svelte";
   import ConversationSidebar from "$lib/ConversationSidebar.svelte";
   import Icon from "$lib/Icon.svelte";
+  import TranscriptViewToggle from "$lib/TranscriptViewToggle.svelte";
   import type { Conversation } from "$lib/ConversationSidebar.svelte";
   import {
     initializeSDK,
@@ -9580,19 +9581,10 @@ Output only the summary text, no preamble.`;
             <div class="transcription-result">
               <h3>Transcription:</h3>
               {#if transcriptionSegments.length > 0}
-                <div class="transcript-toggle">
-                  <button
-                    class="small"
-                    class:secondary={showTimestampedTranscript}
-                    onclick={() => (showTimestampedTranscript = false)}>Plain text</button
-                  >
-                  <button
-                    class="small"
-                    class:secondary={!showTimestampedTranscript}
-                    onclick={() => (showTimestampedTranscript = true)}
-                    >Estimated times ({transcriptionSegments.length})</button
-                  >
-                </div>
+                <TranscriptViewToggle
+                  bind:showTimestampedTranscript
+                  segmentCount={transcriptionSegments.length}
+                />
               {/if}
 
               {#if showTimestampedTranscript && transcriptionSegments.length > 0}
@@ -14071,12 +14063,6 @@ Output only the summary text, no preamble.`;
     font-family: monospace;
     max-height: 200px;
     overflow: auto;
-  }
-
-  .transcript-toggle {
-    display: flex;
-    gap: 6px;
-    margin-bottom: 8px;
   }
 
   .timestamp-note {
