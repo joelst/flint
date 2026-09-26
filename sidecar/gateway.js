@@ -55,6 +55,9 @@ const MAX_USAGE_METRICS_CHARS = 64 * 1024;
 const multipartModel = Symbol('multipartModel');
 const multipartPrefix = Symbol('multipartPrefix');
 const multipartEnded = Symbol('multipartEnded');
+const NOT_MULTIPART = Symbol('notMultipart');
+const TRANSCRIPTION_REQUIRES_MULTIPART =
+  'Audio transcription requires a multipart/form-data body with an audio file.';
 
 /**
  * Classify OpenAI-compatible routes for metadata-only access logging.
@@ -63,22 +66,25 @@ const multipartEnded = Symbol('multipartEnded');
  * grouped together without matching unrelated names that merely contain it.
  */
 export function classifyGatewayRoute (urlPath) {
-  const path = String(urlPath || '').split('?')[0];
+  // Foundry's router collapses empty segments (`/v1/audio//transcriptions` routes), so the
+  // classification must too, or a doubled slash would bypass the speech guard.
+  const path = String(urlPath || '').split(/[?#]/)[0].replace(/\/{2,}/g, '/');
   if (/(^|\/)chat\/completions(\/|$)/.test(path)) return 'chat';
   if (/(^|\/)embeddings(\/|$)/.test(path)) return 'embeddings';
-  if (/(^|\/)audio\/transcriptions(\/|$)/.test(path)) return 'speech';
+  if (/(^|\/)audio\/transcriptions(\/|$)/i.test(path)) return 'speech';
   if (/(^|\/)models(\/|$)/.test(path)) return 'models';
   return 'other';
 }
 
 /**
- * Returns undefined while the leading field is incomplete, null when it is not `model`, or
- * the submitted model value once its terminating boundary is available.
+ * Returns undefined while the leading field is incomplete, NOT_MULTIPART when the body does
+ * not open with its declared boundary, null when the first part is not `model`, or the
+ * submitted model value once its terminating boundary is available.
  */
 function extractLeadingMultipartModel (body, boundary) {
   const opening = `--${boundary}\r\n`;
   if (!body.startsWith(opening)) {
-    return body.length < opening.length && opening.startsWith(body) ? undefined : null;
+    return body.length < opening.length && opening.startsWith(body) ? undefined : NOT_MULTIPART;
   }
   const headersEnd = body.indexOf('\r\n\r\n', opening.length);
   if (headersEnd < 0) return undefined;
@@ -324,6 +330,14 @@ export function createGateway (options) {
     req.resume();
   }
 
+  /** A transcription request that must not reach Foundry. Nothing was leased or forwarded. */
+  function refuseTranscription (req, res, status) {
+    res.writeHead(status, { 'content-type': 'application/json', connection: 'close' });
+    res.end(openAiError(TRANSCRIPTION_REQUIRES_MULTIPART, 'invalid_request_error'));
+    req.resume();
+    return ABORTED;
+  }
+
   /**
    * @param {(model: string) => boolean} [setActivityModel] moves the request's lease to
    *        `model`; false means the owner refused it, and the request must not load or replay.
@@ -406,6 +420,24 @@ export function createGateway (options) {
    * @returns {Promise<string|null|typeof ABORTED>}
    */
   function maybeBufferBody (req, res) {
+    const contentType = Array.isArray(req.headers['content-type'])
+      ? req.headers['content-type'][0]
+      : req.headers['content-type'];
+    if (classifyGatewayRoute(req.url) === 'speech') {
+      // Foundry's transcription route ignores Content-Type and reads any JSON body's
+      // `filename` as a path on this machine. Only a body that opens with its multipart
+      // boundary (never valid JSON) may reach it, and nothing else is buffered or loaded.
+      if (typeof contentType !== 'string' || !/^multipart\/form-data(?:;|$)/i.test(contentType)) {
+        return Promise.resolve(refuseTranscription(req, res, 415));
+      }
+      return peekMultipartModel(req).then(model => {
+        if (model === ABORTED) return ABORTED;
+        if (model === NOT_MULTIPART) return refuseTranscription(req, res, 400);
+        req[multipartModel] = model;
+        return null;
+      });
+    }
+
     const declared = Number(req.headers['content-length']);
     const wanted = autoload && shouldBufferBody({
       method: req.method,
@@ -413,22 +445,6 @@ export function createGateway (options) {
       contentLength: Number.isFinite(declared) ? declared : null,
       maxBytes: bufferedBodyLimit,
     }) && autoloadAllowedFor(req);
-
-    const contentType = Array.isArray(req.headers['content-type'])
-      ? req.headers['content-type'][0]
-      : req.headers['content-type'];
-    if (
-      !wanted
-      && classifyGatewayRoute(req.url) === 'speech'
-      && typeof contentType === 'string'
-      && /^multipart\/form-data(?:;|$)/i.test(contentType)
-    ) {
-      return peekMultipartModel(req).then(model => {
-        if (model === ABORTED) return ABORTED;
-        req[multipartModel] = model;
-        return null;
-      });
-    }
     if (!wanted) return Promise.resolve(null);
 
     return new Promise(resolve2 => {
@@ -466,7 +482,8 @@ export function createGateway (options) {
   /**
    * Peek only the leading multipart field so we can lease known speech work without buffering
    * or replaying the audio upload. Flint's own probe writes `model` first; requests whose first
-   * part is anything else remain opaque pass-through traffic.
+   * part is anything else remain opaque pass-through traffic. A missing boundary or a body
+   * that does not open with it resolves to NOT_MULTIPART and is never forwarded.
    */
   function peekMultipartModel (req) {
     const contentType = Array.isArray(req.headers['content-type'])
@@ -476,7 +493,7 @@ export function createGateway (options) {
       ? /(?:^|;)\s*boundary\s*=\s*(?:"([^"]+)"|([^;\s]+))/i.exec(contentType)
       : null;
     const boundary = boundaryMatch?.[1] || boundaryMatch?.[2];
-    if (!boundary) return Promise.resolve(null);
+    if (!boundary) return Promise.resolve(NOT_MULTIPART);
 
     return new Promise(resolve2 => {
       const chunks = [];
@@ -495,7 +512,8 @@ export function createGateway (options) {
       };
       const onEnd = () => {
         req[multipartEnded] = true;
-        finish(null);
+        const body = Buffer.concat(chunks).toString('latin1');
+        finish(body.startsWith(`--${boundary}\r\n`) ? null : NOT_MULTIPART);
       };
       const onAbort = () => finish(ABORTED);
       const onData = chunk => {
