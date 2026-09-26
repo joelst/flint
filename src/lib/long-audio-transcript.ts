@@ -26,7 +26,8 @@ export function normalizeTranscriptText(value: string): string {
 }
 
 function comparableWord(word: string): string {
-  return word.toLocaleLowerCase();
+  // Overlap matching must not depend on the host locale.
+  return word.toLowerCase();
 }
 
 export function findWordOverlapTailPrefix(

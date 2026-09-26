@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { TranscriptionWindow } from './audio-segmentation';
 import {
   assembleLongAudioTranscript,
   buildLongAudioCompletionStatus,
+  findWordOverlapTailPrefix,
   type TranscriptionWindowOutcome,
 } from './long-audio-transcript';
 
@@ -284,5 +285,53 @@ describe('assembleLongAudioTranscript', () => {
       ' via native audio session',
     );
     expect(status).toBe(expected);
+  });
+});
+
+describe('overlap matching locale independence', () => {
+  /**
+   * Makes a no-argument `toLocaleLowerCase()` behave as it does for a user whose
+   * host locale is Turkish, where `I` lowercases to the dotless `ı`. CI runs in an
+   * ASCII-equivalent locale, so without this the regression is simply unreachable.
+   */
+  function withTurkishHostLocale<T>(run: () => T): T {
+    const nativeLower = String.prototype.toLocaleLowerCase;
+    expect(nativeLower.call('I', 'tr-TR')).toBe('\u0131');
+
+    const spy = vi
+      .spyOn(String.prototype, 'toLocaleLowerCase')
+      .mockImplementation(function (this: string, locales?: unknown) {
+        const usesHostDefault =
+          locales === undefined || (Array.isArray(locales) && locales.length === 0);
+        return nativeLower.call(this, usesHostDefault ? 'tr-TR' : (locales as string));
+      });
+
+    try {
+      return run();
+    } finally {
+      spy.mockRestore();
+    }
+  }
+
+  it.each([
+    { name: 'ASCII I against ASCII i', tail: 'I', head: 'i', expected: 1 },
+    { name: 'dotted capital against ASCII i', tail: '\u0130', head: 'i', expected: 0 },
+    { name: 'ASCII I against dotless i', tail: 'I', head: '\u0131', expected: 0 },
+    { name: 'dotted capital against combining form', tail: '\u0130', head: 'i\u0307', expected: 1 },
+  ])('folds $name the same way regardless of host locale', ({ tail, head, expected }) => {
+    const overlap = withTurkishHostLocale(() =>
+      findWordOverlapTailPrefix(`before ${tail}`, `${head} after`),
+    );
+    expect(overlap).toBe(expected);
+  });
+
+  it('removes a duplicated overlap word without lowercasing the transcript', () => {
+    const assembled = withTurkishHostLocale(() =>
+      assembleLongAudioTranscript([
+        { window: window(0, 0, 28), status: 'success', text: 'we said I' },
+        { window: window(1, 24, 52, { hardSplitEnd: false }), status: 'success', text: 'i agree' },
+      ]),
+    );
+    expect(assembled.text).toBe('we said I agree');
   });
 });
