@@ -2608,6 +2608,40 @@ describe('foundry-sidecar command schema validation', () => {
     expect(String(res.error)).toContain('invalid');
   });
 
+  it('rejects required and forced tool choices without matching nonempty definitions before initialization', async () => {
+    const cases = [
+      {
+        toolChoice: 'required',
+        expected: /requires.*nonempty.*tools/i,
+      },
+      {
+        tools: [],
+        toolChoice: { type: 'function', function: { name: 'read_status' } },
+        expected: /requires.*nonempty.*tools/i,
+      },
+      {
+        tools: [{ type: 'function', function: { name: 'other_tool' } }],
+        toolChoice: { type: 'function', function: { name: 'read_status' } },
+        expected: /match.*declared/i,
+      },
+    ];
+    for (const [offset, testCase] of cases.entries()) {
+      const id = 4751 + offset;
+      proc.stdin.write(`${JSON.stringify({
+        id,
+        cmd: 'chatCompletion',
+        model: 'm',
+        messages: [{ role: 'user', content: 'hi' }],
+        ...(testCase.tools !== undefined ? { tools: testCase.tools } : {}),
+        toolChoice: testCase.toolChoice,
+      })}\n`);
+      const res = await waitForLine(proc, (msg) => msg.id === id);
+      expect(res.ok).not.toBe(true);
+      expect(String(res.error)).toMatch(testCase.expected);
+      expect(String(res.error)).not.toMatch(/initialized|init first/i);
+    }
+  });
+
   it('rejects malformed tool messages before initialization or model dispatch', async () => {
     const cases = [
       {
@@ -3120,6 +3154,7 @@ describe('transcribeAudio AudioSession path', () => {
       '}',
       'class FakeAudioSession {',
       '  constructor(model) {',
+      "    note('audioSession-constructed');",
       `    if (${JSON.stringify(audioSessionMode)} === 'construction-throws') throw new TypeError('unsupported task');`,
       '    this.model = model;',
       '  }',
@@ -3161,7 +3196,10 @@ describe('transcribeAudio AudioSession path', () => {
   const send = (msg: object) => proc.stdin.write(`${JSON.stringify(msg)}\n`);
   const reply = (id: number) => waitForLine(proc, (msg) => msg.id === id, 10000);
 
-  async function startSidecar(audioSessionMode: 'success' | 'construction-throws' | 'request-throws') {
+  async function startSidecar(
+    audioSessionMode: 'success' | 'construction-throws' | 'request-throws',
+    alias = 'fake-model',
+  ) {
     homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-audiosession-'));
     eventLog = join(homeDir, 'events.log');
     const corePath = join(homeDir, 'fake-core.dylib');
@@ -3197,7 +3235,7 @@ describe('transcribeAudio AudioSession path', () => {
     send({ id: 1, cmd: 'init', appName: 'flint-test', logLevel: 'info' });
     expect((await init).ok).toBe(true);
     const loaded = reply(2);
-    send({ id: 2, cmd: 'load', alias: 'fake-model' });
+    send({ id: 2, cmd: 'load', alias });
     expect((await loaded).ok).toBe(true);
   }
 
@@ -3215,7 +3253,7 @@ describe('transcribeAudio AudioSession path', () => {
   }
 
   it('uses the AudioSession result when the model supports it (Whisper-like)', async () => {
-    await startSidecar('success');
+    await startSidecar('success', 'whisper-base');
     const transcribed = reply(3);
     send({
       id: 3,
@@ -3223,7 +3261,7 @@ describe('transcribeAudio AudioSession path', () => {
       audioBase64: wavBase64(),
       mimeType: 'audio/wav',
       fileName: 'probe.wav',
-      model: 'fake-model',
+      model: 'whisper-base',
       language: 'en',
     });
     const res = await transcribed;
@@ -3234,8 +3272,11 @@ describe('transcribeAudio AudioSession path', () => {
     expect(events()).not.toContain('legacy-transcribe');
   }, 30000);
 
-  it('falls back to the legacy AudioClient path when AudioSession construction throws (Nemotron/Parakeet-like)', async () => {
-    await startSidecar('construction-throws');
+  it.each([
+    'nemotron-3.5-asr-streaming-0.6b',
+    'parakeet-tdt-0.6b-v3',
+  ])('never constructs AudioSession for the known unsupported %s family', async (alias) => {
+    await startSidecar('construction-throws', alias);
     const transcribed = reply(3);
     send({
       id: 3,
@@ -3243,7 +3284,7 @@ describe('transcribeAudio AudioSession path', () => {
       audioBase64: wavBase64(),
       mimeType: 'audio/wav',
       fileName: 'probe.wav',
-      model: 'fake-model',
+      model: alias,
       language: 'en',
     });
     const res = await transcribed;
@@ -3251,9 +3292,10 @@ describe('transcribeAudio AudioSession path', () => {
     expect(res.result.text).toContain('legacy hello world transcript');
     expect(res.result.transcriptionPath).not.toBe('audioSession');
     expect(events()).toContain('legacy-transcribe');
+    expect(events()).not.toContain('audioSession-constructed');
   }, 30000);
 
-  it('falls back to the legacy AudioClient path when the AudioSession request itself fails (Nemotron/Parakeet-like)', async () => {
+  it('probes AudioSession for an unknown family and falls back after request failure', async () => {
     await startSidecar('request-throws');
     const transcribed = reply(3);
     send({
@@ -3269,6 +3311,7 @@ describe('transcribeAudio AudioSession path', () => {
     expect(res.ok).toBe(true);
     expect(res.result.text).toContain('legacy hello world transcript');
     expect(res.result.transcriptionPath).not.toBe('audioSession');
+    expect(events()).toContain('audioSession-constructed');
     expect(events()).toContain('legacy-transcribe');
   }, 30000);
 });
@@ -3307,7 +3350,7 @@ describe('chatCompletion ChatSession path', () => {
   //                           already are. Gating on the signal file (rather than a fixed
   //                           delay) makes the ordering deterministic instead of depending on
   //                           IPC round-trip speed on a loaded CI runner.
-  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'legacy-buffered-fixture' | 'legacy-buffered-only-fixture' | 'legacy-stream-only-fixture' | 'session-no-legacy' | 'session-error' | 'session-error-with-legacy' | 'session-error-dispose' | 'session-abort' | 'session-empty-output' | 'session-stream-empty' | 'session-stream-fixture' | 'session-stream-fixture-dispose-error' | 'session-buffered-fixture' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error' | 'session-buffered-tool-cancel' | 'session-stream-tool' | 'session-stream-tool-outoforder' | 'session-stream-tool-high-index' | 'session-stream-tool-cancel';
+  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'legacy-buffered-fixture' | 'legacy-buffered-only-fixture' | 'legacy-stream-only-fixture' | 'session-no-legacy' | 'session-error' | 'session-error-with-legacy' | 'session-error-dispose' | 'session-abort' | 'session-empty-output' | 'session-stream-empty' | 'session-stream-fixture' | 'session-stream-fixture-dispose-error' | 'session-stream-provider-cancel' | 'session-buffered-fixture' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error' | 'session-buffered-tool-cancel' | 'session-stream-tool' | 'session-stream-tool-outoforder' | 'session-stream-tool-high-index' | 'session-stream-tool-cancel';
   function fakeSdk(sdkMode: ChatFakeSdkMode) {
     const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only' || sdkMode === 'legacy-buffered-fixture' || sdkMode === 'legacy-buffered-only-fixture' || sdkMode === 'legacy-stream-only-fixture' || sdkMode === 'session-error-with-legacy';
     const legacyStreamOnly = sdkMode === 'legacy-stream-only-fixture';
@@ -3322,7 +3365,7 @@ describe('chatCompletion ChatSession path', () => {
       "  constructor() { this.id = 'fake-variant'; this.loaded = false; }",
       '  async load() { this.loaded = true; }',
       '  isLoaded() { return this.loaded; }',
-      "  getExecutionProvider() { note('provider-probe'); return 'CPUExecutionProvider'; }",
+      `  async getExecutionProvider() { note('provider-probe'); if (${JSON.stringify(sdkMode)} === 'session-stream-provider-cancel' && fs.readFileSync(process.env.FLINT_TEST_EVENT_LOG, 'utf8').includes('stream-finished')) { note('provider-probe-waiting'); await awaitSignal(); } return 'CPUExecutionProvider'; }`,
       hasLegacy ? '  createChatClient() {' : '  // no createChatClient() in this mode',
       hasLegacy ? '    return {' : '',
       hasLegacy ? '      settings: {},' : '',
@@ -3372,7 +3415,7 @@ describe('chatCompletion ChatSession path', () => {
       `        if (['session-error', 'session-error-with-legacy', 'session-error-dispose'].includes(${JSON.stringify(sdkMode)})) throw new Error('native stream failed');`,
       `        if (${JSON.stringify(sdkMode)} === 'session-abort') { const e = new Error('native stream aborted'); e.name = 'AbortError'; throw e; }`,
       `        if (${JSON.stringify(sdkMode)} === 'session-stream-empty') return;`,
-      `        if (['session-stream-fixture', 'session-stream-fixture-dispose-error'].includes(${JSON.stringify(sdkMode)})) { for (const step of streamSteps()) { if (step.note) note(step.note); if (step.waitForSignal) await awaitSignal(); if (step.chunk) yield { type: 'text', textType: 'openai-json', text: JSON.stringify(step.chunk) }; } return; }`,
+      `        if (['session-stream-fixture', 'session-stream-fixture-dispose-error', 'session-stream-provider-cancel'].includes(${JSON.stringify(sdkMode)})) { for (const step of streamSteps()) { if (step.note) note(step.note); if (step.waitForSignal) await awaitSignal(); if (step.chunk) yield { type: 'text', textType: 'openai-json', text: JSON.stringify(step.chunk) }; } note('stream-finished'); return; }`,
       "        yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { content: 'session ' } }] }) };",
       `        if (${JSON.stringify(sdkMode)} === 'session-stream-tool') yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-1', type: 'function', function: { name: 'read_status', arguments: '{' } }] } }] }) };`,
       `        if (${JSON.stringify(sdkMode)} === 'session-stream-tool') yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '}' } }] } }] }) };`,
@@ -4211,6 +4254,51 @@ describe('chatCompletion ChatSession path', () => {
     expect(events()).toContain('cancel-drained');
   }, 30000);
 
+  it('rechecks cancellation after provider detection before publishing the terminal stream result', async () => {
+    await startSidecar('session-stream-provider-cancel');
+    setStreamSteps([
+      {
+        chunk: {
+          choices: [{
+            delta: {
+              content: 'partial text',
+              tool_calls: [{
+                index: 0,
+                id: 'call-1',
+                type: 'function',
+                function: { name: 'read_status', arguments: '{}' },
+              }],
+            },
+            finish_reason: 'tool_calls',
+          }],
+        },
+      },
+    ]);
+    const streamed = waitForLine(proc, (msg) => msg.id === 42 && msg.stream === true, 10000);
+    const chatted = waitForLine(proc, (msg) => msg.id === 42 && !msg.stream, 10000);
+    send({
+      id: 42,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use a tool' }],
+      stream: true,
+    });
+    await streamed;
+    while (!events().includes('provider-probe-waiting')) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const cancelReply = reply(43);
+    send({ id: 43, cmd: 'cancelChatRequest', requestId: 42 });
+    expect((await cancelReply).ok).toBe(true);
+    writeFileSync(cancelSignalPath, '');
+    const res = await chatted;
+    expect(res.ok).toBe(true);
+    expect(res.result.choices[0].message.content).toBe('partial text');
+    expect(res.result.choices[0].message.tool_calls).toBeUndefined();
+    expect(res.result.choices[0].finish_reason).toBeNull();
+    expect(events()).toContain('session-chat-disposed');
+  }, 30000);
+
   it('rejects malformed tool calls in the buffered stream-derived fallback branch', async () => {
     await startSidecar('legacy-stream-only-fixture');
     setStreamSteps([
@@ -4640,6 +4728,7 @@ describe('chatCompletion ChatSession path', () => {
       cmd: 'chatCompletion',
       model: 'fake-model',
       messages: [{ role: 'user', content: 'hi' }],
+      tools: [{ type: 'function', function: { name: 'read_status' } }],
       toolChoice: 'required',
       responseFormat: { type: 'json_object' },
     });

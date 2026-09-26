@@ -91,8 +91,15 @@ export function validateCompletedChatResponse (response) {
   };
 }
 
-export function createToolCallAccumulator () {
-  return { calls: new Map(), snapshotOnly: new Set(), nextIndex: 0, failure: null };
+export function createToolCallAccumulator ({ utf8ByteLength: measureUtf8 = utf8ByteLength } = {}) {
+  return {
+    calls: new Map(),
+    snapshots: new Map(),
+    snapshotOrder: [],
+    nextIndex: 0,
+    failure: null,
+    measureUtf8,
+  };
 }
 
 function appendLimitedString (current, fragment, field, maxLength) {
@@ -105,24 +112,25 @@ function appendLimitedString (current, fragment, field, maxLength) {
   return typeof current === 'string' ? current + fragment : fragment;
 }
 
-function appendArgumentFragment (current, fragment) {
+function appendArgumentFragment (target, current, fragment, byteState) {
   if (fragment === undefined) return current;
   if (typeof fragment !== 'string') {
     throw new Error('Streamed tool-call function.arguments must be a string');
   }
   const existing = typeof current === 'string' ? current : '';
-  let nextBytes = utf8ByteLength(existing) + utf8ByteLength(fragment);
-  if (existing.length > 0
+  let addedBytes = target.measureUtf8(fragment);
+  if (byteState.trailingHighSurrogate
     && fragment.length > 0
-    && /[\uD800-\uDBFF]/.test(existing.at(-1))
     && /[\uDC00-\uDFFF]/.test(fragment[0])) {
-    // TextEncoder counts each unpaired surrogate as a three-byte replacement. When a
-    // high surrogate ends one fragment and its low surrogate starts the next, the
-    // completed scalar is four bytes, so the separate-fragment sum overcounts by two.
-    nextBytes -= 2;
+    addedBytes -= 2;
   }
+  const nextBytes = byteState.bytes + addedBytes;
   if (nextBytes > MAX_TOOL_CALL_ARGUMENT_BYTES) {
     throw new Error(`Streamed tool-call function.arguments must be at most ${MAX_TOOL_CALL_ARGUMENT_BYTES} UTF-8 bytes (64 KiB)`);
+  }
+  byteState.bytes = nextBytes;
+  if (fragment.length > 0) {
+    byteState.trailingHighSurrogate = /[\uD800-\uDBFF]/.test(fragment.at(-1));
   }
   return existing + fragment;
 }
@@ -142,32 +150,39 @@ function compatibleValue (current, incoming, field, { maxLength, maxBytes } = {}
   throw new Error(`Streamed tool-call ${field} conflicts with an earlier value`);
 }
 
-function mergeSnapshotCall (current, snapshot, snapshotOnly) {
-  if (!current) return snapshot;
-  if (current.type !== undefined && current.type !== snapshot.type) {
-    throw new Error('Streamed tool-call type conflicts with an earlier value');
+function isJsonExtension (current, incoming) {
+  let currentValue;
+  let incomingValue;
+  try {
+    currentValue = JSON.parse(current);
+    incomingValue = JSON.parse(incoming);
+  } catch {
+    return false;
   }
-  if (snapshotOnly) {
-    if (current.id !== snapshot.id || current.function?.name !== snapshot.function.name) {
-      throw new Error('Streamed tool-call snapshot identity conflicts with an earlier snapshot');
+  const pending = [[currentValue, incomingValue]];
+  while (pending.length > 0) {
+    const [subset, value] = pending.pop();
+    if (Object.is(subset, value)) continue;
+    if (!isPlainObject(subset) || !isPlainObject(value)) return false;
+    for (const [key, child] of Object.entries(subset)) {
+      if (!Object.hasOwn(value, key)) return false;
+      pending.push([child, value[key]]);
     }
-    return snapshot;
+  }
+  return true;
+}
+
+function mergeSnapshotCall (current, snapshot) {
+  if (!current) return snapshot;
+  if (current.id !== snapshot.id || current.type !== snapshot.type || current.function.name !== snapshot.function.name) {
+    throw new Error('Streamed tool-call snapshot identity conflicts with an earlier snapshot');
   }
   return {
-    id: current.id === undefined
-      ? snapshot.id
-      : compatibleValue(current.id, snapshot.id, 'id', { maxLength: MAX_TOOL_CALL_ID_LENGTH }),
+    id: snapshot.id,
     type: snapshot.type,
     function: {
-      name: current.function?.name === undefined
-        ? snapshot.function.name
-        : compatibleValue(
-            current.function.name,
-            snapshot.function.name,
-            'function.name',
-            { maxLength: MAX_TOOL_CALL_NAME_LENGTH },
-          ),
-      arguments: current.function?.arguments === undefined
+      name: snapshot.function.name,
+      arguments: isJsonExtension(current.function.arguments, snapshot.function.arguments)
         ? snapshot.function.arguments
         : compatibleValue(
             current.function.arguments,
@@ -177,6 +192,86 @@ function mergeSnapshotCall (current, snapshot, snapshotOnly) {
           ),
     },
   };
+}
+
+function identityCompatible (delta, snapshot) {
+  const deltaId = delta?.id;
+  const deltaName = delta?.function?.name;
+  if (deltaId !== undefined
+    && !(snapshot.id === deltaId || snapshot.id.startsWith(deltaId) || deltaId.startsWith(snapshot.id))) {
+    return false;
+  }
+  if (deltaName !== undefined
+    && !(snapshot.function.name === deltaName
+      || snapshot.function.name.startsWith(deltaName)
+      || deltaName.startsWith(snapshot.function.name))) {
+    return false;
+  }
+  return deltaId !== undefined || deltaName !== undefined;
+}
+
+function matchingSnapshots (target, delta) {
+  return target.snapshotOrder
+    .map((id) => target.snapshots.get(id))
+    .filter((snapshot) => identityCompatible(delta, snapshot));
+}
+
+function mergeDeltaSnapshot (delta, snapshot) {
+  if (delta.type !== undefined && delta.type !== snapshot.type) {
+    throw new Error('Streamed tool-call type conflicts with a complete snapshot');
+  }
+  return {
+    id: delta.id === undefined
+      ? snapshot.id
+      : compatibleValue(delta.id, snapshot.id, 'id', { maxLength: MAX_TOOL_CALL_ID_LENGTH }),
+    type: delta.type ?? snapshot.type,
+    function: {
+      name: delta.function?.name === undefined
+        ? snapshot.function.name
+        : compatibleValue(
+            delta.function.name,
+            snapshot.function.name,
+            'function.name',
+            { maxLength: MAX_TOOL_CALL_NAME_LENGTH },
+          ),
+      arguments: delta.function?.arguments === undefined
+        ? snapshot.function.arguments
+        : compatibleValue(
+            delta.function.arguments,
+            snapshot.function.arguments,
+            'function.arguments',
+            { maxBytes: MAX_TOOL_CALL_ARGUMENT_BYTES },
+          ),
+    },
+  };
+}
+
+function assertReconciliationIsUnambiguous (target, { final = false } = {}) {
+  if (target.snapshots.size === 0 || target.calls.size === 0) return;
+  const matchedSnapshotIds = new Set();
+  let unmatchedDeltas = 0;
+  for (const delta of target.calls.values()) {
+    const candidates = matchingSnapshots(target, delta);
+    if (candidates.length > 1) {
+      if (final) throw new Error('Streamed tool-call identity is ambiguous');
+      continue;
+    }
+    if (candidates.length === 1) {
+      const id = candidates[0].id;
+      if (matchedSnapshotIds.has(id)) {
+        throw new Error('Streamed tool-call identity conflicts with another call');
+      }
+      mergeDeltaSnapshot(delta, candidates[0]);
+      matchedSnapshotIds.add(id);
+    } else if (delta.id !== undefined && delta.function?.name !== undefined) {
+      unmatchedDeltas += 1;
+    }
+  }
+  if (unmatchedDeltas > 0
+    && target.calls.size === target.snapshots.size
+    && matchedSnapshotIds.size + unmatchedDeltas === target.calls.size) {
+    throw new Error('Streamed tool-call identity conflicts with a complete snapshot');
+  }
 }
 
 function mergeDeltas (target, deltas) {
@@ -213,6 +308,10 @@ function mergeDeltas (target, deltas) {
     }
     const currentFunction = existing?.function || {};
     const nextFunction = delta.function || {};
+    const argumentByteState = existing?.argumentByteState || {
+      bytes: 0,
+      trailingHighSurrogate: false,
+    };
     const next = {
       ...(existing?.id !== undefined || delta.id !== undefined
         ? {
@@ -243,41 +342,38 @@ function mergeDeltas (target, deltas) {
               ...(currentFunction.arguments !== undefined || nextFunction.arguments !== undefined
                 ? {
                     arguments: appendArgumentFragment(
+                      target,
                       currentFunction.arguments,
                       nextFunction.arguments,
+                      argumentByteState,
                     ),
                   }
                 : {}),
             },
           }
         : {}),
+      argumentByteState,
     };
     target.calls.set(index, next);
-    target.snapshotOnly.delete(index);
   }
 }
 
 function mergeSnapshot (target, snapshot) {
   if (snapshot === undefined) return;
   const validated = sanitizeToolCalls(snapshot, 'streamed assistant tool_calls');
-  const nextCalls = new Map(target.calls);
-  for (const [snapshotIndex, call] of validated.entries()) {
-    for (const [existingIndex, existing] of nextCalls) {
-      if (existingIndex !== snapshotIndex && existing?.id !== undefined && existing.id === call.id) {
-        throw new Error('Streamed tool-call snapshot conflicts with an earlier call index');
+  const ids = new Set();
+  for (const call of validated) {
+    if (ids.has(call.id)) {
+      throw new Error('Streamed tool-call snapshot contains conflicting identities');
+    }
+    ids.add(call.id);
+    if (!target.snapshots.has(call.id)) {
+      if (target.snapshots.size >= MAX_TOOL_CALLS) {
+        throw new Error(`Streamed tool_calls cannot contain more than ${MAX_TOOL_CALLS} snapshot calls`);
       }
+      target.snapshotOrder.push(call.id);
     }
-    if (!nextCalls.has(snapshotIndex) && nextCalls.size >= MAX_TOOL_CALLS) {
-      throw new Error(`Streamed tool_calls cannot contain more than ${MAX_TOOL_CALLS} distinct call indexes`);
-    }
-    nextCalls.set(
-      snapshotIndex,
-      mergeSnapshotCall(nextCalls.get(snapshotIndex), call, target.snapshotOnly.has(snapshotIndex)),
-    );
-  }
-  target.calls = nextCalls;
-  for (let index = 0; index < validated.length; index += 1) {
-    target.snapshotOnly.add(index);
+    target.snapshots.set(call.id, mergeSnapshotCall(target.snapshots.get(call.id), call));
   }
 }
 
@@ -286,6 +382,7 @@ export function mergeStreamingToolCalls (target, { deltas, snapshot } = {}) {
   try {
     mergeDeltas(target, deltas);
     mergeSnapshot(target, snapshot);
+    assertReconciliationIsUnambiguous(target);
   } catch (error) {
     target.failure ??= error instanceof Error ? error : new Error(String(error));
   }
@@ -294,8 +391,38 @@ export function mergeStreamingToolCalls (target, { deltas, snapshot } = {}) {
 
 export function finalizeStreamingToolCalls (target) {
   if (target.failure) throw target.failure;
+  assertReconciliationIsUnambiguous(target, { final: true });
+  const matchedSnapshotIds = new Set();
   const calls = Array.from(target.calls.entries())
     .sort(([left], [right]) => left - right)
-    .map(([, call]) => call);
+    .map(([, delta]) => {
+      const candidates = matchingSnapshots(target, delta);
+      if (candidates.length > 1) {
+        throw new Error('Streamed tool-call identity is ambiguous');
+      }
+      if (candidates.length === 0) {
+        const { argumentByteState: _argumentByteState, ...call } = delta;
+        return call;
+      }
+      const snapshot = candidates[0];
+      if (matchedSnapshotIds.has(snapshot.id)) {
+        throw new Error('Streamed tool-call identity conflicts with another call');
+      }
+      matchedSnapshotIds.add(snapshot.id);
+      return mergeDeltaSnapshot(delta, snapshot);
+    });
+  for (const id of target.snapshotOrder) {
+    if (!matchedSnapshotIds.has(id)) calls.push(target.snapshots.get(id));
+  }
+  if (calls.length > MAX_TOOL_CALLS) {
+    throw new Error(`Streamed tool_calls cannot contain more than ${MAX_TOOL_CALLS} calls`);
+  }
+  const finalIds = new Set();
+  for (const call of calls) {
+    if (typeof call?.id === 'string' && finalIds.has(call.id)) {
+      throw new Error('Streamed tool-call identity conflicts with another call');
+    }
+    if (typeof call?.id === 'string') finalIds.add(call.id);
+  }
   return calls.length ? sanitizeToolCalls(calls, 'streamed assistant tool_calls') : [];
 }

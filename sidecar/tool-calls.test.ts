@@ -110,6 +110,29 @@ describe('streamed tool-call accumulation', () => {
     expect(target.failure).toBeInstanceOf(Error);
   });
 
+  it('encodes only new argument fragments, including empty fragments and split surrogates', () => {
+    const measured: string[] = [];
+    const target = createToolCallAccumulator({
+      utf8ByteLength: (value: string) => {
+        measured.push(value);
+        return new TextEncoder().encode(value).byteLength;
+      },
+    });
+    mergeStreamingToolCalls(target, delta({
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'read_status', arguments: 'a'.repeat(20_000) },
+    }));
+    mergeStreamingToolCalls(target, delta({ function: { arguments: '' } }));
+    mergeStreamingToolCalls(target, delta({ function: { arguments: '\uD83D' } }));
+    mergeStreamingToolCalls(target, delta({ function: { arguments: '\uDE00' } }));
+    mergeStreamingToolCalls(target, delta({ function: { arguments: 'b'.repeat(20_000) } }));
+    expect(finalizeStreamingToolCalls(target)[0].function.arguments)
+      .toBe(`${'a'.repeat(20_000)}😀${'b'.repeat(20_000)}`);
+    expect(measured).toEqual(['a'.repeat(20_000), '', '\uD83D', '\uDE00', 'b'.repeat(20_000)]);
+    expect(measured.reduce((total, value) => total + value.length, 0)).toBe(40_002);
+  });
+
   it('latches ID and name overflow incrementally without retaining the rejected fragment', () => {
     const idTarget = createToolCallAccumulator();
     mergeStreamingToolCalls(idTarget, delta({
@@ -154,13 +177,114 @@ describe('streamed tool-call accumulation', () => {
     expect(finalizeStreamingToolCalls(target)).toEqual([call('{"a":1}')]);
   });
 
+  it('reconciles snapshot-first, snapshot-between-deltas, and repeated argument fragments without losing provenance', () => {
+    const snapshotFirst = createToolCallAccumulator();
+    mergeStreamingToolCalls(snapshotFirst, { snapshot: [call('{"a":1}')] });
+    mergeStreamingToolCalls(snapshotFirst, delta({
+      id: 'call-',
+      type: 'function',
+      function: { name: 'read_', arguments: '{"a":' },
+    }));
+    mergeStreamingToolCalls(snapshotFirst, delta({
+      id: '1',
+      function: { name: 'status', arguments: '1}' },
+    }));
+    expect(finalizeStreamingToolCalls(snapshotFirst)).toEqual([call('{"a":1}')]);
+
+    const between = createToolCallAccumulator();
+    mergeStreamingToolCalls(between, delta({
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'read_status', arguments: '{"echo":"' },
+    }));
+    mergeStreamingToolCalls(between, { snapshot: [call('{"echo":"ha')] });
+    mergeStreamingToolCalls(between, delta({ function: { arguments: 'ha' } }));
+    mergeStreamingToolCalls(between, delta({ function: { arguments: 'ha"}' } }));
+    expect(finalizeStreamingToolCalls(between)).toEqual([call('{"echo":"haha"}')]);
+  });
+
+  it('reconciles compact snapshots to sparse parallel deltas by identity rather than array offset', () => {
+    const target = createToolCallAccumulator();
+    mergeStreamingToolCalls(target, {
+      deltas: [
+        { index: 9, id: 'call-b', type: 'function', function: { name: 'second', arguments: '{"b":2}' } },
+        { index: 3, id: 'call-a', type: 'function', function: { name: 'first', arguments: '{"a":1}' } },
+      ],
+    });
+    mergeStreamingToolCalls(target, {
+      snapshot: [
+        call('{"a":1}', { id: 'call-a', function: { name: 'first', arguments: '{"a":1}' } }),
+        call('{"b":2}', { id: 'call-b', function: { name: 'second', arguments: '{"b":2}' } }),
+      ],
+    });
+    expect(finalizeStreamingToolCalls(target)).toEqual([
+      call('{"a":1}', { id: 'call-a', function: { name: 'first', arguments: '{"a":1}' } }),
+      call('{"b":2}', { id: 'call-b', function: { name: 'second', arguments: '{"b":2}' } }),
+    ]);
+  });
+
+  it('rejects ambiguous snapshot identities without exposing call values', () => {
+    const target = createToolCallAccumulator();
+    mergeStreamingToolCalls(target, {
+      deltas: [
+        { index: 1, id: 'call-', type: 'function', function: { name: 'lookup', arguments: '{}' } },
+      ],
+      snapshot: [
+        call('{}', { id: 'call-a', function: { name: 'lookup', arguments: '{}' } }),
+        call('{}', { id: 'call-b', function: { name: 'lookup', arguments: '{}' } }),
+      ],
+    });
+    expect(() => finalizeStreamingToolCalls(target)).toThrow(/ambiguous/i);
+    try {
+      finalizeStreamingToolCalls(target);
+    } catch (error) {
+      expect(String(error)).not.toContain('call-a');
+      expect(String(error)).not.toContain('call-b');
+      expect(String(error)).not.toContain('lookup');
+    }
+  });
+
+  it('allows an initially ambiguous fragmented identity to become unambiguous', () => {
+    const target = createToolCallAccumulator();
+    mergeStreamingToolCalls(target, {
+      snapshot: [
+        call('{}', { id: 'call-a', function: { name: 'lookup_a', arguments: '{}' } }),
+        call('{}', { id: 'call-b', function: { name: 'lookup_b', arguments: '{}' } }),
+      ],
+    });
+    mergeStreamingToolCalls(target, {
+      deltas: [{
+        index: 4,
+        id: 'call-',
+        type: 'function',
+        function: { name: 'lookup_', arguments: '{}' },
+      }],
+    });
+    expect(target.failure).toBeNull();
+    mergeStreamingToolCalls(target, {
+      deltas: [{ index: 4, id: 'a', function: { name: 'a' } }],
+    });
+    expect(finalizeStreamingToolCalls(target)[0].id).toBe('call-a');
+  });
+
+  it('rejects duplicate completed identities across distinct sparse indexes', () => {
+    const target = createToolCallAccumulator();
+    mergeStreamingToolCalls(target, {
+      deltas: [
+        { index: 2, id: 'duplicate', type: 'function', function: { name: 'first', arguments: '{}' } },
+        { index: 20, id: 'duplicate', type: 'function', function: { name: 'second', arguments: '{}' } },
+      ],
+    });
+    expect(() => finalizeStreamingToolCalls(target)).toThrow(/identity conflicts/i);
+  });
+
   it('accepts empty delta arrays alongside a valid snapshot', () => {
     const target = createToolCallAccumulator();
     mergeStreamingToolCalls(target, { deltas: [], snapshot: [call()] });
     expect(finalizeStreamingToolCalls(target)).toEqual([call()]);
   });
 
-  it('rejects conflicting snapshots, conflicting identities, and ambiguous reindexing', () => {
+  it('rejects conflicting snapshots and conflicting identities', () => {
     const conflicts = [
       () => {
         const target = createToolCallAccumulator();
@@ -176,14 +300,6 @@ describe('streamed tool-call accumulation', () => {
           id: 'call-1', type: 'function', function: { name: 'read_status', arguments: '{}' },
         }));
         mergeStreamingToolCalls(target, { snapshot: [call('{}', { id: 'other' })] });
-        return target;
-      },
-      () => {
-        const target = createToolCallAccumulator();
-        mergeStreamingToolCalls(target, {
-          deltas: [{ index: 7, id: 'call-1', type: 'function', function: { name: 'read_status', arguments: '{}' } }],
-        });
-        mergeStreamingToolCalls(target, { snapshot: [call()] });
         return target;
       },
     ];

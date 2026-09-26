@@ -416,6 +416,17 @@ function validateCommand(cmd, payload) {
     )) {
       return 'Command "chatCompletion" field "toolChoice" is invalid';
     }
+    const forcedToolName = payload.toolChoice?.type === 'function'
+      ? payload.toolChoice.function.name
+      : null;
+    if ((payload.toolChoice === 'required' || forcedToolName !== null)
+      && (!Array.isArray(payload.tools) || payload.tools.length === 0)) {
+      return 'Command "chatCompletion" field "toolChoice" requires nonempty "tools" definitions';
+    }
+    if (forcedToolName !== null
+      && !payload.tools.some((tool) => tool.function.name === forcedToolName)) {
+      return 'Command "chatCompletion" forced tool choice must exactly match a declared function';
+    }
     if (payload.responseFormat !== undefined && (
       !payload.responseFormat
       || typeof payload.responseFormat !== 'object'
@@ -3541,7 +3552,9 @@ rl.on('line', async (line) => {
         let sessionChatClient = null;
         try {
           const sdkModule = await getFoundrySdkModule();
-          sessionChatClient = createSessionChatClient(chatModel, sdkModule);
+          sessionChatClient = createSessionChatClient(chatModel, sdkModule, {
+            onDiagnostic: (diagnostic) => log('warn', diagnostic.message),
+          });
         } catch (err) {
           log('debug', `ChatSession client unavailable, using createChatClient(): ${err?.message || err}`);
         }
@@ -3650,15 +3663,13 @@ rl.on('line', async (line) => {
             const latchedFailure = firstToolCallFailure(toolCallsByChoice);
             const combinedFailure = mergeStreamFailure(latchedFailure, streamFailure);
             if (combinedFailure) throw combinedFailure;
+            chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
             const wasCanceled = canceledRequests.has(id);
             const compactedToolCalls = wasCanceled
               ? []
               : finalizeToolCallChoices(toolCallsByChoice, finishReasons);
             const chatFinishReason = finishReasons.get(0) ?? null;
-            const publishedFinishReason = wasCanceled && chatFinishReason === 'tool_calls'
-              ? null
-              : chatFinishReason;
-            chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
+            const publishedFinishReason = wasCanceled ? null : chatFinishReason;
             const normalizedStreamResult = validateCompletedChatResponse(normalizeChatResponse({
               choices: [{
                 finish_reason: publishedFinishReason,

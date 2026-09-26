@@ -397,6 +397,46 @@ describe('createSessionChatClient streaming disposal', () => {
     expect(disposeCalls).toHaveLength(1);
   });
 
+  it('preserves a frozen AbortError by identity when disposal also fails and reports safe diagnostics', async () => {
+    const disposeCalls: unknown[] = [];
+    const diagnostics: unknown[] = [];
+    const existingCause = new Error('existing abort cause');
+    const abortError = Object.freeze(Object.assign(
+      new Error('native stream aborted'),
+      { name: 'AbortError', cause: existingCause },
+    ));
+    class Request { addItem() { return this; } }
+    const Item = { text: (text: string, textType: string) => ({ type: 'text', textType, text }) };
+    class ChatSession {
+      // eslint-disable-next-line require-yield -- must throw before any yield to exercise abort plus cleanup
+      async *processStreamingRequest () { throw abortError; }
+      dispose () {
+        disposeCalls.push(this);
+        throw new Error('SECRET_NATIVE_CLEANUP_DETAIL');
+      }
+    }
+    const client = createSessionChatClient(
+      { id: 'm' },
+      { ChatSession, Request, Item },
+      { onDiagnostic: (diagnostic: unknown) => diagnostics.push(diagnostic) },
+    );
+    const iterator = client.completeStreamingChat([{ role: 'user', content: 'hi' }])[Symbol.asyncIterator]();
+    let caught: Error | undefined;
+    try {
+      await iterator.next();
+    } catch (err) {
+      caught = err as Error;
+    }
+    expect(caught).toBe(abortError);
+    expect((caught as Error & { cause?: unknown }).cause).toBe(existingCause);
+    expect(disposeCalls).toHaveLength(1);
+    expect(diagnostics).toEqual([{
+      code: 'chat-session-dispose-after-abort',
+      message: 'ChatSession disposal failed after streaming cancellation.',
+    }]);
+    expect(JSON.stringify(diagnostics)).not.toContain('SECRET_NATIVE_CLEANUP_DETAIL');
+  });
+
   it('wraps a stream that ends without any openai-json output', async () => {
     class Request { addItem() { return this; } }
     const Item = { text: (text: string, textType: string) => ({ type: 'text', textType, text }) };

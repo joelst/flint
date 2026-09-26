@@ -7,7 +7,9 @@
 // Node or the native runtime, matching its siblings.
 
 // Cleanup must never erase why the primary operation failed. If disposal itself throws,
-// combine both failures into one error that still exposes the primary failure as `cause`.
+// combine ordinary failures into one error that still exposes the primary failure as
+// `cause`. AbortError identity is preserved because cancellation classification may
+// depend on the exact object; its cleanup failure is reported through a safe diagnostic.
 export function mergeSessionCleanupFailure (primaryFailure, cleanupFailure) {
   if (!primaryFailure) return cleanupFailure;
   const primaryMessage = primaryFailure?.message || String(primaryFailure);
@@ -19,12 +21,30 @@ export function mergeSessionCleanupFailure (primaryFailure, cleanupFailure) {
   );
 }
 
-export function disposeSession (session, primaryFailure = null) {
+function reportCleanupDiagnostic (onDiagnostic, diagnostic) {
+  if (typeof onDiagnostic !== 'function') return;
+  try {
+    onDiagnostic(diagnostic);
+  } catch {}
+}
+
+export function disposeSession (session, primaryFailure = null, {
+  onDiagnostic,
+  abortDiagnosticCode = 'session-dispose-after-abort',
+  abortDiagnosticMessage = 'Session disposal failed after cancellation.',
+} = {}) {
   if (!session) return primaryFailure;
   try {
     session.dispose();
     return primaryFailure;
   } catch (cleanupFailure) {
+    if (primaryFailure?.name === 'AbortError') {
+      reportCleanupDiagnostic(onDiagnostic, {
+        code: abortDiagnosticCode,
+        message: abortDiagnosticMessage,
+      });
+      return primaryFailure;
+    }
     return mergeSessionCleanupFailure(primaryFailure, cleanupFailure);
   }
 }
@@ -38,7 +58,7 @@ export function disposeSession (session, primaryFailure = null) {
 // downstream consumer of it) byte-identical to the deprecated client while
 // dropping the dependency on the class itself. Returns null if this SDK build
 // does not export ChatSession/Request/Item (falls back to createChatClient()).
-export function createSessionChatClient (chatModel, sdkModule) {
+export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } = {}) {
   const { ChatSession, Request, Item } = sdkModule || {};
   if (typeof ChatSession !== 'function' || typeof Request !== 'function' || typeof Item?.text !== 'function') {
     return null;
@@ -139,7 +159,11 @@ export function createSessionChatClient (chatModel, sdkModule) {
             // try/catch but still runs `finally`, so cleanup - and surfacing a cleanup
             // failure - only happens reliably from inside it, not just on normal
             // completion or a thrown error.
-            failure = disposeSession(session, failure);
+            failure = disposeSession(session, failure, {
+              onDiagnostic,
+              abortDiagnosticCode: 'chat-session-dispose-after-abort',
+              abortDiagnosticMessage: 'ChatSession disposal failed after streaming cancellation.',
+            });
             if (failure) throw failure;
           }
         }
