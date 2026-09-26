@@ -27,6 +27,54 @@ function buildWaveform(spans: Array<{ sec: number; loud: boolean }>): Float32Arr
   return out;
 }
 
+function expectValidWindows(
+  windows: ReturnType<typeof planTranscriptionWindows>,
+  totalSec: number,
+  minSec = 12,
+  maxSec = 30,
+): void {
+  expect(windows.length).toBeGreaterThan(0);
+  expect(windows[0].startSec).toBe(0);
+  expect(windows.at(-1)?.endSec).toBeCloseTo(totalSec, 5);
+
+  for (const [index, window] of windows.entries()) {
+    const length = window.endSec - window.startSec;
+    expect(window.index).toBe(index);
+    expect(length).toBeGreaterThan(0);
+    expect(length).toBeLessThanOrEqual(maxSec + 1e-6);
+    if (totalSec >= minSec) expect(length).toBeGreaterThanOrEqual(minSec - 1e-6);
+    if (window.endSec < totalSec - 1e-6) {
+      expect(window.hardSplitEnd || window.snappedEnd).toBe(true);
+      expect(window.hardSplitEnd && window.snappedEnd).toBe(false);
+    } else {
+      expect(window.hardSplitEnd).toBe(false);
+      expect(window.snappedEnd).toBe(false);
+    }
+
+    if (index === 0) {
+      expect(window.overlapsPrevious).toBe(false);
+      continue;
+    }
+
+    const previous = windows[index - 1];
+    expect(window.startSec).toBeGreaterThan(previous.startSec);
+    expect(window.startSec).toBeLessThanOrEqual(previous.endSec + 1e-6);
+    expect(window.overlapsPrevious).toBe(window.startSec < previous.endSec - 1e-6);
+    expect(window.overlapsPrevious).toBe(previous.hardSplitEnd);
+  }
+}
+
+function buildTrailingPauseWaveform(totalSec: number): Float32Array {
+  return buildWaveform([
+    { sec: 29.5, loud: true },
+    { sec: 1, loud: false },
+    { sec: 29, loud: true },
+    { sec: 1, loud: false },
+    { sec: 29, loud: true },
+    { sec: totalSec - 89.5, loud: false },
+  ]);
+}
+
 describe('computeFrameEnergies', () => {
   it('produces one RMS value per frame', () => {
     const samples = new Float32Array(SR); // 1 second
@@ -94,14 +142,15 @@ describe('findSilenceRuns', () => {
 
 describe('planTranscriptionWindows', () => {
   it('returns a single window for short audio', () => {
-    const windows = planTranscriptionWindows(20, []);
+    const windows = planTranscriptionWindows(5, []);
     expect(windows).toHaveLength(1);
     expect(windows[0]).toMatchObject({
       startSec: 0,
-      endSec: 20,
+      endSec: 5,
       snappedEnd: false,
       overlapsPrevious: false,
     });
+    expectValidWindows(windows, 5);
   });
 
   it('returns nothing for empty or invalid audio', () => {
@@ -170,6 +219,89 @@ describe('planTranscriptionWindows', () => {
     }
   });
 
+  it.each([90, 90.05, 90.1, 90.5])(
+    'reserves a usable tail around the 90-second silence boundary at %s seconds',
+    (duration) => {
+      const windows = planTranscriptionWindows(duration, [
+        { startSec: 29.5, endSec: 30.5, centerSec: 30 },
+        { startSec: 59.5, endSec: 60.5, centerSec: 60 },
+        { startSec: 89.5, endSec: duration, centerSec: (89.5 + duration) / 2 },
+      ]);
+
+      expectValidWindows(windows, duration);
+      if (duration === 90) {
+        expect(windows).toHaveLength(3);
+        expect(windows.at(-1)?.startSec).toBe(60);
+      } else {
+        expect(windows.at(-1)?.endSec! - windows.at(-1)?.startSec!).toBeCloseTo(12, 5);
+        expect(windows.at(-1)?.overlapsPrevious).toBe(true);
+      }
+    },
+  );
+
+  it('rebalances a pause-free hard split instead of dispatching a short tail', () => {
+    const windows = planTranscriptionWindows(102.05, []);
+
+    expectValidWindows(windows, 102.05);
+    expect(windows.at(-1)?.endSec! - windows.at(-1)?.startSec!).toBeCloseTo(12, 5);
+    expect(windows.at(-1)?.overlapsPrevious).toBe(true);
+    expect(windows.at(-2)?.endSec).toBeCloseTo(94.05, 5);
+    expect(windows.at(-2)?.endSec! - windows.at(-1)?.startSec!).toBeCloseTo(4, 5);
+  });
+
+  it('accepts exact minimum tails after silence and hard-split boundaries', () => {
+    const snapped = planTranscriptionWindows(40, [
+      { startSec: 27.5, endSec: 28.5, centerSec: 28 },
+    ]);
+    const hardSplit = planTranscriptionWindows(36, []);
+
+    expectValidWindows(snapped, 40);
+    expect(snapped.at(-1)?.endSec! - snapped.at(-1)?.startSec!).toBeCloseTo(12, 5);
+    expect(snapped.at(-1)?.overlapsPrevious).toBe(false);
+    expectValidWindows(hardSplit, 36);
+    expect(hardSplit.at(-1)?.endSec! - hardSplit.at(-1)?.startSec!).toBeCloseTo(12, 5);
+    expect(hardSplit.at(-1)?.overlapsPrevious).toBe(true);
+  });
+
+  it('supports feasible custom window options without gaps or oversized overlap', () => {
+    const options = {
+      minSec: 8,
+      targetSec: 18,
+      maxSec: 20,
+      searchSec: 5,
+      overlapSec: 3,
+    };
+    const windows = planTranscriptionWindows(
+      67.25,
+      [
+        { startSec: 17, endSec: 18, centerSec: 17.5 },
+        { startSec: 36, endSec: 37, centerSec: 36.5 },
+        { startSec: 63, endSec: 64, centerSec: 63.5 },
+      ],
+      options,
+    );
+
+    expectValidWindows(windows, 67.25, options.minSec, options.maxSec);
+    for (let i = 1; i < windows.length; i++) {
+      const overlap = windows[i - 1].endSec - windows[i].startSec;
+      expect(overlap).toBeLessThanOrEqual(options.overlapSec + 1e-6);
+    }
+  });
+
+  it.each([
+    [{ minSec: Number.NaN }, 'minSec'],
+    [{ targetSec: -1 }, 'targetSec'],
+    [{ maxSec: Number.POSITIVE_INFINITY }, 'maxSec'],
+    [{ searchSec: -0.1 }, 'searchSec'],
+    [{ overlapSec: -0.1 }, 'overlapSec'],
+    [{ minSec: 20, targetSec: 18 }, 'minSec'],
+    [{ targetSec: 31, maxSec: 30 }, 'targetSec'],
+    [{ minSec: 12, targetSec: 18, maxSec: 19, overlapSec: 4 }, 'feasible'],
+    [{ minSec: 12, overlapSec: 12 }, 'overlapSec'],
+  ] as const)('rejects infeasible options %j', (options, message) => {
+    expect(() => planTranscriptionWindows(60, [], options)).toThrow(message);
+  });
+
   it('terminates on pathological silence data instead of looping forever', () => {
     const runs = Array.from({ length: 500 }, (_, i) => ({
       startSec: i * 0.1,
@@ -184,6 +316,15 @@ describe('planTranscriptionWindows', () => {
 });
 
 describe('planSegmentation', () => {
+  it.each([90, 90.05, 90.1, 90.5])(
+    'does not derive a sub-floor dispatch from a trailing pause at %s seconds',
+    (duration) => {
+      const plan = planSegmentation(buildTrailingPauseWaveform(duration), SR);
+      expect(plan.snappedBoundaryCount).toBeGreaterThan(0);
+      expectValidWindows(plan.windows, duration);
+    },
+  );
+
   it('uses silence detection on speech with clear pauses', () => {
     const spans: Array<{ sec: number; loud: boolean }> = [];
     for (let i = 0; i < 6; i++) {

@@ -56,6 +56,14 @@ const DEFAULTS = {
   overlapSec: 4,
 };
 
+interface ValidatedWindowPlanOptions {
+  targetSec: number;
+  minSec: number;
+  maxSec: number;
+  searchSec: number;
+  overlapSec: number;
+}
+
 /** Frame size used for the short-time energy profile. */
 export const FRAME_MS = 20;
 /** A pause must be at least this long to count as a boundary candidate. */
@@ -66,6 +74,37 @@ function percentile(sorted: ArrayLike<number>, fraction: number): number {
   if (n === 0) return 0;
   const idx = Math.min(n - 1, Math.max(0, Math.round((n - 1) * fraction)));
   return sorted[idx];
+}
+
+function validateWindowPlanOptions(options: WindowPlanOptions): ValidatedWindowPlanOptions {
+  const values = {
+    targetSec: options.targetSec ?? DEFAULTS.targetSec,
+    minSec: options.minSec ?? DEFAULTS.minSec,
+    maxSec: options.maxSec ?? DEFAULTS.maxSec,
+    searchSec: options.searchSec ?? DEFAULTS.searchSec,
+    overlapSec: options.overlapSec ?? DEFAULTS.overlapSec,
+  };
+
+  for (const [name, value] of Object.entries(values)) {
+    if (!Number.isFinite(value) || value < 0) {
+      throw new RangeError(`${name} must be finite and non-negative`);
+    }
+  }
+  if (values.minSec <= 0) throw new RangeError('minSec must be greater than zero');
+  if (values.targetSec < values.minSec) {
+    throw new RangeError('minSec must be less than or equal to targetSec');
+  }
+  if (values.targetSec > values.maxSec) {
+    throw new RangeError('targetSec must be less than or equal to maxSec');
+  }
+  if (values.overlapSec >= values.minSec) {
+    throw new RangeError('overlapSec must be less than minSec');
+  }
+  if (values.maxSec + values.overlapSec < 2 * values.minSec) {
+    throw new RangeError('window options must leave a feasible minimum tail');
+  }
+
+  return values;
 }
 
 /** Root-mean-square energy per fixed-length frame. */
@@ -148,11 +187,8 @@ export function planTranscriptionWindows(
   silenceRuns: readonly SilenceRun[] = [],
   options: WindowPlanOptions = {},
 ): TranscriptionWindow[] {
-  const targetSec = options.targetSec ?? DEFAULTS.targetSec;
-  const minSec = options.minSec ?? DEFAULTS.minSec;
-  const maxSec = options.maxSec ?? DEFAULTS.maxSec;
-  const searchSec = options.searchSec ?? DEFAULTS.searchSec;
-  const overlapSec = options.overlapSec ?? DEFAULTS.overlapSec;
+  const { targetSec, minSec, maxSec, searchSec, overlapSec } =
+    validateWindowPlanOptions(options);
 
   const duration = Number.isFinite(totalSec) ? Math.max(0, totalSec) : 0;
   if (duration <= 0) return [];
@@ -190,11 +226,15 @@ export function planTranscriptionWindows(
     for (const c of centers) {
       if (c < lo) continue;
       if (c > hi) break;
+      if (duration - c < minSec) continue;
       if (cut === null || Math.abs(c - idealEnd) < Math.abs(cut - idealEnd)) cut = c;
     }
 
     const hardSplitEnd = cut === null;
-    const endSec = hardSplitEnd ? Math.min(pos + targetSec, duration) : cut!;
+    const latestHardEndWithMinimumTail = duration + overlapSec - minSec;
+    const endSec = hardSplitEnd
+      ? Math.min(pos + targetSec, latestHardEndWithMinimumTail)
+      : cut!;
 
     windows.push({
       index: windows.length,

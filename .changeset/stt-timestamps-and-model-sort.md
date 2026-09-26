@@ -2,4 +2,4 @@
 "flint": minor
 ---
 
-Add Flint-derived transcript timing exports with source-window outcomes in WebVTT notes and paired SRT metadata, plus model family sorting and search.
+Add Flint-derived transcript timing exports with complete source-window outcomes and tail-safe pause-aware chunking, plus model family sorting and search.
