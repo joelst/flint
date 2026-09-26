@@ -308,6 +308,11 @@ const NEEDS_INIT = new Set([
 const AUDIO_BASE64_MAX_CHARS = Math.ceil(50 * 1024 * 1024 * 4 / 3);
 const EMBED_MAX_INPUTS = 32;
 const EMBED_MAX_CHARS = 8192;
+// Envelope bounds. The frontend sends a numeric id and a short command name; these only
+// need to be loose enough to accept any legitimate producer while keeping the values
+// cheap to echo back and safe to interpolate into diagnostics.
+const MAX_ENVELOPE_ID_CHARS = 200;
+const MAX_COMMAND_NAME_CHARS = 64;
 
 /**
  * Validates a command name and its payload fields.
@@ -393,7 +398,16 @@ function validateCommand(cmd, payload) {
         )) {
           return 'Command "chatCompletion" tool parameters must be a JSON object';
         }
-        serializedBytes += Buffer.byteLength(JSON.stringify(tool));
+        // `parameters` is only checked for being a plain object, so it can still be
+        // nested deeply enough to overflow the stack here even though JSON.parse
+        // accepted it. Reject the command rather than letting a RangeError escape.
+        let safeSerialized;
+        try {
+          safeSerialized = JSON.stringify(tool);
+        } catch {
+          return 'Command "chatCompletion" tool definitions must be serializable JSON';
+        }
+        serializedBytes += Buffer.byteLength(safeSerialized);
       }
       if (serializedBytes > 64 * 1024) {
         return 'Command "chatCompletion" tool definitions exceed the 64 KiB limit';
@@ -478,8 +492,10 @@ function validateCommand(cmd, payload) {
     }
   }
   // Lane validation for commands that accept a lane field
+  // The value is deliberately not interpolated: an object such as {"toString": null}
+  // throws TypeError on coercion, from a code path with no caller-side try.
   if (LANE_CMDS.has(cmd) && payload.lane !== undefined && !VALID_LANES.has(payload.lane)) {
-    return `Command "${cmd}" invalid lane "${payload.lane}": must be "chat" or "audio"`;
+    return `Command "${cmd}" has an invalid lane: must be "chat" or "audio"`;
   }
   if (cmd === 'transcribeAudio' && payload.audioBase64.length > AUDIO_BASE64_MAX_CHARS) {
     return `Command "transcribeAudio" audioBase64 exceeds maximum allowed size`;
@@ -2261,6 +2277,23 @@ async function readErrorBody (resp) {
   return readBoundedErrorBody(resp);
 }
 
+// Success bodies are model output: generated text, tool-call arguments and echoed prompt
+// content. V8's JSON.parse quotes an excerpt of its input in the error message, so
+// `resp.json()` on a malformed body would carry that payload into the IPC error and the
+// app log. Report only a size instead, matching the payload-free convention used for IPC
+// diagnostics. The body is read before the parse-only catch so a network or stream
+// failure is still surfaced as itself rather than mislabelled as malformed JSON.
+async function readJsonResponse (resp, description) {
+  const text = await resp.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(
+      `${description} returned output that is not valid JSON (${Buffer.byteLength(text)} bytes).`,
+    );
+  }
+}
+
 function isPlainObject (value) {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -2878,6 +2911,34 @@ rl.on('line', async (line) => {
 
   const { id, cmd, protocolVersion, ...payload } = msg;
 
+  // Reduce the envelope to primitives before anything uses it. Every reply echoes `id`
+  // through `send()`, which serializes synchronously, and the diagnostics below
+  // interpolate `cmd`. JSON.parse accepts values that both of those choke on: a deeply
+  // nested array overflows the stack in JSON.stringify (RangeError), and
+  // `{"toString": null}` throws TypeError on interpolation. Either one would escape this
+  // async listener as an unhandled rejection and kill the sidecar - losing every loaded
+  // model and all in-flight work - instead of rejecting the one bad command.
+  const idIsScalar = id === undefined || id === null
+    || (typeof id === 'number' && Number.isFinite(id))
+    || (typeof id === 'string' && id.length <= MAX_ENVELOPE_ID_CHARS);
+  if (!idIsScalar) {
+    log('warn', 'IPC rejected: "id" must be a finite number or short string');
+    send({ id: null, error: 'Invalid message: "id" must be a finite number or string' });
+    return;
+  }
+  const replyId = id ?? null;
+  if (typeof cmd !== 'string' || cmd.length > MAX_COMMAND_NAME_CHARS) {
+    log('warn', 'IPC rejected: "cmd" must be a string');
+    send({ id: replyId, error: 'Invalid message: "cmd" must be a string' });
+    return;
+  }
+  if (protocolVersion !== undefined
+    && typeof protocolVersion !== 'number' && typeof protocolVersion !== 'string') {
+    log('warn', 'IPC rejected: "protocolVersion" must be a number or string');
+    send({ id: replyId, error: 'Invalid message: "protocolVersion" must be a number or string' });
+    return;
+  }
+
   const reply = (result, callback) => {
     send({ id, protocolVersion: SIDECAR_PROTOCOL_VERSION, ...result }, callback);
   };
@@ -2887,56 +2948,63 @@ rl.on('line', async (line) => {
     if (Number.isFinite(percent)) send({ id, progress: percent, ep: epName, phase: 'accelerator' });
   };
 
-  if (protocolVersion !== undefined && protocolVersion !== SIDECAR_PROTOCOL_VERSION) {
-    reply({ error: `Unsupported sidecar protocol version: ${String(protocolVersion)}` });
-    return;
-  }
-
-  const validationError = validateCommand(cmd, payload);
-  if (validationError) {
-    log('warn', `IPC validation rejected: cmd=${String(cmd).slice(0, 40)} error=${validationError}`);
-    reply({ error: validationError });
-    return;
-  }
-
-  if (NEEDS_INIT.has(cmd) && !manager) {
-    reply({ error: `Foundry SDK not initialized — "init" must run before "${cmd}" (the sidecar may have restarted)` });
-    return;
-  }
-
-  const isRuntimeShutdown = cmd === 'shutdownRuntime';
-  const isDrainCommand = cmd === 'stopAndUnload' || isRuntimeShutdown;
-  // Before admission, so a rejected download is not itself "in flight". The benchmark never
-  // downloads; its own load/chat calls stay admitted.
-  if (benchmarkExclusive && cmd === 'download') {
-    reply({
-      error: 'A benchmark run is active — stop it before downloading a model.',
-      certainty: 'cancelled',
-    });
-    return;
-  }
   let operationAdmitted = false;
-  if (isDrainCommand) {
-    // Fence synchronously, before waiting for the service-transition lock. Otherwise commands
-    // arriving while shutdown is queued could still be admitted behind it.
-    operationAdmission.beginDrain({ terminal: isRuntimeShutdown });
-    if (isRuntimeShutdown) explicitShutdownInProgress = true;
-  } else {
-    operationAdmitted = operationAdmission.admit(id, cmd);
-    if (!operationAdmitted) {
+  let releaseServiceTransition = null;
+
+  // The prelude runs inside this try too. Validation, admission and lock acquisition all
+  // handle caller-shaped payloads, and this listener is async, so anything thrown out
+  // here becomes an unhandled rejection that terminates the sidecar rather than failing
+  // one command. Inside, a throw takes the normal error reply below, and the finally
+  // still releases admission and the service-transition lock.
+  try {
+    if (protocolVersion !== undefined && protocolVersion !== SIDECAR_PROTOCOL_VERSION) {
+      reply({ error: `Unsupported sidecar protocol version: ${String(protocolVersion)}` });
+      return;
+    }
+
+    const validationError = validateCommand(cmd, payload);
+    if (validationError) {
+      log('warn', `IPC validation rejected: cmd=${String(cmd).slice(0, 40)} error=${validationError}`);
+      reply({ error: validationError });
+      return;
+    }
+
+    if (NEEDS_INIT.has(cmd) && !manager) {
+      reply({ error: `Foundry SDK not initialized — "init" must run before "${cmd}" (the sidecar may have restarted)` });
+      return;
+    }
+
+    const isRuntimeShutdown = cmd === 'shutdownRuntime';
+    const isDrainCommand = cmd === 'stopAndUnload' || isRuntimeShutdown;
+    // Before admission, so a rejected download is not itself "in flight". The benchmark never
+    // downloads; its own load/chat calls stay admitted.
+    if (benchmarkExclusive && cmd === 'download') {
       reply({
-        error: `Runtime is draining; "${cmd}" was not started`,
+        error: 'A benchmark run is active — stop it before downloading a model.',
         certainty: 'cancelled',
       });
       return;
     }
-  }
+    if (isDrainCommand) {
+      // Fence synchronously, before waiting for the service-transition lock. Otherwise commands
+      // arriving while shutdown is queued could still be admitted behind it.
+      operationAdmission.beginDrain({ terminal: isRuntimeShutdown });
+      if (isRuntimeShutdown) explicitShutdownInProgress = true;
+    } else {
+      operationAdmitted = operationAdmission.admit(id, cmd);
+      if (!operationAdmitted) {
+        reply({
+          error: `Runtime is draining; "${cmd}" was not started`,
+          certainty: 'cancelled',
+        });
+        return;
+      }
+    }
 
-  const releaseServiceTransition = (
-    cmd === 'startService' || cmd === 'stopService' || cmd === 'stopAndUnload'
-  ) ? await acquireServiceTransition() : null;
+    releaseServiceTransition = (
+      cmd === 'startService' || cmd === 'stopService' || cmd === 'stopAndUnload'
+    ) ? await acquireServiceTransition() : null;
 
-  try {
     if (cmd === 'init') {
       const FManager = await getFoundryManager();
       const appName = payload.appName || 'flint';
@@ -3890,7 +3958,7 @@ rl.on('line', async (line) => {
             const details = await readErrorBody(resp);
             throw new Error(`Chat completion failed (${resp.status} ${resp.statusText}): ${details}`);
           }
-          const httpResult = await resp.json();
+          const httpResult = await readJsonResponse(resp, 'Chat completion');
           if (canceledRequests.has(id)) {
             reply({
               error: 'The chat response was discarded after cancellation; native inference may have continued.',
@@ -4165,7 +4233,7 @@ rl.on('line', async (line) => {
           const details = await readErrorBody(resp);
           throw new Error(`Transcription failed (${resp.status} ${resp.statusText}): ${details}`);
         }
-        const transcriptionResult = await resp.json();
+        const transcriptionResult = await readJsonResponse(resp, 'Transcription');
         audioOk = true;
         reply({
           ok: true,

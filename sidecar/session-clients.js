@@ -6,6 +6,25 @@
 // instead of importing 'foundry-local-sdk' itself, so this file has no dependency on
 // Node or the native runtime, matching its siblings.
 
+// Model output is untrusted for logging purposes: it carries generated text, tool-call
+// arguments and echoed prompt content. V8's JSON.parse errors quote an excerpt of the
+// input ("Unexpected token 'S', \"SENSITIVE_\"... is not valid JSON"), and the wrappers
+// below copy `err.message` into the error that the sidecar forwards over IPC and into the
+// app log. Parsing therefore reports only a size, matching the IPC layer's payload-free
+// convention. The size is measured in real UTF-8 bytes rather than `String.length`, which
+// counts UTF-16 code units and understates any non-ASCII output.
+const utf8Encoder = new TextEncoder();
+
+function parseOpenAiJson (text, description) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(
+      `${description} returned output that is not valid JSON (${utf8Encoder.encode(text).length} bytes).`,
+    );
+  }
+}
+
 // Cleanup must never erase why the primary operation failed. If disposal itself throws,
 // combine ordinary failures into one error that still exposes the primary failure as
 // `cause`. AbortError identity is preserved because cancellation classification may
@@ -106,7 +125,7 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
         if (text === undefined) {
           throw new Error(`Chat completion for model '${chatModel.id}' returned no openai-json text item.`);
         }
-        result = JSON.parse(text);
+        result = parseOpenAiJson(text, `Chat completion for model '${chatModel.id}'`);
       } catch (err) {
         failure = new Error(
           `Chat completion failed for model '${chatModel.id}': ${err?.message || err}`,
@@ -139,7 +158,7 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
             for await (const item of session.processStreamingRequest(request)) {
               if (item?.type !== 'text' || item.textType !== 'openai-json' || !item.text) continue;
               receivedOutput = true;
-              yield JSON.parse(item.text);
+              yield parseOpenAiJson(item.text, `Streaming chat completion for model '${chatModel.id}'`);
             }
             if (!receivedOutput) {
               throw new Error(`Chat completion for model '${chatModel.id}' returned no openai-json text item.`);
@@ -205,7 +224,7 @@ export function createSessionEmbeddingClient (embedModel, sdkModule) {
         if (text === undefined) {
           throw new Error(`Embedding generation for model '${embedModel.id}' returned no openai-json text item.`);
         }
-        result = JSON.parse(text);
+        result = parseOpenAiJson(text, `Embedding generation for model '${embedModel.id}'`);
       } catch (err) {
         failure = new Error(
           `Embedding generation failed for model '${embedModel.id}': ${err?.message || err}`,

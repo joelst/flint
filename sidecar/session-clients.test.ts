@@ -662,3 +662,82 @@ describe('createSessionEmbeddingClient', () => {
     expect(createSessionEmbeddingClient({ id: 'm' }, { EmbeddingsSession, Request, Item: { text: 'not-a-function' } })).toBeNull();
   });
 });
+
+// V8's JSON.parse quotes an excerpt of its input ("Unexpected token 'S', \"SENSITIVE_\"...
+// is not valid JSON"). These wrappers copy err.message into the error the sidecar
+// forwards over IPC and writes to the app log, so a malformed model response must never
+// carry generated text, tool-call arguments or echoed prompt content into that message.
+describe('session client malformed output redaction', () => {
+  const SECRET = 'SENSITIVE_PROMPT_a1b2c3_user@example.com';
+  // A model emitting prose instead of JSON is the realistic failure, and it is the shape
+  // whose parser error quotes the input.
+  const MALFORMED = `${SECRET} - I could not answer that.`;
+  const LEAKY = /SENSITIVE_|a1b2c3|example\.com/;
+
+  async function messageOf (run: () => Promise<unknown>): Promise<string> {
+    try {
+      await run();
+    } catch (e) {
+      return e instanceof Error ? `${e.message}` : String(e);
+    }
+    throw new Error('expected the operation to reject');
+  }
+
+  function malformedSdk() {
+    const Item = { text: (text: string, textType: string) => ({ type: 'text', textType, text }) };
+    class Request {
+      items: unknown[] = [];
+      addItem(item: unknown) { this.items.push(item); return this; }
+    }
+    class Session {
+      async processRequest() { return { output: [Item.text(MALFORMED, 'openai-json')] }; }
+      async *processStreamingRequest() { yield Item.text(MALFORMED, 'openai-json'); }
+      dispose() {}
+    }
+    return { ChatSession: Session, EmbeddingsSession: Session, Request, Item };
+  }
+
+  // Anchors the whole suite: if the runtime ever stops quoting the input, these tests
+  // would otherwise start passing for the wrong reason.
+  it('confirms the unredacted parser error would leak the payload', () => {
+    let raw = '';
+    try { JSON.parse(MALFORMED); } catch (e) { raw = (e as Error).message; }
+    expect(raw).toMatch(LEAKY);
+  });
+
+  it('keeps model output out of buffered chat errors', async () => {
+    const client = createSessionChatClient({ id: 'm' }, malformedSdk());
+    const message = await messageOf(() => client.completeChat([], undefined));
+    expect(message).toMatch(/not valid JSON \(\d+ bytes\)/);
+    expect(message).not.toMatch(LEAKY);
+  });
+
+  it('keeps model output out of streaming chat errors', async () => {
+    const client = createSessionChatClient({ id: 'm' }, malformedSdk());
+    const message = await messageOf(async () => {
+      for await (const _chunk of client.completeStreamingChat([], undefined)) { /* consume */ }
+    });
+    expect(message).toMatch(/not valid JSON \(\d+ bytes\)/);
+    expect(message).not.toMatch(LEAKY);
+  });
+
+  it('keeps embedding output out of errors', async () => {
+    const client = createSessionEmbeddingClient({ id: 'e' }, malformedSdk());
+    const message = await messageOf(() => client.generateEmbeddings(['x']));
+    expect(message).toMatch(/not valid JSON \(\d+ bytes\)/);
+    expect(message).not.toMatch(LEAKY);
+  });
+
+  it('reports UTF-8 byte length, not UTF-16 code units', async () => {
+    const Item = { text: (text: string, textType: string) => ({ type: 'text', textType, text }) };
+    class Request { items: unknown[] = []; addItem(i: unknown) { this.items.push(i); return this; } }
+    class Session {
+      async processRequest() { return { output: [Item.text('\u00e9\u{1F642}', 'openai-json')] }; }
+      dispose() {}
+    }
+    const client = createSessionEmbeddingClient({ id: 'e' }, { EmbeddingsSession: Session, Request, Item });
+    // 'e-acute + slightly-smiling-face' is 3 UTF-16 code units but 6 UTF-8 bytes.
+    const message = await messageOf(() => client.generateEmbeddings(['x']));
+    expect(message).toContain('(6 bytes)');
+  });
+});

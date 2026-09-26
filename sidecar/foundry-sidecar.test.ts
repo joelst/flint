@@ -2728,6 +2728,63 @@ describe('foundry-sidecar command schema validation', () => {
     expect(String(res.error)).toContain('finite non-negative number');
   });
 
+  // Each of these is a JSON payload the sidecar accepts at the JSON.parse stage but that
+  // crashed the whole process while being validated or echoed. The rl 'line' listener is
+  // async, so a throw there became an unhandled promise rejection and Node terminated the
+  // sidecar, losing every loaded model and all in-flight work instead of rejecting one
+  // command. Each case asserts the sidecar both answers and is still alive afterwards.
+  //
+  // The deep-nesting payloads are built as raw JSON text on purpose: they are valid JSON,
+  // but JSON.stringify overflows the stack on them, so the test could not serialize its
+  // own frame. That asymmetry is exactly the bug being guarded.
+  const deepJson = (depth: number) => `${'['.repeat(depth)}1${']'.repeat(depth)}`;
+  // `parameters` must be a non-array object to reach the serialization step at all.
+  const deepObjectJson = (depth: number) => `${'{"a":'.repeat(depth)}1${'}'.repeat(depth)}`;
+
+  it.each([
+    {
+      name: 'deeply nested tool parameters (JSON.stringify RangeError)',
+      id: 810,
+      line: () => `{"id":810,"cmd":"chatCompletion","model":"m","messages":[{"role":"user","content":"hi"}],`
+        + `"tools":[{"type":"function","function":{"name":"deep","parameters":${deepObjectJson(50000)}}}]}`,
+      expected: /serializable JSON/i,
+    },
+    {
+      name: 'non-coercible lane (interpolation TypeError)',
+      id: 811,
+      line: () => '{"id":811,"cmd":"load","alias":"any-model","lane":{"toString":null}}',
+      expected: /invalid lane/i,
+    },
+    {
+      name: 'deeply nested envelope id (reply serialization RangeError)',
+      id: null,
+      line: () => `{"id":${deepJson(200000)},"cmd":"listModels"}`,
+      expected: /"id" must be a finite number or string/i,
+    },
+    {
+      name: 'non-coercible cmd (diagnostic TypeError)',
+      id: 813,
+      line: () => '{"id":813,"cmd":{"toString":null}}',
+      expected: /"cmd" must be a string/i,
+    },
+    {
+      name: 'non-coercible protocolVersion (String() TypeError)',
+      id: 814,
+      line: () => '{"id":814,"cmd":"listModels","protocolVersion":{"toString":null}}',
+      expected: /"protocolVersion" must be a number or string/i,
+    },
+  ])('rejects $name without killing the sidecar', async ({ id, line, expected }) => {
+    proc.stdin.write(`${line()}\n`);
+    const res = await waitForLine(proc, (msg) => msg.id === id, 20000);
+    expect(String(res.error)).toMatch(expected);
+
+    // The point of the fix: the process must still be serving commands.
+    expect(proc.exitCode).toBeNull();
+    proc.stdin.write(`${JSON.stringify({ id: 899, cmd: 'runArbitraryCode' })}\n`);
+    const after = await waitForLine(proc, (msg) => msg.id === 899, 20000);
+    expect(String(after.error)).toContain('Unknown command');
+  });
+
   it('rejects load with invalid lane name', async () => {
     proc.stdin.write(`${JSON.stringify({ id: 20, cmd: 'load', alias: 'any-model', lane: 'invalid' })}\n`);
     const res = await waitForLine(proc, (msg) => msg.id === 20);
