@@ -103,6 +103,15 @@ function validateWindowPlanOptions(options: WindowPlanOptions): ValidatedWindowP
   if (values.maxSec + values.overlapSec < 2 * values.minSec) {
     throw new RangeError('window options must leave a feasible minimum tail');
   }
+  // A hard split restarts `overlapSec` before the cut, so it only advances by
+  // `targetSec - overlapSec`. The bounds above keep that positive but allow it to be
+  // arbitrarily small (targetSec === minSec with overlapSec just under minSec), which
+  // would need unboundedly many windows to reach the end of the audio. Requiring a full
+  // minimum window of progress keeps the window count bounded by duration / minSec, so
+  // planning always terminates having covered the whole input.
+  if (values.targetSec - values.overlapSec < values.minSec) {
+    throw new RangeError('overlapSec must leave at least minSec of forward progress per hard split');
+  }
 
   return values;
 }
@@ -245,10 +254,21 @@ export function planTranscriptionWindows(
   const windows: TranscriptionWindow[] = [];
   let pos = 0;
   let overlapsPrevious = false;
-  let guard = 0;
+  // Every iteration advances `pos` by at least `minSec`: a snapped cut is chosen no
+  // earlier than `pos + minSec`, and a hard split advances `targetSec - overlapSec`,
+  // which validation now keeps at or above `minSec`. The one exception is the final
+  // hard split clamped to leave a minimum tail, which can advance less but leaves
+  // `minSec` remaining and so always exits through the final-window branch next pass.
+  // Anything beyond this bound means that invariant broke, and a plan that stops short
+  // of `duration` would silently drop audio, so fail instead of returning partial coverage.
+  const maxWindows = Math.ceil(duration / minSec) + 4;
 
   while (pos < duration - 0.05) {
-    if (guard++ > 10000) break; // defensive: never spin
+    if (windows.length > maxWindows) {
+      throw new RangeError(
+        `window planning failed to cover ${duration}s after ${windows.length} windows`,
+      );
+    }
     const remaining = duration - pos;
     if (remaining <= maxSec) {
       windows.push({

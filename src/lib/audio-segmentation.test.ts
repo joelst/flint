@@ -300,8 +300,31 @@ describe('planTranscriptionWindows', () => {
     [{ targetSec: 31, maxSec: 30 }, 'targetSec'],
     [{ minSec: 12, targetSec: 18, maxSec: 19, overlapSec: 4 }, 'feasible'],
     [{ minSec: 12, overlapSec: 12 }, 'overlapSec'],
+    // targetSec === minSec with overlap just under it advances ~1ms per hard split,
+    // which previously exhausted the spin guard and returned a plan covering only
+    // part of the audio.
+    [{ targetSec: 12, minSec: 12, overlapSec: 11.999 }, 'forward progress'],
+    [{ targetSec: 20, minSec: 12, overlapSec: 10 }, 'forward progress'],
   ] as const)('rejects infeasible options %j', (options, message) => {
     expect(() => planTranscriptionWindows(60, [], options)).toThrow(message);
+  });
+
+  it('covers the whole input for every accepted option set', () => {
+    const accepted = [
+      {},
+      { targetSec: 12, minSec: 12, overlapSec: 0 },
+      { minSec: 8, targetSec: 18, maxSec: 20, searchSec: 5, overlapSec: 3 },
+      { minSec: 12, targetSec: 28, maxSec: 30, overlapSec: 4 },
+    ];
+    for (const options of accepted) {
+      for (const duration of [30, 60, 137, 600]) {
+        const windows = planTranscriptionWindows(duration, [], options);
+        const last = windows[windows.length - 1];
+        expect(windows[0].startSec).toBe(0);
+        // A plan that stops short would silently drop the remaining audio.
+        expect(last.endSec).toBeGreaterThanOrEqual(duration - 1e-6);
+      }
+    }
   });
 
   it('terminates on pathological silence data instead of looping forever', () => {
@@ -314,6 +337,20 @@ describe('planTranscriptionWindows', () => {
     expect(windows.length).toBeGreaterThan(0);
     expect(windows.length).toBeLessThan(500);
     expect(windows[windows.length - 1].endSec).toBeCloseTo(600, 5);
+  });
+
+  it('plans long audio with dense minimum-length snaps without tripping the bound', () => {
+    // Silence every minSec forces the shortest legal advance on every boundary, the
+    // worst case for the window-count bound. It must still cover the full duration.
+    const runs = Array.from({ length: 400 }, (_, i) => ({
+      startSec: 12 * (i + 1) - 0.05,
+      endSec: 12 * (i + 1) + 0.05,
+      centerSec: 12 * (i + 1),
+    }));
+    for (const duration of [600, 1800, 3600]) {
+      const windows = planTranscriptionWindows(duration, runs);
+      expect(windows[windows.length - 1].endSec).toBeCloseTo(duration, 5);
+    }
   });
 });
 
