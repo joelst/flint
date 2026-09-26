@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   DEFAULT_BUFFERED_RESPONSE_TIMEOUT_MS,
   stripHopByHopHeaders,
+  contentTypeMediaType,
+  isContentType,
   isJsonContentType,
   modelRejection,
   rejectionNames,
@@ -51,12 +53,26 @@ describe('isJsonContentType', () => {
   it('matches the media type ignoring parameters', () => {
     expect(isJsonContentType('application/json')).toBe(true);
     expect(isJsonContentType('application/json; charset=utf-8')).toBe(true);
+    expect(isJsonContentType(' application/json \t; charset=utf-8')).toBe(true);
     expect(isJsonContentType('APPLICATION/JSON')).toBe(true);
   });
 
   it('rejects other types', () => {
     expect(isJsonContentType('multipart/form-data')).toBe(false);
     expect(isJsonContentType(undefined)).toBe(false);
+  });
+});
+
+describe('Content-Type media parsing', () => {
+  it('normalizes optional whitespace, casing, and parameters once for every caller', () => {
+    expect(contentTypeMediaType(' Multipart/Form-Data \t; boundary=x')).toBe('multipart/form-data');
+    expect(isContentType(' Multipart/Form-Data \t; boundary=x', 'multipart/form-data')).toBe(true);
+    expect(isContentType('application/json; charset=utf-8', 'multipart/form-data')).toBe(false);
+  });
+
+  it('fails closed when the expected media type is absent', () => {
+    expect(isContentType(undefined, undefined)).toBe(false);
+    expect(isContentType('', '')).toBe(false);
   });
 });
 

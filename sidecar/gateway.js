@@ -39,6 +39,7 @@ import {
   rewriteStatusEndpoints,
   formatPublicEndpoint,
   isLoopbackAddress,
+  isContentType,
   isJsonContentType,
   DEFAULT_BUFFERED_RESPONSE_TIMEOUT_MS,
   DEFAULT_MAX_BUFFERED_BODY,
@@ -427,7 +428,7 @@ export function createGateway (options) {
       // Foundry's transcription route ignores Content-Type and reads any JSON body's
       // `filename` as a path on this machine. Only a body that opens with its multipart
       // boundary (never valid JSON) may reach it, and nothing else is buffered or loaded.
-      if (typeof contentType !== 'string' || !/^multipart\/form-data(?:;|$)/i.test(contentType)) {
+      if (!isContentType(contentType, 'multipart/form-data')) {
         return Promise.resolve(refuseTranscription(req, res, 415));
       }
       return peekMultipartModel(req).then(model => {

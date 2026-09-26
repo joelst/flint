@@ -1527,7 +1527,7 @@ describe('gateway activity hook', () => {
 
     const res = await request(gateway.publicPort, '/v1/audio/transcriptions', {
       method: 'POST',
-      headers: { 'content-type': `multipart/form-data; charset=utf-8; BOUNDARY = "${boundary}"` },
+      headers: { 'content-type': ` multipart/form-data \t; charset=utf-8; BOUNDARY = "${boundary}"` },
       body,
     });
 
