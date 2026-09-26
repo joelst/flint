@@ -473,12 +473,24 @@ describe('native service startup', () => {
   });
 
   it('classifies ASR model names the same way the endpoint classifier does', async () => {
-    const { looksLikeSpeech } = await import('./model-classification.js');
+    const { audioSessionUriSupport, looksLikeSpeech } = await import('./model-classification.js');
     expect(looksLikeSpeech('nemotron-3.5-asr-streaming-0.6b')).toBe(true);
     expect(looksLikeSpeech('nemotron-speech-en-0.6b')).toBe(true);
     expect(looksLikeSpeech('whisper-tiny-generic-cpu')).toBe(true);
     expect(looksLikeSpeech('parakeet-tdt-generic-cpu')).toBe(true);
     expect(looksLikeSpeech('qwen3-0.6b-generic-cpu')).toBe(false);
+    expect(audioSessionUriSupport({ alias: 'whisper-tiny' })).toBe('supported');
+    expect(audioSessionUriSupport({ alias: 'nemotron-3.5-asr-streaming-0.6b' })).toBe('unsupported');
+    expect(audioSessionUriSupport({ alias: 'parakeet-tdt-0.6b-v2' })).toBe('unsupported');
+    expect(audioSessionUriSupport({
+      alias: 'opaque-variant',
+      info: { capabilities: 'automatic-speech-recognition whisper' },
+    })).toBe('supported');
+    expect(audioSessionUriSupport({
+      alias: 'opaque-variant',
+      info: { task: 'automatic-speech-recognition', modelType: 'parakeet' },
+    })).toBe('unsupported');
+    expect(audioSessionUriSupport({ alias: 'future-asr-model' })).toBe('unknown');
   });
 });
 

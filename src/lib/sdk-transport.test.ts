@@ -282,6 +282,36 @@ afterEach(() => {
 });
 
 describe('sidecar stderr classification', () => {
+  it('logs sidecar reply metadata without exposing response payloads', async () => {
+    const sdk = await loadSdk();
+    const request = sdk.chatCompletion('m', [{ role: 'user', content: 'hi' }]);
+    const id = await waitForWrite('chatCompletion');
+    const sentinel = 'SECRET_TOOL_ARGUMENT_SENTINEL';
+    harness.emitStdout({
+      id,
+      result: {
+        choices: [{
+          message: {
+            tool_calls: [{
+              id: 'call-1',
+              type: 'function',
+              function: { name: 'private_tool', arguments: sentinel },
+            }],
+          },
+        }],
+      },
+    });
+    await request;
+
+    const renderedLogs = vi.mocked(console.log).mock.calls
+      .flat()
+      .map((value) => String(value))
+      .join('\n');
+    expect(renderedLogs).toContain(`[sidecar stdout] id=${id}`);
+    expect(renderedLogs).not.toContain(sentinel);
+    expect(renderedLogs).not.toContain('private_tool');
+  });
+
   it('records tagged diagnostics at the declared level instead of as errors', async () => {
     const sdk = await loadSdk();
     const request = capture(sdk.getEps());

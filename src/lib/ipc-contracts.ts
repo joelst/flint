@@ -1,5 +1,63 @@
 export type LaneName = 'chat' | 'audio';
 
+export interface ChatToolDefinition {
+  type: 'function';
+  function: {
+    name: string;
+    description?: string;
+    parameters?: Record<string, unknown>;
+  };
+}
+
+export interface ChatTextContentPart {
+  type: 'text';
+  text: string;
+}
+
+export interface ChatImageContentPart {
+  type: 'image_url';
+  image_url: {
+    url: string;
+    detail?: 'auto' | 'low' | 'high';
+  };
+}
+
+export type ChatContent = string | Array<ChatTextContentPart | ChatImageContentPart>;
+
+export interface ChatToolCall {
+  id: string;
+  type: 'function';
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+export type ChatAssistantMessage = {
+  role: 'assistant';
+  name?: string;
+} & (
+  | { content: ChatContent; tool_calls?: ChatToolCall[] }
+  | { content?: null; tool_calls: ChatToolCall[] }
+);
+
+export type ChatRequestMessage =
+  | { role: 'system'; content: ChatContent; name?: string }
+  | { role: 'user'; content: ChatContent; name?: string }
+  | ChatAssistantMessage
+  | { role: 'tool'; content: ChatContent; tool_call_id: string; name?: string };
+
+export type ChatToolChoice =
+  | 'none'
+  | 'auto'
+  | 'required'
+  | { type: 'function'; function: { name: string } };
+
+export type ChatResponseFormat =
+  | { type: 'text' }
+  | { type: 'json_object' }
+  | { type: 'json_schema'; json_schema: Record<string, unknown> };
+
 /** Version of the JSON-lines transport handshake shared with the sidecar. */
 export const SIDECAR_PROTOCOL_VERSION = 1;
 
@@ -17,7 +75,23 @@ export type SidecarCommand =
   | { cmd: 'unload'; alias: string; lane?: LaneName; ifIdle?: boolean }
   | { cmd: 'deleteModel'; alias: string; variantId?: string }
   | { cmd: 'getEndpoint' }
-  | { cmd: 'chatCompletion'; model: string; messages: unknown[]; maxTokens?: number; temperature?: number; preferredEp?: string; stream?: boolean; topP?: number; topK?: number; frequencyPenalty?: number; presencePenalty?: number; randomSeed?: number }
+  | {
+      cmd: 'chatCompletion';
+      model: string;
+      messages: ChatRequestMessage[];
+      maxTokens?: number;
+      temperature?: number;
+      preferredEp?: string;
+      stream?: boolean;
+      tools?: ChatToolDefinition[];
+      toolChoice?: ChatToolChoice;
+      responseFormat?: ChatResponseFormat;
+      topP?: number;
+      topK?: number;
+      frequencyPenalty?: number;
+      presencePenalty?: number;
+      randomSeed?: number;
+    }
   | { cmd: 'cancelChatRequest'; requestId: number }
   | { cmd: 'transcribeAudio'; audioBase64: string; mimeType: string; fileName: string; model: string; language: string; temperature?: number; preferredEp?: string }
   | { cmd: 'embedTexts'; model: string; inputs: string[] }

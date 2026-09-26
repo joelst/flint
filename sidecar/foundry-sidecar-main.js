@@ -21,6 +21,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { annotateVariantUpdates } from './model-updates.js';
 import { selectChatTransport } from './chat-transport.js';
+import { createSessionChatClient, createSessionEmbeddingClient } from './session-clients.js';
 import { assertWavBuffer } from './audio-format.js';
 import { createGateway } from './gateway.js';
 import { formatPublicEndpoint } from './gateway-http.js';
@@ -32,7 +33,7 @@ import {
   resolveModelId,
 } from './model-registry.js';
 import { activityCandidateKeys } from './activity-booking.js';
-import { looksLikeSpeech } from './model-classification.js';
+import { audioSessionUriSupport, looksLikeSpeech } from './model-classification.js';
 import { waitUntilIdle } from './monotonic-wait.js';
 import {
   createOperationAdmission,
@@ -201,7 +202,16 @@ const FIELD_TYPES = {
   load:              { alias: 'non-empty-string', variantId: 'non-empty-string' },
   unload:            { alias: 'non-empty-string', ifIdle: 'boolean' },
   deleteModel:       { alias: 'non-empty-string', variantId: 'non-empty-string' },
-  chatCompletion:    { model: 'non-empty-string', messages: 'array', topP: 'number', topK: 'number', frequencyPenalty: 'number', presencePenalty: 'number', randomSeed: 'number' },
+  chatCompletion:    {
+    model: 'non-empty-string',
+    messages: 'array',
+    tools: 'array',
+    topP: 'number',
+    topK: 'number',
+    frequencyPenalty: 'number',
+    presencePenalty: 'number',
+    randomSeed: 'number',
+  },
   cancelChatRequest: { requestId: 'number' },
   transcribeAudio:   { audioBase64: 'string', mimeType: 'non-empty-string', fileName: 'non-empty-string', model: 'non-empty-string', language: 'non-empty-string' },
   embedTexts:        { model: 'non-empty-string', inputs: 'array' },
@@ -242,7 +252,14 @@ const COMMAND_SCHEMA = {
   unload:             { required: ['alias'], optional: ['lane', 'ifIdle'] },
   deleteModel:        { required: ['alias'], optional: ['variantId'] },
   getEndpoint:        { required: [], optional: [] },
-  chatCompletion:     { required: ['model', 'messages'], optional: ['maxTokens', 'temperature', 'preferredEp', 'stream', 'topP', 'topK', 'frequencyPenalty', 'presencePenalty', 'randomSeed'] },
+  chatCompletion:     {
+    required: ['model', 'messages'],
+    optional: [
+      'maxTokens', 'temperature', 'preferredEp', 'stream',
+      'tools', 'toolChoice', 'responseFormat',
+      'topP', 'topK', 'frequencyPenalty', 'presencePenalty', 'randomSeed',
+    ],
+  },
   cancelChatRequest:  { required: ['requestId'], optional: [] },
   transcribeAudio:    { required: ['audioBase64', 'mimeType', 'fileName', 'model', 'language'], optional: ['temperature', 'preferredEp'] },
   embedTexts:         { required: ['model', 'inputs'], optional: [] },
@@ -340,8 +357,73 @@ function validateCommand(cmd, payload) {
     return `Command "${cmd}" field "temperature" must be between 0 and 2`;
   }
   if (cmd === 'chatCompletion') {
+    try {
+      toSdkMessages(payload.messages);
+    } catch (err) {
+      return `Command "chatCompletion" field "messages" is invalid: ${err?.message || err}`;
+    }
     if (payload.stream !== undefined && typeof payload.stream !== 'boolean') return `Command "chatCompletion" field "stream" must be a boolean`;
     if (payload.maxTokens !== undefined && typeof payload.maxTokens !== 'number') return `Command "chatCompletion" field "maxTokens" must be a number`;
+    if (payload.tools !== undefined) {
+      if (!Array.isArray(payload.tools) || payload.tools.length > 64) {
+        return 'Command "chatCompletion" field "tools" must contain at most 64 definitions';
+      }
+      let serializedBytes = 0;
+      for (const tool of payload.tools) {
+        if (!tool || typeof tool !== 'object' || Array.isArray(tool) || tool.type !== 'function') {
+          return 'Command "chatCompletion" tool definitions must use type "function"';
+        }
+        const fn = tool.function;
+        if (!fn || typeof fn !== 'object' || Array.isArray(fn)
+          || typeof fn.name !== 'string' || !fn.name.trim() || fn.name.length > 128) {
+          return 'Command "chatCompletion" tool function names must be non-empty strings of at most 128 characters';
+        }
+        if (fn.description !== undefined && (typeof fn.description !== 'string' || fn.description.length > 4096)) {
+          return 'Command "chatCompletion" tool descriptions must be strings of at most 4096 characters';
+        }
+        if (fn.parameters !== undefined && (
+          typeof fn.parameters !== 'object' || fn.parameters === null || Array.isArray(fn.parameters)
+        )) {
+          return 'Command "chatCompletion" tool parameters must be a JSON object';
+        }
+        serializedBytes += Buffer.byteLength(JSON.stringify(tool));
+      }
+      if (serializedBytes > 64 * 1024) {
+        return 'Command "chatCompletion" tool definitions exceed the 64 KiB limit';
+      }
+    }
+    if (payload.toolChoice !== undefined && !(
+      payload.toolChoice === 'none'
+      || payload.toolChoice === 'auto'
+      || payload.toolChoice === 'required'
+      || (
+        payload.toolChoice
+        && typeof payload.toolChoice === 'object'
+        && !Array.isArray(payload.toolChoice)
+        && payload.toolChoice.type === 'function'
+        && payload.toolChoice.function
+        && typeof payload.toolChoice.function.name === 'string'
+        && payload.toolChoice.function.name.trim().length > 0
+        && payload.toolChoice.function.name.length <= 128
+      )
+    )) {
+      return 'Command "chatCompletion" field "toolChoice" is invalid';
+    }
+    if (payload.responseFormat !== undefined && (
+      !payload.responseFormat
+      || typeof payload.responseFormat !== 'object'
+      || Array.isArray(payload.responseFormat)
+      || !['text', 'json_object', 'json_schema'].includes(payload.responseFormat.type)
+    )) {
+      return 'Command "chatCompletion" field "responseFormat" is invalid';
+    }
+    if (payload.responseFormat?.type === 'json_schema' && (
+      !payload.responseFormat.json_schema
+      || typeof payload.responseFormat.json_schema !== 'object'
+      || Array.isArray(payload.responseFormat.json_schema)
+    )) {
+      return 'Command "chatCompletion" json_schema response format requires a JSON object';
+    }
     if (typeof payload.maxTokens === 'number' && (!Number.isInteger(payload.maxTokens) || payload.maxTokens <= 0)) {
       return `Command "chatCompletion" field "maxTokens" must be a positive integer`;
     }
@@ -2161,16 +2243,259 @@ async function readErrorBody (resp) {
   return readBoundedErrorBody(resp);
 }
 
+function isPlainObject (value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function sanitizeChatName (name, field) {
+  if (name === undefined) return undefined;
+  if (typeof name !== 'string' || !name.trim() || name.length > 128) {
+    throw new Error(`${field} must be a non-empty string of at most 128 characters`);
+  }
+  return name;
+}
+
+function sanitizeChatContent (content, field, { nullable = false, optional = false } = {}) {
+  if (content === undefined && optional) return undefined;
+  if (content === null && nullable) return null;
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) {
+    throw new Error(`${field} must be a string or an array of content parts`);
+  }
+  return content.map((part, index) => {
+    if (!isPlainObject(part)) {
+      throw new Error(`${field}[${index}] must be an object`);
+    }
+    if (part.type === 'text') {
+      if (typeof part.text !== 'string') {
+        throw new Error(`${field}[${index}].text must be a string`);
+      }
+      return { type: 'text', text: part.text };
+    }
+    if (part.type === 'image_url') {
+      if (!isPlainObject(part.image_url)
+        || typeof part.image_url.url !== 'string'
+        || !part.image_url.url) {
+        throw new Error(`${field}[${index}].image_url.url must be a non-empty string`);
+      }
+      const detail = part.image_url.detail;
+      if (detail !== undefined && !['auto', 'low', 'high'].includes(detail)) {
+        throw new Error(`${field}[${index}].image_url.detail is invalid`);
+      }
+      return {
+        type: 'image_url',
+        image_url: {
+          url: part.image_url.url,
+          ...(detail !== undefined ? { detail } : {}),
+        },
+      };
+    }
+    throw new Error(`${field}[${index}].type must be "text" or "image_url"`);
+  });
+}
+
+function sanitizeToolCalls (toolCalls, messageIndex) {
+  if (!Array.isArray(toolCalls) || toolCalls.length === 0 || toolCalls.length > 64) {
+    throw new Error(`messages[${messageIndex}].tool_calls must contain 1 to 64 calls`);
+  }
+  return toolCalls.map((toolCall, toolIndex) => {
+    const field = `messages[${messageIndex}].tool_calls[${toolIndex}]`;
+    if (!isPlainObject(toolCall)
+      || typeof toolCall.id !== 'string'
+      || !toolCall.id.trim()
+      || toolCall.id.length > 256) {
+      throw new Error(`${field}.id must be a non-empty string of at most 256 characters`);
+    }
+    if (toolCall.type !== 'function') {
+      throw new Error(`${field}.type must be "function"`);
+    }
+    if (!isPlainObject(toolCall.function)
+      || typeof toolCall.function.name !== 'string'
+      || !toolCall.function.name.trim()
+      || toolCall.function.name.length > 128) {
+      throw new Error(`${field}.function.name must be a non-empty string of at most 128 characters`);
+    }
+    if (typeof toolCall.function.arguments !== 'string') {
+      throw new Error(`${field}.function.arguments must be a string`);
+    }
+    return {
+      id: toolCall.id,
+      type: 'function',
+      function: {
+        name: toolCall.function.name,
+        arguments: toolCall.function.arguments,
+      },
+    };
+  });
+}
+
 function toSdkMessages (messages) {
-  // Pass content through as-is to support vision arrays:
-  // { role, content: "text" } or { role, content: [ {type:"text", text:...}, {type:"image_url", image_url:{url:...}} ] }
-  return (messages || [])
-    .filter((m) => m && (m.role === 'system' || m.role === 'user' || m.role === 'assistant'))
-    .map((m) => ({ role: m.role, content: m.content }));
+  return messages.map((message, index) => {
+    if (!isPlainObject(message)) {
+      throw new Error(`messages[${index}] must be an object`);
+    }
+    const name = sanitizeChatName(message.name, `messages[${index}].name`);
+    if (message.role === 'system' || message.role === 'user') {
+      return {
+        role: message.role,
+        content: sanitizeChatContent(message.content, `messages[${index}].content`),
+        ...(name !== undefined ? { name } : {}),
+      };
+    }
+    if (message.role === 'assistant') {
+      const content = sanitizeChatContent(
+        message.content,
+        `messages[${index}].content`,
+        { nullable: true, optional: true },
+      );
+      const toolCalls = message.tool_calls === undefined
+        ? undefined
+        : sanitizeToolCalls(message.tool_calls, index);
+      if ((content === undefined || content === null) && toolCalls === undefined) {
+        throw new Error(`messages[${index}] assistant message requires content or tool_calls`);
+      }
+      return {
+        role: 'assistant',
+        ...(content !== undefined ? { content } : {}),
+        ...(name !== undefined ? { name } : {}),
+        ...(toolCalls !== undefined ? { tool_calls: toolCalls } : {}),
+      };
+    }
+    if (message.role === 'tool') {
+      if (typeof message.tool_call_id !== 'string'
+        || !message.tool_call_id.trim()
+        || message.tool_call_id.length > 256) {
+        throw new Error(`messages[${index}].tool_call_id must be a non-empty string of at most 256 characters`);
+      }
+      return {
+        role: 'tool',
+        content: sanitizeChatContent(message.content, `messages[${index}].content`),
+        tool_call_id: message.tool_call_id,
+        ...(name !== undefined ? { name } : {}),
+      };
+    }
+    throw new Error(`messages[${index}].role is unsupported`);
+  });
+}
+
+function requiresModernChatTransport (messages) {
+  return messages.some((message) =>
+    message.role === 'tool'
+    || (message.role === 'assistant' && Array.isArray(message.tool_calls))
+  );
 }
 
 function normalizeText (value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+const MAX_STREAMED_TOOL_CALLS = 64;
+
+function latchToolCallDeltaFailure (target, error) {
+  target.failure ??= error instanceof Error ? error : new Error(String(error));
+}
+
+function appendToolCallDeltaString (current, fragment, field) {
+  if (fragment === undefined) return current;
+  if (typeof fragment !== 'string') {
+    throw new Error(`Streamed tool-call ${field} must be a string`);
+  }
+  return typeof current === 'string' ? current + fragment : fragment;
+}
+
+function mergeToolCallDeltas (target, deltas) {
+  if (target.failure) return target;
+  if (deltas === undefined) return target;
+  if (!Array.isArray(deltas)) {
+    latchToolCallDeltaFailure(target, new Error('Streamed tool_calls must be an array'));
+    return target;
+  }
+  for (const delta of deltas) {
+    try {
+      if (!isPlainObject(delta)) {
+        throw new Error('Streamed tool-call delta must be an object');
+      }
+      let index;
+      if (delta.index === undefined) {
+        if (target.nextIndex >= Number.MAX_SAFE_INTEGER) {
+          throw new Error('Invalid streamed tool-call index');
+        }
+        index = target.nextIndex;
+        target.nextIndex += 1;
+      } else {
+        index = delta.index;
+        if (!Number.isSafeInteger(index) || index < 0 || index >= Number.MAX_SAFE_INTEGER) {
+          throw new Error('Invalid streamed tool-call index');
+        }
+        target.nextIndex = Math.max(target.nextIndex, index + 1);
+      }
+      const existing = target.calls.get(index);
+      if (!existing && target.calls.size >= MAX_STREAMED_TOOL_CALLS) {
+        throw new Error(`Streamed tool_calls cannot contain more than ${MAX_STREAMED_TOOL_CALLS} distinct call indexes`);
+      }
+      const current = existing || {};
+      if (delta.type !== undefined && typeof delta.type !== 'string') {
+        throw new Error('Streamed tool-call type must be a string');
+      }
+      if (current.type !== undefined && delta.type !== undefined && current.type !== delta.type) {
+        throw new Error('Streamed tool-call type fragments must not conflict');
+      }
+      if (delta.function !== undefined && !isPlainObject(delta.function)) {
+        throw new Error('Streamed tool-call function must be an object');
+      }
+      const currentFunction = current.function || {};
+      const nextFunction = delta.function || {};
+      target.calls.set(index, {
+        ...(current.id !== undefined || delta.id !== undefined
+          ? { id: appendToolCallDeltaString(current.id, delta.id, 'id') }
+          : {}),
+        ...(current.type !== undefined || delta.type !== undefined
+          ? { type: current.type ?? delta.type }
+          : {}),
+        ...(current.function !== undefined || delta.function !== undefined
+          ? {
+              function: {
+                ...(currentFunction.name !== undefined || nextFunction.name !== undefined
+                  ? {
+                      name: appendToolCallDeltaString(
+                        currentFunction.name,
+                        nextFunction.name,
+                        'function.name',
+                      ),
+                    }
+                  : {}),
+                ...(currentFunction.arguments !== undefined || nextFunction.arguments !== undefined
+                  ? {
+                      arguments: appendToolCallDeltaString(
+                        currentFunction.arguments,
+                        nextFunction.arguments,
+                        'function.arguments',
+                      ),
+                    }
+                  : {}),
+              },
+            }
+          : {}),
+      });
+    } catch (error) {
+      latchToolCallDeltaFailure(target, error);
+      break;
+    }
+  }
+  return target;
+}
+
+function finalizeToolCallDeltas (target) {
+  if (target.failure) throw target.failure;
+  const calls = Array.from(target.calls.entries())
+    .sort(([left], [right]) => left - right)
+    .map(([, call]) => call);
+  if (calls.length === 0) return [];
+  try {
+    return sanitizeToolCalls(calls, 'streamed');
+  } catch (error) {
+    throw new Error(`Invalid streamed assistant tool_calls: ${error?.message || error}`, { cause: error });
+  }
 }
 
 function segmentTextsFromValue (segments) {
@@ -3288,13 +3613,41 @@ rl.on('line', async (line) => {
         // Prefer direct SDK inference to avoid web-service schema/version mismatch issues.
         // Vision is the exception: the SDK client rejects non-string content outright, so a
         // multipart request has to take the HTTP endpoint or it cannot be served at all.
-        const { transport, reason: transportReason } = selectChatTransport(sdkMessages, {
-          chatClient: typeof chatModel?.createChatClient === 'function' ? 'available' : 'unsupported',
+        // Resolve the ChatSession-backed replacement (see createSessionChatClient) before
+        // transport selection: this SDK build may no longer export createChatClient() at all
+        // (removed end of 2026), so transport availability must reflect either path, not just
+        // the deprecated one.
+        let sessionChatClient = null;
+        try {
+          const sdkModule = await getFoundrySdkModule();
+          sessionChatClient = createSessionChatClient(chatModel, sdkModule);
+        } catch (err) {
+          log('debug', `ChatSession client unavailable, using createChatClient(): ${err?.message || err}`);
+        }
+        const hasChatClient = sessionChatClient || typeof chatModel?.createChatClient === 'function';
+        let { transport, reason: transportReason } = selectChatTransport(sdkMessages, {
+          chatClient: hasChatClient ? 'available' : 'unsupported',
           serviceEndpoint: sharedEndpoint ? 'available' : 'unavailable',
         });
+        const legacyUnsupportedRequest = !sessionChatClient
+          && (
+            payload.toolChoice !== undefined
+            || payload.responseFormat !== undefined
+            || requiresModernChatTransport(sdkMessages)
+          );
+        if (transport === 'sdk' && legacyUnsupportedRequest) {
+          if (sharedEndpoint) {
+            transport = 'http';
+          } else {
+            transport = null;
+            transportReason = requiresModernChatTransport(sdkMessages)
+              ? 'Tool-loop messages require the ChatSession path or a local service endpoint.'
+              : 'Tool choice and response format require the ChatSession path or a local service endpoint.';
+          }
+        }
         if (!transport) throw new Error(transportReason);
         if (transport === 'sdk') {
-          const client = chatModel.createChatClient();
+          const client = sessionChatClient || chatModel.createChatClient();
           // SDK reads generation params from client.settings, not completeChat args.
           // Omit unset fields so the model's own defaults are not overwritten.
           if (client?.settings && Number.isFinite(payload.temperature)) {
@@ -3320,11 +3673,30 @@ rl.on('line', async (line) => {
           }
           if (shouldStream && typeof client?.completeStreamingChat === 'function') {
             let content = '';
-            for await (const chunk of client.completeStreamingChat(sdkMessages)) {
+            const toolCalls = { calls: new Map(), nextIndex: 0 };
+            let chatFinishReason = null;
+            for await (const chunk of client.completeStreamingChat(
+              sdkMessages,
+              payload.tools,
+              { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
+            )) {
               const usage = chunk?.usage;
               chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
               chatTokensOut = usage?.completion_tokens ?? usage?.output_tokens ?? chatTokensOut;
               if (canceledRequests.has(id)) continue;
+              // finish_reason (like tool_calls below) is only recorded from chunks that
+              // arrive before cancellation is observed. Capturing it unconditionally would
+              // let a drained post-cancel chunk report e.g. finish_reason: 'tool_calls'
+              // while tool_calls itself stays suppressed -- a self-contradictory result.
+              // Usage stays unguarded above: the trailing usage-only chunk is expected
+              // metadata even for a canceled request, not user-visible generation output.
+              // A malformed tool-call fragment latches failure without breaking iteration:
+              // native inference is not canceled, so keep draining until the provider closes
+              // the stream and the session/fencing cleanup has run.
+              mergeToolCallDeltas(toolCalls, chunk?.choices?.[0]?.delta?.tool_calls);
+              if (toolCalls.failure) continue;
+              const finishReason = chunk?.choices?.[0]?.finish_reason;
+              if (finishReason != null) chatFinishReason = finishReason;
               const deltaText = chunk?.choices?.[0]?.delta?.content;
               const messageText = chunk?.choices?.[0]?.message?.content ?? chunk?.message?.content;
               let delta = '';
@@ -3349,13 +3721,27 @@ rl.on('line', async (line) => {
                 });
               }
             }
-            chatOk = true;
+            const wasCanceled = canceledRequests.has(id);
+            const compactedToolCalls = wasCanceled && !toolCalls.failure
+              ? []
+              : finalizeToolCallDeltas(toolCalls);
+            const publishedFinishReason = wasCanceled && chatFinishReason === 'tool_calls'
+              ? null
+              : chatFinishReason;
             chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
+            chatOk = true;
             reply({
               ok: true,
               result: {
                 ...normalizeChatResponse({
-                  choices: [{ message: { role: 'assistant', content } }],
+                  choices: [{
+                    finish_reason: publishedFinishReason,
+                    message: {
+                      role: 'assistant',
+                      content,
+                      ...(compactedToolCalls.length ? { tool_calls: compactedToolCalls } : {}),
+                    },
+                  }],
                   ...(typeof chatTokensIn === 'number' || typeof chatTokensOut === 'number'
                     ? {
                         usage: {
@@ -3377,7 +3763,18 @@ rl.on('line', async (line) => {
               }
             });
           } else if (typeof client?.completeChat === 'function') {
-            const result = await client.completeChat(sdkMessages);
+            const result = await client.completeChat(
+              sdkMessages,
+              payload.tools,
+              { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
+            );
+            if (canceledRequests.has(id)) {
+              reply({
+                error: 'The chat response was discarded after cancellation; native inference may have continued.',
+                certainty: 'cancelled',
+              });
+              return;
+            }
             const normalizedResult = normalizeChatResponse(result);
             chatTokensIn = normalizedResult?.usage?.prompt_tokens
               ?? normalizedResult?.usage?.input_tokens ?? null;
@@ -3398,6 +3795,14 @@ rl.on('line', async (line) => {
             }
             chatOk = true;
             chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
+            if (canceledRequests.has(id)) {
+              chatOk = false;
+              reply({
+                error: 'The chat response was discarded after cancellation; native inference may have continued.',
+                certainty: 'cancelled',
+              });
+              return;
+            }
             reply({
               ok: true,
               result: {
@@ -3414,24 +3819,58 @@ rl.on('line', async (line) => {
             });
           } else if (typeof client?.completeStreamingChat === 'function') {
             let content = '';
-            for await (const chunk of client.completeStreamingChat(sdkMessages)) {
+            const toolCalls = { calls: new Map(), nextIndex: 0 };
+            let chatFinishReason = null;
+            for await (const chunk of client.completeStreamingChat(
+              sdkMessages,
+              payload.tools,
+              { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
+            )) {
               const usage = chunk?.usage;
               chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
               chatTokensOut = usage?.completion_tokens ?? usage?.output_tokens ?? chatTokensOut;
               if (canceledRequests.has(id)) continue;
+              // See the equivalent SDK-path comment above: finish_reason must not be
+              // captured from a drained post-cancel chunk.
+              mergeToolCallDeltas(toolCalls, chunk?.choices?.[0]?.delta?.tool_calls);
+              if (toolCalls.failure) continue;
+              const finishReason = chunk?.choices?.[0]?.finish_reason;
+              if (finishReason != null) chatFinishReason = finishReason;
               const delta = chunk?.choices?.[0]?.delta?.content || '';
               if (delta) {
                 chatFirstTokenAt ??= Date.now();
                 content += delta;
               }
             }
-            chatOk = true;
+            if (canceledRequests.has(id)) {
+              reply({
+                error: 'The chat response was discarded after cancellation; native inference may have continued.',
+                certainty: 'cancelled',
+              });
+              return;
+            }
+            const compactedToolCalls = finalizeToolCallDeltas(toolCalls);
             chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
+            if (canceledRequests.has(id)) {
+              reply({
+                error: 'The chat response was discarded after cancellation; native inference may have continued.',
+                certainty: 'cancelled',
+              });
+              return;
+            }
+            chatOk = true;
             reply({
               ok: true,
               result: {
                 ...normalizeChatResponse({
-                  choices: [{ message: { role: 'assistant', content } }],
+                  choices: [{
+                    finish_reason: chatFinishReason,
+                    message: {
+                      role: 'assistant',
+                      content,
+                      ...(compactedToolCalls.length ? { tool_calls: compactedToolCalls } : {}),
+                    },
+                  }],
                   ...(typeof chatTokensIn === 'number' || typeof chatTokensOut === 'number'
                     ? {
                         usage: {
@@ -3464,6 +3903,9 @@ rl.on('line', async (line) => {
               stream: false,
               max_tokens: payload.maxTokens,
               temperature: payload.temperature,
+              ...(payload.tools ? { tools: payload.tools } : {}),
+              ...(payload.toolChoice !== undefined ? { tool_choice: payload.toolChoice } : {}),
+              ...(payload.responseFormat !== undefined ? { response_format: payload.responseFormat } : {}),
               top_p: payload.topP,
               frequency_penalty: payload.frequencyPenalty,
               presence_penalty: payload.presencePenalty,
@@ -3484,6 +3926,13 @@ rl.on('line', async (line) => {
             throw new Error(`Chat completion failed (${resp.status} ${resp.statusText}): ${details}`);
           }
           const httpResult = await resp.json();
+          if (canceledRequests.has(id)) {
+            reply({
+              error: 'The chat response was discarded after cancellation; native inference may have continued.',
+              certainty: 'cancelled',
+            });
+            return;
+          }
           const normalizedHttpResult = normalizeChatResponse(httpResult);
           chatTokensIn = normalizedHttpResult?.usage?.prompt_tokens
             ?? normalizedHttpResult?.usage?.input_tokens ?? null;
@@ -3505,6 +3954,14 @@ rl.on('line', async (line) => {
           }
           chatOk = true;
           chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
+          if (canceledRequests.has(id)) {
+            chatOk = false;
+            reply({
+              error: 'The chat response was discarded after cancellation; native inference may have continued.',
+              certainty: 'cancelled',
+            });
+            return;
+          }
           reply({
             ok: true,
             result: {
@@ -3610,7 +4067,8 @@ rl.on('line', async (line) => {
         } catch (err) {
           log('debug', `AudioSession: could not resolve SDK module (${err?.message || err})`);
         }
-        if (sdkModule) {
+        const audioSessionSupport = audioSessionUriSupport(audioModel);
+        if (sdkModule && audioSessionSupport !== 'unsupported') {
           const attempt = await tryAudioSessionTranscription(sdkModule, audioModel, tempPath, payload);
           if (attempt.ok) {
             const result = buildTranscriptResult(attempt.candidate, {
@@ -3631,6 +4089,8 @@ rl.on('line', async (line) => {
             return;
           }
           log('debug', `AudioSession transcription unavailable, using legacy path: ${attempt.reason}`);
+        } else if (audioSessionSupport === 'unsupported') {
+          log('debug', 'AudioSession URI path is not supported for this speech model family; using legacy path');
         }
 
         // Prefer direct AudioClient (like we do for chat) — this avoids relying on the web service HTTP route
@@ -4042,10 +4502,23 @@ rl.on('line', async (line) => {
       try {
         const poolEntry = await ensureModel(modelAlias);
         const embedModel = poolEntry.catModel;
-        if (typeof embedModel?.createEmbeddingClient !== 'function') {
-          throw new Error(`Model ${modelAlias} does not expose createEmbeddingClient`);
+        // Prefer the EmbeddingsSession-backed replacement (see createSessionEmbeddingClient)
+        // over the deprecated createEmbeddingClient() wrapper it mirrors, removed end of 2026.
+        // Falls back to createEmbeddingClient() unchanged on any SDK build that doesn't export
+        // EmbeddingsSession/Request/Item.
+        let client = null;
+        try {
+          const sdkModule = await getFoundrySdkModule();
+          client = createSessionEmbeddingClient(embedModel, sdkModule);
+        } catch (err) {
+          log('debug', `EmbeddingsSession client unavailable, using createEmbeddingClient(): ${err?.message || err}`);
         }
-        const client = embedModel.createEmbeddingClient();
+        if (!client) {
+          if (typeof embedModel?.createEmbeddingClient !== 'function') {
+            throw new Error(`Model ${modelAlias} does not expose createEmbeddingClient`);
+          }
+          client = embedModel.createEmbeddingClient();
+        }
         const result = await client.generateEmbeddings(inputs);
         embedOk = true;
         audit('embedTexts', { alias: modelAlias, count: inputs.length });

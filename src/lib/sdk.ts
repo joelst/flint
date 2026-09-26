@@ -13,6 +13,10 @@ import {
   type EpInfo,
   type EpDownloadResult,
   type SidecarCommandName,
+  type ChatRequestMessage,
+  type ChatToolDefinition,
+  type ChatToolChoice,
+  type ChatResponseFormat,
 } from './ipc-contracts';
 import {
   evaluateNodeProbe,
@@ -37,6 +41,10 @@ export type {
   EpInfo,
   EpDownloadResult,
   AcceleratorReadiness,
+  ChatRequestMessage,
+  ChatToolDefinition,
+  ChatToolChoice,
+  ChatResponseFormat,
 };
 
 export { SIDECAR_PROTOCOL_VERSION };
@@ -644,7 +652,20 @@ async function spawnSidecar() {
       }
       return;
     }
-    console.log(`[sidecar stdout] ${JSON.stringify(msg)}`);
+    const messageId = typeof msg?.id === 'number' ? msg.id : 'none';
+    const messageKind = msg?.stream
+      ? 'stream'
+      : msg?.progress !== undefined
+        ? 'progress'
+        : msg?.type === 'log'
+          ? 'log'
+          : msg?.ready
+            ? 'ready'
+            : msg?.id
+              ? 'reply'
+              : 'event';
+    const replyStatus = messageKind === 'reply' ? ` status=${msg.error ? 'error' : 'ok'}` : '';
+    console.log(`[sidecar stdout] id=${messageId} kind=${messageKind}${replyStatus}`);
     if (msg.id && msg.stream) {
       const onStream = streamHandlers.get(msg.id);
       if (onStream) {
@@ -2573,11 +2594,14 @@ export interface ChatCompletionOptions {
   frequencyPenalty?: number;
   presencePenalty?: number;
   randomSeed?: number;
+  tools?: ChatToolDefinition[];
+  toolChoice?: ChatToolChoice;
+  responseFormat?: ChatResponseFormat;
 }
 
 export async function chatCompletion(
   model: string,
-  messages: Array<{ role: string; content: any }>,
+  messages: ChatRequestMessage[],
   options?: ChatCompletionOptions
 ): Promise<any> {
   const res = await send('chatCompletion', {
@@ -2586,6 +2610,9 @@ export async function chatCompletion(
     maxTokens: options?.maxTokens,
     temperature: options?.temperature,
     preferredEp: options?.preferredEp,
+    tools: options?.tools,
+    toolChoice: options?.toolChoice,
+    responseFormat: options?.responseFormat,
     topP: options?.topP,
     topK: options?.topK,
     frequencyPenalty: options?.frequencyPenalty,
@@ -2597,7 +2624,7 @@ export async function chatCompletion(
 
 export async function chatCompletionStream(
   model: string,
-  messages: Array<{ role: string; content: any }>,
+  messages: ChatRequestMessage[],
   onDelta: (delta: string) => void,
   options?: ChatCompletionOptions,
   onAssignedId?: (id: number) => void
@@ -2610,6 +2637,9 @@ export async function chatCompletionStream(
       maxTokens: options?.maxTokens,
       temperature: options?.temperature,
       preferredEp: options?.preferredEp,
+      tools: options?.tools,
+      toolChoice: options?.toolChoice,
+      responseFormat: options?.responseFormat,
       topP: options?.topP,
       topK: options?.topK,
       frequencyPenalty: options?.frequencyPenalty,

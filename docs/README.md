@@ -43,6 +43,7 @@ or deferred plans kept for the analysis they contain, not measured data
 | Doc | Purpose |
 |---|---|
 | [PURVIEW_GOVERNANCE.md](./PURVIEW_GOVERNANCE.md) | Enterprise audit / Purview memo (implementation unscheduled) |
+| [SDKV2_MIGRATION.md](./SDKV2_MIGRATION.md) | Foundry Local SDK 2.x migration technical boundary (sequencing/gates owned by [PRODUCT_PLAN.md](./PRODUCT_PLAN.md)) |
 | [LINUX_BUILD_PLAN.md](./LINUX_BUILD_PLAN.md) | Linux build plan (deferred — not an active workstream; see [BACKLOG.md](./BACKLOG.md)) |
 | [POOL_SPIKE.md](./POOL_SPIKE.md) | Model pool co-residency spike protocol (complete; retained for re-runs) |
 | [pool-spike-results/](./pool-spike-results/) | Canonical pool-spike result |
