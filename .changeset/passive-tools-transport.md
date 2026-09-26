@@ -2,4 +2,4 @@
 'flint': patch
 ---
 
-Preserve tool calls and response controls across chat transport paths.
+Preserve complete tool-call loops across chat transports without exposing reply payloads in renderer logs.

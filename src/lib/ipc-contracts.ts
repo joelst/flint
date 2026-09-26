@@ -9,6 +9,44 @@ export interface ChatToolDefinition {
   };
 }
 
+export interface ChatTextContentPart {
+  type: 'text';
+  text: string;
+}
+
+export interface ChatImageContentPart {
+  type: 'image_url';
+  image_url: {
+    url: string;
+    detail?: 'auto' | 'low' | 'high';
+  };
+}
+
+export type ChatContent = string | Array<ChatTextContentPart | ChatImageContentPart>;
+
+export interface ChatToolCall {
+  id: string;
+  type: 'function';
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+export type ChatAssistantMessage = {
+  role: 'assistant';
+  name?: string;
+} & (
+  | { content: ChatContent; tool_calls?: ChatToolCall[] }
+  | { content?: null; tool_calls: ChatToolCall[] }
+);
+
+export type ChatRequestMessage =
+  | { role: 'system'; content: ChatContent; name?: string }
+  | { role: 'user'; content: ChatContent; name?: string }
+  | ChatAssistantMessage
+  | { role: 'tool'; content: ChatContent; tool_call_id: string; name?: string };
+
 export type ChatToolChoice =
   | 'none'
   | 'auto'
@@ -40,7 +78,7 @@ export type SidecarCommand =
   | {
       cmd: 'chatCompletion';
       model: string;
-      messages: unknown[];
+      messages: ChatRequestMessage[];
       maxTokens?: number;
       temperature?: number;
       preferredEp?: string;

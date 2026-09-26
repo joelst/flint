@@ -470,7 +470,16 @@ describe('foundry-sidecar protocol basics', () => {
     }
   });
 
-  it('reports nativeStreaming false and servedVariantId on the HTTP fallback', async () => {
+  it('preserves a parallel tool loop through buffered and streamed HTTP fallback requests', async () => {
+    const capturedBodies: any[] = [];
+    let releaseCancelledResponse: (() => void) | undefined;
+    const cancelledResponseGate = new Promise<void>((resolve) => {
+      releaseCancelledResponse = resolve;
+    });
+    let markCancelledRequestSeen: (() => void) | undefined;
+    const cancelledRequestSeen = new Promise<void>((resolve) => {
+      markCancelledRequestSeen = resolve;
+    });
     const server = createServer((req, res) => {
       if (req.url === '/status') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -478,10 +487,37 @@ describe('foundry-sidecar protocol basics', () => {
         return;
       }
       if (req.url === '/v1/chat/completions') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          choices: [{ message: { role: 'assistant', content: 'http-hello' } }],
-        }));
+        let raw = '';
+        req.on('data', (chunk) => { raw += chunk; });
+        req.on('end', () => {
+          const body = JSON.parse(raw);
+          capturedBodies.push(body);
+          const requestNumber = capturedBodies.length;
+          const respond = () => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(requestNumber === 2
+              ? { choices: [{ message: { role: 'assistant', content: 'http-complete' } }] }
+              : {
+                  choices: [{
+                    finish_reason: 'tool_calls',
+                    message: {
+                      role: 'assistant',
+                      content: null,
+                      tool_calls: [
+                        { id: 'call-1', type: 'function', function: { name: 'read_status', arguments: '{}' } },
+                        { id: 'call-2', type: 'function', function: { name: 'read_config', arguments: '{}' } },
+                      ],
+                    },
+                  }],
+                }));
+          };
+          if (requestNumber === 3) {
+            markCancelledRequestSeen?.();
+            void cancelledResponseGate.then(respond);
+          } else {
+            respond();
+          }
+        });
         return;
       }
       res.writeHead(404);
@@ -539,12 +575,70 @@ describe('foundry-sidecar protocol basics', () => {
       expect((await waitForLine(proc, (msg) => msg.id === 45, 15000)).ok).toBe(true);
       proc.stdin.write(`${JSON.stringify({
         id: 41, cmd: 'chatCompletion', model: 'fake-model',
-        messages: [{ role: 'user', content: 'hello' }], stream: false,
+        messages: [{ role: 'user', content: 'inspect both' }],
+        tools: [
+          { type: 'function', function: { name: 'read_status' } },
+          { type: 'function', function: { name: 'read_config' } },
+        ],
+        stream: false,
       })}\n`);
-      const httpChat = await waitForLine(proc, (msg) => msg.id === 41, 15000);
-      expect(httpChat.ok).toBe(true);
-      expect(httpChat.result.nativeStreaming).toBe(false);
-      expect(httpChat.result.servedVariantId).toBe('fake-variant');
+      const first = await waitForLine(proc, (msg) => msg.id === 41, 15000);
+      expect(first.ok).toBe(true);
+      expect(first.result.nativeStreaming).toBe(false);
+      expect(first.result.servedVariantId).toBe('fake-variant');
+
+      const followUpMessages = [
+        { role: 'user', content: 'inspect both', name: 'operator' },
+        {
+          role: 'assistant',
+          content: null,
+          name: 'planner',
+          tool_calls: first.result.choices[0].message.tool_calls,
+        },
+        { role: 'tool', tool_call_id: 'call-1', name: 'read_status', content: '{"ok":true}' },
+        { role: 'tool', tool_call_id: 'call-2', name: 'read_config', content: '{"mode":"safe"}' },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Summarize ' },
+            { type: 'image_url', image_url: { url: 'data:image/png;base64,AA==', detail: 'low' } },
+          ],
+        },
+      ];
+      const streamedDelta = waitForLine(proc, (msg) => msg.id === 42 && msg.stream === true, 15000);
+      const streamedDone = waitForLine(proc, (msg) => msg.id === 42 && msg.ok === true, 15000);
+      proc.stdin.write(`${JSON.stringify({
+        id: 42,
+        cmd: 'chatCompletion',
+        model: 'fake-model',
+        messages: followUpMessages,
+        stream: true,
+      })}\n`);
+      expect((await streamedDelta).delta).toBe('http-complete');
+      expect((await streamedDone).result.nativeStreaming).toBe(false);
+      expect(capturedBodies[1].messages).toEqual(followUpMessages);
+
+      const cancelled = waitForLine(proc, (msg) => msg.id === 43, 15000);
+      proc.stdin.write(`${JSON.stringify({
+        id: 43,
+        cmd: 'chatCompletion',
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'cancel this tool call' }],
+        stream: true,
+      })}\n`);
+      await cancelledRequestSeen;
+      proc.stdin.write(`${JSON.stringify({
+        id: 44,
+        cmd: 'cancelChatRequest',
+        requestId: 43,
+      })}\n`);
+      expect((await waitForLine(proc, (msg) => msg.id === 44, 15000)).ok).toBe(true);
+      releaseCancelledResponse?.();
+      const cancelledResult = await cancelled;
+      expect(cancelledResult.ok).not.toBe(true);
+      expect(cancelledResult.certainty).toBe('cancelled');
+      expect(cancelledResult.result).toBeUndefined();
+      expect(String(cancelledResult.error)).toMatch(/discarded after cancellation/);
     } finally {
       await killAndWait(proc);
       await closeServer(server);
@@ -2461,6 +2555,45 @@ describe('foundry-sidecar command schema validation', () => {
     expect(String(res.error)).toContain('invalid');
   });
 
+  it('rejects malformed tool messages before initialization or model dispatch', async () => {
+    const cases = [
+      {
+        messages: [{ role: 'tool', content: '{"ok":true}' }],
+        expected: /tool_call_id/,
+      },
+      {
+        messages: [{
+          role: 'assistant',
+          content: null,
+          tool_calls: [{
+            id: 'call-1',
+            type: 'function',
+            function: { name: 'read_status', arguments: 42 },
+          }],
+        }],
+        expected: /arguments/,
+      },
+      {
+        messages: [{ role: 'assistant', content: null }],
+        expected: /content or tool_calls/,
+      },
+    ];
+    let id = 4760;
+    for (const testCase of cases) {
+      const reqId = id++;
+      proc.stdin.write(`${JSON.stringify({
+        id: reqId,
+        cmd: 'chatCompletion',
+        model: 'm',
+        messages: testCase.messages,
+      })}\n`);
+      const res = await waitForLine(proc, (msg) => msg.id === reqId);
+      expect(res.error).toBeTruthy();
+      expect(String(res.error)).toMatch(testCase.expected);
+      expect(String(res.error)).not.toContain('not initialized');
+    }
+  });
+
   it('rejects embedTexts with empty or oversized inputs before init', async () => {
     proc.stdin.write(`${JSON.stringify({ id: 41, cmd: 'embedTexts', model: 'm', inputs: [] })}\n`);
     const empty = await waitForLine(proc, (msg) => msg.id === 41);
@@ -3121,9 +3254,9 @@ describe('chatCompletion ChatSession path', () => {
   //                           already are. Gating on the signal file (rather than a fixed
   //                           delay) makes the ordering deterministic instead of depending on
   //                           IPC round-trip speed on a loaded CI runner.
-  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-error-dispose' | 'session-abort' | 'session-empty-output' | 'session-stream-empty' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error' | 'session-stream-tool' | 'session-stream-tool-outoforder' | 'session-stream-tool-high-index' | 'session-stream-tool-cancel';
+  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-error-with-legacy' | 'session-error-dispose' | 'session-abort' | 'session-empty-output' | 'session-stream-empty' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error' | 'session-buffered-tool-cancel' | 'session-stream-tool' | 'session-stream-tool-outoforder' | 'session-stream-tool-high-index' | 'session-stream-tool-cancel';
   function fakeSdk(sdkMode: ChatFakeSdkMode) {
-    const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only';
+    const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only' || sdkMode === 'session-error-with-legacy';
     const hasSession = sdkMode !== 'legacy-only';
     return [
       "import fs from 'node:fs';",
@@ -3155,26 +3288,29 @@ describe('chatCompletion ChatSession path', () => {
       `  dispose() { note('session-chat-disposed'); if (['session-dispose-error', 'session-error-dispose'].includes(${JSON.stringify(sdkMode)})) throw new Error('native ChatSession disposal failed'); }`,
       '  async processRequest(req) {',
       "    note('session-chat');",
-      `    if (['session-error', 'session-error-dispose'].includes(${JSON.stringify(sdkMode)})) throw new Error('native processRequest failed');`,
+      `    if (['session-error', 'session-error-with-legacy', 'session-error-dispose'].includes(${JSON.stringify(sdkMode)})) throw new Error('native processRequest failed');`,
       `    if (${JSON.stringify(sdkMode)} === 'session-empty-output') return { output: [] };`,
       `    if (${JSON.stringify(sdkMode)} === 'session-malformed-json') return { output: [{ type: 'text', textType: 'openai-json', text: 'not json' }] };`,
       '    const requestJson = JSON.parse(req.items[0].text);',
       '    note(`request:${JSON.stringify(requestJson)}`);',
+      `    if (${JSON.stringify(sdkMode)} === 'session-buffered-tool-cancel') { while (!fs.existsSync(process.env.FLINT_TEST_CANCEL_SIGNAL)) { await new Promise((resolve) => setTimeout(resolve, 5)); } }`,
       '    return {',
       '      output: [{',
       "        type: 'text', textType: 'openai-json',",
       '        text: JSON.stringify({',
-      "          choices: [{ message: { role: 'assistant', content: `session reply, temp=${requestJson.temperature}`, ...(requestJson.tools ? { tool_calls: [{ id: 'call-1', type: 'function', function: { name: requestJson.tools[0].function.name, arguments: '{}' } }] } : {}) } }],",
+      "          choices: [{ message: { role: 'assistant', content: requestJson.tools ? null : `session reply, temp=${requestJson.temperature}`, ...(requestJson.tools ? { tool_calls: requestJson.tools.map((tool, index) => ({ id: `call-${index + 1}`, type: 'function', function: { name: tool.function.name, arguments: '{}' } })) } : {}) } }],",
       '          usage: { prompt_tokens: 5, completion_tokens: 6 },',
       '        }),',
       '      }],',
       '    };',
       '  }',
-      '  processStreamingRequest() {',
+      '  processStreamingRequest(req) {',
+      '    const requestJson = JSON.parse(req.items[0].text);',
+      '    note(`request:${JSON.stringify(requestJson)}`);',
       '    return {',
       '      async *[Symbol.asyncIterator]() {',
       "        note('session-chat');",
-      `        if (['session-error', 'session-error-dispose'].includes(${JSON.stringify(sdkMode)})) throw new Error('native stream failed');`,
+      `        if (['session-error', 'session-error-with-legacy', 'session-error-dispose'].includes(${JSON.stringify(sdkMode)})) throw new Error('native stream failed');`,
       `        if (${JSON.stringify(sdkMode)} === 'session-abort') { const e = new Error('native stream aborted'); e.name = 'AbortError'; throw e; }`,
       `        if (${JSON.stringify(sdkMode)} === 'session-stream-empty') return;`,
       "        yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { content: 'session ' } }] }) };",
@@ -3317,6 +3453,114 @@ describe('chatCompletion ChatSession path', () => {
     expect(request.presence_penalty).toBe(-0.5);
     expect(request.top_p).toBe(0.8);
     expect(request.metadata).toEqual({ top_k: '12', random_seed: '17' });
+  }, 30000);
+
+  it('preserves a parallel tool loop through buffered and streaming ChatSession requests', async () => {
+    await startSidecar('session');
+    const tools = [
+      { type: 'function', function: { name: 'read_status' } },
+      { type: 'function', function: { name: 'read_config' } },
+    ];
+    const firstReply = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'inspect both' }],
+      tools,
+    });
+    const first = await firstReply;
+    expect(first.ok).toBe(true);
+    expect(first.result.choices[0].message).toMatchObject({
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        { id: 'call-1', function: { name: 'read_status', arguments: '{}' } },
+        { id: 'call-2', function: { name: 'read_config', arguments: '{}' } },
+      ],
+    });
+
+    const followUpMessages = [
+      { role: 'user', content: 'inspect both', name: 'operator' },
+      {
+        role: 'assistant',
+        content: null,
+        name: 'planner',
+        tool_calls: first.result.choices[0].message.tool_calls,
+      },
+      { role: 'tool', tool_call_id: 'call-1', name: 'read_status', content: '{"ok":true}' },
+      { role: 'tool', tool_call_id: 'call-2', name: 'read_config', content: '{"mode":"safe"}' },
+      { role: 'user', content: 'Summarize the tool results.' },
+    ];
+
+    const bufferedReply = reply(4);
+    send({
+      id: 4,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: followUpMessages,
+    });
+    expect((await bufferedReply).ok).toBe(true);
+
+    const omittedContentMessages = followUpMessages.map((message) => {
+      if (message.role !== 'assistant') return message;
+      const { content: _content, ...withoutContent } = message;
+      return withoutContent;
+    });
+    const streamedReply = waitForLine(proc, (msg) => msg.id === 5 && msg.ok === true, 10000);
+    send({
+      id: 5,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: omittedContentMessages,
+      stream: true,
+    });
+    expect((await streamedReply).ok).toBe(true);
+
+    const requests = events()
+      .filter((event) => event.startsWith('request:'))
+      .map((event) => JSON.parse(event.slice(8)));
+    expect(requests.at(-2).messages).toEqual(followUpMessages);
+    expect(requests.at(-1).messages).toEqual(omittedContentMessages);
+  }, 30000);
+
+  it('rejects malformed tool linkage before invoking ChatSession', async () => {
+    await startSidecar('session');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'tool', content: '{"ok":true}' }],
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain('tool_call_id');
+    expect(events()).not.toContain('session-chat');
+  }, 30000);
+
+  it('suppresses a buffered terminal tool result that arrives after cancellation', async () => {
+    await startSidecar('session-buffered-tool-cancel');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use the tool' }],
+      tools: [{ type: 'function', function: { name: 'read_status' } }],
+    });
+    while (!events().includes('session-chat')) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const canceled = reply(4);
+    send({ id: 4, cmd: 'cancelChatRequest', requestId: 3 });
+    expect((await canceled).ok).toBe(true);
+    writeFileSync(cancelSignalPath, '');
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(res.certainty).toBe('cancelled');
+    expect(res.result).toBeUndefined();
+    expect(String(res.error)).toMatch(/cancel/i);
   }, 30000);
 
   it('prefers the ChatSession-backed client over createChatClient() when the SDK exports it (streaming)', async () => {
@@ -3505,6 +3749,22 @@ describe('chatCompletion ChatSession path', () => {
     expect(res.ok).not.toBe(true);
     expect(String(res.error)).toContain("Chat completion failed for model 'fake-variant'");
     expect(String(res.error)).toContain('native processRequest failed');
+  }, 30000);
+
+  it('does not retry a dispatched ChatSession failure through the legacy client', async () => {
+    await startSidecar('session-error-with-legacy');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain('native processRequest failed');
+    expect(events()).toContain('session-chat');
+    expect(events()).not.toContain('legacy-chat');
     expect(events()).toContain('session-chat-disposed');
   }, 30000);
 
@@ -3670,6 +3930,32 @@ describe('chatCompletion ChatSession path', () => {
     const res = await chatted;
     expect(res.ok).not.toBe(true);
     expect(String(res.error)).toContain('Tool choice and response format require');
+  }, 30000);
+
+  it('rejects tool-loop messages before invoking a legacy-only chat client', async () => {
+    await startSidecar('legacy-only');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{
+            id: 'call-1',
+            type: 'function',
+            function: { name: 'read_status', arguments: '{}' },
+          }],
+        },
+        { role: 'tool', tool_call_id: 'call-1', content: '{"ok":true}' },
+      ],
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain('Tool-loop messages require the ChatSession path or a local service endpoint');
+    expect(events()).not.toContain('legacy-chat');
   }, 30000);
 });
 

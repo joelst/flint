@@ -357,6 +357,11 @@ function validateCommand(cmd, payload) {
     return `Command "${cmd}" field "temperature" must be between 0 and 2`;
   }
   if (cmd === 'chatCompletion') {
+    try {
+      toSdkMessages(payload.messages);
+    } catch (err) {
+      return `Command "chatCompletion" field "messages" is invalid: ${err?.message || err}`;
+    }
     if (payload.stream !== undefined && typeof payload.stream !== 'boolean') return `Command "chatCompletion" field "stream" must be a boolean`;
     if (payload.maxTokens !== undefined && typeof payload.maxTokens !== 'number') return `Command "chatCompletion" field "maxTokens" must be a number`;
     if (payload.tools !== undefined) {
@@ -2238,12 +2243,146 @@ async function readErrorBody (resp) {
   return readBoundedErrorBody(resp);
 }
 
+function isPlainObject (value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function sanitizeChatName (name, field) {
+  if (name === undefined) return undefined;
+  if (typeof name !== 'string' || !name.trim() || name.length > 128) {
+    throw new Error(`${field} must be a non-empty string of at most 128 characters`);
+  }
+  return name;
+}
+
+function sanitizeChatContent (content, field, { nullable = false, optional = false } = {}) {
+  if (content === undefined && optional) return undefined;
+  if (content === null && nullable) return null;
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) {
+    throw new Error(`${field} must be a string or an array of content parts`);
+  }
+  return content.map((part, index) => {
+    if (!isPlainObject(part)) {
+      throw new Error(`${field}[${index}] must be an object`);
+    }
+    if (part.type === 'text') {
+      if (typeof part.text !== 'string') {
+        throw new Error(`${field}[${index}].text must be a string`);
+      }
+      return { type: 'text', text: part.text };
+    }
+    if (part.type === 'image_url') {
+      if (!isPlainObject(part.image_url)
+        || typeof part.image_url.url !== 'string'
+        || !part.image_url.url) {
+        throw new Error(`${field}[${index}].image_url.url must be a non-empty string`);
+      }
+      const detail = part.image_url.detail;
+      if (detail !== undefined && !['auto', 'low', 'high'].includes(detail)) {
+        throw new Error(`${field}[${index}].image_url.detail is invalid`);
+      }
+      return {
+        type: 'image_url',
+        image_url: {
+          url: part.image_url.url,
+          ...(detail !== undefined ? { detail } : {}),
+        },
+      };
+    }
+    throw new Error(`${field}[${index}].type must be "text" or "image_url"`);
+  });
+}
+
+function sanitizeToolCalls (toolCalls, messageIndex) {
+  if (!Array.isArray(toolCalls) || toolCalls.length === 0 || toolCalls.length > 64) {
+    throw new Error(`messages[${messageIndex}].tool_calls must contain 1 to 64 calls`);
+  }
+  return toolCalls.map((toolCall, toolIndex) => {
+    const field = `messages[${messageIndex}].tool_calls[${toolIndex}]`;
+    if (!isPlainObject(toolCall)
+      || typeof toolCall.id !== 'string'
+      || !toolCall.id.trim()
+      || toolCall.id.length > 256) {
+      throw new Error(`${field}.id must be a non-empty string of at most 256 characters`);
+    }
+    if (toolCall.type !== 'function') {
+      throw new Error(`${field}.type must be "function"`);
+    }
+    if (!isPlainObject(toolCall.function)
+      || typeof toolCall.function.name !== 'string'
+      || !toolCall.function.name.trim()
+      || toolCall.function.name.length > 128) {
+      throw new Error(`${field}.function.name must be a non-empty string of at most 128 characters`);
+    }
+    if (typeof toolCall.function.arguments !== 'string') {
+      throw new Error(`${field}.function.arguments must be a string`);
+    }
+    return {
+      id: toolCall.id,
+      type: 'function',
+      function: {
+        name: toolCall.function.name,
+        arguments: toolCall.function.arguments,
+      },
+    };
+  });
+}
+
 function toSdkMessages (messages) {
-  // Pass content through as-is to support vision arrays:
-  // { role, content: "text" } or { role, content: [ {type:"text", text:...}, {type:"image_url", image_url:{url:...}} ] }
-  return (messages || [])
-    .filter((m) => m && (m.role === 'system' || m.role === 'user' || m.role === 'assistant'))
-    .map((m) => ({ role: m.role, content: m.content }));
+  return messages.map((message, index) => {
+    if (!isPlainObject(message)) {
+      throw new Error(`messages[${index}] must be an object`);
+    }
+    const name = sanitizeChatName(message.name, `messages[${index}].name`);
+    if (message.role === 'system' || message.role === 'user') {
+      return {
+        role: message.role,
+        content: sanitizeChatContent(message.content, `messages[${index}].content`),
+        ...(name !== undefined ? { name } : {}),
+      };
+    }
+    if (message.role === 'assistant') {
+      const content = sanitizeChatContent(
+        message.content,
+        `messages[${index}].content`,
+        { nullable: true, optional: true },
+      );
+      const toolCalls = message.tool_calls === undefined
+        ? undefined
+        : sanitizeToolCalls(message.tool_calls, index);
+      if ((content === undefined || content === null) && toolCalls === undefined) {
+        throw new Error(`messages[${index}] assistant message requires content or tool_calls`);
+      }
+      return {
+        role: 'assistant',
+        ...(content !== undefined ? { content } : {}),
+        ...(name !== undefined ? { name } : {}),
+        ...(toolCalls !== undefined ? { tool_calls: toolCalls } : {}),
+      };
+    }
+    if (message.role === 'tool') {
+      if (typeof message.tool_call_id !== 'string'
+        || !message.tool_call_id.trim()
+        || message.tool_call_id.length > 256) {
+        throw new Error(`messages[${index}].tool_call_id must be a non-empty string of at most 256 characters`);
+      }
+      return {
+        role: 'tool',
+        content: sanitizeChatContent(message.content, `messages[${index}].content`),
+        tool_call_id: message.tool_call_id,
+        ...(name !== undefined ? { name } : {}),
+      };
+    }
+    throw new Error(`messages[${index}].role is unsupported`);
+  });
+}
+
+function requiresModernChatTransport (messages) {
+  return messages.some((message) =>
+    message.role === 'tool'
+    || (message.role === 'assistant' && Array.isArray(message.tool_calls))
+  );
 }
 
 function normalizeText (value) {
@@ -3425,14 +3564,20 @@ rl.on('line', async (line) => {
           chatClient: hasChatClient ? 'available' : 'unsupported',
           serviceEndpoint: sharedEndpoint ? 'available' : 'unavailable',
         });
-        const legacyControlsRequested = !sessionChatClient
-          && (payload.toolChoice !== undefined || payload.responseFormat !== undefined);
-        if (transport === 'sdk' && legacyControlsRequested) {
+        const legacyUnsupportedRequest = !sessionChatClient
+          && (
+            payload.toolChoice !== undefined
+            || payload.responseFormat !== undefined
+            || requiresModernChatTransport(sdkMessages)
+          );
+        if (transport === 'sdk' && legacyUnsupportedRequest) {
           if (sharedEndpoint) {
             transport = 'http';
           } else {
             transport = null;
-            transportReason = 'Tool choice and response format require the ChatSession path or a local service endpoint.';
+            transportReason = requiresModernChatTransport(sdkMessages)
+              ? 'Tool-loop messages require the ChatSession path or a local service endpoint.'
+              : 'Tool choice and response format require the ChatSession path or a local service endpoint.';
           }
         }
         if (!transport) throw new Error(transportReason);
@@ -3552,6 +3697,13 @@ rl.on('line', async (line) => {
               payload.tools,
               { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
             );
+            if (canceledRequests.has(id)) {
+              reply({
+                error: 'The chat response was discarded after cancellation; native inference may have continued.',
+                certainty: 'cancelled',
+              });
+              return;
+            }
             const normalizedResult = normalizeChatResponse(result);
             chatTokensIn = normalizedResult?.usage?.prompt_tokens
               ?? normalizedResult?.usage?.input_tokens ?? null;
@@ -3572,6 +3724,14 @@ rl.on('line', async (line) => {
             }
             chatOk = true;
             chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
+            if (canceledRequests.has(id)) {
+              chatOk = false;
+              reply({
+                error: 'The chat response was discarded after cancellation; native inference may have continued.',
+                certainty: 'cancelled',
+              });
+              return;
+            }
             reply({
               ok: true,
               result: {
@@ -3612,8 +3772,23 @@ rl.on('line', async (line) => {
                 content += delta;
               }
             }
+            if (canceledRequests.has(id)) {
+              reply({
+                error: 'The chat response was discarded after cancellation; native inference may have continued.',
+                certainty: 'cancelled',
+              });
+              return;
+            }
             chatOk = true;
             chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
+            if (canceledRequests.has(id)) {
+              chatOk = false;
+              reply({
+                error: 'The chat response was discarded after cancellation; native inference may have continued.',
+                certainty: 'cancelled',
+              });
+              return;
+            }
             const compactedToolCalls = compactToolCallDeltas(toolCalls);
             reply({
               ok: true,
@@ -3682,6 +3857,13 @@ rl.on('line', async (line) => {
             throw new Error(`Chat completion failed (${resp.status} ${resp.statusText}): ${details}`);
           }
           const httpResult = await resp.json();
+          if (canceledRequests.has(id)) {
+            reply({
+              error: 'The chat response was discarded after cancellation; native inference may have continued.',
+              certainty: 'cancelled',
+            });
+            return;
+          }
           const normalizedHttpResult = normalizeChatResponse(httpResult);
           chatTokensIn = normalizedHttpResult?.usage?.prompt_tokens
             ?? normalizedHttpResult?.usage?.input_tokens ?? null;
@@ -3703,6 +3885,14 @@ rl.on('line', async (line) => {
           }
           chatOk = true;
           chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
+          if (canceledRequests.has(id)) {
+            chatOk = false;
+            reply({
+              error: 'The chat response was discarded after cancellation; native inference may have continued.',
+              certainty: 'cancelled',
+            });
+            return;
+          }
           reply({
             ok: true,
             result: {
