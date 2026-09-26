@@ -18,9 +18,7 @@ export type IntegrationStatus =
   /** Reported to work by users / docs but not yet exercised by the Flint team. */
   | 'community'
   /** Config not yet confirmed — snippet is a best-effort starting point only. */
-  | 'research-needed'
-  /** Tool cannot use Flint directly (proprietary backend or non-OpenAI protocol). */
-  | 'unsupported';
+  | 'research-needed';
 
 export type IntegrationCategory =
   | 'editor'        // IDE / editor extensions
@@ -61,12 +59,19 @@ export interface Integration {
   limitations?: string[];
   /** Upstream docs URL for verification. */
   docsUrl?: string;
+  /**
+   * Client version the snippet was actually exercised against.
+   * Omit or leave unset when the status is not `verified` with a pinned version.
+   */
+  testedWith?: string;
 }
 
 /**
  * Substitute `{ENDPOINT}` and `{MODEL}` placeholders in a snippet body.
- * The endpoint is the client-facing loopback URL (always `http://127.0.0.1:<port>/v1`);
- * bind address may be broader for LAN access — snippets still use the loopback connect URL.
+ * The endpoint is the client-facing connect URL, usually loopback
+ * (`http://127.0.0.1:<port>/v1`); WSL2 clients in NAT mode reach Flint on the Windows host
+ * address instead. Bind address may be broader for LAN access — snippets still use the
+ * client-facing connect URL rather than the bind address.
  * The model placeholder is a generic alias hint shown in code.
  */
 export function renderSnippet(
@@ -178,6 +183,8 @@ res = client.chat.completions.create(
     ]),
     limitations: [
       'Restart the Continue extension after editing config.json for changes to take effect.',
+      'Indexer is not verified until a recorded BYOM embedding recipe exists — 1.0.0 recipes are chat completions only.',
+      'Verified for chat completions; client version is not pinned until a recorded dogfood.',
     ],
     docsUrl: 'https://docs.continue.dev/customize/model-providers/openai',
   },
@@ -279,24 +286,9 @@ codex --model {MODEL}`,
     ]),
     limitations: [
       'Setting keys have changed across Cline versions — check the extension settings UI for the exact key names in your install.',
+      'Not yet exercised against a pinned Cline version — remains Unverified until a recorded dogfood.',
     ],
     docsUrl: 'https://github.com/cline/cline',
-  },
-
-  {
-    id: 'claude-code',
-    name: 'Claude Code (CLI + VS Code extension)',
-    vendor: 'Anthropic',
-    category: 'cli',
-    status: 'unsupported',
-    description:
-      "Anthropic's terminal coding agent and the matching VS Code extension are wire-bound to the Anthropic Messages API shape. Flint speaks OpenAI-compatible, so there is no direct path. Translation proxies exist but lose features Claude Code actually uses (prompt caching, extended thinking, content-block tool use, computer-use tools) — we don't recommend that workaround.",
-    snippets: { windows: [], unix: [] },
-    limitations: [
-      'No direct OpenAI-compatible mode — Claude Code uses the Anthropic Messages API exclusively.',
-      'The VS Code extension drives the same CLI binary, so it inherits the same limitation; it does not expose a custom-backend setting.',
-      'For OpenAI-compatible terminal coding agents on Flint, see OpenClaw, OpenCode, or Codex CLI instead.',
-    ],
   },
 
   {
@@ -330,38 +322,6 @@ the picker layout differs from the steps above.`,
       'Only the chat surface accepts custom providers; inline completions still go through the hosted Copilot backend.',
     ],
     docsUrl: 'https://docs.github.com/en/copilot',
-  },
-
-  {
-    id: 'github-copilot-cli',
-    name: 'GitHub Copilot CLI',
-    vendor: 'GitHub',
-    category: 'cli',
-    status: 'unsupported',
-    description:
-      "GitHub's terminal AI tool (`gh copilot`) connects to GitHub's hosted backend and does not support custom endpoints. Distinct from the Copilot VS Code extension above, which does support Flint.",
-    snippets: { windows: [], unix: [] },
-    limitations: [
-      'No public mechanism to point gh copilot at a custom backend.',
-      'For terminal coding agents on Flint, consider OpenCode or Codex CLI; for editor integration, use Copilot for VS Code (entry above) or Continue.dev.',
-    ],
-    docsUrl: 'https://docs.github.com/en/copilot/github-copilot-in-the-cli',
-  },
-
-  {
-    id: 'openai-codex-app',
-    name: 'Codex App (hosted)',
-    vendor: 'OpenAI',
-    category: 'agent',
-    status: 'unsupported',
-    description:
-      "OpenAI's hosted Codex agent product runs in OpenAI's cloud and cannot be redirected to a local backend.",
-    snippets: { windows: [], unix: [] },
-    limitations: [
-      'Hosted product with no self-hosted or BYO-endpoint mode.',
-      'Use the open-source Codex CLI instead if you want a local-backed coding agent.',
-    ],
-    docsUrl: 'https://openai.com/codex',
   },
 
   {
@@ -407,7 +367,7 @@ export OPENAI_API_KEY="not-needed-for-local"
     category: 'agent',
     status: 'community',
     description:
-      'Agentic coding tool. OpenClaw natively supports OpenAI-compatible local endpoints — point it at Flint directly per its "local models" gateway docs. No translation proxy required for the standard path.',
+      'Agentic coding tool. OpenClaw natively supports OpenAI-compatible local endpoints — point it at Flint directly per its "local models" gateway docs. No translation proxy required for the standard path. Running OpenClaw inside WSL2? On Windows 11 22H2+ with WSL 2.0+, enable mirrored networking in Settings → Network → WSL clients, then restart WSL. Otherwise, use the manual NAT setup there. In default NAT mode, the snippet below cannot reach Flint on 127.0.0.1.',
     snippets: {
       windows: [
         {
@@ -439,6 +399,8 @@ openclaw  # then select {MODEL} in the model picker
       ],
     },
     limitations: [
+      'Community-reported; not pinned to a Flint-tested OpenClaw version.',
+      'Prefer to leave WSL in NAT mode? Settings → Network → WSL clients also lists the manual steps — WSL clients then connect to the Windows host address instead of 127.0.0.1.',
       'Tool-calling and streaming features depend on the loaded Flint model exposing OpenAI-style `tool_calls` / streaming.',
       'Optional advanced setup — a LiteLLM proxy in front of Flint provides cross-backend routing (e.g. fallback between local Flint and Azure AI Foundry) and uniform API-key handling, but is not required for direct OpenClaw → Flint use.',
       'See also: flthibau/sample-OpenClaw-on-Azure-with-AI-Foundry, the techbloat.com OpenClaw + Azure Foundry + LiteLLM guide, and the Feb 2026 azurefeeds.com walkthrough — those describe the LiteLLM routing pattern for multi-backend setups.',

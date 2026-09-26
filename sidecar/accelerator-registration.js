@@ -1,0 +1,647 @@
+function errorMessage(error) {
+  return error?.message || String(error);
+}
+
+function discoveredProviders(manager) {
+  if (typeof manager?.discoverEps !== 'function') return [];
+  const providers = manager.discoverEps();
+  return Array.isArray(providers) ? providers : [];
+}
+
+function providerName(provider) {
+  return String(provider?.name || '').trim();
+}
+
+// Module-private and non-enumerable so callers receive the SDK-shaped result while
+// the gate can distinguish an empty-discovery fallback failure from other retries.
+// The register callback must return this result object unchanged.
+const retryLegacyFallback = Symbol('retryLegacyFallback');
+
+function markLegacyFallbackRetry(result) {
+  const retryableFallback = { ...result, retry: true };
+  Object.defineProperty(retryableFallback, retryLegacyFallback, { value: true });
+  return retryableFallback;
+}
+
+/**
+ * Register every provider the runtime discovered before the catalog is first read.
+ *
+ * SDK 2.0.1's no-argument registration selects one preferred provider, and its
+ * `registeredEps` list is the names requested, not a confirmation. The native catalog
+ * is then fixed on first access, so a provider this function reports as registered
+ * has to be one `discoverEps` still marks registered. One failure must not hide the
+ * others, and a provider that appears only after another registration still has to
+ * be registered before that catalog read.
+ */
+export async function registerDiscoveredExecutionProviders(manager, onProgress, options = {}) {
+  if (typeof manager?.downloadAndRegisterEps !== 'function') return null;
+
+  let usedLegacyFallback = false;
+  let fallbackResult = null;
+  const initial = discoveredProviders(manager);
+  if (initial.length === 0) {
+    // An empty list is not proof the machine has no GPU. Discovery can be empty
+    // for a moment after the manager exists. The one-provider fallback is only
+    // for a caller that has already decided not to look again.
+    if (options.allowLegacyFallback === false) {
+      return {
+        success: false,
+        status: 'No execution providers discovered yet',
+        registeredEps: [],
+        failedEps: [],
+        retry: true,
+      };
+    }
+    // No-argument registration selects one preferred provider and reports success
+    // with an empty registeredEps list. Returning that result seals the gate, so
+    // the catalog can be read before any provider that is visible after the call
+    // gets an explicit registration.
+    const fallback = await manager.downloadAndRegisterEps(onProgress);
+    fallbackResult = fallback && typeof fallback === 'object' ? fallback : null;
+    usedLegacyFallback = true;
+    if (!discoveredProviders(manager).some((provider) => providerName(provider))) {
+      if (fallback?.success === false) {
+        return markLegacyFallbackRetry(fallback);
+      }
+      return fallback;
+    }
+  }
+
+  const failures = new Map();
+  const attempted = new Set();
+  // Bounded so a discovery list that keeps growing cannot register forever.
+  // Eight covers the providers this machine can surface (CPU, CUDA, WebGPU,
+  // TensorRT, DML, QNN, OpenVINO) with one spare pass.
+  for (let pass = 0; pass < 8; pass++) {
+    const pending = discoveredProviders(manager).filter((provider) => {
+      const name = providerName(provider);
+      return name && !provider.isRegistered && !attempted.has(name);
+    });
+    if (pending.length === 0) break;
+    for (const provider of pending) {
+      const name = providerName(provider);
+      attempted.add(name);
+      try {
+        await manager.downloadAndRegisterEps([name], onProgress);
+      } catch (error) {
+        failures.set(name, errorMessage(error));
+      }
+    }
+  }
+
+  const registeredEps = [];
+  const failedEps = [];
+  const fallbackFailures = new Set(
+    Array.isArray(fallbackResult?.failedEps) ? fallbackResult.failedEps : [],
+  );
+  for (const name of fallbackFailures) {
+    if (!failures.has(name)) {
+      failures.set(name, fallbackResult?.status || 'fallback registration failed');
+    }
+  }
+  const seen = new Set();
+  for (const provider of discoveredProviders(manager)) {
+    const name = providerName(provider);
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    if (provider.isRegistered) {
+      registeredEps.push(name);
+      failures.delete(name);
+      fallbackFailures.delete(name);
+    } else {
+      failedEps.push(name);
+      if (!failures.has(name)) failures.set(name, 'runtime did not confirm registration');
+    }
+  }
+  for (const name of attempted) {
+    if (seen.has(name)) continue;
+    failedEps.push(name);
+    if (!failures.has(name)) failures.set(name, 'runtime did not confirm registration');
+  }
+  for (const name of fallbackFailures) {
+    if (!failedEps.includes(name)) failedEps.push(name);
+  }
+
+  const success = failedEps.length === 0;
+  const result = {
+    success,
+    status: success
+      ? `Registered ${registeredEps.length} execution provider${registeredEps.length === 1 ? '' : 's'}`
+      : `Registered ${registeredEps.length}; failed ${failedEps.length}: ${
+          failedEps.map((name) => `${name} (${failures.get(name)})`).join('; ')
+        }`,
+    registeredEps,
+    failedEps,
+    // A failed provider can still be registered on a later call, until the catalog
+    // is read. After that read the snapshot cannot gain the missing build.
+    ...(success ? {} : { retry: true }),
+  };
+  return !success && usedLegacyFallback ? markLegacyFallbackRetry(result) : result;
+}
+
+/** Discovery attempts before a catalog read. A failed final fallback gets one additional bounded fallback retry. */
+const CATALOG_REGISTRATION_ATTEMPTS = 3;
+const TELEMETRY_READ_TIMEOUT_MS = 10_000;
+
+/**
+ * The bounded attempts are spent. Callers must be able to read the catalog anyway.
+ * A thrown last attempt used to clear the gate, so every later list, load, and
+ * service start ran the same bounded failures and never got that far. Providers
+ * that registered on an earlier attempt stay in the result; another pass cannot
+ * add them after this result is kept and the snapshot is taken.
+ */
+function terminalRegistrationResult(previous, error) {
+  const registeredEps = Array.isArray(previous?.registeredEps) ? previous.registeredEps : [];
+  const failedEps = Array.isArray(previous?.failedEps) ? previous.failedEps : [];
+  const message = errorMessage(error);
+  return {
+    success: false,
+    status: registeredEps.length > 0
+      ? `Registered ${registeredEps.length}; last attempt failed: ${message}`
+      : message,
+    registeredEps,
+    failedEps,
+  };
+}
+
+/**
+ * Registration before the first catalog read, including one final bounded retry
+ * when the delayed no-discovery fallback itself fails.
+ *
+ * Catalog readers share one cycle: an empty discovery or a failed download is tried
+ * again inside that cycle, and a terminal failure is kept so later readers are not
+ * sent through the same failures. Once a catalog read commits, the
+ * snapshot cannot gain providers, so `ensure` does not run again.
+ *
+ * Settings can call `rerun` before or after that commit. Startup's
+ * `ensureAccelerators` is that same command, and the button calls it again. Before
+ * commitment, the result can affect the catalog snapshot. After commitment, the
+ * provider update still runs, but callers must treat new catalog variants as
+ * restart-bound because the current snapshot cannot gain them. If a native listener
+ * was exposed without a confirmed read, updates are deferred instead: the listener
+ * may be freezing the snapshot outside this queue.
+ *
+ * Work is serialized through the actual first catalog read. A read queued behind
+ * an explicit retry waits for it, and an update queued behind that read cannot
+ * register providers while the runtime freezes its snapshot.
+ */
+export function createCatalogRegistrationGate(register, commitCatalog) {
+  let settled = null;
+  let hasSettled = false;
+  let committed = false;
+  let commitConfirmed = false;
+  /** @type {Promise<unknown>} */
+  let tail = Promise.resolve();
+  /** @type {Promise<unknown>} */
+  let mutationBarrier = Promise.resolve();
+  /** @type {Promise<unknown>} */
+  let postCommitWriteBarrier = Promise.resolve();
+  /** @type {Promise<unknown>} */
+  let providerWriteBarrier = Promise.resolve();
+  /** @type {Promise<unknown>} */
+  let activeMutationBarrier = Promise.resolve();
+  /** @type {Set<Promise<unknown>>} */
+  const activeReads = new Set();
+  /** @type {Set<Promise<unknown>>} */
+  const activeProviderReads = new Set();
+  /** @type {Set<{ result: Promise<unknown>, expired: boolean, dispatched: boolean }>} */
+  const activeTelemetryReads = new Set();
+
+  // `report` is the caller that queued this cycle. A later Settings click must not
+  // steal these events: the UI stall watchdog for the in-flight command only resets
+  // when progress arrives on that command's id.
+  // `carried` is the settled result an explicit rerun starts from. Its retryable
+  // failures take part in the retry decision, so a provider that failed in an earlier
+  // cycle and is missing from this cycle's first discovery is still tried again.
+  async function attempts(report, carried = null) {
+    const notify = typeof report === 'function' ? report : () => {};
+    let last = null;
+    for (let attempt = 1; attempt <= CATALOG_REGISTRATION_ATTEMPTS; attempt++) {
+      try {
+        const current = await register(
+          (name, pct) => notify(name, pct),
+          { allowLegacyFallback: attempt === CATALOG_REGISTRATION_ATTEMPTS },
+        );
+        last = preserveRegisteredProviders(last ?? carried, current);
+      } catch (error) {
+        if (attempt === CATALOG_REGISTRATION_ATTEMPTS) {
+          try {
+            const finalRetry = await register(
+              (name, pct) => notify(name, pct),
+              { allowLegacyFallback: true },
+            );
+            return preserveRegisteredProviders(last, finalRetry);
+          } catch (retryError) {
+            return terminalRegistrationResult(last, retryError);
+          }
+        }
+        continue;
+      }
+      if (!last?.retry) return last;
+    }
+    if (last?.[retryLegacyFallback]) {
+      try {
+        const fallbackRetry = await register(
+          (name, pct) => notify(name, pct),
+          { allowLegacyFallback: true },
+        );
+        return preserveRegisteredProviders(last, fallbackRetry);
+      } catch (error) {
+        return terminalRegistrationResult(last, error);
+      }
+    }
+    return last;
+  }
+
+  // One chain. A catalog read queued behind an explicit retry waits for that retry,
+  // and a second caller cannot start another registration beside the first.
+  function enqueue(task) {
+    const run = tail.then(() => task());
+    tail = run.then(() => {}, () => {});
+    return run;
+  }
+
+  function enqueuePostCommitWrite(task) {
+    // A mutation dispatched before commit confirmation runs on `tail`, while a
+    // later write uses this lane. Preserve dispatch order across that boundary
+    // even though the native mutation itself has completed by the time the
+    // confirmation flag becomes observable.
+    const priorMutations = mutationBarrier;
+    const priorWrites = postCommitWriteBarrier;
+    const priorProviderReads = [...activeProviderReads];
+    const run = Promise.all([
+      priorMutations,
+      priorWrites,
+      Promise.allSettled(priorProviderReads),
+    ]).then(() => task());
+    return publishPostCommitWrite(run);
+  }
+
+  function publishPostCommitWrite(run) {
+    postCommitWriteBarrier = run.then(() => {}, () => {});
+    return run;
+  }
+
+  function trackRead(read) {
+    // Add at dispatch time, not when the operation starts, so a later mutation
+    // snapshots every read that was requested before it.
+    activeReads.add(read);
+    void read.then(
+      () => activeReads.delete(read),
+      () => activeReads.delete(read),
+    );
+    return read;
+  }
+
+  function trackTelemetryRead(operation) {
+    const timeoutError = new Error(
+      'Catalog telemetry deadline expired; native completion is unconfirmed. Retry after it settles or restart the runtime.',
+    );
+    const undispatchedError = new Error(
+      'Catalog telemetry deadline expired before dispatch; no native read was started.',
+    );
+    const entry = { result: null, expired: false, dispatched: false };
+    // The deadline includes waiting for an active mutation. Expiry revokes dispatch,
+    // but cannot cancel a native read that has already started.
+    const read = activeMutationBarrier.then(() => {
+      if (entry.expired) throw undispatchedError;
+      entry.dispatched = true;
+      return operation();
+    });
+    entry.result = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        entry.expired = true;
+        if (!entry.dispatched) activeTelemetryReads.delete(entry);
+        reject(entry.dispatched ? timeoutError : undispatchedError);
+      }, TELEMETRY_READ_TIMEOUT_MS);
+      read.then(resolve, reject).finally(() => {
+        clearTimeout(timer);
+        activeTelemetryReads.delete(entry);
+      });
+    });
+    activeTelemetryReads.add(entry);
+    return entry.result;
+  }
+
+  function trackProviderRead(read) {
+    activeProviderReads.add(read);
+    void read.then(
+      () => activeProviderReads.delete(read),
+      () => activeProviderReads.delete(read),
+    );
+    return trackRead(read);
+  }
+
+  function preserveRegisteredProviders(previous, current) {
+    if (!current || typeof current !== 'object') {
+      return previous && typeof previous === 'object' ? previous : current;
+    }
+    if (!previous || typeof previous !== 'object') {
+      return current;
+    }
+    const currentRegistered = new Set(
+      Array.isArray(current.registeredEps) ? current.registeredEps : [],
+    );
+    const currentFailed = new Set(
+      (Array.isArray(current.failedEps) ? current.failedEps : [])
+        .filter((name) => !currentRegistered.has(name)),
+    );
+    const previousFailed = new Set(
+      (Array.isArray(previous.failedEps) ? previous.failedEps : [])
+        .filter((name) => !currentRegistered.has(name)),
+    );
+    const failedEps = [...new Set([...previousFailed, ...currentFailed])];
+    const failed = new Set(failedEps);
+    const registeredEps = [...new Set([
+      ...(Array.isArray(previous.registeredEps) ? previous.registeredEps : [])
+        .filter((name) => !failed.has(name)),
+      ...currentRegistered,
+    ])];
+    const merged = {
+      ...current,
+      success: current.success === false || failedEps.length > 0 ? false : current.success,
+      registeredEps,
+      failedEps,
+    };
+    // `retry` is a registrar's claim that a later call may still fix a failure. A
+    // failure carried forward from an earlier retryable attempt keeps that claim when
+    // the current attempt said nothing about the provider (for example, it dropped
+    // out of discovery). A provider the current attempt re-evaluated takes the
+    // current verdict instead.
+    if (
+      !merged.retry &&
+      previous.retry &&
+      [...previousFailed].some((name) => !currentFailed.has(name))
+    ) {
+      merged.retry = true;
+    }
+    if (
+      typeof current.status === 'string' &&
+      (
+        registeredEps.length !== currentRegistered.size ||
+        failedEps.length !== (Array.isArray(current.failedEps) ? current.failedEps.length : 0)
+      )
+    ) {
+      if (failedEps.length > 0) {
+        merged.status = `Registered ${registeredEps.length}; failed ${failedEps.length}: ${
+          failedEps.join(', ')
+        }`;
+      } else if (current.success === true) {
+        merged.status = `Registered ${registeredEps.length} execution provider${
+          registeredEps.length === 1 ? '' : 's'
+        }`;
+      } else {
+        const generatedFailure = current.status.match(/^Registered \d+; failed \d+:(.*)$/);
+        if (generatedFailure) {
+          merged.status = `Registered ${registeredEps.length}; failed ${failedEps.length}:${
+            generatedFailure[1]
+          }`;
+        }
+      }
+    }
+    if (current[retryLegacyFallback]) {
+      Object.defineProperty(merged, retryLegacyFallback, { value: true });
+    }
+    return merged;
+  }
+
+  async function ensureSettled(report) {
+    if (!hasSettled) {
+      settled = await attempts(report);
+      hasSettled = true;
+    }
+    return settled;
+  }
+
+  async function confirmCatalogCommit() {
+    if (commitConfirmed || typeof commitCatalog !== 'function') return;
+    await commitOperation(commitCatalog);
+  }
+
+  async function commitOperation(operation) {
+    try {
+      const result = await operation();
+      commitConfirmed = true;
+      return result;
+    } finally {
+      // A rejected native read does not establish whether the immutable
+      // snapshot was taken. Treat any attempted read as committed for
+      // restart reporting, but retry it inside this queue until one is
+      // confirmed so no later catalog caller races provider setup.
+      committed = true;
+    }
+  }
+
+  async function rerunRegistration(report, registerOnce) {
+    const catalogRefreshRequiresRestart = committed;
+    if (committed && !commitConfirmed) {
+      return {
+        ...(settled && typeof settled === 'object' ? settled : {}),
+        success: false,
+        status: 'Accelerator update deferred because Flint cannot confirm whether the model catalog snapshot has already been taken. Restart Flint to apply provider changes.',
+        catalogRefreshRequiresRestart: true,
+        registrationDeferredUntilRestart: true,
+      };
+    }
+    if (registerOnce) await ensureSettled(report);
+    // Cache rebuilds are effectful: run once under this gate, never through the
+    // discovery retry loop that could delete the same provider cache repeatedly.
+    const current = registerOnce ? await registerOnce(report) : await attempts(report, settled);
+    settled = preserveRegisteredProviders(settled, current);
+    hasSettled = true;
+    if (
+      catalogRefreshRequiresRestart &&
+      settled &&
+      typeof settled === 'object'
+    ) {
+      settled = { ...settled, catalogRefreshRequiresRestart: true };
+    }
+    return settled;
+  }
+
+  return {
+    ensure(onProgress) {
+      const report = typeof onProgress === 'function' ? onProgress : null;
+      return enqueue(async () => {
+        return ensureSettled(report);
+      });
+    },
+    rerun(onProgress, registerOnce) {
+      if (registerOnce !== undefined && typeof registerOnce !== 'function') {
+        return Promise.reject(new TypeError('rerun requires a registration operation'));
+      }
+      const report = typeof onProgress === 'function' ? onProgress : null;
+      // Once the immutable snapshot is confirmed, provider registration cannot
+      // change it. Keep later registration serialized with catalog mutations,
+      // but off the telemetry lane so a long EP download cannot stall monitoring.
+      const rerun = commitConfirmed
+        ? enqueuePostCommitWrite(() => rerunRegistration(report, registerOnce))
+        : enqueue(() => rerunRegistration(report, registerOnce));
+      providerWriteBarrier = rerun.then(() => {}, () => {});
+      // A rerun dispatched before confirmation can still be running after the
+      // commit completes. Publish both lanes so provider-sensitive lookups
+      // cannot slip beside that transition.
+      return commitConfirmed ? rerun : publishPostCommitWrite(rerun);
+    },
+    commit(onProgress) {
+      const report = typeof onProgress === 'function' ? onProgress : null;
+      return enqueue(async () => {
+        await ensureSettled(report);
+        await confirmCatalogCommit();
+        return settled;
+      });
+    },
+    read(operation, onProgress) {
+      if (typeof operation !== 'function') {
+        return Promise.reject(new TypeError('read requires a catalog operation'));
+      }
+      // Confirmed reads run concurrently, but remain ordered against local mutations.
+      if (commitConfirmed) {
+        return trackRead(mutationBarrier.then(() => operation()));
+      }
+      const report = typeof onProgress === 'function' ? onProgress : null;
+      const queued = enqueue(async () => {
+        await ensureSettled(report);
+        if (commitConfirmed) return { runOutsideQueue: true };
+        return { runOutsideQueue: false, result: await commitOperation(operation) };
+      });
+      return trackRead(queued.then((outcome) => (
+        outcome.runOutsideQueue ? operation() : outcome.result
+      )));
+    },
+    readUnconfirmed(operation, onProgress) {
+      if (typeof operation !== 'function') {
+        return Promise.reject(new TypeError('readUnconfirmed requires a catalog operation'));
+      }
+      if (commitConfirmed) {
+        // Model lookup can depend on the registered provider set, unlike reads
+        // of the already-frozen public snapshot and loaded-model telemetry.
+        return trackProviderRead(Promise.all([
+          mutationBarrier,
+          postCommitWriteBarrier,
+        ]).then(() => operation()));
+      }
+      const report = typeof onProgress === 'function' ? onProgress : null;
+      return trackProviderRead(enqueue(async () => {
+        await ensureSettled(report);
+        try {
+          return await operation();
+        } finally {
+          // Model lookups and cached inventory reads do not prove that the
+          // immutable public catalog snapshot exists, but they are still
+          // catalog touches. Keep provider updates restart-bound until a real
+          // snapshot read confirms it.
+          committed = true;
+        }
+      }));
+    },
+    readTelemetry(operation) {
+      if (typeof operation !== 'function') {
+        return Promise.reject(new TypeError('readTelemetry requires a catalog operation'));
+      }
+      if (!commitConfirmed) {
+        return Promise.reject(new Error('readTelemetry requires a confirmed catalog snapshot'));
+      }
+      if ([...activeTelemetryReads].some((entry) => entry.expired)) {
+        return Promise.reject(new Error(
+          'An earlier native telemetry read remains unresolved. Retry after it settles or restart the runtime.',
+        ));
+      }
+      // Registration cannot alter the frozen snapshot, but a local mutation can
+      // change the native objects being inspected. Wait only while that mutation
+      // is active. A mutation queued behind registration will observe and await
+      // this read before it begins.
+      return trackTelemetryRead(operation);
+    },
+    readProviders(operation) {
+      if (typeof operation !== 'function') {
+        return Promise.reject(new TypeError('readProviders requires an operation'));
+      }
+      // Provider discovery must reflect every update dispatched before it. Unlike
+      // catalog telemetry, discoverEps reports mutable registration state, so it
+      // cannot run beside either the pre-commit queue or post-commit writer lane.
+      // Before initial registration settles, the queue owns that first cycle.
+      // Afterwards only explicit provider updates can change discoverEps state;
+      // imports, deletion, and other catalog writes must not delay this query.
+      const priorRegistration = hasSettled ? providerWriteBarrier : tail;
+      return priorRegistration.then(() => operation());
+    },
+    isCommitConfirmed() {
+      return commitConfirmed;
+    },
+    mutateAndCommit(operation, onCommitError, onProgress, options = {}) {
+      if (typeof onCommitError !== 'function') {
+        return Promise.reject(new TypeError('mutateAndCommit requires an onCommitError handler'));
+      }
+      const report = typeof onProgress === 'function' ? onProgress : null;
+      const readsBeforeMutation = [...activeReads];
+      const executeMutation = async () => {
+        await ensureSettled(report);
+        const telemetryReadsAtStart = [...activeTelemetryReads];
+        let releaseActiveMutation = () => {};
+        const activeMutation = new Promise((resolve) => {
+          releaseActiveMutation = resolve;
+        });
+        activeMutationBarrier = activeMutation.then(() => {}, () => {});
+        try {
+          await Promise.allSettled([
+            ...readsBeforeMutation,
+            ...telemetryReadsAtStart.map((entry) => entry.result),
+          ]);
+          // A transport/deadline rejection does not establish native cancellation.
+          // Refuse before invoking the mutation rather than racing the live read or
+          // holding the writer lane and the caller's activity fence indefinitely.
+          if (telemetryReadsAtStart.some((entry) =>
+            entry.expired && activeTelemetryReads.has(entry)
+          )) {
+            throw new Error(
+              'Catalog mutation not started: a native telemetry read remains unresolved. Retry after it settles or restart the runtime.',
+            );
+          }
+          // Some mutations must resolve their target through native catalog getters
+          // before changing it. Treat that first lookup as restart-bound uncertainty:
+          // it may establish a stale native snapshot before the mutation completes.
+          const catalogReadBeforeMutation = options.catalogReadBeforeMutation === true;
+          let catalogRefreshRequiresRestart = committed || catalogReadBeforeMutation;
+          if (catalogReadBeforeMutation) committed = true;
+          const result = await operation();
+          try {
+            await confirmCatalogCommit();
+          } catch (error) {
+            // The local mutation is already durable. Report snapshot uncertainty
+            // separately so callers do not mistake a read failure for a failed mutation.
+            onCommitError(error);
+            catalogRefreshRequiresRestart = true;
+          }
+          return {
+            result,
+            ...(catalogRefreshRequiresRestart ? { catalogRefreshRequiresRestart: true } : {}),
+          };
+        } finally {
+          releaseActiveMutation();
+        }
+      };
+      const mutation = commitConfirmed
+        ? enqueuePostCommitWrite(executeMutation)
+        : enqueue(executeMutation);
+      // Keep this assignment after dispatch: enqueuePostCommitWrite snapshots
+      // the prior barrier and must never wait on the mutation being created.
+      // Confirmed reads need to wait for local catalog mutations, but not for
+      // post-commit provider registration that cannot change the frozen snapshot.
+      mutationBarrier = mutation.then(() => {}, () => {});
+      return mutation;
+    },
+    seal(onProgress) {
+      const report = typeof onProgress === 'function' ? onProgress : null;
+      return enqueue(async () => {
+        await ensureSettled(report);
+        // The native listener can perform the first read outside this process.
+        // Close the provider boundary without contacting the registry. Until a
+        // later JS read confirms the snapshot, rerun must defer rather than
+        // registering beside a possible listener-owned first read.
+        committed = true;
+        return settled;
+      });
+    },
+  };
+}

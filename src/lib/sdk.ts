@@ -1,8 +1,19 @@
 import { writable, type Writable } from 'svelte/store';
+import { isPoolEntryResident, retainKnownResidency } from './pool-residency';
+import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { Command } from '@tauri-apps/plugin-shell';
-import { resolveResource, resourceDir } from '@tauri-apps/api/path';
-import { exists } from '@tauri-apps/plugin-fs';
-import type { LaneName, EndpointProfile } from './ipc-contracts';
+import {
+  SIDECAR_PROTOCOL_VERSION,
+  type LaneName,
+  type EndpointProfile,
+  type ModelPriority,
+  type ModelPriorityEntry,
+  type EvictionConfig,
+  type EpInfo,
+  type EpDownloadResult,
+  type SidecarCommandName,
+} from './ipc-contracts';
 import {
   evaluateNodeProbe,
   buildNodeMissingMessage,
@@ -11,15 +22,24 @@ import {
   type NodePreflightResult,
 } from './node-runtime';
 import {
-  SIDECAR_RESOURCE_CANDIDATES,
-  selectSidecarSpawnPaths,
   parseNodeRuntimePreference,
   nodeRuntimeProbeOrder,
   shellProgramForNodeMode,
   type NodeRuntimeMode,
-  type ResolvedSidecarCandidate,
 } from './sidecar-paths';
-export type { LaneName, EndpointProfile };
+import {
+  createProgressStallWatchdog,
+  type ProgressStallWatchdog,
+} from './progress-stall';
+export type {
+  LaneName,
+  EndpointProfile,
+  EpInfo,
+  EpDownloadResult,
+  AcceleratorReadiness,
+};
+
+export { SIDECAR_PROTOCOL_VERSION };
 export {
   MIN_NODE_VERSION,
   formatNodeVersion,
@@ -30,6 +50,25 @@ export {
   PATH_NODE_SHELL_NAME,
   type NodeRuntimeMode,
 } from './sidecar-paths';
+import {
+  SidecarOperationError,
+  certaintyFor,
+  isUncertainOutcome,
+  type InterruptionCause,
+} from './operation-outcome';
+import {
+  hasRegisteredAccelerator,
+  type AcceleratorReadiness,
+} from './accelerator-readiness';
+import { deadlineForCommand } from './ipc-deadlines';
+import { classifySidecarStderrLine } from './sidecar-stderr';
+export {
+  SidecarOperationError,
+  isUncertainOutcome,
+  describeOutcome,
+  effectOf,
+  type OutcomeCertainty,
+} from './operation-outcome';
 
 // Sidecar-based implementation for clean production builds.
 // We never import 'foundry-local-sdk' in the web bundle.
@@ -73,25 +112,85 @@ export interface ModelContextInfo {
   contextLength: number | null;
   family: string | null;
 }
-export interface EpInfo { name: string; isRegistered: boolean; }
-export interface EpDownloadResult { success: boolean; status: string; registeredEps?: string[]; failedEps?: string[]; }
-
 let sidecarProcess: any = null;
 let sidecarReady = false;
+let runtimeQuitRequested = false;
+let sidecarStartEpoch = 0;
+let expectedShutdownGeneration: number | null = null;
+const closeObservers = new Map<number, Set<() => void>>();
 /** Last successful Node runtime (bundled externalBin vs PATH). */
 let activeNodeMode: NodeRuntimeMode | null = null;
-let pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
+type PendingRequest = {
+  resolve: (v: any) => void;
+  reject: (e: any) => void;
+  cmd: SidecarCommandName;
+  /** Whether the bytes are known to have left. Only `false` proves the request never ran. */
+  dispatched: boolean;
+  deadlineTimer?: ReturnType<typeof setTimeout>;
+};
+let pending = new Map<number, PendingRequest>();
 let streamHandlers = new Map<number, (delta: string) => void>();
-let progressHandlers = new Map<number, (p: number) => void>();
+type ProgressHandler = {
+  onProgress?: (p: number, detail?: any) => void;
+  /** Execution-provider registration riding this command's id, never the command's own progress. */
+  onAcceleratorProgress?: (p: number, detail?: any) => void;
+  watchdog?: ProgressStallWatchdog;
+};
+let progressHandlers = new Map<number, ProgressHandler>();
+type AcceleratorSetupListener = {
+  onProgress?: (epName: string, percent: number) => void;
+  onStall?: () => void;
+};
+let acceleratorSetup: {
+  promise: Promise<AcceleratorReadiness>;
+  listeners: Set<AcceleratorSetupListener>;
+  generation: number;
+} | null = null;
+const CATALOG_REGISTRATION_COMMANDS = new Set<SidecarCommandName>([
+  'listModels',
+  'getSTTModels',
+  'getVisionModels',
+  'download',
+  'load',
+  'deleteModel',
+  'getEps',
+  'importModelFolder',
+  'linkModelFolder',
+  'setModelTemplate',
+  'startService',
+]);
 let msgId = 0;
 let currentStatus: any = { initialized: false, modelLoaded: false, serviceRunning: false };
+let currentRuntimeServiceState: RuntimeServiceState = 'unknown';
 export type ModelInfo = IModel & {
   isCached?: boolean;
   isLoaded?: boolean;
+  contextLength?: number | null;
+  supportsToolCalling?: boolean | null;
 };
 
 let managerInstance: any = null;
+let managerReady = false;
+/** Bumped for every sidecar child, so async work can tell whether its child is still the live one. */
+let sidecarGeneration = 0;
+
+/** Current sidecar generation, for callers that must bind a whole multi-call sequence (not just
+ * one call) to "this same live child process" -- e.g. a benchmark run that acquires exclusivity
+ * and priority pins once, then depends on them holding across many later loads/dispatches. Every
+ * individual `sdk.ts` call already guards itself against a respawn happening *during* that one
+ * call, but that says nothing about a respawn that already happened *before* it started; capture
+ * this value once and compare it before/after each later call to detect that case too. */
+export function getSidecarGeneration(): number {
+  return sidecarGeneration;
+}
 let currentEndpoint: string | undefined = undefined;
+/** Init payload of the last successful init, so a crash-respawned sidecar can be re-inited. */
+let lastInitPayload: { appName: string; logLevel: string } | null = null;
+/** Latest frontend catalog policy, preserved across sidecar crash recovery. */
+let lastInitRefreshCatalog = true;
+export function setAutomaticCatalogRefreshEnabled(enabled: boolean): void {
+  lastInitRefreshCatalog = enabled;
+}
 
 function decodeShellOutput(data: string | Uint8Array): string {
   return typeof data === 'string' ? data : new TextDecoder().decode(data);
@@ -158,14 +257,6 @@ function createNodeVersionCommand(mode: NodeRuntimeMode) {
     return Command.sidecar(prog.name, ['-v']);
   }
   return Command.create(prog.name, ['-v']);
-}
-
-function createSidecarSpawnCommand(mode: NodeRuntimeMode, script: string, opts: any) {
-  const prog = shellProgramForNodeMode(mode);
-  if (prog.kind === 'sidecar') {
-    return Command.sidecar(prog.name, [script], opts);
-  }
-  return Command.create(prog.name, [script], opts);
 }
 
 async function probeNodeMode(mode: NodeRuntimeMode): Promise<NodePreflightResult> {
@@ -238,6 +329,11 @@ export interface PoolEntry {
   alias: string;
   variantId: string;
   isLoaded: boolean | null;
+  /** Epoch ms of the most recent request; drives idle eviction. */
+  lastUsedAt?: number;
+  /** Requests currently being served. Non-zero means the model is exempt from eviction. */
+  inFlight?: number;
+  priority?: ModelPriority;
 }
 
 export interface StreamingStatus {
@@ -271,11 +367,32 @@ export interface PoolStats {
   accelerators?: AcceleratorMemory[];
   tokenTotals: Array<{ alias: string; tokensIn: number; tokensOut: number }>;
   streaming: StreamingStatus | null;
+  /** Echoed back by the sidecar so the UI shows the rules actually in force. */
+  eviction?: EvictionConfig;
+}
+
+export type RuntimeProcessState = 'stopped' | 'starting' | 'ready' | 'stopping' | 'crashed' | 'unknown';
+export type RuntimeManagerState = 'unknown' | 'uninitialized' | 'initializing' | 'ready' | 'failed';
+export type RuntimeServiceState = 'unknown' | 'stopped' | 'starting' | 'draining' | 'stopping' | 'running' | 'failed';
+export type RuntimeModelState = 'unknown' | 'empty' | 'loading' | 'ready';
+export type ModelCatalogStatus = 'not-checked' | 'loading' | 'ready' | 'failed';
+
+export interface RuntimeState {
+  process: RuntimeProcessState;
+  manager: RuntimeManagerState;
+  service: RuntimeServiceState;
+  models: RuntimeModelState;
+  generation: number;
+  /** True while a start/stop/restart is queued or running. */
+  transitioning: boolean;
 }
 
 export interface FlintSDKState {
+  runtime: RuntimeState;
   ready: boolean;
   error: string | null;
+  catalogStatus: ModelCatalogStatus;
+  catalogError: string | null;
   models: ModelInfo[];
   cachedModels: ModelInfo[];
   loadedModels: ModelInfo[];
@@ -290,9 +407,46 @@ export interface FlintSDKState {
   poolStats: PoolStats | null;
 }
 
+export interface CacheInventoryEntry {
+  path: string;
+  alias: string | null;
+  variantId: string | null;
+  sizeBytes: number;
+  partial: boolean;
+  linked: boolean;
+  owned: boolean;
+}
+
+export interface CacheInventory {
+  entries: CacheInventoryEntry[];
+  totalBytes: number;
+  partialBytes: number;
+  duplicateBytes: number;
+  duplicateGroups: Array<{
+    alias: string;
+    entries: string[];
+    bytes: number;
+    recommendation: string;
+  }>;
+  partialEntries: Array<{ path: string; bytes: number; recommendation: string }>;
+  scanComplete: boolean;
+  scanErrors: Array<{ path: string; message: string }>;
+  scannedAt: number;
+}
+
 const initialState: FlintSDKState = {
+  runtime: {
+    process: 'stopped',
+    manager: 'unknown',
+    service: 'unknown',
+    models: 'unknown',
+    generation: 0,
+    transitioning: false,
+  },
   ready: false,
   error: null,
+  catalogStatus: 'not-checked',
+  catalogError: null,
   models: [],
   cachedModels: [],
   loadedModels: [],
@@ -309,204 +463,548 @@ const initialState: FlintSDKState = {
 
 export const sdkState: Writable<FlintSDKState> = writable(initialState);
 
-function drainPending(reason: Error) {
-  for (const { reject } of pending.values()) {
-    reject(reason);
+/**
+ * Reject everything outstanding, saying what is known about each.
+ *
+ * The requests are not in the same position. A query that was interrupted changed nothing; a
+ * mutation may have completed with its acknowledgement lost in the dead process. Rejecting them
+ * all with one message would tell the user something false about the second kind.
+ */
+function drainPending(cause: InterruptionCause, detail: string) {
+  sidecarProcess?.clearQueue?.();
+  for (const { reject, cmd, dispatched, deadlineTimer } of pending.values()) {
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+    const actual: InterruptionCause = dispatched ? cause : 'not-dispatched';
+    reject(new SidecarOperationError(cmd, certaintyFor(cmd, actual), detail));
   }
   pending.clear();
   streamHandlers.clear();
+  clearProgressHandlers();
+}
+
+function cancelUndispatchedForRuntimeQuit() {
+  for (const [id, entry] of [...pending]) {
+    if (!entry.dispatched) cancelBeforeDispatch(id);
+  }
+}
+
+function observeSidecarClose(generation: number, timeoutMs: number): Promise<boolean> {
+  if (generation !== sidecarGeneration || !sidecarProcess) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (closed: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const observers = closeObservers.get(generation);
+      observers?.delete(onClose);
+      if (observers?.size === 0) closeObservers.delete(generation);
+      resolve(closed);
+    };
+    const onClose = () => finish(true);
+    const timer = setTimeout(() => finish(false), Math.max(1, timeoutMs));
+    const observers = closeObservers.get(generation) ?? new Set();
+    observers.add(onClose);
+    closeObservers.set(generation, observers);
+  });
+}
+
+function notifySidecarClose(generation: number) {
+  const observers = closeObservers.get(generation);
+  if (!observers) return;
+  closeObservers.delete(generation);
+  for (const resolve of observers) resolve();
+}
+
+function deleteProgressHandler(id: number) {
+  progressHandlers.get(id)?.watchdog?.stop();
+  progressHandlers.delete(id);
+}
+
+function clearProgressHandlers() {
+  for (const handler of progressHandlers.values()) handler.watchdog?.stop();
   progressHandlers.clear();
+}
+
+function registerProgressHandler(
+  id: number,
+  onProgress?: (p: number, detail?: any) => void,
+  onStall?: () => void,
+  onAcceleratorProgress?: (p: number, detail?: any) => void,
+) {
+  if (!onProgress && !onStall && !onAcceleratorProgress) return;
+  progressHandlers.set(id, {
+    onProgress,
+    onAcceleratorProgress,
+    watchdog: onStall
+      ? createProgressStallWatchdog(() => {
+          try { onStall(); } catch {}
+        })
+      : undefined,
+  });
+}
+
+function reportCatalogProgressStall() {
+  appendAppLog(
+    'Catalog refresh: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.',
+    'warn',
+  );
+}
+
+function reportRuntimeProgressStall(cmd: SidecarCommandName) {
+  appendAppLog(
+    `No progress reported for 60 seconds while running ${cmd}. Still awaiting the runtime; Flint has not cancelled this operation.`,
+    'warn',
+  );
+}
+
+function registerCatalogProgressHandler(id: number, cmd: SidecarCommandName) {
+  registerProgressHandler(id, undefined, () => reportRuntimeProgressStall(cmd));
 }
 
 function updateState(partial: Partial<FlintSDKState>) {
   sdkState.update((s) => ({ ...s, ...partial }));
 }
 
+function updateRuntime(partial: Partial<RuntimeState>) {
+  if (partial.service) currentRuntimeServiceState = partial.service;
+  sdkState.update((s) => ({ ...s, runtime: { ...s.runtime, ...partial } }));
+}
+
 export function getSDKState() {
   return sdkState;
 }
 
-async function startSidecar() {
+let startPromise: Promise<void> | null = null;
+
+/**
+ * Spawn the sidecar, at most once at a time.
+ *
+ * The `sidecarProcess` guard alone is not enough: the function awaits the Node preflight and
+ * resource resolution *before* assigning `sidecarProcess`, so two callers arriving together
+ * would both pass the check and spawn a child. The second child's stdout is never read, and it
+ * keeps a second Foundry core alive.
+ */
+async function startSidecar(): Promise<void> {
   if (sidecarProcess) return;
+  if (startPromise) return startPromise;
+  startPromise = spawnSidecar().finally(() => {
+    startPromise = null;
+  });
+  return startPromise;
+}
+
+async function spawnSidecar() {
+  const startEpoch = sidecarStartEpoch;
+  if (sidecarProcess) return;
+  if (runtimeQuitRequested) {
+    throw new Error('The runtime is shutting down.');
+  }
+  updateRuntime({ process: 'starting', manager: 'unknown', service: 'unknown', models: 'unknown' });
 
   const nodeCheck = await ensureNodeRuntime();
+  if (startEpoch !== sidecarStartEpoch) {
+    throw new Error('The runtime start was cancelled.');
+  }
   if (!nodeCheck.ok) {
     updateState({ ready: false, error: nodeCheck.message });
+    updateRuntime({ process: 'stopped', manager: 'unknown', service: 'unknown', models: 'unknown' });
     throw new Error(nodeCheck.message);
   }
 
-  // Resolve resource keys via Tauri, then select layout (flattened / legacy / dev) with pure helpers.
-  // IMPORTANT: resolveResource only joins paths — it does not check the file exists.
-  const candidates: ResolvedSidecarCandidate[] = [];
-  for (const key of SIDECAR_RESOURCE_CANDIDATES) {
-    try {
-      const resolvedPath = await resolveResource(key);
-      let fileExists = false;
-      try {
-        fileExists = await exists(resolvedPath);
-      } catch (e) {
-        // fs scope may block; fall through with a packaged-path heuristic
-        console.log(`[sdk] exists() check failed for ${resolvedPath}: ${e}`);
-        fileExists = /[/\\]sidecar[/\\]foundry-sidecar\.js$/i.test(resolvedPath);
-      }
-      candidates.push({ key, resolvedPath, exists: fileExists });
-      if (!fileExists) {
-        console.log(`[sdk] Sidecar candidate missing (${key}): ${resolvedPath}`);
-      }
-    } catch {
-      // resolveResource unavailable for this key
-    }
-  }
-
-  let resourceDirPath: string | undefined;
-  try {
-    resourceDirPath = await resourceDir();
-    console.log(`[sdk] Resource dir: ${resourceDirPath}`);
-  } catch {
-    console.log(`[sdk] resourceDir unavailable`);
-  }
-
-  const spawnPaths = selectSidecarSpawnPaths({
-    candidates,
-    resourceDir: resourceDirPath,
-  });
-  const { script, baseDir, isDev, nodePath } = spawnPaths;
-  if (isDev) {
-    console.log(`[sdk] Dev/fallback sidecar resolution: script=${script}`);
-  } else {
-    console.log(`[sdk] Production sidecar resolution: script=${script}`);
-  }
-
-  // NODE_PATH only; native Foundry core discovery stays in the sidecar (platform-correct).
-  const env: Record<string, string> = {};
-  if (nodePath) {
-    env.NODE_PATH = nodePath;
-  }
-
-  const opts: any = baseDir
-    ? { cwd: baseDir, env }
-    : Object.keys(env).length
-      ? { env }
-      : undefined;
-
   const nodeMode: NodeRuntimeMode = activeNodeMode ?? 'path';
-  console.log(
-    `[sdk] Spawning sidecar - node=${nodeMode}, isDev=${isDev}, script=${script}, NODE_PATH=${env.NODE_PATH || ''}`,
-  );
+  console.log(`[sdk] Asking native supervisor to spawn sidecar with node=${nodeMode}`);
 
-  const command = createSidecarSpawnCommand(nodeMode, script, opts);
-
-  // Attach stdout listener to the command (works before/after spawn in plugin-shell)
-  let stdoutBuffer = '';
   let stdoutEventFired = false;
   const stderrLines: string[] = [];
+  let stderrRemainder = '';
   let closeData: any = null;
   let commandError: string | null = null;
+  let transportFailed = false;
+  let myGeneration: number | null = null;
+  let startingNative = false;
+  let eventGenerationFloor = 1;
+  let supersededOutputLogged = false;
+  const unlisteners: UnlistenFn[] = [];
+  const cleanupListeners = () => {
+    for (const unlisten of unlisteners.splice(0)) unlisten();
+  };
+  const ensureStartAuthorized = () => {
+    if (startEpoch === sidecarStartEpoch) return;
+    cleanupListeners();
+    throw new Error('The runtime start was cancelled.');
+  };
 
-  const processStdoutLine = (line: string) => {
-    if (!line.trim()) return;
-    console.log(`[sidecar stdout] ${line}`);
-    try {
-      const msg = JSON.parse(line);
-      if (msg.id && msg.stream) {
-        const onStream = streamHandlers.get(msg.id);
-        if (onStream) {
-          const delta = String(
-            msg.delta ??
+  const processStdoutMessage = (msg: any, generation: number) => {
+    stdoutEventFired = true;
+    if (generation !== sidecarGeneration) {
+      if (!supersededOutputLogged) {
+        console.warn('[sdk] Ignoring stdout from a superseded sidecar child');
+        supersededOutputLogged = true;
+      }
+      return;
+    }
+    console.log(`[sidecar stdout] ${JSON.stringify(msg)}`);
+    if (msg.id && msg.stream) {
+      const onStream = streamHandlers.get(msg.id);
+      if (onStream) {
+        const delta = String(
+          msg.delta ??
             msg.chunk?.choices?.[0]?.delta?.content ??
             msg.chunk?.choices?.[0]?.message?.content ??
             ''
-          );
-          if (delta) onStream(delta);
-        }
+        );
+        if (delta) onStream(delta);
+      }
+      return;
+    }
+    if (msg.id && msg.progress !== undefined) {
+      const handler = progressHandlers.get(msg.id);
+      if (handler) {
+        // Accelerator registration can precede any catalog-gated command, so it shares that
+        // command's id. It is still real runtime progress for the stall watchdog, but it is
+        // not the command's own progress and must not be shown as such.
+        const acceleratorPhase = msg.phase === 'accelerator';
+        const onProgress = acceleratorPhase ? handler.onAcceleratorProgress : handler.onProgress;
+        handler.watchdog?.progress();
+        try { onProgress?.(Number(msg.progress), msg); } catch {}
+      }
+      if (msg.alias) {
+        console.log(`[sdk] download progress ${msg.alias}: ${msg.progress}%`);
+      }
+      return;
+    }
+    if (msg.id && pending.has(msg.id)) {
+      const p = pending.get(msg.id)!;
+      pending.delete(msg.id);
+      if (p.deadlineTimer) clearTimeout(p.deadlineTimer);
+      streamHandlers.delete(msg.id);
+      deleteProgressHandler(msg.id);
+      msg.error
+        ? p.reject(
+            new SidecarOperationError(
+              p.cmd,
+              msg.certainty === 'cancelled' ? 'cancelled' : 'failed',
+              String(msg.error),
+            ),
+          )
+        : p.resolve(msg);
+    } else if (msg.type === 'log') {
+      console.log(`[sidecar] ${msg.level}: ${msg.message}`);
+      sdkState.update(s => ({ ...s, logs: [...s.logs.slice(-199), { ts: msg.timestamp ?? Date.now(), level: msg.level ?? 'info', message: msg.message, source: 'sidecar' as const }] }));
+    } else if (msg.ready) {
+      if (transportFailed) return;
+      if (msg.protocolVersion !== SIDECAR_PROTOCOL_VERSION) {
+        console.error(`[sdk] Unsupported sidecar protocol version: ${String(msg.protocolVersion)}`);
+        commandError = `Unsupported sidecar protocol version: ${String(msg.protocolVersion)}`;
         return;
       }
-      if (msg.id && msg.progress !== undefined) {
-        // Progress messages (e.g. from download) should not resolve the pending promise.
-        // The final reply (with ok or error) will do that.
-        const handler = progressHandlers.get(msg.id);
-        if (handler) {
-          try { handler(Number(msg.progress)); } catch {}
-        }
-        if (msg.alias) {
-          console.log(`[sdk] download progress ${msg.alias}: ${msg.progress}%`);
-        }
-        return;
-      }
-      if (msg.id && pending.has(msg.id)) {
-        const p = pending.get(msg.id)!;
-        pending.delete(msg.id);
-        streamHandlers.delete(msg.id);
-        progressHandlers.delete(msg.id);
-        msg.error ? p.reject(new Error(msg.error)) : p.resolve(msg);
-      } else if (msg.type === 'log') {
-        console.log(`[sidecar] ${msg.level}: ${msg.message}`);
-        sdkState.update(s => ({ ...s, logs: [...s.logs.slice(-199), { ts: msg.timestamp ?? Date.now(), level: msg.level ?? 'info', message: msg.message, source: 'sidecar' as const }] }));
-      } else if (msg.ready) {
-        console.log(`[sdk] Sidecar ready signal received!`);
-        sidecarReady = true;
-      }
-    } catch (e) {
-      // Ignore parse errors for non-json lines
+      console.log(`[sdk] Sidecar ready signal received (protocol ${msg.protocolVersion})!`);
+      sidecarReady = true;
+      void invoke('runtime_mark_ready', { generation }).catch((error) => {
+        console.warn('[sdk] Native supervisor did not accept runtime readiness', error);
+      });
+      updateRuntime({ process: 'ready', manager: 'uninitialized' });
     }
   };
 
-  const processStdoutText = (text: string) => {
-    stdoutBuffer += text;
-
-    // The Tauri shell plugin usually emits strings, and depending on platform
-    // those strings may be line-oriented with the newline already stripped.
-    const lines = stdoutBuffer.split(/\r?\n/);
-    stdoutBuffer = lines[lines.length - 1]; // Keep incomplete line
-
-    lines.slice(0, -1).forEach(processStdoutLine);
-
-    const buffered = stdoutBuffer.trim();
-    if (buffered.startsWith('{') && buffered.endsWith('}')) {
-      processStdoutLine(stdoutBuffer);
-      stdoutBuffer = '';
+  const processStderr = (text: string, generation: number, { flush = false } = {}) => {
+    if (generation !== sidecarGeneration) return;
+    const combined = stderrRemainder + text;
+    const lines = combined.split(/\r?\n/);
+    stderrRemainder = flush ? '' : (lines.pop() ?? '');
+    if (flush && lines.length === 0 && combined.trim()) lines.push(combined);
+    for (const raw of lines) {
+      const trimmed = raw.trim();
+      if (!trimmed) continue;
+      const classified = classifySidecarStderrLine(trimmed);
+      if (classified.level === 'error') {
+        stderrLines.push(classified.message);
+        if (stderrLines.length > 10) stderrLines.shift();
+        console.error(`[sidecar stderr] ${classified.message}`);
+      } else if (classified.level === 'warn') {
+        console.warn(`[sidecar stderr] ${classified.message}`);
+      } else {
+        console.log(`[sidecar stderr] ${classified.message}`);
+      }
+      sdkState.update((s) => ({
+        ...s,
+        logs: [...s.logs.slice(-199), {
+          ts: Date.now(),
+          level: classified.level,
+          message: classified.message,
+          source: 'sdk' as const,
+        }],
+      }));
     }
   };
 
-  command.stdout.on('data', (data: string | Uint8Array) => {
-    stdoutEventFired = true;
-    const text = decodeShellOutput(data);
-    console.log(`[sdk] stdout.on('data') fired: ${text.length} bytes`);
-    processStdoutText(text);
-  });
-
-  // Add listener event to detect if listener is even attached
-  console.log(`[sdk] stdout listeners count: ${command.stdout.listenerCount('data')}`);
-  command.stderr.on('data', (data: string | Uint8Array) => {
-    const text = decodeShellOutput(data).trim();
-    if (!text) return;
-    stderrLines.push(text);
-    if (stderrLines.length > 10) {
-      stderrLines.shift();
+  const processClose = (data: any, generation: number) => {
+    if (generation !== sidecarGeneration) {
+      if (generation === myGeneration) cleanupListeners();
+      console.log('[sdk] Ignoring close from a superseded sidecar child');
+      return;
     }
-    console.error(`[sidecar stderr] ${text}`);
-    sdkState.update(s => ({ ...s, logs: [...s.logs.slice(-199), { ts: Date.now(), level: 'error' as const, message: text, source: 'sdk' as const }] }));
-  });
-
-  command.on('close', (data: any) => {
     closeData = data;
+    processStderr('', generation, { flush: true });
     console.log(`[sdk] Sidecar process closed (exit code: ${data?.code})`);
+    const closedGeneration = generation;
+    const expectedShutdown = expectedShutdownGeneration === closedGeneration;
+    const closingProcess = sidecarProcess;
     sidecarReady = false;
     sidecarProcess = null;
-    updateState({ ready: false, error: 'Sidecar closed' });
-    drainPending(new Error('Sidecar closed'));
-  });
+    closingProcess?.clearQueue?.();
+    cleanupListeners();
+    // The manager lived inside that process. Leaving `managerInstance` set would make
+    // initializeSDK() return true immediately on the next Retry, reporting "ready" without
+    // ever running init — the app would look healthy against a dead child.
+    managerInstance = null;
+    managerReady = false;
+    currentEndpoint = undefined;
+    // Residency, the gateway and the native service all belonged to that process. Leaving the
+    // pool populated would show models as resident — and let callers skip loading them —
+    // against a child that no longer exists.
+    sdkState.update((s) => ({
+      ...s,
+      runtime: {
+        ...s.runtime,
+        process: expectedShutdown ? 'stopped' : 'crashed',
+        manager: 'unknown',
+        service: expectedShutdown ? 'stopped' : 'unknown',
+        models: expectedShutdown ? 'empty' : 'unknown',
+        generation: sidecarGeneration,
+      },
+      ready: false,
+      error: expectedShutdown ? null : 'Sidecar closed',
+      serviceRunning: false,
+      endpoint: undefined,
+      pool: [],
+      poolStats: null,
+      loadedModels: [],
+      models: s.models.map((m) => (m.isLoaded ? { ...m, isLoaded: false } : m)),
+    }));
+    drainPending('connection-lost', 'The runtime process stopped.');
+    notifySidecarClose(closedGeneration);
+    if (expectedShutdown) expectedShutdownGeneration = null;
+  };
 
-  command.on('error', (error: any) => {
-    commandError = String(error);
-    console.error(`[sdk] Sidecar error event:`, error);
-    updateState({ error: `Sidecar error: ${error}` });
-    drainPending(new Error(`Sidecar error: ${error}`));
-  });
+  const handleNativeEvent = (generation: number, callback: () => void) => {
+    if (generation < eventGenerationFloor) return;
+    if (startingNative && startEpoch !== sidecarStartEpoch) return;
+    if (myGeneration === null) {
+      if (!startingNative) return;
+      myGeneration = generation;
+      sidecarGeneration = generation;
+    }
+    if (generation === myGeneration) callback();
+  };
 
-  // spawn() returns the Child process which has .write()
-  console.log(`[sdk] Calling spawn()...`);
-  sidecarProcess = await command.spawn();
+  let started: { generation: number };
+  try {
+    unlisteners.push(
+      await listen<{ generation: number; message: any }>('flint://runtime-stdout', ({ payload }) => {
+      handleNativeEvent(payload.generation, () => processStdoutMessage(payload.message, payload.generation));
+      }),
+    );
+    ensureStartAuthorized();
+    unlisteners.push(
+      await listen<{ generation: number; text: string }>('flint://runtime-stderr', ({ payload }) => {
+      handleNativeEvent(payload.generation, () => processStderr(payload.text, payload.generation));
+      }),
+    );
+    ensureStartAuthorized();
+    unlisteners.push(
+      await listen<{ generation: number; text: string }>('flint://runtime-error', ({ payload }) => {
+      handleNativeEvent(payload.generation, () => {
+        if (payload.generation !== sidecarGeneration) return;
+        transportFailed = true;
+        sidecarReady = false;
+        managerReady = false;
+        commandError = payload.text;
+        console.error('[sdk] Native runtime transport error:', payload.text);
+        updateState({ ready: false, error: `Sidecar error: ${payload.text}` });
+        updateRuntime({
+          process: 'stopping',
+          manager: 'unknown',
+          service: 'unknown',
+          models: 'unknown',
+        });
+        drainPending('connection-lost', `The runtime process reported an error: ${payload.text}`);
+        void invoke('runtime_force_stop', { generation: payload.generation }).catch(() => {});
+      });
+      }),
+    );
+    ensureStartAuthorized();
+    unlisteners.push(
+      await listen<{ generation: number; code?: number | null }>('flint://runtime-exit', ({ payload }) => {
+      handleNativeEvent(payload.generation, () => processClose(payload, payload.generation));
+      }),
+    );
+    ensureStartAuthorized();
+
+    const existing = await invoke<{ generation: number; phase: string }>('runtime_status');
+    ensureStartAuthorized();
+    eventGenerationFloor = existing.generation + 1;
+    if (['starting', 'ready', 'shuttingDown'].includes(existing.phase)) {
+      await invoke('runtime_force_stop', { generation: existing.generation });
+      ensureStartAuthorized();
+      const deadline = Date.now() + 2_000;
+      while (Date.now() < deadline) {
+        const status = await invoke<{ generation: number; phase: string }>('runtime_status');
+        ensureStartAuthorized();
+        if (status.phase === 'exited' || status.phase === 'stopped') break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      const status = await invoke<{ generation: number; phase: string }>('runtime_status');
+      ensureStartAuthorized();
+      if (status.phase !== 'exited' && status.phase !== 'stopped') {
+        throw new Error('The previous runtime child did not terminate, so Flint did not replace it.');
+      }
+    }
+
+    console.log(`[sdk] Calling native runtime_start...`);
+    ensureStartAuthorized();
+    startingNative = true;
+    started = await invoke<{ generation: number }>('runtime_start', { nodeMode });
+  } catch (error) {
+    startingNative = false;
+    cleanupListeners();
+    throw error;
+  }
+  startingNative = false;
+  if (startEpoch !== sidecarStartEpoch) {
+    void invoke('runtime_force_stop', { generation: started.generation }).catch(() => {});
+    cleanupListeners();
+    throw new Error('The runtime start was cancelled.');
+  }
+  if (myGeneration !== null && myGeneration !== started.generation) {
+    void invoke('runtime_force_stop', { generation: started.generation }).catch(() => {});
+    cleanupListeners();
+    throw new Error('The native runtime generation changed while it was starting.');
+  }
+  myGeneration = started.generation;
+  sidecarGeneration = started.generation;
+  if (closeData) {
+    throw new Error(formatStartupFailure(stdoutEventFired, stderrLines, closeData, commandError));
+  }
+  let queuedBytes = 0;
+  const writeQueue: Array<{
+    id?: number;
+    priority?: boolean;
+    bytes?: number;
+    operation: () => Promise<any>;
+    resolve: (value: any) => void;
+    reject: (error: any) => void;
+  }> = [];
+  let writeActive = false;
+  const runNextWrite = () => {
+    if (writeActive) return;
+    const next = writeQueue.shift();
+    if (!next) return;
+    queuedBytes = Math.max(0, queuedBytes - (next.bytes ?? 0));
+    writeActive = true;
+    let result: Promise<any>;
+    try {
+      result = next.operation();
+    } catch (error) {
+      result = Promise.reject(error);
+    }
+    result.then(next.resolve, next.reject).finally(() => {
+      writeActive = false;
+      runNextWrite();
+    });
+  };
+  sidecarProcess = {
+    generation: started.generation,
+    clearQueue() {
+      for (let i = 0; i < writeQueue.length; i += 1) {
+        writeQueue[i].resolve(undefined);
+      }
+      writeQueue.length = 0;
+      queuedBytes = 0;
+    },
+    removeQueuedWrite(id: number) {
+      const idx = writeQueue.findIndex((item) => item.id === id);
+      if (idx >= 0) {
+        const [removed] = writeQueue.splice(idx, 1);
+        queuedBytes = Math.max(0, queuedBytes - (removed.bytes ?? 0));
+        removed.resolve(undefined);
+      }
+    },
+    enqueue<T>(
+      operation: () => Promise<T>,
+      options?: { id?: number; priority?: boolean; bytes?: number },
+    ) {
+      const requestBytes = options?.bytes ?? 0;
+      const isPriority = !!options?.priority;
+      const maxCount = isPriority ? MAX_QUEUED_WRITES + 1 : MAX_QUEUED_WRITES;
+      const maxBytes = isPriority
+        ? MAX_QUEUED_WRITE_BYTES + NATIVE_RUNTIME_MAX_FRAME_BYTES
+        : MAX_QUEUED_WRITE_BYTES;
+
+      if (
+        writeQueue.length >= maxCount ||
+        queuedBytes + requestBytes > maxBytes
+      ) {
+        for (let i = writeQueue.length - 1; i >= 0; i -= 1) {
+          const item = writeQueue[i];
+          if (item.id !== undefined && !pending.has(item.id)) {
+            writeQueue.splice(i, 1);
+            queuedBytes = Math.max(0, queuedBytes - (item.bytes ?? 0));
+            item.resolve(undefined);
+          }
+        }
+      }
+      if (isPriority && writeQueue.some((item) => item.priority)) {
+        return Promise.reject(
+          new Error('A priority lifecycle shutdown is already queued.'),
+        );
+      }
+      if (writeQueue.length >= maxCount) {
+        return Promise.reject(
+          new Error(`The runtime write queue is full (${MAX_QUEUED_WRITES} pending writes).`),
+        );
+      }
+      if (queuedBytes + requestBytes > maxBytes) {
+        return Promise.reject(
+          new Error(
+            `The runtime write queue is full (${MAX_QUEUED_WRITE_BYTES} bytes queued).`,
+          ),
+        );
+      }
+      return new Promise<T>((resolve, reject) => {
+        queuedBytes += requestBytes;
+        writeQueue.push({
+          operation,
+          resolve,
+          reject,
+          id: options?.id,
+          priority: isPriority,
+          bytes: requestBytes,
+        });
+        runNextWrite();
+      });
+    },
+    writeNow(line: string) {
+      return invoke('runtime_write', {
+        generation: started.generation,
+        frame: line.endsWith('\n') ? line.slice(0, -1) : line,
+      });
+    },
+    kill() {
+      return invoke('runtime_force_stop', { generation: started.generation });
+    },
+  };
+  if (runtimeQuitRequested) {
+    expectedShutdownGeneration = myGeneration;
+    updateRuntime({ generation: myGeneration, process: 'stopping' });
+    try {
+      const killing = sidecarProcess.kill?.();
+      Promise.resolve(killing).catch(() => {});
+    } catch {}
+    throw new Error('The runtime was asked to shut down while it was starting.');
+  }
+  updateRuntime({ generation: myGeneration, process: sidecarReady ? 'ready' : 'starting' });
   console.log(`[sdk] Sidecar process spawned, waiting for ready signal...`);
 
   // Wait for the sidecar to signal ready (it sends { ready: true } on startup)
@@ -522,11 +1020,17 @@ async function startSidecar() {
       }, 20000); // 20s timeout to be extra patient on first startup
 
       const checkReady = () => {
-        if (sidecarReady) {
+        if (startEpoch !== sidecarStartEpoch) {
+          if (readyTimeout) clearTimeout(readyTimeout);
+          reject(new Error('The runtime start was cancelled.'));
+        } else if (transportFailed || commandError) {
+          if (readyTimeout) clearTimeout(readyTimeout);
+          reject(new Error(formatStartupFailure(stdoutEventFired, stderrLines, closeData, commandError)));
+        } else if (sidecarReady) {
           console.log(`[sdk] Init complete: sidecar is ready!`);
           if (readyTimeout) clearTimeout(readyTimeout);
           resolve();
-        } else if (closeData || commandError) {
+        } else if (closeData) {
           if (readyTimeout) clearTimeout(readyTimeout);
           reject(new Error(formatStartupFailure(stdoutEventFired, stderrLines, closeData, commandError)));
         } else {
@@ -539,45 +1043,327 @@ async function startSidecar() {
   } catch (e) {
     // Best effort cleanup so next attempt can retry fresh
     if (readyTimeout) clearTimeout(readyTimeout);
-    try { sidecarProcess?.kill?.(); } catch {}
-    sidecarProcess = null;
+    if (!runtimeQuitRequested) {
+      try {
+        const killing = sidecarProcess?.kill?.();
+        Promise.resolve(killing).catch(() => {});
+      } catch {}
+    }
     sidecarReady = false;
     throw e;
   }
 }
 
-async function sendInternal(
-  cmd: string,
+/**
+ * Send one command and resolve when the sidecar answers it.
+ *
+ * Deliberately **not** `async`. The returned promise is the request's own settlement promise,
+ * handed back before the runtime is started, so anything that settles the request during that
+ * preparation — a cancellation, a drain on process death — reaches the caller at once. An
+ * `async` wrapper would have parked the caller on the preparation instead, and a request already
+ * answered as cancelled would have gone on waiting for a start it was no longer part of.
+ */
+export function sendInternal(
+  cmd: SidecarCommandName,
   payload: any = {},
   onStream?: (delta: string) => void,
-  onAssignedId?: (id: number) => void
+  onAssignedId?: (id: number) => void,
+  onDispatch?: (generation: number) => void,
 ): Promise<any> {
-  if (!sidecarProcess || !sidecarReady) {
-    await startSidecar();
+  if (runtimeQuitRequested && cmd !== 'shutdownRuntime') {
+    return Promise.reject(
+      new SidecarOperationError(
+        cmd,
+        'cancelled',
+        'The runtime is shutting down, so this request was not sent.',
+      ),
+    );
   }
+  // Allocated before anything is awaited, so a Stop arriving while the sidecar is still starting
+  // has an id to name. Previously the id existed only after startup finished, so a stop during
+  // that window had nothing to cancel and the request was written anyway once startup completed.
   const id = ++msgId;
-  if (onAssignedId) {
-    onAssignedId(id);
-  }
-  return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject });
-    if (onStream) {
-      streamHandlers.set(id, onStream);
-    }
-    // write is async in recent plugin-shell
-    // write returns Promise<void>
-    sidecarProcess.write(JSON.stringify({ id, cmd, ...payload }) + '\n')
-      .then(() => { /* written */ })
-      .catch((e: any) => {
-        pending.delete(id);
-        streamHandlers.delete(id);
-        progressHandlers.delete(id);
-        reject(e);
-      });
+  const entry: PendingRequest = {
+    resolve: (_v: any) => {},
+    reject: (_e: any) => {},
+    cmd,
+    dispatched: false,
+  };
+
+  // The promise is built, and its real handlers installed, *before* the entry is published or
+  // any callback runs. Publishing first would leave a window in which the entry is cancellable
+  // while `reject` is still the placeholder no-op: cancelling from inside `onAssignedId` would
+  // remove the entry, call nothing, and leave a promise nobody can ever settle.
+  const promise = new Promise<any>((resolve, reject) => {
+    entry.resolve = resolve;
+    entry.reject = reject;
   });
+
+  // Registered before the entry becomes visible, so a cancellation during `onAssignedId` removes
+  // the stream handler along with the entry rather than orphaning it.
+  if (onStream) {
+    streamHandlers.set(id, onStream);
+  }
+
+  pending.set(id, entry);
+
+  if (onAssignedId) {
+    try {
+      onAssignedId(id);
+    } catch (e) {
+      // The callback is the caller's code. Letting it escape would abandon a published entry
+      // with nothing left to settle it, so the request is retired as never sent.
+      pending.delete(id);
+      streamHandlers.delete(id);
+      deleteProgressHandler(id);
+      entry.reject(
+        new SidecarOperationError(cmd, 'failed', 'The request was abandoned before it was sent.', e),
+      );
+      return promise;
+    }
+  }
+  // Cancellation from inside onAssignedId already settled and retired the request.
+  // Stop here before installing any automatic progress handler or deadline timer.
+  if (pending.get(id) !== entry) return promise;
+  if (
+    pending.get(id) === entry &&
+    CATALOG_REGISTRATION_COMMANDS.has(cmd) &&
+    !progressHandlers.has(id)
+  ) {
+    registerCatalogProgressHandler(id, cmd);
+  }
+
+  /** Settles once. A later close, or a write rejection that lands after a reply, is ignored. */
+  const settle = (fn: () => void) => {
+    if (pending.get(id) !== entry) return;
+    pending.delete(id);
+    if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer);
+    streamHandlers.delete(id);
+    deleteProgressHandler(id);
+    if (!entry.dispatched) {
+      sidecarProcess?.removeQueuedWrite?.(id);
+    }
+    fn();
+  };
+
+  /**
+   * Whether this request may still act.
+   *
+   * Settling removes the entry, and this is checked after every await and immediately before the
+   * write. Settling has to revoke permission to dispatch, not merely fix the answer: a request
+   * drained as "never sent" while the runtime was starting would otherwise carry on and write
+   * itself to the child that the drain did not kill, so a deletion could be reported as not
+   * having happened and then happen.
+   */
+  const active = () => pending.get(id) === entry;
+
+  const deadlineMs = deadlineForCommand(cmd);
+  if (deadlineMs !== null) {
+    entry.deadlineTimer = setTimeout(() => {
+      const cause: InterruptionCause = entry.dispatched ? 'deadline-expired' : 'not-dispatched';
+      settle(() =>
+        entry.reject(
+          new SidecarOperationError(
+            cmd,
+            certaintyFor(cmd, cause),
+            `The runtime did not answer within ${deadlineMs / 1000} seconds.`,
+          ),
+        ),
+      );
+    }, deadlineMs);
+  }
+
+  void (async () => {
+    // Cancelled from inside `onAssignedId`, before this continuation began.
+    if (!active()) return;
+    try {
+      if (!sidecarProcess || !sidecarReady) {
+        await startSidecar();
+        if (!active()) return;
+        if (!sidecarProcess || !sidecarReady) {
+          settle(() =>
+            entry.reject(
+              new SidecarOperationError(
+                cmd,
+                'failed',
+                'The runtime process did not become ready.',
+              ),
+            ),
+          );
+          return;
+        }
+        // A fresh sidecar process has no SDK manager. If we had initialized before — i.e. this
+        // spawn is a respawn after a crash — re-init transparently, or every catalog-touching
+        // command would fail until the whole app restarts. This re-initializes a *new* process
+        // whose native manager never existed; it does not replay the request that was lost.
+        if (lastInitPayload && cmd !== 'init' && !initializing) {
+          try {
+            await ensureInitialized(lastInitPayload);
+            console.log('[sdk] Sidecar respawned — SDK re-initialized');
+          } catch (e) {
+            // Not swallowed. This command needs the manager that re-init was creating, so a
+            // failure here is a failure of the command — sending it anyway would ask a child
+            // with no manager to do the work and report whatever it made of that.
+            console.warn('[sdk] Sidecar respawn re-init failed', e);
+            settle(() =>
+              entry.reject(
+                new SidecarOperationError(
+                  cmd,
+                  'failed',
+                  'The runtime restarted and could not be prepared, so the request was not sent.',
+                  e,
+                ),
+              ),
+            );
+            return;
+          }
+          if (!active()) return;
+        }
+      }
+      if (!active()) return;
+
+      let line: string;
+      try {
+        line = JSON.stringify({
+          id,
+          protocolVersion: SIDECAR_PROTOCOL_VERSION,
+          cmd,
+          ...payload,
+        }) + '\n';
+      } catch (e) {
+        // Nothing reached the pipe, so nothing ran.
+        settle(() =>
+          entry.reject(
+            new SidecarOperationError(cmd, 'failed', 'The request could not be encoded.', e),
+          ),
+        );
+        return;
+      }
+      const frameBytes = new TextEncoder().encode(line.slice(0, -1)).byteLength;
+      if (frameBytes > NATIVE_RUNTIME_MAX_FRAME_BYTES) {
+        settle(() =>
+          entry.reject(
+            new SidecarOperationError(
+              cmd,
+              'failed',
+              `The runtime request exceeds the ${NATIVE_RUNTIME_MAX_FRAME_BYTES}-byte transport limit.`,
+            ),
+          ),
+        );
+        return;
+      }
+      if (!sidecarProcess) {
+        settle(() =>
+          entry.reject(
+            new SidecarOperationError(cmd, 'failed', 'The runtime process is not running.'),
+          ),
+        );
+        return;
+      }
+
+      // Last check before the bytes can move. Nothing is awaited between here and `write()`, so
+      // no handler can settle the entry in between.
+      if (!active()) return;
+
+      const processToWrite = sidecarProcess;
+      const generationToWrite = sidecarGeneration;
+      processToWrite
+        .enqueue(async () => {
+          if (!active()) return;
+          if (
+            sidecarProcess !== processToWrite ||
+            sidecarGeneration !== generationToWrite ||
+            !sidecarReady
+          ) {
+            settle(() =>
+              entry.reject(
+                new SidecarOperationError(
+                  cmd,
+                  'failed',
+                  'The runtime changed before this request could be sent.',
+                ),
+              ),
+            );
+            return;
+          }
+          if (onDispatch) {
+            try {
+              onDispatch(generationToWrite);
+            } catch (e) {
+              settle(() =>
+                entry.reject(
+                  new SidecarOperationError(
+                    cmd,
+                    'failed',
+                    'The request was abandoned before it was sent.',
+                    e,
+                  ),
+                ),
+              );
+              return;
+            }
+          }
+          if (!active()) return;
+          entry.dispatched = true;
+          progressHandlers.get(id)?.watchdog?.start();
+          try {
+            await processToWrite.writeNow(line);
+          } catch (e) {
+            settle(() =>
+              entry.reject(
+                new SidecarOperationError(cmd, certaintyFor(cmd, 'write-failed'), String(e), e),
+              ),
+            );
+          }
+        }, { id, priority: cmd === 'shutdownRuntime', bytes: frameBytes })
+        .catch((e: unknown) => {
+          settle(() =>
+            entry.reject(
+              e instanceof SidecarOperationError
+                ? e
+                : new SidecarOperationError(cmd, 'failed', String((e as any)?.message ?? e), e),
+            ),
+          );
+        });
+    } catch (e) {
+      // Startup itself failed, so the request was never written.
+      settle(() =>
+        entry.reject(
+          e instanceof SidecarOperationError
+            ? e
+            : new SidecarOperationError(cmd, 'failed', String((e as any)?.message ?? e), e),
+        ),
+      );
+    }
+  })();
+
+  return promise;
 }
 
-async function send(cmd: string, payload: any = {}): Promise<any> {
+/**
+ * Abandon a request that has not been written yet.
+ *
+ * Returns true only when the request is known not to have been sent. Once it is dispatched,
+ * stopping it is a request to the sidecar rather than something the transport can guarantee.
+ *
+ * Settles immediately rather than leaving a flag for the send path to notice. That path may be
+ * parked on a runtime start that never finishes, and a caller told its request was cancelled
+ * must not go on waiting for it — nor later receive `failed` because the start it was no longer
+ * part of eventually gave up.
+ */
+export function cancelBeforeDispatch(id: number): boolean {
+  const entry = pending.get(id);
+  if (!entry || entry.dispatched) return false;
+  pending.delete(id);
+  if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer);
+  streamHandlers.delete(id);
+  deleteProgressHandler(id);
+  sidecarProcess?.removeQueuedWrite?.(id);
+  entry.reject(new SidecarOperationError(entry.cmd, 'cancelled'));
+  return true;
+}
+
+async function send(cmd: SidecarCommandName, payload: any = {}): Promise<any> {
   return sendInternal(cmd, payload);
 }
 
@@ -592,33 +1378,204 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
-let isInitializing = false;
+let initPromise: Promise<void> | null = null;
+// True while performInit is running, so the crash-recovery path in sendInternal does not try to
+// recover the very commands init itself is issuing (which would await its own promise forever).
+let initializing = false;
 
-export async function initializeSDK(config: Partial<any> = {}): Promise<boolean> {
-  if (managerInstance) {
-    updateState({ ready: true });
-    return true;
+async function establishManagerReadiness(refreshCatalog: boolean): Promise<void> {
+  if (refreshCatalog) {
+    await refreshModels();
+    return;
   }
-  if (isInitializing) return false;
-  isInitializing = true;
+
+  // A local status probe proves the manager is usable without calling listModels(), whose
+  // Foundry Local implementation contacts Microsoft's remote model catalog.
+  const status = await sendInternal('getStatus');
+  if (status.result) {
+    currentEndpoint = status.result.endpoint;
+    const loadedAliases = new Set(
+      (status.result.pool ?? []).map((entry: any) => entry.alias).filter(Boolean),
+    );
+    sdkState.update((state) => {
+      const models = state.models.map((model) => ({
+        ...model,
+        isLoaded: loadedAliases.has(model.alias),
+      }));
+      return {
+        ...state,
+        endpoint: currentEndpoint || undefined,
+        serviceRunning: !!status.result.serviceRunning,
+        chatLaneModel: status.result.chatLane?.model || status.result.currentModel || undefined,
+        audioLaneModel: status.result.audioLane?.model || undefined,
+        pool: status.result.pool ?? [],
+        loadedModels: models.filter((model) => model.isLoaded),
+        models,
+      };
+    });
+  }
+  updateRuntime({ models: 'unknown' });
+}
+
+async function performInit(
+  payload: { appName: string; logLevel: string },
+  refreshCatalog: boolean,
+) {
+  initializing = true;
+  updateRuntime({ manager: 'initializing' });
+  try {
+    // Ensure the child exists *before* capturing its generation — otherwise `sendInternal`
+    // would spawn one below, bump the generation, and the check would always fail on a normal
+    // cold start.
+    await startSidecar();
+    // Initialization belongs to one specific child. If that child dies mid-init, a replacement
+    // is spawned that has never seen `init`, and the remaining steps would succeed against it
+    // while its native manager is absent — leaving `ready: true` on an uninitialized process.
+    const generation = sidecarGeneration;
+    const stillOurChild = () =>
+      generation === sidecarGeneration && !!sidecarProcess && sidecarReady;
+
+    await sendInternal('init', payload);
+    if (!stillOurChild()) {
+      throw new Error('Sidecar was replaced during initialization');
+    }
+    await sendInternal('setLogLevel', { level: payload.logLevel });
+    if (!stillOurChild()) {
+      throw new Error('Sidecar was replaced during initialization');
+    }
+    lastInitPayload = payload;
+    managerInstance = true;
+    updateRuntime({ manager: 'ready', models: 'unknown' });
+    // The previous child's residency is meaningless. Refresh the catalog when allowed; otherwise
+    // establish local manager readiness without making the remote catalog request.
+    await establishManagerReadiness(refreshCatalog);
+    if (!stillOurChild()) {
+      throw new Error('Sidecar was replaced while establishing manager readiness');
+    }
+    managerReady = true;
+    updateState({ ready: true, error: null });
+  } finally {
+    initializing = false;
+  }
+}
+
+/**
+ * Initialize the SDK against the current sidecar child, at most once at a time.
+ *
+ * Foundry Local's native core initializes once per process — a second `init` throws
+ * "already initialized". After a crash several concurrent commands (plus a user-pressed Retry)
+ * can all reach for recovery simultaneously, so every path must share one attempt.
+ */
+function ensureInitialized(
+  payload: { appName: string; logLevel: string },
+  refreshCatalog = lastInitRefreshCatalog,
+): Promise<void> {
+  if (managerInstance && managerReady) return Promise.resolve();
+  if (managerInstance) {
+    if (initPromise) return initPromise;
+    const generation = sidecarGeneration;
+    initPromise = (async () => {
+      initializing = true;
+      updateRuntime({ manager: 'initializing' });
+      try {
+        await establishManagerReadiness(refreshCatalog);
+        if (
+          generation !== sidecarGeneration ||
+          !sidecarProcess ||
+          !sidecarReady ||
+          !managerInstance
+        ) {
+          throw new Error('Sidecar was replaced while restoring manager readiness');
+        }
+        managerReady = true;
+        updateState({ ready: true, error: null });
+        updateRuntime({ manager: 'ready' });
+      } finally {
+        initializing = false;
+      }
+    })()
+      .finally(() => {
+        initPromise = null;
+      });
+    return initPromise;
+  }
+  if (initPromise) return initPromise;
+  initPromise = performInit(payload, refreshCatalog).finally(() => {
+    initPromise = null;
+  });
+  return initPromise;
+}
+
+let initializeSDKPromise: Promise<boolean> | null = null;
+
+/**
+ * Bring the SDK up: initialize the core, then start or adopt the local service.
+ *
+ * Single-flighted as a whole, not just around the core init — otherwise a double Retry would
+ * share the init but each caller would still run its own autostart, and `startService` is a
+ * destructive restart that would tear down the gateway out from under the first caller.
+ */
+export async function initializeSDK(config: Partial<any> = {}): Promise<boolean> {
+  // This invocation carries the current frontend policy even when it joins initialization that
+  // is already in flight. Recovery must use the latest request, not whichever call won the race.
+  if (typeof config.refreshCatalog === 'boolean') {
+    lastInitRefreshCatalog = config.refreshCatalog;
+  }
+  if (initializeSDKPromise) return initializeSDKPromise;
+  initializeSDKPromise = performInitializeSDK(config).finally(() => {
+    initializeSDKPromise = null;
+  });
+  return initializeSDKPromise;
+}
+
+async function performInitializeSDK(config: Partial<any>): Promise<boolean> {
+  const initPayload = { appName: config.appName || 'flint', logLevel: config.logLevel || 'info' };
+  const refreshCatalog =
+    typeof config.refreshCatalog === 'boolean'
+      ? config.refreshCatalog
+      : lastInitRefreshCatalog;
+  const alreadyInitialized = !!managerInstance;
   updateState({ error: null });
 
   try {
-    await send('init', { appName: config.appName || 'flint', logLevel: config.logLevel || 'info' });
-    await send('setLogLevel', { level: 'info' }); // at least enabling logging
-
-    managerInstance = true;
-    updateState({ ready: true, error: null });
-    await refreshModels();
-    // Auto start service for endpoint exposure (MVP requirement)
+    await ensureInitialized(initPayload, refreshCatalog);
+    const readyGeneration = sidecarGeneration;
+    // Autostart is a user setting, and the port/bind address belong to the frontend. Starting
+    // the service here unconditionally on a hardcoded 5272 both ignored "don't autostart" and
+    // opened a port the user had not configured. A repeat call against an already-initialized
+    // manager must not restart the service either — that would drop the gateway's connections.
     try {
-      await send('startService', { port: 5272 });
-      const status = await send('getStatus');
-      if (status.result?.endpoint) {
-        updateState({ endpoint: status.result.endpoint, serviceRunning: true });
+      if (config.autoStartService && !alreadyInitialized) {
+        await startService(
+          config.servicePort || 5272,
+          undefined,
+          undefined,
+          config.bindAddress || undefined,
+          // Automatic, not user-driven: it must both respect an earlier unestablished outcome
+          // and record its own, since the error is swallowed just below. The no-refresh policy
+          // must also carry through to this automatic start, or a disabled startup catalog
+          // check would still be violated by the service's own preflight catalog read.
+          { convenience: true, deferCatalogRead: !refreshCatalog },
+        );
+      } else {
+        // Adopt whatever is actually running — including a service started before this init.
+        const status = await send('getStatus');
+        if (status.result?.endpoint) {
+          currentEndpoint = status.result.endpoint;
+          updateState({ endpoint: status.result.endpoint, serviceRunning: true });
+        }
       }
     } catch (e) {
-      console.warn('Auto-start service failed (can be started manually)', e);
+      console.warn('Service start/probe failed (can be started manually)', e);
+    }
+    if (
+      readyGeneration !== sidecarGeneration ||
+      !sidecarProcess ||
+      !sidecarReady ||
+      !managerInstance ||
+      !managerReady
+    ) {
+      throw new Error('Sidecar became unavailable during initialization');
     }
     return true;
   } catch (e: any) {
@@ -629,66 +1586,94 @@ export async function initializeSDK(config: Partial<any> = {}): Promise<boolean>
         ? raw
         : `Sidecar init failed: ${raw}`;
     updateState({ error: errMsg, ready: false });
+    updateRuntime({ manager: 'failed', service: 'unknown', models: 'unknown' });
     return false;
-  } finally {
-    isInitializing = false;
   }
 }
 
-export async function refreshModels(): Promise<void> {
+export async function refreshModels(
+  onProgress?: (epName: string, percent: number) => void,
+  onStall?: () => void,
+): Promise<void> {
+  updateRuntime({ models: 'loading' });
+  updateState({ catalogStatus: 'loading', catalogError: null });
   try {
-    const res = await send('listModels');
+    const res = await sendInternal('listModels', {}, undefined, (id: number) => {
+      registerProgressHandler(
+        id,
+        undefined,
+        onStall ?? reportCatalogProgressStall,
+        onProgress
+          ? (percent, detail) => onProgress(String(detail?.ep || 'accelerator'), percent)
+          : undefined,
+      );
+    });
     const list = res.result || [];
-    let currentLoadedAlias: string | undefined;
 
     // Also refresh status first so loaded-model state is accurate for UI + actions
     const status = await send('getStatus');
     if (status.result) {
       currentEndpoint = status.result.endpoint;
-      const chatLaneModel: string | undefined = status.result.chatLane?.model || status.result.currentModel || undefined;
-      const audioLaneModel: string | undefined = status.result.audioLane?.model || undefined;
-      currentLoadedAlias = chatLaneModel;
       updateState({
         endpoint: currentEndpoint || undefined,
         serviceRunning: !!status.result.serviceRunning,
-        acceleratorsReady: true, // simplified
-        chatLaneModel,
-        audioLaneModel,
       });
     }
+    const statusPool: Array<{ alias: string; variantId: string }> = status.result?.pool ?? [];
 
-    const loadedAliases = new Set(
-      (status?.result?.pool ?? []).map((e: any) => e.alias).filter(Boolean)
-    );
-
-    const models = list.map((m: any) => ({
+    const catalog = list.map((m: any) => ({
       ...m,
       alias: m.alias,
       isCached: m.cached,
-      isLoaded: loadedAliases.has(m.alias),
+      isLoaded: false,
       info: m
     } as ModelInfo));
 
-    updateState({
-      models,
-      cachedModels: models.filter((m: ModelInfo) => m.isCached),
-      loadedModels: models.filter((m: ModelInfo) => m.isLoaded),
+    // Publish the pool together with the flags and lanes derived from it, so a failed
+    // poolStatus below cannot leave `pool` older than those flags. getStatus carries no
+    // telemetry, so an entry keeps the last known telemetry for the same build.
+    let anyLoaded = false;
+    sdkState.update((state) => {
+      const pool: PoolEntry[] = statusPool.map((entry) => {
+        const prior = state.pool.find((known) =>
+          known.alias === entry.alias && known.variantId === entry.variantId
+        );
+        return prior ?? { alias: entry.alias, variantId: entry.variantId, isLoaded: null };
+      });
+      const projected = projectPool(pool, catalog);
+      anyLoaded = projected.loadedModels.length > 0;
+      return {
+        ...state,
+        ...projected,
+        catalogStatus: 'ready',
+        catalogError: null,
+        cachedModels: projected.models.filter((m: ModelInfo) => m.isCached),
+      };
     });
+    updateRuntime({ models: anyLoaded ? 'ready' : 'empty' });
 
     // Refresh pool detail + memory stats
     try {
       const ps = await send('poolStatus');
       if (ps.result) {
-        updateState({
-          pool: ps.result.models ?? [],
+        const pool = ps.result.models ?? [];
+        sdkState.update((state) => ({
+          ...state,
+          ...projectPool(retainKnownResidency(pool, state.pool), state.models),
           poolStats: mapPoolStats(ps.result),
-        });
+        }));
       }
     } catch (e) {
       console.warn('[sdk] poolStatus refresh failed', e);
     }
   } catch (e) {
     console.error('refreshModels via sidecar failed', e);
+    updateState({
+      catalogStatus: 'failed',
+      catalogError: e instanceof Error ? e.message : String(e),
+    });
+    updateRuntime({ models: 'unknown' });
+    throw e;
   }
 }
 
@@ -725,6 +1710,7 @@ function mapPoolStats(result: any): PoolStats {
     accelerators,
     tokenTotals: result.tokenTotals ?? [],
     streaming: result.streaming ?? null,
+    eviction: result.eviction ?? undefined,
   };
 }
 
@@ -734,25 +1720,73 @@ export async function getModel(alias: string) {
   return { alias } as any;
 }
 
-export async function downloadModel(model: any, onProgress?: (p: number) => void, variantId?: string) {
+export async function downloadModel(
+  model: any,
+  onProgress?: (p: number) => void,
+  variantId?: string,
+  onStall?: () => void,
+) {
   const payload: any = { alias: model.alias };
   if (variantId) payload.variantId = variantId;
   await sendInternal('download', payload, undefined, (id: number) => {
-    if (onProgress) {
-      progressHandlers.set(id, onProgress);
-    }
+    registerProgressHandler(
+      id,
+      onProgress,
+      onStall ?? (() => reportRuntimeProgressStall('download')),
+    );
   });
   // Sidecar sends progress messages via stdout; onAssignedId registers the handler above.
   // The pending promise resolves only on the final reply (see stdout processing).
   await refreshModels();
 }
 
-export async function loadModel(model: any, lane?: LaneName, variantId?: string) {
+export async function loadModel(
+  model: any,
+  lane?: LaneName,
+  variantId?: string,
+  onAcknowledged?: () => void,
+) {
   const payload: any = { alias: model.alias };
   if (lane) payload.lane = lane;
   if (variantId) payload.variantId = variantId;
-  const res = await send('load', payload);
+  let generation: number | null = null;
+  const res = await sendInternal(
+    'load',
+    payload,
+    undefined,
+    undefined,
+    (dispatchedGeneration) => {
+      generation = dispatchedGeneration;
+    },
+  );
+  if (
+    generation === null ||
+    generation !== sidecarGeneration ||
+    !sidecarProcess ||
+    !sidecarReady
+  ) {
+    throw new Error('Sidecar was lost after loading the model');
+  }
+  const loadedVariantId = res.result?.variantId;
+  if (typeof loadedVariantId === 'string' && loadedVariantId) {
+    sdkState.update((state) => {
+      const loaded: PoolEntry = { alias: model.alias, variantId: loadedVariantId, isLoaded: true };
+      const pool = state.pool.some((entry) => entry.alias === model.alias)
+        ? state.pool.map((entry) => entry.alias === model.alias ? loaded : entry)
+        : [...state.pool, loaded];
+      return { ...state, ...projectPool(pool, state.models) };
+    });
+  }
+  onAcknowledged?.();
   await refreshModels();
+  if (
+    generation === null ||
+    generation !== sidecarGeneration ||
+    !sidecarProcess ||
+    !sidecarReady
+  ) {
+    throw new Error('Sidecar was replaced while confirming the loaded model');
+  }
   return res.result;
 }
 
@@ -763,15 +1797,175 @@ export async function unloadModel(model: any, lane?: LaneName) {
   await refreshModels();
 }
 
-export async function deleteModel(model: any, variantId?: string) {
-  const payload: any = { alias: model.alias };
-  if (variantId) payload.variantId = variantId;
-  await send('deleteModel', payload);
+export async function unloadModelIfIdle(model: any) {
+  await send('unload', { alias: model.alias, ifIdle: true });
   await refreshModels();
 }
 
-export async function removeFromCache(alias: string, variantId?: string) {
-  await deleteModel({ alias }, variantId);
+/**
+ * Pushes the eviction rules to the sidecar, which owns the sweep. The UI is the source of
+ * truth for the settings; the sidecar holds them only while it runs.
+ */
+export async function setEvictionConfig(
+  config: Partial<EvictionConfig>,
+  opts: { refresh?: boolean } = {},
+): Promise<EvictionConfig | null> {
+  const payload: any = {};
+  if (typeof config.idleUnloadEnabled === 'boolean') payload.idleUnloadEnabled = config.idleUnloadEnabled;
+  if (typeof config.idleTimeoutMs === 'number') payload.idleTimeoutMs = config.idleTimeoutMs;
+  if (typeof config.maxResidentEnabled === 'boolean') payload.maxResidentEnabled = config.maxResidentEnabled;
+  if (typeof config.maxResident === 'number') payload.maxResident = config.maxResident;
+  const res = await send('setEvictionConfig', payload);
+  // Applying the rules can unload models, so the pool view is stale the moment this returns.
+  // Callers that immediately follow up with another refreshing call can skip this one.
+  if (opts.refresh !== false) await pollPoolStatus();
+  return res.result?.config ?? null;
+}
+
+/** Replaces the whole priority map; anything omitted goes back to 'normal'. */
+export async function setModelPriorities(
+  priorities: ModelPriorityEntry[],
+  opts: { refresh?: boolean } = {},
+): Promise<void> {
+  await send('setModelPriorities', { priorities });
+  if (opts.refresh !== false) await pollPoolStatus();
+}
+
+/** Gateway-only exclusive lease for a measured benchmark. IPC chat/load still run. */
+export async function setBenchmarkExclusive(exclusive: boolean): Promise<{ exclusive: boolean; drained?: boolean }> {
+  const res = await send('setBenchmarkExclusive', { exclusive });
+  return res.result ?? { exclusive };
+}
+
+/**
+ * Releases a `benchmarkExclusive` lease left set by a *previous* page instance, if the sidecar
+ * still reports one. The sidecar process outlives a frontend reload/crash-recovery (it is a
+ * long-lived child process independent of the webview), but `benchmarkExclusive` is the only
+ * state that governs gateway admission, and a fresh page load's in-memory
+ * `benchmarkExclusiveGeneration`/retrier always start unset -- they have no persistence of their
+ * own and cannot know whether an earlier, now-gone page instance ever acquired it. Left
+ * unreconciled, every external OpenAI-shaped gateway client would keep getting 503s indefinitely
+ * with no local state left to drive a retry.
+ *
+ * Callers must call this once, early at startup, before this session has ever itself acquired
+ * exclusivity (a page that later legitimately acquires it does not need or want this called
+ * again). Best-effort: a failed probe or release is reported as `false` rather than thrown, so a
+ * transient IPC hiccup during startup does not block the rest of initialization -- worst case,
+ * the existing manual/automatic release-retry banner path still recovers once a benchmark run is
+ * next started or resumed (that acquire's own release path is unaffected by this reconciliation
+ * having skipped a turn).
+ *
+ * `isSafeToRelease`, if given, is re-checked immediately before the release is sent, not only at
+ * entry: `getStatus` is a separate round trip from `setBenchmarkExclusive`, and the UI is already
+ * interactive by the time this runs (readiness is published as part of the same init this
+ * follows), so a legitimate acquire from *this* page can land in between. The caller should pass
+ * a check that is only true while this page has never itself claimed exclusivity (e.g. its own
+ * claim generation still being at its initial, never-claimed value) so a concurrent legitimate
+ * acquire aborts the release instead of being torn down by it.
+ *
+ * `onReleaseDispatched`, if given, is invoked with the release call's promise the instant it is
+ * dispatched (before it is awaited here) -- not this function's own returned promise, which does
+ * not resolve until the release settles. The caller must register it with the same
+ * `pendingExclusiveRelease` tracker every other release path already goes through: like any other
+ * release, `send('setBenchmarkExclusive', ...)` can itself wait out a sidecar respawn/re-init
+ * (see `sdk.ts`'s `sendInternal`) and lose an ordering race against a newer run's own acquire
+ * dispatched moments later, clearing that new lease out from under it. Without this hook, this
+ * reconciliation release was invisible to `pendingExclusiveRelease.join()` (awaited by Start/
+ * Resume before every acquire) -- exactly the race that join exists to close for every other
+ * release path.
+ */
+export async function reconcileBenchmarkExclusive(
+  isSafeToRelease?: () => boolean,
+  onReleaseDispatched?: (releaseCall: Promise<{ exclusive: boolean; drained?: boolean }>) => void,
+): Promise<boolean> {
+  try {
+    const status = await send('getStatus');
+    if (!status.result?.benchmarkExclusive) return false;
+    if (isSafeToRelease && !isSafeToRelease()) return false;
+    const releaseCall = send('setBenchmarkExclusive', { exclusive: false }).then((res) => res.result ?? { exclusive: false });
+    onReleaseDispatched?.(releaseCall);
+    await releaseCall;
+    return true;
+  } catch (e) {
+    console.warn('[sdk] reconcileBenchmarkExclusive failed', e);
+    return false;
+  }
+}
+
+/**
+ * Reads the sidecar's own `lastAppliedMemorySettingsSeq` watermark (see its declaration in
+ * `foundry-sidecar-main.js`), so a freshly-loaded page can seed its local `pushMemorySeq`
+ * counter above it before making its own first `applyMemorySettings` call.
+ *
+ * The sidecar process outlives a frontend reload/crash-recovery, but a page's own monotonic
+ * `pushMemorySeq` counter has no persistence of its own and always restarts at 0. Left
+ * unreconciled, this fresh page's first several pushes would carry a `seq` at or below the
+ * sidecar's retained watermark and be silently accepted-but-skipped (`stale: true` in the reply,
+ * which nothing currently surfaces to the caller) -- a pin or eviction-settings change the user
+ * just made would appear to succeed while having no actual effect.
+ *
+ * Best-effort: returns `null` on a failed probe rather than throwing, so a transient IPC hiccup
+ * during startup does not block the rest of initialization -- worst case, this page's first
+ * `applyMemorySettings` call is itself silently skipped as stale, same as before this existed.
+ */
+export async function getLastAppliedMemorySettingsSeq(): Promise<number | null> {
+  try {
+    const status = await send('getStatus');
+    const seq = status.result?.lastAppliedMemorySettingsSeq;
+    return typeof seq === 'number' ? seq : null;
+  } catch (e) {
+    console.warn('[sdk] getLastAppliedMemorySettingsSeq failed', e);
+    return null;
+  }
+}
+
+/**
+ * Install eviction rules and model priorities together.
+ *
+ * One command because each of the two older commands sweeps immediately: sending them
+ * separately means the first sweep runs under half-updated settings and can unload a model the
+ * user just pinned.
+ */
+export async function applyMemorySettings(
+  priorities: ModelPriorityEntry[],
+  eviction?: Partial<EvictionConfig>,
+  seq?: number,
+): Promise<{ config: EvictionConfig | null; stale: boolean }> {
+  // `seq` (the caller's own monotonic push counter) lets the sidecar refuse to install this
+  // call's full-replace payload if a call with a higher `seq` already landed first -- otherwise
+  // a call delayed behind this transport's respawn/re-init wait could apply after, and silently
+  // overwrite, one issued later. See `lastAppliedMemorySettingsSeq` in foundry-sidecar-main.js.
+  const res = await send('applyMemorySettings', {
+    priorities,
+    ...(eviction ? { eviction } : {}),
+    ...(typeof seq === 'number' ? { seq } : {}),
+  });
+  await pollPoolStatus();
+  // `stale` surfaces the sidecar's own ordering-guard verdict: `true` means this call's payload
+  // was *not* installed (a call with an equal or higher seq already landed first), so the config
+  // returned is whatever was already in effect, not a reflection of what this call asked for.
+  // Callers that skip seeding `seq` from `getLastAppliedMemorySettingsSeq()` at startup (or hit
+  // the rare cross-window race that seeding does not cover) get a way to notice a silently
+  // skipped pin/eviction change instead of assuming it took effect just because `ok` was true.
+  return { config: res.result?.config ?? null, stale: res.result?.stale === true };
+}
+
+export async function deleteModel(
+  model: any,
+  variantId?: string,
+): Promise<CatalogMutationResult> {
+  const payload: any = { alias: model.alias };
+  if (variantId) payload.variantId = variantId;
+  const res = await send('deleteModel', payload);
+  const result = res.result as CatalogMutationResult;
+  return refreshModelsAfterDeletion(result);
+}
+
+export async function removeFromCache(
+  alias: string,
+  variantId?: string,
+): Promise<CatalogMutationResult> {
+  return deleteModel({ alias }, variantId);
 }
 
 export async function getAccessLog(): Promise<any[]> {
@@ -779,14 +1973,84 @@ export async function getAccessLog(): Promise<any[]> {
   return res?.result ?? [];
 }
 
+export async function getHealthRing(): Promise<any[]> {
+  const res = await send('getHealthRing');
+  return res?.result ?? [];
+}
+
+export async function getCacheInventory(): Promise<CacheInventory> {
+  const res = await send('getCacheInventory');
+  if (!res?.result) throw new Error('getCacheInventory returned no result');
+  return res.result as CacheInventory;
+}
+
+/** State of WSL on this machine, for Settings → Network → WSL clients. */
+export interface WslStatusInfo {
+  platform: string;
+  wslPresent: boolean;
+  wslVersion: string | null;
+  windowsBuild: number | null;
+  /** WSL >= 2.0 on Windows 11 22H2+, i.e. mirrored networking is available. */
+  mirroredSupported: boolean;
+  networkingMode: string | null;
+  mirrored: boolean;
+  configPath: string | null;
+  configExists: boolean;
+}
+
+export interface WslEnableMirroredResult {
+  changed: boolean;
+  configPath: string;
+  backupPath: string | null;
+  restartRequired: boolean;
+}
+
+export async function getWslStatus(): Promise<WslStatusInfo | null> {
+  const res = await send('wslStatus');
+  return res?.result ?? null;
+}
+
+/** Writes networkingMode=mirrored into %UserProfile%\.wslconfig (backing up the original first). */
+export async function enableWslMirroredNetworking(): Promise<WslEnableMirroredResult> {
+  const res = await send('wslEnableMirrored');
+  if (!res?.result) throw new Error('wslEnableMirrored returned no result');
+  return res.result as WslEnableMirroredResult;
+}
+
+/** Runs `wsl --shutdown` — terminates all running WSL distros so the config change applies. */
+export async function shutdownWsl(): Promise<void> {
+  await send('wslShutdown');
+}
+
 export async function pollPoolStatus(): Promise<void> {
   const ps = await send('poolStatus');
   if (ps?.result) {
-    updateState({
-      pool: ps.result.models ?? [],
+    const pool = ps.result.models ?? [];
+    sdkState.update((state) => ({
+      ...state,
+      ...projectPool(retainKnownResidency(pool, state.pool), state.models),
       poolStats: mapPoolStats(ps.result),
-    });
+    }));
   }
+}
+
+// Keep evicted entries in the monitor, but not in loaded flags or lane selection.
+// Preserve getStatus's legacy lane positions (pool[0]/pool[1]) rather than reassigning them.
+// Unknown telemetry retains the sidecar's last-known residency until confirmed otherwise.
+function projectPool(pool: PoolEntry[], models: ModelInfo[]) {
+  const resident = pool.filter(isPoolEntryResident);
+  const loadedAliases = new Set(resident.map((entry) => entry.alias).filter(Boolean));
+  const projected = models.map((model) => ({
+    ...model,
+    isLoaded: loadedAliases.has(model.alias),
+  }));
+  return {
+    pool,
+    models: projected,
+    loadedModels: projected.filter((model) => model.isLoaded),
+    chatLaneModel: pool[0] && isPoolEntryResident(pool[0]) ? pool[0].alias : undefined,
+    audioLaneModel: pool[1] && isPoolEntryResident(pool[1]) ? pool[1].alias : undefined,
+  };
 }
 
 export async function getLocalEndpoint(): Promise<string | undefined> {
@@ -794,12 +2058,91 @@ export async function getLocalEndpoint(): Promise<string | undefined> {
   return res.endpoint;
 }
 
-export async function startService(
+/**
+ * Serializes every service lifecycle transition.
+ *
+ * The sidecar's `startService` is a *destructive restart*: it tears down the gateway, cutting
+ * proxied requests, and replaces the listener. Loaded models stay resident. Overlapping a start
+ * with a stop, a settings re-apply or a
+ * second start strands in-flight work against an endpoint that is being replaced, so all of
+ * them queue here rather than each caller guarding itself.
+ */
+let serviceTransition: Promise<unknown> = Promise.resolve();
+let serviceTransitionDepth = 0;
+
+function queueServiceTransition<T>(fn: () => Promise<T>): Promise<T> {
+  serviceTransitionDepth += 1;
+  updateRuntime({ transitioning: true });
+  const next = serviceTransition.then(fn, fn);
+  // Keep the chain alive even when a transition fails; a rejected tail would reject every
+  // subsequent transition. Count queued work, not only the currently running callback, so
+  // the UI latch cannot drop while another start/stop is still waiting.
+  const settled = next.finally(() => {
+    serviceTransitionDepth -= 1;
+    updateRuntime({ transitioning: serviceTransitionDepth > 0 });
+  });
+  serviceTransition = settled.catch(() => {});
+  return next;
+}
+
+/** True while a start/stop/restart is queued or running, for disabling UI that would overlap it. */
+export function isServiceTransitioning(): boolean {
+  return serviceTransitionDepth > 0;
+}
+/** Invalidates starts that were queued before the most recent Stop request. */
+let serviceStopFence = 0;
+
+/**
+ * Set when a start's outcome could not be established — the acknowledgement was lost, so the
+ * service may well be running.
+ *
+ * Held here rather than in the UI because the check has to happen *inside* the transition lock.
+ * A flag consulted before queuing lets two convenience starts both pass while neither has run,
+ * so the first one's uncertainty cannot stop the second. Starting is a destructive restart: it
+ * tears down the gateway and its proxied requests, so repeating one blindly is the specific harm.
+ *
+ * Deliberately **not** clearable from outside. An explicit start is authorized by passing no
+ * `convenience` flag, which bypasses the guard for that one attempt; clearing the shared latch
+ * instead would also release every convenience start already queued behind the lock, so one
+ * authorized retry would license several destructive restarts. The latch is updated only by an
+ * attempt's own outcome.
+ */
+let serviceStartUncertain = false;
+
+/** Whether convenience starts are currently standing down after an unestablished outcome. */
+export function isServiceStartUncertain(): boolean {
+  return serviceStartUncertain;
+}
+
+/**
+ * Start the service *without* taking the transition lock. Only reachable through the
+ * `startNow` handle `withServiceTransition` passes to its callback, so the serialization
+ * invariant cannot be bypassed from outside this module.
+ */
+async function startServiceLocked(
   port = 5272,
   alias?: string,
   preferredEp?: string,
-  bindAddress?: string
+  bindAddress?: string,
+  opts?: { convenience?: boolean; deferCatalogRead?: boolean },
+  fence?: number,
 ): Promise<string> {
+  if (fence !== undefined && fence !== serviceStopFence) {
+    throw new SidecarOperationError(
+      'startService',
+      'cancelled',
+      'This start was queued before a Stop request and was cancelled before dispatch.',
+    );
+  }
+  // Evaluated here, at execution time under the lock, so a start queued before an earlier one
+  // reported uncertainty still sees that uncertainty.
+  if (opts?.convenience && serviceStartUncertain) {
+    throw new SidecarOperationError(
+      'startService',
+      'unknown',
+      'A previous start did not report its outcome, so the service may already be running. Start it explicitly from Settings to try again.',
+    );
+  }
   const payload: any = { port };
   if (alias) {
     payload.alias = alias;
@@ -810,29 +2153,444 @@ export async function startService(
   if (bindAddress) {
     payload.bindAddress = bindAddress;
   }
-  const res = await send('startService', payload);
+  if (opts?.deferCatalogRead) {
+    payload.deferCatalogRead = true;
+  }
+  let res: any;
+  let generation: number | null = null;
+  updateRuntime({ service: 'starting' });
+  try {
+    res = await sendInternal(
+      'startService',
+      payload,
+      undefined,
+      undefined,
+      (dispatchedGeneration) => {
+        generation = dispatchedGeneration;
+      },
+    );
+  } catch (e) {
+    currentEndpoint = undefined;
+    updateState({ endpoint: undefined, serviceRunning: false });
+    // Recorded before the lock is released, so the next transition in the queue sees it.
+    if (isUncertainOutcome(e)) {
+      serviceStartUncertain = true;
+      updateRuntime({ service: 'unknown' });
+    } else {
+      updateRuntime({ service: 'failed' });
+    }
+    throw e;
+  }
+  if (
+    generation === null ||
+    generation !== sidecarGeneration ||
+    !sidecarProcess ||
+    !sidecarReady
+  ) {
+    currentEndpoint = undefined;
+    updateState({ endpoint: undefined, serviceRunning: false });
+    throw new SidecarOperationError(
+      'startService',
+      'failed',
+      'The sidecar exited after starting the service, so its endpoint is no longer available.',
+    );
+  }
+  // A confirmed start settles the question the flag existed to represent.
+  serviceStartUncertain = false;
   currentEndpoint = res.endpoint;
   updateState({ endpoint: currentEndpoint, serviceRunning: true });
+  updateRuntime({ service: 'running' });
   return currentEndpoint!;
 }
 
+export async function startService(
+  port = 5272,
+  alias?: string,
+  preferredEp?: string,
+  bindAddress?: string,
+  opts?: { convenience?: boolean; deferCatalogRead?: boolean }
+): Promise<string> {
+  const fence = serviceStopFence;
+  return withServiceTransition(() =>
+    startServiceLocked(port, alias, preferredEp, bindAddress, opts, fence),
+  );
+}
+
+/**
+ * Ensure the HTTP service is running without restarting a healthy endpoint.
+ *
+ * The status probe and possible start share the transition lock, so a concurrent Stop or
+ * explicit restart cannot make the decision against a stale endpoint.
+ */
+export async function ensureServiceRunning(
+  port = 5272,
+  alias?: string,
+  preferredEp?: string,
+  bindAddress?: string,
+  opts?: { convenience?: boolean; expectedGeneration?: number; deferCatalogRead?: boolean },
+): Promise<{ endpoint: string; started: boolean }> {
+  const authorizationFence = serviceStopFence;
+  return withServiceTransition(async ({ startNow }) => {
+    const assertAuthorized = () => {
+      if (authorizationFence !== serviceStopFence) {
+        throw new SidecarOperationError(
+          'startService',
+          'cancelled',
+          'This service ensure was queued before a Stop request and was cancelled.',
+        );
+      }
+      if (
+        opts?.expectedGeneration !== undefined &&
+        (
+          opts.expectedGeneration !== sidecarGeneration ||
+          !sidecarProcess ||
+          !sidecarReady
+        )
+      ) {
+        throw new SidecarOperationError(
+          'startService',
+          'cancelled',
+          'Runtime changed before the service could start.',
+        );
+      }
+    };
+    assertAuthorized();
+    if (currentEndpoint && currentRuntimeServiceState === 'running') {
+      return { endpoint: currentEndpoint, started: false };
+    }
+
+    try {
+      const status = await send('getStatus');
+      const endpoint = status.result?.endpoint;
+      if (status.result?.serviceRunning && endpoint) {
+        assertAuthorized();
+        currentEndpoint = endpoint;
+        updateState({ endpoint, serviceRunning: true });
+        updateRuntime({ service: 'running' });
+        return { endpoint, started: false };
+      }
+    } catch (e) {
+      // A failed probe is not proof that the service is stopped; startService below preserves
+      // the existing uncertainty rules if it must attempt a destructive transition.
+      console.warn('[sdk] service status probe failed during ensure', e);
+    }
+
+    assertAuthorized();
+    return {
+      endpoint: await startNow(port, alias, preferredEp, bindAddress, opts),
+      started: true,
+    };
+  });
+}
+
 export async function stopService(): Promise<void> {
-  await send('stopService');
-  currentEndpoint = undefined;
-  updateState({ endpoint: undefined, serviceRunning: false });
+  serviceStopFence += 1;
+  return withServiceTransition(async () => {
+    updateRuntime({ service: 'stopping' });
+    try {
+      await send('stopService');
+    } catch (e) {
+      currentEndpoint = undefined;
+      updateState({ endpoint: undefined, serviceRunning: false });
+      updateRuntime({ service: isUncertainOutcome(e) ? 'unknown' : 'failed' });
+      throw e;
+    }
+    // The latch is deliberately **not** cleared here. A Stop acknowledgement is not a quiescence
+    // guarantee: the sidecar handles commands concurrently, so a start whose acknowledgement was
+    // lost may still be inside `startWebService()` and can bring the service up again after Stop
+    // has replied. A rejected Stop now preserves an unknown/failed runtime state above; only a
+    // start that reports its own outcome can retire transport-level uncertainty.
+    currentEndpoint = undefined;
+    updateState({ endpoint: undefined, serviceRunning: false });
+    updateRuntime({ service: 'stopped' });
+  });
+}
+
+export interface RuntimeShutdownCleanup {
+  endpointWithdrawn: boolean;
+  serviceStopped: boolean;
+  drained: boolean;
+  activeOperations: Array<{ id: number | string; command: string }>;
+  modelsUnloaded: string[];
+  unloadFailures: string[];
+  nativeServiceStopped: boolean;
+  cleanup: 'confirmed' | 'timed-out' | 'failed';
+}
+
+export interface RuntimeQuitResult {
+  cleanup: RuntimeShutdownCleanup | null;
+  termination: 'confirmed' | 'escalated-confirmed' | 'unconfirmed';
+}
+
+let runtimeQuitPromise: Promise<RuntimeQuitResult> | null = null;
+export const NATIVE_RUNTIME_MAX_FRAME_BYTES = 80 * 1024 * 1024;
+export const MAX_QUEUED_WRITES = 256;
+export const MAX_QUEUED_WRITE_BYTES = 160 * 1024 * 1024;
+
+function normalizeRuntimeTimeout(value: number | undefined, fallback: number, minimum: number): number {
+  return Number.isFinite(value) && value! >= 0
+    ? Math.max(minimum, Math.floor(value!))
+    : fallback;
+}
+
+/** Stop HTTP traffic and unload models after already-admitted work drains. */
+export async function stopAndUnload(options: {
+  drainTimeoutMs?: number;
+} = {}): Promise<RuntimeShutdownCleanup> {
+  serviceStopFence += 1;
+  return withServiceTransition(async () => {
+    updateRuntime({ service: 'draining' });
+    const drainTimeoutMs = normalizeRuntimeTimeout(options.drainTimeoutMs, 5_000, 0);
+    let result: RuntimeShutdownCleanup;
+    try {
+      const response = await send('stopAndUnload', { drainTimeoutMs });
+      result = response.result as RuntimeShutdownCleanup;
+    } catch (e) {
+      currentEndpoint = undefined;
+      updateState({ endpoint: undefined, serviceRunning: false });
+      updateRuntime({
+        service: isUncertainOutcome(e) ? 'unknown' : 'failed',
+        models: 'unknown',
+      });
+      throw e;
+    }
+
+    const unloaded = new Set(result.modelsUnloaded);
+    currentEndpoint = undefined;
+    currentRuntimeServiceState = result.serviceStopped ? 'stopped' : 'failed';
+    sdkState.update((state) => ({
+      ...state,
+      endpoint: undefined,
+      serviceRunning: false,
+      pool: state.pool.filter((entry) => !unloaded.has(entry.alias)),
+      loadedModels: state.loadedModels.filter((model) => !unloaded.has(model.alias)),
+      models: state.models.map((model) =>
+        unloaded.has(model.alias) ? { ...model, isLoaded: false } : model
+      ),
+      runtime: {
+        ...state.runtime,
+        service: result.serviceStopped ? 'stopped' : 'failed',
+        models: result.drained && result.unloadFailures.length === 0 ? 'empty' : 'unknown',
+      },
+    }));
+    return result;
+  });
+}
+
+/**
+ * Exit the desktop process. A persistent native tray means destroying the last
+ * window no longer ends the app, so callers that mean "quit" must go through here.
+ */
+export async function quitDesktopApp(): Promise<void> {
+  await invoke('quit_app');
+}
+
+/** Restart after an updater install. Native restart skips the quit-flush prevent (RESTART_EXIT_CODE). */
+export async function relaunchApp(): Promise<void> {
+  await invoke('relaunch_app');
+}
+
+/** Native `ExitRequested` asks the frontend to flush, then waits for `ack_quit_flush`. */
+export const QUIT_FLUSH_EVENT = 'flint-quit-flush';
+
+/**
+ * Listen for a native quit-flush request. Always acks, even if `onFlush` throws,
+ * so a failed write cannot hang the process past the native timeout.
+ */
+export async function subscribeQuitFlush(
+  onFlush: () => void | Promise<void>,
+): Promise<UnlistenFn> {
+  return listen(QUIT_FLUSH_EVENT, async () => {
+    try {
+      await onFlush();
+    } finally {
+      await invoke('ack_quit_flush');
+    }
+  });
+}
+
+/**
+ * Shut down the runtime process, escalating to the owned child handle only when graceful cleanup
+ * does not produce a close event. Process termination is reported only from that close event.
+ */
+export function quitRuntime(options: {
+  drainTimeoutMs?: number;
+  gracefulTimeoutMs?: number;
+  killTimeoutMs?: number;
+} = {}): Promise<RuntimeQuitResult> {
+  if (runtimeQuitPromise) return runtimeQuitPromise;
+
+  runtimeQuitRequested = true;
+  serviceStopFence += 1;
+  cancelUndispatchedForRuntimeQuit();
+
+  const quitting = (async (): Promise<RuntimeQuitResult> => {
+    const gracefulTimeoutMs = normalizeRuntimeTimeout(options.gracefulTimeoutMs, 6_000, 1);
+    if (!sidecarProcess && startPromise) {
+      await Promise.race([
+        startPromise.catch(() => {}),
+        new Promise((resolve) => setTimeout(resolve, gracefulTimeoutMs)),
+      ]);
+    }
+
+    const processToStop = sidecarProcess;
+    const generation = sidecarGeneration;
+    if (!processToStop) {
+      if (startPromise) {
+        updateRuntime({ process: 'unknown', service: 'unknown', models: 'unknown' });
+        updateState({ ready: false, error: 'Runtime termination could not be confirmed.' });
+        return { cleanup: null, termination: 'unconfirmed' };
+      }
+      updateRuntime({ process: 'stopped', service: 'stopped', models: 'empty' });
+      updateState({
+        ready: false,
+        error: null,
+        endpoint: undefined,
+        serviceRunning: false,
+        pool: [],
+        poolStats: null,
+        loadedModels: [],
+      });
+      return { cleanup: null, termination: 'confirmed' };
+    }
+
+    const drainTimeoutMs = normalizeRuntimeTimeout(options.drainTimeoutMs, 4_000, 0);
+    const killTimeoutMs = normalizeRuntimeTimeout(options.killTimeoutMs, 2_000, 1);
+    expectedShutdownGeneration = generation;
+    updateRuntime({ process: 'stopping', service: 'draining' });
+
+    if (!sidecarReady) {
+      const forcedClose = observeSidecarClose(generation, killTimeoutMs);
+      try {
+        const killing = processToStop.kill?.();
+        Promise.resolve(killing).catch((e) => {
+          console.warn('[sdk] Failed to terminate sidecar while it was starting', e);
+        });
+      } catch (e) {
+        console.warn('[sdk] Failed to terminate sidecar while it was starting', e);
+      }
+      if (await forcedClose) {
+        return { cleanup: null, termination: 'escalated-confirmed' };
+      }
+      updateRuntime({ process: 'unknown', service: 'unknown', models: 'unknown' });
+      updateState({ ready: false, error: 'Runtime termination could not be confirmed.' });
+      return { cleanup: null, termination: 'unconfirmed' };
+    }
+
+    const gracefulClose = observeSidecarClose(generation, gracefulTimeoutMs);
+    const command = sendInternal('shutdownRuntime', { drainTimeoutMs }).then(
+      (response) => ({ kind: 'reply' as const, cleanup: response.result as RuntimeShutdownCleanup }),
+      (error) => ({ kind: 'error' as const, error }),
+    );
+    const first = await Promise.race([
+      gracefulClose.then((closed) => ({ kind: 'close' as const, closed })),
+      command,
+    ]);
+
+    const cleanup: RuntimeShutdownCleanup | null =
+      first.kind === 'reply' ? first.cleanup : null;
+    let closed = first.kind === 'close' ? first.closed : await gracefulClose;
+    if (closed) return { cleanup, termination: 'confirmed' };
+
+    const forcedClose = observeSidecarClose(generation, killTimeoutMs);
+    try {
+      const killing = processToStop.kill?.();
+      Promise.resolve(killing).catch((e) => {
+        console.warn('[sdk] Failed to terminate sidecar after graceful shutdown timed out', e);
+      });
+    } catch (e) {
+      console.warn('[sdk] Failed to terminate sidecar after graceful shutdown timed out', e);
+    }
+    closed = await forcedClose;
+    if (closed) return { cleanup, termination: 'escalated-confirmed' };
+
+    updateRuntime({ process: 'unknown', service: 'unknown', models: 'unknown' });
+    updateState({
+      ready: false,
+      error: 'Runtime termination could not be confirmed.',
+      endpoint: undefined,
+      serviceRunning: false,
+    });
+    return { cleanup, termination: 'unconfirmed' };
+  })();
+  const resultPromise = quitting.finally(() => {
+    runtimeQuitPromise = null;
+  });
+  runtimeQuitPromise = resultPromise;
+  return resultPromise;
+}
+
+/** The lock-free lifecycle operations handed to a `withServiceTransition` callback. */
+export interface ServiceTransitionHandle {
+  startNow(
+    port?: number,
+    alias?: string,
+    preferredEp?: string,
+    bindAddress?: string,
+    opts?: { convenience?: boolean },
+  ): Promise<string>;
+}
+
+/**
+ * Run `fn` while holding the service-transition lock, so work that depends on the service
+ * staying up (e.g. loading an STT model before transcribing) cannot be torn down mid-flight by
+ * a concurrent restart.
+ *
+ * `fn` must never call the queued `startService` / `stopService` — that would enqueue behind
+ * the lock it already holds and deadlock. Use the passed handle instead.
+ */
+export async function withServiceTransition<T>(
+  fn: (handle: ServiceTransitionHandle) => Promise<T>
+): Promise<T> {
+  return queueServiceTransition(async () => {
+    const transitionFence = serviceStopFence;
+    // The handle is only valid for the duration of the callback. Retaining it and calling
+    // startNow() later would run a destructive restart with no lock held.
+    let handleActive = true;
+    try {
+      return await fn({
+        startNow(port, alias, preferredEp, bindAddress, opts) {
+          if (!handleActive) {
+            return Promise.reject(
+              new Error('Service transition handle used after its transition completed'),
+            );
+          }
+          return startServiceLocked(port, alias, preferredEp, bindAddress, opts, transitionFence);
+        },
+      });
+    } finally {
+      handleActive = false;
+    }
+  });
+}
+
+export interface ChatCompletionOptions {
+  maxTokens?: number;
+  temperature?: number;
+  preferredEp?: string;
+  topP?: number;
+  topK?: number;
+  frequencyPenalty?: number;
+  presencePenalty?: number;
+  randomSeed?: number;
 }
 
 export async function chatCompletion(
   model: string,
   messages: Array<{ role: string; content: any }>,
-  options?: { maxTokens?: number; temperature?: number; preferredEp?: string }
+  options?: ChatCompletionOptions
 ): Promise<any> {
   const res = await send('chatCompletion', {
     model,
     messages,
     maxTokens: options?.maxTokens,
     temperature: options?.temperature,
-    preferredEp: options?.preferredEp
+    preferredEp: options?.preferredEp,
+    topP: options?.topP,
+    topK: options?.topK,
+    frequencyPenalty: options?.frequencyPenalty,
+    presencePenalty: options?.presencePenalty,
+    randomSeed: options?.randomSeed
   });
   return res.result;
 }
@@ -841,7 +2599,7 @@ export async function chatCompletionStream(
   model: string,
   messages: Array<{ role: string; content: any }>,
   onDelta: (delta: string) => void,
-  options?: { maxTokens?: number; temperature?: number; preferredEp?: string },
+  options?: ChatCompletionOptions,
   onAssignedId?: (id: number) => void
 ): Promise<any> {
   const res = await sendInternal(
@@ -852,6 +2610,11 @@ export async function chatCompletionStream(
       maxTokens: options?.maxTokens,
       temperature: options?.temperature,
       preferredEp: options?.preferredEp,
+      topP: options?.topP,
+      topK: options?.topK,
+      frequencyPenalty: options?.frequencyPenalty,
+      presencePenalty: options?.presencePenalty,
+      randomSeed: options?.randomSeed,
       stream: true
     },
     onDelta,
@@ -898,6 +2661,173 @@ export async function transcribeAudio(
   return res.result;
 }
 
+export async function embedTexts(model: string, inputs: string[]): Promise<any> {
+  const res = await send('embedTexts', { model, inputs });
+  return res.result;
+}
+
+/** The four turn wrappers Foundry substitutes `{Content}` into when building a prompt. */
+export interface PromptTemplate {
+  system: string;
+  user: string;
+  assistant: string;
+  prompt: string;
+}
+
+export interface TemplatePreset { label: string; template: PromptTemplate }
+
+/**
+ * Re-exported from the sidecar's Node-free template module so the editor validates with
+ * exactly the rules the sidecar enforces — a second copy of these rules would drift.
+ */
+export {
+  validatePromptTemplate,
+  selectPromptTemplate,
+  TEMPLATE_ROLES,
+  TEMPLATE_PRESETS,
+} from '../../sidecar/prompt-template.js';
+
+export interface InspectFolderResult {
+  ok: boolean;
+  reasons: string[];
+  warnings: string[];
+  detected: {
+    architecture: string | null;
+    contextLength: number | null;
+    hasInferenceModel: boolean;
+    templateSource: string;
+    templateConfident: boolean;
+    promptTemplate: PromptTemplate | null;
+    task: 'embeddings' | null;
+  };
+  modelDir: string;
+  nested: boolean;
+  sizeBytes: number;
+  suggestedName: string;
+  presets: Record<string, TemplatePreset>;
+}
+
+export async function inspectModelFolder(folderPath: string): Promise<InspectFolderResult> {
+  const res = await send('inspectModelFolder', { folderPath });
+  return res.result as InspectFolderResult;
+}
+
+export interface CatalogMutationResult {
+  catalogRefreshRequiresRestart?: boolean;
+  [key: string]: unknown;
+}
+
+async function refreshModelsAfterMutation(result: CatalogMutationResult | undefined): Promise<void> {
+  // A frozen or uncertain immutable snapshot cannot reliably publish this mutation.
+  // Preserve the durable mutation result and let the caller surface restart guidance.
+  if (result?.catalogRefreshRequiresRestart) {
+    console.warn('[sdk] Catalog refresh skipped after mutation pending restart');
+    return;
+  }
+  await refreshModels();
+}
+
+async function refreshModelsAfterDeletion(
+  result: CatalogMutationResult,
+): Promise<CatalogMutationResult> {
+  // Deletion changes live cache state even when an immutable local catalog row
+  // cannot disappear until restart. Refresh those live flags, but never turn a
+  // durable deletion into a reported failure solely because the refresh failed.
+  try {
+    await refreshModels();
+    return result;
+  } catch (error) {
+    console.warn('[sdk] Catalog refresh failed after model deletion', error);
+    reconcileDeletedModelState(result);
+    return { ...result, catalogRefreshRequiresRestart: true };
+  }
+}
+
+function reconcileDeletedModelState(result: CatalogMutationResult): void {
+  const alias = typeof result?.alias === 'string' ? result.alias : null;
+  if (!alias) return;
+  const deletedVariantId =
+    typeof result.variantId === 'string' && result.variantId ? result.variantId : null;
+
+  sdkState.update((state) => {
+    const pool = state.pool.filter((entry) =>
+      entry.alias !== alias || (deletedVariantId !== null && entry.variantId !== deletedVariantId)
+    );
+    const models = state.models.map((model) => {
+      if (model.alias !== alias) return model;
+      const variants = Array.isArray((model as any).variants)
+        ? (model as any).variants.map((variant: any) => (
+            deletedVariantId === null || variant.id === deletedVariantId
+              ? { ...variant, cached: false }
+              : variant
+          ))
+        : (model as any).variants;
+      const isCached = deletedVariantId === null
+        ? false
+        : Array.isArray(variants) && variants.some((variant: any) => variant.cached === true);
+      return {
+        ...model,
+        variants,
+        isCached,
+      };
+    });
+    const projected = projectPool(pool, models);
+    return {
+      ...state,
+      ...projected,
+      cachedModels: projected.models.filter((model) => model.isCached),
+    };
+  });
+}
+
+export async function importModelFolder(options: {
+  folderPath: string;
+  name: string;
+  publisher?: string;
+  version?: number;
+  promptTemplate?: PromptTemplate;
+}): Promise<CatalogMutationResult> {
+  const res = await send('importModelFolder', options);
+  const result = res.result as CatalogMutationResult;
+  await refreshModelsAfterMutation(result);
+  return result;
+}
+
+export async function linkModelFolder(options: {
+  folderPath: string;
+  name: string;
+  publisher?: string;
+}): Promise<CatalogMutationResult> {
+  const res = await send('linkModelFolder', options);
+  const result = res.result as CatalogMutationResult;
+  await refreshModelsAfterMutation(result);
+  return result;
+}
+
+export interface ModelTemplateResult {
+  name: string;
+  modelName: string | null;
+  promptTemplate: PromptTemplate | null;
+  templateSource: string | null;
+  presets: Record<string, TemplatePreset>;
+  path: string;
+}
+
+export async function getModelTemplate(name: string): Promise<ModelTemplateResult> {
+  const res = await send('getModelTemplate', { name });
+  return res.result as ModelTemplateResult;
+}
+
+export async function setModelTemplate(
+  name: string,
+  promptTemplate: PromptTemplate,
+): Promise<CatalogMutationResult> {
+  const res = await send('setModelTemplate', { name, promptTemplate });
+  const result = res.result as CatalogMutationResult;
+  await refreshModelsAfterMutation(result);
+  return result;
+}
+
 export function appendAppLog(message: string, level: LogEntry['level'] = 'info') {
   sdkState.update(s => ({ ...s, logs: [...s.logs.slice(-199), { ts: Date.now(), level, message, source: 'app' as const }] }));
 }
@@ -907,30 +2837,166 @@ export function getManager(): any {
 }
 
 export function resetSDK() {
+  drainPending('connection-lost', 'The runtime was reset before answering.');
+  sidecarStartEpoch += 1;
+  sidecarGeneration = 0;
   if (sidecarProcess) {
-    // best effort
-    sidecarProcess.kill();
+    try { sidecarProcess.kill(); } catch {}
   }
   sidecarProcess = null;
   sidecarReady = false;
   managerInstance = null;
+  managerReady = false;
+  lastInitPayload = null; // a deliberate reset must not auto-re-init on the next send
+  lastInitRefreshCatalog = true;
   currentEndpoint = undefined;
+  runtimeQuitRequested = false;
+  runtimeQuitPromise = null;
+  expectedShutdownGeneration = null;
+  closeObservers.clear();
+  acceleratorSetup?.listeners.clear();
+  acceleratorSetup = null;
   sdkState.set(initialState);
 }
 
 /**
  * Discover available execution providers (accelerators like CPU, CUDA, QNN for NPU, etc.)
  */
-export async function getEps(): Promise<EpInfo[]> {
-  const res = await send('getEps');
+async function discoverExecutionProviders(
+  expectedGeneration?: number,
+  replacementMessage = 'Sidecar was replaced while discovering execution providers',
+): Promise<EpInfo[]> {
+  let dispatchedGeneration: number | null = null;
+  const res = await sendInternal(
+    'getEps',
+    {},
+    undefined,
+    undefined,
+    (generation) => {
+      dispatchedGeneration = generation;
+    },
+  );
   const eps = res.result || [];
-  updateState({ eps, acceleratorsReady: eps.some((e: EpInfo) => e.isRegistered) });
+  const ownerGeneration = expectedGeneration ?? dispatchedGeneration;
+  if (
+    ownerGeneration === null ||
+    ownerGeneration !== sidecarGeneration ||
+    !sidecarProcess ||
+    !sidecarReady
+  ) {
+    throw new Error(replacementMessage);
+  }
+  updateState({ eps, acceleratorsReady: hasRegisteredAccelerator(eps) });
   return eps;
 }
 
-export async function ensureAccelerators(): Promise<void> {
-  await send('ensureAccelerators');
-  await getEps();
+export async function getEps(): Promise<EpInfo[]> {
+  return discoverExecutionProviders();
+}
+
+async function performAcceleratorSetup(
+  onProgress?: (epName: string, percent: number) => void,
+  onStall?: () => void,
+  options?: { rebuildBroken?: boolean },
+): Promise<AcceleratorReadiness> {
+  let generation: number | null = null;
+  const res = await sendInternal(
+    'ensureAccelerators',
+    options?.rebuildBroken ? { rebuildBroken: true } : {},
+    undefined,
+    (id: number) => {
+      registerProgressHandler(
+        id,
+        onProgress
+          ? (percent, detail) => {
+              onProgress(String(detail?.ep || 'accelerator'), percent);
+            }
+          : undefined,
+        onStall,
+      );
+    },
+    (dispatchedGeneration) => {
+      generation = dispatchedGeneration;
+    },
+  );
+  if (!sidecarProcess || !sidecarReady) {
+    throw new Error('Sidecar was lost after accelerator registration');
+  }
+  if (generation === null) {
+    throw new Error('Sidecar was replaced while confirming accelerator readiness');
+  }
+  const providers = await discoverExecutionProviders(
+    generation,
+    'Sidecar was replaced while confirming accelerator readiness',
+  );
+  return {
+    generation,
+    registration: res.result ?? null,
+    providers,
+  };
+}
+
+export function ensureAccelerators(
+  onProgress?: (epName: string, percent: number) => void,
+  onStall?: () => void,
+  options?: { forceRerun?: boolean; rebuildBroken?: boolean },
+): Promise<AcceleratorReadiness> {
+  const listener = { onProgress, onStall };
+  const currentGeneration = sidecarGeneration;
+  if (
+    acceleratorSetup &&
+    acceleratorSetup.generation === currentGeneration &&
+    (options?.forceRerun || options?.rebuildBroken)
+  ) {
+    // The rerun waits for the active cycle, whose provider install is what this caller is
+    // waiting on in the meantime, so it observes that cycle's progress and stall notice too.
+    const active = acceleratorSetup;
+    active.listeners.add(listener);
+    return active.promise
+      .catch(() => undefined)
+      .then(() => {
+        active.listeners.delete(listener);
+        return ensureAccelerators(onProgress, onStall, options);
+      });
+  }
+  if (acceleratorSetup && acceleratorSetup.generation === currentGeneration) {
+    acceleratorSetup.listeners.add(listener);
+    return acceleratorSetup.promise.finally(() => {
+      acceleratorSetup?.listeners.delete(listener);
+    });
+  }
+
+  const listeners = new Set<AcceleratorSetupListener>([listener]);
+  const broadcastProgress = (epName: string, percent: number) => {
+    for (const current of listeners) {
+      try { current.onProgress?.(epName, percent); } catch {}
+    }
+  };
+  // A caller without its own stall handler still gets the durable default notice, once.
+  const broadcastStall = () => {
+    let reportDefault = false;
+    for (const current of listeners) {
+      if (!current.onStall) {
+        reportDefault = true;
+        continue;
+      }
+      try { current.onStall(); } catch {}
+    }
+    if (reportDefault) reportRuntimeProgressStall('ensureAccelerators');
+  };
+  let tracked: Promise<AcceleratorReadiness>;
+  tracked = performAcceleratorSetup(broadcastProgress, broadcastStall, options).finally(() => {
+    if (acceleratorSetup?.promise === tracked) acceleratorSetup = null;
+    listeners.clear();
+  });
+  acceleratorSetup = { promise: tracked, listeners, generation: currentGeneration };
+  return tracked;
+}
+
+export function isAcceleratorReadinessCurrent(
+  readiness: AcceleratorReadiness,
+): boolean {
+  return readiness.generation === sidecarGeneration && !!sidecarProcess && sidecarReady;
 }
 
 /**
@@ -942,32 +3008,26 @@ export function getModelContextInfo(alias: string): ModelContextInfo | null {
   return null; // caller should use state.models
 }
 
+/** Returns catalog models identified as vision-capable by the sidecar metadata filter. */
+export async function getVisionModels(): Promise<ModelInfo[]> {
+  const res = await send('getVisionModels');
+  return (res.result || []).map((m: any) => ({ ...m, isCached: !!m.cached } as ModelInfo));
+}
+
+/**
+ * Returns models that support Speech-to-Text / automatic speech recognition.
+ * Uses the `task` field and capabilities to avoid hardcoding families (Whisper, Nemotron Speech, etc.).
+ */
+export async function getSTTModels(): Promise<ModelInfo[]> {
+  const res = await send('getSTTModels');
+  return (res.result || []).map((m: any) => ({ ...m, isCached: !!m.cached } as ModelInfo));
+}
+
 /**
  * Get recommended small starter models based on current hardware/EPs and available catalog.
  * Returns up to `count` suitable lightweight models.
  * Prefers models good for the detected acceleration.
  */
-/**
- * Returns models that support Speech-to-Text / automatic speech recognition.
- * Uses the `task` field and capabilities to avoid hardcoding families (Whisper, Nemotron Speech, etc.).
- */
-export async function getVisionModels(): Promise<ModelInfo[]> {
-  try {
-    const res = await send('getVisionModels');
-    return (res.result || []).map((m: any) => ({ ...m, isCached: !!m.cached } as ModelInfo));
-  } catch { return []; }
-}
-
-export async function getSTTModels(): Promise<ModelInfo[]> {
-  try {
-    const res = await send('getSTTModels');
-    return (res.result || []).map((m: any) => ({ ...m, isCached: !!m.cached } as ModelInfo));
-  } catch (e) {
-    console.warn('Failed to get STT models', e);
-    return [];
-  }
-}
-
 export async function getRecommendedStarterModels(count: number = 3): Promise<ModelInfo[]> {
   try {
     const res = await send('listModels');

@@ -1,14 +1,17 @@
 # Flint documentation
 
-Index by audience. Prefer these living docs over anything under `archive/`.
+Index by audience. These are the current living docs — completed work lives in
+`git log` and [CHANGELOG.md](../CHANGELOG.md), not in a doc body. AI/agent
+contributors: start at [AGENTS.md](../AGENTS.md) for a token-saving map of which doc
+to load for a given task.
 
 ## Users
 
 | Doc | Purpose |
 |---|---|
 | [README.md](../README.md) | Why Flint, who it’s for, screenshots, quick start |
-| [USER_GUIDE.md](./USER_GUIDE.md) | First run, common tasks, bind vs client URL, troubleshooting |
-| [PRODUCT_PLAN.md](./PRODUCT_PLAN.md) | Living plan: docs/help polish, next release, 1.0 bar |
+| [USER_GUIDE.md](./USER_GUIDE.md) | Current navigation, first run, common tasks, bind vs client URL, troubleshooting |
+| [PRODUCT_PLAN.md](./PRODUCT_PLAN.md) | 1.0 implementation sequencing, acceptance gates, and native supervision decisions |
 | [CHANGELOG.md](../CHANGELOG.md) | Versioned release notes |
 
 ## Contributors
@@ -16,30 +19,44 @@ Index by audience. Prefer these living docs over anything under `archive/`.
 | Doc | Purpose |
 |---|---|
 | [DEVELOPMENT.md](./DEVELOPMENT.md) | Dev setup, scripts, sidecar, versioning |
+| [EXTENDING.md](./EXTENDING.md) | Architecture boundaries and safe extension guide for contributors |
 | [FLINT_DESIGN_SPEC.md](../FLINT_DESIGN_SPEC.md) | Architecture and product principles |
 | [`.github/copilot-instructions.md`](../.github/copilot-instructions.md) | Short AI/contributor conventions |
+| [CONTRIBUTING.md](../CONTRIBUTING.md) | Entry point: which doc to read, pre-PR checklist |
 
 ## Release operators
 
 | Doc | Purpose |
 |---|---|
 | [RELEASE.md](./RELEASE.md) | Signing, GitHub secrets, updater keys, test pipeline |
-| [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) | Living release status, scorecards, 0.4+ plans |
+| [ADMIN.md](./ADMIN.md) | Operator runbook for an installed app (logs, lifecycle, updater, uninstall) |
+| [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) | Current probe-backed plan through 1.0 and the 1.0 release bar (release history: [CHANGELOG.md](../CHANGELOG.md)) |
 
 ## Design / research
 
+Optional deep-dive reading — not required to build or contribute. Some are empirical
+results kept because they came from real measurement and would cost real time to
+reproduce (POOL_SPIKE, pool-spike-results, node-bundle-spike); others are design memos
+or deferred plans kept for the analysis they contain, not measured data
+(PURVIEW_GOVERNANCE, LINUX_BUILD_PLAN).
+
 | Doc | Purpose |
 |---|---|
-| [PURVIEW_GOVERNANCE.md](./PURVIEW_GOVERNANCE.md) | Enterprise audit / Purview memo (implementation later) |
-| [POOL_SPIKE.md](./POOL_SPIKE.md) | Model pool co-residency spike protocol |
-| [pool-spike-results/](./pool-spike-results/) | Canonical spike result |
+| [PURVIEW_GOVERNANCE.md](./PURVIEW_GOVERNANCE.md) | Enterprise audit / Purview memo (implementation unscheduled) |
+| [LINUX_BUILD_PLAN.md](./LINUX_BUILD_PLAN.md) | Linux build plan (deferred — not an active workstream; see [BACKLOG.md](./BACKLOG.md)) |
+| [POOL_SPIKE.md](./POOL_SPIKE.md) | Model pool co-residency spike protocol (complete; retained for re-runs) |
+| [pool-spike-results/](./pool-spike-results/) | Canonical pool-spike result |
+| [spikes/node-bundle-spike.md](./spikes/node-bundle-spike.md) | Bundled-Node packaging size/approach spike (referenced from [DEVELOPMENT.md](./DEVELOPMENT.md)) |
 
 ## Planning process
 
-- **Living planner:** [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) only.
-- Do **not** maintain parallel “sprint plan” + “remaining implementation plan” + roadmap for the same milestone.
-- Deferred follow-ups from docs work: [BACKLOG.md](./BACKLOG.md).
-
-## Archive
-
-Historical execution plans (not live status): [archive/](./archive/).
+- **Operator runbook for an installed app:** [ADMIN.md](./ADMIN.md).
+- **Implementation sequencing and acceptance gates:** [PRODUCT_PLAN.md](./PRODUCT_PLAN.md).
+- **Forward plan through 1.0 and the 1.0 release bar:** [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md).
+  1.0 production is Windows; macOS Apple Silicon is evaluation-only.
+- **Release history:** [CHANGELOG.md](../CHANGELOG.md).
+- Do **not** maintain a separate sprint plan or remaining-implementation-plan file for
+  work already covered by one of the two docs above.
+- Deferred and post-1.0 follow-ups: [BACKLOG.md](./BACKLOG.md) — open items only;
+  completed work lives in `git log` and [CHANGELOG.md](../CHANGELOG.md). 1.0 work
+  belongs in PRODUCT_PLAN, not here.

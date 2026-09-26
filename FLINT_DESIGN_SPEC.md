@@ -1,18 +1,21 @@
 # FLInt – Foundry Local Interface Design Spec
 
-**Project Name:** FLInt  
-**Full Name:** Foundry Local Interface (FLInt)  
-**Backronym / Tagline:** Foundry Local INTerface  
-**Spec revision:** 0.5 (docs consolidation; architecture baseline)  
+**Project Name:** Flint 
+**Full Name:** Foundry Local Interface (Flint)  
+**Backronym / Tagline:** Foundry Local Interface  
+**Spec revision:** 0.6 (positioning, non-goals, and SDK-pinning rationale absorbed from
+RELEASE_ROADMAP.md)  
 **Repository / Folder:** flint  
 **License:** MIT (most permissive)  
-**Date:** June 2026 (revised July 2026)
+**Date:** September 2026
 
-> **Versioned product plans and release status** live in [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md). This file is the architectural and product-principles baseline — not a sprint tracker.
+> **Release history** lives in [CHANGELOG.md](./CHANGELOG.md); the **forward plan through
+> 1.0** lives in [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md). This file is the
+> architectural and product-principles baseline — not a sprint tracker.
 
 ## 1. Executive Summary
 
-**FLInt** (Foundry Local Interface) is a lightweight, privacy-first desktop GUI for Microsoft Foundry Local. It provides an intuitive interface for model management, core inference (chat, audio transcription, and vision where supported), diagnostics/monitoring, integrations, and education about Foundry Local (and Azure AI Foundry as a future cloud path).
+**Flint** (Foundry Local Interface) is a lightweight, privacy-first desktop GUI for Microsoft Foundry Local. It provides an intuitive interface for model management, core inference (chat, audio transcription, and vision where supported), diagnostics/monitoring, integrations, and education about Foundry Local (and Azure AI Foundry as a future cloud path).
 
 The app is designed to:
 
@@ -22,6 +25,14 @@ The app is designed to:
 - Prioritize security and privacy (local-first by default)
 - Support Azure AI Foundry cloud connections as a high-priority future feature
 - Use MIT licensing to encourage adoption and contribution
+
+**Positioning:** the friendly and full-featured control plane for Foundry Local —
+hardware-aware model management, an observable OpenAI-compatible endpoint, and
+reliable integration with local AI clients. Flint does not compete with Ollama on
+model-library breadth, and says so: Foundry Local is ONNX-only, Ollama's ecosystem
+is GGUF. Reasons to choose Flint over Ollama's desktop app instead: NPU/GPU/CPU
+variant selection, multi-model pool co-residency, the side-by-side Model Arena,
+speech-to-text, audit logging, bind-address/network control.
 
 ## 2. Goals & Non-Goals
 
@@ -39,7 +50,27 @@ The app is designed to:
 
 - Built-in model training or fine-tuning
 - Heavy autonomous agent loops inside Flint (prefer external tools on the local endpoint)
-- Replacing purpose-built agent clients (OpenClaw, etc.)
+- Replacing purpose-built agent clients (OpenClaw, etc.). Agent loops stay delegated —
+  OpenClaw is treated as one integration, not a strategic dependency; Flint should work
+  with any conforming OpenAI client.
+- **Tokenomics before 1.0** — "tokens × cloud list price" is not a defensible savings
+  figure: models are not quality-equivalent, tokenizers differ, and cloud pricing splits
+  input/cached/output/batch. If ever built, ship it as a **cost comparator** with visible
+  assumptions, never "savings". Tokens-per-watt needs idle-power baselining and
+  synchronised sampling; omit unless measurable as joules per output token.
+- **A Flint-native tool executor before 1.0** — receiving a call, gating it, executing
+  it, and returning the result to the model *is* a manually gated agent loop. Before 1.0
+  it would inherit the security surface while delivering a worse version of what Cline
+  and OpenClaw already do, and a heuristic prompt-injection guard is not a real boundary.
+  Flint displays and exports tool-call JSON for debugging; clients execute. A narrow,
+  explicitly opt-in exception is tracked post-1.0 in
+  [docs/BACKLOG.md](./docs/BACKLOG.md) ("Tool-calling execution layer"): a 2–3 step
+  user-confirmed linear chain, not an autonomous loop.
+- **Olive conversion (safetensors → ONNX) built into Flint** — stays a documented
+  external recipe. Bundling Python plus conversion, quantisation, and hardware
+  targeting would overwhelm the app.
+- **GGUF support, a `flint` CLI shadowing `foundry`, or a model registry/push** —
+  out of scope.
 
 ## 3. Tech Stack
 
@@ -69,17 +100,21 @@ The app is designed to:
 
 ### Inference
 
-- **Chat** — streaming, personas, system prompts, conversation history, vision image attach when supported
-- **Audio** — microphone + file transcription (STT models)
-- **Compare** — side-by-side model responses (bake-off)
+- **Playground** — Chat (streaming, personas, system prompts, conversation history, vision image attach when supported) and Voice (microphone + file transcription, STT models) in one view with a Chat/Voice toggle
+- **Model Arena** — Quick Compare: live-streamed side-by-side model responses (bake-off) with served variant/execution provider/status
+- **Benchmark Preview** — opt-in, off by default: measured, repeatable multi-model benchmark runs with a hardened Stop/Resume lifecycle
 
 ### Operations & education
 
-- **Diagnostics** — service status, endpoint, execution providers
-- **Monitor** — pool, resources, access/audit logs
-- **Integrations** — copy-paste snippets for external tools
-- **Learn** — Foundry Local education + tool-calling boundary
+- **Diagnostics** — service status, endpoint self-test, execution providers, health ring
+- **Monitor** — pool, resources, access/audit logs (metadata only)
+- **Integrations** — copy-paste snippets for external tools that can actually connect to Flint
+- **Help** — Foundry Local education + tool-calling boundary
 - Persistent local-first privacy messaging
+
+Navigation is grouped as **Build** (Playground, Model Arena, Benchmark Preview),
+**Discover** (Models), **Operate** (Monitor, Diagnostics, Integrations), and
+**Manage** (Settings, Help).
 
 ## 5. Logging Strategy
 
@@ -103,13 +138,16 @@ The app is designed to:
 3. Additional local backends  
 4. Smart routing and fallback between providers  
 
-Versioned timing is in [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) (Azure targeted for 0.4+).
+Azure connections and other future feature work are tracked in
+[docs/BACKLOG.md](./docs/BACKLOG.md) (unscheduled — no version assigned).
 
 ## 7. Security & Privacy
 
 - Inference local by default
 - Clear indicators when any remote provider is used
 - Localhost-only bind by default; non-loopback bind requires explicit user choice and warning
+- Model catalog listing/refresh (via Foundry Local's SDK) contacts Microsoft's remote catalog over the network — enabled by default, with a Settings toggle to disable that startup check
+- Accelerator setup runs automatically at startup and may separately download/register execution-provider components; the catalog toggle does not control it
 - Minimal OS permissions
 - Export/clear paths for logs, cache, and settings
 - Sidecar command validation and least-privilege Tauri capabilities (hardened across 0.2+)
@@ -127,15 +165,15 @@ Versioned timing is in [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) (Azure targete
 **Phase 2 – Incremental Rust + polish**
 
 - Move selected hot paths or packaging concerns to Rust when reliability/footprint benefits are clear
-- Self-contained sidecar would remove the end-user Node-on-PATH requirement
-- Azure connections and advanced enterprise controls per roadmap
+- A native Rust supervisor (see [PRODUCT_PLAN.md Native ownership and runtime architecture](./docs/PRODUCT_PLAN.md#workstream-c-thin-native-ownership----expedited)) supervises the runtime sidecar child, establishes exclusive stdio transport, and enforces single-instance lifecycle recovery
+- Azure connections and advanced enterprise controls: see [docs/BACKLOG.md](./docs/BACKLOG.md)
 
 ## 9. Prerequisites & first-run
 
 **Product packaging (current intent):**
 
-- Foundry Local **runtime is bundled** with Flint builds for a seamless first run (see in-app Learn copy).
-- The **JS sidecar still requires Node.js on PATH** for end-user installers until a self-contained sidecar ships. Document this honestly in user-facing docs.
+- Foundry Local **runtime is bundled** with Flint builds for a seamless first run (see in-app Help copy).
+- Release installers **bundle a Node 22 runtime** for the JS sidecar (Tauri `externalBin`); PATH Node remains a dev/fallback requirement, not an end-user one. See [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md).
 - SDK package selection (winml vs standard) is handled at build/install time.
 - First-run: accelerator detection + starter model recommendations when no persisted state exists.
 
@@ -149,24 +187,33 @@ Versioned timing is in [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md) (Azure targete
 - **Tool-calling boundary:**
   - **Foundry Local:** runtime + OpenAI-compatible endpoint; may emit `tool_calls` in responses.
   - **Flint:** load models, run service, surface endpoint/snippets, audit metadata. Chat UI does **not** parse or execute tool calls.
-  - **Future:** any Flint-side execution requires explicit opt-in, confirmation, and audit trail (see roadmap).
-  - **UI:** Learn tab documents this split.
+  - **Future:** any Flint-side execution requires explicit opt-in, confirmation, and audit
+    trail (this remains a non-goal before 1.0 — see §2 Non-Goals above).
+  - **UI:** Help view documents this split.
 - **Vision** — supported when catalog + chat client accept image content; multi-image attach shipped in 0.3.
+- **Pinned SDK, not latest** — Foundry Local's REST API is preview and explicitly subject
+  to breaking change. Flint pins SDK 2.0.1. The in-process OpenAI clients
+  (`createChatClient` and the audio/embedding equivalents) still exist but are
+  deprecated and scheduled for removal at the end of 2026; the Session API migration
+  is separate from this pin. A CLI or core update can silently break cache, gateway,
+  or BYOM assumptions with no Flint change; see
+  [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md) Wave 1 for the startup version-check
+  that guards against this.
 
 ## 11. Security & Privacy (expanded)
 
 - Local inference default (in-process or localhost server).
 - “Running locally” style messaging; clear cloud indicators when remote endpoints exist.
-- No telemetry by default.
+- No telemetry by default. Model catalog listing/refresh contacts Microsoft's remote Foundry catalog at startup by default, and that startup check can be disabled in Settings. Accelerator setup also runs automatically at startup and may download/register execution-provider components; it is not controlled by the catalog toggle. User-triggered downloads, manual "Refresh catalog", and other model-management actions can also require network access.
 - Minimal permissions (mic only when user starts audio; filesystem limited to needed paths).
 - Settings, conversations, logs exportable/deletable where implemented.
 - Tauri CSP and capability model restrict webview powers.
 
 ## Summary
 
-FLInt is a focused, privacy-first GUI that makes Foundry Local approachable while staying local-first. It prioritizes an understandable JS/TS codebase, an official SDK path, and a clear split between model runtime and tool execution.
+Flint is a focused, privacy-first GUI that makes Foundry Local approachable while staying local-first. It prioritizes an understandable JS/TS codebase, an official SDK path, and a clear split between model runtime and tool execution.
 
-**Living release plans:** [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md)  
+**Release history:** [CHANGELOG.md](./CHANGELOG.md) · **Forward plan through 1.0:** [RELEASE_ROADMAP.md](./RELEASE_ROADMAP.md)  
 **Contributor how-to:** [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md)
 
 ---

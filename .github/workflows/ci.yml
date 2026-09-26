@@ -6,6 +6,9 @@ on:
   push:
     branches: [ main, master ]
 
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -34,6 +37,11 @@ jobs:
 
       - name: Install Linux system dependencies
         run: |
+          # Remove the preinstalled Google Chrome apt source: it is unrelated to
+          # our build dependencies and its Packages.gz occasionally fails the
+          # runner's mirror sync with a "Hash Sum mismatch", which aborts
+          # apt-get update for every other source too.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
           sudo apt-get update
           sudo apt-get install -y \
             libglib2.0-dev \
@@ -45,8 +53,20 @@ jobs:
             librsvg2-dev \
             patchelf
 
+      - name: Cache Foundry native payload
+        uses: actions/cache@v4
+        with:
+          path: runtime/foundry-native-cache
+          # Exact lockfile only. A prefix fallback once restored another SDK's runtime into the
+          # core folder, and the installer skipped the download because the file names existed.
+          # v2 retires the caches that fallback produced.
+          key: foundry-native-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+
       - name: Install dependencies
-        run: npm ci
+        run: npm run ci:deps
+
+      - name: Save Foundry native payload
+        run: node scripts/hydrate-foundry-native.cjs --save
 
       # Tauri externalBin (binaries/node) is required even for cargo check.
       - name: Cache bundled Node binary
@@ -104,6 +124,12 @@ jobs:
       - name: Frontend check
         run: npm run check
 
+      - name: IPC contract check
+        run: npm run verify:ipc-contracts
+
+      - name: Markdown link check
+        run: npm run verify:markdown-links
+
       - name: Rust check
         working-directory: src-tauri
         run: cargo check
@@ -121,8 +147,20 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
+      - name: Cache Foundry native payload
+        uses: actions/cache@v4
+        with:
+          path: runtime/foundry-native-cache
+          # Exact lockfile only. A prefix fallback once restored another SDK's runtime into the
+          # core folder, and the installer skipped the download because the file names existed.
+          # v2 retires the caches that fallback produced.
+          key: foundry-native-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+
       - name: Install dependencies
-        run: npm ci
+        run: npm run ci:deps
+
+      - name: Save Foundry native payload
+        run: node scripts/hydrate-foundry-native.cjs --save
 
       - name: Run tests with coverage
         run: npm run test:coverage
@@ -157,8 +195,20 @@ jobs:
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
+      - name: Cache Foundry native payload
+        uses: actions/cache@v4
+        with:
+          path: runtime/foundry-native-cache
+          # Exact lockfile only. A prefix fallback once restored another SDK's runtime into the
+          # core folder, and the installer skipped the download because the file names existed.
+          # v2 retires the caches that fallback produced.
+          key: foundry-native-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+
       - name: Install dependencies
-        run: npm ci
+        run: npm run ci:deps
+
+      - name: Save Foundry native payload
+        run: node scripts/hydrate-foundry-native.cjs --save
 
       - name: Cache bundled Node binary
         uses: actions/cache@v4
@@ -171,6 +221,15 @@ jobs:
       - name: Stage bundled Node (externalBin)
         run: npm run ensure:node
 
+      # Packaging prerequisites and a real sidecar-runtime smoke. These catch the
+      # class of bug that only shows up in an installed build, which is invisible
+      # to the unit tests and shipped broken through several green releases.
+      - name: Verify packaging prerequisites
+        run: npm run verify:bundle
+
+      - name: Smoke test bundled Node + Foundry SDK
+        run: npm run smoke:node
+
       - name: Build Tauri (debug for CI speed)
         uses: tauri-apps/tauri-action@v0
         env:
@@ -179,6 +238,10 @@ jobs:
         with:
           # Build debug to keep CI fast; release on tags
           args: --debug --no-sign
+
+      - name: Runtime smoke (Windows debug exe)
+        if: matrix.os == 'windows-latest'
+        run: npm run smoke:runtime
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

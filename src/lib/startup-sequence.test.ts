@@ -1,0 +1,495 @@
+import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import {
+  createSingleFlight,
+  createStartupAuthorization,
+  prepareHydratedRuntime,
+  resolveAcceleratorRestartGuidance,
+  resolveCatalogCheckPresentation,
+  resolveStartupAudioAlias,
+} from './startup-sequence';
+
+describe('resolveAcceleratorRestartGuidance', () => {
+  it('keeps deferred, failed, and successful restart guidance consistent', () => {
+    expect(resolveAcceleratorRestartGuidance({
+      success: false,
+      status: 'Provider update deferred',
+      registeredEps: [],
+      failedEps: [],
+      catalogRefreshRequiresRestart: true,
+      registrationDeferredUntilRestart: true,
+    })).toBe('Provider update deferred');
+    expect(resolveAcceleratorRestartGuidance({
+      success: false,
+      status: 'CUDA registration failed',
+      registeredEps: [],
+      failedEps: ['CUDAExecutionProvider'],
+      catalogRefreshRequiresRestart: true,
+    })).toBe(
+      'CUDA registration failed. Restart Flint to let the model catalog detect any newly available variants.',
+    );
+    expect(resolveAcceleratorRestartGuidance({
+      success: false,
+      status: 'CUDA registration failed!',
+      registeredEps: [],
+      failedEps: ['CUDAExecutionProvider'],
+      catalogRefreshRequiresRestart: true,
+    })).toBe(
+      'CUDA registration failed! Restart Flint to let the model catalog detect any newly available variants.',
+    );
+    expect(resolveAcceleratorRestartGuidance({
+      success: false,
+      status: 'CUDA registration failed. ',
+      registeredEps: [],
+      failedEps: ['CUDAExecutionProvider'],
+      catalogRefreshRequiresRestart: true,
+    })).toBe(
+      'CUDA registration failed. Restart Flint to let the model catalog detect any newly available variants.',
+    );
+    expect(resolveAcceleratorRestartGuidance({
+      success: true,
+      status: 'Registered 1 execution provider',
+      registeredEps: ['CUDAExecutionProvider'],
+      failedEps: [],
+      catalogRefreshRequiresRestart: true,
+    })).toBe(
+      'Accelerator setup finished. Restart Flint to let the model catalog detect any newly available variants.',
+    );
+  });
+
+  it('returns no restart guidance before the catalog boundary', () => {
+    expect(resolveAcceleratorRestartGuidance({
+      success: false,
+      status: 'CUDA registration failed',
+      registeredEps: [],
+      failedEps: ['CUDAExecutionProvider'],
+    })).toBe('');
+  });
+});
+
+describe('prepareHydratedRuntime', () => {
+  it('keeps the page wiring from discarding accelerator readiness', () => {
+    const source = readFileSync(
+      join(process.cwd(), 'src', 'routes', '+page.svelte'),
+      'utf8',
+    );
+    const startupStart = source.indexOf('const init = createSingleFlight(performAppInit);');
+    const startupEnd = source.indexOf('async function loadModels()');
+    expect(startupStart, 'startup sequence start marker not found').toBeGreaterThan(-1);
+    expect(startupEnd, 'startup sequence end marker not found').toBeGreaterThan(startupStart);
+    const startup = source.slice(startupStart, startupEnd);
+
+    expect(startup).toContain('refreshCatalog: false');
+    expect(startup).not.toContain('refreshCatalog: autoRefreshCatalogOnStartup');
+
+    const prepareStart = startup.indexOf('prepareAccelerators:');
+    const prepareEnd = startup.indexOf('validateAccelerators:');
+    expect(prepareStart, 'accelerator stage marker not found').toBeGreaterThan(-1);
+    expect(prepareEnd, 'accelerator validator marker not found').toBeGreaterThan(prepareStart);
+    const prepareAccelerators = startup.slice(prepareStart, prepareEnd);
+    expect(prepareAccelerators).toContain('return');
+    expect(prepareAccelerators).toContain('ensureHardwareAccel({');
+    expect(prepareAccelerators).toContain('refreshCatalog: false');
+    expect(startup).toContain(
+      'deferCatalogRead: !autoRefreshCatalogOnStartup',
+    );
+
+    const fenceStart = startup.indexOf('startupInterrupted ||');
+    const fenceEnd = startup.indexOf('if (startupLoaded > 0)');
+    expect(fenceStart, 'startup summary fence marker not found').toBeGreaterThan(-1);
+    expect(fenceEnd, 'startup summary marker not found').toBeGreaterThan(fenceStart);
+    const summaryFence = startup.slice(fenceStart, fenceEnd);
+    expect(summaryFence).toContain(
+      '!isAcceleratorReadinessCurrent(acceleratorReadiness)',
+    );
+    expect(summaryFence).toContain('return;');
+
+    expect(startup).toContain(
+      '} else if (autoRefreshCatalogOnStartup && autoStartService) {',
+    );
+    const prepared = startup.indexOf('acceleratorReadiness = await prepareHydratedRuntime(');
+    const recoveryPolicy = startup.indexOf(
+      'setAutomaticCatalogRefreshEnabled(autoRefreshCatalogOnStartup);',
+      prepared,
+    );
+    const restartGuidance = startup.indexOf(
+      'if (acceleratorRestartGuidance) {',
+      recoveryPolicy,
+    );
+    const startupSummary = startup.indexOf('if (startupLoaded > 0)', recoveryPolicy);
+    expect(prepared).toBeGreaterThan(-1);
+    expect(recoveryPolicy).toBeGreaterThan(prepared);
+    expect(startupSummary).toBeGreaterThan(recoveryPolicy);
+    expect(restartGuidance).toBeGreaterThan(startupSummary);
+    // The bootstrap override must be undone even when startup fails, or recovery keeps
+    // skipping the catalog refresh the user asked for.
+    const startupCatch = startup.indexOf('Runtime startup stopped before model preload');
+    const startupFinally = startup.indexOf('} finally {', startupCatch);
+    expect(startupCatch).toBeGreaterThan(prepared);
+    expect(startupFinally).toBeGreaterThan(startupCatch);
+    expect(recoveryPolicy).toBeGreaterThan(startupFinally);
+    expect(startup).toMatch(
+      /if \(autoRefreshCatalogOnStartup && startupEntries\.length > 0\) \{[\s\S]*?\r?\n      \}\r?\n      if \(acceleratorRestartGuidance\) \{/,
+    );
+    expect(startup).toContain(
+      'if (autoRefreshCatalogOnStartup && startupEntries.length > 0) {',
+    );
+    expect(startup).toContain('let startupRestoreFailed = false;');
+    expect(startup).toMatch(
+      /catch \(e: any\) \{\s+startupRestoreFailed = true;\s+reportFailure\(`Failed to restore \$\{targetAlias\}`/,
+    );
+    expect(startup).toContain(
+      'let startupFailed = startupRestoreFailed ? 1 : 0;',
+    );
+
+    const refreshCatalogStart = source.indexOf('async function refreshCatalogModels()');
+    const refreshCatalogEnd = source.indexOf('/** About strip', refreshCatalogStart);
+    expect(refreshCatalogStart, 'catalog refresh wrapper marker not found').toBeGreaterThan(-1);
+    expect(refreshCatalogEnd, 'catalog refresh wrapper end marker not found').toBeGreaterThan(
+      refreshCatalogStart,
+    );
+    const refreshCatalog = source.slice(refreshCatalogStart, refreshCatalogEnd);
+    expect(refreshCatalog).toContain('await sdkRefreshModels(');
+    expect(
+      refreshCatalog.indexOf('setAutomaticCatalogRefreshEnabled(autoRefreshCatalogOnStartup);'),
+    ).toBeGreaterThan(refreshCatalog.indexOf('await sdkRefreshModels('));
+    expect(refreshCatalog).not.toContain('catalogRefreshError');
+    expect(refreshCatalog.indexOf('is no longer available')).toBeGreaterThan(
+      refreshCatalog.indexOf('await sdkRefreshModels('),
+    );
+    expect(startup).toMatch(
+      /if \(autoRefreshCatalogOnStartup\) \{\s+await refreshCatalogModels\(\);/,
+    );
+    expect(startup.indexOf('await refreshCatalogModels();')).toBeGreaterThan(prepareEnd);
+    expect(startup).toContain(
+      'state.catalogStatus === "ready"',
+    );
+
+    const defaultAudioStart = startup.indexOf(
+      'selectedSTTModelAlias = resolveStartupAudioAlias(',
+    );
+    const startupModelsStart = startup.indexOf(
+      'const startupEntries = Object.entries(startupModels);',
+    );
+    expect(defaultAudioStart, 'default audio selection marker not found').toBeGreaterThan(-1);
+    expect(startupModelsStart, 'startup models marker not found').toBeGreaterThan(defaultAudioStart);
+    expect(startup.slice(defaultAudioStart - 10, defaultAudioStart)).toMatch(/\}\s+$/);
+    expect(startup.slice(defaultAudioStart, startupModelsStart)).toMatch(
+      /resolveStartupAudioAlias\(\s+autoStartService,/,
+    );
+
+    const loadModelsStart = source.indexOf('async function loadModels()');
+    const loadModelsEnd = source.indexOf('async function loadRecommendations()');
+    expect(loadModelsStart, 'loadModels marker not found').toBeGreaterThan(-1);
+    expect(loadModelsEnd, 'loadRecommendations marker not found').toBeGreaterThan(loadModelsStart);
+    const loadModels = source.slice(loadModelsStart, loadModelsEnd);
+    expect(loadModels).toContain('await refreshCatalogModels();');
+    expect(source).not.toMatch(/await refreshModels\(/);
+    expect(source).not.toContain(
+      '!catalogCheckedThisSession',
+    );
+    expect(source).toContain(
+      'catalogCheckPresentation === "disabled"',
+    );
+    expect(source).toContain(
+      'catalogCheckPresentation === "failed"',
+    );
+    expect(source).toContain(
+      'catalogCheckPresentation === "pending"',
+    );
+    expect(source).toContain(
+      '{#if catalogCheckPresentation === "loading" && state.models.length === 0}',
+    );
+    expect(source).toMatch(
+      /catalogStatus: "not-checked" as "not-checked" \| "loading" \| "ready" \| "failed",\s+catalogError: null as string \| null,/,
+    );
+    const syncStart = source.indexOf('function syncFromStore(s: any)');
+    const syncEnd = source.indexOf('// Local reactive derived', syncStart);
+    expect(syncStart, 'SDK state mirror marker not found').toBeGreaterThan(-1);
+    expect(syncEnd, 'SDK state mirror end marker not found').toBeGreaterThan(syncStart);
+    const syncFromStore = source.slice(syncStart, syncEnd);
+    expect(syncFromStore).toContain('state.catalogStatus = s.catalogStatus ?? "not-checked";');
+    expect(syncFromStore).toContain('state.catalogError = s.catalogError ?? null;');
+  });
+
+  it('explains the catalog restart boundary after a post-commit accelerator update', () => {
+    const source = readFileSync(
+      join(process.cwd(), 'src', 'routes', '+page.svelte'),
+      'utf8',
+    );
+    const start = source.indexOf('async function ensureHardwareAccel(');
+    const end = source.indexOf('\n  async function useStarterModel', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const setup = source.slice(start, end);
+    expect(setup).toContain(
+      'const restartGuidance = resolveAcceleratorRestartGuidance(readiness.registration);',
+    );
+    expect(setup).toMatch(
+      /if \(restartGuidance\) \{[\s\S]*?statusMessage = restartGuidance;[\s\S]*?appendAppLog\(statusMessage, "warn"\);/,
+    );
+  });
+
+  it('persists restart guidance for local catalog mutations after snapshot commitment', () => {
+    const source = readFileSync(
+      join(process.cwd(), 'src', 'routes', '+page.svelte'),
+      'utf8',
+    );
+    const importStart = source.indexOf('async function runByomImport(');
+    const importEnd = source.indexOf('function byomTemplateDirty()', importStart);
+    const templateStart = source.indexOf('async function saveTemplateEdit()');
+    const templateEnd = source.indexOf('// Persistence for chat history', templateStart);
+    const deleteHandlerStart = source.indexOf('function handleDeleteResult(');
+    const variantDeleteStart = source.indexOf('async function deleteVariant(');
+    const variantDeleteEnd = source.indexOf('function accelBadgeInfo(', variantDeleteStart);
+    const modelDeleteStart = source.indexOf('async function deleteCachedModel(');
+    const modelDeleteEnd = source.indexOf('async function sendMessage(', modelDeleteStart);
+    const importFlow = source.slice(importStart, importEnd);
+    const templateFlow = source.slice(templateStart, templateEnd);
+    const deleteHandler = source.slice(deleteHandlerStart, variantDeleteStart);
+    const variantDeleteFlow = source.slice(variantDeleteStart, variantDeleteEnd);
+    const modelDeleteFlow = source.slice(modelDeleteStart, modelDeleteEnd);
+
+    expect(importFlow).toContain('result.catalogRefreshRequiresRestart');
+    expect(importFlow).toMatch(/Restart Flint[\s\S]*?appendAppLog\(statusMessage, "warn"\)/);
+    expect(templateFlow).toContain('result.catalogRefreshRequiresRestart');
+    expect(templateFlow).toMatch(/Restart Flint[\s\S]*?appendAppLog\(statusMessage, "warn"\)/);
+    expect(deleteHandler).toContain('deleteResult?.catalogRefreshRequiresRestart');
+    expect(deleteHandler).toMatch(/Restart Flint[\s\S]*?appendAppLog\(statusMessage, "warn"\)/);
+    expect(variantDeleteFlow).toContain('handleDeleteResult(result, deletedMessage)');
+    expect(modelDeleteFlow).toContain('handleDeleteResult(result, `${model.alias} deleted`)');
+  });
+
+  it('shows progress and quiet-period guidance for manual catalog refresh registration', () => {
+    const source = readFileSync(
+      join(process.cwd(), 'src', 'routes', '+page.svelte'),
+      'utf8',
+    );
+    const start = source.indexOf('async function refreshCatalogModels()');
+    const end = source.indexOf('/** About strip', start);
+    const refresh = source.slice(start, end);
+
+    expect(refresh).toContain('sdkRefreshModels(');
+    expect(refresh).toContain('Catalog accelerator');
+    expect(refresh).toContain('no progress reported for 60 seconds');
+    expect(refresh).toContain('if (statusMessage === catalogProgressMessage) statusMessage = "";');
+  });
+
+  describe('startup preference resolution', () => {
+    it('distinguishes disabled, pending, loading, failed, and completed catalog checks', () => {
+      expect(resolveCatalogCheckPresentation({
+        automaticCheckEnabled: false,
+        status: 'not-checked',
+      })).toBe('disabled');
+      expect(resolveCatalogCheckPresentation({
+        automaticCheckEnabled: true,
+        status: 'not-checked',
+      })).toBe('pending');
+      expect(resolveCatalogCheckPresentation({
+        automaticCheckEnabled: false,
+        status: 'loading',
+      })).toBe('loading');
+      expect(resolveCatalogCheckPresentation({
+        automaticCheckEnabled: false,
+        status: 'failed',
+      })).toBe('failed');
+      expect(resolveCatalogCheckPresentation({
+        automaticCheckEnabled: true,
+        status: 'ready',
+      })).toBe('checked');
+    });
+
+    it('applies a valid configured audio default when startup still owns the selection', () => {
+      expect(resolveStartupAudioAlias(
+        true,
+        'whisper-default',
+        'whisper-last-used',
+        'whisper-last-used',
+        ['whisper-default', 'whisper-last-used'],
+      )).toBe(
+        'whisper-default',
+      );
+    });
+
+    it('preserves the last-used audio model when no default is configured', () => {
+      expect(resolveStartupAudioAlias(
+        true,
+        '',
+        'whisper-last-used',
+        'whisper-last-used',
+        ['whisper-last-used'],
+      )).toBe('whisper-last-used');
+    });
+
+    it('does not select a stale audio default absent from the refreshed catalog', () => {
+      expect(resolveStartupAudioAlias(
+        true,
+        'whisper-removed',
+        'whisper-last-used',
+        'whisper-last-used',
+        ['whisper-last-used'],
+      )).toBe('whisper-last-used');
+    });
+
+    it('does not overwrite an audio selection changed while startup was awaiting work', () => {
+      expect(resolveStartupAudioAlias(
+        true,
+        'whisper-default',
+        'whisper-at-launch',
+        'whisper-user-choice',
+        ['whisper-default', 'whisper-user-choice'],
+      )).toBe('whisper-user-choice');
+    });
+
+    it('preserves the last-used audio model when automatic service startup is disabled', () => {
+      expect(resolveStartupAudioAlias(
+        false,
+        'whisper-default',
+        'whisper-last-used',
+        'whisper-last-used',
+        ['whisper-default', 'whisper-last-used'],
+      )).toBe('whisper-last-used');
+    });
+  });
+
+  it('applies memory policy, then accelerators, then optional service startup', async () => {
+    const order: string[] = [];
+    let releaseMemory!: () => void;
+    let releaseAccelerators!: () => void;
+    let releaseService!: () => void;
+
+    const startup = prepareHydratedRuntime({
+      applyMemorySettings: () => new Promise<void>((resolve) => {
+        order.push('memory');
+        releaseMemory = resolve;
+      }),
+      prepareAccelerators: () => new Promise<void>((resolve) => {
+        order.push('accelerators');
+        releaseAccelerators = resolve;
+      }),
+      startService: () => new Promise<void>((resolve) => {
+        order.push('service');
+        releaseService = resolve;
+      }),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(order).toEqual(['memory']);
+    releaseMemory();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(order).toEqual(['memory', 'accelerators']);
+    releaseAccelerators();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(order).toEqual(['memory', 'accelerators', 'service']);
+    let completed = false;
+    void startup.then(() => { completed = true; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(completed).toBe(false);
+    releaseService();
+    await startup;
+  });
+
+  describe('createSingleFlight', () => {
+    it('shares one in-flight run and permits a later retry', async () => {
+      let release!: () => void;
+      const run = vi.fn(() => new Promise<number>((resolve) => {
+        release = () => resolve(run.mock.calls.length);
+      }));
+      const singleFlight = createSingleFlight(run);
+
+      const first = singleFlight();
+      const second = singleFlight();
+      expect(first).toBe(second);
+      expect(run).not.toHaveBeenCalled();
+      await Promise.resolve();
+      expect(run).toHaveBeenCalledOnce();
+      release();
+      await expect(first).resolves.toBe(1);
+
+      const retry = singleFlight();
+      await Promise.resolve();
+      expect(run).toHaveBeenCalledTimes(2);
+      release();
+      await expect(retry).resolves.toBe(2);
+    });
+
+    it('shares a synchronous failure and permits a later retry', async () => {
+      const run = vi.fn<() => Promise<number>>();
+      run.mockImplementationOnce(() => {
+        throw new Error('synchronous startup failure');
+      });
+      run.mockResolvedValueOnce(2);
+      const singleFlight = createSingleFlight(run);
+
+      const first = singleFlight();
+      const second = singleFlight();
+      expect(first).toBe(second);
+      expect(run).not.toHaveBeenCalled();
+      await expect(first).rejects.toThrow('synchronous startup failure');
+      expect(run).toHaveBeenCalledOnce();
+
+      await expect(singleFlight()).resolves.toBe(2);
+      expect(run).toHaveBeenCalledTimes(2);
+    });
+
+    describe('createStartupAuthorization', () => {
+      it('invalidates work captured before an explicit Stop', () => {
+        const authorization = createStartupAuthorization();
+        const captured = authorization.capture();
+        expect(authorization.isCurrent(captured)).toBe(true);
+        authorization.invalidate();
+        expect(authorization.isCurrent(captured)).toBe(false);
+      });
+    });
+  });
+
+  it('does not start later stages when a prerequisite fails', async () => {
+    const prepareAccelerators = vi.fn();
+    const startService = vi.fn();
+
+    await expect(prepareHydratedRuntime({
+      applyMemorySettings: async () => { throw new Error('memory policy rejected'); },
+      prepareAccelerators,
+      startService,
+    })).rejects.toThrow('memory policy rejected');
+
+    expect(prepareAccelerators).not.toHaveBeenCalled();
+    expect(startService).not.toHaveBeenCalled();
+  });
+
+  it('validates accelerator ownership before service startup', async () => {
+    const startService = vi.fn();
+
+    await expect(prepareHydratedRuntime({
+      applyMemorySettings: async () => {},
+      prepareAccelerators: async () => ({ generation: 1 }),
+      validateAccelerators: () => {
+        throw new Error('accelerator readiness is stale');
+      },
+      startService,
+    })).rejects.toThrow('accelerator readiness is stale');
+
+    expect(startService).not.toHaveBeenCalled();
+  });
+
+  it('does not require HTTP autostart', async () => {
+    const order: string[] = [];
+
+    const readiness = await prepareHydratedRuntime({
+      applyMemorySettings: async () => { order.push('memory'); },
+      prepareAccelerators: async () => {
+        order.push('accelerators');
+        return { generation: 1, success: false, registeredEps: ['QNN'], failedEps: ['CUDA'] };
+      },
+    });
+
+    expect(order).toEqual(['memory', 'accelerators']);
+    expect(readiness).toEqual({
+      generation: 1,
+      success: false,
+      registeredEps: ['QNN'],
+      failedEps: ['CUDA'],
+    });
+  });
+});

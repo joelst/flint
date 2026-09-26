@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Flint",
-  "version": "0.4.4",
+  "version": "0.9.1",
   "identifier": "com.flint.flint",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -18,7 +18,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://localhost:* https://localhost:* ws://localhost:*; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+      "csp": "default-src 'self'; connect-src 'self' http://localhost:* https://localhost:* ws://localhost:* http://127.0.0.1:* https://127.0.0.1:* ws://127.0.0.1:*; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'"
     }
   },
   "bundle": {
@@ -39,6 +39,9 @@
       "../sidecar/": "sidecar/",
       "../node_modules/foundry-local-sdk/": "foundry-local-sdk/"
     },
+    "macOS": {
+      "minimumSystemVersion": "14.0"
+    },
     "windows": {
       "digestAlgorithm": "sha256",
       "timestampUrl": "http://timestamp.acs.microsoft.com",
@@ -55,6 +58,15 @@
           "-FilePath",
           "%1"
         ]
+      },
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "installerHooks": "./windows/hooks.nsh"
+      },
+      "wix": {
+        "fragmentPaths": ["./windows/fragments/foundry-sdk-replace.wxs"],
+        "componentRefs": ["FoundrySdkReplaceMarker"]
       }
     }
   },
@@ -62,7 +74,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc1NTI3QUZEMjQwRUQ2QzMKUldURDFnNGsvWHBTZFg1OHNjWXFDaVpCNk80Nlp3Sk5lVis1eEdSOGFQSXJJMStQR1lpSmNGcXUK",
       "endpoints": [
-        "https://github.com/joelst/flint/releases/download/v{{current_version}}/latest.json"
+        "https://github.com/joelst/flint/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"

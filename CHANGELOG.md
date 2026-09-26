@@ -1,104 +1,68 @@
 # Flint Changelog
 
-## 0.4.4
+## 0.9.1
 
 ### Patch Changes
 
-- 6cf3df6: Fix `Sidecar init failed: require is not defined` on packaged builds. The SDK fallback loader used CommonJS `require` inside the ESM sidecar, so installed apps could never load `foundry-local-sdk` from bundled resources. Added a regression test that runs the sidecar against a simulated installer layout.
+- af0f764: Refuse to start a benchmark while a model download is still in progress, including one left running by a page reload, and refuse a new download while a benchmark holds exclusive admission.
+- 531dacd: Add a Settings → Startup toggle ("Check model catalog on startup") to disable the automatic startup check against Microsoft's Foundry Local model catalog. Recommendations and configured model preloads are skipped for that launch when disabled. Docs now disclose when catalog network access occurs.
+- 33cfbf6: Rebuild app resources when Flint icons change and brand the Windows installer and uninstaller with the current app icon.
+- f60cffc: Update the bundled Foundry Local SDK from 1.2.4 to 2.0.1 so models such as Gemma 4 can load. Long native load errors stay in the app log; the header shows one truncated line instead of growing to fit the stack trace.
+- 2506d2b: Improve control contrast, catalog accelerator labels, and runtime failure diagnostics.
+- 87f5dd0: About → Updates: add a "View release" link next to Install/Later that opens the GitHub release page for the available version, so users can download and install it manually as an alternative to the in-app updater.
 
-## 0.4.3
+## 0.9.0
 
-### Patch Changes
+First **stable** channel release after the 0.7.0 evaluation prerelease. 0.8.0 is unused. Publish this version as a full GitHub release (not a prerelease) so `releases/latest` resolves and installed 0.7.0 builds can exercise the in-app updater. **1.0.0** is a later stable, after that upgrade is proven.
 
-- c86ce50: Surface the real Azure Trusted Signing failure instead of Tauri's opaque `failed to run pwsh`. The sign command now logs detailed errors to `src-tauri/target/flint-signing.log`, and the release workflow runs a signing preflight check and publishes the log.
+### Highlights
 
-## 0.4.2
+- **Native tray, quit, and conversations:** Tray Open/Quit from app start, quit waits for a conversation flush (or 2s), and streaming updates follow the originating conversation.
+- **Honest Stop:** Chat Stop settles the caller; Foundry has no abort API, so the UI does not claim native inference stopped. Quick Compare's Stop halts further output for running/pending slots the same way (native generation may still finish in the background); audio transcription cannot be cancelled once started.
+- **Diagnostics:** Gateway access log is metadata only. A bounded health ring is included in diagnostics export. **Test local endpoint** checks envelope, chat, stream `[DONE]`, usage, disconnect, tools, and embeddings (blocked when no embedding model is present).
+- **Embeddings path:** `POST /v1/embeddings` autoloads like chat. BYOM import of an embedding ONNX folder does not require a chat prompt template. Sidecar `embedTexts` is available. There is still no Flint-tested embedding recipe; Continue's indexer is not verified. Full RAG is not in this release.
+- **Model Arena — Quick Compare and Benchmark Preview:** Quick Compare now streams live, Stop halts further output for the running/pending slots (native generation may still finish in the background), and each result shows served variant, execution provider, and run status. A new opt-in **Benchmark Preview** (off by default) under Build adds measured, repeatable multi-model benchmark runs with a hardened Stop/Resume lifecycle (write-ahead-intent-then-terminal-commit journal), plus a testable storage module so save/load failures surface in the App Log instead of failing silently. Benchmark exclusivity drains orphaned load/unload/delete/startService operations left by a previous page instance so a run's timing can't be corrupted by leftover work from a reload. Model downloads and benchmark runs are mutually fenced at the UI (each is blocked from starting while the other is active) but this does not cover a download orphaned by a page reload.
+- **Navigation and visual refresh:** Sidebar regrouped into Build (Playground, Model Arena), Discover (Models), Operate (Monitor, Diagnostics, Integrations), and Manage (Settings, Help), with Chat/Audio merged into a single Playground entry. New Flint "F" app icon and favicon across Windows/macOS bundles and web assets. Native selects (including the Models sort dropdown) and the header theme toggle icon now themed correctly in both light and dark mode. Refreshed README/docs screenshots for dark and light mode.
+- **Chat reliability:** Requested temperature/maxTokens are now applied on the SDK chat transport (previously only the audio path honored them). Reasoning/"thinking" state no longer bleeds between messages when a render slot is reused, and models whose chat template opens `<think>` in the prompt prefix (e.g. qwen3.5-9b) now collapse their reasoning instead of dumping it into the visible answer.
+- **Runtime hardening:** Dependency/native-core stdout noise can no longer corrupt the sidecar's IPC protocol or show up as a spurious log error; the app's own local gateway is reachable at `http://127.0.0.1` (not just `http://localhost`) so the endpoint self-test and other in-app fetches don't fail CSP. Memory/eviction settings no longer silently fail to apply after a reload — a superseded settings change now surfaces a warning instead of failing silently.
+- **Integrations:** Only integrations that can actually connect to Flint are shown.
+- **Packaging and updater:** Windows CI launches the packaged exe until the sidecar is ready. About can Install / show progress / Restart to update / Later. This release is the first `channel=stable` publish.
 
-### Patch Changes
+### Installing and upgrading
 
-- 9496298: Fix Azure OIDC-based Windows signing by pinning the release job to the stable GitHub environment `release`, preflighting the OIDC subject, and supporting stable-branch rebuilds of existing tags.
+- **From 0.7.0 evaluation:** keep that build installed; after 0.9.0 is published as the latest full release, About should offer the update. Do not install 0.9.0 as a GitHub prerelease or the updater will not see it.
+- **Fresh install:** Windows `.msi` or `-setup.exe` from [GitHub Releases](https://github.com/joelst/flint/releases). macOS remains unsigned evaluation-only (`scripts/install-macos.sh` or `xattr -cr`).
+- **Rollback:** install the previous Windows MSI/NSIS from GitHub Releases; the updater does not downgrade.
 
-## 0.4.1
+## 0.7.0
 
-### Patch Changes
+Flint 0.7.0 is a foundation evaluation prerelease of the desktop control plane for Microsoft Foundry Local. This release establishes a dependable desktop runtime, truthful service and accelerator lifecycle states, isolated per-conversation data integrity, and a documented extension boundary for tools and experiments.
 
-- 5fdf366: Integrate Windows release code signing with Azure Trusted Signing private trust.
-- e8a7c81: Fix release workflow failing on non-strict-semver tags (e.g. `v0.4-mvp`) by normalizing a missing patch component to `0` before validating and syncing the version across `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml`.
-- a6a7e51: Add mocked Pester coverage for the Azure Trusted Signing invocation path.
+### Highlights & Capabilities
 
-## 0.4.0
+- **Native Runtime Supervision:** A thin Rust supervisor owns the long-lived Foundry sidecar process, enforces single-instance application launches with existing-window restore, manages generation-tagged stdio JSON-lines communication, and provides bounded write queue backpressure.
+- **Model Catalog & Execution Providers:** Discover, download, load, and manage models directly from the Foundry Local SDK catalog. Hardware-aware accelerator tracks (CPU, DirectML/CUDA GPU, NPU) are verified before assignment.
+- **Bring Your Own Model (BYOM) & Linked Storage:** Import local ONNX model folders with automatic prompt template synthesis and editing (`inference_model.json`), and link external model directories via directory junctions without copying files or modifying foreign folders.
+- **Cache Inventory & Management:** Read-only cache inventory analysis detects duplicate model variants across cache roots, partial download artifacts, and reclaimable disk space.
+- **Chat & Conversation Integrity:** Durable per-conversation storage isolates message histories, persists individual settings (model alias, persona, context length, and thread view), supports multi-image vision attachment, host-aware context, URL fetching into context, and offers conversation export (JSON, Markdown, text) with storage safety warnings.
+- **Audio & Transcription:** Local speech-to-text audio transcription supporting microphone input and file uploads, protected by strict browser WAV normalization validation before passing bytes to the decoding engine.
+- **Model Arena:** Side-by-side multi-model comparison allowing side-by-side prompting, live streaming generation across candidate models, scoring, and evaluation result export.
+- **OpenAI-Compatible Local Endpoint:** Reverse proxy gateway running on loopback (`http://127.0.0.1:<port>/v1`) or configurable network interfaces. Features on-demand auto-loading for unresident cached models upon receiving inference requests, and normalizes chat completion JSON and SSE responses with `[DONE]` termination.
+- **Monitoring & Resource Watchdog:** Real-time resource gauges, active model pool tracking with LRU eviction and pinning options, memory watchdog alerts, and diagnostic access logging with JSON/CSV export.
+- **Zero-Dependency Packaging:** Installers bundle Node 22 runtime binaries and Foundry Local native core libraries, eliminating the requirement for a pre-installed system Node runtime.
 
-### Minor Changes
+### Installing This Prerelease
 
-- 814c3af: Bundle Node 22 for the Foundry JS sidecar in release builds (Tauri externalBin; PATH Node remains a dev fallback). Ship Help/first-run coach, empty-state CTAs, and About strip. Document optional control CLI as non-goal for 0.4; regenerate package-lock for npm ci on Node 22.
+Flint 0.7.0 is published as a GitHub prerelease, so the in-app updater will not offer it. GitHub's `releases/latest` pointer skips prereleases by design, and this build is an evaluation handoff rather than an in-place upgrade. Install it manually from the release assets: the `.msi` or `-setup.exe` on Windows, or the `.dmg` on macOS Apple Silicon (see the note below).
 
-## 0.3.4
+### macOS Installation Note
 
-### Patch Changes
+macOS builds are currently unsigned and require Apple Silicon (macOS 14+). When downloaded via a browser, macOS Gatekeeper may display a warning that the package is damaged or cannot be opened. To install and launch cleanly:
 
-- 631a81f: Remove unsupported x86_64-apple-darwin (Intel macOS) target from the release build matrix. Foundry Local SDK does not publish native cores for darwin-x64, which caused the release build to fail intentionally rather than ship a broken sidecar.
+```bash
+# Recommended one-line install:
+curl -fsSL https://raw.githubusercontent.com/joelst/flint/main/scripts/install-macos.sh | bash
 
-## 0.3.3
-
-### Patch Changes
-
-- f16d761: 0.3.2: package Foundry natives in installers as Flint.exe, fix production sidecar resolution and service rebind on network Apply & restart, and confirm non-loopback bind settings.
-
-## 0.3.1
-
-### Patch Changes
-
-- c413a91: Add acceleration-aware notifications for newer downloaded model variants.
-- 724eecf: Fix release build failure by using platform-specific bundle targets (msi/nsis on Windows, dmg/app on macOS) and enabling updater artifacts via `createUpdaterArtifacts` in the Tauri config.
-
-All notable changes to this project will be documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-Entries are normally produced via [Changesets](https://github.com/changesets/changesets) (`npm run changeset` → Version Packages PR).
-
-## [Unreleased]
-
-### Added
-
-- (Changesets will populate entries here when Version Packages PRs are merged.)
-
-## [0.3.0]
-
-### Added
-
-- **Model pool** — concurrent multi-model load with variant-ID HTTP routing; pool visible in Monitor.
-- **Monitor** — live pool table, resource gauges, access log, audit export (CSV/JSON).
-- **Access log + audit trail** — ring buffer + `~/.flint/logs/` rotation; audit entries for destructive/config sidecar commands.
-- **Network config** — configurable bind address and port in Settings (loopback default; warning for non-loopback).
-- **Keyboard shortcuts** — view navigation, new chat, send, push-to-talk, `?` reference panel.
-- **Autostart + defaults** — OS login-item toggle; default chat/audio model pre-selection.
-- **Vision** — multi-image attach (up to 4), thumbnails, paste and drag-and-drop.
-- **Model comparison** — side-by-side bake-off, ratings, markdown export.
-- **Model update notifications** — detect newer catalog versions for each downloaded acceleration-specific variant and provide a direct update download.
-- **Integrations** — data-driven OpenAI-compatible tool snippets with OS toggle and copy.
-- **Host-aware chat context** — compact identity every turn; expanded fact sheet when the user asks about Flint/Foundry.
-- **Guarded web-fetch → chat context** — user-initiated URL fetch with SSRF/size limits and article extraction.
-- **Purview governance memo** — design-only (`docs/PURVIEW_GOVERNANCE.md`).
-- **Release pipeline scaffolding** — updater plugin hooks, signing workflow steps (self-signed bootstrap).
-- **Node.js preflight** — check Node 22+ on PATH before starting the JS sidecar (security-supported floor); actionable install guidance when missing or too old.
-- **Docs consolidation** — living docs index, DEVELOPMENT/RELEASE guides, archived historical plans, backlog for deferred items.
-
-### Changed
-
-- README and design spec aligned to 0.3 status; honest prerequisites (bundled Foundry runtime; Node required for sidecar).
-
-### Notes
-
-- Version was bumped to 0.3.0 across package manifests; this section records shipped scope for the tag. Updater pubkey and code-signing secrets remain release-operator steps (see `docs/RELEASE.md` and `RELEASE_ROADMAP.md`).
-
-## [0.2.0]
-
-### Minor Changes
-
-- Setup Changesets for PR-driven versioning. New pull requests must now include a changeset (via `npm run changeset`) so that they drive the next app version bump across `package.json`, `tauri.conf.json`, and `Cargo.toml`. Added sync script, CI enforcement, and GitHub Action to manage Version Packages PRs.
-
-## [0.1.0] - Initial
-
-- Initial Flint MVP.
+# Or for manual DMG installs, clear the quarantine flag:
+xattr -cr /Applications/Flint.app
+```

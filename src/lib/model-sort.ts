@@ -1,122 +1,91 @@
-/**
- * Model list sorting and grouping helpers.
- *
- * The Foundry Local catalog reports `family` as null for every model today, so a
- * family grouping has to be derived from the alias. Derivation is only ever used
- * as a *sort/group key* and as an *additional* search target — never as the sole
- * filter dimension, so a bad derivation can never hide a model from the list.
- */
+/** How the model catalog list is ordered. */
+export type ModelSortMode = 'name' | 'family' | 'updated';
 
-export type ModelSortKey = 'family' | 'name' | 'newest';
+export const MODEL_SORT_MODES: ModelSortMode[] = ['name', 'family', 'updated'];
 
-export const MODEL_SORT_OPTIONS: Array<{ value: ModelSortKey; label: string }> = [
-  { value: 'family', label: 'Model family' },
-  { value: 'name', label: 'Model name' },
-  // The catalog exposes `createdAt`, not a modification date. Label it honestly.
-  { value: 'newest', label: 'Newest first' },
-];
-
-export function isModelSortKey(value: unknown): value is ModelSortKey {
-  return value === 'family' || value === 'name' || value === 'newest';
+export function isModelSortMode(value: unknown): value is ModelSortMode {
+  return typeof value === 'string' && (MODEL_SORT_MODES as string[]).includes(value);
 }
 
-/** Tokens that mark the start of a size/variant suffix rather than the family name. */
+/**
+ * The catalog reports `createdAt` in unix *seconds*, and omits it for some models.
+ * A missing date sorts as oldest rather than as "now", so unknown models do not
+ * displace genuinely recent ones at the top of the list.
+ */
+export function modelUpdatedAt(model: any): number {
+  const raw = model?.createdAt ?? model?.info?.createdAt ?? null;
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : 0;
+}
+
 const VARIANT_TOKENS = new Set([
   'instruct', 'chat', 'reasoning', 'turbo', 'base', 'tiny', 'small', 'medium',
   'large', 'mini', 'preview', 'it', 'text', 'vision', 'distill',
 ]);
-
-/** Matches parameter-count tokens such as `7b`, `0.5b`, `600m`. */
 const SIZE_TOKEN = /^\d+(\.\d+)?[bm]$/i;
-/** Matches version tokens such as `v2`, `v0.2`, `v3`. */
 const VERSION_TOKEN = /^v\d+(\.\d+)?$/i;
-/** Matches bare date-ish/build tokens such as `2512`. */
 const BUILD_TOKEN = /^\d{3,}$/;
 
-/**
- * Derive a family label from a model alias by stripping trailing size/variant tokens.
- * `qwen2.5-coder-7b` -> `qwen2.5-coder`, `whisper-large-v3-turbo` -> `whisper`.
- */
 export function deriveModelFamily(alias: string | null | undefined): string {
   const raw = String(alias ?? '').trim().toLowerCase();
   if (!raw) return '';
   const parts = raw.split('-').filter(Boolean);
-  const kept: string[] = [];
+  const family: string[] = [];
   for (const part of parts) {
-    if (SIZE_TOKEN.test(part) || VERSION_TOKEN.test(part) || BUILD_TOKEN.test(part)) break;
-    if (VARIANT_TOKENS.has(part)) break;
-    kept.push(part);
+    if (
+      SIZE_TOKEN.test(part) ||
+      VERSION_TOKEN.test(part) ||
+      BUILD_TOKEN.test(part) ||
+      VARIANT_TOKENS.has(part)
+    ) {
+      break;
+    }
+    family.push(part);
   }
-  // Never return empty: an alias that is entirely variant tokens keeps its full name.
-  return kept.length ? kept.join('-') : raw;
+  return family.length > 0 ? family.join('-') : raw;
 }
 
-/** Family label shown in the UI, falling back to the catalog value when present. */
 export function modelFamilyLabel(model: any): string {
-  const catalogFamily = typeof model?.family === 'string' ? model.family.trim() : '';
+  const catalogFamily = String(model?.family ?? model?.info?.family ?? '').trim();
   if (catalogFamily) return catalogFamily.toLowerCase();
-  return deriveModelFamily(model?.alias);
+  const alias = String(model?.alias ?? '').trim().toLowerCase();
+  const derived = deriveModelFamily(alias);
+  return derived && derived !== alias ? derived : '';
 }
 
-function compareAlias(a: any, b: any): number {
+export function modelMatchesSearch(model: any, term: string): boolean {
+  const needle = String(term ?? '').trim().toLowerCase();
+  if (!needle) return true;
+  const alias = String(model?.alias ?? '').toLowerCase();
+  return alias.includes(needle) || modelFamilyLabel(model).includes(needle);
+}
+
+/**
+ * Compare two models for the chosen ordering.
+ *
+ * Every mode falls through to alias so the order is total: without a tie-break the list
+ * reshuffles on each refresh whenever two models share a family or a date.
+ */
+export function compareModels(a: any, b: any, mode: ModelSortMode): number {
+  if (mode === 'updated') {
+    const diff = modelUpdatedAt(b) - modelUpdatedAt(a); // newest first
+    if (diff !== 0) return diff;
+  } else if (mode === 'family') {
+    const fa = modelFamilyLabel(a);
+    const fb = modelFamilyLabel(b);
+    if (fa !== fb) {
+      // Models with no family belong at the end, not under a blank heading.
+      if (!fa) return 1;
+      if (!fb) return -1;
+      return fa.localeCompare(fb, undefined, { numeric: true, sensitivity: 'base' });
+    }
+  }
   return String(a?.alias ?? '').localeCompare(String(b?.alias ?? ''), undefined, {
     numeric: true,
     sensitivity: 'base',
   });
 }
 
-/**
- * Catalog publish time (unix seconds). Foundry nests model metadata inconsistently,
- * so probe the same locations as `formatModelUpdated` in the Models view and coerce,
- * otherwise every model scores 0 and "Newest" silently degrades to alphabetical.
- */
-function createdAtOf(model: any): number {
-  const raw =
-    model?.createdAt ??
-    model?.createdAtUnix ??
-    model?.info?.createdAt ??
-    model?.info?.createdAtUnix ??
-    model?.info?.info?.createdAt ??
-    model?.info?.info?.createdAtUnix ??
-    null;
-  const unix = Number(raw);
-  if (!Number.isFinite(unix) || unix <= 0) return 0;
-  // Foundry reports seconds; tolerate millisecond values just in case.
-  return unix > 1e12 ? unix : unix * 1000;
-}
-
-/**
- * Returns a new sorted array; the input is not mutated.
- * All comparators fall back to alias order so the result is stable and deterministic.
- */
-export function sortModels<T>(models: readonly T[], key: ModelSortKey): T[] {
-  const list = [...(models ?? [])];
-  if (key === 'name') {
-    return list.sort(compareAlias);
-  }
-  if (key === 'newest') {
-    return list.sort((a, b) => {
-      const diff = createdAtOf(b) - createdAtOf(a);
-      return diff !== 0 ? diff : compareAlias(a, b);
-    });
-  }
-  return list.sort((a, b) => {
-    const famDiff = modelFamilyLabel(a).localeCompare(modelFamilyLabel(b), undefined, {
-      numeric: true,
-      sensitivity: 'base',
-    });
-    return famDiff !== 0 ? famDiff : compareAlias(a, b);
-  });
-}
-
-/**
- * Search predicate. Deliberately additive: a model matches if the query hits the
- * alias OR the derived family, so a mis-derived family can never hide a model.
- */
-export function modelMatchesSearch(model: any, term: string): boolean {
-  const needle = String(term ?? '').trim().toLowerCase();
-  if (!needle) return true;
-  const alias = String(model?.alias ?? '').toLowerCase();
-  if (alias.includes(needle)) return true;
-  return modelFamilyLabel(model).includes(needle);
+/** Sort a copy, so the caller's array (and any reactive state) is left alone. */
+export function sortModels<T>(models: T[], mode: ModelSortMode): T[] {
+  return [...models].sort((a, b) => compareModels(a, b, mode));
 }

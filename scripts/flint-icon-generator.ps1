@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Updates Flint app icon assets from a source image using ffmpeg.
+    Updates Flint app icon assets from a source image using ffmpeg and the Tauri CLI.
 
 .DESCRIPTION
     This script updates icon assets used by the app in:
@@ -101,6 +101,9 @@ Write-Host "`nUpdating Flint icon assets from: $($sourceImagePath)" -ForegroundC
 Write-Host "Repository root: $($repositoryRootPath)`n" -ForegroundColor Cyan
 
 $staticTargets = @(
+    @{ Name = '32x32.png'; Size = 32 },
+    @{ Name = '64x64.png'; Size = 64 },
+    @{ Name = '128x128.png'; Size = 128 },
     @{ Name = 'icon-32x32.png'; Size = 32 },
     @{ Name = 'icon-64x64.png'; Size = 64 },
     @{ Name = 'icon-128x128.png'; Size = 128 },
@@ -122,50 +125,50 @@ Write-Host "Updating static\icon.ico..." -NoNewline
 New-ResizedImage -InputPath $sourceImagePath -OutputPath $staticIcoPath -Size 256
 Write-Host ' Done' -ForegroundColor Green
 
-$tauriTargets = @(
-    @{ Name = '32x32.png'; Size = 32 },
-    @{ Name = '128x128.png'; Size = 128 },
-    @{ Name = '128x128@2x.png'; Size = 256 },
-    @{ Name = 'icon.png'; Size = 512 },
-    @{ Name = 'Square30x30Logo.png'; Size = 30 },
-    @{ Name = 'Square44x44Logo.png'; Size = 44 },
-    @{ Name = 'Square71x71Logo.png'; Size = 71 },
-    @{ Name = 'Square89x89Logo.png'; Size = 89 },
-    @{ Name = 'Square107x107Logo.png'; Size = 107 },
-    @{ Name = 'Square142x142Logo.png'; Size = 142 },
-    @{ Name = 'Square150x150Logo.png'; Size = 150 },
-    @{ Name = 'Square284x284Logo.png'; Size = 284 },
-    @{ Name = 'Square310x310Logo.png'; Size = 310 },
-    @{ Name = 'StoreLogo.png'; Size = 50 }
+$generatedIconsFolder = Join-Path ([System.IO.Path]::GetTempPath()) ("flint-icons-$([System.Guid]::NewGuid().ToString('N'))")
+$tauriIconNames = @(
+    '32x32.png',
+    '128x128.png',
+    '128x128@2x.png',
+    'icon.png',
+    'icon.ico',
+    'icon.icns',
+    'Square30x30Logo.png',
+    'Square44x44Logo.png',
+    'Square71x71Logo.png',
+    'Square89x89Logo.png',
+    'Square107x107Logo.png',
+    'Square142x142Logo.png',
+    'Square150x150Logo.png',
+    'Square284x284Logo.png',
+    'Square310x310Logo.png',
+    'StoreLogo.png'
 )
 
-foreach ($target in $tauriTargets) {
-    $destinationPath = Join-Path $tauriIconsFolder $target.Name
-    Write-Host "Updating src-tauri\icons\$($target.Name)..." -NoNewline
-    New-ResizedImage -InputPath $sourceImagePath -OutputPath $destinationPath -Size $target.Size
-    Write-Host ' Done' -ForegroundColor Green
-}
-
-$tauriIcoPath = Join-Path $tauriIconsFolder 'icon.ico'
-Write-Host 'Updating src-tauri\icons\icon.ico...' -NoNewline
-New-ResizedImage -InputPath $sourceImagePath -OutputPath $tauriIcoPath -Size 256
-Write-Host ' Done' -ForegroundColor Green
-
-$tauriIcnsPath = Join-Path $tauriIconsFolder 'icon.icns'
-Write-Host 'Updating src-tauri\icons\icon.icns...' -NoNewline
-$png2Icns = Get-Command png2icns -ErrorAction SilentlyContinue
-if ($png2Icns) {
-    $tempIcnsPng = Join-Path $tauriIconsFolder 'icon.icns.source.1024.png'
-    New-ResizedImage -InputPath $sourceImagePath -OutputPath $tempIcnsPng -Size 1024
-    & $png2Icns.Path $tauriIcnsPath $tempIcnsPng
-    if ($LASTEXITCODE -ne 0) {
-        throw 'png2icns failed while generating src-tauri\icons\icon.icns'
+try {
+    New-Item -ItemType Directory -Path $generatedIconsFolder | Out-Null
+    Push-Location $repositoryRootPath
+    try {
+        & npx tauri icon $sourceImagePath --output $generatedIconsFolder
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Tauri icon generation failed'
+        }
+    } finally {
+        Pop-Location
     }
-    Remove-Item -LiteralPath $tempIcnsPng -Force
-    Write-Host ' Done' -ForegroundColor Green
-} else {
-    Write-Host ' Skipped' -ForegroundColor Yellow
-    Write-Warning 'png2icns is not available on this machine, so src-tauri\icons\icon.icns was not regenerated. Run this script on macOS with png2icns installed to refresh icon.icns.'
+
+    foreach ($name in $tauriIconNames) {
+        $generatedPath = Join-Path $generatedIconsFolder $name
+        if (-not (Test-Path -LiteralPath $generatedPath)) {
+            throw "Tauri icon generation did not create: $($name)"
+        }
+        Copy-Item -LiteralPath $generatedPath -Destination (Join-Path $tauriIconsFolder $name) -Force
+    }
+    Copy-Item -LiteralPath (Join-Path $generatedIconsFolder 'icon.ico') -Destination $staticIcoPath -Force
+} finally {
+    if (Test-Path -LiteralPath $generatedIconsFolder) {
+        Remove-Item -LiteralPath $generatedIconsFolder -Recurse -Force
+    }
 }
 
 Write-Host "`n========================================" -ForegroundColor Cyan

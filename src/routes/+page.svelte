@@ -1,41 +1,36 @@
 <script lang="ts">
   // @ts-nocheck  // runes ($state etc.) are handled by Svelte compiler, not raw TS
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
+  import { isPoolEntryResident } from "$lib/pool-residency";
+  import { providerRecheckStatus } from "$lib/provider-recheck-status";
   import MessageRenderer from "$lib/MessageRenderer.svelte";
   import ConversationSidebar from "$lib/ConversationSidebar.svelte";
   import Icon from "$lib/Icon.svelte";
   import type { Conversation } from "$lib/ConversationSidebar.svelte";
-  import { planSegmentation } from "$lib/audio-segmentation";
-  import {
-    buildSrt,
-    buildSrtTimingMetadata,
-    buildVtt,
-    buildTimestampedText,
-    formatClockTime,
-    TIMESTAMP_DISCLAIMER,
-    type TranscriptSegment,
-  } from "$lib/transcript-format";
-  import {
-    MODEL_SORT_OPTIONS,
-    isModelSortKey,
-    modelMatchesSearch,
-    sortModels,
-    modelFamilyLabel,
-    type ModelSortKey,
-  } from "$lib/model-sort";
   import {
     initializeSDK,
+    setAutomaticCatalogRefreshEnabled,
     getSDKState,
     getEps,
-    refreshModels,
+    refreshModels as sdkRefreshModels,
     ensureAccelerators,
+    isAcceleratorReadinessCurrent,
     getRecommendedStarterModels,
     getSTTModels,
     startService,
+    ensureServiceRunning as sdkEnsureServiceRunning,
     stopService,
+    stopAndUnload,
+    quitRuntime,
+    quitDesktopApp,
+    relaunchApp,
+    subscribeQuitFlush,
+    withServiceTransition,
     downloadModel,
     loadModel as sdkLoadModel,
+    getSidecarGeneration,
     unloadModel as sdkUnloadModel,
+    unloadModelIfIdle as sdkUnloadModelIfIdle,
     deleteModel as sdkDeleteModel,
     chatCompletion,
     chatCompletionStream,
@@ -44,14 +39,59 @@
     fetchUrl,
     appendAppLog,
     getAccessLog,
+    getHealthRing,
+    getCacheInventory,
     pollPoolStatus,
     ensureNodeRuntime,
     formatNodeVersion,
     MIN_NODE_VERSION,
+    inspectModelFolder,
+    importModelFolder,
+    linkModelFolder,
+    getModelTemplate,
+    setModelTemplate,
+    validatePromptTemplate,
+    TEMPLATE_ROLES,
+    TEMPLATE_PRESETS,
+    setEvictionConfig as sdkSetEvictionConfig,
+    applyMemorySettings as sdkApplyMemorySettings,
+    setBenchmarkExclusive as sdkSetBenchmarkExclusive,
+    reconcileBenchmarkExclusive,
+    getLastAppliedMemorySettingsSeq,
+    getWslStatus,
+    enableWslMirroredNetworking,
+    shutdownWsl,
+    isUncertainOutcome,
+    cancelBeforeDispatch,
+    isServiceStartUncertain,
+    SidecarOperationError,
+    type WslStatusInfo,
     type ModelInfo,
     type EpInfo,
+    type AcceleratorReadiness,
     type LogEntry,
+    type CacheInventory,
   } from "$lib/sdk";
+  import { evaluateStartupPreload, publishedAccelerationLabels } from "$lib/accelerator-readiness";
+  import { failureLogLine, summarizeFailure } from "$lib/status-message";
+  import {
+    evaluate as evaluateWatch,
+    emptyWatchState,
+    normalizeWatchConfig,
+    dismissAll as dismissAllWatch,
+    formatAlertSummary,
+    formatAlertAdvice,
+    toWatchSample,
+    DEFAULT_WATCH_CONFIG,
+  } from "$lib/memory-watchdog";
+  import {
+    createSingleFlight,
+    createStartupAuthorization,
+    prepareHydratedRuntime,
+    resolveAcceleratorRestartGuidance,
+    resolveCatalogCheckPresentation,
+    resolveStartupAudioAlias,
+  } from "$lib/startup-sequence";
   import packageJson from "../../package.json";
 
   import {
@@ -73,10 +113,135 @@
   } from "$lib/integrations";
 
   import { enable as autostartEnable, disable as autostartDisable, isEnabled as autostartIsEnabled } from '$lib/autostart';
+  import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { check as checkForUpdate, type Update } from "@tauri-apps/plugin-updater";
+  import {
+    sortModels,
+    isModelSortMode,
+    modelFamilyLabel,
+    modelMatchesSearch,
+    type ModelSortMode,
+  } from '$lib/model-sort';
   import {
     buildFlintAwareSystemPrompt,
     contentToPlainText,
   } from "$lib/flint-context";
+  import {
+    parsePersistedState,
+    readPersistedTheme,
+    mayEnableAutosave,
+  } from "$lib/chat-persistence";
+  import {
+    openConversationArchive,
+    saveConversationArchive,
+  } from "$lib/conversation-repository";
+  import {
+    collectStoredArchive,
+    collectPreservedPayloads,
+    emptyCollection,
+    hasRecoveryCopies,
+    classifyDestination,
+    buildExportDocument,
+    serializeExportDocument,
+    exportFileName,
+  } from "$lib/conversation-export";
+  import {
+    applyMessagePatch,
+    captureThread,
+    createConversation as createSessionConversation,
+    deleteConversation as deleteSessionConversation,
+    ensureMessageIds,
+    findConversation,
+    selectConversation as selectSessionConversation,
+    snapshotMessages,
+    summarizeConversations,
+  } from "$lib/conversation-session";
+  import {
+    createEmptyArchive,
+    readConversationSettings,
+    type ConversationArchive,
+  } from "$lib/conversation-store";
+  import {
+    DEFAULT_APP_SETTINGS,
+    appSettingDefaultsToPersisted,
+    readAppSettingDefaults,
+    resolveConversationSettings,
+    seedSettingsFor,
+    type AppSettingDefaults,
+  } from "$lib/conversation-settings";
+  import { isFetchableUrl, detectFetchableUrls } from "$lib/url-chips";
+  import {
+    normalizeForAlternatingChat,
+    isEmptyAssistantPlaceholder,
+  } from "$lib/chat-request";
+  import {
+    catalogModelForEndpointId,
+    flintVerifiedFromReport,
+    groupSelfTestChecks,
+    runEndpointSelfTest,
+    type FlintVerified,
+    type SelfTestReport,
+  } from "$lib/endpoint-self-test";
+  import { buildEndpointModelClassifier } from "$lib/endpoint-model-classification";
+  import { endpointLoadTarget } from "$lib/endpoint-load-target";
+  import { decodeWavPcm, getWavDurationSeconds } from "$lib/audio-pcm-decode";
+  import { planSegmentation } from "$lib/audio-segmentation";
+  import {
+    assembleLongAudioTranscript,
+    type TranscriptGap,
+    type TranscriptRange,
+    type TranscriptionWindowOutcome,
+  } from "$lib/long-audio-transcript";
+  import {
+    buildCaptionDownloads,
+    buildTimestampedText,
+    buildTimingDisclaimer,
+    formatClockTime,
+    type TranscriptSegment,
+  } from "$lib/transcript-format";
+  import { sniffAudioFormat } from "../../sidecar/audio-format.js";
+  import { looksLikeSpeech } from "../../sidecar/model-classification.js";
+  import { recommendedMaxTurns as recommendedMaxTurnsFor, clampContextTurns, MIN_CONTEXT_TURNS, MAX_CONTEXT_TURNS } from "$lib/context-turns";
+  import {
+    createSelfTestResidencyController,
+    preferredResidentChatAlias,
+  } from "$lib/endpoint-self-test-residency";
+  import {
+    COMPARE_HISTORY_MAX,
+    COMPARE_MAX_SLOTS,
+    compareSlotKey,
+    cloneCompareResults,
+    loadComparisonHistory,
+    saveComparisonHistory,
+    renderComparisonMarkdown,
+    type CompareSlot,
+    type CompareResult,
+    type SavedComparison,
+  } from "$lib/comparison-history";
+  import {
+    buildFailedCompareResult,
+    buildSettledCompareResult,
+    buildStoppedPreDispatchResult,
+    classifyCompareSlotError,
+  } from "$lib/compare-slot-outcome";
+  import BenchmarkPreview from "$lib/BenchmarkPreview.svelte";
+  import { type StopController } from "$lib/benchmark-runner";
+  import {
+    startBenchmarkSession,
+    resumeBenchmarkSession,
+    type BenchmarkLifecycleHost,
+  } from "$lib/benchmark-lifecycle";
+  import {
+    acquirePriorityLease,
+    releasePriorityLease,
+    overlayPinnedPriorities,
+    overlayResidentCapFloor,
+    computeResidentCapFloor,
+  } from "$lib/benchmark-priority-lease";
+  import { assertBenchmarkGeneration } from "$lib/benchmark-generation-guard";
+  import { createPendingCallTracker } from "$lib/pending-call-tracker";
+  import { createExclusiveReleaseRetrier, type ExclusiveReleaseRetrier } from "$lib/benchmark-exclusive-retry";
+  import type { BenchmarkSuite } from "$lib/benchmark-suite";
 
   // Integrations tab state
   let integrationsOS = $state<'windows' | 'unix'>(detectPlatform());
@@ -94,21 +259,218 @@
   function statusBadgeLabel(status: IntegrationStatus): string {
     if (status === 'verified') return 'Verified';
     if (status === 'community') return 'Community-reported';
-    if (status === 'research-needed') return 'Unverified';
-    return 'Not supported';
+    return 'Unverified';
   }
 
   // Simple client-side navigation
-  type View = "models" | "chat" | "audio" | "monitor" | "diagnostics" | "integrations" | "help" | "settings" | "compare";
+  type View = "models" | "chat" | "audio" | "monitor" | "diagnostics" | "integrations" | "help" | "settings" | "compare" | "benchmark";
   let currentView = $state<View>("models");
+
+  // Keep last Chat/Voice view in sync with every currentView assignment (shortcuts, model-load, CTAs), not only the toggle.
+  let playgroundLastView = $state<"chat" | "audio">("chat");
+  $effect(() => {
+    if (currentView === "chat" || currentView === "audio") playgroundLastView = currentView;
+  });
+
+  // Disabling the preview flag while the Benchmark view is open must navigate away immediately
+  // — an ungated route must never stay reachable just because it was already open.
+  $effect(() => {
+    if (currentView === "benchmark" && !benchmarkPreviewEnabled) currentView = "models";
+  });
 
   const FIRST_RUN_KEY = "flint-first-run-dismissed-v1";
   let showFirstRunCoach = $state(false);
+
+  async function refreshCatalogModels() {
+    let catalogProgressMessage = "";
+    try {
+      await sdkRefreshModels(
+        (epName, pct) => {
+          catalogProgressMessage = `Catalog accelerator ${epName}: ${pct.toFixed(0)}%`;
+          statusMessage = catalogProgressMessage;
+        },
+        () => {
+          catalogProgressMessage = "Catalog refresh: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.";
+          statusMessage = catalogProgressMessage;
+        },
+      );
+      setAutomaticCatalogRefreshEnabled(autoRefreshCatalogOnStartup);
+    } finally {
+      if (statusMessage === catalogProgressMessage) statusMessage = "";
+    }
+    if (
+      selectedModelAlias &&
+      selectedModelAlias !== activeConversationModelAlias() &&
+      state.models.length > 0 &&
+      !state.models.some((m: ModelInfo) => m.alias === selectedModelAlias)
+    ) {
+      appendAppLog(`Previously selected model "${selectedModelAlias}" is no longer available`, 'warn');
+      selectedModelAlias = "";
+      selectedModel = null;
+    }
+  }
 
   /** About strip — app + Node + service (Help + Settings). */
   const appVersion = String((packageJson as { version?: string }).version || "0.0.0");
   let nodeVersionLabel = $state<string>("Checking…");
   let nodeVersionOk = $state<boolean | null>(null);
+  let availableUpdate = $state<Update | null>(null);
+  let updateCheckAt = $state<number | null>(null);
+  let updateCheckError = $state<string | null>(null);
+  let updateCheckState = $state<"idle" | "checking" | "current" | "available" | "error">("idle");
+  let updateCheckBusy = $state(false);
+  let updateInstallState = $state<"idle" | "downloading" | "ready" | "deferred" | "error">("idle");
+  let updateInstallError = $state<string | null>(null);
+  let updateDownloadPercent = $state<number | null>(null);
+  let endpointSelfTestBusy = $state(false);
+  let endpointSelfTestReport = $state<SelfTestReport | null>(null);
+  let lastFlintVerified = $state<FlintVerified | null>(null);
+
+  async function installAvailableUpdate() {
+    if (!availableUpdate || updateInstallState === "downloading") return;
+    updateInstallState = "downloading";
+    updateInstallError = null;
+    updateDownloadPercent = 0;
+    let received = 0;
+    let total = 0;
+    try {
+      await availableUpdate.downloadAndInstall((event) => {
+        if (event.event === "Started") {
+          total = event.data.contentLength ?? 0;
+        } else if (event.event === "Progress") {
+          received += event.data.chunkLength;
+          updateDownloadPercent = total > 0 ? Math.min(100, Math.round((received / total) * 100)) : null;
+        } else if (event.event === "Finished") {
+          updateDownloadPercent = 100;
+        }
+      });
+      updateInstallState = "ready";
+    } catch (error) {
+      updateInstallState = "error";
+      updateInstallError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function restartToApplyUpdate() {
+    flushConversations();
+    await relaunchApp();
+  }
+
+  function deferAvailableUpdate() {
+    updateInstallState = "deferred";
+  }
+
+  async function runGatewaySelfTest() {
+    if (endpointSelfTestBusy) return;
+    if (state.models.length === 0) {
+      statusMessage = "Refresh the catalog before testing the endpoint.";
+      return;
+    }
+    if (benchmarkRunInFlight) {
+      statusMessage = "A benchmark run is active — stop it before changing loaded models.";
+      return;
+    }
+    // The Arena loads and unloads compare slots against the same pool; see runComparison.
+    if (isComparing || comparePreparing) {
+      statusMessage = "An Arena run is active — wait for it before testing the endpoint.";
+      return;
+    }
+    // The run snapshots the pool and later puts it back. A load or unload already in flight
+    // would land after that snapshot and be mistaken for the run's own work.
+    if (poolMutationsInFlight > 0) {
+      statusMessage = "A model is still loading or unloading — wait for it before testing the endpoint.";
+      return;
+    }
+    endpointSelfTestBusy = true;
+    try {
+      await pollPoolStatus();
+      const catalogModels = [...state.models];
+      const initialPool = [...loadedPoolEntries];
+      const classifyModel = buildEndpointModelClassifier(catalogModels);
+      const residency = createSelfTestResidencyController({
+        models: catalogModels,
+        initialPool,
+        currentPool: async () => {
+          await pollPoolStatus();
+          return [...loadedPoolEntries];
+        },
+        load: async (model, variantId) => {
+          await sdkLoadModel(model, undefined, variantId);
+        },
+        unload: async (alias) => {
+          await sdkUnloadModelIfIdle({ alias });
+        },
+      });
+      endpointSelfTestReport = await runEndpointSelfTest({
+        fetch,
+        endpoint: state.endpoint || null,
+        classifyModel,
+        disconnectModelId: preferredResidentChatAlias(initialPool, classifyModel),
+        supportsToolCalling: (modelId: string) =>
+          catalogModelForEndpointId(catalogModels, modelId)?.supportsToolCalling ?? null,
+        prepareSpeechModel: async (modelId: string) => {
+          // The same cached build the gateway routes this id to: highest cached version for
+          // a versionless id, never an uncached one.
+          const target = endpointLoadTarget(catalogModels, modelId);
+          if (!target) throw new Error(`Cached speech model ${modelId} is unavailable.`);
+          const loaded = await sdkLoadModel(target.model, undefined, target.variantId ?? undefined);
+          if (typeof loaded?.variantId !== "string" || !loaded.variantId) {
+            throw new Error(`Cached speech model ${modelId} did not report a loaded variant.`);
+          }
+          return loaded.variantId;
+        },
+        beforeModelProbe: residency.observe,
+        afterModelProbe: residency.restore,
+        onProgress: (event) => {
+          statusMessage = `Testing ${event.modelId} (${event.index + 1} of ${event.total})…`;
+        },
+      });
+      lastFlintVerified = flintVerifiedFromReport(endpointSelfTestReport);
+    } catch (error) {
+      // The run said nothing about the endpoint, so an earlier run's badge must not stand in
+      // for it: the details view would show models as verified beside a failed run.
+      lastFlintVerified = null;
+      endpointSelfTestReport = {
+        ranAt: new Date().toISOString(),
+        endpoint: state.endpoint || null,
+        modelId: selectedModelAlias || null,
+        modelIds: [],
+        embeddingModelId: null,
+        embeddingModelIds: [],
+        speechModelIds: [],
+        checks: [{
+          id: "run",
+          title: "Self-test runner",
+          status: "fail",
+          detail: error instanceof Error ? error.message : String(error),
+        }],
+      };
+    } finally {
+      // The run loaded and unloaded models on its way through; show the pool as it is now
+      // rather than as the last poll before the run saw it.
+      await pollPoolStatus().catch(() => {});
+      endpointSelfTestBusy = false;
+    }
+  }
+
+  async function refreshUpdateStatus() {
+    if (updateCheckBusy) return;
+    updateCheckBusy = true;
+    updateCheckState = "checking";
+    updateCheckError = null;
+    try {
+      availableUpdate = await checkForUpdate();
+      updateCheckAt = Date.now();
+      updateCheckState = availableUpdate ? "available" : "current";
+    } catch (error) {
+      availableUpdate = null;
+      updateCheckAt = Date.now();
+      updateCheckError = error instanceof Error ? error.message : String(error);
+      updateCheckState = "error";
+    } finally {
+      updateCheckBusy = false;
+    }
+  }
 
   async function refreshNodeAboutLine() {
     try {
@@ -158,7 +520,7 @@
       caps = String(info.capabilities || '').toLowerCase();
     }
     if (task.includes('automatic-speech-recognition') || task.includes('stt') || caps.includes('automatic-speech-recognition')) return false;
-    if (alias.includes('whisper') || alias.includes('-stt') || alias.includes('stt-')) return false;
+    if (looksLikeSpeech(alias)) return false;
     if (task.includes('embedding') || alias.includes('embed')) return false;
     return true;
   }
@@ -310,71 +672,74 @@
     });
   }
 
-  function getApplicableAccelerationLabels(
-    model: any,
-    eps: EpInfo[],
-    platform: "windows" | "macos" | "linux" | "unknown",
-  ): string[] {
-    const labels: string[] = [];
-    const has = { cpu: false, gpu: false, npu: false };
-    for (const ep of eps || []) {
-      if (!ep.isRegistered) continue;
-      const kind = classifyExecutionProvider(ep.name);
-      if (kind === "cpu" && !has.cpu) {
-        labels.push("CPU");
-        has.cpu = true;
-      }
-      if (kind === "gpu" && !has.gpu) {
-        labels.push(platform === "macos" ? "Apple GPU (CoreML/Metal)" : "GPU");
-        has.gpu = true;
-      }
-      if (kind === "npu" && !has.npu) {
-        labels.push("NPU");
-        has.npu = true;
-      }
-    }
-
-    if (!has.cpu) labels.push("CPU");
-    if (platform === "macos" && !has.gpu) labels.push("Apple GPU (CoreML/Metal)");
-    if (platform === "windows" && !has.gpu) labels.push("GPU (DirectML if installed)");
-    if (platform === "windows" && !has.npu) labels.push("NPU (QNN if installed)");
-    if (platform === "linux" && !has.gpu) labels.push("GPU (CUDA/ROCm if installed)");
-
-    const sizeMb = parseModelSizeMb(model);
-    if (sizeMb && sizeMb > 10_000 && !labels.some((l) => l.includes("GPU"))) {
-      labels.push("GPU recommended for this size");
-    }
-    return [...new Set(labels)];
-  }
-
   function describeAccelerationFit(model: any, preference: string): string {
+    const published = publishedAccelerationLabels(model?.variants);
+    if (!published.length) {
+      return "Flint could not determine which device builds are published for this model.";
+    }
+    const publishedText = published.join(", ");
     if (preference === "auto") {
-      return "Auto mode: runtime will choose the best available execution provider.";
+      return `Auto uses a published build (${publishedText}).`;
     }
     const kind = classifyExecutionProvider(preference);
-    const sizeMb = parseModelSizeMb(model) ?? 0;
-    if (kind === "npu") {
-      return sizeMb > 7000
-        ? "Large model for NPU-only workflows; expect slower startup or fallback."
-        : "Good candidate for NPU acceleration if the runtime supports this model/provider pair.";
+    const wants = kind === "gpu" ? "GPU" : kind === "npu" ? "NPU" : kind === "cpu" ? "CPU" : null;
+    if (wants && !published.includes(wants)) {
+      return `No ${wants} build to download. Published: ${publishedText}.`;
     }
-    if (kind === "gpu") {
-      return "Good candidate for GPU acceleration when compatible kernels are available.";
+    if (wants === "cpu") {
+      return "Will run on CPU; lower memory pressure but generally slower generation.";
     }
-    if (kind === "cpu") {
-      return "Will run on CPU; lower memory pressure but generally slower generation throughput.";
-    }
+    if (wants) return `A ${wants} build is published. Loading it still depends on that provider being installed.`;
     return "Provider selected. Runtime compatibility depends on model format and installed kernels.";
   }
 
-  async function refreshExecutionProviders() {
+  async function refreshExecutionProviders(
+    options?: { throwOnError?: boolean; refreshRecommendations?: boolean },
+  ) {
     if (!state.ready) return;
     try {
       await getEps();
       statusMessage = `${state.eps.length} execution providers detected`;
-      await loadRecommendations();
+      if (options?.refreshRecommendations !== false) {
+        await loadRecommendations();
+      }
     } catch (e: any) {
       statusMessage = `Provider check failed: ${e?.message || e}`;
+      if (options?.throwOnError) throw e;
+    }
+  }
+
+  let providerRecheckBusy = $state(false);
+
+  async function recheckProviders() {
+    if (!state.ready || providerRecheckBusy) return;
+    providerRecheckBusy = true;
+    statusMessage = "Rechecking execution providers...";
+    try {
+      const readiness = await ensureAccelerators(
+        (epName, pct) => {
+          statusMessage = `Provider ${epName}: ${pct.toFixed(0)}%`;
+        },
+        () => {
+          statusMessage = "Provider rebuild: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.";
+        },
+        { rebuildBroken: true },
+      );
+      await refreshExecutionProviders({
+        throwOnError: true,
+        refreshRecommendations: false,
+      });
+      if (!isAcceleratorReadinessCurrent(readiness)) {
+        throw new Error("Runtime changed while rechecking execution providers");
+      }
+      const outcome = providerRecheckStatus(readiness.registration, state.eps);
+      statusMessage = outcome.message;
+      if (outcome.failed) appendAppLog(statusMessage, "warn");
+    } catch (e: any) {
+      statusMessage = `Provider recheck failed: ${e?.message || e}`;
+      appendAppLog(statusMessage, "warn");
+    } finally {
+      providerRecheckBusy = false;
     }
   }
 
@@ -398,7 +763,7 @@
       task = String(info.task || '').toLowerCase();
       caps = String(info.capabilities || '').toLowerCase();
     }
-    return task.includes('automatic-speech-recognition') || task.includes('stt') || caps.includes('automatic-speech-recognition') || alias.includes('whisper');
+    return task.includes('automatic-speech-recognition') || task.includes('stt') || caps.includes('automatic-speech-recognition') || looksLikeSpeech(alias);
   }
 
   const sdkStateStore = getSDKState();
@@ -406,13 +771,38 @@
   // Local UI state (runes)
   let isLoadingModels = $state(false);
   let searchTerm = $state("");
-  let modelSortKey = $state<ModelSortKey>("family");
   let statusMessage = $state("");
+
+  /** Every model-load failure goes through here: the full native text (stack included)
+   * to the app log, one sentence to the header, which CSS truncates to the bar width
+   * while the hover title still shows the whole sentence.
+   *
+   * A rethrown failure is logged once — the outer catch re-reports it under its own
+   * prefix without repeating the stack in the log. */
+  const loggedFailures = new WeakSet<object>();
+  function reportFailure(prefix: string, error: unknown): string {
+    const tracked = error !== null && (typeof error === "object" || typeof error === "function");
+    if (!tracked || !loggedFailures.has(error as object)) {
+      appendAppLog(failureLogLine(prefix, error), "error");
+      if (tracked) loggedFailures.add(error as object);
+    }
+    statusMessage = summarizeFailure(prefix, error);
+    return statusMessage;
+  }
 
   // Mirror of SDK store for easy template access
   let state = $state({
+    runtime: {
+      process: "stopped",
+      manager: "unknown",
+      service: "unknown",
+      models: "unknown",
+      generation: 0,
+    },
     ready: false,
     error: null as string | null,
+    catalogStatus: "not-checked" as "not-checked" | "loading" | "ready" | "failed",
+    catalogError: null as string | null,
     models: [] as ModelInfo[],
     endpoint: undefined as string | undefined,
     eps: [] as EpInfo[],
@@ -428,6 +818,8 @@
   let recommendedStarters = $state([] as ModelInfo[]);
   let isLoadingRecommendations = $state(false);
   let selectedAccelerationPreference = $state<string>("auto");
+  let cacheInventory = $state<CacheInventory | null>(null);
+  let cacheInventoryLoading = $state(false);
   let hostPlatform = $state<"windows" | "macos" | "linux" | "unknown">("unknown");
   let isMac = $derived(hostPlatform === 'macos');
   const isDev = import.meta.env.DEV;
@@ -440,33 +832,8 @@
   let monitorLog = $state<any[]>([]);
   let monitorLogPaused = $state(false);
 
-  // Compare (bake-off): pick models/variants, prepare (download+load), run, save
-  type CompareSlot = {
-    key: string;
-    alias: string;
-    variantId: string | null;
-    label: string;
-    deviceType?: string | null;
-    executionProvider?: string | null;
-  };
-  type CompareResult = {
-    content: string;
-    latencyMs?: number;
-    tokensIn?: number;
-    tokensOut?: number;
-    rating?: "up" | "down" | null;
-    error?: string;
-  };
-  type SavedComparison = {
-    id: string;
-    createdAt: number;
-    prompt: string;
-    slots: CompareSlot[];
-    results: Record<string, CompareResult>;
-  };
-  const COMPARE_HISTORY_KEY = "flint-comparisons-v1";
-  const COMPARE_MAX_SLOTS = 3;
-  const COMPARE_HISTORY_MAX = 30;
+  // Compare (bake-off): pick models/variants, prepare (download+load), run, save.
+  // Types, slot identity, storage, and export live in $lib/comparison-history.ts.
 
   let compareSlots: CompareSlot[] = $state([]);
   let comparePrompt = $state("");
@@ -478,15 +845,43 @@
   let comparePickerSearch = $state("");
   let compareExpandedAliases: Record<string, boolean> = $state({});
   let compareHistory: SavedComparison[] = $state([]);
+  /** False when unread/unparked bytes must not be overwritten this session. */
+  let compareHistoryWritable = $state(true);
   let compareHistoryOpen = $state(false);
   let compareReviewId: string | null = $state(null);
   /** true = load → run → unload each slot (peak RAM ≈ largest model). false = try to keep all loaded. */
   let compareOneAtATime = $state(true);
+  /** True once Stop has been requested for the run in progress; UI-only, cleared at run start. */
+  let compareStopRequested = $state(false);
+  /**
+   * The in-flight slot's stream handle, if any. Not reactive: read/written only from
+   * runComparison/stopComparison, never bound directly in the template.
+   */
+  let compareActiveStream: { controller: AbortController; requestId: number | null } | null = null;
+  /** Slot key currently receiving deltas, for MessageRenderer's streaming-reasoning buffer. */
+  let compareStreamingSlotKey = $state<string | null>(null);
+  /** Incremented once per run; also used (with slot.key) as MessageRenderer's messageKey so a
+   * re-run reusing the same slots is treated as a new logical message, not an update to the
+   * previous run's. Must be $state — the template reads it to build that key. */
+  let compareRunGeneration = $state(0);
+  let compareStopAckError: string | null = null;
+  let compareStopAckWaits: Promise<void>[] = [];
+  let comparePreDispatchCancelled = false;
 
   // Settings: startup behaviour
   let autoStartService = $state(true);
+  // Listing/refreshing the model catalog (Foundry Local's `catalog.getModels()`) contacts
+  // Microsoft's remote Foundry model registry over the network to fetch the model list and
+  // check for updates -- distinct from inference, which stays local. Default on to preserve
+  // existing behavior; turning it off skips startup catalog access. Manual refresh and later
+  // model-management actions may still refresh the catalog when the user asks them to.
+  let autoRefreshCatalogOnStartup = $state(true);
   let defaultChatAlias = $state('');
   let defaultAudioAlias = $state('');
+  const catalogCheckPresentation = $derived(resolveCatalogCheckPresentation({
+    automaticCheckEnabled: autoRefreshCatalogOnStartup,
+    status: state.catalogStatus,
+  }));
   let osAutoStartEnabled = $state<boolean | null>(null);
 
   // Settings: network (draft UI values — Apply restarts service to take effect)
@@ -496,6 +891,528 @@
   let appliedNetworkPort = $state(5272);
   let appliedNetworkBindAddress = $state('127.0.0.1');
   let networkApplyBusy = $state(false);
+
+  // Settings: WSL clients (Windows host only). Status is fetched on demand —
+  // checking spawns wsl.exe, so it never runs unprompted at startup.
+  const isWindowsHost = detectPlatform() === 'windows';
+  let wslStatus = $state<WslStatusInfo | null>(null);
+  let wslBusy = $state(false);
+  let wslMessage = $state('');
+  let wslNatHelpOpen = $state(false);
+  /** Set after a config write so the "Restart WSL" step is offered. */
+  let wslRestartPending = $state(false);
+
+  // Settings: keep the local service alive when the window is closed. While the service is
+  // running, closing the window hides Flint to the system tray instead of quitting (the
+  // sidecar is a child process, so quitting the app would kill the endpoint).
+  let keepServiceInBackground = $state(true);
+  let trayHideNotified = false;
+
+  // Settings: preview features, disabled by default. Benchmark Preview is a headless-tested
+  // feature (Arena PR4A) getting its first UI surface here — gated so it never appears for
+  // users who haven't opted in.
+  let benchmarkPreviewEnabled = $state(false);
+
+  // Benchmark Preview: run lifecycle state, kept at this top level (not inside
+  // BenchmarkPreview.svelte) so an in-progress run keeps executing if the user navigates to
+  // another view — mirrors how Quick Compare's isComparing/compareSlots state already survives
+  // view switches by living here rather than in a child component.
+  /** Set synchronously (before any await) at the top of start/resume, so a second click cannot
+   * race past the check — this is the global single-active-run guard the plan requires; it is
+   * distinct from the runner's own per-run-id `activeRunIds` guard, which cannot prevent a
+   * second *different* run from starting. */
+  let benchmarkRunInFlight = $state(false);
+  /** The run currently executing, set as soon as `prepareBenchmarkRun` commits the row. */
+  let benchmarkActiveRunId = $state<string | null>(null);
+  let benchmarkKnownAttemptIds = $state<ReadonlySet<string> | null>(null);
+  let benchmarkStopController: StopController | null = null;
+  /** Aliases pinned for the duration of the active run; restored to 'normal' in a finally once
+   * the run halts, so a benchmark never permanently changes a model's eviction priority. */
+  let benchmarkPinnedAliases: string[] = [];
+  /** True once a `setBenchmarkExclusive(false)` release has failed and every automatic retry so
+   * far has also failed. The sidecar's `benchmarkExclusive` flag has no failure branch of its
+   * own for the release direction (it is a synchronous, unconditional assignment) — a rejected
+   * release call means the *round trip* did not confirm, not that the flag is known to still be
+   * set, but the safe assumption is that it may still be blocking every external OpenAI-shaped
+   * gateway client with 503s. Surfaced globally (not just in the Benchmark view) since it affects
+   * clients outside the app entirely. Driven purely from the retrier's `onStuckChange` callback
+   * (see `benchmarkExclusiveRetrier`); never set directly. */
+  let benchmarkExclusiveStuck = $state(false);
+  /** Non-null while a background retry loop for a stuck exclusive-release is running, so a
+   * second stuck run cannot spawn a duplicate loop racing the first — the retry/backoff logic
+   * itself lives in the pure, tested `benchmark-exclusive-retry` module. */
+  let benchmarkExclusiveRetrier: ExclusiveReleaseRetrier | null = null;
+  /** Bumped by every start/resume attempt right before it ever touches `setBenchmarkExclusive`
+   * (whether or not that acquire ultimately succeeds — a rejected acquire call can still have
+   * landed server-side), so cleanup and any retrier it spawns can tell "am I still the run
+   * responsible for releasing this?" See `finishBenchmarkExecution`'s docstring. Plain variable,
+   * not `$state`: nothing reads it reactively, only compares it inside cleanup/retry closures. */
+  let benchmarkExclusiveGeneration = 0;
+  /** Set when a detached run/resume execution settles with anything the UI needs to surface:
+   * a hard `!outcome.ok` failure, or an `ok: true` outcome whose `result.status ===
+   * 'recovery_required'` — a durability write failed mid-run and the run is now stuck needing a
+   * manual Resume. Neither case is visible from `startBenchmarkPreviewRun`/
+   * `resumeBenchmarkPreviewRun`'s own return value, since both return as soon as the run is
+   * confirmed under way, before the run itself has finished. Cleared at the start of the next
+   * start/resume attempt so a stale error doesn't linger across an unrelated later run. */
+  let benchmarkRunError = $state<string | null>(null);
+
+  /** Thin wrapper around the pure `computeResidentCapFloor`, supplying this page's live
+   * filtered resident pool entries and `modelPriorities`. See that function's docstring for why
+   * it must be called fresh on every push rather than cached. */
+  function residentCapFloorFor(ownAliases: readonly string[]): number {
+    return computeResidentCapFloor(loadedPoolEntries, modelPriorities, ownAliases);
+  }
+
+  /** Pins each target alias so pool eviction cannot unload it mid-run. Overlays onto the user's
+   * *actual* configured priorities (`modelPriorities`, the source of truth `pushMemorySettings`
+   * already sends) rather than `state.models[*].priority`, which does not exist on `ModelInfo` —
+   * reading it would silently treat every model as 'normal' and could clobber a user's real
+   * 'low'/'pinned' choices for models outside the benchmark.
+   *
+   * The lease mechanics (record-before-ack, retry-once restore) live in the pure, tested
+   * `benchmark-priority-lease` module; this function only wires it to `pushMemorySettings`. */
+  async function pinBenchmarkTargets(aliases: string[]): Promise<{ ok: true } | { ok: false; error: string }> {
+    // Must not overlap a still-in-flight restore from a prior run's unpin (fire-and-forget from
+    // `finishBenchmarkExecution`) -- see `pendingPriorityRestore`'s docstring for why a stale
+    // restore landing after this push would silently clear this run's own pins. Bounded, not
+    // `join()`: that restore's own `applyMemorySettings` call has no IPC deadline (timing out
+    // after dispatch would not stop the native work), so an unconditional wait here could hang
+    // forever -- and by the time this runs, `benchmarkExclusive` is already held and this run's
+    // slot already reserved, leaving Stop/recovery fenced and every external gateway client
+    // 503ing with no way out. Giving up and failing this attempt (which releases what it already
+    // took, via the normal `!ok` cleanup path below) is far better than hanging alongside it.
+    const restored = await pendingPriorityRestore.joinWithTimeout(BENCHMARK_PRIORITY_RESTORE_JOIN_TIMEOUT_MS);
+    if (!restored) {
+      return {
+        ok: false,
+        error: 'A previous run\'s priority restore has not confirmed yet; refusing to start a new run until it settles.',
+      };
+    }
+    // Set before acquiring the lease: `acquirePriorityLease` invokes `push` (and therefore
+    // `pushMemorySettings`) synchronously, so the floor must already be in place for that very
+    // first push, not only for later ones. Sized to the exact headroom this run needs: the
+    // suite's own distinct target aliases (which we are about to pin) *plus* any other alias
+    // already resident and pinned to a priority other than this run's own — a model the user
+    // separately chose to keep loaded via Monitor/Settings. Both sets are un-evictable once this
+    // pin takes effect, so both must fit under the cap; anything else already resident is a
+    // 'normal'/'low' entry the sweep can still reclaim to make room, so it is deliberately not
+    // counted here. See `overlayResidentCapFloor`'s docstring for why merely covering the
+    // suite's own count is not enough.
+    // A fresh read, not the last poll's cache: `state.pool` can lag a gateway autoload that
+    // pinned/loaded some other alias moments ago, which would otherwise undercount the floor
+    // below and reproduce the very rejection this exists to prevent. This narrows, but cannot
+    // close, that window — the sidecar's own admission check is still the last line of defense
+    // for anything pinned between this read and the push below.
+    try {
+      await refreshCatalogModels();
+    } catch (e) {
+      appendAppLog(`Benchmark: could not refresh pool state before pinning (${(e as any)?.message || e})`, 'warn');
+    }
+    const floor = residentCapFloorFor(aliases);
+    // The sidecar clamps `maxResident` to 1-32 (see `normalizeEvictionConfig` in
+    // sidecar/pool-eviction.js). Pushing a floor above that would silently get clamped back down
+    // server-side, so the cap would end up smaller than this run actually needs — surfacing much
+    // later as an opaque "model limit reached" admission failure instead of here, where the real
+    // cause (too many pinned-resident aliases for this run to fit) is known. This is only an
+    // up-front sanity check against the floor as it stands right now; `pushMemorySettings`
+    // recomputes it fresh on every later push, so a priority change made after this point that
+    // pushes the *live* floor above 32 will still resolve, however it resolves, in the sidecar's
+    // own clamped-cap behavior rather than here.
+    if (floor > 32) {
+      return {
+        ok: false,
+        error: `This run needs ${floor} resident models pinned at once (its own ${aliases.length} target${aliases.length === 1 ? '' : 's'} plus ${floor - aliases.length} already pinned elsewhere), which exceeds the 32-model limit the service supports.`,
+      };
+    }
+    const lease = acquirePriorityLease(aliases, (pinnedAliases) =>
+      pushMemorySettings({ throwOnError: true, pinnedAliasesOverride: pinnedAliases }),
+    );
+    // Adopted synchronously (not after awaiting `lease.ack`) so any *other* concurrent
+    // pushMemorySettings call — from here or from an unrelated Settings/Monitor edit made while
+    // the run is active — already overlays this pin. See pushMemorySettings' pinnedAliasesOverride.
+    benchmarkPinnedAliases = lease.pinnedAliases;
+    const result = await lease.ack;
+    if (!result.ok) {
+      appendAppLog(`Benchmark: could not pin target priorities: ${result.error}`, 'warn');
+    }
+    return result;
+  }
+
+  /** Restores the sidecar's priority map to exactly what the user has configured, once the
+   * lease's retry-once restore also fails to settle within acceptable certainty. See
+   * `pinBenchmarkTargets` for why the lease mechanics themselves live in a separate module. */
+  async function unpinBenchmarkTargets(): Promise<void> {
+    // Nothing to clear explicitly here: `releasePriorityLease` pushes `pinnedAliases: []`, and
+    // `pushMemorySettings` (via `residentCapFloorFor([])`) resolves that to a floor of 0 for this
+    // very push, mirroring the pin side's own restore-the-real-cap behavior.
+    const lease = releasePriorityLease(benchmarkPinnedAliases, (pinnedAliases) =>
+      pushMemorySettings({ throwOnError: true, pinnedAliasesOverride: pinnedAliases }),
+    );
+    if (!lease) return;
+    benchmarkPinnedAliases = lease.pinnedAliases;
+    pendingPriorityRestore.track(lease.ack);
+    const result = await lease.ack;
+    if (!result.ok) {
+      appendAppLog(
+        `Benchmark: could not restore model priorities after the run finished (${result.error}). A benchmark target may still be pinned — check Monitor.`,
+        'warn',
+      );
+    }
+  }
+
+  /**
+   * Constructed once per run, immediately after `setBenchmarkExclusive(true)` resolves (see
+   * `startBenchmarkPreviewRun`/`resumeBenchmarkPreviewRun`), so `getSidecarGeneration()` here is
+   * the exact generation that received this run's exclusive fence and (shortly after) its
+   * priority pins. Every later host call is guarded against that generation having since changed
+   * -- a crash/respawn at any point (between targets, mid-load, between attempts) is transparent
+   * to `sdk.ts` callers (it silently re-inits and carries on against the new process), so without
+   * this the run would keep going with none of its exclusivity/pin/loaded-target guarantees still
+   * holding, and a load that happens to resolve the same variant on the new process would look
+   * indistinguishable from a healthy run. `sdk.ts`'s own per-call generation checks (e.g.
+   * `loadModel`) only prove no replacement happened *during* that one call; they say nothing about
+   * a replacement that already happened before it started, which is exactly the gap here.
+   */
+  function benchmarkHost(): BenchmarkLifecycleHost {
+    const boundGeneration = getSidecarGeneration();
+    const assertBoundGeneration = () => assertBenchmarkGeneration(getSidecarGeneration(), boundGeneration);
+    return {
+      loadModel: async (alias, variantId) => {
+        assertBoundGeneration();
+        const result = await sdkLoadModel({ alias }, undefined, variantId ?? undefined);
+        assertBoundGeneration();
+        const loaded = result && typeof result === 'object' ? (result as { variantId?: unknown }).variantId : null;
+        return typeof loaded === 'string' && loaded.length > 0 ? loaded : null;
+      },
+      pinAliases: async (aliases) => {
+        assertBoundGeneration();
+        const pinned = await pinBenchmarkTargets(aliases);
+        if (!pinned.ok) throw new Error(pinned.error);
+      },
+      unpin: unpinBenchmarkTargets,
+      chatCompletion: async (alias, messages, opts) => {
+        assertBoundGeneration();
+        const res = await chatCompletion(alias, messages, opts);
+        assertBoundGeneration();
+        return res;
+      },
+    };
+  }
+
+  /** Tracks whichever `setBenchmarkExclusive(false)` IPC call this module has in flight -- the
+   * initial attempt in `attemptReleaseBenchmarkExclusive`, and every one of the background
+   * retrier's own retry attempts. `startBenchmarkPreviewRun`/`resumeBenchmarkPreviewRun` join
+   * this before ever acquiring a new generation: without it, a release that is still awaiting a
+   * sidecar respawn/re-init (see `sdk.ts`'s `sendInternal`) can lose a race against a newer run's
+   * `true` acquire dispatched moments later, reopening the gateway mid-benchmark -- see "Prevent
+   * stale release from reopening gateway after a newer acquire". `benchmarkRunInFlight` already
+   * keeps the *caller's own* first release attempt from ever overlapping a new run (it is awaited
+   * before that flag clears), so in practice this only ever has something to join when the
+   * caller's own attempt already failed and the background retrier's own release call is
+   * mid-flight. See `pending-call-tracker.ts` for the (tested) tracking mechanics. */
+  const pendingExclusiveRelease = createPendingCallTracker();
+
+  /** Tracks whichever priority-restore acknowledgement (`releasePriorityLease`'s `ack`, sent by
+   * `unpinBenchmarkTargets`) this module has in flight. `pinBenchmarkTargets` joins this before
+   * ever sending a new run's priority-pin push: `unpinBenchmarkTargets` is now fire-and-forget
+   * from `finishBenchmarkExecution` (see its docstring — `applyMemorySettings` has no IPC
+   * deadline and must not block gateway release or `benchmarkRunInFlight`'s clearing), so without
+   * this join a still in-flight restore for a *previous* run's targets could reach the sidecar
+   * after a new run's pin push and silently clear it — the priority map is a full replace, not a
+   * merge (see `installModelPriorities`), so a stale restore lands as an unconditional unpin of
+   * whatever is currently pinned. This is the same race Round 26 closed for the exclusive-gateway
+   * lease, applied here to the priority-lease side. */
+  const pendingPriorityRestore = createPendingCallTracker();
+  /** Bound for `pendingPriorityRestore.joinWithTimeout` in `pinBenchmarkTargets`. Generous enough
+   * that a merely slow (but completing) sidecar reply never trips it, but finite so a genuinely
+   * stuck restore fails this attempt instead of hanging it -- see that call site's comment. */
+  const BENCHMARK_PRIORITY_RESTORE_JOIN_TIMEOUT_MS = 20_000;
+  /** Bound for `pendingExclusiveRelease.joinWithTimeout` in `attemptReleaseBenchmarkExclusive`.
+   * Kept above `BENCHMARK_EXCLUSIVE_DRAIN_MS` (the sidecar's own 10s drain deadline for this same
+   * command), so a release that is merely waiting out that normal server-side drain never trips
+   * this client-side giveup. */
+  const BENCHMARK_EXCLUSIVE_RELEASE_TIMEOUT_MS = 20_000;
+
+  /** Single attempt to release exclusive gateway admission. Returns whether it is now confirmed
+   * released; a rejected call (transport dispatch/timeout, not a sidecar-side failure — the
+   * release direction has no failure branch once it reaches the sidecar) leaves the prior state
+   * unconfirmed, so callers must not assume it succeeded. Bounded, not a plain `await releaseCall`:
+   * `setBenchmarkExclusive` has no IPC deadline (see `ipc-deadlines.ts`), so an unconditional wait
+   * here could hang `finishBenchmarkExecution`'s whole cleanup forever if the sidecar never
+   * replies -- stranding `benchmarkRunInFlight` (and every recovery control gated on it) exactly
+   * like the priority-restore join above. Giving up early does not abandon the call: it stays
+   * tracked in `pendingExclusiveRelease` (a still-pending release is exactly what that tracker
+   * exists to let a *later* run's own acquire wait for), and a `false` return here already drives
+   * the existing stuck-release retrier/banner below, the same path used for an outright rejection. */
+  async function attemptReleaseBenchmarkExclusive(): Promise<boolean> {
+    const releaseCall = sdkSetBenchmarkExclusive(false);
+    pendingExclusiveRelease.track(releaseCall);
+    const settled = await pendingExclusiveRelease.joinWithTimeout(BENCHMARK_EXCLUSIVE_RELEASE_TIMEOUT_MS);
+    if (!settled) {
+      appendAppLog(
+        'Benchmark: exclusive gateway release has not confirmed yet; continuing without waiting further. External clients may still be blocked until it confirms.',
+        'warn',
+      );
+      return false;
+    }
+    try {
+      await releaseCall;
+      return true;
+    } catch (e: any) {
+      appendAppLog(
+        `Benchmark: could not release exclusive gateway admission (${e?.message || e}). External clients may still be blocked.`,
+        'warn',
+      );
+      return false;
+    }
+  }
+
+  /** Manual retry surfaced from the stuck-release banner: delegates to the retrier's own
+   * immediate attempt (see `benchmark-exclusive-retry.ts`), since the user is actively watching
+   * rather than waiting for the next scheduled background tick. */
+  async function retryBenchmarkExclusiveRelease(): Promise<void> {
+    await benchmarkExclusiveRetrier?.retryNow();
+  }
+
+  /** Common cleanup once a run's execution has fully halted (completed/stopped/recovery), shared
+   * by both start and resume so neither path can forget a step the other remembers.
+   *
+   * `generation` is the exclusivity-claim id the caller captured for *its own* run (see
+   * `benchmarkExclusiveGeneration` at the call sites) before ever attempting acquire. Under
+   * today's admission guard (`benchmarkRunInFlight` blocks a new Start/Resume until this exact
+   * call reaches its own `finally`), the top-level generation check below can never actually
+   * trip — it is a fail-safe against this invariant changing, not the active defense. The
+   * defense that matters is the *retrier's* own `release` callback re-checking this same
+   * generation at send time: its scheduled retries persist in the background well past this
+   * function returning, and can legitimately span across a newer run claiming a later
+   * generation. Releasing on a stale generation there would tear down that newer run's active
+   * lease instead of anything this call actually owns.
+   *
+   * Priority/eviction restore (`unpinBenchmarkTargets`, via `applyMemorySettings`) and exclusive
+   * gateway release are independent operations with no ordering dependency on each other —
+   * `unpinBenchmarkTargets` already clears `benchmarkPinnedAliases` synchronously before this
+   * function is ever called back into, so a slow *acknowledgement* of that restore cannot leave
+   * the pin state itself inconsistent. But `applyMemorySettings` has no IPC deadline (see
+   * `ipc-deadlines.ts` — unbounded by design, since timing out after dispatch would not stop the
+   * native work and the caller could not know whether it took effect), so a genuinely stuck
+   * restore can hang indefinitely. Awaiting it before release would leave `benchmarkExclusive`
+   * true (every gateway client 503s) for as long as it hangs; awaiting it before `finally` would
+   * also leave `benchmarkRunInFlight` blocking every recovery control for the same duration. Fire
+   * it and let it finish (and log any failure) in the background instead of serializing on it. */
+  async function finishBenchmarkExecution(generation: number): Promise<void> {
+    try {
+      benchmarkStopController = null;
+      benchmarkActiveRunId = null;
+      benchmarkKnownAttemptIds = null;
+      void unpinBenchmarkTargets();
+      if (generation !== benchmarkExclusiveGeneration) return;
+      const released = await attemptReleaseBenchmarkExclusive();
+      if (!released) {
+        // A prior retrier could still be running (e.g. this is a second run started while the
+        // first one's release was never confirmed) -- cancel it so its schedule cannot race a
+        // freshly created one that starts its own backoff from the beginning.
+        benchmarkExclusiveRetrier?.cancel();
+        benchmarkExclusiveRetrier = createExclusiveReleaseRetrier(
+          async () => {
+            // Re-checked at send time, not just at creation time: this retrier can still be
+            // waiting on a scheduled backoff tick when a later run claims a new generation.
+            if (generation !== benchmarkExclusiveGeneration) return;
+            const releaseCall = sdkSetBenchmarkExclusive(false);
+            pendingExclusiveRelease.track(releaseCall);
+            await releaseCall;
+          },
+          (stuck) => { benchmarkExclusiveStuck = stuck; },
+        );
+      }
+    } finally {
+      benchmarkRunInFlight = false;
+    }
+  }
+
+  /** Shared classifier for a settled `startBenchmarkRun`/`resumeBenchmarkRun` outcome: surfaces
+   * both a hard failure and a soft `recovery_required` halt (a durability write failed, but the
+   * runner itself returned normally) to `benchmarkRunError` so the UI isn't limited to the app
+   * log for either case. A `stopped` outcome carrying a `haltedError` means the runtime itself
+   * cancelled or was lost — not that the user pressed Stop, which halts with no message — so
+   * that case is surfaced too; a plain user-requested stop stays silent. */
+  function recordBenchmarkOutcome(outcome: { ok: boolean; error?: string; result?: { status: string; haltedError?: string } }): void {
+    if (!outcome.ok) {
+      benchmarkRunError = outcome.error || 'Benchmark run failed';
+      appendAppLog(`Benchmark run failed: ${outcome.error}`, 'error');
+    } else if (outcome.result?.status === 'recovery_required') {
+      benchmarkRunError = `Benchmark run needs recovery: ${outcome.result.haltedError || 'a durability write failed'}`;
+      appendAppLog(`Benchmark run needs recovery: ${outcome.result.haltedError}`, 'error');
+    } else if (outcome.result?.status === 'stopped' && outcome.result.haltedError) {
+      benchmarkRunError = `Benchmark run halted unexpectedly: ${outcome.result.haltedError}`;
+      appendAppLog(`Benchmark run halted unexpectedly: ${outcome.result.haltedError}`, 'error');
+    }
+  }
+
+  type BenchmarkLifecycleOutcome = { ok: true; runId: string } | { ok: false; error: string };
+
+  /** Best-effort reactive approximation of `otherInferenceInFlight()` for disabling the
+   * Start/Resume controls proactively. Omits other-conversation streams (`streamsByConversation`
+   * isn't a reactive rune) since this is UI feedback only — `otherInferenceInFlight()` at
+   * admission time is the actual enforcement and does cover that case. */
+  const otherInferenceActiveForUi = $derived(isStreaming || isDictating || dictationTranscribing || isTranscribing || isSummarizing || endpointSelfTestBusy);
+
+  /** Counts explicit model-mutating operations (load/unload/delete/variant-switch/STT-load) and
+   * model downloads in flight from Models/Monitor/chat-model-switch. `blockedByExclusivePoolRun()`
+   * only blocks a
+   * *new* mutation from starting once `benchmarkRunInFlight` is already true; it does nothing
+   * about a mutation that started the instant before — e.g. the user clicks "Load" (admission
+   * check passes, nothing is running yet), the load's IPC round-trip is still pending, and only
+   * then does the user click Start. Benchmark admission checks this counter too, so a run that
+   * would otherwise begin pinning/loading its own targets concurrently with that in-flight
+   * mutation is rejected instead. Incremented synchronously (no `$state`, since every reader is
+   * either this same synchronous admission check or another synchronous increment/decrement —
+   * no rune-driven re-render needs to observe it). */
+  let poolMutationsInFlight = 0;
+
+  /** Wraps a model-mutating operation, or a model download, with the fence above: call at the
+   * top of every Models/Monitor/chat-model-switch function that directly loads, unloads,
+   * deletes, variant-switches, or downloads a pool entry, immediately after its own
+   * `blockedByExclusivePoolRun()` check (that check keeps a *new* mutation from starting once a
+   * benchmark is already running; this fence is what a benchmark's own admission check reads to
+   * catch one already in flight). */
+  function beginPoolMutation(): () => void {
+    poolMutationsInFlight += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      poolMutationsInFlight -= 1;
+    };
+  }
+
+  /** True while chat (any conversation, including ones navigated away from), dictation,
+   * transcription, summarization, endpoint self-test, or an explicit model-mutating operation
+   * (see `poolMutationsInFlight`) is actually dispatching against, or mutating, the shared
+   * alias-keyed pool. Benchmark Start/Resume must check this — not just Arena — or a benchmark
+   * can begin admission while other inference or a pool mutation is still in flight and contend
+   * for the same pool mid-run. Checked once at admission time (mirrors the existing Arena check
+   * below); the composer/editor controls also disable proactively via the `otherInferenceActive`
+   * prop, but this function call is the actual enforcement. */
+  function otherInferenceInFlight(): boolean {
+    return streamsByConversation.size > 0 || isDictating || dictationTranscribing || isTranscribing || isSummarizing || poolMutationsInFlight > 0 || endpointSelfTestBusy;
+  }
+
+  /** Claimed before ever touching `setBenchmarkExclusive` -- see `finishBenchmarkExecution`'s
+   * docstring for why even a rejected acquire call must still own this generation. Also retires
+   * (cancels, clears the banner for) any still-running retrier from a *previous* run's failed
+   * release: that release is now moot the instant a new run starts, since the new run's own
+   * exclusivity claim supersedes it regardless of whether the old release itself ever gets
+   * confirmed -- there is no reason to keep showing "could not release" once a newer run has
+   * already re-claimed exclusivity. Without this, the stale retrier would eventually self-retire
+   * on its own next tick and clear the banner anyway (see its generation check), but a user
+   * starting a new run would see a stuck banner describing a run that no longer exists for up to
+   * that whole delay in the meantime. */
+  function claimNextBenchmarkExclusiveGeneration(): number {
+    benchmarkExclusiveGeneration += 1;
+    if (benchmarkExclusiveRetrier) {
+      benchmarkExclusiveRetrier.cancel();
+      benchmarkExclusiveRetrier = null;
+      benchmarkExclusiveStuck = false;
+    }
+    return benchmarkExclusiveGeneration;
+  }
+
+  /**
+   * Prepares the run row (so the id is known and Stop is live) then executes in a detached
+   * promise. `startBenchmarkRun` does not resolve until the schedule halts; blocking the
+   * caller on that would leave the progress UI with no Stop button until the run was over.
+   */
+  async function startBenchmarkPreviewRun(suite: BenchmarkSuite): Promise<BenchmarkLifecycleOutcome> {
+    if (benchmarkRunInFlight) return { ok: false, error: 'A benchmark run is already active.' };
+    // Model Arena (Quick Compare) explicitly loads/unloads pool entries for the same alias-keyed
+    // pool a benchmark run pins and dispatches against — pinning only blocks eviction, not those
+    // explicit operations. Admission must be mutually exclusive in both directions or the two
+    // features can replace/unload each other's models mid-run. See runComparison's matching guard.
+    if (isComparing || comparePreparing) return { ok: false, error: 'An Arena run is already active.' };
+    if (otherInferenceInFlight()) {
+      return { ok: false, error: 'Chat, dictation, transcription, summarization, or endpoint self-test is in progress — finish or stop it before starting a benchmark.' };
+    }
+    benchmarkRunInFlight = true;
+    benchmarkRunError = null;
+    const myExclusiveGeneration = claimNextBenchmarkExclusiveGeneration();
+    try {
+      // Must not overlap a still-in-flight release from a prior run (e.g. a background retrier
+      // mid-respawn-recovery) -- see `pendingExclusiveRelease`'s docstring for why the ordering
+      // otherwise cannot be guaranteed.
+      await pendingExclusiveRelease.join();
+      try {
+        await sdkSetBenchmarkExclusive(true);
+      } catch (e: any) {
+        await finishBenchmarkExecution(myExclusiveGeneration);
+        return { ok: false, error: e?.message || 'Could not take exclusive gateway admission for the benchmark' };
+      }
+      const started = await startBenchmarkSession(suite, benchmarkHost());
+      if (!started.ok) {
+        await finishBenchmarkExecution(myExclusiveGeneration);
+        return started;
+      }
+      benchmarkStopController = started.execution.stopController;
+      benchmarkActiveRunId = started.execution.runId;
+      benchmarkKnownAttemptIds = started.execution.knownAttemptIds;
+      started.execution.done
+        .then(recordBenchmarkOutcome)
+        .catch((e: any) => recordBenchmarkOutcome({ ok: false, error: e?.message || String(e) }))
+        .finally(() => { void finishBenchmarkExecution(myExclusiveGeneration); });
+      return { ok: true, runId: started.execution.runId };
+    } catch (e: any) {
+      await finishBenchmarkExecution(myExclusiveGeneration);
+      return { ok: false, error: e?.message || String(e) };
+    }
+  }
+
+  /** Resume already knows its run id up front (the caller supplies it), so — unlike start —
+   * there is no id-discovery step; it can return as soon as the run is confirmed under way. */
+  async function resumeBenchmarkPreviewRun(runId: string): Promise<BenchmarkLifecycleOutcome> {
+    if (benchmarkRunInFlight) return { ok: false, error: 'A benchmark run is already active.' };
+    // See startBenchmarkPreviewRun: benchmark and Arena admission must be mutually exclusive.
+    if (isComparing || comparePreparing) return { ok: false, error: 'An Arena run is already active.' };
+    if (otherInferenceInFlight()) {
+      return { ok: false, error: 'Chat, dictation, transcription, summarization, or endpoint self-test is in progress — finish or stop it before resuming a benchmark.' };
+    }
+    benchmarkRunInFlight = true;
+    benchmarkRunError = null;
+    // See startBenchmarkPreviewRun: claims the generation and retires any stale prior banner.
+    const myExclusiveGeneration = claimNextBenchmarkExclusiveGeneration();
+    try {
+      // See startBenchmarkPreviewRun: must not overlap a still-in-flight release.
+      await pendingExclusiveRelease.join();
+      try {
+        await sdkSetBenchmarkExclusive(true);
+      } catch (e: any) {
+        await finishBenchmarkExecution(myExclusiveGeneration);
+        return { ok: false, error: e?.message || 'Could not take exclusive gateway admission for the benchmark' };
+      }
+      const started = await resumeBenchmarkSession(runId, benchmarkHost());
+      if (!started.ok) {
+        await finishBenchmarkExecution(myExclusiveGeneration);
+        return started;
+      }
+      benchmarkStopController = started.execution.stopController;
+      benchmarkActiveRunId = started.execution.runId;
+      benchmarkKnownAttemptIds = started.execution.knownAttemptIds;
+      started.execution.done
+        .then(recordBenchmarkOutcome)
+        .catch((e: any) => recordBenchmarkOutcome({ ok: false, error: e?.message || String(e) }))
+        .finally(() => { void finishBenchmarkExecution(myExclusiveGeneration); });
+      return { ok: true, runId: started.execution.runId };
+    } catch (e: any) {
+      await finishBenchmarkExecution(myExclusiveGeneration);
+      return { ok: false, error: e?.message || String(e) };
+    }
+  }
+
+  /** Stop is admission-only (see `createStopController`'s contract): it prevents the *next*
+   * dispatch, not an in-flight one. Any attempt already dispatched when this is called may still
+   * complete and be recorded — Flint never claims otherwise. */
+  function stopBenchmarkPreviewRun(): void {
+    benchmarkStopController?.stop();
+  }
 
   // UI: keyboard shortcut help modal
   let showShortcutsHelp = $state(false);
@@ -507,6 +1424,32 @@
   let chatMessages = $state<any[]>([]);
   let chatInput = $state("");
   let isStreaming = $state(false);
+  /** id of the assistant message currently receiving deltas for the visible thread, if any. */
+  let activeStreamAssistantId = $state<string | null>(null);
+  /** In-flight generations keyed by the conversation they belong to, not the visible thread. */
+  const streamsByConversation = new Map();
+
+  function syncVisibleStreaming() {
+    const stream = threadLoadedFor ? streamsByConversation.get(threadLoadedFor) : undefined;
+    isStreaming = !!stream;
+    activeStreamAssistantId = stream?.assistantId ?? null;
+  }
+
+  function abortStreamFor(conversationId: string | null) {
+    if (!conversationId) return;
+    const stream = streamsByConversation.get(conversationId);
+    if (!stream) return;
+    stream.controller.abort();
+    if (stream.requestId != null) {
+      void cancelChatRequest(stream.requestId).catch(() => {});
+    }
+    streamsByConversation.delete(conversationId);
+    if (abortController === stream.controller) {
+      abortController = null;
+      activeStreamRequestId = null;
+    }
+    syncVisibleStreaming();
+  }
   let systemPrompt = $state("You are a helpful assistant.");
 
   // Context management (important for local models - controls token usage)
@@ -515,6 +1458,32 @@
 
   // Whether to show the complete uncondensed thread (for reading full history)
   let showFullHistory = $state(false);
+
+  // Generation parameters (Playground: learning how sampling settings affect model output).
+  // Foundry Local's catalog reports no per-model defaults today, so these are Flint's own.
+  let temperature = $state(0.7);
+  let maxTokens = $state(2048);
+  let topP = $state(1);
+  let topK = $state(50);
+  let frequencyPenalty = $state(0);
+  let presencePenalty = $state(0);
+  // `null` means "no seed" (non-deterministic generation) -- see conversation-settings.ts.
+  let randomSeed: number | null = $state(null);
+
+  /**
+   * The application-level baseline a conversation inherits from when it stores no override.
+   *
+   * The four variables above are the *effective* values for the conversation currently loaded.
+   * This is the separate record of the defaults they resolve against — without it an absent
+   * conversation key would inherit whatever the previously selected conversation happened to
+   * leave in those variables. It is what `persistChat` writes to the application settings blob,
+   * under the same key names as before, so an older build rolls back to exactly these values.
+   *
+   * It is deliberately not updated when the user changes a setting inside a chat: that change
+   * belongs to the chat. Moving the baseline under every inheriting conversation at the same
+   * time is a different operation.
+   */
+  let appSettingDefaults = $state<AppSettingDefaults>({ ...DEFAULT_APP_SETTINGS });
 
   // Collapsible left sidebar
   let sidebarCollapsed = $state(false);
@@ -527,15 +1496,13 @@
   let attachedImages: string[] = $state([]); // array of base64 data urls for vision
 
   // URL-fetch (Option A web fetch): pending URL chips and their fetched content
-  let pendingUrlFetches: { url: string; status: 'pending' | 'fetching' | 'done' | 'error'; title?: string; text?: string; error?: string }[] = $state([]);
+  let pendingUrlFetches: { url: string; attempt: number; status: 'pending' | 'fetching' | 'done' | 'error'; title?: string; text?: string; error?: string }[] = $state([]);
   let isFetchingUrl = $state(false);
 
   // Detects URLs typed/pasted into the chat input that haven't been fetched yet
-  let detectedUrls = $derived.by(() => {
-    const matches = chatInput.match(/https?:\/\/[^\s"'<>)]+/g) ?? [];
-    const alreadyQueued = new Set(pendingUrlFetches.map(f => f.url));
-    return [...new Set(matches)].filter(u => !alreadyQueued.has(u));
-  });
+  let detectedUrls = $derived.by(() =>
+    detectFetchableUrls(chatInput, pendingUrlFetches.map(f => f.url))
+  );
 
   // Proper vision capability detection based on model metadata (not just alias name).
   // We gate multi-image UI on the *selected* model being vision-capable.
@@ -564,6 +1531,9 @@
   let managerNewName = $state("");
   let managerNewPrompt = $state("");
   let editingPersona: Persona | null = $state(null);
+
+  // Playground generation-parameters panel (temperature/maxTokens/topP/topK/penalties/seed), collapsed by default
+  let showGenParamsPanel = $state(false);
 
   // For positioning the persona dropdown (fixed to escape scrollers)
   let personaBtnEl: HTMLButtonElement | null = $state(null);
@@ -612,14 +1582,9 @@
   );
   const currentModelFamily: string | null = $derived(currentModelInfo?.family ?? null);
 
-  // Rough recommended turns based on context length (very conservative)
-  const recommendedMaxTurns: number = $derived.by(() => {
-    if (!currentModelContextLength) return 12;
-    // Very rough: assume ~250-350 tokens per turn (user + assistant avg)
-    const estTokensPerTurn = 300;
-    const safeBudget = Math.floor(currentModelContextLength * 0.6); // leave headroom for system + generation
-    return Math.max(4, Math.min(40, Math.floor(safeBudget / estTokensPerTurn)));
-  });
+  // Rough recommended turns based on context length (very conservative); see
+  // src/lib/context-turns.ts for the extracted, unit-tested math.
+  const recommendedMaxTurns: number = $derived.by(() => recommendedMaxTurnsFor(currentModelContextLength));
 
   // === Step 4: Per-model defaults ===
   // When model changes, optionally suggest or apply a good default
@@ -644,6 +1609,7 @@
     const percent = contextUsagePercent;
     if (!percent || isStreaming || !state.ready) return;
     if (percent < 75) return;  // yellow/red threshold
+    if (benchmarkRunInFlight) return;  // avoid contending with benchmark inference
 
     const currentLen = chatMessages.length;
     // Avoid repeating too soon
@@ -666,7 +1632,9 @@
 
   function applyRecommendedContext() {
     if (recommendedMaxTurns) {
-      contextTurns = recommendedMaxTurns;
+      // Committed, unlike the automatic clamp that uses the same value: the user pressed a
+      // button, so this is a choice about this chat and must survive switching away from it.
+      commitChatSettings({ contextTurns: recommendedMaxTurns });
       statusMessage = `Context set to recommended ${recommendedMaxTurns} turns for this model`;
     }
   }
@@ -716,7 +1684,8 @@
   let audioBlob = $state<Blob | null>(null);
   let transcription = $state("");
   let transcriptionSegments = $state<TranscriptSegment[]>([]);
-  let transcriptionTimingSource = $state<string | null>(null);
+  let transcriptionGaps = $state<TranscriptGap[]>([]);
+  let emptyRecognitionRanges = $state<TranscriptRange[]>([]);
   let showTimestampedTranscript = $state(true);
   let isTranscribing = $state(false);
   let transcriptionProgress = $state<{ current: number; total: number } | null>(null);
@@ -730,7 +1699,24 @@
   let dictationChunks: Blob[] = [];
   let dictationMediaRecorder: MediaRecorder | null = null;
   let dictationStream: MediaStream | null = null;
-  let isRollingTranscribe = false;
+  // Session that currently owns the rolling-transcription pass (0 = free). A session id rather
+  // than a boolean so a stale pass cannot release the current session's lock.
+  let rollingOwner = 0;
+  // Monotonic id for the current dictation recording; see toggleDictation.
+  let dictationSession = 0;
+  // Count of rolling + final dictation transcription requests currently dispatched — a counter
+  // rather than a boolean because the rolling pass and the final `onstop` transcription can
+  // overlap (the final request doesn't wait for or cancel an in-flight rolling one), and either
+  // could settle first; a shared boolean would clear while the other request is still in flight.
+  // Distinct from `isDictating` (recording), since the final transcription fires *after*
+  // `isDictating` is cleared in the recorder's `onstop` handler. Benchmark admission needs to
+  // see this window too, or a benchmark could start while dictation's own STT call is in flight.
+  let dictationTranscribingCount = $state(0);
+  const dictationTranscribing = $derived(dictationTranscribingCount > 0);
+  // True while `compactConversationWithSummary` has an actual chatCompletion request in flight
+  // (not merely while its guard checks run) — same reason as `dictationTranscribing`. Guarded
+  // against re-entrancy at the top of the function, so this can stay a plain boolean.
+  let isSummarizing = $state(false);
   let sttModels = $state<ModelInfo[]>([]);
   let selectedSTTModelAlias = $state("");
   // Tracks the alias of a model explicitly loaded into the audio lane via
@@ -749,7 +1735,7 @@
 
   /** All models currently in the runtime pool (alias + exact variant). */
   const loadedPoolEntries = $derived(
-    (state.pool || []).filter((e: any) => e?.alias),
+    (state.pool || []).filter((entry) => entry?.alias && isPoolEntryResident(entry)),
   );
 
   function shortPoolVariantLabel(variantId: string | null | undefined): string {
@@ -794,6 +1780,25 @@
         return String(a.alias).localeCompare(String(b.alias));
       }),
   );
+
+  /**
+   * True when the chat names a model the catalog does not offer.
+   *
+   * A conversation stores the model it was using, so it can now name one that has since been
+   * deleted, or that never existed on this machine because the archive came from another one.
+   * The picker has no option for it, so without saying anything the header would silently show
+   * a blank selection while the chat still claimed that model.
+   */
+  const chatModelUnavailable = $derived.by(() => {
+    if (!selectedModelAlias) return false;
+    // An empty catalog means "not listed yet" as often as "nothing installed", so stay quiet
+    // until there is something to compare against rather than accuse a model that is fine.
+    if (state.models.length === 0) return false;
+    const known = state.models.find((m: any) => m.alias === selectedModelAlias);
+    // Catalog membership is not installation: a model can be listed and downloadable while
+    // having no local weights, and it cannot answer in that state either.
+    return !known || !(known.isCached || known.isLoaded);
+  });
 
   // If an STT model was loaded via the main UI / top bar / Models list,
   // the Audio page should inherit it automatically as the current STT model.
@@ -860,83 +1865,733 @@
   }
 
   // Conversation management
-  let conversations = $state<Conversation[]>([]);
-  let currentConversationId = $state<string | null>(null);
-  const CHATS_PERSIST_KEY = "flint-chats-v1";
+  //
+  // Backed by the v2 archive (src/lib/conversation-*.ts). The pre-v2 scheme kept a single global
+  // thread plus a title-only index, so selecting a conversation could not load anything — it
+  // blanked the thread. The transitions live in `conversation-session.ts` because this file is
+  // excluded from coverage and these are the paths that destroy history when they are wrong.
+  let conversationArchive = $state<ConversationArchive>(createEmptyArchive());
+  /**
+   * Which conversation `chatMessages` was loaded from, or null when nothing is loaded.
+   *
+   * This is the guard that makes a save safe: an empty `chatMessages` means both "this
+   * conversation is empty" and "nothing loaded yet", and only the first may be written back.
+   */
+  let threadLoadedFor = $state<string | null>(null);
+  const currentConversationId = $derived(conversationArchive.activeId);
+  const conversations = $derived(
+    summarizeConversations(conversationArchive, {
+      loadedFor: threadLoadedFor,
+      messages: chatMessages as any,
+    }),
+  );
+  // Cleared when the stored archive cannot be read or preserved; every conversation writer
+  // honours it so unreadable data is never replaced by a fresh archive.
+  //
+  // Reactive because the risk bar reads it: a session that cannot save must keep saying so for as
+  // long as it lasts, not only until the one-time notice is dismissed.
+  let conversationsWritable = $state(true);
+  /**
+   * True when recovery copies are sitting in application storage.
+   *
+   * Derived from what is actually stored rather than from what this launch happened to do. A
+   * lossy archive is backed up once and then saved in its normalized form, so every subsequent
+   * launch opens cleanly — and the copy holding the parts that could not be read is still there,
+   * still only inside application data, with nothing on screen to say so.
+   */
+  let conversationsBackedUp = $state(false);
+  /**
+   * True when saved settings could not be read this launch.
+   *
+   * Tracked separately from preservation succeeding: a corrupt settings blob can hold a pre-v2
+   * chat thread, and when the copy could *not* be written the live value is the only record of it
+   * — which is more urgent, not less.
+   */
+  let settingsUnreadable = $state(false);
+  /** True when storage could not be listed, so unknown recovery copies may exist. */
+  let storageInventoryUnknown = $state(false);
+  /**
+   * Set when the in-memory archive is ahead of storage, cleared only by a confirmed save.
+   *
+   * A change flag derived from the archive alone cannot survive a failed write: the next capture
+   * would compare against the already-updated in-memory copy, report no change, and never retry.
+   * The unsaved turns would then be lost at exit.
+   */
+  let conversationsDirty = false;
+
+  // Monotonic id for the visible chat thread. Anything that replaces the thread bumps it, so an
+  // in-flight completion or summarization can tell that its output no longer belongs anywhere.
+  // Deliberately a plain `let`: it is only read from async continuations, never rendered.
+  let chatThreadEpoch = 0;
+
+  /**
+   * Replace the visible thread, invalidating any in-flight work that targets it.
+   *
+   * Clearing `threadLoadedFor` is load-bearing. Several callers blank the thread without
+   * changing conversation (starting a chat from a model card, for example); leaving the thread
+   * attributed to the previous conversation would let the next save store this empty array over
+   * that conversation's real history.
+   */
+  function beginNewChatThread() {
+    chatThreadEpoch += 1;
+    chatMessages = [];
+    chatInput = "";
+    lastAutoSummaryCount = 0;
+    threadLoadedFor = null;
+  }
+
+  /** Install a thread loaded from the archive, so it may be written back to that conversation. */
+  /**
+   * Make a thread the live one.
+   *
+   * Snapshots unconditionally rather than trusting the caller. The UI mutates message objects
+   * in place — `msg.pinned = !msg.pinned`, `m.condensed = true` — so a thread sharing objects
+   * with the archive would write those edits straight into it, bypassing `captureThread` and
+   * defeating its change detection at the same time: the stored copy is already mutated, so
+   * the edit looks like no change and is never saved. The pin then vanishes on restart.
+   *
+   * Doing it here rather than at each call site means a new one cannot reintroduce the bug. The
+   * session transitions already snapshot, so this is a cheap second copy on those paths.
+   */
+  function adoptThread(id: string | null, messages: any[]) {
+    chatThreadEpoch += 1;
+    chatInput = "";
+    lastAutoSummaryCount = 0;
+    chatMessages = snapshotMessages(messages as any) as any;
+    threadLoadedFor = id;
+    syncVisibleStreaming();
+  }
+
+  // Guards the async "load this model, then open chat with it" flows. Each captures a token
+  // before its first await; a later flow — or a manual conversation switch — invalidates
+  // whatever is still loading, so a slow load cannot wipe a thread the user has moved on to.
+  let chatNavigationToken = 0;
+
+  function beginChatNavigation(): { token: number; epoch: number } {
+    chatNavigationToken += 1;
+    return { token: chatNavigationToken, epoch: chatThreadEpoch };
+  }
+
+  /**
+   * Observe the current navigation without claiming it.
+   *
+   * `beginChatNavigation()` takes ownership, which is right for a flow the user just started and
+   * wrong for startup: incrementing the token there would invalidate a Load & Chat the user
+   * kicked off first. Startup only needs to notice that it has been superseded.
+   */
+  function currentChatNavigation(): { token: number; epoch: number } {
+    return { token: chatNavigationToken, epoch: chatThreadEpoch };
+  }
+
+  /** True while this navigation is still the one the user is waiting for. */
+  function chatNavigationCurrent(nav: { token: number; epoch: number }): boolean {
+    return nav.token === chatNavigationToken && nav.epoch === chatThreadEpoch;
+  }
 
   function generateConversationId(): string {
     return `chat-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
   }
 
-  function generateConversationTitle(): string {
-    const firstMsg =
-      chatMessages.find((m: any) => m.role === "user")?.content || "New chat";
-    return firstMsg.substring(0, 50).trim() + (firstMsg.length > 50 ? "…" : "");
+  /**
+   * Give every loaded turn an id, in place.
+   *
+   * Must run before *any* transition, not just before a save: create/select/delete each capture
+   * the outgoing thread themselves, so a turn that reached the archive without an id would make
+   * the whole archive fail validation — and keep failing until that conversation was revisited.
+   */
+  function stampThreadIds() {
+    const stamped = ensureMessageIds(chatMessages as any, (i) => `msg-${Date.now()}-${i}`);
+    if (stamped.changed) chatMessages = stamped.messages as any;
+    return stamped.messages;
   }
 
-  function createNewConversation() {
-    const id = generateConversationId();
-    currentConversationId = id;
-    chatMessages = [];
-    chatInput = "";
-    lastAutoSummaryCount = 0;
+  function sessionState() {
+    return {
+      archive: conversationArchive,
+      thread: { loadedFor: threadLoadedFor, messages: stampThreadIds() as any },
+    };
+  }
+
+  /**
+   * Begin a fresh thread that has somewhere to be saved.
+   *
+   * `beginNewChatThread()` alone leaves the thread unattributed, so nothing the user then types
+   * is ever persisted. Reuses the current conversation when it is already empty, so repeatedly
+   * starting a chat from a model card does not fill the sidebar with blank entries.
+   *
+   * Callers set the model they want *before* calling this, so the live values are already the
+   * configuration the fresh chat should have. Creation seeds from them; the reuse branch has to
+   * stamp them itself, because reusing a conversation is not a transition and would otherwise
+   * leave the chosen model unrecorded on the conversation the user is about to type into.
+   */
+  function startFreshConversation() {
+    const active = findConversation(conversationArchive, conversationArchive.activeId);
+    if (active && active.messages.length === 0 && chatMessages.length === 0 && threadLoadedFor === active.id) {
+      chatThreadEpoch += 1;
+      chatInput = "";
+      lastAutoSummaryCount = 0;
+      clearImages();
+      clearUrlFetches();
+      // Only the model, and only when one was chosen. This conversation already exists and may
+      // hold settings the user configured or that this build cannot use; stamping every
+      // effective value onto it would overwrite them, and would persist the automatic context
+      // clamp that the commit rules deliberately keep out of storage.
+      if (hydrated && selectedModelAlias) commitChatSettings({ modelAlias: selectedModelAlias });
+      return;
+    }
+    createNewConversation();
+  }
+
+  function createNewConversation(seedOverrides: Record<string, any> = {}) {
+    const result = createSessionConversation(sessionState(), {
+      id: generateConversationId(),
+      now: Date.now(),
+      // Stamped explicitly rather than left to inherit, so the baseline only ever governs
+      // conversations that predate this feature. `seedOverrides` carries a choice the user made
+      // before the conversation existed — picking a model from a model card, for instance —
+      // which must win over the settings of the chat being left.
+      //
+      // Before hydration the live values are not a chat's configuration, they are the
+      // component's initial state: `loadConversations` reaches here on an empty archive, and
+      // stamping those onto the very first conversation would fabricate overrides for settings
+      // the user has not chosen and `restoreChat` has not yet read.
+      settings: (hydrated
+        ? seedSettingsFor(currentChatSettings(), seedOverrides)
+        : seedOverrides) as any,
+    });
+    conversationArchive = result.archive;
+    adoptThread(result.conversation.id, []);
+    applyConversationSettings(result.conversation.settings);
     clearImages(); // clear any pending vision attachments for new chat
     clearUrlFetches();
-    conversations = [
-      ...conversations,
-      { id, title: "New chat", createdAt: Date.now(), messageCount: 0 },
-    ];
+    conversationsDirty = true;
     saveConversations();
   }
 
   function selectConversation(id: string) {
-    if (currentConversationId === id) return;
+    const result = selectSessionConversation(sessionState(), id, { now: Date.now() });
+    if (!result.conversation) return;
+    conversationArchive = result.archive;
+    if (result.thread.loadedFor !== threadLoadedFor) {
+      adoptThread(result.thread.loadedFor, result.thread.messages as any);
+      clearImages();
+      clearUrlFetches();
+      // The raw bag, not `result.settings`: that is a filtered typed view, and resolving from it
+      // would silently drop the report of any stored value this build cannot use.
+      applyConversationSettings(result.conversation.settings);
+    }
+    if (result.changed) conversationsDirty = true;
     saveConversations();
-    currentConversationId = id;
-    chatMessages = [];
-    chatInput = "";
+  }
+
+  /**
+   * The model the conversation restored at startup asked for, or empty if it named none.
+   *
+   * Read once by init(). Not reactive state: it exists to order two startup steps, and a later
+   * conversation switch must not retroactively change what was prewarmed.
+   */
+  let startupConversationAlias = "";
+
+  /** Set by loadConversations() before the archive is adopted; applied once hydration finishes. */
+  let pendingConversationSettings: unknown = undefined;
+  /**
+   * Whether a pending bag was recorded at all.
+   *
+   * `undefined` is a real value here — a conversation that stores no settings must still be
+   * resolved against the baseline, because the live values at that moment are whatever the
+   * previous session's blob happened to seed.
+   */
+  let pendingConversationSettingsSet = false;
+
+  /**
+   * The model the loaded conversation stores, if any.
+   *
+   * Distinguishes an explicit stored choice from an inherited or leftover global selection, so
+   * cleanup that exists to unpin a stale fallback cannot discard a conversation's own model.
+   */
+  function activeConversationModelAlias(): string {
+    const active = findConversation(conversationArchive, threadLoadedFor);
+    return readConversationSettings(active?.settings).settings.modelAlias || "";
+  }
+
+  /** The settings as they currently apply to the loaded chat. */
+  function currentChatSettings(): AppSettingDefaults {
+    return {
+      modelAlias: selectedModelAlias,
+      systemPrompt,
+      contextTurns,
+      showFullHistory,
+      temperature,
+      maxTokens,
+      topP,
+      topK,
+      frequencyPenalty,
+      presencePenalty,
+      randomSeed,
+    };
+  }
+
+  /**
+   * Load a conversation's settings into the live chat.
+   *
+   * Read-only by design. Resolving a conversation for display must not write anything back:
+   * materialising the inherited values as explicit overrides would freeze today's baseline into
+   * a record that had chosen to inherit it, and would replace any stored value this build
+   * rejects but is obliged to preserve. Writes happen only through `commitChatSettings`, one
+   * explicit patch at a time.
+   */
+  function applyConversationSettings(raw: unknown) {
+    const { effective } = resolveConversationSettings(raw, appSettingDefaults);
+    systemPrompt = effective.systemPrompt;
+    // Clamped: a stored value can be any positive integer (conversation-store.ts only rejects
+    // non-integers and values <= 0), but the live/effective context window must stay within what
+    // the Context slider and downstream trimming actually support -- otherwise the control and
+    // the real context window silently disagree. The archived raw value is never rewritten here.
+    contextTurns = clampContextTurns(effective.contextTurns);
+    showFullHistory = effective.showFullHistory;
+    temperature = effective.temperature;
+    maxTokens = effective.maxTokens;
+    topP = effective.topP;
+    topK = effective.topK;
+    frequencyPenalty = effective.frequencyPenalty;
+    presencePenalty = effective.presencePenalty;
+    randomSeed = effective.randomSeed;
+    // A plain assignment, not `setChatModel`. That function is async: it loads the model and can
+    // start the service, so driving it from a synchronous switch would let two overlapping
+    // switches each decide the service was stopped and queue a restart, tearing down the
+    // endpoint the first one had just made ready. It also refuses an alias the catalog has not
+    // listed yet, which at startup is every alias. Selection is a UI fact; loading is the
+    // gateway's job, and it loads a cached model on demand.
+    //
+    // Never blanked: an empty resolution means the conversation predates model tracking, and the
+    // running chat should keep the model it already has rather than lose it on a switch.
+    if (effective.modelAlias && effective.modelAlias !== selectedModelAlias) {
+      selectedModelAlias = effective.modelAlias;
+      selectedModel = { alias: effective.modelAlias };
+      chatClient = null;
+    }
+  }
+
+  /**
+   * Record a settings change the user made, against the conversation it was made in.
+   *
+   * This is the only writer. It takes a *patch* so that changing one setting cannot overwrite
+   * the others — an untouched key must keep inheriting rather than be frozen at whatever it
+   * currently resolves to.
+   *
+   * Deliberately excluded: runtime fallbacks and limits. Clearing the alias because its model
+   * files were deleted, auto-selecting the first available model, and clamping the context
+   * length to what a small model supports are all things Flint did to the chat, not choices the
+   * user made about it, so they change the live values without being stored.
+   */
+  function commitChatSettings(patch: Record<string, any>) {
+    if ('systemPrompt' in patch) systemPrompt = patch.systemPrompt;
+    if ('contextTurns' in patch) contextTurns = patch.contextTurns;
+    if ('showFullHistory' in patch) showFullHistory = patch.showFullHistory;
+    if ('temperature' in patch) temperature = patch.temperature;
+    if ('maxTokens' in patch) maxTokens = patch.maxTokens;
+    if ('topP' in patch) topP = patch.topP;
+    if ('topK' in patch) topK = patch.topK;
+    if ('frequencyPenalty' in patch) frequencyPenalty = patch.frequencyPenalty;
+    if ('presencePenalty' in patch) presencePenalty = patch.presencePenalty;
+    if ('randomSeed' in patch) randomSeed = patch.randomSeed;
+    if (!threadLoadedFor) return;
+    const result = captureThread(sessionState(), { now: Date.now(), settings: patch as any });
+    if (!result.changed) return;
+    conversationArchive = result.archive;
+    conversationsDirty = true;
+    // Marking dirty is not enough on its own: the autosave effect tracks the thread, not the
+    // settings, so a settings-only change would sit unwritten until the next message.
+    saveConversations();
   }
 
   function deleteConversation(id: string) {
-    conversations = conversations.filter((c) => c.id !== id);
-    if (currentConversationId === id) {
-      if (conversations.length > 0) {
-        selectConversation(conversations[0].id);
-      } else {
-        createNewConversation();
+    abortStreamFor(id);
+    const result = deleteSessionConversation(sessionState(), id, { now: Date.now() });
+    if (!result.removed) return;
+    conversationArchive = result.archive;
+    if (result.thread.loadedFor !== threadLoadedFor) {
+      adoptThread(result.thread.loadedFor, result.thread.messages as any);
+      // Same cleanup as an ordinary switch: pending images and fetched pages belong to the
+      // conversation they were staged in, and must not be sent from its neighbour.
+      clearImages();
+      clearUrlFetches();
+      // Null when the archive is now empty: the thread is unloaded and there is no neighbour to
+      // resolve. Dereferencing it here threw before `conversationsDirty` was set and before the
+      // replacement was created, leaving the UI attributed to nothing — so everything typed
+      // afterwards had no destination and neither autosave nor the flush could store it.
+      if (result.conversation) applyConversationSettings(result.conversation.settings);
+    }
+    conversationsDirty = true;
+    if (result.archive.conversations.length === 0) {
+      createNewConversation();
+      return;
+    }
+    saveConversations();
+  }
+
+  /**
+   * The archive as the user currently sees it, without writing anything.
+   *
+   * `saveConversations()` cannot be used for this: it returns early on a read-only session, and it
+   * returns *before* capturing the thread — so in exactly the sessions worth exporting, the
+   * messages on screen have never been folded into the archive. The capture is pure, so producing
+   * the snapshot costs nothing and commits nothing.
+   *
+   * A thread with no owning conversation is carried out separately rather than dropped. Opening
+   * an incompatible archive leaves the session with no conversation at all, and nothing prevents
+   * the user picking a model and chatting anyway; those turns live only in memory, so the export
+   * is their only way out.
+   */
+  function snapshotConversationArchive() {
+    let messages: unknown[] = [];
+    try {
+      messages = stampThreadIds() as any;
+    } catch {
+      messages = (chatMessages as any) ?? [];
+    }
+
+    if (!threadLoadedFor) {
+      return {
+        archive: conversationArchive,
+        liveThread: messages.length ? { loadedFor: null, messages } : null,
+        captured: true,
+      };
+    }
+
+    try {
+      const captured = captureThread(
+        { archive: conversationArchive, thread: { loadedFor: threadLoadedFor, messages: messages as any } },
+        { now: Date.now() },
+      );
+      if (captured.changed) {
+        return { archive: captured.archive, liveThread: null, captured: true };
       }
+      // Nothing changed either because the archive already matches, or because the conversation
+      // is gone from it. The second case would silently lose the thread, so carry it out too —
+      // duplicating a few messages costs nothing next to dropping them.
+      const attributed = captured.skipped !== 'conversation-absent';
+      return {
+        archive: conversationArchive,
+        liveThread: attributed ? null : { loadedFor: threadLoadedFor, messages },
+        captured: attributed,
+      };
+    } catch {
+      // The archive is now of unknown currency, so the thread goes out verbatim and the document
+      // says the capture failed rather than presenting a possibly stale archive as complete.
+      return {
+        archive: conversationArchive,
+        liveThread: { loadedFor: threadLoadedFor, messages },
+        captured: false,
+      };
+    }
+  }
+
+  let exportBusy = $state(false);
+  /** Outcome of the last export. Its own channel: a conversation save must not clear it. */
+  let exportNotice = $state<string | null>(null);
+  /** Whether the notice reports a clean export or one carrying a caveat. Never a failure. */
+  let exportNoticeTone = $state<"ok" | "caution">("ok");
+  let exportError = $state<string | null>(null);
+
+  /**
+   * Write every recoverable byte to a file the user chooses.
+   *
+   * Flint's own recovery copies live in browser storage inside the application's data directory,
+   * which is precisely what gets destroyed by a reinstall or by clearing application data. This is
+   * the only route out of it.
+   */
+  async function exportConversations() {
+    if (exportBusy) return;
+    exportBusy = true;
+    // Cleared together, so a failure is never read alongside the previous attempt's success.
+    exportNotice = null;
+    exportError = null;
+    try {
+      // Reaching the property can itself throw when site data is blocked, and that must cost the
+      // stored bytes rather than the whole export — the messages on screen are still rescuable.
+      let storage: any = null;
+      try {
+        storage = localStorage;
+      } catch {
+        storage = null;
+      }
+
+      const stored = storage ? collectStoredArchive(storage) : { raw: null, ok: false };
+      const preserved = storage ? collectPreservedPayloads(storage) : emptyCollection(true);
+      const exportedAt = new Date();
+      const doc = buildExportDocument({
+        session: snapshotConversationArchive(),
+        storedArchive: stored,
+        preserved,
+        appVersion,
+        exportedAt,
+      });
+      // Serialized before the dialog, so what is written is the state at the moment the user asked
+      // rather than whatever it drifted to while they browsed for a folder.
+      const contents = serializeExportDocument(doc);
+
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const { writeTextFile, exists, stat, lstat } = await import("@tauri-apps/plugin-fs");
+      const pathApi = await import("@tauri-apps/api/path");
+
+      let defaultPath = exportFileName(exportedAt);
+      try {
+        defaultPath = await pathApi.join(await pathApi.downloadDir(), defaultPath);
+      } catch {
+        // No download directory: let the dialog choose where to open.
+      }
+
+      const target = await save({
+        defaultPath,
+        filters: [{ name: "Flint export", extensions: ["json"] }],
+      });
+      if (!target) return;
+
+      // A file inside Flint's own data is destroyed by the very act the export exists to survive.
+      // Compared by filesystem identity rather than by spelling, because an application directory
+      // reached through a symlink or a junction has a different name and the same location.
+      const appDirs: string[] = [];
+      let appDirsIncomplete = false;
+      for (const dir of [pathApi.appDataDir, pathApi.appLocalDataDir, pathApi.appConfigDir]) {
+        try {
+          appDirs.push(await dir());
+        } catch {
+          // A root we cannot name cannot be compared against, so the comparison set is short and
+          // the classifier must not be allowed to answer "outside" on the strength of it.
+          appDirsIncomplete = true;
+        }
+      }
+      // Classified against whatever roots were obtained, even when the set is short. A missing
+      // root can only hide a match, never invent one, so `inside` stays trustworthy and must
+      // still refuse — skipping the check entirely would wave through a destination plainly
+      // within a root that did resolve. Only `outside` depends on having looked everywhere, so
+      // that is the answer downgraded when the set is incomplete.
+      const verdict = await classifyDestination(target, appDirs, {
+        stat: async (path: string) => {
+          const info: any = await stat(path);
+          return { dev: info?.dev ?? null, ino: info?.ino ?? null };
+        },
+        lstat: async (path: string) => {
+          const info: any = await lstat(path);
+          return { dev: info?.dev ?? null, ino: info?.ino ?? null };
+        },
+        dirname: (path: string) => pathApi.dirname(path),
+      });
+      const classified =
+        appDirsIncomplete && verdict === "outside" ? "unverified" : verdict;
+      if (classified === "inside") {
+        exportError =
+          "That folder is inside Flint's own application data, which is deleted when Flint is " +
+          "reinstalled or its data is cleared — the same event this file is meant to survive. " +
+          "Choose somewhere else, such as Documents or Downloads.";
+        return;
+      }
+
+      // Refuse to replace an existing file. The obvious thing to overwrite is an earlier export,
+      // and a write that fails partway through would have already truncated it — destroying a
+      // backup in the act of making one. `createNew` is the real guarantee; the check above it
+      // exists only to explain the refusal in words rather than as a filesystem error.
+      if (await exists(target)) {
+        exportError =
+          "That file already exists. Flint will not replace an existing file, so an earlier " +
+          "backup cannot be damaged — choose a different name.";
+        return;
+      }
+      await writeTextFile(target, contents, { createNew: true });
+
+      appendAppLog(`Exported conversations to ${target}`, "info");
+      // The file was written, so none of these are failures and none is styled or announced as
+      // one. They are still qualified rather than clean: each names something the export could
+      // not establish, and the caution tone keeps that visible without claiming the export did
+      // not happen. `exportError` stays reserved for a refusal or a write that did not complete.
+      if (!doc.complete) {
+        // Deliberately not "data is missing": when only attribution failed the messages are all
+        // present in `liveThread`. What is true in every case is that completeness is unproven.
+        exportNoticeTone = "caution";
+        exportNotice =
+          `Exported to ${target}, but Flint could not confirm that everything saved on this ` +
+          `computer is in the file. Do not clear or reinstall Flint on the strength of it.`;
+      } else if (classified === "unverified") {
+        exportNoticeTone = "caution";
+        exportNotice =
+          `Exported to ${target}, but Flint could not confirm that this location is outside its ` +
+          `own application data. If it is not, clearing Flint's data would delete this file too.`;
+      } else {
+        exportNoticeTone = "ok";
+        exportNotice = `Conversations exported to ${target}.`;
+      }
+    } catch (e: any) {
+      const message = e?.message || e;
+      exportError = `Export failed: ${message}`;
+      appendAppLog(`Conversation export failed: ${message}`, "error");
+    } finally {
+      exportBusy = false;
+    }
+  }
+
+  /**
+   * Store the loaded thread and commit the archive.
+   *
+   * Every turn is given an id first. The UI creates the user turn, the injected web-context pair,
+   * and the generated summary without one, and the storage layer counts a minted id as a repair —
+   * which makes it refuse the whole archive. Without this, saving would stop working silently the
+   * first time anyone sent a message.
+   */
+  let backgroundArchiveSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  const BACKGROUND_ARCHIVE_SAVE_MS = 400;
+
+  function scheduleBackgroundArchiveSave() {
+    if (mountDisposed || backgroundArchiveSaveTimer) return;
+    backgroundArchiveSaveTimer = setTimeout(() => {
+      backgroundArchiveSaveTimer = null;
+      saveConversations();
+    }, BACKGROUND_ARCHIVE_SAVE_MS);
+  }
+
+  function flushBackgroundArchiveSave() {
+    if (backgroundArchiveSaveTimer) {
+      clearTimeout(backgroundArchiveSaveTimer);
+      backgroundArchiveSaveTimer = null;
     }
     saveConversations();
   }
 
   function saveConversations() {
-    if (currentConversationId) {
-      const conv = conversations.find((c) => c.id === currentConversationId);
-      if (conv) {
-        conv.title = generateConversationTitle();
-        conv.messageCount = chatMessages.length;
+    // Disabled when the stored archive could not be read or preserved, so a fresh archive can
+    // never replace conversations we were unable to parse.
+    if (!conversationsWritable) return;
+
+    if (threadLoadedFor) {
+      const captured = captureThread(
+        { archive: conversationArchive, thread: { loadedFor: threadLoadedFor, messages: stampThreadIds() } },
+        { now: Date.now() },
+      );
+      if (captured.changed) {
+        conversationArchive = captured.archive;
+        conversationsDirty = true;
       }
     }
-    localStorage.setItem(CHATS_PERSIST_KEY, JSON.stringify(conversations));
+
+    if (!conversationsDirty) return;
+    const result = saveConversationArchive(localStorage, conversationArchive);
+    if (result.ok) {
+      // Only a confirmed write clears the flag, so a transient failure is retried rather than
+      // forgotten.
+      conversationsDirty = false;
+      conversationsError = null;
+      cancelConversationRetry();
+      return;
+    }
+    conversationsError = result.error;
+    appendAppLog(`Conversation save failed: ${result.error}`, 'error');
+    scheduleConversationRetry();
+  }
+
+  /**
+   * Last-chance write before the window goes away.
+   *
+   * `saveConversations()` returns early when nothing is outstanding, so calling this on a clean
+   * session costs nothing. When a previous save failed, `conversationsDirty` is still set and
+   * this is the retry — the autosave effect only fires on a *further* thread change, so storage
+   * recovering on its own would otherwise never be noticed.
+   */
+  function flushConversations() {
+    try {
+      saveConversations();
+    } catch (e: any) {
+      appendAppLog(`Conversation flush failed: ${e?.message || e}`, 'error');
+    }
+  }
+
+  // Retry a failed save on a timer rather than waiting for the next edit.
+  //
+  // The autosave effect only fires on a further thread change, so storage recovering on its own
+  // — a quota freed, a transient failure passing — would otherwise go unnoticed until the user
+  // happened to type again. Exit hooks cannot be relied on to catch it either: on macOS neither
+  // Cmd+Q nor Dock Quit reliably reaches the frontend (tauri-apps/tauri#9198).
+  //
+  // Deliberately not capped at a maximum number of attempts. Giving up leaves the app holding
+  // unsaved messages with no route to disk, so a recovery after the final attempt would be
+  // missed and the next quit would lose them. Backoff instead settles at a slow poll, which
+  // costs one timer while the error the user can already see remains on screen.
+  let conversationRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  let conversationRetries = 0;
+  const MAX_CONVERSATION_RETRY_DELAY = 30000;
+
+  function scheduleConversationRetry() {
+    if (conversationRetryTimer || mountDisposed) return;
+    const delay = Math.min(MAX_CONVERSATION_RETRY_DELAY, 1000 * 2 ** conversationRetries);
+    conversationRetries += 1;
+    conversationRetryTimer = setTimeout(() => {
+      conversationRetryTimer = null;
+      // A disposed component must not write: its archive is stale and would overwrite whatever
+      // replaced it.
+      if (mountDisposed) return;
+      if (conversationsDirty) flushConversations();
+    }, delay);
+  }
+
+  function cancelConversationRetry() {
+    if (conversationRetryTimer) clearTimeout(conversationRetryTimer);
+    conversationRetryTimer = null;
+    conversationRetries = 0;
+  }
+
+  /**
+   * Flush when the window is hidden or backgrounded.
+   *
+   * This is the closest thing to a reliable shutdown signal available from the frontend: hiding,
+   * blurring, and page-hide all fire before the process goes away on a native quit, which the
+   * close handler does not see. Cheap enough to run on every occurrence — `saveConversations()`
+   * returns immediately when nothing is outstanding.
+   */
+  function flushOnHide() {
+    if (mountDisposed) return;
+    if (conversationsDirty) flushConversations();
   }
 
   function loadConversations() {
+    const opened = openConversationArchive({
+      storage: localStorage,
+      appVersion: appVersion,
+      now: Date.now(),
+    });
+    conversationArchive = opened.archive;
+    conversationsWritable = opened.writable;
+    // Asked of storage, not inferred from this open: a copy parked by an earlier launch is just
+    // as much at risk, and by then nothing about the open looks unusual.
+    let recovery: string = 'unknown';
     try {
-      const stored = localStorage.getItem(CHATS_PERSIST_KEY);
-      if (stored) {
-        conversations = JSON.parse(stored);
-        if (conversations.length > 0) {
-          currentConversationId = conversations[0].id;
-        }
-      }
-    } catch (e) {
-      console.warn("Failed to load conversations:", e);
+      recovery = hasRecoveryCopies(localStorage as any);
+    } catch {
+      recovery = 'unknown';
     }
-    if (!currentConversationId) {
+    conversationsBackedUp = opened.backedUp || recovery === 'present';
+    // A storage we cannot list may hold copies we cannot name; saying nothing would retire the
+    // warning on the strength of a check that did not run.
+    storageInventoryUnknown = recovery === 'unknown';
+    if (opened.notice) hydrationNotice = opened.notice;
+
+    const active = findConversation(opened.archive, opened.archive.activeId);
+    if (active) {
+      // adoptThread snapshots, so the archive's own message objects are not handed to the UI.
+      adoptThread(active.id, active.messages as any);
+      // Deferred, not applied here: restoreChat() runs next and restores the app-level settings,
+      // which would overwrite these. The conversation's overrides must sit on top of the app
+      // defaults, so they are applied once restoreChat() has established them.
+      pendingConversationSettings = active.settings;
+      pendingConversationSettingsSet = true;
+    } else if (opened.writable) {
       createNewConversation();
     }
+    // A migrated archive is only in memory until it is committed; the legacy keys are left in
+    // place either way, so a failure here costs nothing but a repeated migration next launch.
+    if (opened.migrated && opened.writable) {
+      conversationsDirty = true;
+      saveConversations();
+    }
   }
-
   function loadCustomPersonasState() {
     customPersonas = loadCustomPersonas();
   }
@@ -946,7 +2601,7 @@
   }
 
   function choosePersona(p: Persona) {
-    systemPrompt = p.prompt;
+    commitChatSettings({ systemPrompt: p.prompt });
     statusMessage = `Persona set: ${p.name}`;
   }
 
@@ -1025,8 +2680,8 @@
     }
     saveCustomPersonasState();
     closePersonaManager();
-    // Apply it immediately
-    systemPrompt = newP.prompt;
+    // Apply it immediately, to the conversation it was applied from.
+    commitChatSettings({ systemPrompt: newP.prompt });
   }
 
   function deleteCustomPersona(id: string) {
@@ -1050,7 +2705,7 @@
     saveCustomPersonasState();
     managerNewName = "";
     managerNewPrompt = "";
-    systemPrompt = newP.prompt;
+    commitChatSettings({ systemPrompt: newP.prompt });
   }
 
   // Sidecar logs (basic for now)
@@ -1059,8 +2714,11 @@
   let unsubscribe: (() => void) | null = null;
 
   function syncFromStore(s: any) {
+    state.runtime = s.runtime ?? state.runtime;
     state.ready = s.ready;
     state.error = s.error;
+    state.catalogStatus = s.catalogStatus ?? "not-checked";
+    state.catalogError = s.catalogError ?? null;
     state.models = s.models ?? [];
     state.endpoint = s.endpoint;
     state.eps = s.eps ?? [];
@@ -1073,13 +2731,266 @@
     sidecarLogs = s.logs ?? [];
   }
 
-  // Local reactive derived.
-  // The filter is deliberately additive (alias OR derived family) so a model can
-  // never be hidden by a bad family derivation.
+  // Local reactive derived
+  const MODEL_SORT_KEY = "flint-model-sort";
+  let modelSortMode = $state<ModelSortMode>("name");
+  try {
+    const saved = localStorage.getItem(MODEL_SORT_KEY);
+    if (isModelSortMode(saved)) modelSortMode = saved;
+  } catch {}
+
+  function setModelSortMode(mode: string) {
+    if (!isModelSortMode(mode)) return;
+    modelSortMode = mode;
+    try { localStorage.setItem(MODEL_SORT_KEY, modelSortMode); } catch {}
+  }
+
+  // --- Memory watchdog and pool eviction -------------------------------------------------
+  // The UI owns these settings; the sidecar holds them only while it runs and is re-told on
+  // every service start. Keeping one source of truth avoids the two disagreeing after a
+  // restart, which would be invisible until a model vanished unexpectedly.
+  const MEMORY_SETTINGS_KEY = "flint-memory-settings";
+
+  let watchConfig = $state({ ...DEFAULT_WATCH_CONFIG });
+  const EVICTION_DEFAULTS = {
+    idleUnloadEnabled: false,
+    idleTimeoutMs: 30 * 60 * 1000,
+    maxResidentEnabled: false,
+    maxResident: 3,
+  };
+  let evictionConfig = $state({ ...EVICTION_DEFAULTS });
+  /** alias → 'pinned' | 'low'. Absent means 'normal'; kept for models not currently resident. */
+  let modelPriorities = $state<Record<string, string>>({});
+
+  let watchState = emptyWatchState();
+  let watchAlerts = $state<any[]>([]);
+
+  try {
+    const raw = localStorage.getItem(MEMORY_SETTINGS_KEY);
+    if (raw) {
+      const saved = JSON.parse(raw);
+      watchConfig = normalizeWatchConfig(saved?.watchdog);
+      if (saved?.eviction && typeof saved.eviction === "object") {
+        evictionConfig = { ...EVICTION_DEFAULTS, ...saved.eviction };
+      }
+      if (saved?.priorities && typeof saved.priorities === "object") {
+        modelPriorities = { ...saved.priorities };
+      }
+    }
+  } catch {}
+
+  function persistMemorySettings() {
+    try {
+      localStorage.setItem(
+        MEMORY_SETTINGS_KEY,
+        JSON.stringify({ watchdog: watchConfig, eviction: evictionConfig, priorities: modelPriorities }),
+      );
+    } catch {}
+  }
+
+  function evictionConfigsEqual(a: EvictionConfig, b: EvictionConfig): boolean {
+    return (
+      a.idleUnloadEnabled === b.idleUnloadEnabled &&
+      a.idleTimeoutMs === b.idleTimeoutMs &&
+      a.maxResidentEnabled === b.maxResidentEnabled &&
+      a.maxResident === b.maxResident
+    );
+  }
+
+  /** Sends the priority map and the eviction rules to the sidecar, which runs the sweep.
+   *
+   * Overlays `benchmarkPinnedAliases` (forced to 'pinned', via `overlayPinnedPriorities`) onto
+   * every call, not just the one `pinBenchmarkTargets` itself makes — `setModelPriorities`/
+   * `applyMemorySettings` both replace the whole map, so a user priority change or
+   * eviction-settings edit made from Settings/Monitor *during* a benchmark run would otherwise
+   * resend `modelPriorities` with no pin at all, dropping the overlay and re-exposing a running
+   * benchmark's targets to eviction. Folding the overlay in here (rather than only where pinning
+   * is first installed) makes it a standing invariant of every push for as long as a benchmark
+   * holds the lease, not a one-time snapshot. The resident cap floor (via `residentCapFloorFor`/
+   * `overlayResidentCapFloor`) gets the same treatment and for the same reason, and goes further:
+   * it is *recomputed fresh from live filtered resident entries/`modelPriorities` on every push* rather than
+   * cached from whenever the lease was installed, so a priority edit made mid-run — e.g. the user
+   * pinning another already-resident alias from Monitor/Settings while a later target is still
+   * loading — raises the floor in time for the very next push instead of leaving a stale,
+   * too-low one in place that would make a later target's load look like it exceeds the cap.
+   *
+   * `pinnedAliasesOverride` lets `pinBenchmarkTargets`/`unpinBenchmarkTargets` (in
+   * `benchmark-priority-lease.ts`) force the exact alias list for *this* push, independent of
+   * whatever `benchmarkPinnedAliases` currently holds — those two calls need the new lease's
+   * aliases reflected in the very first push they make, before the caller has had a chance to
+   * assign `benchmarkPinnedAliases` from the lease's return value.
+   */
+  let pushMemorySeq = 0;
+  // Gate every push behind startup's watermark reconciliation (see `performAppInit`) rather than
+  // only awaiting it before the *first* startup push. `initializeSDK()` can itself publish
+  // `state.serviceRunning: true` (adopting an already-running service) partway through its own
+  // internal awaits -- well before `performAppInit` reaches the seeding call below -- which fires
+  // the reactive `serviceRunning` effect's `pushMemorySettings()` immediately. Without this gate
+  // that queued call would run with the still-unseeded `pushMemorySeq`, reproducing the exact
+  // silently-skipped-push bug this reconciliation exists to prevent. `null` once reconciliation
+  // resolves (or a fresh page load hasn't started one), so steady-state pushes never wait on it.
+  let memorySeqReady: Promise<void> | null = null;
+  async function pushMemorySettings(options?: { throwOnError?: boolean; pinnedAliasesOverride?: readonly string[] }) {
+    if (memorySeqReady) await memorySeqReady;
+    const seq = ++pushMemorySeq;
+    const ownAliases = options?.pinnedAliasesOverride ?? benchmarkPinnedAliases;
+    const floor = residentCapFloorFor(ownAliases);
+    const currentEviction = overlayResidentCapFloor({ ...evictionConfig }, floor);
+    const currentPriorities = overlayPinnedPriorities({ ...modelPriorities }, ownAliases);
+    try {
+      // One command, one sweep. Sent as two commands, the first sweeps under half-updated
+      // settings — enough to evict the very model the user just chose to keep loaded.
+      //
+      // `seq` is this call's own position in `pushMemorySettings`'s call order, not merely a
+      // dedupe token for *this* function's replies (that's `pushMemorySeq`'s other job, below) --
+      // it also lets the sidecar refuse to install this payload if a call issued later already
+      // landed first. Two calls can arrive out of issue-order whenever one is delayed behind a
+      // sidecar respawn/re-init wait the other doesn't hit (see sendInternal in sdk.ts), which is
+      // exactly the scenario a benchmark run's pin/unpin and a concurrent Settings/Monitor edit
+      // can hit. Because this command fully replaces the priority map, an old call landing after
+      // a new one would otherwise silently wipe out whatever the new one just pinned/restored.
+      const { config: applied, stale } = await sdkApplyMemorySettings(
+        Object.entries(currentPriorities)
+          .filter(([, priority]) => priority === "pinned" || priority === "low")
+          .map(([alias, priority]) => ({ alias, priority })),
+        currentEviction,
+        seq,
+      );
+      if (stale) {
+        // The sidecar's own ordering guard refused this payload (an equal-or-higher seq already
+        // landed first) -- this push had no effect at all, not even a partial one. Startup seeds
+        // `pushMemorySeq` above the sidecar's watermark (see getLastAppliedMemorySettingsSeq) so
+        // this should not happen in the ordinary case; surfacing it as a failure rather than
+        // silently trusting `ok: true` is the defense for whatever startup ordering did not cover
+        // (e.g. the seeding call itself failing, or a second window sharing the same sidecar).
+        const err = new Error("The runtime reported this change as superseded by a later one and did not apply it.");
+        if (options?.throwOnError) throw err;
+        // Visible in the app log, not just the console -- the caller (e.g. `updateEvictionConfig`)
+        // already persisted this setting locally and returns as if it succeeded, so this is the
+        // only place a user could learn their pin/eviction change did not actually reach the
+        // runtime and evictionConfig/modelPriorities now disagree with what is really enforced.
+        appendAppLog(
+          "Memory settings change was not applied — the runtime reported it as superseded by a later change",
+          "warn",
+        );
+        console.warn("[flint] applyMemorySettings reported stale — payload was not installed", err);
+        return;
+      }
+      // Adopt the sidecar's normalized config, but only on real change and only when no newer
+      // push is in flight — an unconditional assignment re-triggers every effect that reads
+      // evictionConfig (the serviceRunning re-apply effect looped on exactly that). While the
+      // floor is raising the cap we sent, `applied` reflects that raised value, not the user's
+      // real setting — adopting it verbatim would leak the temporary raise into `evictionConfig`
+      // and make it stick around (re-sent by every later push) even after the run releases the
+      // lease. Restore the real maxResident before comparing/adopting; every other normalized
+      // field (e.g. a clamped idle timeout, or maxResidentEnabled, which this overlay never
+      // changes) still adopts normally.
+      // Mirrors `overlayResidentCapFloor`'s own raise condition exactly: only when the cap was
+      // both enabled and actually too low for the floor did that overlay touch `maxResident`, so
+      // only then does `applied.maxResident` reflect the temporary raise rather than the user's
+      // real setting.
+      const displayApplied = evictionConfig.maxResidentEnabled && floor > evictionConfig.maxResident && applied
+        ? { ...applied, maxResident: evictionConfig.maxResident }
+        : applied;
+      if (seq === pushMemorySeq && displayApplied && !evictionConfigsEqual(displayApplied, evictionConfig)) {
+        evictionConfig = displayApplied;
+      }
+    } catch (e) {
+      console.warn("[flint] could not apply memory settings", e);
+      if (options?.throwOnError) throw e;
+    }
+  }
+
+  function updateWatchConfig(patch: Record<string, unknown>) {
+    watchConfig = normalizeWatchConfig({ ...watchConfig, ...patch });
+    // Editing a threshold restarts any pending window inside evaluate(), so a lowered
+    // threshold cannot fire instantly off history gathered under the old one.
+    persistMemorySettings();
+    evaluateWatchdog();
+  }
+
+  function updateEvictionConfig(patch: Record<string, unknown>) {
+    evictionConfig = { ...evictionConfig, ...patch };
+    persistMemorySettings();
+    pushMemorySettings();
+  }
+
+  function setModelPriority(alias: string, priority: string) {
+    const next = { ...modelPriorities };
+    if (priority === "normal") delete next[alias];
+    else next[alias] = priority;
+    modelPriorities = next;
+    persistMemorySettings();
+    pushMemorySettings();
+  }
+
+  function priorityOf(alias: string): string {
+    const p = modelPriorities[alias];
+    return p === "pinned" || p === "low" ? p : "normal";
+  }
+
+  /** Compact "how long since this model was last asked for anything". */
+  function formatIdleFor(lastUsedAt?: number): string {
+    if (!Number.isFinite(lastUsedAt)) return "—";
+    const seconds = Math.max(0, Math.round((Date.now() - Number(lastUsedAt)) / 1000));
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return `${minutes}m`;
+    return `${Math.round(minutes / 60)}h`;
+  }
+
+  function evaluateWatchdog() {
+    const status = { ...(state.poolStats ?? {}), models: loadedPoolEntries };
+    const result = evaluateWatch(watchState, toWatchSample(status, Date.now()), watchConfig);
+    watchState = result.state;
+    watchAlerts = result.active;
+    if (result.raised.length > 0) notifyHighUsage(result.raised);
+  }
+
+  function dismissWatchAlerts() {
+    watchState = dismissAllWatch(watchState);
+    watchAlerts = [];
+  }
+
+  /**
+   * The banner covers the case where Flint is on screen. It does not cover the case that
+   * matters most — an agent driving the gateway while Flint is minimised — so an unfocused
+   * window escalates to an OS notification instead.
+   */
+  async function notifyHighUsage(raised: any[]) {
+    const body = `${formatAlertSummary(raised)}. ${formatAlertAdvice(loadedPoolEntries.length)}`;
+    try {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      if (await getCurrentWindow().isFocused()) return;
+      const notification = await import("@tauri-apps/plugin-notification");
+      let granted = await notification.isPermissionGranted();
+      if (!granted) granted = (await notification.requestPermission()) === "granted";
+      if (granted) notification.sendNotification({ title: "Flint — high memory usage", body });
+    } catch {
+      // No Tauri host (dev in a plain browser) or notifications refused: the banner stands.
+    }
+  }
+
+  // One poll shared by the Monitor tab and the watchdog. Two independent timers would let
+  // responses overlap and arrive out of order, and the watchdog measures elapsed time
+  // between samples, so ordering is not cosmetic.
+  let poolPollInFlight = false;
+  async function pollResources() {
+    if (poolPollInFlight) return;
+    poolPollInFlight = true;
+    try {
+      await pollPoolStatus();
+      evaluateWatchdog();
+    } catch {
+    } finally {
+      poolPollInFlight = false;
+    }
+  }
+
   const filteredModels = $derived(
     sortModels(
-      (state.models || []).filter((m: ModelInfo) => modelMatchesSearch(m, searchTerm)),
-      modelSortKey,
+      (state.models || []).filter((model: ModelInfo) => modelMatchesSearch(model, searchTerm)),
+      modelSortMode,
     ),
   );
   const modelUpdateCount = $derived(
@@ -1089,19 +3000,228 @@
     ),
   );
 
+  // ---- BYOM: import an ONNX model folder that is not in the Foundry catalog ----
+
+  let byomOpen = $state(false);
+  let byomFolder = $state("");
+  let byomName = $state("");
+  let byomInspecting = $state(false);
+  let byomBusy = $state("");
+  let byomReport = $state<any>(null);
+  let byomError = $state("");
+  let byomTemplate = $state<Record<string, string> | null>(null);
+  let byomPreset = $state("");
+  let byomTemplateOpen = $state(false);
+
+  /** Locally imported and linked models report a `local://` uri; catalog models do not. */
+  function isLocalModel(model: any): boolean {
+    return String(model?.info?.uri || "").startsWith("local://");
+  }
+
+  const byomTemplateCheck = $derived(
+    byomTemplate ? validatePromptTemplate(byomTemplate) : null,
+  );
+
+  function resetByom() {
+    byomFolder = "";
+    byomName = "";
+    byomReport = null;
+    byomError = "";
+    byomTemplate = null;
+    byomPreset = "";
+    byomTemplateOpen = false;
+    byomBusy = "";
+  }
+
+  async function pickByomFolder() {
+    byomError = "";
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const picked = await open({ directory: true, multiple: false, title: "Select an ONNX model folder" });
+      if (typeof picked !== "string") return;
+      byomFolder = picked;
+      await inspectByomFolder();
+    } catch (e: any) {
+      byomError = `Could not open the folder picker: ${e?.message || e}`;
+    }
+  }
+
+  async function inspectByomFolder() {
+    if (!byomFolder) return;
+    byomInspecting = true;
+    byomError = "";
+    byomReport = null;
+    try {
+      const report = await inspectModelFolder(byomFolder);
+      byomReport = report;
+      byomName = report.suggestedName || "";
+      byomTemplate = report.detected.promptTemplate ? { ...report.detected.promptTemplate } : null;
+      byomPreset = "";
+      byomTemplateOpen = report.detected.task === 'embeddings' ? false : !report.detected.templateConfident;
+    } catch (e: any) {
+      byomError = e?.message || String(e);
+    } finally {
+      byomInspecting = false;
+    }
+  }
+
+  function applyByomPreset(key: string) {
+    byomPreset = key;
+    const preset = (byomReport?.presets || TEMPLATE_PRESETS)[key];
+    if (preset?.template) byomTemplate = { ...preset.template };
+  }
+
+  async function runByomImport(mode: "copy" | "link") {
+    if (!byomReport?.ok || !byomName.trim()) return;
+    byomBusy = mode;
+    byomError = "";
+    try {
+      let result;
+      if (mode === "link") {
+        result = await linkModelFolder({ folderPath: byomFolder, name: byomName.trim() });
+      } else {
+        result = await importModelFolder({
+          folderPath: byomFolder,
+          name: byomName.trim(),
+          // Only send a template when it differs from what the sidecar would pick anyway.
+          promptTemplate: byomTemplateDirty() ? (byomTemplate as any) : undefined,
+        });
+      }
+      const addedMessage = `Added model "${byomName.trim()}" (${mode === "link" ? "linked" : "copied"})`;
+      if (result.catalogRefreshRequiresRestart) {
+        statusMessage = `${addedMessage}. Restart Flint to let the model catalog detect the change.`;
+        appendAppLog(statusMessage, "warn");
+      } else {
+        appendAppLog(addedMessage, "info");
+      }
+      byomOpen = false;
+      resetByom();
+    } catch (e: any) {
+      byomError = e?.message || String(e);
+    } finally {
+      byomBusy = "";
+    }
+  }
+
+  function byomTemplateDirty(): boolean {
+    const detected = byomReport?.detected?.promptTemplate;
+    if (!detected || !byomTemplate) return false;
+    return TEMPLATE_ROLES.some((r: string) => detected[r] !== byomTemplate?.[r]);
+  }
+
+  // ---- Editing the template of a model Flint already imported ----
+
+  let templateEditAlias = $state<string | null>(null);
+  let templateEdit = $state<Record<string, string> | null>(null);
+  let templateEditPresets = $state<Record<string, any>>({});
+  let templateEditSource = $state("");
+  let templateEditError = $state("");
+  let templateEditSaving = $state(false);
+
+  const templateEditCheck = $derived(
+    templateEdit ? validatePromptTemplate(templateEdit) : null,
+  );
+
+  async function openTemplateEditor(model: any) {
+    templateEditAlias = model.alias;
+    templateEdit = null;
+    templateEditError = "";
+    try {
+      const res = await getModelTemplate(model.alias);
+      templateEdit = { ...(res.promptTemplate as any) };
+      templateEditPresets = res.presets || {};
+      templateEditSource = res.templateSource || "";
+    } catch (e: any) {
+      templateEditError = e?.message || String(e);
+    }
+  }
+
+  async function saveTemplateEdit() {
+    if (!templateEditAlias || !templateEdit) return;
+    templateEditSaving = true;
+    templateEditError = "";
+    try {
+      const result = await setModelTemplate(templateEditAlias, templateEdit as any);
+      const updatedMessage = `Updated prompt template for "${templateEditAlias}"`;
+      if (result.catalogRefreshRequiresRestart) {
+        statusMessage = `${updatedMessage}. Restart Flint to let the model catalog detect the change.`;
+        appendAppLog(statusMessage, "warn");
+      } else {
+        appendAppLog(updatedMessage, "info");
+      }
+      templateEditAlias = null;
+      templateEdit = null;
+    } catch (e: any) {
+      templateEditError = e?.message || String(e);
+    } finally {
+      templateEditSaving = false;
+    }
+  }
+
   // Persistence for chat history and current model
   const PERSIST_KEY = "flint-chat-persist";
+  const PERSIST_BACKUP_KEY = "flint-chat-persist.corrupt";
+
+  // Autosave stays disabled until every localStorage read has completed. Without this gate the
+  // persistence effect below runs at mount (its old guard was always true because systemPrompt
+  // has a non-empty default) and writes in-memory defaults over the saved blob before
+  // restoreChat() ever reads it.
+  let hydrated = $state(false);
+  // Split by source: a successful chat write must not clear a conversation-store failure, and
+  // neither write may clear the one-time hydration notice the user has not seen yet.
+  let persistError = $state<string | null>(null);
+  let conversationsError = $state<string | null>(null);
+  let hydrationNotice = $state<string | null>(null);
+  const storageError = $derived(persistError || conversationsError || hydrationNotice);
+
+  /**
+   * True while conversation data is only in application storage that a reinstall would take.
+   *
+   * Deliberately not part of `storageError`: that banner is dismissible, and dismissing a warning
+   * does not make the data safe. This stays until the condition does.
+   */
+  const conversationsAtRisk = $derived(
+    !conversationsWritable || conversationsBackedUp || settingsUnreadable || storageInventoryUnknown,
+  );
+
+  function dismissStorageError() {
+    persistError = null;
+    conversationsError = null;
+    hydrationNotice = null;
+  }
+
+  // Captured before anything can write, so first-run detection is not fooled by our own writes.
+  let hadPersistedChatAtLaunch = false;
+  /**
+   * The pre-v2 global thread exactly as found on disk, or undefined if there was none.
+   *
+   * Preserved verbatim so `persistChat` can rewrite its key without destroying it. See the
+   * payload in `persistChat` for why it is neither dropped nor kept up to date.
+   */
+  let legacyThreadAtLaunch: unknown = undefined;
 
   // Load theme early (before first paint) to avoid flash
   try {
     const raw = localStorage.getItem(PERSIST_KEY);
-    if (raw) {
-      const d = JSON.parse(raw);
-      if (d.theme === 'light' || d.theme === 'dark') theme = d.theme;
-    }
+    hadPersistedChatAtLaunch = !!raw;
+    const storedTheme = readPersistedTheme(raw);
+    if (storedTheme) theme = storedTheme;
   } catch {}
 
+  /** `bind:checked` applies after an existing `change` listener, so persistChat() alone would
+   * serialize the previous value. Read the event first, then persist. */
+  function persistChatCheckbox(assign: (checked: boolean) => void) {
+    return (e: Event) => {
+      assign((e.currentTarget as HTMLInputElement).checked);
+      persistChat();
+    };
+  }
+
   function persistChat() {
+    // Every writer must honour this, not just the autosave effect: several call sites invoke
+    // persistChat() directly, and any of them could otherwise replace a blob we failed to read
+    // or failed to back up.
+    if (!hydrated) return;
     try {
       localStorage.setItem(
         PERSIST_KEY,
@@ -1109,32 +3229,94 @@
           selectedModelAlias,
           selectedSTTModelAlias,
           selectedAccelerationPreference,
-          chatMessages,
-          systemPrompt,
-          contextTurns,
-          showFullHistory,
+          // Frozen at launch rather than tracking the live thread. Conversations now live in the
+          // v2 archive, so writing the thread here too would double every message against a ~5MB
+          // localStorage budget. Rewriting the key without it would be worse: it is the only
+          // remaining copy of the pre-v2 thread, kept both for rollback and as the migration
+          // source if the archive commit failed. So it is preserved exactly and never extended.
+          chatMessages: legacyThreadAtLaunch,
+          // The baseline, not the values the loaded conversation happens to be using. Writing
+          // the effective values here would republish one chat's model and persona as the
+          // setting every conversation without an override inherits. The key names are
+          // unchanged, so an older build still reads these as its globals.
+          ...appSettingDefaultsToPersisted(appSettingDefaults),
           sidebarCollapsed,
           theme,
           modelRuntimeMeta,
           startupModels,
           autoStartService,
+          autoRefreshCatalogOnStartup,
           defaultChatAlias,
           defaultAudioAlias,
           networkPort,
           networkBindAddress,
-          modelSortKey,
+          keepServiceInBackground,
+          benchmarkPreviewEnabled,
         }),
       );
-    } catch {}
+      // Persist immediately so a failure is not sticky. Assigning the same value is a no-op in
+      // Svelte 5, and not *reading* persistError keeps it out of the effect's dependencies.
+      persistError = null;
+    } catch (e: any) {
+      persistError = `Settings and chat history could not be saved: ${e?.message || e}`;
+      appendAppLog(`Persist failed: ${e?.message || e}`, 'error');
+    }
   }
-  function restoreChat() {
+
+  /**
+   * Keep unparseable bytes so they can be recovered by hand. Returns false when nothing could
+   * be preserved, in which case the caller must stop writing to the live key — replacing it
+   * would destroy the only copy.
+   */
+  function preserveCorruptValue(backupKey: string, raw: string): boolean {
     try {
-      const raw = localStorage.getItem(PERSIST_KEY);
-      if (raw) {
-        const data = JSON.parse(raw);
-        // Guard with the type check so older persisted blobs (which have no
-        // modelSortKey) keep the default instead of breaking the Models view.
-        if (isModelSortKey(data.modelSortKey)) modelSortKey = data.modelSortKey;
+      const existing = localStorage.getItem(backupKey);
+      if (existing === raw) return true;
+      if (existing === null) {
+        localStorage.setItem(backupKey, raw);
+        return true;
+      }
+      // A different blob is already parked there; keep both rather than choosing between them.
+      localStorage.setItem(`${backupKey}.${Date.now()}`, raw);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Restore persisted state. Returns false when autosave must stay disabled. */
+  function restoreChat(): boolean {
+    let raw: string | null = null;
+    try {
+      raw = localStorage.getItem(PERSIST_KEY);
+    } catch (e: any) {
+      // The saved blob may still be there and readable later; enabling autosave now would let
+      // a default-state write replace it.
+      // Older versions of Flint kept conversations inside this same record, so a value we cannot
+      // read may hold messages that exist nowhere else.
+      settingsUnreadable = true;
+      hydrationNotice = `Saved settings could not be read (${e?.message || e}). Autosave is off for this session so existing data is left untouched.`;
+      return false;
+    }
+
+    const parsed = parsePersistedState(raw);
+    if (parsed.corrupt) {
+      const preserved = preserveCorruptValue(PERSIST_BACKUP_KEY, raw as string);
+      hydrationNotice = preserved
+        ? `Saved settings were unreadable, so Flint started with defaults. A copy of the previous data was kept; use Export to save it to a file.`
+        : `Saved settings are unreadable and a backup could not be written (storage may be full). Autosave is off so the existing data is left untouched.`;
+      // The pre-v2 build stored the chat thread inside the settings value, so this blob can hold
+      // the only surviving record of a conversation — and autosave is about to replace the live
+      // key with defaults. Flagged whether or not the copy was written: a failed copy is the more
+      // urgent case, not the lesser one.
+      settingsUnreadable = true;
+      return mayEnableAutosave(parsed, preserved);
+    }
+    const data = parsed.data;
+    if (!data) return true;
+
+    try {
+      {
         if (data.selectedModelAlias)
           selectedModelAlias = data.selectedModelAlias;
         if (data.selectedSTTModelAlias)
@@ -1142,14 +3324,27 @@
         if (typeof data.selectedAccelerationPreference === "string") {
           selectedAccelerationPreference = data.selectedAccelerationPreference;
         }
-        if (data.chatMessages?.length) chatMessages = data.chatMessages;
-        if (data.systemPrompt) systemPrompt = data.systemPrompt;
-        if (typeof data.contextTurns === 'number' && data.contextTurns > 0) {
-          contextTurns = data.contextTurns;
-        }
-        if (typeof data.showFullHistory === 'boolean') {
-          showFullHistory = data.showFullHistory;
-        }
+        // Deliberately NOT restoring `data.chatMessages` into the visible thread. The legacy blob
+        // holds the single pre-v2 global thread, which the archive migration has already imported
+        // as its own "Recovered chat" conversation. Restoring it here would overwrite the thread
+        // just loaded from the archive while it is still attributed to that conversation — so the
+        // next save would write the legacy messages over a real conversation's history.
+        // It is captured instead, so rewriting this key cannot destroy it.
+        // Settings below are still restored: they are app-level and were never per-conversation.
+        if (data.chatMessages !== undefined) legacyThreadAtLaunch = data.chatMessages;
+        // The baseline every conversation without an override resolves against, and the seed
+        // for the live values until a conversation is loaded over them.
+        appSettingDefaults = readAppSettingDefaults(data, DEFAULT_APP_SETTINGS);
+        systemPrompt = appSettingDefaults.systemPrompt;
+        contextTurns = clampContextTurns(appSettingDefaults.contextTurns);
+        showFullHistory = appSettingDefaults.showFullHistory;
+        temperature = appSettingDefaults.temperature;
+        maxTokens = appSettingDefaults.maxTokens;
+        topP = appSettingDefaults.topP;
+        topK = appSettingDefaults.topK;
+        frequencyPenalty = appSettingDefaults.frequencyPenalty;
+        presencePenalty = appSettingDefaults.presencePenalty;
+        randomSeed = appSettingDefaults.randomSeed;
         if (typeof data.sidebarCollapsed === 'boolean') {
           sidebarCollapsed = data.sidebarCollapsed;
         }
@@ -1163,6 +3358,11 @@
           startupModels = data.startupModels;
         }
         if (typeof data.autoStartService === 'boolean') autoStartService = data.autoStartService;
+        if (typeof data.autoRefreshCatalogOnStartup === 'boolean') {
+          autoRefreshCatalogOnStartup = data.autoRefreshCatalogOnStartup;
+        }
+        if (typeof data.keepServiceInBackground === 'boolean') keepServiceInBackground = data.keepServiceInBackground;
+        if (typeof data.benchmarkPreviewEnabled === 'boolean') benchmarkPreviewEnabled = data.benchmarkPreviewEnabled;
         if (typeof data.defaultChatAlias === 'string') defaultChatAlias = data.defaultChatAlias;
         if (typeof data.defaultAudioAlias === 'string') defaultAudioAlias = data.defaultAudioAlias;
         if (typeof data.networkPort === 'number' && data.networkPort >= 1024 && data.networkPort <= 65535) {
@@ -1174,7 +3374,13 @@
           appliedNetworkBindAddress = data.networkBindAddress;
         }
       }
-    } catch {}
+      return true;
+    } catch (e: any) {
+      // A field-level failure leaves partially restored state; keeping autosave off would
+      // strand the user with no persistence at all, so save but make the fault visible.
+      hydrationNotice = `Some saved settings could not be restored: ${e?.message || e}`;
+      return true;
+    }
   }
 
   const networkSettingsDirty = $derived(
@@ -1222,6 +3428,11 @@ function selectBindAddress(next: string) {
   }
 
   async function applyNetworkSettings() {
+    const blocked = blockedByExclusivePoolRun();
+    if (blocked) {
+      statusMessage = blocked;
+      return;
+    }
     const port = Number(networkPort);
     if (!Number.isFinite(port) || port < 1024 || port > 65535) {
       statusMessage = 'Port must be between 1024 and 65535';
@@ -1254,12 +3465,17 @@ function selectBindAddress(next: string) {
     }
 
     networkApplyBusy = true;
+    const release = beginPoolMutation();
     try {
       networkPort = port;
       networkBindAddress = bind;
       persistChat();
 
       const wasRunning = !!state.serviceRunning;
+      // No clearing of the SDK latch: an explicit transition bypasses the guard by not passing
+      // `convenience`, so it needs no authorization, and clearing the shared latch would also
+      // release any convenience start already queued behind the lock. The mirror is refreshed
+      // from the attempt's own outcome below.
       if (wasRunning) {
         statusMessage = 'Restarting service with new network settings…';
         appendAppLog(`Restarting service for network change → ${bind}:${port}`);
@@ -1281,26 +3497,231 @@ updateStateFromSdk();
         appendAppLog(`Network settings applied for next start: ${bind}:${port}`);
       }
     } catch (e: any) {
+      serviceStartUncertain = isServiceStartUncertain();
       statusMessage = `Failed to apply network settings: ${e?.message || e}`;
       appendAppLog(`Network settings apply failed: ${e?.message || e}`, 'error');
       updateStateFromSdk();
     } finally {
+      release();
       networkApplyBusy = false;
     }
   }
 
-  function startSvc(alias?: string, preferredEp?: string) {
-    return startService(networkPort, alias, preferredEp, networkBindAddress || undefined).then((ep) => {
+  function startSvc(alias?: string, preferredEp?: string, opts?: { convenience?: boolean }) {
+    return startService(
+      networkPort,
+      alias,
+      preferredEp,
+      networkBindAddress || undefined,
+      opts,
+    ).then((ep) => {
       markNetworkSettingsApplied();
       return ep;
     });
   }
 
-  $effect(() => {
-    // Persist on changes to chat + audio model state
-    if (selectedModelAlias || selectedSTTModelAlias || chatMessages.length > 0 || systemPrompt) {
-      persistChat();
+  // Mirrors the SDK lock, including queued work. Real serialization lives in sdk.ts.
+  const serviceTransitionBusy = $derived(!!state.runtime?.transitioning);
+  // Label from the SDK start phase, not "busy and not running" — stop/unload also
+  // clear serviceRunning while transitioning, and a restart keeps it true until the
+  // new endpoint is confirmed.
+  const serviceStarting = $derived(state.runtime?.service === 'starting');
+
+  /**
+   * Mirrors the SDK's stand-down state for display only.
+   *
+   * The authoritative flag lives in `sdk.ts`, checked under the service-transition lock: a flag
+   * consulted here, before queuing, would let two convenience starts both pass while neither had
+   * run, so the first one's uncertainty could not stop the second. This copy exists so the UI can
+   * say why convenience starts are standing down.
+   */
+  let serviceStartUncertain = $state(false);
+
+  /**
+   * Start the service for a model on a convenience path.
+   *
+   * These call sites are opportunistic: the user asked to load or chat with a model, not to
+   * perform a service transition. So an ordinary failure is logged rather than raised. An
+   * *uncertain* one is different — the start may have taken effect — and it surfaces.
+   *
+   * Returns *why* it did not start. "Already running" and "stood down after an unestablished
+   * outcome" must not both read as successful continuation to a caller about to announce ready.
+   */
+  /** What became of a convenience service start. */
+  type ServiceStartOutcome = "started" | "already-running" | "blocked" | "failed";
+
+  /** An attempt's outcome plus the error behind it, so callers can preserve the cause. */
+  type ServiceStartAttempt = { result: ServiceStartOutcome; error?: any };
+
+  /**
+   * The clause to append to a "ready" message when the service did not actually start.
+   *
+   * A sticky stand-down is defensible; a sticky stand-down the user cannot see, announced as
+   * "ready", is not — the model is selected but nothing is serving it.
+   */
+  function serviceQualifier(result: ServiceStartOutcome): string {
+    if (result === "blocked")
+      return " The service did not start: an earlier start never reported its outcome. Start it from Settings when you have checked.";
+    if (result === "failed") return " The service could not be started.";
+    return "";
+  }
+
+  async function startServiceForModel(alias: string): Promise<ServiceStartAttempt> {
+    if (state.serviceRunning) return { result: "already-running" };
+    // A service that is not already running has to be (re)started, and the sidecar's start
+    // path clears its whole in-memory pool before the new listener comes up. That would wipe
+    // out a benchmark run's pinned/loaded targets, so this is a pool mutation in its own right
+    // — not just a convenience for the caller's own model.
+    const blocked = blockedByExclusivePoolRun();
+    if (blocked) {
+      statusMessage = blocked;
+      return { result: "failed", error: new Error(blocked) };
     }
+    const release = beginPoolMutation();
+    try {
+      await startSvc(
+        alias,
+        selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+        { convenience: true },
+      );
+      // Read back rather than assumed: the SDK owns the latch and retires it on a start that
+      // reported its own outcome.
+      serviceStartUncertain = isServiceStartUncertain();
+      return { result: "started" };
+    } catch (e: any) {
+      console.warn("Auto-start service failed", e);
+      if (isUncertainOutcome(e)) {
+        serviceStartUncertain = true;
+        statusMessage = e?.message || String(e);
+        return { result: "blocked", error: e };
+      }
+      serviceStartUncertain = isServiceStartUncertain();
+      return { result: serviceStartUncertain ? "blocked" : "failed", error: e };
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * Make the service usable for `alias` with the least disruption.
+   *
+   * If the service is already up we load the model in place rather than restarting, because a
+   * restart would evict every other resident model and reset usage counters — an "Ensure
+   * service" action must not do that. Runs inside the SDK's service-transition lock so a
+   * concurrent Stop or Apply cannot tear the service down mid-load.
+   *
+   * Note: `preferredEp` can only be applied when the service is (re)started. On the
+   * already-running path the caller is told the existing acceleration setting stands.
+   */
+  async function ensureServiceRunning(
+    alias?: string,
+    preferredEp?: string,
+    opts?: { convenience?: boolean },
+  ): Promise<string | undefined> {
+    // Both branches below can mutate the pool: a not-yet-running service is (re)started (which
+    // clears the sidecar's resident set), and an already-running one may still get a fresh
+    // `alias` loaded into it. Either must be fenced against an active benchmark run.
+    const blocked = blockedByExclusivePoolRun();
+    if (blocked) {
+      statusMessage = blocked;
+      throw new Error(blocked);
+    }
+    const release = beginPoolMutation();
+    try {
+      const ensured = await sdkEnsureServiceRunning(
+        networkPort,
+        alias,
+        preferredEp,
+        networkBindAddress || undefined,
+        opts,
+      );
+      if (ensured.started) markNetworkSettingsApplied();
+      if (alias) {
+        const resident = loadedPoolEntries.some((e: any) => e.alias === alias);
+        if (!resident) await sdkLoadModel({ alias }, "audio");
+        if (preferredEp && !ensured.started) {
+          appendAppLog(
+            `Ensure service: ${alias} loaded into the running service (left up to preserve other loaded models); acceleration preference "${preferredEp}" is applied per transcription request.`,
+          );
+        }
+      }
+      return ensured.endpoint;
+    } finally {
+      release();
+    }
+  }
+
+  async function refreshWslStatus() {
+    wslBusy = true;
+    wslMessage = '';
+    try {
+      wslStatus = await getWslStatus();
+      if (wslStatus?.mirrored) wslRestartPending = false;
+    } catch (e: any) {
+      wslMessage = `Could not check WSL: ${e?.message || e}`;
+    } finally {
+      wslBusy = false;
+    }
+  }
+
+  async function enableWslMirrored() {
+    const configPath = wslStatus?.configPath || '%UserProfile%\\.wslconfig';
+    const ok = globalThis.confirm(
+      `Enable WSL mirrored networking?\n\n` +
+        `This writes networkingMode=mirrored into ${configPath} ` +
+        `(a backup of the original is kept next to it). ` +
+        `Other settings in the file are left untouched.\n\n` +
+        `The change takes effect after WSL restarts.`,
+    );
+    if (!ok) return;
+    wslBusy = true;
+    wslMessage = '';
+    try {
+      const result = await enableWslMirroredNetworking();
+      wslRestartPending = result.restartRequired;
+      wslMessage = result.changed
+        ? `Mirrored networking written to ${result.configPath}. Restart WSL to apply.`
+        : 'Mirrored networking was already enabled.';
+      appendAppLog(`WSL mirrored networking ${result.changed ? 'enabled' : 'already enabled'} (${result.configPath})`);
+      wslStatus = await getWslStatus();
+    } catch (e: any) {
+      wslMessage = `Failed to update .wslconfig: ${e?.message || e}`;
+      appendAppLog(`WSL mirrored enable failed: ${e?.message || e}`, 'error');
+    } finally {
+      wslBusy = false;
+    }
+  }
+
+  async function restartWsl() {
+    const ok = globalThis.confirm(
+      `Restart WSL now?\n\n` +
+        `This runs "wsl --shutdown", which terminates every running WSL distro ` +
+        `and anything inside them (shells, servers, editors). WSL starts again ` +
+        `automatically the next time you open it.`,
+    );
+    if (!ok) return;
+    wslBusy = true;
+    wslMessage = '';
+    try {
+      await shutdownWsl();
+      wslRestartPending = false;
+      wslMessage = 'WSL shut down. On next launch it comes back with mirrored networking — WSL clients can then use the loopback URL.';
+      appendAppLog('WSL shut down to apply mirrored networking');
+      wslStatus = await getWslStatus();
+    } catch (e: any) {
+      wslMessage = `Failed to restart WSL: ${e?.message || e}`;
+      appendAppLog(`WSL shutdown failed: ${e?.message || e}`, 'error');
+    } finally {
+      wslBusy = false;
+    }
+  }
+
+  $effect(() => {
+    // Persist on any change to saved state. Dependencies are tracked through persistChat()'s
+    // reads; the hydrated gate keeps mount-time defaults from overwriting the saved blob
+    // regardless of whether this effect or onMount runs first.
+    if (!hydrated) return;
+    persistChat();
   });
 
   function setModelRuntimeMeta(
@@ -1321,9 +3742,12 @@ updateStateFromSdk();
   // Apply theme
   $effect(() => {
     document.documentElement.setAttribute('data-theme', theme);
-    // Persist immediately
+    // Persist immediately — but never before hydration, or this read-modify-write would
+    // create/alter the persisted blob ahead of restoreChat().
+    if (!hydrated) return;
     try {
       const existing = JSON.parse(localStorage.getItem(PERSIST_KEY) || '{}');
+      if (!existing || typeof existing !== 'object' || Array.isArray(existing)) return;
       existing.theme = theme;
       localStorage.setItem(PERSIST_KEY, JSON.stringify(existing));
     } catch {}
@@ -1338,7 +3762,7 @@ updateStateFromSdk();
       try {
         const [log] = await Promise.all([
           getAccessLog(),
-          pollPoolStatus(),
+          pollResources(),
         ]);
         if (!monitorLogPaused) {
           monitorLog = (log ?? []).slice(-100).reverse();
@@ -1351,14 +3775,50 @@ updateStateFromSdk();
     return () => clearInterval(interval);
   });
 
+  // Watchdog polling — deliberately not tied to a tab or to window visibility. The whole
+  // point is to catch pressure while the user is somewhere else and an external client is
+  // loading models through the gateway. Slower while nothing is resident, because with an
+  // empty pool there is nothing to warn about and the accelerator probe shells out.
+  $effect(() => {
+    if (!watchConfig.enabled) return;
+    if (!state.serviceRunning) return;
+    if (currentView === 'monitor') return; // the 5s poll above already feeds the watchdog
+
+    const resident = loadedPoolEntries.length > 0;
+    const interval = setInterval(pollResources, resident ? 30000 : 60000);
+    return () => clearInterval(interval);
+  });
+
+  // Re-apply the rules whenever the sidecar is (re)started, since it keeps them in memory
+  // only and would otherwise come back up with eviction silently switched off.
+  // untrack: this effect must fire on serviceRunning changes only. pushMemorySettings reads
+  // evictionConfig/modelPriorities synchronously and (on normalization) writes evictionConfig
+  // back, so tracking those reads turns the effect into a push → assign → push loop.
+  $effect(() => {
+    if (!state.serviceRunning) return;
+    untrack(() => pushMemorySettings());
+  });
+
   async function refreshMonitorNow() {
     const log = await getAccessLog().catch(() => []);
     monitorLog = (log ?? []).slice(-100).reverse();
     await pollPoolStatus().catch(() => {});
   }
 
-  function compareSlotKey(alias: string, variantId: string | null): string {
-    return variantId ? `${alias}::${variantId}` : `${alias}::default`;
+  /** Monitor's Unload button — guarded the same as the Models tab's unload/delete actions so a
+   * benchmark run's pinned target can't be unloaded from here either. */
+  async function unloadFromMonitor(alias: string) {
+    const blocked = blockedByExclusivePoolRun();
+    if (blocked) {
+      statusMessage = blocked;
+      return;
+    }
+    const release = beginPoolMutation();
+    try {
+      await sdkUnloadModel({ alias }).then(refreshMonitorNow);
+    } finally {
+      release();
+    }
   }
 
   function makeCompareSlot(
@@ -1387,7 +3847,7 @@ updateStateFromSdk();
   }
 
   function isSlotInPool(slot: CompareSlot): boolean {
-    return state.pool.some(
+    return loadedPoolEntries.some(
       (e: any) =>
         e.alias === slot.alias &&
         (slot.variantId ? e.variantId === slot.variantId : true),
@@ -1636,11 +4096,11 @@ updateStateFromSdk();
 
   function addCompareSlot(slot: CompareSlot) {
     if (compareSlots.some((s) => s.key === slot.key)) {
-      statusMessage = `Already in comparison: ${slot.label}`;
+      statusMessage = `Already in the arena: ${slot.label}`;
       return;
     }
     if (compareSlots.length >= COMPARE_MAX_SLOTS) {
-      statusMessage = `Comparison supports at most ${COMPARE_MAX_SLOTS} models`;
+      statusMessage = `The arena supports at most ${COMPARE_MAX_SLOTS} models`;
       return;
     }
     compareSlots = [...compareSlots, slot];
@@ -1654,29 +4114,54 @@ updateStateFromSdk();
     compareResults = next;
   }
 
-  function loadCompareHistory() {
+  function arenaStorage(): Storage | null {
+    // Reaching the property can itself throw when site data is blocked.
     try {
-      const raw = localStorage.getItem(COMPARE_HISTORY_KEY);
-      if (!raw) {
-        compareHistory = [];
-        return;
-      }
-      const parsed = JSON.parse(raw);
-      compareHistory = Array.isArray(parsed) ? parsed : [];
+      return localStorage;
     } catch {
-      compareHistory = [];
+      return null;
     }
   }
 
-  function persistCompareHistory() {
-    try {
-      localStorage.setItem(COMPARE_HISTORY_KEY, JSON.stringify(compareHistory.slice(0, COMPARE_HISTORY_MAX)));
-    } catch {}
+  function loadCompareHistory() {
+    const storage = arenaStorage();
+    if (!storage) {
+      compareHistoryWritable = false;
+      appendAppLog(
+        'Saved arena runs could not be read on this device, so new runs will not be saved this session.',
+        'error',
+      );
+      return;
+    }
+    const loaded = loadComparisonHistory(storage);
+    compareHistoryWritable = loaded.writable;
+    // Non-writable loads return empty history even when storage was not rewritten.
+    if (loaded.writable) compareHistory = loaded.history;
+    if (loaded.notice) appendAppLog(loaded.notice, loaded.writable ? 'warn' : 'error');
+  }
+
+  /** Returns false (and surfaces why) instead of silently reporting a save as if it succeeded. */
+  function persistCompareHistory(): boolean {
+    if (!compareHistoryWritable) {
+      appendAppLog('Arena run history is not writable this session; not saved.', 'error');
+      return false;
+    }
+    const storage = arenaStorage();
+    if (!storage) {
+      compareHistoryWritable = false;
+      appendAppLog('Arena run history is not writable this session; not saved.', 'error');
+      return false;
+    }
+    const saved = saveComparisonHistory(storage, compareHistory);
+    if (!saved.ok) {
+      appendAppLog(`Arena run history save failed: ${saved.error}`, 'error');
+    }
+    return saved.ok;
   }
 
   function saveCurrentComparison() {
     if (!comparePrompt.trim() || Object.keys(compareResults).length === 0 || compareSlots.length < 2) {
-      statusMessage = "Run a comparison first, then save.";
+      statusMessage = "Run the arena first, then save.";
       return;
     }
     const entry: SavedComparison = {
@@ -1684,26 +4169,41 @@ updateStateFromSdk();
       createdAt: Date.now(),
       prompt: comparePrompt.trim(),
       slots: compareSlots.map((s) => ({ ...s })),
-      results: { ...compareResults },
+      results: cloneCompareResults(compareResults),
     };
-    compareHistory = [entry, ...compareHistory].slice(0, COMPARE_HISTORY_MAX);
-    persistCompareHistory();
-    statusMessage = "Comparison saved for review";
+    const nextHistory = [entry, ...compareHistory].slice(0, COMPARE_HISTORY_MAX);
+    const previousHistory = compareHistory;
+    compareHistory = nextHistory;
+    if (persistCompareHistory()) {
+      statusMessage = "Arena run saved for review";
+    } else {
+      compareHistory = previousHistory;
+      statusMessage = "Arena run could not be saved — see App Log.";
+    }
   }
 
   function openSavedComparison(entry: SavedComparison) {
     compareReviewId = entry.id;
     compareSlots = entry.slots.map((s) => ({ ...s }));
     comparePrompt = entry.prompt;
-    compareResults = { ...entry.results };
+    compareResults = cloneCompareResults(entry.results);
+    // A saved run's results are a new logical message for any reused slot/MessageRenderer
+    // instance, exactly like a fresh "Run comparison" — bump the same generation counter so
+    // per-message state (thinking toggle, cached render) doesn't leak from whatever was
+    // previously showing in that slot.
+    compareRunGeneration++;
     compareHistoryOpen = false;
-    statusMessage = `Reviewing comparison from ${new Date(entry.createdAt).toLocaleString()}`;
+    statusMessage = `Reviewing arena run from ${new Date(entry.createdAt).toLocaleString()}`;
   }
 
   function deleteSavedComparison(id: string) {
+    const previousHistory = compareHistory;
     compareHistory = compareHistory.filter((h) => h.id !== id);
+    if (!persistCompareHistory()) {
+      compareHistory = previousHistory;
+      return;
+    }
     if (compareReviewId === id) compareReviewId = null;
-    persistCompareHistory();
   }
 
   /** Download slot weights if missing. Does not load into memory. */
@@ -1721,22 +4221,33 @@ updateStateFromSdk();
         statusMessage = comparePrepStatus;
       },
       slot.variantId ?? undefined,
+      () => {
+        comparePrepStatus = `Downloading ${slot.label}: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.`;
+        statusMessage = comparePrepStatus;
+      },
     );
-    await refreshModels();
+    await refreshCatalogModels();
   }
 
   async function ensureServiceForCompare(alias: string) {
     if (state.serviceRunning) return;
     comparePrepStatus = "Starting local service…";
-    try {
-      await startSvc(
-        alias,
-        selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+    const { result, error } = await startServiceForModel(alias);
+    // A blocked start is not a detail to skip past. Note the wording: readiness could not be
+    // *established*, which is what an unestablished outcome supports — not the stronger claim
+    // that the service is not running. Aborting here is a conservative availability policy
+    // rather than a technical necessity, since the sidecar can serve text Compare through
+    // direct SDK inference with no HTTP endpoint.
+    if (result === "blocked" || result === "failed") {
+      throw new Error(
+        `Service readiness could not be established.${serviceQualifier(result)}`.trim(),
+        // Preserved so the caller can still tell an uncertain start from an ordinary failure.
+        error ? { cause: error } : undefined,
       );
-    } catch {}
+    }
   }
 
-  async function loadCompareSlot(slot: CompareSlot): Promise<void> {
+  async function loadCompareSlot(slot: CompareSlot, onLoaded?: () => void): Promise<void> {
     const model = state.models.find((m: ModelInfo) => m.alias === slot.alias);
     if (!model) throw new Error("Not found in catalog");
     if (isSlotInPool(slot)) {
@@ -1745,16 +4256,15 @@ updateStateFromSdk();
     }
     comparePrepStatus = `Loading ${slot.label}…`;
     statusMessage = comparePrepStatus;
-    await sdkLoadModel(model, "chat", slot.variantId ?? undefined);
-    await refreshModels();
+    await sdkLoadModel(model, "chat", slot.variantId ?? undefined, onLoaded);
   }
 
-  async function unloadCompareSlot(slot: CompareSlot): Promise<void> {
-    if (!state.pool.some((e: any) => e.alias === slot.alias)) return;
+  async function unloadCompareSlot(slot: CompareSlot, force = false): Promise<void> {
+    if (!force && !loadedPoolEntries.some((e: any) => e.alias === slot.alias)) return;
     try {
       comparePrepStatus = `Unloading ${slot.label}…`;
       await sdkUnloadModel({ alias: slot.alias });
-      await refreshModels();
+      await refreshCatalogModels();
     } catch (e: any) {
       console.warn("Compare unload failed", e);
     }
@@ -1770,13 +4280,14 @@ updateStateFromSdk();
     slot: CompareSlot,
     ctx: { preloadedAliases: Set<string>; loadedByCompare: Set<string>; allowUnloadPreloaded: boolean },
   ): Promise<boolean> {
-    if (!state.pool.some((e: any) => e.alias === slot.alias)) return false;
-    const wasPreloaded = ctx.preloadedAliases.has(slot.alias);
     const weLoaded = ctx.loadedByCompare.has(slot.alias);
+    const inPool = loadedPoolEntries.some((e: any) => e.alias === slot.alias);
+    if (!inPool && !weLoaded) return false;
+    const wasPreloaded = ctx.preloadedAliases.has(slot.alias);
     if (wasPreloaded && !ctx.allowUnloadPreloaded && !weLoaded) {
       return false;
     }
-    await unloadCompareSlot(slot);
+    await unloadCompareSlot(slot, weLoaded && !inPool);
     ctx.loadedByCompare.delete(slot.alias);
     return true;
   }
@@ -1805,7 +4316,7 @@ updateStateFromSdk();
         );
       }
       return (
-        `Not enough free memory for comparison. ${parts.join(" · ")}. ` +
+        `Not enough free memory for this arena run. ${parts.join(" · ")}. ` +
         `Free memory or remove a larger model/variant.`
       );
     }
@@ -1896,7 +4407,7 @@ updateStateFromSdk();
     oneAtATime: boolean,
   ): { proceed: boolean; allowUnloadPreloaded: boolean } {
     const preloadedAliases = new Set(
-      (state.pool || []).map((e: any) => e.alias).filter(Boolean) as string[],
+      loadedPoolEntries.map((e: any) => e.alias).filter(Boolean) as string[],
     );
     if (preloadedAliases.size === 0) {
       return { proceed: true, allowUnloadPreloaded: false };
@@ -1907,7 +4418,7 @@ updateStateFromSdk();
     ];
     const variantSwaps = slots
       .map((s) => {
-        const entry = (state.pool || []).find((e: any) => e.alias === s.alias);
+        const entry = loadedPoolEntries.find((e: any) => e.alias === s.alias);
         if (!entry?.variantId || !s.variantId || entry.variantId === s.variantId) return null;
         return `${s.alias}: ${shortPoolVariantLabel(entry.variantId)} → ${shortPoolVariantLabel(s.variantId)}`;
       })
@@ -1922,11 +4433,11 @@ updateStateFromSdk();
     }
 
     const lines: string[] = [
-      "Comparison may unload models that are already in memory.",
+      "This arena run may unload models that are already in memory.",
       "",
     ];
     if (oneAtATime && preloadedCompare.length > 0) {
-      lines.push("Already loaded (in this comparison set):");
+      lines.push("Already loaded (in this arena line-up):");
       for (const a of preloadedCompare) lines.push(`  • ${a}`);
       lines.push("");
       lines.push(
@@ -1939,14 +4450,14 @@ updateStateFromSdk();
       for (const v of variantSwaps) lines.push(`  • ${v}`);
       lines.push("");
     }
-    lines.push("Models not in this comparison will not be touched.");
+    lines.push("Models not in this arena run will not be touched.");
     lines.push("");
     lines.push("OK = allow unloading those models during the run");
-    lines.push("Cancel = abort comparison (nothing unloaded)");
+    lines.push("Cancel = abort the run (nothing unloaded)");
 
     const ok = globalThis.confirm(lines.join("\n"));
     if (!ok) {
-      statusMessage = "Comparison cancelled — existing loaded models left as-is.";
+      statusMessage = "Arena run cancelled — existing loaded models left as-is.";
       return { proceed: false, allowUnloadPreloaded: false };
     }
     return { proceed: true, allowUnloadPreloaded: true };
@@ -1955,16 +4466,34 @@ updateStateFromSdk();
   async function runComparison(e?: Event) {
     e?.preventDefault?.();
     if (compareSlots.length < 2 || !comparePrompt.trim() || isComparing || comparePreparing) return;
+    // See startBenchmarkPreviewRun: a benchmark run pins and dispatches against the same
+    // alias-keyed pool this loads/unloads explicitly (in one-at-a-time mode), so the two
+    // features must never run concurrently in either direction. The endpoint self-test
+    // loads and restores pool entries too, and holds the same fence.
+    const blocked = blockedByExclusivePoolRun();
+    if (blocked) {
+      statusMessage = blocked;
+      return;
+    }
 
     compareReviewId = null;
     const prompt = comparePrompt.trim();
     comparePickerOpen = false;
+    compareStopRequested = false;
+    compareStopAckError = null;
+    compareStopAckWaits = [];
+    comparePreDispatchCancelled = false;
+    const runId = ++compareRunGeneration;
     isComparing = true;
     comparePreparing = true;
     compareResults = {};
 
     try {
       const memErr = await verifyCompareMemory(compareSlots);
+      if (compareStopRequested) {
+        statusMessage = "Arena run stopped";
+        return;
+      }
       if (memErr) {
         statusMessage = memErr;
         for (const slot of compareSlots) {
@@ -1972,6 +4501,7 @@ updateStateFromSdk();
             content: `[Memory check] ${memErr}`,
             error: memErr,
             rating: null,
+            status: "failed",
           };
         }
         compareResults = { ...compareResults };
@@ -1986,7 +4516,7 @@ updateStateFromSdk();
       }
 
       const preloadedAliases = new Set(
-        (state.pool || []).map((e: any) => e.alias).filter(Boolean) as string[],
+        loadedPoolEntries.map((e: any) => e.alias).filter(Boolean) as string[],
       );
       const unloadCtx = {
         preloadedAliases,
@@ -1995,24 +4525,45 @@ updateStateFromSdk();
       };
 
       let failCount = 0;
+      const unloadIfThisRunLoaded = async (target: CompareSlot) => {
+        if (!oneAtATime) return;
+        if (!unloadCtx.loadedByCompare.has(target.alias)) return;
+        try {
+          await safeUnloadCompareSlot(target, unloadCtx);
+        } catch {}
+      };
 
       for (const slot of compareSlots) {
+        // Stop was requested between slots (or during memory/load prep for this one): the
+        // remaining slots stay absent from compareResults, matching "never reached" semantics.
+        if (compareStopRequested) break;
+
         // latencyMs = chatCompletion only (after download/load/service prep)
         let inferenceStarted: number | null = null;
+        let streamedContent = "";
         try {
           await ensureCompareSlotDownloaded(slot);
+
+          if (compareStopRequested) break;
 
           // One-at-a-time: free other compare slots before loading this one (with consent rules).
           if (oneAtATime) {
             for (const other of compareSlots) {
               if (other.key === slot.key) continue;
+              if (compareStopRequested) break;
               await safeUnloadCompareSlot(other, unloadCtx);
             }
           }
 
+          if (compareStopRequested) break;
+
           // Re-check free RAM/VRAM right before this load (stats change after prior loads/unloads).
           comparePrepStatus = `Checking memory for ${slot.label}…`;
           const slotMemErr = await verifySlotMemoryBeforeLoad(slot);
+          if (compareStopRequested) {
+            await unloadIfThisRunLoaded(slot);
+            break;
+          }
           if (slotMemErr) {
             failCount++;
             compareResults[slot.key] = {
@@ -2020,30 +4571,32 @@ updateStateFromSdk();
               latencyMs: undefined,
               error: slotMemErr,
               rating: null,
+              status: "failed",
             };
             compareResults = { ...compareResults };
             statusMessage = slotMemErr;
             continue;
           }
 
-          const alreadyInPool = isSlotInPool(slot);
-          const hadAlias = state.pool.some((e: any) => e.alias === slot.alias);
-          await loadCompareSlot(slot);
-          if (!alreadyInPool) {
-            // We caused a load (new alias or variant replace)
+          await loadCompareSlot(slot, () => {
             unloadCtx.loadedByCompare.add(slot.alias);
-            // Variant replace of a preloaded alias still counts as "we changed pool"
-            if (hadAlias && unloadCtx.preloadedAliases.has(slot.alias)) {
-              unloadCtx.loadedByCompare.add(slot.alias);
-            }
+          });
+          if (compareStopRequested) {
+            await unloadIfThisRunLoaded(slot);
+            break;
           }
 
           await ensureServiceForCompare(slot.alias);
+          if (compareStopRequested) {
+            await unloadIfThisRunLoaded(slot);
+            break;
+          }
 
           // Re-select variant in case pool had another variant for same alias
           if (!isSlotInPool(slot)) {
-            await sdkLoadModel({ alias: slot.alias }, "chat", slot.variantId ?? undefined);
-            unloadCtx.loadedByCompare.add(slot.alias);
+            await sdkLoadModel({ alias: slot.alias }, "chat", slot.variantId ?? undefined, () => {
+              unloadCtx.loadedByCompare.add(slot.alias);
+            });
           }
 
           const completionOpts = {
@@ -2053,6 +4606,13 @@ updateStateFromSdk();
                 ? undefined
                 : selectedAccelerationPreference,
           };
+
+          if (compareStopRequested) {
+            // Stop landed while this slot was still downloading/loading — it never reached
+            // inference, so it gets no result at all (same as a slot never iterated to).
+            await unloadIfThisRunLoaded(slot);
+            break;
+          }
 
           // Discarded warm-up so timed run is not cold-start / first-token init.
           comparePrepStatus = `Warming up ${slot.label}…`;
@@ -2068,38 +4628,118 @@ updateStateFromSdk();
             console.warn(`Compare warm-up failed for ${slot.alias}:`, warmErr?.message || warmErr);
           }
 
+          if (compareStopRequested) {
+            // Stop landed while warm-up was in flight — warm-up is not itself cancellable (it is
+            // discarded anyway), but it must not be followed by the real, expensive timed call.
+            await unloadIfThisRunLoaded(slot);
+            break;
+          }
+
           comparePrepStatus = `Running ${slot.label}…`;
           statusMessage = comparePrepStatus;
           // Latency = measured prompt only (after load + discarded warm-up).
           inferenceStarted = Date.now();
-          const res = await chatCompletion(
-            slot.alias,
-            [{ role: "user", content: prompt }],
-            { ...completionOpts, maxTokens: 512 },
-          );
-          const latency = Date.now() - inferenceStarted;
-          const content = res?.choices?.[0]?.message?.content || "";
+          streamedContent = "";
+          let firstDeltaAt: number | null = null;
+          const requestController = new AbortController();
+          compareActiveStream = { controller: requestController, requestId: null };
+          compareStreamingSlotKey = slot.key;
+          let res: any;
+          try {
+            res = await chatCompletionStream(
+              slot.alias,
+              [{ role: "user", content: prompt }],
+              (delta: string) => {
+                if (requestController.signal.aborted) return;
+                if (firstDeltaAt == null) firstDeltaAt = Date.now();
+                streamedContent += delta;
+                compareResults[slot.key] = { ...(compareResults[slot.key] || {}), content: streamedContent };
+                compareResults = { ...compareResults };
+              },
+              { ...completionOpts, maxTokens: 512 },
+              (requestId: number) => {
+                if (compareActiveStream && compareActiveStream.controller === requestController) {
+                  compareActiveStream.requestId = requestId;
+                }
+                if (requestController.signal.aborted) {
+                  // Stop was requested before this request had an id to cancel by (a race with
+                  // onAssignedId); cancel now that one exists instead of leaving it undispatched.
+                  if (cancelBeforeDispatch(requestId)) {
+                    comparePreDispatchCancelled = true;
+                  } else {
+                    const ack = cancelChatRequest(requestId);
+                    compareStopAckWaits.push(
+                      ack.then(
+                        () => undefined,
+                        (e: any) => {
+                          if (compareRunGeneration !== runId) return;
+                          compareStopAckError = e?.message || String(e);
+                        },
+                      ),
+                    );
+                  }
+                }
+              },
+            );
+          } finally {
+            if (compareActiveStream && compareActiveStream.controller === requestController) {
+              compareActiveStream = null;
+            }
+            if (compareStreamingSlotKey === slot.key) {
+              compareStreamingSlotKey = null;
+            }
+          }
+          const nativeStreaming = !!res?.nativeStreaming;
+          const content = requestController.signal.aborted
+            ? streamedContent
+            : (res?.choices?.[0]?.message?.content || streamedContent);
           const usage = res?.usage || {};
-          compareResults[slot.key] = {
+          const activeEp = String(res?.acceleration?.active || "").trim();
+          compareResults[slot.key] = buildSettledCompareResult({
             content,
-            latencyMs: latency,
-            tokensIn: usage.prompt_tokens ?? usage.input_tokens,
-            tokensOut: usage.completion_tokens ?? usage.output_tokens,
-            rating: null,
-          };
+            stopRequested: compareStopRequested,
+            inferenceStarted,
+            now: Date.now(),
+            nativeStreaming,
+            firstDeltaAt,
+            usage,
+            servedVariantId: res?.servedVariantId ?? null,
+            activeExecutionProvider: activeEp || null,
+          });
 
           if (oneAtATime) {
             await safeUnloadCompareSlot(slot, unloadCtx);
           }
+
+          if (compareStopRequested) break;
         } catch (err: any) {
+          const classified = classifyCompareSlotError({
+            stopRequested: compareStopRequested,
+            error:
+              err instanceof SidecarOperationError
+                ? { certainty: err.certainty, cmd: err.cmd, message: err.message }
+                : { message: err?.message || String(err) },
+            inferenceStarted,
+            preDispatchCancelled: comparePreDispatchCancelled,
+          });
+          if (classified === "pre-dispatch-stop") {
+            compareResults[slot.key] = buildStoppedPreDispatchResult();
+            await unloadIfThisRunLoaded(slot);
+            break;
+          }
+          if (classified === "prep-stop") {
+            await unloadIfThisRunLoaded(slot);
+            break;
+          }
           failCount++;
-          compareResults[slot.key] = {
-            content: `[Error] ${err?.message || err}`,
-            // Only report inference latency if we reached chatCompletion
-            latencyMs: inferenceStarted != null ? Date.now() - inferenceStarted : undefined,
-            error: err?.message || String(err),
-            rating: null,
-          };
+          compareResults[slot.key] = buildFailedCompareResult(
+            err instanceof SidecarOperationError
+              ? { message: err.message }
+              : { message: err?.message || String(err) },
+            inferenceStarted,
+            Date.now(),
+            streamedContent,
+          );
           // Only unload what we are allowed to (never silent-evict preloaded without consent)
           if (oneAtATime) {
             try {
@@ -2111,50 +4751,108 @@ updateStateFromSdk();
       }
 
       comparePrepStatus = "";
-      statusMessage =
-        failCount > 0
-          ? `Comparison finished with ${failCount} failure(s)` +
-            (oneAtATime ? " (one-at-a-time)" : "")
-          : `Comparison complete` + (oneAtATime ? " (one-at-a-time)" : "");
+      if (compareStopAckWaits.length) await Promise.all(compareStopAckWaits);
+      if (compareStopRequested) {
+        statusMessage = `Arena run stopped` +
+          (failCount > 0 ? ` with ${failCount} failure(s)` : "") +
+          (oneAtATime ? " (one-at-a-time)" : "") +
+          (compareStopAckError ? ` (${compareStopAckError})` : "");
+      } else {
+        statusMessage =
+          failCount > 0
+            ? `Arena run finished with ${failCount} failure(s)` +
+              (oneAtATime ? " (one-at-a-time)" : "")
+            : `Arena run complete` + (oneAtATime ? " (one-at-a-time)" : "");
+      }
     } finally {
       comparePreparing = false;
       comparePrepStatus = "";
       isComparing = false;
+      compareActiveStream = null;
+      compareStopRequested = false;
     }
+  }
+
+  /**
+   * Asks the current run to stop after the in-flight slot settles. The sidecar keeps draining
+   * the native iterator, so the slot's await does not resolve early; later slots are skipped.
+   */
+  async function stopComparison() {
+    if (!isComparing || compareStopRequested) return;
+    compareStopRequested = true;
+    const runId = compareRunGeneration;
+    const stream = compareActiveStream;
+    if (!stream) {
+      statusMessage = "Stopping after the current step…";
+      return;
+    }
+    const requestId = stream.requestId;
+    stream.controller.abort();
+    if (requestId == null) {
+      // Assigned asynchronously; abort stops this slot's delta rendering and the flag
+      // prevents any further slot.
+      statusMessage = "Stopping after the current step…";
+      return;
+    }
+    // Provable only before the request is written. After that the sidecar suppresses
+    // further deltas; native generation may continue without being shown.
+    const abandoned = cancelBeforeDispatch(requestId);
+    if (abandoned) {
+      comparePreDispatchCancelled = true;
+      statusMessage = "Slot cancelled before it started; no further slots will run.";
+      return;
+    }
+    try {
+      const ack = cancelChatRequest(requestId);
+      compareStopAckWaits.push(
+        ack.then(
+          () => undefined,
+          (e: any) => {
+            if (compareRunGeneration !== runId) return;
+            compareStopAckError = e?.message || String(e);
+          },
+        ),
+      );
+      await ack;
+    } catch (e: any) {
+      if (compareRunGeneration !== runId) return;
+      compareStopAckError = e?.message || String(e);
+      if (compareActiveStream === stream) {
+        statusMessage = `Stop warning: ${compareStopAckError}`;
+      }
+      return;
+    }
+    if (compareRunGeneration !== runId) return;
+    if (compareActiveStream !== stream) return;
+    statusMessage = "Stopping — the current model may still finish generating in the background.";
   }
 
   function setCompareRating(key: string, rating: "up" | "down") {
     if (!compareResults[key]) return;
-    compareResults[key].rating = compareResults[key].rating === rating ? null : rating;
-    compareResults = { ...compareResults };
-    // Update open saved review if applicable
+    const nextRating = compareResults[key].rating === rating ? null : rating;
+    const previousHistory = compareHistory;
+    const previousResults = compareResults;
+    compareResults = { ...compareResults, [key]: { ...compareResults[key], rating: nextRating } };
     if (compareReviewId) {
       compareHistory = compareHistory.map((h) =>
-        h.id === compareReviewId ? { ...h, results: { ...compareResults } } : h,
+        h.id === compareReviewId ? { ...h, results: cloneCompareResults(compareResults) } : h,
       );
-      persistCompareHistory();
+      if (!persistCompareHistory()) {
+        compareHistory = previousHistory;
+        compareResults = previousResults;
+        statusMessage = "Arena run could not be saved — see App Log.";
+      }
     }
   }
 
   function exportComparison() {
     if (!comparePrompt.trim() || Object.keys(compareResults).length === 0) return;
-    let md = `# Model Comparison\n\n**Date:** ${new Date().toISOString()}\n\n**Prompt:** ${comparePrompt}\n\n`;
-    for (const slot of compareSlots) {
-      const r = compareResults[slot.key];
-      if (!r) continue;
-      md += `## ${slot.label}\n`;
-      md += `- Alias: \`${slot.alias}\`\n`;
-      if (slot.variantId) md += `- Variant: \`${slot.variantId}\`\n`;
-      md += `- Latency: ${r.latencyMs ?? "?"} ms\n`;
-      md += `- Tokens: in ${r.tokensIn ?? "?"} / out ${r.tokensOut ?? "?"}\n`;
-      md += `- Rating: ${r.rating || "none"}\n\n`;
-      md += `${r.content}\n\n---\n\n`;
-    }
+    const md = renderComparisonMarkdown(comparePrompt, compareSlots, compareResults);
     const blob = new Blob([md], { type: "text/markdown" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `comparison-${Date.now()}.md`;
+    a.download = `model-arena-${Date.now()}.md`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -2252,9 +4950,20 @@ updateStateFromSdk();
       mime = 'application/json';
       ext = 'json';
     } else {
-      const headers = 'time,type,model,durationMs,tokensIn,tokensOut,ok';
+      const headers = 'time,type,model,durationMs,ttftMs,promptTokPerSec,decodeTokPerSec,tokensIn,tokensOut,ok';
       const rows = entries.map(e =>
-        [new Date(e.ts).toISOString(), e.type, e.modelAlias ?? '', e.durationMs ?? '', e.tokensIn ?? '', e.tokensOut ?? '', e.ok].join(',')
+        [
+          new Date(e.ts).toISOString(),
+          e.type,
+          e.modelAlias ?? '',
+          e.durationMs ?? '',
+          e.ttftMs ?? '',
+          e.promptTokensPerSecond ?? '',
+          e.decodeTokensPerSecond ?? '',
+          e.tokensIn ?? '',
+          e.tokensOut ?? '',
+          e.ok,
+        ].join(',')
       );
       content = [headers, ...rows].join('\n');
       mime = 'text/csv';
@@ -2270,36 +4979,206 @@ updateStateFromSdk();
     setTimeout(() => URL.revokeObjectURL(url), 10000);
   }
 
-  async function init() {
+  const init = createSingleFlight(performAppInit);
+  const startupAuthorization = createStartupAuthorization();
+
+  async function performAppInit() {
+    const startupAuthorizationToken = startupAuthorization.capture();
     statusMessage = "Checking Node.js and starting Foundry Local...";
 
-    // Load conversation history + custom personas
-    loadConversations();
-    loadCustomPersonasState();
+    // Taken before the first await, and observed rather than claimed. Everything below awaits
+    // the SDK, the model list and the recommendations, and the user can select a conversation or
+    // a model throughout — after which the startup selection must not be published over theirs.
+    const startupNav = currentChatNavigation();
+    const startupAudioAlias = selectedSTTModelAlias;
+
+    // Persisted state (chat, conversations, personas) is hydrated in onMount, before autosave
+    // is enabled — restoring it here would race the autosave effect.
     void refreshNodeAboutLine();
 
-    const ok = await initializeSDK({ appName: "flint" });
+    // Opened before the SDK call below, not after: `initializeSDK()` can itself publish
+    // `state.serviceRunning: true` partway through its own internal awaits (adopting an already-
+    // running service), which fires the reactive `serviceRunning` effect's `pushMemorySettings()`
+    // immediately — before this function ever reaches the seeding call further down. Every
+    // `pushMemorySettings()` call (including that one) now awaits this gate first, so a push
+    // queued that early still runs after `pushMemorySeq` is seeded rather than before it.
+    let resolveMemorySeqReady: () => void = () => {};
+    memorySeqReady = new Promise<void>((resolve) => {
+      resolveMemorySeqReady = resolve;
+    });
+
+    // Settings are hydrated by this point (onMount runs restoreChat before init), so the
+    // service honors the user's autostart choice, port and bind address instead of a hardcoded
+    // 5272 that opened a port they never configured.
+    const ok = await initializeSDK({
+      appName: "flint",
+      // Hydrated runtime policy and accelerator registration must land before HTTP startup or
+      // any model preload. Autostart is performed below after those prerequisites complete.
+      autoStartService: false,
+      refreshCatalog: false,
+      deferCatalogRead: !autoRefreshCatalogOnStartup,
+      servicePort: networkPort,
+      bindAddress: networkBindAddress || undefined,
+    });
     void refreshNodeAboutLine();
+
+    try {
+      if (ok) {
+        // Best-effort, fire-and-forget: releases a `benchmarkExclusive` lease this page's own
+        // in-memory state has no memory of ever acquiring (its generation/retrier always start
+        // unset) but a previous, now-gone page instance (reload/crash-recovery) may have left set
+        // in the sidecar, which outlives that reload. Never awaited -- it must not delay startup.
+        // The guard re-checks that this page still hasn't claimed exclusivity itself by the time
+        // the release would actually be sent: `state.ready` publishes as part of this same init,
+        // so the user could in principle start a run before this call's second round trip lands,
+        // and that legitimate claim must win instead of being released out from under it.
+        // `onReleaseDispatched` registers the release with the same `pendingExclusiveRelease`
+        // tracker every other release goes through -- otherwise, if this release itself waits out
+        // a sidecar respawn/re-init, it is invisible to the `pendingExclusiveRelease.join()`
+        // Start/Resume await before their own acquire, and could clear a newer run's freshly
+        // acquired lease out from under it after the fact.
+        void reconcileBenchmarkExclusive(
+          () => benchmarkExclusiveGeneration === 0,
+          (releaseCall) => pendingExclusiveRelease.track(releaseCall),
+        );
+
+        // Best-effort: on failure `lastAppliedMemorySettingsSeq` stays null and `pushMemorySeq`
+        // is left at 0, which just reproduces the pre-fix behavior for this one page instance
+        // rather than making startup depend on a diagnostic-only probe succeeding.
+        const lastAppliedMemorySettingsSeq = await getLastAppliedMemorySettingsSeq();
+        if (typeof lastAppliedMemorySettingsSeq === 'number') {
+          pushMemorySeq = Math.max(pushMemorySeq, lastAppliedMemorySettingsSeq);
+        }
+      }
+    } finally {
+      // Always released, `ok` or not -- a push already queued behind this gate (e.g. from the
+      // `serviceRunning` effect above) must not hang forever just because startup failed later.
+      memorySeqReady = null;
+      resolveMemorySeqReady();
+    }
 
     if (ok) {
+      // Startup does real pool mutation below (auto-load, multi-model pre-warm, and a
+      // possible service (re)start via the `startService` callback below) with no user action
+      // to gate it on. Benchmark admission must see this as in-flight pool work — same as any
+      // other load/unload — or a run started the instant the UI goes ready (`state.ready` is
+      // set well before this function finishes) could race a startup load/service-start that
+      // clears or mutates the pool out from under the benchmark's own targets.
+      const release = beginPoolMutation();
+      try {
       statusMessage = "Connected to Foundry Local";
-      await loadModels();
-      await loadRecommendations();
-      await loadSTTModels();
+      if (!autoRefreshCatalogOnStartup) {
+        appendAppLog(
+          "Automatic startup catalog check is off; recommendations and configured startup preloads are skipped for this launch. Use Refresh catalog to browse models.",
+          "info",
+        );
+      }
 
-      // Restore previous chat if any
-      restoreChat();
+      // A restored alias for a model that is no longer in the catalog would otherwise pin the
+      // selection forever, because the auto-select effect bails out whenever an alias is set.
+      //
+      // Not applied to an alias the active conversation asked for explicitly. That is a stored
+      // choice rather than a stale global fallback, so clearing it would replace the "not
+      // installed" explanation with a silently auto-selected substitute — and the conversation
+      // would still be storing the model it is no longer shown as using. Read live rather than
+      // from the startup snapshot, because the user may already have switched conversations.
+      if (
+        selectedModelAlias &&
+        selectedModelAlias !== activeConversationModelAlias() &&
+        state.models.length > 0 &&
+        !state.models.some((m: ModelInfo) => m.alias === selectedModelAlias)
+      ) {
+        appendAppLog(`Previously selected model "${selectedModelAlias}" is no longer available`, 'warn');
+        selectedModelAlias = "";
+        selectedModel = null;
+      }
 
-      // Auto setup accelerators (background)
-      ensureHardwareAccel().catch(console.error);
+      let acceleratorReadiness: AcceleratorReadiness;
+      let acceleratorRestartGuidance = "";
+      try {
+        acceleratorReadiness = await prepareHydratedRuntime({
+          applyMemorySettings: async () => {
+            statusMessage = "Applying memory policy...";
+            await pushMemorySettings({ throwOnError: true });
+          },
+          prepareAccelerators: async () => {
+            return await ensureHardwareAccel({
+              throwOnError: true,
+              refreshCatalog: false,
+            });
+          },
+          validateAccelerators: (readiness) => {
+            if (!isAcceleratorReadinessCurrent(readiness)) {
+              throw new Error("Runtime changed while preparing hardware accelerators");
+            }
+          },
+          startService: async (readiness) => {
+            // Re-read after the awaited prerequisites: the user may have changed autostart or
+            // manually started the service while accelerator registration was in flight.
+            if (
+              !autoStartService ||
+              !startupAuthorization.isCurrent(startupAuthorizationToken)
+            ) return;
+            statusMessage = "Starting local service...";
+            const ensured = await sdkEnsureServiceRunning(
+              networkPort,
+              undefined,
+              selectedAccelerationPreference === "auto"
+                ? undefined
+                : selectedAccelerationPreference,
+              networkBindAddress || undefined,
+              {
+                convenience: true,
+                expectedGeneration: readiness.generation,
+                deferCatalogRead: !autoRefreshCatalogOnStartup,
+              },
+            );
+            if (ensured.started) markNetworkSettingsApplied();
+          },
+        });
+        if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
+          throw new Error("Runtime changed while preparing hardware accelerators");
+        }
+        await refreshExecutionProviders({
+          throwOnError: true,
+          refreshRecommendations: false,
+        });
+        if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
+          throw new Error("Runtime changed while refreshing execution providers");
+        }
+        if (autoRefreshCatalogOnStartup) {
+          await refreshCatalogModels();
+          if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
+            throw new Error("Runtime changed while refreshing the model catalog");
+          }
+          await loadRecommendations();
+          if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
+            throw new Error("Runtime changed while refreshing recommendations");
+          }
+          await loadSTTModels();
+          if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
+            throw new Error("Runtime changed while refreshing the speech model catalog");
+          }
+        }
+        acceleratorRestartGuidance = resolveAcceleratorRestartGuidance(
+          acceleratorReadiness.registration,
+        );
+      } catch (e: any) {
+        statusMessage = `Runtime startup stopped before model preload: ${e?.message || e}`;
+        appendAppLog(statusMessage, "error");
+        return;
+      } finally {
+        setAutomaticCatalogRefreshEnabled(autoRefreshCatalogOnStartup);
+      }
+      if (!startupAuthorization.isCurrent(startupAuthorizationToken)) return;
 
       // First-run coach (dismissible); keep until user skips or completes basics
       try {
         const coachDismissed = localStorage.getItem(FIRST_RUN_KEY) === "1";
-        if (!coachDismissed) {
+        if (!coachDismissed && state.catalogStatus === "ready") {
           const hasAnyCached = state.models.some((m: ModelInfo) => m.isCached);
           // Show coach when nothing cached yet, or always until dismissed after first install
-          showFirstRunCoach = !hasAnyCached || !localStorage.getItem(PERSIST_KEY);
+          showFirstRunCoach = !hasAnyCached || !hadPersistedChatAtLaunch;
         }
       } catch {
         showFirstRunCoach = true;
@@ -2307,65 +5186,153 @@ updateStateFromSdk();
 
       // Auto first launch: if no cached models and no persisted chat, offer starter (do not force-download)
       const hasAnyCached = state.models.some((m: ModelInfo) => m.isCached);
-      const hasPersisted = !!localStorage.getItem(PERSIST_KEY);
-      if (!hasAnyCached && !hasPersisted && recommendedStarters.length > 0) {
+      const hasPersisted = hadPersistedChatAtLaunch;
+      let startupRestoreFailed = false;
+      if (state.catalogStatus === "ready" && !hasAnyCached && !hasPersisted && recommendedStarters.length > 0) {
         statusMessage = `First launch — pick a starter model below, or open Help for a guided path.`;
         currentView = "models";
-      } else if (autoStartService) {
-        const targetAlias = defaultChatAlias || selectedModelAlias;
-        if (targetAlias && !selectedModel) {
+      } else if (autoRefreshCatalogOnStartup && autoStartService) {
+        // A conversation restored at startup names the model this chat will actually use, so it
+        // outranks the configured default. Prewarming must also still run for it even though
+        // applying the conversation already installed a model handle, or the restored model
+        // would be selected in the header while the service came up on a different one.
+        const targetAlias = startupConversationAlias || defaultChatAlias || selectedModelAlias;
+        if (targetAlias && (!selectedModel || !!startupConversationAlias)) {
           const existing = state.models.find(
             (m: ModelInfo) => m.alias === targetAlias,
           );
           if (existing?.isCached) {
-            const usingDefault = !!defaultChatAlias;
+            const usingDefault = !startupConversationAlias && !!defaultChatAlias;
             try {
               if (!existing.isLoaded) {
                 statusMessage = usingDefault
                   ? `Auto-loading ${targetAlias}...`
                   : `Restoring ${targetAlias} from previous session...`;
-                await loadModelAndMaybeStart(existing);
-              } else if (!state.serviceRunning) {
-                await startSvc(
-                  targetAlias,
-                  selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
-                );
+                await sdkLoadModel(existing);
               }
-              selectedModelAlias = targetAlias;
-              selectedModel = { alias: targetAlias };
-              chatClient = null;
-              statusMessage = usingDefault
-                ? `${targetAlias} ready`
-                : `${targetAlias} restored from previous session`;
+              if (!startupAuthorization.isCurrent(startupAuthorizationToken)) return;
+              if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
+                statusMessage = `Runtime changed while restoring ${targetAlias}`;
+                appendAppLog(statusMessage, "warn");
+                return;
+              }
+              if (chatNavigationCurrent(startupNav)) {
+                selectedModelAlias = targetAlias;
+                selectedModel = { alias: targetAlias };
+                chatClient = null;
+                statusMessage =
+                  (usingDefault
+                    ? `${targetAlias} ready`
+                    : `${targetAlias} restored from previous session`);
+              } else {
+                // The load still did useful work, so say so rather than silently doing nothing.
+                statusMessage = `${targetAlias} is ready. The chat changed while it loaded.`;
+              }
             } catch (e: any) {
-              statusMessage = `Failed to restore ${targetAlias}: ${e?.message || e}`;
+              startupRestoreFailed = true;
+              reportFailure(`Failed to restore ${targetAlias}`, e);
             }
           }
         }
-        if (defaultAudioAlias) selectedSTTModelAlias = defaultAudioAlias;
       }
+      selectedSTTModelAlias = resolveStartupAudioAlias(
+        autoStartService,
+        defaultAudioAlias,
+        startupAudioAlias,
+        selectedSTTModelAlias,
+        sttModels.filter((model: ModelInfo) => model.isCached).map((model: ModelInfo) => model.alias),
+      );
 
       // Load any additional startup models (multi-model pool pre-warm)
       const startupEntries = Object.entries(startupModels);
-      if (startupEntries.length > 0) {
+      if (autoRefreshCatalogOnStartup && startupEntries.length > 0) {
         let startupLoaded = 0;
+        let startupBlocked = 0;
+        let startupFailed = startupRestoreFailed ? 1 : 0;
+        let startupInterrupted = false;
         for (const [alias, variantId] of startupEntries) {
+          if (!startupAuthorization.isCurrent(startupAuthorizationToken)) break;
+          if (!isAcceleratorReadinessCurrent(acceleratorReadiness)) {
+            statusMessage = "Runtime changed before startup models could finish loading";
+            appendAppLog(statusMessage, "warn");
+            startupInterrupted = true;
+            break;
+          }
           if (alias === selectedModelAlias) continue; // already loading above
           const model = state.models.find((m: ModelInfo) => m.alias === alias);
           if (model?.isCached) {
+            const compatibility = evaluateStartupPreload(
+              model,
+              variantId,
+              acceleratorReadiness,
+            );
+            if (!compatibility.allowed) {
+              startupBlocked++;
+              appendAppLog(
+                `Skipped startup model: ${compatibility.reason}`,
+                "warn",
+              );
+              continue;
+            }
             try {
               statusMessage = `Auto-loading ${alias}...`;
               await sdkLoadModel({ alias }, undefined, variantId ?? undefined);
+              if (
+                !startupAuthorization.isCurrent(startupAuthorizationToken) ||
+                !isAcceleratorReadinessCurrent(acceleratorReadiness)
+              ) {
+                statusMessage = `Runtime changed while loading startup model ${alias}`;
+                appendAppLog(statusMessage, "warn");
+                startupInterrupted = true;
+                break;
+              }
               startupLoaded++;
             } catch (e: any) {
+              if (
+                !startupAuthorization.isCurrent(startupAuthorizationToken) ||
+                !isAcceleratorReadinessCurrent(acceleratorReadiness)
+              ) {
+                statusMessage = `Runtime changed while loading startup model ${alias}`;
+                appendAppLog(statusMessage, "warn");
+                startupInterrupted = true;
+                break;
+              }
               console.warn(`Startup auto-load failed for ${alias}:`, e);
+              startupFailed++;
+              reportFailure(`Startup load failed for ${alias}`, e);
             }
           }
         }
-        if (startupLoaded > 0) {
-          await refreshModels();
-          statusMessage = `${startupLoaded} startup model${startupLoaded !== 1 ? 's' : ''} loaded`;
+        if (
+          startupInterrupted ||
+          !startupAuthorization.isCurrent(startupAuthorizationToken) ||
+          !isAcceleratorReadinessCurrent(acceleratorReadiness)
+        ) {
+          if (!startupInterrupted) {
+            statusMessage = "Runtime changed before startup model results could be published";
+            appendAppLog(statusMessage, "warn");
+          }
+          return;
         }
+        if (startupLoaded > 0) {
+          // A failure must survive the summary: without the count, one model loading
+          // after another failed would report only the success and hide the failure.
+          statusMessage =
+            `${startupLoaded} startup model${startupLoaded !== 1 ? 's' : ''} loaded` +
+            (startupBlocked > 0 ? `; ${startupBlocked} skipped for unavailable acceleration` : "") +
+            (startupFailed > 0 ? `; ${startupFailed} failed (see the app log)` : "");
+        // Nothing loaded but something failed: the header keeps the reason for that
+        // failure rather than a count, and every failure is already in the app log.
+        } else if (startupFailed === 0 && startupBlocked > 0) {
+          statusMessage =
+            `${startupBlocked} startup model${startupBlocked !== 1 ? "s" : ""} skipped for unavailable acceleration`;
+        }
+      }
+      if (acceleratorRestartGuidance) {
+        statusMessage = acceleratorRestartGuidance;
+      }
+      } finally {
+        release();
       }
     } else {
       statusMessage = state.error || "Could not connect to Foundry Local";
@@ -2376,10 +5343,10 @@ updateStateFromSdk();
     if (!state.ready) return;
     isLoadingModels = true;
     try {
-      await refreshModels();
+      await refreshCatalogModels();
       statusMessage = `${state.models.length} models available`;
       // Keep STT list fresh too (metadata driven)
-      loadSTTModels().catch(() => {});
+      void loadSTTModels();
     } catch (e: any) {
       statusMessage = `Failed to load catalog: ${e?.message || e}`;
     } finally {
@@ -2405,46 +5372,114 @@ updateStateFromSdk();
     try {
       sttModels = await getSTTModels();
     } catch (e) {
+      const detail = e?.message || String(e);
       console.warn("Failed to load STT models", e);
-      sttModels = [];
+      statusMessage = `STT catalog unavailable: ${detail}`;
+      appendAppLog(`STT catalog refresh failed: ${detail}`, "error");
     }
   }
 
   async function startLocalService() {
+    const blocked = blockedByExclusivePoolRun();
+    if (blocked) {
+      statusMessage = blocked;
+      return;
+    }
+    const release = beginPoolMutation();
     try {
+      // An explicit start bypasses the stand-down guard on its own (it passes no `convenience`
+      // flag), so nothing is cleared here. The latch is retired only by this attempt succeeding.
       statusMessage = "Starting local service...";
       appendAppLog('Starting local OpenAI-compatible service');
       const ep = await startSvc(
         selectedModelAlias || undefined,
         selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
       );
+      serviceStartUncertain = isServiceStartUncertain();
       updateStateFromSdk();
       statusMessage = `Service running at ${ep}`;
       appendAppLog(`Service started at ${ep}`);
     } catch (e: any) {
+      serviceStartUncertain = isServiceStartUncertain();
       statusMessage = `Failed to start service: ${e?.message || e}`;
       appendAppLog(`Service start failed: ${e?.message || e}`, 'error');
+    } finally {
+      release();
     }
   }
 
   async function stopLocalService() {
+    const blocked = blockedByExclusivePoolRun();
+    if (blocked) {
+      statusMessage = blocked;
+      return;
+    }
+    startupAuthorization.invalidate();
+    const release = beginPoolMutation();
     try {
       await stopService();
+      // The mirror is re-read rather than assumed: a Stop acknowledgement does not prove an
+      // earlier start whose outcome was never established has finished, so the SDK keeps the
+      // latch and the UI must keep showing it.
+      serviceStartUncertain = isServiceStartUncertain();
       updateStateFromSdk();
       statusMessage = "Service stopped";
       appendAppLog('Service stopped');
     } catch (e: any) {
       statusMessage = `Failed to stop service: ${e?.message || e}`;
       appendAppLog(`Service stop failed: ${e?.message || e}`, 'error');
+    } finally {
+      release();
+    }
+  }
+
+  async function stopAndUnloadModels() {
+    const blocked = blockedByExclusivePoolRun();
+    if (blocked) {
+      statusMessage = blocked;
+      return;
+    }
+    startupAuthorization.invalidate();
+    const release = beginPoolMutation();
+    try {
+      statusMessage = "Stopping service and waiting for active work...";
+      const result = await stopAndUnload();
+      serviceStartUncertain = isServiceStartUncertain();
+      updateStateFromSdk();
+      statusMessage = result.cleanup === "confirmed"
+        ? "Service stopped and models unloaded"
+        : result.serviceStopped
+          ? `Service stopped; model cleanup ${result.cleanup}`
+          : `Endpoint withdrawn; native service cleanup ${result.cleanup}`;
+      appendAppLog(statusMessage, result.cleanup === "confirmed" ? "info" : "warn");
+    } catch (e: any) {
+      statusMessage = `Failed to stop and unload: ${e?.message || e}`;
+      appendAppLog(statusMessage, "error");
+    } finally {
+      release();
     }
   }
 
   async function refreshServiceStatus() {
-    await refreshModels();
+    await refreshCatalogModels();
     updateStateFromSdk();
   }
 
+  async function scanCacheInventory() {
+    cacheInventoryLoading = true;
+    try {
+      cacheInventory = await getCacheInventory();
+      statusMessage = "Cache inventory refreshed";
+    } catch (e: any) {
+      statusMessage = `Cache inventory failed: ${e?.message || e}`;
+      appendAppLog(`Cache inventory failed: ${e?.message || e}`, "error");
+    } finally {
+      cacheInventoryLoading = false;
+    }
+  }
+
   async function copyDiagnosticsToClipboard() {
+    const healthRing = await getHealthRing().catch(() => []);
     const diagnosticsSnapshot = {
       generatedAt: new Date().toISOString(),
       app: {
@@ -2480,6 +5515,7 @@ updateStateFromSdk();
         platform: navigator.platform || "unknown",
         language: navigator.language,
       },
+      healthRing,
     };
 
     const payload =
@@ -2499,22 +5535,58 @@ updateStateFromSdk();
     // The sdk.ts already updates the store on refresh/startService
   }
 
-  async function ensureHardwareAccel() {
-    if (!state.ready) return;
+  async function ensureHardwareAccel(
+    options?: { throwOnError?: boolean; refreshCatalog?: boolean; forceRerun?: boolean },
+  ): Promise<AcceleratorReadiness> {
+    if (!state.ready) {
+      return { generation: -1, registration: null, providers: [] };
+    }
     statusMessage = "Setting up hardware accelerators...";
     try {
-      await ensureAccelerators((epName, pct) => {
-        statusMessage = `Accelerator ${epName}: ${pct.toFixed(0)}%`;
-      });
-      statusMessage =
-        state.acceleratorsReady ?
-          "Hardware acceleration ready"
-        : "Accelerators configured";
-      await refreshExecutionProviders();
-      await refreshModels();
-      await loadRecommendations();
+      const readiness = await ensureAccelerators(
+        (epName, pct) => {
+          statusMessage = `Accelerator ${epName}: ${pct.toFixed(0)}%`;
+        },
+        () => {
+          statusMessage = "Accelerator setup: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.";
+        },
+        { forceRerun: options?.forceRerun },
+      );
+      if (options?.refreshCatalog !== false) {
+        await refreshExecutionProviders({
+          throwOnError: true,
+          refreshRecommendations: false,
+        });
+        if (!isAcceleratorReadinessCurrent(readiness)) {
+          throw new Error("Runtime changed while refreshing execution providers");
+        }
+        await refreshCatalogModels();
+        if (!isAcceleratorReadinessCurrent(readiness)) {
+          throw new Error("Runtime changed while refreshing the model catalog");
+        }
+        await loadRecommendations();
+        if (!isAcceleratorReadinessCurrent(readiness)) {
+          throw new Error("Runtime changed while refreshing recommendations");
+        }
+      }
+      const restartGuidance = resolveAcceleratorRestartGuidance(readiness.registration);
+      if (restartGuidance) {
+        statusMessage = restartGuidance;
+        appendAppLog(statusMessage, "warn");
+      } else if (readiness.registration?.success === false) {
+        statusMessage = readiness.registration.status || "Some accelerators could not be registered";
+        appendAppLog(statusMessage, "warn");
+      } else {
+        statusMessage =
+          state.acceleratorsReady
+            ? "Hardware acceleration ready"
+            : "Accelerators configured";
+      }
+      return readiness;
     } catch (e: any) {
       statusMessage = `Accel setup: ${e?.message || "partial"}`;
+      if (options?.throwOnError) throw e;
+      return { generation: -1, registration: null, providers: state.eps };
     }
   }
 
@@ -2525,6 +5597,7 @@ updateStateFromSdk();
     }
     try {
       const alias = model.alias;
+      const nav = beginChatNavigation();
 
       if (!model.isCached) {
         statusMessage = `Downloading recommended model ${alias}...`;
@@ -2535,27 +5608,23 @@ updateStateFromSdk();
         await loadModelAndMaybeStart(model);
       }
 
+      if (!chatNavigationCurrent(nav)) {
+        statusMessage = `${alias} is ready. The chat changed while it loaded — pick it in the chat header to use it.`;
+        return;
+      }
+
       selectedModelAlias = alias;
       selectedModel = { alias }; // minimal handle
       chatClient = null; // use HTTP from sidecar
-      chatMessages = [];
-      chatInput = "";
-      lastAutoSummaryCount = 0;
+      startFreshConversation();
 
       // Auto start service and switch to chat
-      if (!state.serviceRunning) {
-        try {
-          await startSvc(
-            alias,
-            selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
-          );
-        } catch {}
-      }
+      const startResult = await startServiceForModel(alias);
 
-      statusMessage = `${alias} ready. Switching to chat...`;
+      statusMessage = `${alias} ready. Switching to chat...${serviceQualifier(startResult.result)}`;
       currentView = "chat";
     } catch (e: any) {
-      statusMessage = `Failed with starter: ${e?.message || e}`;
+      reportFailure("Failed with starter", e);
     }
   }
 
@@ -2570,10 +5639,8 @@ updateStateFromSdk();
       selectedModelAlias = model.alias;
       selectedModel = { alias: model.alias };
       chatClient = null;
-      chatMessages = [];
-      chatInput = "";
+      startFreshConversation();
       currentView = "chat";
-      lastAutoSummaryCount = 0;
       statusMessage = `Chatting with ${model.alias}`;
 
       // === Step 4: apply good default for this model
@@ -2581,37 +5648,42 @@ updateStateFromSdk();
         contextTurns = recommendedMaxTurns;
       }
 
-      if (!state.serviceRunning) {
-        try {
-          await startSvc(
-            model.alias,
-            selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
-          );
-        } catch {}
-      }
+      const startResult = await startServiceForModel(model.alias);
+      statusMessage = `Chatting with ${model.alias}${serviceQualifier(startResult.result)}`;
     } catch (e: any) {
-      statusMessage = `Failed to select: ${e?.message || e}`;
+      reportFailure("Failed to select", e);
     }
   }
 
   async function loadAndSelect(model: any) {
     if (!modelSupportsChat(model)) {
-      statusMessage = `${model.alias} is an STT/audio model. Switching to Audio tab.`;
+      statusMessage = `${model.alias} is an STT/audio model. Switching to Playground → Voice.`;
       await useSTTModelForAudio(model);
       currentView = 'audio';
       return;
     }
     try {
+      const nav = beginChatNavigation();
       await loadModelAndMaybeStart(model);
+      if (!chatNavigationCurrent(nav)) {
+        statusMessage = `${model.alias} is loaded. The chat changed while it loaded — pick it in the chat header to use it.`;
+        return;
+      }
       await selectAndChat(model);
     } catch (e: any) {
-      statusMessage = `Load failed: ${e?.message || e}`;
+      reportFailure("Load failed", e);
     }
   }
 
   // Dedicated path for audio/STT: loads the model in the audio lane without
   // affecting the chat lane or the running chat service endpoint.
   async function useSTTModelForAudio(model: any) {
+    const blocked = blockedByExclusivePoolRun();
+    if (blocked) {
+      statusMessage = blocked;
+      return;
+    }
+    const release = beginPoolMutation();
     try {
       const alias = model.alias;
 
@@ -2626,97 +5698,284 @@ updateStateFromSdk();
       audioLaneModelAlias = alias;
 
       statusMessage = `Audio ready: ${alias}`;
-      await refreshModels();
+      await refreshCatalogModels();
       await loadSTTModels();
     } catch (e: any) {
-      statusMessage = `Failed to prepare STT model: ${e?.message || e}`;
+      reportFailure("Failed to prepare STT model", e);
+    } finally {
+      release();
     }
   }
+
+  // Native code owns the tray from startup (Open / Quit). Closing the window only hides when
+  // the user asked to keep the service in the background; otherwise this path quits.
+  async function quitFromWindowClose() {
+    // destroy() below bypasses every other shutdown path, so this is the only chance to write.
+    flushConversations();
+    try {
+      const shutdown = await quitRuntime();
+      if (shutdown.termination === "unconfirmed") {
+        appendAppLog("Runtime termination could not be confirmed before Flint exited", "warn");
+      } else if (shutdown.cleanup && shutdown.cleanup.cleanup !== "confirmed") {
+        appendAppLog(
+          `Runtime exited after cleanup was ${shutdown.cleanup.cleanup}; some active work may not have drained`,
+          "warn",
+        );
+      }
+    } catch (e: any) {
+      appendAppLog(`Runtime shutdown failed before exit: ${e?.message || e}`, "warn");
+    }
+    // Again, after the awaits. A streaming callback can land while the service is stopping, so
+    // the flush above is not necessarily the last state worth writing.
+    flushConversations();
+    await quitDesktopApp();
+  }
+
+  async function handleCloseRequested(event: { preventDefault: () => void }) {
+    // Flush first, before any branch can let the window go. Component cleanup is not a reliable
+    // shutdown hook, so this is the last point at which unsaved conversations can still be
+    // written.
+    flushConversations();
+    if (!keepServiceInBackground || !state.serviceRunning) {
+      event.preventDefault();
+      await quitFromWindowClose();
+      return;
+    }
+    event.preventDefault();
+    await getCurrentWindow().hide();
+    appendAppLog("Window closed to tray — local service keeps running");
+    if (!trayHideNotified) {
+      trayHideNotified = true;
+      try {
+        const notification = await import("@tauri-apps/plugin-notification");
+        if (await notification.isPermissionGranted()) {
+          notification.sendNotification({
+            title: "Flint is still running",
+            body: `The local endpoint stays available at http://127.0.0.1:${appliedNetworkPort}/v1. Use the tray icon to reopen or quit.`,
+          });
+        }
+      } catch {}
+    }
+  }
+
+  let unlistenCloseRequested: (() => void) | null = null;
+  let unlistenQuitFlush: (() => void) | null = null;
+  let mountDisposed = false;
 
   onMount(() => {
     hostPlatform = detectHostPlatform();
     // Subscribe to the SDK store
     unsubscribe = sdkStateStore.subscribe(syncFromStore);
-    // Load conversation history
-    loadConversations();
-    loadCompareHistory();
-    init();
+
+    // Register lifecycle listeners before any fallible storage work, so a storage failure
+    // can never leave the app without a keyboard handler or close-to-tray hook.
     document.addEventListener('keydown', handleGlobalKeydown);
+    // Native quit does not reach handleCloseRequested, so treat losing the window as a cue to
+    // write. See flushOnHide.
+    document.addEventListener('visibilitychange', flushOnHide);
+    window.addEventListener('pagehide', flushOnHide);
+    window.addEventListener('blur', flushOnHide);
+    // Native Cmd+Q / Dock Quit / tray Quit never reach onCloseRequested (tauri#9198).
+    // The supervisor emits flint-quit-flush; we write, then ack so exit can proceed.
+    void subscribeQuitFlush(() => {
+      flushConversations();
+    }).then((un) => {
+      if (mountDisposed) un();
+      else unlistenQuitFlush = un;
+    }).catch((e) => console.warn("[flint] quit-flush listener unavailable", e));
+    getCurrentWindow()
+      .onCloseRequested(handleCloseRequested)
+      .then((un) => {
+        // The component can be torn down before this resolves; drop the listener instead of
+        // leaking it.
+        if (mountDisposed) un();
+        else unlistenCloseRequested = un;
+      })
+      .catch((e) => console.warn("[flint] close-to-tray unavailable", e));
+
+    // Hydrate every persisted store *before* enabling autosave, and before init() starts any
+    // async work. persistChat() is inert until `hydrated` flips.
+    //
+    // Order matters: loadConversations() opens the archive and installs the active
+    // conversation's thread, so it must run before restoreChat(), which restores only app-level
+    // settings and must not touch the thread it just loaded.
+    let mayPersist = true;
+    try {
+      loadConversations();
+      mayPersist = restoreChat();
+      // Overrides sit on top of the app defaults restoreChat() just restored, so that a startup
+      // and a later selection of the same conversation produce the same configuration.
+      if (pendingConversationSettingsSet) {
+        // Read from the raw stored bag, not from `selectedModelAlias` after resolution. A
+        // conversation that stores no model inherits the baseline's last-used alias, and taking
+        // the resolved value would present that inherited alias as an explicit request — which
+        // would then outrank the user's configured default chat model at startup.
+        startupConversationAlias =
+          readConversationSettings(pendingConversationSettings).settings.modelAlias || "";
+        applyConversationSettings(pendingConversationSettings);
+        pendingConversationSettings = undefined;
+        pendingConversationSettingsSet = false;
+      }
+      loadCompareHistory();
+      loadCustomPersonasState();
+    } finally {
+      hydrated = mayPersist;
+    }
+
+    init();
 
     return () => {
+      mountDisposed = true;
+      if (backgroundArchiveSaveTimer) {
+        clearTimeout(backgroundArchiveSaveTimer);
+        backgroundArchiveSaveTimer = null;
+      }
       if (unsubscribe) unsubscribe();
-      saveConversations();
       document.removeEventListener('keydown', handleGlobalKeydown);
+      unlistenCloseRequested?.();
+      unlistenQuitFlush?.();
+      document.removeEventListener('visibilitychange', flushOnHide);
+      window.removeEventListener('pagehide', flushOnHide);
+      window.removeEventListener('blur', flushOnHide);
+      flushConversations();
+      // After the final flush: a pending retry would hold this component's archive and could
+      // overwrite whatever replaced it.
+      cancelConversationRetry();
     };
   });
 
-  // Auto-save conversations when messages change (Svelte 5 runes style)
+  // Auto-save the loaded conversation when its thread changes.
+  //
+  // Gated on the thread being attributed rather than on it being non-empty: emptying a
+  // conversation is a change that must be stored, and `captureThread` refuses an unattributed
+  // thread anyway, so the old `length > 0` guard only suppressed legitimate saves.
+  // untrack: saveConversations() both reads and writes `conversationArchive`, so tracking its
+  // reads would make this effect invalidate itself on every save — a save → assign → save loop.
+  // The dependencies that should fire it are read directly here instead.
   $effect(() => {
-    if (currentConversationId && chatMessages.length > 0) {
-      saveConversations();
-    }
+    if (!hydrated) return;
+    const loaded = threadLoadedFor;
+    // Establishes the dependency on the thread itself. Every mutation path reassigns
+    // `chatMessages` (in-place flag edits are followed by a spread) so this sees them all.
+    void chatMessages.length;
+    if (!loaded) return;
+    untrack(() => saveConversations());
   });
 
   async function downloadAndTrack(model: any) {
+    const blocked = blockedByExclusivePoolRun();
+    if (blocked) {
+      statusMessage = blocked;
+      throw new Error(blocked);
+    }
     downloadingModelAliases = { ...downloadingModelAliases, [model.alias]: true };
+    // Routed through the same fence as load/unload/delete: a download consumes disk/network
+    // work a benchmark's own target loads would otherwise have exclusive use of, and it must be
+    // visible to `otherInferenceInFlight()` (checked by benchmark admission) exactly like those
+    // other pool-affecting operations already are.
+    const release = beginPoolMutation();
     try {
       statusMessage = `Downloading ${model.alias}...`;
-      await downloadModel(model, (p: number) => {
-        statusMessage = `Downloading ${model.alias}: ${p.toFixed(1)}%`;
-      });
+      await downloadModel(
+        model,
+        (p: number) => {
+          statusMessage = `Downloading ${model.alias}: ${p.toFixed(1)}%`;
+        },
+        undefined,
+        () => {
+          statusMessage = `Downloading ${model.alias}: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.`;
+        },
+      );
       setModelRuntimeMeta(model.alias, { downloadedAt: new Date().toISOString() });
       statusMessage = `${model.alias} downloaded`;
-      await refreshModels();
+      await refreshCatalogModels();
     } catch (e: any) {
       statusMessage = `Download failed: ${e?.message || e}`;
       throw e;
     } finally {
+      release();
       const next = { ...downloadingModelAliases };
       delete next[model.alias];
       downloadingModelAliases = next;
     }
   }
 
-  async function loadModelAndMaybeStart(model: any) {
+  /**
+   * Load a model into the chat lane and, opportunistically, bring the service up for it.
+   *
+   * Returns the service-start outcome so a caller about to announce "ready" can qualify it. The
+   * value describes the *service* only; a failed load throws.
+   *
+   * The load is the prerequisite, so any load failure propagates. Returning "failed" for it
+   * would be indistinguishable from a failed service start, and callers would go on to announce
+   * the model ready while reporting a service problem — losing both the operation that actually
+   * failed and its explanation. An uncertain load matters twice over, because `startService`
+   * makes the sidecar run `ensureModel(alias)` and would load the same model again.
+   *
+   * The bookkeeping after the load — refreshing the list, recording acceleration, adopting the
+   * model into the chat and audio lanes — is not part of either operation. It runs in its own
+   * guard so that a failure there neither claims the load failed nor is reported as a service
+   * problem, since by then the model is loaded and the service is in whatever state the start
+   * left it. Most callers ignore the return value, so a bookkeeping failure that came back as
+   * `failed` was simply lost; it is surfaced in the status line instead, where it is read.
+   */
+  async function loadModelAndMaybeStart(model: any): Promise<ServiceStartAttempt> {
+    const blocked = blockedByExclusivePoolRun();
+    if (blocked) {
+      statusMessage = blocked;
+      throw new Error(blocked);
+    }
+    let loadResult: any;
+    const release = beginPoolMutation();
     try {
       statusMessage = `Loading ${model.alias}...`;
       appendAppLog(`Loading model ${model.alias} (chat lane)`);
-      const loadResult = await sendLoadToSidecar(model, 'chat');
-      const loadAccel = String(loadResult?.acceleration?.active || "").trim();
-      if (loadAccel) {
-        setModelRuntimeMeta(model.alias, { lastUsedAcceleration: loadAccel });
-      }
-      statusMessage = `${model.alias} loaded`;
-
-      if (!state.serviceRunning) {
-        try {
-          await startSvc(
-            model.alias,
-            selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
-          );
-          statusMessage = `${model.alias} loaded + service started`;
-        } catch (e) {
-          console.warn("Auto-start service failed", e);
-        }
-      }
-
-      await refreshModels();
-
-      // Chat: plain "Load" should become the current chat model when none is set.
-      if (modelSupportsChat(model) && !selectedModelAlias) {
-        selectedModelAlias = model.alias;
-        selectedModel = { alias: model.alias };
-        chatClient = null;
-      }
-
-      // If this was an STT model loaded from the main UI (e.g. Models tab "Load" button),
-      // make the Audio page inherit it automatically.
-      if (modelSupportsAudio(model)) {
-        selectedSTTModelAlias = model.alias;
-      }
+      loadResult = await sendLoadToSidecar(model, 'chat');
     } catch (e: any) {
-      statusMessage = `Load failed: ${e?.message || e}`;
+      reportFailure("Load failed", e);
+      throw e;
+    } finally {
+      release();
     }
+
+    const loadAccel = String(loadResult?.acceleration?.active || "").trim();
+    if (loadAccel) {
+      setModelRuntimeMeta(model.alias, { lastUsedAcceleration: loadAccel });
+    }
+    statusMessage = `${model.alias} loaded`;
+
+    // Never throws: it reports its outcome in the returned value.
+    const startResult = await startServiceForModel(model.alias);
+    if (startResult.result === "started") {
+      statusMessage = `${model.alias} loaded + service started`;
+    }
+
+    try {
+      await refreshCatalogModels();
+    } catch (e: any) {
+      // The list is a view of the model, not the model itself, so a stale list does not make the
+      // loaded model unusable — and saying "load failed" about a model that is loaded would send
+      // the user to fix the wrong thing.
+      const detail = e?.message || e;
+      appendAppLog(`Model list refresh failed after loading ${model.alias}: ${detail}`, "error");
+      statusMessage = `${model.alias} loaded, but the model list could not be refreshed: ${detail}`;
+    }
+
+    // Deliberately outside the guard above: adopting the model into a lane depends on the load,
+    // not on the list having been refreshed.
+    // Chat: plain "Load" should become the current chat model when none is set.
+    if (modelSupportsChat(model) && !selectedModelAlias) {
+      selectedModelAlias = model.alias;
+      selectedModel = { alias: model.alias };
+      chatClient = null;
+    }
+
+    // If this was an STT model loaded from the main UI (e.g. Models tab "Load" button),
+    // make the Audio page inherit it automatically.
+    if (modelSupportsAudio(model)) {
+      selectedSTTModelAlias = model.alias;
+    }
+    return startResult;
   }
 
   /** Switch the active chat model (does not clear conversation history). */
@@ -2728,24 +5987,36 @@ updateStateFromSdk();
       statusMessage = `${next} is not a chat model.`;
       return;
     }
+    // Checked before any state mutation: selecting an already-loaded model is harmless and stays
+    // allowed, but loading a new one would race the benchmark's own load, so it must not proceed
+    // — and must not leave selectedModelAlias pointing at a model that was never loaded.
+    if (!model.isLoaded) {
+      const blocked = blockedByExclusivePoolRun();
+      if (blocked) {
+        statusMessage = blocked;
+        return;
+      }
+    }
+    // Recorded before the first await, against the conversation that was active when the user
+    // picked. Loading a model can take a long time, and a switch made while it loads must not
+    // receive this choice.
+    commitChatSettings({ modelAlias: next });
+    // Claimed synchronously: an explicit pick outranks anything already in flight. Without this
+    // the startup prewarm, which only checks whether it has been superseded, would still
+    // consider itself current and would publish its own model over the one just chosen.
+    const nav = beginChatNavigation();
     try {
       selectedModelAlias = next;
       selectedModel = { alias: next };
       chatClient = null;
-      if (!model.isLoaded) {
-        await loadModelAndMaybeStart(model);
-      } else if (!state.serviceRunning) {
-        try {
-          await startSvc(
-            next,
-            selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
-          );
-        } catch {}
-      }
-      statusMessage = `Chatting with ${next}`;
+      const startResult = !model.isLoaded
+        ? await loadModelAndMaybeStart(model)
+        : await startServiceForModel(next);
+      if (chatNavigationCurrent(nav))
+        statusMessage = `Chatting with ${next}${serviceQualifier(startResult.result)}`;
       persistChat();
     } catch (e: any) {
-      statusMessage = `Failed to select ${next}: ${e?.message || e}`;
+      reportFailure(`Failed to select ${next}`, e);
     }
   }
 
@@ -2753,14 +6024,39 @@ updateStateFromSdk();
     return await sdkLoadModel(model, lane);
   }
 
+  /** Pinning only stops *automatic* eviction; it does nothing to stop a user from directly
+   * unloading, variant-switching, or deleting a benchmark's pinned target from Models/Monitor
+   * while a run is in flight, which would invalidate or fail the remaining measurements. Blocked
+   * globally (not scoped to the run's specific target aliases) to match the coarse-grained
+   * benchmark/Arena mutex above — the page doesn't otherwise track per-run target aliases, and
+   * per-alias scoping would add a new class of staleness bugs for a feature already accepted as
+   * coarse elsewhere in this PR.
+   *
+   * The endpoint self-test holds the same fence. It loads models through the gateway and
+   * afterwards puts the pool back the way it found it, so a user load or unload in the middle
+   * would be undone by that cleanup, or mistaken for the run's own work. */
+  function blockedByExclusivePoolRun(): string | null {
+    if (benchmarkRunInFlight) return "A benchmark run is active — stop it before changing loaded models.";
+    if (endpointSelfTestBusy) return "The endpoint self-test is running — wait for it before changing loaded models.";
+    return null;
+  }
+
   async function unloadModel(model: any) {
+    const blocked = blockedByExclusivePoolRun();
+    if (blocked) {
+      statusMessage = blocked;
+      return;
+    }
+    const release = beginPoolMutation();
     try {
       statusMessage = `Unloading ${model.alias}...`;
       await sdkUnloadModel(model);
       statusMessage = `${model.alias} unloaded`;
-      await refreshModels();
+      await refreshCatalogModels();
     } catch (e: any) {
       statusMessage = `Unload failed: ${e?.message || e}`;
+    } finally {
+      release();
     }
   }
 
@@ -2771,22 +6067,23 @@ updateStateFromSdk();
   }
 
   async function loadVariant(model: any, variantId: string) {
+    const blocked = blockedByExclusivePoolRun();
+    if (blocked) {
+      statusMessage = blocked;
+      return;
+    }
+    const release = beginPoolMutation();
     try {
       statusMessage = `Loading ${model.alias} (${shortVariantLabel(variantId)})...`;
       appendAppLog(`Loading model ${model.alias} variant ${variantId}`);
       await sdkLoadModel(model, "chat", variantId);
-      statusMessage = `${model.alias} loaded (${shortVariantLabel(variantId)})`;
-      if (!state.serviceRunning) {
-        try {
-          await startSvc(
-            model.alias,
-            selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
-          );
-        } catch {}
-      }
-      await refreshModels();
+      const startResult = await startServiceForModel(model.alias);
+      statusMessage = `${model.alias} loaded (${shortVariantLabel(variantId)})${serviceQualifier(startResult.result)}`;
+      await refreshCatalogModels();
     } catch (e: any) {
-      statusMessage = `Load failed: ${e?.message || e}`;
+      reportFailure("Load failed", e);
+    } finally {
+      release();
     }
   }
 
@@ -2796,60 +6093,95 @@ updateStateFromSdk();
       statusMessage = `${model.alias} is not a chat model.`;
       return;
     }
+    const blocked = blockedByExclusivePoolRun();
+    if (blocked) {
+      statusMessage = blocked;
+      return;
+    }
+    const release = beginPoolMutation();
     try {
+      const nav = beginChatNavigation();
       const alreadyThis =
-        state.pool.some((e: any) => e.alias === model.alias && e.variantId === variantId);
+        loadedPoolEntries.some((e: any) => e.alias === model.alias && e.variantId === variantId);
       if (!alreadyThis) {
         statusMessage = `Loading ${model.alias} (${shortVariantLabel(variantId)})...`;
         appendAppLog(`Load & Chat: ${model.alias} variant ${variantId}`);
         await sdkLoadModel(model, "chat", variantId);
       }
+      if (!chatNavigationCurrent(nav)) {
+        statusMessage = `${model.alias} is loaded. The chat changed while it loaded — pick it in the chat header to use it.`;
+        return;
+      }
       selectedModelAlias = model.alias;
       selectedModel = { alias: model.alias };
       chatClient = null;
-      chatMessages = [];
-      chatInput = "";
-      lastAutoSummaryCount = 0;
+      startFreshConversation();
       if (recommendedMaxTurns && recommendedMaxTurns !== contextTurns) {
         contextTurns = recommendedMaxTurns;
       }
-      if (!state.serviceRunning) {
-        try {
-          await startSvc(
-            model.alias,
-            selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
-          );
-        } catch {}
-      }
-      await refreshModels();
-      statusMessage = `Chatting with ${model.alias} (${shortVariantLabel(variantId)})`;
+      const startResult = await startServiceForModel(model.alias);
+      await refreshCatalogModels();
+      statusMessage = `Chatting with ${model.alias} (${shortVariantLabel(variantId)})${serviceQualifier(startResult.result)}`;
       currentView = "chat";
       persistChat();
     } catch (e: any) {
-      statusMessage = `Load & Chat failed: ${e?.message || e}`;
+      reportFailure("Load & Chat failed", e);
+    } finally {
+      release();
     }
   }
 
   async function downloadVariant(model: any, variantId: string) {
+    const blocked = blockedByExclusivePoolRun();
+    if (blocked) {
+      statusMessage = blocked;
+      return;
+    }
     downloadingVariantIds = { ...downloadingVariantIds, [variantId]: true };
+    const release = beginPoolMutation();
     try {
       statusMessage = `Downloading ${model.alias} variant...`;
-      await downloadModel(model, (p: number) => {
-        statusMessage = `Downloading ${model.alias}: ${p.toFixed(1)}%`;
-      }, variantId);
+      await downloadModel(
+        model,
+        (p: number) => {
+          statusMessage = `Downloading ${model.alias}: ${p.toFixed(1)}%`;
+        },
+        variantId,
+        () => {
+          statusMessage = `Downloading ${model.alias}: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.`;
+        },
+      );
       setModelRuntimeMeta(model.alias, { downloadedAt: new Date().toISOString() });
       statusMessage = `${model.alias} variant downloaded`;
-      await refreshModels();
+      await refreshCatalogModels();
     } catch (e: any) {
       statusMessage = `Download failed: ${e?.message || e}`;
     } finally {
+      release();
       const next = { ...downloadingVariantIds };
       delete next[variantId];
       downloadingVariantIds = next;
     }
   }
 
+  function handleDeleteResult(
+    deleteResult: { catalogRefreshRequiresRestart?: boolean } | undefined,
+    successMessage: string,
+  ) {
+    if (deleteResult?.catalogRefreshRequiresRestart) {
+      statusMessage = `${successMessage}. Restart Flint to refresh the model catalog.`;
+      appendAppLog(statusMessage, "warn");
+    } else {
+      statusMessage = successMessage;
+    }
+  }
+
   async function deleteVariant(model: any, variantId: string) {
+    const blocked = blockedByExclusivePoolRun();
+    if (blocked) {
+      statusMessage = blocked;
+      return;
+    }
     try {
       const label = shortVariantLabel(variantId);
       const confirmed = globalThis.confirm(
@@ -2859,30 +6191,36 @@ updateStateFromSdk();
         statusMessage = `Delete cancelled for ${label}`;
         return;
       }
-      statusMessage = `Deleting ${model.alias} (${label})...`;
-      const isLoadedVariant = state.pool.some(
-        (e: any) => e.alias === model.alias && e.variantId === variantId,
-      );
-      if (isLoadedVariant) {
-        await sdkUnloadModel(model);
-      }
-      await sdkDeleteModel(model, variantId);
-      // If no other variants remain cached, clear selection/meta like full delete
-      await refreshModels();
-      const refreshed = state.models.find((m: ModelInfo) => m.alias === model.alias);
-      const anyCached =
-        refreshed?.isCached ||
-        ((refreshed as any)?.variants || []).some((v: any) => v.cached);
-      if (!anyCached) {
-        if (selectedModelAlias === model.alias) selectedModelAlias = "";
-        if (modelRuntimeMeta[model.alias]) {
-          const nextMeta = { ...modelRuntimeMeta };
-          delete nextMeta[model.alias];
-          modelRuntimeMeta = nextMeta;
-          persistChat();
+      const release = beginPoolMutation();
+      try {
+        statusMessage = `Deleting ${model.alias} (${label})...`;
+        const isLoadedVariant = loadedPoolEntries.some(
+          (e: any) => e.alias === model.alias && e.variantId === variantId,
+        );
+        if (isLoadedVariant) {
+          await sdkUnloadModel(model);
         }
+        const result = await sdkDeleteModel(model, variantId);
+        const deletedMessage = `${model.alias} variant deleted (${label})`;
+        // If no other variants remain cached, clear selection/meta like full delete
+        const refreshed = state.models.find((m: ModelInfo) => m.alias === model.alias);
+        const anyCached =
+          refreshed?.isCached ||
+          ((refreshed as any)?.variants || []).some((v: any) => v.cached);
+        if (!anyCached) {
+          if (selectedModelAlias === model.alias) selectedModelAlias = "";
+          if (modelRuntimeMeta[model.alias]) {
+            const nextMeta = { ...modelRuntimeMeta };
+            delete nextMeta[model.alias];
+            modelRuntimeMeta = nextMeta;
+            persistChat();
+          }
+        }
+        handleDeleteResult(result, deletedMessage);
+      } finally {
+        release();
       }
-      statusMessage = `${model.alias} variant deleted (${label})`;
+
     } catch (e: any) {
       statusMessage = `Delete variant failed: ${e?.message || e}`;
     }
@@ -2911,13 +6249,18 @@ updateStateFromSdk();
       startupModels = updated;
     } else {
       // Capture the currently loaded variant so the right device type reloads on startup
-      const activeVariantId = state.pool.find((e: any) => e.alias === alias)?.variantId ?? variantId;
+      const activeVariantId = loadedPoolEntries.find((e: any) => e.alias === alias)?.variantId ?? variantId;
       startupModels = { ...startupModels, [alias]: activeVariantId };
     }
     persistChat();
   }
 
   async function deleteCachedModel(model: any) {
+    const blocked = blockedByExclusivePoolRun();
+    if (blocked) {
+      statusMessage = blocked;
+      return;
+    }
     try {
       const variantCount = ((model as any).variants || []).filter((v: any) => v.cached).length;
       const confirmed = globalThis.confirm(
@@ -2929,29 +6272,42 @@ updateStateFromSdk();
         statusMessage = `Delete cancelled for ${model.alias}`;
         return;
       }
-      statusMessage = `Deleting ${model.alias}...`;
-      if (model.isLoaded) {
-        await sdkUnloadModel(model);
+      const release = beginPoolMutation();
+      try {
+        statusMessage = `Deleting ${model.alias}...`;
+        if (model.isLoaded) {
+          await sdkUnloadModel(model);
+        }
+        const result = await sdkDeleteModel(model);
+        if (selectedModelAlias === model.alias) {
+          selectedModelAlias = "";
+        }
+        if (modelRuntimeMeta[model.alias]) {
+          const nextMeta = { ...modelRuntimeMeta };
+          delete nextMeta[model.alias];
+          modelRuntimeMeta = nextMeta;
+          persistChat();
+        }
+        handleDeleteResult(result, `${model.alias} deleted`);
+      } finally {
+        release();
       }
-      await sdkDeleteModel(model);
-      if (selectedModelAlias === model.alias) {
-        selectedModelAlias = "";
-      }
-      if (modelRuntimeMeta[model.alias]) {
-        const nextMeta = { ...modelRuntimeMeta };
-        delete nextMeta[model.alias];
-        modelRuntimeMeta = nextMeta;
-        persistChat();
-      }
-      statusMessage = `${model.alias} deleted`;
-      await refreshModels();
     } catch (e: any) {
-      statusMessage = `Delete failed: ${e?.message || e}`;
+      // "Delete failed: it may have completed" is a contradiction, so an uncertain outcome
+      // states itself rather than being introduced as a failure.
+      statusMessage = isUncertainOutcome(e)
+        ? e?.message || String(e)
+        : `Delete failed: ${e?.message || e}`;
+      await refreshCatalogModels().catch(() => {});
     }
   }
 
   async function sendMessage(e: Event) {
     e.preventDefault();
+    if (benchmarkRunInFlight) {
+      statusMessage = "Chat is disabled while a benchmark run is active — it would contend for inference and invalidate the measurements.";
+      return;
+    }
     if (chatBlockedByLoadedSTT) {
       statusMessage = "Text chat is disabled while an STT model is active. Load a chat model to continue.";
       return;
@@ -2964,7 +6320,8 @@ updateStateFromSdk();
       statusMessage = "Current model does not support chat completions.";
       return;
     }
-    if (!chatInput.trim() || (!state.endpoint && !chatClient) || isStreaming) return;
+    if (!chatInput.trim() || (!state.endpoint && !chatClient)) return;
+    if (!threadLoadedFor || streamsByConversation.has(threadLoadedFor)) return;
 
     const text = chatInput.trim();
 
@@ -2992,10 +6349,38 @@ updateStateFromSdk();
     chatMessages = [...chatMessages, { role: "user", content: userContent }];
     chatInput = "";
     clearImages(); // clear after queuing for send
-    isStreaming = true;
+    const originId = threadLoadedFor;
     const requestController = new AbortController();
+    const assistantId = `asst-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    streamsByConversation.set(originId, { controller: requestController, requestId: null, assistantId });
     abortController = requestController;
     activeStreamRequestId = null;
+    syncVisibleStreaming();
+
+    // Deltas follow originId, not the visible thread. Switching conversations captures the
+    // partial assistant turn into the archive; later tokens patch that record instead of the
+    // chat now on screen.
+    function updateAssistantMessage(patch: Record<string, any>): boolean {
+      if (threadLoadedFor === originId) {
+        const i = chatMessages.findIndex((m: any) => m.id === assistantId);
+        if (i < 0) return false;
+        chatMessages[i] = { ...chatMessages[i], ...patch };
+        chatMessages = [...chatMessages];
+        return true;
+      }
+      const patched = applyMessagePatch(
+        conversationArchive,
+        originId,
+        assistantId,
+        patch,
+        Date.now(),
+      );
+      if (!patched.changed) return false;
+      conversationArchive = patched.archive;
+      conversationsDirty = true;
+      scheduleBackgroundArchiveSave();
+      return true;
+    }
 
     // Scroll to bottom
     setTimeout(() => {
@@ -3003,9 +6388,9 @@ updateStateFromSdk();
         messagesContainer.scrollTop = messagesContainer.scrollHeight;
     }, 0);
 
+    let assistantContent = "";
     try {
-      let assistantContent = "";
-      chatMessages = [...chatMessages, { role: "assistant", content: "" }];
+      chatMessages = [...chatMessages, { role: "assistant", content: "", id: assistantId }];
 
       // Prefer HTTP endpoint from sidecar when available (clean architecture)
       const endpoint = state.endpoint;
@@ -3017,18 +6402,22 @@ updateStateFromSdk();
           (delta: string) => {
             if (requestController.signal.aborted) return;
             assistantContent += delta;
-            const lastIndex = chatMessages.length - 1;
-            chatMessages[lastIndex] = {
-              ...chatMessages[lastIndex],
-              content: assistantContent,
-            };
-            chatMessages = [...chatMessages];
+            updateAssistantMessage({ content: assistantContent });
           },
           {
             preferredEp: selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+            temperature,
+            maxTokens,
+            topP,
+            topK,
+            frequencyPenalty,
+            presencePenalty,
+            randomSeed: randomSeed ?? undefined,
           },
           (requestId: number) => {
-            activeStreamRequestId = requestId;
+            const stream = streamsByConversation.get(originId);
+            if (stream && stream.controller === requestController) stream.requestId = requestId;
+            if (threadLoadedFor === originId) activeStreamRequestId = requestId;
           },
         );
         if (requestController.signal.aborted) {
@@ -3039,130 +6428,97 @@ updateStateFromSdk();
           setModelRuntimeMeta(selectedModelAlias, { lastUsedAcceleration: endpointAcceleration });
         }
         assistantContent = data?.choices?.[0]?.message?.content || assistantContent;
-        const lastIndex = chatMessages.length - 1;
-        chatMessages[lastIndex] = {
-          ...chatMessages[lastIndex],
-          content: assistantContent,
-        };
-        chatMessages = [...chatMessages];
+        updateAssistantMessage({ content: assistantContent });
         setTimeout(() => {
           if (messagesContainer)
             messagesContainer.scrollTop = messagesContainer.scrollHeight;
         }, 5);
       } else if (chatClient) {
-        // Fallback to direct client (dev only)
+        // Fallback to direct client (dev only). This transport reads generation params from
+        // client.settings, not completion args -- see the sidecar's identical pattern in
+        // createSessionChatClient/createChatClient. Apply them before completion so this path
+        // does not silently ignore the Playground's settings when the endpoint is unavailable.
+        if (chatClient.settings) {
+          chatClient.settings.temperature = temperature;
+          chatClient.settings.maxTokens = maxTokens;
+          chatClient.settings.topP = topP;
+          chatClient.settings.topK = topK;
+          chatClient.settings.frequencyPenalty = frequencyPenalty;
+          chatClient.settings.presencePenalty = presencePenalty;
+          chatClient.settings.randomSeed = randomSeed ?? undefined;
+        }
         const inferenceMessages = getMessagesForInference();
         for await (const chunk of chatClient.completeStreamingChat(inferenceMessages)) {
           if (requestController.signal.aborted) break;
           const delta = chunk.choices?.[0]?.delta?.content || "";
           if (delta) {
             assistantContent += delta;
-            const lastIndex = chatMessages.length - 1;
-            chatMessages[lastIndex] = {
-              ...chatMessages[lastIndex],
-              content: assistantContent,
-            };
-            chatMessages = [...chatMessages];
+            updateAssistantMessage({ content: assistantContent });
           }
         }
       }
     } catch (err: any) {
       if (!requestController.signal.aborted) {
-        const lastIndex = chatMessages.length - 1;
-        chatMessages[lastIndex] = {
-          ...chatMessages[lastIndex],
+        updateAssistantMessage({
           isError: true,
-          content:
-            (chatMessages[lastIndex].content || "") +
-            "\n\n[Error: " +
-            (err?.message || err) +
-            "]",
-        };
-        chatMessages = [...chatMessages];
+          content: `${assistantContent || assistantContentSoFar(assistantId)}\n\n[Error: ${err?.message || err}]`,
+        });
       }
     } finally {
-      isStreaming = false;
-      activeStreamRequestId = null;
+      const stream = streamsByConversation.get(originId);
+      if (stream && stream.controller === requestController) {
+        streamsByConversation.delete(originId);
+      }
       if (abortController === requestController) {
         abortController = null;
+        activeStreamRequestId = null;
       }
+      flushBackgroundArchiveSave();
+      syncVisibleStreaming();
     }
+  }
+
+  /** Current text of an in-flight assistant message, for appending an error to. */
+  function assistantContentSoFar(assistantId: string): string {
+    const msg = chatMessages.find((m: any) => m.id === assistantId);
+    return String(msg?.content || "");
   }
 
   async function stopGeneration() {
-    if (abortController) {
-      abortController.abort();
-      if (activeStreamRequestId != null) {
-        try {
-          await cancelChatRequest(activeStreamRequestId);
-        } catch (e: any) {
-          statusMessage = `Stop warning: ${e?.message || e}`;
-        }
-      }
-      isStreaming = false;
-      statusMessage = "Generation stopped by user";
+    // Stop the visible conversation's stream only. A generation still running in another
+    // conversation keeps going in its archive until that chat is opened and Stopped, or deleted.
+    const originId = threadLoadedFor;
+    const stream = originId ? streamsByConversation.get(originId) : null;
+    if (!stream) return;
+    const requestId = stream.requestId;
+    stream.controller.abort();
+    streamsByConversation.delete(originId);
+    if (abortController === stream.controller) {
+      abortController = null;
+      activeStreamRequestId = null;
     }
+    syncVisibleStreaming();
+    if (requestId != null) {
+      // Provable only before the request is written. After that the sidecar is asked to stop,
+      // which streaming honours at the next chunk and a non-streamed completion cannot honour
+      // at all — so the claim below is about what Flint shows, not about the model.
+      const abandoned = cancelBeforeDispatch(requestId);
+      if (abandoned) {
+        statusMessage = "Generation cancelled before it started";
+        return;
+      }
+      try {
+        await cancelChatRequest(requestId);
+      } catch (e: any) {
+        statusMessage = `Stop warning: ${e?.message || e}`;
+        return;
+      }
+      statusMessage = "Stopped. A response already under way may still finish in the background.";
+      return;
+    }
+    statusMessage = "Generation stopped by user";
   }
 
-  /**
-   * Normalizes messages for strict chat templates (e.g., Mistral Instruct)
-   * that require only user/assistant roles and strict alternation.
-   */
-  function normalizeForAlternatingChat(
-    messages: Array<{ role: string; content: any }>,
-    systemInstruction?: string,
-  ): Array<{ role: "user" | "assistant"; content: string }> {
-    const instructionParts: string[] = [];
-    if (systemInstruction?.trim()) instructionParts.push(systemInstruction.trim());
-
-    const normalized: Array<{ role: "user" | "assistant"; content: any }> = [];
-    for (const message of messages || []) {
-      const role = String(message?.role || "").toLowerCase();
-      const rawContent = message?.content;
-      // For vision: keep array form; for text keep string
-      const content = Array.isArray(rawContent) ? rawContent : String(rawContent ?? "").trim();
-      if (!content || (typeof content === 'string' && !content)) continue;
-      if (role === "system" && typeof content === 'string') {
-        instructionParts.push(content);
-        continue;
-      }
-      if (role === "user" || role === "assistant") {
-        normalized.push({ role, content });
-      }
-    }
-
-    const instructionText = instructionParts.length
-      ? `Follow these instructions:\n${instructionParts.join("\n\n")}`
-      : "";
-
-    if (instructionText) {
-      if (normalized.length > 0 && normalized[0].role === "user") {
-        normalized[0] = {
-          role: "user",
-          content: `${instructionText}\n\n${normalized[0].content}`,
-        };
-      } else {
-        normalized.unshift({ role: "user", content: instructionText });
-      }
-    }
-
-    const alternating: Array<{ role: "user" | "assistant"; content: string }> = [];
-    for (const message of normalized) {
-      if (alternating.length === 0) {
-        if (message.role !== "user") continue;
-        alternating.push(message);
-        continue;
-      }
-      const previous = alternating[alternating.length - 1];
-      if (previous.role === message.role) {
-        previous.content = `${previous.content}\n\n${message.content}`;
-        continue;
-      }
-      alternating.push(message);
-    }
-
-    return alternating;
-  }
 
   /**
    * Builds the messages array to send to the model.
@@ -3177,8 +6533,7 @@ updateStateFromSdk();
     // Remove any trailing empty assistant placeholder (from streaming setup)
     let history = [...chatMessages];
     if (history.length > 0) {
-      const last = history[history.length - 1];
-      if (last.role === 'assistant' && !last.content?.trim()) {
+      if (isEmptyAssistantPlaceholder(history[history.length - 1])) {
         history = history.slice(0, -1);
       }
     }
@@ -3205,7 +6560,7 @@ updateStateFromSdk();
       if (!combined.includes(m)) combined.push(m);
     }
 
-    // Latest user turn drives optional FLInt fact-sheet expansion (token-efficient).
+    // Latest user turn drives optional Flint fact-sheet expansion (token-efficient).
     let latestUserText = "";
     for (let i = combined.length - 1; i >= 0; i--) {
       if (combined[i]?.role === "user") {
@@ -3215,12 +6570,13 @@ updateStateFromSdk();
     }
     const effectiveSystem = buildFlintAwareSystemPrompt(systemPrompt, latestUserText);
 
-    return normalizeForAlternatingChat([
-      ...combined.map((m: any) => ({
+    return normalizeForAlternatingChat(
+      combined.map((m: any) => ({
         role: m.role,
         content: m.content, // can be string or vision array [{type,text}, {type:'image_url',...}]
       })),
-    ], effectiveSystem);
+      { systemInstruction: effectiveSystem },
+    );
   }
 
   /**
@@ -3268,6 +6624,14 @@ updateStateFromSdk();
    * Full history remains accessible via the "Full thread" toggle.
    */
   async function compactConversationWithSummary(turnsToKeep = 6) {
+    if (isSummarizing) {
+      statusMessage = "A summarization is already in progress.";
+      return;
+    }
+    if (benchmarkRunInFlight) {
+      statusMessage = "Summarization is disabled while a benchmark run is active — it would contend for inference.";
+      return;
+    }
     if (chatMessages.length < turnsToKeep * 2 + 4) {
       statusMessage = "Not enough history to summarize yet.";
       return;
@@ -3279,20 +6643,28 @@ updateStateFromSdk();
 
     const splitIndex = chatMessages.length - turnsToKeep * 2;
     const oldMessages = chatMessages.slice(0, splitIndex);
-    const keepMessages = chatMessages.slice(splitIndex);
+    // Identity anchor: after the await the thread may have grown, so a stored index would
+    // splice at the wrong place and drop whatever arrived in the meantime.
+    const boundaryMessage = oldMessages[oldMessages.length - 1];
+    const epoch = chatThreadEpoch;
 
     const summaryPrompt = `You are a precise conversation summarizer.
 Summarize the following conversation history concisely in 4-8 sentences.
 Focus on: key facts the user shared, important decisions, open questions, user goals/preferences, and any code or specific details worth remembering.
 Output only the summary text, no preamble.`;
 
-    const summaryMessages = normalizeForAlternatingChat([
-      ...oldMessages.map((m: any) => ({ role: m.role, content: m.content }))
-    ], summaryPrompt);
+    // `textOnly`: the output here is a text summary, so an image contributes nothing while
+    // costing a base64 payload — and the SDK fallback below rejects non-string content outright,
+    // so a thread containing images would otherwise fail and silently degrade to condense.
+    const summaryMessages = normalizeForAlternatingChat(
+      oldMessages.map((m: any) => ({ role: m.role, content: m.content })),
+      { systemInstruction: summaryPrompt, textOnly: true },
+    );
 
     statusMessage = "Summarizing older context...";
     let summary = "";
 
+    isSummarizing = true;
     try {
       const endpoint = state.endpoint;
       if (endpoint) {
@@ -3307,20 +6679,38 @@ Output only the summary text, no preamble.`;
         try {
           const result: any = await (chatClient as any).completeChat?.(summaryMessages) || {};
           summary = result.choices?.[0]?.message?.content || "";
-        } catch {}
+        } catch (e: any) {
+          // Swallowed deliberately — the caller falls back to condense — but not silently, or a
+          // persistently failing summarizer looks like a model that simply never summarizes.
+          console.warn("Summarization via SDK client failed:", e);
+        }
       }
     } catch (e: any) {
+      isSummarizing = false;
+      if (chatThreadEpoch !== epoch) return;
       statusMessage = `Summarization failed: ${e?.message || e}. Using condense instead.`;
       // Non-destructive fallback
       oldMessages.forEach((m: any) => { if (!m.pinned && !m.isSummary) m.condensed = true; });
       chatMessages = [...chatMessages];
       return;
     }
+    isSummarizing = false;
+
+    // The thread was replaced while the summary was being generated — it belongs nowhere now.
+    if (chatThreadEpoch !== epoch) return;
 
     if (!summary.trim()) {
       statusMessage = "Summary was empty. Condensed instead.";
       oldMessages.forEach((m: any) => { if (!m.pinned && !m.isSummary) m.condensed = true; });
       chatMessages = [...chatMessages];
+      return;
+    }
+
+    // Locate the boundary in the *live* thread rather than trusting the pre-await index, so
+    // turns added while the summary was generating are preserved.
+    const insertAt = boundaryMessage ? chatMessages.indexOf(boundaryMessage) + 1 : 0;
+    if (insertAt <= 0) {
+      statusMessage = "Summary discarded — the conversation changed while it was generating.";
       return;
     }
 
@@ -3335,8 +6725,11 @@ Output only the summary text, no preamble.`;
       if (!m.pinned && !m.isSummary) m.condensed = true;
     });
 
-    // Insert the summary at the position where the old part started
-    chatMessages = [...chatMessages.slice(0, splitIndex), summaryMessage, ...keepMessages];
+    chatMessages = [
+      ...chatMessages.slice(0, insertAt),
+      summaryMessage,
+      ...chatMessages.slice(insertAt),
+    ];
     statusMessage = "Conversation compacted with summary. Full thread still available via toggle.";
   }
 
@@ -3383,26 +6776,58 @@ Output only the summary text, no preamble.`;
   }
 
   // URL fetch helpers
+  let urlFetchAttemptSeq = 0;
+
   async function queueUrlFetch(url: string) {
+    if (!isFetchableUrl(url)) {
+      statusMessage = `Not a fetchable URL: ${url}`;
+      return;
+    }
     if (pendingUrlFetches.some(f => f.url === url)) return;
-    pendingUrlFetches = [...pendingUrlFetches, { url, status: 'pending' }];
+    urlFetchAttemptSeq += 1;
+    pendingUrlFetches = [...pendingUrlFetches, { url, status: 'pending', attempt: urlFetchAttemptSeq }];
+  }
+
+  /** Hide a detected URL without fetching it. Dismissals are chips too, so they need an attempt id. */
+  function dismissDetectedUrl(url: string) {
+    urlFetchAttemptSeq += 1;
+    pendingUrlFetches = [
+      ...pendingUrlFetches,
+      { url, attempt: urlFetchAttemptSeq, status: 'error', error: 'dismissed' },
+    ];
+  }
+
+  // Concurrent fetches share the spinner; a plain boolean would be cleared by whichever
+  // request finished first while the others were still running.
+  let inFlightUrlFetches = 0;
+
+  /**
+   * Patch a chip by attempt id. Matching on the URL alone is not enough: the user can remove a
+   * chip mid-fetch and re-queue the same URL, and the old response would then patch — or
+   * resurrect — that newer chip.
+   */
+  function patchUrlFetch(attempt: number, patch: Record<string, any>) {
+    const i = pendingUrlFetches.findIndex(f => f.attempt === attempt);
+    if (i < 0) return; // the user removed this chip — drop the result
+    pendingUrlFetches[i] = { ...pendingUrlFetches[i], ...patch };
+    pendingUrlFetches = [...pendingUrlFetches];
   }
 
   async function executeFetch(url: string) {
-    const idx = pendingUrlFetches.findIndex(f => f.url === url);
-    if (idx < 0) return;
-    pendingUrlFetches[idx] = { ...pendingUrlFetches[idx], status: 'fetching' };
-    pendingUrlFetches = [...pendingUrlFetches];
+    const chip = pendingUrlFetches.find(f => f.url === url);
+    if (!chip) return;
+    const attempt = chip.attempt;
+    patchUrlFetch(attempt, { status: 'fetching' });
+    inFlightUrlFetches += 1;
     isFetchingUrl = true;
     try {
       const result = await fetchUrl(url);
-      pendingUrlFetches[idx] = { url, status: 'done', title: result.title, text: result.text };
-      pendingUrlFetches = [...pendingUrlFetches];
+      patchUrlFetch(attempt, { status: 'done', title: result.title, text: result.text, error: undefined });
     } catch (e: any) {
-      pendingUrlFetches[idx] = { url, status: 'error', error: e?.message || String(e) };
-      pendingUrlFetches = [...pendingUrlFetches];
+      patchUrlFetch(attempt, { status: 'error', error: e?.message || String(e) });
     } finally {
-      isFetchingUrl = false;
+      inFlightUrlFetches = Math.max(0, inFlightUrlFetches - 1);
+      isFetchingUrl = inFlightUrlFetches > 0;
     }
   }
 
@@ -3499,72 +6924,131 @@ Output only the summary text, no preamble.`;
       if (dictationMediaRecorder && dictationMediaRecorder.state !== 'inactive') {
         dictationMediaRecorder.stop();
       }
-    } else {
-      const sttAlias = effectiveSTTModelAlias || 'whisper-tiny';
-      try {
-        dictationStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        dictationMediaRecorder = new MediaRecorder(dictationStream);
-        dictationChunks = [];
-        dictationInterim = '';
-        isRollingTranscribe = false;
+      return;
+    }
 
-        dictationMediaRecorder.ondataavailable = (event) => {
-          if (event.data.size > 0) {
-            dictationChunks = [...dictationChunks, event.data];
-            if (!isRollingTranscribe) triggerRollingTranscription(sttAlias);
-          }
-        };
+    if (benchmarkRunInFlight) {
+      statusMessage = "Dictation is disabled while a benchmark run is active — it would contend for inference.";
+      return;
+    }
 
-        dictationMediaRecorder.onstop = async () => {
-          dictationStream?.getTracks().forEach((t) => t.stop());
-          isDictating = false;
-          const chunks = dictationChunks;
-          dictationChunks = [];
-          if (chunks.length === 0) { dictationInterim = ''; return; }
-          try {
-            const fullBlob = new Blob(chunks, { type: 'audio/webm' });
-            const wavBlob = await convertAudioBlobToWav(fullBlob).catch(() => fullBlob);
-            const res = await transcribeAudio(wavBlob, sttAlias, transcriptionLanguage, 'dictation.wav', { temperature: 0 });
-            const text = getTranscriptTextFromResult(res);
-            if (text) chatInput = chatInput ? `${chatInput} ${text}` : text;
-          } catch (err) {
-            statusMessage = `Dictation failed: ${err}`;
-          } finally {
-            dictationInterim = '';
-          }
-        };
+    const sttAlias = effectiveSTTModelAlias || 'whisper-tiny';
 
-        dictationMediaRecorder.start(2000);
-        isDictating = true;
-      } catch (err) {
-        dictationStream?.getTracks().forEach((t) => t.stop());
-        dictationStream = null;
-        dictationMediaRecorder = null;
-        dictationChunks = [];
-        dictationInterim = '';
-        isDictating = false;
-        statusMessage = `Dictation mic error: ${err}`;
+    // Identify this recording *before* the first await. `getUserMedia` and transcription both
+    // outlive the recorder, so two starts can be pending at once and a finalizer or rolling
+    // pass from an earlier session must never write into a later one — they all share
+    // dictationInterim / dictationChunks / dictationStream. The chat epoch is captured here so
+    // the transcript belongs to the conversation the user was dictating *into*.
+    dictationSession += 1;
+    const session = dictationSession;
+    const startEpoch = chatThreadEpoch;
+    const isCurrent = () => session === dictationSession;
+
+    let stream: MediaStream | null = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!isCurrent()) {
+        // A newer start superseded us while the permission prompt was open.
+        stream.getTracks().forEach((t) => t.stop());
+        return;
       }
+
+      const recorder = new MediaRecorder(stream);
+      dictationStream = stream;
+      dictationMediaRecorder = recorder;
+      dictationChunks = [];
+      dictationInterim = '';
+      rollingOwner = 0;
+
+      recorder.ondataavailable = (event) => {
+        if (!isCurrent()) return;
+        if (event.data.size > 0) {
+          dictationChunks = [...dictationChunks, event.data];
+          if (rollingOwner === 0) triggerRollingTranscription(sttAlias, session);
+        }
+      };
+
+      recorder.onstop = async () => {
+        // Stop the stream this session captured, never the global one — that may belong to a
+        // newer session by now.
+        stream?.getTracks().forEach((t) => t.stop());
+        if (!isCurrent()) return;
+
+        isDictating = false;
+        const chunks = dictationChunks;
+        dictationChunks = [];
+        if (chunks.length === 0) {
+          dictationInterim = '';
+          return;
+        }
+        if (benchmarkRunInFlight) {
+          statusMessage = 'Dictation discarded — a benchmark run started while recording.';
+          dictationInterim = '';
+          return;
+        }
+        try {
+          dictationTranscribingCount++;
+          const fullBlob = new Blob(chunks, { type: 'audio/webm' });
+          const wavBlob = await convertAudioBlobToWav(fullBlob);
+          const res = await transcribeAudio(wavBlob, sttAlias, transcriptionLanguage, 'dictation.wav', { temperature: 0 });
+          const text = getTranscriptTextFromResult(res);
+          if (!text) {
+            // nothing to place
+          } else if (!isCurrent()) {
+            statusMessage = 'Dictation discarded — a newer recording started while it was transcribing.';
+          } else if (chatThreadEpoch !== startEpoch) {
+            statusMessage = 'Dictation discarded — the chat changed while it was transcribing.';
+          } else {
+            chatInput = chatInput ? `${chatInput} ${text}` : text;
+          }
+        } catch (err) {
+          if (isCurrent()) statusMessage = `Dictation failed: ${err}`;
+        } finally {
+          dictationTranscribingCount--;
+          if (isCurrent()) dictationInterim = '';
+        }
+      };
+
+      recorder.start(2000);
+      isDictating = true;
+    } catch (err) {
+      stream?.getTracks().forEach((t) => t.stop());
+      if (!isCurrent()) return; // a newer session owns the shared state now
+      dictationStream = null;
+      dictationMediaRecorder = null;
+      dictationChunks = [];
+      dictationInterim = '';
+      isDictating = false;
+      statusMessage = `Dictation mic error: ${err}`;
     }
   }
 
-  async function triggerRollingTranscription(sttAlias: string) {
-    if (isRollingTranscribe || dictationChunks.length === 0) return;
-    isRollingTranscribe = true;
+  async function triggerRollingTranscription(sttAlias: string, session: number) {
+    if (session !== dictationSession) return;
+    if (rollingOwner !== 0 || dictationChunks.length === 0) return;
+    if (benchmarkRunInFlight) return;
+    rollingOwner = session;
+    dictationTranscribingCount++;
     const snapshotLen = dictationChunks.length;
     try {
-      const windowChunks = dictationChunks.slice(-2); // ~last 4s (timeslice=2000ms)
+      const windowChunks = dictationChunks.length <= 2
+        ? dictationChunks
+        : [dictationChunks[0], ...dictationChunks.slice(-2)]; // retain WebM initialization
       const blob = new Blob(windowChunks, { type: 'audio/webm' });
-      const wavBlob = await convertAudioBlobToWav(blob).catch(() => blob);
+      const wavBlob = await convertAudioBlobToWav(blob);
       const res = await transcribeAudio(wavBlob, sttAlias, transcriptionLanguage, 'dictation-interim.wav', { temperature: 0 });
       const text = getTranscriptTextFromResult(res);
-      if (text && isDictating) dictationInterim = text;
-    } catch {
-      // rolling transcription is best-effort; failures are silent
+      if (text && isDictating && session === dictationSession) dictationInterim = text;
+    } catch (error) {
+      if (session === dictationSession && isDictating) {
+        statusMessage = `Live dictation preview unavailable: ${error}`;
+      }
     } finally {
-      isRollingTranscribe = false;
-      if (isDictating && dictationChunks.length > snapshotLen) {
-        triggerRollingTranscription(sttAlias);
+      dictationTranscribingCount--;
+      // Release only our own lock: a stale pass must not unlock the current session.
+      if (rollingOwner === session) rollingOwner = 0;
+      if (isDictating && session === dictationSession && dictationChunks.length > snapshotLen) {
+        triggerRollingTranscription(sttAlias, session);
       }
     }
   }
@@ -3587,12 +7071,42 @@ Output only the summary text, no preamble.`;
   // The ONNX Runtime GenAI decoder used by many Foundry Local Whisper models
   // is strict and commonly fails with "Cannot detect audio stream format"
   // on WebM/Opus, MP3, etc.
+  //
+  // A canonical WAV file needs no real codec — it is raw PCM in a RIFF container — so we parse
+  // it ourselves first. Some WebView2/Chromium builds reject WAV bytes that other players (and
+  // even a differently-versioned browser on the same machine) decode without complaint; our own
+  // parser sidesteps that instead of surfacing the browser's opaque "Unable to decode audio
+  // data" for a file that is not actually malformed. `decodeAudioData` remains the path for
+  // every other container (WebM/Opus, MP3, ...), which we cannot parse ourselves.
   async function getMono16kBuffer(blob: Blob): Promise<AudioBuffer> {
     const AudioContextClass = (window.AudioContext || (window as any).webkitAudioContext);
     const audioCtx = new AudioContextClass();
     try {
       const arrayBuffer = await blob.arrayBuffer();
-      const decoded = await audioCtx.decodeAudioData(arrayBuffer);
+      const format = sniffAudioFormat(new Uint8Array(arrayBuffer));
+      let decoded: AudioBuffer;
+
+      if (format === 'wav') {
+        try {
+          const pcm = decodeWavPcm(arrayBuffer);
+          decoded = audioCtx.createBuffer(pcm.channelData.length, pcm.channelData[0].length, pcm.sampleRate);
+          pcm.channelData.forEach((channel, i) => decoded.copyToChannel(channel, i));
+        } catch (parseError) {
+          // A WAV-sniffed file our own parser could not read (unsupported sample format, or
+          // genuinely corrupt) — fall back to the browser decoder rather than failing outright.
+          decoded = await audioCtx.decodeAudioData(arrayBuffer);
+        }
+      } else {
+        try {
+          decoded = await audioCtx.decodeAudioData(arrayBuffer);
+        } catch (decodeError) {
+          const label = format === 'unknown' || format === 'empty' ? 'this audio file' : `${format.toUpperCase()} audio`;
+          throw new Error(
+            `Unable to decode ${label}: the browser's audio decoder rejected it. ` +
+              'Convert it to 16-bit PCM WAV (e.g. `ffmpeg -i input.mp3 -acodec pcm_s16le output.wav`) and try again.',
+          );
+        }
+      }
 
       const targetRate = 16000;
       const targetLength = Math.max(1, Math.ceil(decoded.duration * targetRate));
@@ -3683,45 +7197,6 @@ Output only the summary text, no preamble.`;
     return "";
   }
 
-  function findWordOverlapTailPrefix(previousText: string, nextText: string, maxWords = 24): number {
-    const prevWords = normalizeTranscriptText(previousText).split(" ").filter(Boolean);
-    const nextWords = normalizeTranscriptText(nextText).split(" ").filter(Boolean);
-    const max = Math.min(maxWords, prevWords.length, nextWords.length);
-    for (let overlap = max; overlap > 0; overlap--) {
-      const prevTail = prevWords.slice(prevWords.length - overlap).join(" ").toLowerCase();
-      const nextHead = nextWords.slice(0, overlap).join(" ").toLowerCase();
-      if (prevTail === nextHead) return overlap;
-    }
-    return 0;
-  }
-
-  function mergeTranscriptChunks(chunks: string[]): string {
-    const cleaned = chunks.map((c) => normalizeTranscriptText(c)).filter(Boolean);
-    if (cleaned.length === 0) return "";
-    let merged = cleaned[0];
-    for (let i = 1; i < cleaned.length; i++) {
-      const next = cleaned[i];
-      const overlapWords = findWordOverlapTailPrefix(merged, next);
-      if (overlapWords > 0) {
-        const nextWords = next.split(" ");
-        merged = `${merged} ${nextWords.slice(overlapWords).join(" ")}`.trim();
-      } else if (!merged.toLowerCase().includes(next.toLowerCase())) {
-        merged = `${merged} ${next}`.trim();
-      }
-    }
-    return normalizeTranscriptText(merged);
-  }
-
-  /**
-   * Trim words from the head of `next` that already appear at the tail of `previous`.
-   * Only used where windows deliberately overlap (hard splits).
-   */
-  function trimOverlapPrefix(previousText: string, nextText: string): string {
-    const overlapWords = findWordOverlapTailPrefix(previousText, nextText);
-    if (overlapWords <= 0) return normalizeTranscriptText(nextText);
-    return normalizeTranscriptText(nextText).split(" ").slice(overlapWords).join(" ").trim();
-  }
-
   async function transcribeLongAudio(
     audioBlob: Blob,
     model: string,
@@ -3733,25 +7208,22 @@ Output only the summary text, no preamble.`;
     const mono = await getMono16kBuffer(audioBlob);
     const sr = 16000;
     const total = mono.length;
-
-    // The model provides no timing data, so window boundaries are snapped to
-    // pauses in the audio where possible. Degenerate audio (continuous speech,
-    // noise, near-silence) falls back to fixed overlapping chunks.
-    const source = new Float32Array(total);
-    mono.copyFromChannel(source, 0);
-    const plan = planSegmentation(source, sr);
+    const samples = new Float32Array(total);
+    mono.copyFromChannel(samples, 0);
+    const plan = planSegmentation(samples, sr);
     const windows = plan.windows;
-    const totalChunks = Math.max(1, windows.length);
-
-    const texts: string[] = [];
-    const segments: TranscriptSegment[] = [];
+    const totalChunks = windows.length;
+    const outcomes: TranscriptionWindowOutcome[] = [];
 
     for (let idx = 0; idx < windows.length; idx++) {
-      const win = windows[idx];
-      const startSample = Math.max(0, Math.floor(win.startSec * sr));
-      const endSample = Math.min(total, Math.ceil(win.endSec * sr));
+      const windowPlan = windows[idx];
+      const startSample = Math.max(0, Math.floor(windowPlan.startSec * sr));
+      const endSample = Math.min(total, Math.ceil(windowPlan.endSec * sr));
       const len = endSample - startSample;
-      if (len < 1000) continue; // too short to transcribe
+      if (len < 1000) {
+        outcomes.push({ window: windowPlan, status: 'unprocessed' });
+        continue;
+      }
 
       const data = new Float32Array(len);
       mono.copyFromChannel(data, 0, startSample);
@@ -3764,44 +7236,37 @@ Output only the summary text, no preamble.`;
 
       const wavBlob = new Blob([audioBufferToWav(chunkBuf)], { type: 'audio/wav' });
 
+      if (benchmarkRunInFlight) {
+        // A benchmark started while this chunk loop was running — stop dispatching further
+        // STT inference so it doesn't contend with the benchmark, and count what's left as
+        // uncompleted rather than silently reporting a shorter transcript as complete.
+        for (const remainingWindow of windows.slice(idx)) {
+          outcomes.push({ window: remainingWindow, status: 'unprocessed' });
+        }
+        statusMessage = 'Transcription interrupted — a benchmark run became active.';
+        break;
+      }
+
       if (onProgress) onProgress(idx + 1, totalChunks);
       statusMessage = `Transcribing segment ${idx + 1} of ${totalChunks}...`;
 
       try {
         const res = await transcribeAudio(wavBlob, model, language, `${fileNameBase}_part${idx}.wav`, options);
-        let t = getTranscriptTextFromResult(res);
-        if (!t) continue;
-
-        // Only windows that overlap the previous one can repeat words.
-        // The overlap is re-read audio, so the trimmed text actually begins where
-        // the previous segment ended — report that, otherwise cues overlap on the
-        // time axis and captions would display two at once.
-        let segStartSec = win.startSec;
-        if (win.overlapsPrevious && texts.length > 0) {
-          t = trimOverlapPrefix(texts[texts.length - 1], t);
-          if (!t) continue;
-          const prev = segments[segments.length - 1];
-          if (prev) segStartSec = Math.max(segStartSec, prev.endSec);
-        }
-
-        texts.push(t);
-        segments.push({
-          index: segments.length,
-          startSec: segStartSec,
-          endSec: Math.max(win.endSec, segStartSec + 0.05),
-          text: t,
-          snapped: win.snappedEnd,
-        });
+        const t = getTranscriptTextFromResult(res);
+        outcomes.push({ window: windowPlan, status: 'success', text: t });
       } catch (e) {
+        // Counted, not just logged. A swallowed segment leaves a silent hole in the transcript,
+        // and reporting the result as complete would assert something this loop cannot know.
         console.warn('Chunk transcription failed', e);
+        outcomes.push({ window: windowPlan, status: 'failed', uncertain: isUncertainOutcome(e) });
       }
     }
 
     if (onProgress) onProgress(totalChunks, totalChunks);
     return {
-      text: mergeTranscriptChunks(texts),
-      segments,
-      timingSource: plan.usedSilenceDetection ? 'silence-detection' : 'fixed-chunks',
+      ...assembleLongAudioTranscript(outcomes),
+      totalChunks,
+      timingStrategy: plan.timingStrategy,
     };
   }
 
@@ -3814,6 +7279,15 @@ Output only the summary text, no preamble.`;
     const ctx = new AudioContextClass();
     try {
       const buf = await blob.arrayBuffer();
+      // Prefer our own WAV parser: it does not depend on the browser decoder, which some
+      // WebView2/Chromium builds reject WAV bytes for that other players decode fine.
+      if (sniffAudioFormat(new Uint8Array(buf)) === 'wav') {
+        try {
+          return getWavDurationSeconds(buf);
+        } catch {
+          // Fall through to the browser decoder below.
+        }
+      }
       const decoded = await ctx.decodeAudioData(buf);
       return decoded.duration;
     } catch (error) {
@@ -3836,17 +7310,25 @@ Output only the summary text, no preamble.`;
       return;
     }
 
+    if (benchmarkRunInFlight) {
+      statusMessage = "Transcription is disabled while a benchmark run is active — it would contend for inference.";
+      return;
+    }
+
     isTranscribing = true;
     transcription = "";
     transcriptionSegments = [];
-    transcriptionTimingSource = null;
+    transcriptionGaps = [];
+    emptyRecognitionRanges = [];
     statusMessage = `Transcribing with ${sttAlias} via sidecar...`;
 
     try {
-      // Ensure the local service is running with an STT-capable model.
-      await startSvc(
+      // Ensure the local service is running with an STT-capable model. Deliberately NOT
+      // startSvc: a restart would evict the user's chat models mid-session.
+      await ensureServiceRunning(
         sttAlias,
         selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+        { convenience: true },
       );
 
       const dur = await getAudioDuration(audioBlob);
@@ -3873,20 +7355,17 @@ Output only the summary text, no preamble.`;
           preferredEp: selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference
         });
       } else {
-        let sendBlob = audioBlob;
-        let sendName = "audio.webm";
-        try {
-          sendBlob = await convertAudioBlobToWav(audioBlob);
-          sendName = "audio.wav";
-        } catch (convErr) {
-          console.warn("WAV normalization failed, trying original", convErr);
+        const sendBlob = await convertAudioBlobToWav(audioBlob);
+
+        if (benchmarkRunInFlight) {
+          throw new Error('Transcription cancelled — a benchmark run became active.');
         }
 
         result = await transcribeAudio(
           sendBlob,
           sttAlias,
           transcriptionLanguage,
-          sendName,
+          "audio.wav",
           {
             temperature: 0,
             preferredEp: selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference
@@ -3897,17 +7376,20 @@ Output only the summary text, no preamble.`;
       // Extract the most complete text possible.
       // Some results put full transcript in .text, others have segments for long audio.
       const transcribed = getTranscriptTextFromResult(result);
-      transcription = transcribed || JSON.stringify(result, null, 2);
-
-      // Timed segments only exist for the chunked long-audio path; a single-window
-      // transcription has no interior boundaries to derive timings from.
-      if (Array.isArray(result?.segments) && result.segments.length > 0 && result.segments[0]?.endSec != null) {
-        transcriptionSegments = result.segments;
-        transcriptionTimingSource = result.timingSource ?? null;
+      transcription = transcribed || (
+        dur > 90
+          ? Number(result?.failedChunks || 0) >= Number(result?.totalChunks || 0)
+            ? "No transcript text is available because no audio window completed successfully."
+            : "No text was recognized in the successfully processed audio windows."
+          : JSON.stringify(result, null, 2)
+      );
+      if (dur > 90) {
+        transcriptionSegments = Array.isArray(result?.segments) ? result.segments : [];
+        transcriptionGaps = Array.isArray(result?.gaps) ? result.gaps : [];
+        emptyRecognitionRanges = Array.isArray(result?.emptyRecognitionRanges)
+          ? result.emptyRecognitionRanges
+          : [];
         showTimestampedTranscript = true;
-      } else {
-        transcriptionSegments = [];
-        transcriptionTimingSource = null;
       }
 
       // Helpful for debugging long audio: the backend may return duration or segments
@@ -3917,9 +7399,27 @@ Output only the summary text, no preamble.`;
       }
       transcriptionProgress = null;
       const path = result?.transcriptionPath ? ` via ${result.transcriptionPath}` : "";
-      statusMessage = dur > 90
-        ? `Transcription complete (full long audio via chunks${path})`
-        : `Transcription complete (via sidecar${path})`;
+      if (dur > 90) {
+        const failed = Number(result?.failedChunks || 0);
+        const uncertain = Number(result?.uncertainChunks || 0);
+        const unprocessed = Number(result?.unprocessedChunks || 0);
+        const totalSegments = Number(result?.totalChunks || 0);
+        if (failed > 0) {
+          // The transcript has gaps. Saying "complete" would present a partial result as whole,
+          // and the missing audio is invisible once the segments are merged.
+          const detail =
+            uncertain > 0
+              ? `${failed} of ${totalSegments} segments did not complete (${uncertain} had uncertain outcomes and ${unprocessed} were not processed)`
+              : unprocessed > 0
+                ? `${failed} of ${totalSegments} segments did not complete (${unprocessed} were not processed)`
+                : `${failed} of ${totalSegments} segments failed`;
+          statusMessage = `Transcription incomplete: ${detail}. The text below is missing those parts.${path}`;
+        } else {
+          statusMessage = `Transcription complete (${totalSegments} segments${path})`;
+        }
+      } else {
+        statusMessage = `Transcription complete (via sidecar${path})`;
+      }
     } catch (err: any) {
       transcription = `Error: ${err.message || err}`;
       statusMessage = "Transcription failed";
@@ -3939,6 +7439,17 @@ Output only the summary text, no preamble.`;
     }
   }
 
+  async function copyTimestampedTranscript() {
+    const text = buildTimestampedText(transcriptionSegments);
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      statusMessage = "Timestamped transcript copied with Flint-derived timing metadata";
+    } catch (e: any) {
+      statusMessage = `Failed to copy transcript: ${e?.message || e}`;
+    }
+  }
+
   function downloadTranscription() {
     if (!transcription) return;
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -3953,49 +7464,25 @@ Output only the summary text, no preamble.`;
     statusMessage = `Transcription downloaded: ${fileName}`;
   }
 
-  async function copyTimestampedTranscript() {
-    const text = buildTimestampedText(transcriptionSegments);
-    if (!text) return;
-    try {
-      await navigator.clipboard.writeText(text);
-      statusMessage = "Timestamped transcript copied to clipboard";
-    } catch (e: any) {
-      statusMessage = `Failed to copy transcript: ${e?.message || e}`;
-    }
-  }
-
   function downloadCaptions(format: "srt" | "vtt") {
-    if (!transcriptionSegments.length) return;
-    const body =
-      format === "srt" ? buildSrt(transcriptionSegments) : buildVtt(transcriptionSegments);
-    if (!body) {
-      statusMessage = "No timed segments available to export";
+    const files = buildCaptionDownloads(format, transcriptionSegments);
+    if (files.length === 0) {
+      statusMessage = "No timed transcript text is available to export";
       return;
     }
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const fileName = `flint-transcription-${stamp}.${format}`;
-    const blob = new Blob([body], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = fileName;
-    anchor.click();
-    URL.revokeObjectURL(url);
-    statusMessage = `Captions downloaded: ${fileName}`;
-  }
-
-  function downloadCaptionTimingNote() {
-    if (!transcriptionSegments.length) return;
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const fileName = `flint-transcription-${stamp}.timing.txt`;
-    const blob = new Blob([buildSrtTimingMetadata()], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = fileName;
-    anchor.click();
-    URL.revokeObjectURL(url);
-    statusMessage = `Timing note downloaded: ${fileName}`;
+    for (const file of files) {
+      const blob = new Blob([file.body], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = file.fileName;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    }
+    statusMessage =
+      format === "srt"
+        ? `SRT captions and associated timing note downloaded: ${files[0].fileName}`
+        : `WebVTT captions downloaded: ${files[0].fileName}`;
   }
 </script>
 
@@ -4003,7 +7490,7 @@ Output only the summary text, no preamble.`;
   <header class="header">
     <div class="brand" data-tooltip="Foundry Local Interface">
       <img class="brand-logo" src="/favicon.png" alt="Flint logo" />
-      <strong>FLInt</strong>
+      <strong>Flint</strong>
     </div>
 
     <div class="status-bar">
@@ -4055,11 +7542,16 @@ Output only the summary text, no preamble.`;
 
       {#if state.serviceRunning}
         <span class="service-badge running">● Service ON</span>
+      {:else if state.ready && serviceStarting}
+        <button class="tiny" disabled>
+          <span class="inline-spinner" aria-hidden="true"></span>
+          Starting…
+        </button>
       {:else if state.ready}
-        <button class="tiny" onclick={startLocalService}>Start Service</button>
+        <button class="tiny" onclick={startLocalService} disabled={serviceTransitionBusy || benchmarkRunInFlight}>Start Service</button>
       {/if}
 
-      <span class="status-msg">{statusMessage}</span>
+      <span class="status-msg" title={statusMessage}>{statusMessage}</span>
     </div>
 
     <div class="header-actions">
@@ -4071,12 +7563,57 @@ Output only the summary text, no preamble.`;
       <button
         class="theme-toggle"
         onclick={() => theme = theme === 'dark' ? 'light' : 'dark'}
-        title="Toggle light/dark mode"
+        title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+        aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
       >
-        {#if theme === 'dark'}<Icon name="sun" size={16} />{:else}<Icon name="moon" size={16} />{/if}
+        <svg
+          class="theme-toggle-icon"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="var(--fg)"
+          stroke-width="1.75"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          {#if theme === 'dark'}
+            <circle cx="12" cy="12" r="4"/>
+            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
+          {:else}
+            <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
+          {/if}
+        </svg>
       </button>
     </div>
   </header>
+
+  {#if watchAlerts.length > 0}
+    <!-- One banner for every alerting device: a model load pushes RAM and VRAM at the same
+         time, and stacking a banner per device would bury the point. -->
+    <div class="memory-alert" role="status">
+      <Icon name="monitor" size={16} />
+      <div class="memory-alert-text">
+        <strong>High memory usage — {formatAlertSummary(watchAlerts)}</strong>
+        <span>{formatAlertAdvice(loadedPoolEntries.length)}</span>
+      </div>
+      <button class="small" onclick={() => (currentView = "monitor")}>Open Monitor</button>
+      <button class="small secondary" onclick={dismissWatchAlerts}>Dismiss</button>
+    </div>
+  {/if}
+
+  {#if benchmarkExclusiveStuck}
+    <!-- Global, not Benchmark-view-only: this blocks external OpenAI-shaped gateway clients
+         (503s), not just something visible from inside the app. Retries automatically in the
+         background; this button is for a user actively watching who wants an immediate attempt. -->
+    <div class="memory-alert" role="status">
+      <Icon name="monitor" size={16} />
+      <div class="memory-alert-text">
+        <strong>Benchmark gateway lock could not be released</strong>
+        <span>External API clients may still receive 503s. Retrying automatically in the background.</span>
+      </div>
+      <button class="small" onclick={retryBenchmarkExclusiveRelease}>Retry now</button>
+    </div>
+  {/if}
 
   <div class="body">
     <nav class="sidebar" class:collapsed={sidebarCollapsed}>
@@ -4102,140 +7639,154 @@ Output only the summary text, no preamble.`;
         </svg>
       </button>
 
-      <button
-        class="nav-item"
-        class:active={currentView === "models"}
-        onclick={() => (currentView = "models")}
-        title="Models"
-      >
-        <span class="nav-icon" aria-hidden="true">
-          <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M12 3.5L19 7.5L12 11.5L5 7.5L12 3.5Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
-            <path d="M5 7.5V16.5L12 20.5L19 16.5V7.5" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
-            <path d="M12 11.5V20.5" stroke="currentColor" stroke-width="1.8" />
-          </svg>
-        </span>
-        <span class="nav-label">Models</span>
-      </button>
-      <button
-        class="nav-item"
-        class:active={currentView === "chat"}
-        onclick={() => (currentView = "chat")}
-        title="Chat"
-      >
-        <span class="nav-icon" aria-hidden="true">
-          <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="4" y="5" width="16" height="11" rx="3" stroke="currentColor" stroke-width="1.8" />
-            <path d="M9 16L7.5 19.5L12.5 16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
-            <path d="M8 10.5H16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-          </svg>
-        </span>
-        <span class="nav-label">Chat</span>
-      </button>
-      <button
-        class="nav-item"
-        class:active={currentView === "audio"}
-        onclick={() => (currentView = "audio")}
-        title="Audio"
-      >
-        <span class="nav-icon" aria-hidden="true">
-          <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="9" y="4" width="6" height="10" rx="3" stroke="currentColor" stroke-width="1.8" />
-            <path d="M6.5 11.5C6.5 14.5 8.8 17 12 17C15.2 17 17.5 14.5 17.5 11.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-            <path d="M12 17V20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-            <path d="M9.5 20H14.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-          </svg>
-        </span>
-        <span class="nav-label">Audio</span>
-      </button>
-      <button
-        class="nav-item"
-        class:active={currentView === "diagnostics"}
-        onclick={() => (currentView = "diagnostics")}
-        title="Diagnostics"
-      >
-        <span class="nav-icon" aria-hidden="true">
-          <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M5 17L9 13L12 15L16.5 9.5L19 12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
-            <path d="M4.5 19.5H19.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-            <circle cx="7.5" cy="8" r="1" fill="currentColor" />
-            <circle cx="12" cy="10.5" r="1" fill="currentColor" />
-            <circle cx="16.5" cy="6.5" r="1" fill="currentColor" />
-          </svg>
-        </span>
-        <span class="nav-label">Diagnostics</span>
-      </button>
-      <button
-        class="nav-item"
-        class:active={currentView === "monitor"}
-        onclick={() => { currentView = "monitor"; refreshMonitorNow(); }}
-        title="Monitor"
-      >
-        <span class="nav-icon" aria-hidden="true">
-          <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="3" y="4" width="18" height="13" rx="2" stroke="currentColor" stroke-width="1.8" />
-            <path d="M8 20H16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-            <path d="M12 17V20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-            <path d="M7 12.5L9.5 10L12 12L15 8.5L17 10.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
-          </svg>
-        </span>
-        <span class="nav-label">Monitor</span>
-      </button>
-      <button
-        class="nav-item"
-        class:active={currentView === "compare"}
-        onclick={() => (currentView = "compare")}
-        title="Compare models side-by-side"
-      >
-        <span class="nav-icon" aria-hidden="true">
-          <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="3" y="4" width="7" height="16" rx="1" stroke="currentColor" stroke-width="1.6"/>
-            <rect x="14" y="4" width="7" height="16" rx="1" stroke="currentColor" stroke-width="1.6"/>
-          </svg>
-        </span>
-        <span class="nav-label">Compare</span>
-      </button>
-      <button
-        class="nav-item"
-        class:active={currentView === "integrations"}
-        onclick={() => (currentView = "integrations")}
-        title="Integrations"
-      >
-        <span class="nav-icon" aria-hidden="true">
-          <Icon name="zap" size={20} />
-        </span>
-        <span class="nav-label">Integrations</span>
-      </button>
-      <button
-        class="nav-item"
-        class:active={currentView === "help"}
-        onclick={() => (currentView = "help")}
-        title="Help"
-      >
-        <span class="nav-icon" aria-hidden="true">
-          <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8" />
-            <path d="M9.5 9.5a2.5 2.5 0 1 1 3.6 2.2c-.8.4-1.1.8-1.1 1.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-            <circle cx="12" cy="16.5" r="0.9" fill="currentColor" stroke="none" />
-          </svg>
-        </span>
-        <span class="nav-label">Help</span>
-      </button>
+      <div class="nav-section">
+        <span class="nav-section-label">Build</span>
+        <button
+          class="nav-item"
+          class:active={currentView === "chat" || currentView === "audio"}
+          onclick={() => (currentView = playgroundLastView)}
+          title="Playground — Chat and Voice"
+        >
+          <span class="nav-icon" aria-hidden="true">
+            <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect x="4" y="5" width="16" height="11" rx="3" stroke="currentColor" stroke-width="1.8" />
+              <path d="M9 16L7.5 19.5L12.5 16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+              <path d="M8 10.5H16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+            </svg>
+          </span>
+          <span class="nav-label">Playground</span>
+        </button>
+        <button
+          class="nav-item"
+          class:active={currentView === "compare"}
+          onclick={() => (currentView = "compare")}
+          title="Model Arena — run models side-by-side"
+        >
+          <span class="nav-icon" aria-hidden="true">
+            <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M6 4.5h4.5v4H6zM6 15.5h4.5v4H6zM15 10h4.5v4H15z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+              <path d="M10.5 6.5h2.2c1.2 0 2.3.8 2.7 2l.5 1.5M10.5 17.5h2.2c1.2 0 2.3-.8 2.7-2l.5-1.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+              <path d="M18 8.1l1.5 1.9-2.2.8M18 15.9l1.5-1.9-2.2-.8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </span>
+          <span class="nav-label">Model Arena</span>
+        </button>
+        {#if benchmarkPreviewEnabled}
+          <button
+            class="nav-item"
+            class:active={currentView === "benchmark"}
+            onclick={() => (currentView = "benchmark")}
+            title="Benchmark Preview — measured, repeatable multi-model runs"
+          >
+            <span class="nav-icon" aria-hidden="true">
+              <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M5 19V11M12 19V5M19 19V14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </span>
+            <span class="nav-label">Benchmark</span>
+          </button>
+        {/if}
+      </div>
 
-      <button
-        class="nav-item"
-        class:active={currentView === "settings"}
-        onclick={() => (currentView = "settings")}
-        title="Settings"
-      >
-        <span class="nav-icon" aria-hidden="true">
-          <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="12" cy="12" r="2.8" stroke="currentColor" stroke-width="1.8"/>
-            <path d="M10.29 3.86 8.64 4.86l.26 1.5A6.8 6.8 0 0 0 7.4 7.4L5.9 7.14l-1 1.72 1.07 1.08A6.7 6.7 0 0 0 5.86 12a6.7 6.7 0 0 0 .11 1.06L4.9 14.14l1 1.72 1.5-.26c.36.37.77.7 1.22.98l-.26 1.5 1.72 1L10.86 18c.37.09.75.14 1.14.14.39 0 .77-.05 1.14-.14l.68.98 1.72-1-.26-1.5c.45-.28.86-.61 1.22-.98l1.5.26 1-1.72-1.07-1.08c.07-.35.11-.7.11-1.06 0-.36-.04-.71-.11-1.06l1.07-1.08-1-1.72-1.5.26A6.8 6.8 0 0 0 16.1 7.4l.26-1.5-1.72-1-.68.98A6.8 6.8 0 0 0 12 5.86c-.39 0-.77.05-1.14.14l-.57-.14Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
-          </svg>
-        </span>
-        <span class="nav-label">Settings</span>
-      </button>
+      <div class="nav-section">
+        <span class="nav-section-label">Discover</span>
+        <button
+          class="nav-item"
+          class:active={currentView === "models"}
+          onclick={() => (currentView = "models")}
+          title="Models"
+        >
+          <span class="nav-icon" aria-hidden="true">
+            <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M12 3.5L19 7.5L12 11.5L5 7.5L12 3.5Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
+              <path d="M5 7.5V16.5L12 20.5L19 16.5V7.5" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
+              <path d="M12 11.5V20.5" stroke="currentColor" stroke-width="1.8" />
+            </svg>
+          </span>
+          <span class="nav-label">Models</span>
+        </button>
+      </div>
+
+      <div class="nav-section">
+        <span class="nav-section-label">Operate</span>
+        <button
+          class="nav-item"
+          class:active={currentView === "monitor"}
+          onclick={() => { currentView = "monitor"; refreshMonitorNow(); }}
+          title="Monitor"
+        >
+          <span class="nav-icon" aria-hidden="true">
+            <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect x="3" y="4" width="18" height="13" rx="2" stroke="currentColor" stroke-width="1.8" />
+              <path d="M8 20H16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+              <path d="M12 17V20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+              <path d="M7 12.5L9.5 10L12 12L15 8.5L17 10.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </span>
+          <span class="nav-label">Monitor</span>
+        </button>
+        <button
+          class="nav-item"
+          class:active={currentView === "diagnostics"}
+          onclick={() => (currentView = "diagnostics")}
+          title="Diagnostics"
+        >
+          <span class="nav-icon" aria-hidden="true">
+            <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M5 17L9 13L12 15L16.5 9.5L19 12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+              <path d="M4.5 19.5H19.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+              <circle cx="7.5" cy="8" r="1" fill="currentColor" />
+              <circle cx="12" cy="10.5" r="1" fill="currentColor" />
+              <circle cx="16.5" cy="6.5" r="1" fill="currentColor" />
+            </svg>
+          </span>
+          <span class="nav-label">Diagnostics</span>
+        </button>
+        <button
+          class="nav-item"
+          class:active={currentView === "integrations"}
+          onclick={() => (currentView = "integrations")}
+          title="Integrations"
+        >
+          <span class="nav-icon" aria-hidden="true">
+            <Icon name="zap" size={20} />
+          </span>
+          <span class="nav-label">Integrations</span>
+        </button>
+      </div>
+
+      <div class="nav-section">
+        <span class="nav-section-label">Manage</span>
+        <button
+          class="nav-item"
+          class:active={currentView === "settings"}
+          onclick={() => (currentView = "settings")}
+          title="Settings"
+        >
+          <span class="nav-icon" aria-hidden="true">
+            <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="12" cy="12" r="2.8" stroke="currentColor" stroke-width="1.8"/>
+              <path d="M10.29 3.86 8.64 4.86l.26 1.5A6.8 6.8 0 0 0 7.4 7.4L5.9 7.14l-1 1.72 1.07 1.08A6.7 6.7 0 0 0 5.86 12a6.7 6.7 0 0 0 .11 1.06L4.9 14.14l1 1.72 1.5-.26c.36.37.77.7 1.22.98l-.26 1.5 1.72 1L10.86 18c.37.09.75.14 1.14.14.39 0 .77-.05 1.14-.14l.68.98 1.72-1-.26-1.5c.45-.28.86-.61 1.22-.98l1.5.26 1-1.72-1.07-1.08c.07-.35.11-.7.11-1.06 0-.36-.04-.71-.11-1.06l1.07-1.08-1-1.72-1.5.26A6.8 6.8 0 0 0 16.1 7.4l.26-1.5-1.72-1-.68.98A6.8 6.8 0 0 0 12 5.86c-.39 0-.77.05-1.14.14l-.57-.14Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+            </svg>
+          </span>
+          <span class="nav-label">Settings</span>
+        </button>
+        <button
+          class="nav-item"
+          class:active={currentView === "help"}
+          onclick={() => (currentView = "help")}
+          title="Help"
+        >
+          <span class="nav-icon" aria-hidden="true">
+            <svg class="nav-icon-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8" />
+              <path d="M9.5 9.5a2.5 2.5 0 1 1 3.6 2.2c-.8.4-1.1.8-1.1 1.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+              <circle cx="12" cy="16.5" r="0.9" fill="currentColor" stroke="none" />
+            </svg>
+          </span>
+          <span class="nav-label">Help</span>
+        </button>
+      </div>
 
       <div class="sidebar-footer">
         <div class="privacy">On-device inference</div>
@@ -4243,6 +7794,62 @@ Output only the summary text, no preamble.`;
     </nav>
 
     <section class="content">
+      {#if storageError}
+        <div class="storage-error" role="alert">
+          <span class="storage-error-text">{storageError}</span>
+          <button type="button" class="storage-error-dismiss" onclick={dismissStorageError} aria-label="Dismiss storage warning">
+            Dismiss
+          </button>
+        </div>
+      {/if}
+      {#if conversationsAtRisk}
+        <div class="storage-risk" role="status">
+          <span class="storage-risk-text">
+            {#if !conversationsWritable}
+              Flint could not read some saved conversations, so nothing will be saved this
+              session. The original data is untouched, but it is stored inside Flint's own
+              application data — reinstalling Flint or clearing its data will delete it.
+            {:else if settingsUnreadable}
+              Saved settings could not be read. Older versions of Flint kept conversations in that
+              same record, so it may hold messages that exist nowhere else — and it is stored
+              inside Flint's own application data, which reinstalling or clearing will delete.
+            {:else if conversationsBackedUp}
+              Some saved conversation data could not be read, and a copy of the original was kept
+              inside Flint's application data. Reinstalling Flint or clearing its data will delete
+              that copy.
+            {:else}
+              Flint could not list its own stored data, so it cannot tell whether earlier recovery
+              copies are still present. Anything that is would be inside Flint's application data,
+              which reinstalling or clearing will delete.
+            {/if}
+            Export a file to somewhere Flint does not control before doing either.
+          </span>
+          <button
+            type="button"
+            class="storage-risk-action"
+            disabled={exportBusy}
+            onclick={exportConversations}
+          >
+            {exportBusy ? "Saving…" : "Export a copy"}
+          </button>
+        </div>
+      {/if}
+      {#if exportError}
+        <div class="storage-error" role="alert">
+          <span class="storage-error-text">{exportError}</span>
+          <button type="button" class="storage-error-dismiss" onclick={() => (exportError = null)} aria-label="Dismiss export error">
+            Dismiss
+          </button>
+        </div>
+      {/if}
+      {#if exportNotice}
+        <div class="storage-notice" class:caution={exportNoticeTone === "caution"} role="status">
+          <span class="storage-error-text">{exportNotice}</span>
+          <button type="button" class="storage-error-dismiss" onclick={() => (exportNotice = null)} aria-label="Dismiss export message">
+            Dismiss
+          </button>
+        </div>
+      {/if}
       {#if showFirstRunCoach}
         <div class="first-run-coach" role="region" aria-label="Getting started with Flint">
           <div class="first-run-head">
@@ -4269,7 +7876,19 @@ Output only the summary text, no preamble.`;
             </li>
             <li class:done={firstRunHasModel}>
               <strong>Get a model</strong>
-              <span class="muted">Download a small starter from Models (hardware-aware picks appear when available).</span>
+              {#if state.ready && catalogCheckPresentation === "checked" && state.models.length === 0}
+                <span class="first-run-bad">Catalog is empty — check the network, then Models → Retry.</span>
+              {:else if state.ready && catalogCheckPresentation === "disabled"}
+                <span class="muted">Catalog check is off — open Models and refresh when you want to browse or download.</span>
+              {:else if state.ready && state.models.length === 0 && catalogCheckPresentation === "failed"}
+                <span class="first-run-bad">Catalog check failed — open Models to retry.</span>
+              {:else if state.ready && state.models.length === 0 && catalogCheckPresentation === "loading"}
+                <span class="muted">Checking the model catalog…</span>
+              {:else if state.ready && state.models.length === 0 && catalogCheckPresentation === "pending"}
+                <span class="muted">Catalog has not been checked yet — open Models to refresh.</span>
+              {:else}
+                <span class="muted">Download a small starter from Models (hardware-aware picks appear when available).</span>
+              {/if}
               <button type="button" class="small" onclick={() => (currentView = "models")}>Open Models</button>
             </li>
             <li class:done={firstRunHasChatReady}>
@@ -4279,7 +7898,7 @@ Output only the summary text, no preamble.`;
             </li>
             <li class:done={firstRunServiceOn}>
               <strong>Optional: endpoint for other tools</strong>
-              <span class="muted">Start the service (Diagnostics), then copy snippets from Integrations. Client URL is always loopback.</span>
+              <span class="muted">Start the service (Diagnostics), then copy snippets from Integrations. Client URL is usually loopback; WSL2 NAT clients use Settings → Network → WSL clients.</span>
               <button type="button" class="small" onclick={() => (currentView = "diagnostics")}>Diagnostics</button>
               <button type="button" class="small secondary" onclick={() => (currentView = "integrations")}>Integrations</button>
             </li>
@@ -4309,18 +7928,17 @@ Output only the summary text, no preamble.`;
                   <strong>bundled Node</strong> binary for the JS sidecar; PATH Node is a
                   fallback (dev / incomplete install). See Help → Troubleshooting.
                 </p>
+                <button onclick={init}>Retry</button>
               {:else}
-                <p>
-                  <strong
-                    >Starting sidecar + bundled Foundry Local runtime...</strong
-                  >
-                </p>
+                <div class="startup-status" role="status" aria-live="polite">
+                  <span class="startup-spinner" aria-hidden="true"></span>
+                  <strong>Starting sidecar + bundled Foundry Local runtime...</strong>
+                </div>
                 <p>
                   Checking Node.js, then starting the sidecar for model management
                   and the local service.
                 </p>
               {/if}
-              <button onclick={init}>Retry</button>
             </div>
           {:else}
             <div class="toolbar">
@@ -4329,18 +7947,47 @@ Output only the summary text, no preamble.`;
                 placeholder="Search models (alias or family)..."
                 bind:value={searchTerm}
               />
-              <label class="sort-label" for="model-sort">Sort by</label>
+              <label class="sort-label" for="model-sort">Sort</label>
               <select
                 id="model-sort"
-                class="sort-select"
-                bind:value={modelSortKey}
-                onchange={persistChat}
+                value={modelSortMode}
+                onchange={(e) => setModelSortMode((e.currentTarget as HTMLSelectElement).value)}
               >
-                {#each MODEL_SORT_OPTIONS as opt (opt.value)}
-                  <option value={opt.value}>{opt.label}</option>
-                {/each}
+                <option value="name">Model name</option>
+                <option value="family">Model family</option>
+                <option value="updated">Last updated</option>
               </select>
               <span class="count">{filteredModels.length} models</span>
+              {#if state.models.length === 0 && catalogCheckPresentation === "disabled"}
+                <p class="notice" style="flex-basis:100%;">
+                  <strong>Catalog not checked.</strong> Automatic startup checks are off. Refresh when you want to contact Microsoft's Foundry Local model catalog.
+                </p>
+              {:else if state.models.length === 0 && catalogCheckPresentation === "failed"}
+                <p class="notice" style="flex-basis:100%;">
+                  <strong>Catalog check failed.</strong> {state.catalogError || "The catalog request did not complete."} Retry when the network or catalog service is available.
+                </p>
+              {:else if state.models.length === 0 && catalogCheckPresentation === "loading"}
+                <p class="notice" style="flex-basis:100%;">
+                  <strong>Checking the model catalog…</strong>
+                </p>
+              {:else if state.models.length === 0 && catalogCheckPresentation === "pending"}
+                <p class="notice" style="flex-basis:100%;">
+                  <strong>Catalog has not been checked yet.</strong> Retry to contact Microsoft's Foundry Local model catalog.
+                </p>
+              {:else if state.models.length === 0}
+                <p class="notice" style="flex-basis:100%;">
+                  <strong>Catalog is empty.</strong> The sidecar is ready but returned no models — check the network and Retry, or add a local ONNX folder.
+                </p>
+              {:else if filteredModels.length === 0}
+                <p class="muted" style="flex-basis:100%;">No models match this search.</p>
+              {/if}
+              <button
+                class="secondary"
+                onclick={() => { byomOpen = true; }}
+                title="Add an ONNX model folder that is not in the Foundry catalog"
+              >
+                Add model folder…
+              </button>
             </div>
 
             <div class="accel-panel">
@@ -4361,11 +8008,16 @@ Output only the summary text, no preamble.`;
                     </option>
                   {/each}
                 </select>
-                <button onclick={ensureHardwareAccel} disabled={!state.ready}>
+                <button onclick={() => ensureHardwareAccel({ forceRerun: true })} disabled={!state.ready || providerRecheckBusy}>
                   Install / Update Accelerators
                 </button>
-                <button class="secondary" onclick={refreshExecutionProviders} disabled={!state.ready}>
-                  Recheck Providers
+                <button
+                  class="secondary accel-recheck"
+                  onclick={recheckProviders}
+                  disabled={!state.ready || providerRecheckBusy}
+                  title="Register failed providers again. CUDA and WebGPU are removed from the cache and downloaded again first."
+                >
+                  {providerRecheckBusy ? "Rechecking…" : "Recheck Providers"}
                 </button>
               </div>
               {#if state.eps.length}
@@ -4416,7 +8068,7 @@ Output only the summary text, no preamble.`;
                       <div class="actions">
                         <button
                           onclick={() => useStarterModel(model)}
-                          disabled={isLoadingRecommendations}
+                          disabled={isLoadingRecommendations || benchmarkRunInFlight}
                         >
                           {#if !model.isCached}
                             Download & Start
@@ -4437,6 +8089,7 @@ Output only the summary text, no preamble.`;
                 {#if recommendedStarters.length > 0 && !recommendedStarters.some((m) => m.isCached || m.isLoaded)}
                   <div style="margin-top:8px">
                     <button
+                      disabled={benchmarkRunInFlight}
                       onclick={() => useStarterModel(recommendedStarters[0])}
                     >
                       Quick Start with {recommendedStarters[0].alias}
@@ -4446,10 +8099,10 @@ Output only the summary text, no preamble.`;
               </div>
             {/if}
 
-            {#if state.pool?.length}
+            {#if loadedPoolEntries.length}
               <div class="pool-panel">
                 <div class="pool-panel-header">
-                  <h3>Running ({state.pool.length} model{state.pool.length !== 1 ? 's' : ''})</h3>
+                  <h3>Running ({loadedPoolEntries.length} model{loadedPoolEntries.length !== 1 ? 's' : ''})</h3>
                   {#if state.poolStats}
                     <span class="pool-mem">
                       {state.poolStats.usedMemMb} MB used &nbsp;·&nbsp; {state.poolStats.freeMemMb} MB free of {state.poolStats.totalMemMb} MB
@@ -4457,7 +8110,7 @@ Output only the summary text, no preamble.`;
                   {/if}
                 </div>
                 <div class="pool-table">
-                  {#each state.pool as entry (entry.alias)}
+                  {#each loadedPoolEntries as entry (entry.alias)}
                     {@const shortVariant = entry.variantId?.split(':')[0]?.split('-').slice(-3).join('-') ?? '—'}
                     {@const tokens = state.poolStats?.tokenTotals?.find((t) => t.alias === entry.alias)}
                     <div class="pool-row">
@@ -4469,18 +8122,30 @@ Output only the summary text, no preamble.`;
                       {#if tokens}
                         <span class="pool-tokens" title="Session tokens in / out">↑{tokens.tokensIn} ↓{tokens.tokensOut}</span>
                       {/if}
-                      <button class="small danger-btn" onclick={() => unloadModel({ alias: entry.alias })}>Unload</button>
+                      <button class="small danger-btn" disabled={benchmarkRunInFlight} onclick={() => unloadModel({ alias: entry.alias })}>Unload</button>
                     </div>
                   {/each}
                 </div>
               </div>
             {/if}
 
-            {#if isLoadingModels && state.models.length === 0}
+            {#if catalogCheckPresentation === "loading" && state.models.length === 0}
               <p>Loading catalog...</p>
             {:else if filteredModels.length === 0}
               <div class="empty-state-card">
-                {#if state.models.length === 0}
+                {#if state.models.length === 0 && catalogCheckPresentation === "disabled"}
+                  <h3>Model catalog not checked</h3>
+                  <p>Automatic startup checks are off. Refresh only when you want to browse models or check for updates.</p>
+                  <button type="button" onclick={() => loadModels()}>Refresh catalog</button>
+                {:else if state.models.length === 0 && catalogCheckPresentation === "failed"}
+                  <h3>Model catalog check failed</h3>
+                  <p>{state.catalogError || "The catalog request did not complete."}</p>
+                  <button type="button" onclick={() => loadModels()}>Retry catalog</button>
+                {:else if state.models.length === 0 && catalogCheckPresentation === "pending"}
+                  <h3>Model catalog has not been checked yet</h3>
+                  <p>Retry to contact Microsoft's Foundry Local model catalog.</p>
+                  <button type="button" onclick={() => loadModels()}>Retry catalog</button>
+                {:else if state.models.length === 0}
                   <h3>No models in the catalog yet</h3>
                   <p>Wait for Foundry Local to finish loading the catalog, or retry if something failed.</p>
                   <button type="button" onclick={() => loadModels()}>Refresh catalog</button>
@@ -4492,9 +8157,9 @@ Output only the summary text, no preamble.`;
               </div>
             {:else}
               <div class="model-grid">
-                {#each filteredModels as model, i (model.alias)}
-                  {#if modelSortKey === "family" && (i === 0 || modelFamilyLabel(filteredModels[i - 1]) !== modelFamilyLabel(model))}
-                    <h3 class="family-heading">{modelFamilyLabel(model)}</h3>
+                {#each filteredModels as model, index (model.alias)}
+                  {#if modelSortMode === "family" && (index === 0 || modelFamilyLabel(filteredModels[index - 1]) !== modelFamilyLabel(model))}
+                    <h3 class="family-heading">{modelFamilyLabel(model) || "Other"}</h3>
                   {/if}
                   <div class="model-card">
                     <div class="model-header">
@@ -4532,11 +8197,13 @@ Output only the summary text, no preamble.`;
                           </span>
                         </span>
                       {/if}
-                      <span title="Execution providers currently applicable on this machine">
-                        Acceleration:
+                      <span title="Device build types Flint can identify in this model's catalog variants. This is not the accelerators installed on this PC.">
+                        Available as:
                         <span class="meta-badges">
-                          {#each getApplicableAccelerationLabels(model, state.eps, hostPlatform) as accel}
+                          {#each publishedAccelerationLabels(model.variants) as accel}
                             <span class="meta-badge">{accel}</span>
+                          {:else}
+                            <span class="meta-badge">Unknown</span>
                           {/each}
                         </span>
                       </span>
@@ -4581,7 +8248,7 @@ Output only the summary text, no preamble.`;
                         {#if variantPanelOpen[model.alias]}
                           <div class="variant-list">
                             {#each (model as any).variants as variant (variant.id)}
-                              {@const isCurrentlyLoaded = state.pool.some((e) => e.variantId === variant.id)}
+                              {@const isCurrentlyLoaded = loadedPoolEntries.some((e) => e.variantId === variant.id)}
                               {@const badge = accelBadgeInfo(variant.deviceType, variant.executionProvider)}
                               {@const isCurrentChat =
                                 selectedModelAlias === model.alias && isCurrentlyLoaded}
@@ -4612,7 +8279,7 @@ Output only the summary text, no preamble.`;
                                     <button
                                       class="small update-btn"
                                       onclick={() => downloadVariant(model, variant.update.latestVariantId)}
-                                      disabled={downloadingVariantIds[variant.update.latestVariantId]}
+                                      disabled={downloadingVariantIds[variant.update.latestVariantId] || benchmarkRunInFlight}
                                     >
                                       {downloadingVariantIds[variant.update.latestVariantId] ? 'Downloading…' : 'Download update'}
                                     </button>
@@ -4621,13 +8288,13 @@ Output only the summary text, no preamble.`;
                                     <button
                                       class="small"
                                       onclick={() => downloadVariant(model, variant.id)}
-                                      disabled={downloadingVariantIds[variant.id]}
+                                      disabled={downloadingVariantIds[variant.id] || benchmarkRunInFlight}
                                     >
                                       {downloadingVariantIds[variant.id] ? 'Downloading…' : 'Download'}
                                     </button>
                                   {:else}
                                     {#if !isCurrentlyLoaded}
-                                      <button class="small" onclick={() => loadVariant(model, variant.id)}>Load</button>
+                                      <button class="small" disabled={benchmarkRunInFlight} onclick={() => loadVariant(model, variant.id)}>Load</button>
                                     {/if}
                                     {#if modelSupportsChat(model)}
                                       {#if isCurrentlyLoaded && isCurrentChat}
@@ -4635,12 +8302,13 @@ Output only the summary text, no preamble.`;
                                       {:else if isCurrentlyLoaded}
                                         <button class="small primary-chat" onclick={() => loadAndChatVariant(model, variant.id)}>Chat</button>
                                       {:else}
-                                        <button class="small primary-chat" onclick={() => loadAndChatVariant(model, variant.id)}>Load &amp; Chat</button>
+                                        <button class="small primary-chat" disabled={benchmarkRunInFlight} onclick={() => loadAndChatVariant(model, variant.id)}>Load &amp; Chat</button>
                                       {/if}
                                     {/if}
                                     <button
                                       class="small danger-btn"
                                       title={`Delete ${variant.id} from disk`}
+                                      disabled={benchmarkRunInFlight}
                                       onclick={() => deleteVariant(model, variant.id)}
                                     >Delete</button>
                                   {/if}
@@ -4658,17 +8326,20 @@ Output only the summary text, no preamble.`;
                       {/if}
 
                       {#if !model.isCached}
-                        <button onclick={() => downloadAndTrack(model)} disabled={downloadingModelAliases[model.alias]}>
+                        <button
+                          onclick={() => { void downloadAndTrack(model).catch((e: any) => { statusMessage = `Download failed: ${e?.message || e}`; }); }}
+                          disabled={downloadingModelAliases[model.alias] || benchmarkRunInFlight}
+                        >
                           {downloadingModelAliases[model.alias] ? 'Downloading…' : 'Download'}
                         </button>
                       {/if}
 
                       {#if model.isCached && !model.isLoaded}
-                        <button onclick={() => loadModelAndMaybeStart(model)}
+                        <button disabled={benchmarkRunInFlight} onclick={() => { void loadModelAndMaybeStart(model).catch(() => {}); }}
                           >Load</button
                         >
                         {#if modelSupportsChat(model)}
-                          <button onclick={() => loadAndSelect(model)}
+                          <button disabled={benchmarkRunInFlight} onclick={() => loadAndSelect(model)}
                             >Load & Chat</button
                           >
                         {/if}
@@ -4682,7 +8353,7 @@ Output only the summary text, no preamble.`;
                             >
                           {/if}
                         {/if}
-                        <button onclick={() => unloadModel(model)}
+                        <button disabled={benchmarkRunInFlight} onclick={() => unloadModel(model)}
                           >Unload</button
                         >
                       {/if}
@@ -4701,7 +8372,7 @@ Output only the summary text, no preamble.`;
                       {/if}
 
                       {#if model.isCached}
-                        <button class="danger-btn" onclick={() => deleteCachedModel(model)}>Delete</button>
+                        <button class="danger-btn" disabled={benchmarkRunInFlight} onclick={() => deleteCachedModel(model)}>Delete</button>
                       {/if}
 
                       <label class="startup-toggle" title="Load this model automatically when Flint starts">
@@ -4713,6 +8384,16 @@ Output only the summary text, no preamble.`;
                         Load on startup{#if startupModels[model.alias]}&nbsp;<span class="startup-variant-hint">({startupModels[model.alias]?.split(':')[0]?.split('-').slice(-2).join('-')})</span>{/if}
                       </label>
 
+                      {#if isLocalModel(model) && modelSupportsChat(model)}
+                        <button
+                          class="secondary"
+                          onclick={() => openTemplateEditor(model)}
+                          title="View or edit the prompt template Flint wrote for this model"
+                        >
+                          Prompt template
+                        </button>
+                      {/if}
+
                       <button
                         class="secondary"
                         onclick={() => (modelDetailsAlias = model.alias)}
@@ -4723,6 +8404,241 @@ Output only the summary text, no preamble.`;
                   </div>
                 {/each}
               </div>
+
+              {#if byomOpen}
+                <div
+                  class="model-modal-overlay"
+                  role="presentation"
+                  onclick={() => { byomOpen = false; resetByom(); }}
+                  onkeydown={(e) => { if (e.key === 'Escape') { byomOpen = false; resetByom(); } }}
+                >
+                  <div
+                    class="model-modal byom-modal"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-label="Add a model folder"
+                    tabindex="-1"
+                    onclick={(e) => e.stopPropagation()}
+                    onkeydown={(e) => { if (e.key === 'Escape') { byomOpen = false; resetByom(); } }}
+                  >
+                    <div class="modal-header">
+                      <h3>Add a model folder</h3>
+                      <button type="button" aria-label="Close" onclick={() => { byomOpen = false; resetByom(); }}><Icon name="x" size={14} /></button>
+                    </div>
+                    <div class="modal-body">
+                      <p class="small muted">
+                        Foundry Local runs <strong>ONNX</strong> models built for onnxruntime-genai — a folder
+                        with <code>genai_config.json</code> and a tokenizer. GGUF files will not work.
+                      </p>
+
+                      <div class="byom-row">
+                        <button type="button" onclick={pickByomFolder} disabled={byomInspecting || !!byomBusy}>
+                          Choose folder…
+                        </button>
+                        <span class="byom-path" title={byomFolder}>{byomFolder || "No folder selected"}</span>
+                      </div>
+
+                      {#if byomInspecting}
+                        <p class="small">Checking folder…</p>
+                      {/if}
+
+                      {#if byomError}
+                        <pre class="error-guidance">{byomError}</pre>
+                      {/if}
+
+                      {#if byomReport}
+                        {#if !byomReport.ok}
+                          <div class="byom-verdict bad">
+                            <strong>This folder cannot be used</strong>
+                            <ul>
+                              {#each byomReport.reasons as reason}<li>{reason}</li>{/each}
+                            </ul>
+                          </div>
+                        {:else}
+                          <div class="byom-verdict good">
+                            <strong>Looks like a usable ONNX model</strong>
+                            <div class="byom-facts">
+                              <span>Architecture: {byomReport.detected.architecture || "unknown"}</span>
+                              <span>Context: {byomReport.detected.contextLength ?? "unknown"}</span>
+                              <span>Size: {(byomReport.sizeBytes / (1024 * 1024)).toFixed(0)} MB</span>
+                              {#if byomReport.nested}
+                                <span title={byomReport.modelDir}>Found in a subfolder</span>
+                              {/if}
+                            </div>
+                          </div>
+                          {#if byomReport.warnings?.length}
+                            <ul class="byom-warnings">
+                              {#each byomReport.warnings as w}<li>{w}</li>{/each}
+                            </ul>
+                          {/if}
+
+                          <div class="byom-row">
+                            <label for="byom-name">Name</label>
+                            <input id="byom-name" type="text" bind:value={byomName} placeholder="my-model" />
+                          </div>
+
+                          {#if byomReport.detected.task === "embeddings"}
+                            <p class="small muted">Embedding model — no chat prompt template is required.</p>
+                          {:else}
+                          <div class="byom-template">
+                            <button
+                              type="button"
+                              class="variant-toggle"
+                              onclick={() => (byomTemplateOpen = !byomTemplateOpen)}
+                            >
+                              Prompt template &nbsp;{byomTemplateOpen ? "▲" : "▼"}
+                            </button>
+                            <span
+                              class="badge small"
+                              class:cached={byomReport.detected.templateConfident}
+                              class:update={!byomReport.detected.templateConfident}
+                            >
+                              {byomReport.detected.templateConfident ? "Detected" : "Guessed"}
+                            </span>
+                            <span class="small muted">{byomReport.detected.templateSource}</span>
+                          </div>
+
+                          {#if byomTemplateOpen && byomTemplate}
+                            <p class="small muted">
+                              Foundry replaces <code>&#123;Content&#125;</code> with the message text. A template
+                              without it loads normally but silently drops what you type.
+                            </p>
+                            <div class="byom-row">
+                              <label for="byom-preset">Start from</label>
+                              <select
+                                id="byom-preset"
+                                value={byomPreset}
+                                onchange={(e) => applyByomPreset((e.currentTarget as HTMLSelectElement).value)}
+                              >
+                                <option value="" disabled>Choose a family…</option>
+                                {#each Object.entries(byomReport.presets || TEMPLATE_PRESETS) as [key, preset]}
+                                  <option value={key}>{(preset as any).label}</option>
+                                {/each}
+                              </select>
+                            </div>
+                            {#each TEMPLATE_ROLES as role}
+                              <div class="byom-tpl-field">
+                                <label for={`byom-tpl-${role}`}>{role}</label>
+                                <textarea id={`byom-tpl-${role}`} rows="2" bind:value={byomTemplate[role]}></textarea>
+                              </div>
+                            {/each}
+                            {#if byomTemplateCheck && !byomTemplateCheck.ok}
+                              <ul class="byom-errors">
+                                {#each byomTemplateCheck.errors as err}<li>{err}</li>{/each}
+                              </ul>
+                            {:else if byomTemplateCheck?.warnings?.length}
+                              <ul class="byom-warnings">
+                                {#each byomTemplateCheck.warnings as w}<li>{w}</li>{/each}
+                              </ul>
+                            {/if}
+                          {/if}
+                          {/if}
+                        {/if}
+                      {/if}
+                    </div>
+                    <div class="modal-footer byom-footer">
+                      <button
+                        type="button"
+                        onclick={() => runByomImport("copy")}
+                        disabled={!byomReport?.ok || !byomName.trim() || !!byomBusy || (byomTemplateCheck && !byomTemplateCheck.ok)}
+                        title="Copy the folder into Flint's model cache"
+                      >
+                        {byomBusy === "copy" ? "Copying…" : "Copy into Flint"}
+                      </button>
+                      <button
+                        type="button"
+                        class="secondary"
+                        onclick={() => runByomImport("link")}
+                        disabled={!byomReport?.ok || !byomName.trim() || !!byomBusy || !byomReport?.detected?.hasInferenceModel}
+                        title={byomReport && !byomReport.detected?.hasInferenceModel
+                          ? "Linking cannot add the missing inference_model.json, because the folder is never written to. Copy instead."
+                          : "Register the folder where it is, without copying it"}
+                      >
+                        {byomBusy === "link" ? "Linking…" : "Link in place"}
+                      </button>
+                      <button type="button" class="secondary" onclick={() => { byomOpen = false; resetByom(); }}>Cancel</button>
+                    </div>
+                  </div>
+                </div>
+              {/if}
+
+              {#if templateEditAlias}
+                <div
+                  class="model-modal-overlay"
+                  role="presentation"
+                  onclick={() => { templateEditAlias = null; templateEdit = null; }}
+                  onkeydown={(e) => { if (e.key === 'Escape') { templateEditAlias = null; templateEdit = null; } }}
+                >
+                  <div
+                    class="model-modal byom-modal"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-label={`Prompt template for ${templateEditAlias}`}
+                    tabindex="-1"
+                    onclick={(e) => e.stopPropagation()}
+                    onkeydown={(e) => { if (e.key === 'Escape') { templateEditAlias = null; templateEdit = null; } }}
+                  >
+                    <div class="modal-header">
+                      <h3>Prompt template — {templateEditAlias}</h3>
+                      <button type="button" aria-label="Close" onclick={() => { templateEditAlias = null; templateEdit = null; }}><Icon name="x" size={14} /></button>
+                    </div>
+                    <div class="modal-body">
+                      {#if templateEditError}
+                        <pre class="error-guidance">{templateEditError}</pre>
+                      {/if}
+                      {#if templateEdit}
+                        {#if templateEditSource}
+                          <p class="small muted">Current source: {templateEditSource}</p>
+                        {/if}
+                        <div class="byom-row">
+                          <label for="tpl-preset">Start from</label>
+                          <select
+                            id="tpl-preset"
+                            onchange={(e) => {
+                              const key = (e.currentTarget as HTMLSelectElement).value;
+                              const preset = templateEditPresets[key];
+                              if (preset?.template) templateEdit = { ...preset.template };
+                            }}
+                          >
+                            <option value="" selected disabled>Choose a family…</option>
+                            {#each Object.entries(templateEditPresets) as [key, preset]}
+                              <option value={key}>{(preset as any).label}</option>
+                            {/each}
+                          </select>
+                        </div>
+                        {#each TEMPLATE_ROLES as role}
+                          <div class="byom-tpl-field">
+                            <label for={`tpl-${role}`}>{role}</label>
+                            <textarea id={`tpl-${role}`} rows="2" bind:value={templateEdit[role]}></textarea>
+                          </div>
+                        {/each}
+                        {#if templateEditCheck && !templateEditCheck.ok}
+                          <ul class="byom-errors">
+                            {#each templateEditCheck.errors as err}<li>{err}</li>{/each}
+                          </ul>
+                        {:else if templateEditCheck?.warnings?.length}
+                          <ul class="byom-warnings">
+                            {#each templateEditCheck.warnings as w}<li>{w}</li>{/each}
+                          </ul>
+                        {/if}
+                        <p class="small muted">
+                          Reload the model after saving — a loaded model keeps the template it started with.
+                        </p>
+                      {/if}
+                    </div>
+                    <div class="modal-footer byom-footer">
+                      <button
+                        type="button"
+                        onclick={saveTemplateEdit}
+                        disabled={!templateEdit || templateEditSaving || (templateEditCheck && !templateEditCheck.ok)}
+                      >
+                        {templateEditSaving ? "Saving…" : "Save template"}
+                      </button>
+                      <button type="button" class="secondary" onclick={() => { templateEditAlias = null; templateEdit = null; }}>Cancel</button>
+                    </div>
+                  </div>
+                </div>
+              {/if}
 
               {#if modelDetailsAlias}
                 {@const detailModel = state.models.find((m: any) => m.alias === modelDetailsAlias)}
@@ -4752,7 +8668,43 @@ Output only the summary text, no preamble.`;
                         <div><strong>Size:</strong> {formatSizeLabel(detailModel)}</div>
                         <div><strong>Estimated memory:</strong> {estimateMemoryRequirement(detailModel)}</div>
                         <div><strong>Updated:</strong> {formatModelUpdated(detailModel)}</div>
-                        <div><strong>Context:</strong> {formatContextLength(detailModel)}</div>
+                        <div><strong>Context (catalog):</strong> {formatContextLength(detailModel)}</div>
+                        <div>
+                          <strong>Tool calling (catalog):</strong>
+                          {detailModel.supportsToolCalling === true
+                            ? "Declared supported"
+                            : detailModel.supportsToolCalling === false
+                              ? "Declared unsupported"
+                              : "Unknown"}
+                        </div>
+                        <div>
+                          <strong>Flint-verified:</strong>
+                          {#if lastFlintVerified}
+                            {@const verifiedRows = (lastFlintVerified.aliases ?? []).filter((row) =>
+                              catalogModelForEndpointId(state.models, row.modelId)?.alias === detailModel.alias)}
+                            {#if verifiedRows.length}
+                              {#each verifiedRows as row}
+                                <div>
+                                  {row.modelId}:
+                                  {#if row.kind === "embed"}
+                                    embeddings {row.embeddings ? "yes" : "no"}
+                                  {:else if row.kind === "speech"}
+                                    speech {row.speech ? "yes" : "no"}
+                                  {:else}
+                                    chat {row.chat ? "yes" : "no"} ·
+                                    stream {row.stream ? "yes" : "no"} ·
+                                    tools {row.tools}
+                                  {/if}
+                                </div>
+                              {/each}
+                              <span class="muted small">{new Date(lastFlintVerified.ranAt).toLocaleString()}</span>
+                            {:else}
+                              Not verified in this session — Diagnostics → Test local endpoint
+                            {/if}
+                          {:else}
+                            Not verified in this session — Diagnostics → Test local endpoint
+                          {/if}
+                        </div>
                         <div><strong>Downloaded artifact:</strong> {detailModel.isCached ? "Model weights" : "Not downloaded"}</div>
                         <div><strong>Downloaded at:</strong> {formatMetaTimestamp(modelRuntimeMeta[detailModel.alias]?.downloadedAt)}</div>
                         <div><strong>Last used acceleration:</strong> {modelRuntimeMeta[detailModel.alias]?.lastUsedAcceleration || "Unknown"}</div>
@@ -4761,10 +8713,12 @@ Output only the summary text, no preamble.`;
                           {(detailModel as any).updates?.length || 0}
                         </div>
                         <div>
-                          <strong>Applicable accelerations:</strong>
+                          <strong>Published builds:</strong>
                           <span class="meta-badges">
-                            {#each getApplicableAccelerationLabels(detailModel, state.eps, hostPlatform) as accel}
+                            {#each publishedAccelerationLabels(detailModel.variants) as accel}
                               <span class="meta-badge">{accel}</span>
+                            {:else}
+                              <span class="meta-badge">Unknown</span>
                             {/each}
                           </span>
                         </div>
@@ -4805,6 +8759,10 @@ Output only the summary text, no preamble.`;
         </div>
       {:else if currentView === "chat"}
         <div class="view chat-view">
+          <div class="playground-subnav" role="group" aria-label="Playground mode">
+            <button type="button" class:active={currentView === "chat"} aria-pressed={currentView === "chat"} onclick={() => (currentView = "chat")}>Chat</button>
+            <button type="button" class:active={currentView === "audio"} aria-pressed={currentView === "audio"} onclick={() => (currentView = "audio")}>Voice</button>
+          </div>
           <div class="chat-container">
             <ConversationSidebar
               {conversations}
@@ -4812,6 +8770,8 @@ Output only the summary text, no preamble.`;
               onNewChat={createNewConversation}
               onSelectConversation={selectConversation}
               onDeleteConversation={deleteConversation}
+              onExport={exportConversations}
+              {exportBusy}
             />
 
             <div class="chat-main">
@@ -4820,10 +8780,16 @@ Output only the summary text, no preamble.`;
                   <strong>{loadedAudioModel?.alias}</strong> is currently active for audio transcription.
                   Text chat is temporarily disabled. Load a chat model from the Models view to continue.
                 </div>
+              {:else if chatModelUnavailable}
+                <div class="notice" style="margin: 12px; padding: 12px;">
+                  This conversation used <strong>{selectedModelAlias}</strong>, which is not
+                  installed on this computer. Download it from the Models view, or pick another
+                  model above — the choice is saved to this conversation.
+                </div>
               {:else if !selectedModelSupportsChat}
                 <div class="notice" style="margin: 12px; padding: 12px;">
                   <strong>{selectedModelAlias}</strong> is an STT/audio-only model and does not support chat completions.
-                  Use the Audio tab or select a chat model from the Models view.
+                  Use Playground → Voice or select a chat model from the Models view.
                 </div>
               {/if}
               <div class="chat-header">
@@ -4834,10 +8800,18 @@ Output only the summary text, no preamble.`;
                     <select
                       value={selectedModelAlias}
                       disabled={isStreaming || chatPickerModels.length === 0}
+                      class:unavailable={chatModelUnavailable}
                       title="Model used for this chat. Loaded models are preferred; choosing an unloaded model will load it."
                       onchange={(e) => setChatModel((e.currentTarget as HTMLSelectElement).value)}
                     >
-                      {#if chatPickerModels.length === 0}
+                      {#if chatModelUnavailable}
+                        <!-- Rendered independently of the list: with no installed chat models at
+                             all the picker would otherwise drop the conversation's stored choice
+                             and show a blank selection for a model it still intends to use. -->
+                        <option value={selectedModelAlias} disabled>
+                          {selectedModelAlias} (not installed)
+                        </option>
+                      {:else if chatPickerModels.length === 0}
                         <option value="">No chat models available</option>
                       {:else if !selectedModelAlias}
                         <option value="">Select model…</option>
@@ -4854,7 +8828,7 @@ Output only the summary text, no preamble.`;
                   <button
                     type="button"
                     class="compact-btn full-thread-btn"
-                    onclick={() => (showFullHistory = !showFullHistory)}
+                    onclick={() => commitChatSettings({ showFullHistory: !showFullHistory })}
                     title="Toggle between compact (recommended for inference) and full uncondensed thread"
                   >
                     {#if showFullHistory}<Icon name="scroll" size={13} /> Compact{:else}<Icon name="book" size={13} /> Full thread{/if}
@@ -4879,8 +8853,12 @@ Output only the summary text, no preamble.`;
                     <button
                       type="button"
                       class="compact-btn summarize-btn"
-                      title="Use the model to summarize older turns into a compact memory note. Allows continuing long chats efficiently."
-                      disabled={isStreaming}
+                      title={benchmarkRunInFlight
+                        ? "Disabled while a benchmark run is active."
+                        : isSummarizing
+                          ? "A summarization is already in progress."
+                          : "Use the model to summarize older turns into a compact memory note. Allows continuing long chats efficiently."}
+                      disabled={isStreaming || benchmarkRunInFlight || isSummarizing}
                       onclick={() => compactConversationWithSummary(Math.max(4, Math.floor(contextTurns / 2)))}
                     >
                       Summarize &amp; Compact
@@ -4910,9 +8888,13 @@ Output only the summary text, no preamble.`;
                           >Use {chatPickerModels[0].alias}</button>
                         {/if}
                       </div>
+                    {:else if chatModelUnavailable}
+                      <h3>This conversation's model isn't installed</h3>
+                      <p><strong>{selectedModelAlias}</strong> is not available on this computer. Download it, or choose another model in the header — the choice is saved to this conversation.</p>
+                      <button type="button" onclick={() => (currentView = "models")}>Open Models</button>
                     {:else if chatBlockedByLoadedSTT || !selectedModelSupportsChat}
                       <h3>Chat isn’t available with the current model</h3>
-                      <p>Switch to a chat-capable model from the catalog (STT-only models stay on Audio).</p>
+                      <p>Switch to a chat-capable model from the catalog (STT-only models stay on Playground → Voice).</p>
                       <button type="button" onclick={() => (currentView = "models")}>Open Models</button>
                     {:else}
                       <h3>Start a conversation</h3>
@@ -4958,6 +8940,9 @@ Output only the summary text, no preamble.`;
                           <MessageRenderer
                             content={msg.content}
                             role={msg.role}
+                            isStreaming={isStreaming && msg.id === activeStreamAssistantId}
+                            assumeReasoning={currentModelTags.includes("reasoning")}
+                            messageKey={`${threadLoadedFor}:${msg.id ?? i}`}
                           />
                         </div>
                       </div>
@@ -5014,7 +8999,7 @@ Output only the summary text, no preamble.`;
                             class="persona-item"
                             class:matches={scorePersonaForModel(p, currentModelTags) > 1.5}
                             onclick={() => {
-                              systemPrompt = p.prompt;
+                              commitChatSettings({ systemPrompt: p.prompt });
                               showPersonaMenu = false;
                               statusMessage = `Persona: ${p.name}`;
                             }}
@@ -5040,24 +9025,32 @@ Output only the summary text, no preamble.`;
 
                 <!-- Context management -->
                 <div class="context-control">
-                  <label for="ctx-select" title="Context window for this model">Ctx</label>
-                  <select
+                  <label for="ctx-select" title={`How many recent turns are sent with the next message (${MIN_CONTEXT_TURNS}-${MAX_CONTEXT_TURNS})`}>Context</label>
+                  <span class="context-range-bound">{MIN_CONTEXT_TURNS}</span>
+                  <input
+                    type="range"
                     id="ctx-select"
-                    bind:value={contextTurns}
-                    title={`Keep last N turns. Model context: ${currentModelContextLength ? currentModelContextLength + ' tokens' : 'unknown'}. Lower = faster & lower energy.`}
+                    min={MIN_CONTEXT_TURNS}
+                    max={MAX_CONTEXT_TURNS}
+                    step="1"
+                    value={clampContextTurns(contextTurns)}
+                    oninput={(e) => {
+                      contextTurns = Number((e.currentTarget as HTMLInputElement).value);
+                    }}
+                    onchange={(e) =>
+                      commitChatSettings({
+                        contextTurns: Number((e.currentTarget as HTMLInputElement).value),
+                      })}
+                    title={`Keep last N turns (${MIN_CONTEXT_TURNS}-${MAX_CONTEXT_TURNS}). Model context: ${currentModelContextLength ? currentModelContextLength + ' tokens' : 'unknown'}. Lower = faster & lower energy.`}
                     disabled={isStreaming}
-                  >
-                    <option value={4}>4 turns</option>
-                    <option value={8}>8 turns</option>
-                    <option value={12}>12 turns</option>
-                    <option value={20}>20 turns</option>
-                    <option value={30}>30 turns</option>
-                  </select>
+                  />
+                  <span class="context-range-bound">{MAX_CONTEXT_TURNS}</span>
+                  <span class="context-turns-value">{clampContextTurns(contextTurns)} turns</span>
                   <span
                     class="context-estimate"
-                    title="Estimated tokens being sent this turn (rough). Smaller = less time & energy."
+                    title="Rough token count for this turn. Smaller means a faster, cheaper reply."
                   >
-                    ~{estimatedContextTokens}t
+                    ~{estimatedContextTokens} tokens
                     {#if contextUsagePercent !== null}
                       <span class="usage-pct" class:high={contextUsagePercent > 70}>({contextUsagePercent}%)</span>
                     {/if}
@@ -5072,7 +9065,7 @@ Output only the summary text, no preamble.`;
                         class="recommend-btn"
                         onclick={applyRecommendedContext}
                         title={`Use recommended ${recommendedMaxTurns} turns for this model`}
-                      >rec</button>
+                      >Recommended: {recommendedMaxTurns}</button>
                     {/if}
                   {/if}
 
@@ -5096,6 +9089,168 @@ Output only the summary text, no preamble.`;
                   {/if}
                 </div>
 
+                <!-- Generation parameters: how sampling settings affect model output -->
+                <div class="genparams-control">
+                  <button
+                    type="button"
+                    class="genparams-toggle"
+                    onclick={() => (showGenParamsPanel = !showGenParamsPanel)}
+                    title="Temperature, max tokens, top-p, top-k"
+                    aria-expanded={showGenParamsPanel}
+                  >
+                    <Icon name="settings" size={13} /> Generation
+                  </button>
+                  {#if showGenParamsPanel}
+                    <div class="genparams-panel">
+                      <label for="genparams-temperature" title="Higher = more varied output (0-2)">Temperature</label>
+                      <input
+                        type="range"
+                        id="genparams-temperature"
+                        min="0"
+                        max="2"
+                        step="0.05"
+                        value={temperature}
+                        oninput={(e) => {
+                          temperature = Number((e.currentTarget as HTMLInputElement).value);
+                        }}
+                        onchange={(e) =>
+                          commitChatSettings({
+                            temperature: Number((e.currentTarget as HTMLInputElement).value),
+                          })}
+                        disabled={isStreaming}
+                      />
+                      <span class="genparams-value">{temperature.toFixed(2)}</span>
+
+                      <label for="genparams-maxtokens" title="Maximum tokens generated per reply">Max tokens</label>
+                      <input
+                        type="number"
+                        id="genparams-maxtokens"
+                        min="1"
+                        step="1"
+                        value={maxTokens}
+                        oninput={(e) => {
+                          const value = Number((e.currentTarget as HTMLInputElement).value);
+                          if (Number.isInteger(value) && value > 0) maxTokens = value;
+                        }}
+                        onchange={(e) => {
+                          const value = Number((e.currentTarget as HTMLInputElement).value);
+                          if (Number.isInteger(value) && value > 0) {
+                            commitChatSettings({ maxTokens: value });
+                          } else {
+                            e.currentTarget.value = String(maxTokens);
+                          }
+                        }}
+                        disabled={isStreaming}
+                      />
+
+                      <label for="genparams-topp" title="Nucleus sampling threshold (0-1]">Top-p</label>
+                      <input
+                        type="range"
+                        id="genparams-topp"
+                        min="0.01"
+                        max="1"
+                        step="0.01"
+                        value={topP}
+                        oninput={(e) => {
+                          topP = Number((e.currentTarget as HTMLInputElement).value);
+                        }}
+                        onchange={(e) =>
+                          commitChatSettings({
+                            topP: Number((e.currentTarget as HTMLInputElement).value),
+                          })}
+                        disabled={isStreaming}
+                      />
+                      <span class="genparams-value">{topP.toFixed(2)}</span>
+
+                      <label for="genparams-topk" title="Restrict sampling to the top K candidate tokens">Top-k</label>
+                      <input
+                        type="number"
+                        id="genparams-topk"
+                        min="1"
+                        step="1"
+                        value={topK}
+                        oninput={(e) => {
+                          const value = Number((e.currentTarget as HTMLInputElement).value);
+                          if (Number.isInteger(value) && value > 0) topK = value;
+                        }}
+                        onchange={(e) => {
+                          const value = Number((e.currentTarget as HTMLInputElement).value);
+                          if (Number.isInteger(value) && value > 0) {
+                            commitChatSettings({ topK: value });
+                          } else {
+                            e.currentTarget.value = String(topK);
+                          }
+                        }}
+                        disabled={isStreaming}
+                      />
+
+                      <label for="genparams-freqpenalty" title="Penalize tokens by how often they've already appeared (-2 to 2)">Frequency penalty</label>
+                      <input
+                        type="range"
+                        id="genparams-freqpenalty"
+                        min="-2"
+                        max="2"
+                        step="0.1"
+                        value={frequencyPenalty}
+                        oninput={(e) => {
+                          frequencyPenalty = Number((e.currentTarget as HTMLInputElement).value);
+                        }}
+                        onchange={(e) =>
+                          commitChatSettings({
+                            frequencyPenalty: Number((e.currentTarget as HTMLInputElement).value),
+                          })}
+                        disabled={isStreaming}
+                      />
+                      <span class="genparams-value">{frequencyPenalty.toFixed(1)}</span>
+
+                      <label for="genparams-prespenalty" title="Penalize tokens that have already appeared at all (-2 to 2)">Presence penalty</label>
+                      <input
+                        type="range"
+                        id="genparams-prespenalty"
+                        min="-2"
+                        max="2"
+                        step="0.1"
+                        value={presencePenalty}
+                        oninput={(e) => {
+                          presencePenalty = Number((e.currentTarget as HTMLInputElement).value);
+                        }}
+                        onchange={(e) =>
+                          commitChatSettings({
+                            presencePenalty: Number((e.currentTarget as HTMLInputElement).value),
+                          })}
+                        disabled={isStreaming}
+                      />
+                      <span class="genparams-value">{presencePenalty.toFixed(1)}</span>
+
+                      <label for="genparams-seed" title="Fixed sampling seed for reproducible output; leave blank for non-deterministic generation">Seed</label>
+                      <input
+                        type="number"
+                        id="genparams-seed"
+                        step="1"
+                        placeholder="random"
+                        value={randomSeed ?? ''}
+                        oninput={(e) => {
+                          const raw = (e.currentTarget as HTMLInputElement).value.trim();
+                          if (raw === '') { randomSeed = null; return; }
+                          const value = Number(raw);
+                          if (Number.isSafeInteger(value)) randomSeed = value;
+                        }}
+                        onchange={(e) => {
+                          const raw = (e.currentTarget as HTMLInputElement).value.trim();
+                          if (raw === '') { commitChatSettings({ randomSeed: null }); return; }
+                          const value = Number(raw);
+                          if (Number.isSafeInteger(value)) {
+                            commitChatSettings({ randomSeed: value });
+                          } else {
+                            e.currentTarget.value = randomSeed == null ? '' : String(randomSeed);
+                          }
+                        }}
+                        disabled={isStreaming}
+                      />
+                    </div>
+                  {/if}
+                </div>
+
                 <!-- URL fetch chips: appear when the user types/pastes a URL -->
                 {#if detectedUrls.length > 0 || pendingUrlFetches.length > 0}
                   <div class="url-fetch-bar">
@@ -5105,7 +9260,7 @@ Output only the summary text, no preamble.`;
                         <button type="button" onclick={() => queueUrlFetch(url)} title="Fetch this page as context">
                           <Icon name="download" size={11} /> Fetch
                         </button>
-                        <button type="button" class="chip-dismiss" onclick={() => pendingUrlFetches = [...pendingUrlFetches, { url, status: 'error', error: 'dismissed' }]} title="Dismiss">
+                        <button type="button" class="chip-dismiss" onclick={() => dismissDetectedUrl(url)} title="Dismiss">
                           <Icon name="x" size={10} />
                         </button>
                       </span>
@@ -5172,6 +9327,13 @@ Output only the summary text, no preamble.`;
                 {/if}
               </div>
 
+              {#if !selectedModelAlias && !chatBlockedByLoadedSTT}
+                <div class="notice" style="margin-bottom: 8px;">
+                  <p><strong>No chat model loaded.</strong> Open Models, download a chat-capable model, then Load &amp; Chat.</p>
+                  <button type="button" class="small" onclick={() => (currentView = "models")}>Open Models</button>
+                </div>
+              {/if}
+
               {#if isDictating || dictationInterim}
                 <div class="dictation-preview">
                   <span class="dictation-indicator" class:pulsing={isDictating}><Icon name="mic" size={14} /></span>
@@ -5184,7 +9346,11 @@ Output only the summary text, no preamble.`;
               {/if}
 
               <form class="chat-input" onsubmit={sendMessage} ondrop={handleDrop} ondragover={handleDragOver} ondragenter={handleDragOver}>
-                {#if chatBlockedByLoadedSTT}
+                {#if benchmarkRunInFlight}
+                  <div style="width:100%; padding: 8px; font-size:0.8rem; color:var(--muted);">
+                    Chat is disabled while a benchmark run is active.
+                  </div>
+                {:else if chatBlockedByLoadedSTT}
                   <div style="width:100%; padding: 8px; font-size:0.8rem; color:var(--muted);">
                     Text chat is disabled while STT model <strong>{loadedAudioModel?.alias}</strong> is active.
                   </div>
@@ -5197,21 +9363,21 @@ Output only the summary text, no preamble.`;
                   class:active={isDictating}
                   onclick={toggleDictation}
                   title={isDictating ? "Stop dictation (finalizes transcript)" : "Dictate into chat (requires STT model)"} aria-label={isDictating ? "Stop dictation" : "Start dictation"}
-                  disabled={isStreaming}
+                  disabled={isStreaming || (benchmarkRunInFlight && !isDictating)}
                 >
                   {#if isDictating}<Icon name="stop" size={14} />{:else}<Icon name="mic" size={14} />{/if}
                 </button>
                 <input
                   bind:value={chatInput}
                   placeholder={isDictating ? "Dictating… (click Stop to finish)" : "Type your message... (model is running locally)"}
-                  disabled={chatBlockedByLoadedSTT || !selectedModelSupportsChat || (!state.endpoint && !chatClient) || isStreaming}
+                  disabled={benchmarkRunInFlight || chatBlockedByLoadedSTT || !selectedModelSupportsChat || (!state.endpoint && !chatClient) || isStreaming}
                   onkeydown={(e) => { if ((isMac ? e.metaKey : e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); sendMessage(e); } }}
                   onpaste={handlePaste}
                 />
                 <button
                   type="submit"
                   aria-label="Send message"
-                  disabled={chatBlockedByLoadedSTT || !selectedModelSupportsChat || !chatInput.trim() || (!state.endpoint && !chatClient) || isStreaming}
+                  disabled={benchmarkRunInFlight || chatBlockedByLoadedSTT || !selectedModelSupportsChat || !chatInput.trim() || (!state.endpoint && !chatClient) || isStreaming}
                 >
                   {#if isStreaming}<Icon name="loader" size={15} class="spin" />{:else}<Icon name="send" size={15} />{/if}
                 </button>
@@ -5301,6 +9467,10 @@ Output only the summary text, no preamble.`;
         </div>
       {:else if currentView === "audio"}
         <div class="view audio-view">
+          <div class="playground-subnav" role="group" aria-label="Playground mode">
+            <button type="button" class:active={currentView === "chat"} aria-pressed={currentView === "chat"} onclick={() => (currentView = "chat")}>Chat</button>
+            <button type="button" class:active={currentView === "audio"} aria-pressed={currentView === "audio"} onclick={() => (currentView = "audio")}>Voice</button>
+          </div>
           <h2>Audio Transcription</h2>
 
           <p class="notice">
@@ -5318,12 +9488,17 @@ Output only the summary text, no preamble.`;
             {#if effectiveSTTModelAlias}
               <button
                 class="tiny"
+                disabled={serviceTransitionBusy}
                 onclick={async () => {
-                  await startSvc(
-                    effectiveSTTModelAlias,
-                    selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
-                  );
-                  statusMessage = `Service ensured with ${effectiveSTTModelAlias}`;
+                  try {
+                    await ensureServiceRunning(
+                      effectiveSTTModelAlias,
+                      selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
+                    );
+                    statusMessage = `Service ensured with ${effectiveSTTModelAlias}`;
+                  } catch (e: any) {
+                    statusMessage = `Could not ensure service: ${e?.message || e}`;
+                  }
                 }}
               >
                 Ensure service
@@ -5371,12 +9546,12 @@ Output only the summary text, no preamble.`;
             </button>
             <button
               onclick={doTranscribe}
-              disabled={!audioBlob || isTranscribing || !effectiveSTTModelAlias}
+              disabled={!audioBlob || isTranscribing || !effectiveSTTModelAlias || benchmarkRunInFlight}
             >
               {isTranscribing
                 ? (transcriptionProgress
                     ? `Transcribing ${transcriptionProgress.current}/${transcriptionProgress.total}...`
-                    : "Transcribing...")
+                    : "Transcribing… cannot be stopped once started")
                 : "Transcribe"}
             </button>
           </div>
@@ -5404,46 +9579,73 @@ Output only the summary text, no preamble.`;
                     class="small"
                     class:secondary={!showTimestampedTranscript}
                     onclick={() => (showTimestampedTranscript = true)}
-                    >Timestamps ({transcriptionSegments.length})</button
+                    >Estimated times ({transcriptionSegments.length})</button
                   >
                 </div>
               {/if}
 
               {#if showTimestampedTranscript && transcriptionSegments.length > 0}
-                <p class="timestamp-note" title={TIMESTAMP_DISCLAIMER}>
-                  {TIMESTAMP_DISCLAIMER}
-                  {#if transcriptionTimingSource === "fixed-chunks"}
-                    No clear pauses were detected, so fixed-length windows were used —
-                    boundaries are less precise.
-                  {/if}
-                </p>
+                <p class="timestamp-note">{buildTimingDisclaimer(transcriptionSegments)}</p>
                 <ol class="transcript-segments">
-                  {#each transcriptionSegments as seg (seg.index)}
+                  {#each transcriptionSegments as segment (segment.index)}
                     <li class="transcript-segment">
-                      <span class="segment-time" class:snapped={seg.snapped}>
-                        {formatClockTime(seg.startSec)} – {formatClockTime(seg.endSec)}
+                      <span
+                        class="segment-time"
+                        class:snapped={segment.endBoundary === "pause-snapped"}
+                        title={segment.endBoundary === "pause-snapped"
+                          ? "This ending boundary was snapped to a detected pause."
+                          : segment.endBoundary === "recording-edge"
+                            ? "This boundary is the recording edge."
+                            : "This ending boundary is an approximate fixed-window cut."}
+                      >
+                        {formatClockTime(segment.startSec)} – {formatClockTime(segment.endSec)}
                       </span>
-                      <span class="segment-text">{seg.text}</span>
+                      <span class="segment-text">{segment.text}</span>
                     </li>
                   {/each}
                 </ol>
               {:else}
                 <pre>{transcription}</pre>
               {/if}
+
+              {#if transcriptionGaps.length > 0}
+                <div class="transcript-gaps" role="status">
+                  <strong>Untranscribed ranges:</strong>
+                  {#each transcriptionGaps as gap}
+                    <span>
+                      {formatClockTime(gap.startSec)}–{formatClockTime(gap.endSec)}
+                      ({gap.kind === "unprocessed"
+                        ? "not processed"
+                        : gap.uncertain
+                          ? "outcome uncertain"
+                          : "failed"})
+                    </span>
+                  {/each}
+                  <small>These ranges are gaps, not detected silence.</small>
+                </div>
+              {/if}
+
+              {#if emptyRecognitionRanges.length > 0}
+                <p class="timestamp-note">
+                  No text was recognized in {emptyRecognitionRanges.length}
+                  successfully processed {emptyRecognitionRanges.length === 1 ? "window" : "windows"};
+                  that does not prove those ranges were silent.
+                </p>
+              {/if}
               <div class="transcription-actions">
                 <button onclick={copyTranscriptionToClipboard}>Copy</button>
                 <button onclick={downloadTranscription}>Download .txt</button>
                 {#if transcriptionSegments.length > 0}
-                  <button onclick={copyTimestampedTranscript}>Copy with times</button>
-                  <button onclick={() => downloadCaptions("srt")}>Download .srt</button>
-                  <button onclick={downloadCaptionTimingNote}>Download timing note</button>
+                  <button onclick={copyTimestampedTranscript}>Copy with estimated times</button>
+                  <button onclick={() => downloadCaptions("srt")}>Download .srt + timing note</button>
                   <button onclick={() => downloadCaptions("vtt")}>Download .vtt</button>
                 {/if}
                 <button
                   onclick={() => {
                     transcription = "";
                     transcriptionSegments = [];
-                    transcriptionTimingSource = null;
+                    transcriptionGaps = [];
+                    emptyRecognitionRanges = [];
                   }}>Clear</button
                 >
               </div>
@@ -5466,6 +9668,33 @@ Output only the summary text, no preamble.`;
                 {state.serviceRunning ? "RUNNING" : "STOPPED"}
               </span>
             </div>
+            {#if endpointSelfTestReport}
+              <div class="service-panel">
+                <h3>Endpoint self-test</h3>
+                <p class="setting-note">
+                  {new Date(endpointSelfTestReport.ranAt).toLocaleString()}
+                  {#if endpointSelfTestReport.endpoint}
+                    · {endpointSelfTestReport.endpoint}
+                  {/if}
+                  {#if (endpointSelfTestReport.modelIds?.length ?? 0) + (endpointSelfTestReport.embeddingModelIds?.length ?? 0) + (endpointSelfTestReport.speechModelIds?.length ?? 0) > 0}
+                    · {(endpointSelfTestReport.modelIds?.length ?? 0) + (endpointSelfTestReport.embeddingModelIds?.length ?? 0) + (endpointSelfTestReport.speechModelIds?.length ?? 0)} aliases
+                  {/if}
+                </p>
+                {#each groupSelfTestChecks(endpointSelfTestReport.checks) as group}
+                  {#if group.modelId}
+                    <p class="setting-note">{group.modelId}</p>
+                  {/if}
+                  <ul class="diagnostic-list">
+                    {#each group.checks as item}
+                      <li>
+                        {item.status === "pass" ? "✓" : item.status === "blocked" ? "•" : "✗"}
+                        {item.title}: {item.detail}
+                      </li>
+                    {/each}
+                  </ul>
+                {/each}
+              </div>
+            {/if}
             {#if state.endpoint}
               <div class="endpoint-display">
                 <code>{state.endpoint}</code>
@@ -5476,23 +9705,29 @@ Output only the summary text, no preamble.`;
                 >
               </div>
               <p class="setting-note">
-                Client URL (always loopback). Bind address is configured under Settings → Network
-                and may differ from this host.
+                Client URL is usually loopback. WSL2 NAT clients use Settings → Network → WSL clients;
+                bind address is configured under Settings → Network and may differ from this host.
               </p>
             {/if}
 
             <div class="service-actions">
               <button
                 onclick={startLocalService}
-                disabled={state.serviceRunning || !state.ready}
+                disabled={state.serviceRunning || !state.ready || serviceTransitionBusy || benchmarkRunInFlight}
               >
-                Start Service
+                {serviceStarting ? "Starting…" : "Start Service"}
               </button>
               <button
                 onclick={stopLocalService}
-                disabled={!state.serviceRunning}
+                disabled={!state.serviceRunning || benchmarkRunInFlight}
               >
                 Stop Service
+              </button>
+              <button
+                onclick={stopAndUnloadModels}
+                disabled={!state.ready || benchmarkRunInFlight}
+              >
+                Stop &amp; Unload
               </button>
               <button onclick={refreshServiceStatus} disabled={!state.ready}>
                 Refresh Status
@@ -5500,8 +9735,82 @@ Output only the summary text, no preamble.`;
               <button onclick={copyDiagnosticsToClipboard}>
                 Copy All Diagnostics
               </button>
+              <button
+                onclick={runGatewaySelfTest}
+                disabled={endpointSelfTestBusy || benchmarkRunInFlight || state.models.length === 0}
+                title={state.models.length === 0 ? "Refresh the catalog before testing the endpoint." : undefined}
+              >
+                {endpointSelfTestBusy ? "Testing endpoint…" : "Test local endpoint"}
+              </button>
+              <button onclick={scanCacheInventory} disabled={!state.ready || cacheInventoryLoading}>
+                {cacheInventoryLoading ? "Scanning Cache..." : "Scan Cache"}
+              </button>
             </div>
           </div>
+
+          {#if cacheInventory}
+            <div class="service-panel">
+              <h3>Read-only Cache Inventory</h3>
+              <div class="status-row">
+                <span>Total scanned:</span>
+                <strong>{cacheInventory.entries.length} entries · {(cacheInventory.totalBytes / 1024 / 1024 / 1024).toFixed(2)} GB</strong>
+              </div>
+              <div class="status-row">
+                <span>Partial downloads:</span>
+                <strong>{cacheInventory.partialEntries.length} · {(cacheInventory.partialBytes / 1024 / 1024 / 1024).toFixed(2)} GB</strong>
+              </div>
+              <div class="status-row">
+                <span>Duplicate aliases:</span>
+                <strong>{cacheInventory.duplicateGroups.length} · {(cacheInventory.duplicateBytes / 1024 / 1024 / 1024).toFixed(2)} GB</strong>
+              </div>
+              {#if !cacheInventory.scanComplete}
+                <p class="setting-note" style="color: var(--warning, #fbbf24)">
+                  Inventory incomplete: {cacheInventory.scanErrors.length} cache paths could not be inspected.
+                </p>
+                <ul class="diagnostic-list">
+                  {#each cacheInventory.scanErrors as error}
+                    <li><code>{error.path}</code> · {error.message}</li>
+                  {/each}
+                </ul>
+              {/if}
+              {#if cacheInventory.partialEntries.length || cacheInventory.duplicateGroups.length}
+                <p class="setting-note">
+                  These are recommendations only. Flint does not delete cache files from this view.
+                </p>
+                {#if cacheInventory.partialEntries.length}
+                  <h4>Partial downloads</h4>
+                  <ul class="diagnostic-list">
+                    {#each cacheInventory.partialEntries as entry}
+                      <li><code>{entry.path}</code> · {(entry.bytes / 1024 / 1024).toFixed(1)} MB</li>
+                    {/each}
+                  </ul>
+                {/if}
+                {#if cacheInventory.duplicateGroups.length}
+                  <h4>Duplicate aliases</h4>
+                  <ul class="diagnostic-list">
+                    {#each cacheInventory.duplicateGroups as group}
+                      <li>
+                        <strong>{group.alias}</strong> · {(group.bytes / 1024 / 1024).toFixed(1)} MB reviewable
+                        <ul>
+                          {#each group.entries as entry}<li><code>{entry}</code></li>{/each}
+                        </ul>
+                      </li>
+                    {/each}
+                  </ul>
+                {/if}
+              {:else}
+                <p class="setting-note">No partial downloads or duplicate aliases were found.</p>
+              {/if}
+              {#if cacheInventory.entries.some((entry) => entry.linked)}
+                <h4>Linked entries</h4>
+                <ul class="diagnostic-list">
+                  {#each cacheInventory.entries.filter((entry) => entry.linked) as entry}
+                    <li><code>{entry.path}</code> · foreign target not scanned</li>
+                  {/each}
+                </ul>
+              {/if}
+            </div>
+          {/if}
 
           <div class="log-viewer">
             <div class="log-viewer-header">
@@ -5655,6 +9964,81 @@ Output only the summary text, no preamble.`;
 
           <!-- Pool table -->
           <div class="monitor-section">
+            <h3>Memory &amp; Pool Limits</h3>
+            <p class="log-note">
+              Readings are system-wide, not Flint's own usage — warnings only appear while
+              Flint has models loaded.
+            </p>
+            <div class="memory-settings">
+              <label class="memory-setting">
+                <input
+                  type="checkbox"
+                  checked={watchConfig.enabled}
+                  onchange={(e) => updateWatchConfig({ enabled: e.currentTarget.checked })}
+                />
+                Warn about high memory usage
+              </label>
+
+              <label class="memory-setting" class:disabled={!watchConfig.enabled}>
+                System RAM threshold
+                <input
+                  type="number" min="50" max="99"
+                  value={watchConfig.ramThresholdPct}
+                  disabled={!watchConfig.enabled}
+                  onchange={(e) => updateWatchConfig({ ramThresholdPct: Number(e.currentTarget.value) })}
+                /> %
+              </label>
+
+              <label class="memory-setting" class:disabled={!watchConfig.enabled}>
+                GPU memory threshold
+                <input
+                  type="number" min="50" max="99"
+                  value={watchConfig.vramThresholdPct}
+                  disabled={!watchConfig.enabled}
+                  onchange={(e) => updateWatchConfig({ vramThresholdPct: Number(e.currentTarget.value) })}
+                /> %
+              </label>
+
+              <hr class="memory-divider" />
+
+              <label class="memory-setting">
+                <input
+                  type="checkbox"
+                  checked={evictionConfig.idleUnloadEnabled}
+                  onchange={(e) => updateEvictionConfig({ idleUnloadEnabled: e.currentTarget.checked })}
+                />
+                Unload models left idle for
+                <input
+                  type="number" min="1" max="1440"
+                  value={Math.round(evictionConfig.idleTimeoutMs / 60000)}
+                  disabled={!evictionConfig.idleUnloadEnabled}
+                  onchange={(e) => updateEvictionConfig({ idleTimeoutMs: Number(e.currentTarget.value) * 60000 })}
+                /> min
+              </label>
+
+              <label class="memory-setting">
+                <input
+                  type="checkbox"
+                  checked={evictionConfig.maxResidentEnabled}
+                  onchange={(e) => updateEvictionConfig({ maxResidentEnabled: e.currentTarget.checked })}
+                />
+                Keep at most
+                <input
+                  type="number" min="1" max="32"
+                  value={evictionConfig.maxResident}
+                  disabled={!evictionConfig.maxResidentEnabled}
+                  onchange={(e) => updateEvictionConfig({ maxResident: Number(e.currentTarget.value) })}
+                /> models loaded
+              </label>
+
+              <p class="log-note">
+                Models set to <strong>Keep loaded</strong> below are never unloaded automatically,
+                and a model is never unloaded while it is serving a request.
+              </p>
+            </div>
+          </div>
+
+          <div class="monitor-section">
             <h3>Model Pool</h3>
             {#if state.pool.length === 0}
               <div class="empty-state-card empty-state-compact">
@@ -5672,6 +10056,8 @@ Output only the summary text, no preamble.`;
                     <th>Device</th>
                     <th title="Tokens in this session">↑ In</th>
                     <th title="Tokens out this session">↓ Out</th>
+                    <th title="Time since the last request for this model">Idle</th>
+                    <th title="Pinned models are never unloaded automatically; low priority models are unloaded first">Priority</th>
                     <th></th>
                   </tr>
                 </thead>
@@ -5696,7 +10082,26 @@ Output only the summary text, no preamble.`;
                       </td>
                       <td class="pool-tokens-cell">{tokens?.tokensIn ?? '—'}</td>
                       <td class="pool-tokens-cell">{tokens?.tokensOut ?? '—'}</td>
-                      <td><button class="small danger-btn" onclick={() => sdkUnloadModel({ alias: entry.alias }).then(refreshMonitorNow)}>Unload</button></td>
+                      <td class="pool-idle-cell">
+                        {#if (entry.inFlight ?? 0) > 0}
+                          <span class="badge loaded">In use</span>
+                        {:else}
+                          {formatIdleFor(entry.lastUsedAt)}
+                        {/if}
+                      </td>
+                      <td>
+                        <select
+                          class="pool-priority-select"
+                          value={priorityOf(entry.alias)}
+                          onchange={(e) => setModelPriority(entry.alias, e.currentTarget.value)}
+                          aria-label={`Eviction priority for ${entry.alias}`}
+                        >
+                          <option value="pinned">Keep loaded</option>
+                          <option value="normal">Normal</option>
+                          <option value="low">Unload first</option>
+                        </select>
+                      </td>
+                      <td><button class="small danger-btn" disabled={benchmarkRunInFlight} onclick={() => unloadFromMonitor(entry.alias)}>Unload</button></td>
                     </tr>
                   {/each}
                 </tbody>
@@ -5722,8 +10127,7 @@ Output only the summary text, no preamble.`;
                 <h3>No access log entries yet</h3>
                 <p>Chat, transcribe, or call the local endpoint — requests show up here and under <code>~/.flint/logs/</code>.</p>
                 <div class="empty-state-actions">
-                  <button type="button" onclick={() => (currentView = "chat")}>Open Chat</button>
-                  <button type="button" class="secondary" onclick={() => (currentView = "audio")}>Open Audio</button>
+                  <button type="button" onclick={() => (currentView = playgroundLastView)}>Open Playground</button>
                 </div>
               </div>
             {:else}
@@ -5735,6 +10139,9 @@ Output only the summary text, no preamble.`;
                       <th>Type</th>
                       <th>Model</th>
                       <th>Duration</th>
+                      <th>TTFT</th>
+                      <th>Prompt tok/s</th>
+                      <th>Decode tok/s</th>
                       <th>↑ In</th>
                       <th>↓ Out</th>
                       <th>OK</th>
@@ -5747,6 +10154,9 @@ Output only the summary text, no preamble.`;
                         <td><span class="log-type-badge log-type-{entry.type}">{entry.type}</span></td>
                         <td class="log-model">{entry.modelAlias ?? '—'}</td>
                         <td class="log-dur">{entry.durationMs != null ? `${entry.durationMs}ms` : '—'}</td>
+                        <td class="log-dur">{entry.ttftMs != null ? `${entry.ttftMs}ms` : '—'}</td>
+                        <td class="log-tok">{entry.promptTokensPerSecond != null ? Number(entry.promptTokensPerSecond).toFixed(1) : '—'}</td>
+                        <td class="log-tok">{entry.decodeTokensPerSecond != null ? Number(entry.decodeTokensPerSecond).toFixed(1) : '—'}</td>
                         <td class="log-tok">{entry.tokensIn ?? '—'}</td>
                         <td class="log-tok">{entry.tokensOut ?? '—'}</td>
                         <td class="log-ok">{entry.ok ? '✓' : '✗'}</td>
@@ -5796,7 +10206,7 @@ Output only the summary text, no preamble.`;
             {#each integrations as integration (integration.id)}
               {@const osSnippets = integration.snippets[integrationsOS]}
               {@const isExpanded = expandedIntegrationId === integration.id}
-              <article class="integration-card" class:status-unsupported={integration.status === 'unsupported'}>
+              <article class="integration-card">
                 <header class="integration-card-head">
                   <div class="integration-title">
                     <h3>{integration.name}</h3>
@@ -5804,31 +10214,32 @@ Output only the summary text, no preamble.`;
                   </div>
                   <span class="status-badge status-{integration.status}">
                     {statusBadgeLabel(integration.status)}
+                    {#if integration.testedWith}
+                      · {integration.testedWith}
+                    {:else if integration.status === 'verified'}
+                      · version not pinned
+                    {/if}
                   </span>
                 </header>
                 <p class="integration-desc">{integration.description}</p>
 
-                {#if osSnippets.length === 0}
-                  <p class="integration-empty">No snippet — see limitations below.</p>
-                {:else}
-                  {#each osSnippets as snippet, snippetIdx}
-                    {@const snippetKey = `${integration.id}-${integrationsOS}-${snippetIdx}`}
-                    {@const rendered = renderSnippet(snippet.body, state.endpoint || '')}
-                    <div class="snippet-block">
-                      <div class="snippet-head">
-                        <span class="snippet-label">{snippet.label}</span>
-                        <button
-                          class="snippet-copy"
-                          type="button"
-                          onclick={() => copyIntegrationSnippet(snippetKey, rendered)}
-                        >
-                          {copiedSnippetKey === snippetKey ? 'Copied' : 'Copy'}
-                        </button>
-                      </div>
-                      <pre class="snippet-body">{rendered}</pre>
+                {#each osSnippets as snippet, snippetIdx}
+                  {@const snippetKey = `${integration.id}-${integrationsOS}-${snippetIdx}`}
+                  {@const rendered = renderSnippet(snippet.body, state.endpoint || '')}
+                  <div class="snippet-block">
+                    <div class="snippet-head">
+                      <span class="snippet-label">{snippet.label}</span>
+                      <button
+                        class="snippet-copy"
+                        type="button"
+                        onclick={() => copyIntegrationSnippet(snippetKey, rendered)}
+                      >
+                        {copiedSnippetKey === snippetKey ? 'Copied' : 'Copy'}
+                      </button>
                     </div>
-                  {/each}
-                {/if}
+                    <pre class="snippet-body">{rendered}</pre>
+                  </div>
+                {/each}
 
                 {#if (integration.limitations && integration.limitations.length) || integration.docsUrl}
                   <button
@@ -5872,8 +10283,8 @@ Output only the summary text, no preamble.`;
               <li><strong>Fuller catalog than the CLI alone</strong> — Foundry Local CLI covers common flows; Flint uses the
                 <strong>official SDK</strong> so you get a broader model surface (chat, vision, STT, acceleration variants)
                 without maintaining your own service wrapper.</li>
-              <li><strong>One local endpoint</strong> — start the service and point IDEs/agents at
-                <code>http://127.0.0.1:&lt;port&gt;/v1</code>.</li>
+              <li><strong>One local endpoint</strong> — start the service and point IDEs/agents at the loopback URL, or use
+                Settings → Network → WSL clients for WSL2 NAT.</li>
               <li><strong>Ops visibility</strong> — pool, resources, access and audit logs in Monitor.</li>
             </ul>
             <p class="muted">
@@ -5900,7 +10311,7 @@ Output only the summary text, no preamble.`;
                 download a small starter, then <strong>Load</strong>.
               </li>
               <li>
-                Open <button type="button" class="link-like" onclick={() => (currentView = "chat")}>Chat</button> and send a message.
+                Open <button type="button" class="link-like" onclick={() => (currentView = playgroundLastView)}>Playground</button> and send a message.
               </li>
               <li>
                 Optional: <button type="button" class="link-like" onclick={() => (currentView = "diagnostics")}>Diagnostics</button>
@@ -5918,7 +10329,7 @@ Output only the summary text, no preamble.`;
             <h3>Around the app</h3>
             <ul>
               <li><strong>Models</strong> — catalog, multi-model pool, download/load/unload, update notifications</li>
-              <li><strong>Chat / Audio / Compare</strong> — inference, STT, side-by-side bake-off</li>
+              <li><strong>Playground / Model Arena</strong> — chat and voice inference, side-by-side bake-off</li>
               <li><strong>Monitor</strong> — pool, resources, access and audit logs</li>
               <li><strong>Integrations</strong> — snippets for external OpenAI-compatible tools</li>
               <li><strong>Diagnostics / Settings</strong> — service, bind/port (Apply &amp; restart), autostart, shortcuts (<kbd>?</kbd>)</li>
@@ -5928,8 +10339,10 @@ Output only the summary text, no preamble.`;
           <section class="help-section">
             <h3>Local endpoint for other tools</h3>
             <p>
-              <strong>Client URL</strong> (what Integrations and this app use) is always loopback:
+              <strong>Client URL</strong> (what Integrations and this app use) is usually loopback:
               <code>http://127.0.0.1:&lt;port&gt;/v1</code>.
+              WSL2 clients in default NAT mode use the Windows host address from
+              <strong>Settings → Network → WSL clients</strong> instead.
               <strong>Bind address</strong> in Settings is what the service <em>listens</em> on and may be
               <code>0.0.0.0</code> or a LAN IP — use <strong>Apply &amp; restart</strong> after changing it.
             </p>
@@ -5962,7 +10375,7 @@ Output only the summary text, no preamble.`;
               <li><strong>No models</strong> — Open Models and download a starter; first run may show hardware-aware recommendations.</li>
               <li><strong>Chat disabled</strong> — Load a chat-capable model (not STT-only). Unload audio-only models if they block the lane.</li>
               <li><strong>Integrations show “not started”</strong> — Diagnostics → Start service.</li>
-              <li><strong>Bind / port changes</strong> — Settings → Network → Apply &amp; restart. Client URL stays on 127.0.0.1.</li>
+              <li><strong>Bind / port changes</strong> — Settings → Network → Apply &amp; restart. Client URL usually uses 127.0.0.1; WSL2 NAT clients use the WSL clients panel.</li>
               <li><strong>SmartScreen / unidentified developer</strong> — Expected with self-signed installers until release certs are used.</li>
             </ul>
           </section>
@@ -6017,7 +10430,49 @@ Output only the summary text, no preamble.`;
                 <dt>Network (applied)</dt>
                 <dd>
                   <code class="about-code">{appliedNetworkBindAddress}:{appliedNetworkPort}</code>
-                  <span class="muted small">listen bind · client URL stays on 127.0.0.1</span>
+                  <span class="muted small">listen bind · client URL usually 127.0.0.1; WSL2 NAT differs</span>
+                </dd>
+              </div>
+              <div class="about-row">
+                <dt>Updates</dt>
+                <dd>
+                  <span aria-live="polite">
+                    {#if updateCheckState === "checking"}
+                      <span class="muted">Checking…</span>
+                    {:else if availableUpdate}
+                      <strong>v{availableUpdate.version} available</strong>
+                      {#if updateInstallState === "downloading"}
+                        <span class="muted small"> · downloading{updateDownloadPercent != null ? ` ${updateDownloadPercent}%` : ""}</span>
+                      {:else if updateInstallState === "ready"}
+                        <span class="muted small"> · ready to restart</span>
+                      {:else if updateInstallState === "deferred"}
+                        <span class="muted small"> · deferred</span>
+                      {:else if updateInstallError}
+                        <span class="about-bad"> · {updateInstallError}</span>
+                      {/if}
+                    {:else if updateCheckError}
+                      <span class="about-bad">Check failed: {updateCheckError}</span>
+                    {:else if updateCheckState === "current"}
+                      <span class="muted">No update available</span>
+                    {:else}
+                      <span class="muted">Not checked</span>
+                    {/if}
+                    {#if updateCheckAt && updateCheckState !== "checking"}
+                      <span class="muted small"> · checked {new Date(updateCheckAt).toLocaleString()}</span>
+                    {/if}
+                  </span>
+                  <button type="button" class="tiny" onclick={() => refreshUpdateStatus()} disabled={updateCheckBusy}>
+                    {updateCheckBusy ? "Checking…" : "Check"}
+                  </button>
+                  {#if availableUpdate && updateInstallState !== "ready" && updateInstallState !== "downloading"}
+                    <button type="button" class="tiny" onclick={() => installAvailableUpdate()}>Install</button>
+                    <a class="tiny" href={`https://github.com/joelst/flint/releases/tag/v${availableUpdate.version}`} target="_blank" rel="noopener noreferrer">View release</a>
+                    <button type="button" class="tiny" onclick={() => deferAvailableUpdate()}>Later</button>
+                  {/if}
+                  {#if updateInstallState === "ready"}
+                    <button type="button" class="tiny" onclick={() => restartToApplyUpdate()}>Restart to update</button>
+                    <button type="button" class="tiny" onclick={() => deferAvailableUpdate()}>Later</button>
+                  {/if}
                 </dd>
               </div>
             </dl>
@@ -6040,7 +10495,7 @@ Output only the summary text, no preamble.`;
         <div class="view compare-view">
           <div class="compare-header">
             <div>
-              <h2>Model Comparison</h2>
+              <h2>Model Arena</h2>
               <p class="muted">
                 Pick 2–{COMPARE_MAX_SLOTS} models or variants, then send one prompt. Missing models are downloaded and loaded automatically.
               </p>
@@ -6062,11 +10517,11 @@ Output only the summary text, no preamble.`;
           {#if compareHistoryOpen}
             <div class="compare-history-panel">
               <div class="compare-history-header">
-                <strong>Saved comparisons</strong>
+                <strong>Saved arena runs</strong>
                 <button type="button" class="tiny" onclick={() => (compareHistoryOpen = false)}>Close</button>
               </div>
               {#if compareHistory.length === 0}
-                <p class="muted small">No saved comparisons yet. Run one and click Save.</p>
+                <p class="muted small">No saved arena runs yet. Run one and click Save.</p>
               {:else}
                 <ul class="compare-history-list">
                   {#each compareHistory as entry (entry.id)}
@@ -6079,7 +10534,7 @@ Output only the summary text, no preamble.`;
                       <button
                         type="button"
                         class="tiny danger-btn"
-                        title="Delete saved comparison"
+                        title="Delete saved arena run"
                         onclick={() => deleteSavedComparison(entry.id)}
                       >×</button>
                     </li>
@@ -6108,7 +10563,7 @@ Output only the summary text, no preamble.`;
 
               {#if compareSlots.length === 0}
                 <div class="empty-state-card empty-state-compact">
-                  <h3>No models selected for compare</h3>
+                  <h3>No models in the arena yet</h3>
                   <p>Add at least two chat models (or specific variants), then enter one prompt for all of them.</p>
                   <button
                     type="button"
@@ -6120,7 +10575,7 @@ Output only the summary text, no preamble.`;
                   >Add model…</button>
                 </div>
               {:else}
-                <div class="compare-mode-row" role="group" aria-label="Comparison load mode">
+                <div class="compare-mode-row" role="group" aria-label="Arena load mode">
                   <label class="compare-mode-option" class:active={compareOneAtATime}>
                     <input type="radio" name="compare-mode" checked={compareOneAtATime}
                       onchange={() => { compareOneAtATime = true; }}
@@ -6224,8 +10679,14 @@ Output only the summary text, no preamble.`;
                           <button
                             type="button"
                             class="tiny"
-                            disabled={isComparing || comparePreparing}
+                            disabled={isComparing || comparePreparing || benchmarkRunInFlight}
                             onclick={async () => {
+                              const blocked = blockedByExclusivePoolRun();
+                              if (blocked) {
+                                statusMessage = blocked;
+                                return;
+                              }
+                              const release = beginPoolMutation();
                               try {
                                 statusMessage = `Loading ${slot.label}…`;
                                 await sdkLoadModel(
@@ -6233,10 +10694,12 @@ Output only the summary text, no preamble.`;
                                   "chat",
                                   slot.variantId ?? undefined,
                                 );
-                                await refreshModels();
+                                await refreshCatalogModels();
                                 statusMessage = `Loaded ${slot.label}`;
                               } catch (err: any) {
-                                statusMessage = `Load failed: ${err?.message || err}`;
+                                reportFailure("Load failed", err);
+                              } finally {
+                                release();
                               }
                             }}
                           >Load</button>
@@ -6244,7 +10707,7 @@ Output only the summary text, no preamble.`;
                         <button
                           type="button"
                           class="tiny"
-                          title="Remove from comparison"
+                          title="Remove from the arena"
                           disabled={isComparing || comparePreparing}
                           onclick={() => removeCompareSlot(slot.key)}
                         >×</button>
@@ -6319,7 +10782,7 @@ Output only the summary text, no preamble.`;
                                 {:else}
                                   <span class="badge small">Not downloaded</span>
                                 {/if}
-                                {#if state.pool.some((e) => e.variantId === v.id)}
+                                {#if loadedPoolEntries.some((e) => e.variantId === v.id)}
                                   <span class="badge small loaded">Loaded</span>
                                 {/if}
                               </div>
@@ -6340,7 +10803,7 @@ Output only the summary text, no preamble.`;
                 bind:value={comparePrompt}
                 placeholder="Enter the same prompt for all selected models… (Ctrl/⌘+Enter to send)"
                 rows={3}
-                disabled={isComparing || comparePreparing}
+                disabled={isComparing || comparePreparing || benchmarkRunInFlight}
                 onkeydown={(e) => {
                   if ((isMac ? e.metaKey : e.ctrlKey) && e.key === "Enter") {
                     e.preventDefault();
@@ -6352,23 +10815,39 @@ Output only the summary text, no preamble.`;
                 <button
                   type="submit"
                   class="compare-send"
-                  aria-label="Run comparison"
-                  disabled={compareSlots.length < 2 || !comparePrompt.trim() || isComparing || comparePreparing}
-                  title={compareSlots.length < 2 ? "Add at least 2 models" : "Send prompt to all selected models"}
+                  aria-label="Run the arena"
+                  disabled={compareSlots.length < 2 || !comparePrompt.trim() || isComparing || comparePreparing || benchmarkRunInFlight}
+                  title={benchmarkRunInFlight ? "A benchmark run is active — stop it before running the Arena" : compareSlots.length < 2 ? "Add at least 2 models" : "Send prompt to all selected models"}
                 >
                   {#if isComparing || comparePreparing}
                     <Icon name="loader" size={15} class="spin" />
-                    <span>{comparePreparing ? "Preparing…" : "Comparing…"}</span>
+                    <span>{comparePreparing ? "Preparing…" : "Running…"}</span>
                   {:else}
                     <Icon name="send" size={15} />
                     <span>Send</span>
                   {/if}
                 </button>
+                {#if isComparing}
+                  <button
+                    type="button"
+                    class="secondary small"
+                    onclick={stopComparison}
+                    disabled={compareStopRequested}
+                    title="Stop after the slot currently generating finishes; it may already be done in the background."
+                  >
+                    {compareStopRequested ? "Stopping…" : "Stop"}
+                  </button>
+                {/if}
                 {#if comparePrepStatus}
                   <span class="compare-prep-status">{comparePrepStatus}</span>
                 {/if}
-                {#if Object.keys(compareResults).length}
-                  <button type="button" class="secondary small" onclick={saveCurrentComparison}>Save</button>
+                {#if Object.keys(compareResults).length && !isComparing && !comparePreparing}
+                  <button
+                    type="button"
+                    class="secondary small"
+                    onclick={saveCurrentComparison}
+                    title={compareHistoryWritable ? undefined : "Saved arena run history could not be read; check App Log."}
+                  >Save</button>
                   <button type="button" class="secondary small" onclick={exportComparison}>Export MD</button>
                   <button
                     type="button"
@@ -6385,7 +10864,7 @@ Output only the summary text, no preamble.`;
 
           {#if Object.keys(compareResults).length}
             {#if compareReviewId}
-              <p class="muted small">Reviewing a saved comparison — ratings auto-save.</p>
+              <p class="muted small">Reviewing a saved arena run — ratings auto-save.</p>
             {/if}
             <div class="compare-results">
               {#each compareSlots as slot (slot.key)}
@@ -6393,14 +10872,31 @@ Output only the summary text, no preamble.`;
                 <div class="compare-card" class:has-error={!!r.error}>
                   <div class="card-header">
                     <strong title={slot.variantId || slot.alias}>{slot.label}</strong>
+                    {#if r.status === "stopped"}<span class="badge">stopped</span>{/if}
                     {#if r.latencyMs != null}<span class="badge">{r.latencyMs}ms</span>{/if}
+                    {#if r.nativeStreaming && r.ttftMs != null}<span class="badge" title="Time from request to first streamed text">{r.ttftMs}ms to first text</span>{/if}
                     {#if r.tokensOut != null}<span class="badge">{r.tokensOut} tok out</span>{/if}
+                    {#if r.servedVariantId && r.servedVariantId !== slot.variantId}
+                      <span class="badge" title="Actually-served variant">{r.servedVariantId}</span>
+                    {/if}
+                    {#if r.activeExecutionProvider}<span class="badge">{r.activeExecutionProvider}</span>{/if}
                   </div>
                   <div class="result-body">
                     {#if r.content}
                       <div class="result-content">
-                        <MessageRenderer content={r.content || ""} />
+                        <MessageRenderer
+                          content={r.content || ""}
+                          isStreaming={compareStreamingSlotKey === slot.key}
+                          assumeReasoning={getModelTags(slot.alias, state.models.find((m) => m.alias === slot.alias)?.info).includes("reasoning")}
+                          messageKey={`${compareRunGeneration}:${slot.key}`}
+                        />
                       </div>
+                      {#if r.status === "stopped" && typeof r.nativeStreaming === "boolean"}
+                        <p class="muted small">
+                          Stop was requested during this slot. Native generation may still have
+                          continued; the text above is what Flint received before Stop took effect.
+                        </p>
+                      {/if}
                     {:else if isComparing}
                       <em>Waiting…</em>
                     {:else}
@@ -6408,13 +10904,28 @@ Output only the summary text, no preamble.`;
                     {/if}
                   </div>
                   <div class="rating">
-                    <button type="button" class:selected={r.rating === "up"} onclick={() => setCompareRating(slot.key, "up")}>👍</button>
-                    <button type="button" class:selected={r.rating === "down"} onclick={() => setCompareRating(slot.key, "down")}>👎</button>
+                    <button type="button" class:selected={r.rating === "up"} disabled={isComparing || comparePreparing} onclick={() => setCompareRating(slot.key, "up")}>👍</button>
+                    <button type="button" class:selected={r.rating === "down"} disabled={isComparing || comparePreparing} onclick={() => setCompareRating(slot.key, "down")}>👎</button>
                   </div>
                 </div>
               {/each}
             </div>
           {/if}
+        </div>
+
+      {:else if currentView === "benchmark"}
+        <div class="view benchmark-view">
+          <BenchmarkPreview
+            availableModels={chatPickerModels}
+            activeRunId={benchmarkActiveRunId}
+            knownAttemptIds={benchmarkKnownAttemptIds}
+            runInFlight={benchmarkRunInFlight || isComparing || comparePreparing}
+            otherInferenceActive={otherInferenceActiveForUi}
+            runError={benchmarkRunError}
+            onStart={startBenchmarkPreviewRun}
+            onStop={stopBenchmarkPreviewRun}
+            onResume={resumeBenchmarkPreviewRun}
+          />
         </div>
 
       {:else if currentView === "settings"}
@@ -6426,7 +10937,7 @@ Output only the summary text, no preamble.`;
             {#if !isDev}
               <div class="setting-row">
                 <div class="setting-info">
-                  <span class="setting-name">Launch Flint when the OS starts</span>
+                  <span class="setting-name" id="os-autostart-label">Launch Flint when the OS starts</span>
                   <span class="setting-desc">Registers Flint as a login item (Windows) or LaunchAgent (macOS).</span>
                 </div>
                 {#if osAutoStartEnabled === null}
@@ -6437,23 +10948,53 @@ Output only the summary text, no preamble.`;
                       type="checkbox"
                       checked={osAutoStartEnabled === true}
                       onchange={handleOsAutoStartToggle}
+                      aria-labelledby="os-autostart-label"
                     />
                     <span class="toggle-track"></span>
                   </label>
                 {/if}
               </div>
             {/if}
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-name" id="keep-service-background-label">Keep service running in background</span>
+                <span class="setting-desc">
+                  While the local service is running, closing the window hides Flint to the system
+                  tray instead of quitting. Reopen or quit from the tray icon.
+                </span>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" bind:checked={keepServiceInBackground} onchange={persistChatCheckbox((v) => { keepServiceInBackground = v; })} aria-labelledby="keep-service-background-label" />
+                <span class="toggle-track"></span>
+              </label>
+            </div>
           </div>
 
           <div class="settings-section">
             <h3>Startup</h3>
             <div class="setting-row">
               <div class="setting-info">
-                <span class="setting-name">Start local service automatically</span>
+                <span class="setting-name" id="auto-start-service-label">Start local service automatically</span>
                 <span class="setting-desc">Load the default model and start the inference service when Flint opens</span>
               </div>
               <label class="toggle-switch">
-                <input type="checkbox" bind:checked={autoStartService} onchange={persistChat} />
+                <input type="checkbox" bind:checked={autoStartService} onchange={persistChatCheckbox((v) => { autoStartService = v; })} aria-labelledby="auto-start-service-label" />
+                <span class="toggle-track"></span>
+              </label>
+            </div>
+
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-name" id="auto-refresh-catalog-label">Check model catalog on startup</span>
+                <span class="setting-desc">
+                  Contacts Microsoft's Foundry Local model catalog over the network on startup to list
+                  models and check for updates. Turning this off skips recommendations and configured
+                  model preloads for that launch; manual refresh and model actions may contact it later.
+                  Accelerator setup is separate and may download runtime components automatically.
+                </span>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" bind:checked={autoRefreshCatalogOnStartup} onchange={persistChatCheckbox((v) => { autoRefreshCatalogOnStartup = v; setAutomaticCatalogRefreshEnabled(v); })} aria-labelledby="auto-refresh-catalog-label" />
                 <span class="toggle-track"></span>
               </label>
             </div>
@@ -6491,9 +11032,10 @@ Output only the summary text, no preamble.`;
             <p class="setting-note">
               Edit port or bind address below, then use <strong>Apply &amp; restart</strong> so the
               service rebinds. Draft changes are saved for the next start even if you do not apply yet.
-              The URL shown in Diagnostics / Integrations stays on
-              <code>http://127.0.0.1:&lt;port&gt;/v1</code> (loopback clients) even if the service
-              listens on <code>0.0.0.0</code> or a LAN address.
+              The URL shown in Diagnostics / Integrations is usually
+              <code>http://127.0.0.1:&lt;port&gt;/v1</code> for loopback clients even if the service
+              listens on <code>0.0.0.0</code> or a LAN address. WSL2 clients in default NAT mode
+              use the Windows host address from <strong>WSL clients</strong> instead.
             </p>
 
             <div class="setting-row">
@@ -6584,7 +11126,7 @@ Output only the summary text, no preamble.`;
                   type="button"
                   class="btn-primary"
                   onclick={applyNetworkSettings}
-                  disabled={networkApplyBusy || !networkSettingsDirty}
+                  disabled={networkApplyBusy || !networkSettingsDirty || benchmarkRunInFlight}
                   title={networkSettingsDirty
                     ? (state.serviceRunning ? 'Stop and restart the service with these settings' : 'Save for the next service start')
                     : 'No network changes to apply'}
@@ -6598,6 +11140,138 @@ Output only the summary text, no preamble.`;
                   {/if}
                 </button>
               </div>
+            </div>
+          </div>
+
+          {#if isWindowsHost}
+            <div class="settings-section">
+              <h3>WSL clients</h3>
+              <p class="setting-note">
+                Tools running inside WSL2 (OpenClaw, OpenCode, …) cannot reach
+                <code>127.0.0.1</code> on Windows in WSL's default NAT mode — the WSL VM has its own
+                loopback. WSL <strong>mirrored networking</strong> fixes this: the usual
+                <code>http://127.0.0.1:{appliedNetworkPort}/v1</code> URL works from inside WSL,
+                Flint keeps the recommended loopback-only bind, and automatic model loading keeps
+                working (it trusts loopback callers only).
+              </p>
+
+              <div class="setting-row">
+                <div class="setting-info">
+                  <span class="setting-name">Mirrored networking</span>
+                  <span class="setting-desc">
+                    {#if !wslStatus}
+                      Check whether WSL is installed and how it is configured.
+                    {:else if !wslStatus.wslPresent}
+                      WSL was not detected on this machine.
+                    {:else if wslStatus.mirrored}
+                      Enabled in <code>{wslStatus.configPath}</code> — WSL clients use
+                      <code>http://127.0.0.1:{appliedNetworkPort}/v1</code>.
+                    {:else if wslStatus.mirroredSupported}
+                      WSL {wslStatus.wslVersion} is in {wslStatus.networkingMode || 'NAT (default)'} mode —
+                      mirrored networking is available but not enabled.
+                    {:else}
+                      WSL detected{wslStatus.wslVersion ? ` (version ${wslStatus.wslVersion})` : ''}, but mirrored
+                      networking needs WSL 2.0+ (run <code>wsl --update</code>) on Windows 11 22H2 or newer.
+                      Use the manual NAT setup below instead.
+                    {/if}
+                  </span>
+                </div>
+                <div class="network-apply-actions">
+                  <button type="button" class="btn-secondary" onclick={refreshWslStatus} disabled={wslBusy}>
+                    {wslBusy ? 'Working…' : wslStatus ? 'Re-check' : 'Check WSL'}
+                  </button>
+                  {#if wslStatus?.wslPresent && wslStatus.mirroredSupported && !wslStatus.mirrored}
+                    <button type="button" class="btn-primary" onclick={enableWslMirrored} disabled={wslBusy}>
+                      Enable mirrored networking
+                    </button>
+                  {/if}
+                  {#if wslRestartPending}
+                    <button type="button" class="btn-primary" onclick={restartWsl} disabled={wslBusy}>
+                      Restart WSL now
+                    </button>
+                  {/if}
+                </div>
+              </div>
+
+              {#if wslMessage}
+                <p class="setting-note">{wslMessage}</p>
+              {/if}
+              {#if wslRestartPending}
+                <div class="warning-banner">
+                  The config change applies when WSL restarts. "Restart WSL now" runs
+                  <code>wsl --shutdown</code>, which terminates every running WSL distro and anything
+                  inside them — or simply close your WSL terminals, and it applies the next time WSL starts.
+                </div>
+              {/if}
+
+              <div class="setting-col">
+                <button
+                  type="button"
+                  class="btn-secondary"
+                  onclick={() => (wslNatHelpOpen = !wslNatHelpOpen)}
+                >{wslNatHelpOpen ? 'Hide' : 'Show'} manual setup (keep NAT mode)</button>
+                {#if wslNatHelpOpen}
+                  <div class="setting-note">
+                    <p>
+                      To keep NAT mode instead, WSL clients must connect to the Windows host address
+                      rather than loopback:
+                    </p>
+                    <ol>
+                      <li>
+                        Inside WSL, find the host address:
+                        <code>ip route show default | awk '&#123;print $3&#125;'</code>
+                        (typically <code>172.x.x.1</code>; it can change between reboots).
+                      </li>
+                      <li>
+                        Set <strong>Bind address</strong> above to <code>0.0.0.0</code> and use
+                        <strong>Apply &amp; restart</strong> — with the loopback-only bind, the service
+                        is unreachable from WSL.
+                      </li>
+                      <li>
+                        Allow the port through Windows Firewall, scoped to the WSL adapter so it stays
+                        closed to the rest of the LAN (admin PowerShell):<br />
+                        <code>New-NetFirewallRule -DisplayName "Flint WSL" -Direction Inbound -Protocol TCP -LocalPort {appliedNetworkPort} -InterfaceAlias "vEthernet (WSL)" -Action Allow</code><br />
+                        On newer builds the adapter is named <code>vEthernet (WSL (Hyper-V firewall))</code> —
+                        check <code>Get-NetAdapter</code> if the rule does not take.
+                      </li>
+                      <li>
+                        Point the WSL tool at <code>http://&lt;host address&gt;:{appliedNetworkPort}/v1</code>.
+                      </li>
+                      <li>
+                        Load the model in Flint first: requests that do not arrive over loopback are
+                        served, but never trigger an automatic model load.
+                      </li>
+                    </ol>
+                  </div>
+                {/if}
+              </div>
+            </div>
+          {/if}
+
+          <div class="settings-section">
+            <h3>Preview features</h3>
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-name" id="benchmark-preview-label">Benchmark Preview</span>
+                <span class="setting-desc">
+                  Adds a "Benchmark" entry under Build for measured, repeatable multi-model runs
+                  (distinct from Model Arena's one-shot side-by-side compare). Early preview —
+                  off by default.
+                  {#if benchmarkRunInFlight}
+                    <br /><strong>Disabled while a benchmark run is active</strong> — stop the run first.
+                  {/if}
+                </span>
+              </div>
+              <label class="toggle-switch">
+                <input
+                  type="checkbox"
+                  bind:checked={benchmarkPreviewEnabled}
+                  onchange={persistChatCheckbox((v) => { benchmarkPreviewEnabled = v; })}
+                  disabled={benchmarkRunInFlight}
+                  aria-labelledby="benchmark-preview-label"
+                />
+                <span class="toggle-track"></span>
+              </label>
             </div>
           </div>
 
@@ -6654,6 +11328,48 @@ Output only the summary text, no preamble.`;
                   {/if}
                 </dd>
               </div>
+              <div class="about-row">
+                <dt>Updates</dt>
+                <dd>
+                  <span aria-live="polite">
+                    {#if updateCheckState === "checking"}
+                      <span class="muted">Checking…</span>
+                    {:else if availableUpdate}
+                      <strong>v{availableUpdate.version} available</strong>
+                      {#if updateInstallState === "downloading"}
+                        <span class="muted small"> · downloading{updateDownloadPercent != null ? ` ${updateDownloadPercent}%` : ""}</span>
+                      {:else if updateInstallState === "ready"}
+                        <span class="muted small"> · ready to restart</span>
+                      {:else if updateInstallState === "deferred"}
+                        <span class="muted small"> · deferred</span>
+                      {:else if updateInstallError}
+                        <span class="about-bad"> · {updateInstallError}</span>
+                      {/if}
+                    {:else if updateCheckError}
+                      <span class="about-bad">Check failed: {updateCheckError}</span>
+                    {:else if updateCheckState === "current"}
+                      <span class="muted">No update available</span>
+                    {:else}
+                      <span class="muted">Not checked</span>
+                    {/if}
+                    {#if updateCheckAt && updateCheckState !== "checking"}
+                      <span class="muted small"> · checked {new Date(updateCheckAt).toLocaleString()}</span>
+                    {/if}
+                  </span>
+                  <button type="button" class="tiny" onclick={() => refreshUpdateStatus()} disabled={updateCheckBusy}>
+                    {updateCheckBusy ? "Checking…" : "Check"}
+                  </button>
+                  {#if availableUpdate && updateInstallState !== "ready" && updateInstallState !== "downloading"}
+                    <button type="button" class="tiny" onclick={() => installAvailableUpdate()}>Install</button>
+                    <a class="tiny" href={`https://github.com/joelst/flint/releases/tag/v${availableUpdate.version}`} target="_blank" rel="noopener noreferrer">View release</a>
+                    <button type="button" class="tiny" onclick={() => deferAvailableUpdate()}>Later</button>
+                  {/if}
+                  {#if updateInstallState === "ready"}
+                    <button type="button" class="tiny" onclick={() => restartToApplyUpdate()}>Restart to update</button>
+                    <button type="button" class="tiny" onclick={() => deferAvailableUpdate()}>Later</button>
+                  {/if}
+                </dd>
+              </div>
             </dl>
             <p class="about-links">
               <a href="https://github.com/joelst/flint/releases" target="_blank" rel="noopener noreferrer">Releases</a>
@@ -6682,9 +11398,10 @@ Output only the summary text, no preamble.`;
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+Shift+N</td><td>New conversation</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+1</td><td>Chat</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+2</td><td>Models</td></tr>
-            <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+3</td><td>Audio</td></tr>
+            <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+3</td><td>Voice</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+4</td><td>Monitor</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+5</td><td>Integrations</td></tr>
+            <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+6</td><td>Model Arena</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+,</td><td>Settings</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+B</td><td>Toggle sidebar</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+Space</td><td>Toggle dictation</td></tr>
@@ -6718,12 +11435,17 @@ Output only the summary text, no preamble.`;
     --panel-bg: #222226;
     --border: #2a2a30;
     --accent: #3b82f6;
+    --accent-fg: #111;
     --muted: #888;
     --success: #4ade80;
     --warning: #facc15;
     --danger: #f87171;
     --input-bg: #222226;
-    --button-bg: #001639;
+    /* #001639 sits on #1a1a1e and the button disappears. This blue stays
+       distinct and keeps white text above 4.5:1. */
+    --button-bg: #1d4ed8;
+    --danger-btn-bg: #9f1239;
+    --danger-btn-fg: #fff;
     --subtle-bg: #2a2a30;
     --messages-bg: #16161a;
   }
@@ -6736,12 +11458,15 @@ Output only the summary text, no preamble.`;
     --panel-bg: #ffffff;
     --border: #dee2e6;
     --accent: #0d6efd;
+    --accent-fg: #fff;
     --muted: #6c757d;
     --success: #198754;
     --warning: #ffc107;
     --danger: #dc3545;
     --input-bg: #ffffff;
     --button-bg: #001639;
+    --danger-btn-bg: #9f1239;
+    --danger-btn-fg: #fff;
     --subtle-bg: #e9ecef;
     --messages-bg: #f8f9fa;
   }
@@ -6757,6 +11482,11 @@ Output only the summary text, no preamble.`;
 
   :global(html) {
     height: 100%;
+    color-scheme: dark;
+  }
+
+  :global(html[data-theme="light"]) {
+    color-scheme: light;
   }
 
   :global(body) {
@@ -6776,9 +11506,11 @@ Output only the summary text, no preamble.`;
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 16px;
     padding: 12px 20px;
     background: var(--header-bg);
     border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
   }
 
   .brand {
@@ -6801,6 +11533,9 @@ Output only the summary text, no preamble.`;
     align-items: center;
     gap: 16px;
     font-size: 0.875rem;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
   }
 
   .status {
@@ -6890,20 +11625,86 @@ Output only the summary text, no preamble.`;
     padding: 1px 6px;
     background: var(--panel-bg);
     border: 1px solid var(--border);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  /* Global `button` is white text on the navy fill. Tiny buttons sit on the
+     panel instead, which is white in light mode — without this the Check and
+     Recheck labels disappear. Danger buttons keep their own color. */
+  button.tiny:not(.danger-btn) {
+    color: var(--fg);
+  }
+
+  a.tiny {
+    font-size: 0.7rem;
+    padding: 1px 6px;
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: inherit;
+    text-decoration: none;
+    border-radius: 3px;
+  }
+
+  a.tiny:hover {
+    color: var(--accent);
+  }
+
+  .inline-spinner,
+  .startup-spinner {
+    display: inline-block;
+    border-radius: 999px;
+    border: 2px solid color-mix(in srgb, var(--accent) 25%, var(--border));
+    border-top-color: var(--accent);
+    animation: spin 0.8s linear infinite;
+    flex: 0 0 auto;
+  }
+
+  .inline-spinner {
+    width: 0.75rem;
+    height: 0.75rem;
   }
 
   .theme-toggle {
-    font-size: 1rem;
     background: none;
+    color: var(--fg);
     border: 1px solid var(--border);
-    padding: 2px 6px;
+    width: 30px;
+    height: 30px;
+    padding: 0;
     border-radius: 4px;
     cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .theme-toggle-icon {
+    display: block;
+    width: 16px;
+    height: 16px;
+    flex: 0 0 auto;
   }
 
   .status-msg {
     color: var(--muted);
     font-size: 0.8rem;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
   }
 
   .body {
@@ -6919,6 +11720,30 @@ Output only the summary text, no preamble.`;
     padding: 12px 0;
     display: flex;
     flex-direction: column;
+  }
+
+  .nav-section + .nav-section {
+    margin-top: 10px;
+  }
+
+  .nav-section-label {
+    display: block;
+    padding: 8px 20px 4px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .sidebar.collapsed .nav-section-label {
+    display: none;
+  }
+
+  .sidebar.collapsed .nav-section + .nav-section {
+    margin-top: 2px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
   }
 
   .nav-item {
@@ -7045,24 +11870,39 @@ Output only the summary text, no preamble.`;
 
   .toolbar {
     display: flex;
+    align-items: center;
     gap: 12px;
     margin-bottom: 16px;
+  }
+
+  /* Search, sort, and Add share one height. The text field's padding otherwise
+     makes it taller than the native select and the button, and the row then
+     hangs the field below the rest. */
+  .toolbar > input,
+  .toolbar > select,
+  .toolbar > button {
+    box-sizing: border-box;
+    height: 36px;
+    margin: 0;
+  }
+
+  .toolbar > input,
+  .toolbar > select {
+    padding: 0 12px;
+  }
+
+  .toolbar > button {
+    padding: 0 12px;
+    display: inline-flex;
     align-items: center;
   }
 
-  .toolbar input[type="text"] {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .sort-label {
-    color: var(--muted);
-    font-size: 0.8rem;
-    white-space: nowrap;
-  }
-
-  .sort-select {
-    white-space: nowrap;
+  .toolbar select {
+    flex: 0 0 auto;
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    border-radius: 6px;
   }
 
   .accel-panel {
@@ -7092,6 +11932,14 @@ Output only the summary text, no preamble.`;
     color: var(--fg);
     border: 1px solid var(--border);
     border-radius: 6px;
+  }
+
+  /* The panel fill is --subtle-bg, and a plain secondary button uses that same
+     fill with no border, so Recheck Providers disappears in both themes. */
+  .accel-panel-row button.accel-recheck {
+    background: var(--panel-bg);
+    color: var(--fg);
+    border: 1px solid var(--muted);
   }
 
   .ep-status-list {
@@ -7124,23 +11972,39 @@ Output only the summary text, no preamble.`;
     border-radius: 6px;
   }
 
+  /* Native <select> closed boxes otherwise keep the OS light combobox look. Specific
+     pickers override padding/min-width; color-scheme on html themes the open list. */
+  select {
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    border-radius: 6px;
+  }
+
+  /* The flex/padding above is for text fields sharing a row with a button. Toggles are
+     sized by the UA; letting them flex-grow strands the box far left of its label text. */
+  input[type="checkbox"],
+  input[type="radio"] {
+    flex: 0 0 auto;
+    padding: 0;
+  }
+
   .model-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
     gap: 12px;
   }
 
-  /* Family group headings span the full grid row. */
   .family-heading {
     grid-column: 1 / -1;
     margin: 8px 0 0;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+    color: var(--muted);
     font-size: 0.8rem;
     font-weight: 600;
-    text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: var(--muted);
-    border-bottom: 1px solid var(--border);
-    padding-bottom: 4px;
+    text-transform: uppercase;
   }
 
   .family-heading:first-child {
@@ -7444,6 +12308,22 @@ Output only the summary text, no preamble.`;
   button.small {
     font-size: 0.75rem;
     padding: 2px 8px;
+    /* `.small` later sets muted text for labels. On a button that wins over
+       `color: white`, so Unload / Clear display / Export sit gray on the navy fill. */
+    color: #fff;
+  }
+
+  button.small.secondary {
+    color: var(--fg);
+  }
+
+  button.small.danger-btn {
+    color: var(--danger-btn-fg);
+  }
+
+  button.small.update-btn {
+    background: var(--subtle-bg);
+    color: var(--fg);
   }
 
   /* Startup toggle */
@@ -7467,9 +12347,10 @@ Output only the summary text, no preamble.`;
     font-family: monospace;
   }
 
-  .danger-btn {
-    border-color: #ef4444;
-    color: #fecaca;
+  button.danger-btn {
+    background: var(--danger-btn-bg);
+    border: 1px solid var(--danger-btn-bg);
+    color: var(--danger-btn-fg);
   }
 
   .model-details {
@@ -7509,6 +12390,38 @@ Output only the summary text, no preamble.`;
     color: var(--muted);
   }
 
+  .byom-modal .modal-body { display: flex; flex-direction: column; gap: 10px; }
+  .byom-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .byom-row label { font-size: 0.8rem; color: var(--muted); min-width: 74px; }
+  .byom-row input[type="text"] { flex: 1; min-width: 180px; }
+  .byom-path {
+    font-family: var(--mono, monospace);
+    font-size: 0.75rem;
+    color: var(--muted);
+    overflow-wrap: anywhere;
+    flex: 1;
+  }
+  .byom-verdict { border-radius: 6px; padding: 8px 10px; font-size: 0.82rem; }
+  .byom-verdict.good { border: 1px solid var(--border); }
+  .byom-verdict.bad { border: 1px solid #b4462e; }
+  .byom-verdict ul { margin: 6px 0 0; padding-left: 18px; }
+  .byom-facts { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 6px; color: var(--muted); }
+  .byom-warnings, .byom-errors { margin: 0; padding-left: 18px; font-size: 0.78rem; }
+  .byom-warnings { color: var(--muted); }
+  .byom-errors { color: #d2603f; }
+  .byom-template { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .byom-tpl-field { display: flex; flex-direction: column; gap: 3px; }
+  .byom-tpl-field label { font-size: 0.75rem; color: var(--muted); text-transform: capitalize; }
+  .byom-tpl-field textarea {
+    font-family: var(--mono, monospace);
+    font-size: 0.75rem;
+    resize: vertical;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .byom-footer { display: flex; gap: 8px; justify-content: flex-end; padding: 10px 14px; }
+  .sort-label { font-size: 0.8rem; color: var(--muted); }
+
   button {
     padding: 6px 12px;
     background: var(--button-bg);
@@ -7529,6 +12442,92 @@ Output only the summary text, no preamble.`;
     color: var(--fg);
   }
 
+  .storage-error {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 0 0 12px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--danger, #e5484d) 45%, var(--border));
+    background: color-mix(in srgb, var(--danger, #e5484d) 10%, var(--panel-bg));
+    max-width: 720px;
+    font-size: 13px;
+  }
+
+  /* The export succeeded. Neutral by default, and cautioned rather than alarmed when the
+     result carries a caveat, so a written file is never dressed as a failed one. */
+  .storage-notice {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 0 0 12px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--panel-bg);
+    max-width: 720px;
+    font-size: 13px;
+  }
+
+  .storage-notice.caution {
+    border-color: color-mix(in srgb, var(--warning, #f5a524) 45%, var(--border));
+    background: color-mix(in srgb, var(--warning, #f5a524) 10%, var(--panel-bg));
+  }
+
+  .storage-risk {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 0 0 12px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--warning, #f5a524) 50%, var(--border));
+    background: color-mix(in srgb, var(--warning, #f5a524) 12%, var(--panel-bg));
+    max-width: 720px;
+    font-size: 13px;
+  }
+
+  .storage-risk-text {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .storage-risk-action {
+    flex: 0 0 auto;
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--panel-bg);
+    color: var(--fg);
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .storage-risk-action:hover:not(:disabled) {
+    background: var(--panel-hover, rgba(127, 127, 127, 0.12));
+  }
+
+  .storage-risk-action:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+  .storage-error-text {
+    flex: 1;
+  }
+  .storage-error-dismiss {
+    flex: none;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    cursor: pointer;
+    font-size: 12px;
+    padding: 4px 10px;
+  }
   .first-run-coach {
     margin: 0 0 16px;
     padding: 14px 16px;
@@ -7704,6 +12703,18 @@ Output only the summary text, no preamble.`;
     font-size: 0.85rem;
   }
 
+  .startup-status {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 0.75rem;
+  }
+
+  .startup-spinner {
+    width: 1.15rem;
+    height: 1.15rem;
+  }
+
   .placeholder {
     color: var(--muted);
     font-style: italic;
@@ -7766,6 +12777,8 @@ Output only the summary text, no preamble.`;
 
   .primary-chat {
     background: #22c55e !important;
+    /* Dark text is 8.29:1 on this green; white is only 2.28:1. */
+    color: #111 !important;
   }
 
   /* Chat styles */
@@ -7773,6 +12786,36 @@ Output only the summary text, no preamble.`;
     display: flex;
     flex-direction: column;
     height: 100%;
+  }
+
+  .playground-subnav {
+    display: inline-flex;
+    gap: 2px;
+    padding: 3px;
+    margin-bottom: 10px;
+    background: var(--sidebar-bg);
+    border-radius: 8px;
+    width: fit-content;
+  }
+
+  .playground-subnav button {
+    border: none;
+    background: none;
+    padding: 5px 14px;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    color: var(--muted);
+    cursor: pointer;
+  }
+
+  .playground-subnav button:hover {
+    color: var(--fg);
+  }
+
+  .playground-subnav button.active {
+    background: var(--panel-bg);
+    color: var(--fg);
+    font-weight: 600;
   }
 
   .chat-container {
@@ -7787,6 +12830,7 @@ Output only the summary text, no preamble.`;
     display: flex;
     flex-direction: column;
     min-width: 0;
+    min-height: 0;
   }
 
   .chat-header {
@@ -7840,6 +12884,11 @@ Output only the summary text, no preamble.`;
     background: var(--panel-bg);
     color: var(--fg);
     font-size: 0.9rem;
+  }
+
+  /* The stored model is missing locally; the option itself reads "(not installed)". */
+  .chat-model-picker select.unavailable {
+    border-color: var(--warning);
   }
 
   .messages {
@@ -7981,6 +13030,20 @@ Output only the summary text, no preamble.`;
     overflow: visible;
   }
 
+  /* Persona, context, and image attach share one control height. The image
+     button otherwise inherits the tall primary fill and the select stays a
+     native stub beside it. */
+  .chat-controls .persona-btn,
+  .chat-controls .context-control input[type="range"],
+  .chat-controls .vision-attach > button:not(.mini),
+  .chat-controls .recommend-btn {
+    box-sizing: border-box;
+    height: 32px;
+    margin: 0;
+    border-radius: 6px;
+    font-size: 0.8125rem;
+  }
+
   .persona-control {
     display: flex;
     align-items: center;
@@ -8050,9 +13113,15 @@ Output only the summary text, no preamble.`;
     font-style: italic;
   }
 
-  .vision-attach button {
-    padding: 4px 8px;
-    font-size: 0.75rem;
+  .vision-attach > button:not(.mini) {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 10px;
+    background: var(--input-bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    font-weight: 500;
   }
 
   .image-strip {
@@ -8630,8 +13699,10 @@ Output only the summary text, no preamble.`;
   }
 
   .vision-attach {
-    margin-bottom: 8px;
-    font-size: 0.8rem;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.8125rem;
   }
 
   .service-panel {
@@ -8747,10 +13818,6 @@ Output only the summary text, no preamble.`;
     gap: 10px;
   }
 
-  .integration-card.status-unsupported {
-    opacity: 0.85;
-  }
-
   .integration-card-head {
     display: flex;
     align-items: flex-start;
@@ -8796,24 +13863,11 @@ Output only the summary text, no preamble.`;
     border-color: rgba(241, 196, 15, 0.4);
   }
 
-  .status-badge.status-unsupported {
-    background: rgba(231, 76, 60, 0.1);
-    color: #e74c3c;
-    border-color: rgba(231, 76, 60, 0.4);
-  }
-
   .integration-desc {
     margin: 0;
     color: var(--muted);
     font-size: 13px;
     line-height: 1.5;
-  }
-
-  .integration-empty {
-    margin: 0;
-    color: var(--muted);
-    font-style: italic;
-    font-size: 13px;
   }
 
   .snippet-block {
@@ -8996,23 +14050,23 @@ Output only the summary text, no preamble.`;
 
   .timestamp-note {
     margin: 0 0 8px;
-    font-size: 0.75rem;
     color: var(--muted);
+    font-size: 0.75rem;
     line-height: 1.4;
   }
 
   .transcript-segments {
-    list-style: none;
+    max-height: 260px;
     margin: 0;
     padding: 0;
-    max-height: 260px;
     overflow: auto;
+    list-style: none;
   }
 
   .transcript-segment {
     display: grid;
     grid-template-columns: 108px 1fr;
-    gap: 0 10px;
+    gap: 10px;
     padding: 4px 0;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 40%, transparent);
     font-size: 0.85rem;
@@ -9024,14 +14078,13 @@ Output only the summary text, no preamble.`;
   }
 
   .segment-time {
+    padding-top: 2px;
     color: var(--muted);
     font-family: monospace;
     font-size: 0.75rem;
     white-space: nowrap;
-    padding-top: 2px;
   }
 
-  /* A boundary snapped to a detected pause is more trustworthy than a hard split. */
   .segment-time.snapped {
     color: var(--accent);
   }
@@ -9040,14 +14093,33 @@ Output only the summary text, no preamble.`;
     word-break: break-word;
   }
 
+  .transcript-gaps {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    margin-top: 10px;
+    padding: 8px;
+    border: 1px solid color-mix(in srgb, var(--warning) 55%, var(--border));
+    border-radius: 6px;
+    color: var(--fg);
+    font-size: 0.75rem;
+  }
+
+  .transcript-gaps small {
+    flex-basis: 100%;
+    color: var(--muted);
+  }
+
   /* Persona dropdown + manager */
   .persona-btn {
-    padding: 2px 8px;
-    font-size: 1rem;
+    width: 32px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     line-height: 1;
-    background: var(--subtle-bg);
+    background: var(--input-bg);
     border: 1px solid var(--border);
-    border-radius: 4px;
     cursor: pointer;
     color: var(--fg);
   }
@@ -9066,26 +14138,42 @@ Output only the summary text, no preamble.`;
 
   .context-control {
     display: flex;
+    flex: 1 1 420px;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 4px;
-    font-size: 0.7rem;
+    gap: 8px;
+    min-width: 0;
+    max-width: 100%;
+    font-size: 0.8125rem;
     color: var(--muted);
   }
-  .context-control select {
-    font-size: 0.7rem;
+  .context-control label {
+    line-height: 1;
+  }
+  .context-control input[type="range"] {
     background: var(--input-bg);
     border: 1px solid var(--border);
     color: var(--fg);
-    border-radius: 3px;
-    padding: 1px 4px;
+    padding: 0 8px;
+    width: 120px;
+    min-width: 80px;
+    flex: 0 1 120px;
+  }
+  .context-range-bound {
+    font-size: 0.6875rem;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .context-turns-value {
+    font-variant-numeric: tabular-nums;
+    font-size: 0.8125rem;
+    white-space: nowrap;
   }
   .context-estimate {
-    font-family: ui-monospace, monospace;
-    font-size: 0.65rem;
-    background: color-mix(in srgb, var(--success) 15%, var(--panel-bg));
-    color: var(--success);
-    padding: 1px 5px;
-    border-radius: 3px;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.8125rem;
+    color: var(--muted);
+    white-space: nowrap;
   }
 
   .context-model-info {
@@ -9104,18 +14192,65 @@ Output only the summary text, no preamble.`;
     font-weight: 600;
   }
 
-  .recommend-btn {
-    font-size: 0.6rem;
-    padding: 1px 5px;
-    background: var(--panel-bg);
-    color: var(--accent);
+  .genparams-control {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.8125rem;
+    color: var(--muted);
+  }
+  .genparams-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    background: var(--input-bg);
+    color: var(--fg);
     border: 1px solid var(--border);
-    border-radius: 2px;
+    cursor: pointer;
+    font-size: 0.8125rem;
+  }
+  .genparams-panel {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+  .genparams-panel label {
+    line-height: 1;
+  }
+  .genparams-panel input[type="range"] {
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    padding: 0 8px;
+    width: 100px;
+    min-width: 70px;
+  }
+  .genparams-panel input[type="number"] {
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    padding: 0 6px;
+    width: 70px;
+  }
+  .genparams-value {
+    font-variant-numeric: tabular-nums;
+    font-size: 0.8125rem;
+    white-space: nowrap;
+  }
+
+  .recommend-btn {
+    padding: 0 8px;
+    background: var(--input-bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
     cursor: pointer;
   }
   .recommend-btn:hover {
     background: var(--accent);
-    color: white;
+    color: var(--accent-fg);
   }
 
   .context-meter {
@@ -9381,6 +14516,30 @@ Output only the summary text, no preamble.`;
   .ram-bar-track.ram-bar-unknown { opacity: 0.45; }
   .ram-bar-fill { height: 100%; background: var(--accent); border-radius: 5px; transition: width 0.4s ease; }
   .ram-bar-fill.ram-warn { background: #ef4444; }
+
+/* Memory watchdog banner — sits under the header so it is visible from every tab. */
+.memory-alert {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 1rem;
+  background: color-mix(in srgb, #f59e0b 18%, var(--bg));
+  border-bottom: 1px solid color-mix(in srgb, #f59e0b 45%, transparent);
+  color: var(--text);
+  font-size: 0.85rem;
+}
+.memory-alert-text { display: flex; flex-direction: column; gap: 0.1rem; flex: 1; min-width: 0; }
+.memory-alert-text strong { font-weight: 600; }
+.memory-alert-text span { color: var(--text-muted); font-size: 0.8rem; }
+
+.memory-settings { display: flex; flex-direction: column; gap: 0.5rem; }
+.memory-setting { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; }
+.memory-setting.disabled { opacity: 0.55; }
+.memory-setting input[type="number"] { width: 4.5rem; flex: 0 0 auto; padding: 4px 8px; }
+.memory-divider { width: 100%; border: 0; border-top: 1px solid var(--border); margin: 0.35rem 0; }
+
+.pool-idle-cell { font-variant-numeric: tabular-nums; color: var(--text-muted); }
+.pool-priority-select { font-size: 0.78rem; padding: 0.15rem 0.3rem; }
   .ram-bar-fill.ram-npu { background: #a855f7; }
   .ram-bar-fill.ram-muted { background: color-mix(in srgb, var(--muted) 55%, transparent); }
   .resource-note { font-size: 0.72rem; color: var(--muted); margin: 6px 0 0; }
@@ -9428,7 +14587,7 @@ Output only the summary text, no preamble.`;
   .setting-name { font-size: 0.9rem; font-weight: 500; }
   .setting-desc { font-size: 0.77rem; color: var(--muted); line-height: 1.4; }
   .setting-loading { color: var(--muted); font-size: 0.85rem; flex-shrink: 0; }
-  .settings-view select { padding: 5px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 0.85rem; cursor: pointer; min-width: 140px; flex-shrink: 0; }
+  .settings-view select { padding: 5px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); font-size: 0.85rem; cursor: pointer; min-width: 140px; flex-shrink: 0; }
 
   /* Toggle switch */
   .toggle-switch { position: relative; display: inline-flex; align-items: center; cursor: pointer; flex-shrink: 0; }

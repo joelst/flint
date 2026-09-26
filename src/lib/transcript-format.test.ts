@@ -5,6 +5,8 @@ import {
   formatClockTime,
   buildSrt,
   buildSrtTimingMetadata,
+  buildCaptionDownloads,
+  buildTimingDisclaimer,
   buildVtt,
   buildTimestampedText,
   TIMESTAMP_DISCLAIMER,
@@ -12,8 +14,22 @@ import {
 } from './transcript-format';
 
 const segments: TranscriptSegment[] = [
-  { index: 0, startSec: 0, endSec: 27.5, text: 'The quick brown fox.' },
-  { index: 1, startSec: 27.5, endSec: 61.25, text: 'Jumps over the lazy dog.' },
+  {
+    index: 0,
+    startSec: 0,
+    endSec: 27.5,
+    text: 'The quick brown fox.',
+    startBoundary: 'recording-edge',
+    endBoundary: 'pause-snapped',
+  },
+  {
+    index: 1,
+    startSec: 27.5,
+    endSec: 61.25,
+    text: 'Jumps over the lazy dog.',
+    startBoundary: 'pause-snapped',
+    endBoundary: 'recording-edge',
+  },
 ];
 
 describe('time formatting', () => {
@@ -64,10 +80,10 @@ describe('buildSrt', () => {
   });
 
   it('provides truthful timing-source metadata to accompany SRT exports', () => {
-    const note = buildSrtTimingMetadata();
+    const note = buildSrtTimingMetadata(segments);
     expect(note).toContain('Flint');
-    expect(note).toContain('silence detection is used when available');
-    expect(note).toContain('fixed-length windows as a fallback');
+    expect(note).toContain('snapped to detected pauses');
+    expect(note).toContain('not timings reported by the model');
     expect(note.endsWith('\n')).toBe(true);
   });
 
@@ -84,6 +100,15 @@ describe('buildSrt', () => {
     ]);
     expect(srt).toContain('1\n00:00:00,000 --> 00:00:28,000\nFirst window.');
     expect(srt).toContain('2\n00:00:28,000 --> 00:00:52,000\nSecond window.');
+  });
+
+  it('keeps displayed ranges non-overlapping when overlap text differs only by punctuation', () => {
+    const srt = buildSrt([
+      { index: 0, startSec: 0, endSec: 28, text: 'Wait, what?' },
+      { index: 1, startSec: 24, endSec: 52, text: 'Wait what happens next.' },
+    ]);
+    expect(srt).toContain('1\n00:00:00,000 --> 00:00:28,000\nWait, what?');
+    expect(srt).toContain('2\n00:00:28,000 --> 00:00:52,000\nWait what happens next.');
   });
 
   it('orders cues chronologically even if given out of order', () => {
@@ -116,11 +141,38 @@ describe('buildVtt', () => {
 describe('buildTimestampedText', () => {
   it('renders a readable bracketed listing', () => {
     expect(buildTimestampedText(segments)).toBe(
-      '[0:00 - 0:27] The quick brown fox.\n[0:27 - 1:01] Jumps over the lazy dog.',
+      `${buildTimingDisclaimer(segments)}\n\n` +
+        '[0:00 - 0:27] The quick brown fox.\n[0:27 - 1:01] Jumps over the lazy dog.',
     );
   });
 
   it('returns empty string for no usable segments', () => {
     expect(buildTimestampedText([])).toBe('');
+  });
+
+  describe('timing provenance and caption delivery', () => {
+    it('describes mixed snapped and fixed boundaries truthfully', () => {
+      const note = buildTimingDisclaimer([
+        segments[0],
+        {
+          ...segments[1],
+          startBoundary: 'pause-snapped',
+          endBoundary: 'fixed-window',
+        },
+      ]);
+      expect(note).toContain('Some boundaries were snapped');
+      expect(note).toContain('unsnapped boundaries remain approximate fixed-window cuts');
+    });
+
+    it('builds an SRT and timing note with one stable filename stem', () => {
+      const files = buildCaptionDownloads('srt', segments, new Date('2026-09-26T05:00:00.000Z'));
+      expect(files).toHaveLength(2);
+      expect(files.map((file) => file.fileName)).toEqual([
+        'flint-transcription-2026-09-26T05-00-00-000Z.srt',
+        'flint-transcription-2026-09-26T05-00-00-000Z.timing.txt',
+      ]);
+      expect(files[0].body).not.toContain(TIMESTAMP_DISCLAIMER);
+      expect(files[1].body).toContain(TIMESTAMP_DISCLAIMER);
+    });
   });
 });

@@ -9,6 +9,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { validateNativePayload } = require('./foundry-native-payload.cjs');
 
 const root = path.resolve(__dirname, '..');
 const binariesDir = path.join(root, 'src-tauri', 'binaries');
@@ -30,6 +31,17 @@ function stagedNodePath() {
   return path.join(binariesDir, `node-${triple}${ext}`);
 }
 
+// `ensure:node --target <triple>` stages the binary for the build target, which
+// need not be the host. A cross-staged binary cannot be executed here, so skip
+// rather than report a misleading failure.
+function requestedTarget(argv) {
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === '--target') return argv[i + 1] || null;
+    if (argv[i].startsWith('--target=')) return argv[i].slice('--target='.length);
+  }
+  return process.env.FLINT_SMOKE_TARGET || null;
+}
+
 function run(bin, args, env = {}) {
   return spawnSync(bin, args, {
     cwd: root,
@@ -41,6 +53,14 @@ function run(bin, args, env = {}) {
 }
 
 function main() {
+  const target = requestedTarget(process.argv.slice(2));
+  if (target && target !== hostTriple()) {
+    console.log(
+      `Skipping smoke: staged for ${target}, host is ${hostTriple()} (cannot execute a cross-built Node).`,
+    );
+    return;
+  }
+
   const nodeBin = stagedNodePath();
   if (!fs.existsSync(nodeBin)) {
     console.error(`Missing ${path.relative(root, nodeBin)} — run: npm run ensure:node`);
@@ -64,6 +84,13 @@ function main() {
   const sdkRoot = path.join(root, 'node_modules', 'foundry-local-sdk');
   if (!fs.existsSync(sdkRoot)) {
     console.error('  ✗ node_modules/foundry-local-sdk missing — npm install');
+    process.exit(1);
+  }
+  const payload = validateNativePayload(sdkRoot, `${process.platform}-${process.arch}`);
+  if (payload.invalid.length > 0) {
+    console.error(
+      `  ✗ incomplete Foundry native payload: ${payload.invalid.map((file) => file.name).join(', ')}`,
+    );
     process.exit(1);
   }
 
@@ -92,18 +119,14 @@ console.log('FoundryLocalManager:', typeof mod.FoundryLocalManager);
 const plat = process.platform + '-' + process.arch;
 const coreName =
   process.platform === 'win32'
-    ? 'Microsoft.AI.Foundry.Local.Core.dll'
+    ? 'foundry_local.dll'
     : process.platform === 'darwin'
-      ? 'Microsoft.AI.Foundry.Local.Core.dylib'
-      : 'Microsoft.AI.Foundry.Local.Core.so';
-const core = path.join(
-  root,
-  'node_modules',
-  'foundry-local-sdk',
-  'foundry-local-core',
-  plat,
-  coreName,
-);
+      ? 'libfoundry_local.dylib'
+      : 'libfoundry_local.so';
+// SDK 2.x takes the directory that holds foundry_local.* plus ONNX Runtime as
+// libraryPath; the file path is only used to prove the native is there.
+const libraryPath = path.join(root, 'node_modules', 'foundry-local-sdk', 'prebuilds', plat);
+const core = path.join(libraryPath, coreName);
 if (!fs.existsSync(core)) {
   console.error('core missing (run npm run ensure:foundry):', core);
   process.exit(5);
@@ -114,7 +137,7 @@ try {
   const mgr = mod.FoundryLocalManager.create({
     appName: 'flint-smoke',
     logLevel: 'error',
-    libraryPath: core,
+    libraryPath,
   });
   console.log('manager create: ok', !!mgr);
 } catch (e) {

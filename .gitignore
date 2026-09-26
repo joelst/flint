@@ -9,6 +9,13 @@ node_modules
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 testResults.xml
+.npm-cache/*
+
+# Test coverage output (npm run test:coverage)
+/coverage/
+
+# Foundry sidecar debug logs (e.g. 26.08.log)
+*.log
 
 # Local Windows signing certificate artifacts
 flint-selfsigned.pfx
@@ -16,6 +23,8 @@ flint-selfsigned.pfx.base64
 
 # Bundled Node runtime (Spike A: scripts/ensure-bundled-node.cjs)
 /runtime/node-staging/
+/runtime/foundry-native-cache/
+/runtime/foundry-native-baseline.json
 /src-tauri/binaries/node-*
 /src-tauri/binaries/node.VERSION
 /src-tauri/binaries/node.README.txt

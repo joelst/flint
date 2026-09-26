@@ -1,0 +1,2993 @@
+/**
+ * Behavioural tests for the sidecar transport's delivery and settlement guarantees.
+ *
+ * These drive the real `sdk.ts` against a fake child process. The classification tests in
+ * `operation-outcome.test.ts` check what a given outcome is *called*; these check which outcome
+ * a given sequence of events actually produces, and — the part classification cannot express —
+ * whether a request that has been answered can still reach the child afterwards.
+ *
+ * The module keeps process state in module scope, so every test re-imports it through
+ * `vi.resetModules()` to get a clean transport.
+ */
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+/**
+ * Handles for the fake child.
+ *
+ * The methods are **stable**: they delegate to whichever child is currently spawned rather than
+ * being reassigned when one is. That matters because `obj.method(await x)` looks the property up
+ * before the awaited argument resolves, so a rebinding harness would silently capture the
+ * pre-spawn no-op and the test would hang rather than fail.
+ */
+type Harness = {
+  /** Lines written by the transport, in order. */
+  writes: string[];
+  /** Reject the next write instead of resolving it. */
+  failNextWrite: (err: string) => void;
+  /** Feed a line to the transport's stdout parser. */
+  emitStdout: (obj: unknown) => void;
+  /** Fire the child's `close` event. */
+  emitClose: (data?: unknown) => void;
+  /** Fire the child's `error` event. */
+  emitError: (err: string) => void;
+  /** Feed a chunk to the transport's stderr classifier. */
+  emitStderr: (text: string) => void;
+  /** Resolve the pending `spawn()` call. Only set when spawning is gated. */
+  releaseSpawn?: () => void;
+  /** True once `spawn()` has been entered, so a test can act during a gated startup. */
+  spawnEntered: boolean;
+  spawnCount: number;
+  killCount: number;
+  hangKill: boolean;
+};
+
+let harness: Harness;
+/** The live child's event hooks, replaced on every spawn; the harness delegates to these. */
+/** Module-scoped so it survives the child being replaced. */
+let pendingWriteError: string | null = null;
+/** When set, `spawn()` waits on this so a test can act while startup is still in flight. */
+let gateSpawn = false;
+let readyProtocolVersion = 1;
+let nativeGeneration = 0;
+let nativePhase = 'stopped';
+let listenerRegistrationCount = 0;
+let rejectListenerRegistration: number | null = null;
+let gateNativeWrite = false;
+let nativeWriteStarted = false;
+let releaseNativeWrite: (() => void) | null = null;
+const nativeListeners = new Map<string, Set<(event: { payload: any }) => void>>();
+
+function makeCommand() {
+  return {
+    async execute() {
+      return { code: 0, stdout: 'v22.11.0', stderr: '' };
+    },
+  };
+}
+
+function emitNative(event: string, payload: any) {
+  for (const listener of nativeListeners.get(event) ?? []) listener({ payload });
+}
+
+function nativeListenerCount() {
+  return [...nativeListeners.values()].reduce((total, listeners) => total + listeners.size, 0);
+}
+
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: async (command: string, args: any = {}) => {
+    if (command === 'runtime_status') {
+      return { generation: nativeGeneration, phase: nativePhase };
+    }
+    if (command === 'runtime_start') {
+      harness.spawnEntered = true;
+      harness.spawnCount += 1;
+      nativeGeneration += 1;
+      nativePhase = 'starting';
+      const generation = nativeGeneration;
+      if (gateSpawn) {
+        await new Promise<void>((resolve) => {
+          harness.releaseSpawn = resolve;
+        });
+      }
+      queueMicrotask(() =>
+        emitNative('flint://runtime-stdout', {
+          generation,
+          message: { ready: true, protocolVersion: readyProtocolVersion },
+        }),
+      );
+      return { generation };
+    }
+    if (command === 'runtime_mark_ready') {
+      if (args.generation !== nativeGeneration || nativePhase !== 'starting') return false;
+      nativePhase = 'ready';
+      return true;
+    }
+    if (command === 'runtime_write') {
+      harness.writes.push(`${args.frame}\n`);
+      nativeWriteStarted = true;
+      if (gateNativeWrite) {
+        await new Promise<void>((resolve) => {
+          releaseNativeWrite = resolve;
+        });
+      }
+      if (pendingWriteError) {
+        const error = pendingWriteError;
+        pendingWriteError = null;
+        throw new Error(error);
+      }
+      return;
+    }
+    if (command === 'runtime_force_stop') {
+      harness.killCount += 1;
+      if (harness.hangKill) return new Promise(() => {});
+      nativePhase = 'shuttingDown';
+      return true;
+    }
+    throw new Error(`unexpected invoke command: ${command}`);
+  },
+}));
+
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: async (event: string, listener: (event: { payload: any }) => void) => {
+    listenerRegistrationCount += 1;
+    if (listenerRegistrationCount === rejectListenerRegistration) {
+      throw new Error(`listener ${listenerRegistrationCount} failed`);
+    }
+    const listeners = nativeListeners.get(event) ?? new Set();
+    listeners.add(listener);
+    nativeListeners.set(event, listeners);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) nativeListeners.delete(event);
+    };
+  },
+}));
+
+vi.mock('@tauri-apps/plugin-shell', () => ({
+  Command: {
+    create: () => makeCommand(),
+    sidecar: () => makeCommand(),
+  },
+}));
+async function loadSdk() {
+  vi.resetModules();
+  harness = {
+    writes: [],
+    failNextWrite: (err: string) => {
+      pendingWriteError = err;
+    },
+    emitStdout: (obj) => {
+      const message = typeof obj === 'string' ? JSON.parse(obj) : obj;
+      emitNative('flint://runtime-stdout', { generation: nativeGeneration, message });
+    },
+    emitClose: (data) => {
+      nativePhase = 'exited';
+      emitNative('flint://runtime-exit', {
+        generation: nativeGeneration,
+        ...(data as any ?? { code: 1 }),
+      });
+    },
+    emitError: (err) => {
+      emitNative('flint://runtime-error', { generation: nativeGeneration, text: err });
+    },
+    emitStderr: (text) => {
+      emitNative('flint://runtime-stderr', { generation: nativeGeneration, text });
+    },
+    spawnEntered: false,
+    spawnCount: 0,
+    killCount: 0,
+    hangKill: false,
+  };
+  gateSpawn = false;
+  readyProtocolVersion = 1;
+  nativeGeneration = 0;
+  nativePhase = 'stopped';
+  listenerRegistrationCount = 0;
+  rejectListenerRegistration = null;
+  gateNativeWrite = false;
+  nativeWriteStarted = false;
+  releaseNativeWrite = null;
+  pendingWriteError = null;
+  nativeListeners.clear();
+  return await import('./sdk');
+}
+
+/**
+ * Let the transport reach its next observable state.
+ *
+ * Elapsed time is not a synchronization contract, so this drains the microtask queue repeatedly
+ * and only falls back to real time for the transport's own 100 ms startup poll. `waitFor` below
+ * is preferred wherever there is a condition to wait on.
+ */
+const settleStartup = () => new Promise((r) => setTimeout(r, 250));
+
+/**
+ * Wait until `cond` holds, polling the microtask queue.
+ *
+ * Bounded, and it reports what it was waiting for — a timeout here is a diagnosis rather than a
+ * bare "test timed out after 5000ms".
+ */
+async function waitFor(what: string, cond: () => boolean, timeoutMs = 3000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error(`Timed out waiting for: ${what}`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+/** Wait until a line for `cmd` has been written, and return its id. */
+async function waitForWrite(cmd: string, afterCount = 0): Promise<number> {
+  await waitFor(
+    `a ${cmd} line to be written`,
+    () => harness.writes.filter((w) => w.includes(cmd)).length > afterCount,
+  );
+  const line = harness.writes.filter((w) => w.includes(cmd))[afterCount];
+  return JSON.parse(line).id;
+}
+
+async function completeInitialization(
+  sdk: Awaited<ReturnType<typeof loadSdk>>,
+  logLevel = 'info',
+): Promise<void> {
+  const initialized = sdk.initializeSDK({ autoStartService: false, logLevel });
+  const initId = await waitForWrite('init');
+  harness.emitStdout({ id: initId, result: 'initialized' });
+  const logId = await waitForWrite('setLogLevel');
+  harness.emitStdout({ id: logId, result: {} });
+  const listId = await waitForWrite('listModels');
+  harness.emitStdout({ id: listId, result: [] });
+  const statusId = await waitForWrite('getStatus');
+  harness.emitStdout({ id: statusId, result: { serviceRunning: false, endpoint: null } });
+  const poolId = await waitForWrite('poolStatus');
+  harness.emitStdout({ id: poolId, result: { models: [] } });
+  const finalStatusId = await waitForWrite('getStatus', 1);
+  harness.emitStdout({ id: finalStatusId, result: { serviceRunning: false, endpoint: null } });
+  await expect(initialized).resolves.toBe(true);
+}
+
+/** Capture a rejection without triggering an unhandled-rejection warning. */
+function capture<T>(p: Promise<T>) {
+  const box: { err?: any; done: boolean } = { done: false };
+  const tracked = p.then(
+    () => {
+      box.done = true;
+    },
+    (e) => {
+      box.done = true;
+      box.err = e;
+    },
+  );
+  return { box, tracked };
+}
+
+function sdkSnapshot(sdk: { getSDKState: () => { subscribe: (fn: (state: any) => void) => () => void } }) {
+  let snapshot: any;
+  const unsubscribe = sdk.getSDKState().subscribe((state) => {
+    snapshot = state;
+  });
+  unsubscribe();
+  return snapshot;
+}
+
+beforeEach(() => {
+  vi.spyOn(console, 'log').mockImplementation(() => {});
+  vi.spyOn(console, 'warn').mockImplementation(() => {});
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+describe('sidecar stderr classification', () => {
+  it('records tagged diagnostics at the declared level instead of as errors', async () => {
+    const sdk = await loadSdk();
+    const request = capture(sdk.getEps());
+    const id = await waitForWrite('getEps');
+    harness.emitStderr('FLINT_DIAG info dependency log message\nnative boom\n');
+    const snapshot = sdkSnapshot(sdk);
+    expect(snapshot.logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ level: 'info', message: 'dependency log message', source: 'sdk' }),
+      expect.objectContaining({ level: 'error', message: 'native boom', source: 'sdk' }),
+    ]));
+    harness.emitStdout({ id, result: [] });
+    await request.tracked;
+  });
+
+  it('classifies a tagged diagnostic split across stderr chunks as one info line', async () => {
+    const sdk = await loadSdk();
+    const request = capture(sdk.getEps());
+    const id = await waitForWrite('getEps');
+    harness.emitStderr('FLINT_DIAG in');
+    harness.emitStderr('fo dependency log message\n');
+    const snapshot = sdkSnapshot(sdk);
+    expect(snapshot.logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ level: 'info', message: 'dependency log message', source: 'sdk' }),
+    ]));
+    expect(snapshot.logs.some((entry: { message: string }) => entry.message.includes('FLINT_DIAG'))).toBe(false);
+    harness.emitStdout({ id, result: [] });
+    await request.tracked;
+  });
+});
+
+describe('catalog queries', () => {
+  it('propagates a failed STT catalog query instead of returning an empty list', async () => {
+    const sdk = await loadSdk();
+    const request = capture(sdk.getSTTModels());
+    const id = await waitForWrite('getSTTModels');
+    harness.emitStdout({ id, error: 'catalog unavailable' });
+    await request.tracked;
+    expect(request.box.err?.message).toContain('catalog unavailable');
+  });
+});
+
+describe('reconcileBenchmarkExclusive', () => {
+  it('releases a benchmarkExclusive lease the sidecar reports left over from a previous page instance', async () => {
+    const sdk = await loadSdk();
+    const request = sdk.reconcileBenchmarkExclusive();
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, result: { benchmarkExclusive: true } });
+    const releaseId = await waitForWrite('setBenchmarkExclusive');
+    expect(JSON.parse(harness.writes.find((w) => w.includes('setBenchmarkExclusive'))!).exclusive).toBe(false);
+    harness.emitStdout({ id: releaseId, result: { exclusive: false } });
+    expect(await request).toBe(true);
+  });
+
+  it('does not send a release when the sidecar reports no exclusive lease is held', async () => {
+    const sdk = await loadSdk();
+    const request = sdk.reconcileBenchmarkExclusive();
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, result: { benchmarkExclusive: false } });
+    expect(await request).toBe(false);
+    expect(harness.writes.some((w) => w.includes('setBenchmarkExclusive'))).toBe(false);
+  });
+
+  it('skips the release when isSafeToRelease turns false between the status probe and the release, so a legitimate concurrent acquire is not torn down', async () => {
+    const sdk = await loadSdk();
+    let safe = true;
+    const request = sdk.reconcileBenchmarkExclusive(() => safe);
+    const statusId = await waitForWrite('getStatus');
+    // Simulate this page claiming exclusivity itself in the window between the status probe
+    // landing and the release being sent -- the guard must be re-checked at that point, not
+    // only captured once at call time.
+    safe = false;
+    harness.emitStdout({ id: statusId, result: { benchmarkExclusive: true } });
+    expect(await request).toBe(false);
+    expect(harness.writes.some((w) => w.includes('setBenchmarkExclusive'))).toBe(false);
+  });
+
+  it('is best-effort: a failed status probe resolves false instead of throwing, so startup is not blocked', async () => {
+    const sdk = await loadSdk();
+    const request = capture(sdk.reconcileBenchmarkExclusive());
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, error: 'sidecar unavailable' });
+    await request.tracked;
+    expect(request.box.err).toBeUndefined();
+  });
+
+  it('invokes onReleaseDispatched with the release call the instant it is dispatched, before it settles, so a caller can track it against an overlapping newer acquire', async () => {
+    const sdk = await loadSdk();
+    let dispatchedCall: Promise<unknown> | null = null;
+    let dispatchedSettled = false;
+    const onReleaseDispatched = (releaseCall: Promise<unknown>) => {
+      dispatchedCall = releaseCall;
+      void releaseCall.then(() => { dispatchedSettled = true; });
+    };
+    const request = sdk.reconcileBenchmarkExclusive(undefined, onReleaseDispatched);
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, result: { benchmarkExclusive: true } });
+    const releaseId = await waitForWrite('setBenchmarkExclusive');
+    // The callback must have already fired by the time the release is on the wire -- a caller
+    // relying on it to register the call with a pending-release tracker (see +page.svelte's
+    // `pendingExclusiveRelease`) needs it available before the release settles, not after.
+    expect(dispatchedCall).not.toBeNull();
+    expect(dispatchedSettled).toBe(false);
+    harness.emitStdout({ id: releaseId, result: { exclusive: false } });
+    expect(await request).toBe(true);
+    await dispatchedCall;
+    expect(dispatchedSettled).toBe(true);
+  });
+});
+
+describe('getLastAppliedMemorySettingsSeq', () => {
+  it('returns the sidecar-reported watermark, letting a caller seed its own counter above it', async () => {
+    const sdk = await loadSdk();
+    const request = sdk.getLastAppliedMemorySettingsSeq();
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, result: { lastAppliedMemorySettingsSeq: 7 } });
+    expect(await request).toBe(7);
+  });
+
+  it('is best-effort: a failed status probe resolves null instead of throwing', async () => {
+    const sdk = await loadSdk();
+    const request = sdk.getLastAppliedMemorySettingsSeq();
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, error: 'sidecar unavailable' });
+    await expect(request).resolves.toBeNull();
+  });
+});
+
+describe('applyMemorySettings', () => {
+  it('surfaces stale: false for an ordinary, freshly-installed call', async () => {
+    const sdk = await loadSdk();
+    const request = sdk.applyMemorySettings([], undefined, 5);
+    const id = await waitForWrite('applyMemorySettings');
+    harness.emitStdout({ id, result: { config: { maxResident: 4 }, stale: false } });
+    const poolId = await waitForWrite('poolStatus');
+    harness.emitStdout({ id: poolId, result: { models: [] } });
+    await expect(request).resolves.toEqual({ config: { maxResident: 4 }, stale: false });
+    expect(harness.writes.some((line) => line.includes('"cmd":"listModels"'))).toBe(false);
+  });
+
+  it('surfaces stale: true when the sidecar refuses an out-of-order call, instead of hiding it behind ok: true', async () => {
+    const sdk = await loadSdk();
+    const request = sdk.applyMemorySettings([], undefined, 1);
+    const id = await waitForWrite('applyMemorySettings');
+    harness.emitStdout({ id, result: { config: { maxResident: 4 }, stale: true } });
+    const poolId = await waitForWrite('poolStatus');
+    harness.emitStdout({ id: poolId, result: { models: [] } });
+    await expect(request).resolves.toEqual({ config: { maxResident: 4 }, stale: true });
+    expect(harness.writes.some((line) => line.includes('"cmd":"listModels"'))).toBe(false);
+  });
+});
+
+describe('initialization', () => {
+  it('passes the configured log level through initialization', async () => {
+    const sdk = await loadSdk();
+    const initialized = sdk.initializeSDK({ autoStartService: false, logLevel: 'debug' });
+    const initId = await waitForWrite('init');
+    harness.emitStdout({ id: initId, result: 'initialized' });
+    const logId = await waitForWrite('setLogLevel');
+    const logLine = JSON.parse(harness.writes.find((line) => line.includes('"cmd":"setLogLevel"'))!);
+    expect(logLine.level).toBe('debug');
+    harness.emitStdout({ id: logId, result: {} });
+    const listId = await waitForWrite('listModels');
+    harness.emitStdout({ id: listId, result: [] });
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, result: { serviceRunning: false, endpoint: null } });
+    const poolId = await waitForWrite('poolStatus');
+    harness.emitStdout({ id: poolId, result: { models: [] } });
+    const finalStatusId = await waitForWrite('getStatus', 1);
+    harness.emitStdout({ id: finalStatusId, result: { serviceRunning: false, endpoint: null } });
+    await expect(initialized).resolves.toBe(true);
+  });
+});
+
+describe('settlement revokes permission to dispatch', () => {
+  it('publishes independent process and manager readiness', async () => {
+    const sdk = await loadSdk();
+    const request = capture(sdk.getEps());
+    await waitForWrite('getEps');
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+
+    expect(snapshot.runtime.process).toBe('ready');
+    expect(snapshot.runtime.manager).toBe('uninitialized');
+    expect(snapshot.runtime.generation).toBeGreaterThan(0);
+    harness.emitClose({ code: 1 });
+    await request.tracked;
+    expect(snapshot.runtime.process).toBe('crashed');
+    expect(snapshot.runtime.manager).toBe('unknown');
+    unsubscribe();
+  });
+
+  it('rejects a sidecar with an incompatible handshake before sending requests', async () => {
+    const sdk = await loadSdk();
+    readyProtocolVersion = 999;
+    const { box, tracked } = capture(sdk.getEps());
+    await tracked;
+    expect(box.err).toBeDefined();
+    expect(String(box.err.message)).toContain('Unsupported sidecar protocol version');
+    expect(harness.writes).toHaveLength(0);
+  });
+
+  it('does not claim a failed-start child terminated without a close event', async () => {
+    const sdk = await loadSdk();
+    readyProtocolVersion = 999;
+    const request = capture(sdk.getEps());
+    await request.tracked;
+    expect(harness.killCount).toBe(1);
+
+    const result = await sdk.quitRuntime({ killTimeoutMs: 10 });
+    expect(harness.killCount).toBe(2);
+    expect(result.termination).toBe('unconfirmed');
+  });
+
+  it('uses close evidence even when a late-spawn kill acknowledgement hangs', async () => {
+    const sdk = await loadSdk();
+    gateSpawn = true;
+    harness.hangKill = true;
+    const request = capture(sdk.getEps());
+    await waitFor('the send path to reach the gated spawn', () => harness.spawnEntered);
+
+    const quitting = sdk.quitRuntime({ gracefulTimeoutMs: 100, killTimeoutMs: 100 });
+    harness.releaseSpawn?.();
+    await waitFor('the late-spawn kill request', () => harness.killCount >= 1);
+    harness.emitClose({ code: null, signal: 'SIGTERM' });
+
+    await request.tracked;
+    await expect(quitting).resolves.toMatchObject({ termination: 'confirmed' });
+  });
+
+  it('never writes a request that was drained while the runtime was starting', async () => {
+    const sdk = await loadSdk();
+    gateSpawn = true;
+
+    const { box, tracked } = capture(sdk.deleteModel({ alias: 'm' } as any));
+    await waitFor('the send path to reach the gated spawn', () => harness.spawnEntered);
+    expect(harness.writes).toHaveLength(0);
+
+    // The child dies while the request waits. This settles it as never-dispatched.
+    harness.emitError('boom');
+    await tracked;
+    expect(box.done).toBe(true);
+    expect(box.err).toBeDefined();
+    expect(box.err.certainty).toBe('failed');
+
+    // Now let startup finish. The answered request must not go on to write itself.
+    harness.releaseSpawn?.();
+    await settleStartup();
+    expect(harness.writes.filter((w) => w.includes('deleteModel'))).toHaveLength(0);
+  });
+
+  it('does not retain a child that closed before spawn resolved', async () => {
+    const sdk = await loadSdk();
+    gateSpawn = true;
+    const first = capture(sdk.getEps());
+    await waitFor('the first spawn to be pending', () => harness.spawnEntered);
+    harness.emitClose({ code: 1 });
+    harness.releaseSpawn?.();
+    await first.tracked;
+    expect(first.box.err).toBeDefined();
+
+    gateSpawn = false;
+    const retry = sdk.getEps();
+    const retryId = await waitForWrite('getEps');
+    harness.emitStdout({ id: retryId, result: [] });
+    await expect(retry).resolves.toEqual([]);
+    expect(harness.spawnCount).toBe(2);
+  });
+
+  it('does not adopt a previous generation event while its replacement starts', async () => {
+    const sdk = await loadSdk();
+    nativeGeneration = 1;
+    nativePhase = 'exited';
+    gateSpawn = true;
+
+    const request = sdk.getEps();
+    await waitFor('the replacement spawn to be pending', () => harness.spawnEntered);
+    emitNative('flint://runtime-exit', { generation: 1, code: 1 });
+    harness.releaseSpawn?.();
+
+    const requestId = await waitForWrite('getEps');
+    harness.emitStdout({ id: requestId, result: [] });
+    await expect(request).resolves.toEqual([]);
+    expect(harness.spawnCount).toBe(1);
+    expect(harness.killCount).toBe(0);
+  });
+
+  it('does not let reset authorize a native child whose start was already in flight', async () => {
+    const sdk = await loadSdk();
+    gateSpawn = true;
+    const request = capture(sdk.getEps());
+    await waitFor('the native start to be pending', () => harness.spawnEntered);
+
+    sdk.resetSDK();
+    await request.tracked;
+    harness.releaseSpawn?.();
+    await waitFor('the revoked generation to be terminated', () => harness.killCount === 1);
+    await settleStartup();
+    expect(harness.writes).toHaveLength(0);
+  });
+
+  it('cleans up each listener acquired before a later registration fails', async () => {
+    const sdk = await loadSdk();
+    rejectListenerRegistration = 3;
+
+    const failed = capture(sdk.getEps());
+    await failed.tracked;
+    expect(String(failed.box.err?.message)).toContain('listener 3 failed');
+    expect(nativeListenerCount()).toBe(0);
+
+    rejectListenerRegistration = null;
+    const retry = sdk.getEps();
+    const requestId = await waitForWrite('getEps');
+    harness.emitStdout({ id: requestId, result: [] });
+    await expect(retry).resolves.toEqual([]);
+    expect(nativeListenerCount()).toBe(4);
+  });
+
+  it('removes a reset generation listener set when its close arrives later', async () => {
+    const sdk = await loadSdk();
+    const request = capture(sdk.getEps());
+    await waitForWrite('getEps');
+    expect(nativeListenerCount()).toBe(4);
+
+    sdk.resetSDK();
+    await request.tracked;
+    expect(nativeListenerCount()).toBe(4);
+    harness.emitClose({ code: 1 });
+    expect(nativeListenerCount()).toBe(0);
+  });
+
+  it('does not remove current listeners for an unrelated stale exit', async () => {
+    const sdk = await loadSdk();
+    const request = sdk.getEps();
+    const requestId = await waitForWrite('getEps');
+    expect(nativeListenerCount()).toBe(4);
+
+    emitNative('flint://runtime-exit', { generation: 0, code: 1 });
+    expect(nativeListenerCount()).toBe(4);
+    harness.emitStdout({ id: requestId, result: [] });
+    await expect(request).resolves.toEqual([]);
+  });
+
+  it('rejects an oversized mutation before native dispatch', async () => {
+    const sdk = await loadSdk();
+    try {
+      vi.stubGlobal(
+        'TextEncoder',
+        class {
+          encode() {
+            return { byteLength: sdk.NATIVE_RUNTIME_MAX_FRAME_BYTES + 1 };
+          }
+        },
+      );
+
+      const request = capture(sdk.deleteModel({ alias: 'm' } as any));
+      await request.tracked;
+      expect(request.box.err?.certainty).toBe('failed');
+      expect(String(request.box.err?.message)).toContain('transport limit');
+      expect(harness.writes).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('rechecks authorization inside the ordered native write queue', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    gateNativeWrite = true;
+
+    const first = sdk.getEps();
+    await waitFor('the first native write to block', () => nativeWriteStarted);
+    let secondId = -1;
+    const second = capture(
+      sdk.chatCompletionStream(
+        'm',
+        [{ role: 'user', content: 'hi' }],
+        () => {},
+        undefined,
+        (id) => {
+          secondId = id;
+        },
+      ),
+    );
+    await waitFor('the queued request id', () => secondId > 0);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sdk.cancelBeforeDispatch(secondId)).toBe(true);
+    await second.tracked;
+
+    gateNativeWrite = false;
+    releaseNativeWrite?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(harness.writes.filter((line) => line.includes('chatCompletion'))).toHaveLength(0);
+    const firstId = JSON.parse(harness.writes.find((line) => line.includes('"getEps"'))!).id;
+    harness.emitStdout({ id: firstId, result: [] });
+    await expect(first).resolves.toEqual([]);
+  });
+
+  it('rejects writes exceeding queue backpressure before dispatch', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    gateNativeWrite = true;
+
+    const first = sdk.getEps();
+    await waitFor('the first native write to block', () => nativeWriteStarted);
+
+    const queued: Array<ReturnType<typeof capture>> = [];
+    for (let i = 0; i < sdk.MAX_QUEUED_WRITES; i += 1) {
+      queued.push(capture(sdk.deleteModel({ alias: `queued-${i}` } as any)));
+    }
+
+    const overflow = capture(sdk.deleteModel({ alias: 'overflow' } as any));
+    await overflow.tracked;
+    expect(overflow.box.err?.cmd).toBe('deleteModel');
+    expect(overflow.box.err?.certainty).toBe('failed');
+    expect(String(overflow.box.err?.message)).toContain('write queue is full');
+    expect(harness.writes.filter((line) => line.includes('overflow'))).toHaveLength(0);
+
+    gateNativeWrite = false;
+    releaseNativeWrite?.();
+    const firstId = JSON.parse(harness.writes.find((line) => line.includes('"getEps"'))!).id;
+    harness.emitStdout({ id: firstId, result: [] });
+    await expect(first).resolves.toEqual([]);
+    sdk.resetSDK();
+    await Promise.all(queued.map((q) => q.tracked));
+  });
+
+  it('allows priority writes to bypass write queue limits when full of active requests', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    gateNativeWrite = true;
+
+    const first = sdk.getEps();
+    first.catch(() => {});
+    await waitFor('the first native write to block', () => nativeWriteStarted);
+
+    // Fill queue to MAX_QUEUED_WRITES with uncancelled active requests
+    const queued: Array<ReturnType<typeof capture>> = [];
+    for (let i = 0; i < sdk.MAX_QUEUED_WRITES; i += 1) {
+      queued.push(capture(sdk.deleteModel({ alias: `active-${i}` } as any)));
+    }
+
+    // A normal non-priority write is rejected
+    const normal = capture(sdk.deleteModel({ alias: 'rejected-normal' } as any));
+    await normal.tracked;
+    expect(normal.box.err?.certainty).toBe('failed');
+    expect(String(normal.box.err?.message)).toContain('write queue is full');
+
+    // A priority command (shutdownRuntime) bypasses the full queue and enqueues directly without cancelling the active queue
+    const shutdownPromise = sdk.sendInternal('shutdownRuntime');
+
+    // A second priority shutdown command while one is already queued is rejected to keep priority bounded
+    const secondShutdown = capture(sdk.sendInternal('shutdownRuntime'));
+    await secondShutdown.tracked;
+    expect(secondShutdown.box.err?.certainty).toBe('failed');
+    expect(String(secondShutdown.box.err?.message)).toContain('priority lifecycle shutdown is already queued');
+
+    gateNativeWrite = false;
+    releaseNativeWrite?.();
+
+    const shutdownId = await waitForWrite('shutdownRuntime');
+    expect(shutdownId).toBeDefined();
+    harness.emitStdout({ id: shutdownId, result: { listenersClosed: true, modelsUnloaded: [] } });
+
+    await expect(shutdownPromise).resolves.toEqual({
+      id: shutdownId,
+      result: { listenersClosed: true, modelsUnloaded: [] },
+    });
+    sdk.resetSDK();
+    await Promise.all(queued.map((q) => q.tracked));
+  });
+
+  it('prunes cancelled or settled requests from write queue so they do not consume capacity', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    gateNativeWrite = true;
+
+    const first = sdk.getEps();
+    first.catch(() => {});
+    await waitFor('the first native write to block', () => nativeWriteStarted);
+
+    const queuedIds: number[] = [];
+    const queued: Array<ReturnType<typeof capture>> = [];
+    for (let i = 0; i < sdk.MAX_QUEUED_WRITES; i += 1) {
+      let reqId = 0;
+      queued.push(
+        capture(
+          sdk.chatCompletionStream('m', [{ role: 'user', content: `msg-${i}` }], () => {}, undefined, (id) => {
+            reqId = id;
+          }),
+        ),
+      );
+      queuedIds.push(reqId);
+    }
+
+    // Cancel the first queued item while it's still waiting in write queue
+    expect(sdk.cancelBeforeDispatch(queuedIds[0])).toBe(true);
+    await queued[0].tracked;
+    expect(queued[0].box.err?.certainty).toBe('cancelled');
+
+    // Because queuedIds[0] was pruned, enqueuing one more item should now succeed rather than fail
+    const next = capture(sdk.deleteModel({ alias: 'allowed-after-prune' } as any));
+    // It should not immediately fail with "write queue is full"
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(next.box.err).toBeUndefined();
+
+    gateNativeWrite = false;
+    releaseNativeWrite?.();
+    const firstId = JSON.parse(harness.writes.find((line) => line.includes('"getEps"'))!).id;
+    harness.emitStdout({ id: firstId, result: [] });
+    await expect(first).resolves.toEqual([]);
+    sdk.resetSDK();
+    await Promise.all(queued.slice(1).map((q) => q.tracked));
+    await next.tracked;
+  });
+
+  it('rejects writes exceeding aggregate queued-byte limit before dispatch', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    gateNativeWrite = true;
+
+    const first = sdk.getEps();
+    first.catch(() => {});
+    await waitFor('the first native write to block', () => nativeWriteStarted);
+
+    let firstLarge!: ReturnType<typeof capture>;
+    let secondLarge!: ReturnType<typeof capture>;
+    try {
+      const simulatedSize = 60 * 1024 * 1024;
+      vi.stubGlobal(
+        'TextEncoder',
+        class {
+          encode() {
+            return { byteLength: simulatedSize };
+          }
+        },
+      );
+
+      firstLarge = capture(
+        sdk.chatCompletionStream('m', [{ role: 'user', content: 'large-1' }], () => {}),
+      );
+      secondLarge = capture(
+        sdk.chatCompletionStream('m', [{ role: 'user', content: 'large-2' }], () => {}),
+      );
+      // Third large write would exceed MAX_QUEUED_WRITE_BYTES (160MB: 60 + 60 + 60 = 180MB > 160MB)
+      const thirdLarge = capture(
+        sdk.chatCompletionStream('m', [{ role: 'user', content: 'large-3' }], () => {}),
+      );
+      await thirdLarge.tracked;
+
+      expect(thirdLarge.box.err?.certainty).toBe('failed');
+      expect(String(thirdLarge.box.err?.message)).toContain('bytes queued');
+      expect(harness.writes.filter((line) => line.includes('large-3'))).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+
+    gateNativeWrite = false;
+    releaseNativeWrite?.();
+    const firstId = JSON.parse(harness.writes.find((line) => line.includes('"getEps"'))!).id;
+    harness.emitStdout({ id: firstId, result: [] });
+    await expect(first).resolves.toEqual([]);
+    sdk.resetSDK();
+    await Promise.all([firstLarge.tracked, secondLarge.tracked]);
+  });
+
+  it('keeps transport failure sticky even if a ready frame arrives later', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    harness.writes.length = 0;
+
+    harness.emitError('stdout framing failed');
+    harness.emitStdout({ ready: true, protocolVersion: 1 });
+    const request = capture(sdk.getEps());
+    await request.tracked;
+    expect(request.box.err).toBeDefined();
+    expect(harness.writes).toHaveLength(0);
+  });
+
+  it('reports a drained undispatched request as failed, not unknown', async () => {
+    const sdk = await loadSdk();
+    gateSpawn = true;
+    const { box, tracked } = capture(sdk.deleteModel({ alias: 'm' } as any));
+    await waitFor('the send path to reach the gated spawn', () => harness.spawnEntered);
+    harness.emitClose({ code: 1 });
+    await tracked;
+    // Nothing was written, so the negative is provable even for a mutation.
+    expect(box.err.certainty).toBe('failed');
+  });
+});
+
+describe('cancellation before dispatch', () => {
+  it('settles immediately rather than waiting for a startup that never finishes', async () => {
+    const sdk = await loadSdk();
+    gateSpawn = true;
+
+    let assigned = -1;
+    const { box, tracked } = capture(
+      sdk.chatCompletionStream(
+        'm',
+        [{ role: 'user', content: 'hi' }],
+        () => {},
+        undefined,
+        (id: number) => {
+          assigned = id;
+        },
+      ),
+    );
+    await waitFor('the send path to reach the gated spawn', () => harness.spawnEntered);
+    expect(assigned).toBeGreaterThan(0);
+
+    expect(sdk.cancelBeforeDispatch(assigned)).toBe(true);
+    await tracked;
+
+    // Settled while startup is still gated — the caller is not left waiting on it.
+    expect(box.err.certainty).toBe('cancelled');
+    expect(harness.writes.filter((w) => w.includes('chatCompletion'))).toHaveLength(0);
+  });
+
+  it('does not later downgrade an accepted cancellation to failed', async () => {
+    const sdk = await loadSdk();
+    gateSpawn = true;
+    let assigned = -1;
+    const { box, tracked } = capture(
+      sdk.chatCompletionStream(
+        'm',
+        [{ role: 'user', content: 'hi' }],
+        () => {},
+        undefined,
+        (id: number) => {
+          assigned = id;
+        },
+      ),
+    );
+    await waitFor('the send path to reach the gated spawn', () => harness.spawnEntered);
+    sdk.cancelBeforeDispatch(assigned);
+    await tracked;
+    expect(box.err.certainty).toBe('cancelled');
+
+    // Startup then fails outright. The already-settled request keeps its answer.
+    harness.releaseSpawn?.();
+    harness.emitClose({ code: 1 });
+    await settleStartup();
+    expect(box.err.certainty).toBe('cancelled');
+  });
+
+  it('refuses to cancel a request that has already been written', async () => {
+    const sdk = await loadSdk();
+    let assigned = -1;
+    const p = sdk.chatCompletionStream(
+      'm',
+      [{ role: 'user', content: 'hi' }],
+      () => {},
+      undefined,
+      (id: number) => {
+        assigned = id;
+      },
+    );
+    await settleStartup();
+    expect(harness.writes.some((w) => w.includes('chatCompletion'))).toBe(true);
+
+    // Dispatched, so stopping it is a request to the sidecar, not a transport guarantee.
+    expect(sdk.cancelBeforeDispatch(assigned)).toBe(false);
+
+    harness.emitStdout({ id: assigned, result: { choices: [] } });
+    await expect(p).resolves.toBeDefined();
+  });
+});
+
+describe('progress stall notices', () => {
+  it('reports a quiet catalog-triggered provider registration and retires the notice on failure', async () => {
+    const sdk = await loadSdk();
+    vi.useFakeTimers();
+
+    const refresh = capture(sdk.refreshModels());
+    await vi.advanceTimersByTimeAsync(0);
+    const listLine = harness.writes.find((line) => line.includes('"listModels"'))!;
+    const listId = JSON.parse(listLine).id;
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sdkSnapshot(sdk).logs.at(-1)?.message).toBe(
+      'Catalog refresh: no progress reported for 60 seconds. Still awaiting the runtime; Flint has not cancelled this request.',
+    );
+
+    harness.emitStdout({ id: listId, error: 'catalog unavailable' });
+    await refresh.tracked;
+    expect(refresh.box.err.message).toContain('catalog unavailable');
+    const notices = sdkSnapshot(sdk).logs.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sdkSnapshot(sdk).logs).toHaveLength(notices);
+  });
+
+  it('uses a runtime-neutral quiet-period notice for effectful catalog commands', async () => {
+    const sdk = await loadSdk();
+    vi.useFakeTimers();
+
+    const load = capture(sdk.loadModel({ alias: 'large-model' }));
+    await vi.advanceTimersByTimeAsync(0);
+    const loadLine = harness.writes.find((line) => line.includes('"load"'))!;
+    const loadId = JSON.parse(loadLine).id;
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sdkSnapshot(sdk).logs.at(-1)?.message).toBe(
+      'No progress reported for 60 seconds while running load. Still awaiting the runtime; Flint has not cancelled this operation.',
+    );
+
+    harness.emitStdout({ id: loadId, error: 'load failed' });
+    await load.tracked;
+  });
+
+  it('starts the download quiet period at dispatch and resets it on progress', async () => {
+    const sdk = await loadSdk();
+    gateSpawn = true;
+    const progress: number[] = [];
+    const onStall = vi.fn();
+
+    vi.useFakeTimers();
+    const download = capture(
+      sdk.downloadModel(
+        { alias: 'model-a' },
+        (percent) => progress.push(percent),
+        undefined,
+        onStall,
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(harness.spawnEntered).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(onStall).not.toHaveBeenCalled();
+
+    harness.releaseSpawn?.();
+    await vi.advanceTimersByTimeAsync(0);
+    const downloadLine = harness.writes.find((line) => line.includes('"download"'))!;
+    const downloadId = JSON.parse(downloadLine).id;
+
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(onStall).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(onStall).toHaveBeenCalledTimes(1);
+    expect(download.box.done).toBe(false);
+
+    harness.emitStdout({ id: downloadId, progress: 42, alias: 'model-a' });
+    expect(progress).toEqual([42]);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(onStall).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(onStall).toHaveBeenCalledTimes(2);
+    expect(download.box.done).toBe(false);
+
+    harness.emitStdout({ id: downloadId, error: 'download failed' });
+    await download.tracked;
+    expect(download.box.err.message).toContain('download failed');
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(onStall).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses a default quiet-period notice when download callers omit one', async () => {
+    const sdk = await loadSdk();
+    vi.useFakeTimers();
+
+    const download = capture(sdk.downloadModel({ alias: 'model-a' }));
+    await vi.advanceTimersByTimeAsync(0);
+    const downloadLine = harness.writes.find((line) => line.includes('"download"'))!;
+    const downloadId = JSON.parse(downloadLine).id;
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sdkSnapshot(sdk).logs.at(-1)?.message).toBe(
+      'No progress reported for 60 seconds while running download. Still awaiting the runtime; Flint has not cancelled this operation.',
+    );
+
+    harness.emitStdout({ id: downloadId, error: 'download failed' });
+    await download.tracked;
+  });
+
+  it('retires accelerator stall notices when reset makes the outcome unknown', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    const onStall = vi.fn();
+
+    vi.useFakeTimers();
+    const readiness = capture(sdk.ensureAccelerators(undefined, onStall));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(harness.writes.some((line) => line.includes('"ensureAccelerators"'))).toBe(true);
+
+    sdk.resetSDK();
+    await readiness.tracked;
+    expect(readiness.box.err.certainty).toBe('unknown');
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(onStall).not.toHaveBeenCalled();
+  });
+
+  it('completes a catalog refresh whose pool telemetry probe never answers', async () => {
+    const sdk = await loadSdk();
+    vi.useFakeTimers();
+
+    const refresh = capture(sdk.refreshModels());
+    await vi.advanceTimersByTimeAsync(0);
+    const listId = JSON.parse(harness.writes.find((line) => line.includes('"listModels"'))!).id;
+    harness.emitStdout({ id: listId, result: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    const statusId = JSON.parse(harness.writes.find((line) => line.includes('"getStatus"'))!).id;
+    harness.emitStdout({ id: statusId, result: { serviceRunning: false, endpoint: null } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(harness.writes.some((line) => line.includes('"poolStatus"'))).toBe(true);
+
+    // Telemetry never waits behind accelerator registration, so a silent probe must not hold a
+    // successful catalog refresh open forever.
+    await vi.advanceTimersByTimeAsync(20_000);
+    await refresh.tracked;
+    expect(refresh.box.err).toBeUndefined();
+    expect(sdkSnapshot(sdk).catalogStatus).toBe('ready');
+  });
+
+  it('keeps accelerator registration progress out of a model download percentage', async () => {
+    const sdk = await loadSdk();
+    const progress: number[] = [];
+    const onStall = vi.fn();
+
+    vi.useFakeTimers();
+    const download = capture(
+      sdk.downloadModel(
+        { alias: 'model-a' },
+        (percent: number) => progress.push(percent),
+        undefined,
+        onStall,
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    const downloadId = JSON.parse(harness.writes.find((line) => line.includes('"download"'))!).id;
+
+    // Registration rides this command's id while it waits for the catalog gate. It is runtime
+    // progress for the stall watchdog, but it is not the model's download progress.
+    harness.emitStdout({ id: downloadId, progress: 73, ep: 'CUDAExecutionProvider', phase: 'accelerator' });
+    expect(progress).toEqual([]);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(onStall).not.toHaveBeenCalled();
+
+    harness.emitStdout({ id: downloadId, progress: 12, alias: 'model-a' });
+    expect(progress).toEqual([12]);
+
+    harness.emitStdout({ id: downloadId, error: 'download failed' });
+    await download.tracked;
+  });
+
+  it('reports accelerator registration progress during a catalog refresh', async () => {
+    const sdk = await loadSdk();
+    const seen: Array<[string, number]> = [];
+
+    const refresh = capture(sdk.refreshModels((epName: string, percent: number) => {
+      seen.push([epName, percent]);
+    }));
+    const listId = await waitForWrite('listModels');
+
+    harness.emitStdout({ id: listId, progress: 40, ep: 'CUDAExecutionProvider', phase: 'accelerator' });
+    expect(seen).toEqual([['CUDAExecutionProvider', 40]]);
+
+    harness.emitStdout({ id: listId, error: 'catalog unavailable' });
+    await refresh.tracked;
+  });
+});
+
+describe('one answer per request', () => {
+  it('bounds a dispatched finite read-only query and ignores a late reply', async () => {
+    const sdk = await loadSdk();
+    const warmup = sdk.getEps();
+    const warmupId = await waitForWrite('getEps');
+    harness.emitStdout({ id: warmupId, result: [] });
+    await warmup;
+
+    vi.useFakeTimers();
+    try {
+      const query = capture(sdk.getHealthRing());
+      const queryLine = harness.writes.filter((w) => w.includes('getHealthRing')).at(-1)!;
+      const queryId = JSON.parse(queryLine).id;
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      await query.tracked;
+      expect(query.box.err.certainty).toBe('failed');
+      expect(query.box.err.message).toContain('10 seconds');
+
+      harness.emitStdout({ id: queryId, result: [{ name: 'late' }] });
+      expect(query.box.err.certainty).toBe('failed');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps provider discovery unbounded while it can wait for provider installation', async () => {
+    const sdk = await loadSdk();
+    const warmup = sdk.getEps();
+    const warmupId = await waitForWrite('getEps');
+    harness.emitStdout({ id: warmupId, result: [] });
+    await warmup;
+
+    vi.useFakeTimers();
+    try {
+      const query = capture(sdk.getEps());
+      const queryLine = harness.writes.filter((w) => w.includes('getEps')).at(-1)!;
+      const queryId = JSON.parse(queryLine).id;
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(query.box.done).toBe(false);
+      expect(sdkSnapshot(sdk).logs.at(-1)?.message).toBe(
+        'No progress reported for 60 seconds while running getEps. Still awaiting the runtime; Flint has not cancelled this operation.',
+      );
+
+      harness.emitStdout({ id: queryId, result: [] });
+      await query.tracked;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('revokes an undispatched query when its deadline expires during startup', async () => {
+    const sdk = await loadSdk();
+    gateSpawn = true;
+
+    vi.useFakeTimers();
+    try {
+      const query = capture(sdk.getHealthRing());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(harness.spawnEntered).toBe(true);
+      expect(harness.writes).toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      await query.tracked;
+      expect(query.box.err.certainty).toBe('failed');
+
+      harness.releaseSpawn?.();
+      await vi.advanceTimersByTimeAsync(250);
+      expect(harness.writes.filter((w) => w.includes('getHealthRing'))).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not apply query deadlines to effectful work', async () => {
+    const sdk = await loadSdk();
+    const warmup = sdk.getEps();
+    const warmupId = await waitForWrite('getEps');
+    harness.emitStdout({ id: warmupId, result: [] });
+    await warmup;
+
+    vi.useFakeTimers();
+    try {
+      const mutation = capture(sdk.shutdownWsl());
+      const mutationLine = harness.writes.find((w) => w.includes('wslShutdown'))!;
+      const mutationId = JSON.parse(mutationLine).id;
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(mutation.box.done).toBe(false);
+
+      harness.emitStdout({ id: mutationId, result: {} });
+      await mutation.tracked;
+      expect(mutation.box.err).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('allows pool telemetry to return after the accelerator probe budget', async () => {
+    const sdk = await loadSdk();
+    const warmup = sdk.getEps();
+    const warmupId = await waitForWrite('getEps');
+    harness.emitStdout({ id: warmupId, result: [] });
+    await warmup;
+
+    vi.useFakeTimers();
+    try {
+      const poll = capture(sdk.pollPoolStatus());
+      const poolLine = harness.writes.find((w) => w.includes('poolStatus'))!;
+      const poolId = JSON.parse(poolLine).id;
+
+      await vi.advanceTimersByTimeAsync(10_001);
+      expect(poll.box.done).toBe(false);
+
+      harness.emitStdout({
+        id: poolId,
+        result: {
+          models: [],
+          usedMemMb: 1,
+          totalMemMb: 2,
+          freeMemMb: 1,
+          accelerators: [],
+        },
+      });
+      await poll.tracked;
+      expect(poll.box.err).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps lane aliases aligned with catalog-free pool polling', async () => {
+    const sdk = await loadSdk();
+    const firstPoll = sdk.pollPoolStatus();
+    const firstPoolId = await waitForWrite('poolStatus');
+    harness.emitStdout({
+      id: firstPoolId,
+      result: {
+        models: [
+          { alias: 'chat-model', variantId: 'chat-variant', isLoaded: true },
+          { alias: 'audio-model', variantId: 'audio-variant', isLoaded: true },
+        ],
+      },
+    });
+    await firstPoll;
+    expect(sdkSnapshot(sdk)).toMatchObject({
+      chatLaneModel: 'chat-model',
+      audioLaneModel: 'audio-model',
+    });
+
+    const secondPoll = sdk.pollPoolStatus();
+    const secondPoolId = await waitForWrite('poolStatus', 1);
+    harness.emitStdout({
+      id: secondPoolId,
+      result: {
+        models: [{ alias: 'audio-model', variantId: 'audio-variant', isLoaded: true }],
+      },
+    });
+    await secondPoll;
+    expect(sdkSnapshot(sdk)).toMatchObject({
+      chatLaneModel: 'audio-model',
+      audioLaneModel: undefined,
+    });
+  });
+
+  it('keeps evicted pool entries visible without treating them as loaded models or lanes', async () => {
+    const sdk = await loadSdk();
+    const state = sdkSnapshot(sdk);
+    sdk.sdkState.set({
+      ...state,
+      models: [
+        { alias: 'evicted', isCached: true, isLoaded: true },
+        { alias: 'resident', isCached: true, isLoaded: false },
+        { alias: 'unknown', isCached: true, isLoaded: false },
+      ],
+    });
+    const poll = sdk.pollPoolStatus();
+    const id = await waitForWrite('poolStatus');
+    const pool = [
+      { alias: 'evicted', variantId: 'evicted:1', isLoaded: false },
+      { alias: 'resident', variantId: 'resident:1', isLoaded: true },
+      { alias: 'unknown', variantId: 'unknown:1', isLoaded: null },
+    ];
+    harness.emitStdout({ id, result: { models: pool } });
+    await poll;
+    const snapshot = sdkSnapshot(sdk);
+    expect(snapshot.pool).toEqual(pool);
+    expect(snapshot.models.map((model: any) => model.isLoaded)).toEqual([false, true, true]);
+    expect(snapshot.loadedModels.map((model: any) => model.alias)).toEqual(['resident', 'unknown']);
+    expect(snapshot.chatLaneModel).toBeUndefined();
+    expect(snapshot.audioLaneModel).toBe('resident');
+  });
+
+  it.each(['poll', 'refresh'])('does not resurrect confirmed eviction after unknown telemetry from %s', async (source) => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    const state = sdkSnapshot(sdk);
+    sdk.sdkState.set({
+      ...state,
+      models: [{ alias: 'evicted', isCached: true, isLoaded: false }],
+      pool: [{ alias: 'evicted', variantId: 'evicted:1', isLoaded: false }],
+    });
+    const pending = source === 'poll' ? sdk.pollPoolStatus() : sdk.refreshModels();
+    if (source === 'refresh') {
+      const listId = await waitForWrite('listModels', 1);
+      harness.emitStdout({ id: listId, result: [{ alias: 'evicted', cached: true }] });
+      const statusId = await waitForWrite('getStatus', 2);
+      harness.emitStdout({ id: statusId, result: { pool: [{ alias: 'evicted', variantId: 'evicted:1' }] } });
+    }
+    const poolId = await waitForWrite('poolStatus', 1);
+    harness.emitStdout({ id: poolId, result: {
+      models: [{ alias: 'evicted', variantId: 'evicted:1', isLoaded: null }],
+    } });
+    await pending;
+    expect(sdkSnapshot(sdk)).toMatchObject({
+      pool: [{ alias: 'evicted', variantId: 'evicted:1', isLoaded: false }],
+      models: [{ alias: 'evicted', isLoaded: false }],
+      loadedModels: [],
+      chatLaneModel: undefined,
+    });
+  });
+
+  it('uses a confirmed load to replace remembered eviction even when later telemetry is unknown', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    sdk.sdkState.set({
+      ...sdkSnapshot(sdk),
+      models: [{ alias: 'evicted', isCached: true, isLoaded: false }],
+      pool: [{ alias: 'evicted', variantId: 'evicted:1', isLoaded: false }],
+    });
+    const load = sdk.loadModel({ alias: 'evicted' }, 'chat', 'evicted:1');
+    const loadId = await waitForWrite('load');
+    harness.emitStdout({ id: loadId, result: { variantId: 'evicted:1' } });
+    const listId = await waitForWrite('listModels', 1);
+    expect(sdkSnapshot(sdk).pool[0].isLoaded).toBe(true);
+    harness.emitStdout({ id: listId, result: [{ alias: 'evicted', cached: true }] });
+    const statusId = await waitForWrite('getStatus', 2);
+    harness.emitStdout({ id: statusId, result: { pool: [{ alias: 'evicted', variantId: 'evicted:1' }] } });
+    const poolId = await waitForWrite('poolStatus', 1);
+    harness.emitStdout({ id: poolId, result: {
+      models: [{ alias: 'evicted', variantId: 'evicted:1', isLoaded: null }],
+    } });
+    await load;
+    expect(sdkSnapshot(sdk)).toMatchObject({
+      pool: [{ alias: 'evicted', variantId: 'evicted:1', isLoaded: true }],
+      models: [{ alias: 'evicted', isLoaded: true }],
+      chatLaneModel: 'evicted',
+    });
+  });
+
+  it('keeps the sidecar reply when a close arrives afterwards', async () => {
+    const sdk = await loadSdk();
+    const p = sdk.getEps();
+    const id = await waitForWrite('getEps');
+
+    harness.emitStdout({ id, result: [{ alias: 'a' }] });
+    const value = await p;
+    expect(value).toBeDefined();
+
+    // Must not overwrite an answered request.
+    harness.emitClose({ code: 1 });
+    await settleStartup();
+    expect(await p).toBe(value);
+  });
+
+  it('settles a rejected write by command, not as a clean failure', async () => {
+    const sdk = await loadSdk();
+    // Force the child to exist first: the write hook is installed when it spawns.
+    const warmup = capture(sdk.getEps());
+    const warmupId = await waitForWrite('getEps');
+    harness.emitStdout({ id: warmupId, result: [] });
+    await warmup.tracked;
+
+    harness.failNextWrite('EPIPE');
+    const mutation = capture(sdk.deleteModel({ alias: 'm' } as any));
+    await waitForWrite('deleteModel');
+    await mutation.tracked;
+    // A rejected write does not prove the bytes never arrived, so a mutation stays unknown.
+    expect(mutation.box.err.certainty).toBe('unknown');
+
+    harness.failNextWrite('EPIPE');
+    const query = capture(sdk.getEps());
+    await waitForWrite('getEps', 1);
+    await query.tracked;
+    // The same event on a query is a clean failure: re-running it changes nothing.
+    expect(query.box.err.certainty).toBe('failed');
+  });
+
+  it('keeps an answer already given when the write rejects afterwards', async () => {
+    const sdk = await loadSdk();
+    const warmup = capture(sdk.getEps());
+    const warmupId = await waitForWrite('getEps');
+    harness.emitStdout({ id: warmupId, result: [] });
+    await warmup.tracked;
+
+    harness.failNextWrite('EPIPE');
+    const p = sdk.getEps();
+    const { box } = capture(p);
+    // The reply lands first; the rejected write must not overwrite it.
+    const line = harness.writes.find((w, i) => i > 0 && w.includes('getEps'));
+    expect(line).toBeDefined();
+    harness.emitStdout({ id: JSON.parse(line!).id, result: [{ name: 'CPU', isRegistered: true }] });
+    await settleStartup();
+    expect(box.err).toBeUndefined();
+    await expect(p).resolves.toEqual([{ name: 'CPU', isRegistered: true }]);
+  });
+});
+
+describe('classification of an interrupted mutation', () => {
+  it('calls a dispatched mutation unknown when the connection is lost', async () => {
+    const sdk = await loadSdk();
+    const { box, tracked } = capture(sdk.deleteModel({ alias: 'm' } as any));
+    await waitForWrite('deleteModel');
+
+    harness.emitClose({ code: 1 });
+    await tracked;
+    // Written, so the acknowledgement is lost rather than the work provably skipped.
+    expect(box.err.certainty).toBe('unknown');
+  });
+
+  it('calls a dispatched query failed when the connection is lost', async () => {
+    const sdk = await loadSdk();
+    const { box, tracked } = capture(sdk.getEps());
+    await waitForWrite('getEps');
+    harness.emitClose({ code: 1 });
+    await tracked;
+    expect(box.err.certainty).toBe('failed');
+  });
+
+  it('classifies mixed pending requests independently', async () => {
+    const sdk = await loadSdk();
+    const query = capture(sdk.getEps());
+    const mutation = capture(sdk.deleteModel({ alias: 'm' } as any));
+    await waitForWrite('getEps');
+    await waitForWrite('deleteModel');
+    harness.emitClose({ code: 1 });
+    await Promise.all([query.tracked, mutation.tracked]);
+    expect(query.box.err.certainty).toBe('failed');
+    expect(mutation.box.err.certainty).toBe('unknown');
+  });
+
+  it('treats an explicit error reply as a real failure, not a lost acknowledgement', async () => {
+    const sdk = await loadSdk();
+    const { box, tracked } = capture(sdk.deleteModel({ alias: 'm' } as any));
+    const id = await waitForWrite('deleteModel');
+    // The child answered, so nothing is unknown.
+    harness.emitStdout({ id, error: 'no such model' });
+    await tracked;
+    expect(box.err.certainty).toBe('failed');
+  });
+
+  it('preserves a sidecar-confirmed cancellation as not executed', async () => {
+    const sdk = await loadSdk();
+    const request = capture(sdk.deleteModel({ alias: 'late-model' } as any));
+    const id = await waitForWrite('deleteModel');
+    harness.emitStdout({
+      id,
+      error: 'Runtime is draining; "deleteModel" was not started',
+      certainty: 'cancelled',
+    });
+
+    await request.tracked;
+    expect(request.box.err.certainty).toBe('cancelled');
+    expect(request.box.err.message).toContain('did not run');
+  });
+});
+
+describe('service start uncertainty', () => {
+  it('does not restart a confirmed running service when ensuring readiness', async () => {
+    const sdk = await loadSdk();
+    const start = sdk.startService(5272);
+    const startId = await waitForWrite('startService');
+    harness.emitStdout({ id: startId, endpoint: 'http://127.0.0.1:5272' });
+    await start;
+
+    const before = harness.writes.filter((w) => w.includes('startService')).length;
+    const ensured = await sdk.ensureServiceRunning(5272);
+
+    expect(ensured).toEqual({ endpoint: 'http://127.0.0.1:5272', started: false });
+    expect(harness.writes.filter((w) => w.includes('startService')).length).toBe(before);
+  });
+
+  it('stands down a convenience start after an unestablished outcome', async () => {
+    const sdk = await loadSdk();
+    const first = capture(sdk.startService(5272, undefined, undefined, undefined, {
+      convenience: true,
+    }));
+    await settleStartup();
+    expect(harness.writes.some((w) => w.includes('startService'))).toBe(true);
+
+    // Interrupted with no answer: the service may well be running.
+    harness.emitClose({ code: 1 });
+    await first.tracked;
+    expect(first.box.err.certainty).toBe('unknown');
+    expect(sdk.isServiceStartUncertain()).toBe(true);
+
+    const before = harness.writes.filter((w) => w.includes('startService')).length;
+    const second = capture(
+      sdk.startService(5272, undefined, undefined, undefined, { convenience: true }),
+    );
+    await settleStartup();
+    await second.tracked;
+    // Blocked without writing: starting is a destructive restart.
+    expect(harness.writes.filter((w) => w.includes('startService')).length).toBe(before);
+    expect(second.box.err.certainty).toBe('unknown');
+  });
+
+  it('lets an explicit start through without clearing the latch for anyone else', async () => {
+    const sdk = await loadSdk();
+    const first = capture(
+      sdk.startService(5272, undefined, undefined, undefined, { convenience: true }),
+    );
+    await settleStartup();
+    harness.emitClose({ code: 1 });
+    await first.tracked;
+    expect(sdk.isServiceStartUncertain()).toBe(true);
+
+    // An explicit start bypasses the guard by not being a convenience start. It must not clear
+    // the shared latch, or every convenience start queued behind the lock would be released too.
+    const before = harness.writes.filter((w) => w.includes('startService')).length;
+    const retry = capture(sdk.startService(5272));
+    await settleStartup();
+    expect(harness.writes.filter((w) => w.includes('startService')).length).toBe(before + 1);
+
+    harness.emitClose({ code: 1 });
+    await retry.tracked;
+    // The retry was itself unestablished, so the latch stands.
+    expect(sdk.isServiceStartUncertain()).toBe(true);
+  });
+
+  it('retires the latch only on a start that reported success', async () => {
+    const sdk = await loadSdk();
+    const first = capture(
+      sdk.startService(5272, undefined, undefined, undefined, { convenience: true }),
+    );
+    await settleStartup();
+    harness.emitClose({ code: 1 });
+    await first.tracked;
+    expect(sdk.isServiceStartUncertain()).toBe(true);
+
+    const retry = sdk.startService(5272);
+    await settleStartup();
+    const line = harness.writes.filter((w) => w.includes('startService')).pop()!;
+    harness.emitStdout({ id: JSON.parse(line).id, endpoint: 'http://127.0.0.1:5272' });
+    await retry;
+    expect(sdk.isServiceStartUncertain()).toBe(false);
+  });
+
+  it('does not treat a Stop acknowledgement as proof the service is quiescent', async () => {
+    const sdk = await loadSdk();
+    const first = capture(
+      sdk.startService(5272, undefined, undefined, undefined, { convenience: true }),
+    );
+    await settleStartup();
+    harness.emitClose({ code: 1 });
+    await first.tracked;
+    expect(sdk.isServiceStartUncertain()).toBe(true);
+
+    const stop = sdk.stopService();
+    await settleStartup();
+    const line = harness.writes.filter((w) => w.includes('stopService')).pop()!;
+    harness.emitStdout({ id: JSON.parse(line).id, result: {} });
+    await stop;
+    // The sidecar handles commands concurrently, so the earlier start may still be inside
+    // startWebService() and can bring the service up again after Stop has replied.
+    expect(sdk.isServiceStartUncertain()).toBe(true);
+  });
+
+  it('stops and unloads without terminating the reusable runtime', async () => {
+    const sdk = await loadSdk();
+    const start = sdk.startService(5272);
+    const startId = await waitForWrite('startService');
+    harness.emitStdout({ id: startId, endpoint: 'http://127.0.0.1:5272' });
+    await start;
+
+    const stopping = sdk.stopAndUnload({ drainTimeoutMs: 25 });
+    const stopId = await waitForWrite('stopAndUnload');
+    const cleanup = {
+      endpointWithdrawn: true,
+      serviceStopped: true,
+      drained: true,
+      activeOperations: [],
+      modelsUnloaded: [],
+      unloadFailures: [],
+      nativeServiceStopped: true,
+      cleanup: 'confirmed',
+    };
+    harness.emitStdout({ id: stopId, result: cleanup });
+
+    await expect(stopping).resolves.toEqual(cleanup);
+    expect(harness.killCount).toBe(0);
+    const snapshot = getLastSdkSnapshot(sdk);
+    expect(snapshot.runtime.process).toBe('ready');
+    expect(snapshot.runtime.service).toBe('stopped');
+    expect(snapshot.runtime.models).toBe('empty');
+  });
+
+  it('does not publish a stopped native service when cleanup reports failure', async () => {
+    const sdk = await loadSdk();
+    const warmup = sdk.getEps();
+    const warmupId = await waitForWrite('getEps');
+    harness.emitStdout({ id: warmupId, result: [] });
+    await warmup;
+
+    const stopping = sdk.stopAndUnload();
+    const stopId = await waitForWrite('stopAndUnload');
+    harness.emitStdout({
+      id: stopId,
+      result: {
+        endpointWithdrawn: true,
+        serviceStopped: false,
+        drained: true,
+        activeOperations: [],
+        modelsUnloaded: [],
+        unloadFailures: [],
+        nativeServiceStopped: false,
+        cleanup: 'failed',
+      },
+    });
+    await stopping;
+
+    const snapshot = getLastSdkSnapshot(sdk);
+    expect(snapshot.endpoint).toBeUndefined();
+    expect(snapshot.serviceRunning).toBe(false);
+    expect(snapshot.runtime.service).toBe('failed');
+  });
+
+  it('confirms runtime quit only after the child closes', async () => {
+    const sdk = await loadSdk();
+    const warmup = sdk.getEps();
+    const warmupId = await waitForWrite('getEps');
+    harness.emitStdout({ id: warmupId, result: [] });
+    await warmup;
+
+    const quitting = sdk.quitRuntime({ gracefulTimeoutMs: 100, killTimeoutMs: 100 });
+    const shutdownId = await waitForWrite('shutdownRuntime');
+    const cleanup = {
+      endpointWithdrawn: true,
+      serviceStopped: true,
+      drained: true,
+      activeOperations: [],
+      modelsUnloaded: ['model-a'],
+      unloadFailures: [],
+      nativeServiceStopped: true,
+      cleanup: 'confirmed',
+    };
+    harness.emitStdout({ id: shutdownId, result: cleanup });
+    await Promise.resolve();
+    expect(harness.killCount).toBe(0);
+
+    harness.emitClose({ code: 0 });
+    await expect(quitting).resolves.toEqual({
+      cleanup,
+      termination: 'confirmed',
+    });
+    expect(getLastSdkSnapshot(sdk).runtime.process).toBe('stopped');
+  });
+
+  it('escalates runtime quit only after the graceful close deadline', async () => {
+    const sdk = await loadSdk();
+    const warmup = sdk.getEps();
+    const warmupId = await waitForWrite('getEps');
+    harness.emitStdout({ id: warmupId, result: [] });
+    await warmup;
+
+    const quitting = sdk.quitRuntime({ gracefulTimeoutMs: 20, killTimeoutMs: 100 });
+    await waitForWrite('shutdownRuntime');
+    expect(harness.killCount).toBe(0);
+    harness.hangKill = true;
+    await waitFor('the sidecar kill escalation', () => harness.killCount === 1);
+    harness.emitClose({ code: null, signal: 'SIGTERM' });
+
+    await expect(quitting).resolves.toEqual({
+      cleanup: null,
+      termination: 'escalated-confirmed',
+    });
+  });
+
+  it('starts the quit deadline without waiting for a blocked service transition', async () => {
+    const sdk = await loadSdk();
+    const warmup = sdk.getEps();
+    const warmupId = await waitForWrite('getEps');
+    harness.emitStdout({ id: warmupId, result: [] });
+    await warmup;
+
+    let release!: () => void;
+    const blocked = sdk.withServiceTransition(
+      () => new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    );
+    await waitFor('the service transition to be blocked', () => typeof release === 'function');
+
+    const quitting = sdk.quitRuntime({ gracefulTimeoutMs: 20, killTimeoutMs: 100 });
+    await waitForWrite('shutdownRuntime');
+    await waitFor('the sidecar kill escalation', () => harness.killCount === 1);
+    harness.emitClose({ code: null, signal: 'SIGTERM' });
+    await expect(quitting).resolves.toMatchObject({ termination: 'escalated-confirmed' });
+
+    release();
+    await blocked;
+  });
+
+  it('rejects new work before dispatch once runtime quit begins', async () => {
+    const sdk = await loadSdk();
+    const warmup = sdk.getEps();
+    const warmupId = await waitForWrite('getEps');
+    harness.emitStdout({ id: warmupId, result: [] });
+    await warmup;
+
+    const quitting = sdk.quitRuntime({ gracefulTimeoutMs: 100, killTimeoutMs: 100 });
+    await waitForWrite('shutdownRuntime');
+    const later = capture(sdk.deleteModel({ alias: 'late-model' } as any));
+    await later.tracked;
+
+    expect(later.box.err.certainty).toBe('cancelled');
+    expect(harness.writes.filter((line) => line.includes('late-model'))).toHaveLength(0);
+
+    harness.emitClose({ code: 0 });
+    await quitting;
+  });
+
+  it('keeps service state unknown when Stop delivery is uncertain', async () => {
+    const sdk = await loadSdk();
+    const warmup = capture(sdk.getEps());
+    const warmupId = await waitForWrite('getEps');
+    harness.emitStdout({ id: warmupId, result: [] });
+    await warmup.tracked;
+
+    harness.failNextWrite('EPIPE');
+    const stop = capture(sdk.stopService());
+    const stopId = await waitForWrite('stopService');
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+    await stop.tracked;
+    expect(stop.box.err.certainty).toBe('unknown');
+    expect(snapshot.runtime.service).toBe('unknown');
+    expect(stopId).toBeGreaterThan(0);
+    unsubscribe();
+  });
+
+  it('does not advertise the old endpoint after a failed restart', async () => {
+    const sdk = await loadSdk();
+    const start = sdk.startService(5272);
+    const startId = await waitForWrite('startService');
+    harness.emitStdout({ id: startId, endpoint: 'http://127.0.0.1:5272' });
+    await start;
+
+    const restart = capture(sdk.startService(5273));
+    const restartId = await waitForWrite('startService', 1);
+    harness.emitStdout({ id: restartId, error: 'address already in use' });
+    await restart.tracked;
+
+    const snapshot = getLastSdkSnapshot(sdk);
+    expect(restart.box.err.certainty).toBe('failed');
+    expect(snapshot.endpoint).toBeUndefined();
+    expect(snapshot.serviceRunning).toBe(false);
+    expect(snapshot.runtime.service).toBe('failed');
+  });
+
+  it('blocks a convenience start that was queued before the first outcome was known', async () => {
+    const sdk = await loadSdk();
+    // Warm the child so both starts queue against a live transport.
+    const warmup = capture(sdk.getEps());
+    const warmupId = await waitForWrite('getEps');
+    harness.emitStdout({ id: warmupId, result: [] });
+    await warmup.tracked;
+
+    const before = harness.writes.filter((w) => w.includes('startService')).length;
+    // Queued together: the second is behind the transition lock while the first is in flight,
+    // so it cannot have consulted the latch before the first one set it.
+    const first = capture(
+      sdk.startService(5272, undefined, undefined, undefined, { convenience: true }),
+    );
+    const second = capture(
+      sdk.startService(5272, undefined, undefined, undefined, { convenience: true }),
+    );
+    await settleStartup();
+    expect(harness.writes.filter((w) => w.includes('startService')).length).toBe(before + 1);
+
+    harness.emitClose({ code: 1 });
+    await Promise.all([first.tracked, second.tracked]);
+    // Still one write: the queued start saw the latch when it finally ran.
+    expect(harness.writes.filter((w) => w.includes('startService')).length).toBe(before + 1);
+    expect(second.box.err.certainty).toBe('unknown');
+  });
+
+  it('cancels a start queued before Stop without dispatching it', async () => {
+    const sdk = await loadSdk();
+    let release!: () => void;
+    const hold = sdk.withServiceTransition(
+      () => new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    );
+    await waitFor('the transition lock to be held', () => typeof release === 'function');
+
+    const start = capture(sdk.startService(5272));
+    const stop = capture(sdk.stopService());
+    release();
+    await hold;
+    await start.tracked;
+
+    const starts = harness.writes.filter((w) => w.includes('startService'));
+    expect(starts).toHaveLength(0);
+    expect(start.box.err.certainty).toBe('cancelled');
+
+    const stopId = await waitForWrite('stopService');
+    harness.emitStdout({ id: stopId, result: {} });
+    await stop.tracked;
+  });
+
+  it('cancels an ensure queued before Stop without dispatching a start', async () => {
+    const sdk = await loadSdk();
+    let release!: () => void;
+    const hold = sdk.withServiceTransition(
+      () => new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    );
+    await waitFor('the transition lock to be held', () => typeof release === 'function');
+
+    const ensure = capture(sdk.ensureServiceRunning(5272));
+    const stop = capture(sdk.stopService());
+    release();
+    await hold;
+    await ensure.tracked;
+
+    expect(ensure.box.err.certainty).toBe('cancelled');
+    expect(harness.writes.filter((w) => w.includes('startService'))).toHaveLength(0);
+    const stopId = await waitForWrite('stopService');
+    harness.emitStdout({ id: stopId, result: {} });
+    await stop.tracked;
+  });
+
+  it('publishes runtime.transitioning for queued as well as running transitions', async () => {
+    const sdk = await loadSdk();
+    let release!: () => void;
+    const hold = sdk.withServiceTransition(
+      () => new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    );
+    await waitFor('the transition lock to be held', () => typeof release === 'function');
+    expect(sdk.isServiceTransitioning()).toBe(true);
+    expect(sdkSnapshot(sdk).runtime.transitioning).toBe(true);
+
+    const start = capture(sdk.startService(5272));
+    expect(sdk.isServiceTransitioning()).toBe(true);
+
+    release();
+    await hold;
+    const startId = await waitForWrite('startService');
+    expect(sdkSnapshot(sdk).runtime.transitioning).toBe(true);
+    harness.emitStdout({ id: startId, endpoint: 'http://127.0.0.1:5272' });
+    await start.tracked;
+    expect(sdk.isServiceTransitioning()).toBe(false);
+    expect(sdkSnapshot(sdk).runtime.transitioning).toBe(false);
+  });
+
+  function getLastSdkSnapshot(sdk: { getSDKState: () => { subscribe: (fn: (state: any) => void) => () => void } }) {
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+    unsubscribe();
+    return snapshot;
+  }
+});
+
+describe('initialization readiness recovery', () => {
+  it('does not request the remote catalog when initialization disables catalog refresh', async () => {
+    const sdk = await loadSdk();
+    const initialized = sdk.initializeSDK({
+      autoStartService: false,
+      refreshCatalog: false,
+    });
+
+    const initId = await waitForWrite('init');
+    harness.emitStdout({ id: initId, result: 'initialized' });
+    const logId = await waitForWrite('setLogLevel');
+    harness.emitStdout({ id: logId, result: {} });
+    const readinessStatusId = await waitForWrite('getStatus');
+    harness.emitStdout({
+      id: readinessStatusId,
+      result: { serviceRunning: false, endpoint: null },
+    });
+    const finalStatusId = await waitForWrite('getStatus', 1);
+    harness.emitStdout({
+      id: finalStatusId,
+      result: { serviceRunning: false, endpoint: null },
+    });
+
+    await expect(initialized).resolves.toBe(true);
+    expect(harness.writes.filter((line) => line.includes('"cmd":"listModels"'))).toHaveLength(0);
+    expect(sdkSnapshot(sdk).catalogStatus).toBe('not-checked');
+  }, 15000);
+
+  it('defers the catalog read for an automatic startup service start with refresh disabled', async () => {
+    const sdk = await loadSdk();
+    const initialized = sdk.initializeSDK({
+      autoStartService: true,
+      refreshCatalog: false,
+    });
+
+    const initId = await waitForWrite('init');
+    harness.emitStdout({ id: initId, result: 'initialized' });
+    const logId = await waitForWrite('setLogLevel');
+    harness.emitStdout({ id: logId, result: {} });
+    const readinessStatusId = await waitForWrite('getStatus');
+    harness.emitStdout({
+      id: readinessStatusId,
+      result: { serviceRunning: false, endpoint: null },
+    });
+    const startId = await waitForWrite('startService');
+    const startRequest = harness.writes
+      .map((line) => JSON.parse(line))
+      .find((request) => request.id === startId);
+    expect(startRequest).toMatchObject({
+      cmd: 'startService',
+      deferCatalogRead: true,
+    });
+    harness.emitStdout({ id: startId, endpoint: 'http://127.0.0.1:5272' });
+
+    await expect(initialized).resolves.toBe(true);
+  }, 15000);
+
+  it('preserves an explicit disabled policy when a later initialization omits the option', async () => {
+    const sdk = await loadSdk();
+    sdk.setAutomaticCatalogRefreshEnabled(false);
+    const initialized = sdk.initializeSDK({ autoStartService: false });
+
+    const initId = await waitForWrite('init');
+    harness.emitStdout({ id: initId, result: 'initialized' });
+    const logId = await waitForWrite('setLogLevel');
+    harness.emitStdout({ id: logId, result: {} });
+    const readinessStatusId = await waitForWrite('getStatus');
+    harness.emitStdout({
+      id: readinessStatusId,
+      result: { serviceRunning: false, endpoint: null },
+    });
+    const startupStatusId = await waitForWrite('getStatus', 1);
+    harness.emitStdout({
+      id: startupStatusId,
+      result: { serviceRunning: false, endpoint: null },
+    });
+
+    await expect(initialized).resolves.toBe(true);
+    expect(harness.writes.filter((line) => line.includes('"cmd":"listModels"'))).toHaveLength(0);
+    expect(sdkSnapshot(sdk).catalogStatus).toBe('not-checked');
+  }, 15000);
+
+  it('uses the current catalog policy across sidecar crash recovery', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const policyUpdate = sdk.initializeSDK({
+      autoStartService: false,
+      refreshCatalog: false,
+    });
+    const policyStatusId = await waitForWrite('getStatus', 2);
+    harness.emitStdout({
+      id: policyStatusId,
+      result: { serviceRunning: false, endpoint: null },
+    });
+    await expect(policyUpdate).resolves.toBe(true);
+
+    harness.emitClose({ code: 1 });
+    const poll = sdk.pollPoolStatus();
+    const recoveryInitId = await waitForWrite('init', 1);
+    harness.emitStdout({ id: recoveryInitId, result: 'initialized' });
+    const recoveryLogId = await waitForWrite('setLogLevel', 1);
+    harness.emitStdout({ id: recoveryLogId, result: {} });
+    const recoveryStatusId = await waitForWrite('getStatus', 3);
+    harness.emitStdout({
+      id: recoveryStatusId,
+      result: { serviceRunning: false, endpoint: null },
+    });
+    const poolId = await waitForWrite('poolStatus', 1);
+    harness.emitStdout({ id: poolId, result: { models: [] } });
+
+    await expect(poll).resolves.toBeUndefined();
+    expect(harness.writes.filter((line) => line.includes('"cmd":"listModels"'))).toHaveLength(1);
+  }, 15000);
+
+  it('uses a newer catalog policy requested while initialization is still in flight', async () => {
+    const sdk = await loadSdk();
+    const initialized = sdk.initializeSDK({
+      autoStartService: false,
+      refreshCatalog: true,
+    });
+    const policyUpdate = sdk.initializeSDK({
+      autoStartService: false,
+      refreshCatalog: false,
+    });
+
+    const initId = await waitForWrite('init');
+    harness.emitStdout({ id: initId, result: 'initialized' });
+    const logId = await waitForWrite('setLogLevel');
+    harness.emitStdout({ id: logId, result: {} });
+    const listId = await waitForWrite('listModels');
+    harness.emitStdout({ id: listId, result: [] });
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, result: { serviceRunning: false, endpoint: null } });
+    const poolId = await waitForWrite('poolStatus');
+    harness.emitStdout({ id: poolId, result: { models: [] } });
+    const startupStatusId = await waitForWrite('getStatus', 1);
+    harness.emitStdout({
+      id: startupStatusId,
+      result: { serviceRunning: false, endpoint: null },
+    });
+    await expect(initialized).resolves.toBe(true);
+    await expect(policyUpdate).resolves.toBe(true);
+    expect(sdkSnapshot(sdk).catalogStatus).toBe('ready');
+
+    harness.emitClose({ code: 1 });
+    const poll = sdk.pollPoolStatus();
+    const recoveryInitId = await waitForWrite('init', 1);
+    harness.emitStdout({ id: recoveryInitId, result: 'initialized' });
+    const recoveryLogId = await waitForWrite('setLogLevel', 1);
+    harness.emitStdout({ id: recoveryLogId, result: {} });
+    const recoveryStatusId = await waitForWrite('getStatus', 2);
+    harness.emitStdout({
+      id: recoveryStatusId,
+      result: { serviceRunning: false, endpoint: null },
+    });
+    const recoveryPoolId = await waitForWrite('poolStatus', 1);
+    harness.emitStdout({ id: recoveryPoolId, result: { models: [] } });
+
+    await expect(poll).resolves.toBeUndefined();
+    expect(harness.writes.filter((line) => line.includes('"cmd":"listModels"'))).toHaveLength(1);
+  }, 15000);
+
+  it('does not publish readiness when the initial child is lost during catalog refresh', async () => {
+    const sdk = await loadSdk();
+    const first = sdk.initializeSDK({ autoStartService: false });
+
+    const initId = await waitForWrite('init');
+    harness.emitStdout({ id: initId, result: 'initialized' });
+    const logId = await waitForWrite('setLogLevel');
+    harness.emitStdout({ id: logId, result: {} });
+    const listId = await waitForWrite('listModels');
+    harness.emitStdout({ id: listId, result: [] });
+    const statusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: statusId, result: { serviceRunning: false, endpoint: null } });
+    await waitForWrite('poolStatus');
+    harness.emitClose({ code: 1 });
+
+    await expect(first).resolves.toBe(false);
+  }, 15000);
+
+  it('refreshes an initialized manager after catalog failure without sending init twice', async () => {
+    const sdk = await loadSdk();
+    const first = sdk.initializeSDK({ autoStartService: false });
+
+    const initId = await waitForWrite('init');
+    harness.emitStdout({ id: initId, result: 'initialized' });
+    const logId = await waitForWrite('setLogLevel');
+    harness.emitStdout({ id: logId, result: {} });
+    const firstListId = await waitForWrite('listModels');
+    harness.emitStdout({ id: firstListId, error: 'catalog unavailable' });
+    await expect(first).resolves.toBe(false);
+    expect(sdkSnapshot(sdk).catalogStatus).toBe('failed');
+    expect(sdkSnapshot(sdk).catalogError).toContain('catalog unavailable');
+
+    const retry = sdk.initializeSDK({ autoStartService: false });
+    const secondListId = await waitForWrite('listModels', 1);
+    harness.emitStdout({ id: secondListId, result: [] });
+    const refreshStatusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: refreshStatusId, result: { serviceRunning: false, endpoint: null } });
+    const poolId = await waitForWrite('poolStatus');
+    harness.emitStdout({ id: poolId, result: { models: [] } });
+    const startupStatusId = await waitForWrite('getStatus', 1);
+    harness.emitStdout({ id: startupStatusId, result: { serviceRunning: false, endpoint: null } });
+    await expect(retry).resolves.toBe(true);
+    expect(sdkSnapshot(sdk)).toMatchObject({
+      catalogStatus: 'ready',
+      catalogError: null,
+    });
+
+    expect(harness.writes.filter((line) => line.includes('"cmd":"init"'))).toHaveLength(1);
+  }, 15000);
+
+  it('does not restore readiness when the sidecar is replaced during recovery', async () => {
+    const sdk = await loadSdk();
+    const first = sdk.initializeSDK({ autoStartService: false });
+
+    const initId = await waitForWrite('init');
+    harness.emitStdout({ id: initId, result: 'initialized' });
+    const logId = await waitForWrite('setLogLevel');
+    harness.emitStdout({ id: logId, result: {} });
+    const firstListId = await waitForWrite('listModels');
+    harness.emitStdout({ id: firstListId, error: 'catalog unavailable' });
+    await expect(first).resolves.toBe(false);
+
+    const retry = sdk.initializeSDK({ autoStartService: false });
+    const secondListId = await waitForWrite('listModels', 1);
+    harness.emitStdout({ id: secondListId, result: [] });
+    const refreshStatusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: refreshStatusId, result: { serviceRunning: false, endpoint: null } });
+    await waitForWrite('poolStatus');
+    harness.emitClose({ code: 1 });
+
+    await expect(retry).resolves.toBe(false);
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+    unsubscribe();
+    expect(snapshot.ready).toBe(false);
+  }, 15000);
+
+  it('does not return success when the child is lost during the final status probe', async () => {
+    const sdk = await loadSdk();
+    const first = sdk.initializeSDK({ autoStartService: false });
+
+    const initId = await waitForWrite('init');
+    harness.emitStdout({ id: initId, result: 'initialized' });
+    const logId = await waitForWrite('setLogLevel');
+    harness.emitStdout({ id: logId, result: {} });
+    const firstListId = await waitForWrite('listModels');
+    harness.emitStdout({ id: firstListId, error: 'catalog unavailable' });
+    await expect(first).resolves.toBe(false);
+
+    const retry = sdk.initializeSDK({ autoStartService: false });
+    const secondListId = await waitForWrite('listModels', 1);
+    harness.emitStdout({ id: secondListId, result: [] });
+    const refreshStatusId = await waitForWrite('getStatus');
+    harness.emitStdout({ id: refreshStatusId, result: { serviceRunning: false, endpoint: null } });
+    const poolId = await waitForWrite('poolStatus');
+    harness.emitStdout({ id: poolId, result: { models: [] } });
+    await waitForWrite('getStatus', 1);
+    harness.emitClose({ code: 1 });
+
+    await expect(retry).resolves.toBe(false);
+  }, 15000);
+});
+
+describe('accelerator readiness ownership', () => {
+  it('shares one registration and watchdog across concurrent accelerator setup callers', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const firstProgress = vi.fn();
+    const secondProgress = vi.fn();
+    const firstStall = vi.fn();
+    const secondStall = vi.fn();
+    const first = sdk.ensureAccelerators(firstProgress, firstStall);
+    const second = sdk.ensureAccelerators(secondProgress, secondStall);
+    const registrationId = await waitForWrite('ensureAccelerators');
+    vi.useFakeTimers();
+    expect(harness.writes.filter((line) => line.includes('"cmd":"ensureAccelerators"')))
+      .toHaveLength(1);
+
+    harness.emitStdout({
+      id: registrationId,
+      progress: 35,
+      ep: 'CUDAExecutionProvider',
+    });
+    expect(firstProgress).toHaveBeenCalledWith('CUDAExecutionProvider', 35);
+    expect(secondProgress).toHaveBeenCalledWith('CUDAExecutionProvider', 35);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(firstStall).toHaveBeenCalledTimes(1);
+    expect(secondStall).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+
+    harness.emitStdout({
+      id: registrationId,
+      result: {
+        success: true,
+        status: 'registered',
+        registeredEps: ['CUDAExecutionProvider'],
+        failedEps: [],
+      },
+    });
+    const epsId = await waitForWrite('getEps');
+    harness.emitStdout({
+      id: epsId,
+      result: [{ name: 'CUDAExecutionProvider', isRegistered: true }],
+    });
+
+    await expect(first).resolves.toMatchObject({
+      providers: [{ name: 'CUDAExecutionProvider', isRegistered: true }],
+    });
+    await expect(second).resolves.toMatchObject({
+      providers: [{ name: 'CUDAExecutionProvider', isRegistered: true }],
+    });
+  }, 15000);
+
+  it('logs the default quiet-period notice once when any accelerator caller omits one', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const customStall = vi.fn();
+    const automatic = sdk.ensureAccelerators();
+    const joined = sdk.ensureAccelerators(undefined, customStall);
+    const registrationId = await waitForWrite('ensureAccelerators');
+    vi.useFakeTimers();
+    // Rearms the quiet-period watchdog under the fake clock.
+    harness.emitStdout({ id: registrationId, progress: 10, ep: 'CUDAExecutionProvider' });
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    const notices: string[] = sdkSnapshot(sdk).logs
+      .map((entry: { message: string }) => entry.message)
+      .filter((message: string) => message.includes('while running ensureAccelerators'));
+    expect(notices).toEqual([
+      'No progress reported for 60 seconds while running ensureAccelerators. Still awaiting the runtime; Flint has not cancelled this operation.',
+    ]);
+    expect(customStall).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+
+    harness.emitStdout({
+      id: registrationId,
+      result: { success: true, registeredEps: ['CPUExecutionProvider'], failedEps: [] },
+    });
+    const epsId = await waitForWrite('getEps');
+    harness.emitStdout({ id: epsId, result: [{ name: 'CPUExecutionProvider', isRegistered: true }] });
+    await Promise.all([automatic, joined]);
+  }, 15000);
+
+  it('shows a queued explicit rerun the active cycle progress and stall notice', async () => {
+    // Install / Update waits for the active cycle before rerunning; a provider download in that
+    // cycle is exactly what the user is waiting on, so it must not be silent to them.
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const automatic = sdk.ensureAccelerators();
+    const firstRegistrationId = await waitForWrite('ensureAccelerators');
+    const explicitProgress = vi.fn();
+    const explicitStall = vi.fn();
+    const explicit = sdk.ensureAccelerators(explicitProgress, explicitStall, { forceRerun: true });
+    vi.useFakeTimers();
+
+    harness.emitStdout({ id: firstRegistrationId, progress: 40, ep: 'CUDAExecutionProvider' });
+    expect(explicitProgress).toHaveBeenCalledWith('CUDAExecutionProvider', 40);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(explicitStall).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+
+    harness.emitStdout({
+      id: firstRegistrationId,
+      result: { success: true, registeredEps: ['CPUExecutionProvider'], failedEps: [] },
+    });
+    const firstProbeId = await waitForWrite('getEps');
+    harness.emitStdout({ id: firstProbeId, result: [{ name: 'CPUExecutionProvider', isRegistered: true }] });
+    await automatic;
+
+    const secondRegistrationId = await waitForWrite('ensureAccelerators', 1);
+    harness.emitStdout({ id: secondRegistrationId, progress: 70, ep: 'CUDAExecutionProvider' });
+    expect(explicitProgress).toHaveBeenLastCalledWith('CUDAExecutionProvider', 70);
+    harness.emitStdout({
+      id: secondRegistrationId,
+      result: { success: true, registeredEps: ['CPUExecutionProvider'], failedEps: [] },
+    });
+    const secondProbeId = await waitForWrite('getEps', 1);
+    harness.emitStdout({ id: secondProbeId, result: [{ name: 'CPUExecutionProvider', isRegistered: true }] });
+    await explicit;
+  }, 15000);
+
+  it('keeps an independent provider probe under its transport deadline during setup', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const readiness = sdk.ensureAccelerators();
+    const registrationId = await waitForWrite('ensureAccelerators');
+    const providers = sdk.getEps();
+    const independentId = await waitForWrite('getEps');
+    harness.emitStdout({
+      id: independentId,
+      result: [{ name: 'CPUExecutionProvider', isRegistered: true }],
+    });
+    await expect(providers).resolves.toEqual([
+      { name: 'CPUExecutionProvider', isRegistered: true },
+    ]);
+
+    harness.emitStdout({
+      id: registrationId,
+      result: {
+        success: true,
+        status: 'registered',
+        registeredEps: ['CUDAExecutionProvider'],
+        failedEps: [],
+      },
+    });
+    const confirmationId = await waitForWrite('getEps', 1);
+    harness.emitStdout({
+      id: confirmationId,
+      result: [{ name: 'CUDAExecutionProvider', isRegistered: true }],
+    });
+    await readiness;
+  }, 15000);
+
+  it('queues an explicit accelerator rerun after an active setup cycle', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const automatic = sdk.ensureAccelerators();
+    const firstRegistrationId = await waitForWrite('ensureAccelerators');
+    const explicit = sdk.ensureAccelerators(undefined, undefined, { forceRerun: true });
+    expect(harness.writes.filter((line) => line.includes('"cmd":"ensureAccelerators"')))
+      .toHaveLength(1);
+
+    harness.emitStdout({
+      id: firstRegistrationId,
+      result: { success: true, registeredEps: ['CPUExecutionProvider'], failedEps: [] },
+    });
+    const firstProbeId = await waitForWrite('getEps');
+    harness.emitStdout({
+      id: firstProbeId,
+      result: [{ name: 'CPUExecutionProvider', isRegistered: true }],
+    });
+    await automatic;
+
+    const secondRegistrationId = await waitForWrite('ensureAccelerators', 1);
+    harness.emitStdout({
+      id: secondRegistrationId,
+      result: {
+        success: true,
+        registeredEps: ['CPUExecutionProvider', 'CUDAExecutionProvider'],
+        failedEps: [],
+      },
+    });
+    const secondProbeId = await waitForWrite('getEps', 1);
+    harness.emitStdout({
+      id: secondProbeId,
+      result: [
+        { name: 'CPUExecutionProvider', isRegistered: true },
+        { name: 'CUDAExecutionProvider', isRegistered: true },
+      ],
+    });
+    await expect(explicit).resolves.toMatchObject({
+      providers: [
+        { name: 'CPUExecutionProvider', isRegistered: true },
+        { name: 'CUDAExecutionProvider', isRegistered: true },
+      ],
+    });
+  }, 15000);
+
+  it('rejects a registration result when its sidecar exits before provider discovery', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const readiness = sdk.ensureAccelerators();
+    const registrationId = await waitForWrite('ensureAccelerators');
+    harness.emitStdout({
+      id: registrationId,
+      result: {
+        success: false,
+        status: 'QNN registered; CUDA failed',
+        registeredEps: ['QNNExecutionProvider'],
+        failedEps: ['CUDAExecutionProvider'],
+      },
+    });
+    harness.emitClose({ code: 1 });
+
+    await expect(readiness).rejects.toThrow('lost after accelerator registration');
+    expect(harness.writes.filter((line) => line.includes('"cmd":"getEps"'))).toHaveLength(0);
+  }, 15000);
+
+  it('preserves each explicit rerun when multiple callers queue behind setup', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    const automatic = sdk.ensureAccelerators();
+    await waitForWrite('ensureAccelerators');
+    const first = sdk.ensureAccelerators(undefined, undefined, { forceRerun: true });
+    const second = sdk.ensureAccelerators(undefined, undefined, { forceRerun: true });
+    for (let cycle = 0; cycle < 3; cycle++) {
+      const id = await waitForWrite('ensureAccelerators', cycle);
+      harness.emitStdout({ id, result: { success: true } });
+      const probe = await waitForWrite('getEps', cycle);
+      harness.emitStdout({ id: probe, result: [] });
+    }
+    await Promise.all([automatic, first, second]);
+  }, 15000);
+
+  it('sends rebuildBroken only for a provider recheck and keeps that result', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const install = sdk.ensureAccelerators();
+    const installId = await waitForWrite('ensureAccelerators');
+    const installPayload = JSON.parse(harness.writes.filter((line) => line.includes('"ensureAccelerators"'))[0]);
+    expect(installPayload.cmd).toBe('ensureAccelerators');
+    expect(installPayload.rebuildBroken).toBeUndefined();
+    const recheck = sdk.ensureAccelerators(undefined, undefined, { rebuildBroken: true });
+    expect(harness.writes.filter((line) => line.includes('"ensureAccelerators"'))).toHaveLength(1);
+    harness.emitStdout({
+      id: installId,
+      result: { success: true, status: 'registered', registeredEps: [], failedEps: [] },
+    });
+    const installEps = await waitForWrite('getEps');
+    harness.emitStdout({ id: installEps, result: [] });
+    await install;
+
+    const recheckId = await waitForWrite('ensureAccelerators', 1);
+    const recheckPayload = JSON.parse(harness.writes.filter((line) => line.includes('"ensureAccelerators"'))[1]);
+    expect(recheckPayload.rebuildBroken).toBe(true);
+    harness.emitStdout({
+      id: recheckId,
+      result: {
+        success: false,
+        status: 'Provider still not registered',
+        registeredEps: ['WebGpuExecutionProvider'],
+        failedEps: ['CUDAExecutionProvider'],
+        removedProviderCaches: ['CUDAExecutionProvider'],
+        attemptedProviderRebuilds: ['CUDAExecutionProvider'],
+        busyProviderCaches: [],
+      },
+    });
+    const recheckEps = await waitForWrite('getEps', 1);
+    harness.emitStdout({
+      id: recheckEps,
+      result: [{ name: 'WebGpuExecutionProvider', isRegistered: true }],
+    });
+    await expect(recheck).resolves.toMatchObject({
+      registration: {
+        success: false,
+        failedEps: ['CUDAExecutionProvider'],
+        registeredEps: ['WebGpuExecutionProvider'],
+        busyProviderCaches: [],
+      },
+    });
+  }, 15000);
+
+  it('rejects provider discovery completed by a sidecar that exits before confirmation', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    const originalEps = sdkSnapshot(sdk).eps;
+
+    const readiness = sdk.ensureAccelerators();
+    const registrationId = await waitForWrite('ensureAccelerators');
+    harness.emitStdout({
+      id: registrationId,
+      result: {
+        success: true,
+        status: 'registered',
+        registeredEps: ['QNNExecutionProvider'],
+        failedEps: [],
+      },
+    });
+    const epsId = await waitForWrite('getEps');
+    harness.emitStdout({
+      id: epsId,
+      result: [{ name: 'QNNExecutionProvider', isRegistered: true }],
+    });
+    harness.emitClose({ code: 1 });
+
+    await expect(readiness).rejects.toThrow('replaced while confirming accelerator readiness');
+    expect(sdkSnapshot(sdk).eps).toEqual(originalEps);
+  }, 15000);
+
+  it('binds accelerator readiness to the generation that received the registration request', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+    const dispatchedGeneration = snapshot.runtime.generation;
+
+    const readiness = sdk.ensureAccelerators();
+    const registrationId = await waitForWrite('ensureAccelerators');
+    harness.emitStdout({
+      id: registrationId,
+      result: {
+        success: true,
+        status: 'registered',
+        registeredEps: ['QNNExecutionProvider'],
+        failedEps: [],
+      },
+    });
+    const epsId = await waitForWrite('getEps');
+    harness.emitStdout({
+      id: epsId,
+      result: [{ name: 'QNNExecutionProvider', isRegistered: true }],
+    });
+
+    await expect(readiness).resolves.toMatchObject({ generation: dispatchedGeneration });
+    unsubscribe();
+  }, 15000);
+
+  it('does not start HTTP with readiness owned by an exited sidecar', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const readinessPromise = sdk.ensureAccelerators();
+    const registrationId = await waitForWrite('ensureAccelerators');
+    harness.emitStdout({
+      id: registrationId,
+      result: {
+        success: true,
+        status: 'registered',
+        registeredEps: ['QNNExecutionProvider'],
+        failedEps: [],
+      },
+    });
+    const epsId = await waitForWrite('getEps');
+    harness.emitStdout({
+      id: epsId,
+      result: [{ name: 'QNNExecutionProvider', isRegistered: true }],
+    });
+    const readiness = await readinessPromise;
+    expect(sdk.isAcceleratorReadinessCurrent(readiness)).toBe(true);
+
+    harness.emitClose({ code: 1 });
+    expect(sdk.isAcceleratorReadinessCurrent(readiness)).toBe(false);
+    await expect(sdk.ensureServiceRunning(
+      5272,
+      undefined,
+      undefined,
+      undefined,
+      { convenience: true, expectedGeneration: readiness.generation },
+    )).rejects.toThrow('Runtime changed before the service could start');
+    expect(harness.writes.filter((line) => line.includes('"cmd":"startService"'))).toHaveLength(0);
+  }, 15000);
+
+  it('does not adopt a running endpoint from a status probe answered by an exited sidecar', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+
+    const ensured = sdk.ensureServiceRunning(
+      5272,
+      undefined,
+      undefined,
+      undefined,
+      { convenience: true, expectedGeneration: snapshot.runtime.generation },
+    );
+    const statusId = await waitForWrite('getStatus', 2);
+    harness.emitStdout({
+      id: statusId,
+      result: { serviceRunning: true, endpoint: 'http://127.0.0.1:5272' },
+    });
+    harness.emitClose({ code: 1 });
+
+    await expect(ensured).rejects.toThrow('Runtime changed before the service could start');
+    expect(snapshot.serviceRunning).toBe(false);
+    expect(snapshot.endpoint).toBeUndefined();
+    unsubscribe();
+  }, 15000);
+
+  it('does not publish an endpoint when the sidecar exits after the start reply', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+
+    const ensured = sdk.ensureServiceRunning(
+      5272,
+      undefined,
+      undefined,
+      undefined,
+      { convenience: true, expectedGeneration: snapshot.runtime.generation },
+    );
+    const statusId = await waitForWrite('getStatus', 2);
+    harness.emitStdout({ id: statusId, result: { serviceRunning: false, endpoint: null } });
+    const startId = await waitForWrite('startService');
+    harness.emitStdout({ id: startId, endpoint: 'http://127.0.0.1:5272' });
+    harness.emitClose({ code: 1 });
+
+    await expect(ensured).rejects.toThrow('endpoint is no longer available');
+    expect(snapshot.serviceRunning).toBe(false);
+    expect(snapshot.endpoint).toBeUndefined();
+    unsubscribe();
+  }, 15000);
+
+  it('forwards deferred catalog reads for offline startup service starts', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+
+    const ensured = sdk.ensureServiceRunning(
+      5272,
+      undefined,
+      undefined,
+      undefined,
+      {
+        convenience: true,
+        expectedGeneration: snapshot.runtime.generation,
+        deferCatalogRead: true,
+      },
+    );
+    const statusId = await waitForWrite('getStatus', 2);
+    harness.emitStdout({ id: statusId, result: { serviceRunning: false, endpoint: null } });
+    const startId = await waitForWrite('startService');
+    const startRequest = harness.writes
+      .map((line) => JSON.parse(line))
+      .find((request) => request.id === startId);
+    expect(startRequest).toMatchObject({
+      cmd: 'startService',
+      deferCatalogRead: true,
+    });
+    harness.emitStdout({ id: startId, endpoint: 'http://127.0.0.1:5272' });
+
+    await expect(ensured).resolves.toEqual({
+      endpoint: 'http://127.0.0.1:5272',
+      started: true,
+    });
+    unsubscribe();
+  }, 15000);
+
+  it('does not report a model load after its sidecar exits before refresh', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const load = sdk.loadModel({ alias: 'example' });
+    const loadId = await waitForWrite('load');
+    harness.emitStdout({ id: loadId, result: { alias: 'example', variantId: 'example-qnn-npu:1' } });
+    harness.emitClose({ code: 1 });
+
+    await expect(load).rejects.toThrow('lost after loading the model');
+    expect(harness.writes.filter((line) => line.includes('"cmd":"listModels"'))).toHaveLength(1);
+  }, 15000);
+
+  it('does not report a model load when its refresh completes on an exited sidecar', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const load = sdk.loadModel({ alias: 'example' });
+    const loadId = await waitForWrite('load');
+    harness.emitStdout({ id: loadId, result: { alias: 'example', variantId: 'example-qnn-npu:1' } });
+    const listId = await waitForWrite('listModels', 1);
+    harness.emitStdout({ id: listId, result: [] });
+    const statusId = await waitForWrite('getStatus', 2);
+    harness.emitStdout({ id: statusId, result: { serviceRunning: false, endpoint: null } });
+    const poolId = await waitForWrite('poolStatus', 1);
+    harness.emitStdout({ id: poolId, result: { models: [] } });
+    harness.emitClose({ code: 1 });
+
+    await expect(load).rejects.toThrow('replaced while confirming the loaded model');
+  }, 15000);
+
+  it('notifies onAcknowledged after load ack even if refresh later fails', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    const acked: string[] = [];
+    const load = sdk.loadModel({ alias: 'example' }, undefined, undefined, () => {
+      acked.push('yes');
+    });
+    const loadId = await waitForWrite('load');
+    harness.emitStdout({ id: loadId, result: { alias: 'example', variantId: 'example-qnn-npu:1' } });
+    await waitForWrite('listModels', 1);
+    expect(acked).toEqual(['yes']);
+    harness.emitClose({ code: 1 });
+    await expect(load).rejects.toThrow();
+  }, 15000);
+});
+
+describe('cancellation from inside onAssignedId', () => {
+  it('does not install handlers or deadlines after cancellation', async () => {
+    const sdk = await loadSdk();
+    vi.useFakeTimers();
+
+    const request = capture(
+      sdk.sendInternal('poolStatus', {}, undefined, (id) => {
+        sdk.cancelBeforeDispatch(id);
+      }),
+    );
+    await request.tracked;
+    expect(request.box.err.certainty).toBe('cancelled');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('settles the caller rather than leaving a promise nobody can answer', async () => {
+    const sdk = await loadSdk();
+    gateSpawn = true;
+
+    // The id callback fires before the caller has the promise, so this is the earliest possible
+    // cancellation. The entry must already carry its real reject handler by then.
+    const { box, tracked } = capture(
+      sdk.chatCompletionStream('m', [{ role: 'user', content: 'hi' }], () => {}, undefined, (id) => {
+        sdk.cancelBeforeDispatch(id);
+      }),
+    );
+    await tracked;
+    expect(box.err.certainty).toBe('cancelled');
+
+    harness.releaseSpawn?.();
+    await settleStartup();
+    expect(harness.writes.filter((w) => w.includes('chatCompletion'))).toHaveLength(0);
+  });
+
+  it('settles the caller when the id callback throws', async () => {
+    const sdk = await loadSdk();
+    gateSpawn = true;
+    const { box, tracked } = capture(
+      sdk.chatCompletionStream('m', [{ role: 'user', content: 'hi' }], () => {}, undefined, () => {
+        throw new Error('callback exploded');
+      }),
+    );
+    await tracked;
+    // Never published to the child, so the negative is provable.
+    expect(box.err.certainty).toBe('failed');
+
+    harness.releaseSpawn?.();
+    await settleStartup();
+    expect(harness.writes.filter((w) => w.includes('chatCompletion'))).toHaveLength(0);
+  });
+
+  it('fences startNow when Stop is queued during the same transition', async () => {
+    const sdk = await loadSdk();
+    let stop!: Promise<void>;
+    let start!: ReturnType<typeof capture>;
+    await sdk.withServiceTransition(async ({ startNow }) => {
+      stop = sdk.stopService();
+      start = capture(startNow(5272));
+      await start.tracked;
+    });
+
+    expect(start.box.err.certainty).toBe('cancelled');
+    expect(harness.writes.filter((w) => w.includes('startService'))).toHaveLength(0);
+    const stopId = await waitForWrite('stopService');
+    harness.emitStdout({ id: stopId, result: {} });
+    await stop;
+  });
+});
+
+describe('catalog mutation results', () => {
+  it('preserves a restart-flagged mutation result without attempting an impossible refresh', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const imported = sdk.importModelFolder({ folderPath: '/models/foo', name: 'foo' });
+    const importId = await waitForWrite('importModelFolder');
+    harness.emitStdout({
+      id: importId,
+      result: { catalogRefreshRequiresRestart: true, name: 'foo' },
+    });
+
+    await expect(imported).resolves.toEqual({
+      catalogRefreshRequiresRestart: true,
+      name: 'foo',
+    });
+    expect(harness.writes.filter((line) => line.includes('"listModels"'))).toHaveLength(1);
+  }, 15000);
+
+  it('still rejects when an unflagged mutation result is followed by a failed refresh', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const imported = sdk.importModelFolder({ folderPath: '/models/foo', name: 'foo' });
+    const importId = await waitForWrite('importModelFolder');
+    harness.emitStdout({ id: importId, result: { name: 'foo' } });
+    const listId = await waitForWrite('listModels', 1);
+    harness.emitStdout({ id: listId, error: 'catalog unavailable' });
+
+    await expect(imported).rejects.toThrow('catalog unavailable');
+  }, 15000);
+
+  it('refreshes live deletion state while preserving catalog restart guidance', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const deleted = sdk.deleteModel({ alias: 'foo' } as any, 'foo-cpu:1');
+    const deleteId = await waitForWrite('deleteModel');
+    harness.emitStdout({
+      id: deleteId,
+      result: {
+        alias: 'foo',
+        variantId: 'foo-cpu:1',
+        catalogRefreshRequiresRestart: true,
+      },
+    });
+    const listId = await waitForWrite('listModels', 1);
+    harness.emitStdout({ id: listId, result: [] });
+    const statusId = await waitForWrite('getStatus', 2);
+    harness.emitStdout({ id: statusId, result: { serviceRunning: false, endpoint: null } });
+    const poolId = await waitForWrite('poolStatus', 1);
+    harness.emitStdout({ id: poolId, result: { models: [] } });
+
+    await expect(deleted).resolves.toEqual({
+      alias: 'foo',
+      variantId: 'foo-cpu:1',
+      catalogRefreshRequiresRestart: true,
+    });
+    expect(harness.writes.filter((line) => line.includes('"listModels"'))).toHaveLength(2);
+  }, 15000);
+
+  it('turns a failed post-deletion refresh into explicit restart guidance', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+
+    const deleted = sdk.deleteModel({ alias: 'foo' } as any);
+    const deleteId = await waitForWrite('deleteModel');
+    harness.emitStdout({ id: deleteId, result: { alias: 'foo', count: 1 } });
+    const listId = await waitForWrite('listModels', 1);
+    harness.emitStdout({ id: listId, error: 'catalog unavailable' });
+
+    await expect(deleted).resolves.toEqual({
+      alias: 'foo',
+      count: 1,
+      catalogRefreshRequiresRestart: true,
+    });
+  }, 15000);
+
+  it('reconciles known deletion state when the post-delete catalog refresh fails', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+    sdk.sdkState.set({
+      ...snapshot,
+      models: [{
+        alias: 'foo',
+        isCached: true,
+        isLoaded: true,
+        variants: [
+          { id: 'foo-cpu:1', cached: true },
+          { id: 'foo-cuda:1', cached: true },
+        ],
+      }],
+      pool: [{ alias: 'foo', variantId: 'foo-cpu:1' }],
+    });
+
+    const deleted = sdk.deleteModel({ alias: 'foo' } as any, 'foo-cpu:1');
+    const deleteId = await waitForWrite('deleteModel');
+    harness.emitStdout({
+      id: deleteId,
+      result: { alias: 'foo', variantId: 'foo-cpu:1' },
+    });
+    const listId = await waitForWrite('listModels', 1);
+    harness.emitStdout({ id: listId, error: 'catalog unavailable' });
+
+    await expect(deleted).resolves.toMatchObject({
+      alias: 'foo',
+      variantId: 'foo-cpu:1',
+      catalogRefreshRequiresRestart: true,
+    });
+    expect(snapshot.models[0]).toMatchObject({
+      alias: 'foo',
+      isCached: true,
+      isLoaded: false,
+    });
+    expect(snapshot.models[0].variants).toEqual([
+      { id: 'foo-cpu:1', cached: false },
+      { id: 'foo-cuda:1', cached: true },
+    ]);
+    expect(snapshot.pool).toEqual([]);
+    unsubscribe();
+  }, 15000);
+
+  it('re-derives both lanes from the reconciled pool when the post-delete refresh fails', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+    sdk.sdkState.set({
+      ...snapshot,
+      models: [
+        { alias: 'foo', isCached: true, isLoaded: true, variants: [{ id: 'foo-cpu:1', cached: true }] },
+        { alias: 'bar', isCached: true, isLoaded: true, variants: [{ id: 'bar-cpu:1', cached: true }] },
+      ],
+      pool: [
+        { alias: 'foo', variantId: 'foo-cpu:1' },
+        { alias: 'bar', variantId: 'bar-cpu:1' },
+      ],
+      chatLaneModel: 'foo',
+      audioLaneModel: 'bar',
+    });
+
+    const deleted = sdk.deleteModel({ alias: 'foo' } as any);
+    const deleteId = await waitForWrite('deleteModel');
+    harness.emitStdout({ id: deleteId, result: { alias: 'foo', count: 1 } });
+    const listId = await waitForWrite('listModels', 1);
+    harness.emitStdout({ id: listId, error: 'catalog unavailable' });
+
+    await expect(deleted).resolves.toMatchObject({ catalogRefreshRequiresRestart: true });
+    expect(snapshot.pool).toEqual([{ alias: 'bar', variantId: 'bar-cpu:1' }]);
+    expect(snapshot.chatLaneModel).toBe('bar');
+    expect(snapshot.audioLaneModel).toBeUndefined();
+    expect(snapshot.loadedModels.map((model: any) => model.alias)).toEqual(['bar']);
+    unsubscribe();
+  }, 15000);
+
+  it('keeps residency consistent when pool telemetry fails during a refresh', async () => {
+    const sdk = await loadSdk();
+    await completeInitialization(sdk);
+    let snapshot: any;
+    const unsubscribe = sdk.getSDKState().subscribe((state) => {
+      snapshot = state;
+    });
+    sdk.sdkState.set({
+      ...snapshot,
+      pool: [{ alias: 'foo', variantId: 'foo-cpu:1', isLoaded: true, inFlight: 0 }],
+    });
+
+    const refreshed = sdk.refreshModels();
+    const listId = await waitForWrite('listModels', 1);
+    harness.emitStdout({
+      id: listId,
+      result: [
+        { alias: 'foo', cached: true, variants: [{ id: 'foo-cpu:1', cached: true }] },
+        { alias: 'bar', cached: true, variants: [{ id: 'bar-cpu:1', cached: true }] },
+      ],
+    });
+    const statusId = await waitForWrite('getStatus', 2);
+    harness.emitStdout({
+      id: statusId,
+      result: {
+        serviceRunning: false,
+        endpoint: null,
+        pool: [
+          { alias: 'foo', variantId: 'foo-cpu:1' },
+          { alias: 'bar', variantId: 'bar-cpu:1' },
+        ],
+      },
+    });
+    const poolId = await waitForWrite('poolStatus', 1);
+    harness.emitStdout({ id: poolId, error: 'telemetry unavailable' });
+    await refreshed;
+    expect(snapshot.pool).toEqual([
+      { alias: 'foo', variantId: 'foo-cpu:1', isLoaded: true, inFlight: 0 },
+      { alias: 'bar', variantId: 'bar-cpu:1', isLoaded: null },
+    ]);
+    expect(snapshot.chatLaneModel).toBe('foo');
+    expect(snapshot.audioLaneModel).toBe('bar');
+
+    const deleted = sdk.deleteModel({ alias: 'foo' } as any);
+    const deleteId = await waitForWrite('deleteModel');
+    harness.emitStdout({ id: deleteId, result: { alias: 'foo', count: 1 } });
+    const failedListId = await waitForWrite('listModels', 2);
+    harness.emitStdout({ id: failedListId, error: 'catalog unavailable' });
+
+    await expect(deleted).resolves.toMatchObject({ catalogRefreshRequiresRestart: true });
+    expect(snapshot.loadedModels.map((model: any) => model.alias)).toEqual(['bar']);
+    expect(snapshot.chatLaneModel).toBe('bar');
+    unsubscribe();
+  }, 15000);
+});

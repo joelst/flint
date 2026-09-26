@@ -2,4 +2,4 @@
 "flint": minor
 ---
 
-Add approximate timestamped transcripts and model list sorting.
+Add Flint-derived transcript timing exports with visible incomplete ranges, plus model family sorting and search.

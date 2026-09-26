@@ -1,0 +1,151 @@
+import type { TranscriptionWindow } from './audio-segmentation';
+import type { TranscriptBoundary, TranscriptSegment } from './transcript-format';
+
+export type TranscriptionWindowOutcome =
+  | { window: TranscriptionWindow; status: 'success'; text: string }
+  | { window: TranscriptionWindow; status: 'failed'; uncertain: boolean }
+  | { window: TranscriptionWindow; status: 'unprocessed' };
+
+export interface TranscriptRange {
+  startSec: number;
+  endSec: number;
+}
+
+export interface TranscriptGap extends TranscriptRange {
+  kind: 'failed' | 'unprocessed';
+  uncertain: boolean;
+}
+
+export interface AssembledLongAudioTranscript {
+  text: string;
+  segments: TranscriptSegment[];
+  gaps: TranscriptGap[];
+  emptyRecognitionRanges: TranscriptRange[];
+  failedChunks: number;
+  uncertainChunks: number;
+  unprocessedChunks: number;
+}
+
+export function normalizeTranscriptText(value: string): string {
+  return String(value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function comparableWord(word: string): string {
+  return word.toLocaleLowerCase();
+}
+
+export function findWordOverlapTailPrefix(
+  previousText: string,
+  nextText: string,
+  maxWords = 24,
+): number {
+  const previous = normalizeTranscriptText(previousText).split(' ').filter(Boolean);
+  const next = normalizeTranscriptText(nextText).split(' ').filter(Boolean);
+  const max = Math.min(maxWords, previous.length, next.length);
+  for (let overlap = max; overlap > 0; overlap--) {
+    const previousTail = previous.slice(-overlap).map(comparableWord);
+    const nextHead = next.slice(0, overlap).map(comparableWord);
+    if (previousTail.every((word, index) => word === nextHead[index])) return overlap;
+  }
+  return 0;
+}
+
+function startBoundaryFor(
+  outcomeIndex: number,
+  outcomes: readonly TranscriptionWindowOutcome[],
+): TranscriptBoundary {
+  if (outcomeIndex === 0) return 'recording-edge';
+  const previous = outcomes[outcomeIndex - 1]?.window;
+  return previous?.snappedEnd ? 'pause-snapped' : 'fixed-window';
+}
+
+function endBoundaryFor(
+  outcomeIndex: number,
+  outcomes: readonly TranscriptionWindowOutcome[],
+): TranscriptBoundary {
+  const window = outcomes[outcomeIndex].window;
+  if (outcomeIndex === outcomes.length - 1 && !window.hardSplitEnd && !window.snappedEnd) {
+    return 'recording-edge';
+  }
+  return window.snappedEnd ? 'pause-snapped' : 'fixed-window';
+}
+
+export function assembleLongAudioTranscript(
+  outcomes: readonly TranscriptionWindowOutcome[],
+): AssembledLongAudioTranscript {
+  const segments: TranscriptSegment[] = [];
+  const gaps: TranscriptGap[] = [];
+  const emptyRecognitionRanges: TranscriptRange[] = [];
+  let failedChunks = 0;
+  let uncertainChunks = 0;
+  let unprocessedChunks = 0;
+
+  outcomes.forEach((outcome, outcomeIndex) => {
+    const { window } = outcome;
+    if (outcome.status === 'failed') {
+      failedChunks++;
+      if (outcome.uncertain) uncertainChunks++;
+      gaps.push({
+        startSec: window.startSec,
+        endSec: window.endSec,
+        kind: 'failed',
+        uncertain: outcome.uncertain,
+      });
+      return;
+    }
+    if (outcome.status === 'unprocessed') {
+      failedChunks++;
+      unprocessedChunks++;
+      gaps.push({
+        startSec: window.startSec,
+        endSec: window.endSec,
+        kind: 'unprocessed',
+        uncertain: false,
+      });
+      return;
+    }
+
+    const recognizedText = normalizeTranscriptText(outcome.text);
+    if (!recognizedText) {
+      emptyRecognitionRanges.push({ startSec: window.startSec, endSec: window.endSec });
+      return;
+    }
+
+    let acceptedText = recognizedText;
+    const previousOutcome = outcomes[outcomeIndex - 1];
+    const previousSegment = segments.at(-1);
+    const genuinelyAdjacentOverlap =
+      window.overlapsPrevious &&
+      previousOutcome?.status === 'success' &&
+      previousSegment != null;
+    if (genuinelyAdjacentOverlap) {
+      const overlapWords = findWordOverlapTailPrefix(previousOutcome.text, recognizedText);
+      if (overlapWords > 0) {
+        acceptedText = recognizedText.split(' ').slice(overlapWords).join(' ').trim();
+      }
+    }
+    if (!acceptedText) return;
+
+    const startSec = genuinelyAdjacentOverlap
+      ? Math.max(window.startSec, previousSegment.endSec)
+      : window.startSec;
+    segments.push({
+      index: segments.length,
+      startSec,
+      endSec: Math.max(window.endSec, startSec + 0.05),
+      text: acceptedText,
+      startBoundary: startBoundaryFor(outcomeIndex, outcomes),
+      endBoundary: endBoundaryFor(outcomeIndex, outcomes),
+    });
+  });
+
+  return {
+    text: normalizeTranscriptText(segments.map((segment) => segment.text).join(' ')),
+    segments,
+    gaps,
+    emptyRecognitionRanges,
+    failedChunks,
+    uncertainChunks,
+    unprocessedChunks,
+  };
+}

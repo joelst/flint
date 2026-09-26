@@ -3,7 +3,7 @@
 How to build, run, test, and version Flint locally.
 
 For product overview and screenshots, see [README.md](../README.md).  
-For release status and planning, see [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md).  
+For the forward plan through 1.0, see [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md).  
 For signed release pipeline setup, see [RELEASE.md](./RELEASE.md).
 
 ---
@@ -14,7 +14,7 @@ For signed release pipeline setup, see [RELEASE.md](./RELEASE.md).
 - **Rust** + Cargo (Tauri)
 - Windows: Visual Studio Build Tools / MSVC for native builds (use `build-local.ps1` if `cl.exe` / SignTool paths need wiring)
 
-`npm install` runs the Foundry Local SDK install script, which downloads native core libraries into `node_modules/foundry-local-sdk/foundry-local-core/<platform>/`. Release builds also run `npm run ensure:node` and `npm run ensure:foundry` via Tauri `beforeBuildCommand`.
+`npm install` runs the Foundry Local SDK install script, which downloads the ONNX Runtime / ORT-GenAI libraries into `node_modules/foundry-local-sdk/prebuilds/<platform>/`, next to the `foundry_local` native the package itself ships. Release builds also run `npm run ensure:foundry` so missing native assets fail before packaging. In CI, `npm run ci:deps` restores `runtime/foundry-native-cache` into that directory before the install script runs; the cache records the SDK and runtime versions it was saved from and a restore that does not match them is refused.
 
 ### Bundled Node runtime (Spike A)
 
@@ -34,13 +34,13 @@ Dev without staging still works if Node 22+ is on PATH. For release/dogfood of �
 npm run ensure:node
 npm run smoke:node
 # Windows local: use build-local.ps1 so cl.exe / SignTool are on PATH
-npm run tauri:build
+npm run tauri:build:local
 npm run verify:bundle
 ```
 
 Spike A (2026-08-10): MSI ~**54 MB** / NSIS ~**38 MB** with bundled Node (~+30 / +20 MB vs pre-spike 0.3.1 artifacts). Details: [spikes/node-bundle-spike.md](./spikes/node-bundle-spike.md).
 
-**CI:** `cargo check` and Tauri builds require `src-tauri/binaries/node-<triple>` to exist (`externalBin`). Workflows run `npm run ensure:node` after `npm ci` (see `.github/workflows/ci.yml` and `release.yml`).
+**CI:** `cargo check` and Tauri builds require `src-tauri/binaries/node-<triple>` to exist (`externalBin`). Workflows run `npm run ci:deps` (not plain `npm ci`) so the Foundry native cache is restored before staging Node.
 
 `ensure:foundry` prefers the **build target**, not the host:
 
@@ -67,7 +67,9 @@ Supported Foundry core layouts today: `win32-x64`, `win32-arm64`, `linux-x64`, `
 | `npm run test:coverage` | Tests + coverage |
 | `npm run build` | Frontend web build only |
 | `npm run tauri:build` | Package installers (msi/nsis/dmg); runs ensure:node + ensure:foundry first |
+| `npm run tauri:build:local` | Local package via `--no-sign`: skips **all** code signing (updater signatures, Windows Authenticode, macOS bundle signing), so no `TAURI_SIGNING_PRIVATE_KEY` is needed |
 | `npm run verify:bundle` | Post-build bundle resource check |
+| `npm run verify:release -- 0.9.0 --channel=stable` | Verify package/Tauri/Cargo versions and stable-channel metadata |
 | `npm run run:built` | Launch a release build without installing MSI |
 | `cd src-tauri && cargo check` | Rust/Tauri compile check |
 
@@ -77,24 +79,35 @@ Supported Foundry core layouts today: `win32-x64`, `win32-arm64`, `linux-x64`, `
 
 - **Frontend:** Svelte 5 + SvelteKit SPA (`src/routes/+layout.ts` sets `ssr = false`). Most UI lives in `src/routes/+page.svelte`.
 - **SDK boundary:** `src/lib/sdk.ts` — do not import Foundry Local directly into the web bundle.
-- **Sidecar:** `sidecar/foundry-sidecar.js` speaks JSON-lines over stdio; Rust/Tauri is intentionally thin.
+- **Sidecar:** `sidecar/foundry-sidecar.js` is the process entry (stdout guard, then
+  `foundry-sidecar-main.js`). Rust owns the single child process and transport;
+  Foundry lifecycle and inference remain in Node.
 - **Vite** externalizes `foundry-local-sdk` and Node builtins so the web bundle stays buildable.
 
-When adding sidecar commands: update **both** `src/lib/sdk.ts` (and IPC contracts if applicable) and `sidecar/foundry-sidecar.js`.
+When adding sidecar commands: update **both** `src/lib/sdk.ts` (and IPC contracts if applicable) and `sidecar/foundry-sidecar-main.js`.
+
+### Parallel contributor handoff
+
+See [EXTENDING.md](./EXTENDING.md#working-safely-in-parallel) for work lanes,
+shared hotspots, and the `npm run verify:ipc-contracts` check.
 
 ### Local OpenAI-compatible endpoint
 
 - **Bind address** (Settings → Network) controls which interface the service *listens* on (`127.0.0.1`, `0.0.0.0`, or a custom IP).
-- **Client / Integrations URL** (`sharedEndpoint`) is always `http://127.0.0.1:<port>/v1` so this app and local tools connect over loopback even when the service is bound to all interfaces.
+- **Client / Integrations URL** (`sharedEndpoint`) is usually `http://127.0.0.1:<port>/v1` so this app and local tools connect over loopback even when the service is bound to all interfaces. WSL2 NAT clients should follow **Settings → Network → WSL clients** for mirrored networking or the manual Windows host-address setup; LAN clients should use the machine's LAN IP.
 - Use **Apply & restart** after changing port or bind so the sidecar re-creates the Foundry manager with the new `webServiceUrls`.
 
 ### Why a sidecar?
 
-Direct use of `foundry-local-sdk` from the Svelte frontend hits bundling limits (Node core modules externalized; native prebuilts/DLL resolution). The JS sidecar is the current production path for rapid iteration.
+Direct use of `foundry-local-sdk` from the Svelte frontend hits bundling limits (Node core modules externalized; native prebuilts/DLL resolution). The JS sidecar is the current production path for all Foundry integration.
 
-**Spike A (in progress):** ship a **bundled Node** binary via Tauri `externalBin` so end users need not install Node. A full Rust Foundry bridge remains the longer-term path to remove the Node *process* entirely (see PRODUCT_PLAN / BACKLOG).
+**Spike A (in progress):** ship a **bundled Node** binary via Tauri `externalBin` so end users need not install Node. A full Rust Foundry bridge remains the longer-term path to remove the Node process entirely.
 
-The sidecar emits `{ "ready": true }` after listener setup and lazy-loads the SDK on first `init`. Production resolution uses `resolveResource` + `cwd` + `NODE_PATH`, and spawns `binaries/node` (bundled) or PATH `node`. Stderr is captured; init timeout is 10s.
+The sidecar emits `{ "ready": true }` after listener setup and lazy-loads the SDK
+on first `init`. Rust resolves the trusted packaged resource path, configures
+`cwd`/`NODE_PATH`, and spawns bundled `node` or the explicit development PATH
+fallback. Generation-tagged native events carry complete JSON frames, stderr,
+and observed exit to the frontend.
 
 ---
 
@@ -104,6 +117,43 @@ The sidecar emits `{ "ready": true }` after listener setup and lazy-loads the SD
 npm run tauri:build
 npm run verify:bundle
 ```
+
+`tauri:build` signs the updater artifacts and therefore requires `TAURI_SIGNING_PRIVATE_KEY`.
+Without it the build compiles and bundles the app, then fails at the last step with
+`A public key has been found, but no private key`. For a local build, use:
+
+```bash
+npm run tauri:build:local
+npm run verify:bundle
+```
+
+`--no-sign` skips **all** code signing — updater signatures, Windows Authenticode and macOS
+bundle signing alike — so release builds must keep using `tauri:build`. The release workflow
+invokes `tauri-action` directly and is unaffected by the local script.
+
+macOS builds are Apple Silicon only and declare a minimum of macOS 14.0, because the bundled
+`libonnxruntime.dylib` is built with `minos 14.0` and `foundry-local-sdk` ships no `darwin-x64`
+prebuild.
+
+### macOS: Gatekeeper quarantines the Foundry native library
+
+`foundry-local-sdk` ships `prebuilds/darwin-arm64/libfoundry_local.dylib` **ad-hoc signed only** — it
+carries no Developer ID signature and is not notarized. macOS therefore tags it with
+`com.apple.quarantine` on install and refuses to `dlopen` it, showing a *"Apple could not verify
+… is free of malware"* dialog. Choose **Done**, never *Move to Trash* — trashing it breaks
+`node_modules`.
+
+The symptom is a block of sidecar test failures that look unrelated to your change (the SDK
+load probe and every BYOM end-to-end case), so it is easy to mistake for a pre-existing
+baseline. Clear the attribute after any `npm install` that refreshes the SDK:
+
+```bash
+xattr -d -r com.apple.quarantine node_modules/foundry-local-sdk
+```
+
+Verify with `xattr -r -p com.apple.quarantine node_modules/foundry-local-sdk`, which should
+print nothing. This is deliberately not automated in `postinstall`: stripping Gatekeeper
+metadata is a decision each developer should make knowingly.
 
 - **Dev:** `npm run tauri dev`
 - **Test release exe without MSI:** `npm run run:built` or `scripts\run-built.bat`
@@ -136,7 +186,42 @@ Workflow:
 pwsh .\scripts\flint-icon-generator.ps1 -SourceImage .\static\flint-master-1024.png -RepositoryRoot .
 ```
 
-Updates `static\` and `src-tauri\icons\` (including `.ico`). SVG generation is intentionally excluded (was producing raster-wrapped output).
+Updates `static\` and `src-tauri\icons\`, using the Tauri CLI for the platform bundle
+assets so `.ico` contains the required Windows sizes and `.icns` is generated consistently
+on every development OS. SVG generation is intentionally excluded.
+
+---
+
+## Screenshots
+
+README and docs screenshots go stale after UI changes (nav labels, theme, branding). To
+refresh them:
+
+1. Launch the dev build. On Windows, enable WebView2's remote debugging port so its
+   content can be driven over the Chrome DevTools Protocol (CDP):
+   ```powershell
+   $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9222"
+   .\build-local.ps1 -Command "npm run tauri dev"
+   ```
+   On macOS, run `npm run tauri dev` normally. The terminal that invokes the capture
+   script needs Accessibility and Screen Recording permission.
+2. Once the window is visible and connected, in another terminal run:
+   ```powershell
+   node scripts/capture-screenshots.mjs
+   ```
+   Windows captures each sidebar section in both themes at 1600x1000. macOS captures
+   the same sections and themes as native app windows with `flint-macos-` filenames.
+3. Review the diffs — the app's live state (loaded models, conversation history, sample
+   data) ends up in the screenshot, so put the app into a presentable state first (a
+   clean/representative conversation, a model loaded, no error banners) before capturing.
+4. Update both `SHOTS` and `MAC_SHOTS` in `scripts/capture-screenshots.mjs` if sidebar
+   labels or page headings change (or replace them with a shared configuration), and update
+   `README.md`'s Screenshots section if sections are added, renamed, or removed.
+
+On Windows, the script only uses Node built-ins (global `fetch`/`WebSocket`), so it needs
+no new dependency. On macOS, it additionally shells out to the `swift` compiler and
+`/usr/sbin/screencapture`; `/usr/sbin/screencapture` ships with macOS, but `swift` requires
+Xcode or the Xcode Command Line Tools (`xcode-select --install`) to be installed.
 
 ---
 

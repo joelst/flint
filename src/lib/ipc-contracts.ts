@@ -1,36 +1,113 @@
 export type LaneName = 'chat' | 'audio';
 
+/** Version of the JSON-lines transport handshake shared with the sidecar. */
+export const SIDECAR_PROTOCOL_VERSION = 1;
+
 export type SidecarCommand =
   | { cmd: 'init'; appName: string; logLevel: string }
   | { cmd: 'setLogLevel'; level: string }
-  | { cmd: 'startService'; port: number; alias?: string; preferredEp?: string; bindAddress?: string }
+  | { cmd: 'startService'; port: number; alias?: string; preferredEp?: string; bindAddress?: string; gateway?: boolean; deferCatalogRead?: boolean }
   | { cmd: 'stopService' }
+  | { cmd: 'stopAndUnload'; drainTimeoutMs?: number }
+  | { cmd: 'shutdownRuntime'; drainTimeoutMs?: number }
   | { cmd: 'getStatus' }
   | { cmd: 'listModels' }
   | { cmd: 'download'; alias: string; variantId?: string }
   | { cmd: 'load'; alias: string; lane?: LaneName; variantId?: string }
-  | { cmd: 'unload'; alias: string; lane?: LaneName }
+  | { cmd: 'unload'; alias: string; lane?: LaneName; ifIdle?: boolean }
   | { cmd: 'deleteModel'; alias: string; variantId?: string }
   | { cmd: 'getEndpoint' }
-  | { cmd: 'chatCompletion'; model: string; messages: unknown[]; maxTokens?: number; temperature?: number; preferredEp?: string; stream?: boolean }
+  | { cmd: 'chatCompletion'; model: string; messages: unknown[]; maxTokens?: number; temperature?: number; preferredEp?: string; stream?: boolean; topP?: number; topK?: number; frequencyPenalty?: number; presencePenalty?: number; randomSeed?: number }
   | { cmd: 'cancelChatRequest'; requestId: number }
   | { cmd: 'transcribeAudio'; audioBase64: string; mimeType: string; fileName: string; model: string; language: string; temperature?: number; preferredEp?: string }
+  | { cmd: 'embedTexts'; model: string; inputs: string[] }
   | { cmd: 'getEps' }
-  | { cmd: 'ensureAccelerators' }
+  | { cmd: 'ensureAccelerators'; rebuildBroken?: boolean }
   | { cmd: 'getVisionModels' }
   | { cmd: 'getSTTModels' }
   | { cmd: 'poolStatus' }
   | { cmd: 'getAccessLog' }
-  | { cmd: 'fetchUrl'; url: string; maxChars?: number };
+  | { cmd: 'getHealthRing' }
+  | { cmd: 'getCacheInventory' }
+  | { cmd: 'fetchUrl'; url: string; maxChars?: number }
+  | { cmd: 'inspectModelFolder'; folderPath: string }
+  | { cmd: 'importModelFolder'; folderPath: string; name: string; publisher?: string; version?: number; promptTemplate?: PromptTemplate }
+  | { cmd: 'linkModelFolder'; folderPath: string; name: string; publisher?: string }
+  | { cmd: 'getModelTemplate'; name: string }
+  | { cmd: 'setModelTemplate'; name: string; promptTemplate: PromptTemplate }
+  | { cmd: 'setEvictionConfig'; idleUnloadEnabled?: boolean; idleTimeoutMs?: number; maxResidentEnabled?: boolean; maxResident?: number }
+  | { cmd: 'setModelPriorities'; priorities: ModelPriorityEntry[] }
+  | { cmd: 'applyMemorySettings'; priorities: ModelPriorityEntry[]; eviction?: Partial<EvictionConfig>; seq?: number }
+  | { cmd: 'setBenchmarkExclusive'; exclusive: boolean }
+  | { cmd: 'wslStatus' }
+  | { cmd: 'wslEnableMirrored' }
+  | { cmd: 'wslShutdown' };
+
+/**
+ * How keen Flint is to unload a model when the pool needs to shrink.
+ * `pinned` is exempt from eviction entirely; `low` is unloaded before anything else.
+ */
+export type ModelPriority = 'pinned' | 'normal' | 'low';
+
+export interface ModelPriorityEntry {
+  alias: string;
+  priority: ModelPriority;
+}
+
+/** Bounds how many models stay resident. Both rules are off unless the user turns them on. */
+export interface EvictionConfig {
+  idleUnloadEnabled: boolean;
+  idleTimeoutMs: number;
+  maxResidentEnabled: boolean;
+  maxResident: number;
+}
+
+/** A discoverable execution provider and whether the native runtime can currently use it. */
+export interface EpInfo {
+  name: string;
+  isRegistered: boolean;
+}
+
+/** The native result of attempting to register every discoverable accelerator provider. */
+export interface EpDownloadResult {
+  success: boolean;
+  status: string;
+  registeredEps: string[];
+  failedEps: string[];
+  /** Provider setup ran after the immutable catalog snapshot was committed. */
+  catalogRefreshRequiresRestart?: boolean;
+  /** Provider setup was not started because a listener may be taking the first catalog snapshot. */
+  registrationDeferredUntilRestart?: boolean;
+  /** Provider names Flint asked Foundry to rebuild during a provider recheck. */
+  attemptedProviderRebuilds?: string[];
+  /** Provider names whose on-disk cache was removed before a rebuild. */
+  removedProviderCaches?: string[];
+  /** Provider names left in place because a file in the cache was still loaded. */
+  busyProviderCaches?: string[];
+}
+
+/** The four turn wrappers Foundry substitutes `{Content}` into when building a prompt. */
+export interface PromptTemplate {
+  system: string;
+  user: string;
+  assistant: string;
+  prompt: string;
+}
 
 export type SidecarCommandName = SidecarCommand['cmd'];
 
 export const KNOWN_COMMANDS = new Set<SidecarCommandName>([
-  'init', 'setLogLevel', 'startService', 'stopService', 'getStatus',
+  'init', 'setLogLevel', 'startService', 'stopService', 'stopAndUnload', 'shutdownRuntime', 'getStatus',
   'listModels', 'download', 'load', 'unload', 'deleteModel', 'getEndpoint',
-  'chatCompletion', 'cancelChatRequest', 'transcribeAudio',
+  'chatCompletion', 'cancelChatRequest', 'transcribeAudio', 'embedTexts',
   'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',
-  'poolStatus', 'getAccessLog', 'fetchUrl',
+  'poolStatus', 'getAccessLog', 'getHealthRing', 'fetchUrl',
+  'getCacheInventory',
+  'inspectModelFolder', 'importModelFolder', 'linkModelFolder',
+  'getModelTemplate', 'setModelTemplate',
+  'setEvictionConfig', 'setModelPriorities', 'applyMemorySettings',
+  'setBenchmarkExclusive',
+  'wslStatus', 'wslEnableMirrored', 'wslShutdown',
 ]);
 
 /**

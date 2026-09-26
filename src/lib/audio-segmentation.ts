@@ -216,9 +216,12 @@ export function planTranscriptionWindows(
 
 export interface SegmentationPlan {
   windows: TranscriptionWindow[];
-  /** True when boundaries were snapped to real pauses in the audio. */
+  /** True only when at least one emitted interior boundary was snapped to a pause. */
   usedSilenceDetection: boolean;
   silenceRunCount: number;
+  snappedBoundaryCount: number;
+  hardSplitBoundaryCount: number;
+  timingStrategy: 'single-window' | 'silence-snapped' | 'fixed-windows' | 'mixed';
 }
 
 /**
@@ -235,12 +238,24 @@ export function planSegmentation(
   const threshold = estimateSilenceThreshold(energies);
   const runs = threshold === null ? [] : findSilenceRuns(energies, threshold);
 
-  // A handful of pauses across a long recording is not a usable segmentation
-  // signal; prefer the predictable fixed-chunk path in that case.
-  const usable = runs.length >= 2;
+  const windows = planTranscriptionWindows(totalSec, runs, options);
+  const snappedBoundaryCount = windows.filter((window) => window.snappedEnd).length;
+  const hardSplitBoundaryCount = windows.filter((window) => window.hardSplitEnd).length;
+  const timingStrategy =
+    windows.length <= 1
+      ? 'single-window'
+      : snappedBoundaryCount > 0 && hardSplitBoundaryCount > 0
+        ? 'mixed'
+        : snappedBoundaryCount > 0
+          ? 'silence-snapped'
+          : 'fixed-windows';
+
   return {
-    windows: planTranscriptionWindows(totalSec, usable ? runs : [], options),
-    usedSilenceDetection: usable,
+    windows,
+    usedSilenceDetection: snappedBoundaryCount > 0,
     silenceRunCount: runs.length,
+    snappedBoundaryCount,
+    hardSplitBoundaryCount,
+    timingStrategy,
   };
 }

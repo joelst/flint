@@ -196,6 +196,53 @@ describe('planSegmentation', () => {
     expect(plan.windows.length).toBeGreaterThan(1);
     // At least one boundary should have landed on a real pause.
     expect(plan.windows.some((w) => !w.hardSplitEnd)).toBe(true);
+    expect(plan.snappedBoundaryCount).toBeGreaterThan(0);
+  });
+
+  it('uses one usable pause even when other detected pauses cannot snap a boundary', () => {
+    const plan = planSegmentation(
+      buildWaveform([
+        { sec: 2, loud: true },
+        { sec: 1, loud: false },
+        { sec: 23, loud: true },
+        { sec: 1, loud: false },
+        { sec: 65, loud: true },
+      ]),
+      SR,
+    );
+    expect(plan.silenceRunCount).toBe(2);
+    expect(plan.snappedBoundaryCount).toBe(1);
+    expect(plan.usedSilenceDetection).toBe(true);
+    expect(plan.timingStrategy).toBe('mixed');
+  });
+
+  it('does not claim silence provenance when detected pauses are unusable', () => {
+    const plan = planSegmentation(
+      buildWaveform([
+        { sec: 2, loud: true },
+        { sec: 1, loud: false },
+        { sec: 117, loud: true },
+      ]),
+      SR,
+    );
+    expect(plan.silenceRunCount).toBe(1);
+    expect(plan.snappedBoundaryCount).toBe(0);
+    expect(plan.usedSilenceDetection).toBe(false);
+    expect(plan.timingStrategy).toBe('fixed-windows');
+  });
+
+  it('does not label recording start or end as pause-snapped boundaries', () => {
+    const plan = planSegmentation(
+      buildWaveform([
+        { sec: 27, loud: true },
+        { sec: 1, loud: false },
+        { sec: 20, loud: true },
+      ]),
+      SR,
+    );
+    expect(plan.windows[0].snappedEnd).toBe(true);
+    expect(plan.windows.at(-1)?.snappedEnd).toBe(false);
+    expect(plan.windows.at(-1)?.hardSplitEnd).toBe(false);
   });
 
   it('falls back to fixed chunking for continuous speech with no pauses', () => {
@@ -203,6 +250,7 @@ describe('planSegmentation', () => {
     expect(plan.usedSilenceDetection).toBe(false);
     expect(plan.windows.length).toBeGreaterThan(1);
     expect(plan.windows.slice(1).every((w) => w.overlapsPrevious)).toBe(true);
+    expect(plan.timingStrategy).toBe('fixed-windows');
   });
 
   it('falls back to fixed chunking for a near-silent recording', () => {
