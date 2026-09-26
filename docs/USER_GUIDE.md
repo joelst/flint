@@ -83,6 +83,14 @@ The sidebar is grouped by workflow:
 - **Playground → Voice**: pick an STT model, use mic or file.  
 - Chat and audio share the local service — only one “active” path at a time for some flows; load the right model for the task.
 - Transcription cannot be stopped once started; the Transcribe control says so while in flight.
+- Long recordings use 28-second windows with overlap at fixed cuts. Flint may snap individual
+  boundaries to detected pauses, but every displayed timestamp is a Flint-derived estimate,
+  never timing reported by the model. Mixed plans identify unsnapped boundaries as approximate.
+- **Copy with estimated times** includes that timing disclaimer. **Download .srt + timing note**
+  creates a standard SRT plus an associated `.timing.txt` file with the same filename stem;
+  WebVTT carries the note in its standard `NOTE` block.
+- Failed, uncertain, and unprocessed ranges remain visible as transcript gaps. A successfully
+  processed window with no recognized text is reported separately and is not treated as proven silence.
 
 ### Diagnostics self-test
 

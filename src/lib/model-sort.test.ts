@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { sortModels, compareModels, modelUpdatedAt, isModelSortMode } from './model-sort';
+import {
+  sortModels,
+  compareModels,
+  deriveModelFamily,
+  modelFamilyLabel,
+  modelMatchesSearch,
+  modelUpdatedAt,
+  isModelSortMode,
+} from './model-sort';
 
 const models = [
   { alias: 'qwen3-1.7b', family: 'Qwen', createdAt: 1_700_000_000 },
@@ -53,6 +61,34 @@ describe('modelUpdatedAt', () => {
   it('reads createdAt from the model or its info block', () => {
     expect(modelUpdatedAt({ createdAt: 5 })).toBe(5);
     expect(modelUpdatedAt({ info: { createdAt: 7 } })).toBe(7);
+  });
+
+  describe('derived family behavior', () => {
+    it('derives a useful family only when catalog metadata is missing', () => {
+      expect(deriveModelFamily('qwen2.5-coder-7b-instruct')).toBe('qwen2.5-coder');
+      expect(deriveModelFamily('whisper-large-v3-turbo')).toBe('whisper');
+      expect(modelFamilyLabel({ alias: 'qwen2.5-coder-7b', family: 'Qwen Coder' }))
+        .toBe('qwen coder');
+    });
+
+    it('keeps family search additive to alias search', () => {
+      const model = { alias: 'qwen2.5-coder-7b' };
+      expect(modelMatchesSearch(model, '7b')).toBe(true);
+      expect(modelMatchesSearch(model, 'qwen2.5-coder')).toBe(true);
+      expect(modelMatchesSearch(model, 'phi')).toBe(false);
+    });
+
+    it('groups models with missing catalog families by their derived alias family', () => {
+      const aliases = sortModels(
+        [
+          { alias: 'qwen2.5-coder-14b' },
+          { alias: 'phi-4-mini' },
+          { alias: 'qwen2.5-coder-7b' },
+        ],
+        'family',
+      ).map((model) => model.alias);
+      expect(aliases).toEqual(['phi-4-mini', 'qwen2.5-coder-7b', 'qwen2.5-coder-14b']);
+    });
   });
 
   it('treats a missing or non-finite date as oldest', () => {
