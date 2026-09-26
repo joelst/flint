@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   formatSrtTime,
   formatVttTime,
@@ -11,6 +13,7 @@ import {
   buildTimestampedText,
   TIMESTAMP_DISCLAIMER,
   type TranscriptSegment,
+  type TranscriptExportState,
 } from './transcript-format';
 
 const segments: TranscriptSegment[] = [
@@ -31,6 +34,24 @@ const segments: TranscriptSegment[] = [
     endBoundary: 'recording-edge',
   },
 ];
+
+const cleanState: TranscriptExportState = {
+  segments,
+  gaps: [],
+  emptyRecognitionRanges: [],
+  overlapOnlyRanges: [],
+};
+
+const exhaustiveState: TranscriptExportState = {
+  segments,
+  gaps: [
+    { startSec: 24, endSec: 52, kind: 'failed', uncertain: false },
+    { startSec: 48, endSec: 76, kind: 'failed', uncertain: true },
+    { startSec: 72, endSec: 100, kind: 'unprocessed', uncertain: false },
+  ],
+  emptyRecognitionRanges: [{ startSec: 96, endSec: 124 }],
+  overlapOnlyRanges: [{ startSec: 120, endSec: 148 }],
+};
 
 describe('time formatting', () => {
   it('formats SRT timestamps with a comma separator', () => {
@@ -80,7 +101,7 @@ describe('buildSrt', () => {
   });
 
   it('provides truthful timing-source metadata to accompany SRT exports', () => {
-    const note = buildSrtTimingMetadata(segments);
+    const note = buildSrtTimingMetadata(cleanState);
     expect(note).toContain('Flint');
     expect(note).toContain('snapped to detected pauses');
     expect(note).toContain('not timings reported by the model');
@@ -123,31 +144,38 @@ describe('buildSrt', () => {
 
 describe('buildVtt', () => {
   it('starts with the WEBVTT header and states the timings are derived', () => {
-    const vtt = buildVtt(segments);
+    const vtt = buildVtt(cleanState);
     expect(vtt.startsWith('WEBVTT')).toBe(true);
     expect(vtt).toContain(TIMESTAMP_DISCLAIMER);
   });
 
   it('emits cues without sequence numbers', () => {
-    const vtt = buildVtt(segments);
+    const vtt = buildVtt(cleanState);
     expect(vtt).toContain('00:00:00.000 --> 00:00:27.500\nThe quick brown fox.');
   });
 
   it('still emits a valid header when there are no segments', () => {
-    expect(buildVtt([]).startsWith('WEBVTT')).toBe(true);
+    expect(buildVtt({ ...cleanState, segments: [] }).startsWith('WEBVTT')).toBe(true);
   });
 });
 
 describe('buildTimestampedText', () => {
   it('renders a readable bracketed listing', () => {
-    expect(buildTimestampedText(segments)).toBe(
+    expect(buildTimestampedText(cleanState)).toBe(
       `${buildTimingDisclaimer(segments)}\n\n` +
         '[0:00 - 0:27] The quick brown fox.\n[0:27 - 1:01] Jumps over the lazy dog.',
     );
   });
 
   it('returns empty string for no usable segments', () => {
-    expect(buildTimestampedText([])).toBe('');
+    expect(
+      buildTimestampedText({
+        segments: [],
+        gaps: [],
+        emptyRecognitionRanges: [],
+        overlapOnlyRanges: [],
+      }),
+    ).toBe('');
   });
 
   describe('timing provenance and caption delivery', () => {
@@ -165,7 +193,7 @@ describe('buildTimestampedText', () => {
     });
 
     it('builds an SRT and timing note with one stable filename stem', () => {
-      const files = buildCaptionDownloads('srt', segments, new Date('2026-09-26T05:00:00.000Z'));
+      const files = buildCaptionDownloads('srt', cleanState, new Date('2026-09-26T05:00:00.000Z'));
       expect(files).toHaveLength(2);
       expect(files.map((file) => file.fileName)).toEqual([
         'flint-transcription-2026-09-26T05-00-00-000Z.srt',
@@ -173,6 +201,72 @@ describe('buildTimestampedText', () => {
       ]);
       expect(files[0].body).not.toContain(TIMESTAMP_DISCLAIMER);
       expect(files[1].body).toContain(TIMESTAMP_DISCLAIMER);
+    });
+
+    it.each([
+      ['timestamped text', (state: TranscriptExportState) => buildTimestampedText(state)],
+      ['WebVTT NOTE', (state: TranscriptExportState) => buildVtt(state)],
+      ['SRT timing note', (state: TranscriptExportState) => buildSrtTimingMetadata(state)],
+    ])('preserves every source-window outcome in %s without clamping overlaps', (_name, build) => {
+      const output = build(exhaustiveState);
+      expect(output).toContain('[0:24 - 0:52] Transcription failed.');
+      expect(output).toContain('[0:48 - 1:16] Transcription failed; runtime outcome uncertain.');
+      expect(output).toContain('[1:12 - 1:40] Not processed.');
+      expect(output).toContain('[1:36 - 2:04] Successfully processed; no text was recognized');
+      expect(output).toContain('[2:00 - 2:28] Successfully processed; overlap-only/no-new-text');
+      expect(output).toContain('Transcript incomplete');
+    });
+
+    it('does not add incomplete warnings to clean exports', () => {
+      expect(buildTimestampedText(cleanState)).not.toContain('incomplete');
+      expect(buildVtt(cleanState)).not.toContain('incomplete');
+      expect(buildSrtTimingMetadata(cleanState)).not.toContain('incomplete');
+    });
+
+    it('emits an explanatory SRT metadata artifact when every window failed', () => {
+      const allFailed: TranscriptExportState = {
+        segments: [],
+        gaps: [{ startSec: 0, endSec: 28, kind: 'failed', uncertain: false }],
+        emptyRecognitionRanges: [],
+        overlapOnlyRanges: [],
+      };
+      const files = buildCaptionDownloads(
+        'srt',
+        allFailed,
+        new Date('2026-09-26T05:00:00.000Z'),
+      );
+      expect(files).toEqual([
+        {
+          fileName: 'flint-transcription-2026-09-26T05-00-00-000Z.timing.txt',
+          body: expect.stringContaining('[0:00 - 0:28] Transcription failed.'),
+        },
+      ]);
+      expect(buildTimestampedText(allFailed)).toContain(
+        '[0:00 - 0:28] Transcription failed.',
+      );
+      const vttFiles = buildCaptionDownloads(
+        'vtt',
+        allFailed,
+        new Date('2026-09-26T05:00:00.000Z'),
+      );
+      expect(vttFiles).toHaveLength(1);
+      expect(vttFiles[0].body).toContain('WEBVTT');
+      expect(vttFiles[0].body).toContain('[0:00 - 0:28] Transcription failed.');
+    });
+
+    it('keeps the page call sites wired to the complete assembled transcript state', () => {
+      const source = readFileSync(join(process.cwd(), 'src', 'routes', '+page.svelte'), 'utf8');
+      expect(source).toContain('function currentTranscriptExportState()');
+      expect(source).toContain('buildTimestampedText(currentTranscriptExportState())');
+      expect(source).toContain(
+        'buildCaptionDownloads(format, currentTranscriptExportState())',
+      );
+      expect(source).toContain('overlapOnlyRanges = Array.isArray(result?.overlapOnlyRanges)');
+      expect(source).toContain('buildLongAudioCompletionStatus(result, path)');
+      expect(source).toContain(
+        'they are not failures, empty recognition, or detected silence.',
+      );
+      expect(source).toContain('"Download timing note"');
     });
   });
 });

@@ -17,6 +17,23 @@ export interface TranscriptSegment {
 
 export type TranscriptBoundary = 'recording-edge' | 'pause-snapped' | 'fixed-window';
 
+export interface TranscriptRange {
+  startSec: number;
+  endSec: number;
+}
+
+export interface TranscriptGap extends TranscriptRange {
+  kind: 'failed' | 'unprocessed';
+  uncertain: boolean;
+}
+
+export interface TranscriptExportState {
+  segments: readonly TranscriptSegment[];
+  gaps: readonly TranscriptGap[];
+  emptyRecognitionRanges: readonly TranscriptRange[];
+  overlapOnlyRanges: readonly TranscriptRange[];
+}
+
 export const TIMESTAMP_DISCLAIMER =
   "Timestamps are Flint-derived estimates from audio windows, not timings reported by the model.";
 
@@ -75,6 +92,61 @@ export function formatClockTime(totalSec: number): string {
     : `${minutes}:${pad(seconds)}`;
 }
 
+function formatSourceRange(range: TranscriptRange): string {
+  return `[${formatClockTime(range.startSec)} - ${formatClockTime(range.endSec)}]`;
+}
+
+interface DiagnosticRange extends TranscriptRange {
+  order: number;
+  description: string;
+}
+
+function diagnosticRanges(state: TranscriptExportState): DiagnosticRange[] {
+  return [
+    ...state.gaps.map((gap, order) => ({
+      ...gap,
+      order,
+      description:
+        gap.kind === 'unprocessed'
+          ? 'Not processed.'
+          : gap.uncertain
+            ? 'Transcription failed; runtime outcome uncertain.'
+            : 'Transcription failed.',
+    })),
+    ...state.emptyRecognitionRanges.map((range, order) => ({
+      ...range,
+      order: state.gaps.length + order,
+      description:
+        'Successfully processed; no text was recognized (this is not evidence of silence).',
+    })),
+    ...state.overlapOnlyRanges.map((range, order) => ({
+      ...range,
+      order: state.gaps.length + state.emptyRecognitionRanges.length + order,
+      description:
+        'Successfully processed; overlap-only/no-new-text after heuristic deduplication.',
+    })),
+  ].sort((a, b) => a.startSec - b.startSec || a.endSec - b.endSec || a.order - b.order);
+}
+
+export function buildTranscriptMetadata(state: TranscriptExportState): string {
+  const lines = [buildTimingDisclaimer(state.segments)];
+  if (state.gaps.length > 0) {
+    lines.push(
+      'Transcript incomplete: one or more source windows failed or were not processed.',
+    );
+  }
+  const outcomes = diagnosticRanges(state);
+  if (outcomes.length > 0) {
+    lines.push(
+      'Source-window outcomes (raw source ranges; overlaps are intentional):',
+      ...outcomes.map(
+        (outcome) => `${formatSourceRange(outcome)} ${outcome.description}`,
+      ),
+    );
+  }
+  return lines.join('\n');
+}
+
 function usableSegments(segments: readonly TranscriptSegment[]): TranscriptSegment[] {
   const cleaned = (segments ?? [])
     .filter((s) => s && typeof s.text === 'string' && s.text.trim().length > 0)
@@ -116,13 +188,13 @@ export function buildSrt(segments: readonly TranscriptSegment[]): string {
 }
 
 /** Plain-text companion metadata for SRT, which has no portable comment header. */
-export function buildSrtTimingMetadata(segments: readonly TranscriptSegment[]): string {
-  return `${buildTimingDisclaimer(segments)}\n`;
+export function buildSrtTimingMetadata(state: TranscriptExportState): string {
+  return `${buildTranscriptMetadata(state)}\n`;
 }
 
-export function buildVtt(segments: readonly TranscriptSegment[]): string {
-  const list = usableSegments(segments);
-  const header = `WEBVTT\n\nNOTE\n${buildTimingDisclaimer(list)}\n`;
+export function buildVtt(state: TranscriptExportState): string {
+  const list = usableSegments(state.segments);
+  const header = `WEBVTT\n\nNOTE\n${buildTranscriptMetadata(state)}\n`;
   if (!list.length) return `${header}\n`;
   return (
     header +
@@ -137,13 +209,16 @@ export function buildVtt(segments: readonly TranscriptSegment[]): string {
 }
 
 /** Human-readable `[0:00 - 0:28] text` listing for copy/paste. */
-export function buildTimestampedText(segments: readonly TranscriptSegment[]): string {
-  const list = usableSegments(segments);
-  if (!list.length) return '';
+export function buildTimestampedText(state: TranscriptExportState): string {
+  const list = usableSegments(state.segments);
+  const metadata = buildTranscriptMetadata(state);
+  if (!list.length) {
+    return diagnosticRanges(state).length > 0 ? metadata : '';
+  }
   const body = list
     .map((s) => `[${formatClockTime(s.startSec)} - ${formatClockTime(s.endSec)}] ${s.text}`)
     .join('\n');
-  return `${buildTimingDisclaimer(list)}\n\n${body}`;
+  return `${metadata}\n\n${body}`;
 }
 
 export interface CaptionDownload {
@@ -157,19 +232,19 @@ export function captionFileStem(now: Date = new Date()): string {
 
 export function buildCaptionDownloads(
   format: 'srt' | 'vtt',
-  segments: readonly TranscriptSegment[],
+  state: TranscriptExportState,
   now: Date = new Date(),
 ): CaptionDownload[] {
   const stem = captionFileStem(now);
   if (format === 'srt') {
-    const body = buildSrt(segments);
-    return body
-      ? [
-          { fileName: `${stem}.srt`, body },
-          { fileName: `${stem}.timing.txt`, body: buildSrtTimingMetadata(segments) },
-        ]
-      : [];
+    const body = buildSrt(state.segments);
+    const metadata = buildSrtTimingMetadata(state);
+    if (!body && diagnosticRanges(state).length === 0) return [];
+    return [
+      ...(body ? [{ fileName: `${stem}.srt`, body }] : []),
+      { fileName: `${stem}.timing.txt`, body: metadata },
+    ];
   }
-  const body = buildVtt(segments);
+  const body = buildVtt(state);
   return body ? [{ fileName: `${stem}.vtt`, body }] : [];
 }

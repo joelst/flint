@@ -188,6 +188,7 @@
   import { planSegmentation } from "$lib/audio-segmentation";
   import {
     assembleLongAudioTranscript,
+    buildLongAudioCompletionStatus,
     type TranscriptGap,
     type TranscriptRange,
     type TranscriptionWindowOutcome,
@@ -197,6 +198,7 @@
     buildTimestampedText,
     buildTimingDisclaimer,
     formatClockTime,
+    type TranscriptExportState,
     type TranscriptSegment,
   } from "$lib/transcript-format";
   import { sniffAudioFormat } from "../../sidecar/audio-format.js";
@@ -1686,6 +1688,7 @@
   let transcriptionSegments = $state<TranscriptSegment[]>([]);
   let transcriptionGaps = $state<TranscriptGap[]>([]);
   let emptyRecognitionRanges = $state<TranscriptRange[]>([]);
+  let overlapOnlyRanges = $state<TranscriptRange[]>([]);
   let showTimestampedTranscript = $state(true);
   let isTranscribing = $state(false);
   let transcriptionProgress = $state<{ current: number; total: number } | null>(null);
@@ -7208,9 +7211,7 @@ Output only the summary text, no preamble.`;
     const mono = await getMono16kBuffer(audioBlob);
     const sr = 16000;
     const total = mono.length;
-    const samples = new Float32Array(total);
-    mono.copyFromChannel(samples, 0);
-    const plan = planSegmentation(samples, sr);
+    const plan = planSegmentation(mono.getChannelData(0), sr);
     const windows = plan.windows;
     const totalChunks = windows.length;
     const outcomes: TranscriptionWindowOutcome[] = [];
@@ -7320,6 +7321,7 @@ Output only the summary text, no preamble.`;
     transcriptionSegments = [];
     transcriptionGaps = [];
     emptyRecognitionRanges = [];
+    overlapOnlyRanges = [];
     statusMessage = `Transcribing with ${sttAlias} via sidecar...`;
 
     try {
@@ -7389,6 +7391,9 @@ Output only the summary text, no preamble.`;
         emptyRecognitionRanges = Array.isArray(result?.emptyRecognitionRanges)
           ? result.emptyRecognitionRanges
           : [];
+        overlapOnlyRanges = Array.isArray(result?.overlapOnlyRanges)
+          ? result.overlapOnlyRanges
+          : [];
         showTimestampedTranscript = true;
       }
 
@@ -7400,23 +7405,7 @@ Output only the summary text, no preamble.`;
       transcriptionProgress = null;
       const path = result?.transcriptionPath ? ` via ${result.transcriptionPath}` : "";
       if (dur > 90) {
-        const failed = Number(result?.failedChunks || 0);
-        const uncertain = Number(result?.uncertainChunks || 0);
-        const unprocessed = Number(result?.unprocessedChunks || 0);
-        const totalSegments = Number(result?.totalChunks || 0);
-        if (failed > 0) {
-          // The transcript has gaps. Saying "complete" would present a partial result as whole,
-          // and the missing audio is invisible once the segments are merged.
-          const detail =
-            uncertain > 0
-              ? `${failed} of ${totalSegments} segments did not complete (${uncertain} had uncertain outcomes and ${unprocessed} were not processed)`
-              : unprocessed > 0
-                ? `${failed} of ${totalSegments} segments did not complete (${unprocessed} were not processed)`
-                : `${failed} of ${totalSegments} segments failed`;
-          statusMessage = `Transcription incomplete: ${detail}. The text below is missing those parts.${path}`;
-        } else {
-          statusMessage = `Transcription complete (${totalSegments} segments${path})`;
-        }
+        statusMessage = buildLongAudioCompletionStatus(result, path);
       } else {
         statusMessage = `Transcription complete (via sidecar${path})`;
       }
@@ -7439,8 +7428,26 @@ Output only the summary text, no preamble.`;
     }
   }
 
+  function currentTranscriptExportState(): TranscriptExportState {
+    return {
+      segments: transcriptionSegments,
+      gaps: transcriptionGaps,
+      emptyRecognitionRanges,
+      overlapOnlyRanges,
+    };
+  }
+
+  function hasTimestampExportData(): boolean {
+    return (
+      transcriptionSegments.length > 0 ||
+      transcriptionGaps.length > 0 ||
+      emptyRecognitionRanges.length > 0 ||
+      overlapOnlyRanges.length > 0
+    );
+  }
+
   async function copyTimestampedTranscript() {
-    const text = buildTimestampedText(transcriptionSegments);
+    const text = buildTimestampedText(currentTranscriptExportState());
     if (!text) return;
     try {
       await navigator.clipboard.writeText(text);
@@ -7465,7 +7472,7 @@ Output only the summary text, no preamble.`;
   }
 
   function downloadCaptions(format: "srt" | "vtt") {
-    const files = buildCaptionDownloads(format, transcriptionSegments);
+    const files = buildCaptionDownloads(format, currentTranscriptExportState());
     if (files.length === 0) {
       statusMessage = "No timed transcript text is available to export";
       return;
@@ -7481,8 +7488,12 @@ Output only the summary text, no preamble.`;
     }
     statusMessage =
       format === "srt"
-        ? `SRT captions and associated timing note downloaded: ${files[0].fileName}`
-        : `WebVTT captions downloaded: ${files[0].fileName}`;
+        ? files.some((file) => file.fileName.endsWith(".srt"))
+          ? `SRT captions and associated timing note downloaded: ${files[0].fileName}`
+          : `SRT timing note downloaded with source-window outcomes: ${files[0].fileName}`
+        : transcriptionSegments.length > 0
+          ? `WebVTT captions downloaded: ${files[0].fileName}`
+          : `WebVTT metadata downloaded with source-window outcomes: ${files[0].fileName}`;
   }
 </script>
 
@@ -9632,12 +9643,31 @@ Output only the summary text, no preamble.`;
                   that does not prove those ranges were silent.
                 </p>
               {/if}
+              {#if overlapOnlyRanges.length > 0}
+                <div class="transcript-gaps" role="status">
+                  <strong>Overlap-only ranges:</strong>
+                  {#each overlapOnlyRanges as range}
+                    <span>
+                      {formatClockTime(range.startSec)}–{formatClockTime(range.endSec)}
+                      (processed successfully; no new text after deduplication)
+                    </span>
+                  {/each}
+                  <small>
+                    These source windows repeated text already retained from adjacent overlap;
+                    they are not failures, empty recognition, or detected silence.
+                  </small>
+                </div>
+              {/if}
               <div class="transcription-actions">
                 <button onclick={copyTranscriptionToClipboard}>Copy</button>
                 <button onclick={downloadTranscription}>Download .txt</button>
-                {#if transcriptionSegments.length > 0}
+                {#if hasTimestampExportData()}
                   <button onclick={copyTimestampedTranscript}>Copy with estimated times</button>
-                  <button onclick={() => downloadCaptions("srt")}>Download .srt + timing note</button>
+                  <button onclick={() => downloadCaptions("srt")}>
+                    {transcriptionSegments.length > 0
+                      ? "Download .srt + timing note"
+                      : "Download timing note"}
+                  </button>
                   <button onclick={() => downloadCaptions("vtt")}>Download .vtt</button>
                 {/if}
                 <button
@@ -9646,6 +9676,7 @@ Output only the summary text, no preamble.`;
                     transcriptionSegments = [];
                     transcriptionGaps = [];
                     emptyRecognitionRanges = [];
+                    overlapOnlyRanges = [];
                   }}>Clear</button
                 >
               </div>

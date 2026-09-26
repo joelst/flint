@@ -1,26 +1,21 @@
 import type { TranscriptionWindow } from './audio-segmentation';
-import type { TranscriptBoundary, TranscriptSegment } from './transcript-format';
+import type {
+  TranscriptBoundary,
+  TranscriptExportState,
+  TranscriptGap,
+  TranscriptRange,
+  TranscriptSegment,
+} from './transcript-format';
+
+export type { TranscriptGap, TranscriptRange } from './transcript-format';
 
 export type TranscriptionWindowOutcome =
   | { window: TranscriptionWindow; status: 'success'; text: string }
   | { window: TranscriptionWindow; status: 'failed'; uncertain: boolean }
   | { window: TranscriptionWindow; status: 'unprocessed' };
 
-export interface TranscriptRange {
-  startSec: number;
-  endSec: number;
-}
-
-export interface TranscriptGap extends TranscriptRange {
-  kind: 'failed' | 'unprocessed';
-  uncertain: boolean;
-}
-
-export interface AssembledLongAudioTranscript {
+export interface AssembledLongAudioTranscript extends TranscriptExportState {
   text: string;
-  segments: TranscriptSegment[];
-  gaps: TranscriptGap[];
-  emptyRecognitionRanges: TranscriptRange[];
   failedChunks: number;
   uncertainChunks: number;
   unprocessedChunks: number;
@@ -76,6 +71,7 @@ export function assembleLongAudioTranscript(
   const segments: TranscriptSegment[] = [];
   const gaps: TranscriptGap[] = [];
   const emptyRecognitionRanges: TranscriptRange[] = [];
+  const overlapOnlyRanges: TranscriptRange[] = [];
   let failedChunks = 0;
   let uncertainChunks = 0;
   let unprocessedChunks = 0;
@@ -124,7 +120,10 @@ export function assembleLongAudioTranscript(
         acceptedText = recognizedText.split(' ').slice(overlapWords).join(' ').trim();
       }
     }
-    if (!acceptedText) return;
+    if (!acceptedText) {
+      overlapOnlyRanges.push({ startSec: window.startSec, endSec: window.endSec });
+      return;
+    }
 
     const startSec = genuinelyAdjacentOverlap
       ? Math.max(window.startSec, previousSegment.endSec)
@@ -144,8 +143,46 @@ export function assembleLongAudioTranscript(
     segments,
     gaps,
     emptyRecognitionRanges,
+    overlapOnlyRanges,
     failedChunks,
     uncertainChunks,
     unprocessedChunks,
   };
+}
+
+export function buildLongAudioCompletionStatus(
+  result: AssembledLongAudioTranscript & { totalChunks: number },
+  path = '',
+): string {
+  const failed = Number(result.failedChunks || 0);
+  const uncertain = Number(result.uncertainChunks || 0);
+  const unprocessed = Number(result.unprocessedChunks || 0);
+  const totalSegments = Number(result.totalChunks || 0);
+  if (failed > 0) {
+    const detail =
+      uncertain > 0
+        ? `${failed} of ${totalSegments} segments did not complete (${uncertain} had uncertain outcomes and ${unprocessed} were not processed)`
+        : unprocessed > 0
+          ? `${failed} of ${totalSegments} segments did not complete (${unprocessed} were not processed)`
+          : `${failed} of ${totalSegments} segments failed`;
+    return `Transcription incomplete: ${detail}. The text below is missing those parts.${path}`;
+  }
+
+  const qualifications: string[] = [];
+  const overlapOnly = result.overlapOnlyRanges.length;
+  const emptyRecognition = result.emptyRecognitionRanges.length;
+  if (overlapOnly > 0) {
+    qualifications.push(
+      `${overlapOnly} overlap-only ${overlapOnly === 1 ? 'window added' : 'windows added'} no new text after deduplication`,
+    );
+  }
+  if (emptyRecognition > 0) {
+    qualifications.push(
+      `${emptyRecognition} successfully processed ${emptyRecognition === 1 ? 'window recognized' : 'windows recognized'} no text`,
+    );
+  }
+  if (qualifications.length > 0) {
+    return `Transcription complete with qualifications: ${qualifications.join('; ')} (${totalSegments} segments${path})`;
+  }
+  return `Transcription complete (${totalSegments} segments${path})`;
 }
