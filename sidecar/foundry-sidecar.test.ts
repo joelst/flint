@@ -3254,28 +3254,32 @@ describe('chatCompletion ChatSession path', () => {
   //                           already are. Gating on the signal file (rather than a fixed
   //                           delay) makes the ordering deterministic instead of depending on
   //                           IPC round-trip speed on a loaded CI runner.
-  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-error-with-legacy' | 'session-error-dispose' | 'session-abort' | 'session-empty-output' | 'session-stream-empty' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error' | 'session-buffered-tool-cancel' | 'session-stream-tool' | 'session-stream-tool-outoforder' | 'session-stream-tool-high-index' | 'session-stream-tool-cancel';
+  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'legacy-stream-only-fixture' | 'session-no-legacy' | 'session-error' | 'session-error-with-legacy' | 'session-error-dispose' | 'session-abort' | 'session-empty-output' | 'session-stream-empty' | 'session-stream-fixture' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error' | 'session-buffered-tool-cancel' | 'session-stream-tool' | 'session-stream-tool-outoforder' | 'session-stream-tool-high-index' | 'session-stream-tool-cancel';
   function fakeSdk(sdkMode: ChatFakeSdkMode) {
-    const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only' || sdkMode === 'session-error-with-legacy';
-    const hasSession = sdkMode !== 'legacy-only';
+    const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only' || sdkMode === 'legacy-stream-only-fixture' || sdkMode === 'session-error-with-legacy';
+    const legacyStreamOnly = sdkMode === 'legacy-stream-only-fixture';
+    const hasSession = sdkMode !== 'legacy-only' && !legacyStreamOnly;
     return [
       "import fs from 'node:fs';",
       'const note = (event) => fs.appendFileSync(process.env.FLINT_TEST_EVENT_LOG, event + "\\n");',
+      "const streamSteps = () => JSON.parse(fs.readFileSync(process.env.FLINT_TEST_STREAM_FIXTURE, 'utf8'));",
+      "const awaitSignal = async () => { while (!fs.existsSync(process.env.FLINT_TEST_CANCEL_SIGNAL)) await new Promise((resolve) => setTimeout(resolve, 5)); };",
       'class FakeModel {',
       "  constructor() { this.id = 'fake-variant'; this.loaded = false; }",
       '  async load() { this.loaded = true; }',
       '  isLoaded() { return this.loaded; }',
-      "  getExecutionProvider() { return 'CPUExecutionProvider'; }",
+      "  getExecutionProvider() { note('provider-probe'); return 'CPUExecutionProvider'; }",
       hasLegacy ? '  createChatClient() {' : '  // no createChatClient() in this mode',
       hasLegacy ? '    return {' : '',
       hasLegacy ? '      settings: {},' : '',
-      hasLegacy ? '      async completeChat() {' : '',
-      hasLegacy ? "        note('legacy-chat');" : '',
-      hasLegacy ? "        return { choices: [{ message: { role: 'assistant', content: 'legacy reply' } }], usage: { prompt_tokens: 1, completion_tokens: 2 } };" : '',
-      hasLegacy ? '      },' : '',
+      hasLegacy && !legacyStreamOnly ? '      async completeChat() {' : '',
+      hasLegacy && !legacyStreamOnly ? "        note('legacy-chat');" : '',
+      hasLegacy && !legacyStreamOnly ? "        return { choices: [{ message: { role: 'assistant', content: 'legacy reply' } }], usage: { prompt_tokens: 1, completion_tokens: 2 } };" : '',
+      hasLegacy && !legacyStreamOnly ? '      },' : '',
       hasLegacy ? '      async *completeStreamingChat() {' : '',
       hasLegacy ? "        note('legacy-chat');" : '',
-      hasLegacy ? "        yield { choices: [{ delta: { content: 'legacy reply' } }] };" : '',
+      legacyStreamOnly ? "        for (const step of streamSteps()) { if (step.note) note(step.note); if (step.waitForSignal) await awaitSignal(); if (step.chunk) yield step.chunk; }" : '',
+      hasLegacy && !legacyStreamOnly ? "        yield { choices: [{ delta: { content: 'legacy reply' } }] };" : '',
       hasLegacy ? '      },' : '',
       hasLegacy ? '    };' : '',
       hasLegacy ? '  }' : '',
@@ -3313,6 +3317,7 @@ describe('chatCompletion ChatSession path', () => {
       `        if (['session-error', 'session-error-with-legacy', 'session-error-dispose'].includes(${JSON.stringify(sdkMode)})) throw new Error('native stream failed');`,
       `        if (${JSON.stringify(sdkMode)} === 'session-abort') { const e = new Error('native stream aborted'); e.name = 'AbortError'; throw e; }`,
       `        if (${JSON.stringify(sdkMode)} === 'session-stream-empty') return;`,
+      `        if (${JSON.stringify(sdkMode)} === 'session-stream-fixture') { for (const step of streamSteps()) { if (step.note) note(step.note); if (step.waitForSignal) await awaitSignal(); if (step.chunk) yield { type: 'text', textType: 'openai-json', text: JSON.stringify(step.chunk) }; } return; }`,
       "        yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { content: 'session ' } }] }) };",
       `        if (${JSON.stringify(sdkMode)} === 'session-stream-tool') yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-1', type: 'function', function: { name: 'read_status', arguments: '{' } }] } }] }) };`,
       `        if (${JSON.stringify(sdkMode)} === 'session-stream-tool') yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '}' } }] } }] }) };`,
@@ -3341,6 +3346,7 @@ describe('chatCompletion ChatSession path', () => {
   let homeDir: string;
   let eventLog: string;
   let cancelSignalPath: string;
+  let streamFixturePath: string;
   let proc: ChildProcessWithoutNullStreams;
 
   const events = () => {
@@ -3352,11 +3358,14 @@ describe('chatCompletion ChatSession path', () => {
   };
   const send = (msg: object) => proc.stdin.write(`${JSON.stringify(msg)}\n`);
   const reply = (id: number) => waitForLine(proc, (msg) => msg.id === id, 10000);
+  const setStreamSteps = (steps: object[]) => writeFileSync(streamFixturePath, JSON.stringify(steps));
 
   async function startSidecar(sdkMode: ChatFakeSdkMode) {
     homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-chatsession-'));
     eventLog = join(homeDir, 'events.log');
     cancelSignalPath = join(homeDir, 'cancel.signal');
+    streamFixturePath = join(homeDir, 'stream-fixture.json');
+    setStreamSteps([]);
     const corePath = join(homeDir, 'fake-core.dylib');
     writeFileSync(corePath, '');
     const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
@@ -3384,6 +3393,7 @@ describe('chatCompletion ChatSession path', () => {
         FLINT_FOUNDRY_CORE_PATH: corePath,
         FLINT_TEST_EVENT_LOG: eventLog,
         FLINT_TEST_CANCEL_SIGNAL: cancelSignalPath,
+        FLINT_TEST_STREAM_FIXTURE: streamFixturePath,
       },
     });
     await waitForLine(proc, (msg) => msg.ready === true);
@@ -3600,6 +3610,305 @@ describe('chatCompletion ChatSession path', () => {
       function: { name: 'read_status', arguments: '{}' },
     }]);
     expect(res.result.choices[0].finish_reason).toBe('tool_calls');
+  }, 30000);
+
+  it('round-trips a fragmented streamed tool call into follow-up history', async () => {
+    await startSidecar('session-stream-fixture');
+    setStreamSteps([
+      {
+        chunk: {
+          choices: [{
+            delta: {
+              content: 'checking',
+              tool_calls: [{
+                index: 7,
+                id: 'call-',
+                type: 'function',
+                function: { name: 'read_', arguments: '{"scope":' },
+              }],
+            },
+          }],
+        },
+      },
+      {
+        chunk: {
+          choices: [{
+            delta: {
+              tool_calls: [{
+                index: 7,
+                id: '1',
+                function: { name: 'status', arguments: '"all"' },
+              }],
+            },
+            finish_reason: 'tool_calls',
+          }],
+        },
+      },
+    ]);
+    const firstReply = waitForLine(proc, (msg) => msg.id === 3 && !msg.stream && (msg.ok === true || msg.error), 10000);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'inspect status' }],
+      stream: true,
+    });
+    const first = await firstReply;
+    expect(first.ok).toBe(true);
+    expect(first.result.choices[0].message.tool_calls).toEqual([{
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'read_status', arguments: '{"scope":"all"' },
+    }]);
+
+    setStreamSteps([{ chunk: { choices: [{ delta: { content: 'done' }, finish_reason: 'stop' }] } }]);
+    const secondReply = waitForLine(proc, (msg) => msg.id === 4 && !msg.stream && (msg.ok === true || msg.error), 10000);
+    send({
+      id: 4,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [
+        { role: 'user', content: 'inspect status' },
+        { role: 'assistant', content: 'checking', tool_calls: first.result.choices[0].message.tool_calls },
+        { role: 'tool', tool_call_id: 'call-1', content: '{"ok":true}' },
+      ],
+      stream: true,
+    });
+    expect((await secondReply).ok).toBe(true);
+    const requests = events()
+      .filter((event) => event.startsWith('request:'))
+      .map((event) => JSON.parse(event.slice(8)));
+    expect(requests.at(-1).messages[1].tool_calls).toEqual(first.result.choices[0].message.tool_calls);
+  }, 30000);
+
+  it('rejects completed streamed tool calls with missing or invalid required fields', async () => {
+    await startSidecar('session-stream-fixture');
+    const malformedDeltas = [
+      [{ index: 0, type: 'function', function: { name: 'missing_id', arguments: '{}' } }],
+      [{ index: 0, id: 'call-1', type: 'not-a-function', function: { name: 'wrong_type', arguments: '{}' } }],
+      [{ index: 0, id: 'call-1', type: 'function', function: { arguments: '{}' } }],
+      [{ index: 0, id: 'call-1', type: 'function', function: { name: 'wrong_arguments', arguments: { repaired: false } } }],
+      { index: 0, id: 'call-1', type: 'function', function: { name: 'not_an_array', arguments: '{}' } },
+    ];
+    for (const [offset, toolCalls] of malformedDeltas.entries()) {
+      setStreamSteps([{
+        chunk: {
+          choices: [{
+            delta: { tool_calls: toolCalls },
+            finish_reason: 'tool_calls',
+          }],
+        },
+      }]);
+      const id = 10 + offset;
+      const chatted = waitForLine(proc, (msg) => msg.id === id, 10000);
+      send({
+        id,
+        cmd: 'chatCompletion',
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'use a tool' }],
+        stream: true,
+      });
+      const res = await chatted;
+      expect(res.ok).not.toBe(true);
+      expect(res.result).toBeUndefined();
+      expect(String(res.error)).toMatch(/tool.call/i);
+    }
+  }, 30000);
+
+  it('caps distinct streamed call indexes at 64 while permitting repeats and sparse indexes', async () => {
+    await startSidecar('session-stream-fixture');
+    const call = (index: number) => ({
+      index,
+      id: `call-${index}`,
+      type: 'function',
+      function: { name: `tool_${index}`, arguments: '{}' },
+    });
+    const run = async (id: number, toolCalls: object[]) => {
+      setStreamSteps([{
+        chunk: {
+          choices: [{ delta: { tool_calls: toolCalls }, finish_reason: 'tool_calls' }],
+        },
+      }]);
+      const chatted = waitForLine(proc, (msg) => msg.id === id, 10000);
+      send({
+        id,
+        cmd: 'chatCompletion',
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'use tools' }],
+        stream: true,
+      });
+      return chatted;
+    };
+
+    const sixtyFour = await run(20, Array.from({ length: 64 }, (_, index) => call(index * 1_000_000)));
+    expect(sixtyFour.ok).toBe(true);
+    expect(sixtyFour.result.choices[0].message.tool_calls).toHaveLength(64);
+
+    const repeated = await run(21, [
+      { index: 1_000_000_000, id: 'call-high', type: 'function', function: { name: 'high_tool', arguments: '{' } },
+      { index: 1_000_000_000, function: { arguments: '}' } },
+    ]);
+    expect(repeated.ok).toBe(true);
+    expect(repeated.result.choices[0].message.tool_calls).toEqual([{
+      id: 'call-high',
+      type: 'function',
+      function: { name: 'high_tool', arguments: '{}' },
+    }]);
+
+    const sixtyFive = await run(22, Array.from({ length: 65 }, (_, index) => call(index)));
+    expect(sixtyFive.ok).not.toBe(true);
+    expect(sixtyFive.result).toBeUndefined();
+    expect(String(sixtyFive.error)).toMatch(/64/);
+  }, 30000);
+
+  it('drains after a latched structural failure while retaining leases, disposing, probing, and logging failure', async () => {
+    await startSidecar('session-stream-fixture');
+    const probesBefore = events().filter((event) => event === 'provider-probe').length;
+    setStreamSteps([
+      {
+        chunk: {
+          choices: [{
+            delta: {
+              tool_calls: [{
+                index: 0,
+                type: 'function',
+                function: { name: 'redacted_secret', arguments: 'TOP_SECRET' },
+              }],
+            },
+          }],
+        },
+      },
+      { note: 'drain-waiting', waitForSignal: true },
+      { note: 'drain-finished', chunk: { choices: [{ delta: { content: 'ignored tail' }, finish_reason: 'stop' }] } },
+    ]);
+    const chatted = waitForLine(proc, (msg) => msg.id === 30 && !msg.stream && (msg.ok === true || msg.error), 10000);
+    send({
+      id: 30,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use a tool' }],
+      stream: true,
+    });
+    while (!events().includes('drain-waiting')) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const statusReply = reply(31);
+    send({ id: 31, cmd: 'poolStatus' });
+    const status = await statusReply;
+    expect(status.result.models.find((model: any) => model.alias === 'fake-model').inFlight).toBe(1);
+    let exclusiveSettled = false;
+    const exclusiveReply = reply(33).then((value) => {
+      exclusiveSettled = true;
+      return value;
+    });
+    send({ id: 33, cmd: 'setBenchmarkExclusive', exclusive: true });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(exclusiveSettled).toBe(false);
+    writeFileSync(cancelSignalPath, '');
+
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(res.result).toBeUndefined();
+    expect(String(res.error)).toMatch(/tool.call/i);
+    expect(JSON.stringify(res)).not.toContain('TOP_SECRET');
+    expect(events()).toContain('drain-finished');
+    expect(events()).toContain('session-chat-disposed');
+    expect(events().filter((event) => event === 'provider-probe').length).toBeGreaterThan(probesBefore);
+    expect(events().lastIndexOf('provider-probe')).toBeGreaterThan(events().lastIndexOf('drain-finished'));
+    expect(await exclusiveReply).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
+
+    const releaseReply = reply(34);
+    send({ id: 34, cmd: 'setBenchmarkExclusive', exclusive: false });
+    expect((await releaseReply).ok).toBe(true);
+
+    const accessReply = reply(32);
+    send({ id: 32, cmd: 'getAccessLog' });
+    const chats = (await accessReply).result.filter((entry: any) => entry.type === 'chat');
+    expect(chats.at(-1)).toMatchObject({ source: 'ipc', ok: false });
+  }, 30000);
+
+  it('does not publish a partial tool call or tool_calls finish reason after cancellation', async () => {
+    await startSidecar('session-stream-fixture');
+    setStreamSteps([
+      {
+        chunk: {
+          choices: [{
+            delta: {
+              content: 'partial text',
+              tool_calls: [{
+                index: 0,
+                id: 'call-1',
+                type: 'function',
+                function: { arguments: '{"partial":' },
+              }],
+            },
+            finish_reason: 'tool_calls',
+          }],
+        },
+      },
+      { note: 'cancel-waiting', waitForSignal: true },
+      {
+        chunk: {
+          choices: [{
+            delta: { tool_calls: [{ index: 0, function: { name: 'late_name', arguments: 'true}' } }] },
+          }],
+        },
+      },
+      { note: 'cancel-drained' },
+    ]);
+    const streamed = waitForLine(proc, (msg) => msg.id === 40 && msg.stream === true, 10000);
+    const chatted = waitForLine(proc, (msg) => msg.id === 40 && !msg.stream, 10000);
+    send({
+      id: 40,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use a tool' }],
+      stream: true,
+    });
+    await streamed;
+    const cancelReply = reply(41);
+    send({ id: 41, cmd: 'cancelChatRequest', requestId: 40 });
+    expect((await cancelReply).ok).toBe(true);
+    writeFileSync(cancelSignalPath, '');
+    const res = await chatted;
+    expect(res.ok).toBe(true);
+    expect(res.result.choices[0].message.content).toBe('partial text');
+    expect(res.result.choices[0].message.tool_calls).toBeUndefined();
+    expect(res.result.choices[0].finish_reason).toBeNull();
+    expect(events()).toContain('cancel-drained');
+  }, 30000);
+
+  it('rejects malformed tool calls in the buffered stream-derived fallback branch', async () => {
+    await startSidecar('legacy-stream-only-fixture');
+    setStreamSteps([
+      {
+        chunk: {
+          choices: [{
+            delta: {
+              tool_calls: [{
+                index: 0,
+                id: 'call-1',
+                type: 'function',
+                function: { arguments: '{}' },
+              }],
+            },
+            finish_reason: 'tool_calls',
+          }],
+        },
+      },
+      { note: 'legacy-stream-drained' },
+    ]);
+    const chatted = waitForLine(proc, (msg) => msg.id === 50, 10000);
+    send({
+      id: 50,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use a tool' }],
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(res.result).toBeUndefined();
+    expect(events()).toContain('legacy-stream-drained');
   }, 30000);
 
   it('compacts a tool-call delta stream that never fills a lower parallel index', async () => {

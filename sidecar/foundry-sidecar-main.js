@@ -2389,48 +2389,113 @@ function normalizeText (value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+const MAX_STREAMED_TOOL_CALLS = 64;
+
+function latchToolCallDeltaFailure (target, error) {
+  target.failure ??= error instanceof Error ? error : new Error(String(error));
+}
+
+function appendToolCallDeltaString (current, fragment, field) {
+  if (fragment === undefined) return current;
+  if (typeof fragment !== 'string') {
+    throw new Error(`Streamed tool-call ${field} must be a string`);
+  }
+  return typeof current === 'string' ? current + fragment : fragment;
+}
+
 function mergeToolCallDeltas (target, deltas) {
-  for (const delta of Array.isArray(deltas) ? deltas : []) {
-    let index;
-    if (delta?.index === undefined) {
-      if (target.nextIndex >= Number.MAX_SAFE_INTEGER) {
-        throw new Error('Invalid tool-call delta index');
+  if (target.failure) return target;
+  if (deltas === undefined) return target;
+  if (!Array.isArray(deltas)) {
+    latchToolCallDeltaFailure(target, new Error('Streamed tool_calls must be an array'));
+    return target;
+  }
+  for (const delta of deltas) {
+    try {
+      if (!isPlainObject(delta)) {
+        throw new Error('Streamed tool-call delta must be an object');
       }
-      index = target.nextIndex;
-      target.nextIndex += 1;
-    } else {
-      index = delta.index;
-      if (!Number.isSafeInteger(index) || index < 0 || index >= Number.MAX_SAFE_INTEGER) {
-        throw new Error('Invalid tool-call delta index');
+      let index;
+      if (delta.index === undefined) {
+        if (target.nextIndex >= Number.MAX_SAFE_INTEGER) {
+          throw new Error('Invalid streamed tool-call index');
+        }
+        index = target.nextIndex;
+        target.nextIndex += 1;
+      } else {
+        index = delta.index;
+        if (!Number.isSafeInteger(index) || index < 0 || index >= Number.MAX_SAFE_INTEGER) {
+          throw new Error('Invalid streamed tool-call index');
+        }
+        target.nextIndex = Math.max(target.nextIndex, index + 1);
       }
-      target.nextIndex = Math.max(target.nextIndex, index + 1);
+      const existing = target.calls.get(index);
+      if (!existing && target.calls.size >= MAX_STREAMED_TOOL_CALLS) {
+        throw new Error(`Streamed tool_calls cannot contain more than ${MAX_STREAMED_TOOL_CALLS} distinct call indexes`);
+      }
+      const current = existing || {};
+      if (delta.type !== undefined && typeof delta.type !== 'string') {
+        throw new Error('Streamed tool-call type must be a string');
+      }
+      if (current.type !== undefined && delta.type !== undefined && current.type !== delta.type) {
+        throw new Error('Streamed tool-call type fragments must not conflict');
+      }
+      if (delta.function !== undefined && !isPlainObject(delta.function)) {
+        throw new Error('Streamed tool-call function must be an object');
+      }
+      const currentFunction = current.function || {};
+      const nextFunction = delta.function || {};
+      target.calls.set(index, {
+        ...(current.id !== undefined || delta.id !== undefined
+          ? { id: appendToolCallDeltaString(current.id, delta.id, 'id') }
+          : {}),
+        ...(current.type !== undefined || delta.type !== undefined
+          ? { type: current.type ?? delta.type }
+          : {}),
+        ...(current.function !== undefined || delta.function !== undefined
+          ? {
+              function: {
+                ...(currentFunction.name !== undefined || nextFunction.name !== undefined
+                  ? {
+                      name: appendToolCallDeltaString(
+                        currentFunction.name,
+                        nextFunction.name,
+                        'function.name',
+                      ),
+                    }
+                  : {}),
+                ...(currentFunction.arguments !== undefined || nextFunction.arguments !== undefined
+                  ? {
+                      arguments: appendToolCallDeltaString(
+                        currentFunction.arguments,
+                        nextFunction.arguments,
+                        'function.arguments',
+                      ),
+                    }
+                  : {}),
+              },
+            }
+          : {}),
+      });
+    } catch (error) {
+      latchToolCallDeltaFailure(target, error);
+      break;
     }
-    const current = target.calls.get(index) || {};
-    const currentFunction = current.function || {};
-    const nextFunction = delta?.function || {};
-    target.calls.set(index, {
-      ...current,
-      ...(delta?.id !== undefined ? { id: delta.id } : {}),
-      ...(delta?.type !== undefined ? { type: delta.type } : {}),
-      function: {
-        ...currentFunction,
-        ...nextFunction,
-        ...(typeof nextFunction.name === 'string' && typeof currentFunction.name === 'string'
-          ? { name: currentFunction.name + nextFunction.name }
-          : {}),
-        ...(typeof nextFunction.arguments === 'string' && typeof currentFunction.arguments === 'string'
-          ? { arguments: currentFunction.arguments + nextFunction.arguments }
-          : {}),
-      },
-    });
   }
   return target;
 }
 
-function compactToolCallDeltas (target) {
-  return Array.from(target.calls.entries())
+function finalizeToolCallDeltas (target) {
+  if (target.failure) throw target.failure;
+  const calls = Array.from(target.calls.entries())
     .sort(([left], [right]) => left - right)
     .map(([, call]) => call);
+  if (calls.length === 0) return [];
+  try {
+    return sanitizeToolCalls(calls, 'streamed');
+  } catch (error) {
+    throw new Error(`Invalid streamed assistant tool_calls: ${error?.message || error}`, { cause: error });
+  }
 }
 
 function segmentTextsFromValue (segments) {
@@ -3625,11 +3690,13 @@ rl.on('line', async (line) => {
               // while tool_calls itself stays suppressed -- a self-contradictory result.
               // Usage stays unguarded above: the trailing usage-only chunk is expected
               // metadata even for a canceled request, not user-visible generation output.
+              // A malformed tool-call fragment latches failure without breaking iteration:
+              // native inference is not canceled, so keep draining until the provider closes
+              // the stream and the session/fencing cleanup has run.
+              mergeToolCallDeltas(toolCalls, chunk?.choices?.[0]?.delta?.tool_calls);
+              if (toolCalls.failure) continue;
               const finishReason = chunk?.choices?.[0]?.finish_reason;
               if (finishReason != null) chatFinishReason = finishReason;
-              // Keep sparse model-provided indexes in a Map so an unexpectedly large index
-              // cannot allocate or traverse a correspondingly large sparse array.
-              mergeToolCallDeltas(toolCalls, chunk?.choices?.[0]?.delta?.tool_calls);
               const deltaText = chunk?.choices?.[0]?.delta?.content;
               const messageText = chunk?.choices?.[0]?.message?.content ?? chunk?.message?.content;
               let delta = '';
@@ -3654,17 +3721,21 @@ rl.on('line', async (line) => {
                 });
               }
             }
-            chatOk = true;
+            const wasCanceled = canceledRequests.has(id);
+            const compactedToolCalls = wasCanceled && !toolCalls.failure
+              ? []
+              : finalizeToolCallDeltas(toolCalls);
+            const publishedFinishReason = wasCanceled && chatFinishReason === 'tool_calls'
+              ? null
+              : chatFinishReason;
             chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
-            // Compact once, after the loop: see the in-loop comment for why compaction
-            // must not happen per-chunk.
-            const compactedToolCalls = compactToolCallDeltas(toolCalls);
+            chatOk = true;
             reply({
               ok: true,
               result: {
                 ...normalizeChatResponse({
                   choices: [{
-                    finish_reason: chatFinishReason,
+                    finish_reason: publishedFinishReason,
                     message: {
                       role: 'assistant',
                       content,
@@ -3761,11 +3832,10 @@ rl.on('line', async (line) => {
               if (canceledRequests.has(id)) continue;
               // See the equivalent SDK-path comment above: finish_reason must not be
               // captured from a drained post-cancel chunk.
+              mergeToolCallDeltas(toolCalls, chunk?.choices?.[0]?.delta?.tool_calls);
+              if (toolCalls.failure) continue;
               const finishReason = chunk?.choices?.[0]?.finish_reason;
               if (finishReason != null) chatFinishReason = finishReason;
-              // See the equivalent SDK-path comment above: keep the in-place mutation and
-              // compact once after the loop rather than reassigning per-chunk.
-              mergeToolCallDeltas(toolCalls, chunk?.choices?.[0]?.delta?.tool_calls);
               const delta = chunk?.choices?.[0]?.delta?.content || '';
               if (delta) {
                 chatFirstTokenAt ??= Date.now();
@@ -3779,17 +3849,16 @@ rl.on('line', async (line) => {
               });
               return;
             }
-            chatOk = true;
+            const compactedToolCalls = finalizeToolCallDeltas(toolCalls);
             chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
             if (canceledRequests.has(id)) {
-              chatOk = false;
               reply({
                 error: 'The chat response was discarded after cancellation; native inference may have continued.',
                 certainty: 'cancelled',
               });
               return;
             }
-            const compactedToolCalls = compactToolCallDeltas(toolCalls);
+            chatOk = true;
             reply({
               ok: true,
               result: {
