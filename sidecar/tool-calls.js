@@ -109,8 +109,9 @@ export function createToolCallAccumulator ({ utf8ByteLength: measureUtf8 = utf8B
     nextIndex: 0,
     failure: null,
     measureUtf8,
-    // Caches repeated reconciliation pairs and already-confirmed prefixes. Snapshot
-    // byte accounting is separate so cumulative snapshots encode only their new suffix.
+    // Caches repeated reconciliation pairs and already-confirmed textual prefixes.
+    // Snapshot byte accounting is separate so prefix-extending snapshots encode only
+    // their new suffix; structurally compatible non-prefix revisions are remeasured.
     deltaArgumentCache: new Map(),
     snapshotArgumentCache: new Map(),
     snapshotArgumentByteState: new Map(),
@@ -268,45 +269,10 @@ function isJsonExtension (current, incoming) {
 // its own, so this usually only succeeds once both sides parse), then falls back to
 // plain textual prefix compatibility for partial fragments.
 //
-// `allowDefer` covers a gap the structural/textual checks above cannot: a fragment can
-// be syntactically *incomplete* (fails to parse as JSON at all, e.g. `'{"a":{}'` before
-// its closing brace arrives) without yet being provably wrong — its eventual complete
-// form could still turn out to be a valid JSON-subset extension once finished (as the
-// bidirectional `isJsonExtension` check above would confirm). The plain textual prefix
-// fallback (`compatibleValue`) cannot tell "still incomplete" apart from "genuinely
-// different content" — both simply fail the "is one a literal prefix of the other"
-// test. So when `allowDefer` is set and at least one side does not yet parse as
-// complete JSON, a prefix mismatch is treated as merely undecided rather than a
-// confirmed conflict: `deferred: true` is returned instead of throwing, and the caller
-// must not persist this outcome as settled (see `reconcileArgumentsWithCache`) since a
-// later fragment could still resolve it either way. Once both sides *do* parse (or at
-// `final`, where allowDefer is never set), a prefix mismatch is a real, permanent
-// conflict and still throws exactly as before.
-function reconcileArguments (current, incoming, maxBytes, { allowDefer = false } = {}) {
-  if (isJsonExtension(current, incoming)) return { value: incoming, deferred: false };
-  if (isJsonExtension(incoming, current)) return { value: current, deferred: false };
-  if (allowDefer && (!isCompleteJson(current) || !isCompleteJson(incoming))) {
-    return { value: current.length >= incoming.length ? current : incoming, deferred: true };
-  }
-  return { value: compatibleValue(current, incoming, 'function.arguments', { maxBytes }), deferred: false };
-}
-
-function isCompleteJson (value) {
-  let parsed;
-  try {
-    parsed = JSON.parse(value);
-  } catch {
-    return false;
-  }
-  // A successfully-parsed bare JSON *number* is not necessarily finished growing:
-  // unlike objects/arrays (closed by a matching brace/bracket), strings (closed by a
-  // quote), and the exact keywords true/false/null, a JSON number has no closing
-  // delimiter — '1' parses successfully today but could still become '1e-1' (or '15',
-  // '1.5', etc.) on a later fragment, and a differently-formatted-but-equal number
-  // (e.g. '1e-1' vs '0.1') only resolves once compared as a fully-formed value via
-  // `isJsonExtension`'s numeric equality check above, not while still (potentially)
-  // mid-digit. Every other JSON type genuinely cannot be extended once it parses.
-  return typeof parsed !== 'number';
+function reconcileArguments (current, incoming, maxBytes) {
+  if (isJsonExtension(current, incoming)) return incoming;
+  if (isJsonExtension(incoming, current)) return current;
+  return compatibleValue(current, incoming, 'function.arguments', { maxBytes });
 }
 
 // Reconciles the same pair as `reconcileArguments`, but a growing stream calls this
@@ -332,14 +298,7 @@ function isCompleteJson (value) {
 // The exact, JSON-subset-aware `reconcileArguments` still runs — and its cost is still
 // paid — whenever the cheap paths above cannot answer the pair from cache.
 //
-// `allowDefer` forwards to `reconcileArguments` (see its doc comment) for the mid-stream
-// case where a currently-incomplete fragment cannot yet be proven either compatible or
-// conflicting. A deferred outcome is deliberately NOT committed to `cache`: this same
-// cache is reused, unchanged, by the later `final: true` validation of the same pair
-// once it's known whether more fragments will still arrive — persisting an unproven
-// placeholder here would let that stricter final check wrongly hit the cheap
-// exact-reference fast path above and skip real validation entirely.
-function reconcileArgumentsWithCache (cache, current, incoming, maxBytes, { allowDefer = false } = {}) {
+function reconcileArgumentsWithCache (cache, current, incoming, maxBytes) {
   if (typeof current !== 'string' || typeof incoming !== 'string') {
     throw new Error('Streamed tool-call function.arguments must be a string');
   }
@@ -370,9 +329,7 @@ function reconcileArgumentsWithCache (cache, current, incoming, maxBytes, { allo
     result = longer;
     textualPrefix = true;
   } else {
-    const reconciled = reconcileArguments(current, incoming, maxBytes, { allowDefer });
-    if (reconciled.deferred) return reconciled.value;
-    result = reconciled.value;
+    result = reconcileArguments(current, incoming, maxBytes);
   }
   cache.incomingRef = nextIncomingRef;
   cache.verifiedLength = nextVerifiedLength;
@@ -439,16 +396,7 @@ function finalCandidates (candidates, delta, final) {
   return exact.length === 1 ? exact : candidates;
 }
 
-// `final` defaults to `true` (finalize's own call site never passes it, since finalize
-// always wants strict, unconditional validation). The one caller that validates
-// mid-stream (`assertReconciliationIsUnambiguous`) explicitly passes `final: false`,
-// which allows the `function.arguments` reconciliation to defer an unproven, currently-
-// incomplete-JSON prefix mismatch instead of treating it as a permanent conflict (see
-// `reconcileArguments`'s doc comment). `id`/`function.name` are plain incrementally-
-// streamed text, not JSON, so an in-progress fragment is always a true prefix of its
-// eventual complete value — those two fields have no equivalent "incomplete but not yet
-// disprovable" case and are validated with the same strictness regardless of `final`.
-function mergeDeltaSnapshot (delta, snapshot, cache, { final = true } = {}) {
+function mergeDeltaSnapshot (delta, snapshot, cache) {
   if (delta.type !== undefined && delta.type !== snapshot.type) {
     throw new Error('Streamed tool-call type conflicts with a complete snapshot');
   }
@@ -472,8 +420,6 @@ function mergeDeltaSnapshot (delta, snapshot, cache, { final = true } = {}) {
             cache,
             delta.function.arguments,
             snapshot.function.arguments,
-            undefined,
-            { allowDefer: !final },
           ),
     },
   };
@@ -523,7 +469,7 @@ function assertReconciliationIsUnambiguous (target, { final = false } = {}) {
       if (claimCounts.get(id) > 1) {
         throw new Error('Streamed tool-call identity conflicts with another call');
       }
-      mergeDeltaSnapshot(delta, snapshot, getArgumentCache(target.deltaArgumentCache, index), { final: true });
+      mergeDeltaSnapshot(delta, snapshot, getArgumentCache(target.deltaArgumentCache, index));
       matchedSnapshotIds.add(id);
     } else if (delta.id !== undefined && delta.function?.name !== undefined) {
       unmatchedDeltas += 1;

@@ -2670,31 +2670,37 @@ describe('foundry-sidecar command schema validation', () => {
     }
   });
 
-  it('accepts a complete json_schema response format before initialization', async () => {
-    const id = 4764;
-    proc.stdin.write(`${JSON.stringify({
-      id,
-      cmd: 'chatCompletion',
-      model: 'm',
-      messages: [{ role: 'user', content: 'hi' }],
-      responseFormat: {
-        type: 'json_schema',
-        json_schema: {
-          name: 'structured',
-          description: 'A structured response',
-          schema: { type: 'object', properties: {} },
-          strict: true,
-        },
+  it('accepts minimal and fully annotated json_schema response formats before initialization', async () => {
+    const cases = [
+      { name: 'structured', schema: {} },
+      {
+        name: 'structured',
+        description: 'A structured response',
+        schema: { type: 'object', properties: {} },
+        strict: true,
       },
-    })}\n`);
-    const res = await waitForLine(proc, (msg) => msg.id === id);
-    expect(res.ok).not.toBe(true);
-    expect(String(res.error)).toMatch(/initialized|init first/i);
-    expect(String(res.error)).not.toMatch(/json_schema/i);
+    ];
+    for (const [offset, json_schema] of cases.entries()) {
+      const id = 4764 + offset;
+      proc.stdin.write(`${JSON.stringify({
+        id,
+        cmd: 'chatCompletion',
+        model: 'm',
+        messages: [{ role: 'user', content: 'hi' }],
+        responseFormat: {
+          type: 'json_schema',
+          json_schema,
+        },
+      })}\n`);
+      const res = await waitForLine(proc, (msg) => msg.id === id);
+      expect(res.ok).not.toBe(true);
+      expect(String(res.error)).toMatch(/initialized|init first/i);
+      expect(String(res.error)).not.toMatch(/json_schema/i);
+    }
   });
 
   it('rejects oversized json_schema response formats before initialization', async () => {
-    const id = 4765;
+    const id = 4766;
     proc.stdin.write(`${JSON.stringify({
       id,
       cmd: 'chatCompletion',
@@ -4274,12 +4280,12 @@ describe('chatCompletion ChatSession path', () => {
     while (!events().includes('drain-waiting')) {
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
-    const statusReply = reply(31);
+    const statusReply = waitForLine(proc, (msg) => msg.id === 31, 20000);
     send({ id: 31, cmd: 'poolStatus' });
     const status = await statusReply;
     expect(status.result.models.find((model: any) => model.alias === 'fake-model').inFlight).toBe(1);
     let exclusiveSettled = false;
-    const exclusiveReply = reply(33).then((value) => {
+    const exclusiveReply = waitForLine(proc, (msg) => msg.id === 33, 20000).then((value) => {
       exclusiveSettled = true;
       return value;
     });
@@ -4301,11 +4307,11 @@ describe('chatCompletion ChatSession path', () => {
     expect(events().lastIndexOf('provider-probe')).toBeGreaterThan(events().lastIndexOf('drain-finished'));
     expect(await exclusiveReply).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
 
-    const releaseReply = reply(34);
+    const releaseReply = waitForLine(proc, (msg) => msg.id === 34, 20000);
     send({ id: 34, cmd: 'setBenchmarkExclusive', exclusive: false });
     expect((await releaseReply).ok).toBe(true);
 
-    const accessReply = reply(32);
+    const accessReply = waitForLine(proc, (msg) => msg.id === 32, 20000);
     send({ id: 32, cmd: 'getAccessLog' });
     const chats = (await accessReply).result.filter((entry: any) => entry.type === 'chat');
     expect(chats.at(-1)).toMatchObject({ source: 'ipc', ok: false });

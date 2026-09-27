@@ -220,6 +220,23 @@ describe('streamed tool-call accumulation', () => {
     expect(target.snapshots.get('call-1').function.arguments).toBe(`${prefix}😀`);
   });
 
+  it('remeasures structurally compatible non-prefix snapshots in full', () => {
+    const measured: string[] = [];
+    const target = createToolCallAccumulator({
+      utf8ByteLength: (value: string) => {
+        measured.push(value);
+        return new TextEncoder().encode(value).byteLength;
+      },
+    });
+    const first = '{"a":"é"}';
+    const second = '{"b":"日本","a":"é"}';
+    mergeStreamingToolCalls(target, { snapshot: [call(first)] });
+    mergeStreamingToolCalls(target, { snapshot: [call(second)] });
+    expect(target.failure).toBeNull();
+    expect(finalizeStreamingToolCalls(target)[0].function.arguments).toBe(second);
+    expect(measured).toEqual([first, second]);
+  });
+
   it('bounds discarded snapshots and commits multi-call snapshots atomically', () => {
     const retained = createToolCallAccumulator();
     mergeStreamingToolCalls(retained, { snapshot: [call('{"a":1,"b":2}')] });
