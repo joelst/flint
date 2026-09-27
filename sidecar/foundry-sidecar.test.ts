@@ -3285,7 +3285,7 @@ describe('transcribeAudio AudioSession path', () => {
   // the deprecated client.
   function fakeSdk(
     audioSessionMode: 'success' | 'construction-throws' | 'request-throws',
-    cachedModelsMode: 'success' | 'reject' | 'once-then-reject' = 'success',
+    cachedModelsMode: 'success' | 'reject' | 'once-then-reject' | 'cache-state-only' = 'success',
   ) {
     return [
       "import fs from 'node:fs';",
@@ -3329,7 +3329,7 @@ describe('transcribeAudio AudioSession path', () => {
       'class FakeManager {',
       '  constructor() { this.catalog = {',
       '    getModel: async (alias) => new FakeModel(alias),',
-      "    getModels: async () => [",
+      "    getModels: async () => { const models = [",
       "      { alias: 'opaque-speech', variants: [{ id: 'parakeet-tdt-0.6b-v3-generic-cpu:1', isCached: true }] },",
       "      { alias: 'partial-speech', variants: [",
       "        { id: 'parakeet-tdt-0.6b-v3-generic-cpu:1', isCached: true },",
@@ -3339,8 +3339,13 @@ describe('transcribeAudio AudioSession path', () => {
       "        { id: 'parakeet-tdt-0.6b-v3-generic-cpu:1', isCached: true },",
       "        { id: 'whisper-tiny-generic-cpu:1', isCached: true },",
       "      ] },",
+      "      { alias: 'opaque-cache-state', variants: [",
+      "        { id: 'parakeet-tdt-0.6b-v3-generic-cpu:1', get isCached() { throw new Error('native cache getter failed'); }, info: {} },",
+      "      ] },",
       "      { get alias() { throw new Error('native getter failed'); } },",
-      "    ],",
+      '    ];',
+      `      return ${JSON.stringify(cachedModelsMode)} === 'cache-state-only' ? [models[3]] : models;`,
+      '    },',
       '    getCachedModels: async () => {',
       '      cachedModelCalls++;',
       `      if (${JSON.stringify(cachedModelsMode)} === 'reject' || (${JSON.stringify(cachedModelsMode)} === 'once-then-reject' && cachedModelCalls > 1)) throw new Error('cached inventory unavailable');`,
@@ -3348,6 +3353,7 @@ describe('transcribeAudio AudioSession path', () => {
       "      { alias: 'opaque-speech', id: 'parakeet-tdt-0.6b-v3-generic-cpu:1' },",
       "      { alias: 'mixed-speech', id: 'parakeet-tdt-0.6b-v3-generic-cpu:1' },",
       "      { alias: 'mixed-speech', id: 'whisper-tiny-generic-cpu:1' },",
+      "      { alias: 'opaque-cache-state', id: 'parakeet-tdt-0.6b-v3-generic-cpu:1' },",
       "      { alias: 'partial-speech', id: 'parakeet-tdt-0.6b-v3-generic-cpu:1' },",
       "      { alias: 'partial-speech', id: 'whisper-tiny-generic-cpu:1' },",
       "      { alias: 'lossy-speech', id: 'parakeet-tdt-0.6b-v3-generic-cpu:1' },",
@@ -3381,7 +3387,7 @@ describe('transcribeAudio AudioSession path', () => {
   async function startSidecar(
     audioSessionMode: 'success' | 'construction-throws' | 'request-throws',
     alias = 'fake-model',
-    cachedModelsMode: 'success' | 'reject' | 'once-then-reject' = 'success',
+    cachedModelsMode: 'success' | 'reject' | 'once-then-reject' | 'cache-state-only' = 'success',
   ) {
     homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-audiosession-'));
     eventLog = join(homeDir, 'events.log');
@@ -3550,6 +3556,25 @@ describe('transcribeAudio AudioSession path', () => {
     const res = await transcribed;
     expect(res.error).toContain('Parakeet transcription is not supported');
     expect(events().filter((event) => event.startsWith('model-load:'))).toHaveLength(loadCount);
+  }, 30000);
+
+  it('does not load an opaque cached Parakeet variant when its catalog cache state is unreadable', async () => {
+    await startSidecar('success', 'fake-model', 'cache-state-only');
+    const loadCount = events().filter((event) => event.startsWith('model-load:')).length;
+    const transcribed = reply(3);
+    send({
+      id: 3,
+      cmd: 'transcribeAudio',
+      audioBase64: wavBase64(),
+      mimeType: 'audio/wav',
+      fileName: 'probe.wav',
+      model: 'opaque-cache-state',
+      language: 'en',
+    });
+    const res = await transcribed;
+    expect(res.error).toContain('Parakeet transcription is not supported');
+    expect(events().filter((event) => event.startsWith('model-load:'))).toHaveLength(loadCount);
+    expect(events()).not.toContain('audioSession-processRequest');
   }, 30000);
 
   it('does not falsely reject an alias whose incomplete catalog candidates look unanimously Parakeet', async () => {

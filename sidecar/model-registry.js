@@ -45,7 +45,7 @@ export function isLocalCatalogEntry (entry) {
 /**
  * Whether an SDK model or variant has its build in the local cache. The same predicate admits
  * a variant into the index and re-validates an autoload target, so the two cannot disagree.
- * The native getter can throw; the info snapshot is the fallback.
+ * A boolean native value is authoritative; otherwise the plain info snapshot is the fallback.
  */
 /**
  * @param {{isCached?: boolean, info?: {cached?: boolean}}|null|undefined} model
@@ -61,13 +61,18 @@ export function isCachedModel (model) {
  */
 function readCachedState (model) {
   try {
-    return { cached: !!model?.isCached, readable: true };
+    const cached = model?.isCached;
+    if (typeof cached === 'boolean') return { cached, readable: true };
   } catch {
-    try {
-      return { cached: !!model?.info?.cached, readable: true };
-    } catch {
-      return { cached: false, readable: false };
-    }
+    // Fall through to the plain info snapshot.
+  }
+  try {
+    const cached = model?.info?.cached;
+    return typeof cached === 'boolean'
+      ? { cached, readable: true }
+      : { cached: false, readable: false };
+  } catch {
+    return { cached: false, readable: false };
   }
 }
 

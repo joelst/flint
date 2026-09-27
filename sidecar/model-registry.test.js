@@ -12,9 +12,11 @@ import {
 } from './model-registry.js';
 
 describe('isCachedModel', () => {
-  it('reads the native getter and falls back to the info snapshot only when it throws', () => {
+  it('prefers a boolean native state and otherwise falls back to the info snapshot', () => {
     expect(isCachedModel({ isCached: true })).toBe(true);
     expect(isCachedModel({ isCached: false, info: { cached: true } })).toBe(false);
+    expect(isCachedModel({ info: { cached: true } })).toBe(true);
+    expect(isCachedModel({ isCached: false })).toBe(false);
     expect(isCachedModel({
       get isCached() { throw new Error('native getter failed'); },
       info: { cached: true },
@@ -129,6 +131,39 @@ describe('normalizeCatalogModels', () => {
           { id: 'parakeet-cpu:1', cached: true },
           { id: 'whisper-cpu:1', cached: true },
         ],
+      }],
+    });
+  });
+
+  it('marks cache state unreadable when the native getter and fallback provide no boolean', () => {
+    expect(normalizeCatalogModels([{
+      alias: 'opaque-voice',
+      variants: [{
+        id: 'parakeet-cpu:1',
+        get isCached() { throw new Error('native getter failed'); },
+        info: {},
+      }],
+    }])).toEqual({
+      complete: false,
+      models: [{
+        alias: 'opaque-voice',
+        variants: [],
+      }],
+    });
+  });
+
+  it('keeps an explicit uncached state readable and complete', () => {
+    expect(normalizeCatalogModels([{
+      alias: 'downloadable-voice',
+      variants: [{
+        id: 'whisper-cpu:1',
+        isCached: false,
+      }],
+    }])).toEqual({
+      complete: true,
+      models: [{
+        alias: 'downloadable-voice',
+        variants: [{ id: 'whisper-cpu:1', cached: false }],
       }],
     });
   });
