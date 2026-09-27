@@ -6,6 +6,28 @@ function readAscii (view, offset, length) {
   return out;
 }
 
+const EXTENSIBLE_GUID_TAIL = [0, 0, 16, 0, 128, 0, 0, 170, 0, 56, 155, 113];
+
+function readExtensibleFormatCode (view, bodyOffset, declaredSize) {
+  if (declaredSize < 40) {
+    throw new Error(`WAV extensible fmt chunk is too short: declared ${declaredSize} bytes, requires at least 40.`);
+  }
+  const extensionSize = view.getUint16(bodyOffset + 16, true);
+  if (extensionSize < 22 || declaredSize < 18 + extensionSize) {
+    throw new Error('WAV extensible fmt chunk does not contain its complete declared extension.');
+  }
+  for (let i = 0; i < EXTENSIBLE_GUID_TAIL.length; i += 1) {
+    if (view.getUint8(bodyOffset + 28 + i) !== EXTENSIBLE_GUID_TAIL[i]) {
+      throw new Error('Unsupported WAV extensible subtype GUID.');
+    }
+  }
+  const subtypeCode = view.getUint32(bodyOffset + 24, true);
+  if (subtypeCode !== 1 && subtypeCode !== 3) {
+    throw new Error('Unsupported WAV extensible subtype GUID.');
+  }
+  return subtypeCode;
+}
+
 /**
  * @typedef {Object} WavHeader
  * @property {DataView} view
@@ -65,8 +87,8 @@ export function parseWavHeader (input) {
       numChannels = view.getUint16(bodyOffset + 2, true);
       sampleRate = view.getUint32(bodyOffset + 4, true);
       bitsPerSample = view.getUint16(bodyOffset + 14, true);
-      if (formatCode === 0xfffe && chunkSize >= 26) {
-        formatCode = view.getUint16(bodyOffset + 24, true);
+      if (formatCode === 0xfffe) {
+        formatCode = readExtensibleFormatCode(view, bodyOffset, declaredSize);
       }
     } else if (chunkId === 'data' && dataOffset < 0) {
       dataOffset = bodyOffset;

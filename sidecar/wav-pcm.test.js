@@ -67,6 +67,42 @@ function appendChunk (wav, id, body) {
   return bytes;
 }
 
+function buildExtensibleWav ({
+  cbSize = 22,
+  subtype = 1,
+  bitsPerSample = 16,
+  guidTail = [0, 0, 16, 0, 128, 0, 0, 170, 0, 56, 155, 113],
+} = {}) {
+  const fmtBodyLength = 40;
+  const dataOffset = 12 + 8 + fmtBodyLength + 8;
+  const bytes = new Uint8Array(dataOffset + 4);
+  const view = new DataView(bytes.buffer);
+  const ascii = (offset, text) => {
+    for (let i = 0; i < text.length; i += 1) view.setUint8(offset + i, text.charCodeAt(i));
+  };
+  ascii(0, 'RIFF');
+  view.setUint32(4, bytes.length - 8, true);
+  ascii(8, 'WAVE');
+  ascii(12, 'fmt ');
+  view.setUint32(16, fmtBodyLength, true);
+  const fmtBody = 20;
+  view.setUint16(fmtBody, 0xfffe, true);
+  view.setUint16(fmtBody + 2, 1, true);
+  view.setUint32(fmtBody + 4, 16000, true);
+  view.setUint32(fmtBody + 8, 16000 * bitsPerSample / 8, true);
+  view.setUint16(fmtBody + 12, bitsPerSample / 8, true);
+  view.setUint16(fmtBody + 14, bitsPerSample, true);
+  view.setUint16(fmtBody + 16, cbSize, true);
+  view.setUint16(fmtBody + 18, bitsPerSample, true);
+  view.setUint32(fmtBody + 20, 0, true);
+  view.setUint32(fmtBody + 24, subtype, true);
+  bytes.set(guidTail, fmtBody + 28);
+  ascii(dataOffset - 8, 'data');
+  view.setUint32(dataOffset - 4, 4, true);
+  bytes.set([1, 2, 3, 4], dataOffset);
+  return bytes;
+}
+
 describe('shared WAV PCM parser', () => {
   it('extracts sample bytes after non-audio RIFF chunks', () => {
     const wav = buildWav();
@@ -123,5 +159,29 @@ describe('shared WAV PCM parser', () => {
     const withSecondData = appendChunk(buildWav(), 'data', new Uint8Array([9, 10, 11, 12]));
     const duplicated = appendChunk(withSecondData, 'fmt ', secondFmt);
     expect([...extractNemotronPcm(duplicated)]).toEqual([1, 2, 3, 4]);
+  });
+
+  it('rejects an extensible format with an undersized declared extension', () => {
+    expect(() => extractNemotronPcm(buildExtensibleWav({ cbSize: 0 }))).toThrow(/complete declared extension/i);
+  });
+
+  it('rejects an extensible format whose complete subtype GUID is not PCM', () => {
+    expect(() => extractNemotronPcm(buildExtensibleWav({
+      guidTail: [9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 9, 8],
+    }))).toThrow(/subtype/i);
+  });
+
+  it('rejects an extensible format whose declared extension exceeds the fmt body', () => {
+    expect(() => extractNemotronPcm(buildExtensibleWav({ cbSize: 30 }))).toThrow(/complete declared extension/i);
+  });
+
+  it('accepts a complete extensible PCM subtype GUID', () => {
+    expect([...extractNemotronPcm(buildExtensibleWav())]).toEqual([1, 2, 3, 4]);
+  });
+
+  it('recognizes a complete extensible IEEE-float subtype GUID', () => {
+    const header = parseWavHeader(buildExtensibleWav({ subtype: 3, bitsPerSample: 32 }));
+    expect(header.formatCode).toBe(3);
+    expect(header.isFloat).toBe(true);
   });
 });
