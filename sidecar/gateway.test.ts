@@ -140,6 +140,34 @@ describe('gateway pass-through', () => {
     expect(res.body).toBe('pong');
   });
 
+  it('omits neutral chat penalties before forwarding to Foundry', async () => {
+    const model = 'already-loaded';
+    upstream.state.loaded.add(model);
+    gateway = await startGateway();
+    const body = JSON.stringify({
+      model,
+      messages: [{ role: 'user', content: 'hello' }],
+      frequency_penalty: 0,
+      presence_penalty: 0,
+      temperature: 0,
+    });
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      body,
+      headers: {
+        'content-type': 'application/json',
+        'content-length': String(Buffer.byteLength(body)),
+      },
+    });
+    expect(res.status).toBe(200);
+    const forwarded = JSON.parse(upstream.state.hits[0].body);
+    expect(forwarded.frequency_penalty).toBeUndefined();
+    expect(forwarded.presence_penalty).toBeUndefined();
+    expect(forwarded.temperature).toBe(0);
+    expect(Number(upstream.state.hits[0].headers['content-length']))
+      .toBe(Buffer.byteLength(upstream.state.hits[0].body));
+  });
+
   it('rewrites the Host header so upstream never sees the client value', async () => {
     gateway = await startGateway();
     await request(gateway.publicPort, '/v1/models', { headers: { host: 'evil.example' } });
@@ -414,28 +442,72 @@ describe('gateway autoload', () => {
     expect(called).toBe(false);
   });
 
-  it('rejects a body past the cap instead of truncating it', async () => {
+  it('rejects a declared chat body past the normalization cap without forwarding it', async () => {
     gateway = await startGateway({ maxBufferedBody: 64 });
     const res = await request(gateway.publicPort, '/v1/chat/completions', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ model: 'qwen3-0.6b', pad: 'x'.repeat(500) }),
     });
-    // Declared length is over the cap, so the body streams through unbuffered and the
-    // upstream error reaches the client untouched.
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(413);
+    expect(upstream.state.hits).toEqual([]);
   });
 
-  it('can be turned off entirely', async () => {
+  it('normalizes neutral penalties without enabling disabled autoload', async () => {
     let called = false;
     gateway = await startGateway({ autoload: false, load: async () => { called = true; } });
+    const body = JSON.stringify({
+      model: 'qwen3-0.6b',
+      messages: [{ role: 'user', content: 'hello' }],
+      frequency_penalty: 0,
+      presence_penalty: 0,
+    });
     const res = await request(gateway.publicPort, '/v1/chat/completions', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'qwen3-0.6b' }),
+      body,
     });
     expect(res.status).toBe(400);
     expect(called).toBe(false);
+    const forwarded = JSON.parse(upstream.state.hits[0].body);
+    expect(forwarded.frequency_penalty).toBeUndefined();
+    expect(forwarded.presence_penalty).toBeUndefined();
+  });
+
+  it('normalizes a doubled-slash chat route without enabling disabled autoload', async () => {
+    let called = false;
+    gateway = await startGateway({ autoload: false, load: async () => { called = true; } });
+    const body = JSON.stringify({
+      model: 'qwen3-0.6b',
+      messages: [{ role: 'user', content: 'hello' }],
+      frequency_penalty: 0,
+    });
+    const res = await request(gateway.publicPort, '/v1//chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    });
+    expect(res.status).toBe(200);
+    expect(called).toBe(false);
+    expect(JSON.parse(upstream.state.hits[0].body).frequency_penalty).toBeUndefined();
+  });
+
+  it('normalizes an uppercase chat route without enabling disabled autoload', async () => {
+    let called = false;
+    gateway = await startGateway({ autoload: false, load: async () => { called = true; } });
+    const body = JSON.stringify({
+      model: 'qwen3-0.6b',
+      messages: [{ role: 'user', content: 'hello' }],
+      frequency_penalty: 0,
+    });
+    const res = await request(gateway.publicPort, '/V1/CHAT/COMPLETIONS', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    });
+    expect(res.status).toBe(200);
+    expect(called).toBe(false);
+    expect(JSON.parse(upstream.state.hits[0].body).frequency_penalty).toBeUndefined();
   });
 });
 
@@ -1681,6 +1753,8 @@ describe('gateway activity hook', () => {
         { 'content-type': 'application/json' }, 415],
       ['a leading doubled-slash JSON request', '//v1/audio/transcriptions',
         { 'content-type': 'application/json' }, 415],
+      ['an uppercase JSON request', '/V1/AUDIO/TRANSCRIPTIONS',
+        { 'content-type': 'application/json' }, 415],
       ['a trailing-slash multipart-header JSON request', '/v1/audio/transcriptions//',
         { 'content-type': 'multipart/form-data; boundary=x' }, 400],
     ];
@@ -2020,10 +2094,13 @@ describe('gateway activity hook', () => {
 describe('classifyGatewayRoute', () => {
   it('labels chat, embeddings, models, and other without reading bodies', () => {
     expect(classifyGatewayRoute('/v1/chat/completions')).toBe('chat');
+    expect(classifyGatewayRoute('/V1/CHAT/COMPLETIONS')).toBe('chat');
     expect(classifyGatewayRoute('/v1/models?foo=1')).toBe('models');
+    expect(classifyGatewayRoute('/V1/MODELS?foo=1')).toBe('models');
     expect(classifyGatewayRoute('/v1/models/tiny-cpu')).toBe('models');
     expect(classifyGatewayRoute('/v1/not-models')).toBe('other');
     expect(classifyGatewayRoute('/v1/embeddings')).toBe('embeddings');
+    expect(classifyGatewayRoute('/V1/EMBEDDINGS')).toBe('embeddings');
     expect(classifyGatewayRoute('/v1/embeddings?foo=1')).toBe('embeddings');
     expect(classifyGatewayRoute('/v1/chat/completions-evil')).toBe('other');
     expect(classifyGatewayRoute('/v1/embeddings-preview')).toBe('other');

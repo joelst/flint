@@ -775,13 +775,16 @@ describe('foundry-sidecar protocol basics', () => {
       proc.stdin.write(`${JSON.stringify({
         id: 48, cmd: 'chatCompletion', model: 'fake-model',
         messages: [{ role: 'user', content: 'hello' }], stream: false,
-        temperature: 0.4, maxTokens: 128, topP: 0.8, topK: 20, randomSeed: 7,
+        temperature: 0.4, maxTokens: 128, topP: 0.8, topK: 20,
+        frequencyPenalty: 0, presencePenalty: 0, randomSeed: 7,
       })}\n`);
       const httpChat = await waitForLine(proc, (msg) => msg.id === 48, 15000);
       expect(httpChat.ok).toBe(true);
       expect(capturedBody.temperature).toBe(0.4);
       expect(capturedBody.max_tokens).toBe(128);
       expect(capturedBody.top_p).toBe(0.8);
+      expect(capturedBody.frequency_penalty).toBeUndefined();
+      expect(capturedBody.presence_penalty).toBeUndefined();
       // The SDK's own OpenAI request serializer sends these as stringified metadata fields, not
       // top-level numbers -- the native web service only recognizes that shape.
       expect(capturedBody.top_k).toBeUndefined();
@@ -982,7 +985,7 @@ describe('foundry-sidecar protocol basics', () => {
     });
 
     try {
-      // This test does 5 sequential round trips against a real spawned child; a loaded CI
+      // This test does 6 sequential round trips against a real spawned child; a loaded CI
       // runner can make any single one exceed the plain 5000ms default `waitForLine` timeout
       // well within the outer 90000ms test timeout below, so every wait here gets an explicit,
       // more generous per-call timeout (matching the pattern already used for other
@@ -1081,6 +1084,27 @@ describe('foundry-sidecar protocol basics', () => {
         topK: 40,
         frequencyPenalty: 0.1,
         presencePenalty: 0.2,
+        randomSeed: 99,
+      });
+
+      // Zero is the neutral OpenAI penalty value. It must clear the fake client's nonzero
+      // defaults without being serialized, because Foundry Local 2.0.1 corrupts generation
+      // for multiple models when frequency_penalty: 0 is explicitly present.
+      proc.stdin.write(`${JSON.stringify({
+        id: 55,
+        cmd: 'chatCompletion',
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'hello' }],
+        stream: false,
+        frequencyPenalty: 0,
+        presencePenalty: 0,
+      })}\n`);
+      const neutralPenalties = await waitForLine(proc, (msg) => msg.id === 55, 45000);
+      expect(JSON.parse(neutralPenalties.result.choices[0].message.content)).toEqual({
+        temperature: 0.11,
+        maxTokens: 7,
+        topP: 0.9,
+        topK: 40,
         randomSeed: 99,
       });
 

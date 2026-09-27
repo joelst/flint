@@ -60,6 +60,14 @@ const NOT_MULTIPART = Symbol('notMultipart');
 const TRANSCRIPTION_REQUIRES_MULTIPART =
   'Audio transcription requires a multipart/form-data body beginning with its declared boundary.';
 
+function canonicalGatewayPath (urlPath) {
+  return String(urlPath || '')
+    .split(/[?#]/)[0]
+    .replace(/\/{2,}/g, '/')
+    .replace(/\/+$/, '')
+    .toLowerCase();
+}
+
 /**
  * Classify OpenAI-compatible routes for metadata-only access logging.
  *
@@ -68,11 +76,11 @@ const TRANSCRIPTION_REQUIRES_MULTIPART =
  */
 export function classifyGatewayRoute (urlPath) {
   // Foundry's router collapses empty segments (`/v1/audio//transcriptions` routes), so the
-  // classification must too, or a doubled slash would bypass the speech guard.
-  const path = String(urlPath || '').split(/[?#]/)[0].replace(/\/{2,}/g, '/');
+  // classification must too, and it matches paths case-insensitively.
+  const path = canonicalGatewayPath(urlPath);
   if (/(^|\/)chat\/completions(\/|$)/.test(path)) return 'chat';
   if (/(^|\/)embeddings(\/|$)/.test(path)) return 'embeddings';
-  if (/(^|\/)audio\/transcriptions(\/|$)/i.test(path)) return 'speech';
+  if (/(^|\/)audio\/transcriptions(\/|$)/.test(path)) return 'speech';
   if (/(^|\/)models(\/|$)/.test(path)) return 'models';
   return 'other';
 }
@@ -262,8 +270,10 @@ export function createGateway (options) {
 
   async function handleAdmittedRequest (req, res) {
     const startedAt = Date.now();
-    const buffered = await maybeBufferBody(req, res);
+    const mayAutoload = autoload && autoloadAllowedFor(req);
+    let buffered = await maybeBufferBody(req, res, mayAutoload);
     if (buffered === ABORTED) return;
+    if (buffered !== null) buffered = normalizeChatRequestPenalties(req.url, buffered);
 
     // Populated only for chat completions, streamed or not, by parsing the response the
     // proxy is already decoding for SSE/JSON normalization — never a separate buffering pass.
@@ -273,7 +283,9 @@ export function createGateway (options) {
     let activeBooking;
     let booked = false;
     try {
-      if (!requested) return await route(req, res, buffered, requested, undefined, metrics);
+      if (!requested) {
+        return await route(req, res, buffered, requested, undefined, metrics, mayAutoload);
+      }
 
       // Mark the model busy for the whole life of the request, not just the load. Gateway
       // traffic is proxied straight to Foundry, so the sidecar has no other way to tell a
@@ -297,7 +309,7 @@ export function createGateway (options) {
           activeBooking = nextBooking;
           booked = true;
           return true;
-        }, metrics);
+        }, metrics, mayAutoload);
       } finally {
         if (booked) notifyActivity(activeModel, 'end', activeBooking);
       }
@@ -353,7 +365,15 @@ export function createGateway (options) {
    * @param {{firstTokenAt: number|null, tokensIn: number|null, tokensOut: number|null}} [metrics]
    *        mutable response metrics accumulator, populated while decoding chat responses.
    */
-  async function route (req, res, buffered, requested, setActivityModel = () => true, metrics) {
+  async function route (
+    req,
+    res,
+    buffered,
+    requested,
+    setActivityModel = () => true,
+    metrics,
+    mayAutoload = false,
+  ) {
 
     // An identifier that needed rewriting once needs it on every later request, and the
     // upstream rejection that teaches us costs a round trip each time. Reuse it, and let
@@ -368,7 +388,11 @@ export function createGateway (options) {
     // Upstream's rejection must name the model we sent, which is the rewritten id when a
     // rewrite was applied, not the client's own wording.
     const sentModel = known ?? requested;
-    const attempt = await forward(req, res, outgoing, { captureNotLoaded: true, sentModel, metrics });
+    const attempt = await forward(req, res, outgoing, {
+      captureNotLoaded: mayAutoload,
+      sentModel,
+      metrics,
+    });
     if (attempt === SENT) return;
 
     // Only reached when upstream rejected the model we named as not loaded or not found, and
@@ -424,11 +448,11 @@ export function createGateway (options) {
   }
 
   /**
-   * Read the body when it is small JSON, since that is the only case a replay is possible.
-   * Anything else is streamed and simply cannot be retried.
+   * Read bounded JSON chat bodies so neutral penalties can always be normalized. Other JSON
+   * requests are buffered only when this caller may autoload and replay them.
    * @returns {Promise<string|null|typeof ABORTED>}
    */
-  function maybeBufferBody (req, res) {
+  function maybeBufferBody (req, res, mayAutoload) {
     const contentType = Array.isArray(req.headers['content-type'])
       ? req.headers['content-type'][0]
       : req.headers['content-type'];
@@ -448,12 +472,25 @@ export function createGateway (options) {
     }
 
     const declared = Number(req.headers['content-length']);
-    const wanted = autoload && shouldBufferBody({
+    const bufferableJson = shouldBufferBody({
       method: req.method,
       contentType: req.headers['content-type'],
       contentLength: Number.isFinite(declared) ? declared : null,
       maxBytes: bufferedBodyLimit,
-    }) && autoloadAllowedFor(req);
+    });
+    const isChatJson = isChatCompletionPath(req.url) && shouldBufferBody({
+      method: req.method,
+      contentType: req.headers['content-type'],
+      contentLength: null,
+      maxBytes: bufferedBodyLimit,
+    });
+    if (isChatJson && Number.isFinite(declared) && declared > bufferedBodyLimit) {
+      res.writeHead(413, { 'content-type': 'application/json', connection: 'close' });
+      res.end(openAiError('Request body too large.', 'invalid_request_error'));
+      req.resume();
+      return Promise.resolve(ABORTED);
+    }
+    const wanted = bufferableJson && (isChatJson || mayAutoload);
     if (!wanted) return Promise.resolve(null);
 
     return new Promise(resolve2 => {
@@ -486,6 +523,26 @@ export function createGateway (options) {
       req.on('error', () => finish(ABORTED));
       req.on('aborted', () => finish(ABORTED));
     });
+  }
+
+  function normalizeChatRequestPenalties (url, body) {
+    if (!isChatCompletionPath(url) || typeof body !== 'string') return body;
+    try {
+      const parsed = JSON.parse(body);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return body;
+      let changed = false;
+      if (parsed.frequency_penalty === 0) {
+        delete parsed.frequency_penalty;
+        changed = true;
+      }
+      if (parsed.presence_penalty === 0) {
+        delete parsed.presence_penalty;
+        changed = true;
+      }
+      return changed ? JSON.stringify(parsed) : body;
+    } catch {
+      return body;
+    }
   }
 
   /**
@@ -737,7 +794,7 @@ export function createGateway (options) {
   }
 
   function isChatCompletionPath (url) {
-    return String(url || '').split('?')[0].replace(/\/+$/, '') === '/v1/chat/completions';
+    return canonicalGatewayPath(url) === '/v1/chat/completions';
   }
 
   function isEventStream (contentType) {
@@ -1003,7 +1060,7 @@ const SENT = Symbol('sent');
 const ABORTED = Symbol('aborted');
 
 function isStatusPath (url) {
-  const path = String(url || '').split('?')[0];
+  const path = canonicalGatewayPath(url);
   return path === '/status' || path === '/v1/status';
 }
 
