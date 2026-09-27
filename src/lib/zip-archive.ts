@@ -104,11 +104,20 @@ const UTF8_NAME_FLAG = 0x0800;
 const STORE_METHOD = 0;
 const VERSION_NEEDED = 20;
 
+/** ZIP32 stores the entry count and each name length in 16-bit fields. */
+export const MAX_ZIP_ENTRIES = 0xffff;
+export const MAX_ZIP_NAME_BYTES = 0xffff;
+
 export function createStoredZip(
   entries: readonly ZipEntry[],
   now: Date = new Date(),
 ): Uint8Array {
   if (entries.length === 0) throw new Error('A zip archive needs at least one file');
+  // ZIP32's end record holds the entry count in 16 bits. Writing more would truncate it
+  // and leave a central directory no extractor can enumerate.
+  if (entries.length > MAX_ZIP_ENTRIES) {
+    throw new Error(`A zip archive holds at most ${MAX_ZIP_ENTRIES} files`);
+  }
 
   const seen = new Set<string>();
   for (const entry of entries) {
@@ -127,6 +136,11 @@ export function createStoredZip(
 
   for (const entry of entries) {
     const nameBytes = utf8(entry.fileName);
+    // The name-length fields are 16-bit too, so an over-long name would be written in
+    // full behind a truncated length and derail every header that follows.
+    if (nameBytes.length > MAX_ZIP_NAME_BYTES) {
+      throw new Error(`Zip entry "${entry.fileName}" has too long a file name`);
+    }
     const bodyBytes = utf8(String(entry.body ?? ''));
     if (bodyBytes.length > MAX_ZIP_ENTRY_BYTES) {
       throw new Error(`Zip entry "${entry.fileName}" is too large to archive`);

@@ -1,6 +1,27 @@
 import { describe, expect, it } from 'vitest';
-import { crc32 as nodeCrc32 } from 'node:zlib';
-import { createStoredZip, crc32, MAX_ZIP_ENTRY_BYTES } from './zip-archive';
+import {
+  createStoredZip,
+  crc32,
+  MAX_ZIP_ENTRIES,
+  MAX_ZIP_ENTRY_BYTES,
+  MAX_ZIP_NAME_BYTES,
+} from './zip-archive';
+
+/**
+ * A deliberately naive bitwise CRC-32, so the checksums in the archive are checked
+ * against an implementation that shares no code with the one under test. `node:zlib`
+ * exposes `crc32`, but only from Node 22.2, and this package supports all of Node 22.
+ */
+function nodeCrc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit++) {
+      crc = crc & 1 ? (crc >>> 1) ^ 0xedb88320 : crc >>> 1;
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
 
 /**
  * A deliberately independent reader: it walks the central directory (the record a real
@@ -132,5 +153,27 @@ describe('createStoredZip', () => {
     expect(encoded >>> 9).toBe(127); // 2107
     expect((encoded >>> 5) & 0x0f).toBe(12);
     expect(encoded & 0x1f).toBe(31);
+  });
+});
+
+describe('ZIP32 field limits', () => {
+  it('refuses more entries than the end record can count', () => {
+    const entries = Array.from({ length: MAX_ZIP_ENTRIES + 1 }, (_, i) => ({
+      fileName: `f${i}.txt`,
+      body: '',
+    }));
+    expect(() => createStoredZip(entries)).toThrow(/at most/);
+    expect(() => createStoredZip(entries.slice(0, MAX_ZIP_ENTRIES))).not.toThrow();
+  });
+
+  it('refuses a file name longer than its 16-bit length field', () => {
+    const tooLong = 'a'.repeat(MAX_ZIP_NAME_BYTES + 1);
+    expect(() => createStoredZip([{ fileName: tooLong, body: 'x' }])).toThrow(/file name/);
+  });
+
+  it('measures the name limit in bytes rather than characters', () => {
+    // A multi-byte name that is well under the limit by character count still overruns it.
+    const name = 'é'.repeat(MAX_ZIP_NAME_BYTES);
+    expect(() => createStoredZip([{ fileName: name, body: 'x' }])).toThrow(/file name/);
   });
 });
