@@ -442,28 +442,54 @@ describe('gateway autoload', () => {
     expect(called).toBe(false);
   });
 
-  it('rejects a body past the cap instead of truncating it', async () => {
+  it('rejects a declared chat body past the normalization cap without forwarding it', async () => {
     gateway = await startGateway({ maxBufferedBody: 64 });
     const res = await request(gateway.publicPort, '/v1/chat/completions', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ model: 'qwen3-0.6b', pad: 'x'.repeat(500) }),
     });
-    // Declared length is over the cap, so the body streams through unbuffered and the
-    // upstream error reaches the client untouched.
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(413);
+    expect(upstream.state.hits).toEqual([]);
   });
 
-  it('can be turned off entirely', async () => {
+  it('normalizes neutral penalties without enabling disabled autoload', async () => {
     let called = false;
     gateway = await startGateway({ autoload: false, load: async () => { called = true; } });
+    const body = JSON.stringify({
+      model: 'qwen3-0.6b',
+      messages: [{ role: 'user', content: 'hello' }],
+      frequency_penalty: 0,
+      presence_penalty: 0,
+    });
     const res = await request(gateway.publicPort, '/v1/chat/completions', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'qwen3-0.6b' }),
+      body,
     });
     expect(res.status).toBe(400);
     expect(called).toBe(false);
+    const forwarded = JSON.parse(upstream.state.hits[0].body);
+    expect(forwarded.frequency_penalty).toBeUndefined();
+    expect(forwarded.presence_penalty).toBeUndefined();
+  });
+
+  it('normalizes a doubled-slash chat route without enabling disabled autoload', async () => {
+    let called = false;
+    gateway = await startGateway({ autoload: false, load: async () => { called = true; } });
+    const body = JSON.stringify({
+      model: 'qwen3-0.6b',
+      messages: [{ role: 'user', content: 'hello' }],
+      frequency_penalty: 0,
+    });
+    const res = await request(gateway.publicPort, '/v1//chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    });
+    expect(res.status).toBe(200);
+    expect(called).toBe(false);
+    expect(JSON.parse(upstream.state.hits[0].body).frequency_penalty).toBeUndefined();
   });
 });
 

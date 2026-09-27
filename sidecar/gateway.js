@@ -262,7 +262,8 @@ export function createGateway (options) {
 
   async function handleAdmittedRequest (req, res) {
     const startedAt = Date.now();
-    let buffered = await maybeBufferBody(req, res);
+    const mayAutoload = autoload && autoloadAllowedFor(req);
+    let buffered = await maybeBufferBody(req, res, mayAutoload);
     if (buffered === ABORTED) return;
     if (buffered !== null) buffered = normalizeChatRequestPenalties(req.url, buffered);
 
@@ -274,7 +275,9 @@ export function createGateway (options) {
     let activeBooking;
     let booked = false;
     try {
-      if (!requested) return await route(req, res, buffered, requested, undefined, metrics);
+      if (!requested) {
+        return await route(req, res, buffered, requested, undefined, metrics, mayAutoload);
+      }
 
       // Mark the model busy for the whole life of the request, not just the load. Gateway
       // traffic is proxied straight to Foundry, so the sidecar has no other way to tell a
@@ -298,7 +301,7 @@ export function createGateway (options) {
           activeBooking = nextBooking;
           booked = true;
           return true;
-        }, metrics);
+        }, metrics, mayAutoload);
       } finally {
         if (booked) notifyActivity(activeModel, 'end', activeBooking);
       }
@@ -354,7 +357,15 @@ export function createGateway (options) {
    * @param {{firstTokenAt: number|null, tokensIn: number|null, tokensOut: number|null}} [metrics]
    *        mutable response metrics accumulator, populated while decoding chat responses.
    */
-  async function route (req, res, buffered, requested, setActivityModel = () => true, metrics) {
+  async function route (
+    req,
+    res,
+    buffered,
+    requested,
+    setActivityModel = () => true,
+    metrics,
+    mayAutoload = false,
+  ) {
 
     // An identifier that needed rewriting once needs it on every later request, and the
     // upstream rejection that teaches us costs a round trip each time. Reuse it, and let
@@ -369,7 +380,11 @@ export function createGateway (options) {
     // Upstream's rejection must name the model we sent, which is the rewritten id when a
     // rewrite was applied, not the client's own wording.
     const sentModel = known ?? requested;
-    const attempt = await forward(req, res, outgoing, { captureNotLoaded: true, sentModel, metrics });
+    const attempt = await forward(req, res, outgoing, {
+      captureNotLoaded: mayAutoload,
+      sentModel,
+      metrics,
+    });
     if (attempt === SENT) return;
 
     // Only reached when upstream rejected the model we named as not loaded or not found, and
@@ -425,11 +440,11 @@ export function createGateway (options) {
   }
 
   /**
-   * Read the body when it is small JSON, since that is the only case a replay is possible.
-   * Anything else is streamed and simply cannot be retried.
+   * Read bounded JSON chat bodies so neutral penalties can always be normalized. Other JSON
+   * requests are buffered only when this caller may autoload and replay them.
    * @returns {Promise<string|null|typeof ABORTED>}
    */
-  function maybeBufferBody (req, res) {
+  function maybeBufferBody (req, res, mayAutoload) {
     const contentType = Array.isArray(req.headers['content-type'])
       ? req.headers['content-type'][0]
       : req.headers['content-type'];
@@ -449,12 +464,25 @@ export function createGateway (options) {
     }
 
     const declared = Number(req.headers['content-length']);
-    const wanted = autoload && shouldBufferBody({
+    const bufferableJson = shouldBufferBody({
       method: req.method,
       contentType: req.headers['content-type'],
       contentLength: Number.isFinite(declared) ? declared : null,
       maxBytes: bufferedBodyLimit,
-    }) && autoloadAllowedFor(req);
+    });
+    const isChatJson = isChatCompletionPath(req.url) && shouldBufferBody({
+      method: req.method,
+      contentType: req.headers['content-type'],
+      contentLength: null,
+      maxBytes: bufferedBodyLimit,
+    });
+    if (isChatJson && Number.isFinite(declared) && declared > bufferedBodyLimit) {
+      res.writeHead(413, { 'content-type': 'application/json', connection: 'close' });
+      res.end(openAiError('Request body too large.', 'invalid_request_error'));
+      req.resume();
+      return Promise.resolve(ABORTED);
+    }
+    const wanted = bufferableJson && (isChatJson || mayAutoload);
     if (!wanted) return Promise.resolve(null);
 
     return new Promise(resolve2 => {
@@ -758,7 +786,10 @@ export function createGateway (options) {
   }
 
   function isChatCompletionPath (url) {
-    return String(url || '').split('?')[0].replace(/\/+$/, '') === '/v1/chat/completions';
+    return String(url || '')
+      .split(/[?#]/)[0]
+      .replace(/\/{2,}/g, '/')
+      .replace(/\/+$/, '') === '/v1/chat/completions';
   }
 
   function isEventStream (contentType) {

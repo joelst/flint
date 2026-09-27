@@ -115,7 +115,7 @@ export function rejectionNames (rejection, sentModel) {
   return rejection.model.trim().toLowerCase() === sentModel.trim().toLowerCase();
 }
 
-/** Bodies are only buffered so a request can be replayed; a giant upload is streamed. */
+/** JSON bodies are buffered for bounded replay or chat-request normalization. */
 export const DEFAULT_MAX_BUFFERED_BODY = 32 * 1024 * 1024;
 
 /** Control/error responses are expected to be tiny; never buffer an arbitrary upstream body. */
@@ -125,7 +125,7 @@ export const DEFAULT_MAX_BUFFERED_RESPONSE = 1024 * 1024;
 export const DEFAULT_BUFFERED_RESPONSE_TIMEOUT_MS = 5_000;
 
 /**
- * Decide whether a request body should be held in memory for a possible replay.
+ * Decide whether a request body is eligible for bounded JSON buffering.
  *
  * Only JSON is worth buffering: the identifier lives in a JSON field, and audio uploads are
  * both large and shaped so the model name cannot be read without parsing multipart.
