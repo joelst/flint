@@ -21,6 +21,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { annotateVariantUpdates } from './model-updates.js';
 import { selectChatTransport } from './chat-transport.js';
+import { createSessionChatClient, createSessionEmbeddingClient } from './session-clients.js';
 import { assertWavBuffer } from './audio-format.js';
 import { createGateway } from './gateway.js';
 import { formatPublicEndpoint } from './gateway-http.js';
@@ -32,7 +33,7 @@ import {
   resolveModelId,
 } from './model-registry.js';
 import { activityCandidateKeys } from './activity-booking.js';
-import { looksLikeSpeech } from './model-classification.js';
+import { audioSessionUriSupport, looksLikeSpeech } from './model-classification.js';
 import { waitUntilIdle } from './monotonic-wait.js';
 import {
   createOperationAdmission,
@@ -85,6 +86,13 @@ import {
 } from './byom-import.js';
 import { createAsyncLogWriter } from './async-log-writer.js';
 import { normalizeChatResponse } from './chat-response.js';
+import {
+  createToolCallAccumulator,
+  finalizeStreamingToolCalls,
+  mergeStreamingToolCalls,
+  sanitizeToolCalls,
+  validateCompletedChatResponse,
+} from './tool-calls.js';
 import { buildInferenceMetrics } from './inference-metrics.js';
 import { summarizeCacheInventory } from './cache-inventory.js';
 import { createHealthRing } from './health-ring.js';
@@ -201,7 +209,16 @@ const FIELD_TYPES = {
   load:              { alias: 'non-empty-string', variantId: 'non-empty-string' },
   unload:            { alias: 'non-empty-string', ifIdle: 'boolean' },
   deleteModel:       { alias: 'non-empty-string', variantId: 'non-empty-string' },
-  chatCompletion:    { model: 'non-empty-string', messages: 'array', topP: 'number', topK: 'number', frequencyPenalty: 'number', presencePenalty: 'number', randomSeed: 'number' },
+  chatCompletion:    {
+    model: 'non-empty-string',
+    messages: 'array',
+    tools: 'array',
+    topP: 'number',
+    topK: 'number',
+    frequencyPenalty: 'number',
+    presencePenalty: 'number',
+    randomSeed: 'number',
+  },
   cancelChatRequest: { requestId: 'number' },
   transcribeAudio:   { audioBase64: 'string', mimeType: 'non-empty-string', fileName: 'non-empty-string', model: 'non-empty-string', language: 'non-empty-string' },
   embedTexts:        { model: 'non-empty-string', inputs: 'array' },
@@ -242,7 +259,14 @@ const COMMAND_SCHEMA = {
   unload:             { required: ['alias'], optional: ['lane', 'ifIdle'] },
   deleteModel:        { required: ['alias'], optional: ['variantId'] },
   getEndpoint:        { required: [], optional: [] },
-  chatCompletion:     { required: ['model', 'messages'], optional: ['maxTokens', 'temperature', 'preferredEp', 'stream', 'topP', 'topK', 'frequencyPenalty', 'presencePenalty', 'randomSeed'] },
+  chatCompletion:     {
+    required: ['model', 'messages'],
+    optional: [
+      'maxTokens', 'temperature', 'preferredEp', 'stream',
+      'tools', 'toolChoice', 'responseFormat',
+      'topP', 'topK', 'frequencyPenalty', 'presencePenalty', 'randomSeed',
+    ],
+  },
   cancelChatRequest:  { required: ['requestId'], optional: [] },
   transcribeAudio:    { required: ['audioBase64', 'mimeType', 'fileName', 'model', 'language'], optional: ['temperature', 'preferredEp'] },
   embedTexts:         { required: ['model', 'inputs'], optional: [] },
@@ -284,6 +308,11 @@ const NEEDS_INIT = new Set([
 const AUDIO_BASE64_MAX_CHARS = Math.ceil(50 * 1024 * 1024 * 4 / 3);
 const EMBED_MAX_INPUTS = 32;
 const EMBED_MAX_CHARS = 8192;
+// Envelope bounds. The frontend sends a numeric id and a short command name; these only
+// need to be loose enough to accept any legitimate producer while keeping the values
+// cheap to echo back and safe to interpolate into diagnostics.
+const MAX_ENVELOPE_ID_CHARS = 200;
+const MAX_COMMAND_NAME_CHARS = 64;
 
 /**
  * Validates a command name and its payload fields.
@@ -340,8 +369,114 @@ function validateCommand(cmd, payload) {
     return `Command "${cmd}" field "temperature" must be between 0 and 2`;
   }
   if (cmd === 'chatCompletion') {
+    try {
+      toSdkMessages(payload.messages);
+    } catch (err) {
+      return `Command "chatCompletion" field "messages" is invalid: ${err?.message || err}`;
+    }
     if (payload.stream !== undefined && typeof payload.stream !== 'boolean') return `Command "chatCompletion" field "stream" must be a boolean`;
     if (payload.maxTokens !== undefined && typeof payload.maxTokens !== 'number') return `Command "chatCompletion" field "maxTokens" must be a number`;
+    if (payload.tools !== undefined) {
+      if (!Array.isArray(payload.tools) || payload.tools.length > 64) {
+        return 'Command "chatCompletion" field "tools" must contain at most 64 definitions';
+      }
+      let serializedBytes = 0;
+      for (const tool of payload.tools) {
+        if (!tool || typeof tool !== 'object' || Array.isArray(tool) || tool.type !== 'function') {
+          return 'Command "chatCompletion" tool definitions must use type "function"';
+        }
+        const fn = tool.function;
+        if (!fn || typeof fn !== 'object' || Array.isArray(fn)
+          || typeof fn.name !== 'string' || !fn.name.trim() || fn.name.length > 128) {
+          return 'Command "chatCompletion" tool function names must be non-empty strings of at most 128 characters';
+        }
+        if (fn.description !== undefined && (typeof fn.description !== 'string' || fn.description.length > 4096)) {
+          return 'Command "chatCompletion" tool descriptions must be strings of at most 4096 characters';
+        }
+        if (fn.parameters !== undefined && (
+          typeof fn.parameters !== 'object' || fn.parameters === null || Array.isArray(fn.parameters)
+        )) {
+          return 'Command "chatCompletion" tool parameters must be a JSON object';
+        }
+        // `parameters` is only checked for being a plain object, so it can still be
+        // nested deeply enough to overflow the stack here even though JSON.parse
+        // accepted it. Reject the command rather than letting a RangeError escape.
+        let safeSerialized;
+        try {
+          safeSerialized = JSON.stringify(tool);
+        } catch {
+          return 'Command "chatCompletion" tool definitions must be serializable JSON';
+        }
+        serializedBytes += Buffer.byteLength(safeSerialized);
+      }
+      if (serializedBytes > 64 * 1024) {
+        return 'Command "chatCompletion" tool definitions exceed the 64 KiB limit';
+      }
+    }
+    if (payload.toolChoice !== undefined && !(
+      payload.toolChoice === 'none'
+      || payload.toolChoice === 'auto'
+      || payload.toolChoice === 'required'
+      || (
+        payload.toolChoice
+        && typeof payload.toolChoice === 'object'
+        && !Array.isArray(payload.toolChoice)
+        && payload.toolChoice.type === 'function'
+        && payload.toolChoice.function
+        && typeof payload.toolChoice.function.name === 'string'
+        && payload.toolChoice.function.name.trim().length > 0
+        && payload.toolChoice.function.name.length <= 128
+      )
+    )) {
+      return 'Command "chatCompletion" field "toolChoice" is invalid';
+    }
+    const forcedToolName = payload.toolChoice?.type === 'function'
+      ? payload.toolChoice.function.name
+      : null;
+    if ((payload.toolChoice === 'required' || forcedToolName !== null)
+      && (!Array.isArray(payload.tools) || payload.tools.length === 0)) {
+      return 'Command "chatCompletion" field "toolChoice" requires nonempty "tools" definitions';
+    }
+    if (forcedToolName !== null
+      && !payload.tools.some((tool) => tool.function.name === forcedToolName)) {
+      return 'Command "chatCompletion" forced tool choice must exactly match a declared function';
+    }
+    if (payload.responseFormat !== undefined && (
+      !payload.responseFormat
+      || typeof payload.responseFormat !== 'object'
+      || Array.isArray(payload.responseFormat)
+      || !['text', 'json_object', 'json_schema'].includes(payload.responseFormat.type)
+    )) {
+      return 'Command "chatCompletion" field "responseFormat" is invalid';
+    }
+    if (payload.responseFormat?.type === 'json_schema') {
+      const jsonSchema = payload.responseFormat.json_schema;
+      if (
+        !jsonSchema
+        || typeof jsonSchema !== 'object'
+        || Array.isArray(jsonSchema)
+        || typeof jsonSchema.name !== 'string'
+        || jsonSchema.name.trim().length === 0
+        || jsonSchema.name.length > 128
+        || !jsonSchema.schema
+        || typeof jsonSchema.schema !== 'object'
+        || Array.isArray(jsonSchema.schema)
+        || (jsonSchema.description !== undefined
+          && (typeof jsonSchema.description !== 'string' || jsonSchema.description.length > 4096))
+        || (jsonSchema.strict !== undefined && typeof jsonSchema.strict !== 'boolean')
+      ) {
+        return 'Command "chatCompletion" json_schema response format requires a non-empty "name" of at most 128 characters, an object "schema", an optional description of at most 4096 characters, and an optional boolean "strict"';
+      }
+      let serializedJsonSchema;
+      try {
+        serializedJsonSchema = JSON.stringify(jsonSchema);
+      } catch {
+        return 'Command "chatCompletion" json_schema response format must be serializable JSON';
+      }
+      if (Buffer.byteLength(serializedJsonSchema) > 64 * 1024) {
+        return 'Command "chatCompletion" json_schema response format exceeds the 64 KiB limit';
+      }
+    }
     if (typeof payload.maxTokens === 'number' && (!Number.isInteger(payload.maxTokens) || payload.maxTokens <= 0)) {
       return `Command "chatCompletion" field "maxTokens" must be a positive integer`;
     }
@@ -378,8 +513,10 @@ function validateCommand(cmd, payload) {
     }
   }
   // Lane validation for commands that accept a lane field
+  // The value is deliberately not interpolated: an object such as {"toString": null}
+  // throws TypeError on coercion, from a code path with no caller-side try.
   if (LANE_CMDS.has(cmd) && payload.lane !== undefined && !VALID_LANES.has(payload.lane)) {
-    return `Command "${cmd}" invalid lane "${payload.lane}": must be "chat" or "audio"`;
+    return `Command "${cmd}" has an invalid lane: must be "chat" or "audio"`;
   }
   if (cmd === 'transcribeAudio' && payload.audioBase64.length > AUDIO_BASE64_MAX_CHARS) {
     return `Command "transcribeAudio" audioBase64 exceeds maximum allowed size`;
@@ -2161,16 +2298,190 @@ async function readErrorBody (resp) {
   return readBoundedErrorBody(resp);
 }
 
+// Success bodies are model output: generated text, tool-call arguments and echoed prompt
+// content. V8's JSON.parse quotes an excerpt of its input in the error message, so
+// `resp.json()` on a malformed body would carry that payload into the IPC error and the
+// app log. Report only a size instead, matching the payload-free convention used for IPC
+// diagnostics. The body is read before the parse-only catch so a network or stream
+// failure is still surfaced as itself rather than mislabelled as malformed JSON.
+async function readJsonResponse (resp, description) {
+  const text = await resp.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(
+      `${description} returned output that is not valid JSON (${Buffer.byteLength(text)} bytes).`,
+    );
+  }
+}
+
+function isPlainObject (value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function sanitizeChatName (name, field) {
+  if (name === undefined) return undefined;
+  if (typeof name !== 'string' || !name.trim() || name.length > 128) {
+    throw new Error(`${field} must be a non-empty string of at most 128 characters`);
+  }
+  return name;
+}
+
+function sanitizeChatContent (content, field, { nullable = false, optional = false } = {}) {
+  if (content === undefined && optional) return undefined;
+  if (content === null && nullable) return null;
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) {
+    throw new Error(`${field} must be a string or an array of content parts`);
+  }
+  return content.map((part, index) => {
+    if (!isPlainObject(part)) {
+      throw new Error(`${field}[${index}] must be an object`);
+    }
+    if (part.type === 'text') {
+      if (typeof part.text !== 'string') {
+        throw new Error(`${field}[${index}].text must be a string`);
+      }
+      return { type: 'text', text: part.text };
+    }
+    if (part.type === 'image_url') {
+      if (!isPlainObject(part.image_url)
+        || typeof part.image_url.url !== 'string'
+        || !part.image_url.url) {
+        throw new Error(`${field}[${index}].image_url.url must be a non-empty string`);
+      }
+      const detail = part.image_url.detail;
+      if (detail !== undefined && !['auto', 'low', 'high'].includes(detail)) {
+        throw new Error(`${field}[${index}].image_url.detail is invalid`);
+      }
+      return {
+        type: 'image_url',
+        image_url: {
+          url: part.image_url.url,
+          ...(detail !== undefined ? { detail } : {}),
+        },
+      };
+    }
+    throw new Error(`${field}[${index}].type must be "text" or "image_url"`);
+  });
+}
+
 function toSdkMessages (messages) {
-  // Pass content through as-is to support vision arrays:
-  // { role, content: "text" } or { role, content: [ {type:"text", text:...}, {type:"image_url", image_url:{url:...}} ] }
-  return (messages || [])
-    .filter((m) => m && (m.role === 'system' || m.role === 'user' || m.role === 'assistant'))
-    .map((m) => ({ role: m.role, content: m.content }));
+  return messages.map((message, index) => {
+    if (!isPlainObject(message)) {
+      throw new Error(`messages[${index}] must be an object`);
+    }
+    const name = sanitizeChatName(message.name, `messages[${index}].name`);
+    if (message.role === 'system' || message.role === 'user') {
+      return {
+        role: message.role,
+        content: sanitizeChatContent(message.content, `messages[${index}].content`),
+        ...(name !== undefined ? { name } : {}),
+      };
+    }
+    if (message.role === 'assistant') {
+      const content = sanitizeChatContent(
+        message.content,
+        `messages[${index}].content`,
+        { nullable: true, optional: true },
+      );
+      const toolCalls = message.tool_calls === undefined
+        ? undefined
+        : sanitizeToolCalls(message.tool_calls, `messages[${index}].tool_calls`);
+      if ((content === undefined || content === null) && toolCalls === undefined) {
+        throw new Error(`messages[${index}] assistant message requires content or tool_calls`);
+      }
+      return {
+        role: 'assistant',
+        ...(content !== undefined ? { content } : {}),
+        ...(name !== undefined ? { name } : {}),
+        ...(toolCalls !== undefined ? { tool_calls: toolCalls } : {}),
+      };
+    }
+    if (message.role === 'tool') {
+      if (typeof message.tool_call_id !== 'string'
+        || !message.tool_call_id.trim()
+        || message.tool_call_id.length > 256) {
+        throw new Error(`messages[${index}].tool_call_id must be a non-empty string of at most 256 characters`);
+      }
+      return {
+        role: 'tool',
+        content: sanitizeChatContent(message.content, `messages[${index}].content`),
+        tool_call_id: message.tool_call_id,
+        ...(name !== undefined ? { name } : {}),
+      };
+    }
+    throw new Error(`messages[${index}].role is unsupported`);
+  });
+}
+
+function requiresModernChatTransport (messages) {
+  return messages.some((message) =>
+    message.role === 'tool'
+    || (message.role === 'assistant' && Array.isArray(message.tool_calls))
+  );
 }
 
 function normalizeText (value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function mergeChunkToolCalls (targets, chunk) {
+  const choices = Array.isArray(chunk?.choices) ? chunk.choices : [];
+  for (const [position, choice] of choices.entries()) {
+    const choiceIndex = Number.isSafeInteger(choice?.index) && choice.index >= 0
+      ? choice.index
+      : position;
+    let target = targets.get(choiceIndex);
+    if (!target) {
+      target = createToolCallAccumulator();
+      targets.set(choiceIndex, target);
+    }
+    mergeStreamingToolCalls(target, {
+      deltas: choice?.delta?.tool_calls,
+      snapshot: choice?.message?.tool_calls,
+    });
+  }
+  if (chunk?.message?.tool_calls !== undefined) {
+    let target = targets.get(0);
+    if (!target) {
+      target = createToolCallAccumulator();
+      targets.set(0, target);
+    }
+    mergeStreamingToolCalls(target, { snapshot: chunk.message.tool_calls });
+  }
+}
+
+function firstToolCallFailure (targets) {
+  for (const target of targets.values()) {
+    if (target.failure) return target.failure;
+  }
+  return null;
+}
+
+function finalizeToolCallChoices (targets, finishReasons) {
+  let primaryCalls = [];
+  for (const [choiceIndex, target] of targets) {
+    const calls = finalizeStreamingToolCalls(target);
+    if (finishReasons.get(choiceIndex) === 'tool_calls' && calls.length === 0) {
+      throw new Error(`Invalid completed assistant tool_calls: choice ${choiceIndex} finished with tool_calls without valid nonempty calls`);
+    }
+    if (choiceIndex === 0) primaryCalls = calls;
+  }
+  if (finishReasons.get(0) === 'tool_calls' && !targets.has(0)) {
+    throw new Error('Invalid completed assistant tool_calls: choice 0 finished with tool_calls without valid nonempty calls');
+  }
+  return primaryCalls;
+}
+
+function mergeStreamFailure (primaryFailure, streamFailure) {
+  if (!primaryFailure) return streamFailure;
+  if (!streamFailure) return primaryFailure;
+  return new AggregateError(
+    [primaryFailure, streamFailure],
+    `${primaryFailure.message}; stream cleanup also failed`,
+    { cause: primaryFailure },
+  );
 }
 
 function segmentTextsFromValue (segments) {
@@ -2621,6 +2932,34 @@ rl.on('line', async (line) => {
 
   const { id, cmd, protocolVersion, ...payload } = msg;
 
+  // Reduce the envelope to primitives before anything uses it. Every reply echoes `id`
+  // through `send()`, which serializes synchronously, and the diagnostics below
+  // interpolate `cmd`. JSON.parse accepts values that both of those choke on: a deeply
+  // nested array overflows the stack in JSON.stringify (RangeError), and
+  // `{"toString": null}` throws TypeError on interpolation. Either one would escape this
+  // async listener as an unhandled rejection and kill the sidecar - losing every loaded
+  // model and all in-flight work - instead of rejecting the one bad command.
+  const idIsScalar = id === undefined || id === null
+    || (typeof id === 'number' && Number.isFinite(id))
+    || (typeof id === 'string' && id.length <= MAX_ENVELOPE_ID_CHARS);
+  if (!idIsScalar) {
+    log('warn', 'IPC rejected: "id" must be a finite number or short string');
+    send({ id: null, error: 'Invalid message: "id" must be a finite number or string' });
+    return;
+  }
+  const replyId = id ?? null;
+  if (typeof cmd !== 'string' || cmd.length > MAX_COMMAND_NAME_CHARS) {
+    log('warn', 'IPC rejected: "cmd" must be a string');
+    send({ id: replyId, error: 'Invalid message: "cmd" must be a string' });
+    return;
+  }
+  if (protocolVersion !== undefined
+    && typeof protocolVersion !== 'number' && typeof protocolVersion !== 'string') {
+    log('warn', 'IPC rejected: "protocolVersion" must be a number or string');
+    send({ id: replyId, error: 'Invalid message: "protocolVersion" must be a number or string' });
+    return;
+  }
+
   const reply = (result, callback) => {
     send({ id, protocolVersion: SIDECAR_PROTOCOL_VERSION, ...result }, callback);
   };
@@ -2630,56 +2969,63 @@ rl.on('line', async (line) => {
     if (Number.isFinite(percent)) send({ id, progress: percent, ep: epName, phase: 'accelerator' });
   };
 
-  if (protocolVersion !== undefined && protocolVersion !== SIDECAR_PROTOCOL_VERSION) {
-    reply({ error: `Unsupported sidecar protocol version: ${String(protocolVersion)}` });
-    return;
-  }
-
-  const validationError = validateCommand(cmd, payload);
-  if (validationError) {
-    log('warn', `IPC validation rejected: cmd=${String(cmd).slice(0, 40)} error=${validationError}`);
-    reply({ error: validationError });
-    return;
-  }
-
-  if (NEEDS_INIT.has(cmd) && !manager) {
-    reply({ error: `Foundry SDK not initialized — "init" must run before "${cmd}" (the sidecar may have restarted)` });
-    return;
-  }
-
-  const isRuntimeShutdown = cmd === 'shutdownRuntime';
-  const isDrainCommand = cmd === 'stopAndUnload' || isRuntimeShutdown;
-  // Before admission, so a rejected download is not itself "in flight". The benchmark never
-  // downloads; its own load/chat calls stay admitted.
-  if (benchmarkExclusive && cmd === 'download') {
-    reply({
-      error: 'A benchmark run is active — stop it before downloading a model.',
-      certainty: 'cancelled',
-    });
-    return;
-  }
   let operationAdmitted = false;
-  if (isDrainCommand) {
-    // Fence synchronously, before waiting for the service-transition lock. Otherwise commands
-    // arriving while shutdown is queued could still be admitted behind it.
-    operationAdmission.beginDrain({ terminal: isRuntimeShutdown });
-    if (isRuntimeShutdown) explicitShutdownInProgress = true;
-  } else {
-    operationAdmitted = operationAdmission.admit(id, cmd);
-    if (!operationAdmitted) {
+  let releaseServiceTransition = null;
+
+  // The prelude runs inside this try too. Validation, admission and lock acquisition all
+  // handle caller-shaped payloads, and this listener is async, so anything thrown out
+  // here becomes an unhandled rejection that terminates the sidecar rather than failing
+  // one command. Inside, a throw takes the normal error reply below, and the finally
+  // still releases admission and the service-transition lock.
+  try {
+    if (protocolVersion !== undefined && protocolVersion !== SIDECAR_PROTOCOL_VERSION) {
+      reply({ error: `Unsupported sidecar protocol version: ${String(protocolVersion)}` });
+      return;
+    }
+
+    const validationError = validateCommand(cmd, payload);
+    if (validationError) {
+      log('warn', `IPC validation rejected: cmd=${String(cmd).slice(0, 40)} error=${validationError}`);
+      reply({ error: validationError });
+      return;
+    }
+
+    if (NEEDS_INIT.has(cmd) && !manager) {
+      reply({ error: `Foundry SDK not initialized — "init" must run before "${cmd}" (the sidecar may have restarted)` });
+      return;
+    }
+
+    const isRuntimeShutdown = cmd === 'shutdownRuntime';
+    const isDrainCommand = cmd === 'stopAndUnload' || isRuntimeShutdown;
+    // Before admission, so a rejected download is not itself "in flight". The benchmark never
+    // downloads; its own load/chat calls stay admitted.
+    if (benchmarkExclusive && cmd === 'download') {
       reply({
-        error: `Runtime is draining; "${cmd}" was not started`,
+        error: 'A benchmark run is active — stop it before downloading a model.',
         certainty: 'cancelled',
       });
       return;
     }
-  }
+    if (isDrainCommand) {
+      // Fence synchronously, before waiting for the service-transition lock. Otherwise commands
+      // arriving while shutdown is queued could still be admitted behind it.
+      operationAdmission.beginDrain({ terminal: isRuntimeShutdown });
+      if (isRuntimeShutdown) explicitShutdownInProgress = true;
+    } else {
+      operationAdmitted = operationAdmission.admit(id, cmd);
+      if (!operationAdmitted) {
+        reply({
+          error: `Runtime is draining; "${cmd}" was not started`,
+          certainty: 'cancelled',
+        });
+        return;
+      }
+    }
 
-  const releaseServiceTransition = (
-    cmd === 'startService' || cmd === 'stopService' || cmd === 'stopAndUnload'
-  ) ? await acquireServiceTransition() : null;
+    releaseServiceTransition = (
+      cmd === 'startService' || cmd === 'stopService' || cmd === 'stopAndUnload'
+    ) ? await acquireServiceTransition() : null;
 
-  try {
     if (cmd === 'init') {
       const FManager = await getFoundryManager();
       const appName = payload.appName || 'flint';
@@ -3288,13 +3634,43 @@ rl.on('line', async (line) => {
         // Prefer direct SDK inference to avoid web-service schema/version mismatch issues.
         // Vision is the exception: the SDK client rejects non-string content outright, so a
         // multipart request has to take the HTTP endpoint or it cannot be served at all.
-        const { transport, reason: transportReason } = selectChatTransport(sdkMessages, {
-          chatClient: typeof chatModel?.createChatClient === 'function' ? 'available' : 'unsupported',
+        // Resolve the ChatSession-backed replacement (see createSessionChatClient) before
+        // transport selection: this SDK build may no longer export createChatClient() at all
+        // (removed end of 2026), so transport availability must reflect either path, not just
+        // the deprecated one.
+        let sessionChatClient = null;
+        try {
+          const sdkModule = await getFoundrySdkModule();
+          sessionChatClient = createSessionChatClient(chatModel, sdkModule, {
+            onDiagnostic: (diagnostic) => log('warn', diagnostic.message),
+          });
+        } catch (err) {
+          log('debug', `ChatSession client unavailable, using createChatClient(): ${err?.message || err}`);
+        }
+        const hasChatClient = sessionChatClient || typeof chatModel?.createChatClient === 'function';
+        let { transport, reason: transportReason } = selectChatTransport(sdkMessages, {
+          chatClient: hasChatClient ? 'available' : 'unsupported',
           serviceEndpoint: sharedEndpoint ? 'available' : 'unavailable',
         });
+        const legacyUnsupportedRequest = !sessionChatClient
+          && (
+            payload.toolChoice !== undefined
+            || payload.responseFormat !== undefined
+            || requiresModernChatTransport(sdkMessages)
+          );
+        if (transport === 'sdk' && legacyUnsupportedRequest) {
+          if (sharedEndpoint) {
+            transport = 'http';
+          } else {
+            transport = null;
+            transportReason = requiresModernChatTransport(sdkMessages)
+              ? 'Tool-loop messages require the ChatSession path or a local service endpoint.'
+              : 'Tool choice and response format require the ChatSession path or a local service endpoint.';
+          }
+        }
         if (!transport) throw new Error(transportReason);
         if (transport === 'sdk') {
-          const client = chatModel.createChatClient();
+          const client = sessionChatClient || chatModel.createChatClient();
           // SDK reads generation params from client.settings, not completeChat args.
           // Omit unset fields so the model's own defaults are not overwritten.
           if (client?.settings && Number.isFinite(payload.temperature)) {
@@ -3320,51 +3696,92 @@ rl.on('line', async (line) => {
           }
           if (shouldStream && typeof client?.completeStreamingChat === 'function') {
             let content = '';
-            for await (const chunk of client.completeStreamingChat(sdkMessages)) {
-              const usage = chunk?.usage;
-              chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
-              chatTokensOut = usage?.completion_tokens ?? usage?.output_tokens ?? chatTokensOut;
-              if (canceledRequests.has(id)) continue;
-              const deltaText = chunk?.choices?.[0]?.delta?.content;
-              const messageText = chunk?.choices?.[0]?.message?.content ?? chunk?.message?.content;
-              let delta = '';
-              if (typeof deltaText === 'string' && deltaText) {
-                delta = deltaText;
-              } else if (typeof messageText === 'string' && messageText) {
-                // Some runtimes emit cumulative message text instead of token deltas.
-                delta = messageText.startsWith(content)
-                  ? messageText.slice(content.length)
-                  : messageText;
+            const toolCallsByChoice = new Map();
+            const finishReasons = new Map();
+            let streamFailure = null;
+            try {
+              for await (const chunk of client.completeStreamingChat(
+                sdkMessages,
+                payload.tools,
+                { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
+              )) {
+                const usage = chunk?.usage;
+                chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
+                chatTokensOut = usage?.completion_tokens ?? usage?.output_tokens ?? chatTokensOut;
+                if (canceledRequests.has(id)) continue;
+                if (firstToolCallFailure(toolCallsByChoice)) continue;
+                // Completed snapshots and incremental deltas share one bounded accumulator.
+                // A malformed fragment latches failure without breaking iteration: native
+                // inference is not canceled, so keep draining until provider/session cleanup.
+                mergeChunkToolCalls(toolCallsByChoice, chunk);
+                if (firstToolCallFailure(toolCallsByChoice)) continue;
+                const choices = Array.isArray(chunk?.choices) ? chunk.choices : [];
+                for (const [position, choice] of choices.entries()) {
+                  const choiceIndex = Number.isSafeInteger(choice?.index) && choice.index >= 0
+                    ? choice.index
+                    : position;
+                  if (choice?.finish_reason != null) finishReasons.set(choiceIndex, choice.finish_reason);
+                }
+                const deltaText = chunk?.choices?.[0]?.delta?.content;
+                const messageText = chunk?.choices?.[0]?.message?.content ?? chunk?.message?.content;
+                let delta = '';
+                if (typeof deltaText === 'string' && deltaText) {
+                  delta = deltaText;
+                } else if (typeof messageText === 'string' && messageText) {
+                  // Some runtimes emit cumulative message text instead of token deltas.
+                  delta = messageText.startsWith(content)
+                    ? messageText.slice(content.length)
+                    : messageText;
+                }
+                if (delta) {
+                  chatFirstTokenAt ??= Date.now();
+                  content += delta;
+                  send({
+                    id,
+                    stream: true,
+                    delta,
+                    chunk: {
+                      choices: [{ delta: { role: 'assistant', content: delta } }]
+                    }
+                  });
+                }
               }
-              if (delta) {
-                chatFirstTokenAt ??= Date.now();
-                content += delta;
-                send({
-                  id,
-                  stream: true,
-                  delta,
-                  chunk: {
-                    choices: [{ delta: { role: 'assistant', content: delta } }]
-                  }
-                });
-              }
+            } catch (error) {
+              streamFailure = error;
             }
-            chatOk = true;
+            const latchedFailure = firstToolCallFailure(toolCallsByChoice);
+            const combinedFailure = mergeStreamFailure(latchedFailure, streamFailure);
+            if (combinedFailure) throw combinedFailure;
             chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
+            const wasCanceled = canceledRequests.has(id);
+            const compactedToolCalls = wasCanceled
+              ? []
+              : finalizeToolCallChoices(toolCallsByChoice, finishReasons);
+            const chatFinishReason = finishReasons.get(0) ?? null;
+            const publishedFinishReason = wasCanceled ? null : chatFinishReason;
+            const normalizedStreamResult = validateCompletedChatResponse(normalizeChatResponse({
+              choices: [{
+                finish_reason: publishedFinishReason,
+                message: {
+                  role: 'assistant',
+                  content,
+                  ...(compactedToolCalls.length ? { tool_calls: compactedToolCalls } : {}),
+                },
+              }],
+              ...(typeof chatTokensIn === 'number' || typeof chatTokensOut === 'number'
+                ? {
+                    usage: {
+                      ...(typeof chatTokensIn === 'number' ? { prompt_tokens: chatTokensIn } : {}),
+                      ...(typeof chatTokensOut === 'number' ? { completion_tokens: chatTokensOut } : {}),
+                    },
+                  }
+                : {}),
+            }));
+            chatOk = true;
             reply({
               ok: true,
               result: {
-                ...normalizeChatResponse({
-                  choices: [{ message: { role: 'assistant', content } }],
-                  ...(typeof chatTokensIn === 'number' || typeof chatTokensOut === 'number'
-                    ? {
-                        usage: {
-                          ...(typeof chatTokensIn === 'number' ? { prompt_tokens: chatTokensIn } : {}),
-                          ...(typeof chatTokensOut === 'number' ? { completion_tokens: chatTokensOut } : {}),
-                        },
-                      }
-                    : {}),
-                }),
+                ...normalizedStreamResult,
                 acceleration: {
                   requested: preferred?.requested ?? null,
                   preferredApplied: preferred?.applied ?? null,
@@ -3377,8 +3794,19 @@ rl.on('line', async (line) => {
               }
             });
           } else if (typeof client?.completeChat === 'function') {
-            const result = await client.completeChat(sdkMessages);
-            const normalizedResult = normalizeChatResponse(result);
+            const result = await client.completeChat(
+              sdkMessages,
+              payload.tools,
+              { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
+            );
+            if (canceledRequests.has(id)) {
+              reply({
+                error: 'The chat response was discarded after cancellation; native inference may have continued.',
+                certainty: 'cancelled',
+              });
+              return;
+            }
+            const normalizedResult = validateCompletedChatResponse(normalizeChatResponse(result));
             chatTokensIn = normalizedResult?.usage?.prompt_tokens
               ?? normalizedResult?.usage?.input_tokens ?? null;
             chatTokensOut = normalizedResult?.usage?.completion_tokens
@@ -3398,6 +3826,14 @@ rl.on('line', async (line) => {
             }
             chatOk = true;
             chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
+            if (canceledRequests.has(id)) {
+              chatOk = false;
+              reply({
+                error: 'The chat response was discarded after cancellation; native inference may have continued.',
+                certainty: 'cancelled',
+              });
+              return;
+            }
             reply({
               ok: true,
               result: {
@@ -3414,33 +3850,90 @@ rl.on('line', async (line) => {
             });
           } else if (typeof client?.completeStreamingChat === 'function') {
             let content = '';
-            for await (const chunk of client.completeStreamingChat(sdkMessages)) {
-              const usage = chunk?.usage;
-              chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
-              chatTokensOut = usage?.completion_tokens ?? usage?.output_tokens ?? chatTokensOut;
-              if (canceledRequests.has(id)) continue;
-              const delta = chunk?.choices?.[0]?.delta?.content || '';
-              if (delta) {
-                chatFirstTokenAt ??= Date.now();
-                content += delta;
+            const toolCallsByChoice = new Map();
+            const finishReasons = new Map();
+            let streamFailure = null;
+            try {
+              for await (const chunk of client.completeStreamingChat(
+                sdkMessages,
+                payload.tools,
+                { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
+              )) {
+                const usage = chunk?.usage;
+                chatTokensIn = usage?.prompt_tokens ?? usage?.input_tokens ?? chatTokensIn;
+                chatTokensOut = usage?.completion_tokens ?? usage?.output_tokens ?? chatTokensOut;
+                if (canceledRequests.has(id)) continue;
+                if (firstToolCallFailure(toolCallsByChoice)) continue;
+                mergeChunkToolCalls(toolCallsByChoice, chunk);
+                if (firstToolCallFailure(toolCallsByChoice)) continue;
+                const choices = Array.isArray(chunk?.choices) ? chunk.choices : [];
+                for (const [position, choice] of choices.entries()) {
+                  const choiceIndex = Number.isSafeInteger(choice?.index) && choice.index >= 0
+                    ? choice.index
+                    : position;
+                  if (choice?.finish_reason != null) finishReasons.set(choiceIndex, choice.finish_reason);
+                }
+                const deltaText = chunk?.choices?.[0]?.delta?.content;
+                const messageText = chunk?.choices?.[0]?.message?.content ?? chunk?.message?.content;
+                let delta = '';
+                if (typeof deltaText === 'string' && deltaText) {
+                  delta = deltaText;
+                } else if (typeof messageText === 'string' && messageText) {
+                  delta = messageText.startsWith(content)
+                    ? messageText.slice(content.length)
+                    : messageText;
+                }
+                if (delta) {
+                  chatFirstTokenAt ??= Date.now();
+                  content += delta;
+                }
               }
+            } catch (error) {
+              streamFailure = error;
             }
-            chatOk = true;
+            const latchedFailure = firstToolCallFailure(toolCallsByChoice);
+            const combinedFailure = mergeStreamFailure(latchedFailure, streamFailure);
+            if (combinedFailure) throw combinedFailure;
+            if (canceledRequests.has(id)) {
+              reply({
+                error: 'The chat response was discarded after cancellation; native inference may have continued.',
+                certainty: 'cancelled',
+              });
+              return;
+            }
+            const compactedToolCalls = finalizeToolCallChoices(toolCallsByChoice, finishReasons);
+            const chatFinishReason = finishReasons.get(0) ?? null;
             chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
+            if (canceledRequests.has(id)) {
+              reply({
+                error: 'The chat response was discarded after cancellation; native inference may have continued.',
+                certainty: 'cancelled',
+              });
+              return;
+            }
+            const normalizedStreamResult = validateCompletedChatResponse(normalizeChatResponse({
+              choices: [{
+                finish_reason: chatFinishReason,
+                message: {
+                  role: 'assistant',
+                  content,
+                  ...(compactedToolCalls.length ? { tool_calls: compactedToolCalls } : {}),
+                },
+              }],
+              ...(typeof chatTokensIn === 'number' || typeof chatTokensOut === 'number'
+                ? {
+                    usage: {
+                      ...(typeof chatTokensIn === 'number' ? { prompt_tokens: chatTokensIn } : {}),
+                      ...(typeof chatTokensOut === 'number' ? { completion_tokens: chatTokensOut } : {}),
+                    },
+                  }
+                : {}),
+            }));
+            chatOk = true;
             reply({
               ok: true,
               result: {
-                ...normalizeChatResponse({
-                  choices: [{ message: { role: 'assistant', content } }],
-                  ...(typeof chatTokensIn === 'number' || typeof chatTokensOut === 'number'
-                    ? {
-                        usage: {
-                          ...(typeof chatTokensIn === 'number' ? { prompt_tokens: chatTokensIn } : {}),
-                          ...(typeof chatTokensOut === 'number' ? { completion_tokens: chatTokensOut } : {}),
-                        },
-                      }
-                    : {}),
-                }),
+                ...normalizedStreamResult,
                 acceleration: {
                   requested: preferred?.requested ?? null,
                   preferredApplied: preferred?.applied ?? null,
@@ -3464,6 +3957,9 @@ rl.on('line', async (line) => {
               stream: false,
               max_tokens: payload.maxTokens,
               temperature: payload.temperature,
+              ...(payload.tools ? { tools: payload.tools } : {}),
+              ...(payload.toolChoice !== undefined ? { tool_choice: payload.toolChoice } : {}),
+              ...(payload.responseFormat !== undefined ? { response_format: payload.responseFormat } : {}),
               top_p: payload.topP,
               frequency_penalty: payload.frequencyPenalty,
               presence_penalty: payload.presencePenalty,
@@ -3483,8 +3979,15 @@ rl.on('line', async (line) => {
             const details = await readErrorBody(resp);
             throw new Error(`Chat completion failed (${resp.status} ${resp.statusText}): ${details}`);
           }
-          const httpResult = await resp.json();
-          const normalizedHttpResult = normalizeChatResponse(httpResult);
+          const httpResult = await readJsonResponse(resp, 'Chat completion');
+          if (canceledRequests.has(id)) {
+            reply({
+              error: 'The chat response was discarded after cancellation; native inference may have continued.',
+              certainty: 'cancelled',
+            });
+            return;
+          }
+          const normalizedHttpResult = validateCompletedChatResponse(normalizeChatResponse(httpResult));
           chatTokensIn = normalizedHttpResult?.usage?.prompt_tokens
             ?? normalizedHttpResult?.usage?.input_tokens ?? null;
           chatTokensOut = normalizedHttpResult?.usage?.completion_tokens
@@ -3505,6 +4008,14 @@ rl.on('line', async (line) => {
           }
           chatOk = true;
           chatExecutionProvider = await detectActiveExecutionProvider(chatModel);
+          if (canceledRequests.has(id)) {
+            chatOk = false;
+            reply({
+              error: 'The chat response was discarded after cancellation; native inference may have continued.',
+              certainty: 'cancelled',
+            });
+            return;
+          }
           reply({
             ok: true,
             result: {
@@ -3610,7 +4121,8 @@ rl.on('line', async (line) => {
         } catch (err) {
           log('debug', `AudioSession: could not resolve SDK module (${err?.message || err})`);
         }
-        if (sdkModule) {
+        const audioSessionSupport = audioSessionUriSupport(audioModel);
+        if (sdkModule && audioSessionSupport !== 'unsupported') {
           const attempt = await tryAudioSessionTranscription(sdkModule, audioModel, tempPath, payload);
           if (attempt.ok) {
             const result = buildTranscriptResult(attempt.candidate, {
@@ -3631,6 +4143,8 @@ rl.on('line', async (line) => {
             return;
           }
           log('debug', `AudioSession transcription unavailable, using legacy path: ${attempt.reason}`);
+        } else if (audioSessionSupport === 'unsupported') {
+          log('debug', 'AudioSession URI path is not supported for this speech model family; using legacy path');
         }
 
         // Prefer direct AudioClient (like we do for chat) — this avoids relying on the web service HTTP route
@@ -3740,7 +4254,7 @@ rl.on('line', async (line) => {
           const details = await readErrorBody(resp);
           throw new Error(`Transcription failed (${resp.status} ${resp.statusText}): ${details}`);
         }
-        const transcriptionResult = await resp.json();
+        const transcriptionResult = await readJsonResponse(resp, 'Transcription');
         audioOk = true;
         reply({
           ok: true,
@@ -4042,10 +4556,23 @@ rl.on('line', async (line) => {
       try {
         const poolEntry = await ensureModel(modelAlias);
         const embedModel = poolEntry.catModel;
-        if (typeof embedModel?.createEmbeddingClient !== 'function') {
-          throw new Error(`Model ${modelAlias} does not expose createEmbeddingClient`);
+        // Prefer the EmbeddingsSession-backed replacement (see createSessionEmbeddingClient)
+        // over the deprecated createEmbeddingClient() wrapper it mirrors, removed end of 2026.
+        // Falls back to createEmbeddingClient() unchanged on any SDK build that doesn't export
+        // EmbeddingsSession/Request/Item.
+        let client = null;
+        try {
+          const sdkModule = await getFoundrySdkModule();
+          client = createSessionEmbeddingClient(embedModel, sdkModule);
+        } catch (err) {
+          log('debug', `EmbeddingsSession client unavailable, using createEmbeddingClient(): ${err?.message || err}`);
         }
-        const client = embedModel.createEmbeddingClient();
+        if (!client) {
+          if (typeof embedModel?.createEmbeddingClient !== 'function') {
+            throw new Error(`Model ${modelAlias} does not expose createEmbeddingClient`);
+          }
+          client = embedModel.createEmbeddingClient();
+        }
         const result = await client.generateEmbeddings(inputs);
         embedOk = true;
         audit('embedTexts', { alias: modelAlias, count: inputs.length });

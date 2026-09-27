@@ -470,7 +470,16 @@ describe('foundry-sidecar protocol basics', () => {
     }
   });
 
-  it('reports nativeStreaming false and servedVariantId on the HTTP fallback', async () => {
+  it('preserves a parallel tool loop through buffered and streamed HTTP fallback requests', async () => {
+    const capturedBodies: any[] = [];
+    let releaseCancelledResponse: (() => void) | undefined;
+    const cancelledResponseGate = new Promise<void>((resolve) => {
+      releaseCancelledResponse = resolve;
+    });
+    let markCancelledRequestSeen: (() => void) | undefined;
+    const cancelledRequestSeen = new Promise<void>((resolve) => {
+      markCancelledRequestSeen = resolve;
+    });
     const server = createServer((req, res) => {
       if (req.url === '/status') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -478,10 +487,54 @@ describe('foundry-sidecar protocol basics', () => {
         return;
       }
       if (req.url === '/v1/chat/completions') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          choices: [{ message: { role: 'assistant', content: 'http-hello' } }],
-        }));
+        let raw = '';
+        req.on('data', (chunk) => { raw += chunk; });
+        req.on('end', () => {
+          const body = JSON.parse(raw);
+          capturedBodies.push(body);
+          const requestNumber = capturedBodies.length;
+          const respond = () => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(requestNumber === 2
+              ? { choices: [{ message: { role: 'assistant', content: 'http-complete' } }] }
+              : requestNumber === 4
+                ? {
+                    choices: [
+                      { finish_reason: 'stop', message: { role: 'assistant', content: 'must not emit' } },
+                      {
+                        finish_reason: 'tool_calls',
+                        message: {
+                          role: 'assistant',
+                          tool_calls: [{
+                            id: 'call-secret',
+                            type: 'function',
+                            function: { arguments: 'TOP_SECRET_HTTP' },
+                          }],
+                        },
+                      },
+                    ],
+                  }
+                : {
+                  choices: [{
+                    finish_reason: 'tool_calls',
+                    message: {
+                      role: 'assistant',
+                      content: null,
+                      tool_calls: [
+                        { id: 'call-1', type: 'function', function: { name: 'read_status', arguments: '{}' } },
+                        { id: 'call-2', type: 'function', function: { name: 'read_config', arguments: '{}' } },
+                      ],
+                    },
+                  }],
+                }));
+          };
+          if (requestNumber === 3) {
+            markCancelledRequestSeen?.();
+            void cancelledResponseGate.then(respond);
+          } else {
+            respond();
+          }
+        });
         return;
       }
       res.writeHead(404);
@@ -539,12 +592,106 @@ describe('foundry-sidecar protocol basics', () => {
       expect((await waitForLine(proc, (msg) => msg.id === 45, 15000)).ok).toBe(true);
       proc.stdin.write(`${JSON.stringify({
         id: 41, cmd: 'chatCompletion', model: 'fake-model',
-        messages: [{ role: 'user', content: 'hello' }], stream: false,
+        messages: [{ role: 'user', content: 'inspect both' }],
+        tools: [
+          { type: 'function', function: { name: 'read_status' } },
+          { type: 'function', function: { name: 'read_config' } },
+        ],
+        stream: false,
       })}\n`);
-      const httpChat = await waitForLine(proc, (msg) => msg.id === 41, 15000);
-      expect(httpChat.ok).toBe(true);
-      expect(httpChat.result.nativeStreaming).toBe(false);
-      expect(httpChat.result.servedVariantId).toBe('fake-variant');
+      const first = await waitForLine(proc, (msg) => msg.id === 41, 15000);
+      expect(first.ok).toBe(true);
+      expect(first.result.nativeStreaming).toBe(false);
+      expect(first.result.servedVariantId).toBe('fake-variant');
+
+      const followUpMessages = [
+        { role: 'user', content: 'inspect both', name: 'operator' },
+        {
+          role: 'assistant',
+          content: null,
+          name: 'planner',
+          tool_calls: first.result.choices[0].message.tool_calls,
+        },
+        { role: 'tool', tool_call_id: 'call-1', name: 'read_status', content: '{"ok":true}' },
+        { role: 'tool', tool_call_id: 'call-2', name: 'read_config', content: '{"mode":"safe"}' },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Summarize ' },
+            { type: 'image_url', image_url: { url: 'data:image/png;base64,AA==', detail: 'low' } },
+          ],
+        },
+      ];
+      const streamedDelta = waitForLine(proc, (msg) => msg.id === 42 && msg.stream === true, 15000);
+      const streamedDone = waitForLine(proc, (msg) => msg.id === 42 && msg.ok === true, 15000);
+      proc.stdin.write(`${JSON.stringify({
+        id: 42,
+        cmd: 'chatCompletion',
+        model: 'fake-model',
+        messages: followUpMessages,
+        stream: true,
+      })}\n`);
+      expect((await streamedDelta).delta).toBe('http-complete');
+      expect((await streamedDone).result.nativeStreaming).toBe(false);
+      expect(capturedBodies[1].messages).toEqual(followUpMessages);
+
+      const cancelled = waitForLine(proc, (msg) => msg.id === 43, 15000);
+      proc.stdin.write(`${JSON.stringify({
+        id: 43,
+        cmd: 'chatCompletion',
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'cancel this tool call' }],
+        stream: true,
+      })}\n`);
+      await cancelledRequestSeen;
+      proc.stdin.write(`${JSON.stringify({
+        id: 44,
+        cmd: 'cancelChatRequest',
+        requestId: 43,
+      })}\n`);
+      expect((await waitForLine(proc, (msg) => msg.id === 44, 15000)).ok).toBe(true);
+      releaseCancelledResponse?.();
+      const cancelledResult = await cancelled;
+      expect(cancelledResult.ok).not.toBe(true);
+      expect(cancelledResult.certainty).toBe('cancelled');
+      expect(cancelledResult.result).toBeUndefined();
+      expect(String(cancelledResult.error)).toMatch(/discarded after cancellation/);
+
+      const malformedMessages: any[] = [];
+      let malformedBuffer = '';
+      const collectMalformed = (chunk: Buffer | string) => {
+        malformedBuffer += chunk.toString();
+        const lines = malformedBuffer.split(/\r?\n/);
+        malformedBuffer = lines.pop() || '';
+        for (const line of lines) {
+          try {
+            const message = JSON.parse(line);
+            if (message.id === 46) malformedMessages.push(message);
+          } catch {}
+        }
+      };
+      proc.stdout.on('data', collectMalformed);
+      proc.stdin.write(`${JSON.stringify({
+        id: 46,
+        cmd: 'chatCompletion',
+        model: 'fake-model',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: 'validate every HTTP choice' },
+            { type: 'image_url', image_url: { url: 'data:image/png;base64,AA==' } },
+          ],
+        }],
+        stream: true,
+      })}\n`);
+      const malformed = await waitForLine(proc, (msg) => msg.id === 46 && !msg.stream, 15000);
+      proc.stdout.off('data', collectMalformed);
+      expect(malformed.ok).not.toBe(true);
+      expect(malformed.result).toBeUndefined();
+      expect(String(malformed.error)).toMatch(/tool.calls/i);
+      expect(JSON.stringify(malformed)).not.toContain('call-secret');
+      expect(JSON.stringify(malformed)).not.toContain('TOP_SECRET_HTTP');
+      expect(malformedMessages.some((message) => message.stream === true)).toBe(false);
     } finally {
       await killAndWait(proc);
       await closeServer(server);
@@ -2447,6 +2594,179 @@ describe('foundry-sidecar command schema validation', () => {
     }
   });
 
+  it('rejects an empty forced tool-choice function name', async () => {
+    proc.stdin.write(`${JSON.stringify({
+      id: 4750,
+      cmd: 'chatCompletion',
+      model: 'm',
+      messages: [],
+      toolChoice: { type: 'function', function: { name: '   ' } },
+    })}\n`);
+    const res = await waitForLine(proc, (msg) => msg.id === 4750);
+    expect(res.error).toBeTruthy();
+    expect(String(res.error)).toContain('toolChoice');
+    expect(String(res.error)).toContain('invalid');
+  });
+
+  it('rejects required and forced tool choices without matching nonempty definitions before initialization', async () => {
+    const cases = [
+      {
+        toolChoice: 'required',
+        expected: /requires.*nonempty.*tools/i,
+      },
+      {
+        tools: [],
+        toolChoice: { type: 'function', function: { name: 'read_status' } },
+        expected: /requires.*nonempty.*tools/i,
+      },
+      {
+        tools: [{ type: 'function', function: { name: 'other_tool' } }],
+        toolChoice: { type: 'function', function: { name: 'read_status' } },
+        expected: /match.*declared/i,
+      },
+    ];
+    for (const [offset, testCase] of cases.entries()) {
+      const id = 4751 + offset;
+      proc.stdin.write(`${JSON.stringify({
+        id,
+        cmd: 'chatCompletion',
+        model: 'm',
+        messages: [{ role: 'user', content: 'hi' }],
+        ...(testCase.tools !== undefined ? { tools: testCase.tools } : {}),
+        toolChoice: testCase.toolChoice,
+      })}\n`);
+      const res = await waitForLine(proc, (msg) => msg.id === id);
+      expect(res.ok).not.toBe(true);
+      expect(String(res.error)).toMatch(testCase.expected);
+      expect(String(res.error)).not.toMatch(/initialized|init first/i);
+    }
+  });
+
+  it('rejects incomplete json_schema response formats before initialization', async () => {
+    const cases = [
+      {},
+      { name: 'structured' },
+      { name: '   ', schema: {} },
+      { name: 'structured', schema: null },
+      { name: 'structured', schema: [] },
+      { name: 'structured', schema: {}, description: 1 },
+      { name: 'structured', schema: {}, strict: 'yes' },
+      { name: 'n'.repeat(129), schema: {} },
+      { name: 'structured', schema: {}, description: 'd'.repeat(4097) },
+    ];
+    for (const [offset, json_schema] of cases.entries()) {
+      const id = 4755 + offset;
+      proc.stdin.write(`${JSON.stringify({
+        id,
+        cmd: 'chatCompletion',
+        model: 'm',
+        messages: [{ role: 'user', content: 'hi' }],
+        responseFormat: { type: 'json_schema', json_schema },
+      })}\n`);
+      const res = await waitForLine(proc, (msg) => msg.id === id);
+      expect(res.ok).not.toBe(true);
+      expect(String(res.error)).toMatch(/json_schema.*name.*schema/i);
+      expect(String(res.error)).not.toMatch(/initialized|init first/i);
+    }
+  });
+
+  it('accepts minimal and fully annotated json_schema response formats before initialization', async () => {
+    const cases = [
+      { name: 'structured', schema: {} },
+      {
+        name: 'structured',
+        description: 'A structured response',
+        schema: { type: 'object', properties: {} },
+        strict: true,
+      },
+    ];
+    for (const [offset, json_schema] of cases.entries()) {
+      const id = 4764 + offset;
+      proc.stdin.write(`${JSON.stringify({
+        id,
+        cmd: 'chatCompletion',
+        model: 'm',
+        messages: [{ role: 'user', content: 'hi' }],
+        responseFormat: {
+          type: 'json_schema',
+          json_schema,
+        },
+      })}\n`);
+      const res = await waitForLine(proc, (msg) => msg.id === id);
+      expect(res.ok).not.toBe(true);
+      expect(String(res.error)).toMatch(/initialized|init first/i);
+      expect(String(res.error)).not.toMatch(/json_schema/i);
+    }
+  });
+
+  it('rejects oversized json_schema response formats before initialization', async () => {
+    const id = 4766;
+    proc.stdin.write(`${JSON.stringify({
+      id,
+      cmd: 'chatCompletion',
+      model: 'm',
+      messages: [{ role: 'user', content: 'hi' }],
+      responseFormat: {
+        type: 'json_schema',
+        json_schema: { name: 'structured', schema: { description: 'x'.repeat(64 * 1024) } },
+      },
+    })}\n`);
+    const res = await waitForLine(proc, (msg) => msg.id === id);
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toMatch(/json_schema.*64 KiB/i);
+    expect(String(res.error)).not.toMatch(/initialized|init first/i);
+  });
+
+  it('rejects malformed tool messages before initialization or model dispatch', async () => {
+    const cases = [
+      {
+        messages: [{ role: 'tool', content: '{"ok":true}' }],
+        expected: /tool_call_id/,
+      },
+      {
+        messages: [{
+          role: 'assistant',
+          content: null,
+          tool_calls: [{
+            id: 'call-1',
+            type: 'function',
+            function: { name: 'read_status', arguments: 42 },
+          }],
+        }],
+        expected: /arguments/,
+      },
+      {
+        messages: [{
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            { id: 'call-duplicate', type: 'function', function: { name: 'read_status', arguments: '{}' } },
+            { id: 'call-duplicate', type: 'function', function: { name: 'read_config', arguments: '{}' } },
+          ],
+        }],
+        expected: /duplicate call IDs/i,
+      },
+      {
+        messages: [{ role: 'assistant', content: null }],
+        expected: /content or tool_calls/,
+      },
+    ];
+    let id = 4760;
+    for (const testCase of cases) {
+      const reqId = id++;
+      proc.stdin.write(`${JSON.stringify({
+        id: reqId,
+        cmd: 'chatCompletion',
+        model: 'm',
+        messages: testCase.messages,
+      })}\n`);
+      const res = await waitForLine(proc, (msg) => msg.id === reqId);
+      expect(res.error).toBeTruthy();
+      expect(String(res.error)).toMatch(testCase.expected);
+      expect(String(res.error)).not.toContain('not initialized');
+    }
+  });
+
   it('rejects embedTexts with empty or oversized inputs before init', async () => {
     proc.stdin.write(`${JSON.stringify({ id: 41, cmd: 'embedTexts', model: 'm', inputs: [] })}\n`);
     const empty = await waitForLine(proc, (msg) => msg.id === 41);
@@ -2481,6 +2801,70 @@ describe('foundry-sidecar command schema validation', () => {
     proc.stdin.write(`${JSON.stringify({ id: 18, cmd: 'stopAndUnload', drainTimeoutMs: -1 })}\n`);
     const res = await waitForLine(proc, (msg) => msg.id === 18);
     expect(String(res.error)).toContain('finite non-negative number');
+  });
+
+  // Each of these is a JSON payload the sidecar accepts at the JSON.parse stage but that
+  // crashed the whole process while being validated or echoed. The rl 'line' listener is
+  // async, so a throw there became an unhandled promise rejection and Node terminated the
+  // sidecar, losing every loaded model and all in-flight work instead of rejecting one
+  // command. Each case asserts the sidecar both answers and is still alive afterwards.
+  //
+  // The deep-nesting payloads are built as raw JSON text on purpose: they are valid JSON,
+  // but JSON.stringify overflows the stack on them, so the test could not serialize its
+  // own frame. That asymmetry is exactly the bug being guarded.
+  const deepJson = (depth: number) => `${'['.repeat(depth)}1${']'.repeat(depth)}`;
+  // `parameters` must be a non-array object to reach the serialization step at all.
+  const deepObjectJson = (depth: number) => `${'{"a":'.repeat(depth)}1${'}'.repeat(depth)}`;
+
+  it.each([
+    {
+      name: 'deeply nested tool parameters (JSON.stringify RangeError)',
+      id: 810,
+      line: () => `{"id":810,"cmd":"chatCompletion","model":"m","messages":[{"role":"user","content":"hi"}],`
+        + `"tools":[{"type":"function","function":{"name":"deep","parameters":${deepObjectJson(50000)}}}]}`,
+      expected: /serializable JSON|64 KiB/i,
+    },
+    {
+      name: 'non-coercible lane (interpolation TypeError)',
+      id: 811,
+      line: () => '{"id":811,"cmd":"load","alias":"any-model","lane":{"toString":null}}',
+      expected: /invalid lane/i,
+    },
+    {
+      name: 'deeply nested envelope id (reply serialization RangeError)',
+      id: null,
+      line: () => `{"id":${deepJson(200000)},"cmd":"listModels"}`,
+      expected: /"id" must be a finite number or string/i,
+    },
+    {
+      name: 'non-coercible cmd (diagnostic TypeError)',
+      id: 813,
+      line: () => '{"id":813,"cmd":{"toString":null}}',
+      expected: /"cmd" must be a string/i,
+    },
+    {
+      name: 'non-coercible protocolVersion (String() TypeError)',
+      id: 814,
+      line: () => '{"id":814,"cmd":"listModels","protocolVersion":{"toString":null}}',
+      expected: /"protocolVersion" must be a number or string/i,
+    },
+    {
+      name: 'deeply nested response schema (JSON.stringify RangeError)',
+      id: 815,
+      line: () => `{"id":815,"cmd":"chatCompletion","model":"m","messages":[{"role":"user","content":"hi"}],`
+        + `"responseFormat":{"type":"json_schema","json_schema":{"name":"deep","schema":${deepObjectJson(50000)}}}}`,
+      expected: /json_schema.*(?:serializable JSON|64 KiB)/i,
+    },
+  ])('rejects $name without killing the sidecar', async ({ id, line, expected }) => {
+    proc.stdin.write(`${line()}\n`);
+    const res = await waitForLine(proc, (msg) => msg.id === id, 20000);
+    expect(String(res.error)).toMatch(expected);
+
+    // The point of the fix: the process must still be serving commands.
+    expect(proc.exitCode).toBeNull();
+    proc.stdin.write(`${JSON.stringify({ id: 899, cmd: 'runArbitraryCode' })}\n`);
+    const after = await waitForLine(proc, (msg) => msg.id === 899, 20000);
+    expect(String(after.error)).toContain('Unknown command');
   });
 
   it('rejects load with invalid lane name', async () => {
@@ -2920,6 +3304,7 @@ describe('transcribeAudio AudioSession path', () => {
       '}',
       'class FakeAudioSession {',
       '  constructor(model) {',
+      "    note('audioSession-constructed');",
       `    if (${JSON.stringify(audioSessionMode)} === 'construction-throws') throw new TypeError('unsupported task');`,
       '    this.model = model;',
       '  }',
@@ -2961,13 +3346,1669 @@ describe('transcribeAudio AudioSession path', () => {
   const send = (msg: object) => proc.stdin.write(`${JSON.stringify(msg)}\n`);
   const reply = (id: number) => waitForLine(proc, (msg) => msg.id === id, 10000);
 
-  async function startSidecar(audioSessionMode: 'success' | 'construction-throws' | 'request-throws') {
+  async function startSidecar(
+    audioSessionMode: 'success' | 'construction-throws' | 'request-throws',
+    alias = 'fake-model',
+  ) {
     homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-audiosession-'));
     eventLog = join(homeDir, 'events.log');
     const corePath = join(homeDir, 'fake-core.dylib');
     writeFileSync(corePath, '');
     const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
     const sdk = fakeSdk(audioSessionMode);
+    writeFileSync(loaderPath, [
+      `const sdk = ${JSON.stringify(sdk)};`,
+      'export async function resolve(specifier, context, nextResolve) {',
+      "  if (specifier === 'foundry-local-sdk') return { url: 'data:text/javascript,' + encodeURIComponent(sdk), shortCircuit: true };",
+      '  return nextResolve(specifier, context);',
+      '}',
+      'export async function load(url, context, nextLoad) {',
+      "  if (url.startsWith('data:text/javascript,')) return { format: 'module', source: decodeURIComponent(url.slice('data:text/javascript,'.length)), shortCircuit: true };",
+      '  return nextLoad(url, context);',
+      '}',
+    ].join('\n'));
+    proc = spawn(process.execPath, [
+      '--experimental-loader', pathToFileURL(loaderPath).href, 'sidecar/foundry-sidecar.js',
+    ], {
+      cwd: process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        HOME: homeDir,
+        USERPROFILE: homeDir,
+        FLINT_FOUNDRY_CORE_PATH: corePath,
+        FLINT_TEST_EVENT_LOG: eventLog,
+      },
+    });
+    await waitForLine(proc, (msg) => msg.ready === true);
+    const init = reply(1);
+    send({ id: 1, cmd: 'init', appName: 'flint-test', logLevel: 'info' });
+    expect((await init).ok).toBe(true);
+    const loaded = reply(2);
+    send({ id: 2, cmd: 'load', alias });
+    expect((await loaded).ok).toBe(true);
+  }
+
+  afterEach(async () => {
+    await killAndWait(proc);
+    rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  function wavBase64(): string {
+    const wav = Buffer.alloc(44);
+    wav.write('RIFF', 0, 'ascii');
+    wav.writeUInt32LE(36, 4);
+    wav.write('WAVE', 8, 'ascii');
+    return wav.toString('base64');
+  }
+
+  it('uses the AudioSession result when the model supports it (Whisper-like)', async () => {
+    await startSidecar('success', 'whisper-base');
+    const transcribed = reply(3);
+    send({
+      id: 3,
+      cmd: 'transcribeAudio',
+      audioBase64: wavBase64(),
+      mimeType: 'audio/wav',
+      fileName: 'probe.wav',
+      model: 'whisper-base',
+      language: 'en',
+    });
+    const res = await transcribed;
+    expect(res.ok).toBe(true);
+    expect(res.result.text).toBe('timed hello world transcript');
+    expect(res.result.transcriptionPath).toBe('audioSession');
+    expect(events()).toContain('audioSession-processRequest');
+    expect(events()).not.toContain('legacy-transcribe');
+  }, 30000);
+
+  it.each([
+    'nemotron-3.5-asr-streaming-0.6b',
+    'parakeet-tdt-0.6b-v3',
+  ])('never constructs AudioSession for the known unsupported %s family', async (alias) => {
+    await startSidecar('construction-throws', alias);
+    const transcribed = reply(3);
+    send({
+      id: 3,
+      cmd: 'transcribeAudio',
+      audioBase64: wavBase64(),
+      mimeType: 'audio/wav',
+      fileName: 'probe.wav',
+      model: alias,
+      language: 'en',
+    });
+    const res = await transcribed;
+    expect(res.ok).toBe(true);
+    expect(res.result.text).toContain('legacy hello world transcript');
+    expect(res.result.transcriptionPath).not.toBe('audioSession');
+    expect(events()).toContain('legacy-transcribe');
+    expect(events()).not.toContain('audioSession-constructed');
+  }, 30000);
+
+  it('probes AudioSession for an unknown family and falls back after request failure', async () => {
+    await startSidecar('request-throws');
+    const transcribed = reply(3);
+    send({
+      id: 3,
+      cmd: 'transcribeAudio',
+      audioBase64: wavBase64(),
+      mimeType: 'audio/wav',
+      fileName: 'probe.wav',
+      model: 'fake-model',
+      language: 'en',
+    });
+    const res = await transcribed;
+    expect(res.ok).toBe(true);
+    expect(res.result.text).toContain('legacy hello world transcript');
+    expect(res.result.transcriptionPath).not.toBe('audioSession');
+    expect(events()).toContain('audioSession-constructed');
+    expect(events()).toContain('legacy-transcribe');
+  }, 30000);
+});
+
+describe('chatCompletion ChatSession path', () => {
+  // A minimal fake foundry-local-sdk exposing the Session/Request/Item surface alongside the
+  // legacy createChatClient(), mirroring the real SDK's own ChatClient internals: the request is
+  // serialized as a single openai-json text item, and the response is recovered by JSON-parsing
+  // the first openai-json text item back out.
+  //   'session'             - both ChatSession and createChatClient() present (precedence tests).
+  //   'legacy-only'         - omits ChatSession entirely (createSessionChatClient fallback).
+  //   'session-no-legacy'   - omits createChatClient() entirely (proves transport selection
+  //                           does not gate solely on the deprecated method once it is removed).
+  //   'session-error'       - ChatSession.processRequest/processStreamingRequest throw, to verify
+  //                           error-message wrapping matches the deprecated ChatClient's wrapping.
+  //   'session-abort'       - the streaming iterator throws an Error named "AbortError", which
+  //                           must pass through unwrapped instead of getting the generic wrapper.
+  //   'session-empty-output' - processRequest resolves but its output has no openai-json text
+  //                           item, to verify that failure is wrapped the same way as a thrown
+  //                           native error (extraction/parsing happens inside the try/catch).
+  //   'session-malformed-json' - processRequest resolves with an openai-json item whose text
+  //                           is not valid JSON, to verify JSON.parse failures are wrapped too.
+  //   'session-constructor-error' - the ChatSession constructor itself throws, to verify that
+  //                           failure is wrapped too (construction happens inside the try/catch).
+  //   'session-stream-tool-outoforder' - like 'session-stream-tool' but the parallel
+  //                           tool-call deltas arrive index 1 before index 0, to verify the
+  //                           final tool_calls array is compacted rather than sparse (a hole
+  //                           serializes as `null`, which is invalid per the tool_calls schema).
+  //   'session-stream-tool-high-index' - emits one tool call at a very high index to verify
+  //                           assembly does not allocate a correspondingly sparse array.
+  //   'session-stream-tool-cancel' - yields a text delta, then polls FLINT_TEST_CANCEL_SIGNAL
+  //                           (written by the test only after it has received the
+  //                           cancelChatRequest ack) before yielding a tool_calls delta and a
+  //                           finish_reason, to verify a canceled stream's tool-call deltas are
+  //                           suppressed from the final message just like its text deltas
+  //                           already are. Gating on the signal file (rather than a fixed
+  //                           delay) makes the ordering deterministic instead of depending on
+  //                           IPC round-trip speed on a loaded CI runner.
+  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'legacy-buffered-fixture' | 'legacy-buffered-only-fixture' | 'legacy-stream-only-fixture' | 'session-no-legacy' | 'session-error' | 'session-error-with-legacy' | 'session-error-dispose' | 'session-abort' | 'session-empty-output' | 'session-stream-empty' | 'session-stream-fixture' | 'session-stream-fixture-dispose-error' | 'session-stream-provider-cancel' | 'session-buffered-fixture' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error' | 'session-buffered-tool-cancel' | 'session-stream-tool' | 'session-stream-tool-outoforder' | 'session-stream-tool-high-index' | 'session-stream-tool-cancel';
+  function fakeSdk(sdkMode: ChatFakeSdkMode) {
+    const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only' || sdkMode === 'legacy-buffered-fixture' || sdkMode === 'legacy-buffered-only-fixture' || sdkMode === 'legacy-stream-only-fixture' || sdkMode === 'session-error-with-legacy';
+    const legacyStreamOnly = sdkMode === 'legacy-stream-only-fixture';
+    const hasLegacyStreaming = hasLegacy && sdkMode !== 'legacy-buffered-only-fixture';
+    const hasSession = sdkMode !== 'legacy-only' && sdkMode !== 'legacy-buffered-fixture' && sdkMode !== 'legacy-buffered-only-fixture' && !legacyStreamOnly;
+    return [
+      "import fs from 'node:fs';",
+      'const note = (event) => fs.appendFileSync(process.env.FLINT_TEST_EVENT_LOG, event + "\\n");',
+      "const streamSteps = () => JSON.parse(fs.readFileSync(process.env.FLINT_TEST_STREAM_FIXTURE, 'utf8'));",
+      "const awaitSignal = async () => { while (!fs.existsSync(process.env.FLINT_TEST_CANCEL_SIGNAL)) await new Promise((resolve) => setTimeout(resolve, 5)); };",
+      'class FakeModel {',
+      "  constructor() { this.id = 'fake-variant'; this.loaded = false; }",
+      '  async load() { this.loaded = true; }',
+      '  isLoaded() { return this.loaded; }',
+      `  async getExecutionProvider() { note('provider-probe'); if (${JSON.stringify(sdkMode)} === 'session-stream-provider-cancel' && fs.readFileSync(process.env.FLINT_TEST_EVENT_LOG, 'utf8').includes('stream-finished')) { note('provider-probe-waiting'); await awaitSignal(); } return 'CPUExecutionProvider'; }`,
+      hasLegacy ? '  createChatClient() {' : '  // no createChatClient() in this mode',
+      hasLegacy ? '    return {' : '',
+      hasLegacy ? '      settings: {},' : '',
+      hasLegacy && !legacyStreamOnly ? '      async completeChat() {' : '',
+      hasLegacy && !legacyStreamOnly ? "        note('legacy-chat');" : '',
+      hasLegacy && !legacyStreamOnly ? `        return ${JSON.stringify(['legacy-buffered-fixture', 'legacy-buffered-only-fixture'].includes(sdkMode))} ? streamSteps()[0].chunk : { choices: [{ message: { role: 'assistant', content: 'legacy reply' } }], usage: { prompt_tokens: 1, completion_tokens: 2 } };` : '',
+      hasLegacy && !legacyStreamOnly ? '      },' : '',
+      hasLegacyStreaming ? '      async *completeStreamingChat() {' : '',
+      hasLegacyStreaming ? "        note('legacy-chat');" : '',
+      legacyStreamOnly ? "        for (const step of streamSteps()) { if (step.note) note(step.note); if (step.waitForSignal) await awaitSignal(); if (step.chunk) yield step.chunk; }" : '',
+      hasLegacyStreaming && !legacyStreamOnly ? "        yield { choices: [{ delta: { content: 'legacy reply' } }] };" : '',
+      hasLegacyStreaming ? '      },' : '',
+      hasLegacy ? '    };' : '',
+      hasLegacy ? '  }' : '',
+      '}',
+      'class FakeChatSession {',
+      '  constructor(model) {',
+      `    if (${JSON.stringify(sdkMode)} === 'session-constructor-error') throw new Error('native ChatSession construction failed');`,
+      '    this.model = model;',
+      '  }',
+      `  dispose() { note('session-chat-disposed'); if (['session-dispose-error', 'session-error-dispose', 'session-stream-fixture-dispose-error'].includes(${JSON.stringify(sdkMode)})) throw new Error('native ChatSession disposal failed'); }`,
+      '  async processRequest(req) {',
+      "    note('session-chat');",
+      `    if (['session-error', 'session-error-with-legacy', 'session-error-dispose'].includes(${JSON.stringify(sdkMode)})) throw new Error('native processRequest failed');`,
+      `    if (${JSON.stringify(sdkMode)} === 'session-empty-output') return { output: [] };`,
+      `    if (${JSON.stringify(sdkMode)} === 'session-malformed-json') return { output: [{ type: 'text', textType: 'openai-json', text: 'not json' }] };`,
+      `    if (${JSON.stringify(sdkMode)} === 'session-buffered-fixture') return { output: [{ type: 'text', textType: 'openai-json', text: JSON.stringify(streamSteps()[0].chunk) }] };`,
+      '    const requestJson = JSON.parse(req.items[0].text);',
+      '    note(`request:${JSON.stringify(requestJson)}`);',
+      `    if (${JSON.stringify(sdkMode)} === 'session-buffered-tool-cancel') { while (!fs.existsSync(process.env.FLINT_TEST_CANCEL_SIGNAL)) { await new Promise((resolve) => setTimeout(resolve, 5)); } }`,
+      '    return {',
+      '      output: [{',
+      "        type: 'text', textType: 'openai-json',",
+      '        text: JSON.stringify({',
+      "          choices: [{ message: { role: 'assistant', content: requestJson.tools ? null : `session reply, temp=${requestJson.temperature}`, ...(requestJson.tools ? { tool_calls: requestJson.tools.map((tool, index) => ({ id: `call-${index + 1}`, type: 'function', function: { name: tool.function.name, arguments: '{}' } })) } : {}) } }],",
+      '          usage: { prompt_tokens: 5, completion_tokens: 6 },',
+      '        }),',
+      '      }],',
+      '    };',
+      '  }',
+      '  processStreamingRequest(req) {',
+      '    const requestJson = JSON.parse(req.items[0].text);',
+      '    note(`request:${JSON.stringify(requestJson)}`);',
+      '    return {',
+      '      async *[Symbol.asyncIterator]() {',
+      "        note('session-chat');",
+      `        if (['session-error', 'session-error-with-legacy', 'session-error-dispose'].includes(${JSON.stringify(sdkMode)})) throw new Error('native stream failed');`,
+      `        if (${JSON.stringify(sdkMode)} === 'session-abort') { const e = new Error('native stream aborted'); e.name = 'AbortError'; throw e; }`,
+      `        if (${JSON.stringify(sdkMode)} === 'session-stream-empty') return;`,
+      `        if (['session-stream-fixture', 'session-stream-fixture-dispose-error', 'session-stream-provider-cancel'].includes(${JSON.stringify(sdkMode)})) { for (const step of streamSteps()) { if (step.note) note(step.note); if (step.waitForSignal) await awaitSignal(); if (step.chunk) yield { type: 'text', textType: 'openai-json', text: JSON.stringify(step.chunk) }; } note('stream-finished'); return; }`,
+      "        yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { content: 'session ' } }] }) };",
+      `        if (${JSON.stringify(sdkMode)} === 'session-stream-tool') yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-1', type: 'function', function: { name: 'read_status', arguments: '{' } }] } }] }) };`,
+      `        if (${JSON.stringify(sdkMode)} === 'session-stream-tool') yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '}' } }] } }] }) };`,
+      `        if (${JSON.stringify(sdkMode)} === 'session-stream-tool-outoforder') yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 1, id: 'call-2', type: 'function', function: { name: 'second_tool', arguments: '{}' } }] } }] }) };`,
+      `        if (${JSON.stringify(sdkMode)} === 'session-stream-tool-high-index') yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 1000000000, id: 'call-high', type: 'function', function: { name: 'high_index_tool', arguments: '{}' } }] } }] }) };`,
+      `        if (${JSON.stringify(sdkMode)} === 'session-stream-tool-cancel') { while (!fs.existsSync(process.env.FLINT_TEST_CANCEL_SIGNAL)) { await new Promise((resolve) => setTimeout(resolve, 5)); } yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-1', type: 'function', function: { name: 'read_status', arguments: '{}' } }] } }] }) }; }`,
+      `        yield { type: 'text', textType: 'openai-json', text: JSON.stringify({ choices: [{ delta: { content: 'reply' }, finish_reason: ${JSON.stringify(['session-stream-tool', 'session-stream-tool-outoforder', 'session-stream-tool-cancel'].includes(sdkMode) ? 'tool_calls' : 'stop')} }], usage: { prompt_tokens: 5, completion_tokens: 6 } }) };`,
+      '      },',
+      '    };',
+      '  }',
+      '}',
+      'class FakeRequest {',
+      `  constructor() { if (${JSON.stringify(sdkMode)} === 'request-constructor-error') throw new Error('native Request construction failed'); this.items = []; }`,
+      '  addItem(item) { this.items.push(item); return this; }',
+      '  setOptions() { return this; }',
+      '}',
+      "const Item = { text: (text, textType) => ({ type: 'text', textType, text }) };",
+      'class FakeManager {',
+      '  constructor() { this.catalog = { getModel: async () => new FakeModel(), getModels: async () => [] }; }',
+      '  static create() { return new FakeManager(); }',
+      '}',
+      `export { FakeManager as FoundryLocalManager, ${hasSession ? 'FakeChatSession as ChatSession, ' : ''}FakeRequest as Request, Item };`,
+    ].join('\n');
+  }
+
+  let homeDir: string;
+  let eventLog: string;
+  let cancelSignalPath: string;
+  let streamFixturePath: string;
+  let proc: ChildProcessWithoutNullStreams;
+
+  const events = () => {
+    try {
+      return readFileSync(eventLog, 'utf8').split('\n').filter(Boolean);
+    } catch {
+      return [];
+    }
+  };
+  const send = (msg: object) => proc.stdin.write(`${JSON.stringify(msg)}\n`);
+  const reply = (id: number) => waitForLine(proc, (msg) => msg.id === id, 10000);
+  const setStreamSteps = (steps: object[]) => writeFileSync(streamFixturePath, JSON.stringify(steps));
+
+  async function startSidecar(sdkMode: ChatFakeSdkMode) {
+    homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-chatsession-'));
+    eventLog = join(homeDir, 'events.log');
+    cancelSignalPath = join(homeDir, 'cancel.signal');
+    streamFixturePath = join(homeDir, 'stream-fixture.json');
+    setStreamSteps([]);
+    const corePath = join(homeDir, 'fake-core.dylib');
+    writeFileSync(corePath, '');
+    const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
+    const sdk = fakeSdk(sdkMode);
+    writeFileSync(loaderPath, [
+      `const sdk = ${JSON.stringify(sdk)};`,
+      'export async function resolve(specifier, context, nextResolve) {',
+      "  if (specifier === 'foundry-local-sdk') return { url: 'data:text/javascript,' + encodeURIComponent(sdk), shortCircuit: true };",
+      '  return nextResolve(specifier, context);',
+      '}',
+      'export async function load(url, context, nextLoad) {',
+      "  if (url.startsWith('data:text/javascript,')) return { format: 'module', source: decodeURIComponent(url.slice('data:text/javascript,'.length)), shortCircuit: true };",
+      '  return nextLoad(url, context);',
+      '}',
+    ].join('\n'));
+    proc = spawn(process.execPath, [
+      '--experimental-loader', pathToFileURL(loaderPath).href, 'sidecar/foundry-sidecar.js',
+    ], {
+      cwd: process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        HOME: homeDir,
+        USERPROFILE: homeDir,
+        FLINT_FOUNDRY_CORE_PATH: corePath,
+        FLINT_TEST_EVENT_LOG: eventLog,
+        FLINT_TEST_CANCEL_SIGNAL: cancelSignalPath,
+        FLINT_TEST_STREAM_FIXTURE: streamFixturePath,
+      },
+    });
+    await waitForLine(proc, (msg) => msg.ready === true);
+    const init = reply(1);
+    send({ id: 1, cmd: 'init', appName: 'flint-test', logLevel: 'info' });
+    expect((await init).ok).toBe(true);
+    const loaded = reply(2);
+    send({ id: 2, cmd: 'load', alias: 'fake-model' });
+    expect((await loaded).ok).toBe(true);
+  }
+
+  afterEach(async () => {
+    await killAndWait(proc);
+    rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  it('prefers the ChatSession-backed client over createChatClient() when the SDK exports it (buffered)', async () => {
+    await startSidecar('session');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+      temperature: 0.4,
+    });
+    const res = await chatted;
+    expect(res.ok).toBe(true);
+    expect(res.result.choices[0].message.content).toBe('session reply, temp=0.4');
+    expect(events()).toContain('session-chat');
+    expect(events()).toContain('session-chat-disposed');
+    expect(events()).not.toContain('legacy-chat');
+  }, 30000);
+
+  it('passes tool definitions and response controls through ChatSession and preserves tool_calls', async () => {
+    await startSidecar('session');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use the tool' }],
+      frequencyPenalty: 0.25,
+      presencePenalty: -0.5,
+      topP: 0.8,
+      topK: 12,
+      randomSeed: 17,
+      tools: [{
+        type: 'function',
+        function: {
+          name: 'read_status',
+          description: 'Read local status',
+          parameters: { type: 'object', properties: {} },
+        },
+      }],
+      toolChoice: { type: 'function', function: { name: 'read_status' } },
+      responseFormat: { type: 'json_object' },
+    });
+    const res = await chatted;
+    expect(res.ok).toBe(true);
+    expect(res.result.choices[0].message.tool_calls[0].function.name).toBe('read_status');
+    const request = JSON.parse(events().find((event) => event.startsWith('request:')).slice(8));
+    expect(request.tools[0].function.name).toBe('read_status');
+    expect(request.tool_choice).toEqual({ type: 'function', function: { name: 'read_status' } });
+    expect(request.response_format).toEqual({ type: 'json_object' });
+    expect(request.frequency_penalty).toBe(0.25);
+    expect(request.presence_penalty).toBe(-0.5);
+    expect(request.top_p).toBe(0.8);
+    expect(request.metadata).toEqual({ top_k: '12', random_seed: '17' });
+  }, 30000);
+
+  it.each([
+    ['session-buffered-fixture', 'ChatSession'],
+    ['legacy-buffered-fixture', 'legacy client'],
+  ] as const)('rejects malformed completed tool calls in every buffered %s choice', async (mode) => {
+    await startSidecar(mode);
+    const cases = [
+      {
+        choices: [
+          { finish_reason: 'stop', message: { role: 'assistant', content: 'safe' } },
+          {
+            finish_reason: 'tool_calls',
+            message: {
+              role: 'assistant',
+              tool_calls: [{
+                id: 'call-secret',
+                type: 'function',
+                function: { arguments: 'TOP_SECRET_ARGUMENTS' },
+              }],
+            },
+          },
+        ],
+      },
+      {
+        choices: [{
+          finish_reason: 'tool_calls',
+          message: { role: 'assistant', content: null, tool_calls: [] },
+        }],
+      },
+    ];
+    for (const [offset, chunk] of cases.entries()) {
+      setStreamSteps([{ chunk }]);
+      const id = 60 + offset;
+      const chatted = reply(id);
+      send({
+        id,
+        cmd: 'chatCompletion',
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'use a tool' }],
+      });
+      const res = await chatted;
+      expect(res.ok).not.toBe(true);
+      expect(res.result).toBeUndefined();
+      expect(String(res.error)).toMatch(/tool.calls/i);
+      expect(JSON.stringify(res)).not.toContain('call-secret');
+      expect(JSON.stringify(res)).not.toContain('TOP_SECRET_ARGUMENTS');
+    }
+  }, 30000);
+
+  it('validates a buffered legacy result before emitting its synthetic stream delta', async () => {
+    await startSidecar('legacy-buffered-only-fixture');
+    setStreamSteps([{
+      chunk: {
+        choices: [
+          { finish_reason: 'stop', message: { role: 'assistant', content: 'must not emit' } },
+          {
+            finish_reason: 'tool_calls',
+            message: {
+              role: 'assistant',
+              tool_calls: [{
+                id: 'call-secret',
+                type: 'function',
+                function: { arguments: 'TOP_SECRET_BUFFERED' },
+              }],
+            },
+          },
+        ],
+      },
+    }]);
+    const protocolMessages: any[] = [];
+    let protocolBuffer = '';
+    const collectProtocol = (chunk: Buffer | string) => {
+      protocolBuffer += chunk.toString();
+      const lines = protocolBuffer.split(/\r?\n/);
+      protocolBuffer = lines.pop() || '';
+      for (const line of lines) {
+        try {
+          const message = JSON.parse(line);
+          if (message.id === 67) protocolMessages.push(message);
+        } catch {}
+      }
+    };
+    proc.stdout.on('data', collectProtocol);
+    const chatted = reply(67);
+    send({
+      id: 67,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use a tool' }],
+      stream: true,
+    });
+    const res = await chatted;
+    proc.stdout.off('data', collectProtocol);
+    expect(res.ok).not.toBe(true);
+    expect(res.result).toBeUndefined();
+    expect(protocolMessages.some((message) => message.stream === true)).toBe(false);
+    expect(JSON.stringify(res)).not.toContain('call-secret');
+    expect(JSON.stringify(res)).not.toContain('TOP_SECRET_BUFFERED');
+  }, 30000);
+
+  it('preserves a parallel tool loop through buffered and streaming ChatSession requests', async () => {
+    await startSidecar('session');
+    const tools = [
+      { type: 'function', function: { name: 'read_status' } },
+      { type: 'function', function: { name: 'read_config' } },
+    ];
+    const firstReply = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'inspect both' }],
+      tools,
+    });
+    const first = await firstReply;
+    expect(first.ok).toBe(true);
+    expect(first.result.choices[0].message).toMatchObject({
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        { id: 'call-1', function: { name: 'read_status', arguments: '{}' } },
+        { id: 'call-2', function: { name: 'read_config', arguments: '{}' } },
+      ],
+    });
+
+    const followUpMessages = [
+      { role: 'user', content: 'inspect both', name: 'operator' },
+      {
+        role: 'assistant',
+        content: null,
+        name: 'planner',
+        tool_calls: first.result.choices[0].message.tool_calls,
+      },
+      { role: 'tool', tool_call_id: 'call-1', name: 'read_status', content: '{"ok":true}' },
+      { role: 'tool', tool_call_id: 'call-2', name: 'read_config', content: '{"mode":"safe"}' },
+      { role: 'user', content: 'Summarize the tool results.' },
+    ];
+
+    const bufferedReply = reply(4);
+    send({
+      id: 4,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: followUpMessages,
+    });
+    expect((await bufferedReply).ok).toBe(true);
+
+    const omittedContentMessages = followUpMessages.map((message) => {
+      if (message.role !== 'assistant') return message;
+      const { content: _content, ...withoutContent } = message;
+      return withoutContent;
+    });
+    const streamedReply = waitForLine(proc, (msg) => msg.id === 5 && msg.ok === true, 10000);
+    send({
+      id: 5,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: omittedContentMessages,
+      stream: true,
+    });
+    expect((await streamedReply).ok).toBe(true);
+
+    const requests = events()
+      .filter((event) => event.startsWith('request:'))
+      .map((event) => JSON.parse(event.slice(8)));
+    expect(requests.at(-2).messages).toEqual(followUpMessages);
+    expect(requests.at(-1).messages).toEqual(omittedContentMessages);
+  }, 30000);
+
+  it('rejects malformed tool linkage before invoking ChatSession', async () => {
+    await startSidecar('session');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'tool', content: '{"ok":true}' }],
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain('tool_call_id');
+    expect(events()).not.toContain('session-chat');
+  }, 30000);
+
+  it('enforces the per-call UTF-8 argument limit in inbound history', async () => {
+    await startSidecar('session');
+    const run = async (id: number, argumentsText: string) => {
+      const chatted = reply(id);
+      send({
+        id,
+        cmd: 'chatCompletion',
+        model: 'fake-model',
+        messages: [
+          {
+            role: 'assistant',
+            tool_calls: [{
+              id: 'call-1',
+              type: 'function',
+              function: { name: 'read_status', arguments: argumentsText },
+            }],
+          },
+          { role: 'tool', tool_call_id: 'call-1', content: '{"ok":true}' },
+        ],
+      });
+      return chatted;
+    };
+    expect((await run(65, '😀'.repeat(16_384))).ok).toBe(true);
+    const callsBeforeOverflow = events().filter((event) => event === 'session-chat').length;
+    const overflow = await run(66, `${'😀'.repeat(16_384)}a`);
+    expect(overflow.ok).not.toBe(true);
+    expect(String(overflow.error)).toMatch(/65536 UTF-8 bytes|64 KiB/i);
+    expect(events().filter((event) => event === 'session-chat')).toHaveLength(callsBeforeOverflow);
+  }, 30000);
+
+  it('suppresses a buffered terminal tool result that arrives after cancellation', async () => {
+    await startSidecar('session-buffered-tool-cancel');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use the tool' }],
+      tools: [{ type: 'function', function: { name: 'read_status' } }],
+    });
+    while (!events().includes('session-chat')) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const canceled = reply(4);
+    send({ id: 4, cmd: 'cancelChatRequest', requestId: 3 });
+    expect((await canceled).ok).toBe(true);
+    writeFileSync(cancelSignalPath, '');
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(res.certainty).toBe('cancelled');
+    expect(res.result).toBeUndefined();
+    expect(String(res.error)).toMatch(/cancel/i);
+  }, 30000);
+
+  it('prefers the ChatSession-backed client over createChatClient() when the SDK exports it (streaming)', async () => {
+    await startSidecar('session');
+    const chatted = waitForLine(proc, (msg) => msg.id === 3 && msg.ok === true, 10000);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+      stream: true,
+    });
+    const res = await chatted;
+    expect(res.ok).toBe(true);
+    expect(res.result.choices[0].message.content).toBe('session reply');
+    expect(res.result.choices[0].finish_reason).toBe('stop');
+    expect(events()).toContain('session-chat');
+    expect(events()).toContain('session-chat-disposed');
+    expect(events()).not.toContain('legacy-chat');
+  }, 30000);
+
+  it('removes streaming-only tool-call indexes from the final message', async () => {
+    await startSidecar('session-stream-tool');
+    const chatted = waitForLine(proc, (msg) => msg.id === 3 && msg.ok === true, 10000);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use the tool' }],
+      stream: true,
+    });
+    const res = await chatted;
+    expect(res.ok).toBe(true);
+    expect(res.result.choices[0].message.tool_calls).toEqual([{
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'read_status', arguments: '{}' },
+    }]);
+    expect(res.result.choices[0].finish_reason).toBe('tool_calls');
+  }, 30000);
+
+  it('round-trips a fragmented streamed tool call into follow-up history', async () => {
+    await startSidecar('session-stream-fixture');
+    setStreamSteps([
+      {
+        chunk: {
+          choices: [{
+            delta: {
+              content: 'checking',
+              tool_calls: [{
+                index: 7,
+                id: 'call-',
+                type: 'function',
+                function: { name: 'read_', arguments: '{"scope":' },
+              }],
+            },
+          }],
+        },
+      },
+      {
+        chunk: {
+          choices: [{
+            delta: {
+              tool_calls: [{
+                index: 7,
+                id: '1',
+                function: { name: 'status', arguments: '"all"' },
+              }],
+            },
+            finish_reason: 'tool_calls',
+          }],
+        },
+      },
+    ]);
+    const firstReply = waitForLine(proc, (msg) => msg.id === 3 && !msg.stream && (msg.ok === true || msg.error), 10000);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'inspect status' }],
+      stream: true,
+    });
+    const first = await firstReply;
+    expect(first.ok).toBe(true);
+    expect(first.result.choices[0].message.tool_calls).toEqual([{
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'read_status', arguments: '{"scope":"all"' },
+    }]);
+
+    setStreamSteps([{ chunk: { choices: [{ delta: { content: 'done' }, finish_reason: 'stop' }] } }]);
+    const secondReply = waitForLine(proc, (msg) => msg.id === 4 && !msg.stream && (msg.ok === true || msg.error), 10000);
+    send({
+      id: 4,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [
+        { role: 'user', content: 'inspect status' },
+        { role: 'assistant', content: 'checking', tool_calls: first.result.choices[0].message.tool_calls },
+        { role: 'tool', tool_call_id: 'call-1', content: '{"ok":true}' },
+      ],
+      stream: true,
+    });
+    expect((await secondReply).ok).toBe(true);
+    const requests = events()
+      .filter((event) => event.startsWith('request:'))
+      .map((event) => JSON.parse(event.slice(8)));
+    expect(requests.at(-1).messages[1].tool_calls).toEqual(first.result.choices[0].message.tool_calls);
+  }, 30000);
+
+  it('reconciles full message.tool_calls snapshots with deltas without duplication', async () => {
+    await startSidecar('session-stream-fixture');
+    const complete = [{
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'read_status', arguments: '{"scope":"all"}' },
+    }];
+    const cases = [
+      [{ chunk: { choices: [{ message: { tool_calls: complete }, finish_reason: 'tool_calls' }] } }],
+      [
+        { chunk: { choices: [{ message: { tool_calls: complete } }] } },
+        { chunk: { choices: [{ delta: { tool_calls: [] }, message: { tool_calls: complete }, finish_reason: 'tool_calls' }] } },
+      ],
+      [
+        {
+          chunk: {
+            choices: [{
+              delta: {
+                tool_calls: [{
+                  index: 0,
+                  id: 'call-',
+                  type: 'function',
+                  function: { name: 'read_', arguments: '{"scope":' },
+                }],
+              },
+            }],
+          },
+        },
+        {
+          chunk: {
+            choices: [{
+              delta: {
+                tool_calls: [{
+                  index: 0,
+                  id: '1',
+                  function: { name: 'status', arguments: '"all"}' },
+                }],
+              },
+              message: { tool_calls: complete },
+              finish_reason: 'tool_calls',
+            }],
+          },
+        },
+      ],
+    ];
+    for (const [offset, steps] of cases.entries()) {
+      setStreamSteps(steps);
+      const id = 70 + offset;
+      const chatted = reply(id);
+      send({
+        id,
+        cmd: 'chatCompletion',
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'use a tool' }],
+        stream: true,
+      });
+      const res = await chatted;
+      expect(res.ok).toBe(true);
+      expect(res.result.choices[0].message.tool_calls).toEqual(complete);
+    }
+  }, 30000);
+
+  it('rejects conflicting delta and full-snapshot tool calls', async () => {
+    await startSidecar('session-stream-fixture');
+    setStreamSteps([{
+      chunk: {
+        choices: [{
+          delta: {
+            tool_calls: [{
+              index: 0,
+              id: 'call-1',
+              type: 'function',
+              function: { name: 'read_status', arguments: '{"safe":true}' },
+            }],
+          },
+          message: {
+            tool_calls: [{
+              id: 'call-2',
+              type: 'function',
+              function: { name: 'read_status', arguments: 'TOP_SECRET_CONFLICT' },
+            }],
+          },
+          finish_reason: 'tool_calls',
+        }],
+      },
+    }]);
+    const chatted = reply(80);
+    send({
+      id: 80,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use a tool' }],
+      stream: true,
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toMatch(/conflict/i);
+    expect(JSON.stringify(res)).not.toContain('TOP_SECRET_CONFLICT');
+  }, 30000);
+
+  it('rejects completed streamed tool calls with missing or invalid required fields', async () => {
+    await startSidecar('session-stream-fixture');
+    const malformedDeltas = [
+      [{ index: 0, type: 'function', function: { name: 'missing_id', arguments: '{}' } }],
+      [{ index: 0, id: 'call-1', type: 'not-a-function', function: { name: 'wrong_type', arguments: '{}' } }],
+      [{ index: 0, id: 'call-1', type: 'function', function: { arguments: '{}' } }],
+      [{ index: 0, id: 'call-1', type: 'function', function: { name: 'wrong_arguments', arguments: { repaired: false } } }],
+      { index: 0, id: 'call-1', type: 'function', function: { name: 'not_an_array', arguments: '{}' } },
+    ];
+    for (const [offset, toolCalls] of malformedDeltas.entries()) {
+      setStreamSteps([{
+        chunk: {
+          choices: [{
+            delta: { tool_calls: toolCalls },
+            finish_reason: 'tool_calls',
+          }],
+        },
+      }]);
+      const id = 10 + offset;
+      const chatted = waitForLine(proc, (msg) => msg.id === id, 10000);
+      send({
+        id,
+        cmd: 'chatCompletion',
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'use a tool' }],
+        stream: true,
+      });
+      const res = await chatted;
+      expect(res.ok).not.toBe(true);
+      expect(res.result).toBeUndefined();
+      expect(String(res.error)).toMatch(/tool.call/i);
+    }
+  }, 30000);
+
+  it('caps distinct streamed call indexes at 64 while permitting repeats and sparse indexes', async () => {
+    await startSidecar('session-stream-fixture');
+    const call = (index: number) => ({
+      index,
+      id: `call-${index}`,
+      type: 'function',
+      function: { name: `tool_${index}`, arguments: '{}' },
+    });
+    const run = async (id: number, toolCalls: object[]) => {
+      setStreamSteps([{
+        chunk: {
+          choices: [{ delta: { tool_calls: toolCalls }, finish_reason: 'tool_calls' }],
+        },
+      }]);
+      const chatted = waitForLine(proc, (msg) => msg.id === id, 10000);
+      send({
+        id,
+        cmd: 'chatCompletion',
+        model: 'fake-model',
+        messages: [{ role: 'user', content: 'use tools' }],
+        stream: true,
+      });
+      return chatted;
+    };
+
+    const sixtyFour = await run(20, Array.from({ length: 64 }, (_, index) => call(index * 1_000_000)));
+    expect(sixtyFour.ok).toBe(true);
+    expect(sixtyFour.result.choices[0].message.tool_calls).toHaveLength(64);
+
+    const repeated = await run(21, [
+      { index: 1_000_000_000, id: 'call-high', type: 'function', function: { name: 'high_tool', arguments: '{' } },
+      { index: 1_000_000_000, function: { arguments: '}' } },
+    ]);
+    expect(repeated.ok).toBe(true);
+    expect(repeated.result.choices[0].message.tool_calls).toEqual([{
+      id: 'call-high',
+      type: 'function',
+      function: { name: 'high_tool', arguments: '{}' },
+    }]);
+
+    const sixtyFive = await run(22, Array.from({ length: 65 }, (_, index) => call(index)));
+    expect(sixtyFive.ok).not.toBe(true);
+    expect(sixtyFive.result).toBeUndefined();
+    expect(String(sixtyFive.error)).toMatch(/64/);
+  }, 30000);
+
+  it('drains after a latched structural failure while retaining leases, disposing, probing, and logging failure', async () => {
+    await startSidecar('session-stream-fixture');
+    const probesBefore = events().filter((event) => event === 'provider-probe').length;
+    const protocolMessages: any[] = [];
+    let protocolBuffer = '';
+    const collectProtocol = (chunk: Buffer | string) => {
+      protocolBuffer += chunk.toString();
+      const lines = protocolBuffer.split(/\r?\n/);
+      protocolBuffer = lines.pop() || '';
+      for (const line of lines) {
+        try {
+          protocolMessages.push(JSON.parse(line));
+        } catch {}
+      }
+    };
+    proc.stdout.on('data', collectProtocol);
+    setStreamSteps([
+      {
+        chunk: {
+          choices: [{
+            delta: {
+              content: 'must not emit',
+              tool_calls: 'TOP_SECRET_NOT_AN_ARRAY',
+            },
+          }],
+        },
+      },
+      { chunk: { choices: [{ delta: { content: 'ignored before gate' } }] } },
+      { note: 'drain-waiting', waitForSignal: true },
+      { note: 'drain-finished', chunk: { choices: [{ delta: { content: 'ignored tail' }, finish_reason: 'stop' }] } },
+    ]);
+    const chatted = waitForLine(proc, (msg) => msg.id === 30 && !msg.stream && (msg.ok === true || msg.error), 20000);
+    send({
+      id: 30,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use a tool' }],
+      stream: true,
+    });
+    while (!events().includes('drain-waiting')) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const statusReply = waitForLine(proc, (msg) => msg.id === 31, 20000);
+    send({ id: 31, cmd: 'poolStatus' });
+    const status = await statusReply;
+    expect(status.result.models.find((model: any) => model.alias === 'fake-model').inFlight).toBe(1);
+    let exclusiveSettled = false;
+    const exclusiveReply = waitForLine(proc, (msg) => msg.id === 33, 20000).then((value) => {
+      exclusiveSettled = true;
+      return value;
+    });
+    send({ id: 33, cmd: 'setBenchmarkExclusive', exclusive: true });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(exclusiveSettled).toBe(false);
+    writeFileSync(cancelSignalPath, '');
+
+    const res = await chatted;
+    proc.stdout.off('data', collectProtocol);
+    expect(res.ok).not.toBe(true);
+    expect(res.result).toBeUndefined();
+    expect(String(res.error)).toMatch(/tool.call/i);
+    expect(JSON.stringify(res)).not.toContain('TOP_SECRET_NOT_AN_ARRAY');
+    expect(protocolMessages.filter((message) => message.id === 30 && message.stream === true)).toEqual([]);
+    expect(events()).toContain('drain-finished');
+    expect(events()).toContain('session-chat-disposed');
+    expect(events().filter((event) => event === 'provider-probe').length).toBeGreaterThan(probesBefore);
+    expect(events().lastIndexOf('provider-probe')).toBeGreaterThan(events().lastIndexOf('drain-finished'));
+    expect(await exclusiveReply).toMatchObject({ ok: true, result: { exclusive: true, drained: true } });
+
+    const releaseReply = waitForLine(proc, (msg) => msg.id === 34, 20000);
+    send({ id: 34, cmd: 'setBenchmarkExclusive', exclusive: false });
+    expect((await releaseReply).ok).toBe(true);
+
+    const accessReply = waitForLine(proc, (msg) => msg.id === 32, 20000);
+    send({ id: 32, cmd: 'getAccessLog' });
+    const chats = (await accessReply).result.filter((entry: any) => entry.type === 'chat');
+    expect(chats.at(-1)).toMatchObject({ source: 'ipc', ok: false });
+  }, 30000);
+
+  it('preserves an early validation failure when ChatSession disposal also fails', async () => {
+    await startSidecar('session-stream-fixture-dispose-error');
+    setStreamSteps([
+      {
+        chunk: {
+          choices: [{
+            delta: { tool_calls: 'TOP_SECRET_NOT_AN_ARRAY' },
+          }],
+        },
+      },
+      { note: 'dispose-drain-finished' },
+    ]);
+    const chatted = reply(35);
+    send({
+      id: 35,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use a tool' }],
+      stream: true,
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toMatch(/tool.calls must be an array/i);
+    expect(String(res.error)).toContain('stream cleanup also failed');
+    expect(JSON.stringify(res)).not.toContain('TOP_SECRET_NOT_AN_ARRAY');
+    expect(events()).toContain('dispose-drain-finished');
+    expect(events()).toContain('session-chat-disposed');
+  }, 30000);
+
+  it('does not publish a partial tool call or terminal snapshot after cancellation', async () => {
+    await startSidecar('session-stream-fixture');
+    setStreamSteps([
+      {
+        chunk: {
+          choices: [{
+            delta: {
+              content: 'partial text',
+              tool_calls: [{
+                index: 0,
+                id: 'call-1',
+                type: 'function',
+                function: { arguments: '{"partial":' },
+              }],
+            },
+            finish_reason: 'tool_calls',
+          }],
+        },
+      },
+      { note: 'cancel-waiting', waitForSignal: true },
+      {
+        chunk: {
+          choices: [{
+            message: {
+              tool_calls: [{
+                id: 'call-1',
+                type: 'function',
+                function: { name: 'late_name', arguments: '{"partial":true}' },
+              }],
+            },
+            finish_reason: 'tool_calls',
+          }],
+        },
+      },
+      { note: 'cancel-drained' },
+    ]);
+    const streamed = waitForLine(proc, (msg) => msg.id === 40 && msg.stream === true, 10000);
+    const chatted = waitForLine(proc, (msg) => msg.id === 40 && !msg.stream, 10000);
+    send({
+      id: 40,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use a tool' }],
+      stream: true,
+    });
+    await streamed;
+    const cancelReply = reply(41);
+    send({ id: 41, cmd: 'cancelChatRequest', requestId: 40 });
+    expect((await cancelReply).ok).toBe(true);
+    writeFileSync(cancelSignalPath, '');
+    const res = await chatted;
+    expect(res.ok).toBe(true);
+    expect(res.result.choices[0].message.content).toBe('partial text');
+    expect(res.result.choices[0].message.tool_calls).toBeUndefined();
+    expect(res.result.choices[0].finish_reason).toBeNull();
+    expect(events()).toContain('cancel-drained');
+  }, 30000);
+
+  it('rechecks cancellation after provider detection before publishing the terminal stream result', async () => {
+    await startSidecar('session-stream-provider-cancel');
+    setStreamSteps([
+      {
+        chunk: {
+          choices: [{
+            delta: {
+              content: 'partial text',
+              tool_calls: [{
+                index: 0,
+                id: 'call-1',
+                type: 'function',
+                function: { name: 'read_status', arguments: '{}' },
+              }],
+            },
+            finish_reason: 'tool_calls',
+          }],
+        },
+      },
+    ]);
+    const streamed = waitForLine(proc, (msg) => msg.id === 42 && msg.stream === true, 10000);
+    const chatted = waitForLine(proc, (msg) => msg.id === 42 && !msg.stream, 10000);
+    send({
+      id: 42,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use a tool' }],
+      stream: true,
+    });
+    await streamed;
+    while (!events().includes('provider-probe-waiting')) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const cancelReply = reply(43);
+    send({ id: 43, cmd: 'cancelChatRequest', requestId: 42 });
+    expect((await cancelReply).ok).toBe(true);
+    writeFileSync(cancelSignalPath, '');
+    const res = await chatted;
+    expect(res.ok).toBe(true);
+    expect(res.result.choices[0].message.content).toBe('partial text');
+    expect(res.result.choices[0].message.tool_calls).toBeUndefined();
+    expect(res.result.choices[0].finish_reason).toBeNull();
+    expect(events()).toContain('session-chat-disposed');
+  }, 30000);
+
+  it('rejects malformed tool calls in the buffered stream-derived fallback branch', async () => {
+    await startSidecar('legacy-stream-only-fixture');
+    setStreamSteps([
+      {
+        chunk: {
+          choices: [{
+            delta: {
+              tool_calls: [{
+                index: 0,
+                id: 'call-1',
+                type: 'function',
+                function: { arguments: '{}' },
+              }],
+            },
+            finish_reason: 'tool_calls',
+          }],
+        },
+      },
+      { note: 'legacy-stream-drained' },
+    ]);
+    const chatted = waitForLine(proc, (msg) => msg.id === 50, 10000);
+    send({
+      id: 50,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use a tool' }],
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(res.result).toBeUndefined();
+    expect(events()).toContain('legacy-stream-drained');
+  }, 30000);
+
+  it('rejects tool_calls finish_reason contradictions in the buffered stream-derived fallback branch', async () => {
+    await startSidecar('legacy-stream-only-fixture');
+    setStreamSteps([
+      {
+        chunk: {
+          choices: [{ delta: { content: 'must not survive' }, finish_reason: 'tool_calls' }],
+        },
+      },
+      { note: 'legacy-contradiction-drained' },
+    ]);
+    const chatted = reply(51);
+    send({
+      id: 51,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use a tool' }],
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(res.result).toBeUndefined();
+    expect(String(res.error)).toMatch(/without valid nonempty calls/i);
+    expect(events()).toContain('legacy-contradiction-drained');
+  }, 30000);
+
+  it('reconciles full tool-call snapshots in the buffered legacy stream path', async () => {
+    await startSidecar('legacy-stream-only-fixture');
+    const complete = [{
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'read_status', arguments: '{"scope":"all"}' },
+    }];
+    setStreamSteps([
+      {
+        chunk: {
+          choices: [{
+            delta: {
+              tool_calls: [{
+                index: 0,
+                id: 'call-',
+                type: 'function',
+                function: { name: 'read_', arguments: '{"scope":' },
+              }],
+            },
+          }],
+        },
+      },
+      {
+        chunk: {
+          choices: [{
+            delta: {
+              tool_calls: [{
+                index: 0,
+                id: '1',
+                function: { name: 'status', arguments: '"all"}' },
+              }],
+            },
+            message: { tool_calls: complete },
+            finish_reason: 'tool_calls',
+          }],
+        },
+      },
+    ]);
+    const chatted = reply(52);
+    send({
+      id: 52,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use a tool' }],
+    });
+    const res = await chatted;
+    expect(res.ok).toBe(true);
+    expect(res.result.choices[0].message.tool_calls).toEqual(complete);
+  }, 30000);
+
+  it('compacts a tool-call delta stream that never fills a lower parallel index', async () => {
+    await startSidecar('session-stream-tool-outoforder');
+    const chatted = waitForLine(proc, (msg) => msg.id === 3 && msg.ok === true, 10000);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use a parallel tool' }],
+      stream: true,
+    });
+    const res = await chatted;
+    expect(res.ok).toBe(true);
+    // Only index 1 is ever emitted; index 0 never arrives, leaving a genuine hole in
+    // the underlying sparse array. A caller that skips mergeToolCallDeltas's compacted
+    // return/result would serialize that hole as a literal `null`, which is invalid per
+    // the tool_calls schema.
+    const rawWire = JSON.stringify(res.result.choices[0].message.tool_calls);
+    expect(rawWire).not.toContain('null');
+    expect(res.result.choices[0].message.tool_calls).toEqual([
+      { id: 'call-2', type: 'function', function: { name: 'second_tool', arguments: '{}' } },
+    ]);
+  }, 30000);
+
+  it('assembles a high-index tool call without allocating a sparse array', async () => {
+    await startSidecar('session-stream-tool-high-index');
+    const chatted = waitForLine(proc, (msg) => msg.id === 3 && msg.ok === true, 10000);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use the tool' }],
+      stream: true,
+    });
+    const res = await chatted;
+    expect(res.ok).toBe(true);
+    expect(res.result.choices[0].message.tool_calls).toEqual([{
+      id: 'call-high',
+      type: 'function',
+      function: { name: 'high_index_tool', arguments: '{}' },
+    }]);
+  }, 30000);
+
+  it('suppresses tool-call deltas that arrive after the stream is canceled', async () => {
+    await startSidecar('session-stream-tool-cancel');
+    const chatted = waitForLine(proc, (msg) => msg.id === 3 && msg.ok === true, 10000);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'use the tool' }],
+      stream: true,
+    });
+    // The fake session yields an initial text delta immediately, then blocks (polling
+    // cancelSignalPath) until this test writes the signal file below. Gating on that
+    // file rather than a fixed delay makes the ordering deterministic: the tool_calls
+    // delta cannot be produced until cancellation has already been acknowledged, so
+    // there is no IPC-round-trip race to lose on a slow/loaded runner.
+    await waitForLine(proc, (msg) => msg.id === 3 && msg.stream === true, 10000);
+    send({ id: 4, cmd: 'cancelChatRequest', requestId: 3 });
+    await reply(4);
+    writeFileSync(cancelSignalPath, '');
+    const res = await chatted;
+    expect(res.ok).toBe(true);
+    expect(res.result.choices[0].message.tool_calls).toBeUndefined();
+    // The fixture's only finish_reason-bearing chunk ('tool_calls') is yielded after the
+    // cancel signal, alongside the suppressed tool_calls delta. Recording finish_reason
+    // from that drained chunk would report finish_reason: 'tool_calls' on a message with
+    // no tool_calls -- a self-contradictory result. Nothing legitimate arrived before
+    // cancellation, so finish_reason must stay unset.
+    expect(res.result.choices[0].finish_reason).toBeNull();
+  }, 30000);
+
+  it('fails a streaming ChatSession that emits no openai-json output', async () => {
+    await startSidecar('session-stream-empty');
+    const chatted = waitForLine(proc, (msg) => msg.id === 3 && msg.ok !== true, 10000);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+      stream: true,
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Streaming chat completion failed for model 'fake-variant'");
+    expect(String(res.error)).toContain('returned no openai-json text item');
+  }, 30000);
+
+  it('uses the ChatSession client even when createChatClient() does not exist at all (post-removal shape)', async () => {
+    await startSidecar('session-no-legacy');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    const res = await chatted;
+    expect(res.ok).toBe(true);
+    expect(res.result.choices[0].message.content).toContain('session reply');
+    expect(events()).toContain('session-chat');
+  }, 30000);
+
+  it('wraps a resolved response with no openai-json output the same way a thrown failure is wrapped', async () => {
+    await startSidecar('session-empty-output');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Chat completion failed for model 'fake-variant'");
+    expect(String(res.error)).toContain('returned no openai-json text item');
+    expect(events()).toContain('session-chat-disposed');
+  }, 30000);
+
+  it('wraps a malformed openai-json response the same way a thrown failure is wrapped', async () => {
+    await startSidecar('session-malformed-json');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Chat completion failed for model 'fake-variant'");
+    expect(events()).toContain('session-chat-disposed');
+  }, 30000);
+
+  it('wraps a buffered ChatSession failure the same way the deprecated ChatClient does', async () => {
+    await startSidecar('session-error');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Chat completion failed for model 'fake-variant'");
+    expect(String(res.error)).toContain('native processRequest failed');
+  }, 30000);
+
+  it('does not retry a dispatched ChatSession failure through the legacy client', async () => {
+    await startSidecar('session-error-with-legacy');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain('native processRequest failed');
+    expect(events()).toContain('session-chat');
+    expect(events()).not.toContain('legacy-chat');
+    expect(events()).toContain('session-chat-disposed');
+  }, 30000);
+
+  it('preserves the primary buffered chat failure when disposal also fails', async () => {
+    await startSidecar('session-error-dispose');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Chat completion failed for model 'fake-variant'");
+    expect(String(res.error)).toContain('native processRequest failed');
+    expect(String(res.error)).toContain('session disposal failed');
+    expect(String(res.error)).toContain('native ChatSession disposal failed');
+  }, 30000);
+
+  it('wraps a streaming ChatSession failure the same way the deprecated ChatClient does', async () => {
+    await startSidecar('session-error');
+    const chatted = waitForLine(proc, (msg) => msg.id === 3 && msg.ok !== true, 10000);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+      stream: true,
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Streaming chat completion failed for model 'fake-variant'");
+    expect(String(res.error)).toContain('native stream failed');
+    expect(events()).toContain('session-chat-disposed');
+  }, 30000);
+
+  it('passes through an AbortError from a streaming ChatSession unwrapped, unlike other failures', async () => {
+    await startSidecar('session-abort');
+    const chatted = waitForLine(proc, (msg) => msg.id === 3 && msg.ok !== true, 10000);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+      stream: true,
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).not.toContain('Streaming chat completion failed');
+    expect(String(res.error)).toContain('native stream aborted');
+    expect(events()).toContain('session-chat-disposed');
+  }, 30000);
+
+  it('preserves the primary streaming chat failure when disposal also fails', async () => {
+    await startSidecar('session-error-dispose');
+    const chatted = waitForLine(proc, (msg) => msg.id === 3 && msg.ok !== true, 10000);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+      stream: true,
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Streaming chat completion failed for model 'fake-variant'");
+    expect(String(res.error)).toContain('native stream failed');
+    expect(String(res.error)).toContain('session disposal failed');
+    expect(String(res.error)).toContain('native ChatSession disposal failed');
+  }, 30000);
+
+  it('wraps a buffered ChatSession constructor failure the same way a processRequest failure is wrapped', async () => {
+    await startSidecar('session-constructor-error');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Chat completion failed for model 'fake-variant'");
+    expect(String(res.error)).toContain('native ChatSession construction failed');
+    // The constructor threw, so there is no session instance to dispose.
+    expect(events()).not.toContain('session-chat-disposed');
+  }, 30000);
+
+  it('wraps a streaming ChatSession constructor failure the same way a stream failure is wrapped', async () => {
+    await startSidecar('session-constructor-error');
+    const chatted = waitForLine(proc, (msg) => msg.id === 3 && msg.ok !== true, 10000);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+      stream: true,
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Streaming chat completion failed for model 'fake-variant'");
+    expect(String(res.error)).toContain('native ChatSession construction failed');
+    expect(events()).not.toContain('session-chat-disposed');
+  }, 30000);
+
+  it('wraps request construction failures the same way other ChatSession failures are wrapped', async () => {
+    await startSidecar('request-constructor-error');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Chat completion failed for model 'fake-variant'");
+    expect(String(res.error)).toContain('native Request construction failed');
+  }, 30000);
+
+  it('surfaces ChatSession disposal failures instead of silently swallowing them', async () => {
+    await startSidecar('session-dispose-error');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain('native ChatSession disposal failed');
+  }, 30000);
+
+  it('falls back to createChatClient() when the SDK build does not export ChatSession', async () => {
+    await startSidecar('legacy-only');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    const res = await chatted;
+    expect(res.ok).toBe(true);
+    expect(res.result.choices[0].message.content).toBe('legacy reply');
+    expect(events()).toContain('legacy-chat');
+    expect(events()).not.toContain('session-chat');
+  }, 30000);
+
+  it('rejects response controls when only the legacy client is available without HTTP', async () => {
+    await startSidecar('legacy-only');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{ role: 'user', content: 'hi' }],
+      tools: [{ type: 'function', function: { name: 'read_status' } }],
+      toolChoice: 'required',
+      responseFormat: { type: 'json_object' },
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain('Tool choice and response format require');
+  }, 30000);
+
+  it('rejects tool-loop messages before invoking a legacy-only chat client', async () => {
+    await startSidecar('legacy-only');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{
+            id: 'call-1',
+            type: 'function',
+            function: { name: 'read_status', arguments: '{}' },
+          }],
+        },
+        { role: 'tool', tool_call_id: 'call-1', content: '{"ok":true}' },
+      ],
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain('Tool-loop messages require the ChatSession path or a local service endpoint');
+    expect(events()).not.toContain('legacy-chat');
+  }, 30000);
+});
+
+describe('embedTexts EmbeddingsSession path', () => {
+  // Same pass-through pattern as ChatSession above, mirroring the SDK's own EmbeddingClient
+  // internals: {model, input} serialized as a single openai-json text item, response recovered
+  // from the first openai-json text item in the output.
+  //   'session'             - both EmbeddingsSession and createEmbeddingClient() present.
+  //   'legacy-only'         - omits EmbeddingsSession entirely (fallback for older SDK builds).
+  //   'session-no-legacy'   - omits createEmbeddingClient() entirely (proves embedTexts does not
+  //                           depend on the deprecated method once it is removed).
+  //   'session-error'       - EmbeddingsSession.processRequest throws, to verify error-message
+  //                           wrapping matches the deprecated EmbeddingClient's wrapping.
+  //   'session-empty-output' - processRequest resolves but its output has no openai-json text
+  //                           item, to verify that failure is wrapped too (extraction/parsing
+  //                           happens inside the try/catch).
+  //   'session-malformed-json' - processRequest resolves with an openai-json item whose text
+  //                           is not valid JSON, to verify JSON.parse failures are wrapped too.
+  //   'session-constructor-error' - the EmbeddingsSession constructor itself throws, to verify
+  //                           that failure is wrapped too (construction happens inside try/catch).
+  type EmbedFakeSdkMode = 'session' | 'legacy-only' | 'session-no-legacy' | 'session-error' | 'session-error-dispose' | 'session-empty-output' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error';
+  function fakeSdk(sdkMode: EmbedFakeSdkMode) {
+    const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only';
+    const hasSession = sdkMode !== 'legacy-only';
+    return [
+      "import fs from 'node:fs';",
+      'const note = (event) => fs.appendFileSync(process.env.FLINT_TEST_EVENT_LOG, event + "\\n");',
+      'class FakeModel {',
+      "  constructor() { this.id = 'fake-embed-variant'; this.loaded = false; }",
+      '  async load() { this.loaded = true; }',
+      '  isLoaded() { return this.loaded; }',
+      "  getExecutionProvider() { return 'CPUExecutionProvider'; }",
+      hasLegacy ? '  createEmbeddingClient() {' : '  // no createEmbeddingClient() in this mode',
+      hasLegacy ? '    return {' : '',
+      hasLegacy ? '      async generateEmbeddings(inputs) {' : '',
+      hasLegacy ? "        note('legacy-embed');" : '',
+      hasLegacy ? "        return { data: inputs.map((_, index) => ({ index, embedding: [0, 0, 0] })) };" : '',
+      hasLegacy ? '      },' : '',
+      hasLegacy ? '    };' : '',
+      hasLegacy ? '  }' : '',
+      '}',
+      'class FakeEmbeddingsSession {',
+      '  constructor(model) {',
+      `    if (${JSON.stringify(sdkMode)} === 'session-constructor-error') throw new Error('native EmbeddingsSession construction failed');`,
+      '    this.model = model;',
+      '  }',
+      `  dispose() { note('session-embed-disposed'); if (['session-dispose-error', 'session-error-dispose'].includes(${JSON.stringify(sdkMode)})) throw new Error('native EmbeddingsSession disposal failed'); }`,
+      '  async processRequest(req) {',
+      "    note('session-embed');",
+      `    if (['session-error', 'session-error-dispose'].includes(${JSON.stringify(sdkMode)})) throw new Error('native embedding request failed');`,
+      `    if (${JSON.stringify(sdkMode)} === 'session-empty-output') return { output: [] };`,
+      `    if (${JSON.stringify(sdkMode)} === 'session-malformed-json') return { output: [{ type: 'text', textType: 'openai-json', text: 'not json' }] };`,
+      '    const requestJson = JSON.parse(req.items[0].text);',
+      '    return {',
+      '      output: [{',
+      "        type: 'text', textType: 'openai-json',",
+      '        text: JSON.stringify({',
+      '          data: requestJson.input.map((_, index) => ({ index, embedding: [1, 2, 3] })),',
+      '        }),',
+      '      }],',
+      '    };',
+      '  }',
+      '}',
+      'class FakeRequest {',
+      `  constructor() { if (${JSON.stringify(sdkMode)} === 'request-constructor-error') throw new Error('native Request construction failed'); this.items = []; }`,
+      '  addItem(item) { this.items.push(item); return this; }',
+      '  setOptions() { return this; }',
+      '}',
+      "const Item = { text: (text, textType) => ({ type: 'text', textType, text }) };",
+      'class FakeManager {',
+      '  constructor() { this.catalog = { getModel: async () => new FakeModel(), getModels: async () => [] }; }',
+      '  static create() { return new FakeManager(); }',
+      '}',
+      `export { FakeManager as FoundryLocalManager, ${sdkMode !== 'legacy-only' ? 'FakeEmbeddingsSession as EmbeddingsSession, ' : ''}FakeRequest as Request, Item };`,
+    ].join('\n');
+  }
+
+  let homeDir: string;
+  let eventLog: string;
+  let proc: ChildProcessWithoutNullStreams;
+
+  const events = () => {
+    try {
+      return readFileSync(eventLog, 'utf8').split('\n').filter(Boolean);
+    } catch {
+      return [];
+    }
+  };
+  const send = (msg: object) => proc.stdin.write(`${JSON.stringify(msg)}\n`);
+  const reply = (id: number) => waitForLine(proc, (msg) => msg.id === id, 10000);
+
+  async function startSidecar(sdkMode: EmbedFakeSdkMode) {
+    homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-embedsession-'));
+    eventLog = join(homeDir, 'events.log');
+    const corePath = join(homeDir, 'fake-core.dylib');
+    writeFileSync(corePath, '');
+    const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
+    const sdk = fakeSdk(sdkMode);
     writeFileSync(loaderPath, [
       `const sdk = ${JSON.stringify(sdk)};`,
       'export async function resolve(specifier, context, nextResolve) {',
@@ -3006,70 +5047,112 @@ describe('transcribeAudio AudioSession path', () => {
     rmSync(homeDir, { recursive: true, force: true });
   });
 
-  function wavBase64(): string {
-    const wav = Buffer.alloc(44);
-    wav.write('RIFF', 0, 'ascii');
-    wav.writeUInt32LE(36, 4);
-    wav.write('WAVE', 8, 'ascii');
-    return wav.toString('base64');
-  }
-
-  it('uses the AudioSession result when the model supports it (Whisper-like)', async () => {
-    await startSidecar('success');
-    const transcribed = reply(3);
-    send({
-      id: 3,
-      cmd: 'transcribeAudio',
-      audioBase64: wavBase64(),
-      mimeType: 'audio/wav',
-      fileName: 'probe.wav',
-      model: 'fake-model',
-      language: 'en',
-    });
-    const res = await transcribed;
+  it('prefers the EmbeddingsSession-backed client over createEmbeddingClient() when the SDK exports it', async () => {
+    await startSidecar('session');
+    const embedded = reply(3);
+    send({ id: 3, cmd: 'embedTexts', model: 'fake-model', inputs: ['hello', 'world'] });
+    const res = await embedded;
     expect(res.ok).toBe(true);
-    expect(res.result.text).toBe('timed hello world transcript');
-    expect(res.result.transcriptionPath).toBe('audioSession');
-    expect(events()).toContain('audioSession-processRequest');
-    expect(events()).not.toContain('legacy-transcribe');
+    expect(res.result.data).toEqual([{ index: 0, embedding: [1, 2, 3] }, { index: 1, embedding: [1, 2, 3] }]);
+    expect(events()).toContain('session-embed');
+    expect(events()).toContain('session-embed-disposed');
+    expect(events()).not.toContain('legacy-embed');
   }, 30000);
 
-  it('falls back to the legacy AudioClient path when AudioSession construction throws (Nemotron/Parakeet-like)', async () => {
-    await startSidecar('construction-throws');
-    const transcribed = reply(3);
-    send({
-      id: 3,
-      cmd: 'transcribeAudio',
-      audioBase64: wavBase64(),
-      mimeType: 'audio/wav',
-      fileName: 'probe.wav',
-      model: 'fake-model',
-      language: 'en',
-    });
-    const res = await transcribed;
+  it('uses the EmbeddingsSession client even when createEmbeddingClient() does not exist at all (post-removal shape)', async () => {
+    await startSidecar('session-no-legacy');
+    const embedded = reply(3);
+    send({ id: 3, cmd: 'embedTexts', model: 'fake-model', inputs: ['hello'] });
+    const res = await embedded;
     expect(res.ok).toBe(true);
-    expect(res.result.text).toContain('legacy hello world transcript');
-    expect(res.result.transcriptionPath).not.toBe('audioSession');
-    expect(events()).toContain('legacy-transcribe');
+    expect(res.result.data).toEqual([{ index: 0, embedding: [1, 2, 3] }]);
+    expect(events()).toContain('session-embed');
   }, 30000);
 
-  it('falls back to the legacy AudioClient path when the AudioSession request itself fails (Nemotron/Parakeet-like)', async () => {
-    await startSidecar('request-throws');
-    const transcribed = reply(3);
-    send({
-      id: 3,
-      cmd: 'transcribeAudio',
-      audioBase64: wavBase64(),
-      mimeType: 'audio/wav',
-      fileName: 'probe.wav',
-      model: 'fake-model',
-      language: 'en',
-    });
-    const res = await transcribed;
+  it('wraps an EmbeddingsSession failure the same way the deprecated EmbeddingClient does', async () => {
+    await startSidecar('session-error');
+    const embedded = reply(3);
+    send({ id: 3, cmd: 'embedTexts', model: 'fake-model', inputs: ['hello'] });
+    const res = await embedded;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Embedding generation failed for model 'fake-embed-variant'");
+    expect(String(res.error)).toContain('native embedding request failed');
+    expect(events()).toContain('session-embed-disposed');
+  }, 30000);
+
+  it('preserves the primary embedding failure when disposal also fails', async () => {
+    await startSidecar('session-error-dispose');
+    const embedded = reply(3);
+    send({ id: 3, cmd: 'embedTexts', model: 'fake-model', inputs: ['hello'] });
+    const res = await embedded;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Embedding generation failed for model 'fake-embed-variant'");
+    expect(String(res.error)).toContain('native embedding request failed');
+    expect(String(res.error)).toContain('session disposal failed');
+    expect(String(res.error)).toContain('native EmbeddingsSession disposal failed');
+  }, 30000);
+
+  it('wraps a resolved response with no openai-json output the same way a thrown failure is wrapped', async () => {
+    await startSidecar('session-empty-output');
+    const embedded = reply(3);
+    send({ id: 3, cmd: 'embedTexts', model: 'fake-model', inputs: ['hello'] });
+    const res = await embedded;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Embedding generation failed for model 'fake-embed-variant'");
+    expect(String(res.error)).toContain('returned no openai-json text item');
+    expect(events()).toContain('session-embed-disposed');
+  }, 30000);
+
+  it('wraps a malformed openai-json response the same way a thrown failure is wrapped', async () => {
+    await startSidecar('session-malformed-json');
+    const embedded = reply(3);
+    send({ id: 3, cmd: 'embedTexts', model: 'fake-model', inputs: ['hello'] });
+    const res = await embedded;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Embedding generation failed for model 'fake-embed-variant'");
+    expect(events()).toContain('session-embed-disposed');
+  }, 30000);
+
+  it('wraps an EmbeddingsSession constructor failure the same way a processRequest failure is wrapped', async () => {
+    await startSidecar('session-constructor-error');
+    const embedded = reply(3);
+    send({ id: 3, cmd: 'embedTexts', model: 'fake-model', inputs: ['hello'] });
+    const res = await embedded;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Embedding generation failed for model 'fake-embed-variant'");
+    expect(String(res.error)).toContain('native EmbeddingsSession construction failed');
+    // The constructor threw, so there is no session instance to dispose.
+    expect(events()).not.toContain('session-embed-disposed');
+  }, 30000);
+
+  it('wraps embedding request construction failures the same way other session failures are wrapped', async () => {
+    await startSidecar('request-constructor-error');
+    const embedded = reply(3);
+    send({ id: 3, cmd: 'embedTexts', model: 'fake-model', inputs: ['hello'] });
+    const res = await embedded;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Embedding generation failed for model 'fake-embed-variant'");
+    expect(String(res.error)).toContain('native Request construction failed');
+  }, 30000);
+
+  it('surfaces EmbeddingsSession disposal failures instead of silently swallowing them', async () => {
+    await startSidecar('session-dispose-error');
+    const embedded = reply(3);
+    send({ id: 3, cmd: 'embedTexts', model: 'fake-model', inputs: ['hello'] });
+    const res = await embedded;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain('native EmbeddingsSession disposal failed');
+  }, 30000);
+
+  it('falls back to createEmbeddingClient() when the SDK build does not export EmbeddingsSession', async () => {
+    await startSidecar('legacy-only');
+    const embedded = reply(3);
+    send({ id: 3, cmd: 'embedTexts', model: 'fake-model', inputs: ['hello'] });
+    const res = await embedded;
     expect(res.ok).toBe(true);
-    expect(res.result.text).toContain('legacy hello world transcript');
-    expect(res.result.transcriptionPath).not.toBe('audioSession');
-    expect(events()).toContain('legacy-transcribe');
+    expect(res.result.data).toEqual([{ index: 0, embedding: [0, 0, 0] }]);
+    expect(events()).toContain('legacy-embed');
+    expect(events()).not.toContain('session-embed');
   }, 30000);
 });
 
