@@ -191,9 +191,11 @@
   import {
     assembleLongAudioTranscript,
     buildLongAudioCompletionStatus,
+    formatTranscriptionProgress,
+    processTranscriptionWindows,
+    transcriptionWindowSampleRange,
     type TranscriptGap,
     type TranscriptRange,
-    type TranscriptionWindowOutcome,
   } from "$lib/long-audio-transcript";
   import {
     buildCaptionArtifact,
@@ -7217,17 +7219,12 @@ Output only the summary text, no preamble.`;
     const plan = await planSegmentationAsync(mono.getChannelData(0), sr);
     const windows = plan.windows;
     const totalChunks = windows.length;
-    const outcomes: TranscriptionWindowOutcome[] = [];
-
-    for (let idx = 0; idx < windows.length; idx++) {
-      const windowPlan = windows[idx];
-      const startSample = Math.max(0, Math.floor(windowPlan.startSec * sr));
-      const endSample = Math.min(total, Math.ceil(windowPlan.endSec * sr));
-      const len = endSample - startSample;
-      if (len < 1000) {
-        outcomes.push({ window: windowPlan, status: 'unprocessed' });
-        continue;
+    const processed = await processTranscriptionWindows(windows, async (windowPlan, idx) => {
+      const sampleRange = transcriptionWindowSampleRange(windowPlan, sr, total);
+      if (!sampleRange) {
+        return { status: 'unprocessed' as const };
       }
+      const { startSample, length: len } = sampleRange;
 
       const data = new Float32Array(len);
       mono.copyFromChannel(data, 0, startSample);
@@ -7241,36 +7238,28 @@ Output only the summary text, no preamble.`;
       const wavBlob = new Blob([audioBufferToWav(chunkBuf)], { type: 'audio/wav' });
 
       if (benchmarkRunInFlight) {
-        // A benchmark started while this chunk loop was running — stop dispatching further
-        // STT inference so it doesn't contend with the benchmark, and count what's left as
-        // uncompleted rather than silently reporting a shorter transcript as complete.
-        for (const remainingWindow of windows.slice(idx)) {
-          outcomes.push({ window: remainingWindow, status: 'unprocessed' });
-        }
-        statusMessage = 'Transcription interrupted — a benchmark run became active.';
-        break;
+        return { status: 'interrupted' as const };
       }
-
-      if (onProgress) onProgress(idx + 1, totalChunks);
-      statusMessage = `Transcribing segment ${idx + 1} of ${totalChunks}...`;
 
       try {
         const res = await transcribeAudio(wavBlob, model, language, `${fileNameBase}_part${idx}.wav`, options);
         const t = getTranscriptTextFromResult(res);
-        outcomes.push({ window: windowPlan, status: 'success', text: t });
+        return { status: 'success' as const, text: t };
       } catch (e) {
         // Counted, not just logged. A swallowed segment leaves a silent hole in the transcript,
         // and reporting the result as complete would assert something this loop cannot know.
         console.warn('Chunk transcription failed', e);
-        outcomes.push({ window: windowPlan, status: 'failed', uncertain: isUncertainOutcome(e) });
+        return { status: 'failed' as const, uncertain: isUncertainOutcome(e) };
       }
-    }
-
-    if (onProgress) onProgress(totalChunks, totalChunks);
+    }, {
+      shouldInterrupt: () => benchmarkRunInFlight,
+      onProgress: ({ current, total }) => onProgress?.(current, total),
+    });
     return {
-      ...assembleLongAudioTranscript(outcomes),
+      ...assembleLongAudioTranscript(processed.outcomes),
       totalChunks,
       timingStrategy: plan.timingStrategy,
+      interruptionReason: processed.interrupted ? 'a benchmark run became active' : undefined,
     };
   }
 
@@ -7349,12 +7338,11 @@ Output only the summary text, no preamble.`;
       // backend often only returns the beginning when given one huge file.
       let result: any;
       if (dur > 90) {
-        const estChunks = Math.max(1, Math.ceil(dur / 24));
-        transcriptionProgress = { current: 0, total: estChunks };
+        transcriptionProgress = null;
         statusMessage = "Transcribing long audio in overlapping chunks...";
         result = await transcribeLongAudio(audioBlob, sttAlias, transcriptionLanguage, 'audio', (cur, tot) => {
           transcriptionProgress = { current: cur, total: tot };
-          statusMessage = `Transcribing segment ${cur}/${tot}...`;
+          statusMessage = formatTranscriptionProgress(transcriptionProgress);
         }, {
           temperature: 0,
           preferredEp: selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference
@@ -9554,7 +9542,7 @@ Output only the summary text, no preamble.`;
             >
               {isTranscribing
                 ? (transcriptionProgress
-                    ? `Transcribing ${transcriptionProgress.current}/${transcriptionProgress.total}...`
+                    ? formatTranscriptionProgress(transcriptionProgress)
                     : "Transcribing… cannot be stopped once started")
                 : "Transcribe"}
             </button>

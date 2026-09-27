@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import type { TranscriptionWindow } from './audio-segmentation';
 import {
   assembleLongAudioTranscript,
   buildLongAudioCompletionStatus,
   findWordOverlapTailPrefix,
+  formatTranscriptionProgress,
+  processTranscriptionWindows,
+  transcriptionWindowSampleRange,
   type TranscriptionWindowOutcome,
 } from './long-audio-transcript';
 
@@ -23,6 +27,140 @@ function window(
     ...options,
   };
 }
+
+describe('processTranscriptionWindows', () => {
+  it('reports the finalized plan total from zero through every completed outcome', async () => {
+    const windows = [
+      window(0, 0, 28),
+      window(1, 24, 52),
+      window(2, 48, 70, { hardSplitEnd: false }),
+    ];
+    const progress: Array<{ current: number; total: number }> = [];
+    const processed = await processTranscriptionWindows(
+      windows,
+      async (_window, index) => index === 1
+        ? { status: 'unprocessed' }
+        : { status: 'success', text: `part ${index}` },
+      { onProgress: (value) => progress.push(value) },
+    );
+
+    expect(processed.interrupted).toBe(false);
+    expect(processed.outcomes.map((outcome) => outcome.status))
+      .toEqual(['success', 'unprocessed', 'success']);
+    expect(progress).toEqual([
+      { current: 0, total: 3 },
+      { current: 1, total: 3 },
+      { current: 2, total: 3 },
+      { current: 3, total: 3 },
+    ]);
+  });
+
+  it('marks every remaining window unprocessed without claiming it completed', async () => {
+    const windows = [
+      window(0, 0, 28),
+      window(1, 24, 52),
+      window(2, 48, 70, { hardSplitEnd: false }),
+    ];
+    const progress: Array<{ current: number; total: number }> = [];
+    let completed = 0;
+    const processed = await processTranscriptionWindows(
+      windows,
+      async () => {
+        completed++;
+        return { status: 'success', text: 'part' };
+      },
+      {
+        shouldInterrupt: () => completed === 1,
+        onProgress: (value) => progress.push(value),
+      },
+    );
+
+    expect(processed.interrupted).toBe(true);
+    expect(processed.outcomes.map((outcome) => outcome.status))
+      .toEqual(['success', 'unprocessed', 'unprocessed']);
+    expect(progress).toEqual([
+      { current: 0, total: 3 },
+      { current: 1, total: 3 },
+    ]);
+  });
+
+  it('interrupts before dispatch and preserves failed outcome details', async () => {
+    const windows = [window(0, 0, 28), window(1, 24, 52)];
+    const processWindow = vi.fn(async () => ({ status: 'success' as const, text: 'unused' }));
+    const beforeStart = await processTranscriptionWindows(windows, processWindow, {
+      shouldInterrupt: () => true,
+    });
+    expect(processWindow).not.toHaveBeenCalled();
+    expect(beforeStart.outcomes.map((outcome) => outcome.status))
+      .toEqual(['unprocessed', 'unprocessed']);
+
+    const failed = await processTranscriptionWindows(
+      [windows[0]],
+      async () => ({ status: 'failed', uncertain: true }),
+    );
+    expect(failed.outcomes).toEqual([
+      { window: windows[0], status: 'failed', uncertain: true },
+    ]);
+  });
+
+  it('interrupts after preparation without counting or dispatching that window', async () => {
+    const windows = [window(0, 0, 28), window(1, 24, 52)];
+    const progress: Array<{ current: number; total: number }> = [];
+    const processed = await processTranscriptionWindows(
+      windows,
+      async () => ({ status: 'interrupted' }),
+      { onProgress: (value) => progress.push(value) },
+    );
+    expect(processed).toEqual({
+      outcomes: [
+        { window: windows[0], status: 'unprocessed' },
+        { window: windows[1], status: 'unprocessed' },
+      ],
+      interrupted: true,
+    });
+    expect(progress).toEqual([{ current: 0, total: 2 }]);
+  });
+
+  it('reports a stable empty plan without dispatching work', async () => {
+    const progress: Array<{ current: number; total: number }> = [];
+    const processWindow = vi.fn();
+    const processed = await processTranscriptionWindows([], processWindow, {
+      onProgress: (value) => progress.push(value),
+    });
+    expect(processed).toEqual({ outcomes: [], interrupted: false });
+    expect(processWindow).not.toHaveBeenCalled();
+    expect(progress).toEqual([{ current: 0, total: 0 }]);
+  });
+});
+
+describe('formatTranscriptionProgress', () => {
+  it('distinguishes planning from completed window counts', () => {
+    expect(formatTranscriptionProgress({ current: 0, total: 3 }))
+      .toBe('Transcribing 3 planned segments...');
+    expect(formatTranscriptionProgress({ current: 1, total: 3 }))
+      .toBe('Processed 1/3 segments...');
+    expect(formatTranscriptionProgress({ current: 0, total: 0 }))
+      .toBe('No transcription segments were planned.');
+  });
+
+  it('does not publish a duration-estimated total before the segmentation plan exists', () => {
+    const page = readFileSync('src/routes/+page.svelte', 'utf8');
+    expect(page).not.toMatch(/Math\.ceil\s*\(\s*dur\s*\/\s*24\s*\)/);
+    expect(page).toMatch(/if\s*\(\s*dur\s*>\s*90\s*\)\s*\{\s*transcriptionProgress\s*=\s*null\s*;/);
+    expect(page).toContain('formatTranscriptionProgress(transcriptionProgress)');
+  });
+});
+
+describe('transcriptionWindowSampleRange', () => {
+  it('clamps planned windows and rejects slices too short to transcribe', () => {
+    expect(transcriptionWindowSampleRange(window(0, -1, 2), 1000, 1500)).toEqual({
+      startSample: 0,
+      endSample: 1500,
+      length: 1500,
+    });
+    expect(transcriptionWindowSampleRange(window(0, 1, 2), 1000, 1500)).toBeNull();
+  });
+});
 
 describe('assembleLongAudioTranscript', () => {
   it('keeps identical phrases separated by a silence boundary', () => {
@@ -316,6 +454,19 @@ describe('assembleLongAudioTranscript', () => {
       ' via native audio session',
     );
     expect(status).toBe(expected);
+  });
+
+  it('explains when benchmark contention leaves windows unprocessed', () => {
+    const status = buildLongAudioCompletionStatus({
+      ...assembleLongAudioTranscript([
+        { window: window(0, 0, 28), status: 'success', text: 'done' },
+        { window: window(1, 24, 52, { hardSplitEnd: false }), status: 'unprocessed' },
+      ]),
+      totalChunks: 2,
+      interruptionReason: 'a benchmark run became active',
+    });
+    expect(status).toContain('1 was not processed');
+    expect(status).toContain('Processing stopped because a benchmark run became active.');
   });
 });
 

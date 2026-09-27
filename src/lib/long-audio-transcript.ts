@@ -21,6 +21,88 @@ export interface AssembledLongAudioTranscript extends TranscriptExportState {
   unprocessedChunks: number;
 }
 
+export interface TranscriptionWindowSampleRange {
+  startSample: number;
+  endSample: number;
+  length: number;
+}
+
+export function transcriptionWindowSampleRange(
+  window: TranscriptionWindow,
+  sampleRate: number,
+  totalSamples: number,
+  minimumSamples = 1000,
+): TranscriptionWindowSampleRange | null {
+  const startSample = Math.max(0, Math.floor(window.startSec * sampleRate));
+  const endSample = Math.min(totalSamples, Math.ceil(window.endSec * sampleRate));
+  const length = endSample - startSample;
+  return length >= minimumSamples ? { startSample, endSample, length } : null;
+}
+
+export interface TranscriptionProgress {
+  current: number;
+  total: number;
+}
+
+export function formatTranscriptionProgress(progress: TranscriptionProgress): string {
+  if (progress.total === 0) return 'No transcription segments were planned.';
+  if (progress.current === 0) {
+    return `Transcribing ${progress.total} planned ${progress.total === 1 ? 'segment' : 'segments'}...`;
+  }
+  return `Processed ${progress.current}/${progress.total} segments...`;
+}
+
+type ProcessWindow = (
+  window: TranscriptionWindow,
+  index: number,
+) => Promise<
+  | { status: 'success'; text: string }
+  | { status: 'failed'; uncertain: boolean }
+  | { status: 'unprocessed' }
+  | { status: 'interrupted' }
+>;
+
+export async function processTranscriptionWindows(
+  windows: readonly TranscriptionWindow[],
+  processWindow: ProcessWindow,
+  options: {
+    onProgress?: (progress: TranscriptionProgress) => void;
+    shouldInterrupt?: () => boolean;
+  } = {},
+): Promise<{ outcomes: TranscriptionWindowOutcome[]; interrupted: boolean }> {
+  const outcomes: TranscriptionWindowOutcome[] = [];
+  const total = windows.length;
+  options.onProgress?.({ current: 0, total });
+
+  for (let index = 0; index < total; index++) {
+    if (options.shouldInterrupt?.()) {
+      for (const window of windows.slice(index)) {
+        outcomes.push({ window, status: 'unprocessed' });
+      }
+      return { outcomes, interrupted: true };
+    }
+
+    const window = windows[index];
+    const outcome = await processWindow(window, index);
+    if (outcome.status === 'interrupted') {
+      for (const remainingWindow of windows.slice(index)) {
+        outcomes.push({ window: remainingWindow, status: 'unprocessed' });
+      }
+      return { outcomes, interrupted: true };
+    }
+    if (outcome.status === 'success') {
+      outcomes.push({ window, status: 'success', text: outcome.text });
+    } else if (outcome.status === 'failed') {
+      outcomes.push({ window, status: 'failed', uncertain: outcome.uncertain });
+    } else {
+      outcomes.push({ window, status: 'unprocessed' });
+    }
+    options.onProgress?.({ current: index + 1, total });
+  }
+
+  return { outcomes, interrupted: false };
+}
+
 export function normalizeTranscriptText(value: string): string {
   return String(value ?? '').replace(/\s+/g, ' ').trim();
 }
@@ -158,7 +240,7 @@ function joinClauses(clauses: readonly string[]): string {
 }
 
 export function buildLongAudioCompletionStatus(
-  result: AssembledLongAudioTranscript & { totalChunks: number },
+  result: AssembledLongAudioTranscript & { totalChunks: number; interruptionReason?: string },
   path = '',
 ): string {
   const failed = Number(result.failedChunks || 0);
@@ -190,7 +272,10 @@ export function buildLongAudioCompletionStatus(
         : `${failed} of ${totalChunks} ${segmentLabel} failed`;
     // An uncertain window may still have produced text, and overlapping neighbours may
     // already cover a failed range, so Flint cannot assert that anything is missing.
-    return `Transcription incomplete: ${detail}. Text may be missing from those ranges.${path}`;
+    const interruption = result.interruptionReason
+      ? ` Processing stopped because ${result.interruptionReason}.`
+      : '';
+    return `Transcription incomplete: ${detail}. Text may be missing from those ranges.${interruption}${path}`;
   }
 
   const qualifications: string[] = [];

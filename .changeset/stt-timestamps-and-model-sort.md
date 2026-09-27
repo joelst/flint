@@ -2,4 +2,5 @@
 "flint": minor
 ---
 
-Add Flint-derived transcript timing exports with complete source-window outcomes and tail-safe pause-aware chunking, plus model family sorting and search. SRT captions and their timing note now export together as one download, and incomplete transcriptions report every failure mode.
+Add derived transcript timing exports with pause-aware chunking and accurate segment progress, plus model family sorting and search.
+Download SRT captions and their timing note together.
