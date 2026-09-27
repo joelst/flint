@@ -52,11 +52,66 @@ export function isLocalCatalogEntry (entry) {
  * @returns {boolean}
  */
 export function isCachedModel (model) {
+  return readCachedState(model).cached;
+}
+
+/**
+ * @param {{isCached?: boolean, info?: {cached?: boolean}}|null|undefined} model
+ * @returns {{cached: boolean, readable: boolean}}
+ */
+function readCachedState (model) {
   try {
-    return !!model?.isCached;
+    return { cached: !!model?.isCached, readable: true };
   } catch {
-    return !!model?.info?.cached;
+    try {
+      return { cached: !!model?.info?.cached, readable: true };
+    } catch {
+      return { cached: false, readable: false };
+    }
   }
+}
+
+/**
+ * Snapshot the native-backed catalog into plain data before publishing derived indexes.
+ * One unreadable row or variant must not discard usable siblings or leak a partial index.
+ *
+ * @param {Array<{
+ *   alias?: string,
+ *   variants?: Array<{id?: string, isCached?: boolean, info?: {cached?: boolean}}>
+ * }>} models
+ * @returns {{
+ *   models: Array<{alias: string, variants: Array<{id: string, cached: boolean}>}>,
+ *   complete: boolean
+ * }}
+ */
+export function normalizeCatalogModels (models) {
+  const normalized = [];
+  let complete = true;
+  for (const model of Array.isArray(models) ? models : []) {
+    try {
+      const alias = typeof model?.alias === 'string' ? model.alias : '';
+      const variants = [];
+      for (const variant of Array.isArray(model?.variants) ? model.variants : []) {
+        try {
+          const id = typeof variant?.id === 'string' ? variant.id : '';
+          const cachedState = readCachedState(variant);
+          if (!cachedState.readable) {
+            complete = false;
+            continue;
+          }
+          if (id) variants.push({ id, cached: cachedState.cached });
+        } catch {
+          complete = false;
+          // One native-backed variant getter must not discard usable sibling variants.
+        }
+      }
+      if (alias) normalized.push({ alias, variants });
+    } catch {
+      complete = false;
+      // One native-backed row must not prevent other aliases from being indexed.
+    }
+  }
+  return { models: normalized, complete };
 }
 
 /**
@@ -130,6 +185,52 @@ export function buildCachedModelIndex (models) {
     }
   }
   return buildModelIndex(normalized);
+}
+
+/**
+ * Group cached variant ids by normalized alias without trusting native-backed getters.
+ * Catalog rows expose `variants`; cached-only inventory rows expose one `id` each.
+ *
+ * @param {Array<{
+ *   alias?: string,
+ *   id?: string,
+ *   cached?: boolean,
+ *   isCached?: boolean,
+ *   info?: {cached?: boolean},
+ *   variants?: Array<{
+ *     id?: string,
+ *     cached?: boolean,
+ *     isCached?: boolean,
+ *     info?: {cached?: boolean}
+ *   }>
+ * }>} models
+ * @param {{ rowsAreCached?: boolean }} [options]
+ * @returns {Map<string, string[]>}
+ */
+export function buildCachedVariantIdsByAlias (models, { rowsAreCached = false } = {}) {
+  const byAlias = new Map();
+  for (const model of Array.isArray(models) ? models : []) {
+    try {
+      const alias = indexKey(model?.alias);
+      if (!alias) continue;
+      const variants = Array.isArray(model?.variants) ? model.variants : [model];
+      for (const variant of variants) {
+        try {
+          const id = typeof variant?.id === 'string' ? variant.id : '';
+          const cached = rowsAreCached || variant?.cached === true || isCachedModel(variant);
+          if (!id || !cached) continue;
+          const ids = byAlias.get(alias) || [];
+          if (!ids.includes(id)) ids.push(id);
+          byAlias.set(alias, ids);
+        } catch {
+          // One native-backed variant getter must not discard usable sibling variants.
+        }
+      }
+    } catch {
+      // One native-backed row must not prevent other aliases from being classified.
+    }
+  }
+  return byAlias;
 }
 
 /** Index keys ignore case; the values keep the catalog's own spelling. */

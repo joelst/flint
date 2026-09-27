@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { getSpeechModelStrategy, SPEECH_SDK_VERSION } from './speech-models.js';
+import {
+  getSpeechModelStrategy,
+  getSpeechModelStrategyForVariants,
+  SPEECH_SDK_VERSION,
+} from './speech-models.js';
 import { readFileSync } from 'node:fs';
 
 describe('speech model strategy', () => {
@@ -28,6 +32,14 @@ describe('speech model strategy', () => {
     });
   });
 
+  it('prefers the canonical variant family when the alias names another family', () => {
+    expect(getSpeechModelStrategy('parakeet-voice', 'whisper-tiny-generic-cpu:1')).toMatchObject({
+      family: 'whisper',
+      strategy: 'audioUri',
+      supported: true,
+    });
+  });
+
   it('reports Parakeet as unsupported by the probed runtime', () => {
     expect(getSpeechModelStrategy('parakeet-tdt-0.6b-v2')).toEqual({
       family: 'parakeet',
@@ -35,6 +47,37 @@ describe('speech model strategy', () => {
       supported: false,
       reason: `Parakeet transcription is not supported by Foundry Local SDK ${SPEECH_SDK_VERSION}.`,
     });
+  });
+
+  it('resolves an opaque alias when every cached variant belongs to Parakeet', () => {
+    expect(getSpeechModelStrategyForVariants('local-voice', [
+      'parakeet-tdt-0.6b-v3-generic-cpu:1',
+      'parakeet-tdt-0.6b-v3-cuda-gpu:1',
+    ])).toMatchObject({
+      family: 'parakeet',
+      supported: false,
+    });
+  });
+
+  it('prefers unanimous cached variants over a misleading alias', () => {
+    expect(getSpeechModelStrategyForVariants('parakeet-voice', [
+      'whisper-tiny-generic-cpu:1',
+      'whisper-tiny-cuda-gpu:1',
+    ])).toMatchObject({
+      family: 'whisper',
+      supported: true,
+    });
+  });
+
+  it('defers opaque aliases with mixed or unknown cached variant families', () => {
+    expect(getSpeechModelStrategyForVariants('local-voice', [
+      'parakeet-tdt-0.6b-v3-generic-cpu:1',
+      'whisper-tiny-generic-cpu:1',
+    ]).family).toBe('unknown');
+    expect(getSpeechModelStrategyForVariants('local-voice', [
+      'parakeet-tdt-0.6b-v3-generic-cpu:1',
+      'custom-asr-generic-cpu:1',
+    ]).family).toBe('unknown');
   });
 
   it('uses one URI attempt for a family not in the compatibility table', () => {

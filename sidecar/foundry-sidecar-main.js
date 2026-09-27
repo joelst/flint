@@ -26,9 +26,11 @@ import { createGateway } from './gateway.js';
 import { formatPublicEndpoint } from './gateway-http.js';
 import {
   buildCachedModelIndex,
+  buildCachedVariantIdsByAlias,
   buildModelIndex,
   isCachedModel,
   isLocalCatalogEntry,
+  normalizeCatalogModels,
   resolveModelId,
 } from './model-registry.js';
 import { activityCandidateKeys } from './activity-booking.js';
@@ -1011,21 +1013,28 @@ let upstreamPort = null;
 // Identifier → {alias, variantId} for autoload. Rebuilt lazily and invalidated whenever the
 // set of cached models changes, since a stale map would refuse a model the user just added.
 let modelIndex = null;
+let cachedVariantIdsByAlias = new Map();
 
 function invalidateModelIndex () {
   modelIndex = null;
+  cachedVariantIdsByAlias = new Map();
 }
 
 function cacheModelIndexFromCatalog(models) {
-  modelIndex = buildModelIndex((models || []).map(m => ({
-    alias: m.alias,
-    variants: (m.variants || []).map(v => ({ id: v.id, cached: isCachedModel(v) })),
-  })));
-  return modelIndex;
+  const snapshot = normalizeCatalogModels(models);
+  const normalized = snapshot.models;
+  const nextVariantIds = buildCachedVariantIdsByAlias(normalized);
+  const nextIndex = buildModelIndex(normalized);
+  cachedVariantIdsByAlias = nextVariantIds;
+  modelIndex = nextIndex;
+  return { index: modelIndex, complete: snapshot.complete };
 }
 
 function cacheModelIndexFromCachedModels(models) {
-  modelIndex = buildCachedModelIndex(models);
+  const nextVariantIds = buildCachedVariantIdsByAlias(models, { rowsAreCached: true });
+  const nextIndex = buildCachedModelIndex(models);
+  cachedVariantIdsByAlias = nextVariantIds;
+  modelIndex = nextIndex;
   return modelIndex;
 }
 
@@ -1035,11 +1044,13 @@ async function resolveForGateway (requested) {
     try {
       return await readCatalog(async () => {
         const models = await manager.catalog.getModels();
-        cacheModelIndexFromCatalog(models);
-        return resolveModelId(modelIndex, requested);
+        const snapshot = cacheModelIndexFromCatalog(models);
+        const resolution = resolveModelId(snapshot.index, requested);
+        if (resolution || snapshot.complete) return resolution;
+        throw new Error('Catalog snapshot was incomplete for the requested model.');
       });
     } catch (e) {
-      log('warn', `Gateway could not read the catalog: ${e?.message ?? e}`);
+      log('warn', `Model resolver could not read the catalog: ${e?.message ?? e}`);
       try {
         return await readUnconfirmedCatalog(async () => {
           const cached = await manager.catalog.getCachedModels();
@@ -1047,12 +1058,25 @@ async function resolveForGateway (requested) {
           return resolveModelId(modelIndex, requested);
         });
       } catch (lookupError) {
-        log('warn', `Gateway could not resolve cached model ${requested}: ${lookupError?.message ?? lookupError}`);
+        log('warn', `Model resolver could not resolve cached model ${requested}: ${lookupError?.message ?? lookupError}`);
         return null;
       }
     }
   }
   return resolveModelId(modelIndex, requested);
+}
+
+async function speechStrategyBeforeLoad(requested) {
+  const residentAlias = aliasForModelName(requested);
+  const residentVariantId = residentAlias ? pool.get(residentAlias)?.variantId : null;
+  if (residentVariantId) {
+    return assertSpeechModelSupported(requested, residentVariantId);
+  }
+  const resolution = await resolveForGateway(requested);
+  const variants = resolution?.variantId
+    ? [resolution.variantId]
+    : cachedVariantIdsByAlias.get(String(resolution?.alias || requested || '').trim().toLowerCase()) || [];
+  return assertSpeechModelSupported(requested, resolution?.variantId || '', variants);
 }
 
 /**
@@ -3444,7 +3468,7 @@ rl.on('line', async (line) => {
       activeStreamCount++;
       if (!activeStreamOldest) activeStreamOldest = { type: 'audio', modelAlias: requestedAlias, startedAt: audioAccessTs };
       try {
-        const requestedStrategy = assertSpeechModelSupported(requestedAlias);
+        const requestedStrategy = await speechStrategyBeforeLoad(requestedAlias);
         if (requestedStrategy.strategy === 'itemQueue') extractNemotronPcm(bytes);
         if (requestedAlias) {
           await ensureModel(requestedAlias);

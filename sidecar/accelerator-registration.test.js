@@ -353,7 +353,7 @@ describe('native service startup', () => {
     const listGate = source.indexOf('readCatalog(', listModels);
     const listProgress = source.indexOf('reportCatalogProgress', listGate);
     const listRead = source.indexOf('manager.catalog.getModels()', listModels);
-    const gatewayFallback = source.indexOf('Gateway could not read the catalog');
+    const gatewayFallback = source.indexOf('Model resolver could not read the catalog');
     const gatewayFallbackEnd = source.indexOf('} catch (lookupError)', gatewayFallback);
     const gatewayFallbackFlow = source.slice(gatewayFallback, gatewayFallbackEnd);
     expect(gateStart).toBeGreaterThan(-1);

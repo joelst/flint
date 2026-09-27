@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   buildModelIndex,
   buildCachedModelIndex,
+  buildCachedVariantIdsByAlias,
   isCachedModel,
   isLocalCatalogEntry,
+  normalizeCatalogModels,
   resolveModelId,
   stripVersion,
 } from './model-registry.js';
@@ -16,6 +18,10 @@ describe('isCachedModel', () => {
       get isCached() { throw new Error('native getter failed'); },
       info: { cached: true },
     })).toBe(true);
+    expect(isCachedModel({
+      get isCached() { throw new Error('native getter failed'); },
+      get info() { throw new Error('snapshot getter failed'); },
+    })).toBe(false);
     expect(isCachedModel({ get isCached() { throw new Error('native getter failed'); } })).toBe(false);
     expect(isCachedModel(null)).toBe(false);
   });
@@ -99,6 +105,59 @@ describe('buildCachedModelIndex', () => {
       alias: 'usable-model',
       variantId: null,
     });
+  });
+});
+
+describe('normalizeCatalogModels', () => {
+  it('snapshots usable rows and variants when native-backed getters throw', () => {
+    expect(normalizeCatalogModels([
+      {
+        alias: 'local-voice',
+        variants: [
+          { id: 'parakeet-cpu:1', isCached: true },
+          { get id() { throw new Error('native getter failed'); } },
+          { id: 'whisper-cpu:1', isCached: true },
+        ],
+      },
+      { get alias() { throw new Error('native getter failed'); } },
+    ])).toEqual({
+      complete: false,
+      models: [{
+        alias: 'local-voice',
+        variants: [
+          { id: 'parakeet-cpu:1', cached: true },
+          { id: 'whisper-cpu:1', cached: true },
+        ],
+      }],
+    });
+  });
+});
+
+describe('buildCachedVariantIdsByAlias', () => {
+  it('merges duplicate and differently-cased catalog aliases using cached variants only', () => {
+    expect(buildCachedVariantIdsByAlias([
+      {
+        alias: 'Local-Voice',
+        variants: [
+          { id: 'parakeet-cpu:1', cached: true },
+          { id: 'uncached:1', cached: false },
+        ],
+      },
+      { alias: ' local-voice ', variants: [{ id: 'whisper-cpu:1', cached: true }] },
+    ])).toEqual(new Map([
+      ['local-voice', ['parakeet-cpu:1', 'whisper-cpu:1']],
+    ]));
+  });
+
+  it('keeps usable cached-only rows when native-backed getters throw', () => {
+    expect(buildCachedVariantIdsByAlias([
+      { alias: 'local-voice', id: 'parakeet-cpu:1' },
+      { get alias() { throw new Error('native getter failed'); } },
+      { alias: 'local-voice', get id() { throw new Error('native getter failed'); } },
+      { alias: 'local-voice', id: 'whisper-cpu:1' },
+    ], { rowsAreCached: true })).toEqual(new Map([
+      ['local-voice', ['parakeet-cpu:1', 'whisper-cpu:1']],
+    ]));
   });
 });
 

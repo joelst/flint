@@ -2904,7 +2904,7 @@ describe('transcribeAudio AudioSession path', () => {
       "import fs from 'node:fs';",
       'const note = (event) => fs.appendFileSync(process.env.FLINT_TEST_EVENT_LOG, event + "\\n");',
       'class FakeModel {',
-      "  constructor(alias) { this.alias = alias; this.id = 'whisper-tiny-generic-cpu:1'; this.loaded = false; }",
+      "  constructor(alias) { this.alias = alias; this.id = alias === 'opaque-speech' || alias === 'lossy-speech' ? 'parakeet-tdt-0.6b-v3-generic-cpu:1' : 'whisper-tiny-generic-cpu:1'; this.loaded = false; }",
       "  async load() { this.loaded = true; note('model-load:' + this.alias); }",
       '  isLoaded() { return this.loaded; }',
       "  getExecutionProvider() { return 'CPUExecutionProvider'; }",
@@ -2938,7 +2938,23 @@ describe('transcribeAudio AudioSession path', () => {
       '}',
       "const Item = { audioFromUri: (uri) => ({ type: 'audio', uri }) };",
       'class FakeManager {',
-      '  constructor() { this.catalog = { getModel: async (alias) => new FakeModel(alias), getModels: async () => [] }; }',
+      '  constructor() { this.catalog = {',
+      '    getModel: async (alias) => new FakeModel(alias),',
+      "    getModels: async () => [",
+      "      { alias: 'opaque-speech', variants: [{ id: 'parakeet-tdt-0.6b-v3-generic-cpu:1', isCached: true }] },",
+      "      { alias: 'mixed-speech', variants: [",
+      "        { id: 'parakeet-tdt-0.6b-v3-generic-cpu:1', isCached: true },",
+      "        { id: 'whisper-tiny-generic-cpu:1', isCached: true },",
+      "      ] },",
+      "      { get alias() { throw new Error('native getter failed'); } },",
+      "    ],",
+      "    getCachedModels: async () => [",
+      "      { alias: 'opaque-speech', id: 'parakeet-tdt-0.6b-v3-generic-cpu:1' },",
+      "      { alias: 'mixed-speech', id: 'parakeet-tdt-0.6b-v3-generic-cpu:1' },",
+      "      { alias: 'mixed-speech', id: 'whisper-tiny-generic-cpu:1' },",
+      "      { alias: 'lossy-speech', id: 'parakeet-tdt-0.6b-v3-generic-cpu:1' },",
+      "    ],",
+      '  }; }',
       '  static create() { return new FakeManager(); }',
       '}',
       'export { FakeManager as FoundryLocalManager, FakeAudioSession as AudioSession, FakeRequest as Request, Item };',
@@ -3084,6 +3100,61 @@ describe('transcribeAudio AudioSession path', () => {
     expect(res.error).toContain('Parakeet transcription is not supported');
     expect(events().filter((event) => event.startsWith('model-load:'))).toHaveLength(loadCount);
     expect(events()).not.toContain('audioSession-processRequest');
+  }, 30000);
+
+  it('refuses an opaque alias whose cached variants are Parakeet before loading', async () => {
+    await startSidecar('success');
+    const loadCount = events().filter((event) => event.startsWith('model-load:')).length;
+    const transcribed = reply(3);
+    send({
+      id: 3,
+      cmd: 'transcribeAudio',
+      audioBase64: wavBase64(),
+      mimeType: 'audio/wav',
+      fileName: 'probe.wav',
+      model: 'opaque-speech',
+      language: 'en',
+    });
+    const res = await transcribed;
+    expect(res.error).toContain('Parakeet transcription is not supported');
+    expect(events().filter((event) => event.startsWith('model-load:'))).toHaveLength(loadCount);
+    expect(events()).not.toContain('audioSession-processRequest');
+  }, 30000);
+
+  it('falls back to cached inventory when a lossy catalog snapshot misses the alias', async () => {
+    await startSidecar('success');
+    const loadCount = events().filter((event) => event.startsWith('model-load:')).length;
+    const transcribed = reply(3);
+    send({
+      id: 3,
+      cmd: 'transcribeAudio',
+      audioBase64: wavBase64(),
+      mimeType: 'audio/wav',
+      fileName: 'probe.wav',
+      model: 'lossy-speech',
+      language: 'en',
+    });
+    const res = await transcribed;
+    expect(res.error).toContain('Parakeet transcription is not supported');
+    expect(events().filter((event) => event.startsWith('model-load:'))).toHaveLength(loadCount);
+  }, 30000);
+
+  it('defers a mixed-family opaque alias until the runtime selects its variant', async () => {
+    await startSidecar('success');
+    const transcribed = reply(3);
+    send({
+      id: 3,
+      cmd: 'transcribeAudio',
+      audioBase64: wavBase64(),
+      mimeType: 'audio/wav',
+      fileName: 'probe.wav',
+      model: 'mixed-speech',
+      language: 'en',
+    });
+    const res = await transcribed;
+    expect(res.ok).toBe(true);
+    expect(events()).toContain('model-load:mixed-speech');
+    expect(events()).toContain('audioSession-processRequest');
   }, 30000);
 });
 

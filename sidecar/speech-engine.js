@@ -1,4 +1,8 @@
-import { getSpeechModelStrategy, SPEECH_SDK_VERSION } from './speech-models.js';
+import {
+  getSpeechModelStrategy,
+  getSpeechModelStrategyForVariants,
+  SPEECH_SDK_VERSION,
+} from './speech-models.js';
 import { extractNemotronPcm } from './wav-pcm.js';
 
 export class SpeechEngineError extends Error {
@@ -48,8 +52,10 @@ function unsupportedRuntimeError (modelName) {
   );
 }
 
-export function assertSpeechModelSupported (modelAlias, variantId = '') {
-  const selected = getSpeechModelStrategy(modelAlias, variantId);
+export function assertSpeechModelSupported (modelAlias, variantId = '', candidateVariantIds = []) {
+  const selected = variantId
+    ? getSpeechModelStrategy(modelAlias, variantId)
+    : getSpeechModelStrategyForVariants(modelAlias, candidateVariantIds);
   if (!selected.supported) {
     throw new SpeechEngineError('unsupported-by-runtime', selected.reason);
   }
