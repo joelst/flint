@@ -118,6 +118,19 @@ describe('createStoredZip', () => {
   it('clamps a pre-1980 timestamp rather than emitting an impossible DOS date', () => {
     const zip = createStoredZip([{ fileName: 'note.txt', body: 'x' }], new Date('1970-01-01Z'));
     const view = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
-    expect(view.getUint16(12, true) >>> 9).toBeGreaterThanOrEqual(0); // year - 1980
+    // The DOS date epoch is 1980, so a 1970 timestamp must clamp to exactly year 0.
+    expect(view.getUint16(12, true) >>> 9).toBe(0);
+    expect((view.getUint16(12, true) >>> 5) & 0x0f).toBe(1); // month 1, never the invalid 0
+    expect(view.getUint16(12, true) & 0x1f).toBe(1); // day 1, never the invalid 0
+    expect(view.getUint16(10, true)).toBe(0);
+  });
+
+  it('clamps a post-2107 timestamp to the last representable DOS date', () => {
+    const zip = createStoredZip([{ fileName: 'note.txt', body: 'x' }], new Date('2200-06-15Z'));
+    const view = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
+    const encoded = view.getUint16(12, true);
+    expect(encoded >>> 9).toBe(127); // 2107
+    expect((encoded >>> 5) & 0x0f).toBe(12);
+    expect(encoded & 0x1f).toBe(31);
   });
 });

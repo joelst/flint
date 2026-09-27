@@ -65,6 +65,13 @@ describe('downloadCaptionArtifact', () => {
       name: 'vtt captions',
       format: 'vtt' as const,
       transcriptState: state(),
+      // A player dispatches on the media type, so WebVTT must not go out as plain text.
+      type: 'text/vtt;charset=utf-8',
+    },
+    {
+      name: 'lone timing note',
+      format: 'srt' as const,
+      transcriptState: state({ segments: [], gaps: [{ startSec: 0, endSec: 4, kind: 'failed' }] as any }),
       type: 'text/plain;charset=utf-8',
     },
   ])('sends the $name as a single blob of the declared type', ({ format, transcriptState, type }) => {

@@ -282,6 +282,13 @@ export interface CaptionArtifact {
 const TEXT_MIME = 'text/plain;charset=utf-8';
 const ZIP_MIME = 'application/zip';
 
+/** Caption players dispatch on the media type, so a `.vtt` sent as plain text is refused. */
+function captionMimeType(fileName: string): string {
+  if (fileName.endsWith('.vtt')) return 'text/vtt;charset=utf-8';
+  if (fileName.endsWith('.srt')) return 'application/x-subrip;charset=utf-8';
+  return TEXT_MIME;
+}
+
 /**
  * Build the one file the caption export downloads.
  *
@@ -305,7 +312,7 @@ export function buildCaptionArtifact(
     return {
       fileName: files[0].fileName,
       body: new TextEncoder().encode(files[0].body),
-      mimeType: TEXT_MIME,
+      mimeType: captionMimeType(files[0].fileName),
       contents: [files[0].fileName],
     };
   }

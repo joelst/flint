@@ -87,9 +87,10 @@ The sidebar is grouped by workflow:
   individual boundaries to detected pauses and rebalances fixed cuts to avoid an unsuitable short
   final window, but every displayed timestamp is a Flint-derived estimate, never timing reported
   by the model. Mixed plans identify unsnapped boundaries as approximate.
-- **Copy with estimated times** includes that timing disclaimer. **Download .srt + timing note**
-  creates a standard SRT plus an associated `.timing.txt` file with the same filename stem;
-  WebVTT carries the note in its standard `NOTE` block.
+- **Copy with estimated times** includes that timing disclaimer. **Download .srt bundle (.zip)**
+  creates one archive holding a standard SRT and a `.timing.txt` note with the same filename
+  stem, so the captions cannot circulate without the statement that Flint derived the times.
+  WebVTT carries that note in its standard `NOTE` block and so downloads as a single file.
 - Failed, uncertain, and unprocessed ranges remain visible as transcript gaps. A successfully
   processed window with no recognized text is reported separately and is not treated as proven silence.
 

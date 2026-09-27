@@ -47,7 +47,11 @@ export function crc32(bytes: Uint8Array): number {
  */
 function dosDateTime(date: Date): { time: number; date: number } {
   const valid = Number.isFinite(date?.getTime?.()) ? date : new Date(0);
-  const year = Math.min(Math.max(valid.getFullYear(), 1980), 2107);
+  const year = valid.getFullYear();
+  // Clamping only the year would keep the original month and day, yielding a date the
+  // source never had. An out-of-range mtime is pinned whole to the nearest legal instant.
+  if (year < 1980) return { time: 0, date: (1 << 5) | 1 };
+  if (year > 2107) return { time: (23 << 11) | (59 << 5) | 29, date: (127 << 9) | (12 << 5) | 31 };
   return {
     time:
       (valid.getHours() << 11) | (valid.getMinutes() << 5) | (Math.floor(valid.getSeconds() / 2)),
