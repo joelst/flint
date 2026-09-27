@@ -1,11 +1,12 @@
 import { defineConfig } from "vite";
 import { sveltekit } from "@sveltejs/kit/vite";
+import { svelteTesting } from '@testing-library/svelte/vite';
 
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
 export default defineConfig(() => ({
-  plugins: [sveltekit()],
+  plugins: [sveltekit(), svelteTesting({ autoCleanup: false })],
 
   // Externalize the Foundry SDK to avoid browser/Node builtin issues during build.
   // Real usage should move to Tauri commands or sidecar for production.
@@ -99,6 +100,11 @@ export default defineConfig(() => ({
         'src/lib/endpoint-model-classification.ts',
         'src/lib/endpoint-load-target.ts',
         'src/lib/audio-pcm-decode.ts',
+        'src/lib/audio-segmentation.ts',
+        'src/lib/transcript-format.ts',
+        'src/lib/long-audio-transcript.ts',
+        'src/lib/caption-download.ts',
+        'src/lib/zip-archive.ts',
         'src/lib/endpoint-self-test-residency.ts',
         'src/lib/endpoint-self-test.ts',
         'src/lib/sidecar-stderr.ts',

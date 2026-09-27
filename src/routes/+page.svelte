@@ -6,6 +6,8 @@
   import MessageRenderer from "$lib/MessageRenderer.svelte";
   import ConversationSidebar from "$lib/ConversationSidebar.svelte";
   import Icon from "$lib/Icon.svelte";
+  import TranscriptViewToggle from "$lib/TranscriptViewToggle.svelte";
+  import TranscriptSegmentTime from "$lib/TranscriptSegmentTime.svelte";
   import type { Conversation } from "$lib/ConversationSidebar.svelte";
   import {
     initializeSDK,
@@ -115,7 +117,13 @@
   import { enable as autostartEnable, disable as autostartDisable, isEnabled as autostartIsEnabled } from '$lib/autostart';
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { check as checkForUpdate, type Update } from "@tauri-apps/plugin-updater";
-  import { sortModels, isModelSortMode, type ModelSortMode } from '$lib/model-sort';
+  import {
+    sortModels,
+    isModelSortMode,
+    modelFamilyLabel,
+    modelMatchesSearch,
+    type ModelSortMode,
+  } from '$lib/model-sort';
   import {
     buildFlintAwareSystemPrompt,
     contentToPlainText,
@@ -179,6 +187,25 @@
   import { buildEndpointModelClassifier } from "$lib/endpoint-model-classification";
   import { endpointLoadTarget } from "$lib/endpoint-load-target";
   import { decodeWavPcm, getWavDurationSeconds } from "$lib/audio-pcm-decode";
+  import { planSegmentationAsync } from "$lib/audio-segmentation";
+  import {
+    assembleLongAudioTranscript,
+    buildLongAudioCompletionStatus,
+    formatTranscriptionProgress,
+    processTranscriptionWindows,
+    transcriptionWindowSampleRange,
+    type TranscriptGap,
+    type TranscriptRange,
+  } from "$lib/long-audio-transcript";
+  import {
+    buildCaptionArtifact,
+    buildTimestampedText,
+    buildTimingDisclaimer,
+    formatClockTime,
+    type TranscriptExportState,
+    type TranscriptSegment,
+  } from "$lib/transcript-format";
+  import { downloadCaptionArtifact } from "$lib/caption-download";
   import { sniffAudioFormat } from "../../sidecar/audio-format.js";
   import { looksLikeSpeech } from "../../sidecar/model-classification.js";
   import { recommendedMaxTurns as recommendedMaxTurnsFor, clampContextTurns, MIN_CONTEXT_TURNS, MAX_CONTEXT_TURNS } from "$lib/context-turns";
@@ -1663,6 +1690,11 @@
   let isRecording = $state(false);
   let audioBlob = $state<Blob | null>(null);
   let transcription = $state("");
+  let transcriptionSegments = $state<TranscriptSegment[]>([]);
+  let transcriptionGaps = $state<TranscriptGap[]>([]);
+  let emptyRecognitionRanges = $state<TranscriptRange[]>([]);
+  let overlapOnlyRanges = $state<TranscriptRange[]>([]);
+  let showTimestampedTranscript = $state(true);
   let isTranscribing = $state(false);
   let transcriptionProgress = $state<{ current: number; total: number } | null>(null);
   let transcriptionLanguage = $state("auto");
@@ -2965,11 +2997,7 @@
 
   const filteredModels = $derived(
     sortModels(
-      (state.models || []).filter(
-        (m: ModelInfo) =>
-          m.alias?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          (m as any).family?.toLowerCase?.()?.includes(searchTerm.toLowerCase()),
-      ),
+      (state.models || []).filter((model: ModelInfo) => modelMatchesSearch(model, searchTerm)),
       modelSortMode,
     ),
   );
@@ -7177,35 +7205,6 @@ Output only the summary text, no preamble.`;
     return "";
   }
 
-  function findWordOverlapTailPrefix(previousText: string, nextText: string, maxWords = 24): number {
-    const prevWords = normalizeTranscriptText(previousText).split(" ").filter(Boolean);
-    const nextWords = normalizeTranscriptText(nextText).split(" ").filter(Boolean);
-    const max = Math.min(maxWords, prevWords.length, nextWords.length);
-    for (let overlap = max; overlap > 0; overlap--) {
-      const prevTail = prevWords.slice(prevWords.length - overlap).join(" ").toLowerCase();
-      const nextHead = nextWords.slice(0, overlap).join(" ").toLowerCase();
-      if (prevTail === nextHead) return overlap;
-    }
-    return 0;
-  }
-
-  function mergeTranscriptChunks(chunks: string[]): string {
-    const cleaned = chunks.map((c) => normalizeTranscriptText(c)).filter(Boolean);
-    if (cleaned.length === 0) return "";
-    let merged = cleaned[0];
-    for (let i = 1; i < cleaned.length; i++) {
-      const next = cleaned[i];
-      const overlapWords = findWordOverlapTailPrefix(merged, next);
-      if (overlapWords > 0) {
-        const nextWords = next.split(" ");
-        merged = `${merged} ${nextWords.slice(overlapWords).join(" ")}`.trim();
-      } else if (!merged.toLowerCase().includes(next.toLowerCase())) {
-        merged = `${merged} ${next}`.trim();
-      }
-    }
-    return normalizeTranscriptText(merged);
-  }
-
   async function transcribeLongAudio(
     audioBlob: Blob,
     model: string,
@@ -7216,27 +7215,19 @@ Output only the summary text, no preamble.`;
   ): Promise<any> {
     const mono = await getMono16kBuffer(audioBlob);
     const sr = 16000;
-    const chunkSec = 28;
-    const overlapSec = 4;
-    const chunkSamples = Math.floor(chunkSec * sr);
-    const step = chunkSamples - Math.floor(overlapSec * sr);
     const total = mono.length;
-
-    const texts: string[] = [];
-    // Tracked so the caller can qualify the result rather than report an unqualified success.
-    let failedChunks = 0;
-    let uncertainChunks = 0;
-    let pos = 0;
-    let idx = 0;
-    const totalChunks = Math.max(1, Math.ceil(total / step));
-
-    while (pos < total) {
-      const end = Math.min(pos + chunkSamples, total);
-      const len = end - pos;
-      if (len < 1000) break; // too short
+    const plan = await planSegmentationAsync(mono.getChannelData(0), sr);
+    const windows = plan.windows;
+    const totalChunks = windows.length;
+    const processed = await processTranscriptionWindows(windows, async (windowPlan, idx) => {
+      const sampleRange = transcriptionWindowSampleRange(windowPlan, sr, total);
+      if (!sampleRange) {
+        return { status: 'unprocessed' as const };
+      }
+      const { startSample, length: len } = sampleRange;
 
       const data = new Float32Array(len);
-      mono.copyFromChannel(data, 0, pos);
+      mono.copyFromChannel(data, 0, startSample);
 
       // Small temp context just to build AudioBuffer for the chunk WAV
       const tmpCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -7247,35 +7238,29 @@ Output only the summary text, no preamble.`;
       const wavBlob = new Blob([audioBufferToWav(chunkBuf)], { type: 'audio/wav' });
 
       if (benchmarkRunInFlight) {
-        // A benchmark started while this chunk loop was running — stop dispatching further
-        // STT inference so it doesn't contend with the benchmark, and count what's left as
-        // uncompleted rather than silently reporting a shorter transcript as complete.
-        failedChunks += (totalChunks - idx);
-        statusMessage = 'Transcription interrupted — a benchmark run became active.';
-        break;
+        return { status: 'interrupted' as const };
       }
-
-      if (onProgress) onProgress(idx + 1, totalChunks);
-      statusMessage = `Transcribing segment ${idx + 1} of ${totalChunks}...`;
 
       try {
         const res = await transcribeAudio(wavBlob, model, language, `${fileNameBase}_part${idx}.wav`, options);
         const t = getTranscriptTextFromResult(res);
-        if (t) texts.push(t);
+        return { status: 'success' as const, text: t };
       } catch (e) {
         // Counted, not just logged. A swallowed segment leaves a silent hole in the transcript,
         // and reporting the result as complete would assert something this loop cannot know.
         console.warn('Chunk transcription failed', e);
-        failedChunks += 1;
-        if (isUncertainOutcome(e)) uncertainChunks += 1;
+        return { status: 'failed' as const, uncertain: isUncertainOutcome(e) };
       }
-
-      pos += step;
-      idx++;
-    }
-
-    if (onProgress) onProgress(totalChunks, totalChunks);
-    return { text: mergeTranscriptChunks(texts), totalChunks, failedChunks, uncertainChunks };
+    }, {
+      shouldInterrupt: () => benchmarkRunInFlight,
+      onProgress: ({ current, total }) => onProgress?.(current, total),
+    });
+    return {
+      ...assembleLongAudioTranscript(processed.outcomes),
+      totalChunks,
+      timingStrategy: plan.timingStrategy,
+      interruptionReason: processed.interrupted ? 'a benchmark run became active' : undefined,
+    };
   }
 
   async function getAudioDuration(blob: Blob): Promise<number> {
@@ -7325,6 +7310,10 @@ Output only the summary text, no preamble.`;
 
     isTranscribing = true;
     transcription = "";
+    transcriptionSegments = [];
+    transcriptionGaps = [];
+    emptyRecognitionRanges = [];
+    overlapOnlyRanges = [];
     statusMessage = `Transcribing with ${sttAlias} via sidecar...`;
 
     try {
@@ -7349,12 +7338,11 @@ Output only the summary text, no preamble.`;
       // backend often only returns the beginning when given one huge file.
       let result: any;
       if (dur > 90) {
-        const estChunks = Math.max(1, Math.ceil(dur / 24));
-        transcriptionProgress = { current: 0, total: estChunks };
+        transcriptionProgress = null;
         statusMessage = "Transcribing long audio in overlapping chunks...";
         result = await transcribeLongAudio(audioBlob, sttAlias, transcriptionLanguage, 'audio', (cur, tot) => {
           transcriptionProgress = { current: cur, total: tot };
-          statusMessage = `Transcribing segment ${cur}/${tot}...`;
+          statusMessage = formatTranscriptionProgress(transcriptionProgress);
         }, {
           temperature: 0,
           preferredEp: selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference
@@ -7381,7 +7369,24 @@ Output only the summary text, no preamble.`;
       // Extract the most complete text possible.
       // Some results put full transcript in .text, others have segments for long audio.
       const transcribed = getTranscriptTextFromResult(result);
-      transcription = transcribed || JSON.stringify(result, null, 2);
+      transcription = transcribed || (
+        dur > 90
+          ? Number(result?.failedChunks || 0) >= Number(result?.totalChunks || 0)
+            ? "No transcript text is available because no audio window has a confirmed successful result."
+            : "No text was recognized in the successfully processed audio windows."
+          : JSON.stringify(result, null, 2)
+      );
+      if (dur > 90) {
+        transcriptionSegments = Array.isArray(result?.segments) ? result.segments : [];
+        transcriptionGaps = Array.isArray(result?.gaps) ? result.gaps : [];
+        emptyRecognitionRanges = Array.isArray(result?.emptyRecognitionRanges)
+          ? result.emptyRecognitionRanges
+          : [];
+        overlapOnlyRanges = Array.isArray(result?.overlapOnlyRanges)
+          ? result.overlapOnlyRanges
+          : [];
+        showTimestampedTranscript = true;
+      }
 
       // Helpful for debugging long audio: the backend may return duration or segments
       // even if .text is partial.
@@ -7391,20 +7396,7 @@ Output only the summary text, no preamble.`;
       transcriptionProgress = null;
       const path = result?.transcriptionPath ? ` via ${result.transcriptionPath}` : "";
       if (dur > 90) {
-        const failed = Number(result?.failedChunks || 0);
-        const uncertain = Number(result?.uncertainChunks || 0);
-        const totalSegments = Number(result?.totalChunks || 0);
-        if (failed > 0) {
-          // The transcript has gaps. Saying "complete" would present a partial result as whole,
-          // and the missing audio is invisible once the segments are merged.
-          const detail =
-            uncertain > 0
-              ? `${failed} of ${totalSegments} segments did not complete (${uncertain} were interrupted without an answer, so they may have run)`
-              : `${failed} of ${totalSegments} segments failed`;
-          statusMessage = `Transcription incomplete: ${detail}. The text below is missing those parts.${path}`;
-        } else {
-          statusMessage = `Transcription complete (${totalSegments} segments${path})`;
-        }
+        statusMessage = buildLongAudioCompletionStatus(result, path);
       } else {
         statusMessage = `Transcription complete (via sidecar${path})`;
       }
@@ -7427,6 +7419,35 @@ Output only the summary text, no preamble.`;
     }
   }
 
+  function currentTranscriptExportState(): TranscriptExportState {
+    return {
+      segments: transcriptionSegments,
+      gaps: transcriptionGaps,
+      emptyRecognitionRanges,
+      overlapOnlyRanges,
+    };
+  }
+
+  function hasTimestampExportData(): boolean {
+    return (
+      transcriptionSegments.length > 0 ||
+      transcriptionGaps.length > 0 ||
+      emptyRecognitionRanges.length > 0 ||
+      overlapOnlyRanges.length > 0
+    );
+  }
+
+  async function copyTimestampedTranscript() {
+    const text = buildTimestampedText(currentTranscriptExportState());
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      statusMessage = "Timestamped transcript copied with Flint-derived timing metadata";
+    } catch (e: any) {
+      statusMessage = `Failed to copy transcript: ${e?.message || e}`;
+    }
+  }
+
   function downloadTranscription() {
     if (!transcription) return;
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -7439,6 +7460,21 @@ Output only the summary text, no preamble.`;
     anchor.click();
     URL.revokeObjectURL(url);
     statusMessage = `Transcription downloaded: ${fileName}`;
+  }
+
+  function downloadCaptions(format: "srt" | "vtt") {
+    const artifact = buildCaptionArtifact(format, currentTranscriptExportState());
+    if (!artifact) {
+      statusMessage = "No timed transcript text is available to export";
+      return;
+    }
+    downloadCaptionArtifact(artifact);
+    // The page is not told whether the browser accepted a download, so this reports
+    // what Flint requested rather than claiming the file was saved.
+    statusMessage =
+      artifact.contents.length > 1
+        ? `Download requested: ${artifact.fileName}, containing the captions and their derived-timing note`
+        : `Download requested: ${artifact.fileName}`;
   }
 </script>
 
@@ -8113,7 +8149,10 @@ Output only the summary text, no preamble.`;
               </div>
             {:else}
               <div class="model-grid">
-                {#each filteredModels as model (model.alias)}
+                {#each filteredModels as model, index (model.alias)}
+                  {#if modelSortMode === "family" && (index === 0 || modelFamilyLabel(filteredModels[index - 1]) !== modelFamilyLabel(model))}
+                    <h3 class="family-heading">{modelFamilyLabel(model) || "Other"}</h3>
+                  {/if}
                   <div class="model-card">
                     <div class="model-header">
                       <strong title={getShortModelDescription(model)}>
@@ -9503,7 +9542,7 @@ Output only the summary text, no preamble.`;
             >
               {isTranscribing
                 ? (transcriptionProgress
-                    ? `Transcribing ${transcriptionProgress.current}/${transcriptionProgress.total}...`
+                    ? formatTranscriptionProgress(transcriptionProgress)
                     : "Transcribing… cannot be stopped once started")
                 : "Transcribe"}
             </button>
@@ -9521,13 +9560,89 @@ Output only the summary text, no preamble.`;
           {#if transcription}
             <div class="transcription-result">
               <h3>Transcription:</h3>
-              <pre>{transcription}</pre>
+              {#if transcriptionSegments.length > 0}
+                <TranscriptViewToggle
+                  bind:showTimestampedTranscript
+                  segmentCount={transcriptionSegments.length}
+                />
+              {/if}
+
+              {#if showTimestampedTranscript && transcriptionSegments.length > 0}
+                <p class="timestamp-note">{buildTimingDisclaimer(transcriptionSegments)}</p>
+                <ol class="transcript-segments">
+                  {#each transcriptionSegments as segment (segment.index)}
+                    <li class="transcript-segment">
+                      <TranscriptSegmentTime
+                        startSec={segment.startSec}
+                        endSec={segment.endSec}
+                        endBoundary={segment.endBoundary}
+                      />
+                      <span class="segment-text">{segment.text}</span>
+                    </li>
+                  {/each}
+                </ol>
+              {:else}
+                <pre>{transcription}</pre>
+              {/if}
+
+              {#if transcriptionGaps.length > 0}
+                <div class="transcript-gaps" role="status">
+                  <strong>Untranscribed ranges:</strong>
+                  {#each transcriptionGaps as gap}
+                    <span>
+                      {formatClockTime(gap.startSec)}–{formatClockTime(gap.endSec)}
+                      ({gap.kind === "unprocessed"
+                        ? "not processed"
+                        : gap.uncertain
+                          ? "outcome uncertain"
+                          : "failed"})
+                    </span>
+                  {/each}
+                  <small>These ranges are gaps, not detected silence.</small>
+                </div>
+              {/if}
+
+              {#if emptyRecognitionRanges.length > 0}
+                <p class="timestamp-note">
+                  No text was recognized in {emptyRecognitionRanges.length}
+                  successfully processed {emptyRecognitionRanges.length === 1 ? "window" : "windows"};
+                  that does not prove those ranges were silent.
+                </p>
+              {/if}
+              {#if overlapOnlyRanges.length > 0}
+                <div class="transcript-gaps" role="status">
+                  <strong>Overlap-only ranges:</strong>
+                  {#each overlapOnlyRanges as range}
+                    <span>
+                      {formatClockTime(range.startSec)}–{formatClockTime(range.endSec)}
+                      (processed successfully; no new text after deduplication)
+                    </span>
+                  {/each}
+                  <small>
+                    These source windows repeated text already retained from adjacent overlap;
+                    they are not failures, empty recognition, or detected silence.
+                  </small>
+                </div>
+              {/if}
               <div class="transcription-actions">
                 <button onclick={copyTranscriptionToClipboard}>Copy</button>
                 <button onclick={downloadTranscription}>Download .txt</button>
+                {#if hasTimestampExportData()}
+                  <button onclick={copyTimestampedTranscript}>Copy with estimated times</button>
+                  <button onclick={() => downloadCaptions("srt")}>
+                    {transcriptionSegments.length > 0
+                      ? "Download .srt bundle (.zip)"
+                      : "Download timing note"}
+                  </button>
+                  <button onclick={() => downloadCaptions("vtt")}>Download .vtt</button>
+                {/if}
                 <button
                   onclick={() => {
                     transcription = "";
+                    transcriptionSegments = [];
+                    transcriptionGaps = [];
+                    emptyRecognitionRanges = [];
+                    overlapOnlyRanges = [];
                   }}>Clear</button
                 >
               </div>
@@ -11877,6 +11992,22 @@ Output only the summary text, no preamble.`;
     gap: 12px;
   }
 
+  .family-heading {
+    grid-column: 1 / -1;
+    margin: 8px 0 0;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 0.8rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .family-heading:first-child {
+    margin-top: 0;
+  }
+
   .model-card {
     background: var(--panel-bg);
     border: 1px solid var(--border);
@@ -13906,6 +14037,56 @@ Output only the summary text, no preamble.`;
     font-family: monospace;
     max-height: 200px;
     overflow: auto;
+  }
+
+  .timestamp-note {
+    margin: 0 0 8px;
+    color: var(--muted);
+    font-size: 0.75rem;
+    line-height: 1.4;
+  }
+
+  .transcript-segments {
+    max-height: 260px;
+    margin: 0;
+    padding: 0;
+    overflow: auto;
+    list-style: none;
+  }
+
+  .transcript-segment {
+    display: grid;
+    grid-template-columns: 140px 1fr;
+    gap: 10px;
+    padding: 4px 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 40%, transparent);
+    font-size: 0.85rem;
+    line-height: 1.5;
+  }
+
+  .transcript-segment:last-child {
+    border-bottom: none;
+  }
+
+  .segment-text {
+    word-break: break-word;
+  }
+
+  .transcript-gaps {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    margin-top: 10px;
+    padding: 8px;
+    border: 1px solid color-mix(in srgb, var(--warning) 55%, var(--border));
+    border-radius: 6px;
+    color: var(--fg);
+    font-size: 0.75rem;
+  }
+
+  .transcript-gaps small {
+    flex-basis: 100%;
+    color: var(--muted);
   }
 
   /* Persona dropdown + manager */
