@@ -259,7 +259,7 @@ describe('buildTimestampedText', () => {
       expect(source).toContain('function currentTranscriptExportState()');
       expect(source).toContain('buildTimestampedText(currentTranscriptExportState())');
       expect(source).toContain(
-        'buildCaptionDownloads(format, currentTranscriptExportState())',
+        'buildCaptionArtifact(format, currentTranscriptExportState())',
       );
       expect(source).toContain('overlapOnlyRanges = Array.isArray(result?.overlapOnlyRanges)');
       expect(source).toContain('buildLongAudioCompletionStatus(result, path)');
@@ -267,7 +267,10 @@ describe('buildTimestampedText', () => {
         'they are not failures, empty recognition, or detected silence.',
       );
       expect(source).toContain('"Download timing note"');
-      expect(source).toContain('downloadCaptionFiles(files)');
+      expect(source).toContain('downloadCaptionArtifact(artifact)');
+      // One request per export: a second anchor click can be refused without telling us.
+      expect(source.match(/downloadCaptionArtifact\(/g)).toHaveLength(1);
+      expect(source).not.toContain('downloadCaptionFiles');
     });
   });
 });

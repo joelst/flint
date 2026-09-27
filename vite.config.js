@@ -104,6 +104,7 @@ export default defineConfig(() => ({
         'src/lib/transcript-format.ts',
         'src/lib/long-audio-transcript.ts',
         'src/lib/caption-download.ts',
+        'src/lib/zip-archive.ts',
         'src/lib/endpoint-self-test-residency.ts',
         'src/lib/endpoint-self-test.ts',
         'src/lib/sidecar-stderr.ts',

@@ -60,6 +60,22 @@ export function modelMatchesSearch(model: any, term: string): boolean {
 }
 
 /**
+ * Order two labels the way a reader expects (`phi-9` before `phi-10`), then break ties
+ * on the raw string.
+ *
+ * `numeric` + `sensitivity: 'base'` deliberately ignore padding and case, so it returns
+ * 0 for distinct labels such as `phi-4`/`phi-04`. Returning that directly would leave
+ * the order dependent on input sequence, which splits family headings (the list renders
+ * a heading whenever the label differs from the previous row) and reshuffles the list on
+ * every refresh. The tie-break only ever separates labels that are genuinely different.
+ */
+function compareLabels(a: string, b: string): number {
+  const natural = a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+  if (natural !== 0) return natural;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
  * Compare two models for the chosen ordering.
  *
  * Every mode falls through to alias so the order is total: without a tie-break the list
@@ -76,13 +92,10 @@ export function compareModels(a: any, b: any, mode: ModelSortMode): number {
       // Models with no family belong at the end, not under a blank heading.
       if (!fa) return 1;
       if (!fb) return -1;
-      return fa.localeCompare(fb, undefined, { numeric: true, sensitivity: 'base' });
+      return compareLabels(fa, fb);
     }
   }
-  return String(a?.alias ?? '').localeCompare(String(b?.alias ?? ''), undefined, {
-    numeric: true,
-    sensitivity: 'base',
-  });
+  return compareLabels(String(a?.alias ?? ''), String(b?.alias ?? ''));
 }
 
 /** Sort a copy, so the caller's array (and any reactive state) is left alone. */

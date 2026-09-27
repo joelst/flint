@@ -6,6 +6,8 @@
  * therefore SEGMENT level only; there is no honest word-level timing to emit.
  */
 
+import { createStoredZip } from './zip-archive';
+
 export interface TranscriptSegment {
   index: number;
   startSec: number;
@@ -266,4 +268,51 @@ export function buildCaptionDownloads(
   }
   const body = buildVtt(state);
   return body ? [{ fileName: `${stem}.vtt`, body }] : [];
+}
+
+/** A single file to hand to the browser. `body` is already the exact bytes to write. */
+export interface CaptionArtifact {
+  fileName: string;
+  body: Uint8Array;
+  mimeType: string;
+  /** The files inside, for status copy. One name unless this is an archive. */
+  contents: string[];
+}
+
+const TEXT_MIME = 'text/plain;charset=utf-8';
+const ZIP_MIME = 'application/zip';
+
+/**
+ * Build the one file the caption export downloads.
+ *
+ * An SRT export is two files: the captions, and the note recording that the timings are
+ * derived by Flint rather than reported by the model, along with the per-window
+ * outcomes. Requesting two downloads in a row can trip the host WebView's
+ * multiple-automatic-download permission, and a page is never told whether a download
+ * was accepted — so the second file can be dropped while the app cheerfully reports
+ * both. Since the captions must not circulate without that qualification, the pair is
+ * archived and requested once. Anything that is already a single file stays a plain
+ * download.
+ */
+export function buildCaptionArtifact(
+  format: 'srt' | 'vtt',
+  state: TranscriptExportState,
+  now: Date = new Date(),
+): CaptionArtifact | null {
+  const files = buildCaptionDownloads(format, state, now);
+  if (files.length === 0) return null;
+  if (files.length === 1) {
+    return {
+      fileName: files[0].fileName,
+      body: new TextEncoder().encode(files[0].body),
+      mimeType: TEXT_MIME,
+      contents: [files[0].fileName],
+    };
+  }
+  return {
+    fileName: `${captionFileStem(now)}.zip`,
+    body: createStoredZip(files, now),
+    mimeType: ZIP_MIME,
+    contents: files.map((file) => file.fileName),
+  };
 }

@@ -196,14 +196,14 @@
     type TranscriptionWindowOutcome,
   } from "$lib/long-audio-transcript";
   import {
-    buildCaptionDownloads,
+    buildCaptionArtifact,
     buildTimestampedText,
     buildTimingDisclaimer,
     formatClockTime,
     type TranscriptExportState,
     type TranscriptSegment,
   } from "$lib/transcript-format";
-  import { downloadCaptionFiles } from "$lib/caption-download";
+  import { downloadCaptionArtifact } from "$lib/caption-download";
   import { sniffAudioFormat } from "../../sidecar/audio-format.js";
   import { looksLikeSpeech } from "../../sidecar/model-classification.js";
   import { recommendedMaxTurns as recommendedMaxTurnsFor, clampContextTurns, MIN_CONTEXT_TURNS, MAX_CONTEXT_TURNS } from "$lib/context-turns";
@@ -7475,20 +7475,18 @@ Output only the summary text, no preamble.`;
   }
 
   function downloadCaptions(format: "srt" | "vtt") {
-    const files = buildCaptionDownloads(format, currentTranscriptExportState());
-    if (files.length === 0) {
+    const artifact = buildCaptionArtifact(format, currentTranscriptExportState());
+    if (!artifact) {
       statusMessage = "No timed transcript text is available to export";
       return;
     }
-    downloadCaptionFiles(files);
+    downloadCaptionArtifact(artifact);
+    // The page is not told whether the browser accepted a download, so this reports
+    // what Flint requested rather than claiming the file was saved.
     statusMessage =
-      format === "srt"
-        ? files.some((file) => file.fileName.endsWith(".srt"))
-          ? `SRT captions and associated timing note downloaded: ${files[0].fileName}`
-          : `SRT timing note downloaded with source-window outcomes: ${files[0].fileName}`
-        : transcriptionSegments.length > 0
-          ? `WebVTT captions downloaded: ${files[0].fileName}`
-          : `WebVTT metadata downloaded with source-window outcomes: ${files[0].fileName}`;
+      artifact.contents.length > 1
+        ? `Download requested: ${artifact.fileName}, containing the captions and their derived-timing note`
+        : `Download requested: ${artifact.fileName}`;
   }
 </script>
 
@@ -9645,7 +9643,7 @@ Output only the summary text, no preamble.`;
                   <button onclick={copyTimestampedTranscript}>Copy with estimated times</button>
                   <button onclick={() => downloadCaptions("srt")}>
                     {transcriptionSegments.length > 0
-                      ? "Download .srt + timing note"
+                      ? "Download .srt bundle (.zip)"
                       : "Download timing note"}
                   </button>
                   <button onclick={() => downloadCaptions("vtt")}>Download .vtt</button>

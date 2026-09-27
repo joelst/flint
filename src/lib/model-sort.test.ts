@@ -106,6 +106,41 @@ describe('compareModels', () => {
       expect(Math.sign(compareModels(a, b, mode))).toBe(-Math.sign(compareModels(b, a, mode)));
     }
   });
+
+  // A 0 for two labels that are not the same string makes the order depend on input
+  // sequence, which is what splits family headings and reshuffles the list on refresh.
+  it.each([
+    { name: 'zero-padded family', mode: 'family' as const, a: { alias: 'a', family: 'phi-4' }, b: { alias: 'b', family: 'phi-04' } },
+    { name: 'zero-padded alias', mode: 'name' as const, a: { alias: 'Model-1' }, b: { alias: 'model-01' } },
+    { name: 'case-only alias', mode: 'name' as const, a: { alias: 'x' }, b: { alias: 'X' } },
+  ])('never ties distinct labels ($name)', ({ mode, a, b }) => {
+    expect(compareModels(a, b, mode)).not.toBe(0);
+    expect(Math.sign(compareModels(a, b, mode))).toBe(-Math.sign(compareModels(b, a, mode)));
+  });
+
+  it('keeps one heading per family regardless of input order', () => {
+    const models = [
+      { alias: 'p-b', family: 'phi-4' },
+      { alias: 'p-a', family: 'phi-04' },
+      { alias: 'p-c', family: 'phi-4' },
+    ];
+    const orders = [[0, 1, 2], [2, 1, 0], [1, 0, 2], [2, 0, 1]].map((permutation) =>
+      sortModels(permutation.map((index) => models[index]), 'family').map((m) => m.family),
+    );
+
+    for (const order of orders) expect(order).toEqual(orders[0]);
+
+    // The page emits a heading whenever the label differs from the previous row, so
+    // equal labels must be adjacent or the same family is titled more than once.
+    const headings = orders[0].filter((family, index) => index === 0 || orders[0][index - 1] !== family);
+    expect(headings).toEqual(['phi-04', 'phi-4']);
+  });
+
+  it('still orders numerically rather than lexically', () => {
+    expect(
+      sortModels([{ alias: 'phi-10' }, { alias: 'phi-9' }, { alias: 'phi-2' }], 'name').map((m) => m.alias),
+    ).toEqual(['phi-2', 'phi-9', 'phi-10']);
+  });
 });
 
 describe('isModelSortMode', () => {

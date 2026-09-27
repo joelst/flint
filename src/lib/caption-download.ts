@@ -1,13 +1,21 @@
-import type { CaptionDownload } from './transcript-format';
+import type { CaptionArtifact } from './transcript-format';
 
-export function downloadCaptionFiles(files: readonly CaptionDownload[]): void {
-  for (const file of files) {
-    const blob = new Blob([file.body], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = file.fileName;
-    anchor.click();
-    setTimeout(() => URL.revokeObjectURL(url), 10000);
-  }
+/**
+ * Hand one file to the browser's download flow.
+ *
+ * Deliberately takes a single artifact rather than a list: clicking a second generated
+ * anchor can trip the host WebView's multiple-automatic-download permission, and the
+ * page is never told whether a download was accepted, so a dropped file is
+ * indistinguishable from a saved one. Callers that need to deliver several files
+ * together must archive them first.
+ */
+export function downloadCaptionArtifact(artifact: CaptionArtifact): void {
+  const blob = new Blob([artifact.body], { type: artifact.mimeType });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = artifact.fileName;
+  anchor.click();
+  // The download reads the blob asynchronously, so revoking immediately can truncate it.
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
