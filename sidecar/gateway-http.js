@@ -51,10 +51,20 @@ export function stripHopByHopHeaders (headers) {
   return out;
 }
 
+/** Parse the case-insensitive media type while ignoring optional whitespace and parameters. */
+export function contentTypeMediaType (contentType) {
+  return String(contentType || '').split(';', 1)[0].trim().toLowerCase();
+}
+
+/** Compare a Content-Type by media type rather than its raw header serialization. */
+export function isContentType (contentType, expectedMediaType) {
+  const expected = String(expectedMediaType || '').trim().toLowerCase();
+  return expected !== '' && contentTypeMediaType(contentType) === expected;
+}
+
 /** Media type only, so `application/json; charset=utf-8` still counts as JSON. */
 export function isJsonContentType (contentType) {
-  const media = String(contentType || '').split(';')[0].trim().toLowerCase();
-  return media === 'application/json';
+  return isContentType(contentType, 'application/json');
 }
 
 /**
