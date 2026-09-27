@@ -60,6 +60,14 @@ const NOT_MULTIPART = Symbol('notMultipart');
 const TRANSCRIPTION_REQUIRES_MULTIPART =
   'Audio transcription requires a multipart/form-data body beginning with its declared boundary.';
 
+function canonicalGatewayPath (urlPath) {
+  return String(urlPath || '')
+    .split(/[?#]/)[0]
+    .replace(/\/{2,}/g, '/')
+    .replace(/\/+$/, '')
+    .toLowerCase();
+}
+
 /**
  * Classify OpenAI-compatible routes for metadata-only access logging.
  *
@@ -68,11 +76,11 @@ const TRANSCRIPTION_REQUIRES_MULTIPART =
  */
 export function classifyGatewayRoute (urlPath) {
   // Foundry's router collapses empty segments (`/v1/audio//transcriptions` routes), so the
-  // classification must too, or a doubled slash would bypass the speech guard.
-  const path = String(urlPath || '').split(/[?#]/)[0].replace(/\/{2,}/g, '/');
+  // classification must too, and it matches paths case-insensitively.
+  const path = canonicalGatewayPath(urlPath);
   if (/(^|\/)chat\/completions(\/|$)/.test(path)) return 'chat';
   if (/(^|\/)embeddings(\/|$)/.test(path)) return 'embeddings';
-  if (/(^|\/)audio\/transcriptions(\/|$)/i.test(path)) return 'speech';
+  if (/(^|\/)audio\/transcriptions(\/|$)/.test(path)) return 'speech';
   if (/(^|\/)models(\/|$)/.test(path)) return 'models';
   return 'other';
 }
@@ -786,10 +794,7 @@ export function createGateway (options) {
   }
 
   function isChatCompletionPath (url) {
-    return String(url || '')
-      .split(/[?#]/)[0]
-      .replace(/\/{2,}/g, '/')
-      .replace(/\/+$/, '') === '/v1/chat/completions';
+    return canonicalGatewayPath(url) === '/v1/chat/completions';
   }
 
   function isEventStream (contentType) {
@@ -1055,7 +1060,7 @@ const SENT = Symbol('sent');
 const ABORTED = Symbol('aborted');
 
 function isStatusPath (url) {
-  const path = String(url || '').split('?')[0];
+  const path = canonicalGatewayPath(url);
   return path === '/status' || path === '/v1/status';
 }
 
