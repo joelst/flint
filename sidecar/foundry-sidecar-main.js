@@ -1259,10 +1259,7 @@ async function speechStrategyBeforeLoad(requested) {
     : candidatesComplete
       ? cachedVariantIdsByAlias.get(aliasKey) || []
       : [];
-  const classificationAlias = cachedRefreshFailed
-    || (resolution && !resolution.variantId && !candidatesComplete)
-    ? ''
-    : requested;
+  const classificationAlias = resolution?.variantId || candidatesComplete ? requested : '';
   return assertSpeechModelSupported(classificationAlias, resolution?.variantId || '', variants);
 }
 
