@@ -33,6 +33,10 @@ import {
   createEmptyArchive,
   migrateLegacyConversations,
 } from './conversation-store';
+import {
+  MAX_TEXT_FILE_BYTES,
+  MAX_TOTAL_TEXT_ATTACHMENT_BYTES,
+} from './text-attachment-policy';
 
 const textMsg = (role: string, text: string) => ({ role, content: text });
 
@@ -91,6 +95,33 @@ describe('normalizeContent', () => {
       file: { name: 'main.ts', text: 'export {};\n', mimeType: 'text/typescript' },
     }];
     expect(normalizeContent(parts)).toEqual(parts);
+  });
+
+  it('preserves over-limit file parts for display while request validation keeps them unsendable', () => {
+    const oversized = {
+      type: 'file_text',
+      file: { name: 'huge.txt', text: 'x'.repeat(MAX_TEXT_FILE_BYTES + 1) },
+    };
+    const aggregateOverflow = [
+      {
+        type: 'file_text',
+        file: { name: 'first.txt', text: 'a'.repeat(MAX_TEXT_FILE_BYTES) },
+      },
+      {
+        type: 'file_text',
+        file: { name: 'second.txt', text: 'b'.repeat(MAX_TEXT_FILE_BYTES) },
+      },
+      { type: 'file_text', file: { name: 'third.txt', text: 'c' } },
+    ];
+
+    expect(normalizeContentDetailed([oversized])).toMatchObject({
+      content: [oversized],
+      unrecognizedParts: 0,
+    });
+    expect(normalizeContentDetailed(aggregateOverflow)).toMatchObject({
+      content: aggregateOverflow,
+      unrecognizedParts: 0,
+    });
   });
 
   it('drops unrecoverable parts but keeps unrecognized ones verbatim', () => {

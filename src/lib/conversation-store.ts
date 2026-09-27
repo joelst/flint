@@ -7,7 +7,6 @@
  * global message thread under another, so switching conversations silently discarded history.
  * Migrating that shape correctly is the whole reason this module exists.
  */
-
 /** Bump only for a change that older builds cannot read. */
 export const CONVERSATION_SCHEMA_VERSION = 2;
 

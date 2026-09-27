@@ -20,6 +20,12 @@ import {
   type TextFilePart,
 } from './conversation-store';
 import { promptTextForFile } from './text-attachments';
+import {
+  MAX_ATTACHED_TEXT_FILES,
+  MAX_TOTAL_TEXT_ATTACHMENT_BYTES,
+  isValidTextAttachmentData,
+  textAttachmentBytes,
+} from './text-attachment-policy';
 
 /** A part this builder knows how to send. Opaque parts never reach a request. */
 export type PromptPart = TextPart | ImagePart;
@@ -30,6 +36,16 @@ export type PromptContent = string | PromptPart[];
 export interface PromptMessage {
   role: 'user' | 'assistant';
   content: PromptContent;
+}
+
+export class TextAttachmentRequestError extends Error {
+  constructor() {
+    super(
+      'One or more attached text files exceed the supported count or size limits. '
+      + 'Remove the affected attachment before sending.',
+    );
+    this.name = 'TextAttachmentRequestError';
+  }
 }
 
 /**
@@ -50,13 +66,19 @@ const TURN_SEPARATOR = '\n\n';
  * being coerced — `String(123)` would invent text the user never wrote, and a part with no
  * usable url is an image the model cannot fetch.
  */
-export function toPromptParts(content: unknown): PromptPart[] {
+function reducePromptParts(content: unknown): {
+  parts: PromptPart[];
+  rejectedTextAttachments: number;
+} {
   if (typeof content === 'string') {
     const text = content.trim();
-    return text ? [{ type: 'text', text }] : [];
+    return { parts: text ? [{ type: 'text', text }] : [], rejectedTextAttachments: 0 };
   }
-  if (!Array.isArray(content)) return [];
+  if (!Array.isArray(content)) return { parts: [], rejectedTextAttachments: 0 };
   const parts: PromptPart[] = [];
+  let textFileCount = 0;
+  let textFileBytes = 0;
+  let rejectedTextAttachments = 0;
   // `supportedParts` removes anything a newer build stored that this one cannot describe to a
   // model; the checks below then reject anything malformed that it let through.
   for (const part of supportedParts(content as MessageContent)) {
@@ -71,10 +93,29 @@ export function toPromptParts(content: unknown): PromptPart[] {
       const url = (part as ImagePart).image_url?.url;
       if (typeof url === 'string' && url) parts.push({ type: 'image_url', image_url: { url } });
     } else if (part.type === 'file_text') {
-      parts.push({ type: 'text', text: promptTextForFile(part as TextFilePart) });
+      const filePart = part as TextFilePart;
+      if (!isValidTextAttachmentData(filePart.file)) {
+        rejectedTextAttachments += 1;
+        continue;
+      }
+      const bytes = textAttachmentBytes(filePart.file.text);
+      if (
+        textFileCount >= MAX_ATTACHED_TEXT_FILES
+        || textFileBytes + bytes > MAX_TOTAL_TEXT_ATTACHMENT_BYTES
+      ) {
+        rejectedTextAttachments += 1;
+        continue;
+      }
+      parts.push({ type: 'text', text: promptTextForFile(filePart) });
+      textFileCount += 1;
+      textFileBytes += bytes;
     }
   }
-  return parts;
+  return { parts, rejectedTextAttachments };
+}
+
+export function toPromptParts(content: unknown): PromptPart[] {
+  return reducePromptParts(content).parts;
 }
 
 /**
@@ -151,6 +192,8 @@ export interface AlternatingOptions {
   textOnly?: boolean;
   /** Stand-in for an image when `textOnly` is set. Injected so the prompt text is testable. */
   imagePlaceholder?: string;
+  /** Refuse a request rather than silently omitting a known text attachment that exceeds policy. */
+  rejectInvalidTextAttachments?: boolean;
 }
 
 export const DEFAULT_INSTRUCTION_PREFIX = 'Follow these instructions:';
@@ -200,7 +243,11 @@ export function normalizeForAlternatingChat(
   for (const message of messages ?? []) {
     const role = message?.role;
     if (!isPromptRole(role)) continue;
-    const raw = toPromptParts(message?.content);
+    const reduced = reducePromptParts(message?.content);
+    if (options.rejectInvalidTextAttachments && reduced.rejectedTextAttachments > 0) {
+      throw new TextAttachmentRequestError();
+    }
+    const raw = reduced.parts;
     const parts = options.textOnly
       ? flattenPartsToText(raw, options.imagePlaceholder ?? DEFAULT_IMAGE_PLACEHOLDER)
       : raw;

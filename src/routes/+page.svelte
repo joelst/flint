@@ -143,15 +143,15 @@
     MAX_ATTACHED_IMAGES,
     compactImageAttachment,
     imageAttachmentFitsArchive,
+    preparedImageStillOwned,
     storageCharsExcluding,
   } from "$lib/image-attachments";
   import {
     MAX_ATTACHED_TEXT_FILES,
-    MAX_TOTAL_TEXT_ATTACHMENT_CHARS,
     TEXT_ATTACHMENT_ACCEPT,
+    mergePreparedTextAttachments,
     isSupportedTextAttachment,
     prepareTextAttachment,
-    totalTextAttachmentChars,
   } from "$lib/text-attachments";
   import {
     collectStoredArchive,
@@ -1527,7 +1527,8 @@
   let attachedTextFiles: TextFilePart[] = $state([]);
   let imageProcessingCount = $state(0);
   let textAttachmentError = $state("");
-  let attachmentEpoch = 0;
+  let imageAttachmentEpoch = 0;
+  let textAttachmentEpoch = 0;
   let textFileInput: HTMLInputElement | undefined = $state();
 
   // URL-fetch (Option A web fetch): pending URL chips and their fetched content
@@ -1554,8 +1555,12 @@
 
   // Auto-clear images if user switches away from a vision model
   $effect(() => {
-    if (!isVisionModel && attachedImages.length > 0) {
-      attachedImages = [];
+    if (!isVisionModel) {
+      // Invalidate pending compaction even when no thumbnail has landed yet. Do not depend on
+      // imageProcessingCount here: writing an empty array while work remains in flight would
+      // keep this effect's condition true and cause a reactive update loop.
+      imageAttachmentEpoch += 1;
+      if (attachedImages.length > 0) attachedImages = [];
     }
   });
 
@@ -6416,6 +6421,13 @@ updateStateFromSdk();
         return;
       }
     }
+    let requestMessages: any[];
+    try {
+      requestMessages = getMessagesForInference(stamped, true);
+    } catch (error: any) {
+      statusMessage = error?.message || "The attached files could not be included safely.";
+      return;
+    }
     chatMessages = stamped;
     if (doneFetches.length > 0) clearUrlFetches();
     chatInput = "";
@@ -6466,10 +6478,9 @@ updateStateFromSdk();
       // Prefer HTTP endpoint from sidecar when available (clean architecture)
       const endpoint = state.endpoint;
       if (endpoint) {
-        const inferenceMessages = getMessagesForInference();
         const data = await chatCompletionStream(
           selectedModelAlias,
-          inferenceMessages,
+          requestMessages,
           (delta: string) => {
             if (requestController.signal.aborted) return;
             assistantContent += delta;
@@ -6520,8 +6531,7 @@ updateStateFromSdk();
           chatClient.settings.presencePenalty = presencePenalty === 0 ? undefined : presencePenalty;
           chatClient.settings.randomSeed = randomSeed ?? undefined;
         }
-        const inferenceMessages = getMessagesForInference();
-        for await (const chunk of chatClient.completeStreamingChat(inferenceMessages)) {
+        for await (const chunk of chatClient.completeStreamingChat(requestMessages)) {
           if (requestController.signal.aborted) break;
           const delta = chunk.choices?.[0]?.delta?.content || "";
           if (delta) {
@@ -6602,9 +6612,12 @@ updateStateFromSdk();
    * - We normalize to strict user/assistant alternation for model compatibility.
    * - This directly affects latency + energy use, even on powerful local hardware.
    */
-  function getMessagesForInference(): any[] {
+  function getMessagesForInference(
+    sourceMessages: any[] = chatMessages,
+    rejectInvalidTextAttachments = false,
+  ): any[] {
     // Remove any trailing empty assistant placeholder (from streaming setup)
-    let history = [...chatMessages];
+    let history = [...sourceMessages];
     if (history.length > 0) {
       if (isEmptyAssistantPlaceholder(history[history.length - 1])) {
         history = history.slice(0, -1);
@@ -6648,7 +6661,7 @@ updateStateFromSdk();
         role: m.role,
         content: m.content, // can be string or vision array [{type,text}, {type:'image_url',...}]
       })),
-      { systemInstruction: effectiveSystem },
+      { systemInstruction: effectiveSystem, rejectInvalidTextAttachments },
     );
   }
 
@@ -6808,13 +6821,19 @@ Output only the summary text, no preamble.`;
 
   async function addImageFiles(files: File[]) {
     const ownerConversation = threadLoadedFor;
-    const ownerEpoch = attachmentEpoch;
+    const ownerEpoch = imageAttachmentEpoch;
     const slots = Math.max(0, MAX_ATTACHED_IMAGES - attachedImages.length);
     for (const file of files.filter((candidate) => candidate.type.startsWith("image/")).slice(0, slots)) {
       imageProcessingCount += 1;
       try {
         const dataUrl = await compactImageAttachment(file);
-        if (threadLoadedFor !== ownerConversation || attachmentEpoch !== ownerEpoch) return;
+        if (!preparedImageStillOwned(
+          ownerConversation,
+          threadLoadedFor,
+          ownerEpoch,
+          imageAttachmentEpoch,
+          isVisionModel,
+        )) return;
         if (attachedImages.length < MAX_ATTACHED_IMAGES) {
           attachedImages = [...attachedImages, dataUrl];
         }
@@ -6844,12 +6863,12 @@ Output only the summary text, no preamble.`;
   }
 
   function clearImages() {
-    attachmentEpoch += 1;
+    imageAttachmentEpoch += 1;
     attachedImages = [];
   }
 
   function clearTextAttachments() {
-    attachmentEpoch += 1;
+    textAttachmentEpoch += 1;
     attachedTextFiles = [];
     textAttachmentError = "";
   }
@@ -6861,7 +6880,7 @@ Output only the summary text, no preamble.`;
 
   async function addTextFiles(files: File[]) {
     const ownerConversation = threadLoadedFor;
-    const ownerEpoch = attachmentEpoch;
+    const ownerEpoch = textAttachmentEpoch;
     textAttachmentError = "";
     const remaining = MAX_ATTACHED_TEXT_FILES - attachedTextFiles.length;
     if (remaining <= 0) {
@@ -6872,23 +6891,20 @@ Output only the summary text, no preamble.`;
     for (const file of files.slice(0, remaining)) {
       try {
         const part = await prepareTextAttachment(file);
-        if (threadLoadedFor !== ownerConversation || attachmentEpoch !== ownerEpoch) return;
-        if (
-          totalTextAttachmentChars([...attachedTextFiles, ...accepted, part])
-          > MAX_TOTAL_TEXT_ATTACHMENT_CHARS
-        ) {
-          throw new Error("Attached text files are limited to 256 KB of text in total.");
-        }
+        if (threadLoadedFor !== ownerConversation || textAttachmentEpoch !== ownerEpoch) return;
         accepted.push(part);
       } catch (error: any) {
         textAttachmentError = error?.message || "Could not attach that file.";
         break;
       }
     }
-    if (threadLoadedFor !== ownerConversation || attachmentEpoch !== ownerEpoch) return;
-    attachedTextFiles = [...attachedTextFiles, ...accepted];
-    if (files.length > remaining && !textAttachmentError) {
-      textAttachmentError = `Only the first ${remaining} file${remaining === 1 ? "" : "s"} were attached.`;
+    if (threadLoadedFor !== ownerConversation || textAttachmentEpoch !== ownerEpoch) return;
+    const merged = mergePreparedTextAttachments(attachedTextFiles, accepted);
+    attachedTextFiles = merged.attachments;
+    const rejectedCount = merged.rejectedCount + Math.max(0, files.length - remaining);
+    if (rejectedCount > 0 && !textAttachmentError) {
+      textAttachmentError =
+        `${rejectedCount} file${rejectedCount === 1 ? " was" : "s were"} not attached because the count or 256 KB total limit was reached.`;
     }
   }
 

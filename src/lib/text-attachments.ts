@@ -1,8 +1,18 @@
 import type { TextFilePart } from "./conversation-store";
+import {
+  MAX_ATTACHED_TEXT_FILES,
+  MAX_TEXT_FILE_BYTES,
+  MAX_TEXT_FILE_NAME_CHARS,
+  MAX_TOTAL_TEXT_ATTACHMENT_BYTES,
+  isValidTextAttachmentData,
+  textAttachmentBytes,
+} from "./text-attachment-policy";
 
-export const MAX_ATTACHED_TEXT_FILES = 4;
-export const MAX_TEXT_FILE_BYTES = 128 * 1024;
-export const MAX_TOTAL_TEXT_ATTACHMENT_CHARS = 256 * 1024;
+export {
+  MAX_ATTACHED_TEXT_FILES,
+  MAX_TEXT_FILE_BYTES,
+  MAX_TOTAL_TEXT_ATTACHMENT_BYTES,
+} from "./text-attachment-policy";
 
 const TEXT_EXTENSIONS = new Set([
   "c", "cc", "cpp", "cs", "css", "csv", "go", "h", "hpp", "html", "ini", "java",
@@ -18,7 +28,10 @@ export const TEXT_ATTACHMENT_ACCEPT = [
 ].join(",");
 
 function safeFileName(name: string): string {
-  return name.replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 120) || "attachment.txt";
+  return name
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim()
+    .slice(0, MAX_TEXT_FILE_NAME_CHARS) || "attachment.txt";
 }
 
 export function isSupportedTextAttachment(file: Pick<File, "name" | "type">): boolean {
@@ -40,7 +53,7 @@ export async function prepareTextAttachment(file: File): Promise<TextFilePart> {
   if (text.includes("\0")) {
     throw new Error(`${file.name || "The selected file"} appears to contain binary data.`);
   }
-  return {
+  const part: TextFilePart = {
     type: "file_text",
     file: {
       name: safeFileName(file.name),
@@ -48,10 +61,40 @@ export async function prepareTextAttachment(file: File): Promise<TextFilePart> {
       ...(file.type ? { mimeType: file.type } : {}),
     },
   };
+  if (!isValidTextAttachmentData(part.file)) {
+    throw new Error(`${file.name || "The selected file"} is larger than 128 KB after decoding.`);
+  }
+  return part;
 }
 
-export function totalTextAttachmentChars(parts: TextFilePart[]): number {
-  return parts.reduce((total, part) => total + part.file.text.length, 0);
+export function mergePreparedTextAttachments(
+  current: TextFilePart[],
+  prepared: TextFilePart[],
+): { attachments: TextFilePart[]; added: TextFilePart[]; rejectedCount: number } {
+  const attachments = [...current];
+  const added: TextFilePart[] = [];
+  let totalBytes = attachments.reduce(
+    (total, part) => total + textAttachmentBytes(part.file.text),
+    0,
+  );
+  let rejectedCount = 0;
+
+  for (const part of prepared) {
+    const bytes = textAttachmentBytes(part.file.text);
+    if (
+      !isValidTextAttachmentData(part.file)
+      || attachments.length >= MAX_ATTACHED_TEXT_FILES
+      || totalBytes + bytes > MAX_TOTAL_TEXT_ATTACHMENT_BYTES
+    ) {
+      rejectedCount += 1;
+      continue;
+    }
+    attachments.push(part);
+    added.push(part);
+    totalBytes += bytes;
+  }
+
+  return { attachments, added, rejectedCount };
 }
 
 export function promptTextForFile(part: TextFilePart): string {

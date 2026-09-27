@@ -27,13 +27,51 @@ export function storageCharsExcluding(
   storage: Pick<Storage, "length" | "key" | "getItem">,
   excludedKey: string,
 ): number {
+  const firstKeys = listStorageKeys(storage);
   let chars = 0;
-  for (let index = 0; index < storage.length; index += 1) {
-    const key = storage.key(index);
-    if (key === null || key === excludedKey) continue;
+  for (const key of firstKeys) {
+    if (key === excludedKey) continue;
     chars += key.length + (storage.getItem(key)?.length ?? 0);
   }
+  const secondKeys = listStorageKeys(storage);
+  if (!sameKeys(firstKeys, secondKeys)) {
+    throw new Error("Local storage changed while its size was being checked.");
+  }
   return chars;
+}
+
+function listStorageKeys(storage: Pick<Storage, "length" | "key">): Set<string> {
+  const count = storage.length;
+  const keys = new Set<string>();
+  for (let index = 0; index < count; index += 1) {
+    const key = storage.key(index);
+    if (key === null || keys.has(key)) {
+      throw new Error("Local storage changed while its size was being checked.");
+    }
+    keys.add(key);
+  }
+  if (storage.length !== count) {
+    throw new Error("Local storage changed while its size was being checked.");
+  }
+  return keys;
+}
+
+function sameKeys(first: Set<string>, second: Set<string>): boolean {
+  if (first.size !== second.size) return false;
+  for (const key of first) if (!second.has(key)) return false;
+  return true;
+}
+
+export function preparedImageStillOwned(
+  ownerConversation: string | null,
+  currentConversation: string | null,
+  ownerEpoch: number,
+  currentEpoch: number,
+  visionEnabled: boolean,
+): boolean {
+  return ownerConversation === currentConversation
+    && ownerEpoch === currentEpoch
+    && visionEnabled;
 }
 
 function readBlobAsDataUrl(blob: Blob): Promise<string> {

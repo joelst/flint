@@ -4,8 +4,10 @@ import {
   MAX_CONVERSATION_STORAGE_CHARS,
   MAX_SOURCE_IMAGE_BYTES,
   compactImageAttachment,
+  preparedImageStillOwned,
   imageAttachmentFitsArchive,
   imageDataUrlBytes,
+  storageCharsExcluding,
 } from "./image-attachments";
 
 const originalFileReader = globalThis.FileReader;
@@ -53,6 +55,36 @@ describe("image attachment storage limits", () => {
   it("reserves storage headroom for settings and localStorage bookkeeping", () => {
     expect(imageAttachmentFitsArchive(MAX_CONVERSATION_STORAGE_CHARS - 1, 0)).toBe(true);
     expect(imageAttachmentFitsArchive(MAX_CONVERSATION_STORAGE_CHARS, 1)).toBe(false);
+  });
+
+  it("rejects an unstable same-length storage inventory", () => {
+    const snapshots = [
+      ["first", "second"],
+      ["first", "large-new-key"],
+    ];
+    let listing = 0;
+    let index = 0;
+    const storage = {
+      get length() { return 2; },
+      key(current: number) {
+        const key = snapshots[listing][current] ?? null;
+        index += 1;
+        if (index === 2) {
+          listing = 1;
+          index = 0;
+        }
+        return key;
+      },
+      getItem(key: string) {
+        return key === "large-new-key" ? "x".repeat(10_000) : "x";
+      },
+    };
+    expect(() => storageCharsExcluding(storage, "excluded")).toThrow("changed while");
+  });
+
+  it("does not commit a prepared image after switching away from a vision model", () => {
+    expect(preparedImageStillOwned("c1", "c1", 1, 1, true)).toBe(true);
+    expect(preparedImageStillOwned("c1", "c1", 1, 1, false)).toBe(false);
   });
 
   it("returns an already-small safe image without decoding it", async () => {
