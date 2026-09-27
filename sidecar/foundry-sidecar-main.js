@@ -449,12 +449,33 @@ function validateCommand(cmd, payload) {
     )) {
       return 'Command "chatCompletion" field "responseFormat" is invalid';
     }
-    if (payload.responseFormat?.type === 'json_schema' && (
-      !payload.responseFormat.json_schema
-      || typeof payload.responseFormat.json_schema !== 'object'
-      || Array.isArray(payload.responseFormat.json_schema)
-    )) {
-      return 'Command "chatCompletion" json_schema response format requires a JSON object';
+    if (payload.responseFormat?.type === 'json_schema') {
+      const jsonSchema = payload.responseFormat.json_schema;
+      if (
+        !jsonSchema
+        || typeof jsonSchema !== 'object'
+        || Array.isArray(jsonSchema)
+        || typeof jsonSchema.name !== 'string'
+        || jsonSchema.name.trim().length === 0
+        || jsonSchema.name.length > 128
+        || !jsonSchema.schema
+        || typeof jsonSchema.schema !== 'object'
+        || Array.isArray(jsonSchema.schema)
+        || (jsonSchema.description !== undefined
+          && (typeof jsonSchema.description !== 'string' || jsonSchema.description.length > 4096))
+        || (jsonSchema.strict !== undefined && typeof jsonSchema.strict !== 'boolean')
+      ) {
+        return 'Command "chatCompletion" json_schema response format requires a non-empty "name" of at most 128 characters, an object "schema", an optional description of at most 4096 characters, and an optional boolean "strict"';
+      }
+      let serializedJsonSchema;
+      try {
+        serializedJsonSchema = JSON.stringify(jsonSchema);
+      } catch {
+        return 'Command "chatCompletion" json_schema response format must be serializable JSON';
+      }
+      if (Buffer.byteLength(serializedJsonSchema) > 64 * 1024) {
+        return 'Command "chatCompletion" json_schema response format exceeds the 64 KiB limit';
+      }
     }
     if (typeof payload.maxTokens === 'number' && (!Number.isInteger(payload.maxTokens) || payload.maxTokens <= 0)) {
       return `Command "chatCompletion" field "maxTokens" must be a positive integer`;

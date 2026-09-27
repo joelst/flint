@@ -183,6 +183,79 @@ describe('streamed tool-call accumulation', () => {
     expect(finalizeStreamingToolCalls(target)).toEqual([call('{"a":1,"b":2}')]);
   });
 
+  it('validates cumulative snapshot argument bytes incrementally', () => {
+    const measured: string[] = [];
+    const target = createToolCallAccumulator({
+      utf8ByteLength: (value: string) => {
+        measured.push(value);
+        return new TextEncoder().encode(value).byteLength;
+      },
+    });
+    for (let length = 1; length <= 4096; length += 1) {
+      mergeStreamingToolCalls(target, { snapshot: [call('a'.repeat(length))] });
+    }
+    expect(finalizeStreamingToolCalls(target)[0].function.arguments).toBe('a'.repeat(4096));
+    expect(measured).toHaveLength(4096);
+    expect(measured.every((value) => value === 'a')).toBe(true);
+  });
+
+  it('counts cumulative snapshot UTF-8 bytes across split surrogate pairs', () => {
+    const measured: string[] = [];
+    const target = createToolCallAccumulator({
+      utf8ByteLength: (value: string) => {
+        measured.push(value);
+        return new TextEncoder().encode(value).byteLength;
+      },
+    });
+    const prefix = 'a'.repeat(MAX_TOOL_CALL_ARGUMENT_BYTES - 4);
+    mergeStreamingToolCalls(target, { snapshot: [call(`${prefix}\uD83D`)] });
+    mergeStreamingToolCalls(target, { snapshot: [call(`${prefix}😀`)] });
+    expect(target.failure).toBeNull();
+    expect(new TextEncoder().encode(finalizeStreamingToolCalls(target)[0].function.arguments))
+      .toHaveLength(MAX_TOOL_CALL_ARGUMENT_BYTES);
+    expect(measured).toEqual([`${prefix}\uD83D`, '\uDE00']);
+
+    mergeStreamingToolCalls(target, { snapshot: [call(`${prefix}😀x`)] });
+    expect(target.failure).toBeInstanceOf(Error);
+    expect(target.snapshots.get('call-1').function.arguments).toBe(`${prefix}😀`);
+  });
+
+  it('bounds discarded snapshots and commits multi-call snapshots atomically', () => {
+    const retained = createToolCallAccumulator();
+    mergeStreamingToolCalls(retained, { snapshot: [call('{"a":1,"b":2}')] });
+    mergeStreamingToolCalls(retained, {
+      snapshot: [call(`{${' '.repeat(MAX_TOOL_CALL_ARGUMENT_BYTES)}"a":1}`)],
+    });
+    expect(retained.failure).toBeInstanceOf(Error);
+    expect(retained.snapshots.get('call-1').function.arguments).toBe('{"a":1,"b":2}');
+
+    const atomic = createToolCallAccumulator();
+    mergeStreamingToolCalls(atomic, {
+      snapshot: [
+        call('{}'),
+        call('{}', { id: 'call-2', function: { name: '', arguments: '{}' } }),
+      ],
+    });
+    expect(atomic.failure).toBeInstanceOf(Error);
+    expect(atomic.snapshots.size).toBe(0);
+    expect(atomic.snapshotOrder).toEqual([]);
+  });
+
+  it('does not remeasure repeated or rolled-back cumulative snapshots', () => {
+    const measured: string[] = [];
+    const target = createToolCallAccumulator({
+      utf8ByteLength: (value: string) => {
+        measured.push(value);
+        return new TextEncoder().encode(value).byteLength;
+      },
+    });
+    mergeStreamingToolCalls(target, { snapshot: [call('{"a":1,"b":2}')] });
+    mergeStreamingToolCalls(target, { snapshot: [call('{"a":1,"b":2}')] });
+    mergeStreamingToolCalls(target, { snapshot: [call('{"a":1}')] });
+    expect(finalizeStreamingToolCalls(target)).toEqual([call('{"a":1,"b":2}')]);
+    expect(measured).toEqual(['{"a":1,"b":2}', '{"a":1}']);
+  });
+
   it('reconciles deltas followed by a full snapshot and both forms in one chunk', () => {
     const target = createToolCallAccumulator();
     mergeStreamingToolCalls(target, delta({

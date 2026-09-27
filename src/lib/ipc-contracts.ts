@@ -56,7 +56,15 @@ export type ChatToolChoice =
 export type ChatResponseFormat =
   | { type: 'text' }
   | { type: 'json_object' }
-  | { type: 'json_schema'; json_schema: Record<string, unknown> };
+  | {
+      type: 'json_schema';
+      json_schema: {
+        name: string;
+        description?: string;
+        schema: Record<string, unknown>;
+        strict?: boolean;
+      };
+    };
 
 /** Version of the JSON-lines transport handshake shared with the sidecar. */
 export const SIDECAR_PROTOCOL_VERSION = 1;

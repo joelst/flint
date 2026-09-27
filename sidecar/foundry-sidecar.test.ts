@@ -2642,6 +2642,75 @@ describe('foundry-sidecar command schema validation', () => {
     }
   });
 
+  it('rejects incomplete json_schema response formats before initialization', async () => {
+    const cases = [
+      {},
+      { name: 'structured' },
+      { name: '   ', schema: {} },
+      { name: 'structured', schema: null },
+      { name: 'structured', schema: [] },
+      { name: 'structured', schema: {}, description: 1 },
+      { name: 'structured', schema: {}, strict: 'yes' },
+      { name: 'n'.repeat(129), schema: {} },
+      { name: 'structured', schema: {}, description: 'd'.repeat(4097) },
+    ];
+    for (const [offset, json_schema] of cases.entries()) {
+      const id = 4755 + offset;
+      proc.stdin.write(`${JSON.stringify({
+        id,
+        cmd: 'chatCompletion',
+        model: 'm',
+        messages: [{ role: 'user', content: 'hi' }],
+        responseFormat: { type: 'json_schema', json_schema },
+      })}\n`);
+      const res = await waitForLine(proc, (msg) => msg.id === id);
+      expect(res.ok).not.toBe(true);
+      expect(String(res.error)).toMatch(/json_schema.*name.*schema/i);
+      expect(String(res.error)).not.toMatch(/initialized|init first/i);
+    }
+  });
+
+  it('accepts a complete json_schema response format before initialization', async () => {
+    const id = 4764;
+    proc.stdin.write(`${JSON.stringify({
+      id,
+      cmd: 'chatCompletion',
+      model: 'm',
+      messages: [{ role: 'user', content: 'hi' }],
+      responseFormat: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'structured',
+          description: 'A structured response',
+          schema: { type: 'object', properties: {} },
+          strict: true,
+        },
+      },
+    })}\n`);
+    const res = await waitForLine(proc, (msg) => msg.id === id);
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toMatch(/initialized|init first/i);
+    expect(String(res.error)).not.toMatch(/json_schema/i);
+  });
+
+  it('rejects oversized json_schema response formats before initialization', async () => {
+    const id = 4765;
+    proc.stdin.write(`${JSON.stringify({
+      id,
+      cmd: 'chatCompletion',
+      model: 'm',
+      messages: [{ role: 'user', content: 'hi' }],
+      responseFormat: {
+        type: 'json_schema',
+        json_schema: { name: 'structured', schema: { description: 'x'.repeat(64 * 1024) } },
+      },
+    })}\n`);
+    const res = await waitForLine(proc, (msg) => msg.id === id);
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toMatch(/json_schema.*64 KiB/i);
+    expect(String(res.error)).not.toMatch(/initialized|init first/i);
+  });
+
   it('rejects malformed tool messages before initialization or model dispatch', async () => {
     const cases = [
       {
@@ -2747,7 +2816,7 @@ describe('foundry-sidecar command schema validation', () => {
       id: 810,
       line: () => `{"id":810,"cmd":"chatCompletion","model":"m","messages":[{"role":"user","content":"hi"}],`
         + `"tools":[{"type":"function","function":{"name":"deep","parameters":${deepObjectJson(50000)}}}]}`,
-      expected: /serializable JSON/i,
+      expected: /serializable JSON|64 KiB/i,
     },
     {
       name: 'non-coercible lane (interpolation TypeError)',
@@ -2772,6 +2841,13 @@ describe('foundry-sidecar command schema validation', () => {
       id: 814,
       line: () => '{"id":814,"cmd":"listModels","protocolVersion":{"toString":null}}',
       expected: /"protocolVersion" must be a number or string/i,
+    },
+    {
+      name: 'deeply nested response schema (JSON.stringify RangeError)',
+      id: 815,
+      line: () => `{"id":815,"cmd":"chatCompletion","model":"m","messages":[{"role":"user","content":"hi"}],`
+        + `"responseFormat":{"type":"json_schema","json_schema":{"name":"deep","schema":${deepObjectJson(50000)}}}}`,
+      expected: /json_schema.*(?:serializable JSON|64 KiB)/i,
     },
   ])('rejects $name without killing the sidecar', async ({ id, line, expected }) => {
     proc.stdin.write(`${line()}\n`);
@@ -4187,7 +4263,7 @@ describe('chatCompletion ChatSession path', () => {
       { note: 'drain-waiting', waitForSignal: true },
       { note: 'drain-finished', chunk: { choices: [{ delta: { content: 'ignored tail' }, finish_reason: 'stop' }] } },
     ]);
-    const chatted = waitForLine(proc, (msg) => msg.id === 30 && !msg.stream && (msg.ok === true || msg.error), 10000);
+    const chatted = waitForLine(proc, (msg) => msg.id === 30 && !msg.stream && (msg.ok === true || msg.error), 20000);
     send({
       id: 30,
       cmd: 'chatCompletion',

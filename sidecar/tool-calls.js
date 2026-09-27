@@ -22,40 +22,45 @@ export function sanitizeToolCalls (toolCalls, field = 'assistant.tool_calls') {
   const ids = new Set();
   return toolCalls.map((toolCall, index) => {
     const callField = `${field}[${index}]`;
-    if (!isPlainObject(toolCall)
-      || typeof toolCall.id !== 'string'
-      || !toolCall.id.trim()
-      || toolCall.id.length > MAX_TOOL_CALL_ID_LENGTH) {
-      throw new Error(`${callField}.id must be a non-empty string of at most ${MAX_TOOL_CALL_ID_LENGTH} characters`);
-    }
-    if (ids.has(toolCall.id)) {
+    const call = validateToolCallShape(toolCall, callField);
+    if (ids.has(call.id)) {
       throw new Error(`${field} must not contain duplicate call IDs`);
     }
-    ids.add(toolCall.id);
-    if (toolCall.type !== 'function') {
-      throw new Error(`${callField}.type must be "function"`);
-    }
-    if (!isPlainObject(toolCall.function)
-      || typeof toolCall.function.name !== 'string'
-      || !toolCall.function.name.trim()
-      || toolCall.function.name.length > MAX_TOOL_CALL_NAME_LENGTH) {
-      throw new Error(`${callField}.function.name must be a non-empty string of at most ${MAX_TOOL_CALL_NAME_LENGTH} characters`);
-    }
-    if (typeof toolCall.function.arguments !== 'string') {
-      throw new Error(`${callField}.function.arguments must be a string`);
-    }
-    if (utf8ByteLength(toolCall.function.arguments) > MAX_TOOL_CALL_ARGUMENT_BYTES) {
+    ids.add(call.id);
+    if (utf8ByteLength(call.function.arguments) > MAX_TOOL_CALL_ARGUMENT_BYTES) {
       throw new Error(`${callField}.function.arguments must be at most ${MAX_TOOL_CALL_ARGUMENT_BYTES} UTF-8 bytes (64 KiB)`);
     }
-    return {
-      id: toolCall.id,
-      type: 'function',
-      function: {
-        name: toolCall.function.name,
-        arguments: toolCall.function.arguments,
-      },
-    };
+    return call;
   });
+}
+
+function validateToolCallShape (toolCall, field) {
+  if (!isPlainObject(toolCall)
+    || typeof toolCall.id !== 'string'
+    || !toolCall.id.trim()
+    || toolCall.id.length > MAX_TOOL_CALL_ID_LENGTH) {
+    throw new Error(`${field}.id must be a non-empty string of at most ${MAX_TOOL_CALL_ID_LENGTH} characters`);
+  }
+  if (toolCall.type !== 'function') {
+    throw new Error(`${field}.type must be "function"`);
+  }
+  if (!isPlainObject(toolCall.function)
+    || typeof toolCall.function.name !== 'string'
+    || !toolCall.function.name.trim()
+    || toolCall.function.name.length > MAX_TOOL_CALL_NAME_LENGTH) {
+    throw new Error(`${field}.function.name must be a non-empty string of at most ${MAX_TOOL_CALL_NAME_LENGTH} characters`);
+  }
+  if (typeof toolCall.function.arguments !== 'string') {
+    throw new Error(`${field}.function.arguments must be a string`);
+  }
+  return {
+    id: toolCall.id,
+    type: 'function',
+    function: {
+      name: toolCall.function.name,
+      arguments: toolCall.function.arguments,
+    },
+  };
 }
 
 export function validateCompletedChatResponse (response) {
@@ -104,13 +109,11 @@ export function createToolCallAccumulator ({ utf8ByteLength: measureUtf8 = utf8B
     nextIndex: 0,
     failure: null,
     measureUtf8,
-    // Caches incremental argument-prefix verification so repeatedly reconciling one
-    // call's growing `function.arguments` (against a snapshot counterpart, or between
-    // successive snapshots of the same id) costs proportionally to the new bytes added
-    // since the last check, not to the full accumulated length each time. Keyed by
-    // delta call index / snapshot id respectively; see `reconcileArgumentsWithCache`.
+    // Caches repeated reconciliation pairs and already-confirmed prefixes. Snapshot
+    // byte accounting is separate so cumulative snapshots encode only their new suffix.
     deltaArgumentCache: new Map(),
     snapshotArgumentCache: new Map(),
+    snapshotArgumentByteState: new Map(),
   };
 }
 
@@ -146,6 +149,45 @@ function appendArgumentFragment (target, current, fragment, byteState) {
     byteState.trailingHighSurrogate = /[\uD800-\uDBFF]/.test(fragment.at(-1));
   }
   return existing + fragment;
+}
+
+function measureSnapshotArgument (target, previous, incoming, merged, reconciliationCache) {
+  if (previous?.value === merged) {
+    if (merged !== incoming && target.measureUtf8(incoming) > MAX_TOOL_CALL_ARGUMENT_BYTES) {
+      throw new Error(`Streamed tool-call function.arguments must be at most ${MAX_TOOL_CALL_ARGUMENT_BYTES} UTF-8 bytes (64 KiB)`);
+    }
+    return previous;
+  }
+  if (!previous
+    || merged !== incoming
+    || !reconciliationCache.currentWasPrefixOfIncoming
+    || previous.value !== reconciliationCache.currentRef) {
+    const bytes = target.measureUtf8(incoming);
+    if (bytes > MAX_TOOL_CALL_ARGUMENT_BYTES) {
+      throw new Error(`Streamed tool-call function.arguments must be at most ${MAX_TOOL_CALL_ARGUMENT_BYTES} UTF-8 bytes (64 KiB)`);
+    }
+    return {
+      value: incoming,
+      bytes,
+      trailingHighSurrogate: incoming.length > 0 && /[\uD800-\uDBFF]/.test(incoming.at(-1)),
+    };
+  }
+  const suffix = incoming.slice(previous.value.length);
+  let addedBytes = target.measureUtf8(suffix);
+  if (previous.trailingHighSurrogate
+    && suffix.length > 0
+    && /[\uDC00-\uDFFF]/.test(suffix[0])) {
+    addedBytes -= 2;
+  }
+  const bytes = previous.bytes + addedBytes;
+  if (bytes > MAX_TOOL_CALL_ARGUMENT_BYTES) {
+    throw new Error(`Streamed tool-call function.arguments must be at most ${MAX_TOOL_CALL_ARGUMENT_BYTES} UTF-8 bytes (64 KiB)`);
+  }
+  return {
+    value: incoming,
+    bytes,
+    trailingHighSurrogate: incoming.length > 0 && /[\uD800-\uDBFF]/.test(incoming.at(-1)),
+  };
 }
 
 function compatibleValue (current, incoming, field, { maxLength, maxBytes } = {}) {
@@ -279,8 +321,6 @@ function isCompleteJson (value) {
 //     neither side has actually changed since the last check (e.g. a different call
 //     index's fragment triggered re-validation of this one) is O(1), not a repeat of
 //     the full comparison;
-//   - the UTF-8 byte length ceiling check for `incoming`, performed only when
-//     `incoming` itself changes identity, not on every call;
 //   - how much of the shorter side has already been confirmed as a matching textual
 //     prefix of the longer side, advanced only via that same cheap textual comparison
 //     (never optimistically advanced by a structural-only match, since two strings can
@@ -324,9 +364,11 @@ function reconcileArgumentsWithCache (cache, current, incoming, maxBytes, { allo
   const longer = current.length <= incoming.length ? incoming : current;
   const start = Math.min(nextVerifiedLength, shorter.length);
   let result;
+  let textualPrefix = false;
   if (start === shorter.length || shorter.slice(start) === longer.slice(start, shorter.length)) {
     nextVerifiedLength = shorter.length;
     result = longer;
+    textualPrefix = true;
   } else {
     const reconciled = reconcileArguments(current, incoming, maxBytes, { allowDefer });
     if (reconciled.deferred) return reconciled.value;
@@ -336,6 +378,7 @@ function reconcileArgumentsWithCache (cache, current, incoming, maxBytes, { allo
   cache.verifiedLength = nextVerifiedLength;
   cache.currentRef = current;
   cache.result = result;
+  cache.currentWasPrefixOfIncoming = textualPrefix && current.length <= incoming.length;
   return result;
 }
 
@@ -353,7 +396,6 @@ function mergeSnapshotCall (current, snapshot, cache) {
         cache,
         current.function.arguments,
         snapshot.function.arguments,
-        MAX_TOOL_CALL_ARGUMENT_BYTES,
       ),
     },
   };
@@ -430,7 +472,7 @@ function mergeDeltaSnapshot (delta, snapshot, cache, { final = true } = {}) {
             cache,
             delta.function.arguments,
             snapshot.function.arguments,
-            MAX_TOOL_CALL_ARGUMENT_BYTES,
+            undefined,
             { allowDefer: !final },
           ),
     },
@@ -440,7 +482,13 @@ function mergeDeltaSnapshot (delta, snapshot, cache, { final = true } = {}) {
 function getArgumentCache (cacheMap, key) {
   let cache = cacheMap.get(key);
   if (!cache) {
-    cache = { currentRef: undefined, incomingRef: undefined, verifiedLength: 0, result: undefined };
+    cache = {
+      currentRef: undefined,
+      incomingRef: undefined,
+      verifiedLength: 0,
+      result: undefined,
+      currentWasPrefixOfIncoming: false,
+    };
     cacheMap.set(key, cache);
   }
   return cache;
@@ -574,19 +622,56 @@ function mergeDeltas (target, deltas) {
 
 function mergeSnapshot (target, snapshot) {
   if (snapshot === undefined) return;
-  const validated = sanitizeToolCalls(snapshot, 'streamed assistant tool_calls');
-  for (const call of validated) {
-    if (!target.snapshots.has(call.id)) {
-      if (target.snapshots.size >= MAX_TOOL_CALLS) {
+  if (!Array.isArray(snapshot) || snapshot.length === 0 || snapshot.length > MAX_TOOL_CALLS) {
+    throw new Error(`streamed assistant tool_calls must contain 1 to ${MAX_TOOL_CALLS} calls`);
+  }
+  const staged = {
+    ...target,
+    snapshots: new Map(target.snapshots),
+    snapshotOrder: [...target.snapshotOrder],
+    snapshotArgumentCache: new Map(
+      Array.from(target.snapshotArgumentCache, ([id, cache]) => [id, { ...cache }]),
+    ),
+    snapshotArgumentByteState: new Map(target.snapshotArgumentByteState),
+  };
+  const ids = new Set();
+  for (const [index, rawCall] of snapshot.entries()) {
+    const call = validateToolCallShape(rawCall, `streamed assistant tool_calls[${index}]`);
+    if (ids.has(call.id)) {
+      throw new Error('streamed assistant tool_calls must not contain duplicate call IDs');
+    }
+    ids.add(call.id);
+    if (call.function.arguments.length > MAX_TOOL_CALL_ARGUMENT_BYTES) {
+      throw new Error(`streamed assistant tool_calls[${index}].function.arguments must be at most ${MAX_TOOL_CALL_ARGUMENT_BYTES} UTF-8 bytes (64 KiB)`);
+    }
+    if (!staged.snapshots.has(call.id)) {
+      if (staged.snapshots.size >= MAX_TOOL_CALLS) {
         throw new Error(`Streamed tool_calls cannot contain more than ${MAX_TOOL_CALLS} snapshot calls`);
       }
-      target.snapshotOrder.push(call.id);
+      staged.snapshotOrder.push(call.id);
     }
-    target.snapshots.set(
-      call.id,
-      mergeSnapshotCall(target.snapshots.get(call.id), call, getArgumentCache(target.snapshotArgumentCache, call.id)),
+    const previousCall = staged.snapshots.get(call.id);
+    const previousByteState = staged.snapshotArgumentByteState.get(call.id);
+    const reconciliationCache = getArgumentCache(staged.snapshotArgumentCache, call.id);
+    const merged = mergeSnapshotCall(
+      previousCall,
+      call,
+      reconciliationCache,
     );
+    const nextByteState = measureSnapshotArgument(
+      staged,
+      previousByteState,
+      call.function.arguments,
+      merged.function.arguments,
+      reconciliationCache,
+    );
+    staged.snapshots.set(call.id, merged);
+    staged.snapshotArgumentByteState.set(call.id, nextByteState);
   }
+  target.snapshots = staged.snapshots;
+  target.snapshotOrder = staged.snapshotOrder;
+  target.snapshotArgumentCache = staged.snapshotArgumentCache;
+  target.snapshotArgumentByteState = staged.snapshotArgumentByteState;
 }
 
 export function mergeStreamingToolCalls (target, { deltas, snapshot } = {}) {
