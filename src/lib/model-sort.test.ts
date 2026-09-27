@@ -13,27 +13,27 @@ const models = [
   { alias: 'qwen3-1.7b', family: 'Qwen', createdAt: 1_700_000_000 },
   { alias: 'phi-4-mini', family: 'Phi', createdAt: 1_750_000_000 },
   { alias: 'deepseek-r1', family: 'Qwen', createdAt: 1_720_000_000 },
-  { alias: 'my-import', createdAt: null },
+  { alias: '', createdAt: null },
 ];
 
 describe('sortModels', () => {
   it('orders by alias for name mode', () => {
     expect(sortModels(models, 'name').map(m => m.alias))
-      .toEqual(['deepseek-r1', 'my-import', 'phi-4-mini', 'qwen3-1.7b']);
+      .toEqual(['', 'deepseek-r1', 'phi-4-mini', 'qwen3-1.7b']);
   });
 
   it('groups by family and orders by alias inside a family', () => {
     expect(sortModels(models, 'family').map(m => m.alias))
-      .toEqual(['phi-4-mini', 'deepseek-r1', 'qwen3-1.7b', 'my-import']);
+      .toEqual(['phi-4-mini', 'deepseek-r1', 'qwen3-1.7b', '']);
   });
 
   it('puts models with no family last rather than first', () => {
-    expect(sortModels(models, 'family').at(-1)?.alias).toBe('my-import');
+    expect(sortModels(models, 'family').at(-1)?.alias).toBe('');
   });
 
   it('orders newest first for updated mode, undated last', () => {
     expect(sortModels(models, 'updated').map(m => m.alias))
-      .toEqual(['phi-4-mini', 'deepseek-r1', 'qwen3-1.7b', 'my-import']);
+      .toEqual(['phi-4-mini', 'deepseek-r1', 'qwen3-1.7b', '']);
   });
 
   it('does not mutate the input array', () => {
@@ -148,5 +148,56 @@ describe('isModelSortMode', () => {
     expect(['name', 'family', 'updated'].every(isModelSortMode)).toBe(true);
     expect(isModelSortMode('size')).toBe(false);
     expect(isModelSortMode(null)).toBe(false);
+  });
+});
+
+describe('modelFamilyLabel without catalog metadata', () => {
+  it.each([
+    ['phi-4', 'phi-4-mini', 'phi-4'],
+    ['deepseek-r1', 'deepseek-r1-distill-qwen-7b', 'deepseek-r1'],
+  ])('groups the bare alias %s with its sibling %s', (base, sibling, family) => {
+    // Dropping a derived family because nothing was stripped put the bare alias under
+    // "Other" while its own variant headed a group of the same name.
+    expect([base, sibling].map((alias) => modelFamilyLabel({ alias }))).toEqual([
+      family,
+      family,
+    ]);
+  });
+
+  it.each([
+    ['gemma', 'gemma'],
+    ['mistral', 'mistral'],
+    ['my-import', 'my-import'],
+  ])('labels %s with its own name', (alias, expected) => {
+    expect(modelFamilyLabel({ alias })).toBe(expected);
+  });
+
+  it.each(['mini', 'mini-chat', '7b', 'v3', '123', '', '   '])(
+    'leaves the descriptor-only alias %s unlabelled',
+    (alias) => {
+      // `mini` describes a size, so heading a group with it would invent a family.
+      expect(modelFamilyLabel({ alias })).toBe('');
+    },
+  );
+
+  it('still prefers catalog metadata, nested or not', () => {
+    expect(modelFamilyLabel({ alias: 'phi-4', family: 'Phi' })).toBe('phi');
+    expect(modelFamilyLabel({ alias: 'phi-4', info: { family: 'Phi' } })).toBe('phi');
+  });
+
+  it('renders one heading per family however the list arrives', () => {
+    const roster = [
+      { alias: 'phi-4' },
+      { alias: 'deepseek-r1-distill-qwen-7b' },
+      { alias: 'phi-4-mini' },
+      { alias: 'deepseek-r1' },
+      { alias: '' },
+    ];
+    for (const order of [roster, [...roster].reverse(), [...roster].sort((a, b) => a.alias < b.alias ? 1 : -1)]) {
+      const labels = sortModels(order, 'family').map((m) => modelFamilyLabel(m));
+      // The page emits a heading whenever the label differs from the previous row.
+      const headings = labels.filter((label, i) => label !== labels[i - 1]).map((l) => l || 'Other');
+      expect(headings).toEqual(['deepseek-r1', 'phi-4', 'Other']);
+    }
   });
 });

@@ -25,12 +25,14 @@ const SIZE_TOKEN = /^\d+(\.\d+)?[bm]$/i;
 const VERSION_TOKEN = /^v\d+(\.\d+)?$/i;
 const BUILD_TOKEN = /^\d{3,}$/;
 
-export function deriveModelFamily(alias: string | null | undefined): string {
-  const raw = String(alias ?? '').trim().toLowerCase();
-  if (!raw) return '';
-  const parts = raw.split('-').filter(Boolean);
+/**
+ * The leading tokens of an alias that name the family, stopping at the first size,
+ * version, build or variant descriptor. Empty when the alias opens with a descriptor
+ * (`mini`, `7b`), which names no family at all.
+ */
+function familyTokens(raw: string): string[] {
   const family: string[] = [];
-  for (const part of parts) {
+  for (const part of raw.split('-').filter(Boolean)) {
     if (
       SIZE_TOKEN.test(part) ||
       VERSION_TOKEN.test(part) ||
@@ -41,6 +43,13 @@ export function deriveModelFamily(alias: string | null | undefined): string {
     }
     family.push(part);
   }
+  return family;
+}
+
+export function deriveModelFamily(alias: string | null | undefined): string {
+  const raw = String(alias ?? '').trim().toLowerCase();
+  if (!raw) return '';
+  const family = familyTokens(raw);
   return family.length > 0 ? family.join('-') : raw;
 }
 
@@ -48,8 +57,11 @@ export function modelFamilyLabel(model: any): string {
   const catalogFamily = String(model?.family ?? model?.info?.family ?? '').trim();
   if (catalogFamily) return catalogFamily.toLowerCase();
   const alias = String(model?.alias ?? '').trim().toLowerCase();
-  const derived = deriveModelFamily(alias);
-  return derived && derived !== alias ? derived : '';
+  // Keep a derived family even when it spans the whole alias: `phi-4` names the same
+  // family as `phi-4-mini`, and discarding it because nothing was stripped split the
+  // two across separate headings. An alias that opens with a descriptor still has no
+  // family, so it stays unlabelled rather than heading a group called `mini`.
+  return familyTokens(alias).join('-');
 }
 
 export function modelMatchesSearch(model: any, term: string): boolean {
