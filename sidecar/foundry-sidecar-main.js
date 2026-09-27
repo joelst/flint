@@ -1199,7 +1199,7 @@ async function resolveFromCachedInventory(requested) {
   });
 }
 
-async function resolveForGateway (requested) {
+async function resolveForGateway (requested, onCachedLookupFailure = null) {
   if (!modelIndex) {
     if (!manager) return null;
     try {
@@ -1215,6 +1215,7 @@ async function resolveForGateway (requested) {
       try {
         return await resolveFromCachedInventory(requested);
       } catch (lookupError) {
+        onCachedLookupFailure?.();
         log('warn', `Model resolver could not resolve cached model ${requested}: ${lookupError?.message ?? lookupError}`);
         return null;
       }
@@ -1225,6 +1226,7 @@ async function resolveForGateway (requested) {
   try {
     return await resolveFromCachedInventory(requested);
   } catch (lookupError) {
+    onCachedLookupFailure?.();
     log('warn', `Model resolver could not resolve cached model ${requested}: ${lookupError?.message ?? lookupError}`);
     return null;
   }
@@ -1236,19 +1238,31 @@ async function speechStrategyBeforeLoad(requested) {
   if (residentVariantId) {
     return assertSpeechModelSupported(requested, residentVariantId);
   }
-  let resolution = await resolveForGateway(requested);
+  let cachedRefreshFailed = false;
+  let resolution = await resolveForGateway(requested, () => {
+    cachedRefreshFailed = true;
+  });
   if (resolution && !resolution.variantId && !modelIndexComplete) {
-    resolution = await resolveFromCachedInventory(requested);
+    try {
+      resolution = await resolveFromCachedInventory(requested);
+    } catch (lookupError) {
+      cachedRefreshFailed = true;
+      log('warn', `Speech model resolver could not refresh cached candidates for ${requested}: ${lookupError?.message ?? lookupError}`);
+    }
   }
   const aliasKey = String(resolution?.alias || requested || '').trim().toLowerCase();
-  const candidatesComplete = !candidateInventoryHasUnknownAliasFailure
+  const candidatesComplete = !cachedRefreshFailed
+    && !candidateInventoryHasUnknownAliasFailure
     && !incompleteCandidateAliases.has(aliasKey);
   const variants = resolution?.variantId
     ? [resolution.variantId]
     : candidatesComplete
       ? cachedVariantIdsByAlias.get(aliasKey) || []
       : [];
-  const classificationAlias = resolution && !resolution.variantId && !candidatesComplete ? '' : requested;
+  const classificationAlias = cachedRefreshFailed
+    || (resolution && !resolution.variantId && !candidatesComplete)
+    ? ''
+    : requested;
   return assertSpeechModelSupported(classificationAlias, resolution?.variantId || '', variants);
 }
 

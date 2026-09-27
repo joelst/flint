@@ -3283,7 +3283,10 @@ describe('transcribeAudio AudioSession path', () => {
   // A minimal fake foundry-local-sdk exposing the Session/Request/Item surface alongside an
   // AudioClient, so tests can verify that a failed AudioSession request is not retried through
   // the deprecated client.
-  function fakeSdk(audioSessionMode: 'success' | 'construction-throws' | 'request-throws') {
+  function fakeSdk(
+    audioSessionMode: 'success' | 'construction-throws' | 'request-throws',
+    cachedModelsMode: 'success' | 'reject' | 'once-then-reject' = 'success',
+  ) {
     return [
       "import fs from 'node:fs';",
       'const note = (event) => fs.appendFileSync(process.env.FLINT_TEST_EVENT_LOG, event + "\\n");',
@@ -3322,6 +3325,7 @@ describe('transcribeAudio AudioSession path', () => {
       '  setOptions() { return this; }',
       '}',
       "const Item = { audioFromUri: (uri) => ({ type: 'audio', uri }) };",
+      'let cachedModelCalls = 0;',
       'class FakeManager {',
       '  constructor() { this.catalog = {',
       '    getModel: async (alias) => new FakeModel(alias),',
@@ -3337,7 +3341,10 @@ describe('transcribeAudio AudioSession path', () => {
       "      ] },",
       "      { get alias() { throw new Error('native getter failed'); } },",
       "    ],",
-      "    getCachedModels: async () => [",
+      '    getCachedModels: async () => {',
+      '      cachedModelCalls++;',
+      `      if (${JSON.stringify(cachedModelsMode)} === 'reject' || (${JSON.stringify(cachedModelsMode)} === 'once-then-reject' && cachedModelCalls > 1)) throw new Error('cached inventory unavailable');`,
+      '      return [',
       "      { alias: 'opaque-speech', id: 'parakeet-tdt-0.6b-v3-generic-cpu:1' },",
       "      { alias: 'mixed-speech', id: 'parakeet-tdt-0.6b-v3-generic-cpu:1' },",
       "      { alias: 'mixed-speech', id: 'whisper-tiny-generic-cpu:1' },",
@@ -3346,7 +3353,10 @@ describe('transcribeAudio AudioSession path', () => {
       "      { alias: 'lossy-speech', id: 'parakeet-tdt-0.6b-v3-generic-cpu:1' },",
       "      { alias: 'parakeet-cached-partial', id: 'parakeet-tdt-0.6b-v3-generic-cpu:1' },",
       "      { alias: 'parakeet-cached-partial', get id() { throw new Error('cached native getter failed'); } },",
-      "    ],",
+      "      { alias: 'parakeet-runtime-whisper', id: 'parakeet-tdt-0.6b-v3-generic-cpu:1' },",
+      "      { alias: 'unrelated-incomplete' },",
+      '      ];',
+      '    },',
       '  }; }',
       '  static create() { return new FakeManager(); }',
       '}',
@@ -3371,13 +3381,14 @@ describe('transcribeAudio AudioSession path', () => {
   async function startSidecar(
     audioSessionMode: 'success' | 'construction-throws' | 'request-throws',
     alias = 'fake-model',
+    cachedModelsMode: 'success' | 'reject' | 'once-then-reject' = 'success',
   ) {
     homeDir = mkdtempSync(join(tmpdir(), 'flint-sidecar-audiosession-'));
     eventLog = join(homeDir, 'events.log');
     const corePath = join(homeDir, 'fake-core.dylib');
     writeFileSync(corePath, '');
     const loaderPath = join(homeDir, 'fake-sdk-loader.mjs');
-    const sdk = fakeSdk(audioSessionMode);
+    const sdk = fakeSdk(audioSessionMode, cachedModelsMode);
     writeFileSync(loaderPath, [
       `const sdk = ${JSON.stringify(sdk)};`,
       'export async function resolve(specifier, context, nextResolve) {',
@@ -3582,6 +3593,50 @@ describe('transcribeAudio AudioSession path', () => {
     const res = await transcribed;
     expect(res.ok).toBe(true);
     expect(events()).toContain('model-load:parakeet-cached-partial');
+    expect(events()).toContain('audioSession-processRequest');
+  }, 30000);
+
+  it('defers an incomplete alias-only catalog hit when cached inventory refresh fails', async () => {
+    await startSidecar('success', 'fake-model', 'reject');
+    const listed = reply(3);
+    send({ id: 3, cmd: 'listModels' });
+    expect((await listed).ok).not.toBe(true);
+
+    const transcribed = reply(4);
+    send({
+      id: 4,
+      cmd: 'transcribeAudio',
+      audioBase64: wavBase64(),
+      mimeType: 'audio/wav',
+      fileName: 'probe.wav',
+      model: 'partial-speech',
+      language: 'en',
+    });
+    const res = await transcribed;
+    expect(res.ok).toBe(true);
+    expect(events()).toContain('model-load:partial-speech');
+    expect(events()).toContain('audioSession-processRequest');
+  }, 30000);
+
+  it('does not classify from stale cached candidates when their refresh fails', async () => {
+    await startSidecar('success', 'fake-model', 'once-then-reject');
+    const listed = reply(3);
+    send({ id: 3, cmd: 'listModels' });
+    expect((await listed).ok).not.toBe(true);
+
+    const transcribed = reply(4);
+    send({
+      id: 4,
+      cmd: 'transcribeAudio',
+      audioBase64: wavBase64(),
+      mimeType: 'audio/wav',
+      fileName: 'probe.wav',
+      model: 'parakeet-runtime-whisper',
+      language: 'en',
+    });
+    const res = await transcribed;
+    expect(res.ok).toBe(true);
+    expect(events()).toContain('model-load:parakeet-runtime-whisper');
     expect(events()).toContain('audioSession-processRequest');
   }, 30000);
 
