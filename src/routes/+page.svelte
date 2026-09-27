@@ -7384,7 +7384,7 @@ Output only the summary text, no preamble.`;
       transcription = transcribed || (
         dur > 90
           ? Number(result?.failedChunks || 0) >= Number(result?.totalChunks || 0)
-            ? "No transcript text is available because no audio window completed successfully."
+            ? "No transcript text is available because no audio window has a confirmed successful result."
             : "No text was recognized in the successfully processed audio windows."
           : JSON.stringify(result, null, 2)
       );

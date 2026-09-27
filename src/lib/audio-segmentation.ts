@@ -266,7 +266,7 @@ export function planTranscriptionWindows(
   // of `duration` would silently drop audio, so fail instead of returning partial coverage.
   const maxWindows = Math.ceil(duration / minSec) + 4;
 
-  while (pos < duration - 0.05) {
+  while (pos < duration) {
     if (windows.length > maxWindows) {
       throw new RangeError(
         `window planning failed to cover ${duration}s after ${windows.length} windows`,
@@ -302,6 +302,13 @@ export function planTranscriptionWindows(
     const endSec = hardSplitEnd
       ? Math.min(pos + targetSec, latestHardEndWithMinimumTail)
       : cut!;
+
+    // A cut that does not advance past `pos` would replan the same window forever, and
+    // the window-count backstop is not finite once `minSec` is small enough that
+    // `duration / minSec` overflows. Refuse the plan instead of spinning.
+    if (!(endSec > pos)) {
+      throw new RangeError(`window planning stalled at ${pos}s of ${duration}s`);
+    }
 
     windows.push({
       index: windows.length,

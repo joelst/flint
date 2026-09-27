@@ -151,6 +151,12 @@ export function assembleLongAudioTranscript(
   };
 }
 
+/** Joins clauses as `a`, `a and b`, or `a, b, and c`. */
+function joinClauses(clauses: readonly string[]): string {
+  if (clauses.length <= 2) return clauses.join(' and ');
+  return `${clauses.slice(0, -1).join(', ')}, and ${clauses[clauses.length - 1]}`;
+}
+
 export function buildLongAudioCompletionStatus(
   result: AssembledLongAudioTranscript & { totalChunks: number },
   path = '',
@@ -161,18 +167,30 @@ export function buildLongAudioCompletionStatus(
   const totalChunks = Number(result.totalChunks || 0);
   const segmentLabel = totalChunks === 1 ? 'segment' : 'segments';
   if (failed > 0) {
+    // `failed` is the total; uncertain and unprocessed are subsets of it, so the
+    // remainder is the number of windows that definitely failed. A negative value
+    // would mean a window was counted twice, which is a bug worth surfacing rather
+    // than clamping away.
+    const definite = failed - uncertain - unprocessed;
     const clauses: string[] = [];
-    if (uncertain > 0) {
-      clauses.push(`${uncertain} had ${uncertain === 1 ? 'an uncertain outcome' : 'uncertain outcomes'}`);
-    }
-    if (unprocessed > 0) {
-      clauses.push(`${unprocessed} ${unprocessed === 1 ? 'was' : 'were'} not processed`);
+    if (uncertain > 0 || unprocessed > 0) {
+      if (definite !== 0) clauses.push(`${definite} failed`);
+      if (uncertain > 0) {
+        clauses.push(
+          `${uncertain} had ${uncertain === 1 ? 'an uncertain outcome' : 'uncertain outcomes'}`,
+        );
+      }
+      if (unprocessed > 0) {
+        clauses.push(`${unprocessed} ${unprocessed === 1 ? 'was' : 'were'} not processed`);
+      }
     }
     const detail =
       clauses.length > 0
-        ? `${failed} of ${totalChunks} ${segmentLabel} did not complete (${clauses.join(' and ')})`
+        ? `no confirmed successful result for ${failed} of ${totalChunks} ${segmentLabel} (${joinClauses(clauses)})`
         : `${failed} of ${totalChunks} ${segmentLabel} failed`;
-    return `Transcription incomplete: ${detail}. The text below is missing those parts.${path}`;
+    // An uncertain window may still have produced text, and overlapping neighbours may
+    // already cover a failed range, so Flint cannot assert that anything is missing.
+    return `Transcription incomplete: ${detail}. Text may be missing from those ranges.${path}`;
   }
 
   const qualifications: string[] = [];

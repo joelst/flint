@@ -233,7 +233,7 @@ describe('assembleLongAudioTranscript', () => {
         { window: window(0, 0, 20, { hardSplitEnd: false }), status: 'failed', uncertain: false },
       ]),
       expected:
-        'Transcription incomplete: 1 of 1 segment failed. The text below is missing those parts. via native audio session',
+        'Transcription incomplete: 1 of 1 segment failed. Text may be missing from those ranges. via native audio session',
     },
     {
       name: 'one failure among multiple source windows',
@@ -243,7 +243,7 @@ describe('assembleLongAudioTranscript', () => {
         { window: window(1, 24, 40, { hardSplitEnd: false }), status: 'failed', uncertain: false },
       ]),
       expected:
-        'Transcription incomplete: 1 of 2 segments failed. The text below is missing those parts. via native audio session',
+        'Transcription incomplete: 1 of 2 segments failed. Text may be missing from those ranges. via native audio session',
     },
     {
       name: 'one uncertain failed source window',
@@ -252,7 +252,7 @@ describe('assembleLongAudioTranscript', () => {
         { window: window(0, 0, 20, { hardSplitEnd: false }), status: 'failed', uncertain: true },
       ]),
       expected:
-        'Transcription incomplete: 1 of 1 segment did not complete (1 had an uncertain outcome). The text below is missing those parts. via native audio session',
+        'Transcription incomplete: no confirmed successful result for 1 of 1 segment (1 had an uncertain outcome). Text may be missing from those ranges. via native audio session',
     },
     {
       name: 'one unprocessed source window among multiple windows',
@@ -262,7 +262,7 @@ describe('assembleLongAudioTranscript', () => {
         { window: window(1, 24, 40, { hardSplitEnd: false }), status: 'unprocessed' },
       ]),
       expected:
-        'Transcription incomplete: 1 of 2 segments did not complete (1 was not processed). The text below is missing those parts. via native audio session',
+        'Transcription incomplete: no confirmed successful result for 1 of 2 segments (1 was not processed). Text may be missing from those ranges. via native audio session',
     },
     {
       name: 'multiple uncertain and unprocessed source windows together',
@@ -273,7 +273,38 @@ describe('assembleLongAudioTranscript', () => {
         { window: window(2, 48, 76, { hardSplitEnd: false }), status: 'unprocessed' },
       ]),
       expected:
-        'Transcription incomplete: 3 of 3 segments did not complete (2 had uncertain outcomes and 1 was not processed). The text below is missing those parts. via native audio session',
+        'Transcription incomplete: no confirmed successful result for 3 of 3 segments (2 had uncertain outcomes and 1 was not processed). Text may be missing from those ranges. via native audio session',
+    },
+    {
+      name: 'a definite failure alongside an uncertain one',
+      totalChunks: 2,
+      result: assembleLongAudioTranscript([
+        { window: window(0, 0, 28, { hardSplitEnd: false }), status: 'failed', uncertain: false },
+        { window: window(1, 24, 52, { hardSplitEnd: false }), status: 'failed', uncertain: true },
+      ]),
+      expected:
+        'Transcription incomplete: no confirmed successful result for 2 of 2 segments (1 failed and 1 had an uncertain outcome). Text may be missing from those ranges. via native audio session',
+    },
+    {
+      name: 'a definite failure alongside an unprocessed window',
+      totalChunks: 2,
+      result: assembleLongAudioTranscript([
+        { window: window(0, 0, 28, { hardSplitEnd: false }), status: 'failed', uncertain: false },
+        { window: window(1, 24, 52, { hardSplitEnd: false }), status: 'unprocessed' },
+      ]),
+      expected:
+        'Transcription incomplete: no confirmed successful result for 2 of 2 segments (1 failed and 1 was not processed). Text may be missing from those ranges. via native audio session',
+    },
+    {
+      name: 'all three failure modes at once',
+      totalChunks: 3,
+      result: assembleLongAudioTranscript([
+        { window: window(0, 0, 28, { hardSplitEnd: false }), status: 'failed', uncertain: false },
+        { window: window(1, 24, 52, { hardSplitEnd: false }), status: 'failed', uncertain: true },
+        { window: window(2, 48, 76, { hardSplitEnd: false }), status: 'unprocessed' },
+      ]),
+      expected:
+        'Transcription incomplete: no confirmed successful result for 3 of 3 segments (1 failed, 1 had an uncertain outcome, and 1 was not processed). Text may be missing from those ranges. via native audio session',
     },
   ])('reports $name with path wording and source-window plurality', ({
     result,

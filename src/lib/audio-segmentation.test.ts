@@ -143,6 +143,33 @@ describe('findSilenceRuns', () => {
 });
 
 describe('planTranscriptionWindows', () => {
+  it.each([1 / 16000, 0.02, 0.049, 0.05, 0.06, 1])(
+    'covers the whole of a %ss recording it accepted',
+    (duration) => {
+      const windows = planTranscriptionWindows(duration, []);
+      // A duration the validator accepted must never plan zero work: the caller would
+      // transcribe nothing and report success.
+      expect(windows.length).toBeGreaterThan(0);
+      expect(windows[0].startSec).toBe(0);
+      expect(windows[windows.length - 1].endSec).toBe(duration);
+      for (const w of windows) expect(w.endSec).toBeGreaterThan(w.startSec);
+    },
+  );
+
+  it('refuses a plan whose cuts cannot advance instead of looping forever', () => {
+    // `minSec` this small makes `duration / minSec` non-finite, so the window-count
+    // backstop never trips; only the per-window progress check ends this.
+    expect(() =>
+      planTranscriptionWindows(3, [{ startSec: 0.9, endSec: 1.1, centerSec: 1 }], {
+        minSec: 1e-320,
+        targetSec: 1,
+        maxSec: 1,
+        searchSec: 1,
+        overlapSec: 0,
+      }),
+    ).toThrow(RangeError);
+  });
+
   it('returns a single window for short audio', () => {
     const windows = planTranscriptionWindows(5, []);
     expect(windows).toHaveLength(1);
