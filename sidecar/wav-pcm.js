@@ -44,6 +44,7 @@ export function parseWavHeader (input) {
   let dataLength = 0;
   let dataDeclaredSize = 0;
   let dataAvailable = 0;
+  let hasFormat = false;
 
   let offset = 12;
   while (offset + 8 <= bytes.byteLength) {
@@ -52,7 +53,14 @@ export function parseWavHeader (input) {
     const bodyOffset = offset + 8;
     const chunkSize = Math.min(declaredSize, Math.max(0, bytes.byteLength - bodyOffset));
 
-    if (chunkId === 'fmt ') {
+    if (chunkId === 'fmt ' && !hasFormat) {
+      if (declaredSize < 16) {
+        throw new Error(`WAV fmt chunk is too short: declared ${declaredSize} bytes, requires at least 16.`);
+      }
+      if (chunkSize < declaredSize) {
+        throw new Error(`WAV fmt chunk is truncated: declared ${declaredSize} bytes but only ${chunkSize} are present.`);
+      }
+      hasFormat = true;
       formatCode = view.getUint16(bodyOffset, true);
       numChannels = view.getUint16(bodyOffset + 2, true);
       sampleRate = view.getUint32(bodyOffset + 4, true);
@@ -60,7 +68,7 @@ export function parseWavHeader (input) {
       if (formatCode === 0xfffe && chunkSize >= 26) {
         formatCode = view.getUint16(bodyOffset + 24, true);
       }
-    } else if (chunkId === 'data') {
+    } else if (chunkId === 'data' && dataOffset < 0) {
       dataOffset = bodyOffset;
       dataLength = chunkSize;
       dataDeclaredSize = declaredSize;

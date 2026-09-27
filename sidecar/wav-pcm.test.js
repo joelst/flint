@@ -30,6 +30,43 @@ function buildWav ({ sampleRate = 16000, channels = 1, bitsPerSample = 16, data 
   return bytes;
 }
 
+function buildShortFmtWav () {
+  const bytes = new Uint8Array(54);
+  const view = new DataView(bytes.buffer);
+  const ascii = (offset, text) => {
+    for (let i = 0; i < text.length; i += 1) view.setUint8(offset + i, text.charCodeAt(i));
+  };
+  ascii(0, 'RIFF');
+  view.setUint32(4, bytes.length - 8, true);
+  ascii(8, 'WAVE');
+  ascii(12, 'fmt ');
+  view.setUint32(16, 2, true);
+  view.setUint16(20, 1, true);
+
+  // These bytes belong to the next unknown chunk, but the malformed fmt parser used to
+  // borrow them as channels, sample rate, and bit depth.
+  view.setUint16(22, 1, true);
+  view.setUint16(24, 16000, true);
+  view.setUint32(26, 0, true);
+
+  ascii(30, 'data');
+  view.setUint32(34, 16, true);
+  bytes.set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], 38);
+  return bytes;
+}
+
+function appendChunk (wav, id, body) {
+  const paddedLength = body.length + (body.length % 2);
+  const bytes = new Uint8Array(wav.length + 8 + paddedLength);
+  bytes.set(wav);
+  const view = new DataView(bytes.buffer);
+  for (let i = 0; i < id.length; i += 1) view.setUint8(wav.length + i, id.charCodeAt(i));
+  view.setUint32(wav.length + 4, body.length, true);
+  bytes.set(body, wav.length + 8);
+  view.setUint32(4, bytes.length - 8, true);
+  return bytes;
+}
+
 describe('shared WAV PCM parser', () => {
   it('extracts sample bytes after non-audio RIFF chunks', () => {
     const wav = buildWav();
@@ -58,5 +95,33 @@ describe('shared WAV PCM parser', () => {
     const wav = buildWav();
     new DataView(wav.buffer).setUint32(wav.length - 8, 100, true);
     expect(() => extractNemotronPcm(wav)).toThrow(/truncated/i);
+  });
+
+  it('rejects a fmt chunk shorter than the 16-byte PCM base header', () => {
+    expect(() => extractNemotronPcm(buildShortFmtWav())).toThrow(/fmt chunk is too short/i);
+  });
+
+  it('rejects a truncated fmt chunk before reading its fields', () => {
+    const wav = buildWav();
+    const truncated = wav.subarray(0, 30);
+    expect(() => parseWavHeader(truncated)).toThrow(/fmt chunk is truncated/i);
+  });
+
+  it('rejects a fmt chunk whose declared extension is truncated', () => {
+    const wav = buildWav();
+    new DataView(wav.buffer).setUint32(16, 40, true);
+    expect(() => parseWavHeader(wav.subarray(0, 40))).toThrow(/fmt chunk is truncated/i);
+  });
+
+  it('uses the first fmt and data chunks when duplicates follow', () => {
+    const secondFmt = new Uint8Array(16);
+    const fmtView = new DataView(secondFmt.buffer);
+    fmtView.setUint16(0, 1, true);
+    fmtView.setUint16(2, 2, true);
+    fmtView.setUint32(4, 48000, true);
+    fmtView.setUint16(14, 32, true);
+    const withSecondData = appendChunk(buildWav(), 'data', new Uint8Array([9, 10, 11, 12]));
+    const duplicated = appendChunk(withSecondData, 'fmt ', secondFmt);
+    expect([...extractNemotronPcm(duplicated)]).toEqual([1, 2, 3, 4]);
   });
 });
