@@ -1734,6 +1734,37 @@ describe('gateway activity hook', () => {
       expect(res.status).toBe(400);
       expect(upstream.state.hits).toEqual([]);
     });
+
+    it.each([
+      ['after the opening boundary', '--flint-boundary\r\n'],
+      ['inside the first part headers',
+        '--flint-boundary\r\nContent-Disposition: form-data; name="model"'],
+      ['inside the leading model value',
+        '--flint-boundary\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-tiny:1'],
+      ['inside the leading model delimiter',
+        '--flint-boundary\r\nContent-Disposition: form-data; name="model"\r\n\r\n'
+          + 'whisper-tiny:1\r\n--flint-boundary'],
+    ])('refuses a multipart body that ends %s', async (_label, body) => {
+      gateway = await startGateway();
+      const res = await request(gateway.publicPort, '/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: { 'content-type': 'multipart/form-data; boundary=flint-boundary' },
+        body,
+      });
+      expect(res.status).toBe(400);
+      expect(upstream.state.hits).toEqual([]);
+    });
+
+    it('refuses a leading multipart part that remains incomplete at the peek limit', async () => {
+      gateway = await startGateway();
+      const res = await request(gateway.publicPort, '/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: { 'content-type': 'multipart/form-data; boundary=flint-boundary' },
+        body: '--flint-boundary\r\nX-Incomplete: ' + 'x'.repeat(16 * 1024),
+      });
+      expect(res.status).toBe(400);
+      expect(upstream.state.hits).toEqual([]);
+    });
   });
 
   it('stays open across an autoload and replay rather than reporting twice', async () => {

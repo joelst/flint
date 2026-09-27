@@ -58,7 +58,7 @@ const multipartPrefix = Symbol('multipartPrefix');
 const multipartEnded = Symbol('multipartEnded');
 const NOT_MULTIPART = Symbol('notMultipart');
 const TRANSCRIPTION_REQUIRES_MULTIPART =
-  'Audio transcription requires a multipart/form-data body with an audio file.';
+  'Audio transcription requires a multipart/form-data body beginning with its declared boundary.';
 
 /**
  * Classify OpenAI-compatible routes for metadata-only access logging.
@@ -79,21 +79,29 @@ export function classifyGatewayRoute (urlPath) {
 
 /**
  * Returns undefined while the leading field is incomplete, NOT_MULTIPART when the body does
- * not open with its declared boundary, null when the first part is not `model`, or the
- * submitted model value once its terminating boundary is available.
+ * not open with its declared boundary (or ends before the leading field is structurally
+ * complete), null when the first part is not `model`, or the submitted model value once its
+ * terminating boundary is available.
  */
-function extractLeadingMultipartModel (body, boundary) {
+function extractLeadingMultipartModel (body, boundary, ended = false) {
   const opening = `--${boundary}\r\n`;
   if (!body.startsWith(opening)) {
-    return body.length < opening.length && opening.startsWith(body) ? undefined : NOT_MULTIPART;
+    return !ended && body.length < opening.length && opening.startsWith(body)
+      ? undefined
+      : NOT_MULTIPART;
   }
   const headersEnd = body.indexOf('\r\n\r\n', opening.length);
-  if (headersEnd < 0) return undefined;
+  if (headersEnd < 0) return ended ? NOT_MULTIPART : undefined;
   const headers = body.slice(opening.length, headersEnd);
-  if (!/^content-disposition:[^\r\n]*\bname="model"(?:;|\r?$)/im.test(headers)) return null;
+  const isModelPart = /^content-disposition:[^\r\n]*\bname="model"(?:;|\r?$)/im.test(headers);
   const valueStart = headersEnd + 4;
-  const valueEnd = body.indexOf(`\r\n--${boundary}`, valueStart);
-  if (valueEnd < 0) return undefined;
+  const delimiter = `\r\n--${boundary}`;
+  const valueEnd = body.indexOf(delimiter, valueStart);
+  if (valueEnd < 0) return ended ? NOT_MULTIPART : undefined;
+  const delimiterSuffix = body.slice(valueEnd + delimiter.length, valueEnd + delimiter.length + 2);
+  if (delimiterSuffix.length < 2) return ended ? NOT_MULTIPART : undefined;
+  if (delimiterSuffix !== '\r\n' && delimiterSuffix !== '--') return NOT_MULTIPART;
+  if (!isModelPart) return null;
   const value = body.slice(valueStart, valueEnd).trim();
   if (value.length > MULTIPART_MODEL_MAX_CHARS) return null;
   return value || null;
@@ -514,7 +522,7 @@ export function createGateway (options) {
       const onEnd = () => {
         req[multipartEnded] = true;
         const body = Buffer.concat(chunks).toString('latin1');
-        finish(body.startsWith(`--${boundary}\r\n`) ? null : NOT_MULTIPART);
+        finish(extractLeadingMultipartModel(body, boundary, true));
       };
       const onAbort = () => finish(ABORTED);
       const onData = chunk => {
@@ -526,7 +534,7 @@ export function createGateway (options) {
           boundary,
         );
         if (model !== undefined || size >= MULTIPART_MODEL_PEEK_BYTES) {
-          finish(model ?? null);
+          finish(model === undefined ? NOT_MULTIPART : model);
           return;
         }
         req.resume();
