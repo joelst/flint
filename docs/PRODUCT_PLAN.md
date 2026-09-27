@@ -93,17 +93,18 @@ constructors while keeping the existing IPC and gateway contracts.
   `createEmbeddingClient()` only until the supported SDK floor no longer exports
   it. Preserve OpenAI-shaped results and surface both primary and cleanup
   failures.
-- **Audio:** use the proven `AudioSession` URI shape for Whisper-family models;
-  never construct it for the known unsupported Nemotron and Parakeet families;
-  probe it for unknown speech families and fall back to the legacy or HTTP path
-  when the runtime rejects it. Implement Nemotron raw-PCM support separately.
+- **Audio:** use `AudioSession` with the proven URI shape for Whisper-family
+  models and raw 16 kHz mono PCM through `ItemQueue` for Nemotron. Refuse
+  Parakeet when its unsupported family is determinable before loading, defer
+  ambiguous aliases to the runtime-selected variant, and never retry through
+  deprecated `AudioClient` or HTTP.
 - **Prompt metadata:** keep Flint's BYOM template validation independent of SDK
   `PromptTemplate` types.
 
 **Acceptance gate:** chat and embeddings must run without deprecated client
-constructors on the supported SDK; audio must use AudioSession for Whisper,
-skip it for known Nemotron and Parakeet aliases, and probe then fall back for
-unknown families; all three paths must preserve IPC, gateway,
+constructors on the supported SDK; audio must use the URI request for Whisper,
+the raw-PCM queue for Nemotron, and an explicit unsupported result for Parakeet,
+while conservatively resolving opaque aliases before loading; all three paths must preserve IPC, gateway,
 logging, activity-fence, error, and cancellation semantics; and the test matrix
 must cover session exports, legacy-only exports, missing legacy methods, malformed
 output, constructor failures, disposal failures, and streaming cancellation.

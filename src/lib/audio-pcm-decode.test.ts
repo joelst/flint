@@ -147,7 +147,9 @@ describe('decodeWavPcm', () => {
     view.setUint16(fmtBody + 16, 22, true); // cbSize
     view.setUint16(fmtBody + 18, 16, true); // valid bits per sample
     view.setUint32(fmtBody + 20, 0, true); // channel mask
-    view.setUint16(fmtBody + 24, 1, true); // sub-format code: PCM
+    new Uint8Array(buffer, fmtBody + 24, 16).set([
+      1, 0, 0, 0, 0, 0, 16, 0, 128, 0, 0, 170, 0, 56, 155, 113,
+    ]); // KSDATAFORMAT_SUBTYPE_PCM
     writeAscii(view, 12 + 8 + fmtBodyLen, 'data');
     view.setUint32(12 + 8 + fmtBodyLen + 4, samples.byteLength, true);
     new Uint8Array(buffer, dataOffset, samples.byteLength).set(new Uint8Array(samples.buffer));
@@ -155,7 +157,7 @@ describe('decodeWavPcm', () => {
     expect(decoded.channelData[0][0]).toBeCloseTo(500 / 32768, 4);
   });
 
-  it('falls through to the base format code when an EXTENSIBLE fmt chunk is truncated before the sub-format bytes', () => {
+  it('rejects an EXTENSIBLE fmt chunk truncated before the subtype GUID', () => {
     // A 24-byte fmt body (16-byte base + cbSize + validBits + channelMask, but no sub-format
     // GUID at all) must not be treated as having a readable sub-format code.
     const samples = new Int16Array([500]);
@@ -181,8 +183,7 @@ describe('decodeWavPcm', () => {
     writeAscii(view, 12 + 8 + fmtBodyLen, 'data');
     view.setUint32(12 + 8 + fmtBodyLen + 4, samples.byteLength, true);
     new Uint8Array(buffer, dataOffset, samples.byteLength).set(new Uint8Array(samples.buffer));
-    // formatCode stays 0xfffe (unsupported), since there is no sub-format code to read.
-    expect(() => decodeWavPcm(buffer)).toThrow(/Unsupported WAV sample format/);
+    expect(() => decodeWavPcm(buffer)).toThrow(/extensible fmt chunk is too short/i);
   });
 
   it('rejects an unsupported bit depth before allocating channel buffers', () => {

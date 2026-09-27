@@ -2,20 +2,29 @@ import { describe, expect, it } from 'vitest';
 import {
   buildModelIndex,
   buildCachedModelIndex,
+  buildCachedVariantIdsByAlias,
   isCachedModel,
   isLocalCatalogEntry,
+  normalizeCachedModels,
+  normalizeCatalogModels,
   resolveModelId,
   stripVersion,
 } from './model-registry.js';
 
 describe('isCachedModel', () => {
-  it('reads the native getter and falls back to the info snapshot only when it throws', () => {
+  it('prefers a boolean native state and otherwise falls back to the info snapshot', () => {
     expect(isCachedModel({ isCached: true })).toBe(true);
     expect(isCachedModel({ isCached: false, info: { cached: true } })).toBe(false);
+    expect(isCachedModel({ info: { cached: true } })).toBe(true);
+    expect(isCachedModel({ isCached: false })).toBe(false);
     expect(isCachedModel({
       get isCached() { throw new Error('native getter failed'); },
       info: { cached: true },
     })).toBe(true);
+    expect(isCachedModel({
+      get isCached() { throw new Error('native getter failed'); },
+      get info() { throw new Error('snapshot getter failed'); },
+    })).toBe(false);
     expect(isCachedModel({ get isCached() { throw new Error('native getter failed'); } })).toBe(false);
     expect(isCachedModel(null)).toBe(false);
   });
@@ -99,6 +108,129 @@ describe('buildCachedModelIndex', () => {
       alias: 'usable-model',
       variantId: null,
     });
+  });
+});
+
+describe('normalizeCatalogModels', () => {
+  it('snapshots usable rows and variants when native-backed getters throw', () => {
+    expect(normalizeCatalogModels([
+      {
+        alias: 'local-voice',
+        variants: [
+          { id: 'parakeet-cpu:1', isCached: true },
+          { get id() { throw new Error('native getter failed'); } },
+          { id: 'whisper-cpu:1', isCached: true },
+        ],
+      },
+      { get alias() { throw new Error('native getter failed'); } },
+    ])).toEqual({
+      complete: false,
+      models: [{
+        alias: 'local-voice',
+        variants: [
+          { id: 'parakeet-cpu:1', cached: true },
+          { id: 'whisper-cpu:1', cached: true },
+        ],
+      }],
+    });
+  });
+
+  it('marks cache state unreadable when the native getter and fallback provide no boolean', () => {
+    expect(normalizeCatalogModels([{
+      alias: 'opaque-voice',
+      variants: [{
+        id: 'parakeet-cpu:1',
+        get isCached() { throw new Error('native getter failed'); },
+        info: {},
+      }],
+    }])).toEqual({
+      complete: false,
+      models: [{
+        alias: 'opaque-voice',
+        variants: [],
+      }],
+    });
+  });
+
+  it('keeps an explicit uncached state readable and complete', () => {
+    expect(normalizeCatalogModels([{
+      alias: 'downloadable-voice',
+      variants: [{
+        id: 'whisper-cpu:1',
+        isCached: false,
+      }],
+    }])).toEqual({
+      complete: true,
+      models: [{
+        alias: 'downloadable-voice',
+        variants: [{ id: 'whisper-cpu:1', cached: false }],
+      }],
+    });
+  });
+});
+
+describe('normalizeCachedModels', () => {
+  it('retains usable rows and marks a snapshot incomplete when a native getter throws', () => {
+    expect(normalizeCachedModels([
+      { alias: 'usable', id: 'whisper-cpu:1' },
+      { alias: 'broken', get id() { throw new Error('native getter failed'); } },
+    ])).toEqual({
+      complete: false,
+      incompleteAliases: ['broken'],
+      models: [{ alias: 'usable', id: 'whisper-cpu:1' }],
+      unknownAliasFailure: false,
+    });
+  });
+
+  it('marks every alias uncertain when the failing row alias is unreadable', () => {
+    expect(normalizeCachedModels([
+      { get alias() { throw new Error('native getter failed'); } },
+    ])).toEqual({
+      complete: false,
+      incompleteAliases: [],
+      models: [],
+      unknownAliasFailure: true,
+    });
+  });
+
+  it('marks missing cached identity fields incomplete instead of authorizing a miss', () => {
+    expect(normalizeCachedModels([
+      { alias: 'missing-id' },
+      { id: 'missing-alias:1' },
+    ])).toEqual({
+      complete: false,
+      incompleteAliases: ['missing-id'],
+      models: [],
+      unknownAliasFailure: true,
+    });
+  });
+});
+
+describe('buildCachedVariantIdsByAlias', () => {
+  it('merges duplicate and differently-cased catalog aliases using cached variants only', () => {
+    expect(buildCachedVariantIdsByAlias([
+      {
+        alias: 'Local-Voice',
+        variants: [
+          { id: 'parakeet-cpu:1', cached: true },
+          { id: 'uncached:1', cached: false },
+        ],
+      },
+      { alias: ' local-voice ', variants: [{ id: 'whisper-cpu:1', cached: true }] },
+    ])).toEqual(new Map([
+      ['local-voice', ['parakeet-cpu:1', 'whisper-cpu:1']],
+    ]));
+  });
+
+  it('keeps usable cached-only rows when native-backed getters throw', () => {
+    expect(buildCachedVariantIdsByAlias([
+      { alias: 'local-voice', id: 'parakeet-cpu:1' },
+      { get alias() { throw new Error('native getter failed'); } },
+      { alias: 'local-voice', get id() { throw new Error('native getter failed'); } },
+      { alias: 'local-voice', id: 'whisper-cpu:1' },
+    ], { rowsAreCached: true })).toEqual(new Map([
+      ['local-voice', ['parakeet-cpu:1', 'whisper-cpu:1']],
+    ]));
   });
 });
 

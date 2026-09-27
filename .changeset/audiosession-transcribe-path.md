@@ -2,4 +2,4 @@
 "flint": patch
 ---
 
-Use AudioSession for Whisper transcription, keep known Nemotron and Parakeet models on the compatible fallback, and probe unknown speech families before falling back.
+Route Whisper and Nemotron through supported single-inference AudioSession paths, validate WAV chunk boundaries, defer uncertain speech-family routing until load, reject known unsupported Parakeet models early, and preserve transcription errors when cleanup also fails.

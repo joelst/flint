@@ -353,9 +353,12 @@ describe('native service startup', () => {
     const listGate = source.indexOf('readCatalog(', listModels);
     const listProgress = source.indexOf('reportCatalogProgress', listGate);
     const listRead = source.indexOf('manager.catalog.getModels()', listModels);
-    const gatewayFallback = source.indexOf('Gateway could not read the catalog');
+    const gatewayFallback = source.indexOf('Model resolver could not read the catalog');
     const gatewayFallbackEnd = source.indexOf('} catch (lookupError)', gatewayFallback);
     const gatewayFallbackFlow = source.slice(gatewayFallback, gatewayFallbackEnd);
+    const cachedResolver = source.indexOf('async function resolveFromCachedInventory');
+    const cachedResolverEnd = source.indexOf('async function resolveForGateway', cachedResolver);
+    const cachedResolverFlow = source.slice(cachedResolver, cachedResolverEnd);
     expect(gateStart).toBeGreaterThan(-1);
     expect(forcedRead).toBeGreaterThan(gateStart);
     expect(start).toBeGreaterThan(-1);
@@ -389,9 +392,13 @@ describe('native service startup', () => {
     expect(gatewayFallback).toBeGreaterThan(-1);
     expect(gatewayFallbackEnd).toBeGreaterThan(gatewayFallback);
     expect(gatewayFallbackFlow).not.toContain('await beforeCatalogRead();');
-    expect(gatewayFallbackFlow).toContain('readUnconfirmedCatalog(');
-    expect(gatewayFallbackFlow).not.toContain('readCatalog(');
-    expect(gatewayFallbackFlow).toContain('manager.catalog.getCachedModels()');
+    expect(gatewayFallbackFlow).toContain('resolveFromCachedInventory(requested)');
+    expect(cachedResolver).toBeGreaterThan(-1);
+    expect(cachedResolverEnd).toBeGreaterThan(cachedResolver);
+    expect(cachedResolverFlow).toContain('readUnconfirmedCatalog(');
+    expect(cachedResolverFlow).not.toContain('readCatalog(');
+    expect(cachedResolverFlow).toContain('manager.catalog.getCachedModels()');
+    expect(source.match(/return await resolveFromCachedInventory\(requested\)/g)).toHaveLength(2);
     for (const cmd of ['getSTTModels', 'getVisionModels']) {
       const at = source.indexOf(`} else if (cmd === '${cmd}') {`);
       const trackedRead = source.indexOf('readCatalog(', at);

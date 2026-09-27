@@ -15,7 +15,7 @@ Flint already has compatibility adapters for the text paths:
 |---|---|---|
 | `chatCompletion` | `ChatSession` with an `openai-json` request item | `Model.createChatClient()` |
 | `embedTexts` | `EmbeddingsSession` with an `openai-json` request item | `Model.createEmbeddingClient()` |
-| `transcribeAudio` | `AudioSession` with `Item.audioFromUri()` | `Model.createAudioClient()` and existing HTTP fallback |
+| `transcribeAudio` | Whisper: `AudioSession` + `Item.audioFromUri()`; Nemotron: `AudioSession` + raw-PCM `ItemQueue` | None; unsupported families fail explicitly |
 
 The adapters preserve Flint's existing OpenAI-shaped request and response
 contracts. They create a fresh session for each operation, so the migration does
@@ -30,13 +30,13 @@ rejects conflicts. Each call is limited to 256 ID characters, 128 function-name
 characters, and 64 KiB of UTF-8 function arguments; a response may contain at
 most 64 distinct calls.
 
-The current audio code classifies the loaded model before attempting the
-`AudioSession` URI shape. Whisper-family models use the proven one-shot URI
-request; known Nemotron and Parakeet families skip that unsupported shape and
-use the existing legacy fallback. Unknown speech families still probe the
-session path and fall back if the runtime rejects it. Nemotron requires a
-different raw-PCM `ItemQueue` shape, and Parakeet has no working `AudioSession`
-request shape in the pinned SDK.
+The current audio code classifies the requested model before loading whenever
+its alias, explicit variant, resident variant, or unanimous cached candidates
+identify the family. Whisper-family models use the proven one-shot URI request.
+Nemotron uses 16 kHz mono 16-bit PCM through `ItemQueue`. Parakeet has no working
+request shape in the pinned SDK and is refused before loading when determinable.
+Mixed or unreadable cached candidates defer to the exact runtime-selected
+variant; no speech request retries through deprecated `AudioClient` or HTTP.
 
 Flint's `sidecar/prompt-template.js` is not the SDK's deprecated
 `PromptTemplate` type. It is a Node-free Flint module that validates and authors
@@ -47,14 +47,12 @@ inference time.
 
 ## Migration boundary
 
-The migration makes deprecated client constructors optional compatibility
-fallbacks rather than the primary path. It does not remove:
+The migration keeps deprecated text-client constructors as optional
+compatibility fallbacks rather than primary paths. It does not remove:
 
 - Flint's OpenAI-shaped IPC and gateway contracts;
 - `openai-json` request serialization used by the session adapters;
 - Flint-owned BYOM template validation and editing;
-- the legacy audio path before every supported STT family has a proven session
-  request shape;
 - model-family capability checks and runtime fallback handling.
 
 The sidecar remains the only place that imports the Foundry SDK. The frontend
@@ -62,5 +60,5 @@ continues to use `src/lib/sdk.ts` and IPC contracts.
 
 Implementation sequencing and release acceptance gates for this migration are
 owned by `docs/PRODUCT_PLAN.md`. This document remains the technical boundary:
-the session adapters, legacy fallbacks, model-family checks, request shapes, and
-error/cancellation contracts described above are the current behavior.
+the session adapters, text compatibility fallbacks, model-family checks, request
+shapes, and error/cancellation contracts described above are the current behavior.
