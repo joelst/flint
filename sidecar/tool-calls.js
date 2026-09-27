@@ -206,37 +206,6 @@ function compatibleValue (current, incoming, field, { maxLength, maxBytes } = {}
   throw new Error(`Streamed tool-call ${field} conflicts with an earlier value`);
 }
 
-// Structural equality used only for array leaves inside `isJsonExtension`: JSON.parse
-// always produces fresh array instances, so Object.is never matches even when an array
-// field is genuinely unchanged between two cumulative snapshots. Arrays are compared by
-// value here rather than treated as extendable, since element-wise growth cannot be
-// distinguished from replacement. Uses an explicit worklist (not recursion) since
-// `function.arguments` up to 64 KiB can encode arrays/objects nested deeply enough to
-// overflow the call stack if compared recursively.
-function deepEqual (a, b) {
-  const pending = [[a, b]];
-  while (pending.length > 0) {
-    const [x, y] = pending.pop();
-    if (Object.is(x, y)) continue;
-    if (Array.isArray(x) && Array.isArray(y)) {
-      if (x.length !== y.length) return false;
-      for (let i = 0; i < x.length; i += 1) pending.push([x[i], y[i]]);
-      continue;
-    }
-    if (isPlainObject(x) && isPlainObject(y)) {
-      const keys = Object.keys(x);
-      if (keys.length !== Object.keys(y).length) return false;
-      for (const key of keys) {
-        if (!Object.hasOwn(y, key)) return false;
-        pending.push([x[key], y[key]]);
-      }
-      continue;
-    }
-    return false;
-  }
-  return true;
-}
-
 function isJsonExtension (current, incoming) {
   let currentValue;
   let incomingValue;
@@ -250,10 +219,14 @@ function isJsonExtension (current, incoming) {
   while (pending.length > 0) {
     const [subset, value] = pending.pop();
     if (Object.is(subset, value)) continue;
-    if (Array.isArray(subset) || Array.isArray(value)) {
-      if (!deepEqual(subset, value)) return false;
+    if (Array.isArray(subset) && Array.isArray(value)) {
+      if (subset.length > value.length) return false;
+      for (let index = 0; index < subset.length; index += 1) {
+        pending.push([subset[index], value[index]]);
+      }
       continue;
     }
+    if (Array.isArray(subset) || Array.isArray(value)) return false;
     if (!isPlainObject(subset) || !isPlainObject(value)) return false;
     for (const [key, child] of Object.entries(subset)) {
       if (!Object.hasOwn(value, key)) return false;

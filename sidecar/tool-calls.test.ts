@@ -183,6 +183,38 @@ describe('streamed tool-call accumulation', () => {
     expect(finalizeStreamingToolCalls(target)).toEqual([call('{"a":1,"b":2}')]);
   });
 
+  it('supports recursive array-prefix growth in cumulative snapshots', () => {
+    const target = createToolCallAccumulator();
+    mergeStreamingToolCalls(target, { snapshot: [call('{"items":[{"tags":["a"]}]}')] });
+    mergeStreamingToolCalls(target, { snapshot: [call('{"items":[{"tags":["a","b"]},{"tags":["c"]}]}')] });
+    expect(target.failure).toBeNull();
+    expect(finalizeStreamingToolCalls(target)).toEqual([
+      call('{"items":[{"tags":["a","b"]},{"tags":["c"]}]}'),
+    ]);
+  });
+
+  it('rejects array element replacement, insertion, and reordering', () => {
+    for (const [initial, conflicting] of [
+      ['{"items":[1,2]}', '{"items":[1,3]}'],
+      ['{"items":["x"]}', '{"items":["y","x"]}'],
+      ['{"items":[1,2]}', '{"items":[2,1]}'],
+    ]) {
+      const target = createToolCallAccumulator();
+      mergeStreamingToolCalls(target, { snapshot: [call(initial)] });
+      mergeStreamingToolCalls(target, { snapshot: [call(conflicting)] });
+      expect(target.failure, `${initial} -> ${conflicting}`).toBeInstanceOf(Error);
+      expect(target.snapshots.get('call-1').function.arguments).toBe(initial);
+    }
+  });
+
+  it('retains the longer array prefix when an older cumulative snapshot repeats', () => {
+    const target = createToolCallAccumulator();
+    mergeStreamingToolCalls(target, { snapshot: [call('{"items":[1,2]}')] });
+    mergeStreamingToolCalls(target, { snapshot: [call('{"items":[1]}')] });
+    expect(target.failure).toBeNull();
+    expect(finalizeStreamingToolCalls(target)).toEqual([call('{"items":[1,2]}')]);
+  });
+
   it('validates cumulative snapshot argument bytes incrementally', () => {
     const measured: string[] = [];
     const target = createToolCallAccumulator({

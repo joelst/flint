@@ -47,8 +47,8 @@ inference time.
 
 ## Migration boundary
 
-The migration removes Flint's dependency on deprecated client constructors. It
-does not remove:
+The migration makes deprecated client constructors optional compatibility
+fallbacks rather than the primary path. It does not remove:
 
 - Flint's OpenAI-shaped IPC and gateway contracts;
 - `openai-json` request serialization used by the session adapters;
