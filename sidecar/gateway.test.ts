@@ -1527,7 +1527,7 @@ describe('gateway activity hook', () => {
 
     const res = await request(gateway.publicPort, '/v1/audio/transcriptions', {
       method: 'POST',
-      headers: { 'content-type': `multipart/form-data; charset=utf-8; BOUNDARY = "${boundary}"` },
+      headers: { 'content-type': ` multipart/form-data \t; charset=utf-8; BOUNDARY = "${boundary}"` },
       body,
     });
 
@@ -1649,6 +1649,122 @@ describe('gateway activity hook', () => {
   it('classifies speech routes without matching neighboring paths', () => {
     expect(classifyGatewayRoute('/v1/audio/transcriptions?format=json')).toBe('speech');
     expect(classifyGatewayRoute('/v1/audio/transcription-preview')).toBe('other');
+  });
+
+  it('classifies doubled-slash and trailing-slash speech paths that Foundry still routes', () => {
+    for (const path of [
+      '//v1/audio/transcriptions',
+      '/v1//audio/transcriptions',
+      '/v1/audio//transcriptions',
+      '/v1/audio/transcriptions/',
+      '/v1/audio/transcriptions//',
+      'v1/audio/transcriptions',
+      '/V1/Audio/Transcriptions',
+    ]) {
+      expect(classifyGatewayRoute(path), path).toBe('speech');
+    }
+  });
+
+  // Foundry's transcription route ignores Content-Type and decodes the JSON `filename` as a
+  // path on the machine running Flint, so no such body may reach it by any route or header.
+  describe('refuses transcription bodies that are not multipart', () => {
+    const LOCAL_PATH_BODY = JSON.stringify({ model: 'whisper-tiny:1', filename: 'C:\\secret.wav' });
+    const cases = [
+      ['a JSON body', '/v1/audio/transcriptions', { 'content-type': 'application/json' }, 415],
+      ['a text/plain body', '/v1/audio/transcriptions', { 'content-type': 'text/plain' }, 415],
+      ['a body with no content type', '/v1/audio/transcriptions', {}, 415],
+      ['a multipart header with no boundary', '/v1/audio/transcriptions',
+        { 'content-type': 'multipart/form-data' }, 400],
+      ['a multipart header with a JSON body', '/v1/audio/transcriptions',
+        { 'content-type': 'multipart/form-data; boundary=x' }, 400],
+      ['a doubled-slash JSON request', '/v1/audio//transcriptions',
+        { 'content-type': 'application/json' }, 415],
+      ['a leading doubled-slash JSON request', '//v1/audio/transcriptions',
+        { 'content-type': 'application/json' }, 415],
+      ['a trailing-slash multipart-header JSON request', '/v1/audio/transcriptions//',
+        { 'content-type': 'multipart/form-data; boundary=x' }, 400],
+    ];
+
+    for (const [label, path, headers, status] of cases) {
+      it(`refuses ${label} without leasing, loading, or forwarding`, async () => {
+        const events = [];
+        let loaded = false;
+        gateway = await startGateway({
+          load: async () => { loaded = true; },
+          onActivity: (...event) => events.push(event),
+        });
+
+        const res = await request(gateway.publicPort, path, {
+          method: 'POST', headers, body: LOCAL_PATH_BODY,
+        });
+
+        expect(res.status).toBe(status);
+        expect(JSON.parse(res.body).error.type).toBe('invalid_request_error');
+        expect(upstream.state.hits).toEqual([]);
+        expect(events).toEqual([]);
+        expect(loaded).toBe(false);
+      });
+    }
+
+    it('refuses a JSON body even with autoload disabled', async () => {
+      gateway = await startGateway({ autoload: false });
+      const res = await request(gateway.publicPort, '/v1/audio/transcriptions', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: LOCAL_PATH_BODY,
+      });
+      expect(res.status).toBe(415);
+      expect(upstream.state.hits).toEqual([]);
+    });
+
+    it('refuses an empty multipart body', async () => {
+      gateway = await startGateway();
+      const res = await request(gateway.publicPort, '/v1/audio/transcriptions', {
+        method: 'POST', headers: { 'content-type': 'multipart/form-data; boundary=x' },
+      });
+      expect(res.status).toBe(400);
+      expect(upstream.state.hits).toEqual([]);
+    });
+
+    it('refuses a body that ends inside the opening boundary', async () => {
+      gateway = await startGateway();
+      const res = await request(gateway.publicPort, '/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: { 'content-type': 'multipart/form-data; boundary=flint-boundary' },
+        body: '--flint-bou',
+      });
+      expect(res.status).toBe(400);
+      expect(upstream.state.hits).toEqual([]);
+    });
+
+    it.each([
+      ['after the opening boundary', '--flint-boundary\r\n'],
+      ['inside the first part headers',
+        '--flint-boundary\r\nContent-Disposition: form-data; name="model"'],
+      ['inside the leading model value',
+        '--flint-boundary\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-tiny:1'],
+      ['inside the leading model delimiter',
+        '--flint-boundary\r\nContent-Disposition: form-data; name="model"\r\n\r\n'
+          + 'whisper-tiny:1\r\n--flint-boundary'],
+    ])('refuses a multipart body that ends %s', async (_label, body) => {
+      gateway = await startGateway();
+      const res = await request(gateway.publicPort, '/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: { 'content-type': 'multipart/form-data; boundary=flint-boundary' },
+        body,
+      });
+      expect(res.status).toBe(400);
+      expect(upstream.state.hits).toEqual([]);
+    });
+
+    it('refuses a leading multipart part that remains incomplete at the peek limit', async () => {
+      gateway = await startGateway();
+      const res = await request(gateway.publicPort, '/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: { 'content-type': 'multipart/form-data; boundary=flint-boundary' },
+        body: '--flint-boundary\r\nX-Incomplete: ' + 'x'.repeat(16 * 1024),
+      });
+      expect(res.status).toBe(400);
+      expect(upstream.state.hits).toEqual([]);
+    });
   });
 
   it('stays open across an autoload and replay rather than reporting twice', async () => {

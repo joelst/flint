@@ -1,11 +1,12 @@
 import { defineConfig } from "vite";
 import { sveltekit } from "@sveltejs/kit/vite";
+import { svelteTesting } from '@testing-library/svelte/vite';
 
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
 export default defineConfig(() => ({
-  plugins: [sveltekit()],
+  plugins: [sveltekit(), svelteTesting({ autoCleanup: false })],
 
   // Externalize the Foundry SDK to avoid browser/Node builtin issues during build.
   // Real usage should move to Tauri commands or sidecar for production.
@@ -102,6 +103,11 @@ export default defineConfig(() => ({
         'sidecar/speech-models.js',
         'sidecar/speech-engine.js',
         'sidecar/wav-pcm.js',
+        'src/lib/audio-segmentation.ts',
+        'src/lib/transcript-format.ts',
+        'src/lib/long-audio-transcript.ts',
+        'src/lib/caption-download.ts',
+        'src/lib/zip-archive.ts',
         'src/lib/endpoint-self-test-residency.ts',
         'src/lib/endpoint-self-test.ts',
         'src/lib/sidecar-stderr.ts',
@@ -110,6 +116,7 @@ export default defineConfig(() => ({
         'src/lib/status-message.ts',
         'sidecar/protocol-stdout.js',
         'sidecar/chat-transport.js',
+        'sidecar/session-clients.js',
         'sidecar/audio-format.js',
         'sidecar/accelerator-registration.js',
         'sidecar/model-operation-queue.js',
@@ -134,6 +141,7 @@ export default defineConfig(() => ({
         'sidecar/async-log-writer.js',
         'sidecar/monotonic-wait.js',
         'sidecar/chat-response.js',
+        'sidecar/tool-calls.js',
         'sidecar/inference-metrics.js',
         'sidecar/foundry-runtime-pin.js',
         'sidecar/health-ring.js',

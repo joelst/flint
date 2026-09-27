@@ -124,9 +124,9 @@ async function transcribeWithItemQueue ({
       queue.push(Item.bytes(new Uint8Array(pcm.buffer, pcm.byteOffset + offset, end - offset)));
     }
     queue.markFinished();
-    await consume;
+    const [, terminalResponse] = await Promise.all([consume, response]);
     return {
-      ...speechResultFrom(await response, 'nemotron'),
+      ...speechResultFrom(terminalResponse, 'nemotron'),
       transcriptionPath: 'itemQueue',
     };
   } catch (error) {

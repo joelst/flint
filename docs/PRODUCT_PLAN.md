@@ -76,9 +76,38 @@ Embedding-model path, not RAG. Ships in 0.9.0 with the rest of the post-0.7.0 wa
 
 - Gateway classifies `/v1/embeddings` and autoloads like chat (proven in tests). Chat JSON/SSE normalization stays chat-only.
 - BYOM import detects embedding folders and does not require a chat prompt template.
-- Sidecar `embedTexts` uses `createEmbeddingClient()` with the same pool inFlight fencing as chat. Batches are bounded (32 strings, 8k chars each).
+- Sidecar `embedTexts` uses the `EmbeddingsSession` adapter (falling back to `createEmbeddingClient()` on SDK builds without it) with the same pool inFlight fencing as chat. Batches are bounded (32 strings, 8k chars each).
 - Diagnostics self-test **blocks** embeddings when no embedding model is present; **passes** when `POST /v1/embeddings` returns a numeric vector.
 - One recorded BYOM recipe is still a spike: do not fake a Continue indexer verification.
+
+### SDK 2.x session migration
+
+This workstream replaces Flint's deprecated OpenAI-shaped model-client
+constructors while keeping the existing IPC and gateway contracts.
+
+- **Chat:** use `ChatSession` as the primary path with the OpenAI-JSON request
+  bridge; retain `createChatClient()` only for SDK builds without the session
+  surface. Preserve generation settings, tool controls, streaming finish
+  reasons, cancellation behavior, and model-specific error boundaries.
+- **Embeddings:** use the stateless `EmbeddingsSession` bridge; retain
+  `createEmbeddingClient()` only until the supported SDK floor no longer exports
+  it. Preserve OpenAI-shaped results and surface both primary and cleanup
+  failures.
+- **Audio:** use `AudioSession` with the proven URI shape for Whisper-family
+  models and raw 16 kHz mono PCM through `ItemQueue` for Nemotron. Refuse
+  Parakeet when its unsupported family is determinable before loading, defer
+  ambiguous aliases to the runtime-selected variant, and never retry through
+  deprecated `AudioClient` or HTTP.
+- **Prompt metadata:** keep Flint's BYOM template validation independent of SDK
+  `PromptTemplate` types.
+
+**Acceptance gate:** chat and embeddings must run without deprecated client
+constructors on the supported SDK; audio must use the URI request for Whisper,
+the raw-PCM queue for Nemotron, and an explicit unsupported result for Parakeet,
+while conservatively resolving opaque aliases before loading; all three paths must preserve IPC, gateway,
+logging, activity-fence, error, and cancellation semantics; and the test matrix
+must cover session exports, legacy-only exports, missing legacy methods, malformed
+output, constructor failures, disposal failures, and streaming cancellation.
 
 ## Acceptance gates for 1.0 workstreams
 

@@ -356,6 +356,9 @@ describe('native service startup', () => {
     const gatewayFallback = source.indexOf('Model resolver could not read the catalog');
     const gatewayFallbackEnd = source.indexOf('} catch (lookupError)', gatewayFallback);
     const gatewayFallbackFlow = source.slice(gatewayFallback, gatewayFallbackEnd);
+    const cachedResolver = source.indexOf('async function resolveFromCachedInventory');
+    const cachedResolverEnd = source.indexOf('async function resolveForGateway', cachedResolver);
+    const cachedResolverFlow = source.slice(cachedResolver, cachedResolverEnd);
     expect(gateStart).toBeGreaterThan(-1);
     expect(forcedRead).toBeGreaterThan(gateStart);
     expect(start).toBeGreaterThan(-1);
@@ -389,9 +392,13 @@ describe('native service startup', () => {
     expect(gatewayFallback).toBeGreaterThan(-1);
     expect(gatewayFallbackEnd).toBeGreaterThan(gatewayFallback);
     expect(gatewayFallbackFlow).not.toContain('await beforeCatalogRead();');
-    expect(gatewayFallbackFlow).toContain('readUnconfirmedCatalog(');
-    expect(gatewayFallbackFlow).not.toContain('readCatalog(');
-    expect(gatewayFallbackFlow).toContain('manager.catalog.getCachedModels()');
+    expect(gatewayFallbackFlow).toContain('resolveFromCachedInventory(requested)');
+    expect(cachedResolver).toBeGreaterThan(-1);
+    expect(cachedResolverEnd).toBeGreaterThan(cachedResolver);
+    expect(cachedResolverFlow).toContain('readUnconfirmedCatalog(');
+    expect(cachedResolverFlow).not.toContain('readCatalog(');
+    expect(cachedResolverFlow).toContain('manager.catalog.getCachedModels()');
+    expect(source.match(/return await resolveFromCachedInventory\(requested\)/g)).toHaveLength(2);
     for (const cmd of ['getSTTModels', 'getVisionModels']) {
       const at = source.indexOf(`} else if (cmd === '${cmd}') {`);
       const trackedRead = source.indexOf('readCatalog(', at);
@@ -473,12 +480,24 @@ describe('native service startup', () => {
   });
 
   it('classifies ASR model names the same way the endpoint classifier does', async () => {
-    const { looksLikeSpeech } = await import('./model-classification.js');
+    const { audioSessionUriSupport, looksLikeSpeech } = await import('./model-classification.js');
     expect(looksLikeSpeech('nemotron-3.5-asr-streaming-0.6b')).toBe(true);
     expect(looksLikeSpeech('nemotron-speech-en-0.6b')).toBe(true);
     expect(looksLikeSpeech('whisper-tiny-generic-cpu')).toBe(true);
     expect(looksLikeSpeech('parakeet-tdt-generic-cpu')).toBe(true);
     expect(looksLikeSpeech('qwen3-0.6b-generic-cpu')).toBe(false);
+    expect(audioSessionUriSupport({ alias: 'whisper-tiny' })).toBe('supported');
+    expect(audioSessionUriSupport({ alias: 'nemotron-3.5-asr-streaming-0.6b' })).toBe('unsupported');
+    expect(audioSessionUriSupport({ alias: 'parakeet-tdt-0.6b-v2' })).toBe('unsupported');
+    expect(audioSessionUriSupport({
+      alias: 'opaque-variant',
+      info: { capabilities: 'automatic-speech-recognition whisper' },
+    })).toBe('supported');
+    expect(audioSessionUriSupport({
+      alias: 'opaque-variant',
+      info: { task: 'automatic-speech-recognition', modelType: 'parakeet' },
+    })).toBe('unsupported');
+    expect(audioSessionUriSupport({ alias: 'future-asr-model' })).toBe('unknown');
   });
 });
 

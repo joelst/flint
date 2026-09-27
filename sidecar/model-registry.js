@@ -188,6 +188,27 @@ export function buildCachedModelIndex (models) {
 }
 
 /**
+ * Snapshot cached-only native rows into plain data and retain whether every row was readable.
+ *
+ * @param {Array<{alias?: string, id?: string}>} models
+ * @returns {{models: Array<{alias: string, id: string}>, complete: boolean}}
+ */
+export function normalizeCachedModels (models) {
+  const normalized = [];
+  let complete = true;
+  for (const model of Array.isArray(models) ? models : []) {
+    try {
+      const alias = typeof model?.alias === 'string' ? model.alias : '';
+      const id = typeof model?.id === 'string' ? model.id : '';
+      if (alias && id) normalized.push({ alias, id });
+    } catch {
+      complete = false;
+    }
+  }
+  return { models: normalized, complete };
+}
+
+/**
  * Group cached variant ids by normalized alias without trusting native-backed getters.
  * Catalog rows expose `variants`; cached-only inventory rows expose one `id` each.
  *

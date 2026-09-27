@@ -33,7 +33,7 @@ function buildWav ({ sampleRate = 16000, channels = 1, bitsPerSample = 16, extra
   return bytes;
 }
 
-function fakeSdk ({ response, streamingError } = {}) {
+function fakeSdk ({ response, streamingError, stalledIterator = false, streamingResponse } = {}) {
   const state = { request: null, queued: [], queueFinished: false, queueDisposed: false, sessionDisposed: false };
   class Request {
     items = [];
@@ -57,8 +57,10 @@ function fakeSdk ({ response, streamingError } = {}) {
       state.request = request;
       const result = response ?? { output: [{ type: 'speechResult', text: '<en-US>hello there', segments: [{ text: '<en-US>hello there' }] }] };
       return {
-        async *[Symbol.asyncIterator] () {},
-        response: Promise.resolve(result),
+        [Symbol.asyncIterator]: stalledIterator
+          ? () => ({ next: () => new Promise(() => {}) })
+          : async function * () {},
+        response: streamingResponse ?? Promise.resolve(result),
       };
     }
     dispose () { state.sessionDisposed = true; }
@@ -180,6 +182,24 @@ describe('transcribeSpeech', () => {
       message: expect.stringContaining('Foundry Local SDK 2.0.1'),
     });
     expect(createAudioClient).not.toHaveBeenCalled();
+    expect(state.sessionDisposed).toBe(true);
+  });
+
+  it('surfaces an early Nemotron response failure even when the stream iterator never finishes', async () => {
+    const nativeFailure = new Error('native streaming request failed');
+    const { module, state } = fakeSdk({
+      stalledIterator: true,
+      streamingResponse: Promise.reject(nativeFailure),
+    });
+    await expect(transcribeSpeech({
+      sdkModule: module,
+      model: {},
+      modelAlias: 'nemotron-speech-en-0.6b',
+      filePath: '',
+      audioBytes: buildWav(),
+    })).rejects.toBe(nativeFailure);
+    expect(state.queueFinished).toBe(true);
+    expect(state.queueDisposed).toBe(true);
     expect(state.sessionDisposed).toBe(true);
   });
 

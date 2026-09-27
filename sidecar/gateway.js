@@ -39,6 +39,7 @@ import {
   rewriteStatusEndpoints,
   formatPublicEndpoint,
   isLoopbackAddress,
+  isContentType,
   isJsonContentType,
   DEFAULT_BUFFERED_RESPONSE_TIMEOUT_MS,
   DEFAULT_MAX_BUFFERED_BODY,
@@ -55,6 +56,9 @@ const MAX_USAGE_METRICS_CHARS = 64 * 1024;
 const multipartModel = Symbol('multipartModel');
 const multipartPrefix = Symbol('multipartPrefix');
 const multipartEnded = Symbol('multipartEnded');
+const NOT_MULTIPART = Symbol('notMultipart');
+const TRANSCRIPTION_REQUIRES_MULTIPART =
+  'Audio transcription requires a multipart/form-data body beginning with its declared boundary.';
 
 /**
  * Classify OpenAI-compatible routes for metadata-only access logging.
@@ -63,30 +67,41 @@ const multipartEnded = Symbol('multipartEnded');
  * grouped together without matching unrelated names that merely contain it.
  */
 export function classifyGatewayRoute (urlPath) {
-  const path = String(urlPath || '').split('?')[0];
+  // Foundry's router collapses empty segments (`/v1/audio//transcriptions` routes), so the
+  // classification must too, or a doubled slash would bypass the speech guard.
+  const path = String(urlPath || '').split(/[?#]/)[0].replace(/\/{2,}/g, '/');
   if (/(^|\/)chat\/completions(\/|$)/.test(path)) return 'chat';
   if (/(^|\/)embeddings(\/|$)/.test(path)) return 'embeddings';
-  if (/(^|\/)audio\/transcriptions(\/|$)/.test(path)) return 'speech';
+  if (/(^|\/)audio\/transcriptions(\/|$)/i.test(path)) return 'speech';
   if (/(^|\/)models(\/|$)/.test(path)) return 'models';
   return 'other';
 }
 
 /**
- * Returns undefined while the leading field is incomplete, null when it is not `model`, or
- * the submitted model value once its terminating boundary is available.
+ * Returns undefined while the leading field is incomplete, NOT_MULTIPART when the body does
+ * not open with its declared boundary (or ends before the leading field is structurally
+ * complete), null when the first part is not `model`, or the submitted model value once its
+ * terminating boundary is available.
  */
-function extractLeadingMultipartModel (body, boundary) {
+function extractLeadingMultipartModel (body, boundary, ended = false) {
   const opening = `--${boundary}\r\n`;
   if (!body.startsWith(opening)) {
-    return body.length < opening.length && opening.startsWith(body) ? undefined : null;
+    return !ended && body.length < opening.length && opening.startsWith(body)
+      ? undefined
+      : NOT_MULTIPART;
   }
   const headersEnd = body.indexOf('\r\n\r\n', opening.length);
-  if (headersEnd < 0) return undefined;
+  if (headersEnd < 0) return ended ? NOT_MULTIPART : undefined;
   const headers = body.slice(opening.length, headersEnd);
-  if (!/^content-disposition:[^\r\n]*\bname="model"(?:;|\r?$)/im.test(headers)) return null;
+  const isModelPart = /^content-disposition:[^\r\n]*\bname="model"(?:;|\r?$)/im.test(headers);
   const valueStart = headersEnd + 4;
-  const valueEnd = body.indexOf(`\r\n--${boundary}`, valueStart);
-  if (valueEnd < 0) return undefined;
+  const delimiter = `\r\n--${boundary}`;
+  const valueEnd = body.indexOf(delimiter, valueStart);
+  if (valueEnd < 0) return ended ? NOT_MULTIPART : undefined;
+  const delimiterSuffix = body.slice(valueEnd + delimiter.length, valueEnd + delimiter.length + 2);
+  if (delimiterSuffix.length < 2) return ended ? NOT_MULTIPART : undefined;
+  if (delimiterSuffix !== '\r\n' && delimiterSuffix !== '--') return NOT_MULTIPART;
+  if (!isModelPart) return null;
   const value = body.slice(valueStart, valueEnd).trim();
   if (value.length > MULTIPART_MODEL_MAX_CHARS) return null;
   return value || null;
@@ -324,6 +339,14 @@ export function createGateway (options) {
     req.resume();
   }
 
+  /** A transcription request that must not reach Foundry. Nothing was leased or forwarded. */
+  function refuseTranscription (req, res, status) {
+    res.writeHead(status, { 'content-type': 'application/json', connection: 'close' });
+    res.end(openAiError(TRANSCRIPTION_REQUIRES_MULTIPART, 'invalid_request_error'));
+    req.resume();
+    return ABORTED;
+  }
+
   /**
    * @param {(model: string) => boolean} [setActivityModel] moves the request's lease to
    *        `model`; false means the owner refused it, and the request must not load or replay.
@@ -406,6 +429,24 @@ export function createGateway (options) {
    * @returns {Promise<string|null|typeof ABORTED>}
    */
   function maybeBufferBody (req, res) {
+    const contentType = Array.isArray(req.headers['content-type'])
+      ? req.headers['content-type'][0]
+      : req.headers['content-type'];
+    if (classifyGatewayRoute(req.url) === 'speech') {
+      // Foundry's transcription route ignores Content-Type and reads any JSON body's
+      // `filename` as a path on this machine. Only a body that opens with its multipart
+      // boundary (never valid JSON) may reach it, and nothing else is buffered or loaded.
+      if (!isContentType(contentType, 'multipart/form-data')) {
+        return Promise.resolve(refuseTranscription(req, res, 415));
+      }
+      return peekMultipartModel(req).then(model => {
+        if (model === ABORTED) return ABORTED;
+        if (model === NOT_MULTIPART) return refuseTranscription(req, res, 400);
+        req[multipartModel] = model;
+        return null;
+      });
+    }
+
     const declared = Number(req.headers['content-length']);
     const wanted = autoload && shouldBufferBody({
       method: req.method,
@@ -413,22 +454,6 @@ export function createGateway (options) {
       contentLength: Number.isFinite(declared) ? declared : null,
       maxBytes: bufferedBodyLimit,
     }) && autoloadAllowedFor(req);
-
-    const contentType = Array.isArray(req.headers['content-type'])
-      ? req.headers['content-type'][0]
-      : req.headers['content-type'];
-    if (
-      !wanted
-      && classifyGatewayRoute(req.url) === 'speech'
-      && typeof contentType === 'string'
-      && /^multipart\/form-data(?:;|$)/i.test(contentType)
-    ) {
-      return peekMultipartModel(req).then(model => {
-        if (model === ABORTED) return ABORTED;
-        req[multipartModel] = model;
-        return null;
-      });
-    }
     if (!wanted) return Promise.resolve(null);
 
     return new Promise(resolve2 => {
@@ -466,7 +491,8 @@ export function createGateway (options) {
   /**
    * Peek only the leading multipart field so we can lease known speech work without buffering
    * or replaying the audio upload. Flint's own probe writes `model` first; requests whose first
-   * part is anything else remain opaque pass-through traffic.
+   * part is anything else remain opaque pass-through traffic. A missing boundary or a body
+   * that does not open with it resolves to NOT_MULTIPART and is never forwarded.
    */
   function peekMultipartModel (req) {
     const contentType = Array.isArray(req.headers['content-type'])
@@ -476,7 +502,7 @@ export function createGateway (options) {
       ? /(?:^|;)\s*boundary\s*=\s*(?:"([^"]+)"|([^;\s]+))/i.exec(contentType)
       : null;
     const boundary = boundaryMatch?.[1] || boundaryMatch?.[2];
-    if (!boundary) return Promise.resolve(null);
+    if (!boundary) return Promise.resolve(NOT_MULTIPART);
 
     return new Promise(resolve2 => {
       const chunks = [];
@@ -495,7 +521,8 @@ export function createGateway (options) {
       };
       const onEnd = () => {
         req[multipartEnded] = true;
-        finish(null);
+        const body = Buffer.concat(chunks).toString('latin1');
+        finish(extractLeadingMultipartModel(body, boundary, true));
       };
       const onAbort = () => finish(ABORTED);
       const onData = chunk => {
@@ -507,7 +534,7 @@ export function createGateway (options) {
           boundary,
         );
         if (model !== undefined || size >= MULTIPART_MODEL_PEEK_BYTES) {
-          finish(model ?? null);
+          finish(model === undefined ? NOT_MULTIPART : model);
           return;
         }
         req.resume();

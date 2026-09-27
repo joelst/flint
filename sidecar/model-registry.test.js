@@ -5,6 +5,7 @@ import {
   buildCachedVariantIdsByAlias,
   isCachedModel,
   isLocalCatalogEntry,
+  normalizeCachedModels,
   normalizeCatalogModels,
   resolveModelId,
   stripVersion,
@@ -129,6 +130,18 @@ describe('normalizeCatalogModels', () => {
           { id: 'whisper-cpu:1', cached: true },
         ],
       }],
+    });
+  });
+});
+
+describe('normalizeCachedModels', () => {
+  it('retains usable rows and marks a snapshot incomplete when a native getter throws', () => {
+    expect(normalizeCachedModels([
+      { alias: 'usable', id: 'whisper-cpu:1' },
+      { alias: 'broken', get id() { throw new Error('native getter failed'); } },
+    ])).toEqual({
+      complete: false,
+      models: [{ alias: 'usable', id: 'whisper-cpu:1' }],
     });
   });
 });
