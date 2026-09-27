@@ -21,7 +21,11 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { annotateVariantUpdates } from './model-updates.js';
 import { selectChatTransport } from './chat-transport.js';
-import { createSessionChatClient, createSessionEmbeddingClient } from './session-clients.js';
+import {
+  createSessionChatClient,
+  createSessionEmbeddingClient,
+  normalizeChatPenalty,
+} from './session-clients.js';
 import { assertWavBuffer } from './audio-format.js';
 import { createGateway } from './gateway.js';
 import { formatPublicEndpoint } from './gateway-http.js';
@@ -3618,10 +3622,10 @@ rl.on('line', async (line) => {
             client.settings.topK = payload.topK;
           }
           if (client?.settings && Number.isFinite(payload.frequencyPenalty)) {
-            client.settings.frequencyPenalty = payload.frequencyPenalty;
+            client.settings.frequencyPenalty = normalizeChatPenalty(payload.frequencyPenalty);
           }
           if (client?.settings && Number.isFinite(payload.presencePenalty)) {
-            client.settings.presencePenalty = payload.presencePenalty;
+            client.settings.presencePenalty = normalizeChatPenalty(payload.presencePenalty);
           }
           if (client?.settings && Number.isFinite(payload.randomSeed)) {
             client.settings.randomSeed = payload.randomSeed;
@@ -3893,8 +3897,12 @@ rl.on('line', async (line) => {
               ...(payload.toolChoice !== undefined ? { tool_choice: payload.toolChoice } : {}),
               ...(payload.responseFormat !== undefined ? { response_format: payload.responseFormat } : {}),
               top_p: payload.topP,
-              frequency_penalty: payload.frequencyPenalty,
-              presence_penalty: payload.presencePenalty,
+              ...(normalizeChatPenalty(payload.frequencyPenalty) !== undefined
+                ? { frequency_penalty: payload.frequencyPenalty }
+                : {}),
+              ...(normalizeChatPenalty(payload.presencePenalty) !== undefined
+                ? { presence_penalty: payload.presencePenalty }
+                : {}),
               // The native web service mirrors the SDK client's own serialization, which sends
               // top_k/random_seed as stringified metadata fields rather than top-level numbers.
               ...(payload.topK !== undefined || payload.randomSeed !== undefined

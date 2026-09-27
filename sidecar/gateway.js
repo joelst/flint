@@ -262,8 +262,9 @@ export function createGateway (options) {
 
   async function handleAdmittedRequest (req, res) {
     const startedAt = Date.now();
-    const buffered = await maybeBufferBody(req, res);
+    let buffered = await maybeBufferBody(req, res);
     if (buffered === ABORTED) return;
+    if (buffered !== null) buffered = normalizeChatRequestPenalties(req.url, buffered);
 
     // Populated only for chat completions, streamed or not, by parsing the response the
     // proxy is already decoding for SSE/JSON normalization — never a separate buffering pass.
@@ -486,6 +487,26 @@ export function createGateway (options) {
       req.on('error', () => finish(ABORTED));
       req.on('aborted', () => finish(ABORTED));
     });
+  }
+
+  function normalizeChatRequestPenalties (url, body) {
+    if (!isChatCompletionPath(url) || typeof body !== 'string') return body;
+    try {
+      const parsed = JSON.parse(body);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return body;
+      let changed = false;
+      if (parsed.frequency_penalty === 0) {
+        delete parsed.frequency_penalty;
+        changed = true;
+      }
+      if (parsed.presence_penalty === 0) {
+        delete parsed.presence_penalty;
+        changed = true;
+      }
+      return changed ? JSON.stringify(parsed) : body;
+    } catch {
+      return body;
+    }
   }
 
   /**

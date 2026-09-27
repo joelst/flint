@@ -140,6 +140,34 @@ describe('gateway pass-through', () => {
     expect(res.body).toBe('pong');
   });
 
+  it('omits neutral chat penalties before forwarding to Foundry', async () => {
+    const model = 'already-loaded';
+    upstream.state.loaded.add(model);
+    gateway = await startGateway();
+    const body = JSON.stringify({
+      model,
+      messages: [{ role: 'user', content: 'hello' }],
+      frequency_penalty: 0,
+      presence_penalty: 0,
+      temperature: 0,
+    });
+    const res = await request(gateway.publicPort, '/v1/chat/completions', {
+      method: 'POST',
+      body,
+      headers: {
+        'content-type': 'application/json',
+        'content-length': String(Buffer.byteLength(body)),
+      },
+    });
+    expect(res.status).toBe(200);
+    const forwarded = JSON.parse(upstream.state.hits[0].body);
+    expect(forwarded.frequency_penalty).toBeUndefined();
+    expect(forwarded.presence_penalty).toBeUndefined();
+    expect(forwarded.temperature).toBe(0);
+    expect(Number(upstream.state.hits[0].headers['content-length']))
+      .toBe(Buffer.byteLength(upstream.state.hits[0].body));
+  });
+
   it('rewrites the Host header so upstream never sees the client value', async () => {
     gateway = await startGateway();
     await request(gateway.publicPort, '/v1/models', { headers: { host: 'evil.example' } });

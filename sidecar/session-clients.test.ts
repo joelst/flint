@@ -1,6 +1,23 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest';
-import { createSessionChatClient, createSessionEmbeddingClient, disposeSession, mergeCleanupFailure, mergeSessionCleanupFailure } from './session-clients.js';
+import {
+  createSessionChatClient,
+  createSessionEmbeddingClient,
+  disposeSession,
+  mergeCleanupFailure,
+  mergeSessionCleanupFailure,
+  normalizeChatPenalty,
+} from './session-clients.js';
+
+describe('normalizeChatPenalty', () => {
+  it('omits neutral and invalid penalties while preserving effective values', () => {
+    expect(normalizeChatPenalty(0)).toBeUndefined();
+    expect(normalizeChatPenalty(Number.NaN)).toBeUndefined();
+    expect(normalizeChatPenalty(undefined)).toBeUndefined();
+    expect(normalizeChatPenalty(0.1)).toBe(0.1);
+    expect(normalizeChatPenalty(-0.1)).toBe(-0.1);
+  });
+});
 
 describe('mergeCleanupFailure', () => {
   it('does not flatten a foreign AggregateError that happens to carry a cause', () => {
@@ -218,10 +235,9 @@ describe('createSessionChatClient buffered chat', () => {
     expect(wire.metadata).toEqual({ top_k: '40', random_seed: '7' });
   });
 
-  it('serializes zero-valued settings instead of treating them as absent', async () => {
-    // Number.isFinite(0) is true, so a zero temperature/penalty/topK/randomSeed must
-    // still be serialized. A regression to a truthiness check (`settings.temperature &&
-    // ...`) would silently drop these legitimate zero values.
+  it('omits neutral penalties while preserving other zero-valued settings', async () => {
+    // Foundry Local 2.0.1 misapplies an explicit frequency_penalty of 0 for some models.
+    // Omission is semantically identical for penalties, but not for the other settings.
     let capturedItem: { text: string } | undefined;
     class Request {
       addItem (item: { text: string }) { capturedItem = item; return this; }
@@ -245,9 +261,9 @@ describe('createSessionChatClient buffered chat', () => {
     });
     await client.completeChat([{ role: 'user', content: 'hi' }]);
     const wire = JSON.parse(capturedItem!.text);
-    expect(wire.frequency_penalty).toBe(0);
+    expect(wire.frequency_penalty).toBeUndefined();
     expect(wire.max_tokens).toBe(0);
-    expect(wire.presence_penalty).toBe(0);
+    expect(wire.presence_penalty).toBeUndefined();
     expect(wire.temperature).toBe(0);
     expect(wire.top_p).toBe(0);
     expect(wire.metadata).toEqual({ top_k: '0', random_seed: '0' });

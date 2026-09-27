@@ -6451,8 +6451,10 @@ updateStateFromSdk();
           chatClient.settings.maxTokens = maxTokens;
           chatClient.settings.topP = topP;
           chatClient.settings.topK = topK;
-          chatClient.settings.frequencyPenalty = frequencyPenalty;
-          chatClient.settings.presencePenalty = presencePenalty;
+          // Zero is neutral, but Foundry Local 2.0.1 misapplies an explicitly serialized
+          // frequency_penalty of 0 for some models. Clear reused-client settings instead.
+          chatClient.settings.frequencyPenalty = frequencyPenalty === 0 ? undefined : frequencyPenalty;
+          chatClient.settings.presencePenalty = presencePenalty === 0 ? undefined : presencePenalty;
           chatClient.settings.randomSeed = randomSeed ?? undefined;
         }
         const inferenceMessages = getMessagesForInference();

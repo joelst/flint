@@ -55,6 +55,13 @@ export function mergeSessionCleanupFailure (primaryFailure, cleanupFailure) {
   return mergeCleanupFailure(primaryFailure, cleanupFailure, 'session disposal');
 }
 
+// Zero is the OpenAI-defined neutral value for both penalties, so omitting it preserves
+// semantics. Foundry Local 2.0.1 misapplies an explicitly serialized frequency_penalty of 0
+// for some models (notably Gemma 4 E2B), causing otherwise normal replies to degenerate.
+export function normalizeChatPenalty (value) {
+  return Number.isFinite(value) && value !== 0 ? value : undefined;
+}
+
 function reportCleanupDiagnostic (onDiagnostic, diagnostic) {
   if (typeof onDiagnostic !== 'function') return;
   try {
@@ -100,9 +107,11 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
   const settings = {};
   const serializeSettings = () => {
     const out = {};
-    if (Number.isFinite(settings.frequencyPenalty)) out.frequency_penalty = settings.frequencyPenalty;
+    const frequencyPenalty = normalizeChatPenalty(settings.frequencyPenalty);
+    const presencePenalty = normalizeChatPenalty(settings.presencePenalty);
+    if (frequencyPenalty !== undefined) out.frequency_penalty = frequencyPenalty;
     if (Number.isFinite(settings.maxTokens)) out.max_tokens = settings.maxTokens;
-    if (Number.isFinite(settings.presencePenalty)) out.presence_penalty = settings.presencePenalty;
+    if (presencePenalty !== undefined) out.presence_penalty = presencePenalty;
     if (Number.isFinite(settings.temperature)) out.temperature = settings.temperature;
     if (Number.isFinite(settings.topP)) out.top_p = settings.topP;
     const metadata = {};
