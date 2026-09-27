@@ -1,8 +1,69 @@
 import { describe, expect, it } from "vitest";
 import {
   extractThinkingTrace,
+  messageClipboardText,
+  renderableMessageParts,
   sanitizeAssistantHtml,
 } from "./message-rendering";
+
+describe("multipart message rendering", () => {
+  const content = [
+    { type: "text" as const, text: "What is this?" },
+    {
+      type: "image_url" as const,
+      image_url: { url: "data:image/png;base64,AQID" },
+    },
+  ];
+
+  it("keeps text and safe image previews separate instead of coercing objects", () => {
+    expect(renderableMessageParts(content)).toEqual([
+      { type: "text", text: "What is this?" },
+      {
+        type: "image",
+        previewUrl: "data:image/png;base64,AQID",
+        label: "Attached image",
+      },
+    ]);
+    expect(JSON.stringify(renderableMessageParts(content))).not.toContain("[object Object]");
+  });
+
+  it("copies meaningful text and an attachment marker", () => {
+    expect(messageClipboardText(content)).toBe("What is this?\n[Attached image]");
+    expect(messageClipboardText("plain text")).toBe("plain text");
+  });
+
+  it("does not preview active image formats such as SVG", () => {
+    expect(renderableMessageParts([{
+      type: "image_url",
+      image_url: { url: "data:image/svg+xml;base64,PHN2Zz4=" },
+    }])).toEqual([{ type: "image", previewUrl: null, label: "Attached image" }]);
+  });
+
+  it("renders attached text files as chips and copies their contents", () => {
+    const fileContent = [{
+      type: "file_text" as const,
+      file: { name: "main.ts", text: "export const answer = 42;" },
+    }];
+    expect(renderableMessageParts(fileContent)).toEqual([{
+      type: "file",
+      name: "main.ts",
+      text: "export const answer = 42;",
+    }]);
+    expect(messageClipboardText(fileContent))
+      .toBe("[Attached file: main.ts]\nexport const answer = 42;");
+  });
+
+  it("renders malformed and future parts as an honest placeholder instead of throwing", () => {
+    const parts = renderableMessageParts([
+      { type: "image_url", image_url: {} } as any,
+      { type: "x-flint-unknown", original: { type: "audio_url" } },
+    ]);
+    expect(parts).toEqual([
+      { type: "unknown", label: "Attachment this version cannot display" },
+      { type: "unknown", label: "Attachment this version cannot display" },
+    ]);
+  });
+});
 
 describe("extractThinkingTrace", () => {
   it("extracts closed think tags and keeps visible content", () => {
@@ -38,6 +99,27 @@ describe("extractThinkingTrace", () => {
   it("leaves ordinary content untouched when no think tags appear at all", () => {
     const input = "Just a normal answer with no reasoning markers.";
     const result = extractThinkingTrace(input);
+    expect(result.visibleContent).toBe(input);
+    expect(result.thinkingContent).toEqual([]);
+  });
+
+  it("collapses an explicit plain-text thinking section for a reasoning model", () => {
+    const input = "Thinking Process:\nInspect the pixels carefully.\n\nFinal Answer: A red square.";
+    const result = extractThinkingTrace(input, true);
+    expect(result.visibleContent).toBe("A red square.");
+    expect(result.thinkingContent).toEqual(["Inspect the pixels carefully."]);
+  });
+
+  it("keeps an unfinished explicit thinking section collapsed after streaming", () => {
+    const input = "Thinking Process:\nInspect the pixels carefully.";
+    const result = extractThinkingTrace(input, true);
+    expect(result.visibleContent).toBe("");
+    expect(result.thinkingContent).toEqual(["Inspect the pixels carefully."]);
+  });
+
+  it("does not reinterpret plain-text headings for a non-reasoning model", () => {
+    const input = "Thinking Process:\nThis is ordinary requested prose.";
+    const result = extractThinkingTrace(input, false);
     expect(result.visibleContent).toBe(input);
     expect(result.thinkingContent).toEqual([]);
   });

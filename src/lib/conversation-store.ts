@@ -87,6 +87,15 @@ export interface ImagePart {
   image_url: { url: string };
 }
 
+export interface TextFilePart {
+  type: 'file_text';
+  file: {
+    name: string;
+    text: string;
+    mimeType?: string;
+  };
+}
+
 /**
  * A part this schema version does not model, kept verbatim at its original position.
  *
@@ -100,7 +109,7 @@ export interface OpaquePart {
   original: unknown;
 }
 
-export type SupportedPart = TextPart | ImagePart;
+export type SupportedPart = TextPart | ImagePart | TextFilePart;
 export type ContentPart = SupportedPart | OpaquePart;
 
 export const OPAQUE_PART_TYPE = 'x-flint-unknown';
@@ -561,6 +570,24 @@ export function normalizeContentDetailed(raw: unknown): ContentNormalization {
           image_url: { ...((part as any).image_url || {}), url },
         });
       } else dropped += 1;
+    } else if (type === 'file_text') {
+      const file = (part as any).file;
+      if (
+        file
+        && typeof file === 'object'
+        && typeof file.name === 'string'
+        && file.name !== ''
+        && typeof file.text === 'string'
+      ) {
+        parts.push({
+          type: 'file_text',
+          file: {
+            name: file.name,
+            text: file.text,
+            ...(typeof file.mimeType === 'string' ? { mimeType: file.mimeType } : {}),
+          },
+        });
+      } else dropped += 1;
     } else {
       // An unrecognized part is still the user's data. Keep it, but wrapped, so no consumer
       // can mistake it for something it knows how to render or send.
@@ -583,7 +610,12 @@ export function contentToText(content: unknown): string {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
   return content
-    .map((p) => (p && typeof p === 'object' && (p as any).type === 'text' ? String((p as any).text || '') : ''))
+    .map((p) => {
+      if (!p || typeof p !== 'object') return '';
+      if ((p as any).type === 'text') return String((p as any).text || '');
+      if ((p as any).type === 'file_text') return String((p as any).file?.text || '');
+      return '';
+    })
     .filter(Boolean)
     .join('\n');
 }
@@ -955,7 +987,19 @@ export function parseConversationArchive(
 /** Build a title from the first user turn's text. Never stringifies a parts array. */
 export function deriveConversationTitle(messages: StoredMessage[], fallback = 'New chat'): string {
   const firstUser = messages.find((m) => m.role === 'user');
-  const text = contentToText(firstUser?.content).trim();
+  const content = firstUser?.content;
+  const typedText = typeof content === 'string'
+    ? content
+    : Array.isArray(content)
+      ? content
+        .filter((part) => part?.type === 'text')
+        .map((part) => String((part as TextPart).text || ''))
+        .join('\n')
+      : '';
+  const firstFileName = Array.isArray(content)
+    ? content.find((part) => part?.type === 'file_text') as TextFilePart | undefined
+    : undefined;
+  const text = typedText.trim() || firstFileName?.file.name || '';
   if (!text) return fallback;
   const oneLine = text.replace(/\s+/g, ' ').trim();
   return oneLine.length > 50 ? `${oneLine.slice(0, 50).trim()}…` : oneLine;

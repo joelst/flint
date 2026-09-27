@@ -16,8 +16,12 @@ describe('hasMultipartContent', () => {
     expect(hasMultipartContent([text('a'), { role: 'assistant', content: 'b' }])).toBe(false);
   });
 
-  it('is true when any message carries parts', () => {
+  it('is true when any message carries an image part', () => {
     expect(hasMultipartContent([text('a'), vision()])).toBe(true);
+  });
+
+  it('does not classify a text-only parts array as vision', () => {
+    expect(hasMultipartContent([text([{ type: 'text', text: 'hello' }])])).toBe(false);
   });
 
   it('is false for an empty or missing thread', () => {
@@ -42,22 +46,24 @@ describe('hasMultipartContent', () => {
 });
 
 describe('selectChatTransport', () => {
-  const both = { chatClient: 'available', serviceEndpoint: 'available' };
+  const both = {
+    chatClient: 'available',
+    multimodalClient: 'available',
+    serviceEndpoint: 'available',
+  };
 
   it('prefers the SDK for a text-only request', () => {
     // The SDK path avoids web-service schema and version mismatches.
     expect(selectChatTransport([text('a')], both)).toEqual({ transport: 'sdk', reason: null });
   });
 
-  it('forces HTTP for a vision request even when the SDK client exists', () => {
-    // The SDK client validates `typeof content === 'string'` and throws, so preferring it here
-    // would fail every image request before inference starts.
-    expect(selectChatTransport([vision()], both)).toEqual({ transport: 'http', reason: null });
+  it('uses the native multimodal SDK session for a vision request', () => {
+    expect(selectChatTransport([vision()], both)).toEqual({ transport: 'sdk', reason: null });
   });
 
-  it('forces HTTP when only one message in a long thread is multipart', () => {
+  it('uses the native multimodal SDK session when one message in a long thread has an image', () => {
     const thread = [text('a'), { role: 'assistant', content: 'b' }, vision()];
-    expect(selectChatTransport(thread, both).transport).toBe('http');
+    expect(selectChatTransport(thread, both).transport).toBe('sdk');
   });
 
   it('falls back to HTTP for text when there is no chat client', () => {
@@ -67,12 +73,23 @@ describe('selectChatTransport', () => {
     });
   });
 
-  it('refuses a vision request with no endpoint, naming the real cause', () => {
-    const r = selectChatTransport([vision()], { chatClient: 'available', serviceEndpoint: 'unavailable' });
+  it('serves vision without the HTTP endpoint when native multimodal sessions are available', () => {
+    const r = selectChatTransport([vision()], {
+      chatClient: 'available',
+      multimodalClient: 'available',
+      serviceEndpoint: 'unavailable',
+    });
+    expect(r).toEqual({ transport: 'sdk', reason: null });
+  });
+
+  it('refuses vision when native multimodal sessions are unavailable instead of silently using HTTP', () => {
+    const r = selectChatTransport([vision()], {
+      chatClient: 'available',
+      multimodalClient: 'unsupported',
+      serviceEndpoint: 'available',
+    });
     expect(r.transport).toBeNull();
-    // The SDK's own failure here is an opaque validator message about content types, which
-    // tells the user nothing about what to do.
-    expect(r.reason).toContain('Image input requires the local service endpoint');
+    expect(r.reason).toContain('native multimodal');
   });
 
   it('refuses a text request with neither transport available', () => {
@@ -89,7 +106,7 @@ describe('selectChatTransport', () => {
   it('never returns a null transport without a reason', () => {
     const cases = [
       [[text('a')], { chatClient: 'unsupported', serviceEndpoint: 'unavailable' }],
-      [[vision()], { chatClient: 'available', serviceEndpoint: 'unavailable' }],
+      [[vision()], { chatClient: 'available', multimodalClient: 'unsupported', serviceEndpoint: 'available' }],
       [[vision()], { chatClient: 'unsupported', serviceEndpoint: 'unavailable' }],
     ];
     for (const [messages, caps] of cases) {

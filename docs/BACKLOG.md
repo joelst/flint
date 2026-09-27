@@ -185,8 +185,6 @@ first per [PRODUCT_PLAN.md](./PRODUCT_PLAN.md) — these are not 1.0 work.
       failover; escalate chat from local to a cloud endpoint when a prompt exceeds local
       context length. Explicitly **not** a 1.0 requirement (the 1.0 bar is one local
       endpoint).
-- [ ] **Vision polish** — inline image preview thumbnails inside chat message bubbles
-      (multi-image attach already works; bubble display was deferred).
 - [ ] **Curated ONNX catalog** — Flint-validated imports (pinned repo/revision, tested
       EP, required files). See [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) "After 1.0".
 

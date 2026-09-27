@@ -17,7 +17,9 @@ import {
   type ImagePart,
   type MessageContent,
   type TextPart,
+  type TextFilePart,
 } from './conversation-store';
+import { promptTextForFile } from './text-attachments';
 
 /** A part this builder knows how to send. Opaque parts never reach a request. */
 export type PromptPart = TextPart | ImagePart;
@@ -68,6 +70,8 @@ export function toPromptParts(content: unknown): PromptPart[] {
     } else if (part.type === 'image_url') {
       const url = (part as ImagePart).image_url?.url;
       if (typeof url === 'string' && url) parts.push({ type: 'image_url', image_url: { url } });
+    } else if (part.type === 'file_text') {
+      parts.push({ type: 'text', text: promptTextForFile(part as TextFilePart) });
     }
   }
   return parts;

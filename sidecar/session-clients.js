@@ -62,6 +62,66 @@ export function normalizeChatPenalty (value) {
   return Number.isFinite(value) && value !== 0 ? value : undefined;
 }
 
+function hasMultipartMessages (messages) {
+  return Array.isArray(messages) && messages.some((message) =>
+    Array.isArray(message?.content)
+    && message.content.some((part) => part?.type === 'image_url'),
+  );
+}
+
+function nativeFinishReason (finishReason) {
+  if (finishReason === 'toolCalls') return 'tool_calls';
+  if (finishReason === 'none') return null;
+  return finishReason ?? null;
+}
+
+function nativeUsage (usage) {
+  if (!usage) return undefined;
+  return {
+    prompt_tokens: usage.promptTokens,
+    completion_tokens: usage.completionTokens,
+    total_tokens: usage.totalTokens,
+  };
+}
+
+function nativeText (output) {
+  let text = '';
+  for (const item of output || []) {
+    if (item?.type === 'text' && typeof item.text === 'string') {
+      text += item.text;
+      continue;
+    }
+    if (item?.type !== 'message') continue;
+    if (typeof item.content === 'string') {
+      text += item.content;
+      continue;
+    }
+    for (const part of item.parts || []) {
+      if (part?.type === 'text' && typeof part.text === 'string') text += part.text;
+    }
+  }
+  return text;
+}
+
+const NATIVE_IMAGE_FORMATS = new Set(['bmp', 'gif', 'jpeg', 'jpg', 'png', 'webp']);
+
+function decodeImageDataUrl (url) {
+  const match = /^data:image\/([a-z0-9.+-]+);base64,([a-z0-9+/]*={0,2})$/i.exec(url);
+  const rawFormat = match?.[1]?.toLowerCase();
+  if (!match || !NATIVE_IMAGE_FORMATS.has(rawFormat)) {
+    throw new Error('Native image input must be a supported base64 data URL.');
+  }
+  let decoded;
+  try {
+    decoded = atob(match[2]);
+  } catch {
+    throw new Error('Native image input contains invalid base64 data.');
+  }
+  const bytes = new Uint8Array(decoded.length);
+  for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i);
+  return { format: rawFormat === 'jpg' ? 'jpeg' : rawFormat, bytes };
+}
+
 function reportCleanupDiagnostic (onDiagnostic, diagnostic) {
   if (typeof onDiagnostic !== 'function') return;
   try {
@@ -104,6 +164,8 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
   if (typeof ChatSession !== 'function' || typeof Request !== 'function' || typeof Item?.text !== 'function') {
     return null;
   }
+  const supportsMultipart = typeof Item.message === 'function'
+    && typeof Item.imageFromData === 'function';
   const settings = {};
   const serializeSettings = () => {
     const out = {};
@@ -120,6 +182,81 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
     if (Object.keys(metadata).length > 0) out.metadata = metadata;
     return out;
   };
+  const serializeNativeSettings = () => {
+    const search = {};
+    const frequencyPenalty = normalizeChatPenalty(settings.frequencyPenalty);
+    const presencePenalty = normalizeChatPenalty(settings.presencePenalty);
+    if (frequencyPenalty !== undefined) search.frequencyPenalty = frequencyPenalty;
+    if (Number.isFinite(settings.maxTokens)) search.maxOutputTokens = settings.maxTokens;
+    if (presencePenalty !== undefined) search.presencePenalty = presencePenalty;
+    if (Number.isFinite(settings.temperature)) search.temperature = settings.temperature;
+    if (Number.isFinite(settings.topP)) search.topP = settings.topP;
+    if (Number.isFinite(settings.topK)) search.topK = settings.topK;
+    if (Number.isFinite(settings.randomSeed)) search.seed = settings.randomSeed;
+    return search;
+  };
+  const assertNativeMultimodalOptions = (messages, tools, options) => {
+    if (!supportsMultipart) {
+      throw new Error('This Foundry Local SDK does not expose native multimodal items.');
+    }
+    if ((Array.isArray(tools) ? tools.length > 0 : tools != null)
+      || options.toolChoice !== undefined
+      || options.responseFormat !== undefined) {
+      throw new Error('Native image input cannot be combined with tools or structured response options.');
+    }
+    if (messages.some((message) =>
+      message?.role === 'tool'
+      || message?.tool_calls !== undefined
+      || message?.name !== undefined
+    )) {
+      throw new Error('Native image input cannot be combined with named or tool-loop messages.');
+    }
+  };
+  const toNativeMessage = (message) => {
+    if (!['system', 'user', 'assistant'].includes(message?.role)) {
+      throw new Error(`Native image input does not support message role '${message?.role}'.`);
+    }
+    if (typeof message.content === 'string') {
+      return Item.message(message.role, message.content);
+    }
+    if (!Array.isArray(message.content)) {
+      throw new Error(`Native image input requires string or multipart content for role '${message.role}'.`);
+    }
+    const parts = message.content.map((part) => {
+      if (part?.type === 'text' && typeof part.text === 'string') {
+        return Item.text(part.text);
+      }
+      if (part?.type === 'image_url' && typeof part.image_url?.url === 'string') {
+        const { format, bytes } = decodeImageDataUrl(part.image_url.url);
+        return Item.imageFromData(format, bytes);
+      }
+      throw new Error('Native image input contains an unsupported content part.');
+    });
+    return Item.message(message.role, parts);
+  };
+  const buildNativeRequest = (messages, tools, options) => {
+    assertNativeMultimodalOptions(messages, tools, options);
+    const request = new Request();
+    const search = serializeNativeSettings();
+    if (Object.keys(search).length > 0) request.setOptions({ search });
+    for (const message of messages) request.addItem(toNativeMessage(message));
+    return request;
+  };
+  const nativeResult = (response) => {
+    const content = nativeText(response?.output);
+    if (!content) {
+      throw new Error(`Chat completion for model '${chatModel.id}' returned no text output.`);
+    }
+    const usage = nativeUsage(response?.usage);
+    return {
+      choices: [{
+        index: 0,
+        finish_reason: nativeFinishReason(response?.finishReason),
+        message: { role: 'assistant', content },
+      }],
+      ...(usage ? { usage } : {}),
+    };
+  };
   const findOpenAiJsonText = (output) => {
     for (const item of output || []) {
       if (item?.type === 'text' && item.textType === 'openai-json') return item.text;
@@ -128,7 +265,9 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
   };
   return {
     settings,
+    supportsMultipart,
     async completeChat (messages, tools, options = {}) {
+      const multipart = hasMultipartMessages(messages);
       const requestJson = {
         model: chatModel.id,
         messages,
@@ -141,15 +280,20 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
       let result;
       let failure = null;
       try {
-        const request = new Request();
-        request.addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
+        const request = multipart
+          ? buildNativeRequest(messages, tools, options)
+          : new Request().addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
         session = new ChatSession(chatModel);
         const response = await session.processRequest(request);
-        const text = findOpenAiJsonText(response?.output);
-        if (text === undefined) {
-          throw new Error(`Chat completion for model '${chatModel.id}' returned no openai-json text item.`);
+        if (multipart) {
+          result = nativeResult(response);
+        } else {
+          const text = findOpenAiJsonText(response?.output);
+          if (text === undefined) {
+            throw new Error(`Chat completion for model '${chatModel.id}' returned no openai-json text item.`);
+          }
+          result = parseOpenAiJson(text, `Chat completion for model '${chatModel.id}'`);
         }
-        result = parseOpenAiJson(text, `Chat completion for model '${chatModel.id}'`);
       } catch (err) {
         failure = new Error(
           `Chat completion failed for model '${chatModel.id}': ${err?.message || err}`,
@@ -161,6 +305,7 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
       return result;
     },
     completeStreamingChat (messages, tools, options = {}) {
+      const multipart = hasMultipartMessages(messages);
       const requestJson = {
         model: chatModel.id,
         messages,
@@ -176,16 +321,50 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
           let failure = null;
           let receivedOutput = false;
           try {
-            const request = new Request();
-            request.addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
+            const request = multipart
+              ? buildNativeRequest(messages, tools, options)
+              : new Request().addItem(Item.text(JSON.stringify(requestJson), 'openai-json'));
             session = new ChatSession(chatModel);
-            for await (const item of session.processStreamingRequest(request)) {
-              if (item?.type !== 'text' || item.textType !== 'openai-json' || !item.text) continue;
-              receivedOutput = true;
-              yield parseOpenAiJson(item.text, `Streaming chat completion for model '${chatModel.id}'`);
+            const stream = session.processStreamingRequest(request);
+            const responsePromise = multipart ? Promise.resolve(stream.response) : null;
+            // A consumer may stop iteration at a yield. Attach a rejection handler immediately
+            // so the SDK's terminal response cannot become an unhandled rejection while the
+            // generator unwinds and disposes the session.
+            responsePromise?.catch(() => {});
+            for await (const item of stream) {
+              if (item?.type !== 'text' || !item.text) continue;
+              if (multipart) {
+                receivedOutput = true;
+                yield {
+                  choices: [{
+                    index: 0,
+                    delta: { role: 'assistant', content: item.text },
+                    finish_reason: null,
+                  }],
+                };
+              } else if (item.textType === 'openai-json') {
+                receivedOutput = true;
+                yield parseOpenAiJson(item.text, `Streaming chat completion for model '${chatModel.id}'`);
+              }
             }
             if (!receivedOutput) {
-              throw new Error(`Chat completion for model '${chatModel.id}' returned no openai-json text item.`);
+              throw new Error(
+                multipart
+                  ? `Chat completion for model '${chatModel.id}' returned no text output.`
+                  : `Chat completion for model '${chatModel.id}' returned no openai-json text item.`,
+              );
+            }
+            if (multipart) {
+              const response = await responsePromise;
+              const usage = nativeUsage(response?.usage);
+              yield {
+                choices: [{
+                  index: 0,
+                  delta: {},
+                  finish_reason: nativeFinishReason(response?.finishReason),
+                }],
+                ...(usage ? { usage } : {}),
+              };
             }
           } catch (err) {
             failure = err?.name === 'AbortError'

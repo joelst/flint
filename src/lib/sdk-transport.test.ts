@@ -1165,6 +1165,7 @@ describe('progress stall notices', () => {
     await refresh.tracked;
     expect(refresh.box.err).toBeUndefined();
     expect(sdkSnapshot(sdk).catalogStatus).toBe('ready');
+    expect(sdkSnapshot(sdk).catalogRefreshedAt).toEqual(expect.any(Number));
   });
 
   it('keeps accelerator registration progress out of a model download percentage', async () => {

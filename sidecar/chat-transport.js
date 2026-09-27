@@ -1,19 +1,17 @@
 /**
  * Choosing how a chat request reaches the model.
  *
- * Two transports exist and they are not interchangeable. The SDK's chat client is preferred
- * because it avoids web-service schema and version mismatches, but it validates
- * `typeof content === 'string'` and throws on anything else — so it cannot carry a vision turn
- * at all. The OpenAI-shaped HTTP endpoint accepts the multipart form but only exists while the
- * local service is running.
+ * Two transports exist and they are not interchangeable. The SDK's direct ChatSession path is
+ * preferred because it avoids web-service schema and version mismatches and can carry native
+ * image items. The OpenAI-shaped HTTP endpoint accepts multipart JSON but Foundry Local 2.0.1
+ * silently ignores those images, so it must never be selected for a vision request.
  *
- * Getting this wrong is silent in one direction and loud in the other: routing multipart to the
- * SDK fails the request outright, and routing text to HTTP when the endpoint is stale can hit a
- * schema mismatch. This module is pure so the decision can be tested without a running service.
+ * Getting this wrong is silent: the HTTP request succeeds while the model receives only text.
+ * This module is pure so the decision can be tested without a running service.
  */
 
 /**
- * True when any message carries multipart (vision) content the SDK client cannot accept.
+ * True when any message carries an image part.
  *
  * A non-array argument is treated as carrying nothing rather than throwing. This module exists
  * to turn an unroutable request into a reason the user can read, so throwing from the check
@@ -22,7 +20,10 @@
  */
 export function hasMultipartContent (messages) {
   if (!Array.isArray(messages)) return false;
-  return messages.some((m) => Array.isArray(m?.content));
+  return messages.some((message) =>
+    Array.isArray(message?.content)
+    && message.content.some((part) => part?.type === 'image_url'),
+  );
 }
 
 /**
@@ -35,13 +36,14 @@ export function hasMultipartContent (messages) {
 export function selectChatTransport (messages, capabilities) {
   const multipart = hasMultipartContent(messages);
   const hasChatClient = capabilities?.chatClient === 'available';
+  const hasMultimodalClient = capabilities?.multimodalClient === 'available';
   const hasEndpoint = capabilities?.serviceEndpoint === 'available';
 
   if (multipart) {
-    if (hasEndpoint) return { transport: 'http', reason: null };
+    if (hasMultimodalClient) return { transport: 'sdk', reason: null };
     return {
       transport: null,
-      reason: 'Image input requires the local service endpoint, which is not running.',
+      reason: 'Image input requires Foundry Local native multimodal session support.',
     };
   }
   if (hasChatClient) return { transport: 'sdk', reason: null };

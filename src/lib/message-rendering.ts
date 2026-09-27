@@ -1,4 +1,87 @@
-export function extractThinkingTrace(text: string): {
+import type { MessageContent } from "./conversation-store";
+
+export type RenderableMessagePart =
+  | { type: "text"; text: string }
+  | { type: "image"; previewUrl: string | null; label: string }
+  | { type: "file"; name: string; text: string }
+  | { type: "unknown"; label: string };
+
+const SAFE_IMAGE_PREVIEW = /^data:image\/(?:bmp|gif|jpeg|jpg|png|webp);base64,/i;
+
+function hasTextPart(part: unknown): part is { type: "text"; text: string } {
+  return typeof part === "object"
+    && part !== null
+    && (part as { type?: unknown }).type === "text"
+    && typeof (part as { text?: unknown }).text === "string";
+}
+
+function hasFilePart(part: unknown): part is {
+  type: "file_text";
+  file: { name: string; text: string };
+} {
+  if (typeof part !== "object" || part === null || (part as { type?: unknown }).type !== "file_text") {
+    return false;
+  }
+  const file = (part as { file?: unknown }).file;
+  return typeof file === "object"
+    && file !== null
+    && typeof (file as { name?: unknown }).name === "string"
+    && typeof (file as { text?: unknown }).text === "string";
+}
+
+function hasImagePart(part: unknown): part is {
+  type: "image_url";
+  image_url: { url: string };
+} {
+  if (typeof part !== "object" || part === null || (part as { type?: unknown }).type !== "image_url") {
+    return false;
+  }
+  const image = (part as { image_url?: unknown }).image_url;
+  return typeof image === "object"
+    && image !== null
+    && typeof (image as { url?: unknown }).url === "string";
+}
+
+export function renderableMessageParts(content: MessageContent): RenderableMessagePart[] {
+  const parts: unknown[] = typeof content === "string" ? [{ type: "text", text: content }] : content;
+  return parts.map((part) => {
+    if (hasTextPart(part)) {
+      return { type: "text" as const, text: part.text };
+    }
+    if (hasFilePart(part)) {
+      return { type: "file" as const, name: part.file.name, text: part.file.text };
+    }
+    if (hasImagePart(part)) {
+      return {
+        type: "image" as const,
+        previewUrl: SAFE_IMAGE_PREVIEW.test(part.image_url.url) ? part.image_url.url : null,
+        label: "Attached image",
+      };
+    }
+    return { type: "unknown" as const, label: "Attachment this version cannot display" };
+  });
+}
+
+export function messagePlainText(content: MessageContent): string {
+  const parts: unknown[] = typeof content === "string" ? [{ type: "text", text: content }] : content;
+  return parts
+    .filter(hasTextPart)
+    .map((part) => part.text)
+    .join("\n");
+}
+
+export function messageClipboardText(content: MessageContent): string {
+  return renderableMessageParts(content)
+    .map((part) => {
+      if (part.type === "text") return part.text;
+      if (part.type === "file") return `[Attached file: ${part.name}]\n${part.text}`;
+      return `[${part.label}]`;
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+export function extractThinkingTrace(text: string, recognizePlainText = false): {
   visibleContent: string;
   thinkingContent: string[];
 } {
@@ -37,6 +120,27 @@ export function extractThinkingTrace(text: string): {
       const body = String(openMatch[1] ?? '').trim();
       if (body) sections.push(body);
       visible = visible.replace(openPattern, '');
+    }
+  }
+
+  if (recognizePlainText && sections.length === 0) {
+    const heading = visible.match(
+      /^\s*(?:#{1,6}\s*)?(?:\*\*|__)?(?:thinking|reasoning) process(?:\*\*|__)?\s*:\s*/i,
+    );
+    if (heading) {
+      const body = visible.slice(heading[0].length);
+      const finalHeading = body.match(
+        /(?:^|\n)\s*(?:#{1,6}\s*)?(?:\*\*|__)?(?:final answer|answer)(?:\*\*|__)?\s*:\s*/i,
+      );
+      if (finalHeading?.index !== undefined) {
+        const reasoning = body.slice(0, finalHeading.index).trim();
+        if (reasoning) sections.push(reasoning);
+        visible = body.slice(finalHeading.index + finalHeading[0].length);
+      } else {
+        const reasoning = body.trim();
+        if (reasoning) sections.push(reasoning);
+        visible = "";
+      }
     }
   }
 

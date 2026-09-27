@@ -3568,8 +3568,8 @@ rl.on('line', async (line) => {
         }
 
         // Prefer direct SDK inference to avoid web-service schema/version mismatch issues.
-        // Vision is the exception: the SDK client rejects non-string content outright, so a
-        // multipart request has to take the HTTP endpoint or it cannot be served at all.
+        // Vision must use native ChatSession image items: Foundry Local 2.0.1's OpenAI HTTP
+        // bridge accepts multipart JSON but silently drops the image before inference.
         // Resolve the ChatSession-backed replacement (see createSessionChatClient) before
         // transport selection: this SDK build may no longer export createChatClient() at all
         // (removed end of 2026), so transport availability must reflect either path, not just
@@ -3586,6 +3586,7 @@ rl.on('line', async (line) => {
         const hasChatClient = sessionChatClient || typeof chatModel?.createChatClient === 'function';
         let { transport, reason: transportReason } = selectChatTransport(sdkMessages, {
           chatClient: hasChatClient ? 'available' : 'unsupported',
+          multimodalClient: sessionChatClient?.supportsMultipart === true ? 'available' : 'unsupported',
           serviceEndpoint: sharedEndpoint ? 'available' : 'unavailable',
         });
         const legacyUnsupportedRequest = !sessionChatClient

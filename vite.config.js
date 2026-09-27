@@ -61,6 +61,8 @@ export default defineConfig(() => ({
         'src/lib/personas.ts',
         'src/lib/pool-residency.ts',
         'src/lib/message-rendering.ts',
+        'src/lib/image-attachments.ts',
+        'src/lib/text-attachments.ts',
         'src/lib/conversation-sidebar.ts',
         'src/lib/ipc-contracts.ts',
         'src/lib/ipc-deadlines.ts',

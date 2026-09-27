@@ -470,7 +470,7 @@ describe('foundry-sidecar protocol basics', () => {
     }
   });
 
-  it('preserves a parallel tool loop through buffered and streamed HTTP fallback requests', async () => {
+  it('preserves a parallel tool loop through HTTP fallback and refuses HTTP vision', async () => {
     const capturedBodies: any[] = [];
     let releaseCancelledResponse: (() => void) | undefined;
     const cancelledResponseGate = new Promise<void>((resolve) => {
@@ -614,13 +614,7 @@ describe('foundry-sidecar protocol basics', () => {
         },
         { role: 'tool', tool_call_id: 'call-1', name: 'read_status', content: '{"ok":true}' },
         { role: 'tool', tool_call_id: 'call-2', name: 'read_config', content: '{"mode":"safe"}' },
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: 'Summarize ' },
-            { type: 'image_url', image_url: { url: 'data:image/png;base64,AA==', detail: 'low' } },
-          ],
-        },
+        { role: 'user', content: 'Summarize the tool results.' },
       ];
       const streamedDelta = waitForLine(proc, (msg) => msg.id === 42 && msg.stream === true, 15000);
       const streamedDone = waitForLine(proc, (msg) => msg.id === 42 && msg.ok === true, 15000);
@@ -634,6 +628,24 @@ describe('foundry-sidecar protocol basics', () => {
       expect((await streamedDelta).delta).toBe('http-complete');
       expect((await streamedDone).result.nativeStreaming).toBe(false);
       expect(capturedBodies[1].messages).toEqual(followUpMessages);
+
+      proc.stdin.write(`${JSON.stringify({
+        id: 47,
+        cmd: 'chatCompletion',
+        model: 'fake-model',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Describe this.' },
+            { type: 'image_url', image_url: { url: 'data:image/png;base64,AA==' } },
+          ],
+        }],
+        stream: false,
+      })}\n`);
+      const unsupportedVision = await waitForLine(proc, (msg) => msg.id === 47, 15000);
+      expect(unsupportedVision.ok).not.toBe(true);
+      expect(String(unsupportedVision.error)).toMatch(/native multimodal/i);
+      expect(capturedBodies).toHaveLength(2);
 
       const cancelled = waitForLine(proc, (msg) => msg.id === 43, 15000);
       proc.stdin.write(`${JSON.stringify({
@@ -675,13 +687,7 @@ describe('foundry-sidecar protocol basics', () => {
         id: 46,
         cmd: 'chatCompletion',
         model: 'fake-model',
-        messages: [{
-          role: 'user',
-          content: [
-            { type: 'text', text: 'validate every HTTP choice' },
-            { type: 'image_url', image_url: { url: 'data:image/png;base64,AA==' } },
-          ],
-        }],
+        messages: [{ role: 'user', content: 'validate every HTTP choice' }],
         stream: true,
       })}\n`);
       const malformed = await waitForLine(proc, (msg) => msg.id === 46 && !msg.stream, 15000);
@@ -3831,6 +3837,7 @@ describe('chatCompletion ChatSession path', () => {
       `    if (${JSON.stringify(sdkMode)} === 'session-empty-output') return { output: [] };`,
       `    if (${JSON.stringify(sdkMode)} === 'session-malformed-json') return { output: [{ type: 'text', textType: 'openai-json', text: 'not json' }] };`,
       `    if (${JSON.stringify(sdkMode)} === 'session-buffered-fixture') return { output: [{ type: 'text', textType: 'openai-json', text: JSON.stringify(streamSteps()[0].chunk) }] };`,
+      "    if (req.items[0]?.type === 'message') return { output: [{ type: 'message', role: 'assistant', content: 'native vision reply' }], usage: { promptTokens: 9, completionTokens: 3, totalTokens: 12 }, finishReason: 'stop' };",
       '    const requestJson = JSON.parse(req.items[0].text);',
       '    note(`request:${JSON.stringify(requestJson)}`);',
       `    if (${JSON.stringify(sdkMode)} === 'session-buffered-tool-cancel') { while (!fs.existsSync(process.env.FLINT_TEST_CANCEL_SIGNAL)) { await new Promise((resolve) => setTimeout(resolve, 5)); } }`,
@@ -3845,6 +3852,7 @@ describe('chatCompletion ChatSession path', () => {
       '    };',
       '  }',
       '  processStreamingRequest(req) {',
+      "    if (req.items[0]?.type === 'message') return { async *[Symbol.asyncIterator]() { note('session-chat'); yield { type: 'text', textType: 'default', text: 'native ' }; yield { type: 'text', textType: 'default', text: 'vision reply' }; }, response: Promise.resolve({ output: [], usage: { promptTokens: 9, completionTokens: 3, totalTokens: 12 }, finishReason: 'stop' }) };",
       '    const requestJson = JSON.parse(req.items[0].text);',
       '    note(`request:${JSON.stringify(requestJson)}`);',
       '    return {',
@@ -3868,9 +3876,9 @@ describe('chatCompletion ChatSession path', () => {
       'class FakeRequest {',
       `  constructor() { if (${JSON.stringify(sdkMode)} === 'request-constructor-error') throw new Error('native Request construction failed'); this.items = []; }`,
       '  addItem(item) { this.items.push(item); return this; }',
-      '  setOptions() { return this; }',
+      '  setOptions(options) { this.options = options; return this; }',
       '}',
-      "const Item = { text: (text, textType) => ({ type: 'text', textType, text }) };",
+      "const Item = { text: (text, textType) => ({ type: 'text', textType, text }), message: (role, contentOrParts) => typeof contentOrParts === 'string' ? ({ type: 'message', role, content: contentOrParts }) : ({ type: 'message', role, parts: contentOrParts }), imageFromData: (format, data) => ({ type: 'image', format, data }) };",
       'class FakeManager {',
       '  constructor() { this.catalog = { getModel: async () => new FakeModel(), getModels: async () => [] }; }',
       '  static create() { return new FakeManager(); }',
@@ -4945,6 +4953,50 @@ describe('chatCompletion ChatSession path', () => {
     expect(res.ok).toBe(true);
     expect(res.result.choices[0].message.content).toContain('session reply');
     expect(events()).toContain('session-chat');
+  }, 30000);
+
+  it('streams image input through native ChatSession items without a service endpoint', async () => {
+    await startSidecar('session-no-legacy');
+    const deltas: string[] = [];
+    let buffer = '';
+    const collect = (chunk: Buffer | string) => {
+      buffer += chunk.toString();
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        try {
+          const message = JSON.parse(line);
+          if (message.id === 3 && message.stream === true) deltas.push(message.delta);
+        } catch {}
+      }
+    };
+    proc.stdout.on('data', collect);
+    const chatted = waitForLine(proc, (message) => message.id === 3 && message.ok === true, 10000);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Describe this.' },
+          { type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' } },
+        ],
+      }],
+      stream: true,
+    });
+    const res = await chatted;
+    proc.stdout.off('data', collect);
+    expect(res.ok).toBe(true);
+    expect(deltas.join('')).toBe('native vision reply');
+    expect(res.result.nativeStreaming).toBe(true);
+    expect(res.result.usage).toEqual({
+      prompt_tokens: 9,
+      completion_tokens: 3,
+    });
+    expect(events()).toContain('session-chat');
+    expect(events()).toContain('session-chat-disposed');
+    expect(events()).not.toContain('legacy-chat');
   }, 30000);
 
   it('wraps a resolved response with no openai-json output the same way a thrown failure is wrapped', async () => {

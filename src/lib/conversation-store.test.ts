@@ -85,6 +85,14 @@ describe('normalizeContent', () => {
     expect(normalizeContent([{ type: 'text', text: 'hi' }])).toEqual([{ type: 'text', text: 'hi' }]);
   });
 
+  it('preserves locally attached text files', () => {
+    const parts = [{
+      type: 'file_text',
+      file: { name: 'main.ts', text: 'export {};\n', mimeType: 'text/typescript' },
+    }];
+    expect(normalizeContent(parts)).toEqual(parts);
+  });
+
   it('drops unrecoverable parts but keeps unrecognized ones verbatim', () => {
     const result = normalizeContentDetailed([
       { type: 'text', text: 'keep' },
@@ -132,6 +140,34 @@ describe('contentToText', () => {
 
   it('returns empty text for an image-only turn', () => {
     expect(contentToText([{ type: 'image_url', image_url: { url: 'x' } }])).toBe('');
+  });
+
+  it('includes attached file text in titles and search text', () => {
+    expect(contentToText([{
+      type: 'file_text',
+      file: { name: 'notes.txt', text: 'reference material' },
+    }])).toBe('reference material');
+  });
+});
+
+describe('deriveConversationTitle attachment fallback', () => {
+  it('prefers typed text over attached file contents', () => {
+    expect(deriveConversationTitle([{
+      id: 'm1',
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Review this' },
+        { type: 'file_text', file: { name: 'huge.log', text: 'internal file body' } },
+      ],
+    }])).toBe('Review this');
+  });
+
+  it('uses the filename when a turn contains only an attached file', () => {
+    expect(deriveConversationTitle([{
+      id: 'm1',
+      role: 'user',
+      content: [{ type: 'file_text', file: { name: 'main.ts', text: 'export {}' } }],
+    }])).toBe('main.ts');
   });
 });
 
