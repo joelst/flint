@@ -1155,11 +1155,15 @@ let modelIndex = null;
 // callers such as listModels cannot publish a partial index that suppresses cached-only fallback.
 let modelIndexComplete = false;
 let cachedVariantIdsByAlias = new Map();
+let incompleteCandidateAliases = new Set();
+let candidateInventoryHasUnknownAliasFailure = false;
 
 function invalidateModelIndex () {
   modelIndex = null;
   modelIndexComplete = false;
   cachedVariantIdsByAlias = new Map();
+  incompleteCandidateAliases = new Set();
+  candidateInventoryHasUnknownAliasFailure = false;
 }
 
 function cacheModelIndexFromCatalog(models) {
@@ -1170,6 +1174,8 @@ function cacheModelIndexFromCatalog(models) {
   cachedVariantIdsByAlias = nextVariantIds;
   modelIndex = nextIndex;
   modelIndexComplete = snapshot.complete;
+  incompleteCandidateAliases = new Set();
+  candidateInventoryHasUnknownAliasFailure = !snapshot.complete;
   return { index: modelIndex, complete: snapshot.complete };
 }
 
@@ -1180,6 +1186,8 @@ function cacheModelIndexFromCachedModels(models) {
   cachedVariantIdsByAlias = nextVariantIds;
   modelIndex = nextIndex;
   modelIndexComplete = snapshot.complete;
+  incompleteCandidateAliases = new Set(snapshot.incompleteAliases);
+  candidateInventoryHasUnknownAliasFailure = snapshot.unknownAliasFailure;
   return { index: modelIndex, complete: snapshot.complete };
 }
 
@@ -1232,10 +1240,16 @@ async function speechStrategyBeforeLoad(requested) {
   if (resolution && !resolution.variantId && !modelIndexComplete) {
     resolution = await resolveFromCachedInventory(requested);
   }
+  const aliasKey = String(resolution?.alias || requested || '').trim().toLowerCase();
+  const candidatesComplete = !candidateInventoryHasUnknownAliasFailure
+    && !incompleteCandidateAliases.has(aliasKey);
   const variants = resolution?.variantId
     ? [resolution.variantId]
-    : cachedVariantIdsByAlias.get(String(resolution?.alias || requested || '').trim().toLowerCase()) || [];
-  return assertSpeechModelSupported(requested, resolution?.variantId || '', variants);
+    : candidatesComplete
+      ? cachedVariantIdsByAlias.get(aliasKey) || []
+      : [];
+  const classificationAlias = resolution && !resolution.variantId && !candidatesComplete ? '' : requested;
+  return assertSpeechModelSupported(classificationAlias, resolution?.variantId || '', variants);
 }
 
 /**

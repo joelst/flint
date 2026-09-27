@@ -80,6 +80,16 @@ describe('speech model strategy', () => {
     ]).family).toBe('unknown');
   });
 
+  it('defers mixed cached families even when the alias names Parakeet', () => {
+    expect(getSpeechModelStrategyForVariants('parakeet-voice', [
+      'parakeet-tdt-0.6b-v3-generic-cpu:1',
+      'whisper-tiny-generic-cpu:1',
+    ])).toMatchObject({
+      family: 'unknown',
+      supported: true,
+    });
+  });
+
   it('uses one URI attempt for a family not in the compatibility table', () => {
     expect(getSpeechModelStrategy('local-asr')).toMatchObject({
       family: 'unknown',

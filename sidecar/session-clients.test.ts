@@ -1,6 +1,30 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest';
-import { createSessionChatClient, createSessionEmbeddingClient, disposeSession, mergeSessionCleanupFailure } from './session-clients.js';
+import { createSessionChatClient, createSessionEmbeddingClient, disposeSession, mergeCleanupFailure, mergeSessionCleanupFailure } from './session-clients.js';
+
+describe('mergeCleanupFailure', () => {
+  it('does not flatten a foreign AggregateError that happens to carry a cause', () => {
+    const root = new Error('root');
+    const foreign = new AggregateError([new Error('inner')], 'foreign aggregate', { cause: root });
+    const cleanup = new Error('cleanup');
+    const merged = mergeCleanupFailure(foreign, cleanup, 'resource disposal');
+    expect(merged.cause).toBe(foreign);
+    expect(merged.errors).toEqual([foreign, cleanup]);
+  });
+
+  it('flattens only its own prior cleanup merges and preserves the root error code', () => {
+    const primary = Object.assign(new Error('unsupported'), { code: 'unsupported-by-runtime' });
+    const first = mergeCleanupFailure(primary, new Error('queue cleanup'), 'queue disposal');
+    const second = mergeCleanupFailure(first, new Error('session cleanup'), 'session disposal');
+    expect(second.cause).toBe(primary);
+    expect(second.code).toBe('unsupported-by-runtime');
+    expect(second.errors).toEqual([
+      primary,
+      expect.objectContaining({ message: 'queue cleanup' }),
+      expect.objectContaining({ message: 'session cleanup' }),
+    ]);
+  });
+});
 
 // Minimal fake ChatSession/Request/Item, matching the shapes createSessionChatClient
 // expects. `dispose()` records every call so tests can assert it always runs, including
@@ -11,6 +35,7 @@ function fakeSdk({ disposeThrows = false, processRequestThrows = false, processR
     constructor() { this.items = []; }
     addItem(item) { this.items.push(item); return this; }
   }
+
   const Item = {
     text: (text, textType) => ({ type: 'text', textType, text }),
   };

@@ -3344,6 +3344,8 @@ describe('transcribeAudio AudioSession path', () => {
       "      { alias: 'partial-speech', id: 'parakeet-tdt-0.6b-v3-generic-cpu:1' },",
       "      { alias: 'partial-speech', id: 'whisper-tiny-generic-cpu:1' },",
       "      { alias: 'lossy-speech', id: 'parakeet-tdt-0.6b-v3-generic-cpu:1' },",
+      "      { alias: 'parakeet-cached-partial', id: 'parakeet-tdt-0.6b-v3-generic-cpu:1' },",
+      "      { alias: 'parakeet-cached-partial', get id() { throw new Error('cached native getter failed'); } },",
       "    ],",
       '  }; }',
       '  static create() { return new FakeManager(); }',
@@ -3558,6 +3560,28 @@ describe('transcribeAudio AudioSession path', () => {
     const res = await transcribed;
     expect(res.ok).toBe(true);
     expect(events()).toContain('model-load:partial-speech');
+    expect(events()).toContain('audioSession-processRequest');
+  }, 30000);
+
+  it('defers classification when cached-only inventory remains incomplete', async () => {
+    await startSidecar('success');
+    const listed = reply(3);
+    send({ id: 3, cmd: 'listModels' });
+    expect((await listed).ok).not.toBe(true);
+
+    const transcribed = reply(4);
+    send({
+      id: 4,
+      cmd: 'transcribeAudio',
+      audioBase64: wavBase64(),
+      mimeType: 'audio/wav',
+      fileName: 'probe.wav',
+      model: 'parakeet-cached-partial',
+      language: 'en',
+    });
+    const res = await transcribed;
+    expect(res.ok).toBe(true);
+    expect(events()).toContain('model-load:parakeet-cached-partial');
     expect(events()).toContain('audioSession-processRequest');
   }, 30000);
 

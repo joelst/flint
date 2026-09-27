@@ -3,6 +3,7 @@ import {
   getSpeechModelStrategyForVariants,
   SPEECH_SDK_VERSION,
 } from './speech-models.js';
+import { mergeCleanupFailure } from './session-clients.js';
 import { extractNemotronPcm } from './wav-pcm.js';
 
 export class SpeechEngineError extends Error {
@@ -65,23 +66,34 @@ export function assertSpeechModelSupported (modelAlias, variantId = '', candidat
 async function transcribeWithUri ({ sdkModule, model, filePath, language, temperature, modelName }) {
   const { AudioSession, Request, Item } = sdkModule;
   let session;
+  let result;
+  let failure = null;
   try {
     session = new AudioSession(model);
     const request = new Request().addItem(Item.audioFromUri(filePath));
     request.setOptions(requestOptions(language, temperature));
     const response = await session.processRequest(request);
-    return {
+    result = {
       ...speechResultFrom(response, 'whisper'),
       transcriptionPath: 'audioSession',
     };
   } catch (error) {
     if (/does not support audio processing/i.test(String(error?.message || error))) {
-      throw unsupportedRuntimeError(modelName);
+      failure = unsupportedRuntimeError(modelName);
+    } else {
+      failure = error;
     }
-    throw error;
   } finally {
-    session?.dispose();
+    if (session) {
+      try {
+        session.dispose();
+      } catch (cleanupFailure) {
+        failure = mergeCleanupFailure(failure, cleanupFailure, 'session disposal');
+      }
+    }
   }
+  if (failure) throw failure;
+  return result;
 }
 
 async function transcribeWithItemQueue ({
@@ -102,6 +114,8 @@ async function transcribeWithItemQueue ({
   const pcm = extractNemotronPcm(audioBytes);
   const queue = new ItemQueue();
   let session;
+  let result;
+  let failure = null;
   try {
     session = new AudioSession(model);
     const request = new Request()
@@ -125,20 +139,45 @@ async function transcribeWithItemQueue ({
     }
     queue.markFinished();
     const [, terminalResponse] = await Promise.all([consume, response]);
-    return {
+    result = {
       ...speechResultFrom(terminalResponse, 'nemotron'),
       transcriptionPath: 'itemQueue',
     };
   } catch (error) {
     if (/does not support audio processing/i.test(String(error?.message || error))) {
-      throw unsupportedRuntimeError(modelName);
+      failure = unsupportedRuntimeError(modelName);
+    } else {
+      failure = error;
     }
-    throw error;
   } finally {
-    if (!queue.finished) queue.markFinished();
-    queue.dispose();
-    session?.dispose();
+    let queueFinished = true;
+    try {
+      queueFinished = queue.finished;
+    } catch (cleanupFailure) {
+      failure = mergeCleanupFailure(failure, cleanupFailure, 'queue completion state');
+    }
+    if (!queueFinished) {
+      try {
+        queue.markFinished();
+      } catch (cleanupFailure) {
+        failure = mergeCleanupFailure(failure, cleanupFailure, 'queue completion');
+      }
+    }
+    try {
+      queue.dispose();
+    } catch (cleanupFailure) {
+      failure = mergeCleanupFailure(failure, cleanupFailure, 'queue disposal');
+    }
+    if (session) {
+      try {
+        session.dispose();
+      } catch (cleanupFailure) {
+        failure = mergeCleanupFailure(failure, cleanupFailure, 'session disposal');
+      }
+    }
   }
+  if (failure) throw failure;
+  return result;
 }
 
 /**

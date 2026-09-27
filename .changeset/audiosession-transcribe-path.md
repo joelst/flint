@@ -2,4 +2,4 @@
 "flint": patch
 ---
 
-Route Whisper and Nemotron through their supported AudioSession request shapes, and reject unsupported Parakeet models before loading when their family is known.
+Route Whisper and Nemotron through their supported AudioSession request shapes, reject known unsupported Parakeet models before loading, and preserve transcription errors when cleanup also fails.

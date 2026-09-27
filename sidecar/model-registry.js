@@ -90,6 +90,10 @@ export function normalizeCatalogModels (models) {
   for (const model of Array.isArray(models) ? models : []) {
     try {
       const alias = typeof model?.alias === 'string' ? model.alias : '';
+      if (!alias) {
+        complete = false;
+        continue;
+      }
       const variants = [];
       for (const variant of Array.isArray(model?.variants) ? model.variants : []) {
         try {
@@ -99,13 +103,17 @@ export function normalizeCatalogModels (models) {
             complete = false;
             continue;
           }
-          if (id) variants.push({ id, cached: cachedState.cached });
+          if (id) {
+            variants.push({ id, cached: cachedState.cached });
+          } else {
+            complete = false;
+          }
         } catch {
           complete = false;
           // One native-backed variant getter must not discard usable sibling variants.
         }
       }
-      if (alias) normalized.push({ alias, variants });
+      normalized.push({ alias, variants });
     } catch {
       complete = false;
       // One native-backed row must not prevent other aliases from being indexed.
@@ -191,21 +199,48 @@ export function buildCachedModelIndex (models) {
  * Snapshot cached-only native rows into plain data and retain whether every row was readable.
  *
  * @param {Array<{alias?: string, id?: string}>} models
- * @returns {{models: Array<{alias: string, id: string}>, complete: boolean}}
+ * @returns {{
+ *   models: Array<{alias: string, id: string}>,
+ *   complete: boolean,
+ *   incompleteAliases: string[],
+ *   unknownAliasFailure: boolean
+ * }}
  */
 export function normalizeCachedModels (models) {
   const normalized = [];
   let complete = true;
+  const incompleteAliases = new Set();
+  let unknownAliasFailure = false;
   for (const model of Array.isArray(models) ? models : []) {
+    let alias = '';
     try {
-      const alias = typeof model?.alias === 'string' ? model.alias : '';
+      alias = typeof model?.alias === 'string' ? model.alias : '';
       const id = typeof model?.id === 'string' ? model.id : '';
-      if (alias && id) normalized.push({ alias, id });
+      if (alias && id) {
+        normalized.push({ alias, id });
+      } else {
+        complete = false;
+        if (alias) {
+          incompleteAliases.add(indexKey(alias));
+        } else {
+          unknownAliasFailure = true;
+        }
+      }
     } catch {
       complete = false;
+      if (alias) {
+        incompleteAliases.add(indexKey(alias));
+      } else {
+        unknownAliasFailure = true;
+      }
     }
   }
-  return { models: normalized, complete };
+  return {
+    models: normalized,
+    complete,
+    incompleteAliases: [...incompleteAliases],
+    unknownAliasFailure,
+  };
 }
 
 /**

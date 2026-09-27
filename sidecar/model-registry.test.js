@@ -141,7 +141,32 @@ describe('normalizeCachedModels', () => {
       { alias: 'broken', get id() { throw new Error('native getter failed'); } },
     ])).toEqual({
       complete: false,
+      incompleteAliases: ['broken'],
       models: [{ alias: 'usable', id: 'whisper-cpu:1' }],
+      unknownAliasFailure: false,
+    });
+  });
+
+  it('marks every alias uncertain when the failing row alias is unreadable', () => {
+    expect(normalizeCachedModels([
+      { get alias() { throw new Error('native getter failed'); } },
+    ])).toEqual({
+      complete: false,
+      incompleteAliases: [],
+      models: [],
+      unknownAliasFailure: true,
+    });
+  });
+
+  it('marks missing cached identity fields incomplete instead of authorizing a miss', () => {
+    expect(normalizeCachedModels([
+      { alias: 'missing-id' },
+      { id: 'missing-alias:1' },
+    ])).toEqual({
+      complete: false,
+      incompleteAliases: ['missing-id'],
+      models: [],
+      unknownAliasFailure: true,
     });
   });
 });

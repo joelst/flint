@@ -60,11 +60,11 @@ function strategyForName (name) {
 export function getSpeechModelStrategyForVariants (alias, variantIds = []) {
   const aliasStrategy = getSpeechModelStrategy(alias);
   const candidates = variantIds.map((variantId) => getSpeechModelStrategy('', variantId));
-  if (candidates.length === 0 || candidates.some((candidate) => candidate.family === 'unknown')) {
-    return aliasStrategy;
-  }
+  if (candidates.length === 0) return aliasStrategy;
+  const deferred = getSpeechModelStrategy('');
+  if (candidates.some((candidate) => candidate.family === 'unknown')) return deferred;
   const [first] = candidates;
   return candidates.every((candidate) => candidate.family === first.family)
     ? first
-    : aliasStrategy;
+    : deferred;
 }

@@ -14,6 +14,7 @@
 // convention. The size is measured in real UTF-8 bytes rather than `String.length`, which
 // counts UTF-16 code units and understates any non-ASCII output.
 const utf8Encoder = new TextEncoder();
+const CLEANUP_FAILURE_AGGREGATE = Symbol('cleanupFailureAggregate');
 
 function parseOpenAiJson (text, description) {
   try {
@@ -29,15 +30,29 @@ function parseOpenAiJson (text, description) {
 // combine ordinary failures into one error that still exposes the primary failure as
 // `cause`. AbortError identity is preserved because cancellation classification may
 // depend on the exact object; its cleanup failure is reported through a safe diagnostic.
-export function mergeSessionCleanupFailure (primaryFailure, cleanupFailure) {
+export function mergeCleanupFailure (primaryFailure, cleanupFailure, description = 'cleanup') {
   if (!primaryFailure) return cleanupFailure;
+  const isPriorCleanupMerge = primaryFailure?.[CLEANUP_FAILURE_AGGREGATE] === true;
+  const rootCause = isPriorCleanupMerge
+    ? primaryFailure.cause
+    : primaryFailure;
+  const priorFailures = isPriorCleanupMerge
+    ? Array.from(primaryFailure.errors)
+    : [primaryFailure];
   const primaryMessage = primaryFailure?.message || String(primaryFailure);
   const cleanupMessage = cleanupFailure?.message || String(cleanupFailure);
-  return new AggregateError(
-    [primaryFailure, cleanupFailure],
-    `${primaryMessage}; session disposal failed: ${cleanupMessage}`,
-    { cause: primaryFailure },
+  const aggregate = new AggregateError(
+    [...priorFailures, cleanupFailure],
+    `${primaryMessage}; ${description} failed: ${cleanupMessage}`,
+    { cause: rootCause },
   );
+  Object.defineProperty(aggregate, CLEANUP_FAILURE_AGGREGATE, { value: true });
+  if (typeof rootCause?.code === 'string') aggregate.code = rootCause.code;
+  return aggregate;
+}
+
+export function mergeSessionCleanupFailure (primaryFailure, cleanupFailure) {
+  return mergeCleanupFailure(primaryFailure, cleanupFailure, 'session disposal');
 }
 
 function reportCleanupDiagnostic (onDiagnostic, diagnostic) {
