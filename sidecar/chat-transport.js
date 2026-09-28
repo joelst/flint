@@ -27,6 +27,21 @@ export function hasMultipartContent (messages) {
 }
 
 /**
+ * The deprecated ChatClient accepts string content, while ChatSession and HTTP accept text
+ * content-parts arrays. Preserve the text when routing a text-only request to that client.
+ */
+export function normalizeTextPartsForLegacyClient (messages) {
+  if (!Array.isArray(messages)) return messages;
+  return messages.map((message) => {
+    if (!Array.isArray(message?.content)
+      || !message.content.every((part) => part?.type === 'text' && typeof part.text === 'string')) {
+      return message;
+    }
+    return { ...message, content: message.content.map((part) => part.text).join('') };
+  });
+}
+
+/**
  * Decide the transport for a request.
  *
  * Returns `{transport, reason}`. `transport` is `'sdk'`, `'http'`, or `null` when the request

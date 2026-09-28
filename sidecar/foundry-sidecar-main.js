@@ -20,7 +20,7 @@ import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { annotateVariantUpdates } from './model-updates.js';
-import { selectChatTransport } from './chat-transport.js';
+import { normalizeTextPartsForLegacyClient, selectChatTransport } from './chat-transport.js';
 import {
   createSessionChatClient,
   createSessionEmbeddingClient,
@@ -3606,6 +3606,9 @@ rl.on('line', async (line) => {
           }
         }
         if (!transport) throw new Error(transportReason);
+        const sdkInferenceMessages = sessionChatClient
+          ? sdkMessages
+          : normalizeTextPartsForLegacyClient(sdkMessages);
         if (transport === 'sdk') {
           const client = sessionChatClient || chatModel.createChatClient();
           // SDK reads generation params from client.settings, not completeChat args.
@@ -3638,7 +3641,7 @@ rl.on('line', async (line) => {
             let streamFailure = null;
             try {
               for await (const chunk of client.completeStreamingChat(
-                sdkMessages,
+                sdkInferenceMessages,
                 payload.tools,
                 { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
               )) {
@@ -3732,7 +3735,7 @@ rl.on('line', async (line) => {
             });
           } else if (typeof client?.completeChat === 'function') {
             const result = await client.completeChat(
-              sdkMessages,
+              sdkInferenceMessages,
               payload.tools,
               { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
             );
@@ -3792,7 +3795,7 @@ rl.on('line', async (line) => {
             let streamFailure = null;
             try {
               for await (const chunk of client.completeStreamingChat(
-                sdkMessages,
+                sdkInferenceMessages,
                 payload.tools,
                 { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
               )) {

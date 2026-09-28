@@ -1,6 +1,10 @@
 // @vitest-environment node
 import { describe, it, expect } from 'vitest';
-import { hasMultipartContent, selectChatTransport } from './chat-transport.js';
+import {
+  hasMultipartContent,
+  normalizeTextPartsForLegacyClient,
+  selectChatTransport,
+} from './chat-transport.js';
 
 const text = (content) => ({ role: 'user', content });
 const vision = () => ({
@@ -42,6 +46,23 @@ describe('hasMultipartContent', () => {
       expect(hasMultipartContent(bogus)).toBe(false);
     }
     expect(selectChatTransport({}, { chatClient: 'available' }).transport).toBe('sdk');
+  });
+});
+
+describe('normalizeTextPartsForLegacyClient', () => {
+  it('joins text-only content parts without changing their message metadata', () => {
+    const messages = [
+      { role: 'user', name: 'client', content: [{ type: 'text', text: 'hello' }, { type: 'text', text: ' world' }] },
+    ];
+    expect(normalizeTextPartsForLegacyClient(messages)).toEqual([
+      { role: 'user', name: 'client', content: 'hello world' },
+    ]);
+    expect(messages[0].content).toHaveLength(2);
+  });
+
+  it('does not change strings or multipart image messages', () => {
+    const messages = [text('plain'), vision()];
+    expect(normalizeTextPartsForLegacyClient(messages)).toEqual(messages);
   });
 });
 

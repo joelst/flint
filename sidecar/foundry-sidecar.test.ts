@@ -3795,12 +3795,12 @@ describe('chatCompletion ChatSession path', () => {
   //                           already are. Gating on the signal file (rather than a fixed
   //                           delay) makes the ordering deterministic instead of depending on
   //                           IPC round-trip speed on a loaded CI runner.
-  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'legacy-buffered-fixture' | 'legacy-buffered-only-fixture' | 'legacy-stream-only-fixture' | 'session-no-legacy' | 'session-error' | 'session-error-with-legacy' | 'session-error-dispose' | 'session-abort' | 'session-empty-output' | 'session-stream-empty' | 'session-stream-fixture' | 'session-stream-fixture-dispose-error' | 'session-stream-provider-cancel' | 'session-buffered-fixture' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error' | 'session-buffered-tool-cancel' | 'session-stream-tool' | 'session-stream-tool-outoforder' | 'session-stream-tool-high-index' | 'session-stream-tool-cancel';
+  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'legacy-only-text-parts' | 'legacy-buffered-fixture' | 'legacy-buffered-only-fixture' | 'legacy-stream-only-fixture' | 'session-no-legacy' | 'session-error' | 'session-error-with-legacy' | 'session-error-dispose' | 'session-abort' | 'session-empty-output' | 'session-stream-empty' | 'session-stream-fixture' | 'session-stream-fixture-dispose-error' | 'session-stream-provider-cancel' | 'session-buffered-fixture' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error' | 'session-buffered-tool-cancel' | 'session-stream-tool' | 'session-stream-tool-outoforder' | 'session-stream-tool-high-index' | 'session-stream-tool-cancel';
   function fakeSdk(sdkMode: ChatFakeSdkMode) {
-    const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only' || sdkMode === 'legacy-buffered-fixture' || sdkMode === 'legacy-buffered-only-fixture' || sdkMode === 'legacy-stream-only-fixture' || sdkMode === 'session-error-with-legacy';
+    const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only' || sdkMode === 'legacy-only-text-parts' || sdkMode === 'legacy-buffered-fixture' || sdkMode === 'legacy-buffered-only-fixture' || sdkMode === 'legacy-stream-only-fixture' || sdkMode === 'session-error-with-legacy';
     const legacyStreamOnly = sdkMode === 'legacy-stream-only-fixture';
     const hasLegacyStreaming = hasLegacy && sdkMode !== 'legacy-buffered-only-fixture';
-    const hasSession = sdkMode !== 'legacy-only' && sdkMode !== 'legacy-buffered-fixture' && sdkMode !== 'legacy-buffered-only-fixture' && !legacyStreamOnly;
+    const hasSession = sdkMode !== 'legacy-only' && sdkMode !== 'legacy-only-text-parts' && sdkMode !== 'legacy-buffered-fixture' && sdkMode !== 'legacy-buffered-only-fixture' && !legacyStreamOnly;
     return [
       "import fs from 'node:fs';",
       'const note = (event) => fs.appendFileSync(process.env.FLINT_TEST_EVENT_LOG, event + "\\n");',
@@ -3814,7 +3814,8 @@ describe('chatCompletion ChatSession path', () => {
       hasLegacy ? '  createChatClient() {' : '  // no createChatClient() in this mode',
       hasLegacy ? '    return {' : '',
       hasLegacy ? '      settings: {},' : '',
-      hasLegacy && !legacyStreamOnly ? '      async completeChat() {' : '',
+      hasLegacy && !legacyStreamOnly ? '      async completeChat(messages) {' : '',
+      sdkMode === 'legacy-only-text-parts' ? "        note('legacy-content:' + JSON.stringify(messages.map((message) => message.content))); if (messages.some((message) => Array.isArray(message.content))) throw new Error('legacy client received an unsupported content-parts array');" : '',
       hasLegacy && !legacyStreamOnly ? "        note('legacy-chat');" : '',
       hasLegacy && !legacyStreamOnly ? `        return ${JSON.stringify(['legacy-buffered-fixture', 'legacy-buffered-only-fixture'].includes(sdkMode))} ? streamSteps()[0].chunk : { choices: [{ message: { role: 'assistant', content: 'legacy reply' } }], usage: { prompt_tokens: 1, completion_tokens: 2 } };` : '',
       hasLegacy && !legacyStreamOnly ? '      },' : '',
@@ -5275,6 +5276,26 @@ describe('chatCompletion ChatSession path', () => {
     expect(res.result.choices[0].message.content).toBe('legacy reply');
     expect(events()).toContain('legacy-chat');
     expect(events()).not.toContain('session-chat');
+  }, 30000);
+
+  it('normalizes text-only content parts for the legacy ChatClient', async () => {
+    await startSidecar('legacy-only-text-parts');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{
+        role: 'user',
+        content: [{ type: 'text', text: 'hello' }, { type: 'text', text: ' world' }],
+      }],
+      stream: false,
+    });
+    const res = await chatted;
+    expect(res.ok).toBe(true);
+    expect(res.result.choices[0].message.content).toBe('legacy reply');
+    expect(events()).toContain('legacy-content:["hello world"]');
+    expect(events()).toContain('legacy-chat');
   }, 30000);
 
   it('rejects response controls when only the legacy client is available without HTTP', async () => {
