@@ -10,6 +10,10 @@ import {
   imageDataUrlBytes,
   storageCharsExcluding,
 } from "./image-attachments";
+import { pngDataUrl, TINY_PNG_DATA_URL } from "../../sidecar/test-fixtures/images";
+
+// A real 3200x1600 header padded past the fast-path size limit.
+const LARGE_PNG = pngDataUrl(3200, 1600, MAX_ATTACHMENT_DATA_URL_CHARS);
 
 const originalFileReader = globalThis.FileReader;
 const originalCreateImageBitmap = globalThis.createImageBitmap;
@@ -129,14 +133,74 @@ describe("image attachment storage limits", () => {
     installFileReader();
     const decode = vi.fn();
     Object.defineProperty(globalThis, "createImageBitmap", { configurable: true, value: decode });
-    await expect(compactImageAttachment(fileWithDataUrl("data:image/png;base64,AQID")))
-      .resolves.toBe("data:image/png;base64,AQID");
+    await expect(compactImageAttachment(fileWithDataUrl(TINY_PNG_DATA_URL)))
+      .resolves.toBe(TINY_PNG_DATA_URL);
     expect(decode).not.toHaveBeenCalled();
+  });
+
+  it("resizes a small-but-high-resolution image instead of returning it", async () => {
+    installFileReader();
+    const close = vi.fn();
+    const decode = vi.fn(async () => ({ width: 2000, height: 1000, close }));
+    Object.defineProperty(globalThis, "createImageBitmap", { configurable: true, value: decode });
+    const compacted = "data:image/jpeg;base64,AQID";
+    const canvas = {
+      width: 0,
+      height: 0,
+      getContext: () => ({ fillStyle: "", fillRect: vi.fn(), drawImage: vi.fn() }),
+      toBlob: (callback: (blob: Blob) => void) =>
+        callback(Object.assign(new Blob(), { __dataUrl: compacted })),
+    };
+    vi.spyOn(document, "createElement").mockImplementation(((tag: string) =>
+      tag === "canvas" ? canvas : originalCreateElement(tag)) as typeof document.createElement);
+
+    const small = pngDataUrl(2000, 1000);
+    expect(small.length).toBeLessThan(MAX_ATTACHMENT_DATA_URL_CHARS);
+    await expect(compactImageAttachment(fileWithDataUrl(small))).resolves.toBe(compacted);
+    expect(decode).toHaveBeenCalledOnce();
+    expect(canvas.width).toBe(1600);
+  });
+
+  it("refuses a pixel bomb and an unreadable header without decoding", async () => {
+    installFileReader();
+    const decode = vi.fn();
+    Object.defineProperty(globalThis, "createImageBitmap", { configurable: true, value: decode });
+    const bomb = pngDataUrl(10_000, 10_000);
+    expect(bomb.length).toBeLessThan(MAX_ATTACHMENT_DATA_URL_CHARS);
+    await expect(compactImageAttachment(fileWithDataUrl(bomb)))
+      .rejects.toThrow("10000x10000, too large to prepare safely");
+    await expect(compactImageAttachment(fileWithDataUrl("data:image/png;base64,AQID")))
+      .rejects.toThrow("not a readable PNG");
+    await expect(compactImageAttachment(fileWithDataUrl("data:image/png;base64,***")))
+      .rejects.toThrow("not a readable PNG");
+    const svg = { ...fileWithDataUrl(`data:image/svg+xml;base64,${btoa('<svg width="99999" height="99999"/>')}`), type: "image/svg+xml" } as File;
+    await expect(compactImageAttachment(svg)).rejects.toThrow("not a readable PNG");
+    expect(decode).not.toHaveBeenCalled();
+  });
+
+  it("uses the header, not the declared type, to bound and re-encode a mislabelled image", async () => {
+    installFileReader();
+    const close = vi.fn();
+    const decode = vi.fn(async () => ({ width: 100, height: 100, close }));
+    Object.defineProperty(globalThis, "createImageBitmap", { configurable: true, value: decode });
+    const compacted = "data:image/jpeg;base64,AQID";
+    const canvas = {
+      width: 0,
+      height: 0,
+      getContext: () => ({ fillStyle: "", fillRect: vi.fn(), drawImage: vi.fn() }),
+      toBlob: (callback: (blob: Blob) => void) =>
+        callback(Object.assign(new Blob(), { __dataUrl: compacted })),
+    };
+    vi.spyOn(document, "createElement").mockImplementation(((tag: string) =>
+      tag === "canvas" ? canvas : originalCreateElement(tag)) as typeof document.createElement);
+    const heicLabelled = { ...fileWithDataUrl(pngDataUrl(100, 100).replace("image/png", "image/heic")), type: "image/heic" } as File;
+    await expect(compactImageAttachment(heicLabelled)).resolves.toBe(compacted);
+    expect(decode).toHaveBeenCalledOnce();
   });
 
   it("rejects oversized source files before reading them", async () => {
     await expect(compactImageAttachment(
-      fileWithDataUrl("data:image/png;base64,AQID", MAX_SOURCE_IMAGE_BYTES + 1),
+      fileWithDataUrl(TINY_PNG_DATA_URL, MAX_SOURCE_IMAGE_BYTES + 1),
     )).rejects.toThrow("larger than 20 MB");
   });
 
@@ -159,7 +223,7 @@ describe("image attachment storage limits", () => {
       tag === "canvas" ? canvas : originalCreateElement(tag)) as typeof document.createElement);
 
     await expect(compactImageAttachment(
-      fileWithDataUrl(`data:image/png;base64,${"A".repeat(MAX_ATTACHMENT_DATA_URL_CHARS)}`),
+      fileWithDataUrl(LARGE_PNG),
     )).resolves.toBe(compacted);
     expect(canvas.width).toBe(1600);
     expect(canvas.height).toBe(800);
@@ -173,7 +237,7 @@ describe("image attachment storage limits", () => {
       configurable: true,
       value: vi.fn(async () => ({ width: 0, height: 10, close })),
     });
-    const large = fileWithDataUrl(`data:image/png;base64,${"A".repeat(MAX_ATTACHMENT_DATA_URL_CHARS)}`);
+    const large = fileWithDataUrl(LARGE_PNG);
     await expect(compactImageAttachment(large)).rejects.toThrow("invalid dimensions");
     expect(close).toHaveBeenCalledOnce();
 
@@ -207,7 +271,7 @@ describe("image attachment storage limits", () => {
       tag === "canvas" ? canvas : originalCreateElement(tag)) as typeof document.createElement);
 
     await expect(compactImageAttachment(
-      fileWithDataUrl(`data:image/png;base64,${"A".repeat(MAX_ATTACHMENT_DATA_URL_CHARS)}`),
+      fileWithDataUrl(LARGE_PNG),
     )).rejects.toThrow("could not be reduced enough");
     expect(close).toHaveBeenCalledOnce();
   });

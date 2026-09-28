@@ -141,6 +141,7 @@
   } from "$lib/conversation-repository";
   import {
     MAX_ATTACHED_IMAGES,
+    IMAGE_ATTACHMENT_ACCEPT,
     compactImageAttachment,
     imageAttachmentFitsArchive,
     prepareImageBatch,
@@ -6884,7 +6885,7 @@ Output only the summary text, no preamble.`;
   function attachImage() {
     const input = document.createElement("input");
     input.type = "file";
-    input.accept = "image/*";
+    input.accept = IMAGE_ATTACHMENT_ACCEPT;
     input.multiple = true; // support multi-image
     input.onchange = (e: any) => {
       const files: FileList = e.target.files;

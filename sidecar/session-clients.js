@@ -6,6 +6,8 @@
 // instead of importing 'foundry-local-sdk' itself, so this file has no dependency on
 // Node or the native runtime, matching its siblings.
 
+import { MAX_NATIVE_IMAGE_PIXELS, readImageDimensions } from './image-dimensions.js';
+
 // Model output is untrusted for logging purposes: it carries generated text, tool-call
 // arguments and echoed prompt content. V8's JSON.parse errors quote an excerpt of the
 // input ("Unexpected token 'S', \"SENSITIVE_\"... is not valid JSON"), and the wrappers
@@ -129,7 +131,18 @@ function decodeImageDataUrl (url) {
   }
   const bytes = new Uint8Array(decoded.length);
   for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i);
-  return { format: rawFormat === 'jpg' ? 'jpeg' : rawFormat, bytes };
+  // Stored and imported images bypass the composer's compaction, so bound decoded pixels
+  // here too. The header, not the declared MIME type, names the format the decoder will see.
+  const dimensions = readImageDimensions(bytes);
+  if (!dimensions) {
+    throw new Error('Native image input has unreadable image dimensions.');
+  }
+  if (dimensions.width * dimensions.height > MAX_NATIVE_IMAGE_PIXELS) {
+    throw new Error(
+      `Native image input is ${dimensions.width}x${dimensions.height}, above the supported pixel limit.`,
+    );
+  }
+  return { format: dimensions.format, bytes };
 }
 
 function reportCleanupDiagnostic (onDiagnostic, diagnostic) {

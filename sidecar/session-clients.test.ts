@@ -8,6 +8,7 @@ import {
   mergeSessionCleanupFailure,
   normalizeChatPenalty,
 } from './session-clients.js';
+import { imageDataUrl, pngDataUrl, TINY_PNG_BYTES, TINY_PNG_DATA_URL } from './test-fixtures/images';
 
 describe('normalizeChatPenalty', () => {
   it('omits neutral and invalid penalties while preserving effective values', () => {
@@ -111,7 +112,7 @@ describe('createSessionChatClient buffered chat', () => {
       role: 'user',
       content: [
         { type: 'text', text: 'Describe this.' },
-        { type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' } },
+        { type: 'image_url', image_url: { url: TINY_PNG_DATA_URL } },
       ],
     }]);
 
@@ -120,7 +121,7 @@ describe('createSessionChatClient buffered chat', () => {
     expect(capturedRequest.items[0].role).toBe('user');
     expect(capturedRequest.items[0].parts[0]).toMatchObject({ type: 'text', text: 'Describe this.' });
     expect(capturedRequest.items[0].parts[1]).toMatchObject({ type: 'image', format: 'png' });
-    expect(Array.from(capturedRequest.items[0].parts[1].data)).toEqual([1, 2, 3]);
+    expect(Array.from(capturedRequest.items[0].parts[1].data)).toEqual(Array.from(TINY_PNG_BYTES));
     expect(capturedRequest.options).toEqual({
       search: { maxOutputTokens: 64, temperature: 0.5, seed: 7 },
     });
@@ -160,7 +161,7 @@ describe('createSessionChatClient buffered chat', () => {
       role: 'user',
       content: [
         { type: 'text', text: 'Describe this.' },
-        { type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' } },
+        { type: 'image_url', image_url: { url: TINY_PNG_DATA_URL } },
       ],
     }])).rejects.toThrow(/native inference failed/);
     expect(disposeCalls).toBe(1);
@@ -205,6 +206,48 @@ describe('createSessionChatClient buffered chat', () => {
     } finally {
       globalThis.atob = originalAtob;
     }
+  });
+
+  it('bounds decoded pixels from the header before native decoding', async () => {
+    const images: Array<{ format: string }> = [];
+    class Request {
+      addItem() { return this; }
+      setOptions() { return this; }
+    }
+    const Item = {
+      text: (text: string) => ({ type: 'text', text }),
+      message: (role: string, parts: any) => ({ type: 'message', role, parts }),
+      imageFromData: (format: string, data: Uint8Array) => {
+        images.push({ format });
+        return { type: 'image', format, data };
+      },
+    };
+    class ChatSession {
+      async processRequest() {
+        return {
+          output: [{ type: 'message', role: 'assistant', content: 'ok' }],
+          finishReason: 'stop',
+        };
+      }
+      dispose() {}
+    }
+    const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+    const send = (url: string) => client.completeChat([{
+      role: 'user',
+      content: [{ type: 'image_url', image_url: { url } }],
+    }]);
+
+    // A few dozen encoded bytes that would expand to 400 MB of RGBA.
+    const bomb = pngDataUrl(10_000, 10_000);
+    expect(bomb.length).toBeLessThan(100);
+    await expect(send(bomb)).rejects.toThrow(/10000x10000, above the supported pixel limit/);
+    await expect(send('data:image/png;base64,AQID')).rejects.toThrow(/unreadable image dimensions/);
+    expect(images).toEqual([]);
+
+    // The decoder sees the bytes, not the label, so the header's format is what is passed on.
+    await send(imageDataUrl(TINY_PNG_BYTES, 'image/jpeg'));
+    await send(pngDataUrl(4032, 3024));
+    expect(images).toEqual([{ format: 'png' }, { format: 'png' }]);
   });
 
   it('returns the parsed response and disposes the session on success', async () => {
@@ -487,7 +530,7 @@ describe('createSessionChatClient streaming disposal', () => {
       role: 'user',
       content: [
         { type: 'text', text: 'Describe this.' },
-        { type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' } },
+        { type: 'image_url', image_url: { url: TINY_PNG_DATA_URL } },
       ],
     }])) {
       chunks.push(chunk);
@@ -532,7 +575,7 @@ describe('createSessionChatClient streaming disposal', () => {
       role: 'user',
       content: [
         { type: 'text', text: 'Describe this.' },
-        { type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' } },
+        { type: 'image_url', image_url: { url: TINY_PNG_DATA_URL } },
       ],
     }])[Symbol.asyncIterator]();
 
@@ -573,7 +616,7 @@ describe('createSessionChatClient streaming disposal', () => {
       role: 'user',
       content: [
         { type: 'text', text: 'Describe this.' },
-        { type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' } },
+        { type: 'image_url', image_url: { url: TINY_PNG_DATA_URL } },
       ],
     }])[Symbol.asyncIterator]();
 

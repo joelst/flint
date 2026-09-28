@@ -8,6 +8,7 @@ import { join } from 'path';
 import { pathToFileURL } from 'url';
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import { killAndWait } from './test-process.js';
+import { TINY_PNG_DATA_URL } from './test-fixtures/images';
 
 function closeServer(server: Server): Promise<void> {
   server.closeAllConnections();
@@ -4981,7 +4982,7 @@ describe('chatCompletion ChatSession path', () => {
         role: 'user',
         content: [
           { type: 'text', text: 'Describe this.' },
-          { type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' } },
+          { type: 'image_url', image_url: { url: TINY_PNG_DATA_URL } },
         ],
       }],
       stream: true,
@@ -5011,7 +5012,7 @@ describe('chatCompletion ChatSession path', () => {
         role: 'user',
         content: [
           { type: 'text', text: 'Describe this.' },
-          { type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' } },
+          { type: 'image_url', image_url: { url: TINY_PNG_DATA_URL } },
         ],
       }],
     });
@@ -5051,7 +5052,7 @@ describe('chatCompletion ChatSession path', () => {
         role: 'user',
         content: [
           { type: 'text', text: 'Describe this.' },
-          { type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' } },
+          { type: 'image_url', image_url: { url: TINY_PNG_DATA_URL } },
         ],
       }],
       stream: true,

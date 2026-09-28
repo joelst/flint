@@ -61,7 +61,8 @@ The sidebar is grouped by workflow:
 - Streaming responses. **Stop** settles Flint's own caller and hides further output, but Foundry Local has no native abort API, so the background generation may still finish; text already received before Stop is kept.
 - Vision: attach up to four images when the loaded model supports it. Flint compacts large
   images before saving them so attachments remain available after restart without exhausting
-  conversation storage.
+  conversation storage. Supported formats are PNG, JPEG, GIF, WebP, and BMP; convert HEIC,
+  AVIF, or SVG first.
 - Attach up to four local text or code files (128 KB each, 256 KB of formatted prompt context
   combined, including framing and escaping). Flint stores them with the conversation, shows them
   as attachment chips, and labels their contents as untrusted reference text when sending them
