@@ -1,4 +1,5 @@
 import type { MessageContent } from "./conversation-store";
+import { parseImageDataUrl } from "../../sidecar/image-dimensions.js";
 
 export type RenderableMessagePart =
   | { type: "text"; text: string }
@@ -6,7 +7,27 @@ export type RenderableMessagePart =
   | { type: "file"; name: string; text: string }
   | { type: "unknown"; label: string };
 
-const SAFE_IMAGE_PREVIEW = /^data:image\/(?:bmp|gif|jpeg|jpg|png|webp);base64,/i;
+// Parsing decodes the whole payload (a JPEG frame header can follow any amount of metadata),
+// and messages re-render often, so verdicts are memoized per URL.
+const PREVIEW_CACHE_LIMIT = 64;
+const previewVerdicts = new Map<string, boolean>();
+
+/**
+ * True when a stored image may be handed to the webview. Stored and imported images never
+ * passed composer compaction, and `<img>` decodes as soon as a conversation opens, so the
+ * encoded length, raster label, header, and pixel budget are all checked first — the same
+ * rules the native request applies.
+ */
+function isSafeImagePreview(url: string): boolean {
+  const cached = previewVerdicts.get(url);
+  if (cached !== undefined) return cached;
+  const safe = parseImageDataUrl(url).ok;
+  if (previewVerdicts.size >= PREVIEW_CACHE_LIMIT) {
+    previewVerdicts.delete(previewVerdicts.keys().next().value as string);
+  }
+  previewVerdicts.set(url, safe);
+  return safe;
+}
 
 function hasTextPart(part: unknown): part is { type: "text"; text: string } {
   return typeof part === "object"
@@ -54,7 +75,7 @@ export function renderableMessageParts(content: MessageContent): RenderableMessa
     if (hasImagePart(part)) {
       return {
         type: "image" as const,
-        previewUrl: SAFE_IMAGE_PREVIEW.test(part.image_url.url) ? part.image_url.url : null,
+        previewUrl: isSafeImagePreview(part.image_url.url) ? part.image_url.url : null,
         label: "Attached image",
       };
     }

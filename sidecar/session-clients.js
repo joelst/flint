@@ -6,7 +6,7 @@
 // instead of importing 'foundry-local-sdk' itself, so this file has no dependency on
 // Node or the native runtime, matching its siblings.
 
-import { MAX_NATIVE_IMAGE_PIXELS, readImageDimensions } from './image-dimensions.js';
+import { MAX_REQUEST_IMAGES, parseImageDataUrl } from './image-dimensions.js';
 
 // Model output is untrusted for logging purposes: it carries generated text, tool-call
 // arguments and echoed prompt content. V8's JSON.parse errors quote an excerpt of the
@@ -111,38 +111,38 @@ function nativeText (output) {
   return text;
 }
 
-const NATIVE_IMAGE_FORMATS = new Set(['bmp', 'gif', 'jpeg', 'jpg', 'png', 'webp']);
-const MAX_NATIVE_IMAGE_DATA_URL_CHARS = 350_000;
+const NATIVE_IMAGE_ERRORS = {
+  size: 'Native image input exceeds the supported size limit.',
+  format: 'Native image input must be a supported base64 data URL.',
+  base64: 'Native image input contains invalid base64 data.',
+  header: 'Native image input has unreadable image dimensions.',
+};
 
+// Stored and imported images bypass the composer's compaction, so bound decoded pixels here
+// too. The header, not the declared MIME type, names the format the decoder will see.
 function decodeImageDataUrl (url) {
-  if (typeof url !== 'string' || url.length > MAX_NATIVE_IMAGE_DATA_URL_CHARS) {
-    throw new Error('Native image input exceeds the supported size limit.');
-  }
-  const match = /^data:image\/([a-z0-9.+-]+);base64,([a-z0-9+/]*={0,2})$/i.exec(url);
-  const rawFormat = match?.[1]?.toLowerCase();
-  if (!match || !NATIVE_IMAGE_FORMATS.has(rawFormat)) {
-    throw new Error('Native image input must be a supported base64 data URL.');
-  }
-  let decoded;
-  try {
-    decoded = atob(match[2]);
-  } catch {
-    throw new Error('Native image input contains invalid base64 data.');
-  }
-  const bytes = new Uint8Array(decoded.length);
-  for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i);
-  // Stored and imported images bypass the composer's compaction, so bound decoded pixels
-  // here too. The header, not the declared MIME type, names the format the decoder will see.
-  const dimensions = readImageDimensions(bytes);
-  if (!dimensions) {
-    throw new Error('Native image input has unreadable image dimensions.');
-  }
-  if (dimensions.width * dimensions.height > MAX_NATIVE_IMAGE_PIXELS) {
+  const parsed = parseImageDataUrl(url);
+  if (parsed.ok) return { format: parsed.format, bytes: parsed.bytes };
+  if (parsed.reason === 'pixels') {
     throw new Error(
-      `Native image input is ${dimensions.width}x${dimensions.height}, above the supported pixel limit.`,
+      `Native image input is ${parsed.width}x${parsed.height}, above the supported pixel limit.`,
     );
   }
-  return { format: dimensions.format, bytes };
+  throw new Error(NATIVE_IMAGE_ERRORS[parsed.reason]);
+}
+
+// Each image is individually bounded, so capping the count bounds the whole request's decode.
+function assertRequestImageCount (messages) {
+  let images = 0;
+  for (const message of messages) {
+    if (!Array.isArray(message?.content)) continue;
+    for (const part of message.content) if (part?.type === 'image_url') images += 1;
+  }
+  if (images > MAX_REQUEST_IMAGES) {
+    throw new Error(
+      `Native image input carries ${images} images; at most ${MAX_REQUEST_IMAGES} are supported per request.`,
+    );
+  }
 }
 
 function reportCleanupDiagnostic (onDiagnostic, diagnostic) {
@@ -259,6 +259,7 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
   };
   const buildNativeRequest = (messages, tools, options) => {
     assertNativeMultimodalOptions(messages, tools, options);
+    assertRequestImageCount(messages);
     const request = new Request();
     const search = serializeNativeSettings();
     if (Object.keys(search).length > 0) request.setOptions({ search });

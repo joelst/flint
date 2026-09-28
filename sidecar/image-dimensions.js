@@ -11,6 +11,16 @@
 /** Native decoder budget. 4096 x 4096 admits legacy phone photos stored before compaction. */
 export const MAX_NATIVE_IMAGE_PIXELS = 4096 * 4096;
 
+/**
+ * Images one request may carry. Each is bounded by MAX_NATIVE_IMAGE_PIXELS, so this bounds the
+ * whole request's decode (4 x 64 MiB RGBA). Matches the composer's per-turn cap, so the turn
+ * being sent always fits; the request builder keeps the newest images and omits older ones.
+ */
+export const MAX_REQUEST_IMAGES = 4;
+
+/** Largest stored image data URL Flint will decode, preview, or send. */
+export const MAX_IMAGE_DATA_URL_CHARS = 350_000;
+
 const u16be = (b, i) => (b[i] << 8) | b[i + 1];
 const u16le = (b, i) => b[i] | (b[i + 1] << 8);
 const u24le = (b, i) => b[i] | (b[i + 1] << 8) | (b[i + 2] << 16);
@@ -159,4 +169,35 @@ const HEADER_READERS = { png, gif, jpeg, webp, bmp };
 export function readImageDimensions (bytes) {
   const format = detectImageFormat(bytes);
   return format ? HEADER_READERS[format](bytes) : null;
+}
+
+const IMAGE_DATA_URL = /^data:image\/(bmp|gif|jpeg|jpg|png|webp);base64,([a-z0-9+/]*={0,2})$/i;
+
+/**
+ * Validate a stored image data URL before anything decodes it: encoded length, a raster label,
+ * base64 payload, a readable header, and the native pixel budget. The label is only a gate;
+ * `format` is what the header encodes. Stored and imported images never passed composer
+ * compaction, so every consumer (webview preview, native request) must go through this.
+ *
+ * Returns `{ ok: true, format, width, height, bytes }` or `{ ok: false, reason }` with reason
+ * one of 'size', 'format', 'base64', 'header', 'pixels' ('pixels' also carries dimensions).
+ */
+export function parseImageDataUrl (url) {
+  if (typeof url !== 'string' || url.length > MAX_IMAGE_DATA_URL_CHARS) return { ok: false, reason: 'size' };
+  const match = IMAGE_DATA_URL.exec(url);
+  if (!match) return { ok: false, reason: 'format' };
+  let decoded;
+  try {
+    decoded = atob(match[2]);
+  } catch {
+    return { ok: false, reason: 'base64' };
+  }
+  const bytes = new Uint8Array(decoded.length);
+  for (let i = 0; i < decoded.length; i += 1) bytes[i] = decoded.charCodeAt(i);
+  const dimensions = readImageDimensions(bytes);
+  if (!dimensions) return { ok: false, reason: 'header' };
+  if (dimensions.width * dimensions.height > MAX_NATIVE_IMAGE_PIXELS) {
+    return { ok: false, reason: 'pixels', width: dimensions.width, height: dimensions.height };
+  }
+  return { ok: true, ...dimensions, bytes };
 }

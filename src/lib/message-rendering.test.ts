@@ -5,13 +5,14 @@ import {
   renderableMessageParts,
   sanitizeAssistantHtml,
 } from "./message-rendering";
+import { TINY_PNG_DATA_URL, pngDataUrl } from "../../sidecar/test-fixtures/images";
 
 describe("multipart message rendering", () => {
   const content = [
     { type: "text" as const, text: "What is this?" },
     {
       type: "image_url" as const,
-      image_url: { url: "data:image/png;base64,AQID" },
+      image_url: { url: TINY_PNG_DATA_URL },
     },
   ];
 
@@ -20,7 +21,7 @@ describe("multipart message rendering", () => {
       { type: "text", text: "What is this?" },
       {
         type: "image",
-        previewUrl: "data:image/png;base64,AQID",
+        previewUrl: TINY_PNG_DATA_URL,
         label: "Attached image",
       },
     ]);
@@ -37,6 +38,18 @@ describe("multipart message rendering", () => {
       type: "image_url",
       image_url: { url: "data:image/svg+xml;base64,PHN2Zz4=" },
     }])).toEqual([{ type: "image", previewUrl: null, label: "Attached image" }]);
+  });
+
+  it("does not hand the webview a stored image it could not safely decode", () => {
+    const refused = [
+      pngDataUrl(10_000, 10_000), // a few bytes that expand to 400 MB of pixels
+      "data:image/png;base64,AQID", // a raster label with no readable header
+      "data:image/png;base64," + "A".repeat(350_001), // over the stored-image length bound
+    ];
+    for (const url of refused) {
+      expect(renderableMessageParts([{ type: "image_url", image_url: { url } }]))
+        .toEqual([{ type: "image", previewUrl: null, label: "Attached image" }]);
+    }
   });
 
   it("renders attached text files as chips and copies their contents", () => {

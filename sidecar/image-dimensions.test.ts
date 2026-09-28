@@ -1,7 +1,13 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest';
-import { MAX_NATIVE_IMAGE_PIXELS, detectImageFormat, readImageDimensions } from './image-dimensions.js';
-import { pngBytes } from './test-fixtures/images';
+import {
+  MAX_IMAGE_DATA_URL_CHARS,
+  MAX_NATIVE_IMAGE_PIXELS,
+  detectImageFormat,
+  parseImageDataUrl,
+  readImageDimensions,
+} from './image-dimensions.js';
+import { TINY_PNG_BYTES, imageDataUrl, pngBytes, pngDataUrl } from './test-fixtures/images';
 
 const bytes = (...parts: Array<number[] | string>) => new Uint8Array(parts.flatMap((part) =>
   typeof part === 'string' ? Array.from(part, (c) => c.charCodeAt(0)) : part));
@@ -129,5 +135,25 @@ describe('detectImageFormat', () => {
     expect(detectImageFormat(bytes('<svg'))).toBeNull();
     expect(detectImageFormat(bytes([0, 0, 0, 0x18], 'ftypheic'))).toBeNull();
     expect(detectImageFormat('PNG' as unknown as Uint8Array)).toBeNull();
+  });
+});
+
+describe('parseImageDataUrl', () => {
+  it('returns the header format, dimensions, and decoded bytes of a bounded raster', () => {
+    const parsed = parseImageDataUrl(imageDataUrl(TINY_PNG_BYTES, 'image/jpeg'));
+    expect(parsed).toMatchObject({ ok: true, format: 'png', width: 1, height: 1 });
+    expect(parsed.ok && Array.from(parsed.bytes)).toEqual(Array.from(TINY_PNG_BYTES));
+  });
+
+  it('names why a URL is refused, checking length before decoding anything', () => {
+    expect(parseImageDataUrl(42)).toEqual({ ok: false, reason: 'size' });
+    expect(parseImageDataUrl(`data:image/png;base64,${'A'.repeat(MAX_IMAGE_DATA_URL_CHARS)}`))
+      .toEqual({ ok: false, reason: 'size' });
+    expect(parseImageDataUrl('data:image/svg+xml;base64,PHN2Zz4=')).toEqual({ ok: false, reason: 'format' });
+    expect(parseImageDataUrl('file:///private/image.png')).toEqual({ ok: false, reason: 'format' });
+    expect(parseImageDataUrl('data:image/png;base64,A')).toEqual({ ok: false, reason: 'base64' });
+    expect(parseImageDataUrl('data:image/png;base64,AQID')).toEqual({ ok: false, reason: 'header' });
+    expect(parseImageDataUrl(pngDataUrl(10_000, 10_000)))
+      .toEqual({ ok: false, reason: 'pixels', width: 10_000, height: 10_000 });
   });
 });

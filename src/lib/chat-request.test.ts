@@ -9,6 +9,7 @@ import {
   hasSendableContent,
   DEFAULT_INSTRUCTION_PREFIX,
   DEFAULT_IMAGE_PLACEHOLDER,
+  DEFAULT_OMITTED_IMAGE_PLACEHOLDER,
   type PromptPart,
 } from './chat-request';
 import { OPAQUE_PART_TYPE } from './conversation-store';
@@ -669,5 +670,42 @@ describe('textOnly', () => {
       { role: 'user', content: [text('t'), image('a')] },
     ]);
     expect(Array.isArray(out[0].content)).toBe(true);
+  });
+});
+
+describe('request image cap', () => {
+  const imageTurn = (n: number) => ({
+    role: 'user',
+    content: [text(`turn ${n}`), ...Array.from({ length: 4 }, (_, i) => image(`data:image/png;base64,T${n}I${i}`))],
+  });
+  const images = (out: Array<{ content: unknown }>) => out.flatMap((m) =>
+    Array.isArray(m.content) ? m.content.filter((p: PromptPart) => p.type === 'image_url') : []);
+
+  it('keeps only the newest images across a long vision thread', () => {
+    const thread = [];
+    for (let n = 0; n < 40; n += 1) {
+      thread.push(imageTurn(n), { role: 'assistant', content: `reply ${n}` });
+    }
+    const out = normalizeForAlternatingChat(thread);
+    expect(images(out)).toEqual([0, 1, 2, 3].map((i) => image(`data:image/png;base64,T39I${i}`)));
+    expect(JSON.stringify(out[0].content)).toContain(DEFAULT_OMITTED_IMAGE_PLACEHOLDER);
+  });
+
+  it('keeps the latest images of an oversized turn and marks the rest', () => {
+    const out = normalizeForAlternatingChat([{
+      role: 'user',
+      content: [image('a'), image('b'), image('c')],
+    }], { maxImages: 2, omittedImagePlaceholder: '<omitted>' });
+    expect(out).toEqual([{ role: 'user', content: [text('<omitted>'), image('b'), image('c')] }]);
+  });
+
+  it('collapses a turn whose only images were omitted back to text', () => {
+    const out = normalizeForAlternatingChat([
+      { role: 'user', content: [text('old '), image('a')] },
+      { role: 'assistant', content: 'seen' },
+      { role: 'user', content: [image('b')] },
+    ], { maxImages: 1, omittedImagePlaceholder: '<omitted>' });
+    expect(out[0]).toEqual({ role: 'user', content: 'old <omitted>' });
+    expect(out[2]).toEqual({ role: 'user', content: [image('b')] });
   });
 });

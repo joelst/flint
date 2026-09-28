@@ -250,6 +250,42 @@ describe('createSessionChatClient buffered chat', () => {
     expect(images).toEqual([{ format: 'png' }, { format: 'png' }]);
   });
 
+  it('bounds the whole request by image count before decoding any image', async () => {
+    const decoded: string[] = [];
+    class Request {
+      addItem() { return this; }
+      setOptions() { return this; }
+    }
+    const Item = {
+      text: (text: string) => ({ type: 'text', text }),
+      message: (role: string, parts: any) => ({ type: 'message', role, parts }),
+      imageFromData: (format: string, data: Uint8Array) => {
+        decoded.push(format);
+        return { type: 'image', format, data };
+      },
+    };
+    let processed = 0;
+    class ChatSession {
+      async processRequest() {
+        processed += 1;
+        return { output: [{ type: 'message', role: 'assistant', content: 'ok' }], finishReason: 'stop' };
+      }
+      dispose() {}
+    }
+    const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+    const turn = (count: number) => ({
+      role: 'user',
+      content: Array.from({ length: count }, () => ({ type: 'image_url', image_url: { url: pngDataUrl(4096, 4096) } })),
+    });
+    // Every image passes the per-image bound; together they would not.
+    await expect(client.completeChat([turn(3), { role: 'assistant', content: 'seen' }, turn(2)]))
+      .rejects.toThrow(/carries 5 images; at most 4/);
+    expect(decoded).toEqual([]);
+    expect(processed).toBe(0);
+
+    await client.completeChat([turn(2), { role: 'assistant', content: 'seen' }, turn(2)]);
+    expect(decoded).toHaveLength(4);
+  });
   it('returns the parsed response and disposes the session on success', async () => {
     const { sdkModule, disposeCalls } = fakeSdk();
     const client = createSessionChatClient({ id: 'm' }, sdkModule);

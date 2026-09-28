@@ -26,6 +26,7 @@ import {
   textAttachmentBytes,
   isValidTextAttachmentData,
 } from './text-attachment-policy';
+import { MAX_REQUEST_IMAGES } from '../../sidecar/image-dimensions.js';
 
 /** A part this builder knows how to send. Opaque parts never reach a request. */
 export type PromptPart = TextPart | ImagePart;
@@ -196,11 +197,44 @@ export interface AlternatingOptions {
   imagePlaceholder?: string;
   /** Refuse a request rather than silently omitting a known text attachment that exceeds policy. */
   rejectInvalidTextAttachments?: boolean;
+  /**
+   * Most images the request may carry; older ones become `omittedImagePlaceholder`. Every image
+   * in the window is resent each turn, so without a request-wide cap a long vision thread (or an
+   * imported one) decodes an unbounded number of images at once.
+   */
+  maxImages?: number;
+  /** Stand-in for an image beyond `maxImages`. Injected so the prompt text is testable. */
+  omittedImagePlaceholder?: string;
 }
 
 export const DEFAULT_INSTRUCTION_PREFIX = 'Follow these instructions:';
 
 export const DEFAULT_IMAGE_PLACEHOLDER = '[image]';
+
+export const DEFAULT_OMITTED_IMAGE_PLACEHOLDER = '[earlier image omitted]';
+
+/**
+ * Keep the newest `maxImages` images, replacing older ones in place with placeholder text.
+ * Newest first, because the turn being sent is the one the user is asking about.
+ */
+function capImages(
+  messages: Array<{ parts: PromptPart[] }>,
+  maxImages: number,
+  placeholder: string,
+): void {
+  let kept = 0;
+  for (let m = messages.length - 1; m >= 0; m -= 1) {
+    const parts = messages[m].parts;
+    for (let p = parts.length - 1; p >= 0; p -= 1) {
+      if (parts[p].type !== 'image_url') continue;
+      if (kept < maxImages) {
+        kept += 1;
+      } else {
+        parts[p] = { type: 'text', text: placeholder };
+      }
+    }
+  }
+}
 
 /**
  * Collapse parts to text, standing an image in with a placeholder.
@@ -295,6 +329,12 @@ export function normalizeForAlternatingChat(
     }
     alternating.push(message);
   }
+
+  capImages(
+    alternating,
+    options.maxImages ?? MAX_REQUEST_IMAGES,
+    options.omittedImagePlaceholder ?? DEFAULT_OMITTED_IMAGE_PLACEHOLDER,
+  );
 
   const result: PromptMessage[] = [];
   for (const message of alternating) {
