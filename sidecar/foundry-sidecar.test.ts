@@ -3835,6 +3835,7 @@ describe('chatCompletion ChatSession path', () => {
       "    note('session-chat');",
       `    if (['session-error', 'session-error-with-legacy', 'session-error-dispose'].includes(${JSON.stringify(sdkMode)})) throw new Error('native processRequest failed');`,
       `    if (${JSON.stringify(sdkMode)} === 'session-empty-output') return { output: [] };`,
+      `    if (${JSON.stringify(sdkMode)} === 'session-finish-error' && req.items[0]?.type === 'message') return { output: [{ type: 'message', role: 'assistant', content: 'partial native answer' }], finishReason: 'error' };`,
       `    if (${JSON.stringify(sdkMode)} === 'session-malformed-json') return { output: [{ type: 'text', textType: 'openai-json', text: 'not json' }] };`,
       `    if (${JSON.stringify(sdkMode)} === 'session-buffered-fixture') return { output: [{ type: 'text', textType: 'openai-json', text: JSON.stringify(streamSteps()[0].chunk) }] };`,
       "    if (req.items[0]?.type === 'message') return { output: [{ type: 'message', role: 'assistant', content: 'native vision reply' }], usage: { promptTokens: 9, completionTokens: 3, totalTokens: 12 }, finishReason: 'stop' };",
@@ -3852,7 +3853,7 @@ describe('chatCompletion ChatSession path', () => {
       '    };',
       '  }',
       '  processStreamingRequest(req) {',
-      "    if (req.items[0]?.type === 'message') return { async *[Symbol.asyncIterator]() { note('session-chat'); yield { type: 'text', textType: 'default', text: 'native ' }; yield { type: 'text', textType: 'default', text: 'vision reply' }; }, response: Promise.resolve({ output: [], usage: { promptTokens: 9, completionTokens: 3, totalTokens: 12 }, finishReason: 'stop' }) };",
+      `    if (req.items[0]?.type === 'message') return { async *[Symbol.asyncIterator]() { note('session-chat'); yield { type: 'text', textType: 'default', text: 'native ' }; yield { type: 'text', textType: 'default', text: 'vision reply' }; }, response: Promise.resolve({ output: [], usage: { promptTokens: 9, completionTokens: 3, totalTokens: 12 }, finishReason: ${JSON.stringify(sdkMode === 'session-stream-finish-error' ? 'error' : 'stop')} }) };`,
       '    const requestJson = JSON.parse(req.items[0].text);',
       '    note(`request:${JSON.stringify(requestJson)}`);',
       '    return {',
@@ -4997,6 +4998,71 @@ describe('chatCompletion ChatSession path', () => {
     expect(events()).toContain('session-chat');
     expect(events()).toContain('session-chat-disposed');
     expect(events()).not.toContain('legacy-chat');
+  }, 30000);
+
+  it('reports buffered native finishReason errors instead of successful partial answers', async () => {
+    await startSidecar('session-finish-error');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Describe this.' },
+          { type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' } },
+        ],
+      }],
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Chat completion failed for model 'fake-variant'");
+    expect(String(res.error)).toContain('native inference failed');
+    expect(events()).toContain('session-chat-disposed');
+  }, 30000);
+
+  it('reports streamed native finishReason errors after forwarding partial deltas', async () => {
+    await startSidecar('session-stream-finish-error');
+    const deltas: string[] = [];
+    let buffer = '';
+    const collect = (chunk: Buffer | string) => {
+      buffer += chunk.toString();
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        try {
+          const message = JSON.parse(line);
+          if (message.id === 3 && message.stream === true) deltas.push(message.delta);
+        } catch {}
+      }
+    };
+    proc.stdout.on('data', collect);
+    const chatted = waitForLine(
+      proc,
+      (message) => message.id === 3 && message.stream !== true && typeof message.error === 'string',
+      10000,
+    );
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Describe this.' },
+          { type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' } },
+        ],
+      }],
+      stream: true,
+    });
+    const res = await chatted;
+    proc.stdout.off('data', collect);
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Streaming chat completion failed for model 'fake-variant'");
+    expect(String(res.error)).toContain('native inference failed');
+    expect(deltas.join('')).toBe('native vision reply');
+    expect(events()).toContain('session-chat-disposed');
   }, 30000);
 
   it('wraps a resolved response with no openai-json output the same way a thrown failure is wrapped', async () => {

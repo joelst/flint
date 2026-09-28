@@ -75,6 +75,12 @@ function nativeFinishReason (finishReason) {
   return finishReason ?? null;
 }
 
+function assertNativeResponseSucceeded (response) {
+  if (response?.finishReason === 'error') {
+    throw new Error('Foundry Local reported that native inference failed.');
+  }
+}
+
 function nativeUsage (usage) {
   if (!usage) return undefined;
   return {
@@ -247,6 +253,7 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
     return request;
   };
   const nativeResult = (response) => {
+    assertNativeResponseSucceeded(response);
     const content = nativeText(response?.output);
     if (!content) {
       throw new Error(`Chat completion for model '${chatModel.id}' returned no text output.`);
@@ -360,6 +367,7 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
             }
             if (multipart) {
               const response = await responsePromise;
+              assertNativeResponseSucceeded(response);
               const usage = nativeUsage(response?.usage);
               yield {
                 choices: [{

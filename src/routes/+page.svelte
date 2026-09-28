@@ -6387,6 +6387,11 @@ updateStateFromSdk();
       statusMessage = "Wait for the attached text or code files to finish preparing before sending.";
       return;
     }
+    const chatTransport = selectPlaygroundChatTransport(state.ready, canUseDirectChat);
+    if (chatTransport === "unavailable") {
+      statusMessage = "The local runtime is not ready yet. Wait for it to finish starting before sending.";
+      return;
+    }
 
     const text = chatInput.trim();
 
@@ -6493,8 +6498,7 @@ updateStateFromSdk();
 
       // Sidecar IPC runs native ChatSession inference independently of the optional HTTP service.
       // Keep the direct client only as the development fallback when no service endpoint exists.
-      const transport = selectPlaygroundChatTransport(state.endpoint, canUseDirectChat);
-      if (transport === "sidecar") {
+      if (chatTransport === "sidecar") {
         const data = await chatCompletionStream(
           selectedModelAlias,
           requestMessages,

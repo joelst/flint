@@ -6,16 +6,17 @@ import {
 } from "./playground-chat-policy";
 
 describe("Playground chat policy", () => {
-  it("uses sidecar IPC without an HTTP endpoint or direct development client", () => {
-    expect(selectPlaygroundChatTransport(undefined, false)).toBe("sidecar");
+  it("uses sidecar IPC when the runtime is ready without requiring its HTTP service", () => {
+    expect(selectPlaygroundChatTransport(true, false)).toBe("sidecar");
   });
 
-  it("prefers sidecar IPC when the HTTP service is available", () => {
-    expect(selectPlaygroundChatTransport("http://127.0.0.1:5272", true)).toBe("sidecar");
+  it("prefers ready sidecar IPC over a development client", () => {
+    expect(selectPlaygroundChatTransport(true, true)).toBe("sidecar");
   });
 
-  it("uses a direct client only as a no-endpoint fallback", () => {
-    expect(selectPlaygroundChatTransport(undefined, true)).toBe("direct");
+  it("uses a direct client only as a runtime-not-ready development fallback", () => {
+    expect(selectPlaygroundChatTransport(false, true)).toBe("direct");
+    expect(selectPlaygroundChatTransport(false, false)).toBe("unavailable");
   });
 
   it("retires only preparation work owned by the current composer epoch", () => {

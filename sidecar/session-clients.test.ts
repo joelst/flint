@@ -134,6 +134,38 @@ describe('createSessionChatClient buffered chat', () => {
     });
   });
 
+  it('rejects buffered native inference errors even when partial output exists', async () => {
+    let disposeCalls = 0;
+    class Request {
+      addItem() { return this; }
+      setOptions() { return this; }
+    }
+    const Item = {
+      text: (text: string) => ({ type: 'text', text }),
+      message: (role: string, parts: any) => ({ type: 'message', role, parts }),
+      imageFromData: (format: string, data: Uint8Array) => ({ type: 'image', format, data }),
+    };
+    class ChatSession {
+      async processRequest() {
+        return {
+          output: [{ type: 'message', role: 'assistant', content: 'partial answer' }],
+          finishReason: 'error',
+        };
+      }
+      dispose() { disposeCalls += 1; }
+    }
+    const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+
+    await expect(client.completeChat([{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Describe this.' },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' } },
+      ],
+    }])).rejects.toThrow(/native inference failed/);
+    expect(disposeCalls).toBe(1);
+  });
+
   it('rejects non-data image URLs instead of granting native file or network access', async () => {
     const { sdkModule } = fakeSdk();
     Object.assign(sdkModule.Item, {
@@ -468,6 +500,47 @@ describe('createSessionChatClient streaming disposal', () => {
         usage: { prompt_tokens: 9, completion_tokens: 2, total_tokens: 11 },
       },
     ]);
+  });
+
+  it('rejects a native terminal inference error after preserving emitted partial deltas', async () => {
+    let disposeCalls = 0;
+    class Request {
+      addItem() { return this; }
+      setOptions() { return this; }
+    }
+    const Item = {
+      text: (text: string) => ({ type: 'text', text }),
+      message: (role: string, parts: any) => ({ type: 'message', role, parts }),
+      imageFromData: (format: string, data: Uint8Array) => ({ type: 'image', format, data }),
+    };
+    class ChatSession {
+      processStreamingRequest() {
+        return {
+          async *[Symbol.asyncIterator]() {
+            yield Item.text('partial answer');
+          },
+          response: Promise.resolve({
+            output: [],
+            finishReason: 'error',
+          }),
+        };
+      }
+      dispose() { disposeCalls += 1; }
+    }
+    const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+    const iterator = client.completeStreamingChat([{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Describe this.' },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' } },
+      ],
+    }])[Symbol.asyncIterator]();
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { choices: [{ delta: { content: 'partial answer' } }] },
+    });
+    await expect(iterator.next()).rejects.toThrow(/native inference failed/);
+    expect(disposeCalls).toBe(1);
   });
 
   it('handles a rejected terminal response when a multimodal consumer stops early', async () => {

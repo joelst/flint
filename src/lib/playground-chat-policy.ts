@@ -1,10 +1,11 @@
-export type PlaygroundChatTransport = "sidecar" | "direct";
+export type PlaygroundChatTransport = "sidecar" | "direct" | "unavailable";
 
 export function selectPlaygroundChatTransport(
-  endpoint: string | null | undefined,
+  runtimeReady: boolean,
   directClientAvailable: boolean,
 ): PlaygroundChatTransport {
-  return endpoint || !directClientAvailable ? "sidecar" : "direct";
+  if (runtimeReady) return "sidecar";
+  return directClientAvailable ? "direct" : "unavailable";
 }
 
 export function preparationScopeIsCurrent(
