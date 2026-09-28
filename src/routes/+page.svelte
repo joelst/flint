@@ -313,6 +313,18 @@
     if (currentView === "chat" || currentView === "audio") playgroundLastView = currentView;
   });
 
+  /**
+   * Surface a view's render failure instead of leaving a blank pane.
+   *
+   * Without a boundary, one thrown expression anywhere in a view's markup or derived reads
+   * unmounts the whole pane: the user clicks a nav item and nothing appears, with the cause
+   * visible only in devtools. The boundary keeps the rest of the app alive and gives the user
+   * something they can report and retry.
+   */
+  function reportViewRenderFailure(view: string, error: unknown): void {
+    console.error(`[Flint] ${view} failed to render`, error);
+  }
+
   // Disabling the preview flag while the Benchmark view is open must navigate away immediately
   // — an ungated route must never stay reachable just because it was already open.
   $effect(() => {
@@ -9054,6 +9066,7 @@ Output only the summary text, no preamble.`;
           {/if}
         </div>
       {:else if currentView === "chat"}
+        <svelte:boundary onerror={(error) => reportViewRenderFailure("Playground (Chat)", error)}>
         <div class="view chat-view">
           <div class="playground-subnav" role="group" aria-label="Playground mode">
             <button type="button" class:active={currentView === "chat"} aria-pressed={currentView === "chat"} onclick={() => (currentView = "chat")}>Chat</button>
@@ -9824,6 +9837,19 @@ Output only the summary text, no preamble.`;
             </div>
           </div>
         </div>
+          {#snippet failed(error, reset)}
+            <div class="view chat-view">
+              <div class="notice" style="margin: 12px; padding: 12px;">
+                <strong>The Playground could not be displayed.</strong>
+                <p>{error instanceof Error ? error.message : String(error)}</p>
+                <p class="small">
+                  Your conversations are unchanged. Try again, or switch to another view and back.
+                </p>
+                <button type="button" onclick={reset}>Try again</button>
+              </div>
+            </div>
+          {/snippet}
+        </svelte:boundary>
       {:else if currentView === "audio"}
         <div class="view audio-view">
           <div class="playground-subnav" role="group" aria-label="Playground mode">

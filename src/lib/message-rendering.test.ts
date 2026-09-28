@@ -9,6 +9,33 @@ import {
 } from "./message-rendering";
 import { TINY_PNG_DATA_URL, pngDataUrl } from "../../sidecar/test-fixtures/images";
 
+describe("malformed stored message content", () => {
+  // The chat view derives preview budgets straight from persisted message objects, so a
+  // record missing `content` must not throw: a thrown derived blanks the whole Playground.
+  const malformed = [undefined, null, 42, { type: "text", text: "not an array" }] as any[];
+
+  it("never throws while allocating conversation preview budgets", () => {
+    expect(() => conversationImagePreviewPartIndexes(malformed)).not.toThrow();
+    expect(conversationImagePreviewPartIndexes(malformed)).toEqual([[], [], [], []]);
+  });
+
+  it("renders malformed content as no parts rather than throwing", () => {
+    for (const content of malformed) {
+      expect(() => renderableMessageParts(content)).not.toThrow();
+      expect(renderableMessageParts(content)).toEqual([]);
+      expect(messageClipboardText(content)).toBe("");
+    }
+  });
+
+  it("keeps surrounding messages renderable when one record is malformed", () => {
+    const contents = [
+      null,
+      [{ type: "image_url", image_url: { url: TINY_PNG_DATA_URL } }],
+    ] as any[];
+    expect(conversationImagePreviewPartIndexes(contents)).toEqual([[], [0]]);
+  });
+});
+
 describe("multipart message rendering", () => {
   const content = [
     { type: "text" as const, text: "What is this?" },
