@@ -76,6 +76,39 @@ describe('toPromptParts', () => {
     }], { rejectInvalidTextAttachments: true })).toThrow(TextAttachmentRequestError);
   });
 
+  it('enforces the text attachment aggregate budget across all turns in a request', () => {
+    const file = (name: string, text: string) => ({
+      type: 'file_text',
+      file: { name, text },
+    });
+    const messages = [
+      { role: 'user', content: [file('first.txt', 'a'.repeat(128 * 1024))] },
+      { role: 'assistant', content: 'answer' },
+      { role: 'user', content: [file('second.txt', '\n'.repeat(128 * 1024))] },
+      { role: 'assistant', content: 'answer two' },
+      { role: 'user', content: [file('third.txt', 'c')] },
+    ];
+
+    expect(() => normalizeForAlternatingChat(messages, {
+      rejectInvalidTextAttachments: true,
+    })).toThrow(TextAttachmentRequestError);
+  });
+
+  it('counts prompt framing and JSON escaping against the request-wide attachment budget', () => {
+    const file = (name: string, text: string) => ({
+      type: 'file_text',
+      file: { name, text },
+    });
+    const messages = [
+      { role: 'user', content: [file('first.txt', 'a'.repeat(128 * 1024))] },
+      { role: 'assistant', content: 'answer' },
+      { role: 'user', content: [file('second.txt', 'b'.repeat(128 * 1024))] },
+    ];
+    expect(() => normalizeForAlternatingChat(messages, {
+      rejectInvalidTextAttachments: true,
+    })).toThrow(TextAttachmentRequestError);
+  });
+
   it('drops a part a newer build stored that this one cannot describe to a model', () => {
     const parts = toPromptParts([
       text('keep'),

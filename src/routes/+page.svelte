@@ -1526,6 +1526,7 @@
   let attachedImages: string[] = $state([]); // array of base64 data urls for vision
   let attachedTextFiles: TextFilePart[] = $state([]);
   let imageProcessingCount = $state(0);
+  let textAttachmentProcessingCount = $state(0);
   let textAttachmentError = $state("");
   let imageAttachmentEpoch = 0;
   let textAttachmentEpoch = 0;
@@ -6371,6 +6372,10 @@ updateStateFromSdk();
       statusMessage = "Wait for the attached image to finish preparing before sending.";
       return;
     }
+    if (textAttachmentProcessingCount > 0) {
+      statusMessage = "Wait for the attached text or code files to finish preparing before sending.";
+      return;
+    }
 
     const text = chatInput.trim();
 
@@ -6881,30 +6886,35 @@ Output only the summary text, no preamble.`;
   async function addTextFiles(files: File[]) {
     const ownerConversation = threadLoadedFor;
     const ownerEpoch = textAttachmentEpoch;
+    textAttachmentProcessingCount += 1;
     textAttachmentError = "";
-    const remaining = MAX_ATTACHED_TEXT_FILES - attachedTextFiles.length;
-    if (remaining <= 0) {
-      textAttachmentError = `You can attach up to ${MAX_ATTACHED_TEXT_FILES} text or code files.`;
-      return;
-    }
-    const accepted: TextFilePart[] = [];
-    for (const file of files.slice(0, remaining)) {
-      try {
-        const part = await prepareTextAttachment(file);
-        if (threadLoadedFor !== ownerConversation || textAttachmentEpoch !== ownerEpoch) return;
-        accepted.push(part);
-      } catch (error: any) {
-        textAttachmentError = error?.message || "Could not attach that file.";
-        break;
+    try {
+      const remaining = MAX_ATTACHED_TEXT_FILES - attachedTextFiles.length;
+      if (remaining <= 0) {
+        textAttachmentError = `You can attach up to ${MAX_ATTACHED_TEXT_FILES} text or code files.`;
+        return;
       }
-    }
-    if (threadLoadedFor !== ownerConversation || textAttachmentEpoch !== ownerEpoch) return;
-    const merged = mergePreparedTextAttachments(attachedTextFiles, accepted);
-    attachedTextFiles = merged.attachments;
-    const rejectedCount = merged.rejectedCount + Math.max(0, files.length - remaining);
-    if (rejectedCount > 0 && !textAttachmentError) {
-      textAttachmentError =
-        `${rejectedCount} file${rejectedCount === 1 ? " was" : "s were"} not attached because the count or 256 KB total limit was reached.`;
+      const accepted: TextFilePart[] = [];
+      for (const file of files.slice(0, remaining)) {
+        try {
+          const part = await prepareTextAttachment(file);
+          if (threadLoadedFor !== ownerConversation || textAttachmentEpoch !== ownerEpoch) return;
+          accepted.push(part);
+        } catch (error: any) {
+          textAttachmentError = error?.message || "Could not attach that file.";
+          break;
+        }
+      }
+      if (threadLoadedFor !== ownerConversation || textAttachmentEpoch !== ownerEpoch) return;
+      const merged = mergePreparedTextAttachments(attachedTextFiles, accepted);
+      attachedTextFiles = merged.attachments;
+      const rejectedCount = merged.rejectedCount + Math.max(0, files.length - remaining);
+      if (rejectedCount > 0 && !textAttachmentError) {
+        textAttachmentError =
+          `${rejectedCount} file${rejectedCount === 1 ? " was" : "s were"} not attached because the count or 256 KB total limit was reached.`;
+      }
+    } finally {
+      textAttachmentProcessingCount -= 1;
     }
   }
 
@@ -9502,6 +9512,10 @@ Output only the summary text, no preamble.`;
               {/if}
               {#if textAttachmentError}
                 <div class="attachment-warning">{textAttachmentError}</div>
+              {:else if textAttachmentProcessingCount > 0}
+                <div class="attachment-warning" role="status">
+                  Preparing {textAttachmentProcessingCount} text or code file{ textAttachmentProcessingCount === 1 ? "" : "s" }…
+                </div>
               {/if}
 
               <form class="chat-input" onsubmit={sendMessage} ondrop={handleDrop} ondragover={handleDragOver} ondragenter={handleDragOver}>
@@ -9549,7 +9563,7 @@ Output only the summary text, no preamble.`;
                 <button
                   type="submit"
                   aria-label="Send message"
-                  disabled={benchmarkRunInFlight || chatBlockedByLoadedSTT || !selectedModelSupportsChat || (!chatInput.trim() && attachedImages.length === 0 && attachedTextFiles.length === 0) || imageProcessingCount > 0 || (!state.endpoint && !chatClient) || isStreaming}
+                  disabled={benchmarkRunInFlight || chatBlockedByLoadedSTT || !selectedModelSupportsChat || (!chatInput.trim() && attachedImages.length === 0 && attachedTextFiles.length === 0) || imageProcessingCount > 0 || textAttachmentProcessingCount > 0 || (!state.endpoint && !chatClient) || isStreaming}
                 >
                   {#if isStreaming}<Icon name="loader" size={15} class="spin" />{:else}<Icon name="send" size={15} />{/if}
                 </button>

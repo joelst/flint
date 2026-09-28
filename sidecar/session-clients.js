@@ -104,8 +104,12 @@ function nativeText (output) {
 }
 
 const NATIVE_IMAGE_FORMATS = new Set(['bmp', 'gif', 'jpeg', 'jpg', 'png', 'webp']);
+const MAX_NATIVE_IMAGE_DATA_URL_CHARS = 350_000;
 
 function decodeImageDataUrl (url) {
+  if (typeof url !== 'string' || url.length > MAX_NATIVE_IMAGE_DATA_URL_CHARS) {
+    throw new Error('Native image input exceeds the supported size limit.');
+  }
   const match = /^data:image\/([a-z0-9.+-]+);base64,([a-z0-9+/]*={0,2})$/i.exec(url);
   const rawFormat = match?.[1]?.toLowerCase();
   if (!match || !NATIVE_IMAGE_FORMATS.has(rawFormat)) {

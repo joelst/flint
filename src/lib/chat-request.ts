@@ -23,8 +23,8 @@ import { promptTextForFile } from './text-attachments';
 import {
   MAX_ATTACHED_TEXT_FILES,
   MAX_TOTAL_TEXT_ATTACHMENT_BYTES,
-  isValidTextAttachmentData,
   textAttachmentBytes,
+  isValidTextAttachmentData,
 } from './text-attachment-policy';
 
 /** A part this builder knows how to send. Opaque parts never reach a request. */
@@ -42,7 +42,7 @@ export class TextAttachmentRequestError extends Error {
   constructor() {
     super(
       'One or more attached text files exceed the supported count or size limits. '
-      + 'Remove the affected attachment before sending.',
+      + 'Remove an attachment or reduce context; if an older archived turn is over limit, start a new chat.',
     );
     this.name = 'TextAttachmentRequestError';
   }
@@ -66,7 +66,10 @@ const TURN_SEPARATOR = '\n\n';
  * being coerced — `String(123)` would invent text the user never wrote, and a part with no
  * usable url is an image the model cannot fetch.
  */
-function reducePromptParts(content: unknown): {
+function reducePromptParts(
+  content: unknown,
+  textAttachmentBudget = { count: 0, bytes: 0 },
+): {
   parts: PromptPart[];
   rejectedTextAttachments: number;
 } {
@@ -76,8 +79,6 @@ function reducePromptParts(content: unknown): {
   }
   if (!Array.isArray(content)) return { parts: [], rejectedTextAttachments: 0 };
   const parts: PromptPart[] = [];
-  let textFileCount = 0;
-  let textFileBytes = 0;
   let rejectedTextAttachments = 0;
   // `supportedParts` removes anything a newer build stored that this one cannot describe to a
   // model; the checks below then reject anything malformed that it let through.
@@ -98,17 +99,18 @@ function reducePromptParts(content: unknown): {
         rejectedTextAttachments += 1;
         continue;
       }
-      const bytes = textAttachmentBytes(filePart.file.text);
+      const prompt = promptTextForFile(filePart);
+      const bytes = textAttachmentBytes(prompt);
       if (
-        textFileCount >= MAX_ATTACHED_TEXT_FILES
-        || textFileBytes + bytes > MAX_TOTAL_TEXT_ATTACHMENT_BYTES
+        textAttachmentBudget.count >= MAX_ATTACHED_TEXT_FILES
+        || textAttachmentBudget.bytes + bytes > MAX_TOTAL_TEXT_ATTACHMENT_BYTES
       ) {
         rejectedTextAttachments += 1;
         continue;
       }
-      parts.push({ type: 'text', text: promptTextForFile(filePart) });
-      textFileCount += 1;
-      textFileBytes += bytes;
+      parts.push({ type: 'text', text: prompt });
+      textAttachmentBudget.count += 1;
+      textAttachmentBudget.bytes += bytes;
     }
   }
   return { parts, rejectedTextAttachments };
@@ -240,10 +242,11 @@ export function normalizeForAlternatingChat(
   if (seed) instructionParts.push({ type: 'text', text: seed });
 
   const collected: Array<{ role: 'user' | 'assistant'; parts: PromptPart[] }> = [];
+  const textAttachmentBudget = { count: 0, bytes: 0 };
   for (const message of messages ?? []) {
     const role = message?.role;
     if (!isPromptRole(role)) continue;
-    const reduced = reducePromptParts(message?.content);
+    const reduced = reducePromptParts(message?.content, textAttachmentBudget);
     if (options.rejectInvalidTextAttachments && reduced.rejectedTextAttachments > 0) {
       throw new TextAttachmentRequestError();
     }

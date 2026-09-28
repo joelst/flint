@@ -140,11 +140,39 @@ describe('createSessionChatClient buffered chat', () => {
       message: (role: string, parts: any) => ({ type: 'message', role, parts }),
       imageFromData: (format: string, data: Uint8Array) => ({ type: 'image', format, data }),
     });
+
     const client = createSessionChatClient({ id: 'm' }, sdkModule);
     await expect(client.completeChat([{
       role: 'user',
       content: [{ type: 'image_url', image_url: { url: 'file:///private/image.png' } }],
     }])).rejects.toThrow('base64 data URL');
+  });
+
+  it('rejects oversized archived image data before native decoding', async () => {
+    const { sdkModule } = fakeSdk();
+    Object.assign(sdkModule.Item, {
+      message: (role: string, parts: any) => ({ type: 'message', role, parts }),
+      imageFromData: (format: string, data: Uint8Array) => ({ type: 'image', format, data }),
+    });
+    let decoded = false;
+    const originalAtob = globalThis.atob;
+    globalThis.atob = ((value: string) => {
+      decoded = true;
+      return originalAtob(value);
+    }) as typeof atob;
+    try {
+      const client = createSessionChatClient({ id: 'm' }, sdkModule);
+      await expect(client.completeChat([{
+        role: 'user',
+        content: [{
+          type: 'image_url',
+          image_url: { url: `data:image/png;base64,${'A'.repeat(350_001)}` },
+        }],
+      }])).rejects.toThrow(/exceeds the supported size limit/);
+      expect(decoded).toBe(false);
+    } finally {
+      globalThis.atob = originalAtob;
+    }
   });
 
   it('returns the parsed response and disposes the session on success', async () => {
