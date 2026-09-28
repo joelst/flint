@@ -112,17 +112,18 @@ function jpeg (b) {
 }
 
 function webp (b) {
-  if (b.length < 30) return null;
+  if (b.length < 20) return null;
   if (ascii(b, 12, 'VP8 ')) {
-    if (b[23] !== 0x9d || b[24] !== 0x01 || b[25] !== 0x2a) return null;
+    if (b.length < 30 || b[23] !== 0x9d || b[24] !== 0x01 || b[25] !== 0x2a) return null;
     return result('webp', u16le(b, 26) & 0x3fff, u16le(b, 28) & 0x3fff);
   }
   if (ascii(b, 12, 'VP8L')) {
-    if (b[20] !== 0x2f) return null;
+    if (b.length < 25 || b[20] !== 0x2f) return null;
     const bits = (b[21] | (b[22] << 8) | (b[23] << 16) | (b[24] << 24)) >>> 0;
     return result('webp', (bits & 0x3fff) + 1, ((bits >>> 14) & 0x3fff) + 1);
   }
   if (ascii(b, 12, 'VP8X')) {
+    if (b.length < 30) return null;
     return result('webp', u24le(b, 24) + 1, u24le(b, 27) + 1);
   }
   return null;

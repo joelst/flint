@@ -81,6 +81,10 @@ describe('readImageDimensions', () => {
     const packed = ((1023 - 1) | ((767 - 1) << 14)) >>> 0;
     const lossless = [0x2f, ...le32(packed), 0, 0, 0, 0, 0];
     expect(readImageDimensions(riff('VP8L', lossless))).toEqual({ format: 'webp', width: 1023, height: 767 });
+    const minimalLossless = riff('VP8L', [0x2f, ...le32(packed)]);
+    expect(minimalLossless.length).toBe(25);
+    expect(readImageDimensions(minimalLossless)).toEqual({ format: 'webp', width: 1023, height: 767 });
+    expect(readImageDimensions(minimalLossless.slice(0, 24))).toBeNull();
     expect(readImageDimensions(riff('VP8L', [0, ...lossless.slice(1)]))).toBeNull();
 
     const extended = [0, 0, 0, 0, ...le24(20_000 - 1), ...le24(30 - 1), 0, 0];
