@@ -66,6 +66,18 @@ describe("image attachment storage limits", () => {
     expect(imageAttachmentFitsArchive(MAX_CONVERSATION_STORAGE_CHARS, 1)).toBe(false);
   });
 
+  it("counts the archive key while excluding the archive value from other storage", () => {
+    const archiveKey = "flint-conversations-v2";
+    const storage = {
+      length: 2,
+      key: (index: number) => [archiveKey, "settings"][index] ?? null,
+      getItem: (key: string) => key === archiveKey ? "archive contents" : "setting value",
+    };
+
+    expect(storageCharsExcluding(storage, archiveKey))
+      .toBe(archiveKey.length + "settings".length + "setting value".length);
+  });
+
   it("rejects an unstable same-length storage inventory", () => {
     const snapshots = [
       ["first", "second"],

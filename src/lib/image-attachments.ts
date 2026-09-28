@@ -52,7 +52,7 @@ export function storageCharsExcluding(
   for (const key of firstKeys) {
     const value = storage.getItem(key);
     firstValues.set(key, value);
-    if (key !== excludedKey) chars += key.length + (value?.length ?? 0);
+    chars += key.length + (key === excludedKey ? 0 : (value?.length ?? 0));
   }
   const secondKeys = listStorageKeys(storage);
   if (!sameKeys(firstKeys, secondKeys)) {
