@@ -1,8 +1,138 @@
 import { describe, expect, it } from "vitest";
 import {
+  conversationImagePreviewPartIndexes,
   extractThinkingTrace,
+  messageClipboardText,
+  nonTextMessageParts,
+  renderableMessageParts,
   sanitizeAssistantHtml,
 } from "./message-rendering";
+import { TINY_PNG_DATA_URL, pngDataUrl } from "../../sidecar/test-fixtures/images";
+
+describe("multipart message rendering", () => {
+  const content = [
+    { type: "text" as const, text: "What is this?" },
+    {
+      type: "image_url" as const,
+      image_url: { url: TINY_PNG_DATA_URL },
+    },
+  ];
+
+  it("keeps text and safe image previews separate instead of coercing objects", () => {
+    expect(renderableMessageParts(content)).toEqual([
+      { type: "text", text: "What is this?" },
+      {
+        type: "image",
+        previewUrl: TINY_PNG_DATA_URL,
+        label: "Attached image",
+      },
+    ]);
+    expect(JSON.stringify(renderableMessageParts(content))).not.toContain("[object Object]");
+  });
+
+  it("copies meaningful text and an attachment marker", () => {
+    expect(messageClipboardText(content)).toBe("What is this?\n[Attached image]");
+    expect(messageClipboardText("plain text")).toBe("plain text");
+  });
+
+  it("does not preview active image formats such as SVG", () => {
+    expect(renderableMessageParts([{
+      type: "image_url",
+      image_url: { url: "data:image/svg+xml;base64,PHN2Zz4=" },
+    }])).toEqual([{ type: "image", previewUrl: null, label: "Attached image" }]);
+  });
+
+  it("does not hand the webview a stored image it could not safely decode", () => {
+    const refused = [
+      pngDataUrl(10_000, 10_000), // a few bytes that expand to 400 MB of pixels
+      "data:image/png;base64,AQID", // a raster label with no readable header
+      "data:image/png;base64," + "A".repeat(350_001), // over the stored-image length bound
+    ];
+    for (const url of refused) {
+      expect(renderableMessageParts([{ type: "image_url", image_url: { url } }]))
+        .toEqual([{ type: "image", previewUrl: null, label: "Attached image" }]);
+    }
+  });
+
+  it("limits image previews across the whole conversation by count and decoded pixels", () => {
+    const images = [
+      pngDataUrl(4096, 4096),
+      pngDataUrl(2000, 2000),
+      TINY_PNG_DATA_URL,
+      TINY_PNG_DATA_URL,
+      TINY_PNG_DATA_URL,
+      TINY_PNG_DATA_URL,
+    ];
+    const contents = images.map((url) => [{
+      type: "image_url" as const,
+      image_url: { url },
+    }]);
+    const allowed = conversationImagePreviewPartIndexes(contents);
+
+    expect(allowed.map((indexes, messageIndex) => indexes.length ? messageIndex : -1)
+      .filter((index) => index >= 0)).toEqual([2, 3, 4, 5]);
+    expect(allowed.flat()).toHaveLength(4);
+    expect(renderableMessageParts(contents[0], allowed[0])[0])
+      .toEqual({ type: "image", previewUrl: null, label: "Attached image" });
+
+    const manySmallImages = Array.from({ length: 6 }, () => [{
+      type: "image_url" as const,
+      image_url: { url: TINY_PNG_DATA_URL },
+    }]);
+    const countLimited = conversationImagePreviewPartIndexes(manySmallImages);
+    expect(countLimited.map((indexes, messageIndex) => indexes.length ? messageIndex : -1)
+      .filter((index) => index >= 0)).toEqual([2, 3, 4, 5]);
+  });
+
+  it("keeps aggregate decoded pixels within budget while favoring the newest image", () => {
+    const contents = [pngDataUrl(3000, 3000), pngDataUrl(3000, 3000)].map((url) => [{
+      type: "image_url" as const,
+      image_url: { url },
+    }]);
+    expect(conversationImagePreviewPartIndexes(contents)).toEqual([[], [0]]);
+  });
+
+  it("renders attached text files as chips and copies their contents", () => {
+    const fileContent = [{
+      type: "file_text" as const,
+      file: { name: "main.ts", text: "export const answer = 42;" },
+    }];
+    expect(renderableMessageParts(fileContent)).toEqual([{
+      type: "file",
+      name: "main.ts",
+      text: "export const answer = 42;",
+    }]);
+    expect(messageClipboardText(fileContent))
+      .toBe("[Attached file: main.ts]\nexport const answer = 42;");
+  });
+
+  it("renders malformed and future parts as an honest placeholder instead of throwing", () => {
+    const parts = renderableMessageParts([
+      { type: "image_url", image_url: {} } as any,
+      { type: "x-flint-unknown", original: { type: "audio_url" } },
+    ]);
+    expect(parts).toEqual([
+      { type: "unknown", label: "Attachment this version cannot display" },
+      { type: "unknown", label: "Attachment this version cannot display" },
+    ]);
+  });
+
+  it("keeps assistant attachments and opaque parts available alongside rendered text", () => {
+    const parts = renderableMessageParts([
+      { type: "text", text: "Here is the result." },
+      { type: "file_text", file: { name: "result.txt", text: "output" } },
+      { type: "image_url", image_url: { url: TINY_PNG_DATA_URL } },
+      { type: "future_part", payload: "kept opaque" },
+    ] as any);
+
+    expect(parts[0]).toEqual({ type: "text", text: "Here is the result." });
+    expect(nonTextMessageParts(parts)).toEqual([
+      { type: "file", name: "result.txt", text: "output" },
+      { type: "image", previewUrl: TINY_PNG_DATA_URL, label: "Attached image" },
+      { type: "unknown", label: "Attachment this version cannot display" },
+    ]);
+  });
+});
 
 describe("extractThinkingTrace", () => {
   it("extracts closed think tags and keeps visible content", () => {
@@ -38,6 +168,27 @@ describe("extractThinkingTrace", () => {
   it("leaves ordinary content untouched when no think tags appear at all", () => {
     const input = "Just a normal answer with no reasoning markers.";
     const result = extractThinkingTrace(input);
+    expect(result.visibleContent).toBe(input);
+    expect(result.thinkingContent).toEqual([]);
+  });
+
+  it("collapses an explicit plain-text thinking section for a reasoning model", () => {
+    const input = "Thinking Process:\nInspect the pixels carefully.\n\nFinal Answer: A red square.";
+    const result = extractThinkingTrace(input, true);
+    expect(result.visibleContent).toBe("A red square.");
+    expect(result.thinkingContent).toEqual(["Inspect the pixels carefully."]);
+  });
+
+  it("keeps an unfinished explicit thinking section collapsed after streaming", () => {
+    const input = "Thinking Process:\nInspect the pixels carefully.";
+    const result = extractThinkingTrace(input, true);
+    expect(result.visibleContent).toBe("");
+    expect(result.thinkingContent).toEqual(["Inspect the pixels carefully."]);
+  });
+
+  it("does not reinterpret plain-text headings for a non-reasoning model", () => {
+    const input = "Thinking Process:\nThis is ordinary requested prose.";
+    const result = extractThinkingTrace(input, false);
     expect(result.visibleContent).toBe(input);
     expect(result.thinkingContent).toEqual([]);
   });

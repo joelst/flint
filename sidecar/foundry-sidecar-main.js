@@ -20,7 +20,7 @@ import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { annotateVariantUpdates } from './model-updates.js';
-import { selectChatTransport } from './chat-transport.js';
+import { normalizeTextPartsForLegacyClient, selectChatTransport } from './chat-transport.js';
 import {
   createSessionChatClient,
   createSessionEmbeddingClient,
@@ -3568,8 +3568,8 @@ rl.on('line', async (line) => {
         }
 
         // Prefer direct SDK inference to avoid web-service schema/version mismatch issues.
-        // Vision is the exception: the SDK client rejects non-string content outright, so a
-        // multipart request has to take the HTTP endpoint or it cannot be served at all.
+        // Vision must use native ChatSession image items: Foundry Local 2.0.1's OpenAI HTTP
+        // bridge accepts multipart JSON but silently drops the image before inference.
         // Resolve the ChatSession-backed replacement (see createSessionChatClient) before
         // transport selection: this SDK build may no longer export createChatClient() at all
         // (removed end of 2026), so transport availability must reflect either path, not just
@@ -3586,6 +3586,7 @@ rl.on('line', async (line) => {
         const hasChatClient = sessionChatClient || typeof chatModel?.createChatClient === 'function';
         let { transport, reason: transportReason } = selectChatTransport(sdkMessages, {
           chatClient: hasChatClient ? 'available' : 'unsupported',
+          multimodalClient: sessionChatClient?.supportsMultipart === true ? 'available' : 'unsupported',
           serviceEndpoint: sharedEndpoint ? 'available' : 'unavailable',
         });
         const legacyUnsupportedRequest = !sessionChatClient
@@ -3605,6 +3606,9 @@ rl.on('line', async (line) => {
           }
         }
         if (!transport) throw new Error(transportReason);
+        const sdkInferenceMessages = sessionChatClient
+          ? sdkMessages
+          : normalizeTextPartsForLegacyClient(sdkMessages);
         if (transport === 'sdk') {
           const client = sessionChatClient || chatModel.createChatClient();
           // SDK reads generation params from client.settings, not completeChat args.
@@ -3637,7 +3641,7 @@ rl.on('line', async (line) => {
             let streamFailure = null;
             try {
               for await (const chunk of client.completeStreamingChat(
-                sdkMessages,
+                sdkInferenceMessages,
                 payload.tools,
                 { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
               )) {
@@ -3731,7 +3735,7 @@ rl.on('line', async (line) => {
             });
           } else if (typeof client?.completeChat === 'function') {
             const result = await client.completeChat(
-              sdkMessages,
+              sdkInferenceMessages,
               payload.tools,
               { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
             );
@@ -3791,7 +3795,7 @@ rl.on('line', async (line) => {
             let streamFailure = null;
             try {
               for await (const chunk of client.completeStreamingChat(
-                sdkMessages,
+                sdkInferenceMessages,
                 payload.tools,
                 { toolChoice: payload.toolChoice, responseFormat: payload.responseFormat },
               )) {

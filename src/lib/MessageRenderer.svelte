@@ -1,7 +1,17 @@
 <script lang="ts">
-  import { extractThinkingTrace, sanitizeAssistantHtml } from "./message-rendering";
+  import type { MessageContent } from "./conversation-store";
+  import {
+    extractThinkingTrace,
+    messageClipboardText,
+    messagePlainText,
+    nonTextMessageParts,
+    renderableMessageParts,
+    sanitizeAssistantHtml,
+  } from "./message-rendering";
 
-  export let content: string = "";
+  export let content: MessageContent = "";
+  /** Image part indexes admitted by the owning conversation-wide preview budget. */
+  export let previewImagePartIndexes: number[] | undefined = undefined;
   export let role: "user" | "assistant" = "assistant";
   /** True while this specific message is actively receiving stream deltas. */
   export let isStreaming: boolean = false;
@@ -37,6 +47,8 @@
   let renderVersion = 0;
   let pendingRenderTimer: ReturnType<typeof setTimeout> | null = null;
   let lastMessageKey: string | number | undefined = undefined;
+  $: userParts = renderableMessageParts(content, previewImagePartIndexes);
+  $: assistantAttachments = nonTextMessageParts(userParts);
 
   $: {
     if (messageKey !== lastMessageKey) {
@@ -82,7 +94,7 @@
       return;
     }
 
-    const extracted = extractThinkingTrace(safeContent);
+    const extracted = extractThinkingTrace(safeContent, reasoning);
     let { visibleContent } = extracted;
     let { thinkingContent } = extracted;
     // No tag detected yet: if this model is known to reason and the stream is still going,
@@ -129,7 +141,7 @@
   }
 
   function copyToClipboard() {
-    navigator.clipboard.writeText(content);
+    navigator.clipboard.writeText(messageClipboardText(content));
   }
 
   /**
@@ -142,7 +154,7 @@
    */
   function queueRender(
     currentRole: "user" | "assistant",
-    currentContent: string,
+    currentContent: MessageContent,
     streaming: boolean,
     reasoning: boolean,
     _key: string | number,
@@ -156,7 +168,13 @@
     const scheduleDelayMs = currentRole === "assistant" ? 40 : 0;
     pendingRenderTimer = setTimeout(() => {
       pendingRenderTimer = null;
-      void renderContent(currentVersion, currentRole, String(currentContent || ""), streaming, reasoning);
+      void renderContent(
+        currentVersion,
+        currentRole,
+        messagePlainText(currentContent),
+        streaming,
+        reasoning,
+      );
     }, scheduleDelayMs);
   }
 
@@ -189,11 +207,40 @@
     <div class="rendered-markdown">
       {@html renderedHtml}
     </div>
+    {#if assistantAttachments.length > 0}
+      <div class="assistant-attachments">
+        {#each assistantAttachments as part}
+          {#if part.type === "file"}
+            <span class="attachment-chip" title={`${part.text.length.toLocaleString()} characters`}>
+              {part.name}
+            </span>
+          {:else if part.type === "image" && part.previewUrl}
+            <img class="attached-image" src={part.previewUrl} alt={part.label} />
+          {:else}
+            <span class="attachment-chip">{part.label}</span>
+          {/if}
+        {/each}
+      </div>
+    {/if}
     <button class="copy-btn" title="Copy message" onclick={copyToClipboard}
       >📋 Copy</button
     >
   {:else}
-    <p>{content}</p>
+    <div class="user-parts">
+      {#each userParts as part}
+        {#if part.type === "text"}
+          <p>{part.text}</p>
+        {:else if part.type === "file"}
+          <span class="attachment-chip" title={`${part.text.length.toLocaleString()} characters`}>
+            {part.name}
+          </span>
+        {:else if part.type === "image" && part.previewUrl}
+          <img class="attached-image" src={part.previewUrl} alt={part.label} />
+        {:else}
+          <span class="attachment-chip">{part.label}</span>
+        {/if}
+      {/each}
+    </div>
     <button class="copy-btn" title="Copy message" onclick={copyToClipboard}
       >📋 Copy</button
     >
@@ -204,6 +251,37 @@
   .message-renderer {
     position: relative;
     width: 100%;
+  }
+
+  .user-parts {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .user-parts p {
+    margin: 0;
+    white-space: pre-wrap;
+  }
+
+  .attached-image {
+    display: block;
+    width: auto;
+    max-width: min(100%, 320px);
+    max-height: 240px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    object-fit: contain;
+  }
+
+  .attachment-chip {
+    align-self: flex-start;
+    padding: 4px 8px;
+    color: var(--muted);
+    background: var(--subtle-bg);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: 0.85em;
   }
 
   .message-renderer.assistant :global(p) {

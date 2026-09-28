@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   createSessionChatClient,
   createSessionEmbeddingClient,
@@ -8,6 +8,7 @@ import {
   mergeSessionCleanupFailure,
   normalizeChatPenalty,
 } from './session-clients.js';
+import { imageDataUrl, pngDataUrl, TINY_PNG_BYTES, TINY_PNG_DATA_URL } from './test-fixtures/images';
 
 describe('normalizeChatPenalty', () => {
   it('omits neutral and invalid penalties while preserving effective values', () => {
@@ -77,6 +78,220 @@ function fakeSdk({ disposeThrows = false, processRequestThrows = false, processR
 }
 
 describe('createSessionChatClient buffered chat', () => {
+  it('sends multipart messages as native text and decoded image items', async () => {
+    let capturedRequest: any;
+    class Request {
+      items: any[] = [];
+      options: any;
+      addItem(item: any) { this.items.push(item); return this; }
+      setOptions(options: any) { this.options = options; return this; }
+    }
+    const Item = {
+      text: (text: string, textType = 'default') => ({ type: 'text', textType, text }),
+      message: (role: string, parts: any) => ({ type: 'message', role, parts }),
+      imageFromData: (format: string, data: Uint8Array) => ({ type: 'image', format, data }),
+    };
+    class ChatSession {
+      async processRequest(request: any) {
+        capturedRequest = request;
+        return {
+          output: [
+            Item.text('private reasoning', 'reasoning'),
+            {
+              type: 'message',
+              role: 'assistant',
+              parts: [
+                { type: 'text', text: 'private reasoning', textType: 'reasoning' },
+                { type: 'text', text: 'A red square.', textType: 'default' },
+              ],
+            },
+          ],
+          usage: { promptTokens: 12, completionTokens: 4, totalTokens: 16 },
+          finishReason: 'stop',
+        };
+      }
+      dispose() {}
+    }
+    const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+    Object.assign(client.settings, { maxTokens: 64, temperature: 0.5, randomSeed: 7 });
+    const result = await client.completeChat([{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Describe this.' },
+        { type: 'image_url', image_url: { url: TINY_PNG_DATA_URL } },
+      ],
+    }]);
+
+    expect(client.supportsMultipart).toBe(true);
+    expect(capturedRequest.items).toHaveLength(1);
+    expect(capturedRequest.items[0].role).toBe('user');
+    expect(capturedRequest.items[0].parts[0]).toMatchObject({ type: 'text', text: 'Describe this.' });
+    expect(capturedRequest.items[0].parts[1]).toMatchObject({ type: 'image', format: 'png' });
+    expect(Array.from(capturedRequest.items[0].parts[1].data)).toEqual(Array.from(TINY_PNG_BYTES));
+    expect(capturedRequest.options).toEqual({
+      search: { maxOutputTokens: 64, temperature: 0.5, seed: 7 },
+    });
+    expect(result).toEqual({
+      choices: [{
+        index: 0,
+        finish_reason: 'stop',
+        message: { role: 'assistant', content: 'A red square.' },
+      }],
+      usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 },
+    });
+  });
+
+  it('rejects buffered native inference errors even when partial output exists', async () => {
+    let disposeCalls = 0;
+    class Request {
+      addItem() { return this; }
+      setOptions() { return this; }
+    }
+    const Item = {
+      text: (text: string) => ({ type: 'text', text }),
+      message: (role: string, parts: any) => ({ type: 'message', role, parts }),
+      imageFromData: (format: string, data: Uint8Array) => ({ type: 'image', format, data }),
+    };
+    class ChatSession {
+      async processRequest() {
+        return {
+          output: [{ type: 'message', role: 'assistant', content: 'partial answer' }],
+          finishReason: 'error',
+        };
+      }
+      dispose() { disposeCalls += 1; }
+    }
+    const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+
+    await expect(client.completeChat([{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Describe this.' },
+        { type: 'image_url', image_url: { url: TINY_PNG_DATA_URL } },
+      ],
+    }])).rejects.toThrow(/native inference failed/);
+    expect(disposeCalls).toBe(1);
+  });
+
+  it('rejects non-data image URLs instead of granting native file or network access', async () => {
+    const { sdkModule } = fakeSdk();
+    Object.assign(sdkModule.Item, {
+      message: (role: string, parts: any) => ({ type: 'message', role, parts }),
+      imageFromData: (format: string, data: Uint8Array) => ({ type: 'image', format, data }),
+    });
+
+    const client = createSessionChatClient({ id: 'm' }, sdkModule);
+    await expect(client.completeChat([{
+      role: 'user',
+      content: [{ type: 'image_url', image_url: { url: 'file:///private/image.png' } }],
+    }])).rejects.toThrow('base64 data URL');
+  });
+
+  it('rejects oversized archived image data before native decoding', async () => {
+    const { sdkModule } = fakeSdk();
+    Object.assign(sdkModule.Item, {
+      message: (role: string, parts: any) => ({ type: 'message', role, parts }),
+      imageFromData: (format: string, data: Uint8Array) => ({ type: 'image', format, data }),
+    });
+    let decoded = false;
+    const originalAtob = globalThis.atob;
+    globalThis.atob = ((value: string) => {
+      decoded = true;
+      return originalAtob(value);
+    }) as typeof atob;
+    try {
+      const client = createSessionChatClient({ id: 'm' }, sdkModule);
+      await expect(client.completeChat([{
+        role: 'user',
+        content: [{
+          type: 'image_url',
+          image_url: { url: `data:image/png;base64,${'A'.repeat(350_001)}` },
+        }],
+      }])).rejects.toThrow(/exceeds the supported size limit/);
+      expect(decoded).toBe(false);
+    } finally {
+      globalThis.atob = originalAtob;
+    }
+  });
+
+  it('bounds decoded pixels from the header before native decoding', async () => {
+    const images: Array<{ format: string }> = [];
+    class Request {
+      addItem() { return this; }
+      setOptions() { return this; }
+    }
+    const Item = {
+      text: (text: string) => ({ type: 'text', text }),
+      message: (role: string, parts: any) => ({ type: 'message', role, parts }),
+      imageFromData: (format: string, data: Uint8Array) => {
+        images.push({ format });
+        return { type: 'image', format, data };
+      },
+    };
+    class ChatSession {
+      async processRequest() {
+        return {
+          output: [{ type: 'message', role: 'assistant', content: 'ok' }],
+          finishReason: 'stop',
+        };
+      }
+      dispose() {}
+    }
+    const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+    const send = (url: string) => client.completeChat([{
+      role: 'user',
+      content: [{ type: 'image_url', image_url: { url } }],
+    }]);
+
+    // A few dozen encoded bytes that would expand to 400 MB of RGBA.
+    const bomb = pngDataUrl(10_000, 10_000);
+    expect(bomb.length).toBeLessThan(100);
+    await expect(send(bomb)).rejects.toThrow(/10000x10000, above the supported pixel limit/);
+    await expect(send('data:image/png;base64,AQID')).rejects.toThrow(/unreadable image dimensions/);
+    expect(images).toEqual([]);
+
+    // The decoder sees the bytes, not the label, so the header's format is what is passed on.
+    await send(imageDataUrl(TINY_PNG_BYTES, 'image/jpeg'));
+    await send(pngDataUrl(4032, 3024));
+    expect(images).toEqual([{ format: 'png' }, { format: 'png' }]);
+  });
+
+  it('bounds the whole request by image count before decoding any image', async () => {
+    const decoded: string[] = [];
+    class Request {
+      addItem() { return this; }
+      setOptions() { return this; }
+    }
+    const Item = {
+      text: (text: string) => ({ type: 'text', text }),
+      message: (role: string, parts: any) => ({ type: 'message', role, parts }),
+      imageFromData: (format: string, data: Uint8Array) => {
+        decoded.push(format);
+        return { type: 'image', format, data };
+      },
+    };
+    let processed = 0;
+    class ChatSession {
+      async processRequest() {
+        processed += 1;
+        return { output: [{ type: 'message', role: 'assistant', content: 'ok' }], finishReason: 'stop' };
+      }
+      dispose() {}
+    }
+    const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+    const turn = (count: number) => ({
+      role: 'user',
+      content: Array.from({ length: count }, () => ({ type: 'image_url', image_url: { url: pngDataUrl(4096, 4096) } })),
+    });
+    // Every image passes the per-image bound; together they would not.
+    await expect(client.completeChat([turn(3), { role: 'assistant', content: 'seen' }, turn(2)]))
+      .rejects.toThrow(/carries 5 images; at most 4/);
+    expect(decoded).toEqual([]);
+    expect(processed).toBe(0);
+
+    await client.completeChat([turn(2), { role: 'assistant', content: 'seen' }, turn(2)]);
+    expect(decoded).toHaveLength(4);
+  });
   it('returns the parsed response and disposes the session on success', async () => {
     const { sdkModule, disposeCalls } = fakeSdk();
     const client = createSessionChatClient({ id: 'm' }, sdkModule);
@@ -323,6 +538,138 @@ describe('createSessionChatClient fallback', () => {
 });
 
 describe('createSessionChatClient streaming disposal', () => {
+  it('adapts native multimodal deltas and terminal metadata to OpenAI-shaped chunks', async () => {
+    class Request {
+      items: any[] = [];
+      addItem(item: any) { this.items.push(item); return this; }
+      setOptions() { return this; }
+    }
+    const Item = {
+      text: (text: string, textType = 'default') => ({ type: 'text', textType, text }),
+      message: (role: string, parts: any) => ({ type: 'message', role, parts }),
+      imageFromData: (format: string, data: Uint8Array) => ({ type: 'image', format, data }),
+    };
+    class ChatSession {
+      processStreamingRequest() {
+        const iterable = {
+          async *[Symbol.asyncIterator]() {
+            yield Item.text('private reasoning', 'reasoning');
+            yield Item.text('red');
+            yield Item.text(' square');
+          },
+          response: Promise.resolve({
+            output: [],
+            usage: { promptTokens: 9, completionTokens: 2, totalTokens: 11 },
+            finishReason: 'length',
+          }),
+        };
+        return iterable;
+      }
+      dispose() {}
+    }
+    const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+    const chunks = [];
+    for await (const chunk of client.completeStreamingChat([{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Describe this.' },
+        { type: 'image_url', image_url: { url: TINY_PNG_DATA_URL } },
+      ],
+    }])) {
+      chunks.push(chunk);
+    }
+    expect(chunks).toEqual([
+      { choices: [{ index: 0, delta: { role: 'assistant', content: 'red' }, finish_reason: null }] },
+      { choices: [{ index: 0, delta: { role: 'assistant', content: ' square' }, finish_reason: null }] },
+      {
+        choices: [{ index: 0, delta: {}, finish_reason: 'length' }],
+        usage: { prompt_tokens: 9, completion_tokens: 2, total_tokens: 11 },
+      },
+    ]);
+  });
+
+  it('rejects a native terminal inference error after preserving emitted partial deltas', async () => {
+    let disposeCalls = 0;
+    class Request {
+      addItem() { return this; }
+      setOptions() { return this; }
+    }
+    const Item = {
+      text: (text: string) => ({ type: 'text', text }),
+      message: (role: string, parts: any) => ({ type: 'message', role, parts }),
+      imageFromData: (format: string, data: Uint8Array) => ({ type: 'image', format, data }),
+    };
+    class ChatSession {
+      processStreamingRequest() {
+        return {
+          async *[Symbol.asyncIterator]() {
+            yield Item.text('partial answer');
+          },
+          response: Promise.resolve({
+            output: [],
+            finishReason: 'error',
+          }),
+        };
+      }
+      dispose() { disposeCalls += 1; }
+    }
+    const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+    const iterator = client.completeStreamingChat([{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Describe this.' },
+        { type: 'image_url', image_url: { url: TINY_PNG_DATA_URL } },
+      ],
+    }])[Symbol.asyncIterator]();
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { choices: [{ delta: { content: 'partial answer' } }] },
+    });
+    await expect(iterator.next()).rejects.toThrow(/native inference failed/);
+    expect(disposeCalls).toBe(1);
+  });
+
+  it('handles a rejected terminal response when a multimodal consumer stops early', async () => {
+    class Request {
+      addItem() { return this; }
+      setOptions() { return this; }
+    }
+    const Item = {
+      text: (text: string, textType = 'default') => ({ type: 'text', textType, text }),
+      message: (role: string, parts: any) => ({ type: 'message', role, parts }),
+      imageFromData: (format: string, data: Uint8Array) => ({ type: 'image', format, data }),
+    };
+    let rejectResponse!: (error: Error) => void;
+    const response = new Promise((_, reject) => { rejectResponse = reject; });
+    const catchSpy = vi.spyOn(response, 'catch');
+    class ChatSession {
+      processStreamingRequest() {
+        return {
+          async *[Symbol.asyncIterator]() {
+            yield Item.text('partial');
+            await new Promise(() => {});
+          },
+          response,
+        };
+      }
+      dispose() {}
+    }
+    const client = createSessionChatClient({ id: 'm' }, { ChatSession, Request, Item });
+    const iterator = client.completeStreamingChat([{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Describe this.' },
+        { type: 'image_url', image_url: { url: TINY_PNG_DATA_URL } },
+      ],
+    }])[Symbol.asyncIterator]();
+
+    await expect(iterator.next()).resolves.toMatchObject({ value: { choices: [{ delta: { content: 'partial' } }] } });
+    rejectResponse(new Error('terminal response failed'));
+    await expect(iterator.return?.()).resolves.toMatchObject({ done: true });
+    await Promise.resolve();
+    expect(catchSpy).toHaveBeenCalledOnce();
+  });
+
   it('disposes the native session when the stream is fully consumed', async () => {
     const { sdkModule, disposeCalls } = fakeSdk();
     const client = createSessionChatClient({ id: 'm' }, sdkModule);

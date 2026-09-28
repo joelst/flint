@@ -401,6 +401,7 @@ export interface FlintSDKState {
   error: string | null;
   catalogStatus: ModelCatalogStatus;
   catalogError: string | null;
+  catalogRefreshedAt: number | null;
   models: ModelInfo[];
   cachedModels: ModelInfo[];
   loadedModels: ModelInfo[];
@@ -455,6 +456,7 @@ const initialState: FlintSDKState = {
   error: null,
   catalogStatus: 'not-checked',
   catalogError: null,
+  catalogRefreshedAt: null,
   models: [],
   cachedModels: [],
   loadedModels: [],
@@ -1668,6 +1670,7 @@ export async function refreshModels(
         ...projected,
         catalogStatus: 'ready',
         catalogError: null,
+        catalogRefreshedAt: Date.now(),
         cachedModels: projected.models.filter((m: ModelInfo) => m.isCached),
       };
     });

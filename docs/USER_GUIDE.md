@@ -37,7 +37,7 @@ The sidebar is grouped by workflow:
 
 3. **Playground**  
    - Open **Playground**, send a message. A **Chat / Voice** toggle inside switches modes.  
-   - Optional: personas, system prompt, image attach (vision models), URL → context chips.
+   - Optional: personas, text/code files, image attach (vision models), URL → context chips.
 
 4. **Optional — service for other apps**  
    - **Diagnostics → Start service**.  
@@ -59,7 +59,17 @@ The sidebar is grouped by workflow:
 
 - Conversations live in the sidebar; new chat via UI or shortcut (see **?**).  
 - Streaming responses. **Stop** settles Flint's own caller and hides further output, but Foundry Local has no native abort API, so the background generation may still finish; text already received before Stop is kept.
-- Vision: attach up to four images when the loaded model supports it.
+- Vision: attach up to four images when the loaded model supports it. Flint compacts large
+  images before saving them so attachments remain available after restart without exhausting
+  conversation storage. Supported formats are PNG, JPEG, GIF, WebP, and BMP; convert HEIC,
+  AVIF, or SVG first.
+- Attach up to four local text or code files (128 KB each, 256 KB of formatted prompt context
+  combined, including framing and escaping). Flint stores them with the conversation, shows them
+  as attachment chips, and labels their contents as untrusted reference text when sending them
+  to the model. PDF and Office documents are not decoded. The attach button's picker shows all
+  files; anything Flint cannot attach is reported in a notice above the composer rather than skipped silently.
+- Persona is beside the message controls. Context and sampling options are in the collapsible
+  **Generation settings** drawer below the composer.
 - **Export conversations**: Export any chat thread as structured JSON, formatted Markdown, or plain text for documentation or archive.
 
 ### Bring Your Own Model (BYOM) and External Linking

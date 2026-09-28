@@ -201,9 +201,11 @@ describe('prepareHydratedRuntime', () => {
     expect(source).toContain(
       '{#if catalogCheckPresentation === "loading" && state.models.length === 0}',
     );
-    expect(source).toMatch(
-      /catalogStatus: "not-checked" as "not-checked" \| "loading" \| "ready" \| "failed",\s+catalogError: null as string \| null,/,
+    expect(source).toContain(
+      'catalogStatus: "not-checked" as "not-checked" | "loading" | "ready" | "failed",',
     );
+    expect(source).toContain('catalogError: null as string | null,');
+    expect(source).toContain('catalogRefreshedAt: null as number | null,');
     const syncStart = source.indexOf('function syncFromStore(s: any)');
     const syncEnd = source.indexOf('// Local reactive derived', syncStart);
     expect(syncStart, 'SDK state mirror marker not found').toBeGreaterThan(-1);

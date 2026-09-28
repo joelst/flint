@@ -33,6 +33,10 @@ import {
   createEmptyArchive,
   migrateLegacyConversations,
 } from './conversation-store';
+import {
+  MAX_TEXT_FILE_BYTES,
+  MAX_TOTAL_TEXT_ATTACHMENT_BYTES,
+} from './text-attachment-policy';
 
 const textMsg = (role: string, text: string) => ({ role, content: text });
 
@@ -85,6 +89,63 @@ describe('normalizeContent', () => {
     expect(normalizeContent([{ type: 'text', text: 'hi' }])).toEqual([{ type: 'text', text: 'hi' }]);
   });
 
+  it('preserves locally attached text files', () => {
+    const parts = [{
+      type: 'file_text',
+      file: { name: 'main.ts', text: 'export {};\n', mimeType: 'text/typescript' },
+    }];
+    expect(normalizeContent(parts)).toEqual(parts);
+  });
+
+  it('preserves unknown file_text metadata while removing invalid known MIME metadata', () => {
+    const original = {
+      type: 'file_text',
+      source: { build: 3 },
+      file: {
+        name: 'main.ts',
+        text: 'export {};\n',
+        mimeType: 42,
+        futureFileMetadata: { encoding: 'utf-8' },
+      },
+      futurePartMetadata: ['retain'],
+    };
+    expect(normalizeContent([original])).toEqual([{
+      ...original,
+      file: {
+        name: original.file.name,
+        text: original.file.text,
+        futureFileMetadata: original.file.futureFileMetadata,
+      },
+    }]);
+  });
+
+  it('preserves over-limit file parts for display while request validation keeps them unsendable', () => {
+    const oversized = {
+      type: 'file_text',
+      file: { name: 'huge.txt', text: 'x'.repeat(MAX_TEXT_FILE_BYTES + 1) },
+    };
+    const aggregateOverflow = [
+      {
+        type: 'file_text',
+        file: { name: 'first.txt', text: 'a'.repeat(MAX_TEXT_FILE_BYTES) },
+      },
+      {
+        type: 'file_text',
+        file: { name: 'second.txt', text: 'b'.repeat(MAX_TEXT_FILE_BYTES) },
+      },
+      { type: 'file_text', file: { name: 'third.txt', text: 'c' } },
+    ];
+
+    expect(normalizeContentDetailed([oversized])).toMatchObject({
+      content: [oversized],
+      unrecognizedParts: 0,
+    });
+    expect(normalizeContentDetailed(aggregateOverflow)).toMatchObject({
+      content: aggregateOverflow,
+      unrecognizedParts: 0,
+    });
+  });
+
   it('drops unrecoverable parts but keeps unrecognized ones verbatim', () => {
     const result = normalizeContentDetailed([
       { type: 'text', text: 'keep' },
@@ -132,6 +193,34 @@ describe('contentToText', () => {
 
   it('returns empty text for an image-only turn', () => {
     expect(contentToText([{ type: 'image_url', image_url: { url: 'x' } }])).toBe('');
+  });
+
+  it('includes attached file text in titles and search text', () => {
+    expect(contentToText([{
+      type: 'file_text',
+      file: { name: 'notes.txt', text: 'reference material' },
+    }])).toBe('reference material');
+  });
+});
+
+describe('deriveConversationTitle attachment fallback', () => {
+  it('prefers typed text over attached file contents', () => {
+    expect(deriveConversationTitle([{
+      id: 'm1',
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Review this' },
+        { type: 'file_text', file: { name: 'huge.log', text: 'internal file body' } },
+      ],
+    }])).toBe('Review this');
+  });
+
+  it('uses the filename when a turn contains only an attached file', () => {
+    expect(deriveConversationTitle([{
+      id: 'm1',
+      role: 'user',
+      content: [{ type: 'file_text', file: { name: 'main.ts', text: 'export {}' } }],
+    }])).toBe('main.ts');
   });
 });
 
@@ -223,6 +312,46 @@ describe('parseConversationArchive', () => {
     expect(r.corrupt).toBe(false);
     expect(r.archive?.activeId).toBe('c1');
     expect(r.archive?.conversations[0].messages[0].content).toBe('hi');
+  });
+
+  it('preserves unknown file_text metadata across archive round-trips', () => {
+    const content = [{
+      type: 'file_text',
+      source: { build: 3 },
+      file: {
+        name: 'main.ts',
+        text: 'export {};\n',
+        mimeType: 42,
+        futureFileMetadata: { encoding: 'utf-8' },
+      },
+      futurePartMetadata: ['retain'],
+    }];
+    const rawArchive = archive({
+      conversations: [{
+        id: 'c1',
+        title: 'One',
+        createdAt: 1,
+        messages: [{ id: 'm1', role: 'user', createdAt: 1, content }],
+      }],
+    });
+    const expectedContent = [{
+      type: 'file_text',
+      source: { build: 3 },
+      file: {
+        name: 'main.ts',
+        text: 'export {};\n',
+        futureFileMetadata: { encoding: 'utf-8' },
+      },
+      futurePartMetadata: ['retain'],
+    }];
+
+    const firstRead = parseConversationArchive(rawArchive, SKIP_APP_VERSION_GATE);
+    expect(firstRead.archive?.conversations[0].messages[0].content).toEqual(expectedContent);
+    const secondRead = parseConversationArchive(
+      JSON.stringify(firstRead.archive),
+      SKIP_APP_VERSION_GATE,
+    );
+    expect(secondRead.archive?.conversations[0].messages[0].content).toEqual(expectedContent);
   });
 
   it('flags unparseable and non-object roots as corrupt', () => {

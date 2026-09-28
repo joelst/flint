@@ -17,7 +17,16 @@ import {
   type ImagePart,
   type MessageContent,
   type TextPart,
+  type TextFilePart,
 } from './conversation-store';
+import { promptTextForFile } from './text-attachments';
+import {
+  MAX_ATTACHED_TEXT_FILES,
+  MAX_TOTAL_TEXT_ATTACHMENT_BYTES,
+  textAttachmentBytes,
+  isValidTextAttachmentData,
+} from './text-attachment-policy';
+import { MAX_REQUEST_IMAGES } from '../../sidecar/image-dimensions.js';
 
 /** A part this builder knows how to send. Opaque parts never reach a request. */
 export type PromptPart = TextPart | ImagePart;
@@ -28,6 +37,16 @@ export type PromptContent = string | PromptPart[];
 export interface PromptMessage {
   role: 'user' | 'assistant';
   content: PromptContent;
+}
+
+export class TextAttachmentRequestError extends Error {
+  constructor() {
+    super(
+      'One or more attached text files exceed the supported count or size limits. '
+      + 'Remove an attachment or reduce context; if an older archived turn is over limit, start a new chat.',
+    );
+    this.name = 'TextAttachmentRequestError';
+  }
 }
 
 /**
@@ -48,13 +67,20 @@ const TURN_SEPARATOR = '\n\n';
  * being coerced — `String(123)` would invent text the user never wrote, and a part with no
  * usable url is an image the model cannot fetch.
  */
-export function toPromptParts(content: unknown): PromptPart[] {
+function reducePromptParts(
+  content: unknown,
+  textAttachmentBudget = { count: 0, bytes: 0 },
+): {
+  parts: PromptPart[];
+  rejectedTextAttachments: number;
+} {
   if (typeof content === 'string') {
     const text = content.trim();
-    return text ? [{ type: 'text', text }] : [];
+    return { parts: text ? [{ type: 'text', text }] : [], rejectedTextAttachments: 0 };
   }
-  if (!Array.isArray(content)) return [];
+  if (!Array.isArray(content)) return { parts: [], rejectedTextAttachments: 0 };
   const parts: PromptPart[] = [];
+  let rejectedTextAttachments = 0;
   // `supportedParts` removes anything a newer build stored that this one cannot describe to a
   // model; the checks below then reject anything malformed that it let through.
   for (const part of supportedParts(content as MessageContent)) {
@@ -68,9 +94,31 @@ export function toPromptParts(content: unknown): PromptPart[] {
     } else if (part.type === 'image_url') {
       const url = (part as ImagePart).image_url?.url;
       if (typeof url === 'string' && url) parts.push({ type: 'image_url', image_url: { url } });
+    } else if (part.type === 'file_text') {
+      const filePart = part as TextFilePart;
+      if (!isValidTextAttachmentData(filePart.file)) {
+        rejectedTextAttachments += 1;
+        continue;
+      }
+      const prompt = promptTextForFile(filePart);
+      const bytes = textAttachmentBytes(prompt);
+      if (
+        textAttachmentBudget.count >= MAX_ATTACHED_TEXT_FILES
+        || textAttachmentBudget.bytes + bytes > MAX_TOTAL_TEXT_ATTACHMENT_BYTES
+      ) {
+        rejectedTextAttachments += 1;
+        continue;
+      }
+      parts.push({ type: 'text', text: prompt });
+      textAttachmentBudget.count += 1;
+      textAttachmentBudget.bytes += bytes;
     }
   }
-  return parts;
+  return { parts, rejectedTextAttachments };
+}
+
+export function toPromptParts(content: unknown): PromptPart[] {
+  return reducePromptParts(content).parts;
 }
 
 /**
@@ -147,11 +195,46 @@ export interface AlternatingOptions {
   textOnly?: boolean;
   /** Stand-in for an image when `textOnly` is set. Injected so the prompt text is testable. */
   imagePlaceholder?: string;
+  /** Refuse a request rather than silently omitting a known text attachment that exceeds policy. */
+  rejectInvalidTextAttachments?: boolean;
+  /**
+   * Most images the request may carry; older ones become `omittedImagePlaceholder`. Every image
+   * in the window is resent each turn, so without a request-wide cap a long vision thread (or an
+   * imported one) decodes an unbounded number of images at once.
+   */
+  maxImages?: number;
+  /** Stand-in for an image beyond `maxImages`. Injected so the prompt text is testable. */
+  omittedImagePlaceholder?: string;
 }
 
 export const DEFAULT_INSTRUCTION_PREFIX = 'Follow these instructions:';
 
 export const DEFAULT_IMAGE_PLACEHOLDER = '[image]';
+
+export const DEFAULT_OMITTED_IMAGE_PLACEHOLDER = '[earlier image omitted]';
+
+/**
+ * Keep the newest `maxImages` images, replacing older ones in place with placeholder text.
+ * Newest first, because the turn being sent is the one the user is asking about.
+ */
+function capImages(
+  messages: Array<{ parts: PromptPart[] }>,
+  maxImages: number,
+  placeholder: string,
+): void {
+  let kept = 0;
+  for (let m = messages.length - 1; m >= 0; m -= 1) {
+    const parts = messages[m].parts;
+    for (let p = parts.length - 1; p >= 0; p -= 1) {
+      if (parts[p].type !== 'image_url') continue;
+      if (kept < maxImages) {
+        kept += 1;
+      } else {
+        parts[p] = { type: 'text', text: placeholder };
+      }
+    }
+  }
+}
 
 /**
  * Collapse parts to text, standing an image in with a placeholder.
@@ -193,10 +276,15 @@ export function normalizeForAlternatingChat(
   if (seed) instructionParts.push({ type: 'text', text: seed });
 
   const collected: Array<{ role: 'user' | 'assistant'; parts: PromptPart[] }> = [];
+  const textAttachmentBudget = { count: 0, bytes: 0 };
   for (const message of messages ?? []) {
     const role = message?.role;
     if (!isPromptRole(role)) continue;
-    const raw = toPromptParts(message?.content);
+    const reduced = reducePromptParts(message?.content, textAttachmentBudget);
+    if (options.rejectInvalidTextAttachments && reduced.rejectedTextAttachments > 0) {
+      throw new TextAttachmentRequestError();
+    }
+    const raw = reduced.parts;
     const parts = options.textOnly
       ? flattenPartsToText(raw, options.imagePlaceholder ?? DEFAULT_IMAGE_PLACEHOLDER)
       : raw;
@@ -241,6 +329,12 @@ export function normalizeForAlternatingChat(
     }
     alternating.push(message);
   }
+
+  capImages(
+    alternating,
+    options.maxImages ?? MAX_REQUEST_IMAGES,
+    options.omittedImagePlaceholder ?? DEFAULT_OMITTED_IMAGE_PLACEHOLDER,
+  );
 
   const result: PromptMessage[] = [];
   for (const message of alternating) {

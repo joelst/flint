@@ -1,4 +1,158 @@
-export function extractThinkingTrace(text: string): {
+import type { MessageContent } from "./conversation-store";
+import {
+  MAX_CONVERSATION_PREVIEW_IMAGES,
+  MAX_CONVERSATION_PREVIEW_PIXELS,
+  parseImageDataUrl,
+} from "../../sidecar/image-dimensions.js";
+
+export type RenderableMessagePart =
+  | { type: "text"; text: string }
+  | { type: "image"; previewUrl: string | null; label: string }
+  | { type: "file"; name: string; text: string }
+  | { type: "unknown"; label: string };
+
+export type RenderableMessageAttachment = Exclude<RenderableMessagePart, { type: "text" }>;
+
+// Parsing decodes the whole payload (a JPEG frame header can follow any amount of metadata),
+// and messages re-render often, so verdicts are memoized per URL.
+const PREVIEW_CACHE_LIMIT = 64;
+const previewVerdicts = new Map<string, { width: number; height: number } | null>();
+
+/**
+ * True when a stored image may be handed to the webview. Stored and imported images never
+ * passed composer compaction, and `<img>` decodes as soon as a conversation opens, so the
+ * encoded length, raster label, header, and pixel budget are all checked first — the same
+ * rules the native request applies.
+ */
+function safeImageDimensions(url: string): { width: number; height: number } | null {
+  const cached = previewVerdicts.get(url);
+  if (cached !== undefined) return cached;
+  const parsed = parseImageDataUrl(url);
+  const dimensions = parsed.ok ? { width: parsed.width, height: parsed.height } : null;
+  if (previewVerdicts.size >= PREVIEW_CACHE_LIMIT) {
+    previewVerdicts.delete(previewVerdicts.keys().next().value as string);
+  }
+  previewVerdicts.set(url, dimensions);
+  return dimensions;
+}
+
+function hasTextPart(part: unknown): part is { type: "text"; text: string } {
+  return typeof part === "object"
+    && part !== null
+    && (part as { type?: unknown }).type === "text"
+    && typeof (part as { text?: unknown }).text === "string";
+}
+
+function hasFilePart(part: unknown): part is {
+  type: "file_text";
+  file: { name: string; text: string };
+} {
+  if (typeof part !== "object" || part === null || (part as { type?: unknown }).type !== "file_text") {
+    return false;
+  }
+  const file = (part as { file?: unknown }).file;
+  return typeof file === "object"
+    && file !== null
+    && typeof (file as { name?: unknown }).name === "string"
+    && typeof (file as { text?: unknown }).text === "string";
+}
+
+function hasImagePart(part: unknown): part is {
+  type: "image_url";
+  image_url: { url: string };
+} {
+  if (typeof part !== "object" || part === null || (part as { type?: unknown }).type !== "image_url") {
+    return false;
+  }
+  const image = (part as { image_url?: unknown }).image_url;
+  return typeof image === "object"
+    && image !== null
+    && typeof (image as { url?: unknown }).url === "string";
+}
+
+/**
+ * Allocate a bounded preview budget across a whole conversation, favoring its most recent
+ * images. Every returned index identifies an image part in the corresponding message.
+ */
+export function conversationImagePreviewPartIndexes(
+  contents: readonly MessageContent[],
+): number[][] {
+  const allowed = contents.map(() => [] as number[]);
+  let remainingPixels = MAX_CONVERSATION_PREVIEW_PIXELS;
+  let remainingImages = MAX_CONVERSATION_PREVIEW_IMAGES;
+  for (let messageIndex = contents.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const content = contents[messageIndex];
+    const parts: unknown[] = typeof content === "string" ? [{ type: "text", text: content }] : content;
+    for (let partIndex = parts.length - 1; partIndex >= 0; partIndex -= 1) {
+      if (remainingImages === 0) return allowed;
+      const part = parts[partIndex];
+      if (!hasImagePart(part)) continue;
+      const dimensions = safeImageDimensions(part.image_url.url);
+      if (!dimensions) continue;
+      const pixels = dimensions.width * dimensions.height;
+      if (pixels > remainingPixels) continue;
+      allowed[messageIndex].push(partIndex);
+      remainingPixels -= pixels;
+      remainingImages -= 1;
+    }
+  }
+  return allowed;
+}
+
+export function renderableMessageParts(
+  content: MessageContent,
+  previewImagePartIndexes?: readonly number[],
+): RenderableMessagePart[] {
+  const parts: unknown[] = typeof content === "string" ? [{ type: "text", text: content }] : content;
+  const allowed = new Set(
+    previewImagePartIndexes ?? conversationImagePreviewPartIndexes([content])[0],
+  );
+  return parts.map((part, index) => {
+    if (hasTextPart(part)) {
+      return { type: "text" as const, text: part.text };
+    }
+    if (hasFilePart(part)) {
+      return { type: "file" as const, name: part.file.name, text: part.file.text };
+    }
+    if (hasImagePart(part)) {
+      return {
+        type: "image" as const,
+        previewUrl: allowed.has(index) && safeImageDimensions(part.image_url.url)
+          ? part.image_url.url
+          : null,
+        label: "Attached image",
+      };
+    }
+    return { type: "unknown" as const, label: "Attachment this version cannot display" };
+  });
+}
+
+export function nonTextMessageParts(
+  parts: readonly RenderableMessagePart[],
+): RenderableMessageAttachment[] {
+  return parts.filter((part): part is RenderableMessageAttachment => part.type !== "text");
+}
+
+export function messagePlainText(content: MessageContent): string {
+  const parts: unknown[] = typeof content === "string" ? [{ type: "text", text: content }] : content;
+  return parts
+    .filter(hasTextPart)
+    .map((part) => part.text)
+    .join("\n");
+}
+
+export function messageClipboardText(content: MessageContent): string {
+  return renderableMessageParts(content)
+    .map((part) => {
+      if (part.type === "text") return part.text;
+      if (part.type === "file") return `[Attached file: ${part.name}]\n${part.text}`;
+      return `[${part.label}]`;
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+export function extractThinkingTrace(text: string, recognizePlainText = false): {
   visibleContent: string;
   thinkingContent: string[];
 } {
@@ -37,6 +191,27 @@ export function extractThinkingTrace(text: string): {
       const body = String(openMatch[1] ?? '').trim();
       if (body) sections.push(body);
       visible = visible.replace(openPattern, '');
+    }
+  }
+
+  if (recognizePlainText && sections.length === 0) {
+    const heading = visible.match(
+      /^\s*(?:#{1,6}\s*)?(?:\*\*|__)?(?:thinking|reasoning) process(?:\*\*|__)?\s*:\s*/i,
+    );
+    if (heading) {
+      const body = visible.slice(heading[0].length);
+      const finalHeading = body.match(
+        /(?:^|\n)\s*(?:#{1,6}\s*)?(?:\*\*|__)?(?:final answer|answer)(?:\*\*|__)?\s*:\s*/i,
+      );
+      if (finalHeading?.index !== undefined) {
+        const reasoning = body.slice(0, finalHeading.index).trim();
+        if (reasoning) sections.push(reasoning);
+        visible = body.slice(finalHeading.index + finalHeading[0].length);
+      } else {
+        const reasoning = body.trim();
+        if (reasoning) sections.push(reasoning);
+        visible = "";
+      }
     }
   }
 

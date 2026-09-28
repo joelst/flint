@@ -134,9 +134,28 @@
     mayEnableAutosave,
   } from "$lib/chat-persistence";
   import {
+    ARCHIVE_KEY,
     openConversationArchive,
     saveConversationArchive,
+    serializeArchive,
   } from "$lib/conversation-repository";
+  import {
+    MAX_ATTACHED_IMAGES,
+    clipboardAttachmentFiles,
+    compactImageAttachment,
+    imageAttachmentFitsArchive,
+    partitionAttachmentFiles,
+    prepareImageBatch,
+    preparedImageStillOwned,
+    rejectedAttachmentNotice,
+    withVisionCapability,
+    storageCharsExcluding,
+  } from "$lib/image-attachments";
+  import {
+    MAX_ATTACHED_TEXT_FILES,
+    mergePreparedTextAttachments,
+    prepareTextAttachmentBatch,
+  } from "$lib/text-attachments";
   import {
     collectStoredArchive,
     collectPreservedPayloads,
@@ -162,6 +181,7 @@
     createEmptyArchive,
     readConversationSettings,
     type ConversationArchive,
+    type TextFilePart,
   } from "$lib/conversation-store";
   import {
     DEFAULT_APP_SETTINGS,
@@ -172,10 +192,19 @@
     type AppSettingDefaults,
   } from "$lib/conversation-settings";
   import { isFetchableUrl, detectFetchableUrls } from "$lib/url-chips";
+  import { conversationImagePreviewPartIndexes } from "$lib/message-rendering";
   import {
     normalizeForAlternatingChat,
     isEmptyAssistantPlaceholder,
   } from "$lib/chat-request";
+  import {
+    beginScopedPreparation,
+    preparationScopeIsCurrent,
+    resetScopedPreparations,
+    selectPlaygroundChatTransport,
+    settleScopedPreparation,
+    settlePreparationCount,
+  } from "$lib/playground-chat-policy";
   import {
     catalogModelForEndpointId,
     flintVerifiedFromReport,
@@ -267,6 +296,11 @@
     if (status === 'verified') return 'Verified';
     if (status === 'community') return 'Community-reported';
     return 'Unverified';
+  }
+
+  function formatCatalogRefreshTime(value: number | null): string {
+    if (!Number.isFinite(value)) return "not yet";
+    return new Date(value as number).toLocaleString();
   }
 
   // Simple client-side navigation
@@ -810,6 +844,7 @@
     error: null as string | null,
     catalogStatus: "not-checked" as "not-checked" | "loading" | "ready" | "failed",
     catalogError: null as string | null,
+    catalogRefreshedAt: null as number | null,
     models: [] as ModelInfo[],
     endpoint: undefined as string | undefined,
     eps: [] as EpInfo[],
@@ -1501,6 +1536,24 @@
   let abortController: AbortController | null = $state(null);
   let activeStreamRequestId: number | null = $state(null);
   let attachedImages: string[] = $state([]); // array of base64 data urls for vision
+  let attachedTextFiles: TextFilePart[] = $state([]);
+  let imageProcessingCount = $state(0);
+  let textAttachmentProcessingCount = $state(0);
+  let attachmentNotice = $state("");
+  // Bumped when the composer's attachments are cleared, so a notice from an admission that
+  // started before the clear (or the send that cleared it) is never published afterwards.
+  let attachmentNoticeEpoch = 0;
+  let attachmentAdmissionsInFlight = 0;
+  // Admissions still reading file heads; their files are not yet counted as preparing, so
+  // send must wait for them too or it would clear the composer and discard them.
+  let attachmentClassifications = $state({ generation: 0, count: 0 });
+  let imageAttachmentEpoch = 0;
+  // Bumped only by an explicit clear or send. Losing vision capability also bumps
+  // imageAttachmentEpoch; admission must tell the two apart, because a capability change is
+  // reported to the user while a clear is not.
+  let imageClearEpoch = 0;
+  let textAttachmentEpoch = 0;
+  let textFileInput: HTMLInputElement | undefined = $state();
 
   // URL-fetch (Option A web fetch): pending URL chips and their fetched content
   let pendingUrlFetches: { url: string; attempt: number; status: 'pending' | 'fetching' | 'done' | 'error'; title?: string; text?: string; error?: string }[] = $state([]);
@@ -1524,10 +1577,23 @@
     return tags.includes('vision');
   });
 
+  // The file picker admits text and (with a vision model) images, so it is full only when
+  // every category it could fill is.
+  let composerAttachmentsFull = $derived(
+    attachedTextFiles.length >= MAX_ATTACHED_TEXT_FILES
+      && (!isVisionModel || attachedImages.length >= MAX_ATTACHED_IMAGES),
+  );
+
   // Auto-clear images if user switches away from a vision model
   $effect(() => {
-    if (!isVisionModel && attachedImages.length > 0) {
-      attachedImages = [];
+    if (!isVisionModel) {
+      // Keep the effect dependent only on vision capability; resetting attachment state reads
+      // and writes reactive values that must not trigger another run.
+      untrack(() => {
+        imageAttachmentEpoch += 1;
+        imageProcessingCount = 0;
+        if (attachedImages.length > 0) attachedImages = [];
+      });
     }
   });
 
@@ -1732,6 +1798,8 @@
   let audioLaneModelAlias = $state("");
 
   const selectedChatModel = $derived(state.models.find((m: any) => m.alias === selectedModelAlias));
+  const canUseDirectChat = $derived(isDev && !!chatClient);
+  const canDispatchChat = $derived(state.ready || canUseDirectChat);
   const selectedModelSupportsChat = $derived(
     !selectedModelAlias || (selectedChatModel ? modelSupportsChat(selectedChatModel) : true)
   );
@@ -1886,6 +1954,9 @@
    * conversation is empty" and "nothing loaded yet", and only the first may be written back.
    */
   let threadLoadedFor = $state<string | null>(null);
+  let chatImagePreviewPartIndexes = $derived.by(() =>
+    conversationImagePreviewPartIndexes(chatMessages.map((message: any) => message.content)),
+  );
   const currentConversationId = $derived(conversationArchive.activeId);
   const conversations = $derived(
     summarizeConversations(conversationArchive, {
@@ -2038,7 +2109,7 @@
       chatThreadEpoch += 1;
       chatInput = "";
       lastAutoSummaryCount = 0;
-      clearImages();
+      clearComposerAttachments();
       clearUrlFetches();
       // Only the model, and only when one was chosen. This conversation already exists and may
       // hold settings the user configured or that this build cannot use; stamping every
@@ -2070,7 +2141,7 @@
     conversationArchive = result.archive;
     adoptThread(result.conversation.id, []);
     applyConversationSettings(result.conversation.settings);
-    clearImages(); // clear any pending vision attachments for new chat
+    clearComposerAttachments();
     clearUrlFetches();
     conversationsDirty = true;
     saveConversations();
@@ -2082,7 +2153,7 @@
     conversationArchive = result.archive;
     if (result.thread.loadedFor !== threadLoadedFor) {
       adoptThread(result.thread.loadedFor, result.thread.messages as any);
-      clearImages();
+      clearComposerAttachments();
       clearUrlFetches();
       // The raw bag, not `result.settings`: that is a filtered typed view, and resolving from it
       // would silently drop the report of any stored value this build cannot use.
@@ -2222,7 +2293,7 @@
       adoptThread(result.thread.loadedFor, result.thread.messages as any);
       // Same cleanup as an ordinary switch: pending images and fetched pages belong to the
       // conversation they were staged in, and must not be sent from its neighbour.
-      clearImages();
+      clearComposerAttachments();
       clearUrlFetches();
       // Null when the archive is now empty: the thread is unloaded and there is no neighbour to
       // resolve. Dereferencing it here threw before `conversationsDirty` was set and before the
@@ -2727,6 +2798,7 @@
     state.error = s.error;
     state.catalogStatus = s.catalogStatus ?? "not-checked";
     state.catalogError = s.catalogError ?? null;
+    state.catalogRefreshedAt = Number.isFinite(s.catalogRefreshedAt) ? s.catalogRefreshedAt : null;
     state.models = s.models ?? [];
     state.endpoint = s.endpoint;
     state.eps = s.eps ?? [];
@@ -6328,10 +6400,35 @@ updateStateFromSdk();
       statusMessage = "Current model does not support chat completions.";
       return;
     }
-    if (!chatInput.trim() || (!state.endpoint && !chatClient)) return;
+    if (!canDispatchChat) {
+      statusMessage = "The local runtime is not ready yet. Wait for it to finish starting before sending.";
+      return;
+    }
+    if (
+      (!chatInput.trim() && attachedImages.length === 0 && attachedTextFiles.length === 0)
+    ) return;
     if (!threadLoadedFor || streamsByConversation.has(threadLoadedFor)) return;
+    if (imageProcessingCount > 0) {
+      statusMessage = "Wait for the attached image to finish preparing before sending.";
+      return;
+    }
+    if (attachmentClassifications.count > 0) {
+      statusMessage = "Wait for the attached files to finish preparing before sending.";
+      return;
+    }
+    if (textAttachmentProcessingCount > 0) {
+      statusMessage = "Wait for the attached text or code files to finish preparing before sending.";
+      return;
+    }
+    const chatTransport = selectPlaygroundChatTransport(state.ready, canUseDirectChat);
+    if (chatTransport === "unavailable") {
+      statusMessage = "The local runtime is not ready yet. Wait for it to finish starting before sending.";
+      return;
+    }
 
     const text = chatInput.trim();
+
+    const nextMessages = [...chatMessages];
 
     // Inject fetched URL content as context ahead of user message
     const doneFetches = pendingUrlFetches.filter(f => f.status === 'done' && f.text);
@@ -6340,23 +6437,55 @@ updateStateFromSdk();
         const titleLine = f.title ? `Title: ${f.title}\n` : '';
         return `--- Page context from ${f.url} ---\n${titleLine}${f.text}\n--- end context ---`;
       }).join('\n\n');
-      chatMessages = [...chatMessages, {
+      nextMessages.push({
         role: "user",
         content: `The following web page content has been fetched for context:\n\n${contextBlock}\n\nPlease use this context to answer my question.`
-      }, { role: "assistant", content: "Understood. I have read the page content and will use it to answer your question." }];
-      clearUrlFetches();
+      }, { role: "assistant", content: "Understood. I have read the page content and will use it to answer your question." });
     }
 
     let userContent: any = text;
-    if (attachedImages.length > 0 && isVisionModel) {
+    if ((attachedImages.length > 0 && isVisionModel) || attachedTextFiles.length > 0) {
       userContent = [
         { type: "text", text },
-        ...attachedImages.map((url) => ({ type: "image_url", image_url: { url } }))
+        ...attachedTextFiles,
+        ...(isVisionModel
+          ? attachedImages.map((url) => ({ type: "image_url", image_url: { url } }))
+          : []),
       ];
     }
-    chatMessages = [...chatMessages, { role: "user", content: userContent }];
+    nextMessages.push({ role: "user", content: userContent });
+    const stamped = ensureMessageIds(nextMessages as any, (i) => `msg-${Date.now()}-${i}`).messages as any;
+    if (attachedImages.length > 0 || attachedTextFiles.length > 0) {
+      const projected = captureThread(
+        { archive: conversationArchive, thread: { loadedFor: threadLoadedFor, messages: stamped } },
+        { now: Date.now() },
+      );
+      const archiveChars = serializeArchive(projected.archive).length;
+      let otherStorageChars: number;
+      try {
+        otherStorageChars = storageCharsExcluding(localStorage, ARCHIVE_KEY);
+      } catch (error: any) {
+        statusMessage =
+          `Conversation storage could not be checked: ${error?.message || error}. The message was not sent.`;
+        return;
+      }
+      if (!imageAttachmentFitsArchive(archiveChars, otherStorageChars)) {
+        statusMessage =
+          "These attachments would exceed conversation storage. Remove an attachment or delete/export older conversations, then try again.";
+        return;
+      }
+    }
+    let requestMessages: any[];
+    try {
+      requestMessages = getMessagesForInference(stamped, true);
+    } catch (error: any) {
+      statusMessage = error?.message || "The attached files could not be included safely.";
+      return;
+    }
+    chatMessages = stamped;
+    if (doneFetches.length > 0) clearUrlFetches();
     chatInput = "";
-    clearImages(); // clear after queuing for send
+    clearComposerAttachments(); // clear after queuing for send
     const originId = threadLoadedFor;
     const requestController = new AbortController();
     const assistantId = `asst-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -6400,13 +6529,12 @@ updateStateFromSdk();
     try {
       chatMessages = [...chatMessages, { role: "assistant", content: "", id: assistantId }];
 
-      // Prefer HTTP endpoint from sidecar when available (clean architecture)
-      const endpoint = state.endpoint;
-      if (endpoint) {
-        const inferenceMessages = getMessagesForInference();
+      // Sidecar IPC runs native ChatSession inference independently of the optional HTTP service.
+      // Keep the direct client only as the development fallback when no service endpoint exists.
+      if (chatTransport === "sidecar") {
         const data = await chatCompletionStream(
           selectedModelAlias,
-          inferenceMessages,
+          requestMessages,
           (delta: string) => {
             if (requestController.signal.aborted) return;
             assistantContent += delta;
@@ -6441,7 +6569,7 @@ updateStateFromSdk();
           if (messagesContainer)
             messagesContainer.scrollTop = messagesContainer.scrollHeight;
         }, 5);
-      } else if (chatClient) {
+      } else {
         // Fallback to direct client (dev only). This transport reads generation params from
         // client.settings, not completion args -- see the sidecar's identical pattern in
         // createSessionChatClient/createChatClient. Apply them before completion so this path
@@ -6457,8 +6585,7 @@ updateStateFromSdk();
           chatClient.settings.presencePenalty = presencePenalty === 0 ? undefined : presencePenalty;
           chatClient.settings.randomSeed = randomSeed ?? undefined;
         }
-        const inferenceMessages = getMessagesForInference();
-        for await (const chunk of chatClient.completeStreamingChat(inferenceMessages)) {
+        for await (const chunk of chatClient.completeStreamingChat(requestMessages)) {
           if (requestController.signal.aborted) break;
           const delta = chunk.choices?.[0]?.delta?.content || "";
           if (delta) {
@@ -6539,9 +6666,12 @@ updateStateFromSdk();
    * - We normalize to strict user/assistant alternation for model compatibility.
    * - This directly affects latency + energy use, even on powerful local hardware.
    */
-  function getMessagesForInference(): any[] {
+  function getMessagesForInference(
+    sourceMessages: any[] = chatMessages,
+    rejectInvalidTextAttachments = false,
+  ): any[] {
     // Remove any trailing empty assistant placeholder (from streaming setup)
-    let history = [...chatMessages];
+    let history = [...sourceMessages];
     if (history.length > 0) {
       if (isEmptyAssistantPlaceholder(history[history.length - 1])) {
         history = history.slice(0, -1);
@@ -6585,7 +6715,7 @@ updateStateFromSdk();
         role: m.role,
         content: m.content, // can be string or vision array [{type,text}, {type:'image_url',...}]
       })),
-      { systemInstruction: effectiveSystem },
+      { systemInstruction: effectiveSystem, rejectInvalidTextAttachments },
     );
   }
 
@@ -6743,46 +6873,179 @@ Output only the summary text, no preamble.`;
     statusMessage = "Conversation compacted with summary. Full thread still available via toggle.";
   }
 
+  /** Adds images to the composer; returns what could not be attached, for the caller to report. */
+  async function addImageFiles(
+    files: File[],
+    ownerConversation = threadLoadedFor,
+    ownerEpoch = imageAttachmentEpoch,
+    ownerClearEpoch = imageClearEpoch,
+  ): Promise<string[]> {
+    const problems: string[] = [];
+    const failed = new Set<File>();
+    // Room is rechecked before each file, so a failed image leaves its slot to the next one.
+    let overflow = 0;
+    const skippedForRoom = await prepareImageBatch(
+      files,
+      () => preparedImageStillOwned(
+        ownerConversation,
+        threadLoadedFor,
+        ownerEpoch,
+        imageAttachmentEpoch,
+        isVisionModel,
+      ),
+      compactImageAttachment,
+      (dataUrl) => {
+        if (attachedImages.length < MAX_ATTACHED_IMAGES) {
+          attachedImages = [...attachedImages, dataUrl];
+        } else {
+          overflow += 1;
+        }
+      },
+      (file, error) => {
+        failed.add(file);
+        problems.push((error as Error)?.message || `Image ${file.name} could not be prepared.`);
+      },
+      () => {
+        imageProcessingCount += 1;
+      },
+      () => {
+        imageProcessingCount = settlePreparationCount(
+          imageProcessingCount,
+          preparationScopeIsCurrent(
+          ownerConversation,
+          threadLoadedFor,
+          ownerEpoch,
+          imageAttachmentEpoch,
+          ),
+        );
+      },
+      () => attachedImages.length < MAX_ATTACHED_IMAGES,
+    );
+    // Added after the await: `overflow += await …` would read overflow first and lose late
+    // overflows counted by onPrepared meanwhile.
+    overflow += skippedForRoom;
+    // A capability change retires the preparation without clearing the composer (the clear
+    // epoch is unchanged): the images already attached were cleared and the rest discarded, so
+    // name them all, whether or not vision has since been restored. Files that had already
+    // failed keep their own error; a model change would not have fixed them.
+    if (
+      threadLoadedFor === ownerConversation
+      && imageClearEpoch === ownerClearEpoch
+      && imageAttachmentEpoch !== ownerEpoch
+    ) {
+      const lost = files.filter((file) => !failed.has(file));
+      if (lost.length === 0) return problems;
+      return [
+        ...problems,
+        isVisionModel
+          ? rejectedAttachmentNotice({ needsVision: [], unsupported: [], modelChanged: lost })
+          : rejectedAttachmentNotice({ needsVision: lost, unsupported: [] }),
+      ];
+    }
+    if (overflow > 0) {
+      problems.push(
+        `${overflow} image${overflow === 1 ? " was" : "s were"} not attached: up to ${MAX_ATTACHED_IMAGES} images per message.`,
+      );
+    }
+    return problems;
+  }
+
   function attachImage() {
     const input = document.createElement("input");
     input.type = "file";
-    input.accept = "image/*";
     input.multiple = true; // support multi-image
     input.onchange = (e: any) => {
       const files: FileList = e.target.files;
       if (!files) return;
-      const max = 4;
-      const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB decoded approx (base64 will be ~33% larger)
-      for (const file of Array.from(files)) {
-        if (attachedImages.length >= max) break;
-        if (file.size > MAX_IMAGE_SIZE) {
-          statusMessage = `Image ${file.name} is too large (max ~5MB)`;
-          continue;
-        }
-        const reader = new FileReader();
-        reader.onload = () => {
-          const dataUrl = reader.result as string;
-          // Rough check on base64 size too
-          if (dataUrl.length > MAX_IMAGE_SIZE * 1.4) {
-            statusMessage = `Image ${file.name} is too large after encoding`;
-            return;
-          }
-          if (attachedImages.length < max) {
-            attachedImages = [...attachedImages, dataUrl];
-          }
-        };
-        reader.readAsDataURL(file);
-      }
+      void admitAttachmentFiles(Array.from(files));
     };
     input.click();
   }
 
   function removeImage(index: number) {
     attachedImages = attachedImages.filter((_, i) => i !== index);
+    attachmentNotice = "";
   }
 
   function clearImages() {
+    imageAttachmentEpoch += 1;
+    imageClearEpoch += 1;
+    attachmentNoticeEpoch += 1;
+    imageProcessingCount = 0;
     attachedImages = [];
+    attachmentNotice = "";
+  }
+
+  function clearTextAttachments() {
+    textAttachmentEpoch += 1;
+    attachmentNoticeEpoch += 1;
+    textAttachmentProcessingCount = 0;
+    attachedTextFiles = [];
+    attachmentNotice = "";
+  }
+
+  function clearComposerAttachments() {
+    attachmentClassifications = resetScopedPreparations(attachmentClassifications);
+    clearImages();
+    clearTextAttachments();
+  }
+
+  /** Adds text files to the composer; returns what could not be attached, for the caller to report. */
+  async function addTextFiles(
+    files: File[],
+    ownerConversation = threadLoadedFor,
+    ownerEpoch = textAttachmentEpoch,
+  ): Promise<string[]> {
+    const problems: string[] = [];
+    if (!preparationScopeIsCurrent(ownerConversation, threadLoadedFor, ownerEpoch, textAttachmentEpoch)) {
+      return problems;
+    }
+    textAttachmentProcessingCount += 1;
+    try {
+      const remaining = Math.max(0, MAX_ATTACHED_TEXT_FILES - attachedTextFiles.length);
+      const batch = await prepareTextAttachmentBatch(files, remaining, {
+        canAccept: (prepared, candidate) =>
+          mergePreparedTextAttachments(attachedTextFiles, [...prepared, candidate]).added.length
+            === prepared.length + 1,
+      });
+      if (threadLoadedFor !== ownerConversation || textAttachmentEpoch !== ownerEpoch) return [];
+      problems.push(...batch.errors);
+      if (threadLoadedFor !== ownerConversation || textAttachmentEpoch !== ownerEpoch) return [];
+      const merged = mergePreparedTextAttachments(attachedTextFiles, batch.prepared);
+      attachedTextFiles = merged.attachments;
+      const rejectedCount = merged.rejectedCount + batch.rejectedCount + batch.overflow;
+      if (rejectedCount > 0) {
+        problems.push(
+          `${rejectedCount} file${rejectedCount === 1 ? " was" : "s were"} not attached because the count or 256 KB total limit was reached.`,
+        );
+      }
+      return problems;
+    } finally {
+      textAttachmentProcessingCount = settlePreparationCount(
+        textAttachmentProcessingCount,
+        preparationScopeIsCurrent(
+          ownerConversation,
+          threadLoadedFor,
+          ownerEpoch,
+          textAttachmentEpoch,
+        ),
+      );
+    }
+  }
+
+  // Unfiltered on purpose: `accept` cannot express exact names (Dockerfile, Makefile), and it is
+  // only a hint anyway. Picked files take the same byte-based admission as dropped and pasted
+  // ones, which names anything it refuses.
+  async function onTextFilesSelected(event: Event) {
+    const input = event.target as HTMLInputElement;
+    const files = Array.from(input.files ?? []);
+    input.value = "";
+    await admitAttachmentFiles(files);
+  }
+
+  function removeTextAttachment(index: number) {
+    attachedTextFiles = attachedTextFiles.filter((_, current) => current !== index);
+    attachmentNotice = "";
   }
 
   // URL fetch helpers
@@ -6849,44 +7112,76 @@ Output only the summary text, no preamble.`;
     pendingUrlFetches = [];
   }
 
-  // Drag & drop support for images (only when vision model)
+  // One admission path for picker, drop, and paste. Classification reads each file's leading
+  // bytes, so ownership is captured before that await: a conversation switch during it must
+  // not attach the files to the conversation that was switched to.
+  async function admitAttachmentFiles(files: File[]) {
+    const conversation = threadLoadedFor;
+    const imageClear = imageClearEpoch;
+    const textEpoch = textAttachmentEpoch;
+    const noticeEpoch = attachmentNoticeEpoch;
+    // A notice describes the admissions since the composer was last idle; concurrent
+    // admissions append to it instead of overwriting one another.
+    if (attachmentAdmissionsInFlight === 0) attachmentNotice = "";
+    attachmentAdmissionsInFlight += 1;
+    try {
+      // Capability is applied after the heads are read: the model may change meanwhile, and a
+      // raster must then be refused by name rather than dropped or wrongly refused.
+      const classification = beginScopedPreparation(attachmentClassifications);
+      attachmentClassifications = classification.next;
+      let classified;
+      try {
+        classified = await partitionAttachmentFiles(files, isVisionModel);
+      } finally {
+        attachmentClassifications = settleScopedPreparation(
+          attachmentClassifications,
+          classification.generation,
+        );
+      }
+      const partitioned = withVisionCapability(classified, isVisionModel);
+      if (threadLoadedFor !== conversation) return;
+      const { images, texts } = partitioned;
+      // Each batch runs only if its own attachments were not cleared meanwhile; a stale batch
+      // must not touch the current counters or error state. Image preparation is owned from
+      // here, so it takes the current epoch rather than one a capability change has retired.
+      const [imageProblems, textProblems] = await Promise.all([
+        images.length > 0 && imageClearEpoch === imageClear
+          ? addImageFiles(images, conversation, imageAttachmentEpoch, imageClear)
+          : [],
+        texts.length > 0 && textAttachmentEpoch === textEpoch
+          ? addTextFiles(texts, conversation, textEpoch)
+          : [],
+      ]);
+      if (threadLoadedFor !== conversation || attachmentNoticeEpoch !== noticeEpoch) return;
+      const notice = [rejectedAttachmentNotice(partitioned), ...imageProblems, ...textProblems]
+        .filter(Boolean)
+        .join(" ");
+      if (notice) attachmentNotice = attachmentNotice ? `${attachmentNotice} ${notice}` : notice;
+    } finally {
+      attachmentAdmissionsInFlight -= 1;
+    }
+  }
+
+  // Drag & drop support for local attachments.
   function handleDragOver(e: DragEvent) {
-    if (!isVisionModel) return;
+    const files = Array.from(e.dataTransfer?.items || []);
+    if (!isVisionModel && !files.some((item) => item.kind === "file")) return;
     e.preventDefault();
     e.dataTransfer!.dropEffect = 'copy';
   }
   function handleDrop(e: DragEvent) {
-    if (!isVisionModel) return;
-    e.preventDefault();
     const files = Array.from(e.dataTransfer?.files || []);
-    const imageFiles = files.filter(f => f.type.startsWith('image/'));
-    const max = 4 - attachedImages.length;
-    for (const file of imageFiles.slice(0, max)) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        if (attachedImages.length < 4) attachedImages = [...attachedImages, reader.result as string];
-      };
-      reader.readAsDataURL(file);
-    }
+    if (files.length === 0) return;
+    e.preventDefault();
+    void admitAttachmentFiles(files);
   }
 
-  // Enhanced paste for multiple images
+  // Pasted files take the same byte-based admission as dropped ones.
   function handlePaste(e: ClipboardEvent) {
-    if (!isVisionModel) return;
-    const items = Array.from(e.clipboardData?.items || []);
-    const imageItems = items.filter(item => item.type.startsWith('image/'));
-    if (imageItems.length === 0) return;
+    const files = clipboardAttachmentFiles(e.clipboardData?.items || []);
+    if (files.length === 0) return;
     e.preventDefault();
-    const max = 4 - attachedImages.length;
-    for (const item of imageItems.slice(0, max)) {
-      const file = item.getAsFile();
-      if (!file) continue;
-      const reader = new FileReader();
-      reader.onload = () => {
-        if (attachedImages.length < 4) attachedImages = [...attachedImages, reader.result as string];
-      };
-      reader.readAsDataURL(file);
-    }
+    void admitAttachmentFiles(files);
   }
 
   // Audio functions
@@ -7952,27 +8247,34 @@ Output only the summary text, no preamble.`;
                 <option value="updated">Last updated</option>
               </select>
               <span class="count">{filteredModels.length} models</span>
-              {#if state.models.length === 0 && catalogCheckPresentation === "disabled"}
-                <p class="notice" style="flex-basis:100%;">
-                  <strong>Catalog not checked.</strong> Automatic startup checks are off. Refresh when you want to contact Microsoft's Foundry Local model catalog.
-                </p>
-              {:else if state.models.length === 0 && catalogCheckPresentation === "failed"}
-                <p class="notice" style="flex-basis:100%;">
-                  <strong>Catalog check failed.</strong> {state.catalogError || "The catalog request did not complete."} Retry when the network or catalog service is available.
-                </p>
-              {:else if state.models.length === 0 && catalogCheckPresentation === "loading"}
-                <p class="notice" style="flex-basis:100%;">
-                  <strong>Checking the model catalog…</strong>
-                </p>
-              {:else if state.models.length === 0 && catalogCheckPresentation === "pending"}
-                <p class="notice" style="flex-basis:100%;">
-                  <strong>Catalog has not been checked yet.</strong> Retry to contact Microsoft's Foundry Local model catalog.
-                </p>
-              {:else if state.models.length === 0}
-                <p class="notice" style="flex-basis:100%;">
-                  <strong>Catalog is empty.</strong> The sidecar is ready but returned no models — check the network and Retry, or add a local ONNX folder.
-                </p>
-              {:else if filteredModels.length === 0}
+              {#if state.models.length > 0}
+                <span class="catalog-refresh-status" class:error={catalogCheckPresentation === "failed"}>
+                  {#if catalogCheckPresentation === "loading"}
+                    Refreshing catalog…
+                  {:else if catalogCheckPresentation === "failed"}
+                    Refresh failed: {state.catalogError || "The catalog request did not complete."}
+                  {:else if catalogCheckPresentation === "disabled"}
+                    {#if state.catalogRefreshedAt}
+                      Catalog updates are set to manual. Last refreshed {formatCatalogRefreshTime(state.catalogRefreshedAt)}.
+                    {:else}
+                      Catalog updates are set to manual. The catalog has not been refreshed this session.
+                    {/if}
+                  {:else if catalogCheckPresentation === "pending"}
+                    Catalog has not been refreshed this session.
+                  {:else}
+                    Last refreshed {formatCatalogRefreshTime(state.catalogRefreshedAt)}.
+                  {/if}
+                </span>
+                <button
+                  type="button"
+                  class="small secondary"
+                  onclick={() => loadModels()}
+                  disabled={isLoadingModels}
+                >
+                  {catalogCheckPresentation === "failed" ? "Retry" : "Refresh catalog"}
+                </button>
+              {/if}
+              {#if filteredModels.length === 0 && state.models.length > 0}
                 <p class="muted" style="flex-basis:100%;">No models match this search.</p>
               {/if}
               <button
@@ -8128,17 +8430,17 @@ Output only the summary text, no preamble.`;
             {:else if filteredModels.length === 0}
               <div class="empty-state-card">
                 {#if state.models.length === 0 && catalogCheckPresentation === "disabled"}
-                  <h3>Model catalog not checked</h3>
-                  <p>Automatic startup checks are off. Refresh only when you want to browse models or check for updates.</p>
+                  <h3>Catalog updates are set to manual</h3>
+                  <p>Click Refresh catalog when you want to browse models or check for updates.</p>
                   <button type="button" onclick={() => loadModels()}>Refresh catalog</button>
                 {:else if state.models.length === 0 && catalogCheckPresentation === "failed"}
                   <h3>Model catalog check failed</h3>
                   <p>{state.catalogError || "The catalog request did not complete."}</p>
                   <button type="button" onclick={() => loadModels()}>Retry catalog</button>
                 {:else if state.models.length === 0 && catalogCheckPresentation === "pending"}
-                  <h3>Model catalog has not been checked yet</h3>
-                  <p>Retry to contact Microsoft's Foundry Local model catalog.</p>
-                  <button type="button" onclick={() => loadModels()}>Retry catalog</button>
+                  <h3>Catalog has not been refreshed</h3>
+                  <p>Click Refresh catalog to contact Microsoft's Foundry Local model catalog.</p>
+                  <button type="button" onclick={() => loadModels()}>Refresh catalog</button>
                 {:else if state.models.length === 0}
                   <h3>No models in the catalog yet</h3>
                   <p>Wait for Foundry Local to finish loading the catalog, or retry if something failed.</p>
@@ -8933,6 +9235,7 @@ Output only the summary text, no preamble.`;
                           {/if}
                           <MessageRenderer
                             content={msg.content}
+                            previewImagePartIndexes={chatImagePreviewPartIndexes[i] ?? []}
                             role={msg.role}
                             isStreaming={isStreaming && msg.id === activeStreamAssistantId}
                             assumeReasoning={currentModelTags.includes("reasoning")}
@@ -8954,6 +9257,7 @@ Output only the summary text, no preamble.`;
               </div>
 
               <div class="chat-controls">
+                {#snippet personaControl()}
                 <!-- Persona selector (replaces direct system prompt input) -->
                 <div class="persona-control">
                   {#if currentPersonaName}
@@ -9016,7 +9320,9 @@ Output only the summary text, no preamble.`;
                     </div>
                   {/if}
                 </div>
+                {/snippet}
 
+                {#snippet generationSettings()}
                 <!-- Context management -->
                 <div class="context-control">
                   <label for="ctx-select" title={`How many recent turns are sent with the next message (${MIN_CONTEXT_TURNS}-${MAX_CONTEXT_TURNS})`}>Context</label>
@@ -9084,18 +9390,7 @@ Output only the summary text, no preamble.`;
                 </div>
 
                 <!-- Generation parameters: how sampling settings affect model output -->
-                <div class="genparams-control">
-                  <button
-                    type="button"
-                    class="genparams-toggle"
-                    onclick={() => (showGenParamsPanel = !showGenParamsPanel)}
-                    title="Temperature, max tokens, top-p, top-k"
-                    aria-expanded={showGenParamsPanel}
-                  >
-                    <Icon name="settings" size={13} /> Generation
-                  </button>
-                  {#if showGenParamsPanel}
-                    <div class="genparams-panel">
+                <div class="genparams-panel">
                       <label for="genparams-temperature" title="Higher = more varied output (0-2)">Temperature</label>
                       <input
                         type="range"
@@ -9241,9 +9536,8 @@ Output only the summary text, no preamble.`;
                         }}
                         disabled={isStreaming}
                       />
-                    </div>
-                  {/if}
                 </div>
+                {/snippet}
 
                 <!-- URL fetch chips: appear when the user types/pastes a URL -->
                 {#if detectedUrls.length > 0 || pendingUrlFetches.length > 0}
@@ -9299,10 +9593,11 @@ Output only the summary text, no preamble.`;
                     <button
                       type="button"
                       onclick={attachImage}
-                      disabled={isStreaming || attachedImages.length >= 4}
+                      disabled={isStreaming || imageProcessingCount > 0 || attachedImages.length >= MAX_ATTACHED_IMAGES}
                       title="Attach up to 4 images (vision models only)"
                     >
-                      <Icon name="camera" size={14} /> Image ({attachedImages.length}/4)
+                      <Icon name="camera" size={14} />
+                      {imageProcessingCount > 0 ? "Preparing…" : `Image (${attachedImages.length}/${MAX_ATTACHED_IMAGES})`}
                     </button>
                     {#if attachedImages.length > 0}
                       <div class="image-strip">
@@ -9320,6 +9615,18 @@ Output only the summary text, no preamble.`;
                   </div>
                 {/if}
               </div>
+
+              <input
+                bind:this={textFileInput}
+                id="chat-file-input"
+                type="file"
+                multiple
+                class="visually-hidden"
+                tabindex="-1"
+                aria-hidden="true"
+                disabled={isStreaming || composerAttachmentsFull}
+                onchange={onTextFilesSelected}
+              />
 
               {#if !selectedModelAlias && !chatBlockedByLoadedSTT}
                 <div class="notice" style="margin-bottom: 8px;">
@@ -9339,6 +9646,34 @@ Output only the summary text, no preamble.`;
                 </div>
               {/if}
 
+              {#if attachedTextFiles.length > 0}
+                <div class="file-attachment-strip" aria-label="Attached text and code files">
+                  {#each attachedTextFiles as part, index (`${part.file.name}-${index}`)}
+                    <span class="file-attachment-chip" title={`${part.file.text.length.toLocaleString()} characters`}>
+                      <Icon name="folder" size={14} />
+                      <span>{part.file.name}</span>
+                      <button
+                        type="button"
+                        class="mini"
+                        onclick={() => removeTextAttachment(index)}
+                        aria-label={`Remove ${part.file.name}`}
+                        disabled={isStreaming}
+                      >×</button>
+                    </span>
+                  {/each}
+                  <button type="button" class="link-btn" onclick={clearTextAttachments} disabled={isStreaming}>
+                    Clear files
+                  </button>
+                </div>
+              {/if}
+              {#if attachmentNotice}
+                <div class="attachment-warning" role="status">{attachmentNotice}</div>
+              {:else if textAttachmentProcessingCount > 0}
+                <div class="attachment-warning" role="status">
+                  Preparing {textAttachmentProcessingCount} text or code file{ textAttachmentProcessingCount === 1 ? "" : "s" }…
+                </div>
+              {/if}
+
               <form class="chat-input" onsubmit={sendMessage} ondrop={handleDrop} ondragover={handleDragOver} ondragenter={handleDragOver}>
                 {#if benchmarkRunInFlight}
                   <div style="width:100%; padding: 8px; font-size:0.8rem; color:var(--muted);">
@@ -9351,27 +9686,40 @@ Output only the summary text, no preamble.`;
                 {:else if !selectedModelSupportsChat}
                   <div style="width:100%; padding: 8px; font-size:0.8rem; color:var(--muted);">Chat disabled for current model.</div>
                 {/if}
-                <button
-                  type="button"
-                  class="dictation-btn"
-                  class:active={isDictating}
-                  onclick={toggleDictation}
-                  title={isDictating ? "Stop dictation (finalizes transcript)" : "Dictate into chat (requires STT model)"} aria-label={isDictating ? "Stop dictation" : "Start dictation"}
-                  disabled={isStreaming || (benchmarkRunInFlight && !isDictating)}
-                >
-                  {#if isDictating}<Icon name="stop" size={14} />{:else}<Icon name="mic" size={14} />{/if}
-                </button>
+                <div class="chat-input-left">
+                  {@render personaControl()}
+                  <button
+                    type="button"
+                    class="file-attach-btn"
+                    onclick={() => textFileInput?.click()}
+                    title="Attach files"
+                    aria-label="Attach files"
+                    disabled={isStreaming || composerAttachmentsFull}
+                  >
+                    <Icon name="folder" size={16} />
+                  </button>
+                  <button
+                    type="button"
+                    class="dictation-btn"
+                    class:active={isDictating}
+                    onclick={toggleDictation}
+                    title={isDictating ? "Stop dictation (finalizes transcript)" : "Dictate into chat (requires STT model)"} aria-label={isDictating ? "Stop dictation" : "Start dictation"}
+                    disabled={isStreaming || (benchmarkRunInFlight && !isDictating)}
+                  >
+                    {#if isDictating}<Icon name="stop" size={14} />{:else}<Icon name="mic" size={14} />{/if}
+                  </button>
+                </div>
                 <input
                   bind:value={chatInput}
                   placeholder={isDictating ? "Dictating… (click Stop to finish)" : "Type your message... (model is running locally)"}
-                  disabled={benchmarkRunInFlight || chatBlockedByLoadedSTT || !selectedModelSupportsChat || (!state.endpoint && !chatClient) || isStreaming}
+                  disabled={benchmarkRunInFlight || chatBlockedByLoadedSTT || !selectedModelSupportsChat || !canDispatchChat || isStreaming}
                   onkeydown={(e) => { if ((isMac ? e.metaKey : e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); sendMessage(e); } }}
                   onpaste={handlePaste}
                 />
                 <button
                   type="submit"
                   aria-label="Send message"
-                  disabled={benchmarkRunInFlight || chatBlockedByLoadedSTT || !selectedModelSupportsChat || !chatInput.trim() || (!state.endpoint && !chatClient) || isStreaming}
+                  disabled={benchmarkRunInFlight || chatBlockedByLoadedSTT || !selectedModelSupportsChat || (!chatInput.trim() && attachedImages.length === 0 && attachedTextFiles.length === 0) || imageProcessingCount > 0 || textAttachmentProcessingCount > 0 || attachmentClassifications.count > 0 || !canDispatchChat || isStreaming}
                 >
                   {#if isStreaming}<Icon name="loader" size={15} class="spin" />{:else}<Icon name="send" size={15} />{/if}
                 </button>
@@ -9381,6 +9729,23 @@ Output only the summary text, no preamble.`;
                   >
                 {/if}
               </form>
+              <button
+                type="button"
+                class="composer-settings-toggle"
+                onclick={() => (showGenParamsPanel = !showGenParamsPanel)}
+                title="Context and generation settings"
+                aria-expanded={showGenParamsPanel}
+                aria-controls="composer-settings-drawer"
+                disabled={isStreaming}
+              >
+                <Icon name="settings" size={13} />
+                {showGenParamsPanel ? "Hide generation settings" : "Generation settings"}
+              </button>
+              {#if showGenParamsPanel}
+                <div id="composer-settings-drawer" class="composer-settings-drawer">
+                  {@render generationSettings()}
+                </div>
+              {/if}
 
               <!-- Persona Manager Modal -->
               {#if showPersonaManager}
@@ -11869,6 +12234,7 @@ Output only the summary text, no preamble.`;
 
   .toolbar {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 12px;
     margin-bottom: 16px;
@@ -11902,6 +12268,16 @@ Output only the summary text, no preamble.`;
     border: 1px solid var(--border);
     color: var(--fg);
     border-radius: 6px;
+  }
+
+  .catalog-refresh-status {
+    margin-left: auto;
+    color: var(--muted);
+    font-size: 0.78rem;
+  }
+
+  .catalog-refresh-status.error {
+    color: var(--danger);
   }
 
   .accel-panel {
@@ -13481,6 +13857,7 @@ Output only the summary text, no preamble.`;
 
   .chat-input {
     display: flex;
+    align-items: center;
     gap: 8px;
     padding: 12px;
     background: var(--panel-bg);
@@ -13488,6 +13865,44 @@ Output only the summary text, no preamble.`;
     border-radius: 0;
     position: relative;
     z-index: 1;
+  }
+
+  .chat-input-left {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .chat-input .persona-control {
+    gap: 4px;
+  }
+
+  .chat-input .persona-chip {
+    max-width: 110px;
+  }
+
+  .chat-input .persona-btn,
+  .chat-input .file-attach-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    width: 36px;
+    height: 36px;
+    min-width: 36px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel-bg);
+    color: var(--fg);
+    cursor: pointer;
+  }
+
+  .chat-input .file-attach-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    pointer-events: none;
   }
 
   .chat-input input {
@@ -13535,6 +13950,112 @@ Output only the summary text, no preamble.`;
     border: 1px solid var(--border);
     color: var(--fg);
     font-size: 1rem;
+  }
+
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .file-attachment-strip {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--panel-bg);
+  }
+
+  .file-attachment-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    max-width: min(260px, 100%);
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--input-bg);
+    color: var(--fg);
+    font-size: 0.75rem;
+  }
+
+  .file-attachment-chip > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .attachment-warning {
+    padding: 4px 12px;
+    color: var(--warning);
+    background: var(--panel-bg);
+    font-size: 0.75rem;
+  }
+
+  .composer-settings-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin: 0 12px 8px;
+    padding: 5px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--input-bg);
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 0.75rem;
+  }
+
+  .composer-settings-drawer {
+    display: grid;
+    gap: 12px;
+    margin: -2px 12px 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel-bg);
+    color: var(--muted);
+  }
+
+  .composer-settings-drawer .context-control {
+    flex-basis: auto;
+  }
+
+  @media (max-width: 720px) {
+    .chat-input {
+      flex-wrap: wrap;
+    }
+
+    .chat-input-left {
+      order: 1;
+    }
+
+    .chat-input > input {
+      order: 0;
+      flex-basis: 100%;
+    }
+
+    .chat-input > button[type="submit"],
+    .chat-input > .stop {
+      order: 1;
+    }
+
+    .chat-input .persona-chip {
+      display: none;
+    }
+
+    .composer-settings-drawer .context-control,
+    .composer-settings-drawer .genparams-panel {
+      align-items: flex-start;
+    }
   }
 
   .chat-input .dictation-btn.active {

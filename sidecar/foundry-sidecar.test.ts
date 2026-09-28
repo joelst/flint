@@ -8,6 +8,7 @@ import { join } from 'path';
 import { pathToFileURL } from 'url';
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import { killAndWait } from './test-process.js';
+import { TINY_PNG_DATA_URL } from './test-fixtures/images';
 
 function closeServer(server: Server): Promise<void> {
   server.closeAllConnections();
@@ -470,7 +471,7 @@ describe('foundry-sidecar protocol basics', () => {
     }
   });
 
-  it('preserves a parallel tool loop through buffered and streamed HTTP fallback requests', async () => {
+  it('preserves a parallel tool loop through HTTP fallback and refuses HTTP vision', async () => {
     const capturedBodies: any[] = [];
     let releaseCancelledResponse: (() => void) | undefined;
     const cancelledResponseGate = new Promise<void>((resolve) => {
@@ -614,13 +615,7 @@ describe('foundry-sidecar protocol basics', () => {
         },
         { role: 'tool', tool_call_id: 'call-1', name: 'read_status', content: '{"ok":true}' },
         { role: 'tool', tool_call_id: 'call-2', name: 'read_config', content: '{"mode":"safe"}' },
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: 'Summarize ' },
-            { type: 'image_url', image_url: { url: 'data:image/png;base64,AA==', detail: 'low' } },
-          ],
-        },
+        { role: 'user', content: 'Summarize the tool results.' },
       ];
       const streamedDelta = waitForLine(proc, (msg) => msg.id === 42 && msg.stream === true, 15000);
       const streamedDone = waitForLine(proc, (msg) => msg.id === 42 && msg.ok === true, 15000);
@@ -634,6 +629,24 @@ describe('foundry-sidecar protocol basics', () => {
       expect((await streamedDelta).delta).toBe('http-complete');
       expect((await streamedDone).result.nativeStreaming).toBe(false);
       expect(capturedBodies[1].messages).toEqual(followUpMessages);
+
+      proc.stdin.write(`${JSON.stringify({
+        id: 47,
+        cmd: 'chatCompletion',
+        model: 'fake-model',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Describe this.' },
+            { type: 'image_url', image_url: { url: 'data:image/png;base64,AA==' } },
+          ],
+        }],
+        stream: false,
+      })}\n`);
+      const unsupportedVision = await waitForLine(proc, (msg) => msg.id === 47, 15000);
+      expect(unsupportedVision.ok).not.toBe(true);
+      expect(String(unsupportedVision.error)).toMatch(/native multimodal/i);
+      expect(capturedBodies).toHaveLength(2);
 
       const cancelled = waitForLine(proc, (msg) => msg.id === 43, 15000);
       proc.stdin.write(`${JSON.stringify({
@@ -675,13 +688,7 @@ describe('foundry-sidecar protocol basics', () => {
         id: 46,
         cmd: 'chatCompletion',
         model: 'fake-model',
-        messages: [{
-          role: 'user',
-          content: [
-            { type: 'text', text: 'validate every HTTP choice' },
-            { type: 'image_url', image_url: { url: 'data:image/png;base64,AA==' } },
-          ],
-        }],
+        messages: [{ role: 'user', content: 'validate every HTTP choice' }],
         stream: true,
       })}\n`);
       const malformed = await waitForLine(proc, (msg) => msg.id === 46 && !msg.stream, 15000);
@@ -3788,12 +3795,12 @@ describe('chatCompletion ChatSession path', () => {
   //                           already are. Gating on the signal file (rather than a fixed
   //                           delay) makes the ordering deterministic instead of depending on
   //                           IPC round-trip speed on a loaded CI runner.
-  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'legacy-buffered-fixture' | 'legacy-buffered-only-fixture' | 'legacy-stream-only-fixture' | 'session-no-legacy' | 'session-error' | 'session-error-with-legacy' | 'session-error-dispose' | 'session-abort' | 'session-empty-output' | 'session-stream-empty' | 'session-stream-fixture' | 'session-stream-fixture-dispose-error' | 'session-stream-provider-cancel' | 'session-buffered-fixture' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error' | 'session-buffered-tool-cancel' | 'session-stream-tool' | 'session-stream-tool-outoforder' | 'session-stream-tool-high-index' | 'session-stream-tool-cancel';
+  type ChatFakeSdkMode = 'session' | 'legacy-only' | 'legacy-only-text-parts' | 'legacy-buffered-fixture' | 'legacy-buffered-only-fixture' | 'legacy-stream-only-fixture' | 'session-no-legacy' | 'session-error' | 'session-error-with-legacy' | 'session-error-dispose' | 'session-abort' | 'session-empty-output' | 'session-finish-error' | 'session-stream-empty' | 'session-stream-finish-error' | 'session-stream-fixture' | 'session-stream-fixture-dispose-error' | 'session-stream-provider-cancel' | 'session-buffered-fixture' | 'session-malformed-json' | 'session-constructor-error' | 'request-constructor-error' | 'session-dispose-error' | 'session-buffered-tool-cancel' | 'session-stream-tool' | 'session-stream-tool-outoforder' | 'session-stream-tool-high-index' | 'session-stream-tool-cancel';
   function fakeSdk(sdkMode: ChatFakeSdkMode) {
-    const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only' || sdkMode === 'legacy-buffered-fixture' || sdkMode === 'legacy-buffered-only-fixture' || sdkMode === 'legacy-stream-only-fixture' || sdkMode === 'session-error-with-legacy';
+    const hasLegacy = sdkMode === 'session' || sdkMode === 'legacy-only' || sdkMode === 'legacy-only-text-parts' || sdkMode === 'legacy-buffered-fixture' || sdkMode === 'legacy-buffered-only-fixture' || sdkMode === 'legacy-stream-only-fixture' || sdkMode === 'session-error-with-legacy';
     const legacyStreamOnly = sdkMode === 'legacy-stream-only-fixture';
     const hasLegacyStreaming = hasLegacy && sdkMode !== 'legacy-buffered-only-fixture';
-    const hasSession = sdkMode !== 'legacy-only' && sdkMode !== 'legacy-buffered-fixture' && sdkMode !== 'legacy-buffered-only-fixture' && !legacyStreamOnly;
+    const hasSession = sdkMode !== 'legacy-only' && sdkMode !== 'legacy-only-text-parts' && sdkMode !== 'legacy-buffered-fixture' && sdkMode !== 'legacy-buffered-only-fixture' && !legacyStreamOnly;
     return [
       "import fs from 'node:fs';",
       'const note = (event) => fs.appendFileSync(process.env.FLINT_TEST_EVENT_LOG, event + "\\n");',
@@ -3807,7 +3814,8 @@ describe('chatCompletion ChatSession path', () => {
       hasLegacy ? '  createChatClient() {' : '  // no createChatClient() in this mode',
       hasLegacy ? '    return {' : '',
       hasLegacy ? '      settings: {},' : '',
-      hasLegacy && !legacyStreamOnly ? '      async completeChat() {' : '',
+      hasLegacy && !legacyStreamOnly ? '      async completeChat(messages) {' : '',
+      sdkMode === 'legacy-only-text-parts' ? "        note('legacy-content:' + JSON.stringify(messages.map((message) => message.content))); if (messages.some((message) => Array.isArray(message.content))) throw new Error('legacy client received an unsupported content-parts array');" : '',
       hasLegacy && !legacyStreamOnly ? "        note('legacy-chat');" : '',
       hasLegacy && !legacyStreamOnly ? `        return ${JSON.stringify(['legacy-buffered-fixture', 'legacy-buffered-only-fixture'].includes(sdkMode))} ? streamSteps()[0].chunk : { choices: [{ message: { role: 'assistant', content: 'legacy reply' } }], usage: { prompt_tokens: 1, completion_tokens: 2 } };` : '',
       hasLegacy && !legacyStreamOnly ? '      },' : '',
@@ -3829,8 +3837,10 @@ describe('chatCompletion ChatSession path', () => {
       "    note('session-chat');",
       `    if (['session-error', 'session-error-with-legacy', 'session-error-dispose'].includes(${JSON.stringify(sdkMode)})) throw new Error('native processRequest failed');`,
       `    if (${JSON.stringify(sdkMode)} === 'session-empty-output') return { output: [] };`,
+      `    if (${JSON.stringify(sdkMode)} === 'session-finish-error' && req.items[0]?.type === 'message') return { output: [{ type: 'message', role: 'assistant', content: 'partial native answer' }], finishReason: 'error' };`,
       `    if (${JSON.stringify(sdkMode)} === 'session-malformed-json') return { output: [{ type: 'text', textType: 'openai-json', text: 'not json' }] };`,
       `    if (${JSON.stringify(sdkMode)} === 'session-buffered-fixture') return { output: [{ type: 'text', textType: 'openai-json', text: JSON.stringify(streamSteps()[0].chunk) }] };`,
+      "    if (req.items[0]?.type === 'message') return { output: [{ type: 'message', role: 'assistant', content: 'native vision reply' }], usage: { promptTokens: 9, completionTokens: 3, totalTokens: 12 }, finishReason: 'stop' };",
       '    const requestJson = JSON.parse(req.items[0].text);',
       '    note(`request:${JSON.stringify(requestJson)}`);',
       `    if (${JSON.stringify(sdkMode)} === 'session-buffered-tool-cancel') { while (!fs.existsSync(process.env.FLINT_TEST_CANCEL_SIGNAL)) { await new Promise((resolve) => setTimeout(resolve, 5)); } }`,
@@ -3845,6 +3855,7 @@ describe('chatCompletion ChatSession path', () => {
       '    };',
       '  }',
       '  processStreamingRequest(req) {',
+      `    if (req.items[0]?.type === 'message') return { async *[Symbol.asyncIterator]() { note('session-chat'); yield { type: 'text', textType: 'default', text: 'native ' }; yield { type: 'text', textType: 'default', text: 'vision reply' }; }, response: Promise.resolve({ output: [], usage: { promptTokens: 9, completionTokens: 3, totalTokens: 12 }, finishReason: ${JSON.stringify(sdkMode === 'session-stream-finish-error' ? 'error' : 'stop')} }) };`,
       '    const requestJson = JSON.parse(req.items[0].text);',
       '    note(`request:${JSON.stringify(requestJson)}`);',
       '    return {',
@@ -3868,9 +3879,9 @@ describe('chatCompletion ChatSession path', () => {
       'class FakeRequest {',
       `  constructor() { if (${JSON.stringify(sdkMode)} === 'request-constructor-error') throw new Error('native Request construction failed'); this.items = []; }`,
       '  addItem(item) { this.items.push(item); return this; }',
-      '  setOptions() { return this; }',
+      '  setOptions(options) { this.options = options; return this; }',
       '}',
-      "const Item = { text: (text, textType) => ({ type: 'text', textType, text }) };",
+      "const Item = { text: (text, textType) => ({ type: 'text', textType, text }), message: (role, contentOrParts) => typeof contentOrParts === 'string' ? ({ type: 'message', role, content: contentOrParts }) : ({ type: 'message', role, parts: contentOrParts }), imageFromData: (format, data) => ({ type: 'image', format, data }) };",
       'class FakeManager {',
       '  constructor() { this.catalog = { getModel: async () => new FakeModel(), getModels: async () => [] }; }',
       '  static create() { return new FakeManager(); }',
@@ -4947,6 +4958,115 @@ describe('chatCompletion ChatSession path', () => {
     expect(events()).toContain('session-chat');
   }, 30000);
 
+  it('streams image input through native ChatSession items without a service endpoint', async () => {
+    await startSidecar('session-no-legacy');
+    const deltas: string[] = [];
+    let buffer = '';
+    const collect = (chunk: Buffer | string) => {
+      buffer += chunk.toString();
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        try {
+          const message = JSON.parse(line);
+          if (message.id === 3 && message.stream === true) deltas.push(message.delta);
+        } catch {}
+      }
+    };
+    proc.stdout.on('data', collect);
+    const chatted = waitForLine(proc, (message) => message.id === 3 && message.ok === true, 10000);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Describe this.' },
+          { type: 'image_url', image_url: { url: TINY_PNG_DATA_URL } },
+        ],
+      }],
+      stream: true,
+    });
+    const res = await chatted;
+    proc.stdout.off('data', collect);
+    expect(res.ok).toBe(true);
+    expect(deltas.join('')).toBe('native vision reply');
+    expect(res.result.nativeStreaming).toBe(true);
+    expect(res.result.usage).toEqual({
+      prompt_tokens: 9,
+      completion_tokens: 3,
+    });
+    expect(events()).toContain('session-chat');
+    expect(events()).toContain('session-chat-disposed');
+    expect(events()).not.toContain('legacy-chat');
+  }, 30000);
+
+  it('reports buffered native finishReason errors instead of successful partial answers', async () => {
+    await startSidecar('session-finish-error');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Describe this.' },
+          { type: 'image_url', image_url: { url: TINY_PNG_DATA_URL } },
+        ],
+      }],
+    });
+    const res = await chatted;
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Chat completion failed for model 'fake-variant'");
+    expect(String(res.error)).toContain('native inference failed');
+    expect(events()).toContain('session-chat-disposed');
+  }, 30000);
+
+  it('reports streamed native finishReason errors after forwarding partial deltas', async () => {
+    await startSidecar('session-stream-finish-error');
+    const deltas: string[] = [];
+    let buffer = '';
+    const collect = (chunk: Buffer | string) => {
+      buffer += chunk.toString();
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        try {
+          const message = JSON.parse(line);
+          if (message.id === 3 && message.stream === true) deltas.push(message.delta);
+        } catch {}
+      }
+    };
+    proc.stdout.on('data', collect);
+    const chatted = waitForLine(
+      proc,
+      (message) => message.id === 3 && message.stream !== true && typeof message.error === 'string',
+      10000,
+    );
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Describe this.' },
+          { type: 'image_url', image_url: { url: TINY_PNG_DATA_URL } },
+        ],
+      }],
+      stream: true,
+    });
+    const res = await chatted;
+    proc.stdout.off('data', collect);
+    expect(res.ok).not.toBe(true);
+    expect(String(res.error)).toContain("Streaming chat completion failed for model 'fake-variant'");
+    expect(String(res.error)).toContain('native inference failed');
+    expect(deltas.join('')).toBe('native vision reply');
+    expect(events()).toContain('session-chat-disposed');
+  }, 30000);
+
   it('wraps a resolved response with no openai-json output the same way a thrown failure is wrapped', async () => {
     await startSidecar('session-empty-output');
     const chatted = reply(3);
@@ -5156,6 +5276,26 @@ describe('chatCompletion ChatSession path', () => {
     expect(res.result.choices[0].message.content).toBe('legacy reply');
     expect(events()).toContain('legacy-chat');
     expect(events()).not.toContain('session-chat');
+  }, 30000);
+
+  it('normalizes text-only content parts for the legacy ChatClient', async () => {
+    await startSidecar('legacy-only-text-parts');
+    const chatted = reply(3);
+    send({
+      id: 3,
+      cmd: 'chatCompletion',
+      model: 'fake-model',
+      messages: [{
+        role: 'user',
+        content: [{ type: 'text', text: 'hello' }, { type: 'text', text: ' world' }],
+      }],
+      stream: false,
+    });
+    const res = await chatted;
+    expect(res.ok).toBe(true);
+    expect(res.result.choices[0].message.content).toBe('legacy reply');
+    expect(events()).toContain('legacy-content:["hello world"]');
+    expect(events()).toContain('legacy-chat');
   }, 30000);
 
   it('rejects response controls when only the legacy client is available without HTTP', async () => {
