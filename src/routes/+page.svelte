@@ -141,7 +141,6 @@
   } from "$lib/conversation-repository";
   import {
     MAX_ATTACHED_IMAGES,
-    IMAGE_ATTACHMENT_ACCEPT,
     clipboardAttachmentFiles,
     compactImageAttachment,
     imageAttachmentFitsArchive,
@@ -155,7 +154,7 @@
   import {
     MAX_ATTACHED_TEXT_FILES,
     mergePreparedTextAttachments,
-    prepareTextAttachment,
+    prepareTextAttachmentBatch,
   } from "$lib/text-attachments";
   import {
     collectStoredArchive,
@@ -6954,7 +6953,6 @@ Output only the summary text, no preamble.`;
   function attachImage() {
     const input = document.createElement("input");
     input.type = "file";
-    input.accept = IMAGE_ATTACHMENT_ACCEPT;
     input.multiple = true; // support multi-image
     input.onchange = (e: any) => {
       const files: FileList = e.target.files;
@@ -7004,26 +7002,18 @@ Output only the summary text, no preamble.`;
     }
     textAttachmentProcessingCount += 1;
     try {
-      const remaining = MAX_ATTACHED_TEXT_FILES - attachedTextFiles.length;
-      if (remaining <= 0) {
-        problems.push(`You can attach up to ${MAX_ATTACHED_TEXT_FILES} text or code files.`);
-        return problems;
-      }
-      const accepted: TextFilePart[] = [];
-      // Every file is attempted and every failure reported; one bad file does not hide the rest.
-      for (const file of files.slice(0, remaining)) {
-        try {
-          const part = await prepareTextAttachment(file);
-          if (threadLoadedFor !== ownerConversation || textAttachmentEpoch !== ownerEpoch) return [];
-          accepted.push(part);
-        } catch (error: any) {
-          problems.push(error?.message || `Could not attach ${file.name || "that file"}.`);
-        }
-      }
+      const remaining = Math.max(0, MAX_ATTACHED_TEXT_FILES - attachedTextFiles.length);
+      const batch = await prepareTextAttachmentBatch(files, remaining, {
+        canAccept: (prepared, candidate) =>
+          mergePreparedTextAttachments(attachedTextFiles, [...prepared, candidate]).added.length
+            === prepared.length + 1,
+      });
       if (threadLoadedFor !== ownerConversation || textAttachmentEpoch !== ownerEpoch) return [];
-      const merged = mergePreparedTextAttachments(attachedTextFiles, accepted);
+      problems.push(...batch.errors);
+      if (threadLoadedFor !== ownerConversation || textAttachmentEpoch !== ownerEpoch) return [];
+      const merged = mergePreparedTextAttachments(attachedTextFiles, batch.prepared);
       attachedTextFiles = merged.attachments;
-      const rejectedCount = merged.rejectedCount + Math.max(0, files.length - remaining);
+      const rejectedCount = merged.rejectedCount + batch.rejectedCount + batch.overflow;
       if (rejectedCount > 0) {
         problems.push(
           `${rejectedCount} file${rejectedCount === 1 ? " was" : "s were"} not attached because the count or 256 KB total limit was reached.`,

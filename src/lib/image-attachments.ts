@@ -9,14 +9,6 @@ export const MAX_CONVERSATION_STORAGE_CHARS = 4_000_000;
 export const MAX_SOURCE_IMAGE_PIXELS = 64 * 1024 * 1024;
 
 export const MAX_IMAGE_DIMENSION = 1600;
-/**
- * File-picker filter for the formats `compactImageAttachment` can bound before decoding.
- * Extensions are listed too because the picker, like `File.type`, only guesses from names.
- */
-export const IMAGE_ATTACHMENT_ACCEPT = [
-  "image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp",
-  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
-].join(",");
 const SAFE_IMAGE_DATA_URL = /^data:image\/(?:bmp|gif|jpeg|jpg|png|webp);base64,/i;
 
 function dataUrlPayloadBytes(dataUrl: string): Uint8Array | null {

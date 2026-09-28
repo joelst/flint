@@ -63,6 +63,47 @@ export async function prepareTextAttachment(file: File): Promise<TextFilePart> {
   return part;
 }
 
+export interface PreparedTextAttachmentBatch {
+  prepared: TextFilePart[];
+  errors: string[];
+  rejectedCount: number;
+  overflow: number;
+}
+
+export interface PrepareTextAttachmentBatchOptions {
+  prepare?: (file: File) => Promise<TextFilePart>;
+  canAccept?: (prepared: readonly TextFilePart[], candidate: TextFilePart) => boolean;
+}
+
+/**
+ * Continue past failed files until the available slots are filled by successful preparations
+ * or every selected file has been attempted. `overflow` counts only files never attempted.
+ */
+export async function prepareTextAttachmentBatch(
+  files: readonly File[],
+  availableSlots: number,
+  { prepare = prepareTextAttachment, canAccept = () => true }: PrepareTextAttachmentBatchOptions = {},
+): Promise<PreparedTextAttachmentBatch> {
+  const prepared: TextFilePart[] = [];
+  const errors: string[] = [];
+  let rejectedCount = 0;
+  const limit = Math.max(0, Math.floor(availableSlots));
+  let attempted = 0;
+
+  while (attempted < files.length && prepared.length < limit) {
+    const file = files[attempted++];
+    try {
+      const candidate = await prepare(file);
+      if (canAccept(prepared, candidate)) prepared.push(candidate);
+      else rejectedCount += 1;
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  return { prepared, errors, rejectedCount, overflow: files.length - attempted };
+}
+
 export function mergePreparedTextAttachments(
   current: TextFilePart[],
   prepared: TextFilePart[],

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   isSupportedTextAttachment,
   mergePreparedTextAttachments,
+  prepareTextAttachmentBatch,
   prepareTextAttachment,
   promptTextForFile,
 } from "./text-attachments";
@@ -76,5 +77,63 @@ describe("text attachments", () => {
     expect(result.attachments).toHaveLength(4);
     expect(result.added).toHaveLength(1);
     expect(result.rejectedCount).toBe(2);
+  });
+
+  it("keeps trying files after a failure until a slot is successfully filled", async () => {
+    const files = ["corrupt.txt", "valid.txt", "unused.txt"].map((name) => ({ name } as File));
+    const batch = await prepareTextAttachmentBatch(files, 1, {
+      prepare: async (file) => {
+        if (file.name === "corrupt.txt") throw new Error("corrupt file");
+        return {
+          type: "file_text",
+          file: { name: file.name, text: "valid content" },
+        };
+      },
+    });
+
+    expect(batch.errors).toEqual(["corrupt file"]);
+    expect(batch.prepared.map((part) => part.file.name)).toEqual(["valid.txt"]);
+    expect(batch.rejectedCount).toBe(0);
+    expect(batch.overflow).toBe(1);
+  });
+
+  it("counts every selected file as overflow when no slots are available", async () => {
+    let prepareCalls = 0;
+    const batch = await prepareTextAttachmentBatch([{ name: "one" } as File], 0, {
+      prepare: async () => {
+        prepareCalls += 1;
+        return {
+          type: "file_text",
+          file: { name: "unused.txt", text: "unused" },
+        };
+      },
+    });
+    expect(batch.prepared).toEqual([]);
+    expect(batch.errors).toEqual([]);
+    expect(batch.rejectedCount).toBe(0);
+    expect(batch.overflow).toBe(1);
+    expect(prepareCalls).toBe(0);
+  });
+
+  it("continues past a file that cannot fit the aggregate budget", async () => {
+    const files = ["large.txt", "small.txt"].map((name) => ({ name } as File));
+    const current = [{
+      type: "file_text" as const,
+      file: { name: "existing.txt", text: "x".repeat(128 * 1024) },
+    }];
+    const candidates = new Map([
+      ["large.txt", { type: "file_text" as const, file: { name: "large.txt", text: "x".repeat(128 * 1024) } }],
+      ["small.txt", { type: "file_text" as const, file: { name: "small.txt", text: "ok" } }],
+    ]);
+    const batch = await prepareTextAttachmentBatch(files, 1, {
+      prepare: async (file) => candidates.get(file.name)!,
+      canAccept: (prepared, candidate) =>
+        mergePreparedTextAttachments(current, [...prepared, candidate]).added.length
+          === prepared.length + 1,
+    });
+
+    expect(batch.prepared.map((part) => part.file.name)).toEqual(["small.txt"]);
+    expect(batch.rejectedCount).toBe(1);
+    expect(batch.overflow).toBe(0);
   });
 });
