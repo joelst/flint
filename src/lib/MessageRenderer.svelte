@@ -4,6 +4,7 @@
     extractThinkingTrace,
     messageClipboardText,
     messagePlainText,
+    nonTextMessageParts,
     renderableMessageParts,
     sanitizeAssistantHtml,
   } from "./message-rendering";
@@ -47,6 +48,7 @@
   let pendingRenderTimer: ReturnType<typeof setTimeout> | null = null;
   let lastMessageKey: string | number | undefined = undefined;
   $: userParts = renderableMessageParts(content, previewImagePartIndexes);
+  $: assistantAttachments = nonTextMessageParts(userParts);
 
   $: {
     if (messageKey !== lastMessageKey) {
@@ -205,6 +207,21 @@
     <div class="rendered-markdown">
       {@html renderedHtml}
     </div>
+    {#if assistantAttachments.length > 0}
+      <div class="assistant-attachments">
+        {#each assistantAttachments as part}
+          {#if part.type === "file"}
+            <span class="attachment-chip" title={`${part.text.length.toLocaleString()} characters`}>
+              {part.name}
+            </span>
+          {:else if part.type === "image" && part.previewUrl}
+            <img class="attached-image" src={part.previewUrl} alt={part.label} />
+          {:else}
+            <span class="attachment-chip">{part.label}</span>
+          {/if}
+        {/each}
+      </div>
+    {/if}
     <button class="copy-btn" title="Copy message" onclick={copyToClipboard}
       >📋 Copy</button
     >

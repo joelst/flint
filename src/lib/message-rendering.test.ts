@@ -3,6 +3,7 @@ import {
   conversationImagePreviewPartIndexes,
   extractThinkingTrace,
   messageClipboardText,
+  nonTextMessageParts,
   renderableMessageParts,
   sanitizeAssistantHtml,
 } from "./message-rendering";
@@ -112,6 +113,22 @@ describe("multipart message rendering", () => {
     ]);
     expect(parts).toEqual([
       { type: "unknown", label: "Attachment this version cannot display" },
+      { type: "unknown", label: "Attachment this version cannot display" },
+    ]);
+  });
+
+  it("keeps assistant attachments and opaque parts available alongside rendered text", () => {
+    const parts = renderableMessageParts([
+      { type: "text", text: "Here is the result." },
+      { type: "file_text", file: { name: "result.txt", text: "output" } },
+      { type: "image_url", image_url: { url: TINY_PNG_DATA_URL } },
+      { type: "future_part", payload: "kept opaque" },
+    ] as any);
+
+    expect(parts[0]).toEqual({ type: "text", text: "Here is the result." });
+    expect(nonTextMessageParts(parts)).toEqual([
+      { type: "file", name: "result.txt", text: "output" },
+      { type: "image", previewUrl: TINY_PNG_DATA_URL, label: "Attached image" },
       { type: "unknown", label: "Attachment this version cannot display" },
     ]);
   });

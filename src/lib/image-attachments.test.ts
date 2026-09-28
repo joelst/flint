@@ -118,6 +118,37 @@ describe("image attachment storage limits", () => {
     expect(preparedImageStillOwned("c1", "c1", 1, 1, false)).toBe(false);
   });
 
+  it("discards an in-flight image when vision capability changes before preparation completes", async () => {
+    let resolvePreparation!: (dataUrl: string) => void;
+    const preparation = new Promise<string>((resolve) => { resolvePreparation = resolve; });
+    let visionEnabled = true;
+    let imageEpoch = 4;
+    let processingCount = 0;
+    const attached: string[] = [];
+    const batch = prepareImageBatch(
+      ["picture.png"],
+      () => preparedImageStillOwned("c1", "c1", 4, imageEpoch, visionEnabled),
+      () => preparation,
+      (dataUrl) => attached.push(dataUrl),
+      () => {},
+      () => { processingCount += 1; },
+      () => {
+        if (imageEpoch === 4) processingCount = Math.max(0, processingCount - 1);
+      },
+    );
+
+    await Promise.resolve();
+    expect(processingCount).toBe(1);
+    visionEnabled = false;
+    imageEpoch += 1;
+    processingCount = 0;
+    resolvePreparation("data:image/png;base64,prepared");
+    await batch;
+
+    expect(attached).toEqual([]);
+    expect(processingCount).toBe(0);
+  });
+
   it("stops a multi-image batch when a failed preparation loses ownership", async () => {
     let rejectFirst!: (error: Error) => void;
     let ownerIsCurrent = true;

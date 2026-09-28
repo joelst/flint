@@ -11,6 +11,8 @@ export type RenderableMessagePart =
   | { type: "file"; name: string; text: string }
   | { type: "unknown"; label: string };
 
+export type RenderableMessageAttachment = Exclude<RenderableMessagePart, { type: "text" }>;
+
 // Parsing decodes the whole payload (a JPEG frame header can follow any amount of metadata),
 // and messages re-render often, so verdicts are memoized per URL.
 const PREVIEW_CACHE_LIMIT = 64;
@@ -123,6 +125,12 @@ export function renderableMessageParts(
     }
     return { type: "unknown" as const, label: "Attachment this version cannot display" };
   });
+}
+
+export function nonTextMessageParts(
+  parts: readonly RenderableMessagePart[],
+): RenderableMessageAttachment[] {
+  return parts.filter((part): part is RenderableMessageAttachment => part.type !== "text");
 }
 
 export function messagePlainText(content: MessageContent): string {
