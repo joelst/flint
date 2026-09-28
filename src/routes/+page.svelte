@@ -1563,12 +1563,13 @@
   // Auto-clear images if user switches away from a vision model
   $effect(() => {
     if (!isVisionModel) {
-      // Invalidate pending compaction even when no thumbnail has landed yet. Do not depend on
-      // imageProcessingCount here: writing an empty array while work remains in flight would
-      // keep this effect's condition true and cause a reactive update loop.
-      imageAttachmentEpoch += 1;
-      imageProcessingCount = 0;
-      if (attachedImages.length > 0) attachedImages = [];
+      // Keep the effect dependent only on vision capability; resetting attachment state reads
+      // and writes reactive values that must not trigger another run.
+      untrack(() => {
+        imageAttachmentEpoch += 1;
+        imageProcessingCount = 0;
+        if (attachedImages.length > 0) attachedImages = [];
+      });
     }
   });
 
