@@ -8,9 +8,11 @@ import {
   preparedImageStillOwned,
   imageAttachmentFitsArchive,
   imageDataUrlBytes,
+  clipboardAttachmentFiles,
+  partitionAttachmentFiles,
   storageCharsExcluding,
 } from "./image-attachments";
-import { pngDataUrl, TINY_PNG_DATA_URL } from "../../sidecar/test-fixtures/images";
+import { pngBytes, pngDataUrl, TINY_PNG_DATA_URL } from "../../sidecar/test-fixtures/images";
 
 // A real 3200x1600 header padded past the fast-path size limit.
 const LARGE_PNG = pngDataUrl(3200, 1600, MAX_ATTACHMENT_DATA_URL_CHARS);
@@ -178,24 +180,89 @@ describe("image attachment storage limits", () => {
     expect(decode).not.toHaveBeenCalled();
   });
 
-  it("uses the header, not the declared type, to bound and re-encode a mislabelled image", async () => {
+  it("ignores the declared type and stores what the header proves", async () => {
+    installFileReader();
+    const decode = vi.fn();
+    Object.defineProperty(globalThis, "createImageBitmap", { configurable: true, value: decode });
+    const png = pngDataUrl(100, 100);
+    const payload = png.slice(png.indexOf(","));
+    const cases: Array<[string, string]> = [
+      ["", `data:application/octet-stream;base64${payload}`],
+      ["application/octet-stream", `data:application/octet-stream;base64${payload}`],
+      ["image/heic", `data:image/heic;base64${payload}`],
+      ["", `data:;base64${payload}`],
+    ];
+    for (const [type, dataUrl] of cases) {
+      const file = { ...fileWithDataUrl(dataUrl), type } as File;
+      await expect(compactImageAttachment(file)).resolves.toBe(png);
+    }
+    expect(decode).not.toHaveBeenCalled();
+  });
+
+  it("decodes a resized source under the header's type, not the declared one", async () => {
     installFileReader();
     const close = vi.fn();
-    const decode = vi.fn(async () => ({ width: 100, height: 100, close }));
+    const decode = vi.fn(async (_blob: Blob) => ({ width: 2000, height: 1000, close }));
     Object.defineProperty(globalThis, "createImageBitmap", { configurable: true, value: decode });
-    const compacted = "data:image/jpeg;base64,AQID";
     const canvas = {
       width: 0,
       height: 0,
       getContext: () => ({ fillStyle: "", fillRect: vi.fn(), drawImage: vi.fn() }),
       toBlob: (callback: (blob: Blob) => void) =>
-        callback(Object.assign(new Blob(), { __dataUrl: compacted })),
+        callback(Object.assign(new Blob(), { __dataUrl: "data:image/jpeg;base64,AQID" })),
     };
     vi.spyOn(document, "createElement").mockImplementation(((tag: string) =>
       tag === "canvas" ? canvas : originalCreateElement(tag)) as typeof document.createElement);
-    const heicLabelled = { ...fileWithDataUrl(pngDataUrl(100, 100).replace("image/png", "image/heic")), type: "image/heic" } as File;
-    await expect(compactImageAttachment(heicLabelled)).resolves.toBe(compacted);
-    expect(decode).toHaveBeenCalledOnce();
+    const png = pngDataUrl(2000, 1000);
+    const file = { ...fileWithDataUrl(png.replace("image/png", "application/octet-stream")), type: "" } as File;
+    await expect(compactImageAttachment(file)).resolves.toBe("data:image/jpeg;base64,AQID");
+    expect(decode.mock.calls[0][0].type).toBe("image/png");
+  });
+
+  it("partitions files by their leading bytes, not their name or declared type", async () => {
+    const png = pngBytes(10, 10);
+    const untyped = new File([png], "photo", { type: "" });
+    const generic = new File([png], "photo.bin", { type: "application/octet-stream" });
+    const misnamed = new File([png], "notes.txt", { type: "text/plain" });
+    const code = new File(["const x = 1;"], "a.ts", { type: "" });
+    const svg = new File(['<svg width="9" height="9"/>'], "a.svg", { type: "image/svg+xml" });
+    const heicNamed = new File([png], "a.heic", { type: "image/heic" });
+    const unreadable = {
+      name: "notes.md",
+      type: "",
+      slice: () => { throw new Error("gone"); },
+    } as unknown as File;
+
+    const vision = await partitionAttachmentFiles(
+      [untyped, generic, misnamed, code, svg, heicNamed, unreadable],
+      true,
+    );
+    expect(vision.images).toEqual([untyped, generic, misnamed, heicNamed]);
+    expect(vision.texts).toEqual([code, unreadable]);
+    expect(vision.unsupported).toEqual([svg]);
+
+    const text = await partitionAttachmentFiles([untyped, code], false);
+    expect(text.images).toEqual([]);
+    expect(text.texts).toEqual([code]);
+    expect(text.unsupported).toEqual([untyped]);
+
+    const bm25 = new File(["BM25 is a ranking function used by search engines.\n"], "ranking.md");
+    for (const visionEnabled of [true, false]) {
+      expect((await partitionAttachmentFiles([bm25], visionEnabled)).texts).toEqual([bm25]);
+    }
+  });
+
+  it("pastes clipboard files but keeps a text paste that carries a picture rendering", () => {
+    const image = new File([pngBytes(1, 1)], "image.png", { type: "image/png" });
+    const fileItem = { kind: "file", type: "image/png", getAsFile: () => image };
+    const emptyFile = { kind: "file", type: "", getAsFile: () => null };
+    const plain = { kind: "string", type: "text/plain", getAsFile: () => null };
+    const html = { kind: "string", type: "text/html", getAsFile: () => null };
+
+    expect(clipboardAttachmentFiles([fileItem, emptyFile])).toEqual([image]);
+    expect(clipboardAttachmentFiles([html, fileItem])).toEqual([image]);
+    expect(clipboardAttachmentFiles([plain, html, fileItem])).toEqual([]);
+    expect(clipboardAttachmentFiles([plain])).toEqual([]);
   });
 
   it("rejects oversized source files before reading them", async () => {

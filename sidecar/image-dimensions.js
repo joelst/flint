@@ -122,18 +122,41 @@ function bmp (b) {
   return result('bmp', i32le(b, 18), Math.abs(i32le(b, 22)));
 }
 
+const BMP_HEADER_SIZES = new Set([12, 16, 40, 52, 56, 64, 108, 124]);
+
+// "BM" alone is two printable letters (a Markdown file can open with "BM25"), so a BMP is only
+// recognized with a known DIB header size and a colour-plane count of exactly one.
+function isBmp (b) {
+  if (!ascii(b, 0, 'BM') || b.length < 18) return false;
+  const headerSize = (b[14] | (b[15] << 8) | (b[16] << 16) | (b[17] << 24)) >>> 0;
+  if (!BMP_HEADER_SIZES.has(headerSize)) return false;
+  const planes = headerSize === 12 ? 22 : 26;
+  return b.length >= planes + 2 && u16le(b, planes) === 1;
+}
+
+/**
+ * The raster format the leading bytes announce, or null. A match says what a decoder would
+ * try, not that the header is complete. The first 28 bytes suffice for every format.
+ */
+export function detectImageFormat (bytes) {
+  if (!(bytes instanceof Uint8Array)) return null;
+  const b = bytes;
+  if (b.length >= 8 && b[0] === 0x89 && ascii(b, 1, 'PNG\r\n\x1a\n')) return 'png';
+  if (ascii(b, 0, 'GIF87a') || ascii(b, 0, 'GIF89a')) return 'gif';
+  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'jpeg';
+  if (ascii(b, 0, 'RIFF') && ascii(b, 8, 'WEBP')) return 'webp';
+  if (isBmp(b)) return 'bmp';
+  return null;
+}
+
+const HEADER_READERS = { png, gif, jpeg, webp, bmp };
+
 /**
  * Dimensions and the format the bytes actually encode, or null when the header is not a
  * complete, recognizable PNG, GIF, JPEG, WebP, or BMP header. Callers must treat null as
  * unbounded, never as small.
  */
 export function readImageDimensions (bytes) {
-  if (!(bytes instanceof Uint8Array)) return null;
-  const b = bytes;
-  if (b.length >= 8 && b[0] === 0x89 && ascii(b, 1, 'PNG\r\n\x1a\n')) return png(b);
-  if (ascii(b, 0, 'GIF87a') || ascii(b, 0, 'GIF89a')) return gif(b);
-  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return jpeg(b);
-  if (ascii(b, 0, 'RIFF') && ascii(b, 8, 'WEBP')) return webp(b);
-  if (ascii(b, 0, 'BM')) return bmp(b);
-  return null;
+  const format = detectImageFormat(bytes);
+  return format ? HEADER_READERS[format](bytes) : null;
 }

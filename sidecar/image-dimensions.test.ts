@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest';
-import { MAX_NATIVE_IMAGE_PIXELS, readImageDimensions } from './image-dimensions.js';
+import { MAX_NATIVE_IMAGE_PIXELS, detectImageFormat, readImageDimensions } from './image-dimensions.js';
 import { pngBytes } from './test-fixtures/images';
 
 const bytes = (...parts: Array<number[] | string>) => new Uint8Array(parts.flatMap((part) =>
@@ -84,15 +84,25 @@ describe('readImageDimensions', () => {
   });
 
   it('reads core and info BMP headers, including top-down heights', () => {
-    const core = bytes('BM', new Array(12).fill(0), le32(12), le16(64), le16(32), new Array(8).fill(0));
+    const core = bytes('BM', new Array(12).fill(0), le32(12), le16(64), le16(32), le16(1), new Array(6).fill(0));
     expect(readImageDimensions(core)).toEqual({ format: 'bmp', width: 64, height: 32 });
-    const info = bytes('BM', new Array(12).fill(0), le32(40), le32(300), le32(-200), new Array(8).fill(0));
+    const info = bytes('BM', new Array(12).fill(0), le32(40), le32(300), le32(-200), le16(1), new Array(6).fill(0));
     expect(readImageDimensions(info)).toEqual({ format: 'bmp', width: 300, height: 200 });
-    const negativeWidth = bytes('BM', new Array(12).fill(0), le32(40), le32(-3), le32(2), new Array(8).fill(0));
+    const negativeWidth = bytes('BM', new Array(12).fill(0), le32(40), le32(-3), le32(2), le16(1), new Array(6).fill(0));
     expect(readImageDimensions(negativeWidth)).toBeNull();
-    const unknownHeader = bytes('BM', new Array(12).fill(0), le32(20), le32(3), le32(2), new Array(8).fill(0));
+    const unknownHeader = bytes('BM', new Array(12).fill(0), le32(20), le32(3), le32(2), le16(1), new Array(6).fill(0));
     expect(readImageDimensions(unknownHeader)).toBeNull();
+    const zeroPlanes = bytes('BM', new Array(12).fill(0), le32(40), le32(3), le32(2), le16(0), new Array(6).fill(0));
+    expect(readImageDimensions(zeroPlanes)).toBeNull();
     expect(readImageDimensions(bytes('BM', [0, 0]))).toBeNull();
+  });
+
+  it('does not mistake text that starts with "BM" for a bitmap', () => {
+    for (const text of ['BM25 is a ranking function used by search engines.', 'BMW\n'.repeat(10)]) {
+      const encoded = bytes(text);
+      expect(detectImageFormat(encoded)).toBeNull();
+      expect(readImageDimensions(encoded)).toBeNull();
+    }
   });
 
   it('treats unrecognized and non-byte input as unknown', () => {
@@ -104,5 +114,20 @@ describe('readImageDimensions', () => {
   it('admits legacy phone photos but not decoder-sized bombs', () => {
     expect(4032 * 3024).toBeLessThanOrEqual(MAX_NATIVE_IMAGE_PIXELS);
     expect(10_000 * 10_000).toBeGreaterThan(MAX_NATIVE_IMAGE_PIXELS);
+  });
+});
+
+describe('detectImageFormat', () => {
+  it('names the format from a short signature prefix alone', () => {
+    const head = (b: Uint8Array) => b.slice(0, 16);
+    expect(detectImageFormat(head(pngBytes(1, 1)))).toBe('png');
+    expect(detectImageFormat(head(gif()))).toBe('gif');
+    expect(detectImageFormat(head(jpeg(1, 1)))).toBe('jpeg');
+    expect(detectImageFormat(bytes('RIFF', [0, 0, 0, 0], 'WEBP'))).toBe('webp');
+    expect(detectImageFormat(bytes('BM', new Array(12).fill(0), le32(40), le32(1), le32(1), le16(1)))).toBe('bmp');
+    expect(detectImageFormat(bytes('BM'))).toBeNull();
+    expect(detectImageFormat(bytes('<svg'))).toBeNull();
+    expect(detectImageFormat(bytes([0, 0, 0, 0x18], 'ftypheic'))).toBeNull();
+    expect(detectImageFormat('PNG' as unknown as Uint8Array)).toBeNull();
   });
 });

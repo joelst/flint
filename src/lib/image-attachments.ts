@@ -1,4 +1,5 @@
-import { readImageDimensions } from "../../sidecar/image-dimensions.js";
+import { detectImageFormat, readImageDimensions } from "../../sidecar/image-dimensions.js";
+import { isSupportedTextAttachment } from "./text-attachments";
 
 export const MAX_ATTACHED_IMAGES = 4;
 export const MAX_SOURCE_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -8,8 +9,14 @@ export const MAX_CONVERSATION_STORAGE_CHARS = 4_000_000;
 export const MAX_SOURCE_IMAGE_PIXELS = 64 * 1024 * 1024;
 
 export const MAX_IMAGE_DIMENSION = 1600;
-/** File-picker filter for the formats `compactImageAttachment` can bound before decoding. */
-export const IMAGE_ATTACHMENT_ACCEPT = "image/png,image/jpeg,image/gif,image/webp,image/bmp";
+/**
+ * File-picker filter for the formats `compactImageAttachment` can bound before decoding.
+ * Extensions are listed too because the picker, like `File.type`, only guesses from names.
+ */
+export const IMAGE_ATTACHMENT_ACCEPT = [
+  "image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp",
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
+].join(",");
 const SAFE_IMAGE_DATA_URL = /^data:image\/(?:bmp|gif|jpeg|jpg|png|webp);base64,/i;
 
 function dataUrlPayloadBytes(dataUrl: string): Uint8Array | null {
@@ -128,6 +135,66 @@ function readBlobAsDataUrl(blob: Blob): Promise<string> {
   });
 }
 
+const SIGNATURE_BYTES = 32;
+
+function readBlobHead(blob: Blob): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error("The file could not be read."));
+    reader.onload = () => resolve(new Uint8Array(reader.result as ArrayBuffer));
+    reader.readAsArrayBuffer(blob.slice(0, SIGNATURE_BYTES));
+  });
+}
+
+/**
+ * Files a paste should attach, or an empty list when the default paste must run. A clipboard
+ * that also carries plain text (Office copies a picture rendering alongside cells or
+ * paragraphs) keeps its text paste, so the user's text is never swallowed.
+ */
+export function clipboardAttachmentFiles(
+  items: ArrayLike<Pick<DataTransferItem, "kind" | "type" | "getAsFile">>,
+): File[] {
+  const list = Array.from(items);
+  if (list.some((item) => item.kind === "string" && item.type === "text/plain")) return [];
+  return list
+    .filter((item) => item.kind === "file")
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => file !== null);
+}
+
+export interface PartitionedAttachments {
+  images: File[];
+  texts: File[];
+  unsupported: File[];
+}
+
+/**
+ * Sorts candidate files for the composer. `File.type` and the name are guesses (a valid PNG
+ * can arrive with an empty or generic type), so a supported raster signature in the file's
+ * own bytes decides "image" and wins over any name. Everything else falls back to the
+ * name-based text rules. Images are only admitted while a vision model is selected.
+ */
+export async function partitionAttachmentFiles(
+  files: readonly File[],
+  visionEnabled: boolean,
+): Promise<PartitionedAttachments> {
+  const heads = await Promise.all(
+    files.map((file) => readBlobHead(file).then((head) => head, () => null)),
+  );
+  const result: PartitionedAttachments = { images: [], texts: [], unsupported: [] };
+  files.forEach((file, index) => {
+    const head = heads[index];
+    if (head && detectImageFormat(head)) {
+      (visionEnabled ? result.images : result.unsupported).push(file);
+    } else if (isSupportedTextAttachment(file)) {
+      result.texts.push(file);
+    } else {
+      result.unsupported.push(file);
+    }
+  });
+  return result;
+}
+
 function canvasBlob(canvas: HTMLCanvasElement, quality: number): Promise<Blob> {
   return new Promise((resolve, reject) => {
     canvas.toBlob(
@@ -139,20 +206,19 @@ function canvasBlob(canvas: HTMLCanvasElement, quality: number): Promise<Blob> {
 }
 
 export async function compactImageAttachment(file: File): Promise<string> {
-  if (!file.type.startsWith("image/")) {
-    throw new Error(`${file.name || "The selected file"} is not an image.`);
-  }
+  const label = file.name || "The selected image";
   if (file.size > MAX_SOURCE_IMAGE_BYTES) {
-    throw new Error(`${file.name || "The selected image"} is larger than 20 MB.`);
+    throw new Error(`${label} is larger than 20 MB.`);
   }
 
   const original = await readBlobAsDataUrl(file);
-  const label = file.name || "The selected image";
   // Encoded size does not bound decoded size, so every decision below starts from the
-  // dimensions in the file's own header, whatever MIME type it declares. A file this module
-  // cannot parse (SVG, HEIC, AVIF, corrupt data) is refused rather than handed to a decoder
-  // that might expand it without limit.
-  const payload = dataUrlPayloadBytes(original);
+  // dimensions in the file's own header. `File.type` is not consulted: it is a guess that
+  // can be empty for a valid PNG or wrong for any file. Anything this module cannot parse
+  // (SVG, HEIC, AVIF, corrupt data) is refused rather than handed to a decoder that might
+  // expand it without limit.
+  const comma = original.indexOf(",");
+  const payload = /^data:[^,]*;base64,/i.test(original) ? dataUrlPayloadBytes(original) : null;
   const header = payload ? readImageDimensions(payload) : null;
   if (!header) {
     throw new Error(`${label} is not a readable PNG, JPEG, GIF, WebP, or BMP image.`);
@@ -160,15 +226,17 @@ export async function compactImageAttachment(file: File): Promise<string> {
   if (header.width * header.height > MAX_SOURCE_IMAGE_PIXELS) {
     throw new Error(`${label} is ${header.width}x${header.height}, too large to prepare safely.`);
   }
+  // Stored and decoded under the type the bytes carry, never the declared one.
+  const mimeType = `image/${header.format}`;
+  const labelled = `data:${mimeType};base64,${original.slice(comma + 1)}`;
   if (
-    SAFE_IMAGE_DATA_URL.test(original)
-    && original.length <= MAX_ATTACHMENT_DATA_URL_CHARS
+    labelled.length <= MAX_ATTACHMENT_DATA_URL_CHARS
     && Math.max(header.width, header.height) <= MAX_IMAGE_DIMENSION
   ) {
-    return original;
+    return labelled;
   }
 
-  const bitmap = await createImageBitmap(file);
+  const bitmap = await createImageBitmap(new Blob([file], { type: mimeType }));
   try {
     if (bitmap.width < 1 || bitmap.height < 1) {
       throw new Error(`${label} has invalid dimensions.`);

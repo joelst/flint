@@ -142,8 +142,10 @@
   import {
     MAX_ATTACHED_IMAGES,
     IMAGE_ATTACHMENT_ACCEPT,
+    clipboardAttachmentFiles,
     compactImageAttachment,
     imageAttachmentFitsArchive,
+    partitionAttachmentFiles,
     prepareImageBatch,
     preparedImageStillOwned,
     storageCharsExcluding,
@@ -152,7 +154,6 @@
     MAX_ATTACHED_TEXT_FILES,
     TEXT_ATTACHMENT_ACCEPT,
     mergePreparedTextAttachments,
-    isSupportedTextAttachment,
     prepareTextAttachment,
   } from "$lib/text-attachments";
   import {
@@ -6843,12 +6844,14 @@ Output only the summary text, no preamble.`;
     statusMessage = "Conversation compacted with summary. Full thread still available via toggle.";
   }
 
-  async function addImageFiles(files: File[]) {
-    const ownerConversation = threadLoadedFor;
-    const ownerEpoch = imageAttachmentEpoch;
+  async function addImageFiles(
+    files: File[],
+    ownerConversation = threadLoadedFor,
+    ownerEpoch = imageAttachmentEpoch,
+  ) {
     const slots = Math.max(0, MAX_ATTACHED_IMAGES - attachedImages.length);
     await prepareImageBatch(
-      files.filter((candidate) => candidate.type.startsWith("image/")).slice(0, slots),
+      files.slice(0, slots),
       () => preparedImageStillOwned(
         ownerConversation,
         threadLoadedFor,
@@ -6890,7 +6893,7 @@ Output only the summary text, no preamble.`;
     input.onchange = (e: any) => {
       const files: FileList = e.target.files;
       if (!files) return;
-      void addImageFiles(Array.from(files));
+      void admitAttachmentFiles(Array.from(files));
     };
     input.click();
   }
@@ -6917,9 +6920,14 @@ Output only the summary text, no preamble.`;
     clearTextAttachments();
   }
 
-  async function addTextFiles(files: File[]) {
-    const ownerConversation = threadLoadedFor;
-    const ownerEpoch = textAttachmentEpoch;
+  async function addTextFiles(
+    files: File[],
+    ownerConversation = threadLoadedFor,
+    ownerEpoch = textAttachmentEpoch,
+  ) {
+    if (!preparationScopeIsCurrent(ownerConversation, threadLoadedFor, ownerEpoch, textAttachmentEpoch)) {
+      return;
+    }
     textAttachmentProcessingCount += 1;
     textAttachmentError = "";
     try {
@@ -7042,6 +7050,29 @@ Output only the summary text, no preamble.`;
     pendingUrlFetches = [];
   }
 
+  // One admission path for picker, drop, and paste. Classification reads each file's leading
+  // bytes, so ownership is captured before that await: a conversation switch during it must
+  // not attach the files to the conversation that was switched to.
+  async function admitAttachmentFiles(files: File[]) {
+    const conversation = threadLoadedFor;
+    const imageEpoch = imageAttachmentEpoch;
+    const textEpoch = textAttachmentEpoch;
+    const { images, texts, unsupported } = await partitionAttachmentFiles(files, isVisionModel);
+    if (threadLoadedFor !== conversation) return;
+    // Each batch runs only if its own attachments were not cleared meanwhile; a stale batch
+    // must not touch the current counters or error state.
+    const admitImages = images.length > 0 && imageAttachmentEpoch === imageEpoch;
+    const admitTexts = texts.length > 0 && textAttachmentEpoch === textEpoch;
+    if (images.length === 0 && texts.length === 0) {
+      if (unsupported.length > 0) {
+        statusMessage = "Only supported text/code files and images for vision models can be attached.";
+      }
+      return;
+    }
+    if (admitImages) void addImageFiles(images, conversation, imageEpoch);
+    if (admitTexts) void addTextFiles(texts, conversation, textEpoch);
+  }
+
   // Drag & drop support for local attachments.
   function handleDragOver(e: DragEvent) {
     const files = Array.from(e.dataTransfer?.items || []);
@@ -7053,28 +7084,15 @@ Output only the summary text, no preamble.`;
     const files = Array.from(e.dataTransfer?.files || []);
     if (files.length === 0) return;
     e.preventDefault();
-    const imageFiles = isVisionModel ? files.filter((file) => file.type.startsWith("image/")) : [];
-    const textFiles = files.filter((file) => isSupportedTextAttachment(file));
-    if (imageFiles.length === 0 && textFiles.length === 0) {
-      statusMessage = "Only supported text/code files and images for vision models can be attached.";
-      return;
-    }
-    if (imageFiles.length > 0) void addImageFiles(imageFiles);
-    if (textFiles.length > 0) void addTextFiles(textFiles);
+    void admitAttachmentFiles(files);
   }
 
-  // Enhanced paste for multiple images
+  // Pasted files take the same byte-based admission as dropped ones.
   function handlePaste(e: ClipboardEvent) {
-    if (!isVisionModel) return;
-    const items = Array.from(e.clipboardData?.items || []);
-    const imageItems = items.filter(item => item.type.startsWith('image/'));
-    if (imageItems.length === 0) return;
+    const files = clipboardAttachmentFiles(e.clipboardData?.items || []);
+    if (files.length === 0) return;
     e.preventDefault();
-    void addImageFiles(
-      imageItems
-        .map((item) => item.getAsFile())
-        .filter((file): file is File => file !== null),
-    );
+    void admitAttachmentFiles(files);
   }
 
   // Audio functions
