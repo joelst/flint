@@ -8,6 +8,8 @@ export interface ImageDimensions {
 
 export const MAX_NATIVE_IMAGE_PIXELS: number;
 export const MAX_REQUEST_IMAGES: number;
+export const MAX_CONVERSATION_PREVIEW_PIXELS: number;
+export const MAX_CONVERSATION_PREVIEW_IMAGES: number;
 export const MAX_IMAGE_DATA_URL_CHARS: number;
 export function detectImageFormat(bytes: Uint8Array): ImageHeaderFormat | null;
 export function readImageDimensions(bytes: Uint8Array): ImageDimensions | null;

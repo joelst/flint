@@ -9,6 +9,8 @@
   } from "./message-rendering";
 
   export let content: MessageContent = "";
+  /** Image part indexes admitted by the owning conversation-wide preview budget. */
+  export let previewImagePartIndexes: number[] | undefined = undefined;
   export let role: "user" | "assistant" = "assistant";
   /** True while this specific message is actively receiving stream deltas. */
   export let isStreaming: boolean = false;
@@ -44,7 +46,7 @@
   let renderVersion = 0;
   let pendingRenderTimer: ReturnType<typeof setTimeout> | null = null;
   let lastMessageKey: string | number | undefined = undefined;
-  $: userParts = renderableMessageParts(content);
+  $: userParts = renderableMessageParts(content, previewImagePartIndexes);
 
   $: {
     if (messageKey !== lastMessageKey) {

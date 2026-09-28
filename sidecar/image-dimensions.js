@@ -18,6 +18,10 @@ export const MAX_NATIVE_IMAGE_PIXELS = 4096 * 4096;
  */
 export const MAX_REQUEST_IMAGES = 4;
 
+/** Whole-conversation webview preview budget: at most 64 MiB of RGBA pixels and four images. */
+export const MAX_CONVERSATION_PREVIEW_PIXELS = MAX_NATIVE_IMAGE_PIXELS;
+export const MAX_CONVERSATION_PREVIEW_IMAGES = MAX_REQUEST_IMAGES;
+
 /** Largest stored image data URL Flint will decode, preview, or send. */
 export const MAX_IMAGE_DATA_URL_CHARS = 350_000;
 

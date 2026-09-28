@@ -1,5 +1,9 @@
 import type { MessageContent } from "./conversation-store";
-import { parseImageDataUrl } from "../../sidecar/image-dimensions.js";
+import {
+  MAX_CONVERSATION_PREVIEW_IMAGES,
+  MAX_CONVERSATION_PREVIEW_PIXELS,
+  parseImageDataUrl,
+} from "../../sidecar/image-dimensions.js";
 
 export type RenderableMessagePart =
   | { type: "text"; text: string }
@@ -10,7 +14,7 @@ export type RenderableMessagePart =
 // Parsing decodes the whole payload (a JPEG frame header can follow any amount of metadata),
 // and messages re-render often, so verdicts are memoized per URL.
 const PREVIEW_CACHE_LIMIT = 64;
-const previewVerdicts = new Map<string, boolean>();
+const previewVerdicts = new Map<string, { width: number; height: number } | null>();
 
 /**
  * True when a stored image may be handed to the webview. Stored and imported images never
@@ -18,15 +22,16 @@ const previewVerdicts = new Map<string, boolean>();
  * encoded length, raster label, header, and pixel budget are all checked first — the same
  * rules the native request applies.
  */
-function isSafeImagePreview(url: string): boolean {
+function safeImageDimensions(url: string): { width: number; height: number } | null {
   const cached = previewVerdicts.get(url);
   if (cached !== undefined) return cached;
-  const safe = parseImageDataUrl(url).ok;
+  const parsed = parseImageDataUrl(url);
+  const dimensions = parsed.ok ? { width: parsed.width, height: parsed.height } : null;
   if (previewVerdicts.size >= PREVIEW_CACHE_LIMIT) {
     previewVerdicts.delete(previewVerdicts.keys().next().value as string);
   }
-  previewVerdicts.set(url, safe);
-  return safe;
+  previewVerdicts.set(url, dimensions);
+  return dimensions;
 }
 
 function hasTextPart(part: unknown): part is { type: "text"; text: string } {
@@ -63,9 +68,44 @@ function hasImagePart(part: unknown): part is {
     && typeof (image as { url?: unknown }).url === "string";
 }
 
-export function renderableMessageParts(content: MessageContent): RenderableMessagePart[] {
+/**
+ * Allocate a bounded preview budget across a whole conversation, favoring its most recent
+ * images. Every returned index identifies an image part in the corresponding message.
+ */
+export function conversationImagePreviewPartIndexes(
+  contents: readonly MessageContent[],
+): number[][] {
+  const allowed = contents.map(() => [] as number[]);
+  let remainingPixels = MAX_CONVERSATION_PREVIEW_PIXELS;
+  let remainingImages = MAX_CONVERSATION_PREVIEW_IMAGES;
+  for (let messageIndex = contents.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const content = contents[messageIndex];
+    const parts: unknown[] = typeof content === "string" ? [{ type: "text", text: content }] : content;
+    for (let partIndex = parts.length - 1; partIndex >= 0; partIndex -= 1) {
+      if (remainingImages === 0) return allowed;
+      const part = parts[partIndex];
+      if (!hasImagePart(part)) continue;
+      const dimensions = safeImageDimensions(part.image_url.url);
+      if (!dimensions) continue;
+      const pixels = dimensions.width * dimensions.height;
+      if (pixels > remainingPixels) continue;
+      allowed[messageIndex].push(partIndex);
+      remainingPixels -= pixels;
+      remainingImages -= 1;
+    }
+  }
+  return allowed;
+}
+
+export function renderableMessageParts(
+  content: MessageContent,
+  previewImagePartIndexes?: readonly number[],
+): RenderableMessagePart[] {
   const parts: unknown[] = typeof content === "string" ? [{ type: "text", text: content }] : content;
-  return parts.map((part) => {
+  const allowed = new Set(
+    previewImagePartIndexes ?? conversationImagePreviewPartIndexes([content])[0],
+  );
+  return parts.map((part, index) => {
     if (hasTextPart(part)) {
       return { type: "text" as const, text: part.text };
     }
@@ -75,7 +115,9 @@ export function renderableMessageParts(content: MessageContent): RenderableMessa
     if (hasImagePart(part)) {
       return {
         type: "image" as const,
-        previewUrl: isSafeImagePreview(part.image_url.url) ? part.image_url.url : null,
+        previewUrl: allowed.has(index) && safeImageDimensions(part.image_url.url)
+          ? part.image_url.url
+          : null,
         label: "Attached image",
       };
     }

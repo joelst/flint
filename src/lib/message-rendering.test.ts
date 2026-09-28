@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  conversationImagePreviewPartIndexes,
   extractThinkingTrace,
   messageClipboardText,
   renderableMessageParts,
@@ -50,6 +51,44 @@ describe("multipart message rendering", () => {
       expect(renderableMessageParts([{ type: "image_url", image_url: { url } }]))
         .toEqual([{ type: "image", previewUrl: null, label: "Attached image" }]);
     }
+  });
+
+  it("limits image previews across the whole conversation by count and decoded pixels", () => {
+    const images = [
+      pngDataUrl(4096, 4096),
+      pngDataUrl(2000, 2000),
+      TINY_PNG_DATA_URL,
+      TINY_PNG_DATA_URL,
+      TINY_PNG_DATA_URL,
+      TINY_PNG_DATA_URL,
+    ];
+    const contents = images.map((url) => [{
+      type: "image_url" as const,
+      image_url: { url },
+    }]);
+    const allowed = conversationImagePreviewPartIndexes(contents);
+
+    expect(allowed.map((indexes, messageIndex) => indexes.length ? messageIndex : -1)
+      .filter((index) => index >= 0)).toEqual([2, 3, 4, 5]);
+    expect(allowed.flat()).toHaveLength(4);
+    expect(renderableMessageParts(contents[0], allowed[0])[0])
+      .toEqual({ type: "image", previewUrl: null, label: "Attached image" });
+
+    const manySmallImages = Array.from({ length: 6 }, () => [{
+      type: "image_url" as const,
+      image_url: { url: TINY_PNG_DATA_URL },
+    }]);
+    const countLimited = conversationImagePreviewPartIndexes(manySmallImages);
+    expect(countLimited.map((indexes, messageIndex) => indexes.length ? messageIndex : -1)
+      .filter((index) => index >= 0)).toEqual([2, 3, 4, 5]);
+  });
+
+  it("keeps aggregate decoded pixels within budget while favoring the newest image", () => {
+    const contents = [pngDataUrl(3000, 3000), pngDataUrl(3000, 3000)].map((url) => [{
+      type: "image_url" as const,
+      image_url: { url },
+    }]);
+    expect(conversationImagePreviewPartIndexes(contents)).toEqual([[], [0]]);
   });
 
   it("renders attached text files as chips and copies their contents", () => {

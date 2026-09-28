@@ -193,6 +193,7 @@
     type AppSettingDefaults,
   } from "$lib/conversation-settings";
   import { isFetchableUrl, detectFetchableUrls } from "$lib/url-chips";
+  import { conversationImagePreviewPartIndexes } from "$lib/message-rendering";
   import {
     normalizeForAlternatingChat,
     isEmptyAssistantPlaceholder,
@@ -1954,6 +1955,9 @@
    * conversation is empty" and "nothing loaded yet", and only the first may be written back.
    */
   let threadLoadedFor = $state<string | null>(null);
+  let chatImagePreviewPartIndexes = $derived.by(() =>
+    conversationImagePreviewPartIndexes(chatMessages.map((message: any) => message.content)),
+  );
   const currentConversationId = $derived(conversationArchive.activeId);
   const conversations = $derived(
     summarizeConversations(conversationArchive, {
@@ -9241,6 +9245,7 @@ Output only the summary text, no preamble.`;
                           {/if}
                           <MessageRenderer
                             content={msg.content}
+                            previewImagePartIndexes={chatImagePreviewPartIndexes[i] ?? []}
                             role={msg.role}
                             isStreaming={isStreaming && msg.id === activeStreamAssistantId}
                             assumeReasoning={currentModelTags.includes("reasoning")}
