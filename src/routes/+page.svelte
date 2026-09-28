@@ -198,8 +198,11 @@
     isEmptyAssistantPlaceholder,
   } from "$lib/chat-request";
   import {
+    beginScopedPreparation,
     preparationScopeIsCurrent,
+    resetScopedPreparations,
     selectPlaygroundChatTransport,
+    settleScopedPreparation,
     settlePreparationCount,
   } from "$lib/playground-chat-policy";
   import {
@@ -1543,7 +1546,7 @@
   let attachmentAdmissionsInFlight = 0;
   // Admissions still reading file heads; their files are not yet counted as preparing, so
   // send must wait for them too or it would clear the composer and discard them.
-  let attachmentClassifyingCount = $state(0);
+  let attachmentClassifications = $state({ generation: 0, count: 0 });
   let imageAttachmentEpoch = 0;
   // Bumped only by an explicit clear or send. Losing vision capability also bumps
   // imageAttachmentEpoch; admission must tell the two apart, because a capability change is
@@ -6406,7 +6409,7 @@ updateStateFromSdk();
       statusMessage = "Wait for the attached image to finish preparing before sending.";
       return;
     }
-    if (attachmentClassifyingCount > 0) {
+    if (attachmentClassifications.count > 0) {
       statusMessage = "Wait for the attached files to finish preparing before sending.";
       return;
     }
@@ -6980,6 +6983,7 @@ Output only the summary text, no preamble.`;
   }
 
   function clearComposerAttachments() {
+    attachmentClassifications = resetScopedPreparations(attachmentClassifications);
     clearImages();
     clearTextAttachments();
   }
@@ -7129,12 +7133,16 @@ Output only the summary text, no preamble.`;
     try {
       // Capability is applied after the heads are read: the model may change meanwhile, and a
       // raster must then be refused by name rather than dropped or wrongly refused.
-      attachmentClassifyingCount += 1;
+      const classification = beginScopedPreparation(attachmentClassifications);
+      attachmentClassifications = classification.next;
       let classified;
       try {
         classified = await partitionAttachmentFiles(files, isVisionModel);
       } finally {
-        attachmentClassifyingCount -= 1;
+        attachmentClassifications = settleScopedPreparation(
+          attachmentClassifications,
+          classification.generation,
+        );
       }
       const partitioned = withVisionCapability(classified, isVisionModel);
       if (threadLoadedFor !== conversation) return;
@@ -9716,7 +9724,7 @@ Output only the summary text, no preamble.`;
                 <button
                   type="submit"
                   aria-label="Send message"
-                  disabled={benchmarkRunInFlight || chatBlockedByLoadedSTT || !selectedModelSupportsChat || (!chatInput.trim() && attachedImages.length === 0 && attachedTextFiles.length === 0) || imageProcessingCount > 0 || textAttachmentProcessingCount > 0 || attachmentClassifyingCount > 0 || !canDispatchChat || isStreaming}
+                  disabled={benchmarkRunInFlight || chatBlockedByLoadedSTT || !selectedModelSupportsChat || (!chatInput.trim() && attachedImages.length === 0 && attachedTextFiles.length === 0) || imageProcessingCount > 0 || textAttachmentProcessingCount > 0 || attachmentClassifications.count > 0 || !canDispatchChat || isStreaming}
                 >
                   {#if isStreaming}<Icon name="loader" size={15} class="spin" />{:else}<Icon name="send" size={15} />{/if}
                 </button>

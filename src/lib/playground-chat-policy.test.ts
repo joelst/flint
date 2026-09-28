@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  beginScopedPreparation,
   preparationScopeIsCurrent,
+  resetScopedPreparations,
   selectPlaygroundChatTransport,
+  settleScopedPreparation,
   settlePreparationCount,
 } from "./playground-chat-policy";
 
@@ -25,5 +28,19 @@ describe("Playground chat policy", () => {
     expect(preparationScopeIsCurrent("conversation-a", "conversation-a", 3, 4)).toBe(false);
     expect(settlePreparationCount(2, true)).toBe(1);
     expect(settlePreparationCount(1, false)).toBe(1);
+  });
+
+  it("does not let a retired classification decrement newer in-flight work", () => {
+    let state = { generation: 0, count: 0 };
+    const old = beginScopedPreparation(state);
+    state = old.next;
+    state = resetScopedPreparations(state);
+    const current = beginScopedPreparation(state);
+    state = current.next;
+
+    state = settleScopedPreparation(state, old.generation);
+    expect(state.count).toBe(1);
+    state = settleScopedPreparation(state, current.generation);
+    expect(state.count).toBe(0);
   });
 });
