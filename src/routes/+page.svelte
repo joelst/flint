@@ -143,6 +143,7 @@
     MAX_ATTACHED_IMAGES,
     compactImageAttachment,
     imageAttachmentFitsArchive,
+    prepareImageBatch,
     preparedImageStillOwned,
     storageCharsExcluding,
   } from "$lib/image-attachments";
@@ -6844,42 +6845,39 @@ Output only the summary text, no preamble.`;
     const ownerConversation = threadLoadedFor;
     const ownerEpoch = imageAttachmentEpoch;
     const slots = Math.max(0, MAX_ATTACHED_IMAGES - attachedImages.length);
-    for (const file of files.filter((candidate) => candidate.type.startsWith("image/")).slice(0, slots)) {
-      imageProcessingCount += 1;
-      try {
-        const dataUrl = await compactImageAttachment(file);
-        if (!preparedImageStillOwned(
-          ownerConversation,
-          threadLoadedFor,
-          ownerEpoch,
-          imageAttachmentEpoch,
-          isVisionModel,
-        )) return;
+    await prepareImageBatch(
+      files.filter((candidate) => candidate.type.startsWith("image/")).slice(0, slots),
+      () => preparedImageStillOwned(
+        ownerConversation,
+        threadLoadedFor,
+        ownerEpoch,
+        imageAttachmentEpoch,
+        isVisionModel,
+      ),
+      compactImageAttachment,
+      (dataUrl) => {
         if (attachedImages.length < MAX_ATTACHED_IMAGES) {
           attachedImages = [...attachedImages, dataUrl];
         }
-      } catch (error: any) {
-        if (preparedImageStillOwned(
+      },
+      (file, error) => {
+        statusMessage = (error as Error)?.message || `Image ${file.name} could not be prepared.`;
+      },
+      () => {
+        imageProcessingCount += 1;
+      },
+      () => {
+        imageProcessingCount = settlePreparationCount(
+          imageProcessingCount,
+          preparationScopeIsCurrent(
           ownerConversation,
           threadLoadedFor,
           ownerEpoch,
           imageAttachmentEpoch,
-          isVisionModel,
-        )) {
-          statusMessage = error?.message || `Image ${file.name} could not be prepared.`;
-        }
-      } finally {
-        imageProcessingCount = settlePreparationCount(
-          imageProcessingCount,
-          preparationScopeIsCurrent(
-            ownerConversation,
-            threadLoadedFor,
-            ownerEpoch,
-            imageAttachmentEpoch,
           ),
         );
-      }
-    }
+      },
+    );
   }
 
   function attachImage() {

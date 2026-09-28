@@ -74,6 +74,31 @@ export function preparedImageStillOwned(
     && visionEnabled;
 }
 
+export async function prepareImageBatch<TFile>(
+  files: readonly TFile[],
+  isOwned: () => boolean,
+  prepare: (file: TFile) => Promise<string>,
+  onPrepared: (dataUrl: string) => void,
+  onError: (file: TFile, error: unknown) => void,
+  onStart: () => void,
+  onFinish: () => void,
+): Promise<void> {
+  for (const file of files) {
+    if (!isOwned()) return;
+    onStart();
+    try {
+      const dataUrl = await prepare(file);
+      if (!isOwned()) return;
+      onPrepared(dataUrl);
+    } catch (error) {
+      if (!isOwned()) return;
+      onError(file, error);
+    } finally {
+      onFinish();
+    }
+  }
+}
+
 function readBlobAsDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();

@@ -4,6 +4,7 @@ import {
   MAX_CONVERSATION_STORAGE_CHARS,
   MAX_SOURCE_IMAGE_BYTES,
   compactImageAttachment,
+  prepareImageBatch,
   preparedImageStillOwned,
   imageAttachmentFitsArchive,
   imageDataUrlBytes,
@@ -85,6 +86,43 @@ describe("image attachment storage limits", () => {
   it("does not commit a prepared image after switching away from a vision model", () => {
     expect(preparedImageStillOwned("c1", "c1", 1, 1, true)).toBe(true);
     expect(preparedImageStillOwned("c1", "c1", 1, 1, false)).toBe(false);
+  });
+
+  it("stops a multi-image batch when a failed preparation loses ownership", async () => {
+    let rejectFirst!: (error: Error) => void;
+    let ownerIsCurrent = true;
+    let processingCount = 0;
+    const started: string[] = [];
+    const failures: string[] = [];
+    const firstPreparation = new Promise<string>((_, reject) => {
+      rejectFirst = reject;
+    });
+
+    const batch = prepareImageBatch(
+      ["first", "second"],
+      () => ownerIsCurrent,
+      async (file) => {
+        started.push(file);
+        return file === "first" ? firstPreparation : `data:${file}`;
+      },
+      () => {},
+      (file) => failures.push(file),
+      () => { processingCount += 1; },
+      () => {
+        processingCount = ownerIsCurrent ? Math.max(0, processingCount - 1) : processingCount;
+      },
+    );
+
+    await Promise.resolve();
+    expect(processingCount).toBe(1);
+    ownerIsCurrent = false;
+    processingCount = 0;
+    rejectFirst(new Error("stale image read failed"));
+    await batch;
+
+    expect(processingCount).toBe(0);
+    expect(started).toEqual(["first"]);
+    expect(failures).toEqual([]);
   });
 
   it("returns an already-small safe image without decoding it", async () => {
