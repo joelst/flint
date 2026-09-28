@@ -91,6 +91,16 @@ describe("image attachment storage limits", () => {
     expect(() => storageCharsExcluding(storage, "excluded")).toThrow("changed while");
   });
 
+  it("rejects a storage value that changes between the two inventory passes", () => {
+    let reads = 0;
+    const storage = {
+      length: 1,
+      key: () => "settings",
+      getItem: () => (++reads === 1 ? "small" : "x".repeat(10_000)),
+    };
+    expect(() => storageCharsExcluding(storage, "archive")).toThrow("changed while");
+  });
+
   it("does not commit a prepared image after switching away from a vision model", () => {
     expect(preparedImageStillOwned("c1", "c1", 1, 1, true)).toBe(true);
     expect(preparedImageStillOwned("c1", "c1", 1, 1, false)).toBe(false);

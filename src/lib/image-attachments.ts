@@ -56,13 +56,20 @@ export function storageCharsExcluding(
 ): number {
   const firstKeys = listStorageKeys(storage);
   let chars = 0;
+  const firstValues = new Map<string, string | null>();
   for (const key of firstKeys) {
-    if (key === excludedKey) continue;
-    chars += key.length + (storage.getItem(key)?.length ?? 0);
+    const value = storage.getItem(key);
+    firstValues.set(key, value);
+    if (key !== excludedKey) chars += key.length + (value?.length ?? 0);
   }
   const secondKeys = listStorageKeys(storage);
   if (!sameKeys(firstKeys, secondKeys)) {
     throw new Error("Local storage changed while its size was being checked.");
+  }
+  for (const key of secondKeys) {
+    if (storage.getItem(key) !== firstValues.get(key)) {
+      throw new Error("Local storage changed while its size was being checked.");
+    }
   }
   return chars;
 }
