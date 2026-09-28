@@ -194,6 +194,11 @@
     isEmptyAssistantPlaceholder,
   } from "$lib/chat-request";
   import {
+    preparationScopeIsCurrent,
+    selectPlaygroundChatTransport,
+    settlePreparationCount,
+  } from "$lib/playground-chat-policy";
+  import {
     catalogModelForEndpointId,
     flintVerifiedFromReport,
     groupSelfTestChecks,
@@ -1561,6 +1566,7 @@
       // imageProcessingCount here: writing an empty array while work remains in flight would
       // keep this effect's condition true and cause a reactive update loop.
       imageAttachmentEpoch += 1;
+      imageProcessingCount = 0;
       if (attachedImages.length > 0) attachedImages = [];
     }
   });
@@ -1766,6 +1772,8 @@
   let audioLaneModelAlias = $state("");
 
   const selectedChatModel = $derived(state.models.find((m: any) => m.alias === selectedModelAlias));
+  const canUseDirectChat = $derived(isDev && !!chatClient);
+  const canDispatchChat = $derived(state.ready || canUseDirectChat);
   const selectedModelSupportsChat = $derived(
     !selectedModelAlias || (selectedChatModel ? modelSupportsChat(selectedChatModel) : true)
   );
@@ -6363,9 +6371,12 @@ updateStateFromSdk();
       statusMessage = "Current model does not support chat completions.";
       return;
     }
+    if (!canDispatchChat) {
+      statusMessage = "The local runtime is not ready yet. Wait for it to finish starting before sending.";
+      return;
+    }
     if (
       (!chatInput.trim() && attachedImages.length === 0 && attachedTextFiles.length === 0)
-      || (!state.endpoint && !chatClient)
     ) return;
     if (!threadLoadedFor || streamsByConversation.has(threadLoadedFor)) return;
     if (imageProcessingCount > 0) {
@@ -6480,9 +6491,10 @@ updateStateFromSdk();
     try {
       chatMessages = [...chatMessages, { role: "assistant", content: "", id: assistantId }];
 
-      // Prefer HTTP endpoint from sidecar when available (clean architecture)
-      const endpoint = state.endpoint;
-      if (endpoint) {
+      // Sidecar IPC runs native ChatSession inference independently of the optional HTTP service.
+      // Keep the direct client only as the development fallback when no service endpoint exists.
+      const transport = selectPlaygroundChatTransport(state.endpoint, canUseDirectChat);
+      if (transport === "sidecar") {
         const data = await chatCompletionStream(
           selectedModelAlias,
           requestMessages,
@@ -6520,7 +6532,7 @@ updateStateFromSdk();
           if (messagesContainer)
             messagesContainer.scrollTop = messagesContainer.scrollHeight;
         }, 5);
-      } else if (chatClient) {
+      } else {
         // Fallback to direct client (dev only). This transport reads generation params from
         // client.settings, not completion args -- see the sidecar's identical pattern in
         // createSessionChatClient/createChatClient. Apply them before completion so this path
@@ -6843,9 +6855,25 @@ Output only the summary text, no preamble.`;
           attachedImages = [...attachedImages, dataUrl];
         }
       } catch (error: any) {
-        statusMessage = error?.message || `Image ${file.name} could not be prepared.`;
+        if (preparedImageStillOwned(
+          ownerConversation,
+          threadLoadedFor,
+          ownerEpoch,
+          imageAttachmentEpoch,
+          isVisionModel,
+        )) {
+          statusMessage = error?.message || `Image ${file.name} could not be prepared.`;
+        }
       } finally {
-        imageProcessingCount -= 1;
+        imageProcessingCount = settlePreparationCount(
+          imageProcessingCount,
+          preparationScopeIsCurrent(
+            ownerConversation,
+            threadLoadedFor,
+            ownerEpoch,
+            imageAttachmentEpoch,
+          ),
+        );
       }
     }
   }
@@ -6869,11 +6897,13 @@ Output only the summary text, no preamble.`;
 
   function clearImages() {
     imageAttachmentEpoch += 1;
+    imageProcessingCount = 0;
     attachedImages = [];
   }
 
   function clearTextAttachments() {
     textAttachmentEpoch += 1;
+    textAttachmentProcessingCount = 0;
     attachedTextFiles = [];
     textAttachmentError = "";
   }
@@ -6901,7 +6931,14 @@ Output only the summary text, no preamble.`;
           if (threadLoadedFor !== ownerConversation || textAttachmentEpoch !== ownerEpoch) return;
           accepted.push(part);
         } catch (error: any) {
-          textAttachmentError = error?.message || "Could not attach that file.";
+          if (preparationScopeIsCurrent(
+            ownerConversation,
+            threadLoadedFor,
+            ownerEpoch,
+            textAttachmentEpoch,
+          )) {
+            textAttachmentError = error?.message || "Could not attach that file.";
+          }
           break;
         }
       }
@@ -6914,7 +6951,15 @@ Output only the summary text, no preamble.`;
           `${rejectedCount} file${rejectedCount === 1 ? " was" : "s were"} not attached because the count or 256 KB total limit was reached.`;
       }
     } finally {
-      textAttachmentProcessingCount -= 1;
+      textAttachmentProcessingCount = settlePreparationCount(
+        textAttachmentProcessingCount,
+        preparationScopeIsCurrent(
+          ownerConversation,
+          threadLoadedFor,
+          ownerEpoch,
+          textAttachmentEpoch,
+        ),
+      );
     }
   }
 
@@ -9556,14 +9601,14 @@ Output only the summary text, no preamble.`;
                 <input
                   bind:value={chatInput}
                   placeholder={isDictating ? "Dictating… (click Stop to finish)" : "Type your message... (model is running locally)"}
-                  disabled={benchmarkRunInFlight || chatBlockedByLoadedSTT || !selectedModelSupportsChat || (!state.endpoint && !chatClient) || isStreaming}
+                  disabled={benchmarkRunInFlight || chatBlockedByLoadedSTT || !selectedModelSupportsChat || !canDispatchChat || isStreaming}
                   onkeydown={(e) => { if ((isMac ? e.metaKey : e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); sendMessage(e); } }}
                   onpaste={handlePaste}
                 />
                 <button
                   type="submit"
                   aria-label="Send message"
-                  disabled={benchmarkRunInFlight || chatBlockedByLoadedSTT || !selectedModelSupportsChat || (!chatInput.trim() && attachedImages.length === 0 && attachedTextFiles.length === 0) || imageProcessingCount > 0 || textAttachmentProcessingCount > 0 || (!state.endpoint && !chatClient) || isStreaming}
+                  disabled={benchmarkRunInFlight || chatBlockedByLoadedSTT || !selectedModelSupportsChat || (!chatInput.trim() && attachedImages.length === 0 && attachedTextFiles.length === 0) || imageProcessingCount > 0 || textAttachmentProcessingCount > 0 || !canDispatchChat || isStreaming}
                 >
                   {#if isStreaming}<Icon name="loader" size={15} class="spin" />{:else}<Icon name="send" size={15} />{/if}
                 </button>
