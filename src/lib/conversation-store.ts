@@ -578,13 +578,12 @@ export function normalizeContentDetailed(raw: unknown): ContentNormalization {
         && file.name !== ''
         && typeof file.text === 'string'
       ) {
+        const normalizedFile = { ...file, name: file.name, text: file.text };
+        if (typeof file.mimeType !== 'string') delete normalizedFile.mimeType;
         parts.push({
+          ...(part as any),
           type: 'file_text',
-          file: {
-            name: file.name,
-            text: file.text,
-            ...(typeof file.mimeType === 'string' ? { mimeType: file.mimeType } : {}),
-          },
+          file: normalizedFile,
         });
       } else dropped += 1;
     } else {

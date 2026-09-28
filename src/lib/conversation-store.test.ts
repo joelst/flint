@@ -97,6 +97,28 @@ describe('normalizeContent', () => {
     expect(normalizeContent(parts)).toEqual(parts);
   });
 
+  it('preserves unknown file_text metadata while removing invalid known MIME metadata', () => {
+    const original = {
+      type: 'file_text',
+      source: { build: 3 },
+      file: {
+        name: 'main.ts',
+        text: 'export {};\n',
+        mimeType: 42,
+        futureFileMetadata: { encoding: 'utf-8' },
+      },
+      futurePartMetadata: ['retain'],
+    };
+    expect(normalizeContent([original])).toEqual([{
+      ...original,
+      file: {
+        name: original.file.name,
+        text: original.file.text,
+        futureFileMetadata: original.file.futureFileMetadata,
+      },
+    }]);
+  });
+
   it('preserves over-limit file parts for display while request validation keeps them unsendable', () => {
     const oversized = {
       type: 'file_text',
@@ -290,6 +312,46 @@ describe('parseConversationArchive', () => {
     expect(r.corrupt).toBe(false);
     expect(r.archive?.activeId).toBe('c1');
     expect(r.archive?.conversations[0].messages[0].content).toBe('hi');
+  });
+
+  it('preserves unknown file_text metadata across archive round-trips', () => {
+    const content = [{
+      type: 'file_text',
+      source: { build: 3 },
+      file: {
+        name: 'main.ts',
+        text: 'export {};\n',
+        mimeType: 42,
+        futureFileMetadata: { encoding: 'utf-8' },
+      },
+      futurePartMetadata: ['retain'],
+    }];
+    const rawArchive = archive({
+      conversations: [{
+        id: 'c1',
+        title: 'One',
+        createdAt: 1,
+        messages: [{ id: 'm1', role: 'user', createdAt: 1, content }],
+      }],
+    });
+    const expectedContent = [{
+      type: 'file_text',
+      source: { build: 3 },
+      file: {
+        name: 'main.ts',
+        text: 'export {};\n',
+        futureFileMetadata: { encoding: 'utf-8' },
+      },
+      futurePartMetadata: ['retain'],
+    }];
+
+    const firstRead = parseConversationArchive(rawArchive, SKIP_APP_VERSION_GATE);
+    expect(firstRead.archive?.conversations[0].messages[0].content).toEqual(expectedContent);
+    const secondRead = parseConversationArchive(
+      JSON.stringify(firstRead.archive),
+      SKIP_APP_VERSION_GATE,
+    );
+    expect(secondRead.archive?.conversations[0].messages[0].content).toEqual(expectedContent);
   });
 
   it('flags unparseable and non-object roots as corrupt', () => {
