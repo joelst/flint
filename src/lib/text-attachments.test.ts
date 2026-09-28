@@ -13,6 +13,13 @@ describe("text attachments", () => {
     expect(isSupportedTextAttachment({ name: "report.pdf", type: "application/pdf" } as File)).toBe(false);
   });
 
+  it("accepts MIME-only text and extensionless well-known names", () => {
+    expect(isSupportedTextAttachment({ name: "notes.adoc", type: "text/plain" } as File)).toBe(true);
+    expect(isSupportedTextAttachment({ name: "Dockerfile", type: "" } as File)).toBe(true);
+    expect(isSupportedTextAttachment({ name: "Makefile", type: "" } as File)).toBe(true);
+  });
+
+
   it("reads text, sanitizes the name, and preserves the MIME type", async () => {
     const part = await prepareTextAttachment(
       {

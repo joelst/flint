@@ -10,6 +10,8 @@ import {
   imageDataUrlBytes,
   clipboardAttachmentFiles,
   partitionAttachmentFiles,
+  rejectedAttachmentNotice,
+  withVisionCapability,
   storageCharsExcluding,
 } from "./image-attachments";
 import { pngBytes, pngDataUrl, TINY_PNG_DATA_URL } from "../../sidecar/test-fixtures/images";
@@ -131,6 +133,31 @@ describe("image attachment storage limits", () => {
     expect(failures).toEqual([]);
   });
 
+  it("gives a failed image's slot to the next file and counts only what found no room", async () => {
+    const attached: string[] = [];
+    const failures: string[] = [];
+    const started: string[] = [];
+    const skipped = await prepareImageBatch(
+      ["bad", "good", "late1", "late2"],
+      () => true,
+      async (file) => {
+        started.push(file);
+        if (file === "bad") throw new Error("corrupt");
+        return `data:${file}`;
+      },
+      (dataUrl) => attached.push(dataUrl),
+      (file) => failures.push(file),
+      () => {},
+      () => {},
+      () => attached.length < 1,
+    );
+
+    expect(failures).toEqual(["bad"]);
+    expect(attached).toEqual(["data:good"]);
+    expect(started).toEqual(["bad", "good"]);
+    expect(skipped).toBe(2);
+  });
+
   it("returns an already-small safe image without decoding it", async () => {
     installFileReader();
     const decode = vi.fn();
@@ -244,7 +271,8 @@ describe("image attachment storage limits", () => {
     const text = await partitionAttachmentFiles([untyped, code], false);
     expect(text.images).toEqual([]);
     expect(text.texts).toEqual([code]);
-    expect(text.unsupported).toEqual([untyped]);
+    expect(text.needsVision).toEqual([untyped]);
+    expect(text.unsupported).toEqual([]);
 
     const bm25 = new File(["BM25 is a ranking function used by search engines.\n"], "ranking.md");
     for (const visionEnabled of [true, false]) {
@@ -252,6 +280,45 @@ describe("image attachment storage limits", () => {
     }
   });
 
+  it("names refused files, even when others in the batch were attached", async () => {
+    const png = new File([pngBytes(4, 4)], "shot.png", { type: "image/png" });
+    const notes = new File(["hello"], "notes.txt", { type: "text/plain" });
+    const pdf = new File(["%PDF-1.7"], "report.pdf", { type: "application/pdf" });
+
+    const partial = await partitionAttachmentFiles([notes, pdf, png], false);
+    expect(partial.texts).toEqual([notes]);
+    expect(rejectedAttachmentNotice(partial)).toBe(
+      "Not attached (not a supported text, code, or image file): report.pdf. "
+      + "Not attached (images need a vision model): shot.png.",
+    );
+    expect(rejectedAttachmentNotice(await partitionAttachmentFiles([notes, png], true))).toBeNull();
+
+    const many = ["a", "b", "c", "d", "e"].map((n) => new File(["x"], `${n}.pdf`));
+    expect(rejectedAttachmentNotice({ needsVision: [], unsupported: many }))
+      .toBe("Not attached (not a supported text, code, or image file): a.pdf, b.pdf, c.pdf and 2 more.");
+  });
+
+  it("applies the vision capability current at admission, not at partition", async () => {
+    const png = new File([pngBytes(4, 4)], "shot.png", { type: "image/png" });
+    const notes = new File(["hello"], "notes.txt", { type: "text/plain" });
+    const pdf = new File(["%PDF-1.7"], "report.pdf", { type: "application/pdf" });
+
+    const underVision = await partitionAttachmentFiles([png, notes, pdf], true);
+    const switchedAway = withVisionCapability(underVision, false);
+    expect(switchedAway.images).toEqual([]);
+    expect(switchedAway.needsVision).toEqual([png]);
+    expect(switchedAway.texts).toEqual([notes]);
+    expect(switchedAway.unsupported).toEqual([pdf]);
+    expect(rejectedAttachmentNotice(switchedAway)).toContain("images need a vision model): shot.png.");
+
+    const switchedTo = withVisionCapability(await partitionAttachmentFiles([png, notes], false), true);
+    expect(switchedTo.images).toEqual([png]);
+    expect(switchedTo.needsVision).toEqual([]);
+    expect(rejectedAttachmentNotice(switchedTo)).toBeNull();
+    expect(rejectedAttachmentNotice({ needsVision: [], unsupported: [], modelChanged: [png] })).toBe(
+      "Not attached (the model changed while images were being prepared; attach them again): shot.png.",
+    );
+  });
   it("pastes clipboard files but keeps a text paste that carries a picture rendering", () => {
     const image = new File([pngBytes(1, 1)], "image.png", { type: "image/png" });
     const fileItem = { kind: "file", type: "image/png", getAsFile: () => image };

@@ -101,6 +101,11 @@ export function preparedImageStillOwned(
     && visionEnabled;
 }
 
+/**
+ * Prepares files one at a time while the batch is still owned. `hasRoom` is consulted before each
+ * file, so a failed preparation leaves its slot to the next file; returns how many files were
+ * skipped because there was no room.
+ */
 export async function prepareImageBatch<TFile>(
   files: readonly TFile[],
   isOwned: () => boolean,
@@ -109,21 +114,24 @@ export async function prepareImageBatch<TFile>(
   onError: (file: TFile, error: unknown) => void,
   onStart: () => void,
   onFinish: () => void,
-): Promise<void> {
-  for (const file of files) {
-    if (!isOwned()) return;
+  hasRoom: () => boolean = () => true,
+): Promise<number> {
+  for (const [index, file] of files.entries()) {
+    if (!isOwned()) return 0;
+    if (!hasRoom()) return files.length - index;
     onStart();
     try {
       const dataUrl = await prepare(file);
-      if (!isOwned()) return;
+      if (!isOwned()) return 0;
       onPrepared(dataUrl);
     } catch (error) {
-      if (!isOwned()) return;
+      if (!isOwned()) return 0;
       onError(file, error);
     } finally {
       onFinish();
     }
   }
+  return 0;
 }
 
 function readBlobAsDataUrl(blob: Blob): Promise<string> {
@@ -165,7 +173,57 @@ export function clipboardAttachmentFiles(
 export interface PartitionedAttachments {
   images: File[];
   texts: File[];
+  /** Supported images that arrived while no vision model is selected. */
+  needsVision: File[];
   unsupported: File[];
+}
+
+const NOTICE_NAME_LIMIT = 3;
+
+function namedList(files: readonly File[]): string {
+  const names = files.slice(0, NOTICE_NAME_LIMIT).map((file) => file.name || "unnamed file");
+  const extra = files.length - names.length;
+  return extra > 0 ? `${names.join(", ")} and ${extra} more` : names.join(", ");
+}
+
+/**
+ * What to tell the user about files a batch did not attach, or null when nothing was refused.
+ * Reported even when other files in the same batch were attached, so a refusal is never silent.
+ */
+export function rejectedAttachmentNotice(
+  { needsVision, unsupported, modelChanged = [] }:
+    Pick<PartitionedAttachments, "needsVision" | "unsupported"> & { modelChanged?: readonly File[] },
+): string | null {
+  const notices: string[] = [];
+  if (unsupported.length > 0) {
+    notices.push(`Not attached (not a supported text, code, or image file): ${namedList(unsupported)}.`);
+  }
+  if (needsVision.length > 0) {
+    notices.push(`Not attached (images need a vision model): ${namedList(needsVision)}.`);
+  }
+  if (modelChanged.length > 0) {
+    notices.push(
+      `Not attached (the model changed while images were being prepared; attach them again): ${namedList(modelChanged)}.`,
+    );
+  }
+  return notices.length > 0 ? notices.join(" ") : null;
+}
+
+/**
+ * Re-applies vision capability to a partition. Capability can change while the partition reads
+ * file heads, so the caller applies the capability current at admission: supported rasters
+ * attach with a vision model and are refused as `needsVision` without one.
+ */
+export function withVisionCapability(
+  partitioned: PartitionedAttachments,
+  visionEnabled: boolean,
+): PartitionedAttachments {
+  const rasters = [...partitioned.images, ...partitioned.needsVision];
+  return {
+    ...partitioned,
+    images: visionEnabled ? rasters : [],
+    needsVision: visionEnabled ? [] : rasters,
+  };
 }
 
 /**
@@ -181,11 +239,11 @@ export async function partitionAttachmentFiles(
   const heads = await Promise.all(
     files.map((file) => readBlobHead(file).then((head) => head, () => null)),
   );
-  const result: PartitionedAttachments = { images: [], texts: [], unsupported: [] };
+  const result: PartitionedAttachments = { images: [], texts: [], needsVision: [], unsupported: [] };
   files.forEach((file, index) => {
     const head = heads[index];
     if (head && detectImageFormat(head)) {
-      (visionEnabled ? result.images : result.unsupported).push(file);
+      (visionEnabled ? result.images : result.needsVision).push(file);
     } else if (isSupportedTextAttachment(file)) {
       result.texts.push(file);
     } else {

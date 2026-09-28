@@ -66,7 +66,8 @@ The sidebar is grouped by workflow:
 - Attach up to four local text or code files (128 KB each, 256 KB of formatted prompt context
   combined, including framing and escaping). Flint stores them with the conversation, shows them
   as attachment chips, and labels their contents as untrusted reference text when sending them
-  to the model. PDF and Office documents are not decoded.
+  to the model. PDF and Office documents are not decoded. The attach button's picker shows all
+  files; anything Flint cannot attach is reported in a notice above the composer rather than skipped silently.
 - Persona is beside the message controls. Context and sampling options are in the collapsible
   **Generation settings** drawer below the composer.
 - **Export conversations**: Export any chat thread as structured JSON, formatted Markdown, or plain text for documentation or archive.

@@ -148,11 +148,12 @@
     partitionAttachmentFiles,
     prepareImageBatch,
     preparedImageStillOwned,
+    rejectedAttachmentNotice,
+    withVisionCapability,
     storageCharsExcluding,
   } from "$lib/image-attachments";
   import {
     MAX_ATTACHED_TEXT_FILES,
-    TEXT_ATTACHMENT_ACCEPT,
     mergePreparedTextAttachments,
     prepareTextAttachment,
   } from "$lib/text-attachments";
@@ -1535,8 +1536,19 @@
   let attachedTextFiles: TextFilePart[] = $state([]);
   let imageProcessingCount = $state(0);
   let textAttachmentProcessingCount = $state(0);
-  let textAttachmentError = $state("");
+  let attachmentNotice = $state("");
+  // Bumped when the composer's attachments are cleared, so a notice from an admission that
+  // started before the clear (or the send that cleared it) is never published afterwards.
+  let attachmentNoticeEpoch = 0;
+  let attachmentAdmissionsInFlight = 0;
+  // Admissions still reading file heads; their files are not yet counted as preparing, so
+  // send must wait for them too or it would clear the composer and discard them.
+  let attachmentClassifyingCount = $state(0);
   let imageAttachmentEpoch = 0;
+  // Bumped only by an explicit clear or send. Losing vision capability also bumps
+  // imageAttachmentEpoch; admission must tell the two apart, because a capability change is
+  // reported to the user while a clear is not.
+  let imageClearEpoch = 0;
   let textAttachmentEpoch = 0;
   let textFileInput: HTMLInputElement | undefined = $state();
 
@@ -1561,6 +1573,13 @@
     const tags = getModelTags(selectedModelAlias, model.info);
     return tags.includes('vision');
   });
+
+  // The file picker admits text and (with a vision model) images, so it is full only when
+  // every category it could fill is.
+  let composerAttachmentsFull = $derived(
+    attachedTextFiles.length >= MAX_ATTACHED_TEXT_FILES
+      && (!isVisionModel || attachedImages.length >= MAX_ATTACHED_IMAGES),
+  );
 
   // Auto-clear images if user switches away from a vision model
   $effect(() => {
@@ -6387,6 +6406,10 @@ updateStateFromSdk();
       statusMessage = "Wait for the attached image to finish preparing before sending.";
       return;
     }
+    if (attachmentClassifyingCount > 0) {
+      statusMessage = "Wait for the attached files to finish preparing before sending.";
+      return;
+    }
     if (textAttachmentProcessingCount > 0) {
       statusMessage = "Wait for the attached text or code files to finish preparing before sending.";
       return;
@@ -6844,14 +6867,19 @@ Output only the summary text, no preamble.`;
     statusMessage = "Conversation compacted with summary. Full thread still available via toggle.";
   }
 
+  /** Adds images to the composer; returns what could not be attached, for the caller to report. */
   async function addImageFiles(
     files: File[],
     ownerConversation = threadLoadedFor,
     ownerEpoch = imageAttachmentEpoch,
-  ) {
-    const slots = Math.max(0, MAX_ATTACHED_IMAGES - attachedImages.length);
-    await prepareImageBatch(
-      files.slice(0, slots),
+    ownerClearEpoch = imageClearEpoch,
+  ): Promise<string[]> {
+    const problems: string[] = [];
+    const failed = new Set<File>();
+    // Room is rechecked before each file, so a failed image leaves its slot to the next one.
+    let overflow = 0;
+    const skippedForRoom = await prepareImageBatch(
+      files,
       () => preparedImageStillOwned(
         ownerConversation,
         threadLoadedFor,
@@ -6863,10 +6891,13 @@ Output only the summary text, no preamble.`;
       (dataUrl) => {
         if (attachedImages.length < MAX_ATTACHED_IMAGES) {
           attachedImages = [...attachedImages, dataUrl];
+        } else {
+          overflow += 1;
         }
       },
       (file, error) => {
-        statusMessage = (error as Error)?.message || `Image ${file.name} could not be prepared.`;
+        failed.add(file);
+        problems.push((error as Error)?.message || `Image ${file.name} could not be prepared.`);
       },
       () => {
         imageProcessingCount += 1;
@@ -6882,7 +6913,35 @@ Output only the summary text, no preamble.`;
           ),
         );
       },
+      () => attachedImages.length < MAX_ATTACHED_IMAGES,
     );
+    // Added after the await: `overflow += await …` would read overflow first and lose late
+    // overflows counted by onPrepared meanwhile.
+    overflow += skippedForRoom;
+    // A capability change retires the preparation without clearing the composer (the clear
+    // epoch is unchanged): the images already attached were cleared and the rest discarded, so
+    // name them all, whether or not vision has since been restored. Files that had already
+    // failed keep their own error; a model change would not have fixed them.
+    if (
+      threadLoadedFor === ownerConversation
+      && imageClearEpoch === ownerClearEpoch
+      && imageAttachmentEpoch !== ownerEpoch
+    ) {
+      const lost = files.filter((file) => !failed.has(file));
+      if (lost.length === 0) return problems;
+      return [
+        ...problems,
+        isVisionModel
+          ? rejectedAttachmentNotice({ needsVision: [], unsupported: [], modelChanged: lost })
+          : rejectedAttachmentNotice({ needsVision: lost, unsupported: [] }),
+      ];
+    }
+    if (overflow > 0) {
+      problems.push(
+        `${overflow} image${overflow === 1 ? " was" : "s were"} not attached: up to ${MAX_ATTACHED_IMAGES} images per message.`,
+      );
+    }
+    return problems;
   }
 
   function attachImage() {
@@ -6900,19 +6959,24 @@ Output only the summary text, no preamble.`;
 
   function removeImage(index: number) {
     attachedImages = attachedImages.filter((_, i) => i !== index);
+    attachmentNotice = "";
   }
 
   function clearImages() {
     imageAttachmentEpoch += 1;
+    imageClearEpoch += 1;
+    attachmentNoticeEpoch += 1;
     imageProcessingCount = 0;
     attachedImages = [];
+    attachmentNotice = "";
   }
 
   function clearTextAttachments() {
     textAttachmentEpoch += 1;
+    attachmentNoticeEpoch += 1;
     textAttachmentProcessingCount = 0;
     attachedTextFiles = [];
-    textAttachmentError = "";
+    attachmentNotice = "";
   }
 
   function clearComposerAttachments() {
@@ -6920,48 +6984,44 @@ Output only the summary text, no preamble.`;
     clearTextAttachments();
   }
 
+  /** Adds text files to the composer; returns what could not be attached, for the caller to report. */
   async function addTextFiles(
     files: File[],
     ownerConversation = threadLoadedFor,
     ownerEpoch = textAttachmentEpoch,
-  ) {
+  ): Promise<string[]> {
+    const problems: string[] = [];
     if (!preparationScopeIsCurrent(ownerConversation, threadLoadedFor, ownerEpoch, textAttachmentEpoch)) {
-      return;
+      return problems;
     }
     textAttachmentProcessingCount += 1;
-    textAttachmentError = "";
     try {
       const remaining = MAX_ATTACHED_TEXT_FILES - attachedTextFiles.length;
       if (remaining <= 0) {
-        textAttachmentError = `You can attach up to ${MAX_ATTACHED_TEXT_FILES} text or code files.`;
-        return;
+        problems.push(`You can attach up to ${MAX_ATTACHED_TEXT_FILES} text or code files.`);
+        return problems;
       }
       const accepted: TextFilePart[] = [];
+      // Every file is attempted and every failure reported; one bad file does not hide the rest.
       for (const file of files.slice(0, remaining)) {
         try {
           const part = await prepareTextAttachment(file);
-          if (threadLoadedFor !== ownerConversation || textAttachmentEpoch !== ownerEpoch) return;
+          if (threadLoadedFor !== ownerConversation || textAttachmentEpoch !== ownerEpoch) return [];
           accepted.push(part);
         } catch (error: any) {
-          if (preparationScopeIsCurrent(
-            ownerConversation,
-            threadLoadedFor,
-            ownerEpoch,
-            textAttachmentEpoch,
-          )) {
-            textAttachmentError = error?.message || "Could not attach that file.";
-          }
-          break;
+          problems.push(error?.message || `Could not attach ${file.name || "that file"}.`);
         }
       }
-      if (threadLoadedFor !== ownerConversation || textAttachmentEpoch !== ownerEpoch) return;
+      if (threadLoadedFor !== ownerConversation || textAttachmentEpoch !== ownerEpoch) return [];
       const merged = mergePreparedTextAttachments(attachedTextFiles, accepted);
       attachedTextFiles = merged.attachments;
       const rejectedCount = merged.rejectedCount + Math.max(0, files.length - remaining);
-      if (rejectedCount > 0 && !textAttachmentError) {
-        textAttachmentError =
-          `${rejectedCount} file${rejectedCount === 1 ? " was" : "s were"} not attached because the count or 256 KB total limit was reached.`;
+      if (rejectedCount > 0) {
+        problems.push(
+          `${rejectedCount} file${rejectedCount === 1 ? " was" : "s were"} not attached because the count or 256 KB total limit was reached.`,
+        );
       }
+      return problems;
     } finally {
       textAttachmentProcessingCount = settlePreparationCount(
         textAttachmentProcessingCount,
@@ -6975,15 +7035,19 @@ Output only the summary text, no preamble.`;
     }
   }
 
+  // Unfiltered on purpose: `accept` cannot express exact names (Dockerfile, Makefile), and it is
+  // only a hint anyway. Picked files take the same byte-based admission as dropped and pasted
+  // ones, which names anything it refuses.
   async function onTextFilesSelected(event: Event) {
     const input = event.target as HTMLInputElement;
-    await addTextFiles(Array.from(input.files ?? []));
+    const files = Array.from(input.files ?? []);
     input.value = "";
+    await admitAttachmentFiles(files);
   }
 
   function removeTextAttachment(index: number) {
     attachedTextFiles = attachedTextFiles.filter((_, current) => current !== index);
-    textAttachmentError = "";
+    attachmentNotice = "";
   }
 
   // URL fetch helpers
@@ -7055,22 +7119,45 @@ Output only the summary text, no preamble.`;
   // not attach the files to the conversation that was switched to.
   async function admitAttachmentFiles(files: File[]) {
     const conversation = threadLoadedFor;
-    const imageEpoch = imageAttachmentEpoch;
+    const imageClear = imageClearEpoch;
     const textEpoch = textAttachmentEpoch;
-    const { images, texts, unsupported } = await partitionAttachmentFiles(files, isVisionModel);
-    if (threadLoadedFor !== conversation) return;
-    // Each batch runs only if its own attachments were not cleared meanwhile; a stale batch
-    // must not touch the current counters or error state.
-    const admitImages = images.length > 0 && imageAttachmentEpoch === imageEpoch;
-    const admitTexts = texts.length > 0 && textAttachmentEpoch === textEpoch;
-    if (images.length === 0 && texts.length === 0) {
-      if (unsupported.length > 0) {
-        statusMessage = "Only supported text/code files and images for vision models can be attached.";
+    const noticeEpoch = attachmentNoticeEpoch;
+    // A notice describes the admissions since the composer was last idle; concurrent
+    // admissions append to it instead of overwriting one another.
+    if (attachmentAdmissionsInFlight === 0) attachmentNotice = "";
+    attachmentAdmissionsInFlight += 1;
+    try {
+      // Capability is applied after the heads are read: the model may change meanwhile, and a
+      // raster must then be refused by name rather than dropped or wrongly refused.
+      attachmentClassifyingCount += 1;
+      let classified;
+      try {
+        classified = await partitionAttachmentFiles(files, isVisionModel);
+      } finally {
+        attachmentClassifyingCount -= 1;
       }
-      return;
+      const partitioned = withVisionCapability(classified, isVisionModel);
+      if (threadLoadedFor !== conversation) return;
+      const { images, texts } = partitioned;
+      // Each batch runs only if its own attachments were not cleared meanwhile; a stale batch
+      // must not touch the current counters or error state. Image preparation is owned from
+      // here, so it takes the current epoch rather than one a capability change has retired.
+      const [imageProblems, textProblems] = await Promise.all([
+        images.length > 0 && imageClearEpoch === imageClear
+          ? addImageFiles(images, conversation, imageAttachmentEpoch, imageClear)
+          : [],
+        texts.length > 0 && textAttachmentEpoch === textEpoch
+          ? addTextFiles(texts, conversation, textEpoch)
+          : [],
+      ]);
+      if (threadLoadedFor !== conversation || attachmentNoticeEpoch !== noticeEpoch) return;
+      const notice = [rejectedAttachmentNotice(partitioned), ...imageProblems, ...textProblems]
+        .filter(Boolean)
+        .join(" ");
+      if (notice) attachmentNotice = attachmentNotice ? `${attachmentNotice} ${notice}` : notice;
+    } finally {
+      attachmentAdmissionsInFlight -= 1;
     }
-    if (admitImages) void addImageFiles(images, conversation, imageEpoch);
-    if (admitTexts) void addTextFiles(texts, conversation, textEpoch);
   }
 
   // Drag & drop support for local attachments.
@@ -9530,12 +9617,11 @@ Output only the summary text, no preamble.`;
                 bind:this={textFileInput}
                 id="chat-file-input"
                 type="file"
-                accept={TEXT_ATTACHMENT_ACCEPT}
                 multiple
                 class="visually-hidden"
                 tabindex="-1"
                 aria-hidden="true"
-                disabled={isStreaming || attachedTextFiles.length >= MAX_ATTACHED_TEXT_FILES}
+                disabled={isStreaming || composerAttachmentsFull}
                 onchange={onTextFilesSelected}
               />
 
@@ -9577,8 +9663,8 @@ Output only the summary text, no preamble.`;
                   </button>
                 </div>
               {/if}
-              {#if textAttachmentError}
-                <div class="attachment-warning">{textAttachmentError}</div>
+              {#if attachmentNotice}
+                <div class="attachment-warning" role="status">{attachmentNotice}</div>
               {:else if textAttachmentProcessingCount > 0}
                 <div class="attachment-warning" role="status">
                   Preparing {textAttachmentProcessingCount} text or code file{ textAttachmentProcessingCount === 1 ? "" : "s" }…
@@ -9603,9 +9689,9 @@ Output only the summary text, no preamble.`;
                     type="button"
                     class="file-attach-btn"
                     onclick={() => textFileInput?.click()}
-                    title="Attach text or code files"
-                    aria-label="Attach text or code files"
-                    disabled={isStreaming || attachedTextFiles.length >= MAX_ATTACHED_TEXT_FILES}
+                    title="Attach files"
+                    aria-label="Attach files"
+                    disabled={isStreaming || composerAttachmentsFull}
                   >
                     <Icon name="folder" size={16} />
                   </button>
@@ -9630,7 +9716,7 @@ Output only the summary text, no preamble.`;
                 <button
                   type="submit"
                   aria-label="Send message"
-                  disabled={benchmarkRunInFlight || chatBlockedByLoadedSTT || !selectedModelSupportsChat || (!chatInput.trim() && attachedImages.length === 0 && attachedTextFiles.length === 0) || imageProcessingCount > 0 || textAttachmentProcessingCount > 0 || !canDispatchChat || isStreaming}
+                  disabled={benchmarkRunInFlight || chatBlockedByLoadedSTT || !selectedModelSupportsChat || (!chatInput.trim() && attachedImages.length === 0 && attachedTextFiles.length === 0) || imageProcessingCount > 0 || textAttachmentProcessingCount > 0 || attachmentClassifyingCount > 0 || !canDispatchChat || isStreaming}
                 >
                   {#if isStreaming}<Icon name="loader" size={15} class="spin" />{:else}<Icon name="send" size={15} />{/if}
                 </button>

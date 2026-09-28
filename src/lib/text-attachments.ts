@@ -23,12 +23,6 @@ const TEXT_EXTENSIONS = new Set([
 ]);
 const TEXT_NAMES = new Set(["dockerfile", "makefile"]);
 
-export const TEXT_ATTACHMENT_ACCEPT = [
-  ".txt", ".md", ".json", ".csv", ".tsv", ".log", ".yaml", ".yml", ".xml", ".html",
-  ".css", ".js", ".jsx", ".ts", ".tsx", ".py", ".rs", ".go", ".java", ".cs", ".c",
-  ".cc", ".cpp", ".h", ".hpp", ".ps1", ".sh", ".sql", ".toml", ".ini",
-].join(",");
-
 function safeFileName(name: string): string {
   return name
     .replace(/[\u0000-\u001f\u007f]/g, "")
