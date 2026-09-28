@@ -2802,6 +2802,7 @@ function toFileUrl (filePath) {
 
 async function getFoundryManager () {
   if (FoundryLocalManager) return FoundryLocalManager;
+  let normalImportError = null;
   try {
     // Try normal module resolution (works in dev when node_modules is present)
     const mod = await import('foundry-local-sdk');
@@ -2809,7 +2810,18 @@ async function getFoundryManager () {
     cachedSdkModule = mod;
     return FoundryLocalManager;
   } catch (err) {
-    log('warn', `Normal SDK import failed (${err?.message || err}), trying bundled resource paths`);
+    normalImportError = err;
+    // Installed builds ship the SDK beside the sidecar with no node_modules tree, so bare
+    // resolution *always* fails there. That is the expected packaged layout, not a fault:
+    // warning about it on every launch trains users to ignore real SDK load failures. Only
+    // a failure that is not "package is absent" is worth a warning here; if every candidate
+    // below also fails, the thrown error carries this one.
+    const expectedInPackagedLayout = err?.code === 'ERR_MODULE_NOT_FOUND'
+      || err?.code === 'MODULE_NOT_FOUND';
+    log(
+      expectedInPackagedLayout ? 'info' : 'warn',
+      `Bare SDK import unavailable (${err?.message || err}), trying bundled resource paths`,
+    );
   }
 
   // Packaged layout: sidecar next to foundry-local-sdk; dev uses node_modules
@@ -2835,7 +2847,7 @@ async function getFoundryManager () {
       log('warn', `Failed loading SDK from ${sdkEntry}: ${e?.message || e}`);
     }
   }
-  throw lastErr || new Error(
+  throw lastErr || normalImportError || new Error(
     'Could not load foundry-local-sdk from packaged resources. ' +
     'Expected foundry-local-sdk next to the sidecar or under node_modules.'
   );

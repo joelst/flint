@@ -264,6 +264,13 @@
     white-space: pre-wrap;
   }
 
+  .assistant-attachments {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 8px;
+  }
+
   .attached-image {
     display: block;
     width: auto;
