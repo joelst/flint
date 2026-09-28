@@ -95,11 +95,17 @@ describe('createSessionChatClient buffered chat', () => {
       async processRequest(request: any) {
         capturedRequest = request;
         return {
-          output: [{
-            type: 'message',
-            role: 'assistant',
-            parts: [{ type: 'text', text: 'A red square.', textType: 'default' }],
-          }],
+          output: [
+            Item.text('private reasoning', 'reasoning'),
+            {
+              type: 'message',
+              role: 'assistant',
+              parts: [
+                { type: 'text', text: 'private reasoning', textType: 'reasoning' },
+                { type: 'text', text: 'A red square.', textType: 'default' },
+              ],
+            },
+          ],
           usage: { promptTokens: 12, completionTokens: 4, totalTokens: 16 },
           finishReason: 'stop',
         };
@@ -547,6 +553,7 @@ describe('createSessionChatClient streaming disposal', () => {
       processStreamingRequest() {
         const iterable = {
           async *[Symbol.asyncIterator]() {
+            yield Item.text('private reasoning', 'reasoning');
             yield Item.text('red');
             yield Item.text(' square');
           },

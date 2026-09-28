@@ -95,7 +95,7 @@ function nativeUsage (usage) {
 function nativeText (output) {
   let text = '';
   for (const item of output || []) {
-    if (item?.type === 'text' && typeof item.text === 'string') {
+    if (item?.type === 'text' && item.textType !== 'reasoning' && typeof item.text === 'string') {
       text += item.text;
       continue;
     }
@@ -105,7 +105,9 @@ function nativeText (output) {
       continue;
     }
     for (const part of item.parts || []) {
-      if (part?.type === 'text' && typeof part.text === 'string') text += part.text;
+      if (part?.type === 'text' && part.textType !== 'reasoning' && typeof part.text === 'string') {
+        text += part.text;
+      }
     }
   }
   return text;
@@ -357,7 +359,7 @@ export function createSessionChatClient (chatModel, sdkModule, { onDiagnostic } 
             // generator unwinds and disposes the session.
             responsePromise?.catch(() => {});
             for await (const item of stream) {
-              if (item?.type !== 'text' || !item.text) continue;
+              if (item?.type !== 'text' || item.textType === 'reasoning' || !item.text) continue;
               if (multipart) {
                 receivedOutput = true;
                 yield {
