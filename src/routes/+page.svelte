@@ -323,6 +323,35 @@
    */
   function reportViewRenderFailure(view: string, error: unknown): void {
     console.error(`[Flint] ${view} failed to render`, error);
+    recordUncaughtError(`${view} failed to render`, error);
+  }
+
+  /**
+   * Last uncaught frontend error, shown as a banner.
+   *
+   * Release builds have no devtools, so an exception thrown while Svelte renders or flushes
+   * effects is completely invisible: the symptom is a nav click that appears to do nothing.
+   * Keeping the first one on screen is the only way a user can report what actually broke.
+   */
+  let uncaughtError = $state<string | null>(null);
+
+  function recordUncaughtError(context: string, error: unknown): void {
+    // Only the first is kept: a render failure usually repeats on every flush, and replacing
+    // the message each time would churn the banner and bury the original cause.
+    if (uncaughtError) return;
+    const detail = error instanceof Error
+      ? `${error.name}: ${error.message}`
+      : String(error ?? "unknown error");
+    uncaughtError = `${context} — ${detail}`;
+  }
+
+  function handleWindowError(event: ErrorEvent): void {
+    const where = event.filename ? ` (${event.filename}:${event.lineno})` : "";
+    recordUncaughtError(`Unexpected error${where}`, event.error ?? event.message);
+  }
+
+  function handleUnhandledRejection(event: PromiseRejectionEvent): void {
+    recordUncaughtError("Unhandled background failure", event.reason);
   }
 
   // Disabling the preview flag while the Benchmark view is open must navigate away immediately
@@ -5861,6 +5890,8 @@ updateStateFromSdk();
 
     // Register lifecycle listeners before any fallible storage work, so a storage failure
     // can never leave the app without a keyboard handler or close-to-tray hook.
+    window.addEventListener('error', handleWindowError);
+    window.addEventListener('unhandledrejection', handleUnhandledRejection);
     document.addEventListener('keydown', handleGlobalKeydown);
     // Native quit does not reach handleCloseRequested, so treat losing the window as a cue to
     // write. See flushOnHide.
@@ -5924,6 +5955,8 @@ updateStateFromSdk();
       }
       if (unsubscribe) unsubscribe();
       document.removeEventListener('keydown', handleGlobalKeydown);
+      window.removeEventListener('error', handleWindowError);
+      window.removeEventListener('unhandledrejection', handleUnhandledRejection);
       unlistenCloseRequested?.();
       unlistenQuitFlush?.();
       document.removeEventListener('visibilitychange', flushOnHide);
@@ -8147,6 +8180,16 @@ Output only the summary text, no preamble.`;
         <div class="storage-notice" class:caution={exportNoticeTone === "caution"} role="status">
           <span class="storage-error-text">{exportNotice}</span>
           <button type="button" class="storage-error-dismiss" onclick={() => (exportNotice = null)} aria-label="Dismiss export message">
+            Dismiss
+          </button>
+        </div>
+      {/if}
+      {#if uncaughtError}
+        <div class="storage-error" role="alert">
+          <span class="storage-error-text">
+            Something went wrong in the interface. {uncaughtError}
+          </span>
+          <button type="button" class="storage-error-dismiss" onclick={() => (uncaughtError = null)} aria-label="Dismiss error">
             Dismiss
           </button>
         </div>
