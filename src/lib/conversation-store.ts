@@ -535,15 +535,39 @@ export interface ContentNormalization {
 }
 
 /**
+ * True for a single content part stored where an array of parts belongs.
+ *
+ * Shared by the archive normalizer, the request builder, and the renderer so all three
+ * agree on what is repairable: what the view shows is what is persisted and what is sent.
+ * A string `type` is the whole test — recognizing the specific type is each caller's job,
+ * and an object without one is not a part at all (a legacy `{text: 'hi'}` stays rejected).
+ */
+export function isBareContentPart(value: unknown): value is ContentPart {
+  return typeof value === 'object'
+    && value !== null
+    && !Array.isArray(value)
+    && typeof (value as { type?: unknown }).type === 'string';
+}
+
+/**
  * Reduce content to the parts we can store and re-render, reporting anything lost.
  *
  * An empty array is preserved as an empty array rather than rejected: `content: ''` survives,
  * so `content: []` must too — the two express the same thing, and deleting the message is a
  * far worse outcome than storing an empty turn.
+ *
+ * By the same rule, a single part object stored where an array belongs is repaired into a
+ * one-element array rather than rejected. `null` here deletes the message, and a record that
+ * plainly carries one part is not worth deleting. Repairing it at the archive boundary also
+ * keeps rendering, persistence, and inference agreeing on the same content, instead of the
+ * view showing a part that the next load would drop.
  */
 export function normalizeContentDetailed(raw: unknown): ContentNormalization {
   if (typeof raw === 'string') return { content: raw, droppedParts: 0, unrecognizedParts: 0 };
-  if (!Array.isArray(raw)) return { content: null, droppedParts: 0, unrecognizedParts: 0 };
+  if (!Array.isArray(raw)) {
+    if (isBareContentPart(raw)) return normalizeContentDetailed([raw]);
+    return { content: null, droppedParts: 0, unrecognizedParts: 0 };
+  }
 
   const parts: ContentPart[] = [];
   let dropped = 0;

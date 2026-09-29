@@ -1,4 +1,4 @@
-import type { MessageContent } from "./conversation-store";
+import { isBareContentPart, type MessageContent } from "./conversation-store";
 import {
   MAX_CONVERSATION_PREVIEW_IMAGES,
   MAX_CONVERSATION_PREVIEW_PIXELS,
@@ -21,10 +21,17 @@ export type RenderableMessageAttachment = Exclude<RenderableMessagePart, { type:
  * helpers feed a `$derived` read by the whole chat view, and a derived that throws takes the
  * entire Playground down rather than degrading one message — so anything that is not a string
  * or an array renders as no parts at all.
+ *
+ * A bare part object is the one non-array shape worth recovering, and it is recovered
+ * everywhere rather than only here: `normalizeContentDetailed` repairs it into a
+ * one-element array on load and `reducePromptParts` sends it, so what renders is also
+ * what persists and what the model receives.
  */
 function contentParts(content: unknown): unknown[] {
   if (typeof content === "string") return [{ type: "text", text: content }];
-  return Array.isArray(content) ? content : [];
+  if (Array.isArray(content)) return content;
+  if (isBareContentPart(content)) return [content];
+  return [];
 }
 
 // Parsing decodes the whole payload (a JPEG frame header can follow any amount of metadata),
