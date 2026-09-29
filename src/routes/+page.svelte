@@ -26,6 +26,7 @@
     quitRuntime,
     quitDesktopApp,
     relaunchApp,
+    openDevTools,
     subscribeQuitFlush,
     withServiceTransition,
     downloadModel,
@@ -995,6 +996,21 @@
   // feature (Arena PR4A) getting its first UI surface here — gated so it never appears for
   // users who haven't opted in.
   let benchmarkPreviewEnabled = $state(false);
+
+  // Settings: exposes the Open developer tools action and its shortcut. Release builds
+  // compile the inspector in, so the platform inspector shortcut keeps working regardless;
+  // this only controls Flint's own entry points, it does not disable the inspector.
+  let devToolsEnabled = $state(false);
+  let devToolsError = $state<string | null>(null);
+
+  async function openDeveloperTools() {
+    devToolsError = null;
+    try {
+      await openDevTools();
+    } catch (e) {
+      devToolsError = e instanceof Error ? e.message : String(e);
+    }
+  }
 
   // Benchmark Preview: run lifecycle state, kept at this top level (not inside
   // BenchmarkPreview.svelte) so an in-progress run keeps executing if the user navigates to
@@ -3373,6 +3389,7 @@
           networkBindAddress,
           keepServiceInBackground,
           benchmarkPreviewEnabled,
+          devToolsEnabled,
         }),
       );
       // Persist immediately so a failure is not sticky. Assigning the same value is a no-op in
@@ -3484,6 +3501,7 @@
         }
         if (typeof data.keepServiceInBackground === 'boolean') keepServiceInBackground = data.keepServiceInBackground;
         if (typeof data.benchmarkPreviewEnabled === 'boolean') benchmarkPreviewEnabled = data.benchmarkPreviewEnabled;
+        if (typeof data.devToolsEnabled === 'boolean') devToolsEnabled = data.devToolsEnabled;
         if (typeof data.defaultChatAlias === 'string') defaultChatAlias = data.defaultChatAlias;
         if (typeof data.defaultAudioAlias === 'string') defaultAudioAlias = data.defaultAudioAlias;
         if (typeof data.networkPort === 'number' && data.networkPort >= 1024 && data.networkPort <= 65535) {
@@ -5033,6 +5051,19 @@ updateStateFromSdk();
     }
     if (e.key === 'Escape' && showShortcutsHelp) {
       showShortcutsHelp = false;
+      return;
+    }
+
+    // Mirrors the platform inspector shortcut: Ctrl+Shift+I on Windows/Linux,
+    // ⌘⌥I on macOS. Opt-in, because opening the inspector is not something to
+    // trip over mid-conversation.
+    if (
+      devToolsEnabled &&
+      (e.key === 'I' || e.key === 'i' || e.code === 'KeyI') &&
+      (isMac ? e.metaKey && e.altKey : e.ctrlKey && e.shiftKey)
+    ) {
+      e.preventDefault();
+      void openDeveloperTools();
       return;
     }
 
@@ -11709,6 +11740,41 @@ Output only the summary text, no preamble.`;
           </div>
 
           <div class="settings-section">
+            <h3>Developer</h3>
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-name" id="dev-tools-label">Developer tools</span>
+                <span class="setting-desc">
+                  Shows a button for opening the webview inspector, so a console is available
+                  when something in the interface misbehaves. This only controls Flint's own
+                  entry points — the inspector is built in, so {isMac ? '⌘⌥I' : 'F12 and Ctrl+Shift+I'}
+                  {isMac ? 'works' : 'work'} either way. Close it from the inspector window.
+                </span>
+              </div>
+              <label class="toggle-switch">
+                <input
+                  type="checkbox"
+                  bind:checked={devToolsEnabled}
+                  onchange={persistChatCheckbox((v) => { devToolsEnabled = v; if (!v) devToolsError = null; })}
+                  aria-labelledby="dev-tools-label"
+                />
+                <span class="toggle-track"></span>
+              </label>
+            </div>
+            {#if devToolsEnabled}
+              <div class="setting-row">
+                <div class="setting-info">
+                  <span class="setting-name">Open developer tools</span>
+                  {#if devToolsError}
+                    <span class="setting-desc about-bad">Could not open: {devToolsError}</span>
+                  {/if}
+                </div>
+                <button type="button" class="tiny" onclick={() => openDeveloperTools()}>Open</button>
+              </div>
+            {/if}
+          </div>
+
+          <div class="settings-section">
             <h3>Appearance</h3>
             <div class="setting-row">
               <div class="setting-info">
@@ -11838,6 +11904,9 @@ Output only the summary text, no preamble.`;
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+,</td><td>Settings</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+B</td><td>Toggle sidebar</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+Space</td><td>Toggle dictation</td></tr>
+            {#if devToolsEnabled}
+              <tr><td class="sk">{isMac ? '⌘⌥I' : 'Ctrl+Shift+I'}</td><td>Open developer tools</td></tr>
+            {/if}
             <tr><td class="sk">?</td><td>Show this help</td></tr>
             <tr><td class="sk">Escape</td><td>Close this dialog</td></tr>
           </tbody>
