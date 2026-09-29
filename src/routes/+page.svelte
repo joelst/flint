@@ -9312,289 +9312,289 @@ Output only the summary text, no preamble.`;
                 {/if}
               </div>
 
-              <div class="chat-controls">
-                {#snippet personaControl()}
-                <!-- Persona selector (replaces direct system prompt input) -->
-                <div class="persona-control">
-                  {#if currentPersonaName}
-                    <span class="persona-chip" title="Active persona">{currentPersonaName}</span>
-                  {/if}
-                  <button
-                    type="button"
-                    class="persona-btn"
-                    title="Choose persona (system prompt preset)"
-                    disabled={isStreaming}
-                    bind:this={personaBtnEl}
-                    onclick={() => {
-                      const next = !showPersonaMenu;
-                      showPersonaMenu = next;
-                      if (next) queueMicrotask(positionPersonaMenu);
-                    }}
-                  >
-                    <Icon name="masks" size={16} label="Choose persona" />
-                  </button>
+              {#snippet personaControl()}
+              <!-- Persona selector (replaces direct system prompt input) -->
+              <div class="persona-control">
+                {#if currentPersonaName}
+                  <span class="persona-chip" title="Active persona">{currentPersonaName}</span>
+                {/if}
+                <button
+                  type="button"
+                  class="persona-btn"
+                  title="Choose persona (system prompt preset)"
+                  disabled={isStreaming}
+                  bind:this={personaBtnEl}
+                  onclick={() => {
+                    const next = !showPersonaMenu;
+                    showPersonaMenu = next;
+                    if (next) queueMicrotask(positionPersonaMenu);
+                  }}
+                >
+                  <Icon name="masks" size={16} label="Choose persona" />
+                </button>
 
-                  {#if showPersonaMenu}
-                    <div
-                      class="persona-menu"
-                      class:up={personaMenuDirection === 'up'}
-                      role="menu"
-                      tabindex="-1"
-                      style="position: fixed; top: {personaMenuPos.top}px; left: {personaMenuPos.left}px;"
-                    >
-                      <div class="persona-menu-header">
-                        Choose persona
-                        <span class="hint">({currentModelTags.join(", ")} model)</span>
-                      </div>
-                      <div class="persona-menu-items">
-                        {#each sortedPersonasForUI as p (p.id)}
-                          <button
-                            type="button"
-                            class="persona-item"
-                            class:matches={scorePersonaForModel(p, currentModelTags) > 1.5}
-                            onclick={() => {
-                              commitChatSettings({ systemPrompt: p.prompt });
-                              showPersonaMenu = false;
-                              statusMessage = `Persona: ${p.name}`;
-                            }}
-                          >
-                            <span class="p-name">{p.name}</span>
-                            {#if p.description}
-                              <span class="p-desc">{p.description}</span>
-                            {/if}
-                            {#if p.tags?.length}
-                              <span class="p-tags">{p.tags.join(" ")}</span>
-                            {/if}
-                          </button>
-                        {/each}
-                      </div>
-                      <div class="persona-menu-footer">
-                        <button type="button" class="manage-link" onclick={() => { showPersonaMenu = false; showPersonaManager = true; }}>
-                          Manage personas…
+                {#if showPersonaMenu}
+                  <div
+                    class="persona-menu"
+                    class:up={personaMenuDirection === 'up'}
+                    role="menu"
+                    tabindex="-1"
+                    style="position: fixed; top: {personaMenuPos.top}px; left: {personaMenuPos.left}px;"
+                  >
+                    <div class="persona-menu-header">
+                      Choose persona
+                      <span class="hint">({currentModelTags.join(", ")} model)</span>
+                    </div>
+                    <div class="persona-menu-items">
+                      {#each sortedPersonasForUI as p (p.id)}
+                        <button
+                          type="button"
+                          class="persona-item"
+                          class:matches={scorePersonaForModel(p, currentModelTags) > 1.5}
+                          onclick={() => {
+                            commitChatSettings({ systemPrompt: p.prompt });
+                            showPersonaMenu = false;
+                            statusMessage = `Persona: ${p.name}`;
+                          }}
+                        >
+                          <span class="p-name">{p.name}</span>
+                          {#if p.description}
+                            <span class="p-desc">{p.description}</span>
+                          {/if}
+                          {#if p.tags?.length}
+                            <span class="p-tags">{p.tags.join(" ")}</span>
+                          {/if}
                         </button>
-                      </div>
+                      {/each}
                     </div>
-                  {/if}
-                </div>
-                {/snippet}
+                    <div class="persona-menu-footer">
+                      <button type="button" class="manage-link" onclick={() => { showPersonaMenu = false; showPersonaManager = true; }}>
+                        Manage personas…
+                      </button>
+                    </div>
+                  </div>
+                {/if}
+              </div>
+              {/snippet}
 
-                {#snippet generationSettings()}
-                <!-- Context management -->
-                <div class="context-control">
-                  <label for="ctx-select" title={`How many recent turns are sent with the next message (${MIN_CONTEXT_TURNS}-${MAX_CONTEXT_TURNS})`}>Context</label>
-                  <span class="context-range-bound">{MIN_CONTEXT_TURNS}</span>
-                  <input
-                    type="range"
-                    id="ctx-select"
-                    min={MIN_CONTEXT_TURNS}
-                    max={MAX_CONTEXT_TURNS}
-                    step="1"
-                    value={clampContextTurns(contextTurns)}
-                    oninput={(e) => {
-                      contextTurns = Number((e.currentTarget as HTMLInputElement).value);
-                    }}
-                    onchange={(e) =>
-                      commitChatSettings({
-                        contextTurns: Number((e.currentTarget as HTMLInputElement).value),
-                      })}
-                    title={`Keep last N turns (${MIN_CONTEXT_TURNS}-${MAX_CONTEXT_TURNS}). Model context: ${currentModelContextLength ? currentModelContextLength + ' tokens' : 'unknown'}. Lower = faster & lower energy.`}
-                    disabled={isStreaming}
-                  />
-                  <span class="context-range-bound">{MAX_CONTEXT_TURNS}</span>
-                  <span class="context-turns-value">{clampContextTurns(contextTurns)} turns</span>
-                  <span
-                    class="context-estimate"
-                    title="Rough token count for this turn. Smaller means a faster, cheaper reply."
-                  >
-                    ~{estimatedContextTokens} tokens
-                    {#if contextUsagePercent !== null}
-                      <span class="usage-pct" class:high={contextUsagePercent > 70}>({contextUsagePercent}%)</span>
-                    {/if}
-                  </span>
-                  {#if currentModelContextLength}
-                    <span class="context-model-info" title="Model's reported context window">
-                      / ~{Math.round(currentModelContextLength / 1024)}k
-                    </span>
-                    {#if recommendedMaxTurns && Math.abs(contextTurns - recommendedMaxTurns) > 1}
-                      <button
-                        type="button"
-                        class="recommend-btn"
-                        onclick={applyRecommendedContext}
-                        title={`Use recommended ${recommendedMaxTurns} turns for this model`}
-                      >Recommended: {recommendedMaxTurns}</button>
-                    {/if}
-                  {/if}
-
-                  <!-- Usage meter -->
+              {#snippet generationSettings()}
+              <!-- Context management -->
+              <div class="context-control">
+                <label for="ctx-select" title={`How many recent turns are sent with the next message (${MIN_CONTEXT_TURNS}-${MAX_CONTEXT_TURNS})`}>Context</label>
+                <span class="context-range-bound">{MIN_CONTEXT_TURNS}</span>
+                <input
+                  type="range"
+                  id="ctx-select"
+                  min={MIN_CONTEXT_TURNS}
+                  max={MAX_CONTEXT_TURNS}
+                  step="1"
+                  value={clampContextTurns(contextTurns)}
+                  oninput={(e) => {
+                    contextTurns = Number((e.currentTarget as HTMLInputElement).value);
+                  }}
+                  onchange={(e) =>
+                    commitChatSettings({
+                      contextTurns: Number((e.currentTarget as HTMLInputElement).value),
+                    })}
+                  title={`Keep last N turns (${MIN_CONTEXT_TURNS}-${MAX_CONTEXT_TURNS}). Model context: ${currentModelContextLength ? currentModelContextLength + ' tokens' : 'unknown'}. Lower = faster & lower energy.`}
+                  disabled={isStreaming}
+                />
+                <span class="context-range-bound">{MAX_CONTEXT_TURNS}</span>
+                <span class="context-turns-value">{clampContextTurns(contextTurns)} turns</span>
+                <span
+                  class="context-estimate"
+                  title="Rough token count for this turn. Smaller means a faster, cheaper reply."
+                >
+                  ~{estimatedContextTokens} tokens
                   {#if contextUsagePercent !== null}
-                    <div class="context-meter" title="Approximate % of model context used by current trimmed history">
-                      <div class="meter-bar">
-                        <div
-                          class="meter-fill"
-                          style="width: {contextUsagePercent}%"
-                          class:warn={contextUsagePercent > 70}
-                          class:danger={contextUsagePercent > 85}
-                        ></div>
-                      </div>
-                    </div>
-                    {#if contextUsagePercent > 70}
-                      <span class="context-warn" title="High context usage may slow responses and use more power. Consider trimming, summarizing, or lowering turns.">
-                        <Icon name="warning" size={13} /> High
-                      </span>
-                    {/if}
+                    <span class="usage-pct" class:high={contextUsagePercent > 70}>({contextUsagePercent}%)</span>
                   {/if}
-                </div>
+                </span>
+                {#if currentModelContextLength}
+                  <span class="context-model-info" title="Model's reported context window">
+                    / ~{Math.round(currentModelContextLength / 1024)}k
+                  </span>
+                  {#if recommendedMaxTurns && Math.abs(contextTurns - recommendedMaxTurns) > 1}
+                    <button
+                      type="button"
+                      class="recommend-btn"
+                      onclick={applyRecommendedContext}
+                      title={`Use recommended ${recommendedMaxTurns} turns for this model`}
+                    >Recommended: {recommendedMaxTurns}</button>
+                  {/if}
+                {/if}
 
-                <!-- Generation parameters: how sampling settings affect model output -->
-                <div class="genparams-panel">
-                      <label for="genparams-temperature" title="Higher = more varied output (0-2)">Temperature</label>
-                      <input
-                        type="range"
-                        id="genparams-temperature"
-                        min="0"
-                        max="2"
-                        step="0.05"
-                        value={temperature}
-                        oninput={(e) => {
-                          temperature = Number((e.currentTarget as HTMLInputElement).value);
-                        }}
-                        onchange={(e) =>
-                          commitChatSettings({
-                            temperature: Number((e.currentTarget as HTMLInputElement).value),
-                          })}
-                        disabled={isStreaming}
-                      />
-                      <span class="genparams-value">{temperature.toFixed(2)}</span>
+                <!-- Usage meter -->
+                {#if contextUsagePercent !== null}
+                  <div class="context-meter" title="Approximate % of model context used by current trimmed history">
+                    <div class="meter-bar">
+                      <div
+                        class="meter-fill"
+                        style="width: {contextUsagePercent}%"
+                        class:warn={contextUsagePercent > 70}
+                        class:danger={contextUsagePercent > 85}
+                      ></div>
+                    </div>
+                  </div>
+                  {#if contextUsagePercent > 70}
+                    <span class="context-warn" title="High context usage may slow responses and use more power. Consider trimming, summarizing, or lowering turns.">
+                      <Icon name="warning" size={13} /> High
+                    </span>
+                  {/if}
+                {/if}
+              </div>
 
-                      <label for="genparams-maxtokens" title="Maximum tokens generated per reply">Max tokens</label>
-                      <input
-                        type="number"
-                        id="genparams-maxtokens"
-                        min="1"
-                        step="1"
-                        value={maxTokens}
-                        oninput={(e) => {
-                          const value = Number((e.currentTarget as HTMLInputElement).value);
-                          if (Number.isInteger(value) && value > 0) maxTokens = value;
-                        }}
-                        onchange={(e) => {
-                          const value = Number((e.currentTarget as HTMLInputElement).value);
-                          if (Number.isInteger(value) && value > 0) {
-                            commitChatSettings({ maxTokens: value });
-                          } else {
-                            e.currentTarget.value = String(maxTokens);
-                          }
-                        }}
-                        disabled={isStreaming}
-                      />
+              <!-- Generation parameters: how sampling settings affect model output -->
+              <div class="genparams-panel">
+                    <label for="genparams-temperature" title="Higher = more varied output (0-2)">Temperature</label>
+                    <input
+                      type="range"
+                      id="genparams-temperature"
+                      min="0"
+                      max="2"
+                      step="0.05"
+                      value={temperature}
+                      oninput={(e) => {
+                        temperature = Number((e.currentTarget as HTMLInputElement).value);
+                      }}
+                      onchange={(e) =>
+                        commitChatSettings({
+                          temperature: Number((e.currentTarget as HTMLInputElement).value),
+                        })}
+                      disabled={isStreaming}
+                    />
+                    <span class="genparams-value">{temperature.toFixed(2)}</span>
 
-                      <label for="genparams-topp" title="Nucleus sampling threshold (0-1]">Top-p</label>
-                      <input
-                        type="range"
-                        id="genparams-topp"
-                        min="0.01"
-                        max="1"
-                        step="0.01"
-                        value={topP}
-                        oninput={(e) => {
-                          topP = Number((e.currentTarget as HTMLInputElement).value);
-                        }}
-                        onchange={(e) =>
-                          commitChatSettings({
-                            topP: Number((e.currentTarget as HTMLInputElement).value),
-                          })}
-                        disabled={isStreaming}
-                      />
-                      <span class="genparams-value">{topP.toFixed(2)}</span>
+                    <label for="genparams-maxtokens" title="Maximum tokens generated per reply">Max tokens</label>
+                    <input
+                      type="number"
+                      id="genparams-maxtokens"
+                      min="1"
+                      step="1"
+                      value={maxTokens}
+                      oninput={(e) => {
+                        const value = Number((e.currentTarget as HTMLInputElement).value);
+                        if (Number.isInteger(value) && value > 0) maxTokens = value;
+                      }}
+                      onchange={(e) => {
+                        const value = Number((e.currentTarget as HTMLInputElement).value);
+                        if (Number.isInteger(value) && value > 0) {
+                          commitChatSettings({ maxTokens: value });
+                        } else {
+                          e.currentTarget.value = String(maxTokens);
+                        }
+                      }}
+                      disabled={isStreaming}
+                    />
 
-                      <label for="genparams-topk" title="Restrict sampling to the top K candidate tokens">Top-k</label>
-                      <input
-                        type="number"
-                        id="genparams-topk"
-                        min="1"
-                        step="1"
-                        value={topK}
-                        oninput={(e) => {
-                          const value = Number((e.currentTarget as HTMLInputElement).value);
-                          if (Number.isInteger(value) && value > 0) topK = value;
-                        }}
-                        onchange={(e) => {
-                          const value = Number((e.currentTarget as HTMLInputElement).value);
-                          if (Number.isInteger(value) && value > 0) {
-                            commitChatSettings({ topK: value });
-                          } else {
-                            e.currentTarget.value = String(topK);
-                          }
-                        }}
-                        disabled={isStreaming}
-                      />
+                    <label for="genparams-topp" title="Nucleus sampling threshold (0-1]">Top-p</label>
+                    <input
+                      type="range"
+                      id="genparams-topp"
+                      min="0.01"
+                      max="1"
+                      step="0.01"
+                      value={topP}
+                      oninput={(e) => {
+                        topP = Number((e.currentTarget as HTMLInputElement).value);
+                      }}
+                      onchange={(e) =>
+                        commitChatSettings({
+                          topP: Number((e.currentTarget as HTMLInputElement).value),
+                        })}
+                      disabled={isStreaming}
+                    />
+                    <span class="genparams-value">{topP.toFixed(2)}</span>
 
-                      <label for="genparams-freqpenalty" title="Penalize tokens by how often they've already appeared (-2 to 2)">Frequency penalty</label>
-                      <input
-                        type="range"
-                        id="genparams-freqpenalty"
-                        min="-2"
-                        max="2"
-                        step="0.1"
-                        value={frequencyPenalty}
-                        oninput={(e) => {
-                          frequencyPenalty = Number((e.currentTarget as HTMLInputElement).value);
-                        }}
-                        onchange={(e) =>
-                          commitChatSettings({
-                            frequencyPenalty: Number((e.currentTarget as HTMLInputElement).value),
-                          })}
-                        disabled={isStreaming}
-                      />
-                      <span class="genparams-value">{frequencyPenalty.toFixed(1)}</span>
+                    <label for="genparams-topk" title="Restrict sampling to the top K candidate tokens">Top-k</label>
+                    <input
+                      type="number"
+                      id="genparams-topk"
+                      min="1"
+                      step="1"
+                      value={topK}
+                      oninput={(e) => {
+                        const value = Number((e.currentTarget as HTMLInputElement).value);
+                        if (Number.isInteger(value) && value > 0) topK = value;
+                      }}
+                      onchange={(e) => {
+                        const value = Number((e.currentTarget as HTMLInputElement).value);
+                        if (Number.isInteger(value) && value > 0) {
+                          commitChatSettings({ topK: value });
+                        } else {
+                          e.currentTarget.value = String(topK);
+                        }
+                      }}
+                      disabled={isStreaming}
+                    />
 
-                      <label for="genparams-prespenalty" title="Penalize tokens that have already appeared at all (-2 to 2)">Presence penalty</label>
-                      <input
-                        type="range"
-                        id="genparams-prespenalty"
-                        min="-2"
-                        max="2"
-                        step="0.1"
-                        value={presencePenalty}
-                        oninput={(e) => {
-                          presencePenalty = Number((e.currentTarget as HTMLInputElement).value);
-                        }}
-                        onchange={(e) =>
-                          commitChatSettings({
-                            presencePenalty: Number((e.currentTarget as HTMLInputElement).value),
-                          })}
-                        disabled={isStreaming}
-                      />
-                      <span class="genparams-value">{presencePenalty.toFixed(1)}</span>
+                    <label for="genparams-freqpenalty" title="Penalize tokens by how often they've already appeared (-2 to 2)">Frequency penalty</label>
+                    <input
+                      type="range"
+                      id="genparams-freqpenalty"
+                      min="-2"
+                      max="2"
+                      step="0.1"
+                      value={frequencyPenalty}
+                      oninput={(e) => {
+                        frequencyPenalty = Number((e.currentTarget as HTMLInputElement).value);
+                      }}
+                      onchange={(e) =>
+                        commitChatSettings({
+                          frequencyPenalty: Number((e.currentTarget as HTMLInputElement).value),
+                        })}
+                      disabled={isStreaming}
+                    />
+                    <span class="genparams-value">{frequencyPenalty.toFixed(1)}</span>
 
-                      <label for="genparams-seed" title="Fixed sampling seed for reproducible output; leave blank for non-deterministic generation">Seed</label>
-                      <input
-                        type="number"
-                        id="genparams-seed"
-                        step="1"
-                        placeholder="random"
-                        value={randomSeed ?? ''}
-                        oninput={(e) => {
-                          const raw = (e.currentTarget as HTMLInputElement).value.trim();
-                          if (raw === '') { randomSeed = null; return; }
-                          const value = Number(raw);
-                          if (Number.isSafeInteger(value)) randomSeed = value;
-                        }}
-                        onchange={(e) => {
-                          const raw = (e.currentTarget as HTMLInputElement).value.trim();
-                          if (raw === '') { commitChatSettings({ randomSeed: null }); return; }
-                          const value = Number(raw);
-                          if (Number.isSafeInteger(value)) {
-                            commitChatSettings({ randomSeed: value });
-                          } else {
-                            e.currentTarget.value = randomSeed == null ? '' : String(randomSeed);
-                          }
-                        }}
-                        disabled={isStreaming}
-                      />
-                </div>
-                {/snippet}
+                    <label for="genparams-prespenalty" title="Penalize tokens that have already appeared at all (-2 to 2)">Presence penalty</label>
+                    <input
+                      type="range"
+                      id="genparams-prespenalty"
+                      min="-2"
+                      max="2"
+                      step="0.1"
+                      value={presencePenalty}
+                      oninput={(e) => {
+                        presencePenalty = Number((e.currentTarget as HTMLInputElement).value);
+                      }}
+                      onchange={(e) =>
+                        commitChatSettings({
+                          presencePenalty: Number((e.currentTarget as HTMLInputElement).value),
+                        })}
+                      disabled={isStreaming}
+                    />
+                    <span class="genparams-value">{presencePenalty.toFixed(1)}</span>
 
+                    <label for="genparams-seed" title="Fixed sampling seed for reproducible output; leave blank for non-deterministic generation">Seed</label>
+                    <input
+                      type="number"
+                      id="genparams-seed"
+                      step="1"
+                      placeholder="random"
+                      value={randomSeed ?? ''}
+                      oninput={(e) => {
+                        const raw = (e.currentTarget as HTMLInputElement).value.trim();
+                        if (raw === '') { randomSeed = null; return; }
+                        const value = Number(raw);
+                        if (Number.isSafeInteger(value)) randomSeed = value;
+                      }}
+                      onchange={(e) => {
+                        const raw = (e.currentTarget as HTMLInputElement).value.trim();
+                        if (raw === '') { commitChatSettings({ randomSeed: null }); return; }
+                        const value = Number(raw);
+                        if (Number.isSafeInteger(value)) {
+                          commitChatSettings({ randomSeed: value });
+                        } else {
+                          e.currentTarget.value = randomSeed == null ? '' : String(randomSeed);
+                        }
+                      }}
+                      disabled={isStreaming}
+                    />
+              </div>
+              {/snippet}
+
+              <div class="chat-controls">
                 <!-- URL fetch chips: appear when the user types/pastes a URL -->
                 {#if detectedUrls.length > 0 || pendingUrlFetches.length > 0}
                   <div class="url-fetch-bar">
