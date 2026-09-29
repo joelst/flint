@@ -194,6 +194,7 @@
   } from "$lib/conversation-settings";
   import { isFetchableUrl, detectFetchableUrls } from "$lib/url-chips";
   import { conversationImagePreviewPartIndexes } from "$lib/message-rendering";
+  import { estimateTokensForMessages } from "$lib/token-estimate";
   import {
     normalizeForAlternatingChat,
     isEmptyAssistantPlaceholder,
@@ -2011,8 +2012,11 @@
    * conversation is empty" and "nothing loaded yet", and only the first may be written back.
    */
   let threadLoadedFor = $state<string | null>(null);
+  // `message?.content`: a record from a damaged archive can be null, and this feeds a
+  // `$derived` read by the whole chat view — a throw here blanks the Playground rather
+  // than degrading one message.
   let chatImagePreviewPartIndexes = $derived.by(() =>
-    conversationImagePreviewPartIndexes(chatMessages.map((message: any) => message.content)),
+    conversationImagePreviewPartIndexes(chatMessages.map((message: any) => message?.content)),
   );
   const currentConversationId = $derived(conversationArchive.activeId);
   const conversations = $derived(
@@ -6793,44 +6797,6 @@ updateStateFromSdk();
       })),
       { systemInstruction: effectiveSystem, rejectInvalidTextAttachments },
     );
-  }
-
-  /**
-   * === Step 3: Better token counting ===
-   * Improved heuristic + can be upgraded with sidecar tokenizer in future.
-   * We use a blended heuristic that works reasonably for English + code.
-   */
-  function estimateTokens(text: string): number {
-    if (!text) return 0;
-    const chars = text.length;
-    const words = text.trim().split(/\s+/).length;
-    // Blended heuristic:
-    // - ~3.8-4.2 chars per token common for many tokenizers
-    // - Word-based backup: ~1.3-1.4 tokens per word for English
-    const charBased = chars / 3.9;
-    const wordBased = words * 1.33;
-    return Math.ceil(Math.max(charBased, wordBased));
-  }
-
-  function estimateTokensForMessages(msgs: any[]): number {
-    let total = 0;
-    for (const m of msgs) {
-      if (Array.isArray(m.content)) {
-        // Vision content: sum text parts + rough overhead per image (approx for 0.3)
-        for (const part of m.content) {
-          if (part.type === 'text' && typeof part.text === 'string') {
-            total += estimateTokens(part.text);
-          } else if (part.type === 'image_url') {
-            total += 500; // rough overhead per image (base64 + encoding)
-          }
-        }
-      } else {
-        const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
-        total += estimateTokens(text);
-      }
-    }
-    // Add a bit for roles / formatting overhead
-    return total + Math.ceil(msgs.length * 1.5);
   }
 
   /**

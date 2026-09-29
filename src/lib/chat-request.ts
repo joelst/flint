@@ -12,6 +12,7 @@
  */
 
 import {
+  isBareContentPart,
   isPromptRole,
   supportedParts,
   type ImagePart,
@@ -78,7 +79,12 @@ function reducePromptParts(
     const text = content.trim();
     return { parts: text ? [{ type: 'text', text }] : [], rejectedTextAttachments: 0 };
   }
-  if (!Array.isArray(content)) return { parts: [], rejectedTextAttachments: 0 };
+  if (!Array.isArray(content)) {
+    // A single part stored where an array belongs is repaired rather than dropped, so the
+    // archive, the renderer, and this request builder agree on the same content.
+    if (!isBareContentPart(content)) return { parts: [], rejectedTextAttachments: 0 };
+    return reducePromptParts([content], textAttachmentBudget);
+  }
   const parts: PromptPart[] = [];
   let rejectedTextAttachments = 0;
   // `supportedParts` removes anything a newer build stored that this one cannot describe to a

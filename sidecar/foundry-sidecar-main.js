@@ -42,6 +42,7 @@ import {
 import { activityCandidateKeys } from './activity-booking.js';
 import { looksLikeSpeech } from './model-classification.js';
 import { assertSpeechModelSupported, transcribeSpeech } from './speech-engine.js';
+import { isPackageAbsentError } from './sdk-import-diagnosis.js';
 import { extractNemotronPcm } from './wav-pcm.js';
 import { waitUntilIdle } from './monotonic-wait.js';
 import {
@@ -2815,9 +2816,9 @@ async function getFoundryManager () {
     // resolution *always* fails there. That is the expected packaged layout, not a fault:
     // warning about it on every launch trains users to ignore real SDK load failures. Only
     // a failure that is not "package is absent" is worth a warning here; if every candidate
-    // below also fails, the thrown error carries this one.
-    const expectedInPackagedLayout = err?.code === 'ERR_MODULE_NOT_FOUND'
-      || err?.code === 'MODULE_NOT_FOUND';
+    // below also fails, the thrown error carries this one. See `sdk-import-diagnosis.js`
+    // for why the error code alone is not enough to make that call.
+    const expectedInPackagedLayout = isPackageAbsentError(err, 'foundry-local-sdk');
     log(
       expectedInPackagedLayout ? 'info' : 'warn',
       `Bare SDK import unavailable (${err?.message || err}), trying bundled resource paths`,
