@@ -118,6 +118,7 @@ export default defineConfig(() => ({
         'src/lib/accelerator-readiness.ts',
         'src/lib/provider-recheck-status.ts',
         'src/lib/status-message.ts',
+        'src/lib/snippet-scope.ts',
         'sidecar/protocol-stdout.js',
         'sidecar/chat-transport.js',
         'sidecar/session-clients.js',
