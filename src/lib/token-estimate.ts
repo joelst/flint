@@ -3,9 +3,8 @@
  *
  * This is a display heuristic, not a tokenizer: Foundry Local exposes no tokenizer to the
  * frontend, so the meter approximates. It feeds a `$derived` read by the whole chat view,
- * and it is handed message records that originate in the persisted archive — a throw here
- * blanks the Playground rather than degrading one number, so every shape that is not what
- * this expects contributes what it can and nothing else.
+ * so every shape that is not what this expects contributes what it can and nothing else
+ * rather than throwing and blanking the Playground over a number.
  *
  * It expects *prompt* messages — what `normalizeForAlternatingChat` produces, where every
  * part is already `text` or `image_url`. Composer-only parts such as `file_text` have been

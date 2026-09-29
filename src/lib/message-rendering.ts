@@ -23,9 +23,10 @@ export type RenderableMessageAttachment = Exclude<RenderableMessagePart, { type:
  * or an array renders as no parts at all.
  *
  * A bare part object is the one non-array shape worth recovering, and it is recovered
- * everywhere rather than only here: `normalizeContentDetailed` repairs it into a
- * one-element array on load and `reducePromptParts` sends it, so what renders is also
- * what persists and what the model receives.
+ * everywhere rather than only here: `normalizeContentDetailed` repairs the same shape on
+ * load and `reducePromptParts` sends it, so a lone part is not shown here only to be
+ * dropped on the next launch. Each of the three still judges the part's own contents for
+ * its own purpose; the shared rule is the wrapper, not the verdict.
  */
 function contentParts(content: unknown): unknown[] {
   if (typeof content === "string") return [{ type: "text", text: content }];

@@ -9,15 +9,28 @@
  *
  * `+page.svelte` is `@ts-nocheck` and has no component tests, so nothing else
  * in the toolchain catches that. This module walks the parsed template and
- * reports every reference to a snippet declared in the same file but out of
+ * reports references to a snippet declared in the same file that are out of
  * scope at the reference site.
+ *
+ * It is a best-effort guard, not a complete scope analysis, and it is honest
+ * about both directions of that:
+ *
+ * - It does not model JavaScript function scopes. A parameter or local
+ *   declaration inside an event handler that happens to share a snippet's name
+ *   is reported even though it compiles and runs. A false report is visible
+ *   immediately as a failing test, so it costs a moment rather than a bug.
+ * - `collectPatternNames` walks every key of a binding construct, so a name
+ *   merely *read* in a `{@const}` initializer or a default value is treated as
+ *   bound for that fragment. That can hide a genuine out-of-scope reference to
+ *   a snippet of the same name. Narrowing this to true declaration positions
+ *   would make the guard strictly stronger.
  *
  * Names that are not declared as a snippet anywhere in the file are ignored:
  * they are props, snippet parameters, `{#each}` bindings, `{@const}` values or
  * ordinary `<script>` variables, none of which this analysis models. That keeps
- * the check free of false positives on idiomatic markup, at the cost of not
- * reporting a render of a snippet that simply does not exist — which the Svelte
- * compiler and the runtime both surface on their own.
+ * the check quiet on idiomatic markup, at the cost of not reporting a render of
+ * a snippet that simply does not exist — which the Svelte compiler and the
+ * runtime both surface on their own.
  */
 
 export interface UnresolvedSnippetReference {
@@ -84,7 +97,8 @@ function collectPatternNames(pattern: unknown, into: Set<string>): void {
 
 /**
  * Names a node binds for its own subtree. Adding a name here only suppresses
- * reporting, so erring towards including a binding is the safe direction.
+ * reporting, so a name included in error costs a missed report, never a false
+ * one — see the note on `collectPatternNames` in the module header.
  */
 function bindingsIntroducedBy(node: Record<string, unknown>): string[] {
   const bound = new Set<string>();

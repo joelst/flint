@@ -126,7 +126,7 @@ describe("lineAtOffset", () => {
 describe("+page.svelte snippet scopes", () => {
   // `+page.svelte` is `@ts-nocheck` and has no component tests, so an
   // out-of-scope snippet reference there would otherwise only surface as a
-  // blank view in a packaged build, where devtools are unavailable.
+  // blank view, in a build where the user is unlikely to open the inspector.
   it("references every snippet from a scope that can see it", () => {
     const source = readFileSync(join(process.cwd(), "src", "routes", "+page.svelte"), "utf8");
     const refs = findUnresolvedSnippetReferences(parseFragment(source));

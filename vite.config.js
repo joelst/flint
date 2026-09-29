@@ -119,6 +119,7 @@ export default defineConfig(() => ({
         'src/lib/provider-recheck-status.ts',
         'src/lib/status-message.ts',
         'src/lib/snippet-scope.ts',
+        'src/lib/error-detail.ts',
         'src/lib/token-estimate.ts',
         'sidecar/protocol-stdout.js',
         'sidecar/sdk-import-diagnosis.js',

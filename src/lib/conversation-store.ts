@@ -538,9 +538,16 @@ export interface ContentNormalization {
  * True for a single content part stored where an array of parts belongs.
  *
  * Shared by the archive normalizer, the request builder, and the renderer so all three
- * agree on what is repairable: what the view shows is what is persisted and what is sent.
- * A string `type` is the whole test — recognizing the specific type is each caller's job,
- * and an object without one is not a part at all (a legacy `{text: 'hi'}` stays rejected).
+ * agree on this *shape*: a lone part is repaired into a one-element array rather than
+ * being treated as unusable content, which in the normalizer would delete the message.
+ *
+ * The agreement is about the wrapper only. Each caller still validates the part itself on
+ * its own terms — the archive keeps an unknown part as opaque, the request builder omits
+ * what the model cannot accept, and the renderer labels what it cannot display — so this
+ * is deliberately not a claim that all three treat every part identically.
+ *
+ * A string `type` is the whole test, and an object without one is not a part at all
+ * (a legacy `{text: 'hi'}` stays rejected).
  */
 export function isBareContentPart(value: unknown): value is ContentPart {
   return typeof value === 'object'

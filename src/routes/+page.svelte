@@ -195,6 +195,7 @@
   import { isFetchableUrl, detectFetchableUrls } from "$lib/url-chips";
   import { conversationImagePreviewPartIndexes } from "$lib/message-rendering";
   import { estimateTokensForMessages } from "$lib/token-estimate";
+  import { formatErrorDetail, formatUncaughtError } from "$lib/error-detail";
   import {
     normalizeForAlternatingChat,
     isEmptyAssistantPlaceholder,
@@ -329,10 +330,39 @@
   }
 
   /**
+   * Record a single message that failed to render.
+   *
+   * Deliberately quieter than a view failure: the per-message boundary already shows the
+   * problem in place, the rest of the thread still works, and one malformed message in a long
+   * conversation is not a reason to raise an app-level banner.
+   */
+  function reportMessageRenderFailure(messageKey: unknown, error: unknown): void {
+    console.error(`[Flint] message ${String(messageKey)} failed to render`, error);
+    logQuietly(`Message failed to render: ${formatErrorDetail(error)}`, 'warn');
+  }
+
+  /**
+   * Append to the app log without letting logging fail the error path.
+   *
+   * Every caller here is already handling a failure, so a throw from the log itself would
+   * replace a reported problem with an unreported one.
+   */
+  function logQuietly(message: string, level: 'warn' | 'error'): void {
+    try {
+      appendAppLog(message, level);
+    } catch (logError) {
+      // Reported rather than swallowed: a silent catch here would make a broken app log
+      // indistinguishable from a working one, and the app log is where users are asked to
+      // look when something goes wrong. The console is the only remaining sink.
+      console.error('[Flint] failed to append to the app log', logError);
+    }
+  }
+
+  /**
    * Last uncaught frontend error, shown as a banner.
    *
-   * Release builds have no devtools, so an exception thrown while Svelte renders or flushes
-   * effects is completely invisible: the symptom is a nav click that appears to do nothing.
+   * An exception thrown while Svelte renders or flushes effects is otherwise invisible unless
+   * the user has opened the inspector: the symptom is a nav click that appears to do nothing.
    * Keeping the first one on screen is the only way a user can report what actually broke.
    */
   let uncaughtError = $state<string | null>(null);
@@ -341,10 +371,12 @@
     // Only the first is kept: a render failure usually repeats on every flush, and replacing
     // the message each time would churn the banner and bury the original cause.
     if (uncaughtError) return;
-    const detail = error instanceof Error
-      ? `${error.name}: ${error.message}`
-      : String(error ?? "unknown error");
-    uncaughtError = `${context} — ${detail}`;
+    // Formatting is delegated so a hostile thrown value cannot throw again here, on the one
+    // path that has nowhere left to report to. See src/lib/error-detail.ts.
+    uncaughtError = formatUncaughtError(context, error);
+    // The banner is dismissible and in-memory, so without this the only durable record of a
+    // crash would be a console the user cannot open in a packaged build.
+    logQuietly(uncaughtError, 'error');
   }
 
   function handleWindowError(event: ErrorEvent): void {
@@ -2012,9 +2044,10 @@
    * conversation is empty" and "nothing loaded yet", and only the first may be written back.
    */
   let threadLoadedFor = $state<string | null>(null);
-  // `message?.content`: a record from a damaged archive can be null, and this feeds a
-  // `$derived` read by the whole chat view — a throw here blanks the Playground rather
-  // than degrading one message.
+  // `message?.content` is cheap defensiveness on a `$derived` the whole chat view reads, not
+  // a fix for a reachable case: the archive loader drops a message it cannot normalize, so
+  // `chatMessages` holds no null records. It costs nothing and removes one way this derived
+  // could blank the Playground if that ever stops being true.
   let chatImagePreviewPartIndexes = $derived.by(() =>
     conversationImagePreviewPartIndexes(chatMessages.map((message: any) => message?.content)),
   );
@@ -5059,8 +5092,9 @@ updateStateFromSdk();
     }
 
     // Mirrors the platform inspector shortcut: Ctrl+Shift+I on Windows/Linux,
-    // ⌘⌥I on macOS. Opt-in, because opening the inspector is not something to
-    // trip over mid-conversation.
+    // ⌘⌥I on macOS. Gated on the setting only so Flint does not add a second way to
+    // trip into the inspector mid-conversation; the platform shortcut is unaffected
+    // either way, because release builds compile the inspector in.
     if (
       devToolsEnabled &&
       (e.key === 'I' || e.key === 'i' || e.code === 'KeyI') &&
@@ -9259,7 +9293,15 @@ Output only the summary text, no preamble.`;
                     {/if}
                   </div>
                 {:else}
-                  {#each chatMessages as msg, i}
+                  <!--
+                    Keyed by message identity, not position. An unkeyed each reuses the item
+                    effect for whatever message later occupies the index, and a boundary only
+                    leaves its failed state when it is reset or its effect is destroyed — so an
+                    index key would keep showing the error for an unrelated message after a
+                    conversation switch. `idx:` prefixes the positional fallback so a message
+                    without an id can never collide with another message's numeric id.
+                  -->
+                  {#each chatMessages as msg, i (msg.id ?? `idx:${i}`)}
                     {#if showFullHistory || !msg.condensed || msg.isSummary}
                       <div class="message {msg.role}" class:summary={!!msg.isSummary} class:pinned={!!msg.pinned} class:condensed={msg.condensed && !showFullHistory}>
                         <div class="role">
@@ -9286,14 +9328,45 @@ Output only the summary text, no preamble.`;
                           {#if msg.condensed && !showFullHistory}
                             <div class="condensed-hint">(condensed — switch to full thread to read)</div>
                           {/if}
-                          <MessageRenderer
-                            content={msg.content}
-                            previewImagePartIndexes={chatImagePreviewPartIndexes[i] ?? []}
-                            role={msg.role}
-                            isStreaming={isStreaming && msg.id === activeStreamAssistantId}
-                            assumeReasoning={currentModelTags.includes("reasoning")}
-                            messageKey={`${threadLoadedFor}:${msg.id ?? i}`}
-                          />
+                          <!--
+                            Per-message boundary. A message that always fails to render is the
+                            case the view-level boundary cannot recover from: retrying re-renders
+                            the same saved message, so the Playground would fail again on every
+                            attempt and on every restart. Isolating each message keeps the rest
+                            of the thread, the composer, and Stop usable, and confines the damage
+                            to the one message that caused it.
+                          -->
+                          <svelte:boundary
+                            onerror={(error) => reportMessageRenderFailure(msg.id ?? i, error)}
+                          >
+                            <MessageRenderer
+                              content={msg.content}
+                              previewImagePartIndexes={chatImagePreviewPartIndexes[i] ?? []}
+                              role={msg.role}
+                              isStreaming={isStreaming && msg.id === activeStreamAssistantId}
+                              assumeReasoning={currentModelTags.includes("reasoning")}
+                              messageKey={`${threadLoadedFor}:${msg.id ?? i}`}
+                            />
+                            {#snippet failed(error, reset)}
+                              <div class="message-render-error" role="note">
+                                This message could not be displayed.
+                                <span class="small">{formatErrorDetail(error)}</span>
+                                <span class="small">
+                                  The message itself was not changed by this failure, and the rest
+                                  of the conversation is still usable.
+                                </span>
+                                <!--
+                                  Streaming replaces this message in place, so its key does not
+                                  change and the boundary stays failed for the rest of the reply.
+                                  Retry re-renders whatever is stored now, which is how a message
+                                  that failed mid-stream becomes readable once it is complete.
+                                -->
+                                <button type="button" class="link-btn" onclick={reset}>
+                                  Try this message again
+                                </button>
+                              </div>
+                            {/snippet}
+                          </svelte:boundary>
                         </div>
                       </div>
                     {/if}
@@ -9879,18 +9952,46 @@ Output only the summary text, no preamble.`;
         </div>
           {#snippet failed(error, reset)}
             <div class="view chat-view">
+              <div class="playground-subnav" role="group" aria-label="Playground mode">
+                <button type="button" class:active={currentView === "chat"} aria-pressed={currentView === "chat"} onclick={() => (currentView = "chat")}>Chat</button>
+                <button type="button" class:active={false} aria-pressed={false} onclick={() => (currentView = "audio")}>Voice</button>
+              </div>
               <div class="notice" style="margin: 12px; padding: 12px;">
                 <strong>The Playground could not be displayed.</strong>
-                <p>{error instanceof Error ? error.message : String(error)}</p>
+                <p>{formatErrorDetail(error)}</p>
                 <p class="small">
-                  Your conversations are unchanged. Try again, or switch to another view and back.
+                  This is a display failure. Nothing here says whether the conversation was
+                  saved, and a reply that was already generating may still be running.
                 </p>
-                <button type="button" onclick={reset}>Try again</button>
+                <div class="row" style="gap: 8px; flex-wrap: wrap;">
+                  <button type="button" onclick={reset}>Try again</button>
+                  <!--
+                    Retrying re-renders the same saved conversation, so a message that always
+                    fails would fail again here and on every restart. Starting a new
+                    conversation is the one exit that does not depend on the broken one, and
+                    Stop is only reachable from here because the composer is inside the
+                    boundary that just failed.
+
+                    `reset()` after the switch is what actually leaves this panel: creating the
+                    conversation changes state but not the boundary, and without the reset the
+                    new conversation would be created — and persisted — behind a panel that
+                    never goes away, once per click.
+                  -->
+                  <button type="button" class="secondary" onclick={() => { createNewConversation(); reset(); }}>
+                    Start a new conversation
+                  </button>
+                  {#if isStreaming}
+                    <button type="button" class="secondary" onclick={() => stopGeneration()}>
+                      Stop generating
+                    </button>
+                  {/if}
+                </div>
               </div>
             </div>
           {/snippet}
         </svelte:boundary>
       {:else if currentView === "audio"}
+        <svelte:boundary onerror={(error) => reportViewRenderFailure("Playground (Voice)", error)}>
         <div class="view audio-view">
           <div class="playground-subnav" role="group" aria-label="Playground mode">
             <button type="button" class:active={currentView === "chat"} aria-pressed={currentView === "chat"} onclick={() => (currentView = "chat")}>Chat</button>
@@ -10082,6 +10183,24 @@ Output only the summary text, no preamble.`;
             </div>
           {/if}
         </div>
+          {#snippet failed(error, reset)}
+            <div class="view audio-view">
+              <div class="playground-subnav" role="group" aria-label="Playground mode">
+                <button type="button" class:active={false} aria-pressed={false} onclick={() => (currentView = "chat")}>Chat</button>
+                <button type="button" class:active={true} aria-pressed={true} onclick={() => (currentView = "audio")}>Voice</button>
+              </div>
+              <div class="notice" style="margin: 12px; padding: 12px;">
+                <strong>Voice could not be displayed.</strong>
+                <p>{formatErrorDetail(error)}</p>
+                <p class="small">
+                  This is a display failure. A transcription that was already running may still
+                  be in progress.
+                </p>
+                <button type="button" onclick={reset}>Try again</button>
+              </div>
+            </div>
+          {/snippet}
+        </svelte:boundary>
       {:else if currentView === "diagnostics"}
         <div class="view">
           <h2>Service & Diagnostics</h2>
@@ -13491,6 +13610,24 @@ Output only the summary text, no preamble.`;
     font-style: italic;
     color: var(--muted);
     margin-bottom: 4px;
+  }
+
+  /* Shown in place of one message whose rendering threw, so the rest of the thread survives. */
+  .message-render-error {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px 10px;
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+    color: var(--muted);
+    font-size: 0.8rem;
+  }
+
+  .message-render-error .small {
+    font-size: 0.7rem;
+    opacity: 0.85;
+    word-break: break-word;
   }
 
   .message.condensed {
