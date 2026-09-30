@@ -9715,17 +9715,8 @@ Output only the summary text, no preamble.`;
                 {/if}
 
                 {#if isVisionModel}
-                  <div class="vision-attach">
-                    <button
-                      type="button"
-                      onclick={attachImage}
-                      disabled={isStreaming || imageProcessingCount > 0 || attachedImages.length >= MAX_ATTACHED_IMAGES}
-                      title="Attach up to 4 images (vision models only)"
-                    >
-                      <Icon name="camera" size={14} />
-                      {imageProcessingCount > 0 ? "Preparing…" : `Image (${attachedImages.length}/${MAX_ATTACHED_IMAGES})`}
-                    </button>
-                    {#if attachedImages.length > 0}
+                  {#if attachedImages.length > 0}
+                    <div class="vision-attach">
                       <div class="image-strip">
                         {#each attachedImages as img, i (i)}
                           <span class="thumb">
@@ -9736,9 +9727,9 @@ Output only the summary text, no preamble.`;
                           </span>
                         {/each}
                       </div>
-                      <button type="button" onclick={clearImages} class="mini">Clear all</button>
-                    {/if}
-                  </div>
+                      <button type="button" onclick={clearImages} class="mini" disabled={isStreaming}>Clear all</button>
+                    </div>
+                  {/if}
                 {/if}
               </div>
 
@@ -9824,6 +9815,18 @@ Output only the summary text, no preamble.`;
                   >
                     <Icon name="folder" size={16} />
                   </button>
+                  {#if isVisionModel}
+                    <button
+                      type="button"
+                      class="image-attach-btn"
+                      onclick={attachImage}
+                      disabled={isStreaming || imageProcessingCount > 0 || attachedImages.length >= MAX_ATTACHED_IMAGES}
+                      title="Attach up to 4 images (vision models only)"
+                    >
+                      <Icon name="camera" size={14} />
+                      {imageProcessingCount > 0 ? "Preparing…" : `Image (${attachedImages.length}/${MAX_ATTACHED_IMAGES})`}
+                    </button>
+                  {/if}
                   <button
                     type="button"
                     class="dictation-btn"
@@ -13539,7 +13542,7 @@ Output only the summary text, no preamble.`;
   .message {
     display: flex;
     gap: 8px;
-    margin-bottom: 6px;
+    margin-bottom: 2px;
     align-items: flex-start;
   }
 
@@ -14138,6 +14141,29 @@ Output only the summary text, no preamble.`;
     background: var(--panel-bg);
     color: var(--fg);
     cursor: pointer;
+  }
+
+  .chat-input .image-attach-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    box-sizing: border-box;
+    height: 36px;
+    min-width: 0;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel-bg);
+    color: var(--fg);
+    cursor: pointer;
+    font-size: 0.8125rem;
+    white-space: nowrap;
+  }
+
+  .chat-input .image-attach-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .chat-input .file-attach-btn:disabled {
