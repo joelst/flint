@@ -703,7 +703,8 @@ export function normalizeMessageDetailed(input: unknown, fallbackId: string): Me
   const { content, droppedParts, unrecognizedParts } = normalizeContentDetailed((raw as any).content);
   if (content === null) return nothing;
 
-  let repaired = droppedParts > 0;
+  const bareContent = isBareContentPart((raw as any).content);
+  let repaired = droppedParts > 0 || bareContent;
   const rawId = (raw as any).id;
   // A message with no usable id gets one, but that is a repair: the caller cannot address the
   // original turn any more, and a later merge cannot match it. An *absent* id is no better

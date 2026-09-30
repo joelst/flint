@@ -198,6 +198,26 @@ export function findUnresolvedSnippetReferences(fragment: unknown): UnresolvedSn
     const introduced = bindingsIntroducedBy(node);
     const inner = introduced.length > 0 ? new Set([...scope, ...introduced]) : scope;
 
+    if (node.type === "EachBlock") {
+      visit(node.expression, scope);
+      visit(node.key, inner);
+      visit(node.body, inner);
+      visit(node.fallback, scope);
+      return;
+    }
+
+    if (node.type === "AwaitBlock") {
+      const thenBindings = new Set(scope);
+      collectPatternNames(node.value, thenBindings);
+      const catchBindings = new Set(scope);
+      collectPatternNames(node.error, catchBindings);
+      visit(node.expression, scope);
+      visit(node.pending, scope);
+      visit(node.then, thenBindings);
+      visit(node.catch, catchBindings);
+      return;
+    }
+
     for (const [key, value] of Object.entries(node)) {
       if (key === "type" || key === "loc" || key === "parent") continue;
       // A snippet's own name is declared by its parent fragment, and these

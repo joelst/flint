@@ -59,6 +59,30 @@ describe("findUnresolvedSnippetReferences", () => {
     ).toEqual([]);
   });
 
+  it("does not apply each bindings to the collection or fallback", () => {
+    expect(
+      unresolved(
+        `<div>{#snippet cell()}<b/>{/snippet}</div>{#each cell() as cell (cell())}{@render cell()}{:else}{@render cell()}{/each}`,
+      ),
+    ).toEqual(["cell", "cell"]);
+  });
+
+  it("does not apply await bindings to the expression or pending branch", () => {
+    expect(
+      unresolved(
+        `<div>{#snippet value()}<b/>{/snippet}</div>{#await value()}{@render value()}{:then value}{@render value()}{:catch error}{@render error()}{/await}`,
+      ),
+    ).toEqual(["value", "value"]);
+  });
+
+  it("keeps await then and catch bindings separate", () => {
+    expect(
+      unresolved(
+        `{#if ok}{#snippet value()}<b/>{/snippet}{#snippet error()}<b/>{/snippet}{/if}{#await p then value}{@render error()}{:catch error}{@render value()}{/await}`,
+      ),
+    ).toEqual(["error", "value"]);
+  });
+
   it("ignores names that are not snippets declared in this file", () => {
     // Props, parameters and script values are out of this analysis's model, and
     // the compiler reports genuinely missing names on its own.

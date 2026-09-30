@@ -198,6 +198,15 @@ describe('normalizeContent', () => {
     });
   });
 
+  it('flags bare content wrapper repair for archive preservation', () => {
+    const result = normalizeMessageDetailed(
+      { id: 'm1', role: 'user', content: { type: 'text', text: 'bare' } },
+      'fallback',
+    );
+    expect(result.message?.content).toEqual([{ type: 'text', text: 'bare' }]);
+    expect(result.repaired).toBe(true);
+  });
+
   it('still rejects a bare part whose own payload is unusable', () => {
     expect(normalizeContentDetailed({ type: 'text', text: '' })).toMatchObject({
       content: [],
