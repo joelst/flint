@@ -23,6 +23,7 @@
     "smoke:runtime": "node scripts/smoke-packaged-runtime.cjs",
     "tauri:build": "tauri build",
     "tauri:build:local": "tauri build --no-sign",
+    "tauri:build:local:version": "node scripts/build-local-version.cjs",
     "verify:bundle": "node scripts/verify-bundle.cjs",
     "verify:ipc-contracts": "node scripts/verify-ipc-contracts.cjs",
     "verify:markdown-links": "node scripts/verify-markdown-links.cjs",
