@@ -6831,7 +6831,11 @@ updateStateFromSdk();
         role: m.role,
         content: m.content, // can be string or vision array [{type,text}, {type:'image_url',...}]
       })),
-      { systemInstruction: effectiveSystem, rejectInvalidTextAttachments },
+      {
+        systemInstruction: effectiveSystem,
+        rejectInvalidTextAttachments,
+        rejectInvalidImageAttachments: rejectInvalidTextAttachments,
+      },
     );
   }
 
