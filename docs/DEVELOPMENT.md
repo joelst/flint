@@ -68,6 +68,7 @@ Supported Foundry core layouts today: `win32-x64`, `win32-arm64`, `linux-x64`, `
 | `npm run build` | Frontend web build only |
 | `npm run tauri:build` | Package installers (msi/nsis/dmg); runs ensure:node + ensure:foundry first |
 | `npm run tauri:build:local` | Local package via `--no-sign`: skips **all** code signing (updater signatures, Windows Authenticode, macOS bundle signing), so no `TAURI_SIGNING_PRIVATE_KEY` is needed |
+| `npm run tauri:build:local:version -- <semver>` | Build an unsigned local package with a temporary app version override; tracked version files are unchanged |
 | `npm run verify:bundle` | Post-build bundle resource check |
 | `npm run verify:release -- 0.9.0 --channel=stable` | Verify package/Tauri/Cargo versions and stable-channel metadata |
 | `npm run run:built` | Launch a release build without installing MSI |
@@ -130,6 +131,21 @@ npm run verify:bundle
 `--no-sign` skips **all** code signing — updater signatures, Windows Authenticode and macOS
 bundle signing alike — so release builds must keep using `tauri:build`. The release workflow
 invokes `tauri-action` directly and is unaffected by the local script.
+
+To build locally with a version that has not been rolled into the repository, pass a full
+SemVer version. The command writes a temporary Tauri config override, removes it after the build,
+and leaves `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml` unchanged:
+
+```powershell
+npm run tauri:build:local:version -- 0.10.0
+```
+
+Forward additional Tauri build options after the version, for example
+`--target x86_64-pc-windows-msvc`. On Windows machines that need local MSVC setup, wrap the npm command:
+
+```powershell
+.\build-local.ps1 -Command "npm run tauri:build:local:version -- 0.10.0"
+```
 
 macOS builds are Apple Silicon only and declare a minimum of macOS 14.0, because the bundled
 `libonnxruntime.dylib` is built with `minos 14.0` and `foundry-local-sdk` ships no `darwin-x64`
