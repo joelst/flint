@@ -13541,7 +13541,7 @@ Output only the summary text, no preamble.`;
   .message {
     display: flex;
     gap: 8px;
-    margin-bottom: 12px;
+    margin-bottom: 6px;
     align-items: flex-start;
   }
 
