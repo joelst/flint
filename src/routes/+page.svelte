@@ -9830,12 +9830,24 @@ Output only the summary text, no preamble.`;
                     <button
                       type="button"
                       class="image-attach-btn"
+                      class:at-limit={attachedImages.length >= MAX_ATTACHED_IMAGES}
                       onclick={attachImage}
                       disabled={isStreaming || imageProcessingCount > 0 || attachedImages.length >= MAX_ATTACHED_IMAGES}
-                      title="Attach up to 4 images (vision models only)"
+                      title={attachedImages.length >= MAX_ATTACHED_IMAGES
+                        ? `Maximum of ${MAX_ATTACHED_IMAGES} images attached`
+                        : `Attach images (${attachedImages.length} of ${MAX_ATTACHED_IMAGES} attached)`}
+                      aria-label={attachedImages.length >= MAX_ATTACHED_IMAGES
+                        ? `Maximum of ${MAX_ATTACHED_IMAGES} images attached`
+                        : `Attach images, ${attachedImages.length} of ${MAX_ATTACHED_IMAGES} attached`}
                     >
-                      <Icon name="camera" size={14} />
-                      {imageProcessingCount > 0 ? "Preparing…" : `Image (${attachedImages.length}/${MAX_ATTACHED_IMAGES})`}
+                      {#if imageProcessingCount > 0}
+                        <Icon name="loader" size={14} class="spin" />
+                      {:else}
+                        <Icon name="camera" size={14} />
+                        {#if attachedImages.length >= MAX_ATTACHED_IMAGES}
+                          <span class="image-limit-count">{attachedImages.length}/{MAX_ATTACHED_IMAGES}</span>
+                        {/if}
+                      {/if}
                     </button>
                   {/if}
                   <button
@@ -14159,11 +14171,12 @@ Output only the summary text, no preamble.`;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 6px;
+    gap: 5px;
     box-sizing: border-box;
+    width: 36px;
     height: 36px;
-    min-width: 0;
-    padding: 0 10px;
+    min-width: 36px;
+    padding: 0;
     border: 1px solid var(--border);
     border-radius: 6px;
     background: var(--panel-bg);
@@ -14171,6 +14184,16 @@ Output only the summary text, no preamble.`;
     cursor: pointer;
     font-size: 0.8125rem;
     white-space: nowrap;
+  }
+
+  .chat-input .image-attach-btn.at-limit {
+    width: auto;
+    padding: 0 8px;
+  }
+
+  .image-limit-count {
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
   }
 
   .chat-input .image-attach-btn:disabled {
