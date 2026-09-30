@@ -9341,6 +9341,7 @@ Output only the summary text, no preamble.`;
                           >
                             <MessageRenderer
                               content={msg.content}
+                              createdAt={msg.createdAt}
                               previewImagePartIndexes={chatImagePreviewPartIndexes[i] ?? []}
                               role={msg.role}
                               isStreaming={isStreaming && msg.id === activeStreamAssistantId}
@@ -13548,6 +13549,7 @@ Output only the summary text, no preamble.`;
 
   .message.user {
     justify-content: flex-start;
+    margin-left: 24px;
   }
 
   .message .role {
