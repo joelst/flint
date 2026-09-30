@@ -9863,7 +9863,7 @@ Output only the summary text, no preamble.`;
                 </div>
                 <input
                   bind:value={chatInput}
-                  placeholder={isDictating ? "Dictating… (click Stop to finish)" : "Type your message... (model is running locally)"}
+                  placeholder={isDictating ? "Dictating… (click Stop to finish)" : "Type your message..."}
                   disabled={benchmarkRunInFlight || chatBlockedByLoadedSTT || !selectedModelSupportsChat || !canDispatchChat || isStreaming}
                   onkeydown={(e) => { if ((isMac ? e.metaKey : e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); sendMessage(e); } }}
                   onpaste={handlePaste}
