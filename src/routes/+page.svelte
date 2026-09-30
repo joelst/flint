@@ -13544,12 +13544,12 @@ Output only the summary text, no preamble.`;
   .message {
     display: flex;
     gap: 8px;
-    margin-bottom: 2px;
+    margin-bottom: 6px;
     align-items: flex-start;
   }
 
   .message.user {
-    justify-content: flex-end;
+    justify-content: flex-start;
   }
 
   .message .role {
