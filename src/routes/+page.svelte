@@ -26,6 +26,7 @@
     quitRuntime,
     quitDesktopApp,
     relaunchApp,
+    openDevTools,
     subscribeQuitFlush,
     withServiceTransition,
     downloadModel,
@@ -193,6 +194,8 @@
   } from "$lib/conversation-settings";
   import { isFetchableUrl, detectFetchableUrls } from "$lib/url-chips";
   import { conversationImagePreviewPartIndexes } from "$lib/message-rendering";
+  import { estimateTokensForMessages } from "$lib/token-estimate";
+  import { formatErrorDetail, formatUncaughtError } from "$lib/error-detail";
   import {
     normalizeForAlternatingChat,
     isEmptyAssistantPlaceholder,
@@ -312,6 +315,78 @@
   $effect(() => {
     if (currentView === "chat" || currentView === "audio") playgroundLastView = currentView;
   });
+
+  /**
+   * Surface a view's render failure instead of leaving a blank pane.
+   *
+   * Without a boundary, one thrown expression anywhere in a view's markup or derived reads
+   * unmounts the whole pane: the user clicks a nav item and nothing appears, with the cause
+   * visible only in devtools. The boundary keeps the rest of the app alive and gives the user
+   * something they can report and retry.
+   */
+  function reportViewRenderFailure(view: string, error: unknown): void {
+    console.error(`[Flint] ${view} failed to render`, error);
+    recordUncaughtError(`${view} failed to render`, error);
+  }
+
+  /**
+   * Record a single message that failed to render.
+   *
+   * Deliberately quieter than a view failure: the per-message boundary already shows the
+   * problem in place, the rest of the thread still works, and one malformed message in a long
+   * conversation is not a reason to raise an app-level banner.
+   */
+  function reportMessageRenderFailure(messageKey: unknown, error: unknown): void {
+    console.error(`[Flint] message ${String(messageKey)} failed to render`, error);
+    logQuietly(`Message failed to render: ${formatErrorDetail(error)}`, 'warn');
+  }
+
+  /**
+   * Append to the app log without letting logging fail the error path.
+   *
+   * Every caller here is already handling a failure, so a throw from the log itself would
+   * replace a reported problem with an unreported one.
+   */
+  function logQuietly(message: string, level: 'warn' | 'error'): void {
+    try {
+      appendAppLog(message, level);
+    } catch (logError) {
+      // Reported rather than swallowed: a silent catch here would make a broken app log
+      // indistinguishable from a working one, and the app log is where users are asked to
+      // look when something goes wrong. The console is the only remaining sink.
+      console.error('[Flint] failed to append to the app log', logError);
+    }
+  }
+
+  /**
+   * Last uncaught frontend error, shown as a banner.
+   *
+   * An exception thrown while Svelte renders or flushes effects is otherwise invisible unless
+   * the user has opened the inspector: the symptom is a nav click that appears to do nothing.
+   * Keeping the first one on screen is the only way a user can report what actually broke.
+   */
+  let uncaughtError = $state<string | null>(null);
+
+  function recordUncaughtError(context: string, error: unknown): void {
+    // Only the first is kept: a render failure usually repeats on every flush, and replacing
+    // the message each time would churn the banner and bury the original cause.
+    if (uncaughtError) return;
+    // Formatting is delegated so a hostile thrown value cannot throw again here, on the one
+    // path that has nowhere left to report to. See src/lib/error-detail.ts.
+    uncaughtError = formatUncaughtError(context, error);
+    // The banner is dismissible and in-memory, so without this the only durable record of a
+    // crash would be a console the user cannot open in a packaged build.
+    logQuietly(uncaughtError, 'error');
+  }
+
+  function handleWindowError(event: ErrorEvent): void {
+    const where = event.filename ? ` (${event.filename}:${event.lineno})` : "";
+    recordUncaughtError(`Unexpected error${where}`, event.error ?? event.message);
+  }
+
+  function handleUnhandledRejection(event: PromiseRejectionEvent): void {
+    recordUncaughtError("Unhandled background failure", event.reason);
+  }
 
   // Disabling the preview flag while the Benchmark view is open must navigate away immediately
   // — an ungated route must never stay reachable just because it was already open.
@@ -954,6 +1029,21 @@
   // feature (Arena PR4A) getting its first UI surface here — gated so it never appears for
   // users who haven't opted in.
   let benchmarkPreviewEnabled = $state(false);
+
+  // Settings: exposes the Open developer tools action and its shortcut. Release builds
+  // compile the inspector in, so the platform inspector shortcut keeps working regardless;
+  // this only controls Flint's own entry points, it does not disable the inspector.
+  let devToolsEnabled = $state(false);
+  let devToolsError = $state<string | null>(null);
+
+  async function openDeveloperTools() {
+    devToolsError = null;
+    try {
+      await openDevTools();
+    } catch (e) {
+      devToolsError = e instanceof Error ? e.message : String(e);
+    }
+  }
 
   // Benchmark Preview: run lifecycle state, kept at this top level (not inside
   // BenchmarkPreview.svelte) so an in-progress run keeps executing if the user navigates to
@@ -1954,8 +2044,12 @@
    * conversation is empty" and "nothing loaded yet", and only the first may be written back.
    */
   let threadLoadedFor = $state<string | null>(null);
+  // `message?.content` is cheap defensiveness on a `$derived` the whole chat view reads, not
+  // a fix for a reachable case: the archive loader drops a message it cannot normalize, so
+  // `chatMessages` holds no null records. It costs nothing and removes one way this derived
+  // could blank the Playground if that ever stops being true.
   let chatImagePreviewPartIndexes = $derived.by(() =>
-    conversationImagePreviewPartIndexes(chatMessages.map((message: any) => message.content)),
+    conversationImagePreviewPartIndexes(chatMessages.map((message: any) => message?.content)),
   );
   const currentConversationId = $derived(conversationArchive.activeId);
   const conversations = $derived(
@@ -3332,6 +3426,7 @@
           networkBindAddress,
           keepServiceInBackground,
           benchmarkPreviewEnabled,
+          devToolsEnabled,
         }),
       );
       // Persist immediately so a failure is not sticky. Assigning the same value is a no-op in
@@ -3443,6 +3538,7 @@
         }
         if (typeof data.keepServiceInBackground === 'boolean') keepServiceInBackground = data.keepServiceInBackground;
         if (typeof data.benchmarkPreviewEnabled === 'boolean') benchmarkPreviewEnabled = data.benchmarkPreviewEnabled;
+        if (typeof data.devToolsEnabled === 'boolean') devToolsEnabled = data.devToolsEnabled;
         if (typeof data.defaultChatAlias === 'string') defaultChatAlias = data.defaultChatAlias;
         if (typeof data.defaultAudioAlias === 'string') defaultAudioAlias = data.defaultAudioAlias;
         if (typeof data.networkPort === 'number' && data.networkPort >= 1024 && data.networkPort <= 65535) {
@@ -4995,6 +5091,20 @@ updateStateFromSdk();
       return;
     }
 
+    // Mirrors the platform inspector shortcut: Ctrl+Shift+I on Windows/Linux,
+    // ⌘⌥I on macOS. Gated on the setting only so Flint does not add a second way to
+    // trip into the inspector mid-conversation; the platform shortcut is unaffected
+    // either way, because release builds compile the inspector in.
+    if (
+      devToolsEnabled &&
+      (e.key === 'I' || e.key === 'i' || e.code === 'KeyI') &&
+      (isMac ? e.metaKey && e.altKey : e.ctrlKey && e.shiftKey)
+    ) {
+      e.preventDefault();
+      void openDeveloperTools();
+      return;
+    }
+
     if (!mod) return;
 
     switch (e.key) {
@@ -5849,6 +5959,8 @@ updateStateFromSdk();
 
     // Register lifecycle listeners before any fallible storage work, so a storage failure
     // can never leave the app without a keyboard handler or close-to-tray hook.
+    window.addEventListener('error', handleWindowError);
+    window.addEventListener('unhandledrejection', handleUnhandledRejection);
     document.addEventListener('keydown', handleGlobalKeydown);
     // Native quit does not reach handleCloseRequested, so treat losing the window as a cue to
     // write. See flushOnHide.
@@ -5912,6 +6024,8 @@ updateStateFromSdk();
       }
       if (unsubscribe) unsubscribe();
       document.removeEventListener('keydown', handleGlobalKeydown);
+      window.removeEventListener('error', handleWindowError);
+      window.removeEventListener('unhandledrejection', handleUnhandledRejection);
       unlistenCloseRequested?.();
       unlistenQuitFlush?.();
       document.removeEventListener('visibilitychange', flushOnHide);
@@ -6717,44 +6831,6 @@ updateStateFromSdk();
       })),
       { systemInstruction: effectiveSystem, rejectInvalidTextAttachments },
     );
-  }
-
-  /**
-   * === Step 3: Better token counting ===
-   * Improved heuristic + can be upgraded with sidecar tokenizer in future.
-   * We use a blended heuristic that works reasonably for English + code.
-   */
-  function estimateTokens(text: string): number {
-    if (!text) return 0;
-    const chars = text.length;
-    const words = text.trim().split(/\s+/).length;
-    // Blended heuristic:
-    // - ~3.8-4.2 chars per token common for many tokenizers
-    // - Word-based backup: ~1.3-1.4 tokens per word for English
-    const charBased = chars / 3.9;
-    const wordBased = words * 1.33;
-    return Math.ceil(Math.max(charBased, wordBased));
-  }
-
-  function estimateTokensForMessages(msgs: any[]): number {
-    let total = 0;
-    for (const m of msgs) {
-      if (Array.isArray(m.content)) {
-        // Vision content: sum text parts + rough overhead per image (approx for 0.3)
-        for (const part of m.content) {
-          if (part.type === 'text' && typeof part.text === 'string') {
-            total += estimateTokens(part.text);
-          } else if (part.type === 'image_url') {
-            total += 500; // rough overhead per image (base64 + encoding)
-          }
-        }
-      } else {
-        const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
-        total += estimateTokens(text);
-      }
-    }
-    // Add a bit for roles / formatting overhead
-    return total + Math.ceil(msgs.length * 1.5);
   }
 
   /**
@@ -8139,6 +8215,16 @@ Output only the summary text, no preamble.`;
           </button>
         </div>
       {/if}
+      {#if uncaughtError}
+        <div class="storage-error" role="alert">
+          <span class="storage-error-text">
+            Something went wrong in the interface. {uncaughtError}
+          </span>
+          <button type="button" class="storage-error-dismiss" onclick={() => (uncaughtError = null)} aria-label="Dismiss error">
+            Dismiss
+          </button>
+        </div>
+      {/if}
       {#if showFirstRunCoach}
         <div class="first-run-coach" role="region" aria-label="Getting started with Flint">
           <div class="first-run-head">
@@ -9054,6 +9140,7 @@ Output only the summary text, no preamble.`;
           {/if}
         </div>
       {:else if currentView === "chat"}
+        <svelte:boundary onerror={(error) => reportViewRenderFailure("Playground (Chat)", error)}>
         <div class="view chat-view">
           <div class="playground-subnav" role="group" aria-label="Playground mode">
             <button type="button" class:active={currentView === "chat"} aria-pressed={currentView === "chat"} onclick={() => (currentView = "chat")}>Chat</button>
@@ -9206,7 +9293,15 @@ Output only the summary text, no preamble.`;
                     {/if}
                   </div>
                 {:else}
-                  {#each chatMessages as msg, i}
+                  <!--
+                    Keyed by message identity, not position. An unkeyed each reuses the item
+                    effect for whatever message later occupies the index, and a boundary only
+                    leaves its failed state when it is reset or its effect is destroyed — so an
+                    index key would keep showing the error for an unrelated message after a
+                    conversation switch. `idx:` prefixes the positional fallback so a message
+                    without an id can never collide with another message's numeric id.
+                  -->
+                  {#each chatMessages as msg, i (msg.id ?? `idx:${i}`)}
                     {#if showFullHistory || !msg.condensed || msg.isSummary}
                       <div class="message {msg.role}" class:summary={!!msg.isSummary} class:pinned={!!msg.pinned} class:condensed={msg.condensed && !showFullHistory}>
                         <div class="role">
@@ -9233,14 +9328,45 @@ Output only the summary text, no preamble.`;
                           {#if msg.condensed && !showFullHistory}
                             <div class="condensed-hint">(condensed — switch to full thread to read)</div>
                           {/if}
-                          <MessageRenderer
-                            content={msg.content}
-                            previewImagePartIndexes={chatImagePreviewPartIndexes[i] ?? []}
-                            role={msg.role}
-                            isStreaming={isStreaming && msg.id === activeStreamAssistantId}
-                            assumeReasoning={currentModelTags.includes("reasoning")}
-                            messageKey={`${threadLoadedFor}:${msg.id ?? i}`}
-                          />
+                          <!--
+                            Per-message boundary. A message that always fails to render is the
+                            case the view-level boundary cannot recover from: retrying re-renders
+                            the same saved message, so the Playground would fail again on every
+                            attempt and on every restart. Isolating each message keeps the rest
+                            of the thread, the composer, and Stop usable, and confines the damage
+                            to the one message that caused it.
+                          -->
+                          <svelte:boundary
+                            onerror={(error) => reportMessageRenderFailure(msg.id ?? i, error)}
+                          >
+                            <MessageRenderer
+                              content={msg.content}
+                              previewImagePartIndexes={chatImagePreviewPartIndexes[i] ?? []}
+                              role={msg.role}
+                              isStreaming={isStreaming && msg.id === activeStreamAssistantId}
+                              assumeReasoning={currentModelTags.includes("reasoning")}
+                              messageKey={`${threadLoadedFor}:${msg.id ?? i}`}
+                            />
+                            {#snippet failed(error, reset)}
+                              <div class="message-render-error" role="note">
+                                This message could not be displayed.
+                                <span class="small">{formatErrorDetail(error)}</span>
+                                <span class="small">
+                                  The message itself was not changed by this failure, and the rest
+                                  of the conversation is still usable.
+                                </span>
+                                <!--
+                                  Streaming replaces this message in place, so its key does not
+                                  change and the boundary stays failed for the rest of the reply.
+                                  Retry re-renders whatever is stored now, which is how a message
+                                  that failed mid-stream becomes readable once it is complete.
+                                -->
+                                <button type="button" class="link-btn" onclick={reset}>
+                                  Try this message again
+                                </button>
+                              </div>
+                            {/snippet}
+                          </svelte:boundary>
                         </div>
                       </div>
                     {/if}
@@ -9256,289 +9382,289 @@ Output only the summary text, no preamble.`;
                 {/if}
               </div>
 
-              <div class="chat-controls">
-                {#snippet personaControl()}
-                <!-- Persona selector (replaces direct system prompt input) -->
-                <div class="persona-control">
-                  {#if currentPersonaName}
-                    <span class="persona-chip" title="Active persona">{currentPersonaName}</span>
-                  {/if}
-                  <button
-                    type="button"
-                    class="persona-btn"
-                    title="Choose persona (system prompt preset)"
-                    disabled={isStreaming}
-                    bind:this={personaBtnEl}
-                    onclick={() => {
-                      const next = !showPersonaMenu;
-                      showPersonaMenu = next;
-                      if (next) queueMicrotask(positionPersonaMenu);
-                    }}
-                  >
-                    <Icon name="masks" size={16} label="Choose persona" />
-                  </button>
+              {#snippet personaControl()}
+              <!-- Persona selector (replaces direct system prompt input) -->
+              <div class="persona-control">
+                {#if currentPersonaName}
+                  <span class="persona-chip" title="Active persona">{currentPersonaName}</span>
+                {/if}
+                <button
+                  type="button"
+                  class="persona-btn"
+                  title="Choose persona (system prompt preset)"
+                  disabled={isStreaming}
+                  bind:this={personaBtnEl}
+                  onclick={() => {
+                    const next = !showPersonaMenu;
+                    showPersonaMenu = next;
+                    if (next) queueMicrotask(positionPersonaMenu);
+                  }}
+                >
+                  <Icon name="masks" size={16} label="Choose persona" />
+                </button>
 
-                  {#if showPersonaMenu}
-                    <div
-                      class="persona-menu"
-                      class:up={personaMenuDirection === 'up'}
-                      role="menu"
-                      tabindex="-1"
-                      style="position: fixed; top: {personaMenuPos.top}px; left: {personaMenuPos.left}px;"
-                    >
-                      <div class="persona-menu-header">
-                        Choose persona
-                        <span class="hint">({currentModelTags.join(", ")} model)</span>
-                      </div>
-                      <div class="persona-menu-items">
-                        {#each sortedPersonasForUI as p (p.id)}
-                          <button
-                            type="button"
-                            class="persona-item"
-                            class:matches={scorePersonaForModel(p, currentModelTags) > 1.5}
-                            onclick={() => {
-                              commitChatSettings({ systemPrompt: p.prompt });
-                              showPersonaMenu = false;
-                              statusMessage = `Persona: ${p.name}`;
-                            }}
-                          >
-                            <span class="p-name">{p.name}</span>
-                            {#if p.description}
-                              <span class="p-desc">{p.description}</span>
-                            {/if}
-                            {#if p.tags?.length}
-                              <span class="p-tags">{p.tags.join(" ")}</span>
-                            {/if}
-                          </button>
-                        {/each}
-                      </div>
-                      <div class="persona-menu-footer">
-                        <button type="button" class="manage-link" onclick={() => { showPersonaMenu = false; showPersonaManager = true; }}>
-                          Manage personas…
+                {#if showPersonaMenu}
+                  <div
+                    class="persona-menu"
+                    class:up={personaMenuDirection === 'up'}
+                    role="menu"
+                    tabindex="-1"
+                    style="position: fixed; top: {personaMenuPos.top}px; left: {personaMenuPos.left}px;"
+                  >
+                    <div class="persona-menu-header">
+                      Choose persona
+                      <span class="hint">({currentModelTags.join(", ")} model)</span>
+                    </div>
+                    <div class="persona-menu-items">
+                      {#each sortedPersonasForUI as p (p.id)}
+                        <button
+                          type="button"
+                          class="persona-item"
+                          class:matches={scorePersonaForModel(p, currentModelTags) > 1.5}
+                          onclick={() => {
+                            commitChatSettings({ systemPrompt: p.prompt });
+                            showPersonaMenu = false;
+                            statusMessage = `Persona: ${p.name}`;
+                          }}
+                        >
+                          <span class="p-name">{p.name}</span>
+                          {#if p.description}
+                            <span class="p-desc">{p.description}</span>
+                          {/if}
+                          {#if p.tags?.length}
+                            <span class="p-tags">{p.tags.join(" ")}</span>
+                          {/if}
                         </button>
-                      </div>
+                      {/each}
                     </div>
-                  {/if}
-                </div>
-                {/snippet}
+                    <div class="persona-menu-footer">
+                      <button type="button" class="manage-link" onclick={() => { showPersonaMenu = false; showPersonaManager = true; }}>
+                        Manage personas…
+                      </button>
+                    </div>
+                  </div>
+                {/if}
+              </div>
+              {/snippet}
 
-                {#snippet generationSettings()}
-                <!-- Context management -->
-                <div class="context-control">
-                  <label for="ctx-select" title={`How many recent turns are sent with the next message (${MIN_CONTEXT_TURNS}-${MAX_CONTEXT_TURNS})`}>Context</label>
-                  <span class="context-range-bound">{MIN_CONTEXT_TURNS}</span>
-                  <input
-                    type="range"
-                    id="ctx-select"
-                    min={MIN_CONTEXT_TURNS}
-                    max={MAX_CONTEXT_TURNS}
-                    step="1"
-                    value={clampContextTurns(contextTurns)}
-                    oninput={(e) => {
-                      contextTurns = Number((e.currentTarget as HTMLInputElement).value);
-                    }}
-                    onchange={(e) =>
-                      commitChatSettings({
-                        contextTurns: Number((e.currentTarget as HTMLInputElement).value),
-                      })}
-                    title={`Keep last N turns (${MIN_CONTEXT_TURNS}-${MAX_CONTEXT_TURNS}). Model context: ${currentModelContextLength ? currentModelContextLength + ' tokens' : 'unknown'}. Lower = faster & lower energy.`}
-                    disabled={isStreaming}
-                  />
-                  <span class="context-range-bound">{MAX_CONTEXT_TURNS}</span>
-                  <span class="context-turns-value">{clampContextTurns(contextTurns)} turns</span>
-                  <span
-                    class="context-estimate"
-                    title="Rough token count for this turn. Smaller means a faster, cheaper reply."
-                  >
-                    ~{estimatedContextTokens} tokens
-                    {#if contextUsagePercent !== null}
-                      <span class="usage-pct" class:high={contextUsagePercent > 70}>({contextUsagePercent}%)</span>
-                    {/if}
-                  </span>
-                  {#if currentModelContextLength}
-                    <span class="context-model-info" title="Model's reported context window">
-                      / ~{Math.round(currentModelContextLength / 1024)}k
-                    </span>
-                    {#if recommendedMaxTurns && Math.abs(contextTurns - recommendedMaxTurns) > 1}
-                      <button
-                        type="button"
-                        class="recommend-btn"
-                        onclick={applyRecommendedContext}
-                        title={`Use recommended ${recommendedMaxTurns} turns for this model`}
-                      >Recommended: {recommendedMaxTurns}</button>
-                    {/if}
-                  {/if}
-
-                  <!-- Usage meter -->
+              {#snippet generationSettings()}
+              <!-- Context management -->
+              <div class="context-control">
+                <label for="ctx-select" title={`How many recent turns are sent with the next message (${MIN_CONTEXT_TURNS}-${MAX_CONTEXT_TURNS})`}>Context</label>
+                <span class="context-range-bound">{MIN_CONTEXT_TURNS}</span>
+                <input
+                  type="range"
+                  id="ctx-select"
+                  min={MIN_CONTEXT_TURNS}
+                  max={MAX_CONTEXT_TURNS}
+                  step="1"
+                  value={clampContextTurns(contextTurns)}
+                  oninput={(e) => {
+                    contextTurns = Number((e.currentTarget as HTMLInputElement).value);
+                  }}
+                  onchange={(e) =>
+                    commitChatSettings({
+                      contextTurns: Number((e.currentTarget as HTMLInputElement).value),
+                    })}
+                  title={`Keep last N turns (${MIN_CONTEXT_TURNS}-${MAX_CONTEXT_TURNS}). Model context: ${currentModelContextLength ? currentModelContextLength + ' tokens' : 'unknown'}. Lower = faster & lower energy.`}
+                  disabled={isStreaming}
+                />
+                <span class="context-range-bound">{MAX_CONTEXT_TURNS}</span>
+                <span class="context-turns-value">{clampContextTurns(contextTurns)} turns</span>
+                <span
+                  class="context-estimate"
+                  title="Rough token count for this turn. Smaller means a faster, cheaper reply."
+                >
+                  ~{estimatedContextTokens} tokens
                   {#if contextUsagePercent !== null}
-                    <div class="context-meter" title="Approximate % of model context used by current trimmed history">
-                      <div class="meter-bar">
-                        <div
-                          class="meter-fill"
-                          style="width: {contextUsagePercent}%"
-                          class:warn={contextUsagePercent > 70}
-                          class:danger={contextUsagePercent > 85}
-                        ></div>
-                      </div>
-                    </div>
-                    {#if contextUsagePercent > 70}
-                      <span class="context-warn" title="High context usage may slow responses and use more power. Consider trimming, summarizing, or lowering turns.">
-                        <Icon name="warning" size={13} /> High
-                      </span>
-                    {/if}
+                    <span class="usage-pct" class:high={contextUsagePercent > 70}>({contextUsagePercent}%)</span>
                   {/if}
-                </div>
+                </span>
+                {#if currentModelContextLength}
+                  <span class="context-model-info" title="Model's reported context window">
+                    / ~{Math.round(currentModelContextLength / 1024)}k
+                  </span>
+                  {#if recommendedMaxTurns && Math.abs(contextTurns - recommendedMaxTurns) > 1}
+                    <button
+                      type="button"
+                      class="recommend-btn"
+                      onclick={applyRecommendedContext}
+                      title={`Use recommended ${recommendedMaxTurns} turns for this model`}
+                    >Recommended: {recommendedMaxTurns}</button>
+                  {/if}
+                {/if}
 
-                <!-- Generation parameters: how sampling settings affect model output -->
-                <div class="genparams-panel">
-                      <label for="genparams-temperature" title="Higher = more varied output (0-2)">Temperature</label>
-                      <input
-                        type="range"
-                        id="genparams-temperature"
-                        min="0"
-                        max="2"
-                        step="0.05"
-                        value={temperature}
-                        oninput={(e) => {
-                          temperature = Number((e.currentTarget as HTMLInputElement).value);
-                        }}
-                        onchange={(e) =>
-                          commitChatSettings({
-                            temperature: Number((e.currentTarget as HTMLInputElement).value),
-                          })}
-                        disabled={isStreaming}
-                      />
-                      <span class="genparams-value">{temperature.toFixed(2)}</span>
+                <!-- Usage meter -->
+                {#if contextUsagePercent !== null}
+                  <div class="context-meter" title="Approximate % of model context used by current trimmed history">
+                    <div class="meter-bar">
+                      <div
+                        class="meter-fill"
+                        style="width: {contextUsagePercent}%"
+                        class:warn={contextUsagePercent > 70}
+                        class:danger={contextUsagePercent > 85}
+                      ></div>
+                    </div>
+                  </div>
+                  {#if contextUsagePercent > 70}
+                    <span class="context-warn" title="High context usage may slow responses and use more power. Consider trimming, summarizing, or lowering turns.">
+                      <Icon name="warning" size={13} /> High
+                    </span>
+                  {/if}
+                {/if}
+              </div>
 
-                      <label for="genparams-maxtokens" title="Maximum tokens generated per reply">Max tokens</label>
-                      <input
-                        type="number"
-                        id="genparams-maxtokens"
-                        min="1"
-                        step="1"
-                        value={maxTokens}
-                        oninput={(e) => {
-                          const value = Number((e.currentTarget as HTMLInputElement).value);
-                          if (Number.isInteger(value) && value > 0) maxTokens = value;
-                        }}
-                        onchange={(e) => {
-                          const value = Number((e.currentTarget as HTMLInputElement).value);
-                          if (Number.isInteger(value) && value > 0) {
-                            commitChatSettings({ maxTokens: value });
-                          } else {
-                            e.currentTarget.value = String(maxTokens);
-                          }
-                        }}
-                        disabled={isStreaming}
-                      />
+              <!-- Generation parameters: how sampling settings affect model output -->
+              <div class="genparams-panel">
+                    <label for="genparams-temperature" title="Higher = more varied output (0-2)">Temperature</label>
+                    <input
+                      type="range"
+                      id="genparams-temperature"
+                      min="0"
+                      max="2"
+                      step="0.05"
+                      value={temperature}
+                      oninput={(e) => {
+                        temperature = Number((e.currentTarget as HTMLInputElement).value);
+                      }}
+                      onchange={(e) =>
+                        commitChatSettings({
+                          temperature: Number((e.currentTarget as HTMLInputElement).value),
+                        })}
+                      disabled={isStreaming}
+                    />
+                    <span class="genparams-value">{temperature.toFixed(2)}</span>
 
-                      <label for="genparams-topp" title="Nucleus sampling threshold (0-1]">Top-p</label>
-                      <input
-                        type="range"
-                        id="genparams-topp"
-                        min="0.01"
-                        max="1"
-                        step="0.01"
-                        value={topP}
-                        oninput={(e) => {
-                          topP = Number((e.currentTarget as HTMLInputElement).value);
-                        }}
-                        onchange={(e) =>
-                          commitChatSettings({
-                            topP: Number((e.currentTarget as HTMLInputElement).value),
-                          })}
-                        disabled={isStreaming}
-                      />
-                      <span class="genparams-value">{topP.toFixed(2)}</span>
+                    <label for="genparams-maxtokens" title="Maximum tokens generated per reply">Max tokens</label>
+                    <input
+                      type="number"
+                      id="genparams-maxtokens"
+                      min="1"
+                      step="1"
+                      value={maxTokens}
+                      oninput={(e) => {
+                        const value = Number((e.currentTarget as HTMLInputElement).value);
+                        if (Number.isInteger(value) && value > 0) maxTokens = value;
+                      }}
+                      onchange={(e) => {
+                        const value = Number((e.currentTarget as HTMLInputElement).value);
+                        if (Number.isInteger(value) && value > 0) {
+                          commitChatSettings({ maxTokens: value });
+                        } else {
+                          e.currentTarget.value = String(maxTokens);
+                        }
+                      }}
+                      disabled={isStreaming}
+                    />
 
-                      <label for="genparams-topk" title="Restrict sampling to the top K candidate tokens">Top-k</label>
-                      <input
-                        type="number"
-                        id="genparams-topk"
-                        min="1"
-                        step="1"
-                        value={topK}
-                        oninput={(e) => {
-                          const value = Number((e.currentTarget as HTMLInputElement).value);
-                          if (Number.isInteger(value) && value > 0) topK = value;
-                        }}
-                        onchange={(e) => {
-                          const value = Number((e.currentTarget as HTMLInputElement).value);
-                          if (Number.isInteger(value) && value > 0) {
-                            commitChatSettings({ topK: value });
-                          } else {
-                            e.currentTarget.value = String(topK);
-                          }
-                        }}
-                        disabled={isStreaming}
-                      />
+                    <label for="genparams-topp" title="Nucleus sampling threshold (0-1]">Top-p</label>
+                    <input
+                      type="range"
+                      id="genparams-topp"
+                      min="0.01"
+                      max="1"
+                      step="0.01"
+                      value={topP}
+                      oninput={(e) => {
+                        topP = Number((e.currentTarget as HTMLInputElement).value);
+                      }}
+                      onchange={(e) =>
+                        commitChatSettings({
+                          topP: Number((e.currentTarget as HTMLInputElement).value),
+                        })}
+                      disabled={isStreaming}
+                    />
+                    <span class="genparams-value">{topP.toFixed(2)}</span>
 
-                      <label for="genparams-freqpenalty" title="Penalize tokens by how often they've already appeared (-2 to 2)">Frequency penalty</label>
-                      <input
-                        type="range"
-                        id="genparams-freqpenalty"
-                        min="-2"
-                        max="2"
-                        step="0.1"
-                        value={frequencyPenalty}
-                        oninput={(e) => {
-                          frequencyPenalty = Number((e.currentTarget as HTMLInputElement).value);
-                        }}
-                        onchange={(e) =>
-                          commitChatSettings({
-                            frequencyPenalty: Number((e.currentTarget as HTMLInputElement).value),
-                          })}
-                        disabled={isStreaming}
-                      />
-                      <span class="genparams-value">{frequencyPenalty.toFixed(1)}</span>
+                    <label for="genparams-topk" title="Restrict sampling to the top K candidate tokens">Top-k</label>
+                    <input
+                      type="number"
+                      id="genparams-topk"
+                      min="1"
+                      step="1"
+                      value={topK}
+                      oninput={(e) => {
+                        const value = Number((e.currentTarget as HTMLInputElement).value);
+                        if (Number.isInteger(value) && value > 0) topK = value;
+                      }}
+                      onchange={(e) => {
+                        const value = Number((e.currentTarget as HTMLInputElement).value);
+                        if (Number.isInteger(value) && value > 0) {
+                          commitChatSettings({ topK: value });
+                        } else {
+                          e.currentTarget.value = String(topK);
+                        }
+                      }}
+                      disabled={isStreaming}
+                    />
 
-                      <label for="genparams-prespenalty" title="Penalize tokens that have already appeared at all (-2 to 2)">Presence penalty</label>
-                      <input
-                        type="range"
-                        id="genparams-prespenalty"
-                        min="-2"
-                        max="2"
-                        step="0.1"
-                        value={presencePenalty}
-                        oninput={(e) => {
-                          presencePenalty = Number((e.currentTarget as HTMLInputElement).value);
-                        }}
-                        onchange={(e) =>
-                          commitChatSettings({
-                            presencePenalty: Number((e.currentTarget as HTMLInputElement).value),
-                          })}
-                        disabled={isStreaming}
-                      />
-                      <span class="genparams-value">{presencePenalty.toFixed(1)}</span>
+                    <label for="genparams-freqpenalty" title="Penalize tokens by how often they've already appeared (-2 to 2)">Frequency penalty</label>
+                    <input
+                      type="range"
+                      id="genparams-freqpenalty"
+                      min="-2"
+                      max="2"
+                      step="0.1"
+                      value={frequencyPenalty}
+                      oninput={(e) => {
+                        frequencyPenalty = Number((e.currentTarget as HTMLInputElement).value);
+                      }}
+                      onchange={(e) =>
+                        commitChatSettings({
+                          frequencyPenalty: Number((e.currentTarget as HTMLInputElement).value),
+                        })}
+                      disabled={isStreaming}
+                    />
+                    <span class="genparams-value">{frequencyPenalty.toFixed(1)}</span>
 
-                      <label for="genparams-seed" title="Fixed sampling seed for reproducible output; leave blank for non-deterministic generation">Seed</label>
-                      <input
-                        type="number"
-                        id="genparams-seed"
-                        step="1"
-                        placeholder="random"
-                        value={randomSeed ?? ''}
-                        oninput={(e) => {
-                          const raw = (e.currentTarget as HTMLInputElement).value.trim();
-                          if (raw === '') { randomSeed = null; return; }
-                          const value = Number(raw);
-                          if (Number.isSafeInteger(value)) randomSeed = value;
-                        }}
-                        onchange={(e) => {
-                          const raw = (e.currentTarget as HTMLInputElement).value.trim();
-                          if (raw === '') { commitChatSettings({ randomSeed: null }); return; }
-                          const value = Number(raw);
-                          if (Number.isSafeInteger(value)) {
-                            commitChatSettings({ randomSeed: value });
-                          } else {
-                            e.currentTarget.value = randomSeed == null ? '' : String(randomSeed);
-                          }
-                        }}
-                        disabled={isStreaming}
-                      />
-                </div>
-                {/snippet}
+                    <label for="genparams-prespenalty" title="Penalize tokens that have already appeared at all (-2 to 2)">Presence penalty</label>
+                    <input
+                      type="range"
+                      id="genparams-prespenalty"
+                      min="-2"
+                      max="2"
+                      step="0.1"
+                      value={presencePenalty}
+                      oninput={(e) => {
+                        presencePenalty = Number((e.currentTarget as HTMLInputElement).value);
+                      }}
+                      onchange={(e) =>
+                        commitChatSettings({
+                          presencePenalty: Number((e.currentTarget as HTMLInputElement).value),
+                        })}
+                      disabled={isStreaming}
+                    />
+                    <span class="genparams-value">{presencePenalty.toFixed(1)}</span>
 
+                    <label for="genparams-seed" title="Fixed sampling seed for reproducible output; leave blank for non-deterministic generation">Seed</label>
+                    <input
+                      type="number"
+                      id="genparams-seed"
+                      step="1"
+                      placeholder="random"
+                      value={randomSeed ?? ''}
+                      oninput={(e) => {
+                        const raw = (e.currentTarget as HTMLInputElement).value.trim();
+                        if (raw === '') { randomSeed = null; return; }
+                        const value = Number(raw);
+                        if (Number.isSafeInteger(value)) randomSeed = value;
+                      }}
+                      onchange={(e) => {
+                        const raw = (e.currentTarget as HTMLInputElement).value.trim();
+                        if (raw === '') { commitChatSettings({ randomSeed: null }); return; }
+                        const value = Number(raw);
+                        if (Number.isSafeInteger(value)) {
+                          commitChatSettings({ randomSeed: value });
+                        } else {
+                          e.currentTarget.value = randomSeed == null ? '' : String(randomSeed);
+                        }
+                      }}
+                      disabled={isStreaming}
+                    />
+              </div>
+              {/snippet}
+
+              <div class="chat-controls">
                 <!-- URL fetch chips: appear when the user types/pastes a URL -->
                 {#if detectedUrls.length > 0 || pendingUrlFetches.length > 0}
                   <div class="url-fetch-bar">
@@ -9824,7 +9950,48 @@ Output only the summary text, no preamble.`;
             </div>
           </div>
         </div>
+          {#snippet failed(error, reset)}
+            <div class="view chat-view">
+              <div class="playground-subnav" role="group" aria-label="Playground mode">
+                <button type="button" class:active={currentView === "chat"} aria-pressed={currentView === "chat"} onclick={() => (currentView = "chat")}>Chat</button>
+                <button type="button" class:active={false} aria-pressed={false} onclick={() => (currentView = "audio")}>Voice</button>
+              </div>
+              <div class="notice" style="margin: 12px; padding: 12px;">
+                <strong>The Playground could not be displayed.</strong>
+                <p>{formatErrorDetail(error)}</p>
+                <p class="small">
+                  This is a display failure. Nothing here says whether the conversation was
+                  saved, and a reply that was already generating may still be running.
+                </p>
+                <div class="row" style="gap: 8px; flex-wrap: wrap;">
+                  <button type="button" onclick={reset}>Try again</button>
+                  <!--
+                    Retrying re-renders the same saved conversation, so a message that always
+                    fails would fail again here and on every restart. Starting a new
+                    conversation is the one exit that does not depend on the broken one, and
+                    Stop is only reachable from here because the composer is inside the
+                    boundary that just failed.
+
+                    `reset()` after the switch is what actually leaves this panel: creating the
+                    conversation changes state but not the boundary, and without the reset the
+                    new conversation would be created — and persisted — behind a panel that
+                    never goes away, once per click.
+                  -->
+                  <button type="button" class="secondary" onclick={() => { createNewConversation(); reset(); }}>
+                    Start a new conversation
+                  </button>
+                  {#if isStreaming}
+                    <button type="button" class="secondary" onclick={() => stopGeneration()}>
+                      Stop generating
+                    </button>
+                  {/if}
+                </div>
+              </div>
+            </div>
+          {/snippet}
+        </svelte:boundary>
       {:else if currentView === "audio"}
+        <svelte:boundary onerror={(error) => reportViewRenderFailure("Playground (Voice)", error)}>
         <div class="view audio-view">
           <div class="playground-subnav" role="group" aria-label="Playground mode">
             <button type="button" class:active={currentView === "chat"} aria-pressed={currentView === "chat"} onclick={() => (currentView = "chat")}>Chat</button>
@@ -10016,6 +10183,24 @@ Output only the summary text, no preamble.`;
             </div>
           {/if}
         </div>
+          {#snippet failed(error, reset)}
+            <div class="view audio-view">
+              <div class="playground-subnav" role="group" aria-label="Playground mode">
+                <button type="button" class:active={false} aria-pressed={false} onclick={() => (currentView = "chat")}>Chat</button>
+                <button type="button" class:active={true} aria-pressed={true} onclick={() => (currentView = "audio")}>Voice</button>
+              </div>
+              <div class="notice" style="margin: 12px; padding: 12px;">
+                <strong>Voice could not be displayed.</strong>
+                <p>{formatErrorDetail(error)}</p>
+                <p class="small">
+                  This is a display failure. A transcription that was already running may still
+                  be in progress.
+                </p>
+                <button type="button" onclick={reset}>Try again</button>
+              </div>
+            </div>
+          {/snippet}
+        </svelte:boundary>
       {:else if currentView === "diagnostics"}
         <div class="view">
           <h2>Service & Diagnostics</h2>
@@ -11640,6 +11825,41 @@ Output only the summary text, no preamble.`;
           </div>
 
           <div class="settings-section">
+            <h3>Developer</h3>
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-name" id="dev-tools-label">Developer tools</span>
+                <span class="setting-desc">
+                  Shows a button for opening the webview inspector, so a console is available
+                  when something in the interface misbehaves. This only controls Flint's own
+                  entry points — the inspector is built in, so {isMac ? '⌘⌥I' : 'F12 and Ctrl+Shift+I'}
+                  {isMac ? 'works' : 'work'} either way. Close it from the inspector window.
+                </span>
+              </div>
+              <label class="toggle-switch">
+                <input
+                  type="checkbox"
+                  bind:checked={devToolsEnabled}
+                  onchange={persistChatCheckbox((v) => { devToolsEnabled = v; if (!v) devToolsError = null; })}
+                  aria-labelledby="dev-tools-label"
+                />
+                <span class="toggle-track"></span>
+              </label>
+            </div>
+            {#if devToolsEnabled}
+              <div class="setting-row">
+                <div class="setting-info">
+                  <span class="setting-name">Open developer tools</span>
+                  {#if devToolsError}
+                    <span class="setting-desc about-bad">Could not open: {devToolsError}</span>
+                  {/if}
+                </div>
+                <button type="button" class="tiny" onclick={() => openDeveloperTools()}>Open</button>
+              </div>
+            {/if}
+          </div>
+
+          <div class="settings-section">
             <h3>Appearance</h3>
             <div class="setting-row">
               <div class="setting-info">
@@ -11769,6 +11989,9 @@ Output only the summary text, no preamble.`;
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+,</td><td>Settings</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+B</td><td>Toggle sidebar</td></tr>
             <tr><td class="sk">{isMac ? '⌘' : 'Ctrl'}+Space</td><td>Toggle dictation</td></tr>
+            {#if devToolsEnabled}
+              <tr><td class="sk">{isMac ? '⌘⌥I' : 'Ctrl+Shift+I'}</td><td>Open developer tools</td></tr>
+            {/if}
             <tr><td class="sk">?</td><td>Show this help</td></tr>
             <tr><td class="sk">Escape</td><td>Close this dialog</td></tr>
           </tbody>
@@ -13387,6 +13610,24 @@ Output only the summary text, no preamble.`;
     font-style: italic;
     color: var(--muted);
     margin-bottom: 4px;
+  }
+
+  /* Shown in place of one message whose rendering threw, so the rest of the thread survives. */
+  .message-render-error {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px 10px;
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+    color: var(--muted);
+    font-size: 0.8rem;
+  }
+
+  .message-render-error .small {
+    font-size: 0.7rem;
+    opacity: 0.85;
+    word-break: break-word;
   }
 
   .message.condensed {

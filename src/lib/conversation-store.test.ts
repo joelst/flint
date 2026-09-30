@@ -178,6 +178,41 @@ describe('normalizeContent', () => {
     expect(normalizeContent(null)).toBeNull();
     expect(normalizeContent(42)).toBeNull();
   });
+
+  // `null` here deletes the message. A record plainly carrying one part is repaired into a
+  // one-element array instead, so the archive keeps what the renderer already shows.
+  it('repairs a single part stored where an array belongs', () => {
+    expect(normalizeContent({ type: 'text', text: 'bare' })).toEqual([
+      { type: 'text', text: 'bare' },
+    ]);
+    expect(normalizeContent({ type: 'image_url', image_url: { url: 'data:image/png;base64,AA' } }))
+      .toEqual([{ type: 'image_url', image_url: { url: 'data:image/png;base64,AA' } }]);
+  });
+
+  it('keeps an unrecognized bare part verbatim rather than deleting the message', () => {
+    const part = { type: 'video_url', video_url: { url: 'x' } };
+    expect(normalizeContentDetailed(part)).toMatchObject({
+      content: [{ type: OPAQUE_PART_TYPE, original: part }],
+      droppedParts: 0,
+      unrecognizedParts: 1,
+    });
+  });
+
+  it('flags bare content wrapper repair for archive preservation', () => {
+    const result = normalizeMessageDetailed(
+      { id: 'm1', role: 'user', content: { type: 'text', text: 'bare' } },
+      'fallback',
+    );
+    expect(result.message?.content).toEqual([{ type: 'text', text: 'bare' }]);
+    expect(result.repaired).toBe(true);
+  });
+
+  it('still rejects a bare part whose own payload is unusable', () => {
+    expect(normalizeContentDetailed({ type: 'text', text: '' })).toMatchObject({
+      content: [],
+      droppedParts: 1,
+    });
+  });
 });
 
 describe('contentToText', () => {

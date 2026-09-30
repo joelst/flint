@@ -9,6 +9,66 @@ import {
 } from "./message-rendering";
 import { TINY_PNG_DATA_URL, pngDataUrl } from "../../sidecar/test-fixtures/images";
 
+describe("malformed stored message content", () => {
+  // The chat view derives preview budgets straight from persisted message objects, so a
+  // record missing `content` must not throw: a thrown derived blanks the whole Playground.
+  const malformed = [undefined, null, 42, { noType: true }, { type: 7 }] as any[];
+
+  it("never throws while allocating conversation preview budgets", () => {
+    expect(() => conversationImagePreviewPartIndexes(malformed)).not.toThrow();
+    expect(conversationImagePreviewPartIndexes(malformed)).toEqual([[], [], [], [], []]);
+  });
+
+  it("renders malformed content as no parts rather than throwing", () => {
+    for (const content of malformed) {
+      expect(() => renderableMessageParts(content)).not.toThrow();
+      expect(renderableMessageParts(content)).toEqual([]);
+      expect(messageClipboardText(content)).toBe("");
+    }
+  });
+
+  it("keeps surrounding messages renderable when one record is malformed", () => {
+    const contents = [
+      null,
+      [{ type: "image_url", image_url: { url: TINY_PNG_DATA_URL } }],
+    ] as any[];
+    expect(conversationImagePreviewPartIndexes(contents)).toEqual([[], [0]]);
+  });
+});
+
+// A single part object where an array is expected is a plausible legacy or hand-edited
+// payload. Dropping it renders an apparently empty message, which reads as data loss;
+// wrapping it renders what it carries, or labels it undisplayable.
+describe("a bare content part stored outside an array", () => {
+  it("renders a bare text part", () => {
+    expect(renderableMessageParts({ type: "text", text: "stored bare" } as any)).toEqual([
+      { type: "text", text: "stored bare" },
+    ]);
+    expect(messageClipboardText({ type: "text", text: "stored bare" } as any)).toBe("stored bare");
+  });
+
+  it("renders a bare image part, and budgets it like any other image", () => {
+    const content = { type: "image_url", image_url: { url: TINY_PNG_DATA_URL } } as any;
+    expect(conversationImagePreviewPartIndexes([content])).toEqual([[0]]);
+    expect(renderableMessageParts(content)).toEqual([
+      { type: "image", previewUrl: TINY_PNG_DATA_URL, label: "Attached image" },
+    ]);
+  });
+
+  it("renders a bare file part", () => {
+    const content = { type: "file_text", file: { name: "a.txt", text: "body" } } as any;
+    expect(renderableMessageParts(content)).toEqual([
+      { type: "file", name: "a.txt", text: "body" },
+    ]);
+  });
+
+  it("labels a bare part of an unrecognized type rather than dropping it", () => {
+    expect(renderableMessageParts({ type: "video_url", video_url: {} } as any)).toEqual([
+      { type: "unknown", label: "Attachment this version cannot display" },
+    ]);
+  });
+});
+
 describe("multipart message rendering", () => {
   const content = [
     { type: "text" as const, text: "What is this?" },

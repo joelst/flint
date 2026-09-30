@@ -1,4 +1,4 @@
-import type { MessageContent } from "./conversation-store";
+import { isBareContentPart, type MessageContent } from "./conversation-store";
 import {
   MAX_CONVERSATION_PREVIEW_IMAGES,
   MAX_CONVERSATION_PREVIEW_PIXELS,
@@ -12,6 +12,28 @@ export type RenderableMessagePart =
   | { type: "unknown"; label: string };
 
 export type RenderableMessageAttachment = Exclude<RenderableMessagePart, { type: "text" }>;
+
+/**
+ * Normalize a stored message's content into a parts array.
+ *
+ * Message records come straight out of the persisted archive and are typed `any` at the call
+ * sites, so a record can legitimately be missing `content` (or carry a legacy shape). These
+ * helpers feed a `$derived` read by the whole chat view, and a derived that throws takes the
+ * entire Playground down rather than degrading one message — so anything that is not a string
+ * or an array renders as no parts at all.
+ *
+ * A bare part object is the one non-array shape worth recovering, and it is recovered
+ * everywhere rather than only here: `normalizeContentDetailed` repairs the same shape on
+ * load and `reducePromptParts` sends it, so a lone part is not shown here only to be
+ * dropped on the next launch. Each of the three still judges the part's own contents for
+ * its own purpose; the shared rule is the wrapper, not the verdict.
+ */
+function contentParts(content: unknown): unknown[] {
+  if (typeof content === "string") return [{ type: "text", text: content }];
+  if (Array.isArray(content)) return content;
+  if (isBareContentPart(content)) return [content];
+  return [];
+}
 
 // Parsing decodes the whole payload (a JPEG frame header can follow any amount of metadata),
 // and messages re-render often, so verdicts are memoized per URL.
@@ -82,7 +104,7 @@ export function conversationImagePreviewPartIndexes(
   let remainingImages = MAX_CONVERSATION_PREVIEW_IMAGES;
   for (let messageIndex = contents.length - 1; messageIndex >= 0; messageIndex -= 1) {
     const content = contents[messageIndex];
-    const parts: unknown[] = typeof content === "string" ? [{ type: "text", text: content }] : content;
+    const parts = contentParts(content);
     for (let partIndex = parts.length - 1; partIndex >= 0; partIndex -= 1) {
       if (remainingImages === 0) return allowed;
       const part = parts[partIndex];
@@ -103,7 +125,7 @@ export function renderableMessageParts(
   content: MessageContent,
   previewImagePartIndexes?: readonly number[],
 ): RenderableMessagePart[] {
-  const parts: unknown[] = typeof content === "string" ? [{ type: "text", text: content }] : content;
+  const parts = contentParts(content);
   const allowed = new Set(
     previewImagePartIndexes ?? conversationImagePreviewPartIndexes([content])[0],
   );
@@ -134,8 +156,7 @@ export function nonTextMessageParts(
 }
 
 export function messagePlainText(content: MessageContent): string {
-  const parts: unknown[] = typeof content === "string" ? [{ type: "text", text: content }] : content;
-  return parts
+  return contentParts(content)
     .filter(hasTextPart)
     .map((part) => part.text)
     .join("\n");

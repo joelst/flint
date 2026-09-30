@@ -42,6 +42,7 @@ import {
 import { activityCandidateKeys } from './activity-booking.js';
 import { looksLikeSpeech } from './model-classification.js';
 import { assertSpeechModelSupported, transcribeSpeech } from './speech-engine.js';
+import { isPackageAbsentError } from './sdk-import-diagnosis.js';
 import { extractNemotronPcm } from './wav-pcm.js';
 import { waitUntilIdle } from './monotonic-wait.js';
 import {
@@ -2802,6 +2803,7 @@ function toFileUrl (filePath) {
 
 async function getFoundryManager () {
   if (FoundryLocalManager) return FoundryLocalManager;
+  let normalImportError = null;
   try {
     // Try normal module resolution (works in dev when node_modules is present)
     const mod = await import('foundry-local-sdk');
@@ -2809,7 +2811,18 @@ async function getFoundryManager () {
     cachedSdkModule = mod;
     return FoundryLocalManager;
   } catch (err) {
-    log('warn', `Normal SDK import failed (${err?.message || err}), trying bundled resource paths`);
+    normalImportError = err;
+    // Installed builds ship the SDK beside the sidecar with no node_modules tree, so bare
+    // resolution *always* fails there. That is the expected packaged layout, not a fault:
+    // warning about it on every launch trains users to ignore real SDK load failures. Only
+    // a failure that is not "package is absent" is worth a warning here; if every candidate
+    // below also fails, this error is reported as part of the thrown one. See
+    // `sdk-import-diagnosis.js` for why the error code alone is not enough to make that call.
+    const expectedInPackagedLayout = isPackageAbsentError(err, 'foundry-local-sdk');
+    log(
+      expectedInPackagedLayout ? 'info' : 'warn',
+      `Bare SDK import unavailable (${err?.message || err}), trying bundled resource paths`,
+    );
   }
 
   // Packaged layout: sidecar next to foundry-local-sdk; dev uses node_modules
@@ -2822,8 +2835,10 @@ async function getFoundryManager () {
   ];
 
   let lastErr = null;
+  const attempted = [];
   for (const sdkEntry of entryCandidates) {
     if (!fs.existsSync(sdkEntry)) continue;
+    attempted.push(sdkEntry);
     try {
       log('info', `Loading Foundry SDK from ${sdkEntry}`);
       const mod = await import(toFileUrl(sdkEntry));
@@ -2835,9 +2850,24 @@ async function getFoundryManager () {
       log('warn', `Failed loading SDK from ${sdkEntry}: ${e?.message || e}`);
     }
   }
-  throw lastErr || new Error(
-    'Could not load foundry-local-sdk from packaged resources. ' +
-    'Expected foundry-local-sdk next to the sidecar or under node_modules.'
+  // Describe the packaged layout rather than rethrowing the bare-resolution error. In an
+  // installed build that error is always "Cannot find package 'foundry-local-sdk'", which
+  // points at a node_modules tree that is never expected to exist there and says nothing
+  // about the folder that is actually missing.
+  const underlying = lastErr || normalImportError;
+  const detail = attempted.length > 0
+    ? `Tried: ${attempted.join(', ')}.`
+    : `No candidate path existed. Looked for: ${entryCandidates.join(', ')}.`;
+  // The reason is inlined into the message, not left only in `cause`. Command replies send
+  // `e.message` to the frontend, and neither `.message`, `.stack`, nor JSON serialization
+  // includes `cause` — so a reason kept only there would never leave the sidecar log. When a
+  // candidate existed and failed, its error is the informative one; otherwise the bare-import
+  // failure is all there is. `cause` is still set for anything inspecting the error object.
+  const reason = underlying ? ` Last error: ${underlying?.message || underlying}.` : '';
+  throw new Error(
+    `Could not load foundry-local-sdk from packaged resources. ${detail} ` +
+    `Expected foundry-local-sdk next to the sidecar or under node_modules.${reason}`,
+    { cause: underlying },
   );
 }
 
