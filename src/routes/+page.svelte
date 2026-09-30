@@ -352,7 +352,9 @@
   }
 
   /** About strip — app + Node + service (Help + Settings). */
-  const appVersion = String((packageJson as { version?: string }).version || "0.0.0");
+  const appVersion = String(
+    import.meta.env.VITE_FLINT_BUILD_VERSION || (packageJson as { version?: string }).version || "0.0.0",
+  );
   let nodeVersionLabel = $state<string>("Checking…");
   let nodeVersionOk = $state<boolean | null>(null);
   let availableUpdate = $state<Update | null>(null);

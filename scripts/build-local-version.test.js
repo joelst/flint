@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { createTauriBuildArgs, createTauriConfig } from './build-local-version.cjs';
+import {
+  createBuildEnv,
+  createTauriBuildArgs,
+  createTauriConfig,
+} from './build-local-version.cjs';
 
 describe('local versioned build arguments', () => {
   it('uses an ephemeral config override and keeps local builds unsigned', () => {
@@ -22,5 +26,10 @@ describe('local versioned build arguments', () => {
         '--target',
         'x86_64-pc-windows-msvc',
       ]);
+  });
+
+  it('passes the same version to the frontend without changing other environment values', () => {
+    expect(createBuildEnv('0.10.0', { PATH: 'path', VITE_FLINT_BUILD_VERSION: '0.9.1' }))
+      .toEqual({ PATH: 'path', VITE_FLINT_BUILD_VERSION: '0.10.0' });
   });
 });
