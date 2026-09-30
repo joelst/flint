@@ -2414,6 +2414,17 @@ export async function relaunchApp(): Promise<void> {
   await invoke('relaunch_app');
 }
 
+/**
+ * Open the webview inspector on the main window.
+ *
+ * There is no matching close: on Windows the WebView2 backend cannot close the
+ * inspector or report whether it is open, so Flint only offers the action it
+ * can actually perform. The inspector is closed from its own window.
+ */
+export async function openDevTools(): Promise<void> {
+  await invoke('open_devtools');
+}
+
 /** Native `ExitRequested` asks the frontend to flush, then waits for `ack_quit_flush`. */
 export const QUIT_FLUSH_EVENT = 'flint-quit-flush';
 

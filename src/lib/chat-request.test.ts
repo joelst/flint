@@ -33,6 +33,14 @@ describe('toPromptParts', () => {
     expect(toPromptParts([])).toEqual([]);
   });
 
+  // The archive repairs this shape into a one-element array, and the renderer shows it, so
+  // the request builder must send it too rather than silently omitting it from the prompt.
+  it('sends a single part stored where an array belongs', () => {
+    expect(toPromptParts({ type: 'text', text: 'bare' } as any)).toEqual([text('bare')]);
+    expect(toPromptParts({ type: 'image_url', image_url: { url: 'data:image/png;base64,AAA' } } as any))
+      .toEqual([image('data:image/png;base64,AAA')]);
+  });
+
   it('keeps text and image parts in order', () => {
     expect(toPromptParts([text('what is this'), image('data:image/png;base64,AAA')])).toEqual([
       text('what is this'),
@@ -148,7 +156,9 @@ describe('toPromptParts', () => {
   });
 
   it('returns nothing for content that is neither a string nor an array', () => {
-    for (const bad of [null, undefined, 7, true, { type: 'text', text: 'x' }]) {
+    // A bare part object is no longer in this list: it is repaired and sent, matching the
+    // archive and the renderer. See "sends a single part stored where an array belongs".
+    for (const bad of [null, undefined, 7, true, { text: 'no type' }]) {
       expect(toPromptParts(bad)).toEqual([]);
     }
   });

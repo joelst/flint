@@ -16,6 +16,22 @@ fn relaunch_app(app: tauri::AppHandle) {
     app.restart();
 }
 
+/// Open the webview inspector on the main window.
+///
+/// Only opening is exposed. On Windows the WebView2 backend implements
+/// `close_devtools` as a no-op and always reports `is_devtools_open` as false,
+/// so a close command or an open/closed indicator would report an outcome
+/// Flint cannot establish. The inspector is closed from its own window.
+#[tauri::command]
+fn open_devtools(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager as _;
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "The main window is not available.".to_string())?;
+    window.open_devtools();
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -41,6 +57,7 @@ pub fn run() {
             runtime_manager::runtime_force_stop,
             quit_app,
             relaunch_app,
+            open_devtools,
             quit_flush::ack_quit_flush,
         ])
         .setup(|app| {

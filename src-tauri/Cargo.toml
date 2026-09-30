@@ -25,7 +25,10 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+# `devtools` keeps the webview inspector available in release builds. Without it
+# a frontend exception in a packaged build is invisible: there is no console to
+# open and the app can only show whatever its own error banner caught.
+tauri = { version = "2", features = ["tray-icon", "image-png", "devtools"] }
 tauri-plugin-fs = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-autostart = "2"
