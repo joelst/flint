@@ -6570,22 +6570,21 @@ updateStateFromSdk();
     nextMessages.push({ role: "user", content: userContent });
     const stamped = ensureMessageIds(nextMessages as any, (i) => `msg-${Date.now()}-${i}`).messages as any;
     if (attachedImages.length > 0 || attachedTextFiles.length > 0) {
-      const projected = captureThread(
-        { archive: conversationArchive, thread: { loadedFor: threadLoadedFor, messages: stamped } },
-        { now: Date.now() },
-      );
-      const archiveChars = serializeArchive(projected.archive).length;
-      let otherStorageChars: number;
       try {
-        otherStorageChars = storageCharsExcluding(localStorage, ARCHIVE_KEY);
+        const projected = captureThread(
+          { archive: conversationArchive, thread: { loadedFor: threadLoadedFor, messages: stamped } },
+          { now: Date.now() },
+        );
+        const archiveChars = serializeArchive(projected.archive).length;
+        const otherStorageChars = storageCharsExcluding(localStorage, ARCHIVE_KEY);
+        if (!imageAttachmentFitsArchive(archiveChars, otherStorageChars)) {
+          attachmentNotice =
+            "These attachments would exceed conversation storage. Remove an attachment or delete/export older conversations, then try again.";
+          return;
+        }
       } catch (error: any) {
-        statusMessage =
+        attachmentNotice =
           `Conversation storage could not be checked: ${error?.message || error}. The message was not sent.`;
-        return;
-      }
-      if (!imageAttachmentFitsArchive(archiveChars, otherStorageChars)) {
-        statusMessage =
-          "These attachments would exceed conversation storage. Remove an attachment or delete/export older conversations, then try again.";
         return;
       }
     }
@@ -6593,7 +6592,12 @@ updateStateFromSdk();
     try {
       requestMessages = getMessagesForInference(stamped, true);
     } catch (error: any) {
-      statusMessage = error?.message || "The attached files could not be included safely.";
+      const message = error?.message || "The attached files could not be included safely.";
+      if (attachedImages.length > 0 || attachedTextFiles.length > 0) {
+        attachmentNotice = message;
+      } else {
+        statusMessage = message;
+      }
       return;
     }
     chatMessages = stamped;
