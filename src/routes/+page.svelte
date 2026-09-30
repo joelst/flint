@@ -14253,6 +14253,8 @@ Output only the summary text, no preamble.`;
     color: var(--muted);
     cursor: pointer;
     font-size: 0.75rem;
+    width: calc(100% - 24px);
+    box-sizing: border-box;
   }
 
   .composer-settings-drawer {
@@ -14264,6 +14266,8 @@ Output only the summary text, no preamble.`;
     border-radius: 8px;
     background: var(--panel-bg);
     color: var(--muted);
+    width: calc(100% - 24px);
+    box-sizing: border-box;
   }
 
   .composer-settings-drawer .context-control {
@@ -15065,6 +15069,12 @@ Output only the summary text, no preamble.`;
     font-size: 0.8rem;
   }
 
+  :global(html[data-theme="light"]) .persona-menu {
+    background: #fff;
+    color: #212529;
+    border-color: #dee2e6;
+  }
+
   /* When we decide to open upward (near bottom of window) */
   .persona-menu.up {
     transform: translateY(-100%);
@@ -15092,7 +15102,7 @@ Output only the summary text, no preamble.`;
     width: 100%;
     text-align: left;
     padding: 8px 10px;
-    background: none;
+    background: var(--panel-bg);
     border: none;
     color: var(--fg);
     cursor: pointer;
@@ -15102,6 +15112,13 @@ Output only the summary text, no preamble.`;
   .persona-item.matches {
     background: color-mix(in srgb, var(--accent) 15%, var(--panel-bg));
   }
+  :global(html[data-theme="light"]) .persona-item {
+    background: #fff;
+    color: #212529;
+    border-bottom-color: #dee2e6;
+  }
+  :global(html[data-theme="light"]) .persona-item:hover { background: #f1f3f5; }
+  :global(html[data-theme="light"]) .persona-item.matches { background: #dbeafe; }
   .persona-item .p-name { font-weight: 600; display: block; }
   .persona-item .p-desc { font-size: 0.75rem; color: var(--muted); display: block; }
   .persona-item .p-tags { font-size: 0.65rem; color: var(--success); }
