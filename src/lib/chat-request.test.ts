@@ -4,6 +4,7 @@ import {
   fromPromptParts,
   mergePromptParts,
   normalizeForAlternatingChat,
+  retainNewestImagesByChronology,
   ImageAttachmentRequestError,
   TextAttachmentRequestError,
   isEmptyAssistantPlaceholder,
@@ -286,7 +287,15 @@ describe('normalizeForAlternatingChat', () => {
         { role: 'user', content: [text('second'), image('b')] },
       ]);
       expect(out).toEqual([
-        { role: 'user', content: [text('first'), image('a'), text('second'), image('b')] },
+        {
+          role: 'user',
+          content: [
+            text('first'),
+            text(DEFAULT_OMITTED_IMAGE_PLACEHOLDER),
+            text('second'),
+            image('b'),
+          ],
+        },
       ]);
       expect(JSON.stringify(out)).not.toContain('[object Object]');
     });
@@ -700,7 +709,7 @@ describe('request image cap', () => {
       thread.push(imageTurn(n), { role: 'assistant', content: `reply ${n}` });
     }
     const out = normalizeForAlternatingChat(thread);
-    expect(images(out)).toEqual([0, 1, 2, 3].map((i) => image(`data:image/png;base64,T39I${i}`)));
+    expect(images(out)).toEqual([image('data:image/png;base64,T39I3')]);
     expect(JSON.stringify(out[0].content)).toContain(DEFAULT_OMITTED_IMAGE_PLACEHOLDER);
   });
 
@@ -730,7 +739,7 @@ describe('request image cap', () => {
     }], { rejectInvalidImageAttachments: true })).toThrowError(
       expect.objectContaining({
         name: 'ImageAttachmentRequestError',
-        message: expect.stringContaining('recent conversation images are sent too'),
+        message: expect.stringContaining('image selected for this request'),
       }),
     );
   });
@@ -746,5 +755,31 @@ describe('request image cap', () => {
       rejectInvalidImageAttachments: true,
     });
     expect(images(out)).toEqual([image(TINY_PNG_DATA_URL)]);
+  });
+});
+
+describe('chronological image retention', () => {
+  it('keeps the newest image before pinned messages are reordered', () => {
+    const older = { role: 'user', content: [image('older')] };
+    const newerPinned = { role: 'user', pinned: true, content: [image('newer')] };
+    const bounded = retainNewestImagesByChronology([older, newerPinned]);
+    const reordered = [bounded[1], bounded[0]];
+    const out = normalizeForAlternatingChat(reordered);
+    const retained = out.flatMap((message) =>
+      Array.isArray(message.content)
+        ? message.content.filter((part) => part.type === 'image_url')
+        : []);
+    expect(retained).toEqual([image('newer')]);
+  });
+
+  it('does not mutate stored conversation content', () => {
+    const messages = [
+      { content: [image('older')] },
+      { content: [image('newer')] },
+    ];
+    const bounded = retainNewestImagesByChronology(messages);
+    expect(messages[0].content).toEqual([image('older')]);
+    expect(bounded[0].content).toEqual([text(DEFAULT_OMITTED_IMAGE_PLACEHOLDER)]);
+    expect(bounded[1]).toBe(messages[1]);
   });
 });

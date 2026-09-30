@@ -62,9 +62,9 @@ export class ImageAttachmentRequestError extends Error {
         ? `is ${width}x${height}, above Flint's supported pixel limit`
         : 'is not a valid supported raster image';
     super(
-      `An image in the outgoing conversation ${detail}. `
-      + 'The file size on disk is not the deciding limit because recent conversation images are sent too. '
-      + 'Remove the current attachment if it is affected, or start a new chat to exclude older images.',
+      `The image selected for this request ${detail}. `
+      + 'The file size on disk is not the deciding limit. Remove the current attachment, '
+      + 'or remove the newest image from the conversation if it came from an earlier turn.',
     );
     this.name = 'ImageAttachmentRequestError';
   }
@@ -240,6 +240,44 @@ export const DEFAULT_INSTRUCTION_PREFIX = 'Follow these instructions:';
 export const DEFAULT_IMAGE_PLACEHOLDER = '[image]';
 
 export const DEFAULT_OMITTED_IMAGE_PLACEHOLDER = '[earlier image omitted]';
+
+/**
+ * Bound images while messages are still in chronological order.
+ *
+ * Callers may later move pinned turns ahead of recent turns, so applying the request cap only
+ * after that reordering can retain an older image. This keeps message metadata and ordering
+ * untouched while replacing every older image with the same marker used by request normalization.
+ */
+export function retainNewestImagesByChronology<T extends { content?: unknown }>(
+  messages: readonly T[],
+  maxImages = MAX_REQUEST_IMAGES,
+  placeholder = DEFAULT_OMITTED_IMAGE_PLACEHOLDER,
+): T[] {
+  let kept = 0;
+  const result = [...messages];
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = messages[messageIndex];
+    if (!Array.isArray(message.content)) continue;
+    let changed = false;
+    const content = [...message.content];
+    for (let partIndex = content.length - 1; partIndex >= 0; partIndex -= 1) {
+      const part = content[partIndex];
+      if (
+        !part
+        || typeof part !== 'object'
+        || (part as { type?: unknown }).type !== 'image_url'
+      ) continue;
+      if (kept < maxImages) {
+        kept += 1;
+      } else {
+        content[partIndex] = { type: 'text', text: placeholder };
+        changed = true;
+      }
+    }
+    if (changed) result[messageIndex] = { ...message, content };
+  }
+  return result;
+}
 
 /**
  * Keep the newest `maxImages` images, replacing older ones in place with placeholder text.

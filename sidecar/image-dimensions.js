@@ -12,15 +12,14 @@
 export const MAX_NATIVE_IMAGE_PIXELS = 4096 * 4096;
 
 /**
- * Images one request may carry. Each is bounded by MAX_NATIVE_IMAGE_PIXELS, so this bounds the
- * whole request's decode (4 x 64 MiB RGBA). Matches the composer's per-turn cap, so the turn
- * being sent always fits; the request builder keeps the newest images and omits older ones.
+ * Images one native ChatSession request may carry. Foundry Local currently rejects a second
+ * image anywhere in the request, including one from recent conversation history.
  */
-export const MAX_REQUEST_IMAGES = 4;
+export const MAX_REQUEST_IMAGES = 1;
 
 /** Whole-conversation webview preview budget: at most 64 MiB of RGBA pixels and four images. */
 export const MAX_CONVERSATION_PREVIEW_PIXELS = MAX_NATIVE_IMAGE_PIXELS;
-export const MAX_CONVERSATION_PREVIEW_IMAGES = MAX_REQUEST_IMAGES;
+export const MAX_CONVERSATION_PREVIEW_IMAGES = 4;
 
 /** Largest stored image data URL Flint will decode, preview, or send. */
 export const MAX_IMAGE_DATA_URL_CHARS = 350_000;
