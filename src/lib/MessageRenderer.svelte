@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "./Icon.svelte";
   import type { MessageContent } from "./conversation-store";
   import {
     extractThinkingTrace,
@@ -222,9 +223,10 @@
         {/each}
       </div>
     {/if}
-    <button class="copy-btn" title="Copy message" onclick={copyToClipboard}
-      >📋 Copy</button
-    >
+    <button class="copy-btn" type="button" title="Copy message" aria-label="Copy message" onclick={copyToClipboard}>
+      <Icon name="copy" size={14} />
+      <span>Copy</span>
+    </button>
   {:else}
     <div class="user-parts">
       {#each userParts as part}
@@ -241,9 +243,10 @@
         {/if}
       {/each}
     </div>
-    <button class="copy-btn" title="Copy message" onclick={copyToClipboard}
-      >📋 Copy</button
-    >
+    <button class="copy-btn" type="button" title="Copy message" aria-label="Copy message" onclick={copyToClipboard}>
+      <Icon name="copy" size={14} />
+      <span>Copy</span>
+    </button>
   {/if}
 </div>
 
@@ -251,6 +254,8 @@
   .message-renderer {
     position: relative;
     width: 100%;
+    display: flex;
+    flex-direction: column;
   }
 
   .user-parts {
@@ -437,10 +442,12 @@
   }
 
   .copy-btn {
-    position: absolute;
-    top: 4px;
-    right: 4px;
-    padding: 2px 6px;
+    align-self: flex-end;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 4px;
+    padding: 3px 7px;
     font-size: 0.7rem;
     background: var(--subtle-bg);
     color: var(--fg);
