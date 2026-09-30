@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_ATTACHMENT_DATA_URL_CHARS,
   MAX_CONVERSATION_STORAGE_CHARS,
+  MAX_OPTIMIZED_IMAGE_BYTES,
   MAX_SOURCE_IMAGE_BYTES,
   compactImageAttachment,
   prepareImageBatch,
@@ -241,6 +242,39 @@ describe("image attachment storage limits", () => {
     await expect(compactImageAttachment(fileWithDataUrl(small))).resolves.toBe(compacted);
     expect(decode).toHaveBeenCalledOnce();
     expect(canvas.width).toBe(1600);
+  });
+
+  it("automatically compresses an image whose decoded payload exceeds 200 KiB", async () => {
+    installFileReader();
+    const close = vi.fn();
+    const decode = vi.fn(async () => ({ width: 800, height: 600, close }));
+    Object.defineProperty(globalThis, "createImageBitmap", { configurable: true, value: decode });
+    const compacted = "data:image/jpeg;base64,AQID";
+    const stillLarge = pngDataUrl(800, 600, MAX_OPTIMIZED_IMAGE_BYTES);
+    const qualities: number[] = [];
+    const canvas = {
+      width: 0,
+      height: 0,
+      getContext: () => ({ fillStyle: "", fillRect: vi.fn(), drawImage: vi.fn() }),
+      toBlob: (callback: (blob: Blob) => void, _type: string, quality: number) => {
+        qualities.push(quality);
+        callback(Object.assign(new Blob(), {
+          __dataUrl: qualities.length === 1 ? stillLarge : compacted,
+        }));
+      },
+    };
+    vi.spyOn(document, "createElement").mockImplementation(((tag: string) =>
+      tag === "canvas" ? canvas : originalCreateElement(tag)) as typeof document.createElement);
+
+    const source = pngDataUrl(800, 600, MAX_OPTIMIZED_IMAGE_BYTES);
+    expect(imageDataUrlBytes(source)).toBeGreaterThan(MAX_OPTIMIZED_IMAGE_BYTES);
+    expect(source.length).toBeLessThan(MAX_ATTACHMENT_DATA_URL_CHARS);
+    await expect(compactImageAttachment(fileWithDataUrl(source))).resolves.toBe(compacted);
+    expect(decode).toHaveBeenCalledOnce();
+    expect(canvas.width).toBe(800);
+    expect(canvas.height).toBe(600);
+    expect(qualities).toEqual([0.86, 0.65]);
+    expect(close).toHaveBeenCalledOnce();
   });
 
   it("refuses a pixel bomb and an unreadable header without decoding", async () => {
