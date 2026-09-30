@@ -27,7 +27,11 @@ import {
   textAttachmentBytes,
   isValidTextAttachmentData,
 } from './text-attachment-policy';
-import { MAX_REQUEST_IMAGES } from '../../sidecar/image-dimensions.js';
+import {
+  MAX_IMAGE_DATA_URL_CHARS,
+  MAX_REQUEST_IMAGES,
+  parseImageDataUrl,
+} from '../../sidecar/image-dimensions.js';
 
 /** A part this builder knows how to send. Opaque parts never reach a request. */
 export type PromptPart = TextPart | ImagePart;
@@ -47,6 +51,22 @@ export class TextAttachmentRequestError extends Error {
       + 'Remove an attachment or reduce context; if an older archived turn is over limit, start a new chat.',
     );
     this.name = 'TextAttachmentRequestError';
+  }
+}
+
+export class ImageAttachmentRequestError extends Error {
+  constructor(reason: 'size' | 'format' | 'base64' | 'header' | 'pixels', width?: number, height?: number) {
+    const detail = reason === 'size'
+      ? `exceeds Flint's ${MAX_IMAGE_DATA_URL_CHARS.toLocaleString()}-character encoded limit`
+      : reason === 'pixels'
+        ? `is ${width}x${height}, above Flint's supported pixel limit`
+        : 'is not a valid supported raster image';
+    super(
+      `An image in the outgoing conversation ${detail}. `
+      + 'The file size on disk is not the deciding limit because recent conversation images are sent too. '
+      + 'Remove the current attachment if it is affected, or start a new chat to exclude older images.',
+    );
+    this.name = 'ImageAttachmentRequestError';
   }
 }
 
@@ -203,6 +223,8 @@ export interface AlternatingOptions {
   imagePlaceholder?: string;
   /** Refuse a request rather than silently omitting a known text attachment that exceeds policy. */
   rejectInvalidTextAttachments?: boolean;
+  /** Refuse a request before dispatch when an image remaining after the request cap is unsafe. */
+  rejectInvalidImageAttachments?: boolean;
   /**
    * Most images the request may carry; older ones become `omittedImagePlaceholder`. Every image
    * in the window is resent each turn, so without a request-wide cap a long vision thread (or an
@@ -238,6 +260,20 @@ function capImages(
       } else {
         parts[p] = { type: 'text', text: placeholder };
       }
+    }
+  }
+}
+
+function assertRequestImages(parts: PromptPart[]): void {
+  for (const part of parts) {
+    if (part.type !== 'image_url') continue;
+    const parsed = parseImageDataUrl(part.image_url.url);
+    if (!parsed.ok) {
+      throw new ImageAttachmentRequestError(
+        parsed.reason,
+        parsed.reason === 'pixels' ? parsed.width : undefined,
+        parsed.reason === 'pixels' ? parsed.height : undefined,
+      );
     }
   }
 }
@@ -341,6 +377,9 @@ export function normalizeForAlternatingChat(
     options.maxImages ?? MAX_REQUEST_IMAGES,
     options.omittedImagePlaceholder ?? DEFAULT_OMITTED_IMAGE_PLACEHOLDER,
   );
+  if (options.rejectInvalidImageAttachments) {
+    for (const message of alternating) assertRequestImages(message.parts);
+  }
 
   const result: PromptMessage[] = [];
   for (const message of alternating) {

@@ -4,6 +4,7 @@ import {
   fromPromptParts,
   mergePromptParts,
   normalizeForAlternatingChat,
+  ImageAttachmentRequestError,
   TextAttachmentRequestError,
   isEmptyAssistantPlaceholder,
   hasSendableContent,
@@ -14,6 +15,8 @@ import {
 } from './chat-request';
 import { OPAQUE_PART_TYPE } from './conversation-store';
 import { MAX_TEXT_FILE_BYTES } from './text-attachment-policy';
+import { MAX_IMAGE_DATA_URL_CHARS } from '../../sidecar/image-dimensions.js';
+import { TINY_PNG_DATA_URL } from '../../sidecar/test-fixtures/images';
 
 const text = (t: string): PromptPart => ({ type: 'text', text: t });
 const image = (url: string): PromptPart => ({ type: 'image_url', image_url: { url } });
@@ -717,5 +720,31 @@ describe('request image cap', () => {
     ], { maxImages: 1, omittedImagePlaceholder: '<omitted>' });
     expect(out[0]).toEqual({ role: 'user', content: 'old <omitted>' });
     expect(out[2]).toEqual({ role: 'user', content: [image('b')] });
+  });
+
+  it('rejects an oversized image that remains in the outgoing request', () => {
+    const oversized = `data:image/png;base64,${'A'.repeat(MAX_IMAGE_DATA_URL_CHARS)}`;
+    expect(() => normalizeForAlternatingChat([{
+      role: 'user',
+      content: [image(oversized)],
+    }], { rejectInvalidImageAttachments: true })).toThrowError(
+      expect.objectContaining({
+        name: 'ImageAttachmentRequestError',
+        message: expect.stringContaining('recent conversation images are sent too'),
+      }),
+    );
+  });
+
+  it('does not reject an invalid older image after the image cap omits it', () => {
+    const oversized = `data:image/png;base64,${'A'.repeat(MAX_IMAGE_DATA_URL_CHARS)}`;
+    const out = normalizeForAlternatingChat([
+      { role: 'user', content: [image(oversized)] },
+      { role: 'assistant', content: 'seen' },
+      { role: 'user', content: [image(TINY_PNG_DATA_URL)] },
+    ], {
+      maxImages: 1,
+      rejectInvalidImageAttachments: true,
+    });
+    expect(images(out)).toEqual([image(TINY_PNG_DATA_URL)]);
   });
 });
