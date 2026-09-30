@@ -199,6 +199,7 @@
   import {
     normalizeForAlternatingChat,
     isEmptyAssistantPlaceholder,
+    retainNewestImagesByChronology,
   } from "$lib/chat-request";
   import {
     beginScopedPreparation,
@@ -6805,8 +6806,9 @@ updateStateFromSdk();
     });
 
     // === Step 5: Respect pinned messages ===
-    const pinned = effectiveHistory.filter((m: any) => m.pinned);
-    const nonPinned = effectiveHistory.filter((m: any) => !m.pinned);
+    const imageBoundedHistory = retainNewestImagesByChronology(effectiveHistory);
+    const pinned = imageBoundedHistory.filter((m: any) => m.pinned);
+    const nonPinned = imageBoundedHistory.filter((m: any) => !m.pinned);
 
     const maxRecent = Math.max(2, contextTurns * 2);
     const recentNonPinned = nonPinned.slice(-maxRecent);

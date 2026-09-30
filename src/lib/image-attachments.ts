@@ -1,7 +1,11 @@
-import { detectImageFormat, readImageDimensions } from "../../sidecar/image-dimensions.js";
+import {
+  MAX_REQUEST_IMAGES,
+  detectImageFormat,
+  readImageDimensions,
+} from "../../sidecar/image-dimensions.js";
 import { isSupportedTextAttachment } from "./text-attachments";
 
-export const MAX_ATTACHED_IMAGES = 4;
+export const MAX_ATTACHED_IMAGES = MAX_REQUEST_IMAGES;
 export const MAX_SOURCE_IMAGE_BYTES = 20 * 1024 * 1024;
 export const MAX_ATTACHMENT_DATA_URL_CHARS = 350_000;
 export const MAX_OPTIMIZED_IMAGE_BYTES = 200 * 1024;

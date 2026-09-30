@@ -283,14 +283,14 @@ describe('createSessionChatClient buffered chat', () => {
       role: 'user',
       content: Array.from({ length: count }, () => ({ type: 'image_url', image_url: { url: pngDataUrl(4096, 4096) } })),
     });
-    // Every image passes the per-image bound; together they would not.
-    await expect(client.completeChat([turn(3), { role: 'assistant', content: 'seen' }, turn(2)]))
-      .rejects.toThrow(/carries 5 images; at most 4/);
+    // The native session supports only one image across the complete request.
+    await expect(client.completeChat([turn(1), { role: 'assistant', content: 'seen' }, turn(1)]))
+      .rejects.toThrow(/carries 2 images; at most 1/);
     expect(decoded).toEqual([]);
     expect(processed).toBe(0);
 
-    await client.completeChat([turn(2), { role: 'assistant', content: 'seen' }, turn(2)]);
-    expect(decoded).toHaveLength(4);
+    await client.completeChat([turn(1)]);
+    expect(decoded).toHaveLength(1);
   });
   it('returns the parsed response and disposes the session on success', async () => {
     const { sdkModule, disposeCalls } = fakeSdk();
