@@ -133,8 +133,10 @@ bundle signing alike — so release builds must keep using `tauri:build`. The re
 invokes `tauri-action` directly and is unaffected by the local script.
 
 To build locally with a version that has not been rolled into the repository, pass a full
-SemVer version. The command writes a temporary Tauri config override, removes it after the build,
-and leaves `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml` unchanged:
+SemVer version. The command writes a temporary Tauri config override and passes the same version
+to the frontend build, so both the app's About screen and the packaged app use it. The temporary
+config is removed after the build, and `package.json`, `src-tauri/tauri.conf.json`, and
+`src-tauri/Cargo.toml` remain unchanged:
 
 ```powershell
 npm run tauri:build:local:version -- 0.10.0

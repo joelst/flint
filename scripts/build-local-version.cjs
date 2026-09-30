@@ -15,6 +15,10 @@ function createTauriBuildArgs(configPath, extraArgs = []) {
   return ['build', '--no-sign', '--config', configPath, ...extraArgs];
 }
 
+function createBuildEnv(version, env = process.env) {
+  return { ...env, VITE_FLINT_BUILD_VERSION: version };
+}
+
 function main(argv = process.argv.slice(2)) {
   const [version, ...extraArgs] = argv;
   if (!isStrictSemver(version)) {
@@ -37,7 +41,11 @@ function main(argv = process.argv.slice(2)) {
     const result = spawnSync(
       process.execPath,
       [tauriCli, ...createTauriBuildArgs(configPath, extraArgs)],
-      { cwd: process.cwd(), stdio: 'inherit' },
+      {
+        cwd: process.cwd(),
+        stdio: 'inherit',
+        env: createBuildEnv(version),
+      },
     );
     if (result.error) throw result.error;
     process.exitCode = result.status ?? 1;
@@ -51,4 +59,4 @@ function main(argv = process.argv.slice(2)) {
 
 if (require.main === module) main();
 
-module.exports = { createTauriBuildArgs, createTauriConfig };
+module.exports = { createBuildEnv, createTauriBuildArgs, createTauriConfig };
