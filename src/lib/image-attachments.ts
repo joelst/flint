@@ -4,6 +4,7 @@ import { isSupportedTextAttachment } from "./text-attachments";
 export const MAX_ATTACHED_IMAGES = 4;
 export const MAX_SOURCE_IMAGE_BYTES = 20 * 1024 * 1024;
 export const MAX_ATTACHMENT_DATA_URL_CHARS = 350_000;
+export const MAX_OPTIMIZED_IMAGE_BYTES = 200 * 1024;
 export const MAX_CONVERSATION_STORAGE_CHARS = 4_000_000;
 /** Largest source the webview is asked to decode for resizing (about 256 MB of RGBA). */
 export const MAX_SOURCE_IMAGE_PIXELS = 64 * 1024 * 1024;
@@ -277,7 +278,7 @@ export async function compactImageAttachment(file: File): Promise<string> {
   const comma = original.indexOf(",");
   const payload = /^data:[^,]*;base64,/i.test(original) ? dataUrlPayloadBytes(original) : null;
   const header = payload ? readImageDimensions(payload) : null;
-  if (!header) {
+  if (!payload || !header) {
     throw new Error(`${label} is not a readable PNG, JPEG, GIF, WebP, or BMP image.`);
   }
   if (header.width * header.height > MAX_SOURCE_IMAGE_PIXELS) {
@@ -288,6 +289,7 @@ export async function compactImageAttachment(file: File): Promise<string> {
   const labelled = `data:${mimeType};base64,${original.slice(comma + 1)}`;
   if (
     labelled.length <= MAX_ATTACHMENT_DATA_URL_CHARS
+    && payload.length <= MAX_OPTIMIZED_IMAGE_BYTES
     && Math.max(header.width, header.height) <= MAX_IMAGE_DIMENSION
   ) {
     return labelled;
@@ -299,10 +301,9 @@ export async function compactImageAttachment(file: File): Promise<string> {
       throw new Error(`${label} has invalid dimensions.`);
     }
     let scale = Math.min(1, MAX_IMAGE_DIMENSION / Math.max(bitmap.width, bitmap.height));
-    let quality = 0.86;
-    let lastLength = Number.POSITIVE_INFINITY;
+    const qualities = [0.86, 0.65, 0.48];
 
-    for (let attempt = 0; attempt < 8; attempt += 1) {
+    for (let resizeAttempt = 0; resizeAttempt < 5; resizeAttempt += 1) {
       const canvas = document.createElement("canvas");
       canvas.width = Math.max(1, Math.round(bitmap.width * scale));
       canvas.height = Math.max(1, Math.round(bitmap.height * scale));
@@ -312,12 +313,26 @@ export async function compactImageAttachment(file: File): Promise<string> {
       context.fillRect(0, 0, canvas.width, canvas.height);
       context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
 
-      const compacted = await readBlobAsDataUrl(await canvasBlob(canvas, quality));
-      if (compacted.length <= MAX_ATTACHMENT_DATA_URL_CHARS) return compacted;
-      if (compacted.length >= lastLength && scale <= 0.35) break;
-      lastLength = compacted.length;
-      scale *= 0.78;
-      quality = Math.max(0.48, quality - 0.08);
+      let lowestQualityBytes: number | null = null;
+      for (const quality of qualities) {
+        const compacted = await readBlobAsDataUrl(await canvasBlob(canvas, quality));
+        const compactedBytes = imageDataUrlBytes(compacted);
+        if (
+          compacted.length <= MAX_ATTACHMENT_DATA_URL_CHARS
+          && compactedBytes !== null
+          && compactedBytes <= MAX_OPTIMIZED_IMAGE_BYTES
+        ) return compacted;
+        lowestQualityBytes = compactedBytes;
+      }
+
+      const ratio = lowestQualityBytes && lowestQualityBytes > 0
+        ? Math.sqrt(MAX_OPTIMIZED_IMAGE_BYTES / lowestQualityBytes) * 0.92
+        : 0.78;
+      const nextScale = scale * Math.min(0.78, Math.max(0.35, ratio));
+      const nextWidth = Math.max(1, Math.round(bitmap.width * nextScale));
+      const nextHeight = Math.max(1, Math.round(bitmap.height * nextScale));
+      if (nextWidth === canvas.width && nextHeight === canvas.height) break;
+      scale = nextScale;
     }
   } finally {
     bitmap.close();
