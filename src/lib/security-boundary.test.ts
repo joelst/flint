@@ -162,12 +162,26 @@ describe('renderer/sidecar boundary', () => {
     expect(page).toContain('const anyTruncated = doneFetches.some');
     expect(page).toContain('doneFetches.map((fetch) => fetch.url)');
     expect(page).toContain('webSources = [...webSources, ...executed.sources]');
-    expect(page).toContain('const hasWebAudit = webRoundStarted || webSources.length > 0 || webErrors.length > 0');
-    expect(page).toContain('const failedContent = hasWebAudit');
-    expect(page).toContain('appendWebSourceAudit(failureMessage, webSources)');
-    expect(page).toContain('appendWebErrorAudit(failedContent, webErrors)');
+    // The audit is stored beside the model's Markdown, never concatenated into it: an unclosed
+    // comment, fence, or block in untrusted output would otherwise hide or restyle it.
+    expect(page).not.toMatch(/appendWeb(Source|Error)Audit/);
+    expect(page).toContain('const webAudit = buildWebAudit(webSources, webErrors);');
+    expect(page.match(/\.\.\.webAuditPatch\(\)/g)?.length).toBe(7);
+    expect(page).toMatch(/isError: true,\s*content: failureMessage,\s*\.\.\.webAuditPatch\(\)/);
+    expect(page).toContain('updateAssistantMessage({ content: assistantContent, ...webAuditPatch() });');
+    expect(page).toContain('webAudit={msg.webAudit}');
     expect(page).toContain('if (webSources.length > 0 || webErrors.length > 0)');
-    expect(page).toContain('appendWebSourceAudit(assistantContent, webSources)');
     expect(page).toContain('{ webToolsEnabled: includeWebToolInstruction }');
+  });
+
+  it('renders the web audit outside the model Markdown sink', () => {
+    const renderer = readFileSync(join(process.cwd(), 'src', 'lib', 'MessageRenderer.svelte'), 'utf8');
+    expect(renderer.match(/\{@html /g)?.length).toBe(1);
+    const markdownEnd = renderer.indexOf('{@html renderedHtml}');
+    const audit = renderer.indexOf('<section class="web-audit"');
+    expect(markdownEnd).toBeGreaterThan(0);
+    expect(audit).toBeGreaterThan(markdownEnd);
+    expect(renderer).toContain('normalizeWebAudit(webAudit)');
+    expect(renderer).toContain('messageClipboardWithWebAudit(messageClipboardText(content), webAuditView)');
   });
 });

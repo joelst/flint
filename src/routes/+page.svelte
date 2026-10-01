@@ -206,10 +206,9 @@
     isEmptyAssistantPlaceholder,
     selectPinnedAndRecentMessages,
   } from "$lib/chat-request";
+  import { buildWebAudit } from "$lib/web-audit";
   import {
     WEB_TOOL_DEFINITIONS,
-    appendWebErrorAudit,
-    appendWebSourceAudit,
     collectCurrentWebFetchUrls,
     executeWebToolCalls,
     messagesContainImages,
@@ -6755,6 +6754,11 @@ updateStateFromSdk();
       truncated: fetch.truncated,
     }));
     let webErrors = [];
+    // The audit is a separate, app-controlled field: model Markdown cannot hide or restyle it.
+    const webAuditPatch = () => {
+      const webAudit = buildWebAudit(webSources, webErrors);
+      return webAudit ? { webAudit } : {};
+    };
     try {
       chatMessages = [...chatMessages, createTimestampedMessage({
         role: "assistant",
@@ -6787,14 +6791,9 @@ updateStateFromSdk();
         if (requestController.signal.aborted) {
           if (webSources.length > 0 || webErrors.length > 0) {
             updateAssistantMessage({
-              content: appendWebErrorAudit(
-                appendWebSourceAudit(
-                  `${assistantContent || assistantContentSoFar(assistantId)}\n\n`
-                    + "[Stopped after web retrieval. The partial response may already have been saved.]",
-                  webSources,
-                ),
-                webErrors,
-              ),
+              content: `${assistantContent || assistantContentSoFar(assistantId)}\n\n`
+                + "[Stopped after web retrieval. The partial response may already have been saved.]",
+              ...webAuditPatch(),
             });
           }
           return;
@@ -6822,13 +6821,8 @@ updateStateFromSdk();
           webErrors = executed.errors;
           if (requestController.signal.aborted) {
             updateAssistantMessage({
-              content: appendWebErrorAudit(
-                appendWebSourceAudit(
-                  "[Stopped after web retrieval. An already-started network request may have completed.]",
-                  webSources,
-                ),
-                webErrors,
-              ),
+              content: "[Stopped after web retrieval. An already-started network request may have completed.]",
+              ...webAuditPatch(),
             });
             return;
           }
@@ -6863,13 +6857,8 @@ updateStateFromSdk();
           );
           if (requestController.signal.aborted) {
             updateAssistantMessage({
-              content: appendWebErrorAudit(
-                appendWebSourceAudit(
-                  `${assistantContent}\n\n[Stopped after web retrieval. The partial response may already have been saved.]`.trim(),
-                  webSources,
-                ),
-                webErrors,
-              ),
+              content: `${assistantContent}\n\n[Stopped after web retrieval. The partial response may already have been saved.]`.trim(),
+              ...webAuditPatch(),
             });
             return;
           }
@@ -6883,9 +6872,7 @@ updateStateFromSdk();
           setModelRuntimeMeta(requestModelAlias, { lastUsedAcceleration: endpointAcceleration });
         }
         assistantContent = data?.choices?.[0]?.message?.content || assistantContent;
-        assistantContent = appendWebSourceAudit(assistantContent, webSources);
-        assistantContent = appendWebErrorAudit(assistantContent, webErrors);
-        updateAssistantMessage({ content: assistantContent });
+        updateAssistantMessage({ content: assistantContent, ...webAuditPatch() });
         setTimeout(() => {
           if (messagesContainer)
             messagesContainer.scrollTop = messagesContainer.scrollHeight;
@@ -6914,35 +6901,21 @@ updateStateFromSdk();
             updateAssistantMessage({ content: assistantContent });
           }
         }
-        assistantContent = appendWebErrorAudit(
-          appendWebSourceAudit(assistantContent, webSources),
-          webErrors,
-        );
-        updateAssistantMessage({ content: assistantContent });
+        updateAssistantMessage({ content: assistantContent, ...webAuditPatch() });
       }
     } catch (err: any) {
       if (!requestController.signal.aborted) {
         const failureMessage =
           `${assistantContent || assistantContentSoFar(assistantId)}\n\n[Error: ${err?.message || err}]`;
-        const hasWebAudit = webRoundStarted || webSources.length > 0 || webErrors.length > 0;
-        const failedContent = hasWebAudit
-          ? appendWebSourceAudit(failureMessage, webSources)
-          : failureMessage;
         updateAssistantMessage({
           isError: true,
-          content: hasWebAudit
-            ? appendWebErrorAudit(failedContent, webErrors)
-            : failedContent,
+          content: failureMessage,
+          ...webAuditPatch(),
         });
       } else if (webRoundStarted || webSources.length > 0 || webErrors.length > 0) {
         updateAssistantMessage({
-          content: appendWebErrorAudit(
-            appendWebSourceAudit(
-              `${assistantContent}\n\n[Stopped during web retrieval. An already-started network request may have completed.]`.trim(),
-              webSources,
-            ),
-            webErrors,
-          ),
+          content: `${assistantContent}\n\n[Stopped during web retrieval. An already-started network request may have completed.]`.trim(),
+          ...webAuditPatch(),
         });
       }
     } finally {
@@ -9588,6 +9561,7 @@ Output only the summary text, no preamble.`;
                           >
                             <MessageRenderer
                               content={msg.content}
+                              webAudit={msg.webAudit}
                               createdAt={msg.createdAt}
                               timestampNow={messageTimestampNow}
                               previewImagePartIndexes={chatImagePreviewPartIndexes[i] ?? []}

@@ -74,7 +74,9 @@ The sidebar is grouped by workflow:
   the current conversation. When enabled, the model may make one bounded round of public
   `web_search` or `web_fetch` calls. Fetch is limited to HTTPS URLs typed or attached as a URL chip
   in the current message, retrieved text is treated as untrusted reference material, and consulted
-  sources are appended visibly to the answer. Search terms and requested public URLs leave the
+  sources (and any tool issues) appear in a separate **Sources consulted** section under the
+  answer that the model's text cannot hide or alter. Copying the message includes that section.
+  Search terms and requested public URLs leave the
   device; Flint does not send cookies, credentials, or browser state.
   The toggle governs only what the model may do. Adding a detected URL as a context chip and then
   clicking that chip's **Fetch** is a separate explicit action: the page is requested immediately,

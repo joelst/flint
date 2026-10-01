@@ -1,8 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import { buildWebAudit } from './web-audit';
 import {
   WEB_TOOL_DEFINITIONS,
-  appendWebErrorAudit,
-  appendWebSourceAudit,
   collectCurrentWebFetchUrls,
   collectWebFetchUrls,
   executeWebToolCalls,
@@ -18,38 +17,6 @@ describe('web tool calls', () => {
   it('exposes only bounded search and fetch tools', () => {
     expect(WEB_TOOL_DEFINITIONS.map((tool) => tool.function.name))
       .toEqual(['web_search', 'web_fetch']);
-  });
-
-  describe('web source audit', () => {
-    it('appends unique visible citations even when the model omits them', () => {
-      expect(appendWebSourceAudit('Answer', [
-        { title: 'One', url: 'https://example.com/' },
-        { title: 'Duplicate', url: 'https://example.com/' },
-      ])).toBe('Answer\n\nSources consulted:\n- [One](<https://example.com/>)');
-    });
-
-    it('escapes untrusted source titles before adding Markdown', () => {
-      expect(appendWebSourceAudit('Answer', [{
-        title: '[source]\n<script>(https://attacker.example/)',
-        url: 'https://example.com/a_(b)',
-      }])).toBe(
-        'Answer\n\nSources consulted:\n'
-        + '- [\\[source\\] script(https://attacker.example/)](<https://example.com/a_(b)>)',
-      );
-    });
-
-    it('persists truncation in the visible audit and merges it across duplicate sources', () => {
-      expect(appendWebSourceAudit('Answer', [
-        { title: 'Page', url: 'https://example.com/' },
-        { title: 'Duplicate', url: 'https://example.com/', truncated: true },
-      ])).toBe(
-        'Answer\n\nSources consulted:\n- [Page (truncated)](<https://example.com/>)',
-      );
-    });
-
-    it('leaves an answer unchanged when no source was consulted', () => {
-      expect(appendWebSourceAudit('Answer', [])).toBe('Answer');
-    });
   });
 
   it('rejects unknown tools, malformed JSON, and more than two calls', () => {
@@ -304,7 +271,9 @@ describe('web tool calls', () => {
       url: 'https://example.com/long',
       truncated: true,
     }]);
-    expect(appendWebSourceAudit('Answer', result.sources)).toContain('[Long page (truncated)]');
+    expect(buildWebAudit(result.sources, [])?.sources).toEqual([
+      { title: 'Long page', url: 'https://example.com/long', truncated: true },
+    ]);
   });
 
   it('does not dispatch another call after Stop is observed', async () => {
@@ -371,13 +340,6 @@ describe('web tool calls', () => {
     expect(result.sources).toEqual([{ title: 'Result', url: 'https://example.com/' }]);
     expect(result.errors).toEqual(['web_fetch: page too large']);
     expect(result.toolMessages[0].content).toContain('"error":"page too large"');
-  });
-
-  it('appends sanitized visible tool failures', () => {
-    expect(appendWebErrorAudit('Answer', ['web_fetch: <bad>\n[detail]'])).toBe(
-      'Answer\n\nWeb tool issues:\n- web_fetch: bad \\[detail\\]',
-    );
-    expect(appendWebErrorAudit('Answer', [])).toBe('Answer');
   });
 
   it('adds trusted one-round prompt-injection guidance', () => {

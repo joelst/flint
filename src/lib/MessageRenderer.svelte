@@ -10,8 +10,17 @@
     renderableMessageParts,
     sanitizeAssistantHtml,
   } from "./message-rendering";
+  import {
+    messageClipboardWithWebAudit,
+    normalizeWebAudit,
+    webAuditErrorLabel,
+    webAuditSourceLabel,
+    type WebAudit,
+  } from "./web-audit";
 
   export let content: MessageContent = "";
+  /** App-controlled web retrieval audit, rendered outside the model's Markdown. */
+  export let webAudit: WebAudit | undefined = undefined;
   /** Image part indexes admitted by the owning conversation-wide preview budget. */
   export let previewImagePartIndexes: number[] | undefined = undefined;
   export let role: "user" | "assistant" = "assistant";
@@ -54,6 +63,7 @@
   $: userParts = renderableMessageParts(content, previewImagePartIndexes);
   $: assistantAttachments = nonTextMessageParts(userParts);
   $: timestamp = messageTimestamp(createdAt, timestampNow);
+  $: webAuditView = role === "assistant" ? normalizeWebAudit(webAudit) : undefined;
 
   $: {
     if (messageKey !== lastMessageKey) {
@@ -146,7 +156,9 @@
   }
 
   function copyToClipboard() {
-    navigator.clipboard.writeText(messageClipboardText(content));
+    navigator.clipboard.writeText(
+      messageClipboardWithWebAudit(messageClipboardText(content), webAuditView),
+    );
   }
 
   /**
@@ -227,6 +239,28 @@
         {/each}
       </div>
     {/if}
+    {#if webAuditView}
+      <section class="web-audit" aria-label="Web retrieval audit">
+        {#if webAuditView.sources.length > 0}
+          <div class="web-audit-heading">Sources consulted</div>
+          <ul>
+            {#each webAuditView.sources as source}
+              <li>
+                <a href={source.url} target="_blank" rel="noopener noreferrer" title={source.url}>{webAuditSourceLabel(source)}</a>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        {#if webAuditView.errors.length > 0}
+          <div class="web-audit-heading">Web tool issues</div>
+          <ul>
+            {#each webAuditView.errors as error}
+              <li>{webAuditErrorLabel(error)}</li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
+    {/if}
   {:else}
     <div class="user-parts">
       {#each userParts as part}
@@ -278,6 +312,29 @@
     flex-direction: column;
     gap: 8px;
     margin-top: 8px;
+  }
+
+  .web-audit {
+    margin-top: 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--subtle-bg);
+    font-size: 0.85em;
+  }
+
+  .web-audit-heading {
+    color: var(--muted);
+    font-weight: 600;
+  }
+
+  .web-audit ul {
+    margin: 4px 0;
+    padding-left: 18px;
+  }
+
+  .web-audit li {
+    overflow-wrap: anywhere;
   }
 
   .attached-image {
