@@ -142,4 +142,12 @@ describe('renderer/sidecar boundary', () => {
     expect(page).toContain('messagesContainImages(requestMessages)');
     expect(page).toContain('Web tools cannot be combined with image context');
   });
+
+  it('preserves retrieval audits when the follow-up completion fails', () => {
+    const page = readFileSync(join(process.cwd(), 'src', 'routes', '+page.svelte'), 'utf8');
+    expect(page).toContain('const failedContent = webRoundStarted');
+    expect(page).toContain('appendWebSourceAudit(failureMessage, webSources)');
+    expect(page).toContain('appendWebErrorAudit(failedContent, webErrors)');
+    expect(page).toContain('{ webToolsEnabled: includeWebToolInstruction }');
+  });
 });

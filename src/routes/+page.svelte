@@ -6877,9 +6877,16 @@ updateStateFromSdk();
       }
     } catch (err: any) {
       if (!requestController.signal.aborted) {
+        const failureMessage =
+          `${assistantContent || assistantContentSoFar(assistantId)}\n\n[Error: ${err?.message || err}]`;
+        const failedContent = webRoundStarted
+          ? appendWebSourceAudit(failureMessage, webSources)
+          : failureMessage;
         updateAssistantMessage({
           isError: true,
-          content: `${assistantContent || assistantContentSoFar(assistantId)}\n\n[Error: ${err?.message || err}]`,
+          content: webRoundStarted
+            ? appendWebErrorAudit(failedContent, webErrors)
+            : failedContent,
         });
       } else if (webRoundStarted) {
         updateAssistantMessage({
@@ -6991,7 +6998,11 @@ updateStateFromSdk();
         break;
       }
     }
-    const baseSystem = buildFlintAwareSystemPrompt(systemPrompt, latestUserText);
+    const baseSystem = buildFlintAwareSystemPrompt(
+      systemPrompt,
+      latestUserText,
+      { webToolsEnabled: includeWebToolInstruction },
+    );
     const effectiveSystem = includeWebToolInstruction
       ? webToolSystemInstruction(baseSystem)
       : includeUntrustedWebContent

@@ -14,6 +14,9 @@
 export const FLINT_IDENTITY_LINE =
   "[Host] You run inside Flint (Foundry Local Interface), a privacy-first desktop GUI for Microsoft Foundry Local. Foundry Local runs models on this device via an OpenAI-compatible local API. You only reply in chat—you cannot change app settings, download models, or execute tools.";
 
+export const FLINT_WEB_IDENTITY_LINE =
+  "[Host] You run inside Flint (Foundry Local Interface), a privacy-first desktop GUI for Microsoft Foundry Local. Foundry Local runs models on this device via an OpenAI-compatible local API. You only reply in chat. For this request, Flint may execute the supervised read-only web tools it explicitly offers; you cannot change app settings, download models, or execute any other tools.";
+
 /**
  * Expanded product facts. Injected only when the user appears to ask about
  * Flint, Foundry Local, or the local runtime/endpoint.
@@ -41,6 +44,16 @@ export const FLINT_FACT_SHEET = `[About Flint & Foundry Local — use when the u
 - What you (the model in Flint chat) cannot do: change UI, load/unload models, execute tools, access files, or browse the network on the user's behalf.
 - If asked how to do something in the app, give concise UI steps (Models / Chat / Audio / Model Arena / Monitor / Integrations / Diagnostics / Settings / Learn).
 - If unsure about a version-specific detail, say so rather than inventing.`;
+
+export const FLINT_WEB_FACT_SHEET = FLINT_FACT_SHEET
+  .replace(
+    "- Chat window is display-only: it does not parse or execute tool calls, run shell/file ops, or make network requests for the model (guarded web-fetch is user-initiated URL context only).",
+    "- Chat can process one supervised round of `web_search` or `web_fetch` when the user enables public web access. Flint validates current-send consent, executes the bounded read-only request outside the model runtime, and returns untrusted text for a tool-free answer.",
+  )
+  .replace(
+    "- What you (the model in Flint chat) cannot do: change UI, load/unload models, execute tools, access files, or browse the network on the user's behalf.",
+    "- What you (the model in Flint chat) cannot do: change UI, load/unload models, access files, or use any network/tool capability beyond the supervised read-only web tools explicitly offered for this request.",
+  );
 
 /** Patterns that suggest the user wants app/runtime help (not general knowledge). */
 const ABOUT_APP_PATTERNS: RegExp[] = [
@@ -81,14 +94,17 @@ export function userAsksAboutFlint(text: string): boolean {
  * @param personaPrompt Active persona / system prompt
  * @param latestUserText Most recent user message (string); used only for expansion trigger
  * @param opts.forceFull Always include fact sheet (e.g. dedicated guide mode)
+ * @param opts.webToolsEnabled Describe Flint's narrow supervised web-tool capability
  */
 export function buildFlintAwareSystemPrompt(
   personaPrompt: string,
   latestUserText?: string,
-  opts?: { forceFull?: boolean },
+  opts?: { forceFull?: boolean; webToolsEnabled?: boolean },
 ): string {
   const persona = String(personaPrompt || "").trim() || "You are a helpful assistant.";
   const wantFull = !!opts?.forceFull || userAsksAboutFlint(latestUserText || "");
+  const identity = opts?.webToolsEnabled ? FLINT_WEB_IDENTITY_LINE : FLINT_IDENTITY_LINE;
+  const factSheet = opts?.webToolsEnabled ? FLINT_WEB_FACT_SHEET : FLINT_FACT_SHEET;
 
   // De-dupe if persona already embeds our identity/facts.
   const lower = persona.toLowerCase();
@@ -99,8 +115,8 @@ export function buildFlintAwareSystemPrompt(
     !lower.includes("## foundry local");
 
   const parts = [persona];
-  if (needIdentity) parts.push(FLINT_IDENTITY_LINE);
-  if (needFacts) parts.push(FLINT_FACT_SHEET);
+  if (needIdentity) parts.push(identity);
+  if (needFacts) parts.push(factSheet);
   return parts.join("\n\n");
 }
 
