@@ -76,6 +76,9 @@ The sidebar is grouped by workflow:
   in the current message, retrieved text is treated as untrusted reference material, and consulted
   sources are appended visibly to the answer. Search terms and requested public URLs leave the
   device; Flint does not send cookies, credentials, or browser state.
+  The toggle governs only what the model may do. Adding a detected URL as a context chip and then
+  clicking that chip's **Fetch** is a separate explicit action: the page is requested immediately,
+  with the toggle on or off and before you send, through the same isolated helper.
   To authorize a search, put the exact unquoted query on its own line as
   **`Search the web for: your query`**. Flint shows the exact outbound search query for
   confirmation immediately before sending it.

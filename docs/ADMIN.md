@@ -41,16 +41,20 @@ The installer contains Flint, bundled Node, and Foundry native libraries. It doe
 
 ## Playground public web retrieval
 
-Public web search and retrieval is disabled by default and enabled per conversation in Playground
-Generation settings. It runs in a short-lived helper process separate from the Foundry sidecar.
+Public web search and retrieval by the **model** is disabled by default and enabled per
+conversation in Playground Generation settings; that toggle governs only model-initiated
+`web_search`/`web_fetch` calls. Separately, a pasted or typed URL can be added as a context chip
+and then fetched by clicking **Fetch** on that chip. That explicit, user-initiated fetch happens
+immediately, independent of the toggle and of sending, and uses the same isolated helper and
+network rules. Both paths run in a short-lived helper process separate from the Foundry sidecar.
 The helper accepts only bounded public HTTPS search/fetch requests, rejects local and special IP
 ranges on every DNS resolution and redirect, sends no cookies or credentials, and returns only
 bounded text through memory-backed pipes. Raw retrieved bodies are not written to Flint's
 conversation archive or access logs; the final answer and its visible source links are persisted.
 Search terms and requested public URLs are disclosed to the public search service and destination
 site. Search dispatch requires an affirmative **`Search the web for: <query>`** line in the
-current user message, and the model must use that exact unquoted query. Fetch dispatch is limited
-to URLs typed or attached as URL chips in that same send. A final confirmation displays the exact
+current user message, and the model must use that exact unquoted query. Model `web_fetch` dispatch
+is limited to URLs typed or attached as URL chips in that same send. A final confirmation displays the exact
 search query before dispatch; declining it sends no search request.
 Flint admits at most two helper processes at once and refuses excess retrievals explicitly. The
 Foundry chat transport does not support tools and image parts together, so Flint rejects that
