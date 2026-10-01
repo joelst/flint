@@ -6725,7 +6725,10 @@ updateStateFromSdk();
 
     let assistantContent = "";
     let webRoundStarted = false;
-    let webSources = [];
+    let webSources = doneFetches.map((fetch) => ({
+      title: fetch.title || fetch.url,
+      url: fetch.url,
+    }));
     let webErrors = [];
     try {
       chatMessages = [...chatMessages, createTimestampedMessage({
@@ -6757,6 +6760,18 @@ updateStateFromSdk();
           },
         );
         if (requestController.signal.aborted) {
+          if (webSources.length > 0 || webErrors.length > 0) {
+            updateAssistantMessage({
+              content: appendWebErrorAudit(
+                appendWebSourceAudit(
+                  `${assistantContent || assistantContentSoFar(assistantId)}\n\n`
+                    + "[Stopped after web retrieval. The partial response may already have been saved.]",
+                  webSources,
+                ),
+                webErrors,
+              ),
+            });
+          }
           return;
         }
         const toolCalls = allowWebTools
@@ -6777,7 +6792,7 @@ updateStateFromSdk();
               + "The exact query will be sent to DuckDuckGo. Retrieved content is untrusted.",
             ),
           );
-          webSources = executed.sources;
+          webSources = [...webSources, ...executed.sources];
           webErrors = executed.errors;
           if (requestController.signal.aborted) {
             updateAssistantMessage({
@@ -6874,21 +6889,27 @@ updateStateFromSdk();
             updateAssistantMessage({ content: assistantContent });
           }
         }
+        assistantContent = appendWebErrorAudit(
+          appendWebSourceAudit(assistantContent, webSources),
+          webErrors,
+        );
+        updateAssistantMessage({ content: assistantContent });
       }
     } catch (err: any) {
       if (!requestController.signal.aborted) {
         const failureMessage =
           `${assistantContent || assistantContentSoFar(assistantId)}\n\n[Error: ${err?.message || err}]`;
-        const failedContent = webRoundStarted
+        const hasWebAudit = webRoundStarted || webSources.length > 0 || webErrors.length > 0;
+        const failedContent = hasWebAudit
           ? appendWebSourceAudit(failureMessage, webSources)
           : failureMessage;
         updateAssistantMessage({
           isError: true,
-          content: webRoundStarted
+          content: hasWebAudit
             ? appendWebErrorAudit(failedContent, webErrors)
             : failedContent,
         });
-      } else if (webRoundStarted) {
+      } else if (webRoundStarted || webSources.length > 0 || webErrors.length > 0) {
         updateAssistantMessage({
           content: appendWebErrorAudit(
             appendWebSourceAudit(

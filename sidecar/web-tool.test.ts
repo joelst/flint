@@ -161,6 +161,35 @@ describe('web tool network boundary', () => {
     expect(request).toHaveBeenCalledTimes(1);
   });
 
+  it('allows a cross-origin 302 only after converting the redirected request to GET', async () => {
+    const resolve = vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]);
+    const request = vi.fn()
+      .mockResolvedValueOnce({
+        statusCode: 302,
+        headers: { location: 'https://other.example/results' },
+        body: Buffer.alloc(0),
+        truncated: false,
+      })
+      .mockResolvedValueOnce({
+        statusCode: 200,
+        headers: { 'content-type': 'text/plain' },
+        body: Buffer.from('results'),
+        truncated: false,
+      });
+    await expect(fetchPublicText('https://search.example/', {
+      resolve,
+      request,
+      method: 'POST',
+      body: 'q=private+query',
+    })).resolves.toMatchObject({ body: 'results' });
+    expect(request).toHaveBeenNthCalledWith(
+      2,
+      new URL('https://other.example/results'),
+      { address: '93.184.216.34', family: 4 },
+      expect.objectContaining({ method: 'GET', body: null }),
+    );
+  });
+
   it('enforces one overall deadline across DNS, redirects, and response capture', async () => {
     const resolve = vi.fn(() => new Promise(() => {}));
     await expect(fetchPublicText('https://public.example/', {

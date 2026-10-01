@@ -145,9 +145,15 @@ describe('renderer/sidecar boundary', () => {
 
   it('preserves retrieval audits when the follow-up completion fails', () => {
     const page = readFileSync(join(process.cwd(), 'src', 'routes', '+page.svelte'), 'utf8');
-    expect(page).toContain('const failedContent = webRoundStarted');
+    expect(page).toContain('let webSources = doneFetches.map');
+    expect(page).toContain('title: fetch.title || fetch.url');
+    expect(page).toContain('webSources = [...webSources, ...executed.sources]');
+    expect(page).toContain('const hasWebAudit = webRoundStarted || webSources.length > 0 || webErrors.length > 0');
+    expect(page).toContain('const failedContent = hasWebAudit');
     expect(page).toContain('appendWebSourceAudit(failureMessage, webSources)');
     expect(page).toContain('appendWebErrorAudit(failedContent, webErrors)');
+    expect(page).toContain('if (webSources.length > 0 || webErrors.length > 0)');
+    expect(page).toContain('appendWebSourceAudit(assistantContent, webSources)');
     expect(page).toContain('{ webToolsEnabled: includeWebToolInstruction }');
   });
 });
