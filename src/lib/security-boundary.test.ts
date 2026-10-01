@@ -146,7 +146,14 @@ describe('renderer/sidecar boundary', () => {
   it('preserves retrieval audits when the follow-up completion fails', () => {
     const page = readFileSync(join(process.cwd(), 'src', 'routes', '+page.svelte'), 'utf8');
     expect(page).toContain('let webSources = doneFetches.map');
-    expect(page).toContain('title: fetch.title || fetch.url');
+    expect(page).toContain('title: fetch.title || fetch.finalUrl || fetch.url');
+    expect(page).toContain('url: fetch.finalUrl || fetch.url');
+    expect(page).toContain('truncated: fetch.truncated');
+    expect(page).toContain('finalUrl: result.url');
+    expect(page).toContain('truncated: result.truncated');
+    expect(page).toContain('the page content above is a truncated prefix');
+    expect(page).toContain('const anyTruncated = doneFetches.some');
+    expect(page).toContain('doneFetches.map((fetch) => fetch.url)');
     expect(page).toContain('webSources = [...webSources, ...executed.sources]');
     expect(page).toContain('const hasWebAudit = webRoundStarted || webSources.length > 0 || webErrors.length > 0');
     expect(page).toContain('const failedContent = hasWebAudit');

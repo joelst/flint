@@ -1668,7 +1668,16 @@
   // URL-fetch (Option A web fetch): pending URL chips and their fetched content
   const MAX_URL_CONTEXTS = 4;
   const MAX_URL_CONTEXT_CHARS = 20_000;
-  let pendingUrlFetches: { url: string; attempt: number; status: 'pending' | 'fetching' | 'done' | 'error'; title?: string; text?: string; error?: string }[] = $state([]);
+  let pendingUrlFetches: {
+    url: string;
+    attempt: number;
+    status: 'pending' | 'fetching' | 'done' | 'error';
+    finalUrl?: string;
+    title?: string;
+    text?: string;
+    truncated?: boolean;
+    error?: string;
+  }[] = $state([]);
   let isFetchingUrl = $state(false);
 
   // Detects URLs typed/pasted into the chat input that haven't been fetched yet
@@ -6606,14 +6615,21 @@ updateStateFromSdk();
     if (doneFetches.length > 0) {
       const contextBlock = doneFetches.map(f => {
         const titleLine = f.title ? `Title: ${f.title}\n` : '';
-        return `--- Page context from ${f.url} ---\n${titleLine}${f.text}\n--- end context ---`;
+        const sourceUrl = f.finalUrl || f.url;
+        const truncationNotice = f.truncated
+          ? '\nFlint notice: the page content above is a truncated prefix.'
+          : '';
+        return `--- Page context from ${sourceUrl} ---\n${titleLine}${f.text}\n--- end context ---${truncationNotice}`;
       }).join('\n\n');
+      const anyTruncated = doneFetches.some((fetch) => fetch.truncated);
       urlContextMessages.push(createTimestampedMessage({
         role: "user",
         content: `The following web page content has been fetched for context:\n\n${contextBlock}\n\nPlease use this context to answer my question.`
       }, userCreatedAt), createTimestampedMessage({
         role: "assistant",
-        content: "Understood. I have read the page content and will use it to answer your question.",
+        content: anyTruncated
+          ? "Understood. I have read the provided page prefixes and will account for their truncation."
+          : "Understood. I have read the page content and will use it to answer your question.",
       }, userCreatedAt));
     }
 
@@ -6726,8 +6742,9 @@ updateStateFromSdk();
     let assistantContent = "";
     let webRoundStarted = false;
     let webSources = doneFetches.map((fetch) => ({
-      title: fetch.title || fetch.url,
-      url: fetch.url,
+      title: fetch.title || fetch.finalUrl || fetch.url,
+      url: fetch.finalUrl || fetch.url,
+      truncated: fetch.truncated,
     }));
     let webErrors = [];
     try {
@@ -7386,7 +7403,14 @@ Output only the summary text, no preamble.`;
     isFetchingUrl = true;
     try {
       const result = await fetchUrl(url, MAX_URL_CONTEXT_CHARS);
-      patchUrlFetch(attempt, { status: 'done', title: result.title, text: result.text, error: undefined });
+      patchUrlFetch(attempt, {
+        status: 'done',
+        finalUrl: result.url,
+        title: result.title,
+        text: result.text,
+        truncated: result.truncated,
+        error: undefined,
+      });
     } catch (e: any) {
       patchUrlFetch(attempt, { status: 'error', error: e?.message || String(e) });
     } finally {

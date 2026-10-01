@@ -38,6 +38,15 @@ describe('web tool calls', () => {
       );
     });
 
+    it('persists truncation in the visible audit and merges it across duplicate sources', () => {
+      expect(appendWebSourceAudit('Answer', [
+        { title: 'Page', url: 'https://example.com/' },
+        { title: 'Duplicate', url: 'https://example.com/', truncated: true },
+      ])).toBe(
+        'Answer\n\nSources consulted:\n- [Page (truncated)](<https://example.com/>)',
+      );
+    });
+
     it('leaves an answer unchanged when no source was consulted', () => {
       expect(appendWebSourceAudit('Answer', [])).toBe('Answer');
     });

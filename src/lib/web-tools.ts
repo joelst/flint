@@ -26,6 +26,7 @@ export type WebToolResult =
 export interface WebSource {
   title: string;
   url: string;
+  truncated?: boolean;
 }
 
 export const WEB_TOOL_DEFINITIONS: ChatToolDefinition[] = [
@@ -301,15 +302,19 @@ export function webToolSystemInstruction(systemPrompt: string): string {
 export function appendWebSourceAudit(content: string, sources: WebSource[]): string {
   if (sources.length === 0) return content;
   const unique: WebSource[] = [];
-  const seen = new Set<string>();
+  const indexes = new Map<string, number>();
   for (const source of sources) {
-    if (seen.has(source.url)) continue;
-    seen.add(source.url);
-    unique.push(source);
+    const existing = indexes.get(source.url);
+    if (existing !== undefined) {
+      if (source.truncated) unique[existing].truncated = true;
+      continue;
+    }
+    indexes.set(source.url, unique.length);
+    unique.push({ ...source });
   }
 
   const lines = unique.map((source) => {
-    const label = (source.title || source.url)
+    const label = `${source.title || source.url}${source.truncated ? ' (truncated)' : ''}`
       .replace(/[\u0000-\u001f\u007f-\u009f\s]+/g, ' ')
       .replace(/[<>]/g, '')
       .replace(/\\/g, '\\\\')
