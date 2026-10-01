@@ -3,6 +3,7 @@ import {
   captureThread,
   applyMessagePatch,
   ensureMessageIds,
+  createTimestampedMessage,
   snapshotMessages,
   createConversation,
   deleteConversation,
@@ -22,6 +23,21 @@ import {
 import { openConversationArchive, saveConversationArchive } from './conversation-repository';
 
 const NOW = 1_700_000_000_000;
+
+describe('createTimestampedMessage', () => {
+  it('stamps generated chat messages without changing their other fields', () => {
+    expect(createTimestampedMessage({
+      role: 'assistant',
+      content: '',
+      id: 'assistant-1',
+    }, NOW)).toEqual({
+      role: 'assistant',
+      content: '',
+      id: 'assistant-1',
+      createdAt: NOW,
+    });
+  });
+});
 
 function msg(id: string, text: string, role: StoredMessage['role'] = 'user'): StoredMessage {
   return { id, role, content: text };

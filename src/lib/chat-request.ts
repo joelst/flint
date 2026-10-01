@@ -27,7 +27,11 @@ import {
   textAttachmentBytes,
   isValidTextAttachmentData,
 } from './text-attachment-policy';
-import { MAX_REQUEST_IMAGES } from '../../sidecar/image-dimensions.js';
+import {
+  MAX_IMAGE_DATA_URL_CHARS,
+  MAX_REQUEST_IMAGES,
+  parseImageDataUrl,
+} from '../../sidecar/image-dimensions.js';
 
 /** A part this builder knows how to send. Opaque parts never reach a request. */
 export type PromptPart = TextPart | ImagePart;
@@ -47,6 +51,22 @@ export class TextAttachmentRequestError extends Error {
       + 'Remove an attachment or reduce context; if an older archived turn is over limit, start a new chat.',
     );
     this.name = 'TextAttachmentRequestError';
+  }
+}
+
+export class ImageAttachmentRequestError extends Error {
+  constructor(reason: 'size' | 'format' | 'base64' | 'header' | 'pixels', width?: number, height?: number) {
+    const detail = reason === 'size'
+      ? `exceeds Flint's ${MAX_IMAGE_DATA_URL_CHARS.toLocaleString()}-character encoded limit`
+      : reason === 'pixels'
+        ? `is ${width}x${height}, above Flint's supported pixel limit`
+        : 'is not a valid supported raster image';
+    super(
+      `The image selected for this request ${detail}. `
+      + 'The file size on disk is not the deciding limit. Remove the current attachment, '
+      + 'or remove the newest image from the conversation if it came from an earlier turn.',
+    );
+    this.name = 'ImageAttachmentRequestError';
   }
 }
 
@@ -203,6 +223,8 @@ export interface AlternatingOptions {
   imagePlaceholder?: string;
   /** Refuse a request rather than silently omitting a known text attachment that exceeds policy. */
   rejectInvalidTextAttachments?: boolean;
+  /** Refuse a request before dispatch when an image remaining after the request cap is unsafe. */
+  rejectInvalidImageAttachments?: boolean;
   /**
    * Most images the request may carry; older ones become `omittedImagePlaceholder`. Every image
    * in the window is resent each turn, so without a request-wide cap a long vision thread (or an
@@ -218,6 +240,77 @@ export const DEFAULT_INSTRUCTION_PREFIX = 'Follow these instructions:';
 export const DEFAULT_IMAGE_PLACEHOLDER = '[image]';
 
 export const DEFAULT_OMITTED_IMAGE_PLACEHOLDER = '[earlier image omitted]';
+
+function isUsableImagePart(part: unknown): part is ImagePart {
+  if (!part || typeof part !== 'object' || (part as { type?: unknown }).type !== 'image_url') {
+    return false;
+  }
+  const imageUrl = (part as { image_url?: unknown }).image_url;
+  return !!imageUrl
+    && typeof imageUrl === 'object'
+    && typeof (imageUrl as { url?: unknown }).url === 'string'
+    && (imageUrl as { url: string }).url.length > 0;
+}
+
+/**
+ * Bound images while messages are still in chronological order.
+ *
+ * Callers may later move pinned turns ahead of recent turns, so applying the request cap only
+ * after that reordering can retain an older image. This keeps message metadata and ordering
+ * untouched while replacing every older image with the same marker used by request normalization.
+ */
+export function retainNewestImagesByChronology<T extends { content?: unknown }>(
+  messages: readonly T[],
+  maxImages = MAX_REQUEST_IMAGES,
+  placeholder = DEFAULT_OMITTED_IMAGE_PLACEHOLDER,
+): T[] {
+  let kept = 0;
+  const result = [...messages];
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = messages[messageIndex];
+    if (!Array.isArray(message.content)) continue;
+    let changed = false;
+    const content = [...message.content];
+    for (let partIndex = content.length - 1; partIndex >= 0; partIndex -= 1) {
+      const part = content[partIndex];
+      if (!isUsableImagePart(part)) continue;
+      if (kept < maxImages) {
+        kept += 1;
+      } else {
+        content[partIndex] = { type: 'text', text: placeholder };
+        changed = true;
+      }
+    }
+    if (changed) result[messageIndex] = { ...message, content };
+  }
+  return result;
+}
+
+/**
+ * Select the final inference window before applying the request-wide image cap.
+ *
+ * A message that is outside the recent window must not consume the only native image slot.
+ * Selection therefore happens in original chronological order, then image retention is applied,
+ * and only then are pinned turns moved ahead of recent turns for prompt semantics.
+ */
+export function selectPinnedAndRecentMessages<
+  T extends { content?: unknown; pinned?: unknown },
+>(
+  messages: readonly T[],
+  maxRecent: number,
+  maxImages = MAX_REQUEST_IMAGES,
+): T[] {
+  const recentNonPinned = messages.filter((message) => !message.pinned).slice(-maxRecent);
+  const recentSet = new Set(recentNonPinned);
+  const selectedChronological = messages.filter(
+    (message) => !!message.pinned || recentSet.has(message),
+  );
+  const imageBounded = retainNewestImagesByChronology(selectedChronological, maxImages);
+  return [
+    ...imageBounded.filter((message) => !!message.pinned),
+    ...imageBounded.filter((message) => !message.pinned),
+  ];
+}
 
 /**
  * Keep the newest `maxImages` images, replacing older ones in place with placeholder text.
@@ -238,6 +331,20 @@ function capImages(
       } else {
         parts[p] = { type: 'text', text: placeholder };
       }
+    }
+  }
+}
+
+function assertRequestImages(parts: PromptPart[]): void {
+  for (const part of parts) {
+    if (part.type !== 'image_url') continue;
+    const parsed = parseImageDataUrl(part.image_url.url);
+    if (!parsed.ok) {
+      throw new ImageAttachmentRequestError(
+        parsed.reason,
+        parsed.reason === 'pixels' ? parsed.width : undefined,
+        parsed.reason === 'pixels' ? parsed.height : undefined,
+      );
     }
   }
 }
@@ -341,6 +448,9 @@ export function normalizeForAlternatingChat(
     options.maxImages ?? MAX_REQUEST_IMAGES,
     options.omittedImagePlaceholder ?? DEFAULT_OMITTED_IMAGE_PLACEHOLDER,
   );
+  if (options.rejectInvalidImageAttachments) {
+    for (const message of alternating) assertRequestImages(message.parts);
+  }
 
   const result: PromptMessage[] = [];
   for (const message of alternating) {

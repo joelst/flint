@@ -35,6 +35,13 @@ import {
   type StoredMessage,
 } from './conversation-store';
 
+export function createTimestampedMessage<T extends Record<string, unknown>>(
+  message: T,
+  createdAt = Date.now(),
+): T & { createdAt: number } {
+  return { ...message, createdAt };
+}
+
 /**
  * The messages currently held in the UI, tagged with the conversation they came from.
  *

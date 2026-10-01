@@ -173,6 +173,50 @@ export function messageClipboardText(content: MessageContent): string {
     .join("\n");
 }
 
+export function messageTimestamp(
+  timestamp: unknown,
+  now = Date.now(),
+  locale?: string,
+): { label: string; title: string; datetime: string } | null {
+  if (typeof timestamp !== "number" || !Number.isFinite(timestamp)) return null;
+  const date = new Date(timestamp);
+  if (!Number.isFinite(date.getTime())) return null;
+
+  const current = new Date(now);
+  const sameDay = Number.isFinite(current.getTime())
+    && date.getFullYear() === current.getFullYear()
+    && date.getMonth() === current.getMonth()
+    && date.getDate() === current.getDate();
+  const time = new Intl.DateTimeFormat(locale, {
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
+  const label = sameDay
+    ? time
+    : new Intl.DateTimeFormat(locale, {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      }).format(date);
+  const title = new Intl.DateTimeFormat(locale, {
+    dateStyle: "full",
+    timeStyle: "medium",
+  }).format(date);
+  return { label, title, datetime: date.toISOString() };
+}
+
+export function millisecondsUntilNextLocalDay(now = Date.now()): number {
+  const current = new Date(now);
+  if (!Number.isFinite(current.getTime())) return 60_000;
+  const next = new Date(
+    current.getFullYear(),
+    current.getMonth(),
+    current.getDate() + 1,
+  ).getTime();
+  return Math.max(1, next - now + 100);
+}
+
 export function extractThinkingTrace(text: string, recognizePlainText = false): {
   visibleContent: string;
   thinkingContent: string[];

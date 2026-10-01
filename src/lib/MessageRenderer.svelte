@@ -1,9 +1,11 @@
 <script lang="ts">
+  import Icon from "./Icon.svelte";
   import type { MessageContent } from "./conversation-store";
   import {
     extractThinkingTrace,
     messageClipboardText,
     messagePlainText,
+    messageTimestamp,
     nonTextMessageParts,
     renderableMessageParts,
     sanitizeAssistantHtml,
@@ -13,6 +15,8 @@
   /** Image part indexes admitted by the owning conversation-wide preview budget. */
   export let previewImagePartIndexes: number[] | undefined = undefined;
   export let role: "user" | "assistant" = "assistant";
+  export let createdAt: number | undefined = undefined;
+  export let timestampNow: number = Date.now();
   /** True while this specific message is actively receiving stream deltas. */
   export let isStreaming: boolean = false;
   /**
@@ -49,6 +53,7 @@
   let lastMessageKey: string | number | undefined = undefined;
   $: userParts = renderableMessageParts(content, previewImagePartIndexes);
   $: assistantAttachments = nonTextMessageParts(userParts);
+  $: timestamp = messageTimestamp(createdAt, timestampNow);
 
   $: {
     if (messageKey !== lastMessageKey) {
@@ -222,9 +227,6 @@
         {/each}
       </div>
     {/if}
-    <button class="copy-btn" title="Copy message" onclick={copyToClipboard}
-      >📋 Copy</button
-    >
   {:else}
     <div class="user-parts">
       {#each userParts as part}
@@ -241,16 +243,23 @@
         {/if}
       {/each}
     </div>
-    <button class="copy-btn" title="Copy message" onclick={copyToClipboard}
-      >📋 Copy</button
-    >
   {/if}
+  <div class="message-meta">
+    {#if timestamp}
+      <time datetime={timestamp.datetime} title={timestamp.title}>{timestamp.label}</time>
+    {/if}
+    <button class="copy-btn" type="button" title="Copy message" aria-label="Copy message" onclick={copyToClipboard}>
+      <Icon name="copy" size={14} />
+    </button>
+  </div>
 </div>
 
 <style>
   .message-renderer {
     position: relative;
     width: 100%;
+    display: flex;
+    flex-direction: column;
   }
 
   .user-parts {
@@ -443,12 +452,29 @@
     line-height: 1.4;
   }
 
+  .message-meta {
+    align-self: flex-end;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+    min-height: 24px;
+    color: var(--muted);
+    font-size: 0.68rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .message-meta time {
+    cursor: help;
+  }
+
   .copy-btn {
-    position: absolute;
-    top: 4px;
-    right: 4px;
-    padding: 2px 6px;
-    font-size: 0.7rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
     background: var(--subtle-bg);
     color: var(--fg);
     border: 1px solid var(--border);
@@ -458,7 +484,8 @@
     transition: opacity 0.2s;
   }
 
-  .message-renderer:hover .copy-btn {
+  .message-renderer:hover .copy-btn,
+  .copy-btn:focus-visible {
     opacity: 1;
   }
 

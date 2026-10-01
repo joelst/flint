@@ -173,6 +173,7 @@
     createConversation as createSessionConversation,
     deleteConversation as deleteSessionConversation,
     ensureMessageIds,
+    createTimestampedMessage,
     findConversation,
     selectConversation as selectSessionConversation,
     snapshotMessages,
@@ -193,12 +194,16 @@
     type AppSettingDefaults,
   } from "$lib/conversation-settings";
   import { isFetchableUrl, detectFetchableUrls } from "$lib/url-chips";
-  import { conversationImagePreviewPartIndexes } from "$lib/message-rendering";
+  import {
+    conversationImagePreviewPartIndexes,
+    millisecondsUntilNextLocalDay,
+  } from "$lib/message-rendering";
   import { estimateTokensForMessages } from "$lib/token-estimate";
   import { formatErrorDetail, formatUncaughtError } from "$lib/error-detail";
   import {
     normalizeForAlternatingChat,
     isEmptyAssistantPlaceholder,
+    selectPinnedAndRecentMessages,
   } from "$lib/chat-request";
   import {
     beginScopedPreparation,
@@ -1554,6 +1559,8 @@
   let selectedModel: any = $state(null);
   let chatClient: any = $state(null);
   let chatMessages = $state<any[]>([]);
+  let messageTimestampNow = $state(Date.now());
+  let messageTimestampRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   let chatInput = $state("");
   let isStreaming = $state(false);
   /** id of the assistant message currently receiving deltas for the visible thread, if any. */
@@ -5954,6 +5961,14 @@ updateStateFromSdk();
 
   onMount(() => {
     hostPlatform = detectHostPlatform();
+    const scheduleMessageTimestampRefresh = () => {
+      if (messageTimestampRefreshTimer) clearTimeout(messageTimestampRefreshTimer);
+      messageTimestampRefreshTimer = setTimeout(() => {
+        messageTimestampNow = Date.now();
+        scheduleMessageTimestampRefresh();
+      }, millisecondsUntilNextLocalDay());
+    };
+    scheduleMessageTimestampRefresh();
     // Subscribe to the SDK store
     unsubscribe = sdkStateStore.subscribe(syncFromStore);
 
@@ -6021,6 +6036,10 @@ updateStateFromSdk();
       if (backgroundArchiveSaveTimer) {
         clearTimeout(backgroundArchiveSaveTimer);
         backgroundArchiveSaveTimer = null;
+      }
+      if (messageTimestampRefreshTimer) {
+        clearTimeout(messageTimestampRefreshTimer);
+        messageTimestampRefreshTimer = null;
       }
       if (unsubscribe) unsubscribe();
       document.removeEventListener('keydown', handleGlobalKeydown);
@@ -6543,6 +6562,7 @@ updateStateFromSdk();
     const text = chatInput.trim();
 
     const nextMessages = [...chatMessages];
+    const userCreatedAt = Date.now();
 
     // Inject fetched URL content as context ahead of user message
     const doneFetches = pendingUrlFetches.filter(f => f.status === 'done' && f.text);
@@ -6551,10 +6571,13 @@ updateStateFromSdk();
         const titleLine = f.title ? `Title: ${f.title}\n` : '';
         return `--- Page context from ${f.url} ---\n${titleLine}${f.text}\n--- end context ---`;
       }).join('\n\n');
-      nextMessages.push({
+      nextMessages.push(createTimestampedMessage({
         role: "user",
         content: `The following web page content has been fetched for context:\n\n${contextBlock}\n\nPlease use this context to answer my question.`
-      }, { role: "assistant", content: "Understood. I have read the page content and will use it to answer your question." });
+      }, userCreatedAt), createTimestampedMessage({
+        role: "assistant",
+        content: "Understood. I have read the page content and will use it to answer your question.",
+      }, userCreatedAt));
     }
 
     let userContent: any = text;
@@ -6567,25 +6590,27 @@ updateStateFromSdk();
           : []),
       ];
     }
-    nextMessages.push({ role: "user", content: userContent });
+    nextMessages.push(createTimestampedMessage({
+      role: "user",
+      content: userContent,
+    }, userCreatedAt));
     const stamped = ensureMessageIds(nextMessages as any, (i) => `msg-${Date.now()}-${i}`).messages as any;
     if (attachedImages.length > 0 || attachedTextFiles.length > 0) {
-      const projected = captureThread(
-        { archive: conversationArchive, thread: { loadedFor: threadLoadedFor, messages: stamped } },
-        { now: Date.now() },
-      );
-      const archiveChars = serializeArchive(projected.archive).length;
-      let otherStorageChars: number;
       try {
-        otherStorageChars = storageCharsExcluding(localStorage, ARCHIVE_KEY);
+        const projected = captureThread(
+          { archive: conversationArchive, thread: { loadedFor: threadLoadedFor, messages: stamped } },
+          { now: Date.now() },
+        );
+        const archiveChars = serializeArchive(projected.archive).length;
+        const otherStorageChars = storageCharsExcluding(localStorage, ARCHIVE_KEY);
+        if (!imageAttachmentFitsArchive(archiveChars, otherStorageChars)) {
+          attachmentNotice =
+            "These attachments would exceed conversation storage. Remove an attachment or delete/export older conversations, then try again.";
+          return;
+        }
       } catch (error: any) {
-        statusMessage =
+        attachmentNotice =
           `Conversation storage could not be checked: ${error?.message || error}. The message was not sent.`;
-        return;
-      }
-      if (!imageAttachmentFitsArchive(archiveChars, otherStorageChars)) {
-        statusMessage =
-          "These attachments would exceed conversation storage. Remove an attachment or delete/export older conversations, then try again.";
         return;
       }
     }
@@ -6593,7 +6618,12 @@ updateStateFromSdk();
     try {
       requestMessages = getMessagesForInference(stamped, true);
     } catch (error: any) {
-      statusMessage = error?.message || "The attached files could not be included safely.";
+      const message = error?.message || "The attached files could not be included safely.";
+      if (attachedImages.length > 0 || attachedTextFiles.length > 0) {
+        attachmentNotice = message;
+      } else {
+        statusMessage = message;
+      }
       return;
     }
     chatMessages = stamped;
@@ -6641,7 +6671,11 @@ updateStateFromSdk();
 
     let assistantContent = "";
     try {
-      chatMessages = [...chatMessages, { role: "assistant", content: "", id: assistantId }];
+      chatMessages = [...chatMessages, createTimestampedMessage({
+        role: "assistant",
+        content: "",
+        id: assistantId,
+      })];
 
       // Sidecar IPC runs native ChatSession inference independently of the optional HTTP service.
       // Keep the direct client only as the development fallback when no service endpoint exists.
@@ -6801,18 +6835,8 @@ updateStateFromSdk();
     });
 
     // === Step 5: Respect pinned messages ===
-    const pinned = effectiveHistory.filter((m: any) => m.pinned);
-    const nonPinned = effectiveHistory.filter((m: any) => !m.pinned);
-
     const maxRecent = Math.max(2, contextTurns * 2);
-    const recentNonPinned = nonPinned.slice(-maxRecent);
-
-    // Combine: pinned first (they act as long-term memory), then recent
-    // Dedup by reference
-    const combined = [...pinned];
-    for (const m of recentNonPinned) {
-      if (!combined.includes(m)) combined.push(m);
-    }
+    const combined = selectPinnedAndRecentMessages(effectiveHistory, maxRecent);
 
     // Latest user turn drives optional Flint fact-sheet expansion (token-efficient).
     let latestUserText = "";
@@ -6829,7 +6853,11 @@ updateStateFromSdk();
         role: m.role,
         content: m.content, // can be string or vision array [{type,text}, {type:'image_url',...}]
       })),
-      { systemInstruction: effectiveSystem, rejectInvalidTextAttachments },
+      {
+        systemInstruction: effectiveSystem,
+        rejectInvalidTextAttachments,
+        rejectInvalidImageAttachments: rejectInvalidTextAttachments,
+      },
     );
   }
 
@@ -6930,11 +6958,11 @@ Output only the summary text, no preamble.`;
       return;
     }
 
-    const summaryMessage = {
+    const summaryMessage = createTimestampedMessage({
       role: "assistant",
       content: `[Previous conversation summary — ${oldMessages.length} earlier messages]:\n${summary.trim()}`,
       isSummary: true,
-    };
+    });
 
     // Mark old non-pinned non-summary messages as condensed (they stay in the array for full thread)
     oldMessages.forEach((m: any) => {
@@ -9341,6 +9369,8 @@ Output only the summary text, no preamble.`;
                           >
                             <MessageRenderer
                               content={msg.content}
+                              createdAt={msg.createdAt}
+                              timestampNow={messageTimestampNow}
                               previewImagePartIndexes={chatImagePreviewPartIndexes[i] ?? []}
                               role={msg.role}
                               isStreaming={isStreaming && msg.id === activeStreamAssistantId}
@@ -9715,17 +9745,8 @@ Output only the summary text, no preamble.`;
                 {/if}
 
                 {#if isVisionModel}
-                  <div class="vision-attach">
-                    <button
-                      type="button"
-                      onclick={attachImage}
-                      disabled={isStreaming || imageProcessingCount > 0 || attachedImages.length >= MAX_ATTACHED_IMAGES}
-                      title="Attach up to 4 images (vision models only)"
-                    >
-                      <Icon name="camera" size={14} />
-                      {imageProcessingCount > 0 ? "Preparing…" : `Image (${attachedImages.length}/${MAX_ATTACHED_IMAGES})`}
-                    </button>
-                    {#if attachedImages.length > 0}
+                  {#if attachedImages.length > 0}
+                    <div class="vision-attach">
                       <div class="image-strip">
                         {#each attachedImages as img, i (i)}
                           <span class="thumb">
@@ -9736,9 +9757,9 @@ Output only the summary text, no preamble.`;
                           </span>
                         {/each}
                       </div>
-                      <button type="button" onclick={clearImages} class="mini">Clear all</button>
-                    {/if}
-                  </div>
+                      <button type="button" onclick={clearImages} class="mini" disabled={isStreaming}>Clear all</button>
+                    </div>
+                  {/if}
                 {/if}
               </div>
 
@@ -9824,6 +9845,30 @@ Output only the summary text, no preamble.`;
                   >
                     <Icon name="folder" size={16} />
                   </button>
+                  {#if isVisionModel}
+                    <button
+                      type="button"
+                      class="image-attach-btn"
+                      class:at-limit={attachedImages.length >= MAX_ATTACHED_IMAGES}
+                      onclick={attachImage}
+                      disabled={isStreaming || imageProcessingCount > 0 || attachedImages.length >= MAX_ATTACHED_IMAGES}
+                      title={attachedImages.length >= MAX_ATTACHED_IMAGES
+                        ? `Maximum of ${MAX_ATTACHED_IMAGES} images attached`
+                        : `Attach images (${attachedImages.length} of ${MAX_ATTACHED_IMAGES} attached)`}
+                      aria-label={attachedImages.length >= MAX_ATTACHED_IMAGES
+                        ? `Maximum of ${MAX_ATTACHED_IMAGES} images attached`
+                        : `Attach images, ${attachedImages.length} of ${MAX_ATTACHED_IMAGES} attached`}
+                    >
+                      {#if imageProcessingCount > 0}
+                        <Icon name="loader" size={14} class="spin" />
+                      {:else}
+                        <Icon name="camera" size={14} />
+                        {#if attachedImages.length >= MAX_ATTACHED_IMAGES}
+                          <span class="image-limit-count">{attachedImages.length}/{MAX_ATTACHED_IMAGES}</span>
+                        {/if}
+                      {/if}
+                    </button>
+                  {/if}
                   <button
                     type="button"
                     class="dictation-btn"
@@ -9837,7 +9882,7 @@ Output only the summary text, no preamble.`;
                 </div>
                 <input
                   bind:value={chatInput}
-                  placeholder={isDictating ? "Dictating… (click Stop to finish)" : "Type your message... (model is running locally)"}
+                  placeholder={isDictating ? "Dictating… (click Stop to finish)" : "Type your message..."}
                   disabled={benchmarkRunInFlight || chatBlockedByLoadedSTT || !selectedModelSupportsChat || !canDispatchChat || isStreaming}
                   onkeydown={(e) => { if ((isMac ? e.metaKey : e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); sendMessage(e); } }}
                   onpaste={handlePaste}
@@ -13539,12 +13584,13 @@ Output only the summary text, no preamble.`;
   .message {
     display: flex;
     gap: 8px;
-    margin-bottom: 12px;
+    margin-bottom: 6px;
     align-items: flex-start;
   }
 
   .message.user {
-    justify-content: flex-end;
+    justify-content: flex-start;
+    margin-left: 24px;
   }
 
   .message .role {
@@ -14140,6 +14186,40 @@ Output only the summary text, no preamble.`;
     cursor: pointer;
   }
 
+  .chat-input .image-attach-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    box-sizing: border-box;
+    width: 36px;
+    height: 36px;
+    min-width: 36px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel-bg);
+    color: var(--fg);
+    cursor: pointer;
+    font-size: 0.8125rem;
+    white-space: nowrap;
+  }
+
+  .chat-input .image-attach-btn.at-limit {
+    width: auto;
+    padding: 0 8px;
+  }
+
+  .image-limit-count {
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .chat-input .image-attach-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
   .chat-input .file-attach-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
@@ -14253,6 +14333,8 @@ Output only the summary text, no preamble.`;
     color: var(--muted);
     cursor: pointer;
     font-size: 0.75rem;
+    width: calc(100% - 24px);
+    box-sizing: border-box;
   }
 
   .composer-settings-drawer {
@@ -14264,6 +14346,8 @@ Output only the summary text, no preamble.`;
     border-radius: 8px;
     background: var(--panel-bg);
     color: var(--muted);
+    width: calc(100% - 24px);
+    box-sizing: border-box;
   }
 
   .composer-settings-drawer .context-control {
@@ -15065,6 +15149,12 @@ Output only the summary text, no preamble.`;
     font-size: 0.8rem;
   }
 
+  :global(html[data-theme="light"]) .persona-menu {
+    background: #fff;
+    color: #212529;
+    border-color: #dee2e6;
+  }
+
   /* When we decide to open upward (near bottom of window) */
   .persona-menu.up {
     transform: translateY(-100%);
@@ -15092,7 +15182,7 @@ Output only the summary text, no preamble.`;
     width: 100%;
     text-align: left;
     padding: 8px 10px;
-    background: none;
+    background: var(--panel-bg);
     border: none;
     color: var(--fg);
     cursor: pointer;
@@ -15102,6 +15192,13 @@ Output only the summary text, no preamble.`;
   .persona-item.matches {
     background: color-mix(in srgb, var(--accent) 15%, var(--panel-bg));
   }
+  :global(html[data-theme="light"]) .persona-item {
+    background: #fff;
+    color: #212529;
+    border-bottom-color: #dee2e6;
+  }
+  :global(html[data-theme="light"]) .persona-item:hover { background: #f1f3f5; }
+  :global(html[data-theme="light"]) .persona-item.matches { background: #dbeafe; }
   .persona-item .p-name { font-weight: 600; display: block; }
   .persona-item .p-desc { font-size: 0.75rem; color: var(--muted); display: block; }
   .persona-item .p-tags { font-size: 0.65rem; color: var(--success); }

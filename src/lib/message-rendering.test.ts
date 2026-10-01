@@ -3,6 +3,8 @@ import {
   conversationImagePreviewPartIndexes,
   extractThinkingTrace,
   messageClipboardText,
+  messageTimestamp,
+  millisecondsUntilNextLocalDay,
   nonTextMessageParts,
   renderableMessageParts,
   sanitizeAssistantHtml,
@@ -88,6 +90,35 @@ describe("multipart message rendering", () => {
       },
     ]);
     expect(JSON.stringify(renderableMessageParts(content))).not.toContain("[object Object]");
+  });
+
+  describe("messageTimestamp", () => {
+    it("uses a concise time today and exposes the full timestamp", () => {
+      const timestamp = new Date(2026, 8, 30, 15, 41, 12).getTime();
+      const result = messageTimestamp(timestamp, new Date(2026, 8, 30, 16).getTime(), "en-US");
+      expect(result?.label).toBe("3:41 PM");
+      expect(result?.title).toContain("Wednesday, September 30, 2026");
+      expect(result?.title).toContain("3:41:12 PM");
+      expect(result?.datetime).toBe(new Date(timestamp).toISOString());
+    });
+
+    it("includes the date for messages from another day", () => {
+      const timestamp = new Date(2026, 8, 29, 9, 5).getTime();
+      expect(messageTimestamp(timestamp, new Date(2026, 8, 30).getTime(), "en-US")?.label)
+        .toBe("Sep 29, 9:05 AM");
+    });
+
+    it("rejects absent and invalid timestamps", () => {
+      expect(messageTimestamp(undefined)).toBeNull();
+      expect(messageTimestamp(Number.NaN)).toBeNull();
+    });
+  });
+
+  describe("millisecondsUntilNextLocalDay", () => {
+    it("schedules the refresh just after the next local midnight", () => {
+      const now = new Date(2026, 8, 30, 23, 59, 59, 500).getTime();
+      expect(millisecondsUntilNextLocalDay(now)).toBe(600);
+    });
   });
 
   it("copies meaningful text and an attachment marker", () => {
