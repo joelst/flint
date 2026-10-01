@@ -95,6 +95,36 @@ describe('web tool network boundary', () => {
     expect(request).not.toHaveBeenCalled();
   });
 
+  it.each([
+    'https://localhost/',
+    'https://localhost./',
+    'https://LOCALHOST../',
+    'https://printer.local/',
+    'https://printer.local./',
+    'https://app.localhost/',
+    'https://app.localhost./',
+  ])('rejects local hostname %s before resolving it', async (url) => {
+    const resolve = vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]);
+    const request = vi.fn();
+    await expect(fetchPublicText(url, { resolve, request })).rejects.toThrow(/local hostnames/i);
+    expect(resolve).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+    expect(() => normalizeRequest({ operation: 'fetch', url })).toThrow(/local hostnames/i);
+  });
+
+  it('rejects a redirect to a trailing-dot local hostname before resolving it', async () => {
+    const resolve = vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]);
+    const request = vi.fn(async () => ({
+      statusCode: 302,
+      headers: { location: 'https://localhost./admin' },
+      body: Buffer.alloc(0),
+    }));
+    await expect(fetchPublicText('https://public.example/', { resolve, request }))
+      .rejects.toThrow(/local hostnames/i);
+    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
   it('revalidates redirect destinations before connecting', async () => {
     const resolve = vi.fn(async (hostname: string) => [{
       address: hostname === 'public.example' ? '93.184.216.34' : '127.0.0.1',

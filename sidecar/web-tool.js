@@ -154,8 +154,14 @@ function normalizePublicUrl(raw) {
   if (parsed.protocol !== 'https:') throw new Error('Only HTTPS URLs are allowed');
   if (parsed.username || parsed.password) throw new Error('URL credentials are not allowed');
   if (parsed.port && parsed.port !== '443') throw new Error('Only the standard HTTPS port is allowed');
-  const hostname = parsed.hostname.toLowerCase();
-  if (!hostname || hostname === 'localhost' || hostname.endsWith('.local')) {
+  // Trailing root dots name the same host ("localhost." is localhost), and RFC 6761 reserves
+  // every *.localhost name for loopback.
+  const hostname = parsed.hostname.toLowerCase().replace(/\.+$/, '');
+  if (!hostname
+    || hostname === 'localhost'
+    || hostname.endsWith('.localhost')
+    || hostname === 'local'
+    || hostname.endsWith('.local')) {
     throw new Error('Local hostnames are not allowed');
   }
   parsed.hash = '';

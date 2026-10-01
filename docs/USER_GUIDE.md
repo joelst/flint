@@ -209,7 +209,7 @@ Then launch Flint normally from Finder or Spotlight.
 
 ## Tool calling
 
-Models may return `tool_calls` on the OpenAI-compatible API. **Flint’s chat UI does not execute tools.** Point an agent client (Continue, Cline, your code) at the local endpoint; that client owns permissions and confirmation.
+Models may return `tool_calls` on the OpenAI-compatible API. **Flint’s chat UI does not execute general tools.** The one exception is the supervised **Public web search & retrieval** round described under [Chat and conversations](#chat-and-conversations): it runs only when you enable it for a conversation, executes only Flint’s own `web_search` and `web_fetch`, and never runs tools a model invents. For anything else, point an agent client (Continue, Cline, your code) at the local endpoint; that client owns permissions and confirmation.
 
 ---
 
