@@ -142,6 +142,23 @@ describe('web tool network boundary', () => {
     })).rejects.toThrow(/content type/i);
   });
 
+  it('never forwards a POST body to a different redirect origin', async () => {
+    const resolve = vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]);
+    const request = vi.fn(async () => ({
+      statusCode: 307,
+      headers: { location: 'https://other.example/search' },
+      body: Buffer.alloc(0),
+      truncated: false,
+    }));
+    await expect(fetchPublicText('https://search.example/', {
+      resolve,
+      request,
+      method: 'POST',
+      body: 'q=private+query',
+    })).rejects.toThrow(/cross-origin/i);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
   it('enforces one overall deadline across DNS, redirects, and response capture', async () => {
     const resolve = vi.fn(() => new Promise(() => {}));
     await expect(fetchPublicText('https://public.example/', {

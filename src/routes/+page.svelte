@@ -212,7 +212,9 @@
     appendWebSourceAudit,
     collectCurrentWebFetchUrls,
     executeWebToolCalls,
+    messagesContainImages,
     readWebToolCalls,
+    webContentSystemInstruction,
     webToolSystemInstruction,
   } from "$lib/web-tools";
   import {
@@ -6658,7 +6660,12 @@ updateStateFromSdk();
       const inferenceMessages = urlContextMessages.length > 0
         ? [...stamped.slice(0, -1), ...urlContextMessages, stamped.at(-1)]
         : stamped;
-      requestMessages = getMessagesForInference(inferenceMessages, true, allowWebTools);
+      requestMessages = getMessagesForInference(
+        inferenceMessages,
+        true,
+        urlContextMessages.length > 0,
+        allowWebTools,
+      );
     } catch (error: any) {
       const message = error?.message || "The attached files could not be included safely.";
       if (attachedImages.length > 0 || attachedTextFiles.length > 0) {
@@ -6666,6 +6673,11 @@ updateStateFromSdk();
       } else {
         statusMessage = message;
       }
+      return;
+    }
+    if (allowWebTools && messagesContainImages(requestMessages)) {
+      statusMessage =
+        "Web tools cannot be combined with image context in the same request. Remove the image or disable web tools for this send.";
       return;
     }
     chatMessages = stamped;
@@ -6948,6 +6960,7 @@ updateStateFromSdk();
   function getMessagesForInference(
     sourceMessages: any[] = chatMessages,
     rejectInvalidTextAttachments = false,
+    includeUntrustedWebContent = false,
     includeWebToolInstruction = false,
   ): any[] {
     // Remove any trailing empty assistant placeholder (from streaming setup)
@@ -6981,7 +6994,9 @@ updateStateFromSdk();
     const baseSystem = buildFlintAwareSystemPrompt(systemPrompt, latestUserText);
     const effectiveSystem = includeWebToolInstruction
       ? webToolSystemInstruction(baseSystem)
-      : baseSystem;
+      : includeUntrustedWebContent
+        ? webContentSystemInstruction(baseSystem)
+        : baseSystem;
 
     return normalizeForAlternatingChat(
       combined.map((m: any) => ({

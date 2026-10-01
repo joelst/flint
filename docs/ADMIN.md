@@ -52,6 +52,9 @@ site. Search dispatch requires an affirmative **`Search the web for: <query>`** 
 current user message, and the model must use that exact unquoted query. Fetch dispatch is limited
 to URLs typed or attached as URL chips in that same send. A final confirmation displays the exact
 search query before dispatch; declining it sends no search request.
+Flint admits at most two helper processes at once and refuses excess retrievals explicitly. The
+Foundry chat transport does not support tools and image parts together, so Flint rejects that
+combination before starting inference.
 The helper inherits only minimal Windows runtime environment variables, but it is not an OS
 security boundary against other processes running as the same signed-in user.
 

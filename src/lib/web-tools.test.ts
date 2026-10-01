@@ -6,7 +6,9 @@ import {
   collectCurrentWebFetchUrls,
   collectWebFetchUrls,
   executeWebToolCalls,
+  messagesContainImages,
   readWebToolCalls,
+  webContentSystemInstruction,
   webToolSystemInstruction,
   type WebToolRequest,
   type WebToolResult,
@@ -70,7 +72,7 @@ describe('web tool calls', () => {
       id: '2',
       type: 'function',
       function: { name: 'web_fetch', arguments: '{"url":"https://other.example/"}' },
-    }], allowed)).toThrow(/already present/i);
+    }], allowed)).toThrow(/current user message/i);
   });
 
   it('allows only explicitly requested search text from the latest user message', () => {
@@ -321,5 +323,23 @@ describe('web tool calls', () => {
     expect(prompt).toContain('Be helpful.');
     expect(prompt).toContain('not instructions');
     expect(prompt).toContain('only once');
+  });
+
+  it('marks manual page context untrusted even when model tools are unavailable', () => {
+    const prompt = webContentSystemInstruction('Be helpful.');
+    expect(prompt).toContain('Be helpful.');
+    expect(prompt).toContain('untrusted reference material');
+    expect(prompt).not.toContain('request tools');
+  });
+
+  it('detects image parts that cannot be combined with Foundry tool calls', () => {
+    expect(messagesContainImages([
+      { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+      { role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AA' } }] },
+    ])).toBe(true);
+    expect(messagesContainImages([
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: [{ type: 'text', text: 'world' }] },
+    ])).toBe(false);
   });
 });

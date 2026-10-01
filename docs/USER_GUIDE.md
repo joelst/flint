@@ -72,14 +72,15 @@ The sidebar is grouped by workflow:
   **Generation settings** drawer below the composer.
 - **Public web search & retrieval** in Generation settings is off by default and applies only to
   the current conversation. When enabled, the model may make one bounded round of public
-  `web_search` or `web_fetch` calls. Fetch is limited to HTTPS URLs already present in the
-  conversation, retrieved text is treated as untrusted reference material, and consulted sources
-  are appended visibly to the answer. Search terms and requested public URLs leave the device;
-  Flint does not send cookies, credentials, or browser state.
+  `web_search` or `web_fetch` calls. Fetch is limited to HTTPS URLs typed or attached as a URL chip
+  in the current message, retrieved text is treated as untrusted reference material, and consulted
+  sources are appended visibly to the answer. Search terms and requested public URLs leave the
+  device; Flint does not send cookies, credentials, or browser state.
   To authorize a search, put the exact unquoted query on its own line as
-  **`Search the web for: your query`**. A URL fetch is authorized only when that URL is typed or
-  attached as a URL chip in the current message. Flint then shows the exact outbound search query
-  for confirmation immediately before sending it.
+  **`Search the web for: your query`**. Flint shows the exact outbound search query for
+  confirmation immediately before sending it.
+  Web tools cannot be combined with image context in one model request; remove the image or turn
+  web tools off for that send.
   Stop suppresses any continuation after an in-flight retrieval returns; it does not prove that an
   already-started network request was cancelled.
 - **Export conversations**: Export any chat thread as structured JSON, formatted Markdown, or plain text for documentation or archive.

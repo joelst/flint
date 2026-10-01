@@ -3,6 +3,7 @@ use std::{
     io::{Read, Write},
     path::PathBuf,
     process::{Child, Command, Stdio},
+    sync::atomic::{AtomicUsize, Ordering},
     thread,
     time::{Duration, Instant},
 };
@@ -17,6 +18,36 @@ const MAX_INPUT_BYTES: usize = 16 * 1024;
 const MAX_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_ERROR_BYTES: usize = 16 * 1024;
 const HELPER_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_CONCURRENT_HELPERS: usize = 2;
+static ACTIVE_HELPERS: AtomicUsize = AtomicUsize::new(0);
+
+struct HelperPermit;
+
+impl HelperPermit {
+    fn acquire() -> Result<Self, String> {
+        let mut active = ACTIVE_HELPERS.load(Ordering::Acquire);
+        loop {
+            if active >= MAX_CONCURRENT_HELPERS {
+                return Err("Too many web requests are already running".to_string());
+            }
+            match ACTIVE_HELPERS.compare_exchange_weak(
+                active,
+                active + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(Self),
+                Err(current) => active = current,
+            }
+        }
+    }
+}
+
+impl Drop for HelperPermit {
+    fn drop(&mut self) {
+        ACTIVE_HELPERS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 struct KillOnDropChild(Child);
 
@@ -180,7 +211,11 @@ pub async fn web_tool_execute(app: AppHandle, request: Value) -> Result<Value, S
         .sidecar("node")
         .map_err(|error| format!("Could not resolve bundled Node for the web tool: {error}"))?;
     let command: Command = shell_command.arg(script).current_dir(base_dir).into();
-    tauri::async_runtime::spawn_blocking(move || run_helper(command, input))
+    let permit = HelperPermit::acquire()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        run_helper(command, input)
+    })
         .await
         .map_err(|error| format!("Web tool task failed: {error}"))?
 }

@@ -128,4 +128,18 @@ describe('renderer/sidecar boundary', () => {
     expect(rust).toContain('const HELPER_TIMEOUT: Duration = Duration::from_secs(15)');
     expect(rust).toContain('.join("web-tool.js")');
   });
+
+  it('bounds process-wide web helper concurrency before spawning children', () => {
+    const rust = readFileSync(join(process.cwd(), 'src-tauri', 'src', 'web_tool.rs'), 'utf8');
+    expect(rust).toContain('MAX_CONCURRENT_HELPERS');
+    expect(rust).toContain('ACTIVE_HELPERS');
+    expect(rust).toContain('Too many web requests are already running');
+  });
+
+  it('marks manual web context untrusted and rejects image/tool combinations before inference', () => {
+    const page = readFileSync(join(process.cwd(), 'src', 'routes', '+page.svelte'), 'utf8');
+    expect(page).toContain('urlContextMessages.length > 0,');
+    expect(page).toContain('messagesContainImages(requestMessages)');
+    expect(page).toContain('Web tools cannot be combined with image context');
+  });
 });

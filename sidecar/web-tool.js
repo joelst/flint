@@ -317,7 +317,11 @@ export async function fetchPublicText(rawUrl, dependencies = {}) {
       const location = response.headers.location;
       if (!location) throw new Error('Redirect response has no destination');
       if (redirects === MAX_REDIRECTS) throw new Error('Too many redirects');
-      current = normalizePublicUrl(new URL(location, current).toString());
+      const next = normalizePublicUrl(new URL(location, current).toString());
+      if (body && method !== 'GET' && next.origin !== current.origin) {
+        throw new Error('Cross-origin redirects cannot receive a request body');
+      }
+      current = next;
       if ([301, 302, 303].includes(response.statusCode)) {
         method = 'GET';
         body = null;
