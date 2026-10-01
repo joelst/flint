@@ -6708,6 +6708,14 @@ updateStateFromSdk();
     activeStreamRequestId = null;
     syncVisibleStreaming();
 
+    // A settled request must not stay cancellable: the sidecar records cancelled IDs and only a
+    // live request's cleanup removes them, so Stop during retrieval would leak a stale entry.
+    function releaseSettledRequestId() {
+      const stream = streamsByConversation.get(originId);
+      if (stream && stream.controller === requestController) stream.requestId = null;
+      if (abortController === requestController) activeStreamRequestId = null;
+    }
+
     // Deltas follow originId, not the visible thread. Switching conversations captures the
     // partial assistant turn into the archive; later tokens patch that record instead of the
     // chat now on screen.
@@ -6796,6 +6804,7 @@ updateStateFromSdk();
           : [];
         if (toolCalls.length > 0) {
           webRoundStarted = true;
+          releaseSettledRequestId();
           assistantContent = "";
           updateAssistantMessage({ content: "Consulting the public web..." });
           const executed = await executeWebToolCalls(
@@ -6833,7 +6842,6 @@ updateStateFromSdk();
             assistantToolMessage,
             ...executed.toolMessages,
           ];
-          activeStreamRequestId = null;
           data = await chatCompletionStream(
             requestModelAlias,
             requestMessages,

@@ -136,6 +136,13 @@ describe('renderer/sidecar boundary', () => {
     expect(rust).toContain('Too many web requests are already running');
   });
 
+  it('releases the settled tool-call request ID before awaiting retrieval', () => {
+    const page = readFileSync(join(process.cwd(), 'src', 'routes', '+page.svelte'), 'utf8');
+    const round = page.slice(page.indexOf('webRoundStarted = true;'), page.indexOf('const executed = await executeWebToolCalls('));
+    expect(round).toContain('releaseSettledRequestId();');
+    expect(page).toMatch(/function releaseSettledRequestId\(\) \{[\s\S]*?stream\.requestId = null;[\s\S]*?activeStreamRequestId = null;/);
+  });
+
   it('marks manual web context untrusted and rejects image/tool combinations before inference', () => {
     const page = readFileSync(join(process.cwd(), 'src', 'routes', '+page.svelte'), 'utf8');
     expect(page).toContain('urlContextMessages.length > 0,');
