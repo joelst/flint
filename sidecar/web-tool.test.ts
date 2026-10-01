@@ -224,6 +224,17 @@ describe('search result decoding', () => {
     expect(decodeSearchResults(html, 1)[0].title).toBe('Safe bad title');
   });
 
+  it('decodes entities once so nested encodings cannot become active markup', () => {
+    const html = `
+      <div class="result">
+        <a class="result__a" href="https://example.com/">
+          Safe &amp;lt;script&amp;gt;literal&amp;lt;/script&amp;gt;
+        </a>
+      </div>`;
+    expect(decodeSearchResults(html, 1)[0].title)
+      .toBe('Safe &lt;script&gt;literal&lt;/script&gt;');
+  });
+
   it('skips advertising blocks and DuckDuckGo ad redirects', () => {
     const html = `
       <div class="result result--ad">

@@ -19,13 +19,16 @@ const ALLOWED_CONTENT_TYPES = [
 ];
 
 function decodeEntities(value) {
-  return value
-    .replace(/&amp;/gi, '&')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;|&apos;/gi, "'")
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&#(x?[0-9a-f]+);/gi, (_match, raw) => {
+  const named = {
+    amp: '&',
+    quot: '"',
+    apos: "'",
+    lt: '<',
+    gt: '>',
+  };
+  return value.replace(/&(?:#(x?[0-9a-f]+)|(amp|quot|apos|lt|gt));/gi, (_match, raw, name) => {
+    if (name) return named[name.toLowerCase()];
+    if (raw) {
       const radix = raw[0].toLowerCase() === 'x' ? 16 : 10;
       const digits = radix === 16 ? raw.slice(1) : raw;
       const codePoint = Number.parseInt(digits, radix);
@@ -35,7 +38,9 @@ function decodeEntities(value) {
         && !(codePoint >= 0xd800 && codePoint <= 0xdfff)
         ? String.fromCodePoint(codePoint)
         : '';
-    });
+    }
+    return '';
+  });
 }
 
 function stripMarkup(value) {
