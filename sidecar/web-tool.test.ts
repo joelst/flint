@@ -58,6 +58,13 @@ describe('web tool network boundary', () => {
     '::ffff:127.0.0.1',
     '::ffff:7f00:1',
     '::c0a8:101',
+    '192.88.99.1',
+    '192.88.99.2',
+    '100:0:0:1::1',
+    '100::1',
+    '200::1',
+    '4000::1',
+    'e000::1',
     '::ffff:0:7f00:1',
     '::ffff:0:a00:1',
     '::ffff:0:c0a8:101',
@@ -71,6 +78,10 @@ describe('web tool network boundary', () => {
     expect(isDeniedAddress('93.184.216.34')).toBe(false);
     expect(isDeniedAddress('2606:2800:220:1:248:1893:25c8:1946')).toBe(false);
     expect(isDeniedAddress('::ffff:93.184.216.34')).toBe(false);
+    expect(isDeniedAddress('192.88.98.255')).toBe(false);
+    expect(isDeniedAddress('192.88.100.1')).toBe(false);
+    expect(isDeniedAddress('2a00:1450:4001:80b::200e')).toBe(false);
+    expect(isDeniedAddress('3ffd:ffff::1')).toBe(false);
   });
 
   it.each([

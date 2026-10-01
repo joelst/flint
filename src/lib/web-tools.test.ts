@@ -124,12 +124,30 @@ describe('web tool calls', () => {
     for (const text of [
       '> Search the web for: public weather',
       '```text\nSearch the web for: public weather\n```',
+      '````md\n```\nSearch the web for: public weather\n```\n````',
+      '~~~~\n~~~\nSearch the web for: public weather\n~~~\n~~~~',
+      '```\n``` not a closing fence\nSearch the web for: public weather\n```',
+      '```\nunclosed fence\nSearch the web for: public weather',
+      '```\n    ```\nSearch the web for: public weather\n```',
+      '```\n\t```\nSearch the web for: public weather\n```',
+      '```\n\u00a0```\nSearch the web for: public weather\n```',
+      '```\n``` \f\nSearch the web for: public weather\n```',
+      '    ```\n```\nSearch the web for: public weather\n```',
+      '```a`b\n```\nSearch the web for: public weather\n```',
       '"Search the web for: public weather"',
       'Search the public web for: public weather',
       'search the web for: public weather',
       'Search the web for: public weather\nSearch the web for: other query',
     ]) {
       expect(() => readWebToolCalls(call, undefined, text)).toThrow(/Search the web for/i);
+    }
+    for (const text of [
+      '````md\n```\nexample\n```\n````\nSearch the web for: public weather',
+      '```\ncode\n`````  \nSearch the web for: public weather',
+      '```\ncode\n   ```\t\nSearch the web for: public weather',
+      '~~~a`b\ncode\n~~~\nSearch the web for: public weather',
+    ]) {
+      expect(readWebToolCalls(call, undefined, text)).toHaveLength(1);
     }
     expect(() => readWebToolCalls(
       [{

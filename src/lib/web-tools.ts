@@ -151,17 +151,26 @@ export function messagesContainImages(messages: unknown): boolean {
 function authorizedSearchQuery(text: string): string | null {
   const prefix = 'Search the web for: ';
   const matches: string[] = [];
-  let fence: '```' | '~~~' | null = null;
+  let fence: { char: '`' | '~'; length: number } | null = null;
   for (const rawLine of text.split('\n')) {
     const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
-    const trimmed = line.trimStart();
-    if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
-      const marker = trimmed.startsWith('```') ? '```' : '~~~';
-      if (fence === null) fence = marker;
-      else if (fence === marker) fence = null;
+    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    const run = marker?.[1];
+    const rest = marker?.[2] ?? '';
+    if (fence !== null) {
+      // CommonMark: a closer is indented at most 3 spaces, repeats the opener's character
+      // at least as many times, and is followed only by spaces/tabs. Unclosed fences run to the end.
+      if (run && run[0] === fence.char && run.length >= fence.length && /^[ \t]*$/.test(rest)) {
+        fence = null;
+      }
       continue;
     }
-    if (fence !== null || trimmed.startsWith('>')) continue;
+    // A backtick opener's info string may not contain backticks.
+    if (run && !(run[0] === '`' && rest.includes('`'))) {
+      fence = { char: run[0] as '`' | '~', length: run.length };
+      continue;
+    }
+    if (line.trimStart().startsWith('>')) continue;
     if (!line.startsWith(prefix)) continue;
     const query = line.slice(prefix.length);
     if (!query || query !== query.trim() || /^["'“”‘’]|["'“”‘’]$/.test(query)) return null;

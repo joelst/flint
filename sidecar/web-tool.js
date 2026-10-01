@@ -107,6 +107,7 @@ export function isDeniedAddress(address) {
       ['192.0.0.0', 24],
       ['192.0.2.0', 24],
       ['192.168.0.0', 16],
+      ['192.88.99.0', 24],
       ['198.18.0.0', 15],
       ['198.51.100.0', 24],
       ['203.0.113.0', 24],
@@ -135,22 +136,14 @@ export function isDeniedAddress(address) {
         ipv4 & 0xff,
       ].join('.'));
     }
+    // Only global unicast (2000::/3) can be a public destination; everything else
+    // (reserved ::/8 and 100::/8 blocks, ULA, link-local, multicast) is refused outright.
+    if (!inV6Range(address, '2000::', 3)) return true;
     return [
-      ['::', 128],
-      ['::1', 128],
-      ['64:ff9b::', 96],
-      ['::ffff:0:0:0', 96],
-      ['64:ff9b:1::', 48],
-      ['100::', 64],
       ['2001::', 23],
       ['2001:db8::', 32],
       ['2002::', 16],
       ['3fff::', 20],
-      ['5f00::', 16],
-      ['fc00::', 7],
-      ['fec0::', 10],
-      ['fe80::', 10],
-      ['ff00::', 8],
     ].some(([base, prefix]) => inV6Range(address, base, prefix));
   }
   return true;
