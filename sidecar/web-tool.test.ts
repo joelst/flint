@@ -246,6 +246,32 @@ describe('web tool network boundary', () => {
       spy.mockRestore();
     }
   });
+
+  it.each([
+    ['https://example.com/', { address: '93.184.216.34', family: 4 }, 'example.com'],
+    ['https://93.184.216.34/', { address: '93.184.216.34', family: 4 }, undefined],
+    ['https://[2606:4700:4700::1111]/', { address: '2606:4700:4700::1111', family: 6 }, undefined],
+  ])('sends SNI only for DNS names (%s)', async (raw, resolved, servername) => {
+    let captured: any;
+    const request = Object.assign(new EventEmitter(), {
+      end: vi.fn(() => request.emit('error', new Error('stop'))),
+      write: vi.fn(),
+      destroy: vi.fn(),
+      setTimeout: vi.fn(),
+    });
+    const spy = vi.spyOn(https, 'request').mockImplementation(((options: any) => {
+      captured = options;
+      return request;
+    }) as any);
+    try {
+      await expect(requestPinned(new URL(raw), resolved)).rejects.toThrow('stop');
+      expect(captured.hostname).toBe(resolved.address);
+      expect(captured.servername).toBe(servername);
+      expect(captured.hostname).not.toMatch(/[[\]]/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 describe('search result decoding', () => {

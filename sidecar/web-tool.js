@@ -224,6 +224,7 @@ function decodeResponseBody(body, truncated) {
 export function requestPinned(url, resolved, options = {}) {
   return new Promise((resolve, reject) => {
     const body = options.body ? Buffer.from(options.body) : null;
+    const literalHost = url.hostname.replace(/^\[(.*)\]$/, '$1');
     const request = https.request({
       protocol: 'https:',
       hostname: resolved.address,
@@ -231,7 +232,8 @@ export function requestPinned(url, resolved, options = {}) {
       port: 443,
       path: `${url.pathname}${url.search}`,
       method: options.method ?? 'GET',
-      servername: url.hostname,
+      // RFC 6066 forbids IP literals in SNI; without it Node verifies the pinned IP against the certificate's IP SANs.
+      servername: net.isIP(literalHost) ? undefined : url.hostname,
       headers: {
         Accept: 'text/html,text/plain,application/json;q=0.9',
         'Accept-Encoding': 'identity',
