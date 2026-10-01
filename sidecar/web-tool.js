@@ -3,6 +3,9 @@ import https from 'node:https';
 import net from 'node:net';
 import { StringDecoder } from 'node:string_decoder';
 import { pathToFileURL } from 'node:url';
+import { canonicalHostname, isDeniedAddress, isLocalHostname } from './web-address-policy.js';
+
+export { isDeniedAddress };
 
 const MAX_INPUT_BYTES = 16 * 1024;
 const MAX_OUTPUT_BYTES = 256 * 1024;
@@ -50,105 +53,6 @@ function stripMarkup(value) {
     .trim();
 }
 
-function ipv4Number(address) {
-  const parts = address.split('.').map(Number);
-  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
-    return null;
-  }
-  return (((parts[0] * 256 + parts[1]) * 256 + parts[2]) * 256 + parts[3]) >>> 0;
-}
-
-function inV4Range(address, base, prefix) {
-  const value = ipv4Number(address);
-  const baseValue = ipv4Number(base);
-  if (value === null || baseValue === null) return false;
-  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
-  return (value & mask) === (baseValue & mask);
-}
-
-function ipv6Number(address) {
-  const withoutZone = address.split('%', 1)[0].toLowerCase();
-  let value = withoutZone;
-  const ipv4Tail = value.match(/(?:^|:)(\d+\.\d+\.\d+\.\d+)$/);
-  if (ipv4Tail) {
-    const ipv4 = ipv4Number(ipv4Tail[1]);
-    if (ipv4 === null) return null;
-    value = `${value.slice(0, -ipv4Tail[1].length)}${(ipv4 >>> 16).toString(16)}:${(ipv4 & 0xffff).toString(16)}`;
-  }
-  const halves = value.split('::');
-  if (halves.length > 2) return null;
-  const left = halves[0] ? halves[0].split(':') : [];
-  const right = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
-  const missing = 8 - left.length - right.length;
-  if (missing < 0 || (halves.length === 1 && missing !== 0)) return null;
-  const groups = [...left, ...Array(missing).fill('0'), ...right];
-  if (groups.length !== 8 || groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))) return null;
-  return groups.reduce((total, group) => (total << 16n) | BigInt(`0x${group}`), 0n);
-}
-
-function inV6Range(address, base, prefix) {
-  const value = ipv6Number(address);
-  const baseValue = ipv6Number(base);
-  if (value === null || baseValue === null) return false;
-  const shift = BigInt(128 - prefix);
-  return (value >> shift) === (baseValue >> shift);
-}
-
-export function isDeniedAddress(address) {
-  const family = net.isIP(address);
-  if (family === 4) {
-    return [
-      ['0.0.0.0', 8],
-      ['10.0.0.0', 8],
-      ['100.64.0.0', 10],
-      ['127.0.0.0', 8],
-      ['169.254.0.0', 16],
-      ['172.16.0.0', 12],
-      ['192.0.0.0', 24],
-      ['192.0.2.0', 24],
-      ['192.168.0.0', 16],
-      ['192.88.99.0', 24],
-      ['198.18.0.0', 15],
-      ['198.51.100.0', 24],
-      ['203.0.113.0', 24],
-      ['224.0.0.0', 4],
-      ['240.0.0.0', 4],
-    ].some(([base, prefix]) => inV4Range(address, base, prefix));
-  }
-  if (family === 6) {
-    if (inV6Range(address, '::', 96)) {
-      const value = ipv6Number(address);
-      const ipv4 = Number(value & 0xffffffffn);
-      return isDeniedAddress([
-        (ipv4 >>> 24) & 0xff,
-        (ipv4 >>> 16) & 0xff,
-        (ipv4 >>> 8) & 0xff,
-        ipv4 & 0xff,
-      ].join('.'));
-    }
-    if (inV6Range(address, '::ffff:0:0', 96)) {
-      const value = ipv6Number(address);
-      const ipv4 = Number(value & 0xffffffffn);
-      return isDeniedAddress([
-        (ipv4 >>> 24) & 0xff,
-        (ipv4 >>> 16) & 0xff,
-        (ipv4 >>> 8) & 0xff,
-        ipv4 & 0xff,
-      ].join('.'));
-    }
-    // Only global unicast (2000::/3) can be a public destination; everything else
-    // (reserved ::/8 and 100::/8 blocks, ULA, link-local, multicast) is refused outright.
-    if (!inV6Range(address, '2000::', 3)) return true;
-    return [
-      ['2001::', 23],
-      ['2001:db8::', 32],
-      ['2002::', 16],
-      ['3fff::', 20],
-    ].some(([base, prefix]) => inV6Range(address, base, prefix));
-  }
-  return true;
-}
-
 function normalizePublicUrl(raw) {
   const parsed = new URL(String(raw).trim());
   if (parsed.protocol !== 'https:') throw new Error('Only HTTPS URLs are allowed');
@@ -156,12 +60,8 @@ function normalizePublicUrl(raw) {
   if (parsed.port && parsed.port !== '443') throw new Error('Only the standard HTTPS port is allowed');
   // Trailing root dots name the same host ("localhost." is localhost), and RFC 6761 reserves
   // every *.localhost name for loopback.
-  const hostname = parsed.hostname.toLowerCase().replace(/\.+$/, '');
-  if (!hostname
-    || hostname === 'localhost'
-    || hostname.endsWith('.localhost')
-    || hostname === 'local'
-    || hostname.endsWith('.local')) {
+  const hostname = canonicalHostname(parsed.hostname);
+  if (isLocalHostname(hostname)) {
     throw new Error('Local hostnames are not allowed');
   }
   parsed.hash = '';

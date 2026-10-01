@@ -85,11 +85,13 @@ function checkPayloadAt(label, dir) {
 console.log('Verifying Foundry Local SDK packaging prerequisites...');
 console.log(`Platform: ${platformKey}`);
 
-const webToolSource = path.join(root, 'sidecar', 'web-tool.js');
-if (!fs.existsSync(webToolSource)) {
-  bad('missing sidecar/web-tool.js');
-} else {
-  ok('isolated web helper source: sidecar/web-tool.js');
+const webToolSources = ['web-tool.js', 'web-address-policy.js'];
+for (const file of webToolSources) {
+  if (!fs.existsSync(path.join(root, 'sidecar', file))) {
+    bad(`missing sidecar/${file}`);
+  } else {
+    ok(`isolated web helper source: sidecar/${file}`);
+  }
 }
 
 // --- Bundled Node (Spike A: Tauri externalBin binaries/node) ---
@@ -145,11 +147,12 @@ if (!fs.existsSync(sdkRoot)) {
 const stagedSdk = path.join(releaseDir, 'foundry-local-sdk');
 if (fs.existsSync(releaseDir)) {
   console.log(`Checking release resource staging (${path.relative(root, releaseDir)})...`);
-  const stagedWebTool = path.join(releaseDir, 'sidecar', 'web-tool.js');
-  if (!fs.existsSync(stagedWebTool)) {
-    bad('staged resources missing sidecar/web-tool.js');
-  } else {
-    ok('staged resources include sidecar/web-tool.js');
+  for (const file of webToolSources) {
+    if (!fs.existsSync(path.join(releaseDir, 'sidecar', file))) {
+      bad(`staged resources missing sidecar/${file}`);
+    } else {
+      ok(`staged resources include sidecar/${file}`);
+    }
   }
   if (!fs.existsSync(stagedSdk)) {
     bad(
@@ -177,10 +180,12 @@ if (fs.existsSync(releaseDir)) {
   const nsiPath = path.join(releaseDir, 'nsis', 'x64', 'installer.nsi');
   if (fs.existsSync(nsiPath)) {
     const nsi = fs.readFileSync(nsiPath, 'utf8');
-    if (/sidecar[\\/]web-tool\.js/i.test(nsi) || nsi.includes('web-tool.js')) {
-      ok('NSIS script includes web-tool.js');
-    } else {
-      bad(`NSIS script missing web-tool.js: ${path.relative(root, nsiPath)}`);
+    for (const file of webToolSources) {
+      if (nsi.includes(file)) {
+        ok(`NSIS script includes ${file}`);
+      } else {
+        bad(`NSIS script missing ${file}: ${path.relative(root, nsiPath)}`);
+      }
     }
     // NSI lists each resource with File /oname=...prebuilds\win32-x64\...
     for (const file of expectedFiles || []) {

@@ -4,6 +4,7 @@
  * Kept pure and dependency-free so it can be unit tested and shared without pulling in
  * component state.
  */
+import { isPotentiallyPublicHostname } from '../../sidecar/web-address-policy.js';
 
 /**
  * Whether a detected string is something the sidecar can actually fetch.
@@ -22,7 +23,9 @@ export function isFetchableUrl(value: string): boolean {
   }
   if (parsed.protocol !== 'https:' || parsed.username || parsed.password) return false;
   if (parsed.port && parsed.port !== '443') return false;
-  return !!parsed.hostname;
+  // Same local-name and IP-literal rules the isolated helper enforces, so the composer never
+  // offers a Fetch it would always refuse. DNS-resolved names are still checked by the helper.
+  return isPotentiallyPublicHostname(parsed.hostname);
 }
 
 const URL_PATTERN = /https:\/\/[^\s"'<>)]+/g;
