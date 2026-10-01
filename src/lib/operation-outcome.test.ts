@@ -46,10 +46,6 @@ describe('command classification', () => {
     expect(certaintyFor('somethingAddedLater', 'connection-lost')).toBe('unknown');
   });
 
-  it('classifies reaching a third-party server as effectful', () => {
-    // The request may have been billed, consumed a single-use URL, or acted on. Flint cannot see.
-  });
-
   it('separates discovering execution providers from registering them', () => {
     expect(COMMAND_EFFECTS.getEps).toBe('query');
     expect(COMMAND_EFFECTS.ensureAccelerators).toBe('effectful');

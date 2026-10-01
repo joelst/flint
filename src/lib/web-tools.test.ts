@@ -164,6 +164,19 @@ describe('web tool calls', () => {
     ]);
   });
 
+  it('preserves terminal exclamation and question marks in current-send URL authority', () => {
+    expect([...collectCurrentWebFetchUrls(
+      {
+        role: 'user',
+        content: 'Use https://example.com/page! and https://example.com/query?',
+      },
+      [],
+    )]).toEqual([
+      'https://example.com/page!',
+      'https://example.com/query?',
+    ]);
+  });
+
   it('rejects malformed IDs, call envelopes, argument shapes, and URLs', () => {
     expect(() => readWebToolCalls([
       { id: 'same', type: 'function', function: { name: 'web_search', arguments: '{"query":"a"}' } },

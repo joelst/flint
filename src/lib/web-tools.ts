@@ -106,7 +106,7 @@ export function collectWebFetchUrls(messages: unknown): Set<string> {
     if (role !== 'user') continue;
     const text = contentText('content' in message ? message.content : null);
     for (const match of text.matchAll(/https:\/\/[^\s<>"'`]+/gi)) {
-      let candidate = match[0].replace(/[.,;:!?\]}]+$/, '');
+      let candidate = match[0].replace(/[.,;:\]}]+$/, '');
       while (candidate.endsWith(')')) {
         const opens = (candidate.match(/\(/g) ?? []).length;
         const closes = (candidate.match(/\)/g) ?? []).length;
