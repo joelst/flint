@@ -20,6 +20,7 @@ const baseline: AppSettingDefaults = {
   frequencyPenalty: 0.2,
   presencePenalty: -0.2,
   randomSeed: 7,
+  webToolsEnabled: false,
 };
 
 describe('readAppSettingDefaults', () => {
@@ -34,7 +35,7 @@ describe('readAppSettingDefaults', () => {
       {
         selectedModelAlias: 'qwen3-0.6b', systemPrompt: 'hi', contextTurns: 20, showFullHistory: true,
         temperature: 1.1, maxTokens: 512, topP: 0.8, topK: 10,
-        frequencyPenalty: 1.5, presencePenalty: -1.5, randomSeed: 42,
+        frequencyPenalty: 1.5, presencePenalty: -1.5, randomSeed: 42, webToolsEnabled: true,
       },
       baseline,
     );
@@ -50,6 +51,7 @@ describe('readAppSettingDefaults', () => {
       frequencyPenalty: 1.5,
       presencePenalty: -1.5,
       randomSeed: 42,
+      webToolsEnabled: false,
     });
   });
 
@@ -93,6 +95,7 @@ describe('readAppSettingDefaults', () => {
     // still correct, so only the write side omits it.
     const persisted = appSettingDefaultsToPersisted(baseline);
     expect('selectedModelAlias' in persisted).toBe(false);
+    expect('webToolsEnabled' in persisted).toBe(false);
     expect(readAppSettingDefaults({ ...persisted, selectedModelAlias: baseline.modelAlias })).toEqual(
       baseline,
     );
@@ -115,6 +118,7 @@ describe('resolveConversationSettings', () => {
       'temperature',
       'topK',
       'topP',
+      'webToolsEnabled',
     ]);
   });
 
@@ -225,7 +229,13 @@ describe('seedSettingsFor', () => {
       frequencyPenalty: 0.2,
       presencePenalty: -0.2,
       randomSeed: 7,
+      webToolsEnabled: false,
     });
+  });
+
+  it('requires fresh opt-in instead of carrying web permission into a new chat', () => {
+    expect(seedSettingsFor({ ...baseline, webToolsEnabled: true }).webToolsEnabled).toBe(false);
+    expect(seedSettingsFor(baseline, { webToolsEnabled: true }).webToolsEnabled).toBe(true);
   });
 
   it('stamps an explicit null randomSeed rather than leaving it absent', () => {

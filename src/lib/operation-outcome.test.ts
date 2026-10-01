@@ -48,7 +48,6 @@ describe('command classification', () => {
 
   it('classifies reaching a third-party server as effectful', () => {
     // The request may have been billed, consumed a single-use URL, or acted on. Flint cannot see.
-    expect(COMMAND_EFFECTS.fetchUrl).toBe('effectful');
   });
 
   it('separates discovering execution providers from registering them', () => {

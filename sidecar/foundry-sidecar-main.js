@@ -64,8 +64,6 @@ import {
   waitForHttpReady,
 } from './native-service.js';
 import {
-  DEFAULT_FETCH_BODY_LIMIT,
-  fetchBoundedResponseText,
   readBoundedErrorBody,
 } from './fetch-response.js';
 import {
@@ -198,7 +196,7 @@ const KNOWN_COMMANDS = new Set([
   'listModels', 'download', 'load', 'unload', 'deleteModel', 'getEndpoint',
   'chatCompletion', 'cancelChatRequest', 'transcribeAudio', 'embedTexts',
   'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',
-  'poolStatus', 'getAccessLog', 'getHealthRing', 'fetchUrl',
+  'poolStatus', 'getAccessLog', 'getHealthRing',
   'getCacheInventory',
   'inspectModelFolder', 'importModelFolder', 'linkModelFolder',
   'getModelTemplate', 'setModelTemplate',
@@ -233,7 +231,6 @@ const FIELD_TYPES = {
   transcribeAudio:   { audioBase64: 'string', mimeType: 'non-empty-string', fileName: 'non-empty-string', model: 'non-empty-string', language: 'non-empty-string' },
   embedTexts:        { model: 'non-empty-string', inputs: 'array' },
   ensureAccelerators: { rebuildBroken: 'boolean' },
-  fetchUrl:          { url: 'non-empty-string' },
   inspectModelFolder: { folderPath: 'non-empty-string' },
   importModelFolder: { folderPath: 'non-empty-string', name: 'non-empty-string' },
   linkModelFolder:   { folderPath: 'non-empty-string', name: 'non-empty-string' },
@@ -288,7 +285,6 @@ const COMMAND_SCHEMA = {
   getAccessLog:       { required: [], optional: [] },
   getHealthRing:      { required: [], optional: [] },
   getCacheInventory:  { required: [], optional: [] },
-  fetchUrl:           { required: ['url'], optional: ['maxChars'] },
   inspectModelFolder: { required: ['folderPath'], optional: [] },
   importModelFolder:  { required: ['folderPath', 'name'], optional: ['publisher', 'version', 'promptTemplate'] },
   linkModelFolder:    { required: ['folderPath', 'name'], optional: ['publisher'] },
@@ -547,12 +543,6 @@ function validateCommand(cmd, payload) {
       assertWavBuffer(Buffer.from(String(payload.audioBase64).slice(0, 32), 'base64'), payload.fileName);
     } catch (e) {
       return e.message;
-    }
-  }
-  if (cmd === 'fetchUrl') {
-    try { new URL(payload.url); } catch { return `Command "fetchUrl" field "url" must be a valid URL`; }
-    if (payload.maxChars !== undefined && typeof payload.maxChars !== 'number') {
-      return `Command "fetchUrl" field "maxChars" must be a number`;
     }
   }
   if (cmd === 'importModelFolder' && payload.version !== undefined
@@ -4279,115 +4269,6 @@ rl.on('line', async (line) => {
       reply({ ok: true, result: accessLog });
     } else if (cmd === 'getHealthRing') {
       reply({ ok: true, result: healthRing.snapshot() });
-    } else if (cmd === 'fetchUrl') {
-      const fetchTs = Date.now();
-      const rawUrl = String(payload.url).trim();
-      const maxChars = typeof payload.maxChars === 'number' ? payload.maxChars : 50000;
-
-      // SSRF / protocol guard — reject anything that isn't https/http, and block
-      // private/loopback ranges so the sidecar can't be used as a proxy to reach
-      // local services (LAN hosts, the Foundry endpoint itself, etc.).
-      let parsedUrl;
-      try {
-        parsedUrl = new URL(rawUrl);
-      } catch {
-        reply({ error: `fetchUrl: invalid URL` });
-        return;
-      }
-      if (parsedUrl.protocol !== 'https:' && parsedUrl.protocol !== 'http:') {
-        reply({ error: `fetchUrl: only http/https URLs are supported` });
-        return;
-      }
-      const hostname = parsedUrl.hostname.toLowerCase();
-      const privateRanges = [
-        /^localhost$/,
-        /^127\./,
-        /^10\./,
-        /^172\.(1[6-9]|2[0-9]|3[01])\./,
-        /^192\.168\./,
-        /^169\.254\./,     // link-local
-        /^::1$/,           // IPv6 loopback
-        /^fc00:/,          // IPv6 ULA
-        /^fe80:/,          // IPv6 link-local
-        /^0\.0\.0\.0$/,
-      ];
-      if (privateRanges.some((re) => re.test(hostname))) {
-        reply({ error: `fetchUrl: private/loopback addresses are not allowed` });
-        return;
-      }
-
-      try {
-        const raw = await fetchBoundedResponseText(fetch, rawUrl, {
-          maxBytes: DEFAULT_FETCH_BODY_LIMIT,
-          headers: { 'User-Agent': 'Flint/0.3 (local-AI-client; +https://github.com/joelst/flint)' },
-          redirect: 'follow',
-        });
-
-        const contentType = raw.response.headers.get('content-type') || '';
-        const capped = raw.text;
-
-        let title = '';
-        let extractedText = '';
-
-        if (contentType.includes('text/html')) {
-          // Dynamically import jsdom + readability (both ship in node_modules)
-          const { JSDOM } = await import('jsdom');
-          const { Readability } = await import('@mozilla/readability');
-          const dom = new JSDOM(capped, { url: rawUrl });
-          title = dom.window.document.title?.trim() || '';
-          const reader = new Readability(dom.window.document, { charThreshold: 50 });
-          const article = reader.parse();
-          if (article) {
-            title = article.title?.trim() || title;
-            extractedText = article.textContent?.replace(/\s+/g, ' ').trim() || '';
-          } else {
-            extractedText = dom.window.document.body?.textContent?.replace(/\s+/g, ' ').trim() || '';
-          }
-        } else {
-          extractedText = capped.replace(/\s+/g, ' ').trim();
-        }
-
-        const truncated = raw.truncated || extractedText.length > maxChars;
-        const finalText = extractedText.length > maxChars
-          ? extractedText.slice(0, maxChars)
-          : extractedText;
-
-        appendAccessLog({
-          ts: fetchTs,
-          type: 'fetchUrl',
-          modelAlias: null,
-          durationMs: Date.now() - fetchTs,
-          tokensIn: null,
-          tokensOut: null,
-          source: 'ipc',
-          ok: true,
-          url: parsedUrl.hostname, // host only, not full URL (privacy)
-        });
-        log('info', `fetchUrl: fetched ${parsedUrl.hostname} (${finalText.length} chars, truncated=${truncated})`);
-        reply({
-          ok: true,
-          result: {
-            url: rawUrl,
-            title,
-            text: finalText,
-            truncated,
-            charCount: finalText.length,
-          }
-        });
-      } catch (err) {
-        appendAccessLog({
-          ts: fetchTs,
-          type: 'fetchUrl',
-          modelAlias: null,
-          durationMs: Date.now() - fetchTs,
-          tokensIn: null,
-          tokensOut: null,
-          source: 'ipc',
-          ok: false,
-          url: parsedUrl?.hostname || rawUrl,
-        });
-        throw err;
-      }
     } else if (cmd === 'embedTexts') {
       const inputs = payload.inputs;
       const modelAlias = payload.model;

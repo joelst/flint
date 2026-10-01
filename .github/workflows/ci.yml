@@ -134,6 +134,10 @@ jobs:
         working-directory: src-tauri
         run: cargo check
 
+      - name: Rust release check
+        working-directory: src-tauri
+        run: cargo check --release
+
   test:
     runs-on: ubuntu-latest
     steps:

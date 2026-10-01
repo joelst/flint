@@ -32,7 +32,6 @@ export const IPC_COMMAND_DEADLINES_MS: Record<SidecarCommandName, number | null>
   inspectModelFolder: 30_000,
   getModelTemplate: 30_000,
 
-  fetchUrl: null,
   download: null,
   deleteModel: null,
   importModelFolder: null,

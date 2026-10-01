@@ -253,13 +253,15 @@ export interface ConversationSettings {
    * sidecar treats any finite number, including 0, as a seed to send.
    */
   randomSeed?: number | null;
+  /** Whether this conversation may offer bounded public web tools to the model. */
+  webToolsEnabled?: boolean;
 }
 
 /** Keys `ConversationSettings` owns. Anything else is passthrough. */
 export const CONVERSATION_SETTING_KEYS = [
   'modelAlias', 'systemPrompt', 'contextTurns', 'showFullHistory',
   'temperature', 'maxTokens', 'topP', 'topK',
-  'frequencyPenalty', 'presencePenalty', 'randomSeed',
+  'frequencyPenalty', 'presencePenalty', 'randomSeed', 'webToolsEnabled',
 ] as const;
 
 
@@ -307,6 +309,10 @@ export function readConversationSettings(raw: unknown): ConversationSettingsRead
         break;
       case 'showFullHistory':
         if (typeof value === 'boolean') settings.showFullHistory = value;
+        else invalidKeys.push(key);
+        break;
+      case 'webToolsEnabled':
+        if (typeof value === 'boolean') settings.webToolsEnabled = value;
         else invalidKeys.push(key);
         break;
       case 'temperature':

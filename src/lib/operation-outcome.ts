@@ -51,10 +51,6 @@ export const COMMAND_EFFECTS: Record<SidecarCommandName, OperationEffect> = {
   inspectModelFolder: 'query',
   getModelTemplate: 'query',
 
-  // Reaches a third-party server, which may bill for the request, consume a single-use URL, or
-  // act on it. Flint cannot see any of that, so it cannot promise a repeat is free.
-  fetchUrl: 'effectful',
-
   // Touch the model cache on disk.
   download: 'effectful',
   deleteModel: 'effectful',
@@ -172,8 +168,6 @@ function recoveryAdvice(cmd: string): string {
       // Not "nothing was saved": streaming writes each delta into the conversation and autosave
       // persists it, so partial output may already be on disk. Only completion is unconfirmed.
       return 'The model may have run, and any output received before the interruption may already have been kept.';
-    case 'fetchUrl':
-      return 'The page may have been requested even though Flint never received it.';
     default:
       return '';
   }

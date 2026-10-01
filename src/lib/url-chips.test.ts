@@ -2,8 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { isFetchableUrl, detectFetchableUrls } from './url-chips';
 
 describe('isFetchableUrl', () => {
-  it('accepts http and https URLs with a host', () => {
-    expect(isFetchableUrl('http://example.com')).toBe(true);
+  it('accepts credential-free HTTPS URLs on the standard port', () => {
     expect(isFetchableUrl('https://example.com/a/b?c=d#e')).toBe(true);
     expect(isFetchableUrl('  https://example.com  ')).toBe(true);
   });
@@ -12,6 +11,9 @@ describe('isFetchableUrl', () => {
     ['empty', ''],
     ['whitespace', '   '],
     ['not a URL', 'example.com'],
+    ['http scheme', 'http://example.com'],
+    ['credentials', 'https://user:pass@example.com'],
+    ['nonstandard port', 'https://example.com:8443'],
     ['javascript scheme', 'javascript:alert(1)'],
     ['file scheme', 'file:///etc/passwd'],
     ['data scheme', 'data:text/html,<h1>x</h1>'],
@@ -64,7 +66,9 @@ describe('detectFetchableUrls', () => {
   });
 
   it('does not offer schemes the fetcher cannot use', () => {
-    expect(detectFetchableUrls('javascript:alert(1) file:///etc/passwd')).toEqual([]);
+    expect(detectFetchableUrls(
+      'http://example.com javascript:alert(1) file:///etc/passwd',
+    )).toEqual([]);
   });
 
   it('treats a punctuation-stripped duplicate as the same URL', () => {

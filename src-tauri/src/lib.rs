@@ -5,6 +5,7 @@ pub mod runtime_state;
 pub mod runtime_supervisor;
 pub mod runtime_transport;
 pub mod tray;
+pub mod web_tool;
 
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) {
@@ -58,6 +59,7 @@ pub fn run() {
             quit_app,
             relaunch_app,
             open_devtools,
+            web_tool::web_tool_execute,
             quit_flush::ack_quit_flush,
         ])
         .setup(|app| {

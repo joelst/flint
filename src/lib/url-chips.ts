@@ -20,11 +20,12 @@ export function isFetchableUrl(value: string): boolean {
   } catch {
     return false;
   }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password) return false;
+  if (parsed.port && parsed.port !== '443') return false;
   return !!parsed.hostname;
 }
 
-const URL_PATTERN = /https?:\/\/[^\s"'<>)]+/g;
+const URL_PATTERN = /https:\/\/[^\s"'<>)]+/g;
 
 /**
  * Extract fetchable URLs from chat input, in first-seen order, excluding ones already queued.

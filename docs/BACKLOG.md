@@ -12,11 +12,12 @@ Do not add 1.0 work here; that duplicates the plan and the two will drift.
 
 ## Current execution priorities
 
-Follow the 1.0 waves in [PRODUCT_PLAN.md](./PRODUCT_PLAN.md). Waves 1–9 land as
-**0.9.0**, the first stable, so the updater can be proven from 0.7.0 evaluation.
-Remaining process after that: 0.9.0 upgrade dogfood, bugfixes, packaged Windows
-dogfood, integration version pins, then **1.0.0**. Defer wholesale Foundry
-runtime replacement.
+Finish the **0.10.0** qualification gates in
+[PRODUCT_PLAN.md](./PRODUCT_PLAN.md): packaged Benchmark Preview dogfood, the
+bounded public web-retrieval boundary, infrastructure/release validation, and
+the generated release review. Then continue the remaining 1.0 process gates:
+signed clean-machine Windows dogfood, stable updater evidence, and pinned
+integration versions. Defer wholesale Foundry runtime replacement.
 
 **Linux work is deferred:** preserve existing checks and mappings. Continue
 Linux-specific work only where it is already part of another feature; shared
@@ -72,8 +73,8 @@ contract + sidecar E2E + packaged Windows smoke in PRODUCT_PLAN Wave 7).
       when JSON is within the bounded normalization threshold; larger JSON responses
       remain byte-preserving pass-through. Broader endpoint capability conformance
       remains open.
-- [ ] **Recorded BYOM embedding recipe** — gateway autoload and `embedTexts` ship
-      in 0.9.0 (PRODUCT_PLAN Wave 9). Catalog still has zero embedding models. A
+- [ ] **Recorded BYOM embedding recipe** — gateway autoload and `embedTexts` are
+      present (PRODUCT_PLAN Wave 9). Catalog still has zero embedding models. A
       Flint-tested onnxruntime-genai embedding folder (repo, revision, dimension,
       core pin) is still required before Continue's indexer can be marked verified.
 
@@ -82,12 +83,6 @@ contract + sidecar E2E + packaged Windows smoke in PRODUCT_PLAN Wave 7).
 - [ ] **macOS quarantines the SDK's ad-hoc-signed dylib** — see docs/DEVELOPMENT.md.
       Not fixable here (Microsoft would need to notarize it); revisit when the SDK
       pin moves. Separate from Flint.app signing, which is a post-1.0 calendar item.
-- [ ] **`adm-zip` advisory is transitive via `foundry-local-sdk`** — not fixable
-      without an SDK bump. `glib` is Linux/GTK-only and Flint ships Windows + macOS;
-      `cookie` is already patched. Re-check when the SDK pin moves.
-
-CI caching of the Foundry native payload (nuget.org; Azure DevOps fallback 401) is
-PRODUCT_PLAN Wave 1, not deferred.
 
 ## Operation outcomes
 
@@ -158,17 +153,17 @@ first per [PRODUCT_PLAN.md](./PRODUCT_PLAN.md) — these are not 1.0 work.
       Signing Flint.app does not un-quarantine the SDK dylib. Budget the paid
       Developer ID and dogfood Gatekeeper-clean installs only as a post-1.0
       calendar item.
-- [ ] **Tool-calling execution layer** — opt-in, user-confirmed execution of a limited
-      tool allowlist inside Flint (shell/file/HTTP), with a visible audit trail and a
-      prompt-injection heuristic scan before execution. **Decision: delegate autonomous
-      multi-step agent loops to purpose-built tools (OpenClaw, Scout, etc.) rather than
-      building a Flint-native agent runtime** — duplicating loop/sandbox/permission
-      logic is a worse version of what those tools already do, and every unconfirmed
-      step is attack surface Flint's local-first posture makes riskier, not safer. The
-      narrow exception worth revisiting: a 2–3 step user-confirmed linear chain ("run
-      prompt A → pipe into prompt B → show result"), which is not an autonomous loop.
-- [ ] **RAG (local file indexing)** — extend the existing `fetchUrl` fetch → sanitize →
-      inject-as-context pipeline from single-URL to an indexed local knowledge base
+- [ ] **Broad tool-calling execution layer** — shell, file, authenticated HTTP,
+      browser automation, uploads, and autonomous multi-step loops remain
+      post-1.0. Delegate agent loops to purpose-built tools (OpenClaw, Scout,
+      etc.) rather than duplicating their sandbox and permission systems.
+      PRODUCT_PLAN's bounded public web-search/retrieval helper is a narrow,
+      read-only exception: it receives no ambient credentials or filesystem
+      operation/path inputs, keeps fetched bodies request-scoped, and cannot
+      authorize another tool from retrieved text. That exception does not
+      establish a general Flint-native tool runtime.
+- [ ] **RAG (local file indexing)** — extend the bounded request-only URL context pattern
+      from a single public page to an indexed local knowledge base
       (embedded vector store). Show retrieved chunks and sources in the UI, following
       the URL-fetch chip precedent. Needs an embedding model — the Foundry catalog ships
       zero; see the `/v1/embeddings` item above.
@@ -187,9 +182,6 @@ first per [PRODUCT_PLAN.md](./PRODUCT_PLAN.md) — these are not 1.0 work.
       endpoint).
 - [ ] **Curated ONNX catalog** — Flint-validated imports (pinned repo/revision, tested
       EP, required files). See [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) "After 1.0".
-
-In-app updater **install** UX (progress/restart/defer) is PRODUCT_PLAN Wave 8, not
-unscheduled. The availability/error/check-time action is already delivered.
 
 ## Control CLI — not planned
 

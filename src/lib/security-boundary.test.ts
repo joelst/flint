@@ -108,4 +108,24 @@ describe('renderer/sidecar boundary', () => {
     expect(sdk).toContain('NATIVE_RUNTIME_MAX_FRAME_BYTES = 80 * 1024 * 1024');
     expect(rust).toContain('MAX_RUNTIME_FRAME_BYTES: usize = 80 * 1024 * 1024');
   });
+
+  it('keeps generic web access out of the Foundry sidecar', () => {
+    const sidecar = readFileSync(
+      join(process.cwd(), 'sidecar', 'foundry-sidecar-main.js'),
+      'utf8',
+    );
+    const sdk = readFileSync(join(process.cwd(), 'src', 'lib', 'sdk.ts'), 'utf8');
+    expect(sidecar).not.toContain('fetchUrl');
+    expect(sidecar).not.toContain('Readability');
+    expect(sidecar).not.toContain('jsdom');
+    expect(sdk).toContain("'web_tool_execute'");
+  });
+
+  it('runs the web helper with bounded pipes and a cleared environment', () => {
+    const rust = readFileSync(join(process.cwd(), 'src-tauri', 'src', 'web_tool.rs'), 'utf8');
+    expect(rust).toContain('command.env_clear()');
+    expect(rust).toContain('const MAX_OUTPUT_BYTES: usize = 256 * 1024');
+    expect(rust).toContain('const HELPER_TIMEOUT: Duration = Duration::from_secs(15)');
+    expect(rust).toContain('.join("web-tool.js")');
+  });
 });

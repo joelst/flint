@@ -97,6 +97,7 @@ export default defineConfig(() => ({
         'src/lib/conversation-title.ts',
         'src/lib/conversation-session.ts',
         'src/lib/conversation-settings.ts',
+        'src/lib/web-tools.ts',
         'src/lib/conversation-export.ts',
         'src/lib/operation-outcome.ts',
         'src/lib/chat-request.ts',
