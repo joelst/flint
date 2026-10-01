@@ -173,6 +173,7 @@
     createConversation as createSessionConversation,
     deleteConversation as deleteSessionConversation,
     ensureMessageIds,
+    createTimestampedMessage,
     findConversation,
     selectConversation as selectSessionConversation,
     snapshotMessages,
@@ -193,13 +194,16 @@
     type AppSettingDefaults,
   } from "$lib/conversation-settings";
   import { isFetchableUrl, detectFetchableUrls } from "$lib/url-chips";
-  import { conversationImagePreviewPartIndexes } from "$lib/message-rendering";
+  import {
+    conversationImagePreviewPartIndexes,
+    millisecondsUntilNextLocalDay,
+  } from "$lib/message-rendering";
   import { estimateTokensForMessages } from "$lib/token-estimate";
   import { formatErrorDetail, formatUncaughtError } from "$lib/error-detail";
   import {
     normalizeForAlternatingChat,
     isEmptyAssistantPlaceholder,
-    retainNewestImagesByChronology,
+    selectPinnedAndRecentMessages,
   } from "$lib/chat-request";
   import {
     beginScopedPreparation,
@@ -1555,6 +1559,8 @@
   let selectedModel: any = $state(null);
   let chatClient: any = $state(null);
   let chatMessages = $state<any[]>([]);
+  let messageTimestampNow = $state(Date.now());
+  let messageTimestampRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   let chatInput = $state("");
   let isStreaming = $state(false);
   /** id of the assistant message currently receiving deltas for the visible thread, if any. */
@@ -5955,6 +5961,14 @@ updateStateFromSdk();
 
   onMount(() => {
     hostPlatform = detectHostPlatform();
+    const scheduleMessageTimestampRefresh = () => {
+      if (messageTimestampRefreshTimer) clearTimeout(messageTimestampRefreshTimer);
+      messageTimestampRefreshTimer = setTimeout(() => {
+        messageTimestampNow = Date.now();
+        scheduleMessageTimestampRefresh();
+      }, millisecondsUntilNextLocalDay());
+    };
+    scheduleMessageTimestampRefresh();
     // Subscribe to the SDK store
     unsubscribe = sdkStateStore.subscribe(syncFromStore);
 
@@ -6022,6 +6036,10 @@ updateStateFromSdk();
       if (backgroundArchiveSaveTimer) {
         clearTimeout(backgroundArchiveSaveTimer);
         backgroundArchiveSaveTimer = null;
+      }
+      if (messageTimestampRefreshTimer) {
+        clearTimeout(messageTimestampRefreshTimer);
+        messageTimestampRefreshTimer = null;
       }
       if (unsubscribe) unsubscribe();
       document.removeEventListener('keydown', handleGlobalKeydown);
@@ -6544,6 +6562,7 @@ updateStateFromSdk();
     const text = chatInput.trim();
 
     const nextMessages = [...chatMessages];
+    const userCreatedAt = Date.now();
 
     // Inject fetched URL content as context ahead of user message
     const doneFetches = pendingUrlFetches.filter(f => f.status === 'done' && f.text);
@@ -6552,10 +6571,13 @@ updateStateFromSdk();
         const titleLine = f.title ? `Title: ${f.title}\n` : '';
         return `--- Page context from ${f.url} ---\n${titleLine}${f.text}\n--- end context ---`;
       }).join('\n\n');
-      nextMessages.push({
+      nextMessages.push(createTimestampedMessage({
         role: "user",
         content: `The following web page content has been fetched for context:\n\n${contextBlock}\n\nPlease use this context to answer my question.`
-      }, { role: "assistant", content: "Understood. I have read the page content and will use it to answer your question." });
+      }, userCreatedAt), createTimestampedMessage({
+        role: "assistant",
+        content: "Understood. I have read the page content and will use it to answer your question.",
+      }, userCreatedAt));
     }
 
     let userContent: any = text;
@@ -6568,7 +6590,10 @@ updateStateFromSdk();
           : []),
       ];
     }
-    nextMessages.push({ role: "user", content: userContent });
+    nextMessages.push(createTimestampedMessage({
+      role: "user",
+      content: userContent,
+    }, userCreatedAt));
     const stamped = ensureMessageIds(nextMessages as any, (i) => `msg-${Date.now()}-${i}`).messages as any;
     if (attachedImages.length > 0 || attachedTextFiles.length > 0) {
       try {
@@ -6646,7 +6671,11 @@ updateStateFromSdk();
 
     let assistantContent = "";
     try {
-      chatMessages = [...chatMessages, { role: "assistant", content: "", id: assistantId }];
+      chatMessages = [...chatMessages, createTimestampedMessage({
+        role: "assistant",
+        content: "",
+        id: assistantId,
+      })];
 
       // Sidecar IPC runs native ChatSession inference independently of the optional HTTP service.
       // Keep the direct client only as the development fallback when no service endpoint exists.
@@ -6806,19 +6835,8 @@ updateStateFromSdk();
     });
 
     // === Step 5: Respect pinned messages ===
-    const imageBoundedHistory = retainNewestImagesByChronology(effectiveHistory);
-    const pinned = imageBoundedHistory.filter((m: any) => m.pinned);
-    const nonPinned = imageBoundedHistory.filter((m: any) => !m.pinned);
-
     const maxRecent = Math.max(2, contextTurns * 2);
-    const recentNonPinned = nonPinned.slice(-maxRecent);
-
-    // Combine: pinned first (they act as long-term memory), then recent
-    // Dedup by reference
-    const combined = [...pinned];
-    for (const m of recentNonPinned) {
-      if (!combined.includes(m)) combined.push(m);
-    }
+    const combined = selectPinnedAndRecentMessages(effectiveHistory, maxRecent);
 
     // Latest user turn drives optional Flint fact-sheet expansion (token-efficient).
     let latestUserText = "";
@@ -6940,11 +6958,11 @@ Output only the summary text, no preamble.`;
       return;
     }
 
-    const summaryMessage = {
+    const summaryMessage = createTimestampedMessage({
       role: "assistant",
       content: `[Previous conversation summary — ${oldMessages.length} earlier messages]:\n${summary.trim()}`,
       isSummary: true,
-    };
+    });
 
     // Mark old non-pinned non-summary messages as condensed (they stay in the array for full thread)
     oldMessages.forEach((m: any) => {
@@ -9352,6 +9370,7 @@ Output only the summary text, no preamble.`;
                             <MessageRenderer
                               content={msg.content}
                               createdAt={msg.createdAt}
+                              timestampNow={messageTimestampNow}
                               previewImagePartIndexes={chatImagePreviewPartIndexes[i] ?? []}
                               role={msg.role}
                               isStreaming={isStreaming && msg.id === activeStreamAssistantId}

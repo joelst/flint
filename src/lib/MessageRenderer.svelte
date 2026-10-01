@@ -16,6 +16,7 @@
   export let previewImagePartIndexes: number[] | undefined = undefined;
   export let role: "user" | "assistant" = "assistant";
   export let createdAt: number | undefined = undefined;
+  export let timestampNow: number = Date.now();
   /** True while this specific message is actively receiving stream deltas. */
   export let isStreaming: boolean = false;
   /**
@@ -52,7 +53,7 @@
   let lastMessageKey: string | number | undefined = undefined;
   $: userParts = renderableMessageParts(content, previewImagePartIndexes);
   $: assistantAttachments = nonTextMessageParts(userParts);
-  $: timestamp = messageTimestamp(createdAt);
+  $: timestamp = messageTimestamp(createdAt, timestampNow);
 
   $: {
     if (messageKey !== lastMessageKey) {

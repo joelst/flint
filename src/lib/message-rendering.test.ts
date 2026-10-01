@@ -4,6 +4,7 @@ import {
   extractThinkingTrace,
   messageClipboardText,
   messageTimestamp,
+  millisecondsUntilNextLocalDay,
   nonTextMessageParts,
   renderableMessageParts,
   sanitizeAssistantHtml,
@@ -110,6 +111,13 @@ describe("multipart message rendering", () => {
     it("rejects absent and invalid timestamps", () => {
       expect(messageTimestamp(undefined)).toBeNull();
       expect(messageTimestamp(Number.NaN)).toBeNull();
+    });
+  });
+
+  describe("millisecondsUntilNextLocalDay", () => {
+    it("schedules the refresh just after the next local midnight", () => {
+      const now = new Date(2026, 8, 30, 23, 59, 59, 500).getTime();
+      expect(millisecondsUntilNextLocalDay(now)).toBe(600);
     });
   });
 

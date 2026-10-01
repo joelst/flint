@@ -5,6 +5,7 @@ import {
   mergePromptParts,
   normalizeForAlternatingChat,
   retainNewestImagesByChronology,
+  selectPinnedAndRecentMessages,
   ImageAttachmentRequestError,
   TextAttachmentRequestError,
   isEmptyAssistantPlaceholder,
@@ -781,5 +782,35 @@ describe('chronological image retention', () => {
     expect(messages[0].content).toEqual([image('older')]);
     expect(bounded[0].content).toEqual([text(DEFAULT_OMITTED_IMAGE_PLACEHOLDER)]);
     expect(bounded[1]).toBe(messages[1]);
+  });
+
+  it('does not let a malformed newest image consume the usable image slot', () => {
+    const messages = [
+      { content: [image('valid')] },
+      { content: [{ type: 'image_url', image_url: {} }] },
+    ];
+    const bounded = retainNewestImagesByChronology(messages);
+    expect(bounded[0].content).toEqual([image('valid')]);
+  });
+});
+
+describe('pinned and recent request selection', () => {
+  it('caps images only after selecting the pinned and recent window', () => {
+    const pinned = { id: 'pinned', pinned: true, content: [image('pinned-image')] };
+    const dropped = { id: 'dropped', content: [image('dropped-image')] };
+    const recent = [
+      { id: 'recent-1', content: 'one' },
+      { id: 'recent-2', content: 'two' },
+    ];
+    const history = [pinned, dropped, ...recent];
+    const before = structuredClone(history);
+    const selected = selectPinnedAndRecentMessages(history, 2);
+    expect(selected.map((message) => message.id)).toEqual([
+      'pinned',
+      'recent-1',
+      'recent-2',
+    ]);
+    expect(selected[0].content).toEqual([image('pinned-image')]);
+    expect(history).toEqual(before);
   });
 });

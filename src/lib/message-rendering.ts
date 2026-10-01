@@ -206,6 +206,17 @@ export function messageTimestamp(
   return { label, title, datetime: date.toISOString() };
 }
 
+export function millisecondsUntilNextLocalDay(now = Date.now()): number {
+  const current = new Date(now);
+  if (!Number.isFinite(current.getTime())) return 60_000;
+  const next = new Date(
+    current.getFullYear(),
+    current.getMonth(),
+    current.getDate() + 1,
+  ).getTime();
+  return Math.max(1, next - now + 100);
+}
+
 export function extractThinkingTrace(text: string, recognizePlainText = false): {
   visibleContent: string;
   thinkingContent: string[];

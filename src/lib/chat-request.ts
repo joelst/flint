@@ -241,6 +241,17 @@ export const DEFAULT_IMAGE_PLACEHOLDER = '[image]';
 
 export const DEFAULT_OMITTED_IMAGE_PLACEHOLDER = '[earlier image omitted]';
 
+function isUsableImagePart(part: unknown): part is ImagePart {
+  if (!part || typeof part !== 'object' || (part as { type?: unknown }).type !== 'image_url') {
+    return false;
+  }
+  const imageUrl = (part as { image_url?: unknown }).image_url;
+  return !!imageUrl
+    && typeof imageUrl === 'object'
+    && typeof (imageUrl as { url?: unknown }).url === 'string'
+    && (imageUrl as { url: string }).url.length > 0;
+}
+
 /**
  * Bound images while messages are still in chronological order.
  *
@@ -262,11 +273,7 @@ export function retainNewestImagesByChronology<T extends { content?: unknown }>(
     const content = [...message.content];
     for (let partIndex = content.length - 1; partIndex >= 0; partIndex -= 1) {
       const part = content[partIndex];
-      if (
-        !part
-        || typeof part !== 'object'
-        || (part as { type?: unknown }).type !== 'image_url'
-      ) continue;
+      if (!isUsableImagePart(part)) continue;
       if (kept < maxImages) {
         kept += 1;
       } else {
@@ -277,6 +284,32 @@ export function retainNewestImagesByChronology<T extends { content?: unknown }>(
     if (changed) result[messageIndex] = { ...message, content };
   }
   return result;
+}
+
+/**
+ * Select the final inference window before applying the request-wide image cap.
+ *
+ * A message that is outside the recent window must not consume the only native image slot.
+ * Selection therefore happens in original chronological order, then image retention is applied,
+ * and only then are pinned turns moved ahead of recent turns for prompt semantics.
+ */
+export function selectPinnedAndRecentMessages<
+  T extends { content?: unknown; pinned?: unknown },
+>(
+  messages: readonly T[],
+  maxRecent: number,
+  maxImages = MAX_REQUEST_IMAGES,
+): T[] {
+  const recentNonPinned = messages.filter((message) => !message.pinned).slice(-maxRecent);
+  const recentSet = new Set(recentNonPinned);
+  const selectedChronological = messages.filter(
+    (message) => !!message.pinned || recentSet.has(message),
+  );
+  const imageBounded = retainNewestImagesByChronology(selectedChronological, maxImages);
+  return [
+    ...imageBounded.filter((message) => !!message.pinned),
+    ...imageBounded.filter((message) => !message.pinned),
+  ];
 }
 
 /**
