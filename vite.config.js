@@ -129,6 +129,7 @@ export default defineConfig(() => ({
         'sidecar/session-clients.js',
         'sidecar/image-dimensions.js',
         'sidecar/web-address-policy.js',
+        'sidecar/web-tool.js',
         'sidecar/audio-format.js',
         'sidecar/accelerator-registration.js',
         'sidecar/model-operation-queue.js',

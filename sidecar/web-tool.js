@@ -31,18 +31,15 @@ function decodeEntities(value) {
   };
   return value.replace(/&(?:#(x?[0-9a-f]+)|(amp|quot|apos|lt|gt));/gi, (_match, raw, name) => {
     if (name) return named[name.toLowerCase()];
-    if (raw) {
-      const radix = raw[0].toLowerCase() === 'x' ? 16 : 10;
-      const digits = radix === 16 ? raw.slice(1) : raw;
-      const codePoint = Number.parseInt(digits, radix);
-      return Number.isInteger(codePoint)
-        && codePoint >= 0
-        && codePoint <= 0x10ffff
-        && !(codePoint >= 0xd800 && codePoint <= 0xdfff)
-        ? String.fromCodePoint(codePoint)
-        : '';
-    }
-    return '';
+    const radix = raw[0].toLowerCase() === 'x' ? 16 : 10;
+    const digits = radix === 16 ? raw.slice(1) : raw;
+    const codePoint = Number.parseInt(digits, radix);
+    return Number.isInteger(codePoint)
+      && codePoint >= 0
+      && codePoint <= 0x10ffff
+      && !(codePoint >= 0xd800 && codePoint <= 0xdfff)
+      ? String.fromCodePoint(codePoint)
+      : '';
   });
 }
 
@@ -339,10 +336,10 @@ export async function executeWebRequest(raw, dependencies = {}) {
   };
 }
 
-async function readStdin() {
+async function readInput(input) {
   const chunks = [];
   let bytes = 0;
-  for await (const chunk of process.stdin) {
+  for await (const chunk of input) {
     bytes += chunk.length;
     if (bytes > MAX_INPUT_BYTES) throw new Error('Input exceeds the byte limit');
     chunks.push(chunk);
@@ -350,20 +347,25 @@ async function readStdin() {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-async function main() {
+/** Run one request from `input` and write one JSON line. Resolves to the process exit code. */
+export async function runHelper(
+  input = process.stdin,
+  write = (line) => process.stdout.write(line),
+  dependencies = {},
+) {
   try {
-    const raw = JSON.parse(await readStdin());
-    const result = await executeWebRequest(raw);
+    const raw = JSON.parse(await readInput(input));
+    const result = await executeWebRequest(raw, dependencies);
     const output = JSON.stringify({ ok: true, result });
     if (Buffer.byteLength(output) > MAX_OUTPUT_BYTES) throw new Error('Output exceeds the byte limit');
-    process.stdout.write(`${output}\n`);
+    write(`${output}\n`);
+    return 0;
   } catch (error) {
-    const output = JSON.stringify({ ok: false, error: error?.message || String(error) });
-    process.stdout.write(`${output}\n`);
-    process.exitCode = 1;
+    write(`${JSON.stringify({ ok: false, error: error?.message || String(error) })}\n`);
+    return 1;
   }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  await main();
+  process.exitCode = await runHelper();
 }

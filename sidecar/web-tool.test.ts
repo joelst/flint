@@ -8,6 +8,7 @@ import {
   isDeniedAddress,
   normalizeRequest,
   requestPinned,
+  runHelper,
 } from './web-tool.js';
 
 describe('web tool request validation', () => {
@@ -415,5 +416,248 @@ describe('search execution', () => {
         snippet: 'Snippet',
       }],
     });
+  });
+});
+
+describe('fetch execution and helper entry', () => {
+  const resolve = vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]);
+  const respond = (body: string, headers: Record<string, string> = { 'content-type': 'text/html' }, statusCode = 200) =>
+    vi.fn(async () => ({ statusCode, headers, body: Buffer.from(body), truncated: false }));
+
+  async function* chunks(...values: string[]) {
+    for (const value of values) yield Buffer.from(value);
+  }
+
+  it('extracts bounded page text and a decoded title, dropping active content', async () => {
+    const html = '<title>A &amp; B &#x263A; &#9731; &#xD800; &#99999999;</title>'
+      + '<script>secret()</script><p>Hello&nbsp;<b>world</b> &QUOT;q&quot;</p>';
+    const result = await executeWebRequest(
+      { operation: 'fetch', url: 'https://example.com/#frag' },
+      { resolve, request: respond(html) },
+    );
+    expect(result).toMatchObject({
+      operation: 'fetch',
+      url: 'https://example.com/',
+      title: 'A & B \u263a \u2603',
+      truncated: false,
+    });
+    expect(result.text).toContain('Hello&nbsp; world "q"');
+    expect(result.text).not.toContain('secret');
+  });
+
+  it('collapses plain text and truncates it to the requested size', async () => {
+    const result = await executeWebRequest(
+      { operation: 'fetch', url: 'https://example.com/', maxChars: 1_000 },
+      { resolve, request: respond(`a \n ${'b'.repeat(2_000)}`, { 'content-type': 'text/plain; charset=utf-8' }) },
+    );
+    expect(result.text).toHaveLength(1_000);
+    expect(result.truncated).toBe(true);
+    expect(result.charCount).toBe(1_000);
+  });
+
+  it('refuses malformed requests before any network activity', () => {
+    for (const raw of [null, [], 'x', { operation: 'shell' }]) {
+      expect(() => normalizeRequest(raw)).toThrow(/object|search or fetch/i);
+    }
+    expect(() => normalizeRequest({ operation: 'search', query: '  ' })).toThrow(/1-500/);
+    expect(() => normalizeRequest({ operation: 'search', query: 'x'.repeat(501) })).toThrow(/1-500/);
+    expect(normalizeRequest({ operation: 'search', query: 'q' })).toMatchObject({ maxResults: 5 });
+    expect(normalizeRequest({ operation: 'search', query: 'q', maxResults: 0 })).toMatchObject({ maxResults: 1 });
+    expect(normalizeRequest({ operation: 'fetch', url: 'https://example.com/', maxChars: 1 }))
+      .toMatchObject({ maxChars: 1_000 });
+    expect(normalizeRequest({ operation: 'fetch', url: 'https://example.com/', maxChars: 1e9 }))
+      .toMatchObject({ maxChars: 50_000 });
+    expect(normalizeRequest({ operation: 'fetch', url: 'https://example.com:443/' }))
+      .toMatchObject({ url: 'https://example.com/' });
+    expect(() => normalizeRequest({ operation: 'fetch', url: 'https://example.com:8443/' })).toThrow(/port/i);
+    expect(() => normalizeRequest({ operation: 'fetch', url: 'https://printer.local/' })).toThrow(/local/i);
+  });
+
+  it('connects to IP literals without DNS and refuses empty or private answers', async () => {
+    const lookup = vi.fn();
+    await fetchPublicText('https://[2606:4700:4700::1111]/', {
+      resolve: lookup,
+      request: respond('ok', { 'content-type': 'text/plain' }),
+    });
+    expect(lookup).not.toHaveBeenCalled();
+    await expect(fetchPublicText('https://10.0.0.1/', { resolve: lookup })).rejects.toThrow(/private/);
+    await expect(fetchPublicText('https://empty.example/', { resolve: vi.fn(async () => []) }))
+      .rejects.toThrow(/did not resolve/);
+    await expect(fetchPublicText('https://empty.example/', { resolve: vi.fn(async () => null) }))
+      .rejects.toThrow(/did not resolve/);
+  });
+
+  it('fails immediately when no time remains and on unusable responses', async () => {
+    await expect(fetchPublicText('https://example.com/', { resolve, overallTimeoutMs: 0 }))
+      .rejects.toThrow(/timed out/);
+    await expect(fetchPublicText('https://example.com/', { resolve, request: respond('', {}, 302) }))
+      .rejects.toThrow(/no destination/);
+    await expect(fetchPublicText('https://example.com/', { resolve, request: respond('', {}, 500) }))
+      .rejects.toThrow(/HTTP 500/);
+    await expect(fetchPublicText('https://example.com/', { resolve, request: respond('', {}) }))
+      .rejects.toThrow(/content type: missing/);
+    await expect(fetchPublicText('https://example.com/', {
+      resolve,
+      request: respond('', { 'content-type': 'text/html', 'content-encoding': 'gzip' }),
+    })).rejects.toThrow(/encoding: gzip/);
+  });
+
+  it('writes one JSON line and an exit code for success and every failure', async () => {
+    const lines: string[] = [];
+    const write = (line: string) => { lines.push(line); };
+    await expect(runHelper(
+      chunks('{"operation":"fetch",', '"url":"https://example.com/"}'),
+      write,
+      { resolve, request: respond('plain', { 'content-type': 'text/plain' }) },
+    )).resolves.toBe(0);
+    expect(JSON.parse(lines[0])).toMatchObject({ ok: true, result: { text: 'plain' } });
+
+    await expect(runHelper(chunks('{'), write)).resolves.toBe(1);
+    expect(JSON.parse(lines[1]).ok).toBe(false);
+
+    await expect(runHelper(chunks('x'.repeat(16 * 1024 + 1)), write)).resolves.toBe(1);
+    expect(JSON.parse(lines[2]).error).toMatch(/Input exceeds/);
+
+    await expect(runHelper(
+      chunks('{"operation":"fetch","url":"https://example.com/","maxChars":50000}'),
+      write,
+      { resolve, request: respond('\u0001'.repeat(50_000), { 'content-type': 'text/plain' }) },
+    )).resolves.toBe(1);
+    expect(JSON.parse(lines[3]).error).toMatch(/Output exceeds/);
+
+    await expect(runHelper(chunks('{"operation":"search","query":"q"}'), write, {
+      resolve,
+      request: vi.fn(async () => { throw 'raw failure'; }),
+    })).resolves.toBe(1);
+    expect(JSON.parse(lines[4]).error).toBe('raw failure');
+    expect(lines.every((line) => line.endsWith('\n'))).toBe(true);
+  });
+});
+
+describe('pinned request transport', () => {
+  function fakeTransport() {
+    const response = Object.assign(new EventEmitter(), { headers: {}, statusCode: undefined, destroy: vi.fn() });
+    const request = Object.assign(new EventEmitter(), { write: vi.fn(), destroy: vi.fn(), end: vi.fn() });
+    let captured: any;
+    let callback: (value: any) => void = () => {};
+    const spy = vi.spyOn(https, 'request').mockImplementation(((options: any, cb: any) => {
+      captured = options;
+      callback = cb;
+      return request;
+    }) as any);
+    return { response, request, spy, options: () => captured, deliver: () => callback(response) };
+  }
+
+  it('sends a form body with explicit length and reports a missing status as 0', async () => {
+    const t = fakeTransport();
+    t.request.end.mockImplementation(() => {
+      t.deliver();
+      t.response.emit('data', Buffer.from('ok'));
+      t.response.emit('end');
+    });
+    try {
+      const result = await requestPinned(
+        new URL('https://example.com/a?b=c'),
+        { address: '93.184.216.34', family: 4 },
+        { method: 'POST', body: 'q=x' },
+      );
+      expect(t.request.write).toHaveBeenCalledWith(Buffer.from('q=x'));
+      expect(t.options()).toMatchObject({
+        method: 'POST',
+        path: '/a?b=c',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': '3' },
+      });
+      expect(result).toMatchObject({ statusCode: 0, truncated: false });
+      expect(result.body.toString()).toBe('ok');
+    } finally {
+      t.spy.mockRestore();
+    }
+  });
+
+  it('stops at an exact byte limit and ignores later stream errors', async () => {
+    const t = fakeTransport();
+    t.request.end.mockImplementation(() => {
+      t.deliver();
+      t.response.emit('data', Buffer.from('12345'));
+      t.response.emit('data', Buffer.from('6'));
+      t.response.emit('error', new Error('after settle'));
+      t.response.emit('end');
+    });
+    try {
+      const result = await requestPinned(
+        new URL('https://example.com/'),
+        { address: '93.184.216.34', family: 4 },
+        { maxBytes: 5 },
+      );
+      expect(result.body.toString()).toBe('12345');
+      expect(result.truncated).toBe(true);
+      expect(t.response.destroy).toHaveBeenCalled();
+    } finally {
+      t.spy.mockRestore();
+    }
+  });
+
+  it('rejects on a response error and destroys a timed-out request', async () => {
+    const t = fakeTransport();
+    t.request.end.mockImplementation(() => {
+      t.deliver();
+      t.response.emit('error', new Error('reset'));
+    });
+    try {
+      await expect(requestPinned(new URL('https://example.com/'), { address: '93.184.216.34', family: 4 }))
+        .rejects.toThrow('reset');
+    } finally {
+      t.spy.mockRestore();
+    }
+
+    const timed = fakeTransport();
+    timed.request.destroy.mockImplementation((error: Error) => timed.request.emit('error', error));
+    timed.request.end.mockImplementation(() => timed.request.emit('timeout'));
+    try {
+      await expect(requestPinned(new URL('https://example.com/'), { address: '93.184.216.34', family: 4 }))
+        .rejects.toThrow(/timed out/);
+      expect(timed.options().timeout).toBe(8_000);
+    } finally {
+      timed.spy.mockRestore();
+    }
+  });
+});
+
+describe('remaining helper edges', () => {
+  const resolve = vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]);
+
+  it('keeps unknown entities and drops an incomplete trailing character from a truncated body', async () => {
+    const body = Buffer.concat([Buffer.from('<title>x&bogus;y</title>caf'), Buffer.from('\u00e9').subarray(0, 1)]);
+    const result = await executeWebRequest(
+      { operation: 'fetch', url: 'https://example.com/' },
+      { resolve, request: vi.fn(async () => ({ statusCode: 200, headers: { 'content-type': 'text/html' }, body, truncated: true })) },
+    );
+    expect(result.title).toBe('x&bogus;y');
+    expect(result.text).toBe('x&bogus;y caf');
+    expect(result.truncated).toBe(true);
+  });
+
+  it('stops following an endless redirect chain', async () => {
+    const request = vi.fn(async () => ({ statusCode: 302, headers: { location: '/again' }, body: Buffer.alloc(0) }));
+    await expect(fetchPublicText('https://example.com/', { resolve, request })).rejects.toThrow(/Too many redirects/);
+    expect(request.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it('skips advertising redirects and result blocks without a result link', () => {
+    const html = '<div class="result"><span>no link</span></div>'
+      + '<div class="result"><a class="result__a" href="https://duckduckgo.com/y.js?ad=1">Ad</a></div>'
+      + '<div class="result"><a class="result__a" href="https://example.org/">Real</a></div>';
+    expect(decodeSearchResults(html, 5)).toEqual([{ title: 'Real', url: 'https://example.org/', snippet: '' }]);
+  });
+
+  it('writes to stdout by default', async () => {
+    const spy = vi.spyOn(process.stdout, 'write').mockImplementation((() => true) as any);
+    try {
+      async function* input() { yield Buffer.from('{'); }
+      await expect(runHelper(input())).resolves.toBe(1);
+      expect(String(spy.mock.calls[0][0])).toMatch(/^\{"ok":false/);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
