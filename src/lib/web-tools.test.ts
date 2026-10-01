@@ -267,6 +267,28 @@ describe('web tool calls', () => {
     });
   });
 
+  it('preserves truncation on model-fetched sources and their audit', async () => {
+    const execute = vi.fn(async (): Promise<WebToolResult> => ({
+      operation: 'fetch',
+      url: 'https://example.com/long',
+      title: 'Long page',
+      text: 'Prefix',
+      truncated: true,
+      charCount: 6,
+    }));
+    const result = await executeWebToolCalls([{
+      id: 'call-t',
+      type: 'function',
+      function: { name: 'web_fetch', arguments: '{"url":"https://example.com/long"}' },
+    }], execute, new Set(['https://example.com/long']));
+    expect(result.sources).toEqual([{
+      title: 'Long page',
+      url: 'https://example.com/long',
+      truncated: true,
+    }]);
+    expect(appendWebSourceAudit('Answer', result.sources)).toContain('[Long page (truncated)]');
+  });
+
   it('does not dispatch another call after Stop is observed', async () => {
     const controller = new AbortController();
     const execute = vi.fn(async (request: WebToolRequest): Promise<WebToolResult> => {

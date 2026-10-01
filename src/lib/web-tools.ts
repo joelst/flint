@@ -258,7 +258,11 @@ export async function executeWebToolCalls(
       if (result.operation === 'search') {
         for (const item of result.results) sources.push({ title: item.title, url: item.url });
       } else {
-        sources.push({ title: result.title || result.url, url: result.url });
+        sources.push({
+          title: result.title || result.url,
+          url: result.url,
+          ...(result.truncated ? { truncated: true } : {}),
+        });
       }
       toolMessages.push({
         role: 'tool',

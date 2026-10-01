@@ -58,6 +58,10 @@ describe('web tool network boundary', () => {
     '::ffff:127.0.0.1',
     '::ffff:7f00:1',
     '::c0a8:101',
+    '::ffff:0:7f00:1',
+    '::ffff:0:a00:1',
+    '::ffff:0:c0a8:101',
+    '::ffff:0:5db8:d822',
     '2001:db8::1',
   ])('denies private or special address %s', (address) => {
     expect(isDeniedAddress(address)).toBe(true);
