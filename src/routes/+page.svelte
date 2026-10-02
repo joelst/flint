@@ -206,7 +206,15 @@
     isEmptyAssistantPlaceholder,
     selectPinnedAndRecentMessages,
   } from "$lib/chat-request";
-  import { dialogFocusable, dialogTabTrap, restoreDialogFocus } from "$lib/dialog-focus";
+  import {
+    consentKeyGate,
+    consentPointerAllows,
+    dialogFocusable,
+    dialogTabTrap,
+    latchConsentPointer,
+    releaseConsentKey,
+    restoreDialogFocus,
+  } from "$lib/dialog-focus";
   import { buildWebAudit, chipTextIsReadable, urlChipRetrievalAudit } from "$lib/web-audit";
   import {
     allUrlsGrantTarget,
@@ -6599,6 +6607,21 @@ updateStateFromSdk();
   });
   let webConsentDialog = $state<HTMLDivElement | null>(null);
   let webConsentReturnFocus: HTMLElement | null = null;
+  // The gesture that answered one prompt must not answer the next one in the queue.
+  let consentHeldKeys = new Set<string>();
+  let consentPointerLatchUntil = 0;
+
+  function acceptConsentChoice(event: MouseEvent, choice: SearchChoice | DomainChoice | null) {
+    // Keyboard activation reports detail 0. A pointer click reports a positive
+    // detail, including the second click of a double-click after the button
+    // underneath it has been replaced by the next prompt.
+    const pointer = event.detail !== 0;
+    if (pointer && !consentPointerAllows(consentPointerLatchUntil, performance.now())) return;
+    finishWebConsent(choice);
+    if (pointer && webConsentQueue.length > 0) {
+      consentPointerLatchUntil = latchConsentPointer(performance.now());
+    }
+  }
 
   function persistWebConsent(next: StoredWebConsent) {
     storedWebConsent = next;
@@ -6689,10 +6712,20 @@ updateStateFromSdk();
         webConsentReturnFocus = active;
       }
     }
-    const initiallyFocused = dialogFocusable(dialog);
-    (initiallyFocused[0] ?? dialog).focus();
+    const grantButton = dialogFocusable(dialog)[0];
+    // A held Enter would activate whichever grant button receives focus.
+    (consentHeldKeys.size > 0 ? dialog : (grantButton ?? dialog)).focus();
     const onKeyDown = (event: KeyboardEvent) => {
       if (!webConsentDialog) return;
+      if (event.key === "Enter" || event.key === " " || event.key === "Escape") {
+        const gate = consentKeyGate(consentHeldKeys, event.key, event.repeat);
+        consentHeldKeys = gate.held;
+        if (!gate.allow) {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+      }
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
@@ -6717,10 +6750,36 @@ updateStateFromSdk();
       if ((event.key === "Enter" || event.key === " ") && !event.metaKey && !event.ctrlKey && !event.altKey) return;
       event.stopPropagation();
     };
+    const focusGrantAfterGesture = () => {
+      const current = webConsentDialog;
+      if (!current) return;
+      // Space activates on keyup, so wait until that click has chosen.
+      queueMicrotask(() => {
+        if (consentHeldKeys.size > 0 || webConsentDialog !== current) return;
+        dialogFocusable(current)[0]?.focus();
+      });
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      const before = consentHeldKeys.size;
+      consentHeldKeys = releaseConsentKey(consentHeldKeys, event.key);
+      if (before > 0 && consentHeldKeys.size === 0) focusGrantAfterGesture();
+    };
+    const onWindowBlur = () => {
+      if (consentHeldKeys.size === 0) return;
+      // A lost keyup would leave the next Enter suppressed.
+      consentHeldKeys = new Set();
+      focusGrantAfterGesture();
+    };
     document.addEventListener("keydown", onKeyDown, true);
+    document.addEventListener("keyup", onKeyUp, true);
+    window.addEventListener("blur", onWindowBlur);
     return () => {
       document.removeEventListener("keydown", onKeyDown, true);
+      document.removeEventListener("keyup", onKeyUp, true);
+      window.removeEventListener("blur", onWindowBlur);
       if (webConsentQueue.length === 0) {
+        consentHeldKeys = new Set();
+        consentPointerLatchUntil = 0;
         const back = webConsentReturnFocus;
         webConsentReturnFocus = null;
         // Search is disabled once the send starts. Focusing that button drops
@@ -12643,18 +12702,18 @@ Output only the summary text, no preamble.`;
       </div>
       <div class="web-consent-actions">
         {#if webConsentPrompt.kind === "search"}
-          <button type="button" onclick={() => finishWebConsent("once")}>Just this search</button>
-          <button type="button" onclick={() => finishWebConsent("session")}>This session</button>
-          <button type="button" onclick={() => finishWebConsent("forever")}>Always</button>
+          <button type="button" onclick={(event) => acceptConsentChoice(event, "once")}>Just this search</button>
+          <button type="button" onclick={(event) => acceptConsentChoice(event, "session")}>This session</button>
+          <button type="button" onclick={(event) => acceptConsentChoice(event, "forever")}>Always</button>
         {:else}
-          <button type="button" onclick={() => finishWebConsent("once")}>This site once</button>
-          <button type="button" onclick={() => finishWebConsent("session")}>This site this session</button>
-          <button type="button" onclick={() => finishWebConsent("forever")}>Always allow this site</button>
+          <button type="button" onclick={(event) => acceptConsentChoice(event, "once")}>This site once</button>
+          <button type="button" onclick={(event) => acceptConsentChoice(event, "session")}>This site this session</button>
+          <button type="button" onclick={(event) => acceptConsentChoice(event, "forever")}>Always allow this site</button>
           {#if webConsentGrantTarget}
-            <button type="button" onclick={() => finishWebConsent("all-urls")}>Allow all URLs in {webConsentGrantTarget.label}</button>
+            <button type="button" onclick={(event) => acceptConsentChoice(event, "all-urls")}>Allow all URLs in {webConsentGrantTarget.label}</button>
           {/if}
         {/if}
-        <button type="button" class="secondary" onclick={() => finishWebConsent(null)}>Don't allow</button>
+        <button type="button" class="secondary" onclick={(event) => acceptConsentChoice(event, null)}>Don't allow</button>
       </div>
     </div>
   </div>

@@ -188,6 +188,11 @@ describe('renderer/sidecar boundary', () => {
     expect(page).toContain('searchResultUrls(result.results)');
     expect(page).not.toContain('packed.sources.map((source) => source.url).join');
     expect(page).toContain('dialogTabTrap(');
+    expect(page).toContain('consentKeyGate(');
+    expect(page).toContain('consentPointerAllows(');
+    expect(page).toContain('latchConsentPointer(');
+    expect(page).toContain('releaseConsentKey(');
+    expect(page).toContain('consentHeldKeys.size > 0 ? dialog : (grantButton ?? dialog)');
     expect(page).toContain('void tick().then(');
     expect(page).toContain('restoreDialogFocus(back, [');
     expect(page).toContain('form button.stop');

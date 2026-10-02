@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { dialogFocusable, dialogTabTrap, restoreDialogFocus } from './dialog-focus';
+import {
+  consentKeyGate,
+  consentPointerAllows,
+  dialogFocusable,
+  dialogTabTrap,
+  latchConsentPointer,
+  releaseConsentKey,
+  restoreDialogFocus,
+} from './dialog-focus';
 
 function dialog(): HTMLElement {
   document.body.innerHTML = [
@@ -100,5 +108,25 @@ describe('dialog focus', () => {
     search.remove();
     expect(restoreDialogFocus(search, fallbacks)).toBe(stop);
     expect(restoreDialogFocus(null, [disabledStop, hiddenStop])).toBeNull();
+  });
+
+  it('requires a fresh key and a later click for the next consent prompt', () => {
+    const first = consentKeyGate(new Set(), 'Enter', false);
+    expect(first.allow).toBe(true);
+    expect(first.held.has('Enter')).toBe(true);
+    expect(consentKeyGate(first.held, 'Enter', true).allow).toBe(false);
+    expect(consentKeyGate(first.held, 'Enter', false).allow).toBe(false);
+    const released = releaseConsentKey(first.held, 'Enter');
+    expect(consentKeyGate(released, 'Enter', false).allow).toBe(true);
+    expect(consentKeyGate(new Set(), 'Escape', true).allow).toBe(false);
+    const space = consentKeyGate(new Set(), ' ', false);
+    expect(space.allow).toBe(true);
+    expect(consentKeyGate(space.held, ' ', true).allow).toBe(false);
+    expect(consentKeyGate(new Set(), 'Tab', false)).toEqual({ allow: true, held: new Set() });
+
+    expect(consentPointerAllows(0, 1_000)).toBe(true);
+    const latched = latchConsentPointer(1_000);
+    expect(consentPointerAllows(latched, 1_499)).toBe(false);
+    expect(consentPointerAllows(latched, 1_500)).toBe(true);
   });
 });
