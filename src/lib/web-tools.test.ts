@@ -183,6 +183,27 @@ describe('web tool calls', () => {
     ]);
   });
 
+  it('keeps a matched IPv6 bracket and still strips an unmatched one', () => {
+    const bare = [...collectCurrentWebFetchUrls(
+      { role: 'user', content: 'Fetch https://[2606:4700:4700::1111] please' },
+      [],
+    )];
+    expect(bare).toEqual(['https://[2606:4700:4700::1111]/']);
+    expect(new URL(bare[0]).hostname).toBe('[2606:4700:4700::1111]');
+
+    const dotted = [...collectCurrentWebFetchUrls(
+      { role: 'user', content: 'Fetch https://[2606:4700:4700::1111].' },
+      [],
+    )];
+    expect(dotted).toEqual(['https://[2606:4700:4700::1111]/']);
+    expect(new URL(dotted[0]).hostname).toBe('[2606:4700:4700::1111]');
+
+    expect([...collectWebFetchUrls([{
+      role: 'user',
+      content: 'See https://example.com/path] next',
+    }])]).toEqual(['https://example.com/path']);
+  });
+
   it('preserves terminal exclamation and question marks in current-send URL authority', () => {
     expect([...collectCurrentWebFetchUrls(
       {
