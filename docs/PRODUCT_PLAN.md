@@ -1,18 +1,83 @@
 # Flint reliability execution plan
 
-**Status:** Phase 0, Phase 1A, Phase 1B, and Phase 2 foundation stages are delivered in Flint 0.7.0. Post-0.7.0 waves land as **0.9.0**, the first stable channel release, so the in-app updater can be proven before **1.0.0**. 0.8.0 is unused. No 1.0 date until that upgrade dogfood and remaining process gates in [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) are done.
+**Status:** The 1.0 foundation waves are present in the 0.9.x stable line. **0.9.2**
+is the current published stable release. **0.10.0** is the next release, with its
+changeset release PR and draft GitHub release kept open until the benchmark,
+infrastructure, and packaged qualification gates below are complete. No 1.0 date
+until the remaining process gates in [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md)
+are done.
 
 **Scope:** 1.0 production is Windows. macOS Apple Silicon remains evaluation-only (unsigned). Linux is deferred.
 
 **Release ownership:** [CHANGELOG.md](../CHANGELOG.md) owns version assignments and release history. [RELEASE_ROADMAP.md](../RELEASE_ROADMAP.md) owns the forward plan through 1.0 and the 1.0 release bar. This document owns 1.0 implementation sequencing and acceptance gates. [BACKLOG.md](./BACKLOG.md) holds deferred and post-1.0 work.
 
+## 0.10.0 release preparation
+
+0.10.0 is a qualification release, not permission to merge every accumulated
+changeset immediately. Keep the generated version PR open while these gates are
+unfinished; newly completed work must flow into it through normal changesets.
+
+### Benchmark Preview qualification
+
+- Keep Benchmark Preview opt-in and off by default until a packaged Windows run
+  records model pinning, Stop, Resume, served-variant reporting, and a gateway
+  `503` during a run.
+- Confirm the persisted run remains authoritative after reload and that a
+  historical read cannot be replaced by stale live polling.
+- Record the exact packaged build and models used. Do not reinterpret full-call
+  response time as time to first token, and do not score stored expected answers.
+
+### Tool and retrieval boundary
+
+- Flint may add a narrow, read-only public web-search/retrieval tool; this does
+  not turn Playground into an autonomous agent runtime.
+- Run retrieval outside the Foundry sidecar in a separately supervised helper.
+  Give it only the explicit query or URL, a minimal environment, bounded JSON
+  input/output, no filesystem operation or path inputs, and no conversation
+  archive, model cache, browser profile, or ambient credential access.
+- HTTPS retrieval must reject loopback, private, link-local, multicast, `.local`,
+  `file:`, `data:`, UNC paths, non-approved ports, DNS rebinding, and redirects to
+  a denied destination. Bound redirects, decompressed bytes, response time,
+  concurrency, calls per turn, and returned text.
+- Treat every result as untrusted reference content. Strip active content, never
+  let retrieved text authorize another tool call, show citations and an audit
+  trail, and require conversation-level opt-in. Search additionally requires an
+  exact current-message directive and confirmation of the exact outbound query;
+  fetch authority comes only from URLs typed or attached in the current send.
+- Permit at most one model tool round with no more than two calls. Force the
+  follow-up completion tool-free so retrieved content cannot start another
+  network action.
+- Keep fetched bodies request-scoped and memory-only by default. They do not
+  enter conversation archives, localStorage, benchmark storage, diagnostics,
+  access logs, model indexes, or unrelated processes. Return bounded text only
+  to the owning tool call so the selected model can answer; persist only
+  user-visible citations and intentionally retained summaries.
+- The first implementation is public and unauthenticated. Authenticated sites,
+  cookies, browser automation, uploads, shell/file tools, and autonomous
+  multi-step loops remain out of scope.
+
+### Release and infrastructure qualification
+
+- Preserve the existing renderer/sidecar security boundary and classify every
+  new helper command by effect, admission, timeout, cancellation certainty, and
+  shutdown ownership before exposing it to the model.
+- Run unit, contract, sidecar E2E, bundle verification, and packaged Windows
+  runtime smoke. Record any clean-machine or signed-installer dogfood completed
+  for this release.
+- Reconcile operator/release docs with the published 0.9.x stable line. Do not
+  publish the draft 0.10.0 release until its generated changelog, version files,
+  artifacts, and updater metadata describe the same build.
+
 ## 1.0 execution waves
 
-Waves 1 and 2 may overlap. Wave 4 may overlap with 2/3. Wave 8 is the ship, not a development dump. If Wave 2 slips, do not compensate with embeddings, RAG, or a scheduler.
+These waves define the continuing 1.0 acceptance bar. Their implementation is
+already present in the 0.9.x line; remaining work is qualification, recorded
+dogfood, integration version pins, and corrections found during that work. Do
+not compensate for a slipped gate with RAG, a scheduler, or broad tool execution.
 
 ### Wave 1 — Security and CI
 
-Rubber-duck: this is not a security product. The boundary already exists; 1.0 requires it audited, named, and gated. `npm ci` extracts packages and runs the SDK installer before a root `preinstall` restore can stick, so CI uses `npm run ci:deps` (extract with `--ignore-scripts`, restore `runtime/foundry-native-cache`, `npm rebuild`) before `skipIfPresent`. `updater:allow-download-and-install` stays because Wave 8 is in the same 0.9.0. PATH `node -v` stays (post-1.0 spawn-surface). CLI version checks are out — packaged users have no CLI.
+Rubber-duck: this is not a security product. The boundary already exists; 1.0 requires it audited, named, and gated. `npm ci` extracts packages and runs the SDK installer before a root `preinstall` restore can stick, so CI uses `npm run ci:deps` (extract with `--ignore-scripts`, restore `runtime/foundry-native-cache`, `npm rebuild`) before `skipIfPresent`. `updater:allow-download-and-install` stays for the stable updater path. PATH `node -v` stays (post-1.0 spawn-surface). CLI version checks are out — packaged users have no CLI.
 
 - Prune unused grants: opener plugin (renderer never imported it); `$RESOURCE` read scope (sidecar paths are native `trusted_runtime_paths`); redundant `core:tray:default` / `core:menu:default` (already in `core:default`). Keep `$RESOURCE` write deny. Comment each survivor.
 - Dedicated `src/lib/security-boundary.test.ts` that fails CI if opener/spawn/kill return, `$RESOURCE` reads return, shell execute is more than `node -v`, IPC allowlists drift, or BYOM `isInsideRoot` accepts a traversal.
@@ -34,7 +99,8 @@ Foundry has no abort API. 1.0 closes honesty and fencing, not a fake Stop.
 - Chat streaming: Stop settles the caller; native loop keeps consuming until stream end or child exit; UI already says the background may finish.
 - Compare: no Stop control. The running state says the run cannot be cancelled — wait for slots.
 - Audio: transcription cannot be stopped once started; the Transcribe button says so while in flight.
-- Gateway disconnect already destroys upstream. The embeddings **path** is in 0.9.0 (Wave 9). Full RAG stays after 1.0.
+- Gateway disconnect already destroys upstream. The embeddings **path** is present
+  (Wave 9). Full RAG stays after 1.0.
 
 ### Wave 4 — Observability
 
@@ -64,15 +130,18 @@ Foundry has no abort API. 1.0 closes honesty and fencing, not a fake Stop.
 - CI (Windows): after the debug Tauri build, `FLINT_RUNTIME_SMOKE=1` launches `Flint.exe` and exits 0 when the sidecar phase is `ready` (`npm run smoke:runtime`). Does not load a model.
 - Process still required: signed clean-machine install, download/load/chat/stop/quit/relaunch. macOS: recorded `install-macos.sh` boot as evaluation evidence.
 
-### Wave 8 — Updater and first stable (0.9.0)
+### Wave 8 — Stable updater channel
 
 - About: Install / progress / Restart to update / Later against the wired updater plugin.
-- Publish **0.9.0** as `channel=stable` (not a prerelease, draft still reviewed by a human) so `releases/latest` resolves. That is the upgrade test from 0.7.0 evaluation. Rollback: previous installer, documented in [RELEASE.md](./RELEASE.md).
-- **1.0.0** is a later stable, after that upgrade is proven and 0.9.0 bugfixes land. Do not skip 0.9.0.
+- Stable releases use `releases/latest`; drafts and prereleases are not updater
+  targets. Rollback is the previous installer documented in
+  [RELEASE.md](./RELEASE.md).
+- Keep updater install evidence and rollback instructions current for every
+  release on the path to 1.0.
 
-### Wave 9 — Embeddings path (in 0.9.0)
+### Wave 9 — Embeddings path
 
-Embedding-model path, not RAG. Ships in 0.9.0 with the rest of the post-0.7.0 waves.
+Embedding-model path, not RAG.
 
 - Gateway classifies `/v1/embeddings` and autoloads like chat (proven in tests). Chat JSON/SSE normalization stays chat-only.
 - BYOM import detects embedding folders and does not require a chat prompt template.
@@ -111,7 +180,8 @@ output, constructor failures, disposal failures, and streaming cancellation.
 
 ## Acceptance gates for 1.0 workstreams
 
-Each wave must satisfy its gate before that slice ships in 0.9.0. Extra audio-decoder work has no 0.9.0/1.0 gate.
+Each wave must remain satisfied through 0.10.0 and 1.0 qualification. Extra
+audio-decoder work has no 1.0 gate.
 
 - **Security gate:** Capability JSON is pruned and commented; the boundary suite fails if unused dangerous grants return or sidecar allowlisting/IPC/BYOM containment regress.
 - **Installed-path and lifecycle gate:** Native tray Open restores the main window and Quit terminates the app on packaged Windows; macOS Dock reopen restores the main window (already native); single-instance launch refocuses the existing instance; process termination tears down the sidecar child without orphans; recovery controls operate if the renderer webview fails; quit waits for a conversation-flush ack or a bounded timeout.
@@ -121,8 +191,11 @@ Each wave must satisfy its gate before that slice ships in 0.9.0. Extra audio-de
 - **UX gate:** The checklist in Wave 6 holds on a packaged Windows build.
 - **Docs gate:** Operator runbook exists and is indexed; USER_GUIDE sidecar troubleshooting matches bundled Node.
 - **Updater UX gate:** In-app updater displays download progress, notifies when an update is ready, prompts to restart, and supports deferral.
-- **Ship gate (0.9.0):** Publish 0.9.0 as stable so `releases/latest` resolves; record a 0.7.0-evaluation → 0.9.0 in-app updater install. Rollback note in RELEASE.md.
-- **Ship gate (1.0.0):** Signed Windows clean-machine dogfood recorded; 0.9.0 upgrade proven; 1.0.0 published stable.
+- **Ship gate (0.10.0):** The release-preparation gates above are recorded;
+  version/changelog/artifacts/updater metadata agree; publish as a full stable
+  release only after the draft is reviewed.
+- **Ship gate (1.0.0):** Signed Windows clean-machine dogfood and stable-channel
+  updater evidence are recorded; 1.0.0 is published stable.
 
 ## Decisions
 
@@ -160,10 +233,10 @@ Each wave must satisfy its gate before that slice ships in 0.9.0. Extra audio-de
 | Must 1.0 ship a time-series health store? | No. Bounded in-process health ring plus diagnostics export. |
 | Is UX maturity missing? | No. It was unscoped. Coach, Network/WSL, and Monitor memory UX exist; 1.0 qualifies them. |
 | Must we component-test `+page.svelte`? | No. Keep extracting into `src/lib/*.ts`. 1.0 testing is unit + contract + sidecar E2E + one packaged Windows smoke. |
-| Is BYOM `/v1/embeddings` a 1.0 blocker? | No. Catalog has zero embedding models. 1.0.0 recipes are chat completions. The embeddings **path** ships in 0.9.0 (Wave 9). Full RAG stays after 1.0. |
+| Is BYOM `/v1/embeddings` a 1.0 blocker? | No. Catalog has zero embedding models. 1.0.0 recipes are chat completions. The embeddings **path** exists (Wave 9). Full RAG stays after 1.0. |
 | Broader WebM/Opus/MP3 decoder for 1.0? | No. Browser `decodeAudioData` → 16 kHz WAV already ships. Document supported formats. Word-level timestamps stay upstream-blocked. |
 | Must CI install the MSI to ship 1.0? | No, if clean-machine dogfood is recorded. Staged-layout smoke in CI; msiexec automation is later. |
-| Is the updater broken? | Unexercised, not unwired. `releases/latest` 404s because 0.7.0 is a prerelease. **0.9.0** is the first stable publish and the upgrade-test; **1.0.0** follows after that works. |
+| Is the updater broken? | No known wiring gap. Stable releases resolve through `releases/latest`; drafts and prereleases are intentionally invisible. Keep install/rollback evidence current before 1.0. |
 | Native tray vs frontend tray? | Native tray from app start, not a Svelte tray created on first close. Dock Reopen is already native. Quit-flush handshake is separate. |
 | Conversation data loss on quit? | 1.0. Native `ExitRequested` → flush → ack. |
 | In-flight generation dropped on conversation switch? | 1.0. Route by originating conversation id. |
@@ -183,10 +256,14 @@ Each wave must satisfy its gate before that slice ships in 0.9.0. Extra audio-de
 | **Behavioral self-test and verified recipes** | In-app runner; catalog vs verified labels; pinned Continue/Cline/OpenClaw. | 5 |
 | **Operator runbook and UX qualification** | Admin doc + checklist holes only. | 6 |
 | **Packaged Windows smoke and dogfood** | Staged-exe ready-check in CI; recorded clean-machine install. | 7 |
-| **Updater install UX and first stable** | Progress/restart/defer; **0.9.0** on `releases/latest`. | 8 |
+| **Updater install UX and stable channel** | Progress/restart/defer; full releases on `releases/latest`. | 8 |
 | **Embeddings path** | Gateway autoload, BYOM without chat template, `embedTexts`. | 9 |
 
-Post-1.0 (not in the table): extra audio decoders, word-level timestamps, multi-endpoint scheduler, Azure connections, curated ONNX catalog, Apple notarization, Linux, full RAG. 1.0.0 is bugfixes after the 0.9.0 upgrade is proven.
+Post-1.0 (not in the table): extra audio decoders, word-level timestamps,
+multi-endpoint scheduler, Azure connections, curated ONNX catalog, Apple
+notarization, Linux, full RAG, and broad tool execution. The bounded public web
+retrieval boundary above is the narrow exception; it does not authorize those
+larger workstreams.
 
 ### Source anchors
 

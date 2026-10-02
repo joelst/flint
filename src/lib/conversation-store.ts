@@ -7,6 +7,8 @@
  * global message thread under another, so switching conversations silently discarded history.
  * Migrating that shape correctly is the whole reason this module exists.
  */
+import { normalizeWebAudit, type WebAudit } from './web-audit';
+
 /** Bump only for a change that older builds cannot read. */
 export const CONVERSATION_SCHEMA_VERSION = 2;
 
@@ -155,6 +157,7 @@ const KNOWN_MESSAGE_KEYS = new Set<string>([
   'role',
   'content',
   'createdAt',
+  'webAudit',
   'extra',
   ...MESSAGE_FLAG_KEYS,
 ]);
@@ -164,6 +167,8 @@ export interface StoredMessage extends MessageFlags {
   role: MessageRole;
   content: MessageContent;
   createdAt?: number;
+  /** App-controlled web retrieval audit, rendered outside the model's Markdown. */
+  webAudit?: WebAudit;
   /**
    * Fields this schema version does not interpret, carried through untouched.
    *
@@ -253,13 +258,15 @@ export interface ConversationSettings {
    * sidecar treats any finite number, including 0, as a seed to send.
    */
   randomSeed?: number | null;
+  /** Whether this conversation may offer bounded public web tools to the model. */
+  webToolsEnabled?: boolean;
 }
 
 /** Keys `ConversationSettings` owns. Anything else is passthrough. */
 export const CONVERSATION_SETTING_KEYS = [
   'modelAlias', 'systemPrompt', 'contextTurns', 'showFullHistory',
   'temperature', 'maxTokens', 'topP', 'topK',
-  'frequencyPenalty', 'presencePenalty', 'randomSeed',
+  'frequencyPenalty', 'presencePenalty', 'randomSeed', 'webToolsEnabled',
 ] as const;
 
 
@@ -307,6 +314,10 @@ export function readConversationSettings(raw: unknown): ConversationSettingsRead
         break;
       case 'showFullHistory':
         if (typeof value === 'boolean') settings.showFullHistory = value;
+        else invalidKeys.push(key);
+        break;
+      case 'webToolsEnabled':
+        if (typeof value === 'boolean') settings.webToolsEnabled = value;
         else invalidKeys.push(key);
         break;
       case 'temperature':
@@ -719,6 +730,12 @@ export function normalizeMessageDetailed(input: unknown, fallbackId: string): Me
   const message: StoredMessage = { id, role, content };
   if (typeof createdAt === 'number' && Number.isFinite(createdAt)) message.createdAt = createdAt;
 
+  const rawWebAudit = (raw as any).webAudit;
+  if (rawWebAudit !== undefined) {
+    const webAudit = role === 'assistant' ? normalizeWebAudit(rawWebAudit) : undefined;
+    if (webAudit) message.webAudit = webAudit;
+    else repaired = true;
+  }
   for (const flag of MESSAGE_FLAG_KEYS) {
     const value = (raw as any)[flag];
     if (value === true) message[flag] = true;

@@ -70,6 +70,29 @@ The sidebar is grouped by workflow:
   files; anything Flint cannot attach is reported in a notice above the composer rather than skipped silently.
 - Persona is beside the message controls. Context and sampling options are in the collapsible
   **Generation settings** drawer below the composer.
+- **Public web search & retrieval** in Generation settings is off by default and applies only to
+  the current conversation. When enabled, the model may make one bounded round of public
+  `web_search` or `web_fetch` calls. Fetch is limited to HTTPS URLs typed or attached as a URL chip
+  in the current message, retrieved text is treated as untrusted reference material, and consulted
+  sources (and any tool issues) appear in a separate **Sources consulted** section under the
+  answer that the model's text cannot hide or alter. A search that returns nothing is listed as
+  a web tool issue instead of leaving no record. A URL chip that finishes in an error, or with no
+  readable text, is listed the same way. A chip you dismissed, or one still loading when you send,
+  is not recorded. Copying the message includes that section.
+  Search terms and requested public URLs leave the
+  device; Flint does not send cookies, credentials, or browser state.
+  The toggle governs only what the model may do. Adding a detected URL as a context chip and then
+  clicking that chip's **Fetch** is a separate explicit action: the page is requested immediately,
+  with the toggle on or off and before you send, through the same isolated helper. Sending clears
+  every URL chip; a page still loading when you send is not used for that message or any later one.
+  To authorize a search, put the exact unquoted query on its own line as
+  **`Search the web for: your query`**, outside block quotes, code blocks, and HTML comments
+  (leave a blank line after a quote). Flint shows the exact outbound search query for
+  confirmation immediately before sending it.
+  Web tools cannot be combined with image context in one model request; remove the image or turn
+  web tools off for that send.
+  Stop suppresses any continuation after an in-flight retrieval returns; it does not prove that an
+  already-started network request was cancelled.
 - **Export conversations**: Export any chat thread as structured JSON, formatted Markdown, or plain text for documentation or archive.
 
 ### Bring Your Own Model (BYOM) and External Linking
@@ -196,7 +219,7 @@ Then launch Flint normally from Finder or Spotlight.
 
 ## Tool calling
 
-Models may return `tool_calls` on the OpenAI-compatible API. **Flint’s chat UI does not execute tools.** Point an agent client (Continue, Cline, your code) at the local endpoint; that client owns permissions and confirmation.
+Models may return `tool_calls` on the OpenAI-compatible API. **Flint’s chat UI does not execute general tools.** The one exception is the supervised **Public web search & retrieval** round described under [Chat and conversations](#chat-and-conversations): it runs only when you enable it for a conversation, executes only Flint’s own `web_search` and `web_fetch`, and never runs tools a model invents. For anything else, point an agent client (Continue, Cline, your code) at the local endpoint; that client owns permissions and confirmation.
 
 ---
 

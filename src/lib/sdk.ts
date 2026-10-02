@@ -2680,8 +2680,15 @@ export interface FetchUrlResult {
 }
 
 export async function fetchUrl(url: string, maxChars = 50000): Promise<FetchUrlResult> {
-  const res = await send('fetchUrl', { url, maxChars });
-  return res.result as FetchUrlResult;
+  return invoke<FetchUrlResult>('web_tool_execute', {
+    request: { operation: 'fetch', url, maxChars },
+  });
+}
+
+export async function executeWebTool(
+  request: import('./web-tools').WebToolRequest,
+): Promise<import('./web-tools').WebToolResult> {
+  return invoke<import('./web-tools').WebToolResult>('web_tool_execute', { request });
 }
 
 export async function transcribeAudio(

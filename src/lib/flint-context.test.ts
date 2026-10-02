@@ -5,6 +5,7 @@ import {
   contentToPlainText,
   FLINT_IDENTITY_LINE,
   FLINT_FACT_SHEET,
+  FLINT_WEB_IDENTITY_LINE,
 } from './flint-context';
 
 describe('userAsksAboutFlint', () => {
@@ -48,6 +49,28 @@ describe('buildFlintAwareSystemPrompt', () => {
   it('forceFull always expands', () => {
     const out = buildFlintAwareSystemPrompt('You are concise.', 'hi', { forceFull: true });
     expect(out).toContain(FLINT_FACT_SHEET);
+  });
+
+  it('describes only the narrow supervised capability when web tools are enabled', () => {
+    const normal = buildFlintAwareSystemPrompt(
+      'You are a helpful assistant.',
+      'hello',
+      { webToolsEnabled: true },
+    );
+    const expanded = buildFlintAwareSystemPrompt(
+      'You are a helpful assistant.',
+      'Can Flint search the web?',
+      { webToolsEnabled: true },
+    );
+    for (const out of [normal, expanded]) {
+      expect(out).toContain(FLINT_WEB_IDENTITY_LINE);
+      expect(out).not.toContain(FLINT_IDENTITY_LINE);
+      expect(out).toContain('supervised read-only web tools');
+      expect(out).not.toMatch(/cannot (?:parse or )?execute tool/i);
+      expect(out).not.toMatch(/cannot .*browse/i);
+    }
+    expect(expanded).toContain('web_search');
+    expect(expanded).toContain('web_fetch');
   });
 });
 

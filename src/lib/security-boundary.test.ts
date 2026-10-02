@@ -108,4 +108,97 @@ describe('renderer/sidecar boundary', () => {
     expect(sdk).toContain('NATIVE_RUNTIME_MAX_FRAME_BYTES = 80 * 1024 * 1024');
     expect(rust).toContain('MAX_RUNTIME_FRAME_BYTES: usize = 80 * 1024 * 1024');
   });
+
+  it('keeps generic web access out of the Foundry sidecar', () => {
+    const sidecar = readFileSync(
+      join(process.cwd(), 'sidecar', 'foundry-sidecar-main.js'),
+      'utf8',
+    );
+    const sdk = readFileSync(join(process.cwd(), 'src', 'lib', 'sdk.ts'), 'utf8');
+    expect(sidecar).not.toContain('fetchUrl');
+    expect(sidecar).not.toContain('Readability');
+    expect(sidecar).not.toContain('jsdom');
+    expect(sdk).toContain("'web_tool_execute'");
+  });
+
+  it('runs the web helper with bounded pipes and a cleared environment', () => {
+    const rust = readFileSync(join(process.cwd(), 'src-tauri', 'src', 'web_tool.rs'), 'utf8');
+    expect(rust).toContain('command.env_clear()');
+    expect(rust).toContain('const MAX_OUTPUT_BYTES: usize = 256 * 1024');
+    expect(rust).toContain('const HELPER_TIMEOUT: Duration = Duration::from_secs(15)');
+    expect(rust).toContain('.join("web-tool.js")');
+  });
+
+  it('bounds process-wide web helper concurrency before spawning children', () => {
+    const rust = readFileSync(join(process.cwd(), 'src-tauri', 'src', 'web_tool.rs'), 'utf8');
+    expect(rust).toContain('MAX_CONCURRENT_HELPERS');
+    expect(rust).toContain('ACTIVE_HELPERS');
+    expect(rust).toContain('Too many web requests are already running');
+  });
+
+  it('releases the settled tool-call request ID before awaiting retrieval', () => {
+    const page = readFileSync(join(process.cwd(), 'src', 'routes', '+page.svelte'), 'utf8');
+    const round = page.slice(page.indexOf('webRoundStarted = true;'), page.indexOf('const executed = await executeWebToolCalls('));
+    expect(round).toContain('releaseSettledRequestId();');
+    expect(page).toMatch(/function releaseSettledRequestId\(\) \{[\s\S]*?stream\.requestId = null;[\s\S]*?activeStreamRequestId = null;/);
+  });
+
+  it('marks manual web context untrusted and rejects image/tool combinations before inference', () => {
+    const page = readFileSync(join(process.cwd(), 'src', 'routes', '+page.svelte'), 'utf8');
+    expect(page).toContain('urlContextMessages.length > 0,');
+    expect(page).toContain('messagesContainImages(requestMessages)');
+    expect(page).toContain('Web tools cannot be combined with image context');
+  });
+
+  it('preserves retrieval audits when the follow-up completion fails', () => {
+    const page = readFileSync(join(process.cwd(), 'src', 'routes', '+page.svelte'), 'utf8');
+    expect(page).toContain('const chipAudit = urlChipRetrievalAudit(pendingUrlFetches);');
+    expect(page.indexOf('const chipAudit = urlChipRetrievalAudit(pendingUrlFetches);'))
+      .toBeLessThan(page.indexOf('clearUrlFetches();', page.indexOf('chatMessages = stamped;')));
+    expect(page).toContain('let webSources = [...chipAudit.sources];');
+    expect(page).toContain('let webErrors = [...chipAudit.errors];');
+    expect(page).toContain('webErrors = [...webErrors, ...executed.errors];');
+    expect(page).not.toContain('webErrors = executed.errors;');
+    const audit = readFileSync(join(process.cwd(), 'src', 'lib', 'web-audit.ts'), 'utf8');
+    expect(audit).toContain('title: chip.title || chip.finalUrl || chip.url');
+    expect(audit).toContain('url: chip.finalUrl || chip.url');
+    expect(audit).toContain('The page contained no readable text');
+    expect(page).toContain('finalUrl: result.url');
+    expect(page).toContain('truncated: result.truncated');
+    expect(page).toContain('the page content above is a truncated prefix');
+    expect(page).toContain('const anyTruncated = doneFetches.some');
+    expect(page).toContain('doneFetches.map((fetch) => fetch.url)');
+    expect(page).toContain('webSources = [...webSources, ...executed.sources]');
+    // The audit is stored beside the model's Markdown, never concatenated into it: an unclosed
+    // comment, fence, or block in untrusted output would otherwise hide or restyle it.
+    expect(page).not.toMatch(/appendWeb(Source|Error)Audit/);
+    expect(page).toContain('const webAudit = buildWebAudit(webSources, webErrors);');
+    expect(page.match(/\.\.\.webAuditPatch\(\)/g)?.length).toBe(7);
+    expect(page).toMatch(/isError: true,\s*content: failureMessage,\s*\.\.\.webAuditPatch\(\)/);
+    expect(page).toContain('updateAssistantMessage({ content: assistantContent, ...webAuditPatch() });');
+    expect(page).toContain('webAudit={msg.webAudit}');
+    expect(page).toContain('if (webSources.length > 0 || webErrors.length > 0)');
+    expect(page).toContain('{ webToolsEnabled: includeWebToolInstruction }');
+  });
+
+  it('retires every staged URL fetch attempt when a send commits', () => {
+    const page = readFileSync(join(process.cwd(), 'src', 'routes', '+page.svelte'), 'utf8');
+    // A fetch still in flight at send time would otherwise patch its chip to done afterwards,
+    // turning that page into context and fetch authority for the next message.
+    expect(page).not.toContain('if (doneFetches.length > 0) clearUrlFetches();');
+    expect(page).toMatch(/chatMessages = stamped;\s*(?:\/\/[^\n]*\n\s*)*clearUrlFetches\(\);/);
+    expect(page).toMatch(/function clearUrlFetches\(\) \{\s*pendingUrlFetches = \[\];/);
+    expect(page).toMatch(/function patchUrlFetch\(attempt: number[^)]*\) \{\s*const i = pendingUrlFetches\.findIndex\(f => f\.attempt === attempt\);\s*if \(i < 0\) return;/);
+  });
+
+  it('renders the web audit outside the model Markdown sink', () => {
+    const renderer = readFileSync(join(process.cwd(), 'src', 'lib', 'MessageRenderer.svelte'), 'utf8');
+    expect(renderer.match(/\{@html /g)?.length).toBe(1);
+    const markdownEnd = renderer.indexOf('{@html renderedHtml}');
+    const audit = renderer.indexOf('<section class="web-audit"');
+    expect(markdownEnd).toBeGreaterThan(0);
+    expect(audit).toBeGreaterThan(markdownEnd);
+    expect(renderer).toContain('normalizeWebAudit(webAudit)');
+    expect(renderer).toContain('messageClipboardWithWebAudit(messageClipboardText(content), webAuditView)');
+  });
 });

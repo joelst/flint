@@ -85,6 +85,15 @@ function checkPayloadAt(label, dir) {
 console.log('Verifying Foundry Local SDK packaging prerequisites...');
 console.log(`Platform: ${platformKey}`);
 
+const webToolSources = ['web-tool.js', 'web-address-policy.js'];
+for (const file of webToolSources) {
+  if (!fs.existsSync(path.join(root, 'sidecar', file))) {
+    bad(`missing sidecar/${file}`);
+  } else {
+    ok(`isolated web helper source: sidecar/${file}`);
+  }
+}
+
 // --- Bundled Node (Spike A: Tauri externalBin binaries/node) ---
 function hostTripleForNode() {
   const { platform, arch } = process;
@@ -138,6 +147,13 @@ if (!fs.existsSync(sdkRoot)) {
 const stagedSdk = path.join(releaseDir, 'foundry-local-sdk');
 if (fs.existsSync(releaseDir)) {
   console.log(`Checking release resource staging (${path.relative(root, releaseDir)})...`);
+  for (const file of webToolSources) {
+    if (!fs.existsSync(path.join(releaseDir, 'sidecar', file))) {
+      bad(`staged resources missing sidecar/${file}`);
+    } else {
+      ok(`staged resources include sidecar/${file}`);
+    }
+  }
   if (!fs.existsSync(stagedSdk)) {
     bad(
       'no staged foundry-local-sdk under target/release (expected foundry-local-sdk/) — run tauri build'
@@ -164,6 +180,13 @@ if (fs.existsSync(releaseDir)) {
   const nsiPath = path.join(releaseDir, 'nsis', 'x64', 'installer.nsi');
   if (fs.existsSync(nsiPath)) {
     const nsi = fs.readFileSync(nsiPath, 'utf8');
+    for (const file of webToolSources) {
+      if (nsi.includes(file)) {
+        ok(`NSIS script includes ${file}`);
+      } else {
+        bad(`NSIS script missing ${file}: ${path.relative(root, nsiPath)}`);
+      }
+    }
     // NSI lists each resource with File /oname=...prebuilds\win32-x64\...
     for (const file of expectedFiles || []) {
       const fileRe = new RegExp(

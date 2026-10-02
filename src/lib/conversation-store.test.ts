@@ -609,6 +609,34 @@ describe('message metadata preservation', () => {
     const c = normalizeConversation({ id: 'c', folderId: 'work', starred: true }).conversation;
     expect(c?.extra).toEqual({ folderId: 'work', starred: true });
   });
+
+  it('keeps the web retrieval audit as its own field across a save and an older build', () => {
+    const webAudit = { sources: [{ title: 'S', url: 'https://example.com/' }], errors: ['e'] };
+    const r = normalizeMessageDetailed(
+      { id: 'm', role: 'assistant', content: 'Answer <!--', webAudit },
+      'i',
+    );
+    expect(r.repaired).toBe(false);
+    expect(r.message?.content).toBe('Answer <!--');
+    expect(r.message?.webAudit).toEqual(webAudit);
+    expect(r.message?.extra).toBeUndefined();
+    // An older build parks the field in `extra`; this build promotes it back.
+    const parked = normalizeMessage({ id: 'm', role: 'assistant', content: 'x', extra: { webAudit } }, 'i');
+    expect(parked?.webAudit).toEqual(webAudit);
+    expect(parked?.extra).toBeUndefined();
+  });
+
+  it('drops and reports an audit this schema would not have written', () => {
+    for (const input of [
+      { id: 'm', role: 'assistant', content: 'x', webAudit: { sources: [{ title: 'x', url: 'javascript:alert(1)' }], errors: [] } },
+      { id: 'm', role: 'user', content: 'x', webAudit: { sources: [], errors: ['e'] } },
+    ]) {
+      const r = normalizeMessageDetailed(input, 'i');
+      expect(r.repaired).toBe(true);
+      expect(r.message).not.toHaveProperty('webAudit');
+      expect(r.message?.extra).toBeUndefined();
+    }
+  });
 });
 
 describe('lossy-parse reporting', () => {

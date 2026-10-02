@@ -111,7 +111,6 @@ export type SidecarCommand =
   | { cmd: 'getAccessLog' }
   | { cmd: 'getHealthRing' }
   | { cmd: 'getCacheInventory' }
-  | { cmd: 'fetchUrl'; url: string; maxChars?: number }
   | { cmd: 'inspectModelFolder'; folderPath: string }
   | { cmd: 'importModelFolder'; folderPath: string; name: string; publisher?: string; version?: number; promptTemplate?: PromptTemplate }
   | { cmd: 'linkModelFolder'; folderPath: string; name: string; publisher?: string }
@@ -183,7 +182,7 @@ export const KNOWN_COMMANDS = new Set<SidecarCommandName>([
   'listModels', 'download', 'load', 'unload', 'deleteModel', 'getEndpoint',
   'chatCompletion', 'cancelChatRequest', 'transcribeAudio', 'embedTexts',
   'getEps', 'ensureAccelerators', 'getVisionModels', 'getSTTModels',
-  'poolStatus', 'getAccessLog', 'getHealthRing', 'fetchUrl',
+  'poolStatus', 'getAccessLog', 'getHealthRing',
   'getCacheInventory',
   'inspectModelFolder', 'importModelFolder', 'linkModelFolder',
   'getModelTemplate', 'setModelTemplate',

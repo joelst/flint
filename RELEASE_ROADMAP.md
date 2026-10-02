@@ -35,36 +35,38 @@ the port: the gateway forwards to the native service and, on that exact rejectio
 replays once. Measured end to end: cold request 200 in 15 s, warm 707 ms with no reload,
 unknown model a clean 400 with no download.
 
-### Remaining gateway work for 1.0
+### Remaining endpoint trust work for 1.0
 
-Gateway work only. The tool-execution layer does **not** share this milestone.
-Chat JSON/SSE normalisation (Foundry extras stripped, one OpenAI-shaped choice,
-`[DONE]`) and autoload-on-demand are already in the tree; sequencing lives in
+The behavioral self-test, chat JSON/SSE normalization, and autoload-on-demand
+are in the tree. Remaining work is qualification, recorded integration version
+pins, and corrections found by that evidence; sequencing lives in
 [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md).
 
-- User-facing conformance self-test that checks *behavior*, not route existence:
-  `/v1/models` OpenAI envelope; a returned ID round-trips into chat; streaming
-  delivers a first token and `[DONE]`; disconnect cancels upstream; `usage` is
-  present when the model emits it; a tool-capable model either emits valid
-  `tool_calls` or is labelled not-verified.
-- Surface `supportsToolCalling` and `contextLength`, labelled **catalog-declared**
-  vs **Flint-verified**. A catalog flag is not a guarantee. Catalog fields already
-  appear in the model-details modal; the verified label is what remains.
 - Verified integration recipes for OpenClaw, Cline, and Continue, pinned to tested
   client versions. 1.0 recipes are **chat completions** against the local gateway.
   OpenClaw accepts any non-empty placeholder API key on loopback and health-checks
   `GET /v1/models`.
 
-### 0.9.0 — first stable (upgrade test)
+### Current stable → 0.10.0
 
-Skip 0.8.0. Publish **0.9.0** as `channel=stable` (not a prerelease) so
-`releases/latest` resolves. That is the in-app updater test from 0.7.0
-evaluation. Waves 1–9 land in this release, including the embeddings path
-(gateway autoload, BYOM without a chat template, sidecar `embedTexts`).
-Full RAG (index + retrieve + show sources) stays after 1.0.
+**0.9.2** is the current published stable release. **0.10.0** is the next
+release; its changeset version PR and GitHub release remain open drafts until
+the release gates in [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md) are complete.
 
-**1.0.0** is the next stable, after that upgrade is proven and 0.9.0
-bugfixes land. Do not cut 1.0.0 as the first `releases/latest` pointer.
+0.10.0 qualifies the existing product rather than opening broad new feature
+work:
+
+- packaged Windows Benchmark Preview dogfood covers pin, Stop, Resume,
+  served-variant reporting, and a gateway `503`; the preview stays opt-in and
+  off by default until that evidence exists;
+- a bounded, read-only public web-search/retrieval helper may be added outside
+  the Foundry sidecar, with no ambient credentials or filesystem operations
+  exposed to retrieved content and with request-scoped untrusted content;
+- unit/contract/sidecar E2E, bundle verification, packaged runtime smoke, and
+  release metadata agree on the same build before the draft is published.
+
+Authenticated retrieval, browser automation, shell/file tools, autonomous agent
+loops, full RAG, and multi-endpoint routing remain outside 0.10.0.
 
 ### After 1.0
 - **Curated model acquisition** — a Flint-validated ONNX catalog (pinned repo and
@@ -89,8 +91,8 @@ not a multi-provider control plane and not "every backlog item closed."
 
 **1.0 production is Windows.** macOS Apple Silicon remains evaluation-only
 (unsigned builds; `scripts/install-macos.sh` or `xattr -cr`). Linux is deferred.
-Do not date 1.0 until **0.9.0** is published stable and the upgrade from 0.7.0
-evaluation is proven. Sequenced work lives in
+Do not date 1.0 until 0.10.0 qualification and the remaining clean-machine,
+stable-updater, and integration-version gates are recorded. Sequenced work lives in
 [docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md).
 
 ### 1.0 release criteria
@@ -134,14 +136,13 @@ evaluation is proven. Sequenced work lives in
 
 ### 1.0 ship gate (process)
 
-- **0.9.0** published as the first stable GitHub release so
-  `https://github.com/joelst/flint/releases/latest/download/latest.json`
-  resolves, with a recorded 0.7.0-evaluation → 0.9.0 in-app updater install.
-  Rollback note in [docs/RELEASE.md](./docs/RELEASE.md).
+- **0.10.0** release gates recorded; version, changelog, artifacts, and updater
+  metadata identify the same reviewed build. Publish the existing draft as a
+  full stable release only after those checks.
 - Signed Windows MSI/NSIS on a clean machine (no PATH Node, Rust, or Foundry)
   downloads and loads a model.
-- **1.0.0** is a later stable, after that upgrade is proven and 0.9.0 bugfixes
-  land.
+- Stable-channel updater and rollback evidence is current.
+- **1.0.0** is a later stable after those qualification gates hold.
 - macOS: one recorded `install-macos.sh` boot as evaluation evidence, not a
   production claim.
 
@@ -150,6 +151,7 @@ evaluation is proven. Sequenced work lives in
 **1.0 is "operationally trustworthy" for the local product that exists.** The
 remaining bar is the seven criteria above holding under real-world Windows use,
 not new features (multi-endpoint routing, RAG, Azure, Linux, a
-Flint-native tool executor). The embeddings **path** ships in 0.9.0.
+general Flint-native tool executor). The bounded public web-retrieval helper
+planned for 0.10.0 is read-only infrastructure, not an autonomous agent loop.
 
 ---

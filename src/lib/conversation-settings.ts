@@ -48,6 +48,8 @@ export interface AppSettingDefaults {
    * number (including 0) as a seed to send. Mirrors the `modelAlias`-absence convention below.
    */
   randomSeed: number | null;
+  /** Explicit per-conversation permission to offer bounded public web tools. */
+  webToolsEnabled: boolean;
 }
 
 /** The baseline used before anything has been persisted. Mirrors the component's initial state. */
@@ -65,10 +67,11 @@ export const DEFAULT_APP_SETTINGS: AppSettingDefaults = Object.freeze({
   frequencyPenalty: 0,
   presencePenalty: 0,
   randomSeed: null,
+  webToolsEnabled: false,
 });
 
 /** The persisted key each default is stored under in the application settings blob. */
-const PERSISTED_KEYS: Record<keyof AppSettingDefaults, string> = {
+const PERSISTED_KEYS: Record<Exclude<keyof AppSettingDefaults, 'webToolsEnabled'>, string> = {
   modelAlias: 'selectedModelAlias',
   systemPrompt: 'systemPrompt',
   contextTurns: 'contextTurns',
@@ -230,6 +233,7 @@ export function resolveConversationSettings(
   take('frequencyPenalty', settings.frequencyPenalty);
   take('presencePenalty', settings.presencePenalty);
   take('randomSeed', settings.randomSeed);
+  take('webToolsEnabled', settings.webToolsEnabled);
 
   return { effective, fromDefault, invalidKeys };
 }
@@ -257,6 +261,7 @@ export function seedSettingsFor(
     frequencyPenalty: effective.frequencyPenalty,
     presencePenalty: effective.presencePenalty,
     randomSeed: effective.randomSeed,
+    webToolsEnabled: false,
   };
   // An empty alias is not a choice, it is the absence of one — on a fresh install no model has
   // been picked yet, and the component's auto-selector fills it in at runtime. Seeding `''`

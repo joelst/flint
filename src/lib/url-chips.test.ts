@@ -2,8 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { isFetchableUrl, detectFetchableUrls } from './url-chips';
 
 describe('isFetchableUrl', () => {
-  it('accepts http and https URLs with a host', () => {
-    expect(isFetchableUrl('http://example.com')).toBe(true);
+  it('accepts credential-free HTTPS URLs on the standard port', () => {
     expect(isFetchableUrl('https://example.com/a/b?c=d#e')).toBe(true);
     expect(isFetchableUrl('  https://example.com  ')).toBe(true);
   });
@@ -12,6 +11,9 @@ describe('isFetchableUrl', () => {
     ['empty', ''],
     ['whitespace', '   '],
     ['not a URL', 'example.com'],
+    ['http scheme', 'http://example.com'],
+    ['credentials', 'https://user:pass@example.com'],
+    ['nonstandard port', 'https://example.com:8443'],
     ['javascript scheme', 'javascript:alert(1)'],
     ['file scheme', 'file:///etc/passwd'],
     ['data scheme', 'data:text/html,<h1>x</h1>'],
@@ -25,6 +27,32 @@ describe('isFetchableUrl', () => {
     expect(isFetchableUrl(undefined as any)).toBe(false);
     expect(isFetchableUrl(null as any)).toBe(false);
     expect(isFetchableUrl(42 as any)).toBe(false);
+  });
+
+  it.each([
+    'https://localhost/',
+    'https://LOCALHOST./',
+    'https://app.localhost/',
+    'https://printer.local/',
+    'https://127.0.0.1/',
+    'https://0x7f.1/',
+    'https://10.0.0.1/',
+    'https://192.168.1.1/',
+    'https://169.254.169.254/',
+    'https://[::1]/',
+    'https://[fe80::1]/',
+    'https://[fd00::1]/',
+    'https://[::ffff:127.0.0.1]/',
+    'https://[2001:db8::1]/',
+  ])('does not offer Fetch for local or special destination %s', (value) => {
+    expect(isFetchableUrl(value)).toBe(false);
+    expect(detectFetchableUrls(`see ${value}`)).toEqual([]);
+  });
+
+  it('still offers public hostnames and public IP literals', () => {
+    expect(isFetchableUrl('https://1.1.1.1/')).toBe(true);
+    expect(isFetchableUrl('https://[2606:4700:4700::1111]/')).toBe(true);
+    expect(isFetchableUrl('https://localhost.example.com/')).toBe(true);
   });
 });
 
@@ -64,7 +92,9 @@ describe('detectFetchableUrls', () => {
   });
 
   it('does not offer schemes the fetcher cannot use', () => {
-    expect(detectFetchableUrls('javascript:alert(1) file:///etc/passwd')).toEqual([]);
+    expect(detectFetchableUrls(
+      'http://example.com javascript:alert(1) file:///etc/passwd',
+    )).toEqual([]);
   });
 
   it('treats a punctuation-stripped duplicate as the same URL', () => {
