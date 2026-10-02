@@ -281,6 +281,87 @@ describe('web tool calls', () => {
     expect(result.toolMessages).toHaveLength(1);
   });
 
+  it('fetches a cross-origin redirect only after the next host is approved', async () => {
+    const execute = vi.fn(async (request: WebToolRequest): Promise<WebToolResult> => {
+      if (request.operation === 'fetch' && request.url === 'https://example.com/') {
+        return { operation: 'redirect', url: 'https://other.example/next' };
+      }
+      return {
+        operation: 'fetch',
+        url: 'https://other.example/next',
+        title: 'Other',
+        text: 'Body',
+        truncated: false,
+        charCount: 4,
+      };
+    });
+    const authorizeFetch = vi.fn(async () => true);
+    const result = await executeWebToolCalls([{
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'web_fetch', arguments: '{"url":"https://example.com/"}' },
+    }], execute, new Set(['https://example.com/']), undefined, authorizeFetch);
+    expect(authorizeFetch).toHaveBeenNthCalledWith(1, 'https://example.com/', 'request');
+    expect(authorizeFetch).toHaveBeenNthCalledWith(2, 'https://other.example/next', 'redirect');
+    expect(execute).toHaveBeenNthCalledWith(2, {
+      operation: 'fetch',
+      url: 'https://other.example/next',
+      maxChars: 20_000,
+    });
+    expect(result.sources).toEqual([{ title: 'Other', url: 'https://other.example/next' }]);
+    expect(result.errors).toEqual([]);
+    expect(result.toolMessages[0].content).toContain('UNTRUSTED WEB RESULT');
+  });
+
+  it('does not request a redirect host the user declines', async () => {
+    const execute = vi.fn(async (): Promise<WebToolResult> => ({
+      operation: 'redirect',
+      url: 'https://other.example/next',
+    }));
+    const authorizeFetch = vi.fn(async (url: string) => url === 'https://example.com/');
+    const result = await executeWebToolCalls([{
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'web_fetch', arguments: '{"url":"https://example.com/"}' },
+    }], execute, new Set(['https://example.com/']), undefined, authorizeFetch);
+    expect(authorizeFetch).toHaveBeenNthCalledWith(2, 'https://other.example/next', 'redirect');
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(result.sources).toEqual([]);
+    expect(result.errors).toEqual(['web_fetch: User declined access to this site']);
+  });
+
+  it('does not request a redirect destination that is not public HTTPS', async () => {
+    const execute = vi.fn(async (): Promise<WebToolResult> => ({
+      operation: 'redirect',
+      url: 'http://other.example/next',
+    }));
+    const authorizeFetch = vi.fn(async () => true);
+    const result = await executeWebToolCalls([{
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'web_fetch', arguments: '{"url":"https://example.com/"}' },
+    }], execute, new Set(['https://example.com/']), undefined, authorizeFetch);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(authorizeFetch).toHaveBeenCalledTimes(1);
+    expect(result.errors).toEqual(['web_fetch: Public web fetch returned an unexpected result']);
+  });
+
+  it('stops a cross-origin redirect chain at the hop cap', async () => {
+    const execute = vi.fn(async (): Promise<WebToolResult> => ({
+      operation: 'redirect',
+      url: 'https://other.example/next',
+    }));
+    const authorizeFetch = vi.fn(async () => true);
+    const result = await executeWebToolCalls([{
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'web_fetch', arguments: '{"url":"https://example.com/"}' },
+    }], execute, new Set(['https://example.com/']), undefined, authorizeFetch);
+    expect(execute).toHaveBeenCalledTimes(4);
+    expect(result.errors).toEqual(['web_fetch: Too many redirects']);
+    expect(result.sources).toEqual([]);
+  });
+
   it('does not fetch a site the user declines', async () => {
     const execute = vi.fn();
     const authorizeFetch = vi.fn(async () => false);
@@ -289,7 +370,7 @@ describe('web tool calls', () => {
       type: 'function',
       function: { name: 'web_fetch', arguments: '{"url":"https://example.com/"}' },
     }], execute, new Set(['https://example.com/']), undefined, authorizeFetch);
-    expect(authorizeFetch).toHaveBeenCalledWith('https://example.com/');
+    expect(authorizeFetch).toHaveBeenCalledWith('https://example.com/', 'request');
     expect(execute).not.toHaveBeenCalled();
     expect(result.errors).toEqual(['web_fetch: User declined access to this site']);
   });

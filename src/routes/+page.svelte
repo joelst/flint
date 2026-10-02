@@ -6577,6 +6577,7 @@ updateStateFromSdk();
       host: string;
       url: string;
       conversationId: string;
+      redirect: boolean;
       resolve: (choice: DomainChoice | null) => void;
     }
   >>([]);
@@ -6610,9 +6611,10 @@ updateStateFromSdk();
     host: string,
     url: string,
     conversationId: string,
+    redirect = false,
   ): Promise<DomainChoice | null> {
     return new Promise((resolve) => {
-      webConsentQueue = [...webConsentQueue, { kind: "domain", host, url, conversationId, resolve }];
+      webConsentQueue = [...webConsentQueue, { kind: "domain", host, url, conversationId, redirect, resolve }];
     });
   }
 
@@ -6861,16 +6863,32 @@ updateStateFromSdk();
     ]);
     let offerFetchTool = allowWebTools
       && (allUrlsGranted(sessionWebConsent, threadLoadedFor ?? "") || (mode !== "search" && fetchAllow.size > 0));
+    const inferenceMessages = urlContextMessages.length > 0
+      ? [...stamped.slice(0, -1), ...urlContextMessages, stamped.at(-1)]
+      : stamped;
     try {
-      const inferenceMessages = urlContextMessages.length > 0
-        ? [...stamped.slice(0, -1), ...urlContextMessages, stamped.at(-1)]
-        : stamped;
       requestMessages = getMessagesForInference(
         inferenceMessages,
         true,
         urlContextMessages.length > 0,
         offerFetchTool,
       );
+      // Foundry rejects tool definitions together with image parts. Search cannot
+      // drop the retrieval and still search, so that send is refused. An ordinary
+      // Send continues with web_fetch left off.
+      if (mode === "search" && messagesContainImages(requestMessages)) {
+        statusMessage = "Web search cannot be combined with an image. Remove the image, or press Send.";
+        return;
+      }
+      if (offerFetchTool && messagesContainImages(requestMessages)) {
+        offerFetchTool = false;
+        requestMessages = getMessagesForInference(
+          inferenceMessages,
+          true,
+          urlContextMessages.length > 0,
+          false,
+        );
+      }
     } catch (error: any) {
       const message = error?.message || "The attached files could not be included safely.";
       if (attachedImages.length > 0 || attachedTextFiles.length > 0) {
@@ -6878,11 +6896,6 @@ updateStateFromSdk();
       } else {
         statusMessage = message;
       }
-      return;
-    }
-    if ((allowWebTools || mode === "search") && messagesContainImages(requestMessages)) {
-      statusMessage =
-        "Web tools cannot be combined with image context in the same request. Remove the image or disable web tools for this send.";
       return;
     }
     let committedSearchQuery: string | null = null;
@@ -7054,13 +7067,13 @@ updateStateFromSdk();
           }
           return;
         }
-        const authorizeFetch = async (url: string) => {
+        const authorizeFetch = async (url: string, hop: "request" | "redirect" = "request") => {
           if (requestController.signal.aborted) return false;
           if (typedFetchUrls.has(url)) return true;
           const host = hostnameOf(url);
           if (!host) return false;
           if (domainGranted(storedWebConsent, sessionWebConsent, host, originId ?? "")) return true;
-          const choice = await askDomainApproval(host, url, originId ?? "");
+          const choice = await askDomainApproval(host, url, originId ?? "", hop === "redirect");
           return choice !== null && !requestController.signal.aborted;
         };
         // Undefined only for this conversation's Allow all URLs grant. The snapshot
@@ -10378,7 +10391,7 @@ Output only the summary text, no preamble.`;
                   type="button"
                   class="search-web-btn"
                   aria-label="Search the web"
-                  title="Search the public web for this message, then answer. You confirm the exact query before it is sent."
+                  title="Search the public web for this message, then answer. Flint asks you to confirm the query until you allow it for this session or always."
                   disabled={benchmarkRunInFlight || chatBlockedByLoadedSTT || !selectedModelSupportsChat || !chatInput.trim() || imageProcessingCount > 0 || textAttachmentProcessingCount > 0 || attachmentClassifications.count > 0 || !canDispatchChat || isStreaming}
                   onclick={(event) => sendMessage(event, "search")}
                 >
@@ -10442,7 +10455,11 @@ Output only the summary text, no preamble.`;
                         <p>The exact query is sent to DuckDuckGo. Results are untrusted reference text.</p>
                       {:else}
                         <p>
-                          This address came from the search results. Opening it contacts
+                          {#if webConsentPrompt.redirect}
+                            This page redirects to a different site. Opening it contacts
+                          {:else}
+                            This address came from the search results. Opening it contacts
+                          {/if}
                           <strong>{webConsentPrompt.host}</strong>. The page text is untrusted.
                         </p>
                         <p class="web-consent-url">{webConsentPrompt.url}</p>

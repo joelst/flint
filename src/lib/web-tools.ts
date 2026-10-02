@@ -21,7 +21,14 @@ export type WebToolResult =
       text: string;
       truncated: boolean;
       charCount: number;
+    }
+  | {
+      operation: 'redirect';
+      url: string;
     };
+
+/** Matches the helper's redirect cap. Each cross-origin hop is a new request. */
+const MAX_CROSS_ORIGIN_REDIRECTS = 3;
 
 export interface WebSource {
   title: string;
@@ -239,7 +246,10 @@ export async function executeWebToolCalls(
   execute: (request: WebToolRequest) => Promise<WebToolResult>,
   allowedFetchUrls?: ReadonlySet<string>,
   signal?: AbortSignal,
-  authorizeFetch?: (url: string) => boolean | Promise<boolean>,
+  authorizeFetch?: (
+    url: string,
+    hop?: 'request' | 'redirect',
+  ) => boolean | Promise<boolean>,
 ): Promise<{ toolMessages: ChatRequestMessage[]; sources: WebSource[]; errors: string[] }> {
   const parsed = readWebToolCalls(calls, allowedFetchUrls);
   const toolMessages: ChatRequestMessage[] = [];
@@ -249,11 +259,38 @@ export async function executeWebToolCalls(
     if (signal?.aborted) break;
     try {
       if (signal?.aborted) break;
-      if (request.operation === 'fetch' && authorizeFetch && !await authorizeFetch(request.url)) {
-        throw new Error('User declined access to this site');
+      // The helper does not contact a different host. Approve that host, then request it.
+      let pending = request;
+      let result: WebToolResult | null = null;
+      let aborted = false;
+      for (let hop = 0; hop <= MAX_CROSS_ORIGIN_REDIRECTS; hop += 1) {
+        if (signal?.aborted) {
+          aborted = true;
+          break;
+        }
+        if (pending.operation === 'fetch' && authorizeFetch && !await authorizeFetch(
+          pending.url,
+          hop === 0 ? 'request' : 'redirect',
+        )) {
+          throw new Error('User declined access to this site');
+        }
+        result = await execute(pending);
+        if (result.operation !== 'redirect') break;
+        // No consent callback means this hop cannot be approved. Do not request the next host.
+        if (!authorizeFetch) throw new Error('Public web fetch returned an unexpected result');
+        if (hop === MAX_CROSS_ORIGIN_REDIRECTS) throw new Error('Too many redirects');
+        const nextUrl = canonicalFetchUrl(result.url);
+        if (!nextUrl) throw new Error('Public web fetch returned an unexpected result');
+        pending = {
+          operation: 'fetch',
+          url: nextUrl,
+          ...(request.operation === 'fetch' && request.maxChars !== undefined
+            ? { maxChars: request.maxChars }
+            : {}),
+        };
       }
-      const result = await execute(request);
-      if (result.operation !== 'fetch') {
+      if (aborted) break;
+      if (!result || result.operation !== 'fetch') {
         throw new Error('Public web fetch returned an unexpected result');
       }
       sources.push({

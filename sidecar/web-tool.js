@@ -107,6 +107,12 @@ function normalizePublicUrl(raw) {
   return parsed;
 }
 
+/** Same site after case and trailing-dot folding. IPv6 hostnames keep brackets in WHATWG. */
+function comparableHost(url) {
+  const host = canonicalHostname(url.hostname);
+  return host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+}
+
 export function normalizeRequest(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new Error('Request must be an object');
@@ -121,12 +127,17 @@ export function normalizeRequest(raw) {
     return { operation: 'search', query, maxResults: Math.min(5, Math.max(1, requested)) };
   }
   if (raw.operation === 'fetch') {
-    if (Object.keys(raw).some((key) => !['operation', 'url', 'maxChars'].includes(key))) {
+    if (Object.keys(raw).some((key) => !['operation', 'url', 'maxChars', 'followCrossOriginRedirects'].includes(key))) {
       throw new Error('Fetch request contains an unsupported field');
     }
     const url = normalizePublicUrl(raw.url).toString();
     const requested = Number.isInteger(raw.maxChars) ? raw.maxChars : 20_000;
-    return { operation: 'fetch', url, maxChars: Math.min(MAX_TEXT_CHARS, Math.max(1_000, requested)) };
+    return {
+      operation: 'fetch',
+      url,
+      maxChars: Math.min(MAX_TEXT_CHARS, Math.max(1_000, requested)),
+      followCrossOriginRedirects: raw.followCrossOriginRedirects === true,
+    };
   }
   throw new Error('Operation must be search or fetch');
 }
@@ -266,6 +277,9 @@ export async function fetchPublicText(rawUrl, dependencies = {}) {
   const resolve = dependencies.resolve ?? dns.lookup;
   const request = dependencies.request ?? requestPinned;
   const deadlineAt = Date.now() + (dependencies.overallTimeoutMs ?? OVERALL_TIMEOUT_MS);
+  // Consent approved the host already requested. Stop before a different host so
+  // the app can ask again. Search leaves this on and still follows public redirects.
+  const followCrossOriginRedirects = dependencies.followCrossOriginRedirects !== false;
   let current = normalizePublicUrl(rawUrl);
   let method = dependencies.method ?? 'GET';
   let body = dependencies.body ?? null;
@@ -289,6 +303,9 @@ export async function fetchPublicText(rawUrl, dependencies = {}) {
       if (!location) throw new Error('Redirect response has no destination');
       if (redirects === MAX_REDIRECTS) throw new Error('Too many redirects');
       const next = normalizePublicUrl(new URL(location, current).toString());
+      if (!followCrossOriginRedirects && comparableHost(next) !== comparableHost(current)) {
+        return { redirectTo: next.toString() };
+      }
       const dropsBody = [301, 302, 303].includes(response.statusCode);
       if (!dropsBody && body && method !== 'GET' && next.origin !== current.origin) {
         throw new Error('Cross-origin redirects cannot receive a request body');
@@ -394,7 +411,16 @@ export async function executeWebRequest(raw, dependencies = {}) {
       results: decodeSearchResults(page.body, request.maxResults),
     };
   }
-  const page = await fetchPublicText(request.url, dependencies);
+  // Model fetches omit the flag, so a different host comes back for approval.
+  // A URL-chip fetch sets it: the user asked to retrieve that URL, and each hop
+  // is still checked as public HTTPS.
+  const page = await fetchPublicText(request.url, {
+    ...dependencies,
+    followCrossOriginRedirects: request.followCrossOriginRedirects === true,
+  });
+  if (page.redirectTo) {
+    return { operation: 'redirect', url: page.redirectTo };
+  }
   const extracted = page.contentType === 'text/html'
     ? extractPageText(page.body)
     : { title: '', text: page.body.replace(/\s+/g, ' ').trim() };

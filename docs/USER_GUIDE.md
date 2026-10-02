@@ -76,6 +76,7 @@ The sidebar is grouped by workflow:
   skip that question when you chose session or always. The model answers from the results and does
   not decide whether to search. If an answer needs a page from those results, Flint asks you to
   allow that domain once, for this session, or always, or to allow all public URLs in this conversation until the page reloads.
+  If that page redirects to a different site, Flint asks before opening the new site.
   A URL you typed or attached as a chip is still fetched only as public HTTPS. Retrieved text is untrusted reference
   material, and consulted sources (and any tool issues) appear in a separate **Sources consulted**
   section under the answer that the model's text cannot hide or alter. A search that returns
@@ -90,8 +91,8 @@ The sidebar is grouped by workflow:
   every URL chip; a page still loading when you send is not used for that message or any later one.
   Declining the search question leaves the draft in the composer and sends nothing.
   **Ask again for search and sites** in Generation settings clears those approvals.
-  Web tools cannot be combined with image context in one model request; remove the image or press
-  Send without Search.
+  Web tools cannot be combined with image context in one model request. Search refuses that send.
+  Press Send without Search and Flint answers with the fetch tool left off, or remove the image.
   Stop suppresses any continuation after an in-flight retrieval returns; it does not prove that an
   already-started network request was cancelled.
 - **Export conversations**: Export any chat thread as structured JSON, formatted Markdown, or plain text for documentation or archive.

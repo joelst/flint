@@ -2680,8 +2680,10 @@ export interface FetchUrlResult {
 }
 
 export async function fetchUrl(url: string, maxChars = 50000): Promise<FetchUrlResult> {
+  // The user asked to retrieve this URL. The helper may follow public redirects in
+  // this one request. Model fetches omit the flag so a new host waits for approval.
   return invoke<FetchUrlResult>('web_tool_execute', {
-    request: { operation: 'fetch', url, maxChars },
+    request: { operation: 'fetch', url, maxChars, followCrossOriginRedirects: true },
   });
 }
 

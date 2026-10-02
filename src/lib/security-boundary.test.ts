@@ -158,7 +158,8 @@ describe('renderer/sidecar boundary', () => {
     expect(page).toContain('Allow this public web search?');
     expect(page).toContain('Just this search');
     expect(page).toContain('Allow all URLs');
-    expect(page).toContain('askDomainApproval(host, url, originId ?? "")');
+    expect(page).toContain('askDomainApproval(host, url, originId ?? "", hop === "redirect")');
+    expect(page).toContain('hop: "request" | "redirect"');
     expect(page).toContain('let offerFetchTool = allowWebTools');
     expect(page).toContain('webConsentQueue = [...webConsentQueue, { kind: "search"');
     expect(page).toContain('webConsentQueue = [...webConsentQueue, { kind: "domain"');
@@ -181,11 +182,21 @@ describe('renderer/sidecar boundary', () => {
     expect(page).not.toContain('localStorage.setItem(WEB_CONSENT_STORAGE_KEY');
   });
 
-  it('marks manual web context untrusted and rejects image/tool combinations before inference', () => {
+  it('marks manual web context untrusted and keeps image sends off the fetch tool', () => {
     const page = readFileSync(join(process.cwd(), 'src', 'routes', '+page.svelte'), 'utf8');
+    const helper = readFileSync(join(process.cwd(), 'sidecar', 'web-tool.js'), 'utf8');
+    const tools = readFileSync(join(process.cwd(), 'src', 'lib', 'web-tools.ts'), 'utf8');
+    const sdk = readFileSync(join(process.cwd(), 'src', 'lib', 'sdk.ts'), 'utf8');
     expect(page).toContain('urlContextMessages.length > 0,');
-    expect(page).toContain('messagesContainImages(requestMessages)');
-    expect(page).toContain('Web tools cannot be combined with image context');
+    expect(page).toContain('if (mode === "search" && messagesContainImages(requestMessages))');
+    expect(page).toContain('Web search cannot be combined with an image. Remove the image, or press Send.');
+    expect(page).toContain('offerFetchTool = false');
+    expect(page).not.toContain('disable web tools for this send');
+    expect(page).toContain('This page redirects to a different site.');
+    expect(helper).toContain('followCrossOriginRedirects');
+    expect(helper).toContain('redirectTo');
+    expect(tools).toContain("result.operation !== 'redirect'");
+    expect(sdk).toContain('followCrossOriginRedirects: true');
   });
 
   it('preserves retrieval audits when the follow-up completion fails', () => {

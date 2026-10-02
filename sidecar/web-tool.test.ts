@@ -253,6 +253,62 @@ describe('web tool network boundary', () => {
     );
   });
 
+  it('returns a cross-origin redirect without requesting the next host when following is disabled', async () => {
+    const resolve = vi.fn(async (hostname: string) => [{
+      address: hostname === 'search.example' ? '93.184.216.34' : '203.0.113.10',
+      family: 4,
+    }]);
+    const request = vi.fn(async () => ({
+      statusCode: 302,
+      headers: { location: 'https://OTHER.example/next' },
+      body: Buffer.alloc(0),
+      truncated: false,
+    }));
+    await expect(fetchPublicText('https://search.example/start', {
+      resolve,
+      request,
+      followCrossOriginRedirects: false,
+    })).resolves.toEqual({ redirectTo: 'https://other.example/next' });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(resolve.mock.calls.map((call) => call[0])).toEqual(['search.example']);
+  });
+
+  it('still follows a same-host redirect when cross-origin following is disabled', async () => {
+    const resolve = vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]);
+    const request = vi.fn()
+      .mockResolvedValueOnce({
+        statusCode: 302,
+        headers: { location: 'https://search.example/page' },
+        body: Buffer.alloc(0),
+      })
+      .mockResolvedValueOnce({
+        statusCode: 200,
+        headers: { 'content-type': 'text/plain' },
+        body: Buffer.from('page'),
+      });
+    await expect(fetchPublicText('https://Search.Example/start', {
+      resolve,
+      request,
+      followCrossOriginRedirects: false,
+    })).resolves.toMatchObject({ url: 'https://search.example/page', body: 'page' });
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects a private cross-origin redirect instead of offering it for approval', async () => {
+    const resolve = vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]);
+    const request = vi.fn(async () => ({
+      statusCode: 302,
+      headers: { location: 'https://127.0.0.1/secret' },
+      body: Buffer.alloc(0),
+    }));
+    await expect(fetchPublicText('https://public.example/', {
+      resolve,
+      request,
+      followCrossOriginRedirects: false,
+    })).rejects.toThrow(/private|special/i);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
   it('enforces one overall deadline across DNS, redirects, and response capture', async () => {
     const resolve = vi.fn(() => new Promise(() => {}));
     await expect(fetchPublicText('https://public.example/', {
@@ -585,6 +641,40 @@ describe('fetch execution and helper entry', () => {
   async function* chunks(...values: string[]) {
     for (const value of values) yield Buffer.from(value);
   }
+
+  it('returns a cross-origin fetch redirect without requesting the next host', async () => {
+    const resolve = vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]);
+    const request = vi.fn(async () => ({
+      statusCode: 302,
+      headers: { location: 'https://other.example/next' },
+      body: Buffer.alloc(0),
+    }));
+    await expect(executeWebRequest(
+      { operation: 'fetch', url: 'https://example.com/start' },
+      { resolve, request },
+    )).resolves.toEqual({ operation: 'redirect', url: 'https://other.example/next' });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('follows a cross-origin fetch redirect when the request opts in', async () => {
+    const resolve = vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]);
+    const request = vi.fn()
+      .mockResolvedValueOnce({
+        statusCode: 302,
+        headers: { location: 'https://other.example/next' },
+        body: Buffer.alloc(0),
+      })
+      .mockResolvedValueOnce({
+        statusCode: 200,
+        headers: { 'content-type': 'text/plain' },
+        body: Buffer.from('page'),
+      });
+    await expect(executeWebRequest(
+      { operation: 'fetch', url: 'https://example.com/start', followCrossOriginRedirects: true },
+      { resolve, request },
+    )).resolves.toMatchObject({ operation: 'fetch', url: 'https://other.example/next', text: 'page' });
+    expect(request).toHaveBeenCalledTimes(2);
+  });
 
   it('extracts bounded page text and a decoded title, dropping active content', async () => {
     const html = '<title>A &amp; B &#x263A; &#9731; &#xD800; &#99999999;</title>'
