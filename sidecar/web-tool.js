@@ -2,7 +2,12 @@ import dns from 'node:dns/promises';
 import https from 'node:https';
 import net from 'node:net';
 import { pathToFileURL } from 'node:url';
-import { canonicalHostname, isDeniedAddress, isLocalHostname } from './web-address-policy.js';
+import {
+  canonicalHostname,
+  ipLiteralFamily,
+  isDeniedAddress,
+  isLocalHostname,
+} from './web-address-policy.js';
 
 export { isDeniedAddress };
 
@@ -59,6 +64,15 @@ function normalizePublicUrl(raw) {
   const hostname = canonicalHostname(parsed.hostname);
   if (isLocalHostname(hostname)) {
     throw new Error('Local hostnames are not allowed');
+  }
+  // Search results never resolve DNS. isDeniedAddress is true for every non-IP, so only
+  // literals are checked here. WHATWG IPv6 hostnames include brackets.
+  const literal = hostname.startsWith('[') && hostname.endsWith(']')
+    ? hostname.slice(1, -1)
+    : hostname;
+  const family = ipLiteralFamily(literal);
+  if ((family === 4 || family === 6) && isDeniedAddress(literal)) {
+    throw new Error('IP literals that are private or special are not allowed');
   }
   parsed.hash = '';
   return parsed;
@@ -284,8 +298,12 @@ export async function fetchPublicText(rawUrl, dependencies = {}) {
 }
 
 function extractPageText(html) {
-  const withoutActive = html
+  const withoutPairs = html
     .replace(/<(script|style|noscript|svg|iframe|form)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ');
+  // A truncated body can open an active element and never close it. The pair pass misses that,
+  // and stripMarkup would then keep the element's text.
+  const withoutActive = withoutPairs
+    .replace(/<(script|style|noscript|svg|iframe|form)\b[^>]*>[\s\S]*$/i, ' ');
   const titleMatch = withoutActive.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i);
   return {
     title: titleMatch ? stripMarkup(titleMatch[1]) : '',

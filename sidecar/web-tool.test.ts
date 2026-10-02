@@ -30,6 +30,19 @@ describe('web tool request validation', () => {
     })).toThrow(/unsupported field/i);
   });
 
+  it('accepts public hosts and IP literals and rejects a denied IP literal', () => {
+    expect(normalizeRequest({ operation: 'fetch', url: 'https://example.com/' }).url)
+      .toBe('https://example.com/');
+    expect(normalizeRequest({ operation: 'fetch', url: 'https://93.184.216.34/' }).url)
+      .toBe('https://93.184.216.34/');
+    expect(normalizeRequest({ operation: 'fetch', url: 'https://[2606:4700:4700::1111]/' }).url)
+      .toBe('https://[2606:4700:4700::1111]/');
+    expect(() => normalizeRequest({ operation: 'fetch', url: 'https://127.0.0.1/' }))
+      .toThrow(/private|special/i);
+    expect(() => normalizeRequest({ operation: 'fetch', url: 'https://[::1]/' }))
+      .toThrow(/private|special/i);
+  });
+
   it('refuses credentials and non-HTTPS retrieval', () => {
     expect(() => normalizeRequest({
       operation: 'fetch',
@@ -359,6 +372,24 @@ describe('search result decoding', () => {
       .toBe('Safe &lt;script&gt;literal&lt;/script&gt;');
   });
 
+  it('drops denied IP literals, including a wrapped result, and keeps a public sibling', () => {
+    const html = `
+      <div class="result">
+        <a class="result__a" href="https://127.0.0.1/">Loopback</a>
+      </div>
+      <div class="result">
+        <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2F127.0.0.1%2Fsecret">Wrapped</a>
+      </div>
+      <div class="result">
+        <a class="result__a" href="https://example.com/kept">Kept</a>
+      </div>`;
+    expect(decodeSearchResults(html, 5)).toEqual([{
+      title: 'Kept',
+      url: 'https://example.com/kept',
+      snippet: '',
+    }]);
+  });
+
   it('skips advertising blocks and DuckDuckGo ad redirects', () => {
     const html = `
       <div class="result result--ad">
@@ -533,6 +564,24 @@ describe('fetch execution and helper entry', () => {
     });
     expect(result.text).toContain('Hello&nbsp; world "q"');
     expect(result.text).not.toContain('secret');
+  });
+
+  it('drops an unclosed active element through the end of a truncated page', async () => {
+    const truncated = await executeWebRequest(
+      { operation: 'fetch', url: 'https://example.com/' },
+      { resolve, request: respond('<p>Visible</p><script>IGNORE secret') },
+    );
+    expect(truncated.text).toContain('Visible');
+    expect(truncated.text).not.toContain('IGNORE');
+    expect(truncated.text).not.toContain('secret');
+
+    const followed = await executeWebRequest(
+      { operation: 'fetch', url: 'https://example.com/' },
+      { resolve, request: respond('<script>secret()</script><p>Visible</p><style>IGNORE secret') },
+    );
+    expect(followed.text).toContain('Visible');
+    expect(followed.text).not.toContain('IGNORE');
+    expect(followed.text).not.toContain('secret');
   });
 
   it('collapses plain text and truncates it to the requested size', async () => {
