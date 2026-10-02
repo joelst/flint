@@ -1,3 +1,5 @@
+import { isPotentiallyPublicHostname } from '../../sidecar/web-address-policy.js';
+
 /**
  * The app-controlled record of what a web tool round sent off the device.
  *
@@ -20,8 +22,13 @@ export function isAuditableUrl(url: unknown): url is string {
   if (typeof url !== 'string' || !url) return false;
   try {
     const parsed = new URL(url);
-    // Mirror the helper's network rule so a hand-edited archive cannot show other URL shapes.
-    return parsed.protocol === 'https:' && !parsed.username && !parsed.password && !parsed.port;
+    // Mirror the helper's network rule so a hand-edited archive cannot show other URL shapes
+    // or a trusted-looking link to a local or private destination the helper always refuses.
+    return parsed.protocol === 'https:'
+      && !parsed.username
+      && !parsed.password
+      && !parsed.port
+      && isPotentiallyPublicHostname(parsed.hostname);
   } catch {
     return false;
   }

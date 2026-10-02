@@ -44,6 +44,24 @@ describe('web audit', () => {
     expect(isAuditableUrl('https://example.com:8443/')).toBe(false);
     expect(isAuditableUrl(42)).toBe(false);
     expect(isAuditableUrl('')).toBe(false);
+    for (const local of [
+      'https://localhost/',
+      'https://api.localhost./',
+      'https://printer.local/',
+      'https://127.0.0.1/',
+      'https://10.0.0.5/',
+      'https://192.168.1.1/',
+      'https://[::1]/',
+      'https://[fd00::1]/',
+      'https://[3ffe::1]/',
+      'https://2130706433/',
+    ]) {
+      expect(isAuditableUrl(local), local).toBe(false);
+    }
+    expect(isAuditableUrl('https://93.184.216.34/')).toBe(true);
+    expect(isAuditableUrl('https://[2606:4700:4700::1111]/')).toBe(true);
+    expect(normalizeWebAudit({ sources: [{ title: 'x', url: 'https://localhost/' }], errors: [] }))
+      .toBeUndefined();
   });
 
   it('is independent of model Markdown that would hide an appended audit', () => {
