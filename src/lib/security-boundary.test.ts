@@ -170,6 +170,8 @@ describe('renderer/sidecar boundary', () => {
     expect(page).not.toContain('webConsentPrompt = {');
     expect(page).toContain('resultUrlsForConversation(sessionWebConsent, threadLoadedFor ?? "")');
     expect(page).toContain('rememberResultUrls(sessionWebConsent, originId ?? "", resultUrls)');
+    expect(page).toContain('searchResultUrls(result.results)');
+    expect(page).not.toContain('packed.sources.map((source) => source.url).join');
     expect(page).toContain('dialogTabTrap(');
     expect(page).toContain('void tick().then(');
     expect(page).toContain('restoreDialogFocus(back, [');

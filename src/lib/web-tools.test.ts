@@ -5,6 +5,7 @@ import {
   collectCurrentWebFetchUrls,
   collectWebFetchUrls,
   composerSearchQuery,
+  searchResultUrls,
   executeWebToolCalls,
   messagesContainImages,
   readWebToolCalls,
@@ -83,6 +84,44 @@ describe('web tool calls', () => {
     expect(empty.sources).toEqual([]);
     expect(empty.errors).toEqual(['web_search: The public search returned no results']);
     expect(buildWebAudit(empty.sources, empty.errors)?.errors).toEqual(empty.errors);
+  });
+
+  it('keeps helper search URLs that legitimately end in punctuation', () => {
+    expect([...searchResultUrls([
+      { url: 'https://example.com/file.' },
+      { url: 'https://example.com/a,' },
+      { url: 'https://example.com/b;' },
+      { url: 'https://example.com/c:' },
+      { url: 'https://example.com/d%7D' },
+      { url: 'https://example.com/d}' },
+      { url: 'https://example.com/page!' },
+      { url: 'https://example.com/file.#section' },
+      { url: 'http://example.com/file.' },
+      { url: '' },
+    ])]).toEqual([
+      'https://example.com/file.',
+      'https://example.com/a,',
+      'https://example.com/b;',
+      'https://example.com/c:',
+      'https://example.com/d%7D',
+      'https://example.com/page!',
+    ]);
+    expect([...collectWebFetchUrls([{
+      role: 'user',
+      content: [
+        'https://example.com/file.',
+        'https://example.com/a,',
+        'https://example.com/b;',
+        'https://example.com/c:',
+        'https://example.com/d}',
+      ].join('\n'),
+    }])]).toEqual([
+      'https://example.com/file',
+      'https://example.com/a',
+      'https://example.com/b',
+      'https://example.com/c',
+      'https://example.com/d',
+    ]);
   });
 
   it('collects text-part URLs while excluding system, tool, and malformed content', () => {

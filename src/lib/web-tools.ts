@@ -120,6 +120,21 @@ export function collectWebFetchUrls(messages: unknown): Set<string> {
   return urls;
 }
 
+/**
+ * Search results are already canonical helper URLs. Scanning that list as prose
+ * strips a path that really ends in punctuation, so the model's exact URL misses
+ * the allowlist. Keep a URL only when it is already in that canonical form.
+ */
+export function searchResultUrls(results: ReadonlyArray<{ url?: unknown }>): Set<string> {
+  const urls = new Set<string>();
+  if (!Array.isArray(results)) return urls;
+  for (const item of results) {
+    const url = item && typeof item.url === 'string' ? item.url : '';
+    if (url && canonicalFetchUrl(url) === url) urls.add(url);
+  }
+  return urls;
+}
+
 export function collectCurrentWebFetchUrls(
   currentMessage: unknown,
   attachedUrls: Iterable<string>,

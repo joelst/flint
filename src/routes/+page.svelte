@@ -232,6 +232,7 @@
     collectCurrentWebFetchUrls,
     composerSearchQuery,
     executeWebToolCalls,
+    searchResultUrls,
     userSearchContext,
     messagesContainImages,
     readWebToolCalls,
@@ -6993,10 +6994,9 @@ updateStateFromSdk();
               throw new Error("Public search returned an unexpected result");
             }
             const packed = userSearchContext(result);
-            const resultUrls = collectWebFetchUrls([{
-              role: "user",
-              content: packed.sources.map((source) => source.url).join("\n"),
-            }]);
+            // Already canonical. The prose scanner would change a path that ends
+            // in real punctuation, and the model's exact result URL would be refused.
+            const resultUrls = searchResultUrls(result.results);
             sessionWebConsent = rememberResultUrls(sessionWebConsent, originId ?? "", resultUrls);
             fetchAllow = new Set([...fetchAllow, ...resultUrls]);
             offerFetchTool = allowWebTools && (allUrlsGranted(sessionWebConsent, originId ?? "") || fetchAllow.size > 0);
