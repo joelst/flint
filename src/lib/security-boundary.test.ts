@@ -227,6 +227,13 @@ describe('renderer/sidecar boundary', () => {
       .toBeLessThan(page.indexOf('clearUrlFetches();', page.indexOf('chatMessages = stamped;')));
     expect(page).toContain('let webSources = [...chipAudit.sources];');
     expect(page).toContain('let webErrors = [...chipAudit.errors];');
+    const searchTry = page.indexOf('updateAssistantMessage({ content: "Searching the public web..." });');
+    const searchCatch = page.indexOf('} catch (error) {', searchTry);
+    const searchBlock = page.slice(searchCatch, page.indexOf('let data = await chatCompletionStream', searchCatch));
+    const recordedAt = searchBlock.indexOf('webErrors = [...webErrors, `web_search: ${message}`]');
+    const abortedAt = searchBlock.indexOf('if (requestController.signal.aborted)');
+    expect(recordedAt).toBeGreaterThanOrEqual(0);
+    expect(abortedAt).toBeGreaterThan(recordedAt);
     expect(page).toContain('webErrors = [...webErrors, ...executed.errors];');
     expect(page).not.toContain('webErrors = executed.errors;');
     const audit = readFileSync(join(process.cwd(), 'src', 'lib', 'web-audit.ts'), 'utf8');

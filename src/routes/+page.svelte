@@ -7058,6 +7058,12 @@ updateStateFromSdk();
               offerFetchTool,
             );
           } catch (error) {
+            // Stop can win the race and the helper can still reject. Record that
+            // failure first, or the stop message has no retrieval audit.
+            const message = String(error instanceof Error ? error.message : error)
+              .replace(/[\u0000-\u001f\u007f-\u009f\s]+/g, " ")
+              .slice(0, 500);
+            webErrors = [...webErrors, `web_search: ${message}`];
             if (requestController.signal.aborted) {
               updateAssistantMessage({
                 content: "[Stopped during web retrieval. An already-started network request may have completed.]",
@@ -7065,10 +7071,6 @@ updateStateFromSdk();
               });
               return;
             }
-            const message = String(error instanceof Error ? error.message : error)
-              .replace(/[\u0000-\u001f\u007f-\u009f\s]+/g, " ")
-              .slice(0, 500);
-            webErrors = [...webErrors, `web_search: ${message}`];
           }
         }
         let data = await chatCompletionStream(
