@@ -1,6 +1,6 @@
 <script lang="ts">
   // @ts-nocheck  // runes ($state etc.) are handled by Svelte compiler, not raw TS
-  import { onMount, untrack } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import { isPoolEntryResident } from "$lib/pool-residency";
   import { providerRecheckStatus } from "$lib/provider-recheck-status";
   import MessageRenderer from "$lib/MessageRenderer.svelte";
@@ -206,7 +206,7 @@
     isEmptyAssistantPlaceholder,
     selectPinnedAndRecentMessages,
   } from "$lib/chat-request";
-  import { dialogFocusable, dialogTabTrap } from "$lib/dialog-focus";
+  import { dialogFocusable, dialogTabTrap, restoreDialogFocus } from "$lib/dialog-focus";
   import { buildWebAudit, chipTextIsReadable, urlChipRetrievalAudit } from "$lib/web-audit";
   import {
     allUrlsGranted,
@@ -6687,8 +6687,13 @@ updateStateFromSdk();
       if (webConsentQueue.length === 0) {
         const back = webConsentReturnFocus;
         webConsentReturnFocus = null;
-        queueMicrotask(() => {
-          if (back instanceof HTMLElement && back.isConnected) back.focus();
+        // Search is disabled once the send starts. Focusing that button drops
+        // focus on the document, so wait until Stop is in the DOM.
+        void tick().then(() => {
+          const target = restoreDialogFocus(back, [
+            ...document.querySelectorAll<HTMLElement>("form button.stop"),
+          ]);
+          target?.focus();
         });
       }
     };

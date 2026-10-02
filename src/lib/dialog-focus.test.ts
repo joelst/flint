@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dialogFocusable, dialogTabTrap } from './dialog-focus';
+import { dialogFocusable, dialogTabTrap, restoreDialogFocus } from './dialog-focus';
 
 function dialog(): HTMLElement {
   document.body.innerHTML = [
@@ -77,5 +77,28 @@ describe('dialog focus', () => {
       action: 'focus',
       element: first,
     });
+  });
+
+  it('returns focus to an enabled control after the opener is disabled', () => {
+    document.body.innerHTML = [
+      '<button id="search" disabled>Search</button>',
+      '<form>',
+      '<button id="stop" class="stop" type="button">Stop</button>',
+      '<button id="also-disabled" class="stop" type="button" disabled>Stop</button>',
+      '</form>',
+      '<div hidden><button id="hidden-stop" class="stop" type="button">Stop</button></div>',
+    ].join('');
+    const search = document.getElementById('search');
+    const stop = document.getElementById('stop');
+    const disabledStop = document.getElementById('also-disabled');
+    const hiddenStop = document.getElementById('hidden-stop');
+    if (!search || !stop || !disabledStop || !hiddenStop) throw new Error('missing controls');
+    const fallbacks = [disabledStop, hiddenStop, stop];
+    expect(restoreDialogFocus(search, fallbacks)).toBe(stop);
+    search.removeAttribute('disabled');
+    expect(restoreDialogFocus(search, fallbacks)).toBe(search);
+    search.remove();
+    expect(restoreDialogFocus(search, fallbacks)).toBe(stop);
+    expect(restoreDialogFocus(null, [disabledStop, hiddenStop])).toBeNull();
   });
 });

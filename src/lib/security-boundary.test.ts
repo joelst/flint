@@ -170,6 +170,9 @@ describe('renderer/sidecar boundary', () => {
     expect(page).toContain('resultUrlsForConversation(sessionWebConsent, threadLoadedFor ?? "")');
     expect(page).toContain('rememberResultUrls(sessionWebConsent, originId ?? "", resultUrls)');
     expect(page).toContain('dialogTabTrap(');
+    expect(page).toContain('void tick().then(');
+    expect(page).toContain('restoreDialogFocus(back, [');
+    expect(page).toContain('form button.stop');
     expect(page).toContain('in this conversation until the page reloads');
     expect(page).not.toContain('until you quit Flint');
     expect(page).toContain('loadStoredWebConsent(');

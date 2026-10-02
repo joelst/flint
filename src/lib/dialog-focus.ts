@@ -22,6 +22,26 @@ export function dialogFocusable(container: ParentNode): HTMLElement[] {
   ));
 }
 
+function canHoldFocus(element: EventTarget | null): element is HTMLElement {
+  return element instanceof HTMLElement
+    && element.isConnected
+    && !element.hasAttribute('disabled')
+    && element.tabIndex >= 0
+    && !element.closest('[hidden]');
+}
+
+/**
+ * The control that opened the dialog may be disabled once the action starts.
+ * A disabled control cannot keep focus, so an enabled fallback is used instead.
+ */
+export function restoreDialogFocus(
+  saved: EventTarget | null,
+  fallbacks: readonly HTMLElement[] = [],
+): HTMLElement | null {
+  if (canHoldFocus(saved)) return saved;
+  return fallbacks.find((element) => canHoldFocus(element)) ?? null;
+}
+
 export function dialogTabTrap(
   active: EventTarget | null,
   container: HTMLElement,
