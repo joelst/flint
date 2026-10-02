@@ -62,7 +62,7 @@ site. Search dispatch is the composer **Search** button. The query is the typed 
 to one line and limited to 500 characters. The first search asks for approval once, for this
 session, or forever. Session approval lasts until the page reloads. Forever approval is stored in
 local storage. Declining leaves the draft unsent. A fetch of a search-result host asks for that
-domain once, for this session, forever, or for all public URLs for the rest of this session.
+domain once, for this session, forever, or for all public URLs in that conversation until the page reloads.
 URLs the user typed or attached do not ask again. A model `web_fetch` may use an HTTPS URL typed
 or attached in that same send without another prompt, or, after the domain approval above, a
 search-result URL from the conversation that ran the search. **Ask again for search and sites**

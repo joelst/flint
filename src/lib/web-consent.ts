@@ -3,7 +3,8 @@
  *
  * "Once" covers the request in front of the user and is not stored.
  * "Session" lasts until the page is reloaded. "Forever" is the only choice written to storage.
- * "All URLs" allows every later public URL for this session, not after a restart.
+ * "All URLs" allows every later public URL in the conversation that approved it,
+ * until the page reloads. It is not stored and does not apply to other conversations.
  * Search-result URLs are remembered only for the conversation that produced them,
  * and only until the page reloads.
  */
@@ -21,7 +22,7 @@ export interface StoredWebConsent {
 export interface SessionWebConsent {
   search: boolean;
   domains: Set<string>;
-  allUrls: boolean;
+  allUrlsByConversation: ReadonlySet<string>;
   resultUrlsByConversation: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
@@ -32,7 +33,12 @@ export function emptyStoredWebConsent(): StoredWebConsent {
 const NO_RESULT_URLS: ReadonlySet<string> = new Set();
 
 export function emptySessionWebConsent(): SessionWebConsent {
-  return { search: false, domains: new Set(), allUrls: false, resultUrlsByConversation: new Map() };
+  return {
+    search: false,
+    domains: new Set(),
+    allUrlsByConversation: new Set(),
+    resultUrlsByConversation: new Map(),
+  };
 }
 
 export function hostnameOf(url: string): string | null {
@@ -83,13 +89,44 @@ export function grantSearch(
   return { stored, session };
 }
 
+export function allUrlsGranted(session: SessionWebConsent, conversationId: string): boolean {
+  return conversationId.length > 0 && session.allUrlsByConversation.has(conversationId);
+}
+
 export function domainGranted(
   stored: StoredWebConsent,
   session: SessionWebConsent,
   host: string,
+  conversationId = '',
 ): boolean {
   const name = host.toLowerCase();
-  return session.allUrls || stored.domainsForever.includes(name) || session.domains.has(name);
+  return allUrlsGranted(session, conversationId)
+    || stored.domainsForever.includes(name)
+    || session.domains.has(name);
+}
+
+export type ConsentQueuePrompt =
+  | { kind: 'search' }
+  | { kind: 'domain'; host: string; conversationId: string };
+
+/** Leading queue entries a session, forever, or conversation all-URL grant already covers. */
+export function splitCoveredConsentPrompts<T extends ConsentQueuePrompt>(
+  stored: StoredWebConsent,
+  session: SessionWebConsent,
+  queue: readonly T[],
+): { covered: T[]; remaining: T[] } {
+  let index = 0;
+  while (index < queue.length && consentPromptCovered(stored, session, queue[index])) index += 1;
+  return { covered: queue.slice(0, index), remaining: queue.slice(index) };
+}
+
+function consentPromptCovered(
+  stored: StoredWebConsent,
+  session: SessionWebConsent,
+  prompt: ConsentQueuePrompt,
+): boolean {
+  if (prompt.kind === 'search') return searchGranted(stored, session);
+  return domainGranted(stored, session, prompt.host, prompt.conversationId);
 }
 
 export function grantDomain(
@@ -97,9 +134,15 @@ export function grantDomain(
   session: SessionWebConsent,
   host: string,
   choice: DomainChoice,
+  conversationId = '',
 ): { stored: StoredWebConsent; session: SessionWebConsent } {
   const name = host.toLowerCase();
-  if (choice === 'all-urls') return { stored, session: { ...session, allUrls: true } };
+  if (choice === 'all-urls') {
+    if (!conversationId) return { stored, session };
+    const allUrlsByConversation = new Set(session.allUrlsByConversation);
+    allUrlsByConversation.add(conversationId);
+    return { stored, session: { ...session, allUrlsByConversation } };
+  }
   if (choice === 'forever') {
     return {
       stored: {

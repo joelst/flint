@@ -75,7 +75,7 @@ The sidebar is grouped by workflow:
   The first search asks you to allow it just once, for this session, or always. Later searches
   skip that question when you chose session or always. The model answers from the results and does
   not decide whether to search. If an answer needs a page from those results, Flint asks you to
-  allow that domain once, for this session, or always, or to allow all public URLs for this session.
+  allow that domain once, for this session, or always, or to allow all public URLs in this conversation until the page reloads.
   A URL you typed or attached as a chip is still fetched only as public HTTPS. Retrieved text is untrusted reference
   material, and consulted sources (and any tool issues) appear in a separate **Sources consulted**
   section under the answer that the model's text cannot hide or alter. A search that returns

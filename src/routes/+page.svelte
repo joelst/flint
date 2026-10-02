@@ -209,6 +209,7 @@
   import { dialogFocusable, dialogTabTrap } from "$lib/dialog-focus";
   import { buildWebAudit, chipTextIsReadable, urlChipRetrievalAudit } from "$lib/web-audit";
   import {
+    allUrlsGranted,
     domainGranted,
     emptySessionWebConsent,
     emptyStoredWebConsent,
@@ -220,6 +221,7 @@
     resultUrlsForConversation,
     saveStoredWebConsent,
     searchGranted,
+    splitCoveredConsentPrompts,
     type DomainChoice,
     type SearchChoice,
     type SessionWebConsent,
@@ -6570,7 +6572,13 @@ updateStateFromSdk();
   // consent at the same time, and that send waits forever.
   let webConsentQueue = $state<Array<
     | { kind: "search"; query: string; resolve: (choice: SearchChoice | null) => void }
-    | { kind: "domain"; host: string; url: string; resolve: (choice: DomainChoice | null) => void }
+    | {
+      kind: "domain";
+      host: string;
+      url: string;
+      conversationId: string;
+      resolve: (choice: DomainChoice | null) => void;
+    }
   >>([]);
   const webConsentPrompt = $derived(webConsentQueue[0] ?? null);
   let webConsentDialog = $state<HTMLDivElement | null>(null);
@@ -6598,29 +6606,48 @@ updateStateFromSdk();
     });
   }
 
-  function askDomainApproval(host: string, url: string): Promise<DomainChoice | null> {
+  function askDomainApproval(
+    host: string,
+    url: string,
+    conversationId: string,
+  ): Promise<DomainChoice | null> {
     return new Promise((resolve) => {
-      webConsentQueue = [...webConsentQueue, { kind: "domain", host, url, resolve }];
+      webConsentQueue = [...webConsentQueue, { kind: "domain", host, url, conversationId, resolve }];
     });
   }
 
   function finishWebConsent(choice: SearchChoice | DomainChoice | null) {
     const prompt = webConsentQueue[0];
     if (!prompt) return;
-    webConsentQueue = webConsentQueue.slice(1);
+    let stored = storedWebConsent;
+    let session = sessionWebConsent;
+    let resolved: SearchChoice | DomainChoice | null = null;
     if (prompt.kind === "search") {
       const searchChoice = choice === "once" || choice === "session" || choice === "forever" ? choice : null;
-      if (searchChoice) applyWebConsent(grantSearch(storedWebConsent, sessionWebConsent, searchChoice));
-      prompt.resolve(searchChoice);
-      return;
+      if (searchChoice) {
+        const next = grantSearch(stored, session, searchChoice);
+        stored = next.stored;
+        session = next.session;
+      }
+      resolved = searchChoice;
+    } else {
+      const domainChoice = choice === "once" || choice === "session" || choice === "forever" || choice === "all-urls"
+        ? choice
+        : null;
+      if (domainChoice) {
+        const next = grantDomain(stored, session, prompt.host, domainChoice, prompt.conversationId);
+        stored = next.stored;
+        session = next.session;
+      }
+      resolved = domainChoice;
     }
-    const domainChoice = choice === "once" || choice === "session" || choice === "forever" || choice === "all-urls"
-      ? choice
-      : null;
-    if (domainChoice) {
-      applyWebConsent(grantDomain(storedWebConsent, sessionWebConsent, prompt.host, domainChoice));
-    }
-    prompt.resolve(domainChoice);
+    applyWebConsent({ stored, session });
+    // A one-time choice does not satisfy the next prompt. A session, forever, or
+    // all-URL grant does, so those waiting requests must not show another dialog.
+    const split = splitCoveredConsentPrompts(stored, session, webConsentQueue.slice(1));
+    webConsentQueue = split.remaining;
+    prompt.resolve(resolved);
+    for (const covered of split.covered) covered.resolve("once");
   }
 
   $effect(() => {
@@ -6828,7 +6855,7 @@ updateStateFromSdk();
       ...resultUrlsForConversation(sessionWebConsent, threadLoadedFor ?? ""),
     ]);
     let offerFetchTool = allowWebTools
-      && (sessionWebConsent.allUrls || (mode !== "search" && fetchAllow.size > 0));
+      && (allUrlsGranted(sessionWebConsent, threadLoadedFor ?? "") || (mode !== "search" && fetchAllow.size > 0));
     try {
       const inferenceMessages = urlContextMessages.length > 0
         ? [...stamped.slice(0, -1), ...urlContextMessages, stamped.at(-1)]
@@ -6954,7 +6981,7 @@ updateStateFromSdk();
             }]);
             sessionWebConsent = rememberResultUrls(sessionWebConsent, originId ?? "", resultUrls);
             fetchAllow = new Set([...fetchAllow, ...resultUrls]);
-            offerFetchTool = allowWebTools && (sessionWebConsent.allUrls || fetchAllow.size > 0);
+            offerFetchTool = allowWebTools && (allUrlsGranted(sessionWebConsent, originId ?? "") || fetchAllow.size > 0);
             webSources = [...webSources, ...packed.sources];
             webErrors = [...webErrors, ...packed.errors];
             if (requestController.signal.aborted) {
@@ -7027,11 +7054,14 @@ updateStateFromSdk();
           if (typedFetchUrls.has(url)) return true;
           const host = hostnameOf(url);
           if (!host) return false;
-          if (domainGranted(storedWebConsent, sessionWebConsent, host)) return true;
-          const choice = await askDomainApproval(host, url);
+          if (domainGranted(storedWebConsent, sessionWebConsent, host, originId ?? "")) return true;
+          const choice = await askDomainApproval(host, url, originId ?? "");
           return choice !== null && !requestController.signal.aborted;
         };
-        const fetchAllowlist = sessionWebConsent.allUrls ? undefined : fetchAllow;
+        // Undefined only for this conversation's Allow all URLs grant. The snapshot
+        // stays in place for the round, so a mid-round grant does not admit URLs
+        // readWebToolCalls already rejected. The helper still requires public HTTPS.
+        const fetchAllowlist = allUrlsGranted(sessionWebConsent, originId ?? "") ? undefined : fetchAllow;
         const toolCalls = offerFetchTool
           ? readWebToolCalls(data?.choices?.[0]?.message?.tool_calls, fetchAllowlist)
           : [];
@@ -9987,9 +10017,9 @@ Output only the summary text, no preamble.`;
                   bodies. Press <strong>Search</strong> beside Send to search for the message you
                   typed. The first search asks whether to allow it once, for this session, or always.
                   Opening a site from the results asks the same kind of question for that domain, or
-                  for all public URLs this session. Flint shows the consulted sources with the answer.
+                  for all public URLs in this conversation until the page reloads. Flint shows the consulted sources with the answer.
                 </span>
-                {#if storedWebConsent.searchForever || storedWebConsent.domainsForever.length > 0 || sessionWebConsent.search || sessionWebConsent.allUrls || sessionWebConsent.domains.size > 0}
+                {#if storedWebConsent.searchForever || storedWebConsent.domainsForever.length > 0 || sessionWebConsent.search || sessionWebConsent.allUrlsByConversation.size > 0 || sessionWebConsent.domains.size > 0}
                   <button type="button" class="small secondary" onclick={forgetWebApprovals}>
                     Ask again for search and sites
                   </button>
@@ -10411,7 +10441,7 @@ Output only the summary text, no preamble.`;
                           <strong>{webConsentPrompt.host}</strong>. The page text is untrusted.
                         </p>
                         <p class="web-consent-url">{webConsentPrompt.url}</p>
-                        <p>Allow all URLs applies to every public site for this session and ends when the page reloads.</p>
+                        <p>Allow all URLs applies to every public site in this conversation until the page reloads.</p>
                       {/if}
                     </div>
                     <div class="web-consent-actions">

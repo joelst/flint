@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  allUrlsGranted,
   domainGranted,
   emptySessionWebConsent,
   emptyStoredWebConsent,
   grantDomain,
   grantSearch,
+  splitCoveredConsentPrompts,
   hostnameOf,
   loadStoredWebConsent,
   readStoredWebConsent,
@@ -40,10 +42,67 @@ describe('web consent', () => {
     expect(domainGranted(forSession.stored, emptySessionWebConsent(), 'example.com')).toBe(false);
     const forever = grantDomain(stored, session, 'Example.com', 'forever');
     expect(domainGranted(forever.stored, emptySessionWebConsent(), 'example.com')).toBe(true);
-    const all = grantDomain(stored, session, 'example.com', 'all-urls');
-    expect(all.session.allUrls).toBe(true);
-    expect(domainGranted(all.stored, all.session, 'other.example')).toBe(true);
-    expect(domainGranted(all.stored, emptySessionWebConsent(), 'other.example')).toBe(false);
+  });
+
+  it('keeps Allow all URLs on the conversation that approved it', () => {
+    const stored = emptyStoredWebConsent();
+    const session = emptySessionWebConsent();
+    const missing = grantDomain(stored, session, 'example.com', 'all-urls');
+    expect(missing.session).toBe(session);
+    const all = grantDomain(stored, session, 'example.com', 'all-urls', 'conv-a');
+    expect(allUrlsGranted(all.session, 'conv-a')).toBe(true);
+    expect(allUrlsGranted(all.session, 'conv-b')).toBe(false);
+    expect(allUrlsGranted(all.session, '')).toBe(false);
+    expect(domainGranted(all.stored, all.session, 'other.example', 'conv-a')).toBe(true);
+    expect(domainGranted(all.stored, all.session, 'other.example', 'conv-b')).toBe(false);
+    expect(domainGranted(all.stored, all.session, 'other.example')).toBe(false);
+    expect(domainGranted(all.stored, emptySessionWebConsent(), 'other.example', 'conv-a')).toBe(false);
+  });
+
+  it('resolves a queued prompt only when a lasting grant already covers it', () => {
+    const stored = emptyStoredWebConsent();
+    const session = emptySessionWebConsent();
+    const queue = [
+      { kind: 'domain' as const, host: 'example.com', conversationId: 'conv-a', id: 'same' },
+      { kind: 'domain' as const, host: 'example.com', conversationId: 'conv-b', id: 'other-conv' },
+      { kind: 'domain' as const, host: 'other.example', conversationId: 'conv-a', id: 'other-host' },
+      { kind: 'search' as const, id: 'search' },
+    ];
+    const once = grantDomain(stored, session, 'example.com', 'once', 'conv-a');
+    expect(splitCoveredConsentPrompts(once.stored, once.session, queue).covered).toEqual([]);
+
+    const forSession = grantDomain(stored, session, 'Example.com', 'session');
+    const afterSession = splitCoveredConsentPrompts(forSession.stored, forSession.session, queue);
+    expect(afterSession.covered.map((prompt) => prompt.id)).toEqual(['same', 'other-conv']);
+    expect(afterSession.remaining.map((prompt) => prompt.id)).toEqual(['other-host', 'search']);
+
+    const forever = grantDomain(stored, session, 'example.com', 'forever');
+    const afterForever = splitCoveredConsentPrompts(forever.stored, forever.session, queue);
+    expect(afterForever.covered.map((prompt) => prompt.id)).toEqual(['same', 'other-conv']);
+
+    const all = grantDomain(stored, session, 'example.com', 'all-urls', 'conv-a');
+    const afterAll = splitCoveredConsentPrompts(all.stored, all.session, queue);
+    expect(afterAll.covered.map((prompt) => prompt.id)).toEqual(['same']);
+    expect(afterAll.remaining.map((prompt) => prompt.id)).toEqual(['other-conv', 'other-host', 'search']);
+    expect(domainGranted(all.stored, all.session, 'later.example', 'conv-a')).toBe(true);
+    expect(domainGranted(all.stored, all.session, 'later.example', 'conv-b')).toBe(false);
+
+    const searches = [
+      { kind: 'search' as const, id: 'next-search' },
+      { kind: 'domain' as const, host: 'example.com', conversationId: 'conv-a', id: 'later-domain' },
+    ];
+    const searchOnce = grantSearch(stored, session, 'once');
+    expect(splitCoveredConsentPrompts(searchOnce.stored, searchOnce.session, searches).covered).toEqual([]);
+    const searchSession = grantSearch(stored, session, 'session');
+    const afterSearch = splitCoveredConsentPrompts(searchSession.stored, searchSession.session, searches);
+    expect(afterSearch.covered.map((prompt) => prompt.id)).toEqual(['next-search']);
+    expect(afterSearch.remaining.map((prompt) => prompt.id)).toEqual(['later-domain']);
+    const searchForever = grantSearch(stored, session, 'forever');
+    expect(splitCoveredConsentPrompts(
+      searchForever.stored,
+      emptySessionWebConsent(),
+      searches,
+    ).covered.map((prompt) => prompt.id)).toEqual(['next-search']);
   });
 
   it('keeps search-result URLs on the conversation that produced them', () => {
