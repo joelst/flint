@@ -6601,9 +6601,20 @@ updateStateFromSdk();
     sessionWebConsent = emptySessionWebConsent();
   }
 
+  function rememberConsentReturnFocus() {
+    // The shell becomes inert when this prompt renders, and the browser moves
+    // focus off the opener before the dialog effect can read it.
+    if (webConsentReturnFocus instanceof HTMLElement && webConsentReturnFocus.isConnected) return;
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement)) return;
+    if (webConsentDialog?.contains(active)) return;
+    webConsentReturnFocus = active;
+  }
+
   function askSearchApproval(query: string): Promise<SearchChoice | null> {
     if (searchGranted(storedWebConsent, sessionWebConsent)) return Promise.resolve("session");
     return new Promise((resolve) => {
+      rememberConsentReturnFocus();
       webConsentQueue = [...webConsentQueue, { kind: "search", query, resolve }];
     });
   }
@@ -6615,6 +6626,7 @@ updateStateFromSdk();
     redirect = false,
   ): Promise<DomainChoice | null> {
     return new Promise((resolve) => {
+      rememberConsentReturnFocus();
       webConsentQueue = [...webConsentQueue, { kind: "domain", host, url, conversationId, redirect, resolve }];
     });
   }
@@ -6673,16 +6685,23 @@ updateStateFromSdk();
         finishWebConsent(null);
         return;
       }
-      if (event.key !== "Tab") return;
-      const trap = dialogTabTrap(
-        document.activeElement,
-        webConsentDialog,
-        dialogFocusable(webConsentDialog),
-        event.shiftKey,
-      );
-      if (trap.action === "default") return;
-      event.preventDefault();
-      trap.element.focus();
+      if (event.key === "Tab") {
+        const trap = dialogTabTrap(
+          document.activeElement,
+          webConsentDialog,
+          dialogFocusable(webConsentDialog),
+          event.shiftKey,
+        );
+        if (trap.action === "default") return;
+        event.preventDefault();
+        trap.element.focus();
+        return;
+      }
+      // Inert does not stop document shortcuts. Plain activation keys still reach
+      // the focused consent button. Modified keys, including Ctrl+Space dictation,
+      // must not act on the page underneath.
+      if ((event.key === "Enter" || event.key === " ") && !event.metaKey && !event.ctrlKey && !event.altKey) return;
+      event.stopPropagation();
     };
     document.addEventListener("keydown", onKeyDown, true);
     return () => {
@@ -8349,7 +8368,7 @@ Output only the summary text, no preamble.`;
   }
 </script>
 
-<main class="app">
+<main class="app" inert={webConsentPrompt ? true : undefined}>
   <header class="header">
     <div class="brand" data-tooltip="Foundry Local Interface">
       <img class="brand-logo" src="/favicon.png" alt="Flint logo" />
@@ -10425,61 +10444,6 @@ Output only the summary text, no preamble.`;
               {#if showGenParamsPanel}
                 <div id="composer-settings-drawer" class="composer-settings-drawer">
                   {@render generationSettings()}
-                </div>
-              {/if}
-
-              {#if webConsentPrompt}
-                <div
-                  class="persona-modal-overlay"
-                  role="presentation"
-                >
-                  <div
-                    bind:this={webConsentDialog}
-                    class="persona-modal"
-                    role="dialog"
-                    aria-modal="true"
-                    aria-labelledby="web-consent-title"
-                    tabindex="-1"
-                  >
-                    <div class="modal-header">
-                      <h3 id="web-consent-title">
-                        {webConsentPrompt.kind === "search"
-                          ? "Search the public web?"
-                          : `Open ${webConsentPrompt.host}?`}
-                      </h3>
-                    </div>
-                    <div class="modal-body">
-                      {#if webConsentPrompt.kind === "search"}
-                        <p>Allow this public web search?</p>
-                        <p><strong>{webConsentPrompt.query}</strong></p>
-                        <p>The exact query is sent to DuckDuckGo. Results are untrusted reference text.</p>
-                      {:else}
-                        <p>
-                          {#if webConsentPrompt.redirect}
-                            This page redirects to a different site. Opening it contacts
-                          {:else}
-                            This address came from the search results. Opening it contacts
-                          {/if}
-                          <strong>{webConsentPrompt.host}</strong>. The page text is untrusted.
-                        </p>
-                        <p class="web-consent-url">{webConsentPrompt.url}</p>
-                        <p>Allow all URLs applies to every public site in this conversation until the page reloads.</p>
-                      {/if}
-                    </div>
-                    <div class="web-consent-actions">
-                      {#if webConsentPrompt.kind === "search"}
-                        <button type="button" onclick={() => finishWebConsent("once")}>Just this search</button>
-                        <button type="button" onclick={() => finishWebConsent("session")}>This session</button>
-                        <button type="button" onclick={() => finishWebConsent("forever")}>Always</button>
-                      {:else}
-                        <button type="button" onclick={() => finishWebConsent("once")}>This site once</button>
-                        <button type="button" onclick={() => finishWebConsent("session")}>This site this session</button>
-                        <button type="button" onclick={() => finishWebConsent("forever")}>Always allow this site</button>
-                        <button type="button" onclick={() => finishWebConsent("all-urls")}>Allow all URLs</button>
-                      {/if}
-                      <button type="button" class="secondary" onclick={() => finishWebConsent(null)}>Don't allow</button>
-                    </div>
-                  </div>
                 </div>
               {/if}
 
@@ -12610,6 +12574,64 @@ Output only the summary text, no preamble.`;
     </div>
   {/if}
 </main>
+
+<!--
+  A background conversation can reach this prompt while another dialog is open.
+  It stays outside the app shell, above the persona menu and the shortcuts
+  overlay. The shell is inert, so those dialogs keep their edits and are not a
+  second modal.
+-->
+{#if webConsentPrompt}
+  <div class="web-consent-overlay" role="presentation">
+    <div
+      bind:this={webConsentDialog}
+      class="persona-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="web-consent-title"
+      tabindex="-1"
+    >
+      <div class="modal-header">
+        <h3 id="web-consent-title">
+          {webConsentPrompt.kind === "search"
+            ? "Search the public web?"
+            : `Open ${webConsentPrompt.host}?`}
+        </h3>
+      </div>
+      <div class="modal-body">
+        {#if webConsentPrompt.kind === "search"}
+          <p>Allow this public web search?</p>
+          <p><strong>{webConsentPrompt.query}</strong></p>
+          <p>The exact query is sent to DuckDuckGo. Results are untrusted reference text.</p>
+        {:else}
+          <p>
+            {#if webConsentPrompt.redirect}
+              This page redirects to a different site. Opening it contacts
+            {:else}
+              This address came from the search results. Opening it contacts
+            {/if}
+            <strong>{webConsentPrompt.host}</strong>. The page text is untrusted.
+          </p>
+          <p class="web-consent-url">{webConsentPrompt.url}</p>
+          <p>Allow all URLs applies to every public site in this conversation until the page reloads.</p>
+        {/if}
+      </div>
+      <div class="web-consent-actions">
+        {#if webConsentPrompt.kind === "search"}
+          <button type="button" onclick={() => finishWebConsent("once")}>Just this search</button>
+          <button type="button" onclick={() => finishWebConsent("session")}>This session</button>
+          <button type="button" onclick={() => finishWebConsent("forever")}>Always</button>
+        {:else}
+          <button type="button" onclick={() => finishWebConsent("once")}>This site once</button>
+          <button type="button" onclick={() => finishWebConsent("session")}>This site this session</button>
+          <button type="button" onclick={() => finishWebConsent("forever")}>Always allow this site</button>
+          <button type="button" onclick={() => finishWebConsent("all-urls")}>Allow all URLs</button>
+        {/if}
+        <button type="button" class="secondary" onclick={() => finishWebConsent(null)}>Don't allow</button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   /* Inline SVG icons sit on the text baseline */
@@ -15836,6 +15858,17 @@ Output only the summary text, no preamble.`;
   }
 
   /* Persona manager modal */
+  .web-consent-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.65);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    /* Above .persona-menu (9999) and .shortcuts-overlay (1000). Sharing
+       .persona-modal-overlay left this prompt at 200, under the later manager. */
+    z-index: 10000;
+  }
   .persona-modal-overlay {
     position: fixed;
     inset: 0;

@@ -163,6 +163,21 @@ describe('renderer/sidecar boundary', () => {
     expect(page).toContain('let offerFetchTool = allowWebTools');
     expect(page).toContain('webConsentQueue = [...webConsentQueue, { kind: "search"');
     expect(page).toContain('webConsentQueue = [...webConsentQueue, { kind: "domain"');
+    // The opener is saved before the shell becomes inert. Inert moves focus
+    // before the dialog effect can read document.activeElement.
+    expect(page).toMatch(/rememberConsentReturnFocus\(\);\r?\n\s+webConsentQueue = \[\.\.\.webConsentQueue, \{ kind: "search"/);
+    expect(page).toMatch(/rememberConsentReturnFocus\(\);\r?\n\s+webConsentQueue = \[\.\.\.webConsentQueue, \{ kind: "domain"/);
+    expect(page).toContain('<main class="app" inert={webConsentPrompt ? true : undefined}>');
+    const mainEnd = page.indexOf('</main>');
+    const consentAt = page.indexOf('class="web-consent-overlay"');
+    expect(mainEnd).toBeGreaterThan(0);
+    expect(consentAt).toBeGreaterThan(mainEnd);
+    expect(page.slice(consentAt, page.indexOf('web-consent-actions', consentAt))).not.toContain('persona-modal-overlay');
+    expect(page).toMatch(/\.web-consent-overlay \{[^}]*z-index:\s*10000;/);
+    const personaMenuZ = Number(page.match(/\.persona-menu \{[^}]*z-index:\s*(\d+);/)?.[1]);
+    const shortcutsZ = Number(page.match(/\.shortcuts-overlay \{[^}]*z-index:\s*(\d+);/)?.[1]);
+    expect(personaMenuZ).toBeLessThan(10000);
+    expect(shortcutsZ).toBeLessThan(10000);
     expect(page).toContain('webConsentQueue.slice(1)');
     expect(page).toContain('splitCoveredConsentPrompts(');
     expect(page).toContain('allUrlsGranted(sessionWebConsent, originId ?? "")');
