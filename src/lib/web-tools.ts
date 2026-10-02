@@ -295,7 +295,7 @@ export function webContentSystemInstruction(systemPrompt: string): string {
 
 export function webToolSystemInstruction(systemPrompt: string): string {
   return `${webContentSystemInstruction(systemPrompt)} `
-    + 'web_fetch is optional and read-only. Use it only for a public HTTPS URL in the latest user message. '
+    + 'web_fetch is optional and read-only. Use it only for a public HTTPS URL in the latest user message or in the current untrusted search results. '
     + 'You may request it only once; after the result, answer without requesting another tool. '
     + 'Do not invent a web search. The user starts a search from the Search button.';
 }

@@ -206,19 +206,20 @@
     isEmptyAssistantPlaceholder,
     selectPinnedAndRecentMessages,
   } from "$lib/chat-request";
+  import { dialogFocusable, dialogTabTrap } from "$lib/dialog-focus";
   import { buildWebAudit, chipTextIsReadable, urlChipRetrievalAudit } from "$lib/web-audit";
   import {
-    WEB_CONSENT_STORAGE_KEY,
     domainGranted,
     emptySessionWebConsent,
     emptyStoredWebConsent,
     grantDomain,
     grantSearch,
     hostnameOf,
-    readStoredWebConsent,
+    loadStoredWebConsent,
     rememberResultUrls,
+    resultUrlsForConversation,
+    saveStoredWebConsent,
     searchGranted,
-    writeStoredWebConsent,
     type DomainChoice,
     type SearchChoice,
     type SessionWebConsent,
@@ -6561,19 +6562,23 @@ updateStateFromSdk();
     }
   }
 
-  let storedWebConsent = $state(readStoredWebConsent(
-    typeof localStorage === "undefined" ? null : localStorage.getItem(WEB_CONSENT_STORAGE_KEY),
+  let storedWebConsent = $state(loadStoredWebConsent(
+    typeof localStorage === "undefined" ? null : localStorage,
   ));
   let sessionWebConsent = $state(emptySessionWebConsent());
-  let webConsentPrompt = $state<
+  // One resolver slot drops an in-flight prompt when another conversation reaches
+  // consent at the same time, and that send waits forever.
+  let webConsentQueue = $state<Array<
     | { kind: "search"; query: string; resolve: (choice: SearchChoice | null) => void }
     | { kind: "domain"; host: string; url: string; resolve: (choice: DomainChoice | null) => void }
-    | null
-  >(null);
+  >>([]);
+  const webConsentPrompt = $derived(webConsentQueue[0] ?? null);
+  let webConsentDialog = $state<HTMLDivElement | null>(null);
+  let webConsentReturnFocus: HTMLElement | null = null;
 
   function persistWebConsent(next: StoredWebConsent) {
     storedWebConsent = next;
-    localStorage.setItem(WEB_CONSENT_STORAGE_KEY, writeStoredWebConsent(next));
+    saveStoredWebConsent(typeof localStorage === "undefined" ? null : localStorage, next);
   }
 
   function applyWebConsent(next: { stored: StoredWebConsent; session: SessionWebConsent }) {
@@ -6589,20 +6594,20 @@ updateStateFromSdk();
   function askSearchApproval(query: string): Promise<SearchChoice | null> {
     if (searchGranted(storedWebConsent, sessionWebConsent)) return Promise.resolve("session");
     return new Promise((resolve) => {
-      webConsentPrompt = { kind: "search", query, resolve };
+      webConsentQueue = [...webConsentQueue, { kind: "search", query, resolve }];
     });
   }
 
   function askDomainApproval(host: string, url: string): Promise<DomainChoice | null> {
     return new Promise((resolve) => {
-      webConsentPrompt = { kind: "domain", host, url, resolve };
+      webConsentQueue = [...webConsentQueue, { kind: "domain", host, url, resolve }];
     });
   }
 
   function finishWebConsent(choice: SearchChoice | DomainChoice | null) {
-    const prompt = webConsentPrompt;
-    webConsentPrompt = null;
+    const prompt = webConsentQueue[0];
     if (!prompt) return;
+    webConsentQueue = webConsentQueue.slice(1);
     if (prompt.kind === "search") {
       const searchChoice = choice === "once" || choice === "session" || choice === "forever" ? choice : null;
       if (searchChoice) applyWebConsent(grantSearch(storedWebConsent, sessionWebConsent, searchChoice));
@@ -6617,6 +6622,50 @@ updateStateFromSdk();
     }
     prompt.resolve(domainChoice);
   }
+
+  $effect(() => {
+    const dialog = webConsentDialog;
+    const prompt = webConsentQueue[0];
+    if (!dialog || !prompt) return;
+    if (!(webConsentReturnFocus instanceof HTMLElement) || !webConsentReturnFocus.isConnected) {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && !dialog.contains(active)) {
+        webConsentReturnFocus = active;
+      }
+    }
+    const initiallyFocused = dialogFocusable(dialog);
+    (initiallyFocused[0] ?? dialog).focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!webConsentDialog) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        finishWebConsent(null);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const trap = dialogTabTrap(
+        document.activeElement,
+        webConsentDialog,
+        dialogFocusable(webConsentDialog),
+        event.shiftKey,
+      );
+      if (trap.action === "default") return;
+      event.preventDefault();
+      trap.element.focus();
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown, true);
+      if (webConsentQueue.length === 0) {
+        const back = webConsentReturnFocus;
+        webConsentReturnFocus = null;
+        queueMicrotask(() => {
+          if (back instanceof HTMLElement && back.isConnected) back.focus();
+        });
+      }
+    };
+  });
 
   async function sendMessage(e: Event, mode: "send" | "search" = "send") {
     e.preventDefault();
@@ -6776,7 +6825,7 @@ updateStateFromSdk();
     // and only after the user approves that domain.
     let fetchAllow = new Set<string>([
       ...typedFetchUrls,
-      ...sessionWebConsent.resultUrls,
+      ...resultUrlsForConversation(sessionWebConsent, threadLoadedFor ?? ""),
     ]);
     let offerFetchTool = allowWebTools
       && (sessionWebConsent.allUrls || (mode !== "search" && fetchAllow.size > 0));
@@ -6903,7 +6952,7 @@ updateStateFromSdk();
               role: "user",
               content: packed.sources.map((source) => source.url).join("\n"),
             }]);
-            sessionWebConsent = rememberResultUrls(sessionWebConsent, resultUrls);
+            sessionWebConsent = rememberResultUrls(sessionWebConsent, originId ?? "", resultUrls);
             fetchAllow = new Set([...fetchAllow, ...resultUrls]);
             offerFetchTool = allowWebTools && (sessionWebConsent.allUrls || fetchAllow.size > 0);
             webSources = [...webSources, ...packed.sources];
@@ -10335,9 +10384,9 @@ Output only the summary text, no preamble.`;
                 <div
                   class="persona-modal-overlay"
                   role="presentation"
-                  onkeydown={(e) => { if (e.key === "Escape") finishWebConsent(null); }}
                 >
                   <div
+                    bind:this={webConsentDialog}
                     class="persona-modal"
                     role="dialog"
                     aria-modal="true"
@@ -10362,7 +10411,7 @@ Output only the summary text, no preamble.`;
                           <strong>{webConsentPrompt.host}</strong>. The page text is untrusted.
                         </p>
                         <p class="web-consent-url">{webConsentPrompt.url}</p>
-                        <p>Allow all URLs applies to every public site until you quit Flint.</p>
+                        <p>Allow all URLs applies to every public site for this session and ends when the page reloads.</p>
                       {/if}
                     </div>
                     <div class="web-consent-actions">

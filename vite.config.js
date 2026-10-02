@@ -100,6 +100,7 @@ export default defineConfig(() => ({
         'src/lib/web-tools.ts',
         'src/lib/web-audit.ts',
         'src/lib/web-consent.ts',
+        'src/lib/dialog-focus.ts',
         'src/lib/conversation-export.ts',
         'src/lib/operation-outcome.ts',
         'src/lib/chat-request.ts',

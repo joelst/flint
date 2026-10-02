@@ -160,6 +160,19 @@ describe('renderer/sidecar boundary', () => {
     expect(page).toContain('Allow all URLs');
     expect(page).toContain('askDomainApproval(host, url)');
     expect(page).toContain('let offerFetchTool = allowWebTools');
+    expect(page).toContain('webConsentQueue = [...webConsentQueue, { kind: "search"');
+    expect(page).toContain('webConsentQueue = [...webConsentQueue, { kind: "domain"');
+    expect(page).toContain('webConsentQueue = webConsentQueue.slice(1)');
+    expect(page).not.toContain('webConsentPrompt = {');
+    expect(page).toContain('resultUrlsForConversation(sessionWebConsent, threadLoadedFor ?? "")');
+    expect(page).toContain('rememberResultUrls(sessionWebConsent, originId ?? "", resultUrls)');
+    expect(page).toContain('dialogTabTrap(');
+    expect(page).toContain('for this session and ends when the page reloads');
+    expect(page).not.toContain('until you quit Flint');
+    expect(page).toContain('loadStoredWebConsent(');
+    expect(page).toContain('saveStoredWebConsent(');
+    expect(page).not.toContain('localStorage.getItem(WEB_CONSENT_STORAGE_KEY)');
+    expect(page).not.toContain('localStorage.setItem(WEB_CONSENT_STORAGE_KEY');
   });
 
   it('marks manual web context untrusted and rejects image/tool combinations before inference', () => {

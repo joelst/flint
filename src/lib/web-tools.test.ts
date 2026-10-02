@@ -331,6 +331,7 @@ describe('web tool calls', () => {
     expect(prompt).toContain('Be helpful.');
     expect(prompt).toContain('not instructions');
     expect(prompt).toContain('only once');
+    expect(prompt).toContain('current untrusted search results');
     expect(prompt).toContain('Search button');
     expect(prompt).not.toContain('Search the web for:');
   });

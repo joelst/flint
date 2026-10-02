@@ -4,6 +4,8 @@
  * "Once" covers the request in front of the user and is not stored.
  * "Session" lasts until the page is reloaded. "Forever" is the only choice written to storage.
  * "All URLs" allows every later public URL for this session, not after a restart.
+ * Search-result URLs are remembered only for the conversation that produced them,
+ * and only until the page reloads.
  */
 
 export const WEB_CONSENT_STORAGE_KEY = 'flint-web-consent';
@@ -20,15 +22,17 @@ export interface SessionWebConsent {
   search: boolean;
   domains: Set<string>;
   allUrls: boolean;
-  resultUrls: Set<string>;
+  resultUrlsByConversation: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
 export function emptyStoredWebConsent(): StoredWebConsent {
   return { searchForever: false, domainsForever: [] };
 }
 
+const NO_RESULT_URLS: ReadonlySet<string> = new Set();
+
 export function emptySessionWebConsent(): SessionWebConsent {
-  return { search: false, domains: new Set(), allUrls: false, resultUrls: new Set() };
+  return { search: false, domains: new Set(), allUrls: false, resultUrlsByConversation: new Map() };
 }
 
 export function hostnameOf(url: string): string | null {
@@ -115,9 +119,43 @@ export function grantDomain(
 
 export function rememberResultUrls(
   session: SessionWebConsent,
+  conversationId: string,
   urls: Iterable<string>,
 ): SessionWebConsent {
-  const resultUrls = new Set(session.resultUrls);
-  for (const url of urls) resultUrls.add(url);
-  return { ...session, resultUrls };
+  if (!conversationId) return session;
+  const resultUrlsByConversation = new Map(session.resultUrlsByConversation);
+  const next = new Set(resultUrlsByConversation.get(conversationId) ?? []);
+  for (const url of urls) next.add(url);
+  resultUrlsByConversation.set(conversationId, next);
+  return { ...session, resultUrlsByConversation };
+}
+
+export function resultUrlsForConversation(
+  session: SessionWebConsent,
+  conversationId: string,
+): ReadonlySet<string> {
+  return session.resultUrlsByConversation.get(conversationId) ?? NO_RESULT_URLS;
+}
+
+export function loadStoredWebConsent(
+  storage: Pick<Storage, 'getItem'> | null | undefined,
+): StoredWebConsent {
+  if (!storage) return emptyStoredWebConsent();
+  try {
+    return readStoredWebConsent(storage.getItem(WEB_CONSENT_STORAGE_KEY));
+  } catch {
+    return emptyStoredWebConsent();
+  }
+}
+
+export function saveStoredWebConsent(
+  storage: Pick<Storage, 'setItem'> | null | undefined,
+  stored: StoredWebConsent,
+): void {
+  if (!storage) return;
+  try {
+    storage.setItem(WEB_CONSENT_STORAGE_KEY, writeStoredWebConsent(stored));
+  } catch {
+    // A locked-down webview throws SecurityError. The in-memory grant still applies.
+  }
 }

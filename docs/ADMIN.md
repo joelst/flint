@@ -44,8 +44,7 @@ The installer contains Flint, bundled Node, and Foundry native libraries. It doe
 Public web search is disabled by default and enabled per conversation in Playground Generation
 settings. With that toggle on, **Search** beside Send runs the typed message as the query.
 Flint asks for confirmation of that exact query before dispatch. The model does not choose the
-query or decide whether to search. Model `web_fetch` remains limited to HTTPS URLs typed or
-attached as URL chips in that same send. Separately, a pasted or typed URL can be added as a
+query or decide whether to search. Separately, a pasted or typed URL can be added as a
 context chip and then fetched by clicking **Fetch** on that chip. That explicit, user-initiated
 fetch happens immediately, independent of the toggle and of sending, and uses the same isolated
 helper and network rules. Search, fetch, and chip fetch all run in a short-lived helper process
@@ -64,8 +63,10 @@ to one line and limited to 500 characters. The first search asks for approval on
 session, or forever. Session approval lasts until the page reloads. Forever approval is stored in
 local storage. Declining leaves the draft unsent. A fetch of a search-result host asks for that
 domain once, for this session, forever, or for all public URLs for the rest of this session.
-URLs the user typed or attached do not ask again. A model `web_fetch` may use an allowed result
-URL after that approval. **Ask again for search and sites** clears the saved and session approvals.
+URLs the user typed or attached do not ask again. A model `web_fetch` may use an HTTPS URL typed
+or attached in that same send without another prompt, or, after the domain approval above, a
+search-result URL from the conversation that ran the search. **Ask again for search and sites**
+clears the saved and session approvals.
 Flint admits at most two helper processes at once and refuses excess retrievals explicitly. The
 Foundry chat transport does not support tools and image parts together, so Flint rejects that
 combination before starting inference.
