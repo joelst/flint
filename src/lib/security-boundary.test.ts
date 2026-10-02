@@ -152,10 +152,17 @@ describe('renderer/sidecar boundary', () => {
 
   it('preserves retrieval audits when the follow-up completion fails', () => {
     const page = readFileSync(join(process.cwd(), 'src', 'routes', '+page.svelte'), 'utf8');
-    expect(page).toContain('let webSources = doneFetches.map');
-    expect(page).toContain('title: fetch.title || fetch.finalUrl || fetch.url');
-    expect(page).toContain('url: fetch.finalUrl || fetch.url');
-    expect(page).toContain('truncated: fetch.truncated');
+    expect(page).toContain('const chipAudit = urlChipRetrievalAudit(pendingUrlFetches);');
+    expect(page.indexOf('const chipAudit = urlChipRetrievalAudit(pendingUrlFetches);'))
+      .toBeLessThan(page.indexOf('clearUrlFetches();', page.indexOf('chatMessages = stamped;')));
+    expect(page).toContain('let webSources = [...chipAudit.sources];');
+    expect(page).toContain('let webErrors = [...chipAudit.errors];');
+    expect(page).toContain('webErrors = [...webErrors, ...executed.errors];');
+    expect(page).not.toContain('webErrors = executed.errors;');
+    const audit = readFileSync(join(process.cwd(), 'src', 'lib', 'web-audit.ts'), 'utf8');
+    expect(audit).toContain('title: chip.title || chip.finalUrl || chip.url');
+    expect(audit).toContain('url: chip.finalUrl || chip.url');
+    expect(audit).toContain('The page contained no readable text');
     expect(page).toContain('finalUrl: result.url');
     expect(page).toContain('truncated: result.truncated');
     expect(page).toContain('the page content above is a truncated prefix');

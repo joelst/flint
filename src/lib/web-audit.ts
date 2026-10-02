@@ -82,6 +82,60 @@ function singleLine(text: string): string {
   return text.replace(/[\u0000-\u001f\u007f-\u009f\s]+/g, ' ').trim();
 }
 
+/** Page text that can be shown to the model. Whitespace alone is not readable. */
+export function chipTextIsReadable(text: unknown): text is string {
+  return typeof text === 'string' && text.trim().length > 0;
+}
+
+export interface UrlChipRetrieval {
+  url: string;
+  status: string;
+  finalUrl?: string;
+  title?: string;
+  text?: string;
+  truncated?: boolean;
+  error?: string;
+}
+
+/**
+ * Finished URL-chip outcomes for the answer's audit.
+ *
+ * A page with readable text is a source. A finished fetch that failed, or that returned no
+ * readable text, is a tool issue: send clears the chips, so this is the only remaining record.
+ * A dismissed chip was never fetched. A chip still loading is not part of this send.
+ */
+export function urlChipRetrievalAudit(chips: readonly UrlChipRetrieval[]): {
+  sources: WebAuditSource[];
+  errors: string[];
+} {
+  const sources: WebAuditSource[] = [];
+  const errors: string[] = [];
+  for (const chip of chips) {
+    if (!chip || typeof chip.url !== 'string' || !chip.url) continue;
+    if (chip.status === 'done' && chipTextIsReadable(chip.text)) {
+      const source: WebAuditSource = {
+        title: chip.title || chip.finalUrl || chip.url,
+        url: chip.finalUrl || chip.url,
+      };
+      if (chip.truncated) source.truncated = true;
+      sources.push(source);
+      continue;
+    }
+    if (chip.status === 'done') {
+      const url = singleLine(chip.finalUrl || chip.url) || chip.url;
+      errors.push(`web_fetch: ${url}: The page contained no readable text`);
+      continue;
+    }
+    if (chip.status === 'error' && !String(chip.error ?? '').includes('dismissed')) {
+      const url = singleLine(chip.url) || chip.url;
+      const detail = singleLine(chip.error || 'The page could not be fetched').slice(0, 500)
+        || 'The page could not be fetched';
+      errors.push(`web_fetch: ${url}: ${detail}`);
+    }
+  }
+  return { sources, errors };
+}
+
 export function webAuditSourceLabel(source: WebAuditSource): string {
   return `${singleLine(source.title || source.url) || source.url}${source.truncated ? ' (truncated)' : ''}`;
 }

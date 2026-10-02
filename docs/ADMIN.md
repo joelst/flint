@@ -53,7 +53,8 @@ bounded text through memory-backed pipes. Raw retrieved bodies are not written t
 conversation archive or access logs; the final answer and its source links and tool issues are
 persisted, the links and issues in a separate message field shown under the answer, outside the
 model's Markdown. A public search that returns no organic results is still recorded as a tool
-issue.
+issue. So is a finished URL-chip fetch that failed or returned no readable text. A dismissed
+chip, or one still loading when the message is sent, is not.
 Search terms and requested public URLs are disclosed to the public search service and destination
 site. Search dispatch requires an affirmative **`Search the web for: <query>`** line in the
 current user message (outside block quotes, including their lazy continuation lines, fenced code,

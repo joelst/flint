@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildWebAudit,
+  chipTextIsReadable,
   isAuditableUrl,
   messageClipboardWithWebAudit,
   normalizeWebAudit,
+  urlChipRetrievalAudit,
   webAuditErrorLabel,
   webAuditPlainText,
   webAuditSourceLabel,
@@ -81,6 +83,27 @@ describe('web audit', () => {
     expect(webAuditErrorLabel('web_fetch:\nbad\u0000x')).toBe('web_fetch: bad x');
     expect(webAuditPlainText(undefined)).toBe('');
     expect(webAuditPlainText({ sources: [], errors: ['oops'] })).toBe('Web tool issues:\n- oops');
+  });
+
+  it('keeps failed and empty URL-chip fetches and drops chips that never finished', () => {
+    expect(chipTextIsReadable('  hello ')).toBe(true);
+    expect(chipTextIsReadable('   ')).toBe(false);
+    expect(chipTextIsReadable(undefined)).toBe(false);
+    const audit = urlChipRetrievalAudit([
+      { url: 'https://example.com/page', status: 'done', title: 'Page', text: 'Hello', truncated: true },
+      { url: 'https://example.com/empty', status: 'done', finalUrl: 'https://example.com/empty/', text: ' \n ' },
+      { url: 'https://example.com/fail', status: 'error', error: 'timed\nout' },
+      { url: 'https://example.com/hide', status: 'error', error: 'dismissed' },
+      { url: 'https://example.com/wait', status: 'fetching' },
+      { url: 'https://example.com/queue', status: 'pending' },
+    ]);
+    expect(audit.sources).toEqual([
+      { title: 'Page', url: 'https://example.com/page', truncated: true },
+    ]);
+    expect(audit.errors).toEqual([
+      'web_fetch: https://example.com/empty/: The page contained no readable text',
+      'web_fetch: https://example.com/fail: timed out',
+    ]);
   });
 
   it('accepts a stored audit unchanged and rejects anything this schema would not write', () => {

@@ -76,7 +76,9 @@ The sidebar is grouped by workflow:
   in the current message, retrieved text is treated as untrusted reference material, and consulted
   sources (and any tool issues) appear in a separate **Sources consulted** section under the
   answer that the model's text cannot hide or alter. A search that returns nothing is listed as
-  a web tool issue instead of leaving no record. Copying the message includes that section.
+  a web tool issue instead of leaving no record. A URL chip that finishes in an error, or with no
+  readable text, is listed the same way. A chip you dismissed, or one still loading when you send,
+  is not recorded. Copying the message includes that section.
   Search terms and requested public URLs leave the
   device; Flint does not send cookies, credentials, or browser state.
   The toggle governs only what the model may do. Adding a detected URL as a context chip and then

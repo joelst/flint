@@ -206,7 +206,7 @@
     isEmptyAssistantPlaceholder,
     selectPinnedAndRecentMessages,
   } from "$lib/chat-request";
-  import { buildWebAudit } from "$lib/web-audit";
+  import { buildWebAudit, chipTextIsReadable, urlChipRetrievalAudit } from "$lib/web-audit";
   import {
     WEB_TOOL_DEFINITIONS,
     collectCurrentWebFetchUrls,
@@ -6609,7 +6609,11 @@ updateStateFromSdk();
 
     // Fetched page bodies are request-only. They must never enter `nextMessages`, because that
     // array becomes the persisted conversation archive below.
-    const doneFetches = pendingUrlFetches.filter(f => f.status === 'done' && f.text);
+    // Snapshot every finished chip before send clears the composer. A failure or a page with no
+    // readable text must stay on the answer; a dismissed chip or one still loading is not a
+    // retrieval outcome for this send.
+    const chipAudit = urlChipRetrievalAudit(pendingUrlFetches);
+    const doneFetches = pendingUrlFetches.filter((f) => f.status === 'done' && chipTextIsReadable(f.text));
     const urlContextMessages: any[] = [];
     if (doneFetches.length > 0) {
       const contextBlock = doneFetches.map(f => {
@@ -6750,12 +6754,8 @@ updateStateFromSdk();
 
     let assistantContent = "";
     let webRoundStarted = false;
-    let webSources = doneFetches.map((fetch) => ({
-      title: fetch.title || fetch.finalUrl || fetch.url,
-      url: fetch.finalUrl || fetch.url,
-      truncated: fetch.truncated,
-    }));
-    let webErrors = [];
+    let webSources = [...chipAudit.sources];
+    let webErrors = [...chipAudit.errors];
     // The audit is a separate, app-controlled field: model Markdown cannot hide or restyle it.
     const webAuditPatch = () => {
       const webAudit = buildWebAudit(webSources, webErrors);
@@ -6820,7 +6820,7 @@ updateStateFromSdk();
             ),
           );
           webSources = [...webSources, ...executed.sources];
-          webErrors = executed.errors;
+          webErrors = [...webErrors, ...executed.errors];
           if (requestController.signal.aborted) {
             updateAssistantMessage({
               content: "[Stopped after web retrieval. An already-started network request may have completed.]",
