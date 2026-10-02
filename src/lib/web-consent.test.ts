@@ -11,6 +11,7 @@ import {
   hostnameOf,
   loadStoredWebConsent,
   readStoredWebConsent,
+  WEB_CONSENT_STORAGE_KEY,
   rememberResultUrls,
   resultUrlsForConversation,
   saveStoredWebConsent,
@@ -160,11 +161,11 @@ describe('web consent', () => {
     };
     expect(loadStoredWebConsent(denied)).toEqual(emptyStoredWebConsent());
     expect(loadStoredWebConsent(null)).toEqual(emptyStoredWebConsent());
-    expect(() => saveStoredWebConsent(denied, {
+    expect(saveStoredWebConsent(denied, {
       searchForever: true,
       domainsForever: ['a.example'],
-    })).not.toThrow();
-    expect(() => saveStoredWebConsent(null, emptyStoredWebConsent())).not.toThrow();
+    })).toBe(false);
+    expect(saveStoredWebConsent(null, emptyStoredWebConsent())).toBe(true);
     const memory = new Map<string, string>();
     const storage = {
       getItem: (key: string) => memory.get(key) ?? null,
@@ -172,10 +173,26 @@ describe('web consent', () => {
         memory.set(key, value);
       },
     };
-    saveStoredWebConsent(storage, { searchForever: true, domainsForever: ['a.example'] });
+    expect(saveStoredWebConsent(storage, { searchForever: true, domainsForever: ['a.example'] })).toBe(true);
     expect(loadStoredWebConsent(storage)).toEqual({
       searchForever: true,
       domainsForever: ['a.example'],
+    });
+    const previous = writeStoredWebConsent({
+      searchForever: true,
+      domainsForever: ['kept.example'],
+    });
+    memory.set(WEB_CONSENT_STORAGE_KEY, previous);
+    const blocked = {
+      getItem: (key: string) => memory.get(key) ?? null,
+      setItem(): void {
+        throw new DOMException('quota', 'QuotaExceededError');
+      },
+    };
+    expect(saveStoredWebConsent(blocked, emptyStoredWebConsent())).toBe(false);
+    expect(loadStoredWebConsent(blocked)).toEqual({
+      searchForever: true,
+      domainsForever: ['kept.example'],
     });
   });
 

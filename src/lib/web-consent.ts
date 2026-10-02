@@ -3,6 +3,7 @@
  *
  * "Once" covers the request in front of the user and is not stored.
  * "Session" lasts until the page is reloaded. "Forever" is the only choice written to storage.
+ * A failed write leaves the previous saved choice in place.
  * "All URLs" allows every later public URL in the conversation that approved it,
  * until the page reloads. It is not stored and does not apply to other conversations.
  * Search-result URLs are remembered only for the conversation that produced them,
@@ -225,14 +226,19 @@ export function loadStoredWebConsent(
   }
 }
 
+/**
+ * False means the previous value is still stored. A missing storage object has
+ * nothing that can reappear on reload, so that is not a failed write.
+ */
 export function saveStoredWebConsent(
   storage: Pick<Storage, 'setItem'> | null | undefined,
   stored: StoredWebConsent,
-): void {
-  if (!storage) return;
+): boolean {
+  if (!storage) return true;
   try {
     storage.setItem(WEB_CONSENT_STORAGE_KEY, writeStoredWebConsent(stored));
+    return true;
   } catch {
-    // A locked-down webview throws SecurityError. The in-memory grant still applies.
+    return false;
   }
 }

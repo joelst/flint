@@ -204,6 +204,9 @@ describe('renderer/sidecar boundary', () => {
     expect(page).not.toContain('until you quit Flint');
     expect(page).toContain('loadStoredWebConsent(');
     expect(page).toContain('saveStoredWebConsent(');
+    expect(page).toContain('Could not save web approvals on this device. The previous choice is unchanged.');
+    expect(page).toContain('if (!persistWebConsent(emptyStoredWebConsent())) return;');
+    expect(page).toContain('splitCoveredConsentPrompts(storedWebConsent, sessionWebConsent, webConsentQueue.slice(1))');
     expect(page).not.toContain('localStorage.getItem(WEB_CONSENT_STORAGE_KEY)');
     expect(page).not.toContain('localStorage.setItem(WEB_CONSENT_STORAGE_KEY');
   });

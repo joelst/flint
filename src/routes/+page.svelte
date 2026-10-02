@@ -6623,18 +6623,24 @@ updateStateFromSdk();
     }
   }
 
-  function persistWebConsent(next: StoredWebConsent) {
+  function persistWebConsent(next: StoredWebConsent): boolean {
+    const saved = saveStoredWebConsent(typeof localStorage === "undefined" ? null : localStorage, next);
+    if (!saved) {
+      statusMessage = "Could not save web approvals on this device. The previous choice is unchanged.";
+      appendAppLog(statusMessage, "warn");
+      return false;
+    }
     storedWebConsent = next;
-    saveStoredWebConsent(typeof localStorage === "undefined" ? null : localStorage, next);
+    return true;
   }
 
   function applyWebConsent(next: { stored: StoredWebConsent; session: SessionWebConsent }) {
-    if (next.stored !== storedWebConsent) persistWebConsent(next.stored);
+    if (next.stored !== storedWebConsent && !persistWebConsent(next.stored)) return;
     sessionWebConsent = next.session;
   }
 
   function forgetWebApprovals() {
-    persistWebConsent(emptyStoredWebConsent());
+    if (!persistWebConsent(emptyStoredWebConsent())) return;
     sessionWebConsent = emptySessionWebConsent();
   }
 
@@ -6696,7 +6702,8 @@ updateStateFromSdk();
     applyWebConsent({ stored, session });
     // A one-time choice does not satisfy the next prompt. A session, forever, or
     // all-URL grant does, so those waiting requests must not show another dialog.
-    const split = splitCoveredConsentPrompts(stored, session, webConsentQueue.slice(1));
+    // Use the grant that was kept. A failed save must not cover the next prompt.
+    const split = splitCoveredConsentPrompts(storedWebConsent, sessionWebConsent, webConsentQueue.slice(1));
     webConsentQueue = split.remaining;
     prompt.resolve(resolved);
     for (const covered of split.covered) covered.resolve("once");

@@ -62,13 +62,15 @@ Search terms and requested public URLs are disclosed to the public search servic
 site. Search dispatch is the composer **Search** button. The query is the typed message, collapsed
 to one line and limited to 500 characters. The first search asks for approval once, for this
 session, or forever. Session approval lasts until the page reloads. Forever approval is stored in
-local storage. Declining leaves the draft unsent. A fetch of a search-result host asks for that
+local storage. If that write fails, Flint reports it and leaves the previous saved choice in place.
+Declining leaves the draft unsent. A fetch of a search-result host asks for that
 domain once, for this session, forever, or for all public URLs in that conversation until the page reloads.
 A redirect to a different host asks for that host before it is contacted.
 URLs the user typed or attached do not ask again. A model `web_fetch` may use an HTTPS URL typed
 or attached in that same send without another prompt, or, after the domain approval above, a
 search-result URL from the conversation that ran the search. **Ask again for search and sites**
-clears the saved and session approvals.
+clears the saved and session approvals when the saved choice can be removed. If that write fails,
+Flint reports it and leaves both in place.
 Flint admits at most two helper processes at once and refuses excess retrievals explicitly. The
 Foundry chat transport does not support tools and image parts together. A Search send that
 includes image context is refused. An ordinary Send leaves the fetch tool off and continues.

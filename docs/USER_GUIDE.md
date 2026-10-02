@@ -91,6 +91,7 @@ The sidebar is grouped by workflow:
   every URL chip; a page still loading when you send is not used for that message or any later one.
   Declining the search question leaves the draft in the composer and sends nothing.
   **Ask again for search and sites** in Generation settings clears those approvals.
+  If that saved choice cannot be written, Flint reports the failure and leaves the previous choice in place.
   Web tools cannot be combined with image context in one model request. Search refuses that send.
   Press Send without Search and Flint answers with the fetch tool left off, or remove the image.
   Stop suppresses any continuation after an in-flight retrieval returns; it does not prove that an
