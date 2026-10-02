@@ -93,6 +93,40 @@ export function allUrlsGranted(session: SessionWebConsent, conversationId: strin
   return conversationId.length > 0 && session.allUrlsByConversation.has(conversationId);
 }
 
+export interface AllUrlsGrantTarget {
+  id: string;
+  label: string;
+  /** The grant is for a conversation other than the one on screen. */
+  background: boolean;
+}
+
+function collapseConsentLabel(value: string | null | undefined): string {
+  return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+}
+
+/**
+ * The conversation an Allow all URLs choice would cover.
+ * An empty id cannot be granted, so the prompt must not offer that choice.
+ * A background chat with the same title as the open one keeps its id in the label.
+ */
+export function allUrlsGrantTarget(
+  conversationId: string,
+  title: string | null | undefined,
+  visibleConversationId?: string | null,
+  visibleTitle?: string | null,
+): AllUrlsGrantTarget | null {
+  const id = collapseConsentLabel(conversationId);
+  if (!id) return null;
+  const named = collapseConsentLabel(title);
+  const visibleId = collapseConsentLabel(visibleConversationId);
+  const background = visibleId !== id;
+  const sameTitle = named !== '' && named === collapseConsentLabel(visibleTitle);
+  const label = named
+    ? (background && sameTitle ? `${named} (${id})` : named)
+    : id;
+  return { id, label, background };
+}
+
 export function domainGranted(
   stored: StoredWebConsent,
   session: SessionWebConsent,

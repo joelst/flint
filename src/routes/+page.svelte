@@ -209,6 +209,7 @@
   import { dialogFocusable, dialogTabTrap, restoreDialogFocus } from "$lib/dialog-focus";
   import { buildWebAudit, chipTextIsReadable, urlChipRetrievalAudit } from "$lib/web-audit";
   import {
+    allUrlsGrantTarget,
     allUrlsGranted,
     domainGranted,
     emptySessionWebConsent,
@@ -6583,6 +6584,19 @@ updateStateFromSdk();
     }
   >>([]);
   const webConsentPrompt = $derived(webConsentQueue[0] ?? null);
+  // Allow all URLs follows the conversation that asked, which may be behind the one on screen.
+  const webConsentGrantTarget = $derived.by(() => {
+    const prompt = webConsentPrompt;
+    if (!prompt || prompt.kind !== "domain") return null;
+    const requested = findConversation(conversationArchive, prompt.conversationId);
+    const visible = findConversation(conversationArchive, threadLoadedFor);
+    return allUrlsGrantTarget(
+      prompt.conversationId,
+      requested?.title,
+      threadLoadedFor,
+      visible?.title,
+    );
+  });
   let webConsentDialog = $state<HTMLDivElement | null>(null);
   let webConsentReturnFocus: HTMLElement | null = null;
 
@@ -12613,7 +12627,16 @@ Output only the summary text, no preamble.`;
             <strong>{webConsentPrompt.host}</strong>. The page text is untrusted.
           </p>
           <p class="web-consent-url">{webConsentPrompt.url}</p>
-          <p>Allow all URLs applies to every public site in this conversation until the page reloads.</p>
+          {#if webConsentGrantTarget}
+            <p>
+              Allow all URLs applies to every public site in
+              <strong>{webConsentGrantTarget.label}</strong>
+              until the page reloads.
+            </p>
+            {#if webConsentGrantTarget.background}
+              <p>This request is from that conversation, not the one open now.</p>
+            {/if}
+          {/if}
         {/if}
       </div>
       <div class="web-consent-actions">
@@ -12625,7 +12648,9 @@ Output only the summary text, no preamble.`;
           <button type="button" onclick={() => finishWebConsent("once")}>This site once</button>
           <button type="button" onclick={() => finishWebConsent("session")}>This site this session</button>
           <button type="button" onclick={() => finishWebConsent("forever")}>Always allow this site</button>
-          <button type="button" onclick={() => finishWebConsent("all-urls")}>Allow all URLs</button>
+          {#if webConsentGrantTarget}
+            <button type="button" onclick={() => finishWebConsent("all-urls")}>Allow all URLs in {webConsentGrantTarget.label}</button>
+          {/if}
         {/if}
         <button type="button" class="secondary" onclick={() => finishWebConsent(null)}>Don't allow</button>
       </div>

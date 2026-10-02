@@ -75,7 +75,7 @@ The sidebar is grouped by workflow:
   The first search asks you to allow it just once, for this session, or always. Later searches
   skip that question when you chose session or always. The model answers from the results and does
   not decide whether to search. If an answer needs a page from those results, Flint asks you to
-  allow that domain once, for this session, or always, or to allow all public URLs in this conversation until the page reloads.
+  allow that domain once, for this session, or always, or to allow all public URLs in the conversation named in that prompt until the page reloads.
   If that page redirects to a different site, Flint asks before opening the new site.
   A URL you typed or attached as a chip is still fetched only as public HTTPS. Retrieved text is untrusted reference
   material, and consulted sources (and any tool issues) appear in a separate **Sources consulted**
@@ -221,7 +221,7 @@ Then launch Flint normally from Finder or Spotlight.
 
 ## Tool calling
 
-Models may return `tool_calls` on the OpenAI-compatible API. **Flint’s chat UI does not execute general tools.** The one exception is the supervised **Public web search & retrieval** round described under [Chat and conversations](#chat-and-conversations): it runs only when you enable it for a conversation, executes only Flint’s own `web_search` and `web_fetch`, and never runs tools a model invents. For anything else, point an agent client (Continue, Cline, your code) at the local endpoint; that client owns permissions and confirmation.
+Models may return `tool_calls` on the OpenAI-compatible API. **Flint’s chat UI does not execute general tools.** With **Public web search & retrieval** on, **Search** runs the typed query before the model answers. The model is not offered `web_search` and cannot start a search. The only tool it may request in that round is Flint’s own `web_fetch`, and only for a URL you already allowed. Flint never runs a tool a model invents. For anything else, point an agent client (Continue, Cline, your code) at the local endpoint; that client owns permissions and confirmation. See [Chat and conversations](#chat-and-conversations).
 
 ---
 

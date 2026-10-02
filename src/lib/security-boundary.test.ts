@@ -192,6 +192,10 @@ describe('renderer/sidecar boundary', () => {
     expect(page).toContain('restoreDialogFocus(back, [');
     expect(page).toContain('form button.stop');
     expect(page).toContain('in this conversation until the page reloads');
+    expect(page).toContain('allUrlsGrantTarget(');
+    expect(page).toContain('Allow all URLs in {webConsentGrantTarget.label}');
+    expect(page).toContain('This request is from that conversation, not the one open now.');
+    expect(page).not.toContain('every public site in this conversation');
     expect(page).not.toContain('until you quit Flint');
     expect(page).toContain('loadStoredWebConsent(');
     expect(page).toContain('saveStoredWebConsent(');

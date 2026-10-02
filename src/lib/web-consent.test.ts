@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  allUrlsGrantTarget,
   allUrlsGranted,
   domainGranted,
   emptySessionWebConsent,
@@ -42,6 +43,31 @@ describe('web consent', () => {
     expect(domainGranted(forSession.stored, emptySessionWebConsent(), 'example.com')).toBe(false);
     const forever = grantDomain(stored, session, 'Example.com', 'forever');
     expect(domainGranted(forever.stored, emptySessionWebConsent(), 'example.com')).toBe(true);
+  });
+
+  it('names the conversation an Allow all URLs grant would cover', () => {
+    expect(allUrlsGrantTarget('', 'Budget notes', 'visible')).toBeNull();
+    expect(allUrlsGrantTarget('   ', 'Budget notes', 'visible')).toBeNull();
+    expect(allUrlsGrantTarget('conv-a', '  Budget   notes  ', 'conv-a', 'Budget notes')).toEqual({
+      id: 'conv-a',
+      label: 'Budget notes',
+      background: false,
+    });
+    expect(allUrlsGrantTarget('conv-a', 'Budget notes', 'conv-b', 'Other')).toEqual({
+      id: 'conv-a',
+      label: 'Budget notes',
+      background: true,
+    });
+    expect(allUrlsGrantTarget('conv-a', 'New chat', 'conv-b', 'New chat')).toEqual({
+      id: 'conv-a',
+      label: 'New chat (conv-a)',
+      background: true,
+    });
+    expect(allUrlsGrantTarget('conv-a', '   ', 'conv-b')).toEqual({
+      id: 'conv-a',
+      label: 'conv-a',
+      background: true,
+    });
   });
 
   it('keeps Allow all URLs on the conversation that approved it', () => {
