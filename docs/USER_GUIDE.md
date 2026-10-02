@@ -82,7 +82,8 @@ The sidebar is grouped by workflow:
   clicking that chip's **Fetch** is a separate explicit action: the page is requested immediately,
   with the toggle on or off and before you send, through the same isolated helper.
   To authorize a search, put the exact unquoted query on its own line as
-  **`Search the web for: your query`**. Flint shows the exact outbound search query for
+  **`Search the web for: your query`**, outside block quotes, code blocks, and HTML comments.
+  Flint shows the exact outbound search query for
   confirmation immediately before sending it.
   Web tools cannot be combined with image context in one model request; remove the image or turn
   web tools off for that send.

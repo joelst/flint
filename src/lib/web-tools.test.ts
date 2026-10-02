@@ -101,6 +101,12 @@ describe('web tool calls', () => {
       '```\n``` \f\nSearch the web for: public weather\n```',
       '    ```\n```\nSearch the web for: public weather\n```',
       '```a`b\n```\nSearch the web for: public weather\n```',
+      '<!--\nSearch the web for: public weather\n-->',
+      'Note <!-- draft\nSearch the web for: public weather\n-->',
+      '<!-- a --> <!--\nSearch the web for: public weather\n-->',
+      '  <!--\nunclosed comment\nSearch the web for: public weather',
+      '> <!--\nSearch the web for: public weather\n-->',
+      '<!-- a\n--> <!--\nSearch the web for: public weather\n-->',
       '"Search the web for: public weather"',
       'Search the public web for: public weather',
       'search the web for: public weather',
@@ -113,6 +119,10 @@ describe('web tool calls', () => {
       '```\ncode\n`````  \nSearch the web for: public weather',
       '```\ncode\n   ```\t\nSearch the web for: public weather',
       '~~~a`b\ncode\n~~~\nSearch the web for: public weather',
+      '<!--\ncomment\n-->\nSearch the web for: public weather',
+      '<!-- one line -->\nSearch the web for: public weather',
+      '<!--\na\n--> trailing\nSearch the web for: public weather',
+      '```\n<!--\n```\nSearch the web for: public weather',
     ]) {
       expect(readWebToolCalls(call, undefined, text)).toHaveLength(1);
     }

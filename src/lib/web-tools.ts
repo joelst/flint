@@ -148,12 +148,31 @@ export function messagesContainImages(messages: unknown): boolean {
   });
 }
 
+/** Whether `line` leaves an HTML comment open at its end. */
+function opensHtmlComment(line: string): boolean {
+  let open = false;
+  let index = 0;
+  for (;;) {
+    const next = line.indexOf(open ? '-->' : '<!--', index);
+    if (next === -1) return open;
+    index = next + (open ? 3 : 4);
+    open = !open;
+  }
+}
+
 function authorizedSearchQuery(text: string): string | null {
   const prefix = 'Search the web for: ';
   const matches: string[] = [];
   let fence: { char: '`' | '~'; length: number } | null = null;
+  let inComment = false;
   for (const rawLine of text.split('\n')) {
     const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+    if (inComment) {
+      // An HTML comment runs to the first `-->`; nothing after it on that line starts a line.
+      const close = line.indexOf('-->');
+      if (close !== -1) inComment = opensHtmlComment(line.slice(close + 3));
+      continue;
+    }
     const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
     const run = marker?.[1];
     const rest = marker?.[2] ?? '';
@@ -170,6 +189,8 @@ function authorizedSearchQuery(text: string): string | null {
       fence = { char: run[0] as '`' | '~', length: run.length };
       continue;
     }
+    // Text inside a multi-line HTML comment is hidden, not affirmative, and may hold pasted markup.
+    inComment = opensHtmlComment(line);
     if (line.trimStart().startsWith('>')) continue;
     if (!line.startsWith(prefix)) continue;
     const query = line.slice(prefix.length);

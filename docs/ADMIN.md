@@ -55,7 +55,7 @@ persisted, the links and issues in a separate message field shown under the answ
 model's Markdown.
 Search terms and requested public URLs are disclosed to the public search service and destination
 site. Search dispatch requires an affirmative **`Search the web for: <query>`** line in the
-current user message, and the model must use that exact unquoted query. Model `web_fetch` dispatch
+current user message (outside block quotes, fenced code, and HTML comments), and the model must use that exact unquoted query. Model `web_fetch` dispatch
 is limited to URLs typed or attached as URL chips in that same send. A final confirmation displays the exact
 search query before dispatch; declining it sends no search request.
 Flint admits at most two helper processes at once and refuses excess retrievals explicitly. The
