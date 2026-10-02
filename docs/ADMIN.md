@@ -52,12 +52,14 @@ ranges on every DNS resolution and redirect, sends no cookies or credentials, an
 bounded text through memory-backed pipes. Raw retrieved bodies are not written to Flint's
 conversation archive or access logs; the final answer and its source links and tool issues are
 persisted, the links and issues in a separate message field shown under the answer, outside the
-model's Markdown.
+model's Markdown. A public search that returns no organic results is still recorded as a tool
+issue.
 Search terms and requested public URLs are disclosed to the public search service and destination
 site. Search dispatch requires an affirmative **`Search the web for: <query>`** line in the
-current user message (outside block quotes, fenced code, and HTML comments), and the model must use that exact unquoted query. Model `web_fetch` dispatch
-is limited to URLs typed or attached as URL chips in that same send. A final confirmation displays the exact
-search query before dispatch; declining it sends no search request.
+current user message (outside block quotes, including their lazy continuation lines, fenced code,
+and HTML comments), and the model must use that exact unquoted query. Model `web_fetch` dispatch
+is limited to URLs typed or attached as URL chips in that same send. A final confirmation displays
+the exact search query before dispatch; declining it sends no search request.
 Flint admits at most two helper processes at once and refuses excess retrievals explicitly. The
 Foundry chat transport does not support tools and image parts together, so Flint rejects that
 combination before starting inference.

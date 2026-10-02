@@ -174,6 +174,16 @@ describe('renderer/sidecar boundary', () => {
     expect(page).toContain('{ webToolsEnabled: includeWebToolInstruction }');
   });
 
+  it('retires every staged URL fetch attempt when a send commits', () => {
+    const page = readFileSync(join(process.cwd(), 'src', 'routes', '+page.svelte'), 'utf8');
+    // A fetch still in flight at send time would otherwise patch its chip to done afterwards,
+    // turning that page into context and fetch authority for the next message.
+    expect(page).not.toContain('if (doneFetches.length > 0) clearUrlFetches();');
+    expect(page).toMatch(/chatMessages = stamped;\s*(?:\/\/[^\n]*\n\s*)*clearUrlFetches\(\);/);
+    expect(page).toMatch(/function clearUrlFetches\(\) \{\s*pendingUrlFetches = \[\];/);
+    expect(page).toMatch(/function patchUrlFetch\(attempt: number[^)]*\) \{\s*const i = pendingUrlFetches\.findIndex\(f => f\.attempt === attempt\);\s*if \(i < 0\) return;/);
+  });
+
   it('renders the web audit outside the model Markdown sink', () => {
     const renderer = readFileSync(join(process.cwd(), 'src', 'lib', 'MessageRenderer.svelte'), 'utf8');
     expect(renderer.match(/\{@html /g)?.length).toBe(1);

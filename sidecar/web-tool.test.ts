@@ -395,6 +395,92 @@ describe('search execution', () => {
     });
   });
 
+  it('decodes a declared charset and rejects one it cannot honor', async () => {
+    const resolve = vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]);
+    const windows1252 = Buffer.concat([
+      Buffer.from('<title>Caf'),
+      Buffer.from([0xe9]),
+      Buffer.from('</title><p>Caf'),
+      Buffer.from([0xe9]),
+      Buffer.from('</p>'),
+    ]);
+    const decoded = await executeWebRequest(
+      { operation: 'fetch', url: 'https://example.com/' },
+      {
+        resolve,
+        request: vi.fn(async () => ({
+          statusCode: 200,
+          headers: { 'content-type': 'text/html; charset="Windows-1252"' },
+          body: windows1252,
+          truncated: false,
+        })),
+      },
+    );
+    expect(decoded.title).toBe('Café');
+    expect(decoded.text).toContain('Café');
+    expect(decoded.text).not.toContain('\uFFFD');
+
+    await expect(fetchPublicText('https://example.com/', {
+      resolve,
+      request: vi.fn(async () => ({
+        statusCode: 200,
+        headers: { 'content-type': "text/plain; charset='utf-8'" },
+        body: Buffer.from('plain'),
+        truncated: false,
+      })),
+    })).resolves.toMatchObject({ body: 'plain' });
+
+    await expect(fetchPublicText('https://example.com/', {
+      resolve,
+      request: vi.fn(async () => ({
+        statusCode: 200,
+        headers: { 'content-type': 'text/plain; charset=utf-7; charset=utf-8' },
+        body: Buffer.from('plain'),
+        truncated: false,
+      })),
+    })).resolves.toMatchObject({ body: 'plain' });
+
+    await expect(fetchPublicText('https://example.com/', {
+      resolve,
+      request: vi.fn(async () => ({
+        statusCode: 200,
+        headers: { 'content-type': 'text/plain; charset=utf-7' },
+        body: Buffer.from('not utf-7'),
+        truncated: false,
+      })),
+    })).rejects.toThrow(/charset: utf-7/i);
+
+    await expect(fetchPublicText('https://example.com/', {
+      resolve,
+      request: vi.fn(async () => ({
+        statusCode: 200,
+        headers: { 'content-type': 'text/plain; charset=' },
+        body: Buffer.from('x'),
+        truncated: false,
+      })),
+    })).rejects.toThrow(/charset/i);
+
+    await expect(fetchPublicText('https://example.com/', {
+      resolve,
+      request: vi.fn(async () => ({
+        statusCode: 200,
+        headers: { 'content-type': 'text/plain; charset=utf-8' },
+        body: Buffer.from([0xff]),
+        truncated: false,
+      })),
+    })).rejects.toThrow(/not valid utf-8/i);
+
+    await expect(fetchPublicText('https://example.com/', {
+      resolve,
+      request: vi.fn(async () => ({
+        statusCode: 200,
+        headers: { 'content-type': 'text/plain' },
+        body: Buffer.from([0xff]),
+        truncated: false,
+      })),
+    })).rejects.toThrow(/not valid utf-8/i);
+  });
+
   it('returns organic results from a successful search page', async () => {
     const resolve = vi.fn(async () => [{ address: '52.142.124.215', family: 4 }]);
     const request = vi.fn(async () => ({

@@ -165,6 +165,7 @@ function authorizedSearchQuery(text: string): string | null {
   const matches: string[] = [];
   let fence: { char: '`' | '~'; length: number } | null = null;
   let inComment = false;
+  let quoteParagraph = false;
   for (const rawLine of text.split('\n')) {
     const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
     if (inComment) {
@@ -187,11 +188,24 @@ function authorizedSearchQuery(text: string): string | null {
     // A backtick opener's info string may not contain backticks.
     if (run && !(run[0] === '`' && rest.includes('`'))) {
       fence = { char: run[0] as '`' | '~', length: run.length };
+      quoteParagraph = false;
       continue;
     }
     // Text inside a multi-line HTML comment is hidden, not affirmative, and may hold pasted markup.
     inComment = opensHtmlComment(line);
-    if (line.trimStart().startsWith('>')) continue;
+    // CommonMark blanks are only spaces and tabs; NBSP, form feed, or BOM lines still continue
+    // a quoted paragraph lazily.
+    if (/^[ \t]*$/.test(line)) {
+      quoteParagraph = false;
+      continue;
+    }
+    if (line.trimStart().startsWith('>')) {
+      // A quoted paragraph continues lazily onto unmarked lines until a blank line, so those
+      // lines are quoted too. Over-denial (e.g. after a quoted heading) is acceptable here.
+      quoteParagraph = /[^ \t>]/.test(line);
+      continue;
+    }
+    if (quoteParagraph) continue;
     if (!line.startsWith(prefix)) continue;
     const query = line.slice(prefix.length);
     if (!query || query !== query.trim() || /^["'“”‘’]|["'“”‘’]$/.test(query)) return null;
@@ -286,6 +300,10 @@ export async function executeWebToolCalls(
       if (signal?.aborted) break;
       const result = await execute(request);
       if (result.operation === 'search') {
+        // buildWebAudit omits a round with neither sources nor issues.
+        if (result.results.length === 0) {
+          errors.push('web_search: The public search returned no results');
+        }
         for (const item of result.results) sources.push({ title: item.title, url: item.url });
       } else {
         sources.push({

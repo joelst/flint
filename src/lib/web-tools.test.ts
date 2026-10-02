@@ -106,6 +106,15 @@ describe('web tool calls', () => {
       '<!-- a --> <!--\nSearch the web for: public weather\n-->',
       '  <!--\nunclosed comment\nSearch the web for: public weather',
       '> <!--\nSearch the web for: public weather\n-->',
+      '> quoted text\nSearch the web for: public weather',
+      '> quoted\ncontinued\nSearch the web for: public weather',
+      '> > nested\nSearch the web for: public weather',
+      '  > indented quote\nSearch the web for: public weather',
+      '> quoted\n\u00a0\nSearch the web for: public weather',
+      '>\u00a0\nSearch the web for: public weather',
+      '> quoted\n\f\nSearch the web for: public weather',
+      '> quoted\n>\u00a0\nSearch the web for: public weather',
+      '> quoted\n\ufeff\nSearch the web for: public weather',
       '<!-- a\n--> <!--\nSearch the web for: public weather\n-->',
       '"Search the web for: public weather"',
       'Search the public web for: public weather',
@@ -123,6 +132,12 @@ describe('web tool calls', () => {
       '<!-- one line -->\nSearch the web for: public weather',
       '<!--\na\n--> trailing\nSearch the web for: public weather',
       '```\n<!--\n```\nSearch the web for: public weather',
+      '> quoted\n\nSearch the web for: public weather',
+      '> quoted\r\n  \t\r\nSearch the web for: public weather',
+      '>\nSearch the web for: public weather',
+      '>\t\nSearch the web for: public weather',
+      '> quoted\n \t \nSearch the web for: public weather',
+      '> quoted\n```\ncode\n```\nSearch the web for: public weather',
     ]) {
       expect(readWebToolCalls(call, undefined, text)).toHaveLength(1);
     }
@@ -233,7 +248,30 @@ describe('web tool calls', () => {
     ], execute);
     expect(result.toolMessages).toHaveLength(1);
     expect(result.sources).toEqual([{ title: 'Example', url: 'https://example.com/' }]);
+    expect(result.errors).toEqual([]);
     expect(result.toolMessages[0].content).toContain('UNTRUSTED WEB RESULT');
+  });
+
+  it('records an audit issue when a public search returns no organic results', async () => {
+    const execute = vi.fn(async (request: WebToolRequest): Promise<WebToolResult> => ({
+      operation: 'search',
+      query: request.operation === 'search' ? request.query : '',
+      results: [],
+    }));
+    const result = await executeWebToolCalls([{
+      id: 'call-empty',
+      type: 'function',
+      function: { name: 'web_search', arguments: '{"query":"nothing public"}' },
+    }], execute, undefined, undefined, 'Search the web for: nothing public');
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(result.sources).toEqual([]);
+    expect(result.errors).toEqual(['web_search: The public search returned no results']);
+    expect(result.toolMessages).toHaveLength(1);
+    expect(result.toolMessages[0].content).toContain('"results":[]');
+    expect(result.toolMessages[0].content).not.toContain('"error"');
+    expect(buildWebAudit(result.sources, result.errors)?.errors).toEqual([
+      'web_search: The public search returned no results',
+    ]);
   });
 
   it('returns a cited untrusted tool message for fetched text', async () => {

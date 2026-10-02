@@ -6696,7 +6696,9 @@ updateStateFromSdk();
       return;
     }
     chatMessages = stamped;
-    if (doneFetches.length > 0) clearUrlFetches();
+    // Retire every staged fetch attempt, including in-flight ones: a reply arriving after this
+    // send would otherwise mark its chip done and become context and authority for the next one.
+    clearUrlFetches();
     chatInput = "";
     clearComposerAttachments(); // clear after queuing for send
     const originId = threadLoadedFor;
@@ -7370,7 +7372,7 @@ Output only the summary text, no preamble.`;
    */
   function patchUrlFetch(attempt: number, patch: Record<string, any>) {
     const i = pendingUrlFetches.findIndex(f => f.attempt === attempt);
-    if (i < 0) return; // the user removed this chip — drop the result
+    if (i < 0) return; // removed, or retired by send — drop the late result
     pendingUrlFetches[i] = { ...pendingUrlFetches[i], ...patch };
     pendingUrlFetches = [...pendingUrlFetches];
   }

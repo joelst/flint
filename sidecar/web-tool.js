@@ -1,7 +1,6 @@
 import dns from 'node:dns/promises';
 import https from 'node:https';
 import net from 'node:net';
-import { StringDecoder } from 'node:string_decoder';
 import { pathToFileURL } from 'node:url';
 import { canonicalHostname, isDeniedAddress, isLocalHostname } from './web-address-policy.js';
 
@@ -118,10 +117,39 @@ function withDeadline(promise, deadlineAt, message) {
   ]);
 }
 
-function decodeResponseBody(body, truncated) {
-  if (!truncated) return body.toString('utf8');
-  const decoder = new StringDecoder('utf8');
-  return decoder.write(body);
+/** Last `charset` parameter, or null when the header does not declare one. `''` means it was empty. */
+function declaredCharset(header) {
+  const pattern = /(?:^|;)\s*charset\s*=\s*(?:"([^"]*)"|'([^']*)'|([^;\s]*))/gi;
+  let found = false;
+  let value = '';
+  for (const match of String(header).matchAll(pattern)) {
+    found = true;
+    value = (match[1] ?? match[2] ?? match[3] ?? '').trim();
+  }
+  return found ? value : null;
+}
+
+function decodeResponseBody(body, truncated, charset) {
+  const label = charset == null ? 'utf-8' : charset;
+  let decoder;
+  try {
+    decoder = new TextDecoder(label, { fatal: true });
+  } catch (error) {
+    if (error instanceof RangeError) {
+      throw new Error(`Unsupported response charset: ${label}`);
+    }
+    throw error;
+  }
+  try {
+    // A bounded prefix may end mid-character. Streaming keeps that tail buffered instead of
+    // inserting a replacement character; a finished body must be valid for its charset.
+    return decoder.decode(body, { stream: truncated === true });
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new Error(`Response body is not valid ${decoder.encoding}`);
+    }
+    throw error;
+  }
 }
 
 export function requestPinned(url, resolved, options = {}) {
@@ -232,8 +260,8 @@ export async function fetchPublicText(rawUrl, dependencies = {}) {
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw new Error(`Remote server returned HTTP ${response.statusCode}`);
     }
-    const contentType = String(response.headers['content-type'] ?? '')
-      .split(';', 1)[0].trim().toLowerCase();
+    const rawContentType = String(response.headers['content-type'] ?? '');
+    const contentType = rawContentType.split(';', 1)[0].trim().toLowerCase();
     if (!ALLOWED_CONTENT_TYPES.includes(contentType)) {
       throw new Error(`Unsupported response content type: ${contentType || 'missing'}`);
     }
@@ -242,11 +270,13 @@ export async function fetchPublicText(rawUrl, dependencies = {}) {
     if (contentEncoding && contentEncoding !== 'identity') {
       throw new Error(`Unsupported response content encoding: ${contentEncoding}`);
     }
+    const charset = declaredCharset(rawContentType);
+    if (charset === '') throw new Error('Unsupported response charset');
     return {
       url: current.toString(),
       statusCode: response.statusCode,
       contentType,
-      body: decodeResponseBody(response.body, response.truncated === true),
+      body: decodeResponseBody(response.body, response.truncated === true, charset),
       truncated: response.truncated === true,
     };
   }
