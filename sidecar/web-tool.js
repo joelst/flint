@@ -54,6 +54,35 @@ function stripMarkup(value) {
     .trim();
 }
 
+/**
+ * Hidden page regions must not become model text. Browsers do not show HTML comments or the
+ * body of an active element; a comment that contains `>` and an unclosed comment or tag are
+ * both still hidden, and `stripMarkup` would otherwise keep that text.
+ */
+function stripHiddenContent(html) {
+  const withoutComments = String(html)
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<!--[\s\S]*$/g, ' ');
+  const open = /<(script|style|noscript|svg|iframe|form)\b[^>]*>/gi;
+  let result = '';
+  let cursor = 0;
+  for (const match of withoutComments.matchAll(open)) {
+    const start = match.index ?? 0;
+    if (start < cursor) continue;
+    result += withoutComments.slice(cursor, start);
+    const tag = match[1].toLowerCase();
+    const rest = withoutComments.slice(start + match[0].length);
+    const close = new RegExp(`</${tag}\\s*>`, 'i').exec(rest);
+    if (!close) return result;
+    cursor = start + match[0].length + close.index + close[0].length;
+  }
+  return result + withoutComments.slice(cursor);
+}
+
+function readableText(html) {
+  return stripMarkup(stripHiddenContent(html));
+}
+
 function normalizePublicUrl(raw) {
   const parsed = new URL(String(raw).trim());
   if (parsed.protocol !== 'https:') throw new Error('Only HTTPS URLs are allowed');
@@ -298,16 +327,11 @@ export async function fetchPublicText(rawUrl, dependencies = {}) {
 }
 
 function extractPageText(html) {
-  const withoutPairs = html
-    .replace(/<(script|style|noscript|svg|iframe|form)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ');
-  // A truncated body can open an active element and never close it. The pair pass misses that,
-  // and stripMarkup would then keep the element's text.
-  const withoutActive = withoutPairs
-    .replace(/<(script|style|noscript|svg|iframe|form)\b[^>]*>[\s\S]*$/i, ' ');
-  const titleMatch = withoutActive.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i);
+  const visible = stripHiddenContent(html);
+  const titleMatch = visible.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i);
   return {
-    title: titleMatch ? stripMarkup(titleMatch[1]) : '',
-    text: stripMarkup(withoutActive),
+    title: titleMatch ? readableText(titleMatch[1]) : '',
+    text: readableText(visible),
   };
 }
 
@@ -338,9 +362,9 @@ export function decodeSearchResults(html, maxResults) {
       const url = unwrapDuckDuckGoUrl(link[1]);
       const snippetMatch = block.match(/<(?:a|div)[^>]+class=["'][^"']*\bresult__snippet\b[^"']*["'][^>]*>([\s\S]*?)<\/(?:a|div)>/i);
       results.push({
-        title: stripMarkup(link[2]).slice(0, 300),
+        title: readableText(link[2]).slice(0, 300),
         url,
-        snippet: snippetMatch ? stripMarkup(snippetMatch[1]).slice(0, 1_000) : '',
+        snippet: snippetMatch ? readableText(snippetMatch[1]).slice(0, 1_000) : '',
       });
     } catch {
       continue;
@@ -359,8 +383,9 @@ export async function executeWebRequest(raw, dependencies = {}) {
       method: 'POST',
       body,
     });
-    if (page.statusCode !== 200
-      || /anomaly-modal|challenge-form|bots use duckduckgo too/i.test(page.body)) {
+    // The challenge page is identified by its markup. The sentence "bots use DuckDuckGo too"
+    // also appears in ordinary result snippets and must not fail a completed search.
+    if (page.statusCode !== 200 || /anomaly-modal|challenge-form/i.test(page.body)) {
       throw new Error('Public search service returned a bot challenge');
     }
     return {
