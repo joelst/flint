@@ -1,5 +1,52 @@
 # Flint Changelog
 
+## 0.10.0
+
+### Minor Changes
+
+- f2b187d: Show benchmark suite definitions and case editing, and record full-call response time on finished runs.
+- 770ba47: A local endpoint request for a cached build can load that build when another build of the same model is idle. Diagnostics → Test local endpoint runs the chat, embedding, and speech checks against every model id and parent alias the endpoint lists.
+- b2be59c: Playground now exposes generation parameters — temperature, max tokens, top-p, top-k, frequency penalty, presence penalty, and a fixed sampling seed — in a collapsible panel next to the Context control, persisted per conversation the same way the model and system prompt are.
+- 0720559: Add opt-in, per-conversation public web search and retrieval with bounded isolation and visible sources.
+- 0cbd257: **Recheck Providers** on the Models page repairs execution providers that are not registered: it replaces a broken CUDA or WebGPU download, registers the others again, and names any provider that is still not registered. The button is visible in light and dark mode.
+- 8715aeb: Add derived transcript timing exports with pause-aware chunking and accurate segment progress, plus model family sorting and search.
+  Download SRT captions and their timing note together.
+
+### Patch Changes
+
+- d7b92b9: Keep a single stored content part renderable, sendable, and saved instead of dropping the message, and tighten SDK-import diagnostics.
+- aede9a3: Route Whisper and Nemotron through supported single-inference AudioSession paths, validate WAV chunk boundaries, defer uncertain speech-family routing until load, reject known unsupported Parakeet models early, and preserve transcription errors when cleanup also fails.
+- 999212b: Fix Playground persona theme colors and align generation settings with the composer width.
+- 9cc7044: Populate the model catalog after registering every discovered accelerator so compatible GPU variants are available.
+  Keep loaded-model tracking accurate across restarts and eviction, and safely refuse catalog changes blocked by expired telemetry.
+- d3f363b: Clarify the "catalog not yet checked" notice so it doesn't imply a check is already running.
+- 999212b: Align Playground image attachment with composer actions and line up user and assistant messages.
+- e3d2f94: Prevent neutral Playground penalty settings from corrupting replies from models such as Gemma 4 E2B.
+- a63b103: Search the public web from the composer Search button, with approval once, for the session, or always. Opening a site from the results asks for that domain, or for all public URLs in that conversation until the page reloads, and a redirect to another site asks before that site is opened.
+- 26c1e1c: Replace the fixed-option Context turns dropdown with a continuous slider (4-40), fixing a bug where a model's recommended turn count often fell outside the preset list and left the control showing blank.
+- d7b92b9: Add a Settings option that opens the webview developer tools, and keep the inspector available in release builds.
+- 54190a5: Requests through the local endpoint that name a model alias, or a model that is not loaded yet, work again on Foundry Local 2.0.1: the gateway recognizes its not-loaded and not-found replies, loads the cached model, and replays under the loaded variant id. An explicit `:<version>` that is not cached is no longer served by another version.
+- 54190a5: Canonicalize whitespace-padded model IDs before replaying local endpoint requests, including IDs that already match the loaded variant after trimming.
+- 3edda9a: Gateway (OpenAI-compatible endpoint) rows in the Access Log now report token counts, time-to-first-token, and decode throughput for chat completions, instead of always showing "—". Captured from the response the proxy already parses for normalization, with no extra buffering of streamed responses.
+- a237030: The gateway now refuses non-multipart and structurally incomplete `/v1/audio/transcriptions` requests before they can reach Foundry.
+- 8f1fa26: Reject malformed IPC envelopes and tool definitions instead of terminating the sidecar, and keep model output out of JSON parse error messages.
+- d2aae11: Add a local build command that applies a temporary app version without changing tracked version files.
+- 6f77c24: Accept the macOS ONNX Runtime alias after Tauri copies release resources. The staged `libonnxruntime.dylib` is a regular file, not the symlink the SDK installer created, and the bundle check was failing the release on that copy.
+- 999212b: Add message timestamps, simplify the copy action, and give user messages a subtle offset.
+- 99d9c9f: Builds no longer reuse a cached Foundry native runtime from a different SDK version; the CI cache is keyed to the exact lockfile.
+- f785d9d: Fix Playground attachments with native image understanding, compact persistence, text/code files, and a cleaner composer.
+- 56aa5d7: Recognize newer Nemotron ASR model names (e.g. `nemotron-3.5-asr-streaming-0.6b`) as speech models instead of chat, matching an `-asr-` marker in addition to the original `-speech-` naming.
+- 8f1fa26: Preserve complete tool-call loops across chat transports without exposing reply payloads in renderer logs.
+- d7b92b9: Show a recoverable error instead of a blank Playground when a message fails to render, and stop warning about the expected packaged SDK layout on every launch.
+- d7b92b9: Fix the Playground failing to open because two composer snippets were declared outside the scope that renders them.
+- 999212b: Improve message copy controls and reduce spacing between Playground messages.
+- 4c13173: Show authoritative completed benchmark results instead of stale live status or poll errors.
+- 0cbd257: Windows installs now replace the Foundry SDK and its ONNX Runtime instead of keeping the previous version's DLLs, and put the previous SDK back if the install fails or is cancelled. Builds no longer package an ONNX Runtime DLL that is not the pinned version.
+- 70d76af: Update the bundled archive dependency with its latest security and reliability fixes.
+- 999212b: Automatically optimize attached images over 200 KiB, enforce the native one-image request limit, surface send failures beside the composer, and simplify the chat composer.
+- 8f1fa26: Migrate chat and embeddings onto SDK v2 sessions while preserving the wire contract, validating structured response formats, and bounding streamed tool-call snapshots efficiently.
+- 2cf6b79: Transcription no longer fails with "Unable to decode audio data" for WAV files some WebView2/Chromium builds reject: Flint parses standard PCM WAV itself instead of relying solely on the browser decoder. Other formats (MP3, etc.) that still fail to decode now report which container was detected and suggest converting to WAV.
+
 ## 0.9.1
 
 ### Patch Changes
