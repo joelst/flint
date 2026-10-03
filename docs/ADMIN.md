@@ -41,12 +41,15 @@ The installer contains Flint, bundled Node, and Foundry native libraries. It doe
 
 ## Playground public web retrieval
 
-Public web search and retrieval by the **model** is disabled by default and enabled per
-conversation in Playground Generation settings; that toggle governs only model-initiated
-`web_search`/`web_fetch` calls. Separately, a pasted or typed URL can be added as a context chip
-and then fetched by clicking **Fetch** on that chip. That explicit, user-initiated fetch happens
-immediately, independent of the toggle and of sending, and uses the same isolated helper and
-network rules. Both paths run in a short-lived helper process separate from the Foundry sidecar.
+Public web search is disabled by default and enabled per conversation in Playground Generation
+settings. With that toggle on, **Search** beside Send runs the typed message as the query.
+Flint asks for confirmation of that exact query before dispatch when no session or forever
+search approval is already remembered. The model does not choose the
+query or decide whether to search. Separately, a pasted or typed URL can be added as a
+context chip and then fetched by clicking **Fetch** on that chip. That explicit, user-initiated
+fetch happens immediately, independent of the toggle and of sending, and uses the same isolated
+helper and network rules. Search, fetch, and chip fetch all run in a short-lived helper process
+separate from the Foundry sidecar.
 The helper accepts only bounded public HTTPS search/fetch requests, rejects local and special IP
 ranges on every DNS resolution and redirect, sends no cookies or credentials, and returns only
 bounded text through memory-backed pipes. Raw retrieved bodies are not written to Flint's
@@ -56,14 +59,21 @@ model's Markdown. A public search that returns no organic results is still recor
 issue. So is a finished URL-chip fetch that failed or returned no readable text. A dismissed
 chip, or one still loading when the message is sent, is not.
 Search terms and requested public URLs are disclosed to the public search service and destination
-site. Search dispatch requires an affirmative **`Search the web for: <query>`** line in the
-current user message (outside block quotes, including their lazy continuation lines, fenced code,
-and HTML comments), and the model must use that exact unquoted query. Model `web_fetch` dispatch
-is limited to URLs typed or attached as URL chips in that same send. A final confirmation displays
-the exact search query before dispatch; declining it sends no search request.
+site. Search dispatch is the composer **Search** button. The query is the typed message, collapsed
+to one line and limited to 500 characters. The first search asks for approval once, for this
+session, or forever. Session approval lasts until the page reloads. Forever approval is stored in
+local storage. If that write fails, Flint reports it and leaves the previous saved choice in place.
+Declining leaves the draft unsent. A fetch of a search-result host asks for that
+domain once, for this session, forever, or for all public URLs in that conversation until the page reloads.
+A redirect to a different host asks for that host before it is contacted.
+URLs the user typed or attached do not ask again. A model `web_fetch` may use an HTTPS URL typed
+or attached in that same send without another prompt, or, after the domain approval above, a
+search-result URL from the conversation that ran the search. **Ask again for search and sites**
+clears the saved and session approvals when the saved choice can be removed. If that write fails,
+Flint reports it and leaves both in place.
 Flint admits at most two helper processes at once and refuses excess retrievals explicitly. The
-Foundry chat transport does not support tools and image parts together, so Flint rejects that
-combination before starting inference.
+Foundry chat transport does not support tools and image parts together. A Search send that
+includes image context is refused. An ordinary Send leaves the fetch tool off and continues.
 The helper inherits only minimal Windows runtime environment variables, but it is not an OS
 security boundary against other processes running as the same signed-in user.
 

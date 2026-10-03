@@ -4,9 +4,12 @@ import {
   WEB_TOOL_DEFINITIONS,
   collectCurrentWebFetchUrls,
   collectWebFetchUrls,
+  composerSearchQuery,
+  searchResultUrls,
   executeWebToolCalls,
   messagesContainImages,
   readWebToolCalls,
+  userSearchContext,
   webContentSystemInstruction,
   webToolSystemInstruction,
   type WebToolRequest,
@@ -14,9 +17,9 @@ import {
 } from './web-tools';
 
 describe('web tool calls', () => {
-  it('exposes only bounded search and fetch tools', () => {
+  it('exposes only a bounded fetch tool to the model', () => {
     expect(WEB_TOOL_DEFINITIONS.map((tool) => tool.function.name))
-      .toEqual(['web_search', 'web_fetch']);
+      .toEqual(['web_fetch']);
   });
 
   it('rejects unknown tools, malformed JSON, and more than two calls', () => {
@@ -51,104 +54,74 @@ describe('web tool calls', () => {
     }], allowed)).toThrow(/current user message/i);
   });
 
-  it('allows only explicitly requested search text from the latest user message', () => {
-    const call = [{
+  it('uses the typed draft as the search query and refuses a model-started search', () => {
+    expect(composerSearchQuery('  public\nweather \t')).toEqual({ ok: true, query: 'public weather' });
+    expect(composerSearchQuery('   ')).toEqual({
+      ok: false,
+      error: 'Type a search query, then press Search.',
+    });
+    expect(composerSearchQuery('x'.repeat(501)).ok).toBe(false);
+    expect(() => readWebToolCalls([{
       id: '1',
-      type: 'function' as const,
+      type: 'function',
       function: { name: 'web_search', arguments: '{"query":"public weather"}' },
-    }];
-    expect(readWebToolCalls(
-      call,
-      undefined,
-      'Private project code: bluebird.\nSearch the web for: public weather',
-    )[0].request).toMatchObject({ query: 'public weather' });
-    expect(() => readWebToolCalls(
-      [{
-        ...call[0],
-        function: { name: 'web_search', arguments: '{"query":"bluebird"}' },
-      }],
-      undefined,
-      'Private project code: bluebird.\nSearch the web for: public weather',
-    )).toThrow(/Search the web for/i);
-    expect(() => readWebToolCalls(
-      call,
-      undefined,
-      'Do not search the web for: public weather',
-    )).toThrow(/Search the web for/i);
-    expect(() => readWebToolCalls(
-      call,
-      undefined,
-      'Search the web for: "public weather"',
-    )).toThrow(/exact unquoted query/i);
-    expect(() => readWebToolCalls(
-      [{
-        ...call[0],
-        function: { name: 'web_search', arguments: '{"query":"weather"}' },
-      }],
-      undefined,
-      'Search the web for: public weather',
-    )).toThrow(/exact unquoted query/i);
-    for (const text of [
-      '> Search the web for: public weather',
-      '```text\nSearch the web for: public weather\n```',
-      '````md\n```\nSearch the web for: public weather\n```\n````',
-      '~~~~\n~~~\nSearch the web for: public weather\n~~~\n~~~~',
-      '```\n``` not a closing fence\nSearch the web for: public weather\n```',
-      '```\nunclosed fence\nSearch the web for: public weather',
-      '```\n    ```\nSearch the web for: public weather\n```',
-      '```\n\t```\nSearch the web for: public weather\n```',
-      '```\n\u00a0```\nSearch the web for: public weather\n```',
-      '```\n``` \f\nSearch the web for: public weather\n```',
-      '    ```\n```\nSearch the web for: public weather\n```',
-      '```a`b\n```\nSearch the web for: public weather\n```',
-      '<!--\nSearch the web for: public weather\n-->',
-      'Note <!-- draft\nSearch the web for: public weather\n-->',
-      '<!-- a --> <!--\nSearch the web for: public weather\n-->',
-      '  <!--\nunclosed comment\nSearch the web for: public weather',
-      '> <!--\nSearch the web for: public weather\n-->',
-      '> quoted text\nSearch the web for: public weather',
-      '> quoted\ncontinued\nSearch the web for: public weather',
-      '> > nested\nSearch the web for: public weather',
-      '  > indented quote\nSearch the web for: public weather',
-      '> quoted\n\u00a0\nSearch the web for: public weather',
-      '>\u00a0\nSearch the web for: public weather',
-      '> quoted\n\f\nSearch the web for: public weather',
-      '> quoted\n>\u00a0\nSearch the web for: public weather',
-      '> quoted\n\ufeff\nSearch the web for: public weather',
-      '<!-- a\n--> <!--\nSearch the web for: public weather\n-->',
-      '"Search the web for: public weather"',
-      'Search the public web for: public weather',
-      'search the web for: public weather',
-      'Search the web for: public weather\nSearch the web for: other query',
-    ]) {
-      expect(() => readWebToolCalls(call, undefined, text)).toThrow(/Search the web for/i);
-    }
-    for (const text of [
-      '````md\n```\nexample\n```\n````\nSearch the web for: public weather',
-      '```\ncode\n`````  \nSearch the web for: public weather',
-      '```\ncode\n   ```\t\nSearch the web for: public weather',
-      '~~~a`b\ncode\n~~~\nSearch the web for: public weather',
-      '<!--\ncomment\n-->\nSearch the web for: public weather',
-      '<!-- one line -->\nSearch the web for: public weather',
-      '<!--\na\n--> trailing\nSearch the web for: public weather',
-      '```\n<!--\n```\nSearch the web for: public weather',
-      '> quoted\n\nSearch the web for: public weather',
-      '> quoted\r\n  \t\r\nSearch the web for: public weather',
-      '>\nSearch the web for: public weather',
-      '>\t\nSearch the web for: public weather',
-      '> quoted\n \t \nSearch the web for: public weather',
-      '> quoted\n```\ncode\n```\nSearch the web for: public weather',
-    ]) {
-      expect(readWebToolCalls(call, undefined, text)).toHaveLength(1);
-    }
-    expect(() => readWebToolCalls(
-      [{
-        ...call[0],
-        function: { name: 'web_search', arguments: '{"query":"Public Weather"}' },
-      }],
-      undefined,
-      'Search the web for: public weather',
-    )).toThrow(/exact unquoted query/i);
+    }])).toThrow(/cannot start a web search/i);
+    const packed = userSearchContext({
+      operation: 'search',
+      query: 'public weather',
+      results: [{ title: 'Forecast', url: 'https://example.com/', snippet: 'Rain' }],
+    });
+    expect(packed.context).toContain('UNTRUSTED WEB RESULT');
+    expect(packed.context).toContain('Search query: public weather');
+    expect(packed.context).toContain('https://example.com/');
+    expect(packed.sources).toEqual([{ title: 'Forecast', url: 'https://example.com/' }]);
+    expect(packed.errors).toEqual([]);
+    const empty = userSearchContext({
+      operation: 'search',
+      query: 'nothing public',
+      results: [],
+    });
+    expect(empty.sources).toEqual([]);
+    expect(empty.errors).toEqual(['web_search: The public search returned no results']);
+    expect(buildWebAudit(empty.sources, empty.errors)?.errors).toEqual(empty.errors);
+  });
+
+  it('keeps helper search URLs that legitimately end in punctuation', () => {
+    expect([...searchResultUrls([
+      { url: 'https://example.com/file.' },
+      { url: 'https://example.com/a,' },
+      { url: 'https://example.com/b;' },
+      { url: 'https://example.com/c:' },
+      { url: 'https://example.com/d%7D' },
+      { url: 'https://example.com/d}' },
+      { url: 'https://example.com/page!' },
+      { url: 'https://example.com/file.#section' },
+      { url: 'http://example.com/file.' },
+      { url: '' },
+    ])]).toEqual([
+      'https://example.com/file.',
+      'https://example.com/a,',
+      'https://example.com/b;',
+      'https://example.com/c:',
+      'https://example.com/d%7D',
+      'https://example.com/page!',
+    ]);
+    expect([...collectWebFetchUrls([{
+      role: 'user',
+      content: [
+        'https://example.com/file.',
+        'https://example.com/a,',
+        'https://example.com/b;',
+        'https://example.com/c:',
+        'https://example.com/d}',
+      ].join('\n'),
+    }])]).toEqual([
+      'https://example.com/file',
+      'https://example.com/a',
+      'https://example.com/b',
+      'https://example.com/c',
+      'https://example.com/d',
+    ]);
   });
 
   it('collects text-part URLs while excluding system, tool, and malformed content', () => {
@@ -219,20 +192,20 @@ describe('web tool calls', () => {
 
   it('rejects malformed IDs, call envelopes, argument shapes, and URLs', () => {
     expect(() => readWebToolCalls([
-      { id: 'same', type: 'function', function: { name: 'web_search', arguments: '{"query":"a"}' } },
-      { id: 'same', type: 'function', function: { name: 'web_search', arguments: '{"query":"b"}' } },
+      { id: 'same', type: 'function', function: { name: 'web_fetch', arguments: '{"url":"https://example.com/a"}' } },
+      { id: 'same', type: 'function', function: { name: 'web_fetch', arguments: '{"url":"https://example.com/b"}' } },
     ])).toThrow(/unique/i);
     expect(() => readWebToolCalls([{ id: '1', type: 'other' }])).toThrow(/malformed/i);
     expect(() => readWebToolCalls([{
       id: '1',
       type: 'function',
-      function: { name: 'web_search', arguments: '[]' },
+      function: { name: 'web_fetch', arguments: '[]' },
     }])).toThrow(/object/i);
     expect(() => readWebToolCalls([{
       id: '1',
       type: 'function',
       function: { name: 'web_search', arguments: '{"query":"x","headers":{}}' },
-    }])).toThrow(/unsupported/i);
+    }])).toThrow(/cannot start a web search/i);
     expect(() => readWebToolCalls([{
       id: '1',
       type: 'function',
@@ -245,54 +218,26 @@ describe('web tool calls', () => {
     }])).toThrow(/unsupported/i);
   });
 
-  it('executes one bounded round and returns source citations separately', async () => {
-    const execute = vi.fn(async (request: WebToolRequest): Promise<WebToolResult> => request.operation === 'search'
-      ? { operation: 'search', query: request.query, results: [{
-          title: 'Example',
-          url: 'https://example.com/',
-          snippet: 'Result text',
-        }] }
-      : {
-          operation: 'fetch',
-          url: request.url,
-          title: 'Page',
-          text: 'Body',
-          truncated: false,
-          charCount: 4,
-        });
+  it('executes one bounded fetch round and returns source citations separately', async () => {
+    const execute = vi.fn(async (request: WebToolRequest): Promise<WebToolResult> => ({
+      operation: 'fetch',
+      url: request.operation === 'fetch' ? request.url : '',
+      title: 'Page',
+      text: 'Body',
+      truncated: false,
+      charCount: 4,
+    }));
     const result = await executeWebToolCalls([
       {
         id: 'call-1',
         type: 'function',
-        function: { name: 'web_search', arguments: '{"query":"local AI"}' },
+        function: { name: 'web_fetch', arguments: '{"url":"https://example.com/"}' },
       },
-    ], execute);
+    ], execute, new Set(['https://example.com/']));
     expect(result.toolMessages).toHaveLength(1);
-    expect(result.sources).toEqual([{ title: 'Example', url: 'https://example.com/' }]);
+    expect(result.sources).toEqual([{ title: 'Page', url: 'https://example.com/' }]);
     expect(result.errors).toEqual([]);
     expect(result.toolMessages[0].content).toContain('UNTRUSTED WEB RESULT');
-  });
-
-  it('records an audit issue when a public search returns no organic results', async () => {
-    const execute = vi.fn(async (request: WebToolRequest): Promise<WebToolResult> => ({
-      operation: 'search',
-      query: request.operation === 'search' ? request.query : '',
-      results: [],
-    }));
-    const result = await executeWebToolCalls([{
-      id: 'call-empty',
-      type: 'function',
-      function: { name: 'web_search', arguments: '{"query":"nothing public"}' },
-    }], execute, undefined, undefined, 'Search the web for: nothing public');
-    expect(execute).toHaveBeenCalledTimes(1);
-    expect(result.sources).toEqual([]);
-    expect(result.errors).toEqual(['web_search: The public search returned no results']);
-    expect(result.toolMessages).toHaveLength(1);
-    expect(result.toolMessages[0].content).toContain('"results":[]');
-    expect(result.toolMessages[0].content).not.toContain('"error"');
-    expect(buildWebAudit(result.sources, result.errors)?.errors).toEqual([
-      'web_search: The public search returned no results',
-    ]);
   });
 
   it('returns a cited untrusted tool message for fetched text', async () => {
@@ -350,47 +295,137 @@ describe('web tool calls', () => {
     const execute = vi.fn(async (request: WebToolRequest): Promise<WebToolResult> => {
       controller.abort();
       return {
-        operation: 'search',
-        query: request.operation === 'search' ? request.query : '',
-        results: [],
+        operation: 'fetch',
+        url: request.operation === 'fetch' ? request.url : '',
+        title: 'Page',
+        text: 'Body',
+        truncated: false,
+        charCount: 4,
       };
     });
+    const allowed = new Set(['https://one.example/', 'https://two.example/']);
     const result = await executeWebToolCalls([
       {
         id: 'call-1',
         type: 'function',
-        function: { name: 'web_search', arguments: '{"query":"one"}' },
+        function: { name: 'web_fetch', arguments: '{"url":"https://one.example/"}' },
       },
       {
         id: 'call-2',
         type: 'function',
-        function: { name: 'web_search', arguments: '{"query":"one"}' },
+        function: { name: 'web_fetch', arguments: '{"url":"https://two.example/"}' },
       },
-    ], execute, undefined, controller.signal, 'Search the web for: one');
+    ], execute, allowed, controller.signal);
     expect(execute).toHaveBeenCalledTimes(1);
     expect(result.toolMessages).toHaveLength(1);
   });
 
-  it('does not dispatch a search the user declines at the final confirmation', async () => {
-    const execute = vi.fn();
-    const confirmSearch = vi.fn(async () => false);
+  it('fetches a cross-origin redirect only after the next host is approved', async () => {
+    const execute = vi.fn(async (request: WebToolRequest): Promise<WebToolResult> => {
+      if (request.operation === 'fetch' && request.url === 'https://example.com/') {
+        return { operation: 'redirect', url: 'https://other.example/next' };
+      }
+      return {
+        operation: 'fetch',
+        url: 'https://other.example/next',
+        title: 'Other',
+        text: 'Body',
+        truncated: false,
+        charCount: 4,
+      };
+    });
+    const authorizeFetch = vi.fn(async () => true);
     const result = await executeWebToolCalls([{
       id: 'call-1',
       type: 'function',
-      function: { name: 'web_search', arguments: '{"query":"public weather"}' },
-    }], execute, undefined, undefined, 'Search the web for: public weather', confirmSearch);
-    expect(confirmSearch).toHaveBeenCalledWith('public weather');
+      function: { name: 'web_fetch', arguments: '{"url":"https://example.com/"}' },
+    }], execute, new Set(['https://example.com/']), undefined, authorizeFetch);
+    expect(authorizeFetch).toHaveBeenNthCalledWith(1, 'https://example.com/', 'request');
+    expect(authorizeFetch).toHaveBeenNthCalledWith(2, 'https://other.example/next', 'redirect');
+    expect(execute).toHaveBeenNthCalledWith(2, {
+      operation: 'fetch',
+      url: 'https://other.example/next',
+      maxChars: 20_000,
+    });
+    expect(result.sources).toEqual([{ title: 'Other', url: 'https://other.example/next' }]);
+    expect(result.errors).toEqual([]);
+    expect(result.toolMessages[0].content).toContain('UNTRUSTED WEB RESULT');
+  });
+
+  it('does not request a redirect host the user declines', async () => {
+    const execute = vi.fn(async (): Promise<WebToolResult> => ({
+      operation: 'redirect',
+      url: 'https://other.example/next',
+    }));
+    const authorizeFetch = vi.fn(async (url: string) => url === 'https://example.com/');
+    const result = await executeWebToolCalls([{
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'web_fetch', arguments: '{"url":"https://example.com/"}' },
+    }], execute, new Set(['https://example.com/']), undefined, authorizeFetch);
+    expect(authorizeFetch).toHaveBeenNthCalledWith(2, 'https://other.example/next', 'redirect');
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(result.sources).toEqual([]);
+    expect(result.errors).toEqual(['web_fetch: User declined access to this site']);
+  });
+
+  it('does not request a redirect destination that is not public HTTPS', async () => {
+    const execute = vi.fn(async (): Promise<WebToolResult> => ({
+      operation: 'redirect',
+      url: 'http://other.example/next',
+    }));
+    const authorizeFetch = vi.fn(async () => true);
+    const result = await executeWebToolCalls([{
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'web_fetch', arguments: '{"url":"https://example.com/"}' },
+    }], execute, new Set(['https://example.com/']), undefined, authorizeFetch);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(authorizeFetch).toHaveBeenCalledTimes(1);
+    expect(result.errors).toEqual(['web_fetch: Public web fetch returned an unexpected result']);
+  });
+
+  it('stops a cross-origin redirect chain at the hop cap', async () => {
+    const execute = vi.fn(async (): Promise<WebToolResult> => ({
+      operation: 'redirect',
+      url: 'https://other.example/next',
+    }));
+    const authorizeFetch = vi.fn(async () => true);
+    const result = await executeWebToolCalls([{
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'web_fetch', arguments: '{"url":"https://example.com/"}' },
+    }], execute, new Set(['https://example.com/']), undefined, authorizeFetch);
+    expect(execute).toHaveBeenCalledTimes(4);
+    expect(result.errors).toEqual(['web_fetch: Too many redirects']);
+    expect(result.sources).toEqual([]);
+  });
+
+  it('does not fetch a site the user declines', async () => {
+    const execute = vi.fn();
+    const authorizeFetch = vi.fn(async () => false);
+    const result = await executeWebToolCalls([{
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'web_fetch', arguments: '{"url":"https://example.com/"}' },
+    }], execute, new Set(['https://example.com/']), undefined, authorizeFetch);
+    expect(authorizeFetch).toHaveBeenCalledWith('https://example.com/', 'request');
     expect(execute).not.toHaveBeenCalled();
-    expect(result.errors).toEqual(['web_search: User declined the public web search']);
+    expect(result.errors).toEqual(['web_fetch: User declined access to this site']);
   });
 
   it('returns individual tool failures without discarding successful calls', async () => {
     const execute = vi.fn(async (request: WebToolRequest): Promise<WebToolResult> => {
-      if (request.operation === 'fetch') throw new Error('page too large');
+      if (request.operation === 'fetch' && request.url === 'https://input.example/') {
+        throw new Error('page too large');
+      }
       return {
-        operation: 'search',
-        query: request.query,
-        results: [{ title: 'Result', url: 'https://example.com/', snippet: 'Text' }],
+        operation: 'fetch',
+        url: request.operation === 'fetch' ? request.url : '',
+        title: 'Result',
+        text: 'Text',
+        truncated: false,
+        charCount: 4,
       };
     });
     const result = await executeWebToolCalls([
@@ -402,9 +437,9 @@ describe('web tool calls', () => {
       {
         id: 'call-2',
         type: 'function',
-        function: { name: 'web_search', arguments: '{"query":"two"}' },
+        function: { name: 'web_fetch', arguments: '{"url":"https://example.com/"}' },
       },
-    ], execute, new Set(['https://input.example/']), undefined, 'Search the web for: two');
+    ], execute, new Set(['https://input.example/', 'https://example.com/']));
     expect(result.toolMessages).toHaveLength(2);
     expect(result.sources).toEqual([{ title: 'Result', url: 'https://example.com/' }]);
     expect(result.errors).toEqual(['web_fetch: page too large']);
@@ -416,6 +451,9 @@ describe('web tool calls', () => {
     expect(prompt).toContain('Be helpful.');
     expect(prompt).toContain('not instructions');
     expect(prompt).toContain('only once');
+    expect(prompt).toContain('current untrusted search results');
+    expect(prompt).toContain('Search button');
+    expect(prompt).not.toContain('Search the web for:');
   });
 
   it('marks manual page context untrusted even when model tools are unavailable', () => {

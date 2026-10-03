@@ -143,11 +143,89 @@ describe('renderer/sidecar boundary', () => {
     expect(page).toMatch(/function releaseSettledRequestId\(\) \{[\s\S]*?stream\.requestId = null;[\s\S]*?activeStreamRequestId = null;/);
   });
 
-  it('marks manual web context untrusted and rejects image/tool combinations before inference', () => {
+  it('runs public search from the Search button before the model answers', () => {
     const page = readFileSync(join(process.cwd(), 'src', 'routes', '+page.svelte'), 'utf8');
+    const tools = readFileSync(join(process.cwd(), 'src', 'lib', 'web-tools.ts'), 'utf8');
+    expect(page).toContain('aria-label="Search the web"');
+    expect(page).toContain('composerSearchQuery(text)');
+    expect(page).toContain('userSearchContext(result)');
+    expect(tools).toContain('The model cannot start a web search');
+    expect(page).not.toContain('Search the web for:');
+    const approvalAt = page.indexOf('await askSearchApproval(parsed.query)');
+    const commitAt = page.indexOf('chatMessages = stamped;');
+    expect(approvalAt).toBeGreaterThan(0);
+    expect(approvalAt).toBeLessThan(commitAt);
+    expect(page).toContain('Allow this public web search?');
+    expect(page).toContain('Just this search');
+    expect(page).toContain('Allow all URLs');
+    expect(page).toContain('askDomainApproval(host, url, originId ?? "", hop === "redirect")');
+    expect(page).toContain('hop: "request" | "redirect"');
+    expect(page).toContain('let offerFetchTool = allowWebTools');
+    expect(page).toContain('webConsentQueue = [...webConsentQueue, { kind: "search"');
+    expect(page).toContain('webConsentQueue = [...webConsentQueue, { kind: "domain"');
+    // The opener is saved before the shell becomes inert. Inert moves focus
+    // before the dialog effect can read document.activeElement.
+    expect(page).toMatch(/rememberConsentReturnFocus\(\);\r?\n\s+webConsentQueue = \[\.\.\.webConsentQueue, \{ kind: "search"/);
+    expect(page).toMatch(/rememberConsentReturnFocus\(\);\r?\n\s+webConsentQueue = \[\.\.\.webConsentQueue, \{ kind: "domain"/);
+    expect(page).toContain('<main class="app" inert={webConsentPrompt ? true : undefined}>');
+    const mainEnd = page.indexOf('</main>');
+    const consentAt = page.indexOf('class="web-consent-overlay"');
+    expect(mainEnd).toBeGreaterThan(0);
+    expect(consentAt).toBeGreaterThan(mainEnd);
+    expect(page.slice(consentAt, page.indexOf('web-consent-actions', consentAt))).not.toContain('persona-modal-overlay');
+    expect(page).toMatch(/\.web-consent-overlay \{[^}]*z-index:\s*10000;/);
+    const personaMenuZ = Number(page.match(/\.persona-menu \{[^}]*z-index:\s*(\d+);/)?.[1]);
+    const shortcutsZ = Number(page.match(/\.shortcuts-overlay \{[^}]*z-index:\s*(\d+);/)?.[1]);
+    expect(personaMenuZ).toBeLessThan(10000);
+    expect(shortcutsZ).toBeLessThan(10000);
+    expect(page).toContain('webConsentQueue.slice(1)');
+    expect(page).toContain('splitCoveredConsentPrompts(');
+    expect(page).toContain('allUrlsGranted(sessionWebConsent, originId ?? "")');
+    expect(page).toContain('allUrlsByConversation');
+    expect(page).not.toContain('webConsentPrompt = {');
+    expect(page).toContain('resultUrlsForConversation(sessionWebConsent, threadLoadedFor ?? "")');
+    expect(page).toContain('rememberResultUrls(sessionWebConsent, originId ?? "", resultUrls)');
+    expect(page).toContain('searchResultUrls(result.results)');
+    expect(page).not.toContain('packed.sources.map((source) => source.url).join');
+    expect(page).toContain('dialogTabTrap(');
+    expect(page).toContain('consentKeyGate(');
+    expect(page).toContain('consentPointerAllows(');
+    expect(page).toContain('latchConsentPointer(');
+    expect(page).toContain('releaseConsentKey(');
+    expect(page).toContain('consentHeldKeys.size > 0 ? dialog : (grantButton ?? dialog)');
+    expect(page).toContain('void tick().then(');
+    expect(page).toContain('restoreDialogFocus(back, [');
+    expect(page).toContain('form button.stop');
+    expect(page).toContain('in this conversation until the page reloads');
+    expect(page).toContain('allUrlsGrantTarget(');
+    expect(page).toContain('Allow all URLs in {webConsentGrantTarget.label}');
+    expect(page).toContain('This request is from that conversation, not the one open now.');
+    expect(page).not.toContain('every public site in this conversation');
+    expect(page).not.toContain('until you quit Flint');
+    expect(page).toContain('loadStoredWebConsent(');
+    expect(page).toContain('saveStoredWebConsent(');
+    expect(page).toContain('Could not save web approvals on this device. The previous choice is unchanged.');
+    expect(page).toContain('if (!persistWebConsent(emptyStoredWebConsent())) return;');
+    expect(page).toContain('splitCoveredConsentPrompts(storedWebConsent, sessionWebConsent, webConsentQueue.slice(1))');
+    expect(page).not.toContain('localStorage.getItem(WEB_CONSENT_STORAGE_KEY)');
+    expect(page).not.toContain('localStorage.setItem(WEB_CONSENT_STORAGE_KEY');
+  });
+
+  it('marks manual web context untrusted and keeps image sends off the fetch tool', () => {
+    const page = readFileSync(join(process.cwd(), 'src', 'routes', '+page.svelte'), 'utf8');
+    const helper = readFileSync(join(process.cwd(), 'sidecar', 'web-tool.js'), 'utf8');
+    const tools = readFileSync(join(process.cwd(), 'src', 'lib', 'web-tools.ts'), 'utf8');
+    const sdk = readFileSync(join(process.cwd(), 'src', 'lib', 'sdk.ts'), 'utf8');
     expect(page).toContain('urlContextMessages.length > 0,');
-    expect(page).toContain('messagesContainImages(requestMessages)');
-    expect(page).toContain('Web tools cannot be combined with image context');
+    expect(page).toContain('if (mode === "search" && messagesContainImages(requestMessages))');
+    expect(page).toContain('Web search cannot be combined with an image. Remove the image, or press Send.');
+    expect(page).toContain('offerFetchTool = false');
+    expect(page).not.toContain('disable web tools for this send');
+    expect(page).toContain('This page redirects to a different site.');
+    expect(helper).toContain('followCrossOriginRedirects');
+    expect(helper).toContain('redirectTo');
+    expect(tools).toContain("result.operation !== 'redirect'");
+    expect(sdk).toContain('followCrossOriginRedirects: true');
   });
 
   it('preserves retrieval audits when the follow-up completion fails', () => {
@@ -157,6 +235,13 @@ describe('renderer/sidecar boundary', () => {
       .toBeLessThan(page.indexOf('clearUrlFetches();', page.indexOf('chatMessages = stamped;')));
     expect(page).toContain('let webSources = [...chipAudit.sources];');
     expect(page).toContain('let webErrors = [...chipAudit.errors];');
+    const searchTry = page.indexOf('updateAssistantMessage({ content: "Searching the public web..." });');
+    const searchCatch = page.indexOf('} catch (error) {', searchTry);
+    const searchBlock = page.slice(searchCatch, page.indexOf('let data = await chatCompletionStream', searchCatch));
+    const recordedAt = searchBlock.indexOf('webErrors = [...webErrors, `web_search: ${message}`]');
+    const abortedAt = searchBlock.indexOf('if (requestController.signal.aborted)');
+    expect(recordedAt).toBeGreaterThanOrEqual(0);
+    expect(abortedAt).toBeGreaterThan(recordedAt);
     expect(page).toContain('webErrors = [...webErrors, ...executed.errors];');
     expect(page).not.toContain('webErrors = executed.errors;');
     const audit = readFileSync(join(process.cwd(), 'src', 'lib', 'web-audit.ts'), 'utf8');
@@ -173,7 +258,7 @@ describe('renderer/sidecar boundary', () => {
     // comment, fence, or block in untrusted output would otherwise hide or restyle it.
     expect(page).not.toMatch(/appendWeb(Source|Error)Audit/);
     expect(page).toContain('const webAudit = buildWebAudit(webSources, webErrors);');
-    expect(page.match(/\.\.\.webAuditPatch\(\)/g)?.length).toBe(7);
+    expect(page.match(/\.\.\.webAuditPatch\(\)/g)?.length).toBe(9);
     expect(page).toMatch(/isError: true,\s*content: failureMessage,\s*\.\.\.webAuditPatch\(\)/);
     expect(page).toContain('updateAssistantMessage({ content: assistantContent, ...webAuditPatch() });');
     expect(page).toContain('webAudit={msg.webAudit}');
