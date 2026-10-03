@@ -19,44 +19,76 @@ function createBuildEnv(version, env = process.env) {
   return { ...env, VITE_FLINT_BUILD_VERSION: version };
 }
 
-function main(argv = process.argv.slice(2)) {
+// Tauri 2's `-c/--config` is repeatable and merged in order, so a later config
+// replaces the temporary version. Clap accepts the attached short form (`-cfile.json`).
+function isConfigOverrideArg(arg) {
+  return arg === '--config'
+    || (typeof arg === 'string' && arg.startsWith('--config='))
+    || (typeof arg === 'string' && arg.startsWith('-c') && !arg.startsWith('--'));
+}
+
+function tauriArgsBeforeRunner(extraArgs) {
+  const separator = extraArgs.indexOf('--');
+  return separator === -1 ? extraArgs : extraArgs.slice(0, separator);
+}
+
+function main(argv = process.argv.slice(2), deps = {}) {
+  const io = {
+    mkdtempSync,
+    rmSync,
+    writeFileSync,
+    spawnSync,
+    resolveTauriCli: () => require.resolve('@tauri-apps/cli/tauri.js'),
+    cwd: process.cwd(),
+    execPath: process.execPath,
+    env: process.env,
+    tmpdir: tmpdir(),
+    logError: (line) => console.error(line),
+    ...deps,
+  };
+
   const [version, ...extraArgs] = argv;
   if (!isStrictSemver(version)) {
-    console.error('Usage: npm run tauri:build:local:version -- <semver> [tauri build options]');
-    console.error('Example: npm run tauri:build:local:version -- 0.10.0');
-    process.exitCode = 2;
-    return;
+    io.logError('Usage: npm run tauri:build:local:version -- <semver> [tauri build options]');
+    io.logError('Example: npm run tauri:build:local:version -- 0.10.0');
+    return 2;
   }
-  if (extraArgs.some((arg) => arg === '--config' || arg === '-c' || arg.startsWith('--config='))) {
-    console.error('Do not pass --config; this command supplies a temporary version override.');
-    process.exitCode = 2;
-    return;
+  if (tauriArgsBeforeRunner(extraArgs).some(isConfigOverrideArg)) {
+    io.logError('Do not pass --config or -c; this command supplies a temporary version override.');
+    return 2;
   }
 
-  const tempDir = mkdtempSync(path.join(tmpdir(), 'flint-local-build-'));
+  const tempDir = io.mkdtempSync(path.join(io.tmpdir, 'flint-local-build-'));
   const configPath = path.join(tempDir, 'tauri-version.json');
   try {
-    writeFileSync(configPath, createTauriConfig(version));
-    const tauriCli = require.resolve('@tauri-apps/cli/tauri.js');
-    const result = spawnSync(
-      process.execPath,
-      [tauriCli, ...createTauriBuildArgs(configPath, extraArgs)],
+    io.writeFileSync(configPath, createTauriConfig(version));
+    const result = io.spawnSync(
+      io.execPath,
+      [io.resolveTauriCli(), ...createTauriBuildArgs(configPath, extraArgs)],
       {
-        cwd: process.cwd(),
+        cwd: io.cwd,
         stdio: 'inherit',
-        env: createBuildEnv(version),
+        env: createBuildEnv(version, io.env),
       },
     );
     if (result.error) throw result.error;
-    process.exitCode = result.status ?? 1;
+    return result.status ?? 1;
   } catch (error) {
-    console.error(`Local Tauri build failed: ${error?.message || error}`);
-    process.exitCode = 1;
+    io.logError(`Local Tauri build failed: ${error?.message || error}`);
+    return 1;
   } finally {
-    rmSync(tempDir, { recursive: true, force: true });
+    io.rmSync(tempDir, { recursive: true, force: true });
   }
 }
 
-if (require.main === module) main();
+if (require.main === module) {
+  process.exitCode = main();
+}
 
-module.exports = { createBuildEnv, createTauriBuildArgs, createTauriConfig };
+module.exports = {
+  createBuildEnv,
+  createTauriBuildArgs,
+  createTauriConfig,
+  isConfigOverrideArg,
+  main,
+};

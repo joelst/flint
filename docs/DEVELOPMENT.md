@@ -138,16 +138,14 @@ to the frontend build, so both the app's About screen and the packaged app use i
 config is removed after the build, and `package.json`, `src-tauri/tauri.conf.json`, and
 `src-tauri/Cargo.toml` remain unchanged:
 
-```powershell
+```bash
 npm run tauri:build:local:version -- 0.10.0
 ```
 
 Forward additional Tauri build options after the version, for example
-`--target x86_64-pc-windows-msvc`. On Windows machines that need local MSVC setup, wrap the npm command:
-
-```powershell
-.\build-local.ps1 -Command "npm run tauri:build:local:version -- 0.10.0"
-```
+`--target x86_64-pc-windows-msvc`. Do not pass `--config` or `-c`; this command supplies
+the version override, and a later config would replace it. Windows builds that need
+`cl.exe` and SignTool on PATH use the same local setup as the other commands in this guide.
 
 macOS builds are Apple Silicon only and declare a minimum of macOS 14.0, because the bundled
 `libonnxruntime.dylib` is built with `minos 14.0` and `foundry-local-sdk` ships no `darwin-x64`
