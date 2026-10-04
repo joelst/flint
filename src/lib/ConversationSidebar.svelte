@@ -26,6 +26,8 @@
   export let onDeleteConversation: (id: string) => void = () => {};
   export let onExport: () => void = () => {};
   export let exportBusy = false;
+  export let collapsed = false;
+  export let onToggleCollapsed: () => void = () => {};
 
   function formatTime(timestamp: number): string {
     const now = Date.now();
@@ -42,10 +44,41 @@
   }
 </script>
 
-<div class="conversation-sidebar">
+<div class="conversation-sidebar" class:collapsed>
+  {#if collapsed}
+    <div class="sidebar-rail">
+      <button
+        type="button"
+        class="rail-btn"
+        aria-label="Show conversations"
+        title="Show conversations"
+        onclick={onToggleCollapsed}
+      >
+        ›
+      </button>
+      <button
+        type="button"
+        class="rail-btn new-chat-btn"
+        aria-label="New conversation"
+        title="New conversation"
+        onclick={onNewChat}
+      >
+        +
+      </button>
+    </div>
+  {:else}
   <div class="sidebar-header">
     <h3>Conversations</h3>
     <div class="sidebar-header-actions">
+      <button
+        type="button"
+        class="export-btn"
+        aria-label="Hide conversations"
+        title="Hide conversations"
+        onclick={onToggleCollapsed}
+      >
+        Hide
+      </button>
       <button
         class="export-btn"
         title="Save a copy of every conversation to a file, including any that Flint could not read"
@@ -121,6 +154,7 @@
       {/each}
     {/if}
   </div>
+  {/if}
 </div>
 
 <style>
@@ -131,6 +165,39 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    flex-shrink: 0;
+  }
+
+  .conversation-sidebar.collapsed {
+    width: 44px;
+  }
+
+  .sidebar-rail {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 4px;
+  }
+
+  .rail-btn {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel-bg);
+    color: var(--fg);
+    cursor: pointer;
+    font-size: 1.1rem;
+    line-height: 1;
+  }
+
+  .sidebar-rail .new-chat-btn {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    font-size: 1.1rem;
   }
 
   .sidebar-header {
@@ -139,6 +206,8 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
   }
 
   .sidebar-header h3 {

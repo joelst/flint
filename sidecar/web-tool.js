@@ -8,11 +8,15 @@ import {
   isDeniedAddress,
   isLocalHostname,
 } from './web-address-policy.js';
+import { detectImageFormat } from './image-dimensions.js';
 
-export { isDeniedAddress };
+export { isDeniedAddress, MAX_OUTPUT_BYTES, MAX_IMAGE_BYTES, MAX_IMAGE_OUTPUT_BYTES };
 
 const MAX_INPUT_BYTES = 16 * 1024;
 const MAX_OUTPUT_BYTES = 256 * 1024;
+/** 1.5 MiB of image bytes. Base64 of that is 2 MiB; the JSON frame needs a little more. */
+const MAX_IMAGE_BYTES = 1_572_864;
+const MAX_IMAGE_OUTPUT_BYTES = 2_200_000;
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const MAX_TEXT_CHARS = 50_000;
 const MAX_REDIRECTS = 3;
@@ -139,7 +143,16 @@ export function normalizeRequest(raw) {
       followCrossOriginRedirects: raw.followCrossOriginRedirects === true,
     };
   }
-  throw new Error('Operation must be search or fetch');
+  if (raw.operation === 'image') {
+    if (raw.followCrossOriginRedirects) {
+      throw new Error('Image requests cannot follow a cross-origin redirect');
+    }
+    if (Object.keys(raw).some((key) => !['operation', 'url'].includes(key))) {
+      throw new Error('Image request contains an unsupported field');
+    }
+    return { operation: 'image', url: normalizePublicUrl(raw.url).toString() };
+  }
+  throw new Error('Operation must be search, fetch, or image');
 }
 
 async function resolvePublic(hostname, resolve = dns.lookup) {
@@ -220,7 +233,7 @@ export function requestPinned(url, resolved, options = {}) {
       // RFC 6066 forbids IP literals in SNI; without it Node verifies the pinned IP against the certificate's IP SANs.
       servername: net.isIP(literalHost) ? undefined : url.hostname,
       headers: {
-        Accept: 'text/html,text/plain,application/json;q=0.9',
+        Accept: options.accept ?? 'text/html,text/plain,application/json;q=0.9',
         'Accept-Encoding': 'identity',
         'User-Agent': 'Flint-Web-Tool/1.0 (+https://github.com/joelst/flint)',
         Host: url.host,
@@ -343,12 +356,42 @@ export async function fetchPublicText(rawUrl, dependencies = {}) {
   throw new Error('Too many redirects');
 }
 
-function extractPageText(html) {
+function firstPageImage(html, pageUrl) {
+  let page;
+  try {
+    page = normalizePublicUrl(pageUrl);
+  } catch {
+    return null;
+  }
+  const tags = String(html).matchAll(/<img\b[^>]*>/gi);
+  for (const tag of tags) {
+    const source = tag[0].match(/\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i);
+    const raw = source?.[1] || source?.[2] || source?.[3] || '';
+    if (!raw || /^data:/i.test(raw) || /\.svg(?:$|[?#])/i.test(raw)) continue;
+    try {
+      const normalized = normalizePublicUrl(new URL(raw, page).toString());
+      if (comparableHost(normalized) !== comparableHost(page)) continue;
+      const alt = tag[0].match(/\balt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+      return {
+        url: normalized.toString(),
+        alt: readableText(alt?.[1] || alt?.[2] || alt?.[3] || ''),
+      };
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+export function extractPageText(html, pageUrl = '') {
   const visible = stripHiddenContent(html);
   const titleMatch = visible.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i);
+  const image = pageUrl ? firstPageImage(visible, pageUrl) : null;
   return {
     title: titleMatch ? readableText(titleMatch[1]) : '',
     text: readableText(visible),
+    imageUrls: image ? [image.url] : [],
+    imageAlt: image?.alt || '',
   };
 }
 
@@ -411,6 +454,9 @@ export async function executeWebRequest(raw, dependencies = {}) {
       results: decodeSearchResults(page.body, request.maxResults),
     };
   }
+  if (request.operation === 'image') {
+    return fetchPublicImage(request.url, dependencies);
+  }
   // Model fetches omit the flag, so a different host comes back for approval.
   // A URL-chip fetch sets it: the user asked to retrieve that URL, and each hop
   // is still checked as public HTTPS.
@@ -422,8 +468,8 @@ export async function executeWebRequest(raw, dependencies = {}) {
     return { operation: 'redirect', url: page.redirectTo };
   }
   const extracted = page.contentType === 'text/html'
-    ? extractPageText(page.body)
-    : { title: '', text: page.body.replace(/\s+/g, ' ').trim() };
+    ? extractPageText(page.body, page.url)
+    : { title: '', text: page.body.replace(/\s+/g, ' ').trim(), imageUrls: [], imageAlt: '' };
   const truncated = page.truncated || extracted.text.length > request.maxChars;
   return {
     operation: 'fetch',
@@ -432,7 +478,59 @@ export async function executeWebRequest(raw, dependencies = {}) {
     text: extracted.text.slice(0, request.maxChars),
     truncated,
     charCount: Math.min(extracted.text.length, request.maxChars),
+    imageUrls: extracted.imageUrls ?? [],
+    imageAlt: extracted.imageAlt ?? '',
   };
+}
+
+async function fetchPublicImage(rawUrl, dependencies = {}) {
+  const resolve = dependencies.resolve ?? dns.lookup;
+  const request = dependencies.request ?? requestPinned;
+  const deadlineAt = Date.now() + (dependencies.overallTimeoutMs ?? OVERALL_TIMEOUT_MS);
+  let current = normalizePublicUrl(rawUrl);
+  for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
+    const resolved = await withDeadline(
+      resolvePublic(current.hostname, resolve),
+      deadlineAt,
+      'Web request timed out while resolving the host',
+    );
+    const response = await withDeadline(request(current, resolved, {
+      maxBytes: MAX_BODY_BYTES,
+      timeoutMs: Math.min(REQUEST_TIMEOUT_MS, Math.max(1, deadlineAt - Date.now())),
+      method: 'GET',
+      accept: 'image/jpeg,image/png,image/webp,image/gif,image/bmp;q=0.9',
+    }), deadlineAt, 'Web request timed out');
+    if ([301, 302, 303, 307, 308].includes(response.statusCode)) {
+      const location = response.headers.location;
+      if (!location) throw new Error('Redirect response has no destination');
+      if (redirects === MAX_REDIRECTS) throw new Error('Too many redirects');
+      const next = normalizePublicUrl(new URL(location, current).toString());
+      if (comparableHost(next) !== comparableHost(current)) {
+        return { operation: 'redirect', url: next.toString() };
+      }
+      current = next;
+      continue;
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw new Error(`Remote server returned HTTP ${response.statusCode}`);
+    }
+    const encoding = String(response.headers['content-encoding'] ?? 'identity').trim().toLowerCase();
+    if (encoding && encoding !== 'identity') {
+      throw new Error(`Unsupported response content encoding: ${encoding}`);
+    }
+    const body = response.body;
+    if (!Buffer.isBuffer(body)) throw new Error('Image response was not bytes');
+    if (body.length > MAX_IMAGE_BYTES) throw new Error('Image exceeds the byte limit');
+    const format = detectImageFormat(new Uint8Array(body));
+    if (!format || format === 'svg') throw new Error('Unsupported image');
+    return {
+      operation: 'image',
+      url: current.toString(),
+      mediaType: `image/${format}`,
+      dataBase64: body.toString('base64'),
+    };
+  }
+  throw new Error('Too many redirects');
 }
 
 async function readInput(input) {
@@ -456,7 +554,8 @@ export async function runHelper(
     const raw = JSON.parse(await readInput(input));
     const result = await executeWebRequest(raw, dependencies);
     const output = JSON.stringify({ ok: true, result });
-    if (Buffer.byteLength(output) > MAX_OUTPUT_BYTES) throw new Error('Output exceeds the byte limit');
+    const outputLimit = raw?.operation === 'image' ? MAX_IMAGE_OUTPUT_BYTES : MAX_OUTPUT_BYTES;
+    if (Buffer.byteLength(output) > outputLimit) throw new Error('Output exceeds the byte limit');
     write(`${output}\n`);
     return 0;
   } catch (error) {

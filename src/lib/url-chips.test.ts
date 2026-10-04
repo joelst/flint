@@ -54,6 +54,15 @@ describe('isFetchableUrl', () => {
     expect(isFetchableUrl('https://[2606:4700:4700::1111]/')).toBe(true);
     expect(isFetchableUrl('https://localhost.example.com/')).toBe(true);
   });
+
+  it('does not offer a chip for a blocklisted host or its subdomain', () => {
+    const blocklist = ['example.com'];
+    expect(isFetchableUrl('https://example.com/a', blocklist)).toBe(false);
+    expect(isFetchableUrl('https://sub.example.com/a', blocklist)).toBe(false);
+    expect(isFetchableUrl('https://notexample.com/a', blocklist)).toBe(true);
+    expect(detectFetchableUrls('see https://example.com/a and https://other.example/b', [], blocklist))
+      .toEqual(['https://other.example/b']);
+  });
 });
 
 describe('detectFetchableUrls', () => {

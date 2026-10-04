@@ -160,8 +160,9 @@ first per [PRODUCT_PLAN.md](./PRODUCT_PLAN.md) — these are not 1.0 work.
       PRODUCT_PLAN's bounded public web-search/retrieval helper is a narrow,
       read-only exception: it receives no ambient credentials or filesystem
       operation/path inputs, keeps fetched bodies request-scoped, and cannot
-      authorize another tool from retrieved text. That exception does not
-      establish a general Flint-native tool runtime.
+      let retrieved text authorize a fetch or a later search. The user's
+      consent does. That exception does not establish a general Flint-native
+      tool runtime.
 - [ ] **RAG (local file indexing)** — extend the bounded request-only URL context pattern
       from a single public page to an indexed local knowledge base
       (embedded vector store). Show retrieved chunks and sources in the UI, following
@@ -174,7 +175,8 @@ first per [PRODUCT_PLAN.md](./PRODUCT_PLAN.md) — these are not 1.0 work.
       URL/auth/routing role) alongside local models in the same session. Secure local
       credential storage (OS keychain) — never localStorage or plaintext disk.
 - [ ] **Enterprise controls** — per-model/per-endpoint allow/deny rules, optional local
-      API key requirement, an IT-deployable machine-level policy file, and the Purview
+      API key requirement, an IT-deployable machine-level policy file, a device
+      toggle for “fetch only hosts on my list, never search,” and the Purview
       SDK implementation (design memo already done: [PURVIEW_GOVERNANCE.md](./PURVIEW_GOVERNANCE.md)).
 - [ ] **Full endpoint scheduler** — sticky routing, fallback, and health-check-based
       failover; escalate chat from local to a cloud endpoint when a prompt exceeds local

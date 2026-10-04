@@ -5,6 +5,7 @@
  * component state.
  */
 import { isPotentiallyPublicHostname } from '../../sidecar/web-address-policy.js';
+import { hostBlocked } from './web-blocklist';
 
 /**
  * Whether a detected string is something the sidecar can actually fetch.
@@ -13,7 +14,7 @@ import { isPotentiallyPublicHostname } from '../../sidecar/web-address-policy.js
  * a trailing bracket, an empty host). Validating before a chip is rendered keeps the UI from
  * offering a fetch that can only fail.
  */
-export function isFetchableUrl(value: string): boolean {
+export function isFetchableUrl(value: string, blocklist: readonly string[] = []): boolean {
   if (typeof value !== 'string' || !value.trim()) return false;
   let parsed: URL;
   try {
@@ -25,7 +26,8 @@ export function isFetchableUrl(value: string): boolean {
   if (parsed.port && parsed.port !== '443') return false;
   // Same local-name and IP-literal rules the isolated helper enforces, so the composer never
   // offers a Fetch it would always refuse. DNS-resolved names are still checked by the helper.
-  return isPotentiallyPublicHostname(parsed.hostname);
+  if (!isPotentiallyPublicHostname(parsed.hostname)) return false;
+  return !hostBlocked(parsed.hostname, blocklist);
 }
 
 const URL_PATTERN = /https:\/\/[^\s"'<>)]+/g;
@@ -38,7 +40,11 @@ const URL_PATTERN = /https:\/\/[^\s"'<>)]+/g;
  * legitimate at the end of real URLs (`.../wiki/Hello!`) and stripping them would silently
  * fetch a different page.
  */
-export function detectFetchableUrls(text: string, alreadyQueued: Iterable<string> = []): string[] {
+export function detectFetchableUrls(
+  text: string,
+  alreadyQueued: Iterable<string> = [],
+  blocklist: readonly string[] = [],
+): string[] {
   const queued = new Set(alreadyQueued);
   const matches = String(text ?? '').match(URL_PATTERN) ?? [];
   const seen = new Set<string>();
@@ -46,7 +52,7 @@ export function detectFetchableUrls(text: string, alreadyQueued: Iterable<string
 
   for (const match of matches) {
     const candidate = match.replace(/[.,;:]+$/, '');
-    if (!isFetchableUrl(candidate)) continue;
+    if (!isFetchableUrl(candidate, blocklist)) continue;
     if (seen.has(candidate) || queued.has(candidate)) continue;
     seen.add(candidate);
     out.push(candidate);

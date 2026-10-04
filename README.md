@@ -209,7 +209,7 @@ Signing and release pipeline: [docs/RELEASE.md](./docs/RELEASE.md)
 - **macOS is unsigned** and evaluation-only for 1.0. Browser-downloaded DMGs trigger a Gatekeeper "damaged" warning; use the install one-liner or `xattr -cr`. 1.0 production is Windows. Windows installers are publicly trusted and do not carry this caveat. A new Windows publisher identity may still accumulate SmartScreen reputation over the first downloads.
 - **The updater does not discover prereleases.** The 0.7.0 evaluation build had to be installed manually; see [Status](#status). Stable releases from 0.9.0 onward are discoverable through the in-app updater.
 - **Audio** quality depends on the STT model and runtime.
-- **Tool calling:** models may emit `tool_calls`. Flint’s chat does not execute general tools. **Search** runs before the model answers, and the model may request only `web_fetch` for a URL you allowed. Other tools belong to an agent client on the local endpoint.  
+- **Tool calling:** models may emit `tool_calls`. Flint’s chat does not execute general tools. With **Web search** on, the model may request `web_search` and `web_fetch` for a URL you allowed. Flint runs at most two of those rounds. Other tools belong to an agent client on the local endpoint.
 - Unit/contract tests are strong; full UI E2E is still light.
 
 ---

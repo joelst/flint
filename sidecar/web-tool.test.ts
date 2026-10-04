@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   decodeSearchResults,
   executeWebRequest,
+  extractPageText,
   fetchPublicText,
   isDeniedAddress,
   normalizeRequest,
@@ -720,6 +721,10 @@ describe('fetch execution and helper entry', () => {
     expect(closed.text).toContain('After');
     expect(closed.text).not.toContain('Ignore');
     expect(closed.text).not.toContain('secret');
+    const marked = extractPageText('Before <!-- a > b --> After', 'https://example.com/');
+    expect(marked.text).toContain('Before');
+    expect(marked.text).toContain('After');
+    expect(marked.text).not.toContain('a > b');
 
     const unclosed = await executeWebRequest(
       { operation: 'fetch', url: 'https://example.com/' },
@@ -741,7 +746,7 @@ describe('fetch execution and helper entry', () => {
 
   it('refuses malformed requests before any network activity', () => {
     for (const raw of [null, [], 'x', { operation: 'shell' }]) {
-      expect(() => normalizeRequest(raw)).toThrow(/object|search or fetch/i);
+      expect(() => normalizeRequest(raw)).toThrow(/object|search, fetch, or image/i);
     }
     expect(() => normalizeRequest({ operation: 'search', query: '  ' })).toThrow(/1-500/);
     expect(() => normalizeRequest({ operation: 'search', query: 'x'.repeat(501) })).toThrow(/1-500/);
@@ -932,6 +937,63 @@ describe('remaining helper edges', () => {
       + '<div class="result"><a class="result__a" href="https://duckduckgo.com/y.js?ad=1">Ad</a></div>'
       + '<div class="result"><a class="result__a" href="https://example.org/">Real</a></div>';
     expect(decodeSearchResults(html, 5)).toEqual([{ title: 'Real', url: 'https://example.org/', snippet: '' }]);
+  });
+
+  it('keeps the first same-host image and drops a comment that contains >', async () => {
+    const html = '<!-- a > b --><p>Visible</p>'
+      + '<img src="https://cdn.example/a.jpg" alt="other">'
+      + '<img src="/photo.svg" alt="graphic">'
+      + '<img alt="A cat" src="/photos/cat.jpg">';
+    const extracted = extractPageText(html, 'https://example.com/page');
+    expect(extracted.text).toContain('Visible');
+    expect(extracted.text).not.toContain('a > b');
+    expect(extracted.imageUrls).toEqual(['https://example.com/photos/cat.jpg']);
+    expect(extracted.imageAlt).toBe('A cat');
+  });
+
+  it('returns image bytes for a sniffed JPEG and a redirect for a different host', async () => {
+    const resolve = vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]);
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0x00]);
+    const request = vi.fn(async () => ({
+      statusCode: 200,
+      headers: { 'content-type': 'text/plain' },
+      body: jpeg,
+    }));
+    const image = await executeWebRequest(
+      { operation: 'image', url: 'https://example.com/cat.jpg' },
+      { resolve, request },
+    );
+    expect(image).toMatchObject({
+      operation: 'image',
+      url: 'https://example.com/cat.jpg',
+      mediaType: 'image/jpeg',
+      dataBase64: jpeg.toString('base64'),
+    });
+
+    const redirected = vi.fn(async () => ({
+      statusCode: 302,
+      headers: { location: 'https://cdn.example/cat.jpg' },
+      body: Buffer.alloc(0),
+    }));
+    await expect(executeWebRequest(
+      { operation: 'image', url: 'https://example.com/cat.jpg' },
+      { resolve, request: redirected },
+    )).resolves.toEqual({ operation: 'redirect', url: 'https://cdn.example/cat.jpg' });
+    expect(redirected).toHaveBeenCalledTimes(1);
+
+    await expect(executeWebRequest(
+      { operation: 'image', url: 'https://example.com/cat.svg' },
+      { resolve, request: vi.fn(async () => ({
+        statusCode: 200,
+        headers: { 'content-type': 'image/svg+xml' },
+        body: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>'),
+      })) },
+    )).rejects.toThrow(/Unsupported image/);
+    expect(() => normalizeRequest({
+      operation: 'image',
+      url: 'https://example.com/cat.jpg',
+      followCrossOriginRedirects: true,
+    })).toThrow(/cannot follow a cross-origin redirect/i);
   });
 
   it('writes to stdout by default', async () => {

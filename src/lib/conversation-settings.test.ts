@@ -236,6 +236,9 @@ describe('seedSettingsFor', () => {
   it('requires fresh opt-in instead of carrying web permission into a new chat', () => {
     expect(seedSettingsFor({ ...baseline, webToolsEnabled: true }).webToolsEnabled).toBe(false);
     expect(seedSettingsFor(baseline, { webToolsEnabled: true }).webToolsEnabled).toBe(true);
+    expect(seedSettingsFor(baseline, {}, { webToolsForNewChats: true }).webToolsEnabled).toBe(true);
+    expect(seedSettingsFor(baseline, { webToolsEnabled: false }, { webToolsForNewChats: true }).webToolsEnabled)
+      .toBe(false);
   });
 
   it('stamps an explicit null randomSeed rather than leaving it absent', () => {

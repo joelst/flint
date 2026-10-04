@@ -1,4 +1,5 @@
 import { isPotentiallyPublicHostname } from '../../sidecar/web-address-policy.js';
+import { sanitizeWebLabel } from './web-envelope';
 
 /**
  * The app-controlled record of what a web tool round sent off the device.
@@ -11,11 +12,13 @@ export interface WebAuditSource {
   title: string;
   url: string;
   truncated?: boolean;
+  budgetShortened?: boolean;
 }
 
 export interface WebAudit {
   sources: WebAuditSource[];
   errors: string[];
+  queries?: string[];
 }
 
 export function isAuditableUrl(url: unknown): url is string {
@@ -38,6 +41,7 @@ export function isAuditableUrl(url: unknown): url is string {
 export function buildWebAudit(
   sources: readonly WebAuditSource[],
   errors: readonly string[],
+  queries: readonly string[] = [],
 ): WebAudit | undefined {
   const unique: WebAuditSource[] = [];
   const indexes = new Map<string, number>();
@@ -46,16 +50,26 @@ export function buildWebAudit(
     const existing = indexes.get(source.url);
     if (existing !== undefined) {
       if (source.truncated) unique[existing].truncated = true;
+      if (source.budgetShortened) unique[existing].budgetShortened = true;
       continue;
     }
     indexes.set(source.url, unique.length);
     const entry: WebAuditSource = { title: String(source.title || source.url), url: source.url };
     if (source.truncated) entry.truncated = true;
+    if (source.budgetShortened) entry.budgetShortened = true;
     unique.push(entry);
   }
   const issues = errors.filter((error) => typeof error === 'string' && error.length > 0);
-  if (unique.length === 0 && issues.length === 0) return undefined;
-  return { sources: unique, errors: [...issues] };
+  const searched = queries
+    .filter((query) => typeof query === 'string' && query.trim().length > 0)
+    .map((query) => singleLine(query).slice(0, 200))
+    .filter((query) => query.length > 0);
+  if (unique.length === 0 && issues.length === 0 && searched.length === 0) return undefined;
+  return {
+    sources: unique,
+    errors: [...issues],
+    ...(searched.length > 0 ? { queries: searched } : {}),
+  };
 }
 
 /**
@@ -65,16 +79,23 @@ export function buildWebAudit(
  */
 export function normalizeWebAudit(raw: unknown): WebAudit | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
-  const { sources, errors } = raw as Record<string, unknown>;
+  const record = raw as Record<string, unknown>;
+  const { sources, errors, queries } = record;
   if (!Array.isArray(sources) || !Array.isArray(errors)) return undefined;
   for (const source of sources) {
     if (!source || typeof source !== 'object' || Array.isArray(source)) return undefined;
-    const { title, url, truncated } = source as Record<string, unknown>;
+    const { title, url, truncated, budgetShortened } = source as Record<string, unknown>;
     if (typeof title !== 'string' || !isAuditableUrl(url)) return undefined;
     if (truncated !== undefined && typeof truncated !== 'boolean') return undefined;
+    if (budgetShortened !== undefined && typeof budgetShortened !== 'boolean') return undefined;
   }
   if (!errors.every((error) => typeof error === 'string')) return undefined;
-  if (sources.length === 0 && errors.length === 0) return undefined;
+  if (queries !== undefined) {
+    if (!Array.isArray(queries) || queries.some((query) => typeof query !== 'string')) return undefined;
+  }
+  if (sources.length === 0 && errors.length === 0 && !(Array.isArray(queries) && queries.length > 0)) {
+    return undefined;
+  }
   return raw as WebAudit;
 }
 
@@ -136,6 +157,34 @@ export function urlChipRetrievalAudit(chips: readonly UrlChipRetrieval[]): {
   return { sources, errors };
 }
 
+/**
+ * Flint-written index for a later send. Titles and URLs only: no page body and no tool errors.
+ * This is metadata. It does not count as web text for a later search confirmation.
+ */
+export function webSourceIndex(messages: readonly { role?: unknown; webAudit?: unknown }[]): string {
+  const lines: string[] = [];
+  for (const message of messages) {
+    if (!message || message.role !== 'assistant') continue;
+    const audit = normalizeWebAudit(message.webAudit);
+    if (!audit) continue;
+    for (const source of audit.sources) {
+      const flags = [
+        source.truncated ? 'truncated' : '',
+        source.budgetShortened ? 'shortened to fit context' : '',
+      ].filter(Boolean).join(', ');
+      const title = sanitizeWebLabel(source.title || source.url);
+      const url = sanitizeWebLabel(source.url, 2_048);
+      lines.push(`- ${title} ${url}${flags ? ` (${flags})` : ''}`);
+    }
+  }
+  if (lines.length === 0) return '';
+  return [
+    'Earlier public pages in this conversation are not included below.',
+    'The body is not in this request. Asking to fetch one again runs consent unless that host is already granted.',
+    ...lines.slice(0, 24),
+  ].join('\n');
+}
+
 export function webAuditSourceLabel(source: WebAuditSource): string {
   return `${singleLine(source.title || source.url) || source.url}${source.truncated ? ' (truncated)' : ''}`;
 }
@@ -154,6 +203,9 @@ export function messageClipboardWithWebAudit(text: string, audit: WebAudit | und
 export function webAuditPlainText(audit: WebAudit | undefined): string {
   if (!audit) return '';
   const sections: string[] = [];
+  if (audit.queries && audit.queries.length > 0) {
+    sections.push(`Searched for:\n${audit.queries.map((query) => `- ${singleLine(query)}`).join('\n')}`);
+  }
   if (audit.sources.length > 0) {
     sections.push(
       `Sources consulted:\n${audit.sources.map((s) => `- ${webAuditSourceLabel(s)}: ${s.url}`).join('\n')}`,

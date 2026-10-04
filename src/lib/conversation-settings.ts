@@ -249,6 +249,7 @@ export function resolveConversationSettings(
 export function seedSettingsFor(
   effective: AppSettingDefaults,
   overrides: ConversationSettings = {},
+  options: { webToolsForNewChats?: boolean } = {},
 ): ConversationSettings {
   const seed: ConversationSettings = {
     systemPrompt: effective.systemPrompt,
@@ -261,7 +262,7 @@ export function seedSettingsFor(
     frequencyPenalty: effective.frequencyPenalty,
     presencePenalty: effective.presencePenalty,
     randomSeed: effective.randomSeed,
-    webToolsEnabled: false,
+    webToolsEnabled: options.webToolsForNewChats === true,
   };
   // An empty alias is not a choice, it is the absence of one — on a fresh install no model has
   // been picked yet, and the component's auto-selector fills it in at runtime. Seeding `''`

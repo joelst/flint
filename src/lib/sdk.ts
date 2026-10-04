@@ -2677,6 +2677,8 @@ export interface FetchUrlResult {
   text: string;
   truncated: boolean;
   charCount: number;
+  imageUrls?: string[];
+  imageAlt?: string;
 }
 
 export async function fetchUrl(url: string, maxChars = 50000): Promise<FetchUrlResult> {

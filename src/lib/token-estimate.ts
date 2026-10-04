@@ -14,7 +14,7 @@
  */
 
 /** Rough per-image context cost. Images are opaque here, so one flat overhead is used. */
-const IMAGE_TOKEN_OVERHEAD = 500;
+export const IMAGE_TOKEN_OVERHEAD = 500;
 
 /** Per-message overhead for role markers and chat-template formatting. */
 const PER_MESSAGE_OVERHEAD = 1.5;

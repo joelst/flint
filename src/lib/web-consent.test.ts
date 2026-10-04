@@ -130,6 +130,17 @@ describe('web consent', () => {
       emptySessionWebConsent(),
       searches,
     ).covered.map((prompt) => prompt.id)).toEqual(['next-search']);
+    const afterWebText = [{ kind: 'search' as const, id: 'after-web', afterWebText: true }];
+    expect(splitCoveredConsentPrompts(
+      searchForever.stored,
+      emptySessionWebConsent(),
+      afterWebText,
+    ).covered).toEqual([]);
+    expect(splitCoveredConsentPrompts(
+      searchForever.stored,
+      emptySessionWebConsent(),
+      afterWebText,
+    ).remaining.map((prompt) => prompt.id)).toEqual(['after-web']);
   });
 
   it('keeps search-result URLs on the conversation that produced them', () => {

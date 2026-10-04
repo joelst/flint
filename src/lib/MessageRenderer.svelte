@@ -241,6 +241,14 @@
     {/if}
     {#if webAuditView}
       <section class="web-audit" aria-label="Web retrieval audit">
+        {#if webAuditView.queries && webAuditView.queries.length > 0}
+          <div class="web-audit-heading">Searched for</div>
+          <ul>
+            {#each webAuditView.queries as query}
+              <li>{query}</li>
+            {/each}
+          </ul>
+        {/if}
         {#if webAuditView.sources.length > 0}
           <div class="web-audit-heading">Sources consulted</div>
           <ul>

@@ -9,6 +9,7 @@ import {
   webAuditErrorLabel,
   webAuditPlainText,
   webAuditSourceLabel,
+  webSourceIndex,
 } from './web-audit';
 
 describe('web audit', () => {
@@ -121,8 +122,46 @@ describe('web audit', () => {
       { sources: [{ title: 1, url: 'https://e.com/' }], errors: [] },
       { sources: [{ title: 'T', url: 'javascript:alert(1)' }], errors: [] },
       { sources: [{ title: 'T', url: 'https://e.com/', truncated: 'yes' }], errors: [] },
+      { sources: [{ title: 'T', url: 'https://e.com/', budgetShortened: 'yes' }], errors: [] },
+      { sources: [], errors: [], queries: [1] },
     ]) {
       expect(normalizeWebAudit(bad)).toBeUndefined();
     }
+  });
+
+  it('keeps searched queries and ORs a shortened flag onto a duplicate URL', () => {
+    expect(buildWebAudit([], [], [' public\nweather '])).toEqual({
+      sources: [],
+      errors: [],
+      queries: ['public weather'],
+    });
+    const audit = buildWebAudit([
+      { title: 'Page', url: 'https://example.com/' },
+      { title: 'Page', url: 'https://example.com/', budgetShortened: true },
+    ], []);
+    expect(audit?.sources).toEqual([
+      { title: 'Page', url: 'https://example.com/', budgetShortened: true },
+    ]);
+    expect(webAuditPlainText(buildWebAudit([], [], ['public weather']))).toContain('Searched for:\n- public weather');
+  });
+
+  it('indexes earlier pages without their body or tool errors', () => {
+    const index = webSourceIndex([
+      { role: 'user', webAudit: { sources: [{ title: 'Hidden', url: 'https://hidden.example/' }], errors: [] } },
+      {
+        role: 'assistant',
+        webAudit: {
+          sources: [{ title: 'Page\nA', url: 'https://example.com/', truncated: true, budgetShortened: true }],
+          errors: ['web_fetch: secret failure'],
+          queries: ['secret query'],
+        },
+      },
+    ]);
+    expect(index).toContain('The body is not in this request.');
+    expect(index).toContain('Page A https://example.com/ (truncated, shortened to fit context)');
+    expect(index).not.toContain('secret failure');
+    expect(index).not.toContain('secret query');
+    expect(index).not.toContain('Hidden');
+    expect(webSourceIndex([])).toBe('');
   });
 });
