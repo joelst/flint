@@ -20,6 +20,16 @@ function permissionById(permissions: unknown[], id: string) {
   return permissions.find((permission) => permissionId(permission) === id);
 }
 
+/**
+ * tauri-plugin-shell 2.3.5: `true` compiles the default with no trailing `$`.
+ * A string is wrapped as `^...$`.
+ */
+function shellOpenRegex(open: unknown): RegExp {
+  if (open === true) return /^((mailto:\w+)|(tel:\w+)|(https?:\/\/\w+)).+/;
+  if (typeof open !== 'string') throw new Error(`unexpected shell open matcher: ${String(open)}`);
+  return new RegExp(`^${open}$`);
+}
+
 describe('renderer capability ACL', () => {
   const capability = JSON.parse(
     readFileSync(join(process.cwd(), 'src-tauri', 'capabilities', 'default.json'), 'utf8'),
@@ -42,7 +52,17 @@ describe('renderer capability ACL', () => {
   it('allows shell open for target=_blank links and keeps the plugin default url regex', () => {
     expect(ids).toContain('shell:default');
     const conf = JSON.parse(readFileSync(join(process.cwd(), 'src-tauri', 'tauri.conf.json'), 'utf8'));
-    expect(conf.plugins?.shell?.open).toBe(true);
+    expect(conf.plugins?.shell?.open).toBe('((mailto:\\w+)|(tel:\\+?\\w+)|(https?://\\w+)).+');
+  });
+
+  it('opens a tel link with one leading plus and still rejects javascript', () => {
+    const conf = JSON.parse(readFileSync(join(process.cwd(), 'src-tauri', 'tauri.conf.json'), 'utf8'));
+    const regex = shellOpenRegex(conf.plugins?.shell?.open);
+    expect(regex.test('tel:+15551234567')).toBe(true);
+    expect(regex.test('tel:5551234567')).toBe(true);
+    expect(regex.test('javascript:alert(1)')).toBe(false);
+    expect(regex.test('ftp://example.com/file')).toBe(false);
+    expect(regex.test('https://example.com/\njavascript:alert(1)')).toBe(false);
   });
 
   it('does not grant the renderer a $RESOURCE read scope', () => {

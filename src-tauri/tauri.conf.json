@@ -72,7 +72,7 @@
   },
   "plugins": {
     "shell": {
-      "open": true
+      "open": "((mailto:\\w+)|(tel:\\+?\\w+)|(https?://\\w+)).+"
     },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc1NTI3QUZEMjQwRUQ2QzMKUldURDFnNGsvWHBTZFg1OHNjWXFDaVpCNk80Nlp3Sk5lVis1eEdSOGFQSXJJMStQR1lpSmNGcXUK",

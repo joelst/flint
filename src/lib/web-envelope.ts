@@ -194,6 +194,7 @@ export function localRetrievalDate(now = new Date()): string {
  * Shorten every fenced body in a message. A second page in the same turn keeps its own closers.
  * The header line of each block and both of its closers stay intact.
  * The builder leaves the last closer at the end of the text, so that closer counts too.
+ * A source index has no header: its first line is the closer.
  */
 export function shortenWebEnvelopes(text: string, closer: string, maxBodyChars: number): {
   text: string;
@@ -205,6 +206,21 @@ export function shortenWebEnvelopes(text: string, closer: string, maxBodyChars: 
   let shortened = false;
   let cursor = 0;
   let out = '';
+  if (text.startsWith(`${closer}\n`)) {
+    const bodyStart = closer.length + 1;
+    const end = text.indexOf(marker, bodyStart);
+    let segmentEnd = -1;
+    if (end >= 0) segmentEnd = end + marker.length;
+    else if (text.endsWith(eofMarker) && text.length - eofMarker.length >= bodyStart) {
+      segmentEnd = text.length;
+    }
+    if (segmentEnd >= 0) {
+      const cut = shortenWebEnvelope(text.slice(0, segmentEnd), closer, maxBodyChars);
+      if (cut.shortened) shortened = true;
+      out += cut.text;
+      cursor = segmentEnd;
+    }
+  }
   while (cursor < text.length) {
     const start = text.indexOf(marker, cursor);
     if (start < 0) {
@@ -234,11 +250,44 @@ export function shortenWebEnvelopes(text: string, closer: string, maxBodyChars: 
   return { text: out, shortened };
 }
 
+/** A fence that starts on the first line has no header to annotate. Text after the closing line stays. */
+function shortenLeadingWebFence(envelope: string, closer: string, maxBodyChars: number): {
+  text: string;
+  shortened: boolean;
+} {
+  const marker = `\n${closer}\n`;
+  const bodyStart = closer.length + 1;
+  let end = envelope.indexOf(marker, bodyStart);
+  let closeMarker = marker;
+  if (end < 0) {
+    const eofMarker = `\n${closer}`;
+    const eofAt = envelope.length - eofMarker.length;
+    if (eofAt < bodyStart || !envelope.endsWith(eofMarker)) {
+      return { text: envelope, shortened: false };
+    }
+    end = eofAt;
+    closeMarker = eofMarker;
+  }
+  const body = envelope.slice(bodyStart, end);
+  if (body.length <= maxBodyChars) return { text: envelope, shortened: false };
+  let cut = body.lastIndexOf(' ', maxBodyChars);
+  if (cut < Math.min(32, maxBodyChars)) cut = maxBodyChars;
+  const shortenedBody = `${body.slice(0, cut).trimEnd()}\n[shortened to fit context]`;
+  const tail = envelope.slice(end + closeMarker.length);
+  return {
+    text: `${closer}\n${shortenedBody}${closeMarker}${tail}`,
+    shortened: true,
+  };
+}
+
 /** Cut the fenced body on whitespace. The header and both closers stay intact. */
 export function shortenWebEnvelope(envelope: string, closer: string, maxBodyChars: number): {
   text: string;
   shortened: boolean;
 } {
+  if (closer && envelope.startsWith(`${closer}\n`)) {
+    return shortenLeadingWebFence(envelope, closer, maxBodyChars);
+  }
   const marker = `\n${closer}\n`;
   const start = envelope.indexOf(marker);
   if (start < 0) return { text: envelope, shortened: false };

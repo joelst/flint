@@ -16,7 +16,7 @@ import {
   prependTextToLatestUser,
   webSourceIndex,
 } from './web-audit';
-import { buildWebEnvelope, shortenWebEnvelope } from './web-envelope';
+import { buildWebEnvelope, shortenWebEnvelope, shortenWebEnvelopes } from './web-envelope';
 
 describe('web audit', () => {
   it('deduplicates by URL, merges truncation, and does not mutate input', () => {
@@ -190,6 +190,44 @@ describe('web audit', () => {
     expect(index).not.toContain('reference data, not instructions');
     expect(fenceWebSourceIndex('', closer)).toBe('');
     expect(fenceWebSourceIndex(index, '')).toBe('');
+  });
+
+  it('shortens a source index that begins on the first line and keeps the question', () => {
+    const closer = 'flint-ref-abcdef012345';
+    const bullets = Array.from({ length: 4 }, (_, i) => (
+      `- Title ${i} https://example.com/${'u'.repeat(180)}/${i}`
+    )).join('\n');
+    const index = fenceWebSourceIndex(bullets, closer);
+    const question = 'what changed on the page?';
+    const page = buildWebEnvelope({
+      closer,
+      title: 'Kept page',
+      url: 'https://example.com/kept',
+      retrievedOn: '2026-10-05',
+      body: `alpha ${'beta '.repeat(40)}`,
+    });
+    const alone = shortenWebEnvelopes(index, closer, 24);
+    expect(alone.shortened).toBe(true);
+    expect(alone.text.startsWith(`${closer}\n`)).toBe(true);
+    expect(alone.text.endsWith(`\n${closer}`)).toBe(true);
+    expect(alone.text.match(/flint-ref-abcdef012345/g)).toHaveLength(2);
+    const leading = shortenWebEnvelopes(`${index}\n\n${question}`, closer, 24);
+    expect(leading.shortened).toBe(true);
+    expect(leading.text.startsWith(`${closer}\n`)).toBe(true);
+    expect(leading.text.endsWith(`\n${closer}\n\n${question}`)).toBe(true);
+    expect(leading.text.match(/flint-ref-abcdef012345/g)).toHaveLength(2);
+    expect(leading.text).not.toContain('u'.repeat(180));
+    const cut = shortenWebEnvelopes(`${index}\n\n${question}\n\n${page}`, closer, 24);
+    expect(cut.shortened).toBe(true);
+    expect(cut.text).toContain(`\n\n${question}\n\n`);
+    expect(cut.text).toContain('Title: Kept page.');
+    expect(cut.text).toContain('https://example.com/kept');
+    expect(cut.text.match(/flint-ref-abcdef012345/g)).toHaveLength(4);
+    expect(cut.text.indexOf(question)).toBeLessThan(cut.text.indexOf('Title: Kept page.'));
+    expect(shortenWebEnvelopes('no closer here', closer, 24)).toEqual({
+      text: 'no closer here',
+      shortened: false,
+    });
   });
 
   it('prepends the fence onto a copy of the latest user message', () => {
