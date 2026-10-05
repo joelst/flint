@@ -49,6 +49,34 @@ function isImagePart(part: unknown): boolean {
 }
 
 /**
+ * Ids, function names, and argument strings travel with the completion even when `content`
+ * is empty. A display `name` is counted only on a tool result that names its `tool_call_id`.
+ */
+function toolLinkageText(message: object): string {
+  const lines: string[] = [];
+  const calls = (message as { tool_calls?: unknown }).tool_calls;
+  if (Array.isArray(calls)) {
+    for (const call of calls) {
+      if (!call || typeof call !== "object") continue;
+      const id = (call as { id?: unknown }).id;
+      const fn = (call as { function?: unknown }).function;
+      const name = fn && typeof fn === "object" ? (fn as { name?: unknown }).name : undefined;
+      const args = fn && typeof fn === "object" ? (fn as { arguments?: unknown }).arguments : undefined;
+      if (typeof id === "string" && id.length > 0) lines.push(id);
+      if (typeof name === "string" && name.length > 0) lines.push(name);
+      if (typeof args === "string" && args.length > 0) lines.push(args);
+    }
+  }
+  const toolCallId = (message as { tool_call_id?: unknown }).tool_call_id;
+  if (typeof toolCallId === "string" && toolCallId.length > 0) {
+    lines.push(toolCallId);
+    const name = (message as { name?: unknown }).name;
+    if (typeof name === "string" && name.length > 0) lines.push(name);
+  }
+  return lines.join("\n");
+}
+
+/**
  * Estimate the context a message list occupies.
  *
  * Non-object messages, and messages whose content is neither a string nor an array, still
@@ -58,9 +86,10 @@ export function estimateTokensForMessages(msgs: readonly unknown[]): number {
   if (!Array.isArray(msgs)) return 0;
   let total = 0;
   for (const message of msgs) {
-    const content = typeof message === "object" && message !== null
-      ? (message as { content?: unknown }).content
-      : undefined;
+    const record = typeof message === "object" && message !== null
+      ? message as { content?: unknown }
+      : null;
+    const content = record?.content;
     if (Array.isArray(content)) {
       for (const part of content) {
         const text = partText(part);
@@ -70,20 +99,21 @@ export function estimateTokensForMessages(msgs: readonly unknown[]): number {
           total += IMAGE_TOKEN_OVERHEAD;
         }
       }
-      continue;
-    }
-    if (typeof content === "string") {
+    } else if (typeof content === "string") {
       total += estimateTokens(content);
-      continue;
+    } else if (content !== undefined && content !== null) {
+      // A non-string, non-array payload still costs context. Serializing is the only estimate
+      // available, and a value that cannot be serialized (a cycle, a BigInt) contributes none
+      // rather than throwing out of the caller's derived.
+      try {
+        total += estimateTokens(JSON.stringify(content) ?? "");
+      } catch {
+        // Unserializable payload: counted as its message overhead only.
+      }
     }
-    // A non-string, non-array payload still costs context. Serializing is the only estimate
-    // available, and a value that cannot be serialized (a cycle, a BigInt) contributes none
-    // rather than throwing out of the caller's derived.
-    if (content === undefined || content === null) continue;
-    try {
-      total += estimateTokens(JSON.stringify(content) ?? "");
-    } catch {
-      // Unserializable payload: counted as its message overhead only.
+    if (record) {
+      const linkage = toolLinkageText(record);
+      if (linkage) total += estimateTokens(linkage);
     }
   }
   return total + Math.ceil(msgs.length * PER_MESSAGE_OVERHEAD);

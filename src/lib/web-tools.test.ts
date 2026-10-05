@@ -102,7 +102,9 @@ describe('web tool calls', () => {
     expect(result.errors).toEqual([]);
     expect(result.toolCalls.map((call) => call.function.name)).toEqual(['web_fetch', 'web_fetch']);
     expect(result.toolCalls.map((call) => call.id)).toEqual(['glued:0', 'glued:1']);
-    expect(result.toolMessages.map((message) => message.tool_call_id)).toEqual(['glued:0', 'glued:1']);
+    expect(result.toolMessages.map((message) => (
+      message.role === 'tool' ? message.tool_call_id : ''
+    ))).toEqual(['glued:0', 'glued:1']);
   });
 
   it('reports one web_fetch issue for a repeated name that does not fit in two calls, and still runs the search', async () => {
@@ -813,6 +815,79 @@ describe('web tool calls', () => {
     expect(blocked).toEqual({ error: 'This host is blocked on this device' });
     expect(authorize).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('returns one image, follows an approved redirect, and stops on decline or abort', async () => {
+    const execute = vi.fn(async (): Promise<WebToolResult> => ({
+      operation: 'image',
+      url: 'https://photos.example/a.jpg',
+      mediaType: 'image/jpeg',
+      dataBase64: 'abc',
+    }));
+    const image = await executeWebImage(
+      'https://photos.example/a.jpg',
+      execute,
+      async () => true,
+    );
+    expect(image).toEqual({
+      url: 'https://photos.example/a.jpg',
+      mediaType: 'image/jpeg',
+      dataBase64: 'abc',
+    });
+
+    const redirected = vi.fn(async (request: WebToolRequest): Promise<WebToolResult> => {
+      const url = 'url' in request ? request.url : '';
+      return url === 'https://photos.example/a.jpg'
+        ? { operation: 'redirect', url: 'https://cdn.example/b.jpg' }
+        : { operation: 'image', url, mediaType: 'image/jpeg', dataBase64: 'zzz' };
+    });
+    const followed = await executeWebImage('https://photos.example/a.jpg', redirected, async () => true);
+    expect(followed).toEqual({
+      url: 'https://cdn.example/b.jpg',
+      mediaType: 'image/jpeg',
+      dataBase64: 'zzz',
+    });
+
+    const declined = await executeWebImage(
+      'https://photos.example/a.jpg',
+      vi.fn(),
+      async () => false,
+    );
+    expect(declined).toEqual({ error: 'User declined access to this site' });
+
+    const stopped = await executeWebImage(
+      'https://photos.example/a.jpg',
+      vi.fn(),
+      async () => true,
+      [],
+      AbortSignal.abort(),
+    );
+    expect(stopped).toEqual({ error: 'Stopped' });
+
+    const unexpected = await executeWebImage(
+      'https://photos.example/a.jpg',
+      async () => ({ operation: 'search', query: 'nope', results: [] }),
+      async () => true,
+    );
+    expect(unexpected).toEqual({ error: 'Public web fetch returned an unexpected result' });
+
+    const badRedirect = await executeWebImage(
+      'https://photos.example/a.jpg',
+      async () => ({ operation: 'redirect', url: 'not a url' }),
+      async () => true,
+    );
+    expect(badRedirect).toEqual({ error: 'Public web fetch returned an unexpected result' });
+
+    let hops = 0;
+    const tooMany = await executeWebImage(
+      'https://photos.example/start.jpg',
+      async () => {
+        hops += 1;
+        return { operation: 'redirect', url: `https://cdn${hops}.example/next.jpg` };
+      },
+      async () => true,
+    );
+    expect(tooMany).toEqual({ error: 'Too many redirects' });
   });
 
   it('names the search or the host while a tool call is running', async () => {

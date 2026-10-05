@@ -7,6 +7,8 @@ import {
   buildWebEnvelope,
   createWebCloser,
   localRetrievalDate,
+  messageContentWithFence,
+  shortenWebEnvelope,
   shortenWebEnvelopes,
   stripWebCloser,
   webCloserInstruction,
@@ -66,5 +68,51 @@ describe('web envelope', () => {
     expect(cut.text).toContain('Title: Two.');
     expect(cut.text).toContain('https://example.com/two');
     expect(cut.text.match(/flint-ref-abcdef012345/g)).toHaveLength(4);
+  });
+
+  it('shortens a single envelope whose closer is the end of the text', () => {
+    const closer = 'flint-ref-abcdef012345';
+    const envelope = buildWebEnvelope({
+      closer,
+      title: 'Only',
+      url: 'https://example.com/only',
+      retrievedOn: '2026-10-03',
+      body: 'alpha '.repeat(40),
+    });
+    expect(envelope.endsWith(closer)).toBe(true);
+    const cut = shortenWebEnvelopes(envelope, closer, 24);
+    expect(cut.shortened).toBe(true);
+    expect(cut.text).toContain('Title: Only.');
+    expect(cut.text).toContain('https://example.com/only');
+    expect(cut.text).toContain('[shortened to fit context]');
+    expect(cut.text.match(/flint-ref-abcdef012345/g)).toHaveLength(2);
+  });
+
+  it('copies a fence onto string content and text parts without touching other parts', () => {
+    const image = { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,aa' } };
+    const content = [{ type: 'text', text: 'question' }, image];
+    const fenced = messageContentWithFence(content, 'fenced question');
+    expect(fenced).not.toBe(content);
+    expect(fenced).toEqual([
+      { type: 'text', text: 'fenced question' },
+      image,
+    ]);
+    expect(content[0]).toEqual({ type: 'text', text: 'question' });
+    expect(messageContentWithFence('question', 'fenced question')).toBe('fenced question');
+    expect(messageContentWithFence(null, 'fenced question')).toBeNull();
+  });
+
+  it('leaves text unchanged when there is no closer to shorten', () => {
+    const closer = 'flint-ref-abcdef012345';
+    expect(stripWebCloser('keep', '')).toBe('keep');
+    expect(shortenWebEnvelopes('plain', closer, 24)).toEqual({ text: 'plain', shortened: false });
+    expect(shortenWebEnvelopes(`mentions ${closer} inline`, closer, 24)).toEqual({
+      text: `mentions ${closer} inline`,
+      shortened: false,
+    });
+    const trailing = `header\n${closer}\nbody\n${closer} trailing`;
+    expect(shortenWebEnvelopes(trailing, closer, 1)).toEqual({ text: trailing, shortened: false });
+    expect(shortenWebEnvelope('no fence', closer, 1)).toEqual({ text: 'no fence', shortened: false });
+    expect(shortenWebEnvelope(trailing, closer, 1)).toEqual({ text: trailing, shortened: false });
   });
 });

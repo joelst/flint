@@ -254,7 +254,7 @@
     webToolSystemInstruction,
     webToolTemplateCrash,
   } from "$lib/web-tools";
-  import { buildWebEnvelope, createWebCloser, localRetrievalDate } from "$lib/web-envelope";
+  import { buildWebEnvelope, createWebCloser, localRetrievalDate, messageContentWithFence } from "$lib/web-envelope";
   import { mergeBlocklists, parseBlocklistText, hostBlocked, BUILT_IN_WEB_BLOCKLIST } from "$lib/web-blocklist";
   import { packContextMessages, plannedWebFit, repackToolRequest } from "$lib/context-packer";
   import {
@@ -7020,10 +7020,10 @@ updateStateFromSdk();
     })).join("\n\n");
     const questionText = chipFence ? `${chipFence}\n\n${text}` : text;
 
-    let userContent: any = questionText;
+    let userContent: any = text;
     if ((attachedImages.length > 0 && isVisionModel) || attachedTextFiles.length > 0) {
       userContent = [
-        { type: "text", text: questionText },
+        { type: "text", text },
         ...attachedTextFiles,
         ...(isVisionModel
           ? attachedImages.map((url) => ({ type: "image_url", image_url: { url } }))
@@ -7070,8 +7070,20 @@ updateStateFromSdk();
     if (offerWebTools && modelCannotUseWebTools(requestModelAlias)) {
       offerWebTools = false;
       webToolsSkippedNote = WEB_TOOLS_UPSTREAM_NOTE;
+    } else if (
+      offerWebTools
+      && catalogModelForEndpointId(state.models, requestModelAlias || "")?.supportsToolCalling === false
+    ) {
+      offerWebTools = false;
     }
-    const inferenceMessages = stamped;
+    // The saved turn stays on `stamped`. The fence is copied onto the last message for this send only.
+    const inferenceMessages = chipFence
+      ? stamped.map((message: any, index: number) => (
+          index === stamped.length - 1
+            ? { ...message, content: messageContentWithFence(message.content, questionText) }
+            : message
+        ))
+      : stamped;
     const sendFit = {
       closer: sendCloser,
       roundsRemaining: offerWebTools ? 2 : 0,
@@ -7408,6 +7420,8 @@ updateStateFromSdk();
           setModelRuntimeMeta(requestModelAlias, { lastUsedAcceleration: endpointAcceleration });
         }
         assistantContent = data?.choices?.[0]?.message?.content || assistantContent;
+        releaseSettledRequestId();
+        let stoppedBeforeVision = false;
         if (webImageUrl && !userAttachedImage && isVisionModel && !requestController.signal.aborted) {
           const imageHost = hostnameOf(webImageUrl) || webImageUrl;
           updateAssistantMessage({ content: `Reading an image from ${imageHost}` });
@@ -7418,28 +7432,41 @@ updateStateFromSdk();
             webHostBlocklist,
             requestController.signal,
           );
-          if (!("error" in image) && image.dataBase64) {
+          if (requestController.signal.aborted) {
+            stoppedBeforeVision = true;
+          } else if (!("error" in image) && image.dataBase64) {
             try {
               const bytes = Uint8Array.from(atob(image.dataBase64), (char) => char.charCodeAt(0));
               const file = new File([bytes], "page-image", { type: image.mediaType || "application/octet-stream" });
               const jpeg = await compactImageAttachment(file, { forceJpeg: true });
-              let visionContent = "";
-              const vision = await chatCompletionStream(
-                requestModelAlias,
-                withVisionImage(visionBase, webFenceForVision, jpeg),
-                (delta: string) => {
-                  if (requestController.signal.aborted) return;
-                  visionContent += delta;
-                  updateAssistantMessage({ content: visionContent });
-                },
-                { ...requestGeneration },
-                publishRequestId,
-              );
-              assistantContent = vision?.choices?.[0]?.message?.content || visionContent || assistantContent;
+              if (requestController.signal.aborted) {
+                stoppedBeforeVision = true;
+              } else {
+                let visionContent = "";
+                const vision = await chatCompletionStream(
+                  requestModelAlias,
+                  withVisionImage(visionBase, webFenceForVision, jpeg),
+                  (delta: string) => {
+                    if (requestController.signal.aborted) return;
+                    visionContent += delta;
+                    updateAssistantMessage({ content: visionContent });
+                  },
+                  { ...requestGeneration },
+                  publishRequestId,
+                );
+                assistantContent = vision?.choices?.[0]?.message?.content || visionContent || assistantContent;
+              }
             } catch {
+              if (requestController.signal.aborted) stoppedBeforeVision = true;
               // A vision failure keeps the text answer. The fence still names the page.
             }
           }
+        }
+        if (stoppedBeforeVision) {
+          assistantContent = replyWithNote(
+            assistantContent,
+            "[Stopped after web retrieval. The partial response may already have been saved.]",
+          );
         }
         assistantContent = stripChatTemplateSpill(assistantContent);
         updateAssistantMessage({ content: assistantContent, ...webAuditPatch() });

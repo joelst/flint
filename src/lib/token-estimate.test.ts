@@ -112,4 +112,41 @@ describe("estimateTokensForMessages", () => {
   it("rounds the per-message overhead up across an odd message count", () => {
     expect(estimateTokensForMessages([{}, {}, {}])).toBe(5);
   });
+
+  it("counts tool-call ids, names, and arguments in addition to content", () => {
+    const content = "answer";
+    const argumentsText = `https://example.com/${"p".repeat(400)}`;
+    const plain = estimateTokensForMessages([{ role: "assistant", content }]);
+    const withCall = estimateTokensForMessages([{
+      role: "assistant",
+      content,
+      tool_calls: [{
+        id: "call-1",
+        type: "function",
+        function: { name: "web_fetch", arguments: argumentsText },
+      }],
+    }]);
+    expect(withCall).toBe(
+      plain + estimateTokens(["call-1", "web_fetch", argumentsText].join("\n")),
+    );
+    const linked = estimateTokensForMessages([{
+      role: "tool",
+      content,
+      tool_call_id: "call-1",
+      name: "web_fetch",
+    }]);
+    expect(linked).toBe(plain + estimateTokens("call-1\nweb_fetch"));
+    const namedOnly = estimateTokensForMessages([{
+      role: "assistant",
+      content,
+      name: "web_fetch",
+    }]);
+    expect(namedOnly).toBe(plain);
+    const unnamedTool = estimateTokensForMessages([{
+      role: "tool",
+      content,
+      name: "web_fetch",
+    }]);
+    expect(unnamedTool).toBe(plain);
+  });
 });

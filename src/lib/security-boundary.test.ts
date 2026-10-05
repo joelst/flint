@@ -149,6 +149,9 @@ describe('renderer/sidecar boundary', () => {
     const round = page.slice(page.indexOf('webRoundStarted = true;'), page.indexOf('const executed = await executeWebToolCalls('));
     expect(round).toContain('releaseSettledRequestId();');
     expect(page).toMatch(/function releaseSettledRequestId\(\) \{[\s\S]*?stream\.requestId = null;[\s\S]*?activeStreamRequestId = null;/);
+    const imageAt = page.indexOf('const image = await executeWebImage(');
+    const textAnswerAt = page.indexOf('assistantContent = data?.choices?.[0]?.message?.content || assistantContent;');
+    expect(page.lastIndexOf('releaseSettledRequestId();', imageAt)).toBeGreaterThan(textAnswerAt);
   });
 
   it('lets an allowed model request search after the message is sent', () => {
@@ -254,6 +257,10 @@ describe('renderer/sidecar boundary', () => {
     const sdk = readFileSync(join(process.cwd(), 'src', 'lib', 'sdk.ts'), 'utf8');
     expect(page).toContain('const chipFence = doneFetches.map');
     expect(page).toContain('const questionText = chipFence ?');
+    expect(page).toContain('let userContent: any = text;');
+    expect(page).toContain('messageContentWithFence(message.content, questionText)');
+    expect(page).toContain('catalogModelForEndpointId(state.models, requestModelAlias || "")?.supportsToolCalling === false');
+    expect(page).toContain('stoppedBeforeVision');
     expect(page).not.toContain('urlContextMessages');
     expect(page).not.toContain('Understood. I have read');
     expect(page).toContain('if (offerWebTools && messagesContainImages(requestMessages))');

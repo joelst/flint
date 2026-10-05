@@ -82,6 +82,20 @@ export function buildWebEnvelope(input: {
   return [header, closer, body, closer].join('\n');
 }
 
+/**
+ * Request-only copy of one message's content. The saved turn stays untouched.
+ * String content is replaced. Text parts are replaced. Every other part is shared.
+ */
+export function messageContentWithFence(content: unknown, fencedText: string): unknown {
+  if (typeof content === 'string') return fencedText;
+  if (!Array.isArray(content)) return content;
+  return content.map((part) => (
+    part && typeof part === 'object' && (part as { type?: unknown }).type === 'text'
+      ? { ...(part as object), text: fencedText }
+      : part
+  ));
+}
+
 /** Local calendar date for the Flint line. The wire format is `YYYY-MM-DD` only. */
 export function localRetrievalDate(now = new Date()): string {
   const year = now.getFullYear();
@@ -93,6 +107,7 @@ export function localRetrievalDate(now = new Date()): string {
 /**
  * Shorten every fenced body in a message. A second page in the same turn keeps its own closers.
  * The header line of each block and both of its closers stay intact.
+ * The builder leaves the last closer at the end of the text, so that closer counts too.
  */
 export function shortenWebEnvelopes(text: string, closer: string, maxBodyChars: number): {
   text: string;
@@ -100,6 +115,7 @@ export function shortenWebEnvelopes(text: string, closer: string, maxBodyChars: 
 } {
   if (!closer || !text.includes(closer)) return { text, shortened: false };
   const marker = `\n${closer}\n`;
+  const eofMarker = `\n${closer}`;
   let shortened = false;
   let cursor = 0;
   let out = '';
@@ -112,7 +128,15 @@ export function shortenWebEnvelopes(text: string, closer: string, maxBodyChars: 
     const bodyStart = start + marker.length;
     const end = text.indexOf(marker, bodyStart);
     if (end < 0) {
-      out += text.slice(cursor);
+      const eofAt = text.length - eofMarker.length;
+      if (eofAt >= bodyStart && text.endsWith(eofMarker)) {
+        const segment = text.slice(cursor);
+        const cut = shortenWebEnvelope(segment, closer, maxBodyChars);
+        if (cut.shortened) shortened = true;
+        out += cut.text;
+      } else {
+        out += text.slice(cursor);
+      }
       break;
     }
     const segment = text.slice(cursor, end + marker.length);
@@ -131,9 +155,19 @@ export function shortenWebEnvelope(envelope: string, closer: string, maxBodyChar
 } {
   const marker = `\n${closer}\n`;
   const start = envelope.indexOf(marker);
-  const end = start >= 0 ? envelope.lastIndexOf(marker) : -1;
-  if (start < 0 || end <= start) return { text: envelope, shortened: false };
+  if (start < 0) return { text: envelope, shortened: false };
   const bodyStart = start + marker.length;
+  let end = envelope.lastIndexOf(marker);
+  let closeMarker = marker;
+  if (end <= start) {
+    const eofMarker = `\n${closer}`;
+    const eofAt = envelope.length - eofMarker.length;
+    if (eofAt < bodyStart || !envelope.endsWith(eofMarker)) {
+      return { text: envelope, shortened: false };
+    }
+    end = eofAt;
+    closeMarker = eofMarker;
+  }
   const body = envelope.slice(bodyStart, end);
   if (body.length <= maxBodyChars) return { text: envelope, shortened: false };
   let cut = body.lastIndexOf(' ', maxBodyChars);
@@ -144,7 +178,7 @@ export function shortenWebEnvelope(envelope: string, closer: string, maxBodyChar
     ? header
     : `${header.trimEnd()} Shortened to fit context.`;
   return {
-    text: `${withNote}${marker}${shortenedBody}${marker}`,
+    text: `${withNote}${marker}${shortenedBody}${closeMarker}`,
     shortened: true,
   };
 }

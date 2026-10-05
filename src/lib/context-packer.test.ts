@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  chooseFetchMaxChars,
   generationReserve,
   packContextMessages,
   plannedWebFit,
+  promptBudget,
   repackToolRequest,
 } from './context-packer';
 import { estimateTokens, estimateTokensForMessages } from './token-estimate';
@@ -92,5 +94,134 @@ describe('context packer', () => {
     expect(packed.messages[0].content).toBe('system folded');
     expect(packed.omittedHistory).toBeGreaterThan(0);
     expect(String(packed.messages.at(-1)?.content)).toContain('Question');
+  });
+
+  it('budgets an unknown context and subtracts a reserve', () => {
+    expect(promptBudget({ contextTokens: null, maxTokens: 100 })).toBe(
+      4096 - generationReserve(4096, 100),
+    );
+    expect(promptBudget({ contextTokens: 0, maxTokens: 100, reserveTokens: 50 })).toBe(
+      4096 - generationReserve(4096, 100) - 50,
+    );
+    expect(promptBudget({ contextTokens: 8000, maxTokens: 100, reserveTokens: -5 })).toBe(
+      8000 - generationReserve(8000, 100),
+    );
+    expect(chooseFetchMaxChars({
+      contextTokens: 4096,
+      maxTokens: 100,
+      roundsRemaining: Number.NaN,
+      occupiedTokens: 0,
+    })).toBe(1_000);
+  });
+
+  it('keeps a summary, a pinned turn, and a short older turn, and drops one that does not fit', () => {
+    const summary = { role: 'assistant', content: 'summary text', isSummary: true };
+    const pinned = { role: 'user', content: 'pinned note', pinned: true };
+    const older = { role: 'assistant', content: 'short older answer' };
+    const huge = { role: 'assistant', content: 'huge '.repeat(8_000) };
+    const latest = { role: 'user', content: 'latest question' };
+    const budget = Math.ceil(
+      (estimateTokens('Be helpful.') + estimateTokensForMessages([summary, pinned, older, latest])) * 1.15,
+    );
+    const packed = packContextMessages({
+      messages: [summary, pinned, older, huge, latest],
+      systemPrompt: 'Be helpful.',
+      budgetTokens: budget,
+    });
+    expect(packed.contextFull).toBe(false);
+    expect(packed.messages.map((message) => message.content)).toEqual([
+      'summary text',
+      'pinned note',
+      'short older answer',
+      'latest question',
+    ]);
+    expect(packed.omittedPinned).toBe(0);
+    expect(packed.omittedSummaries).toBe(0);
+  });
+
+  it('shortens a fenced page in string content and in the first text part', () => {
+    const closer = 'flint-ref-abcdef012345';
+    const fence = buildWebEnvelope({
+      closer,
+      title: 'Page',
+      url: 'https://example.com/p',
+      retrievedOn: '2026-10-03',
+      body: 'alpha '.repeat(80),
+    });
+    const stringPacked = packContextMessages({
+      messages: [{ role: 'user', content: fence }],
+      systemPrompt: 'Be helpful.',
+      budgetTokens: 100_000,
+      closer,
+      bodyChars: 24,
+    });
+    expect(stringPacked.shortened).toBe(true);
+    expect(String(stringPacked.messages[0].content)).toContain('[shortened to fit context]');
+    expect(String(stringPacked.messages[0].content)).toContain('Title: Page.');
+
+    const image = { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,aa' } };
+    const arrayPacked = packContextMessages({
+      messages: [{
+        role: 'user',
+        content: [null, 'nope', image, { type: 'text', text: fence }, { type: 'text', text: 'second' }],
+      }],
+      systemPrompt: '',
+      budgetTokens: 100_000,
+      closer,
+      bodyChars: 24,
+    });
+    expect(arrayPacked.shortened).toBe(true);
+    const parts = arrayPacked.messages[0].content as unknown[];
+    expect(parts[0]).toBeNull();
+    expect(parts[1]).toBe('nope');
+    expect(parts[2]).toBe(image);
+    expect(String((parts[3] as { text: string }).text)).toContain('[shortened to fit context]');
+    expect((parts[4] as { text: string }).text).toBe('second');
+  });
+
+  it('returns no latest turn when the request has no user message', () => {
+    const packed = packContextMessages({
+      messages: [],
+      systemPrompt: 'hi',
+      budgetTokens: 100,
+    });
+    expect(packed.contextFull).toBe(false);
+    expect(packed.messages).toEqual([]);
+  });
+
+  it('keeps a middle turn that fits and refuses a tail that does not fit after shortening', () => {
+    const middle = repackToolRequest({
+      messages: [
+        { role: 'user', content: 'folded' },
+        { role: 'assistant', content: 'middle answer' },
+        { role: 'user', content: 'latest' },
+      ],
+      budgetTokens: 100_000,
+    });
+    expect(middle.contextFull).toBe(false);
+    expect(middle.messages.map((message) => message.content)).toEqual(['folded', 'middle answer', 'latest']);
+    expect(middle.omittedHistory).toBe(0);
+
+    const closer = 'flint-ref-abcdef012345';
+    const fence = buildWebEnvelope({
+      closer,
+      title: 'Page',
+      url: 'https://example.com/p',
+      retrievedOn: '2026-10-03',
+      body: 'alpha '.repeat(400),
+    });
+    const full = repackToolRequest({
+      messages: [
+        { role: 'assistant', content: 'folded' },
+        { role: 'user', content: fence },
+      ],
+      budgetTokens: 20,
+      closer,
+      bodyChars: 2_000,
+      minimumBodyChars: 24,
+    });
+    expect(full.contextFull).toBe(true);
+    expect(full.shortened).toBe(true);
+    expect(full.messages).toEqual([]);
   });
 });
