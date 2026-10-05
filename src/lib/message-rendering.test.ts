@@ -296,9 +296,18 @@ describe("modelPrefillsThink", () => {
     expect(modelPrefillsThink("qwen3-4b")).toBe(true);
     expect(modelPrefillsThink("qwen3-vl-8b")).toBe(true);
     expect(modelPrefillsThink("qwq-32b")).toBe(true);
+    expect(modelPrefillsThink("qwen3")).toBe(true);
+    expect(modelPrefillsThink("qwq")).toBe(true);
+    expect(modelPrefillsThink("Qwen3.5-9B")).toBe(true);
     expect(modelPrefillsThink("qwen2.5-7b")).toBe(false);
     expect(modelPrefillsThink("phi-4-mini-reasoning")).toBe(false);
     expect(modelPrefillsThink("")).toBe(false);
+    expect(modelPrefillsThink("not-qwen3")).toBe(false);
+    expect(modelPrefillsThink("my-qwq")).toBe(false);
+    expect(modelPrefillsThink("qwen30")).toBe(false);
+    expect(modelPrefillsThink("qwq32")).toBe(false);
+    expect(modelPrefillsThink(null)).toBe(false);
+    expect(modelPrefillsThink(undefined)).toBe(false);
   });
 });
 

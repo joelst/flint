@@ -309,10 +309,11 @@ export function extractThinkingTrace(text: string, recognizePlainText = false): 
 /**
  * Qwen3-family and QwQ templates open `<think>` in the prompt, before the model writes.
  * The generated text stays reasoning until the model emits the closing tag. Qwen2 does not.
+ * The alias must start with that family token. A later mention does not.
  */
 export function modelPrefillsThink(alias: string | null | undefined): boolean {
-  const name = (alias ?? "").toLowerCase();
-  return name.includes("qwen3") || name.includes("qwq");
+  const name = (alias ?? "").trim().toLowerCase();
+  return /^(?:qwen3|qwq)(?:$|[^a-z0-9])/.test(name);
 }
 
 /**
