@@ -561,6 +561,8 @@ export async function executeWebToolCalls(
     blocklist?: readonly string[];
     scrubCorpus?: string;
     maxChars?: number;
+    /** 1 runs only the first call. Any other value keeps the cap of 2. */
+    maxCalls?: number;
     onActivity?: (event: { kind: 'search'; query: string } | { kind: 'fetch'; host: string }) => void;
   },
 ): Promise<{
@@ -584,7 +586,22 @@ export async function executeWebToolCalls(
   const closer = options?.closer ?? createWebCloser();
   const retrievedOn = options?.retrievedOn ?? new Date().toISOString().slice(0, 10);
   const fetchChars = Math.min(50_000, Math.max(1_000, options?.maxChars ?? 20_000));
+  const callLimit = options?.maxCalls === 1 ? 1 : 2;
+  let accepted = 0;
   for (const parsedCall of parsed) {
+    if (accepted >= callLimit) {
+      const message = 'Only one web result fits this context.';
+      errors.push(`${parsedCall.call.function.name}: ${message}`);
+      toolCalls.push(parsedCall.call);
+      toolMessages.push({
+        role: 'tool',
+        tool_call_id: parsedCall.call.id,
+        name: parsedCall.call.function.name,
+        content: JSON.stringify({ error: message }),
+      });
+      continue;
+    }
+    accepted += 1;
     if ('error' in parsedCall) {
       const message = collapsed(parsedCall.error).slice(0, 500);
       errors.push(`${parsedCall.call.function.name}: ${message}`);

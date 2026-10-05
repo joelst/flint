@@ -147,7 +147,14 @@ export function plannedWebFit(input: {
   reserveImage?: boolean;
   /** Already included in occupiedTokens. Subtracted once from the message budget. */
   schemaTokens?: number;
-}): { maxChars: number; reserveTokens: number; promptTokens: number; fencedChars: number; toolsViable: boolean } {
+}): {
+  maxChars: number;
+  reserveTokens: number;
+  promptTokens: number;
+  fencedChars: number;
+  toolsViable: boolean;
+  maxToolCalls: number;
+} {
   const context = input.contextTokens && input.contextTokens > 0
     ? input.contextTokens
     : UNKNOWN_CONTEXT_TOKENS;
@@ -182,7 +189,22 @@ export function plannedWebFit(input: {
   const minimumFenceTokens = Math.ceil(
     estimateTokensCeiling(280 + FENCE_FRAMING_CHARS) * PACKER_SAFETY_FACTOR,
   );
-  const toolsViable = input.roundsRemaining <= 0 || reserveRoom >= minimumFenceTokens;
+  // A round may return two calls. Offer tools when one fence fits, and say how many.
+  let maxToolCalls = 0;
+  let toolsViable = true;
+  if (input.roundsRemaining <= 0) {
+    maxToolCalls = 0;
+    toolsViable = true;
+  } else if (reserveRoom >= 2 * minimumFenceTokens) {
+    maxToolCalls = 2;
+    toolsViable = true;
+  } else if (reserveRoom >= minimumFenceTokens) {
+    maxToolCalls = 1;
+    toolsViable = true;
+  } else {
+    maxToolCalls = 0;
+    toolsViable = false;
+  }
   const rawSchema = input.schemaTokens ?? 0;
   const schemaTokens = Number.isFinite(rawSchema) && rawSchema > 0 ? rawSchema : 0;
   return {
@@ -191,6 +213,7 @@ export function plannedWebFit(input: {
     reserveTokens,
     promptTokens: Math.max(0, available - reserveTokens - schemaTokens),
     toolsViable,
+    maxToolCalls,
   };
 }
 

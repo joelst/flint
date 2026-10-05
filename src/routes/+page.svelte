@@ -7407,6 +7407,7 @@ updateStateFromSdk();
               blocklist: webHostBlocklist,
               scrubCorpus: searchScrubCorpus(requestMessages),
               maxChars: roundMaxChars,
+              maxCalls: plan.maxToolCalls,
               onActivity: (event) => {
                 const line = event.kind === "search"
                   ? `Searching the public web: ${event.query}`

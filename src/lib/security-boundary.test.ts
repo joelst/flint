@@ -336,6 +336,7 @@ describe('renderer/sidecar boundary', () => {
     expect(page).not.toMatch(/appendWeb(Source|Error)Audit/);
     expect(page).toContain('const webAudit = buildWebAudit(sources, webErrors, webQueries);');
     expect(page.match(/\.\.\.webAuditPatch\(\)/g)?.length).toBe(7);
+    expect(page).toContain('maxCalls: plan.maxToolCalls');
     expect(page).toMatch(/isError: true,\s*prefilledThink: false,\s*content: failureMessage,\s*\.\.\.webAuditPatch\(\)/);
     expect(page).toContain('updateAssistantMessage({ content: assistantContent, ...webAuditPatch() });');
     expect(page).toContain('webAudit={msg.webAudit}');

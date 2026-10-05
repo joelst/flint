@@ -33,6 +33,7 @@ describe('context packer', () => {
     });
     expect(fit.maxChars).toBe(1_000);
     expect(fit.toolsViable).toBe(true);
+    expect(fit.maxToolCalls).toBe(1);
     expect(fit.promptTokens).toBeGreaterThanOrEqual(occupied);
     const packed = packContextMessages({
       messages: [
@@ -63,6 +64,7 @@ describe('context packer', () => {
       schemaTokens: 80,
     });
     expect(without.promptTokens - withSchemas.promptTokens).toBe(80);
+    expect(without.maxToolCalls).toBe(2);
   });
 
   it('withholds tools when one minimum fence cannot sit beside the prompt', () => {
@@ -79,6 +81,7 @@ describe('context packer', () => {
       occupiedTokens: available - minimumTokens + 1,
     });
     expect(crowded.toolsViable).toBe(false);
+    expect(crowded.maxToolCalls).toBe(0);
     const exact = plannedWebFit({
       contextTokens,
       maxTokens,
@@ -86,6 +89,7 @@ describe('context packer', () => {
       occupiedTokens: available - minimumTokens,
     });
     expect(exact.toolsViable).toBe(true);
+    expect(exact.maxToolCalls).toBe(1);
     const toolFree = plannedWebFit({
       contextTokens,
       maxTokens,
@@ -93,6 +97,7 @@ describe('context packer', () => {
       occupiedTokens: available - minimumTokens + 1,
     });
     expect(toolFree.toolsViable).toBe(true);
+    expect(toolFree.maxToolCalls).toBe(0);
   });
 
   it('refuses only when the system prompt and latest message still do not fit', () => {

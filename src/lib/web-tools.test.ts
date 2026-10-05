@@ -664,6 +664,44 @@ describe('web tool calls', () => {
     expect(missing.queries).toEqual([]);
   });
 
+  it('runs only the first call when one web result fits', async () => {
+    const execute = vi.fn(async (request: WebToolRequest): Promise<WebToolResult> => ({
+      operation: 'search',
+      query: request.operation === 'search' ? request.query : '',
+      results: [],
+    }));
+    const calls = [1, 2].map((index) => ({
+      id: `call-${index}`,
+      type: 'function' as const,
+      function: { name: 'web_search', arguments: JSON.stringify({ query: `query ${index}` }) },
+    }));
+    const result = await executeWebToolCalls(
+      calls,
+      execute,
+      undefined,
+      undefined,
+      undefined,
+      async () => true,
+      { maxCalls: 1 },
+    );
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(result.toolMessages[1]?.content).toContain('Only one web result fits this context.');
+    expect(result.queries).not.toContain('query 2');
+    await expect(executeWebToolCalls(
+      [1, 2, 3].map((index) => ({
+        id: `many-${index}`,
+        type: 'function' as const,
+        function: { name: 'web_search', arguments: '{"query":"x"}' },
+      })),
+      execute,
+      undefined,
+      undefined,
+      undefined,
+      async () => true,
+      { maxCalls: 1 },
+    )).rejects.toThrow(/at most 2/i);
+  });
+
   it('names a search only after the user allows it', async () => {
     const searchCall = [{
       id: 'call-s',

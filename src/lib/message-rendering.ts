@@ -494,11 +494,18 @@ const APP_OUTCOME_NOTES = [
   "This model cannot use web search yet.",
 ];
 
+/** A Flint note starts the text or follows a blank line. The last such note wins. */
 function earliestAppOutcomeNote(text: string): number {
   let at = -1;
   for (const note of APP_OUTCOME_NOTES) {
-    const index = text.indexOf(note);
-    if (index >= 0 && (at < 0 || index < at)) at = index;
+    let from = 0;
+    while (from < text.length) {
+      const index = text.indexOf(note, from);
+      if (index < 0) break;
+      const boundary = index === 0 || text.slice(index - 2, index) === '\n\n';
+      if (boundary) at = Math.max(at, index);
+      from = index + note.length;
+    }
   }
   return at;
 }

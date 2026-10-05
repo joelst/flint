@@ -560,6 +560,19 @@ describe("presentAssistantText", () => {
     expect(result.stoppedBeforeAnswer).toBe(false);
   });
 
+  it('keeps a quoted error inside prefilled reasoning', () => {
+    const note = '[Stopped after web retrieval. The partial response may already have been saved.]';
+    const result = presentAssistantText({
+      text: `The log contains [Error: timeout] and the request never finished.\n\n${note}`,
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(result.thinkingContent).toEqual(['The log contains [Error: timeout] and the request never finished.']);
+    expect(result.visibleContent).toBe(note);
+    expect(result.stoppedBeforeAnswer).toBe(false);
+  });
+
   it("shows an error or stop-during note after prefilled reasoning instead of a cutoff", () => {
     const error = presentAssistantText({
       text: "still reasoning\n\n[Error: network down]",
