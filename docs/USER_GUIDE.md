@@ -69,11 +69,19 @@ The sidebar is grouped by workflow:
   to the model. PDF and Office documents are not decoded. The attach button's picker shows all
   files; anything Flint cannot attach is reported in a notice above the composer rather than skipped silently.
 - Persona is beside the message controls. The gear beside Send opens and closes the
-  **Generation settings** drawer. The conversation list starts collapsed; **Show conversations**
-  opens it and **Hide** closes it again.
+  **Generation settings** drawer. The conversation list starts collapsed. **Show conversations**
+  opens it. The sidebar icon, tooltip **Hide**, closes it again. **Export** beside it is the
+  download icon; its tooltip is **Export**.
+  Qwen3 and QwQ start a reply inside reasoning. Playground keeps that text under **Thinking**
+  until the model closes it. If **Max tokens** runs out first, the answer area says the reply
+  stopped before the answer. The ceiling starts at 8192. **Max tokens** limits the reply
+  length. It does not change the memory the loaded
+  model uses. The context meter is the prompt's share of the model's context window. High
+  memory warnings use system RAM and GPU memory, which move when a model loads.
 - **Web search** in the chat header is off by default and applies only to the current conversation.
   When it is on, and the selected model reports tool calling, the model may request a short public search.
-  The checkbox stays off for a model that does not report tool calling. Flint asks you to allow that query
+  The checkbox stays off for a model that does not report tool calling. Gemma 4 answers without web search until the upstream template fix.
+  Flint asks you to allow that query
   just once, for this session, or always. Later searches skip that question when you chose session
   or always, unless the model wrote the query after it had already read web text in that same send.
   That dialog says so, and **Allow** runs that one search. Declining lets the answer continue without the search. If an answer needs a page from

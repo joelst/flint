@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   conversationImagePreviewPartIndexes,
   extractThinkingTrace,
+  modelPrefillsThink,
+  presentAssistantText,
+  replyUsesPrefilledThink,
+  stripChatTemplateSpill,
   messageClipboardText,
   messageTimestamp,
   millisecondsUntilNextLocalDay,
@@ -282,6 +286,231 @@ describe("extractThinkingTrace", () => {
     const result = extractThinkingTrace(input, false);
     expect(result.visibleContent).toBe(input);
     expect(result.thinkingContent).toEqual([]);
+  });
+});
+
+describe("modelPrefillsThink", () => {
+  it("matches Qwen3-family and QwQ aliases only", () => {
+    expect(modelPrefillsThink("qwen3.5-9b")).toBe(true);
+    expect(modelPrefillsThink("qwen3-4b")).toBe(true);
+    expect(modelPrefillsThink("qwen3-vl-8b")).toBe(true);
+    expect(modelPrefillsThink("qwq-32b")).toBe(true);
+    expect(modelPrefillsThink("qwen2.5-7b")).toBe(false);
+    expect(modelPrefillsThink("phi-4-mini-reasoning")).toBe(false);
+    expect(modelPrefillsThink("")).toBe(false);
+  });
+});
+
+describe("replyUsesPrefilledThink", () => {
+  it("keeps an older unstamped answer visible while Qwen3 is selected", () => {
+    expect(replyUsesPrefilledThink({
+      stamped: false,
+      selectedAlias: "qwen3.5-9b",
+      isLatestAssistant: false,
+      text: "A normal earlier answer.",
+    })).toBe(false);
+  });
+
+  it("reclassifies the latest unclosed reply for a prefilled model", () => {
+    expect(replyUsesPrefilledThink({
+      stamped: false,
+      selectedAlias: "qwen3.5-9b",
+      isLatestAssistant: true,
+      text: "Still reasoning about the dates.",
+    })).toBe(true);
+    expect(replyUsesPrefilledThink({
+      stamped: false,
+      selectedAlias: "qwen3.5-9b",
+      isLatestAssistant: true,
+      text: "done\n</think>\n\nAnswer",
+    })).toBe(false);
+  });
+});
+
+describe("stripChatTemplateSpill", () => {
+  it("drops role lines between a think close and the answer, and a trailing run", () => {
+    const text = [
+      "The user is asking about the Chicago Cubs.",
+      "</think>",
+      "",
+      "user",
+      "",
+      "user",
+      "",
+      "Based on my search, the 2021 record was 74 and 88.",
+      "Ask the user before treating that as official.",
+      "",
+      "user",
+      "",
+      "system",
+      "",
+      "assistant",
+    ].join("\n");
+    const stripped = stripChatTemplateSpill(text);
+    expect(stripped).toContain("The user is asking about the Chicago Cubs.");
+    expect(stripped).toContain("Based on my search, the 2021 record was 74 and 88.");
+    expect(stripped).toContain("Ask the user before treating that as official.");
+    expect(stripped).not.toMatch(/^user$/m);
+    expect(stripped).not.toMatch(/^system$/m);
+    expect(stripped).not.toMatch(/^assistant$/m);
+  });
+
+  it("keeps one role word between sentences and inside a code fence", () => {
+    const text = [
+      "The label below is data.",
+      "",
+      "user",
+      "",
+      "It stays.",
+      "",
+      "```",
+      "user",
+      "```",
+    ].join("\n");
+    expect(stripChatTemplateSpill(text)).toBe(text);
+  });
+
+  it("keeps a reply that is only the word user", () => {
+    expect(stripChatTemplateSpill("user")).toBe("user");
+  });
+
+  it("removes the template markers the decoder usually drops", () => {
+    expect(stripChatTemplateSpill("hello<|im_end|>\n<|im_start|>user")).toBe("hello");
+  });
+
+  it("keeps an unfinished trailing role line while the stream is open", () => {
+    expect(stripChatTemplateSpill("Answer\nuser", { keepTrailingOpenLine: true })).toBe("Answer\nuser");
+    expect(stripChatTemplateSpill("Answer\nuser\n", { keepTrailingOpenLine: true })).toBe("Answer");
+  });
+
+  it("drops web tool JSON lines so a following role line after the think close goes too", () => {
+    const text = [
+      '{"name": "web_search", "arguments": {"query": "Chicago Bears NFC Championship appearances record"}}',
+      "</think>",
+      "",
+      '{"name": "web_fetch", "arguments": {"url": "https://www.espn.com/nfl/team/_/name/chic/bears#championships"}}',
+      '{"name": "web_fetch", "arguments": {"url": "https://www.espn.com/nfl/team/_/name/chic/bears#record-championships"}}',
+      "user",
+      "The search results indicate that the Chicago Bears have appeared in the NFC Championship 5 times.",
+    ].join("\n");
+    const stripped = stripChatTemplateSpill(text);
+    expect(stripped).toContain("The search results indicate that the Chicago Bears have appeared in the NFC Championship 5 times.");
+    expect(stripped).not.toContain("web_search");
+    expect(stripped).not.toContain("web_fetch");
+    expect(stripped).not.toMatch(/^user$/m);
+  });
+
+  it("keeps a fenced web tool JSON example", () => {
+    const text = [
+      "Example:",
+      "```",
+      '{"name": "web_fetch", "arguments": {"url": "https://example.com/"}}',
+      "```",
+    ].join("\n");
+    expect(stripChatTemplateSpill(text)).toBe(text);
+  });
+});
+
+describe("presentAssistantText", () => {
+  it("keeps a prefilled think block out of the answer when the token budget ends it", () => {
+    const result = presentAssistantText({
+      text: "The user wants a comparison. June 2026 has not happened.",
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(result.visibleContent).toBe("");
+    expect(result.thinkingContent).toEqual(["The user wants a comparison. June 2026 has not happened."]);
+    expect(result.stoppedBeforeAnswer).toBe(true);
+  });
+
+  it("holds prefilled reasoning while the reply is still streaming", () => {
+    const result = presentAssistantText({
+      text: "Still reasoning",
+      streaming: true,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(result.visibleContent).toBe("");
+    expect(result.thinkingContent).toEqual(["Still reasoning"]);
+    expect(result.stoppedBeforeAnswer).toBe(false);
+  });
+
+  it("hides spilled role lines between the think close and the answer", () => {
+    const result = presentAssistantText({
+      text: "The user is asking about the Cubs.\n</think>\n\nuser\n\nuser\n\nBased on my search, 2021 was 74 and 88.",
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(result.thinkingContent).toEqual(["The user is asking about the Cubs."]);
+    expect(result.visibleContent).toBe("Based on my search, 2021 was 74 and 88.");
+    expect(result.stoppedBeforeAnswer).toBe(false);
+  });
+
+  it("shows the answer once a prefilled model closes the think tag", () => {
+    const result = presentAssistantText({
+      text: "worked through it\n</think>\n\nThe forecast is rain.",
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(result.visibleContent).toBe("The forecast is rain.");
+    expect(result.thinkingContent).toEqual(["worked through it"]);
+    expect(result.stoppedBeforeAnswer).toBe(false);
+  });
+
+  it("keeps playground status lines in the answer area", () => {
+    const result = presentAssistantText({
+      text: "Searching the public web: chicago weather",
+      streaming: true,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(result.visibleContent).toBe("Searching the public web: chicago weather");
+    expect(result.thinkingContent).toEqual([]);
+    expect(result.stoppedBeforeAnswer).toBe(false);
+  });
+
+  it("hides web tool JSON a model wrote as text, including when there is no think tag", () => {
+    const withThink = [
+      '{"name": "web_search", "arguments": {"query": "Chicago Bears NFC Championship appearances record"}}',
+      "</think>",
+      "",
+      '{"name": "web_fetch", "arguments": {"url": "https://www.espn.com/nfl/team/_/name/chic/bears#championships"}}',
+      "user",
+      "The search results indicate that the Chicago Bears have appeared in the NFC Championship 5 times.",
+    ].join("\n");
+    const shown = presentAssistantText({
+      text: withThink,
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: false,
+    });
+    expect(shown.visibleContent).toBe("The search results indicate that the Chicago Bears have appeared in the NFC Championship 5 times.");
+    expect(shown.thinkingContent.join("\n")).not.toContain("web_search");
+    expect(shown.visibleContent).not.toContain("web_fetch");
+    expect(shown.visibleContent).not.toMatch(/^user$/m);
+    const bare = presentAssistantText({
+      text: '{"name":"web_search","arguments":{"query":"bears"}}\nThe record is 3-2.',
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: false,
+    });
+    expect(bare.visibleContent).toBe("The record is 3-2.");
+    expect(bare.visibleContent).not.toContain("web_search");
+  });
+
+  it("shows an untagged answer from a reasoning model once streaming ends", () => {
+    const result = presentAssistantText({
+      text: "The square is red.",
+      streaming: false,
+      assumeReasoning: true,
+      prefilledThink: false,
+    });
+    expect(result.visibleContent).toBe("The square is red.");
+    expect(result.thinkingContent).toEqual([]);
+    expect(result.stoppedBeforeAnswer).toBe(false);
   });
 });
 

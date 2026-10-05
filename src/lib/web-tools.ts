@@ -276,13 +276,100 @@ export type ReadWebToolCall =
   | { call: ChatToolCall; request: WebToolRequest }
   | { call: ChatToolCall; error: string };
 
+/** Shown when Gemma 4 would crash in the upstream tool template. The checkbox stays as stored. */
+export const WEB_TOOLS_UPSTREAM_NOTE = 'Web search is unavailable for this model until an upstream fix. Answering without it.';
+
+/**
+ * Gemma 4's cached template reads `tool.function.name` after Foundry unwraps `function` to null.
+ * Other Gemma generations are not in that crash class.
+ */
+export function modelCannotUseWebTools(alias: string | null | undefined): boolean {
+  const name = String(alias ?? '').toLowerCase();
+  return name.includes('gemma-4') || name.includes('gemma4');
+}
+
+/** Minja crash from the Gemma 4 tool template. A different failure stays a normal error. */
+export function webToolTemplateCrash(error: unknown): boolean {
+  const message = error instanceof Error
+    ? error.message
+    : error && typeof error === 'object' && 'message' in error
+      ? String((error as { message: unknown }).message)
+      : String(error ?? '');
+  return /property ['"]name['"] on null/i.test(message)
+    || /format_function_declaration/i.test(message);
+}
+
+/**
+ * Streaming deltas for one tool-call index append the full name again, so one call
+ * arrives as `web_fetchweb_fetch`. Fragments such as `web_` + `fetch` stay one name.
+ */
+export function repeatedWebToolName(name: string): { tool: 'web_search' | 'web_fetch'; count: number } | null {
+  const parts = name.match(/web_search|web_fetch/g);
+  if (!parts || parts.length < 2 || parts.join('') !== name) return null;
+  const tool = parts[0];
+  if ((tool !== 'web_search' && tool !== 'web_fetch') || parts.some((part) => part !== tool)) return null;
+  return { tool, count: parts.length };
+}
+
+function reportedToolName(name: unknown): string {
+  if (typeof name !== 'string' || !name) return 'web_fetch';
+  return repeatedWebToolName(name)?.tool ?? name;
+}
+
+/** Concatenated `{...}{...}` argument objects. One JSON value, or leftover text, does not split. */
+function splitJsonObjects(text: string): Record<string, unknown>[] | null {
+  const objects: Record<string, unknown>[] = [];
+  let index = 0;
+  while (index < text.length) {
+    while (index < text.length && /\s/.test(text[index])) index += 1;
+    if (index >= text.length) break;
+    if (text[index] !== '{') return null;
+    const start = index;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    let closed = false;
+    for (; index < text.length; index += 1) {
+      const ch = text[index];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (ch === '\\') escaped = true;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+      if (ch === '{') depth += 1;
+      else if (ch === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          index += 1;
+          closed = true;
+          break;
+        }
+      }
+    }
+    if (!closed || inString || depth !== 0) return null;
+    try {
+      const parsed = JSON.parse(text.slice(start, index));
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+      objects.push(parsed as Record<string, unknown>);
+    } catch {
+      return null;
+    }
+  }
+  return objects;
+}
+
 function toolErrorCall(raw: unknown, fallbackId: string): ChatToolCall {
   const call = raw && typeof raw === 'object' ? raw as ChatToolCall : undefined;
   return {
     id: typeof call?.id === 'string' && call.id ? call.id : fallbackId,
     type: 'function',
     function: {
-      name: typeof call?.function?.name === 'string' ? call.function.name : 'web_fetch',
+      name: reportedToolName(call?.function?.name),
       arguments: typeof call?.function?.arguments === 'string' ? call.function.arguments : '{}',
     },
   };
@@ -291,55 +378,116 @@ function toolErrorCall(raw: unknown, fallbackId: string): ChatToolCall {
 /**
  * More than two calls, or a missing or duplicate id, rejects the whole batch.
  * A bad argument becomes that call's error so one malformed call does not fail the send.
+ * A name repeated on one index splits only when the arguments are that many JSON objects
+ * and the batch still has at most two calls. A larger glue stays one error so a sibling
+ * search is not thrown away.
  */
 export function readWebToolCalls(calls: unknown): ReadWebToolCall[] {
   if (!Array.isArray(calls) || calls.length === 0) return [];
   if (calls.length > 2) throw new Error('A reply may request at most 2 web tool calls');
+  type Pending =
+    | { kind: 'raw'; raw: unknown }
+    | { kind: 'glued'; raw: unknown; tool: 'web_search' | 'web_fetch'; count: number }
+    | { kind: 'split'; raw: unknown; calls: ChatToolCall[]; tool: 'web_search' | 'web_fetch'; count: number };
+  const pending: Pending[] = calls.map((raw) => {
+    const call = raw && typeof raw === 'object' ? raw as ChatToolCall : undefined;
+    const name = typeof call?.function?.name === 'string' ? call.function.name : '';
+    const repeated = repeatedWebToolName(name);
+    if (
+      !repeated
+      || !call
+      || typeof call.id !== 'string'
+      || !call.id
+      || typeof call.function?.arguments !== 'string'
+    ) {
+      return { kind: 'raw', raw };
+    }
+    const objects = splitJsonObjects(call.function.arguments);
+    if (!objects || objects.length !== repeated.count) {
+      return { kind: 'glued', raw, tool: repeated.tool, count: repeated.count };
+    }
+    return {
+      kind: 'split',
+      raw,
+      tool: repeated.tool,
+      count: repeated.count,
+      calls: objects.map((args, part) => ({
+        id: `${call.id}:${part}`,
+        type: 'function' as const,
+        function: { name: repeated.tool, arguments: JSON.stringify(args) },
+      })),
+    };
+  });
+  const projected = pending.reduce((total, item) => (
+    total + (item.kind === 'split' ? item.calls.length : 1)
+  ), 0);
   const seen = new Set<string>();
-  return calls.map((raw, index) => {
-    if (!raw || typeof raw !== 'object') throw new Error('Web tool calls require unique non-empty IDs');
-    const call = raw as ChatToolCall;
-    if (typeof call.id !== 'string' || !call.id || seen.has(call.id)) {
-      throw new Error('Web tool calls require unique non-empty IDs');
+  const parsed: ReadWebToolCall[] = [];
+  pending.forEach((item, index) => {
+    if (item.kind === 'split' && projected <= 2) {
+      for (const splitCall of item.calls) parsed.push(readOneWebToolCall(splitCall, splitCall.id, seen));
+      return;
     }
-    seen.add(call.id);
-    const fail = (error: string): ReadWebToolCall => ({ call: toolErrorCall(call, String(index)), error });
-    if (call.type !== 'function' || !call.function || typeof call.function.arguments !== 'string') {
-      return fail('Malformed web tool call');
+    if (item.kind === 'glued' || item.kind === 'split') {
+      const call = item.raw && typeof item.raw === 'object' ? item.raw as ChatToolCall : undefined;
+      if (!call || typeof call.id !== 'string' || !call.id || seen.has(call.id)) {
+        throw new Error('Web tool calls require unique non-empty IDs');
+      }
+      seen.add(call.id);
+      parsed.push({
+        call: toolErrorCall(call, String(index)),
+        error: `This reply included ${item.count} ${item.tool} calls in one response. A reply may request at most 2.`,
+      });
+      return;
     }
-    let args: Record<string, unknown>;
+    parsed.push(readOneWebToolCall(item.raw, String(index), seen));
+  });
+  return parsed;
+}
+
+function readOneWebToolCall(raw: unknown, fallbackId: string, seen: Set<string>): ReadWebToolCall {
+  if (!raw || typeof raw !== 'object') throw new Error('Web tool calls require unique non-empty IDs');
+  const call = raw as ChatToolCall;
+  if (typeof call.id !== 'string' || !call.id || seen.has(call.id)) {
+    throw new Error('Web tool calls require unique non-empty IDs');
+  }
+  seen.add(call.id);
+  const fail = (error: string): ReadWebToolCall => ({ call: toolErrorCall(call, fallbackId), error });
+  if (call.type !== 'function' || !call.function || typeof call.function.arguments !== 'string') {
+    return fail('Malformed web tool call');
+  }
+  let args: Record<string, unknown>;
+  try {
+    args = record(JSON.parse(call.function.arguments));
+  } catch (error) {
+    if (error instanceof SyntaxError) return fail('Web tool arguments must be valid JSON');
+    return fail(error instanceof Error ? error.message : 'Malformed web tool call');
+  }
+  if (call.function.name === 'web_search') {
+    if (Object.keys(args).some((key) => key !== 'query')) {
+      return fail('web_search received an unsupported argument');
+    }
     try {
-      args = record(JSON.parse(call.function.arguments));
+      return {
+        call,
+        request: { operation: 'search', query: modelSearchQuery(args.query), maxResults: 5 },
+      };
     } catch (error) {
-      if (error instanceof SyntaxError) return fail('Web tool arguments must be valid JSON');
       return fail(error instanceof Error ? error.message : 'Malformed web tool call');
     }
-    if (call.function.name === 'web_search') {
-      if (Object.keys(args).some((key) => key !== 'query')) {
-        return fail('web_search received an unsupported argument');
-      }
-      try {
-        return {
-          call,
-          request: { operation: 'search', query: modelSearchQuery(args.query), maxResults: 5 },
-        };
-      } catch (error) {
-        return fail(error instanceof Error ? error.message : 'Malformed web tool call');
-      }
+  }
+  if (call.function.name === 'web_fetch') {
+    if (Object.keys(args).some((key) => key !== 'url')) {
+      return fail('web_fetch received an unsupported argument');
     }
-    if (call.function.name === 'web_fetch') {
-      if (Object.keys(args).some((key) => key !== 'url')) {
-        return fail('web_fetch received an unsupported argument');
-      }
-      const url = typeof args.url === 'string' ? args.url.trim() : '';
-      if (!url || url.length > 2048) return fail('web_fetch URL must contain 1-2048 characters');
-      if (url.toLowerCase().includes(CLOSER_PREFIX)) return fail(POLICY_REJECTION);
-      const canonical = canonicalFetchUrl(url);
-      if (!canonical) return fail('web_fetch requires a public HTTPS URL without credentials');
-      return { call, request: { operation: 'fetch', url: canonical, maxChars: 20_000 } };
-    }
-    return fail(`Web tool "${call.function.name || 'unknown'}" is not allowed`);
-  });
+    const url = typeof args.url === 'string' ? args.url.trim() : '';
+    if (!url || url.length > 2048) return fail('web_fetch URL must contain 1-2048 characters');
+    if (url.toLowerCase().includes(CLOSER_PREFIX)) return fail(POLICY_REJECTION);
+    const canonical = canonicalFetchUrl(url);
+    if (!canonical) return fail('web_fetch requires a public HTTPS URL without credentials');
+    return { call, request: { operation: 'fetch', url: canonical, maxChars: 20_000 } };
+  }
+  return fail(`Web tool "${call.function.name || 'unknown'}" is not allowed`);
 }
 
 export async function executeWebToolCalls(
@@ -363,6 +511,7 @@ export async function executeWebToolCalls(
   },
 ): Promise<{
   toolMessages: ChatRequestMessage[];
+  toolCalls: ChatToolCall[];
   sources: WebSource[];
   errors: string[];
   resultUrls: string[];
@@ -371,6 +520,7 @@ export async function executeWebToolCalls(
 }> {
   const parsed = readWebToolCalls(calls);
   const toolMessages: ChatRequestMessage[] = [];
+  const toolCalls: ChatToolCall[] = [];
   const sources: WebSource[] = [];
   const errors: string[] = [];
   const resultUrls: string[] = [];
@@ -384,6 +534,7 @@ export async function executeWebToolCalls(
     if ('error' in parsedCall) {
       const message = collapsed(parsedCall.error).slice(0, 500);
       errors.push(`${parsedCall.call.function.name}: ${message}`);
+      toolCalls.push(parsedCall.call);
       toolMessages.push({
         role: 'tool',
         tool_call_id: parsedCall.call.id,
@@ -416,6 +567,7 @@ export async function executeWebToolCalls(
           if (host && hostBlocked(host, options?.blocklist ?? [])) continue;
           resultUrls.push(url);
         }
+        toolCalls.push(call);
         toolMessages.push({
           role: 'tool',
           tool_call_id: call.id,
@@ -447,6 +599,7 @@ export async function executeWebToolCalls(
             throw new Error('This host is blocked on this device');
           }
           if (hop === 0 && seenBodies.has(pending.url)) {
+            toolCalls.push(call);
             toolMessages.push({
               role: 'tool',
               tool_call_id: call.id,
@@ -499,6 +652,7 @@ export async function executeWebToolCalls(
         }
       }
       options?.onActivity?.({ kind: 'fetch', host: hostnameFromUrl(result.url) || result.url });
+      toolCalls.push(call);
       toolMessages.push({
         role: 'tool',
         tool_call_id: call.id,
@@ -519,6 +673,7 @@ export async function executeWebToolCalls(
         .replace(/[\u0000-\u001f\u007f-\u009f\s]+/g, ' ')
         .slice(0, 500);
       errors.push(`${call.function.name}: ${message}`);
+      toolCalls.push(call);
       toolMessages.push({
         role: 'tool',
         tool_call_id: call.id,
@@ -527,7 +682,7 @@ export async function executeWebToolCalls(
       });
     }
   }
-  return { toolMessages, sources, errors, resultUrls, queries, imageUrls };
+  return { toolMessages, toolCalls, sources, errors, resultUrls, queries, imageUrls };
 }
 
 /**

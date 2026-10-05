@@ -188,7 +188,9 @@
   } from "$lib/conversation-store";
   import {
     DEFAULT_APP_SETTINGS,
+    MAX_TOKENS_DEFAULT_GENERATION,
     appSettingDefaultsToPersisted,
+    migrateRetiredMaxTokens,
     readAppSettingDefaults,
     resolveConversationSettings,
     seedSettingsFor,
@@ -198,6 +200,10 @@
   import {
     conversationImagePreviewPartIndexes,
     millisecondsUntilNextLocalDay,
+    messagePlainText,
+    modelPrefillsThink,
+    replyUsesPrefilledThink,
+    stripChatTemplateSpill,
   } from "$lib/message-rendering";
   import { estimateTokens, estimateTokensForMessages } from "$lib/token-estimate";
   import { formatErrorDetail, formatUncaughtError } from "$lib/error-detail";
@@ -238,12 +244,15 @@
   } from "$lib/web-consent";
   import {
     WEB_TOOL_DEFINITIONS,
+    WEB_TOOLS_UPSTREAM_NOTE,
     collectCurrentWebFetchUrls,
     executeWebImage,
     executeWebToolCalls,
     messagesContainImages,
+    modelCannotUseWebTools,
     webContentSystemInstruction,
     webToolSystemInstruction,
+    webToolTemplateCrash,
   } from "$lib/web-tools";
   import { buildWebEnvelope, createWebCloser, localRetrievalDate } from "$lib/web-envelope";
   import { mergeBlocklists, parseBlocklistText, hostBlocked, BUILT_IN_WEB_BLOCKLIST } from "$lib/web-blocklist";
@@ -1647,7 +1656,7 @@
   // Generation parameters (Playground: learning how sampling settings affect model output).
   // Foundry Local's catalog reports no per-model defaults today, so these are Flint's own.
   let temperature = $state(0.7);
-  let maxTokens = $state(2048);
+  let maxTokens = $state(DEFAULT_APP_SETTINGS.maxTokens);
   let topP = $state(1);
   let topK = $state(50);
   let frequencyPenalty = $state(0);
@@ -1810,6 +1819,13 @@
     currentModelInfo?.contextLength ?? currentModelInfo?.maxContext ?? null
   );
   const currentModelFamily: string | null = $derived(currentModelInfo?.family ?? null);
+  const latestAssistantMessageId: string | null = $derived.by(() => {
+    for (let i = chatMessages.length - 1; i >= 0; i -= 1) {
+      const message = chatMessages[i];
+      if (message?.role === "assistant") return typeof message.id === "string" ? message.id : null;
+    }
+    return null;
+  });
 
   // Rough recommended turns based on context length (very conservative); see
   // src/lib/context-turns.ts for the extracted, unit-tested math.
@@ -2438,7 +2454,13 @@
     if ('randomSeed' in patch) randomSeed = patch.randomSeed;
     if ('webToolsEnabled' in patch) webToolsEnabled = patch.webToolsEnabled;
     if (!threadLoadedFor) return;
-    const result = captureThread(sessionState(), { now: Date.now(), settings: patch as any });
+    // The generation mark is what lets a later choice of the retired ceiling stay put.
+    // A settings-less chat's first write has to carry it, or the next launch would
+    // treat that choice as the old untouched default.
+    const result = captureThread(sessionState(), {
+      now: Date.now(),
+      settings: { ...patch, maxTokensDefaultGeneration: MAX_TOKENS_DEFAULT_GENERATION } as any,
+    });
     if (!result.changed) return;
     conversationArchive = result.archive;
     conversationsDirty = true;
@@ -2799,7 +2821,10 @@
       appVersion: appVersion,
       now: Date.now(),
     });
-    conversationArchive = opened.archive;
+    const migratedTokens = migrateRetiredMaxTokens(opened.archive.conversations);
+    conversationArchive = migratedTokens.changed
+      ? { ...opened.archive, conversations: migratedTokens.conversations }
+      : opened.archive;
     conversationsWritable = opened.writable;
     // Asked of storage, not inferred from this open: a copy parked by an earlier launch is just
     // as much at risk, and by then nothing about the open looks unusual.
@@ -2815,7 +2840,7 @@
     storageInventoryUnknown = recovery === 'unknown';
     if (opened.notice) hydrationNotice = opened.notice;
 
-    const active = findConversation(opened.archive, opened.archive.activeId);
+    const active = findConversation(conversationArchive, conversationArchive.activeId);
     if (active) {
       // adoptThread snapshots, so the archive's own message objects are not handed to the UI.
       adoptThread(active.id, active.messages as any);
@@ -2829,7 +2854,7 @@
     }
     // A migrated archive is only in memory until it is committed; the legacy keys are left in
     // place either way, so a failure here costs nothing but a repeated migration next launch.
-    if (opened.migrated && opened.writable) {
+    if ((opened.migrated || migratedTokens.changed) && opened.writable) {
       conversationsDirty = true;
       saveConversations();
     }
@@ -7041,6 +7066,11 @@ updateStateFromSdk();
       ...resultUrlsForConversation(sessionWebConsent, threadLoadedFor ?? ""),
     ]);
     let offerWebTools = allowWebTools;
+    let webToolsSkippedNote = "";
+    if (offerWebTools && modelCannotUseWebTools(requestModelAlias)) {
+      offerWebTools = false;
+      webToolsSkippedNote = WEB_TOOLS_UPSTREAM_NOTE;
+    }
     const inferenceMessages = stamped;
     const sendFit = {
       closer: sendCloser,
@@ -7145,6 +7175,7 @@ updateStateFromSdk();
     if (openingFit?.shortened) webBudgetShortened = true;
     const packNote = contextFitSentence(openingFit);
     if (packNote) statusMessage = packNote;
+    if (webToolsSkippedNote) statusMessage = webToolsSkippedNote;
     // The audit is a separate, app-controlled field: model Markdown cannot hide or restyle it.
     const webAuditPatch = () => {
       const sources = webBudgetShortened
@@ -7158,6 +7189,7 @@ updateStateFromSdk();
         role: "assistant",
         content: "",
         id: assistantId,
+        ...(modelPrefillsThink(requestModelAlias) ? { prefilledThink: true } : {}),
       })];
 
       // Sidecar IPC runs native ChatSession inference independently of the optional HTTP service.
@@ -7196,6 +7228,7 @@ updateStateFromSdk();
         // helper still requires public HTTPS.
         const maxWebToolRounds = 2;
         let webToolRounds = 0;
+        let retriedWithoutTools = false;
         let roundMaxChars = 20_000;
         let data: any;
         const visionBase = requestMessages.map((message: any) => ({
@@ -7231,36 +7264,65 @@ updateStateFromSdk();
           if (fitted.shortened) webBudgetShortened = true;
           const fittedNote = contextFitSentence(fitted);
           if (fittedNote) statusMessage = fittedNote;
+          if (webToolsSkippedNote) statusMessage = webToolsSkippedNote;
           const toolChoice = !offerWebTools
             ? undefined
             : webToolRounds < maxWebToolRounds
               ? "auto"
               : "none";
-          data = await chatCompletionStream(
-            requestModelAlias,
-            requestMessages,
-            (delta: string) => {
-              if (requestController.signal.aborted) return;
-              assistantContent += delta;
-              updateAssistantMessage({ content: assistantContent });
-            },
-            {
-              ...requestGeneration,
-              tools: offerWebTools ? WEB_TOOL_DEFINITIONS : undefined,
-              toolChoice,
-            },
-            publishRequestId,
-          );
+          try {
+            data = await chatCompletionStream(
+              requestModelAlias,
+              requestMessages,
+              (delta: string) => {
+                if (requestController.signal.aborted) return;
+                assistantContent += delta;
+                updateAssistantMessage({ content: assistantContent });
+              },
+              {
+                ...requestGeneration,
+                tools: offerWebTools ? WEB_TOOL_DEFINITIONS : undefined,
+                toolChoice,
+              },
+              publishRequestId,
+            );
+          } catch (error) {
+            const retryWithoutTools = offerWebTools
+              && webToolRounds === 0
+              && !retriedWithoutTools
+              && !requestController.signal.aborted
+              && webToolTemplateCrash(error);
+            if (!retryWithoutTools) throw error;
+            retriedWithoutTools = true;
+            offerWebTools = false;
+            webToolsSkippedNote = WEB_TOOLS_UPSTREAM_NOTE;
+            assistantContent = "";
+            updateAssistantMessage({ content: "" });
+            requestMessages = getMessagesForInference(
+              inferenceMessages,
+              true,
+              chipFence.length > 0,
+              false,
+              { ...sendFit, roundsRemaining: 0 },
+            );
+            statusMessage = webToolsSkippedNote;
+            continue;
+          }
           if (requestController.signal.aborted) {
             if (webRoundStarted) {
               updateAssistantMessage({
-                content: `${assistantContent}\n\n[Stopped after web retrieval. The partial response may already have been saved.]`.trim(),
+                content: replyWithNote(
+                  assistantContent,
+                  "[Stopped after web retrieval. The partial response may already have been saved.]",
+                ),
                 ...webAuditPatch(),
               });
             } else if (webSources.length > 0 || webErrors.length > 0) {
               updateAssistantMessage({
-                content: `${assistantContent || assistantContentSoFar(assistantId)}\n\n`
-                  + "[Stopped after web retrieval. The partial response may already have been saved.]",
+                content: replyWithNote(
+                  assistantContent || assistantContentSoFar(assistantId),
+                  "[Stopped after web retrieval. The partial response may already have been saved.]",
+                ),
                 ...webAuditPatch(),
               });
             }
@@ -7330,12 +7392,13 @@ updateStateFromSdk();
             });
             return;
           }
+          const roundText = data?.choices?.[0]?.message?.content;
           requestMessages = [
             ...requestMessages,
             {
               role: "assistant",
-              content: data?.choices?.[0]?.message?.content ?? null,
-              tool_calls: rawCalls,
+              content: typeof roundText === "string" ? stripChatTemplateSpill(roundText) : (roundText ?? null),
+              tool_calls: executed.toolCalls,
             },
             ...executed.toolMessages,
           ];
@@ -7378,6 +7441,7 @@ updateStateFromSdk();
             }
           }
         }
+        assistantContent = stripChatTemplateSpill(assistantContent);
         updateAssistantMessage({ content: assistantContent, ...webAuditPatch() });
         setTimeout(() => {
           if (messagesContainer)
@@ -7407,12 +7471,18 @@ updateStateFromSdk();
             updateAssistantMessage({ content: assistantContent });
           }
         }
+        assistantContent = stripChatTemplateSpill(assistantContent);
         updateAssistantMessage({ content: assistantContent, ...webAuditPatch() });
       }
+      if (webToolsSkippedNote) statusMessage = webToolsSkippedNote;
     } catch (err: any) {
       if (!requestController.signal.aborted) {
-        const failureMessage =
-          `${assistantContent || assistantContentSoFar(assistantId)}\n\n[Error: ${err?.message || err}]`;
+        const failureMessage = replyWithNote(
+          assistantContent || assistantContentSoFar(assistantId),
+          webToolTemplateCrash(err)
+            ? "This model cannot use web search yet. The upstream template fails when tools are sent, so this reply stopped."
+            : `[Error: ${err?.message || err}]`,
+        );
         updateAssistantMessage({
           isError: true,
           content: failureMessage,
@@ -7420,7 +7490,10 @@ updateStateFromSdk();
         });
       } else if (webRoundStarted || webSources.length > 0 || webErrors.length > 0) {
         updateAssistantMessage({
-          content: `${assistantContent}\n\n[Stopped during web retrieval. An already-started network request may have completed.]`.trim(),
+          content: replyWithNote(
+            assistantContent,
+            "[Stopped during web retrieval. An already-started network request may have completed.]",
+          ),
           ...webAuditPatch(),
         });
       }
@@ -7436,6 +7509,15 @@ updateStateFromSdk();
       flushBackgroundArchiveSave();
       syncVisibleStreaming();
     }
+  }
+
+  /**
+   * Model text with chat-template role lines removed, then Flint's own note.
+   * The note is appended after the strip so a trailing role word cannot hide it.
+   */
+  function replyWithNote(modelText: string, note: string): string {
+    const body = stripChatTemplateSpill(modelText);
+    return body ? `${body}\n\n${note}` : note;
   }
 
   /** Current text of an in-flight assistant message, for appending an error to. */
@@ -7567,7 +7649,10 @@ updateStateFromSdk();
     return normalizeForAlternatingChat(
       combined.map((m: any) => ({
         role: m.role,
-        content: m.content, // can be string or vision array [{type,text}, {type:'image_url',...}]
+        // Role words left behind by a chat template must not be replayed as the model's reply.
+        content: m.role === "assistant" && typeof m.content === "string"
+          ? stripChatTemplateSpill(m.content)
+          : m.content,
       })),
       {
         systemInstruction: effectiveSystem,
@@ -7617,7 +7702,12 @@ Output only the summary text, no preamble.`;
     // costing a base64 payload — and the SDK fallback below rejects non-string content outright,
     // so a thread containing images would otherwise fail and silently degrade to condense.
     const summaryMessages = normalizeForAlternatingChat(
-      oldMessages.map((m: any) => ({ role: m.role, content: m.content })),
+      oldMessages.map((m: any) => ({
+        role: m.role,
+        content: m.role === "assistant" && typeof m.content === "string"
+          ? stripChatTemplateSpill(m.content)
+          : m.content,
+      })),
       { systemInstruction: summaryPrompt, textOnly: true },
     );
 
@@ -7655,6 +7745,7 @@ Output only the summary text, no preamble.`;
       return;
     }
     isSummarizing = false;
+    summary = stripChatTemplateSpill(summary);
 
     // The thread was replaced while the summary was being generated — it belongs nowhere now.
     if (chatThreadEpoch !== epoch) return;
@@ -9977,7 +10068,9 @@ Output only the summary text, no preamble.`;
                     class="chat-web-search"
                     title={webToolsCallingUnsupported
                       ? "This model does not report tool calling."
-                      : "Let the model search the public web and read allowed pages for this conversation. The first search still asks you to allow it."}
+                      : modelCannotUseWebTools(selectedModelAlias)
+                        ? "Gemma 4 cannot use web search until an upstream fix. This chat answers without it."
+                        : "Let the model search the public web and read allowed pages for this conversation. The first search still asks you to allow it."}
                   >
                     <input
                       id="web-tools-enabled"
@@ -10131,6 +10224,12 @@ Output only the summary text, no preamble.`;
                               role={msg.role}
                               isStreaming={isStreaming && msg.id === activeStreamAssistantId}
                               assumeReasoning={currentModelTags.includes("reasoning")}
+                              prefilledThink={replyUsesPrefilledThink({
+                                stamped: msg.prefilledThink === true,
+                                selectedAlias: selectedModelAlias,
+                                isLatestAssistant: msg.role === "assistant" && msg.id === latestAssistantMessageId,
+                                text: messagePlainText(msg.content),
+                              })}
                               messageKey={`${threadLoadedFor}:${msg.id ?? i}`}
                             />
                             {#snippet failed(error, reset)}
@@ -10301,17 +10400,6 @@ Output only the summary text, no preamble.`;
               </div>
 
               <div class="web-tools-control">
-                <span>
-                  Search terms and requested public URLs leave this device. Access is read-only,
-                  unauthenticated HTTPS; results are untrusted, bounded, and not stored as page
-                  bodies. <strong>Web search</strong> in the chat header lets the model request a
-                  short public search, then read an allowed page. The first search asks whether to
-                  allow it once, for this session, or always. Opening a new site asks the same kind
-                  of question for that domain, or for all public URLs in this conversation until the page reloads.
-                  Declining a search lets the answer continue without it. Flint shows
-                  the consulted sources with the answer. A model that cannot return tool calls cannot
-                  use this.
-                </span>
                 {#if storedWebConsent.searchForever || storedWebConsent.domainsForever.length > 0 || sessionWebConsent.search || sessionWebConsent.allUrlsByConversation.size > 0 || sessionWebConsent.domains.size > 0}
                   <button type="button" class="small secondary" onclick={forgetWebApprovals}>
                     Ask again for search and sites
@@ -10341,7 +10429,7 @@ Output only the summary text, no preamble.`;
                     />
                     <span class="genparams-value">{temperature.toFixed(2)}</span>
 
-                    <label for="genparams-maxtokens" title="Maximum tokens generated per reply">Max tokens</label>
+                    <label for="genparams-maxtokens" title="Maximum tokens generated per reply. This does not change how much memory the loaded model uses.">Max tokens</label>
                     <input
                       type="number"
                       id="genparams-maxtokens"
@@ -10362,6 +10450,9 @@ Output only the summary text, no preamble.`;
                       }}
                       disabled={isStreaming}
                     />
+                    {#if modelPrefillsThink(selectedModelAlias)}
+                      <span class="genparams-note">This model reasons before it answers. The ceiling starts at 8192. Raising Max tokens does not load more of the model into memory.</span>
+                    {/if}
 
                     <label for="genparams-topp" title="Nucleus sampling threshold (0-1]">Top-p</label>
                     <input
@@ -12259,6 +12350,7 @@ Output only the summary text, no preamble.`;
                           content={r.content || ""}
                           isStreaming={compareStreamingSlotKey === slot.key}
                           assumeReasoning={getModelTags(slot.alias, state.models.find((m) => m.alias === slot.alias)?.info).includes("reasoning")}
+                          prefilledThink={modelPrefillsThink(slot.alias)}
                           messageKey={`${compareRunGeneration}:${slot.key}`}
                         />
                       </div>
@@ -16020,6 +16112,12 @@ Output only the summary text, no preamble.`;
     font-variant-numeric: tabular-nums;
     font-size: 0.8125rem;
     white-space: nowrap;
+  }
+  .genparams-note {
+    flex-basis: 100%;
+    color: var(--muted);
+    font-size: 0.75rem;
+    line-height: 1.4;
   }
 
   .recommend-btn {

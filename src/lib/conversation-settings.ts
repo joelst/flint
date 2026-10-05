@@ -60,8 +60,9 @@ export const DEFAULT_APP_SETTINGS: AppSettingDefaults = Object.freeze({
   showFullHistory: false,
   // Foundry Local's model catalog reports no default sampling parameters today, so these are
   // Flint's own sensible starting point rather than anything sourced from the catalog.
+  // 8192 leaves room for a thinking model to finish reasoning and still write the answer.
   temperature: 0.7,
-  maxTokens: 2048,
+  maxTokens: 8192,
   topP: 1,
   topK: 50,
   frequencyPenalty: 0,
@@ -69,6 +70,15 @@ export const DEFAULT_APP_SETTINGS: AppSettingDefaults = Object.freeze({
   randomSeed: null,
   webToolsEnabled: false,
 });
+
+/** The untouched Max tokens ceiling this build replaced. A stored copy of it is not a choice. */
+export const RETIRED_DEFAULT_MAX_TOKENS = 2048;
+
+/**
+ * Written onto a conversation the first time its ceiling is checked.
+ * A later choice of the retired number stays, because the mark is already set.
+ */
+export const MAX_TOKENS_DEFAULT_GENERATION = 2;
 
 /** The persisted key each default is stored under in the application settings blob. */
 const PERSISTED_KEYS: Record<Exclude<keyof AppSettingDefaults, 'webToolsEnabled'>, string> = {
@@ -124,7 +134,10 @@ export function readAppSettingDefaults(
 
   const maxTokens = source[PERSISTED_KEYS.maxTokens];
   if (typeof maxTokens === 'number' && Number.isInteger(maxTokens) && maxTokens > 0) {
-    defaults.maxTokens = maxTokens;
+    // A stored copy of the retired untouched ceiling picks up the current default.
+    // Any other positive integer is a choice. This baseline has no generation mark,
+    // so it cannot stay on the retired number.
+    defaults.maxTokens = maxTokens === RETIRED_DEFAULT_MAX_TOKENS ? fallback.maxTokens : maxTokens;
   }
 
   const topP = source[PERSISTED_KEYS.topP];
@@ -239,6 +252,28 @@ export function resolveConversationSettings(
 }
 
 /**
+ * Move chats that still have the old untouched ceiling onto the current default.
+ * A later choice of that same number stays, because the generation mark is written the first time.
+ */
+export function migrateRetiredMaxTokens<T extends { settings?: unknown }>(
+  conversations: T[],
+): { conversations: T[]; changed: boolean } {
+  let changed = false;
+  const next = conversations.map((conversation) => {
+    const settings = conversation.settings;
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) return conversation;
+    const bag = settings as Record<string, unknown>;
+    if (bag.maxTokensDefaultGeneration === MAX_TOKENS_DEFAULT_GENERATION) return conversation;
+    changed = true;
+    const upgraded = bag.maxTokens === RETIRED_DEFAULT_MAX_TOKENS
+      ? { ...bag, maxTokens: DEFAULT_APP_SETTINGS.maxTokens, maxTokensDefaultGeneration: MAX_TOKENS_DEFAULT_GENERATION }
+      : { ...bag, maxTokensDefaultGeneration: MAX_TOKENS_DEFAULT_GENERATION };
+    return { ...conversation, settings: upgraded };
+  });
+  return { conversations: changed ? next : conversations, changed };
+}
+
+/**
  * The settings patch a newly created conversation should be seeded with.
  *
  * New conversations are stamped with explicit values rather than left to inherit, so that the
@@ -257,6 +292,7 @@ export function seedSettingsFor(
     showFullHistory: effective.showFullHistory,
     temperature: effective.temperature,
     maxTokens: effective.maxTokens,
+    maxTokensDefaultGeneration: MAX_TOKENS_DEFAULT_GENERATION,
     topP: effective.topP,
     topK: effective.topK,
     frequencyPenalty: effective.frequencyPenalty,

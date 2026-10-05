@@ -164,6 +164,10 @@ describe('renderer/sidecar boundary', () => {
     const sidebar = readFileSync(join(process.cwd(), 'src', 'lib', 'ConversationSidebar.svelte'), 'utf8');
     expect(sidebar).toContain('aria-label="Show conversations"');
     expect(sidebar).toContain('aria-label="Hide conversations"');
+    expect(sidebar).toContain('title="Hide"');
+    expect(sidebar).toContain('name="panel-left"');
+    expect(sidebar).toContain('title={exportBusy ? "Saving…" : "Export"}');
+    expect(sidebar).toContain('name="download"');
     expect(page).toContain('let offerWebTools = allowWebTools');
     expect(tools).toContain("name: 'web_search'");
     expect(tools).toContain('userSearchContext(result)');
@@ -228,7 +232,7 @@ describe('renderer/sidecar boundary', () => {
     expect(page).toContain('void tick().then(');
     expect(page).toContain('restoreDialogFocus(back, [');
     expect(page).toContain('form button.stop');
-    expect(page).toContain('in this conversation until the page reloads');
+    expect(page).toContain('until the page reloads.');
     expect(page).toContain('allUrlsGrantTarget(');
     expect(page).toContain('Allow all URLs in {webConsentGrantTarget.label}');
     expect(page).toContain('This request is from that conversation, not the one open now.');
@@ -319,6 +323,7 @@ describe('renderer/sidecar boundary', () => {
     expect(markdownEnd).toBeGreaterThan(0);
     expect(audit).toBeGreaterThan(markdownEnd);
     expect(renderer).toContain('normalizeWebAudit(webAudit)');
-    expect(renderer).toContain('messageClipboardWithWebAudit(messageClipboardText(content), webAuditView)');
+    expect(renderer).toContain('stripChatTemplateSpill(messageClipboardText(content))');
+    expect(renderer).toContain('messageClipboardWithWebAudit(copied, webAuditView)');
   });
 });

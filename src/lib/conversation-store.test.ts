@@ -570,6 +570,7 @@ describe('message metadata preservation', () => {
       pinned: true,
       condensed: true,
       isSummary: true,
+      prefilledThink: true,
     };
     const message = normalizeMessage(raw, 'fallback');
     expect(message).toMatchObject({
@@ -577,6 +578,7 @@ describe('message metadata preservation', () => {
       pinned: true,
       condensed: true,
       isSummary: true,
+      prefilledThink: true,
     });
 
     const archive = createEmptyArchive();
@@ -585,7 +587,7 @@ describe('message metadata preservation', () => {
     });
     const round = parseConversationArchive(JSON.stringify(archive), SKIP_APP_VERSION_GATE);
     expect(round.archive?.conversations[0].messages[0]).toMatchObject({
-      isError: true, pinned: true, condensed: true, isSummary: true,
+      isError: true, pinned: true, condensed: true, isSummary: true, prefilledThink: true,
     });
   });
 
@@ -1314,6 +1316,19 @@ describe('mergeConversationSettings', () => {
 
   it('writes a false value rather than treating it as a clear', () => {
     expect(mergeConversationSettings(undefined, { showFullHistory: false })).toEqual({ showFullHistory: false });
+  });
+
+  it('keeps a later choice of the retired max-token ceiling', () => {
+    const bag = mergeConversationSettings(undefined, {
+      maxTokens: 2048,
+      maxTokensDefaultGeneration: 2,
+    });
+    expect(readConversationSettings(bag).settings).toEqual({
+      maxTokens: 2048,
+      maxTokensDefaultGeneration: 2,
+    });
+    const next = mergeConversationSettings(bag, { temperature: 0.2 });
+    expect(next).toMatchObject({ maxTokens: 2048, maxTokensDefaultGeneration: 2, temperature: 0.2 });
   });
 
   it('round-trips through the reader', () => {

@@ -138,18 +138,24 @@ export type MessageContent = string | ContentPart[];
  *
  * These are not cosmetic. `isError` keeps a failed turn out of the next inference request,
  * `pinned` exempts a turn from condensation, `condensed` hides it from the compact thread, and
- * `isSummary` marks the generated summary that replaced the turns it condensed. Dropping any of
- * them on the first save is functional corruption: error turns re-enter inference, pinned turns
- * stop being retained, and condensed turns reappear.
+ * `isSummary` marks the generated summary that replaced the turns it condensed. `prefilledThink`
+ * keeps an unfinished Qwen3 or QwQ reasoning trace under Thinking instead of showing it as the
+ * answer. Dropping any of them on the first save is functional corruption: error turns re-enter
+ * inference, pinned turns stop being retained, and condensed turns reappear.
  */
 export interface MessageFlags {
   isError?: boolean;
   pinned?: boolean;
   condensed?: boolean;
   isSummary?: boolean;
+  /**
+   * The producing model's template opened `<think>` before this reply. Display only:
+   * unclosed text stays under Thinking instead of being shown as the answer.
+   */
+  prefilledThink?: boolean;
 }
 
-export const MESSAGE_FLAG_KEYS = ['isError', 'pinned', 'condensed', 'isSummary'] as const;
+export const MESSAGE_FLAG_KEYS = ['isError', 'pinned', 'condensed', 'isSummary', 'prefilledThink'] as const;
 
 /** Fields this schema owns. Anything else on a message goes to `extra`. */
 const KNOWN_MESSAGE_KEYS = new Set<string>([
@@ -243,6 +249,12 @@ export interface ConversationSettings {
   temperature?: number;
   /** Maximum tokens the model may generate in a single reply. */
   maxTokens?: number;
+  /**
+   * Set once a chat has been checked against the current Max tokens default.
+   * Absent means a stored copy of the retired ceiling still needs to move up.
+   * Present means a later choice of that same number is the user's.
+   */
+  maxTokensDefaultGeneration?: number;
   /** Nucleus sampling cutoff, (0, 1]. */
   topP?: number;
   /** Top-k sampling cutoff. */
@@ -265,7 +277,7 @@ export interface ConversationSettings {
 /** Keys `ConversationSettings` owns. Anything else is passthrough. */
 export const CONVERSATION_SETTING_KEYS = [
   'modelAlias', 'systemPrompt', 'contextTurns', 'showFullHistory',
-  'temperature', 'maxTokens', 'topP', 'topK',
+  'temperature', 'maxTokens', 'maxTokensDefaultGeneration', 'topP', 'topK',
   'frequencyPenalty', 'presencePenalty', 'randomSeed', 'webToolsEnabled',
 ] as const;
 
@@ -330,6 +342,11 @@ export function readConversationSettings(raw: unknown): ConversationSettingsRead
       case 'maxTokens':
         if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
           settings.maxTokens = value;
+        } else invalidKeys.push(key);
+        break;
+      case 'maxTokensDefaultGeneration':
+        if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
+          settings.maxTokensDefaultGeneration = value;
         } else invalidKeys.push(key);
         break;
       case 'topP':

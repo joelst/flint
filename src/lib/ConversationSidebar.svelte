@@ -17,6 +17,7 @@
 </script>
 
 <script lang="ts">
+  import Icon from "./Icon.svelte";
   import { truncateConversationTitle } from "./conversation-sidebar";
 
   export let conversations: Conversation[] = [];
@@ -74,18 +75,24 @@
         type="button"
         class="export-btn"
         aria-label="Hide conversations"
-        title="Hide conversations"
+        title="Hide"
         onclick={onToggleCollapsed}
       >
-        Hide
+        <Icon name="panel-left" size={15} />
       </button>
       <button
+        type="button"
         class="export-btn"
-        title="Save a copy of every conversation to a file, including any that Flint could not read"
+        aria-label={exportBusy ? "Saving…" : "Export conversations"}
+        title={exportBusy ? "Saving…" : "Export"}
         disabled={exportBusy}
         onclick={onExport}
       >
-        {exportBusy ? "Saving…" : "Export"}
+        {#if exportBusy}
+          <Icon name="loader" size={15} class="spin" />
+        {:else}
+          <Icon name="download" size={15} />
+        {/if}
       </button>
       <button class="new-chat-btn" title="New conversation" onclick={onNewChat}>
         ➕ New
@@ -238,14 +245,26 @@
   }
 
   .export-btn {
-    padding: 4px 8px;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     background: transparent;
     color: var(--fg);
     border: 1px solid var(--border);
     border-radius: 3px;
-    font-size: 0.75rem;
     cursor: pointer;
-    white-space: nowrap;
+  }
+
+  .export-btn :global(svg.spin) {
+    animation: export-spin 1s linear infinite;
+  }
+
+  @keyframes export-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
   }
 
   .export-btn:hover:not(:disabled) {

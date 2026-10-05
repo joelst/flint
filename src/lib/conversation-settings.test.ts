@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
   DEFAULT_APP_SETTINGS,
+  MAX_TOKENS_DEFAULT_GENERATION,
+  RETIRED_DEFAULT_MAX_TOKENS,
   appSettingDefaultsToPersisted,
+  migrateRetiredMaxTokens,
   readAppSettingDefaults,
   resolveConversationSettings,
   seedSettingsFor,
@@ -87,6 +90,13 @@ describe('readAppSettingDefaults', () => {
 
   it('uses the shipped defaults when no fallback is given', () => {
     expect(readAppSettingDefaults(null)).toEqual(DEFAULT_APP_SETTINGS);
+  });
+
+  it('treats a stored copy of the retired ceiling as the current default', () => {
+    expect(RETIRED_DEFAULT_MAX_TOKENS).toBe(2048);
+    expect(readAppSettingDefaults({ maxTokens: 2048 }).maxTokens).toBe(DEFAULT_APP_SETTINGS.maxTokens);
+    expect(readAppSettingDefaults({ maxTokens: 2048 }, baseline).maxTokens).toBe(baseline.maxTokens);
+    expect(readAppSettingDefaults({ maxTokens: 4096 }, baseline).maxTokens).toBe(4096);
   });
 
   it('round-trips through the persisted projection', () => {
@@ -230,6 +240,7 @@ describe('seedSettingsFor', () => {
       presencePenalty: -0.2,
       randomSeed: 7,
       webToolsEnabled: false,
+      maxTokensDefaultGeneration: MAX_TOKENS_DEFAULT_GENERATION,
     });
   });
 
@@ -263,5 +274,47 @@ describe('seedSettingsFor', () => {
   it('can override even when the inherited alias is empty', () => {
     const seed = seedSettingsFor({ ...baseline, modelAlias: '' }, { modelAlias: 'qwen3-4b' });
     expect(seed.modelAlias).toBe('qwen3-4b');
+  });
+});
+
+describe('migrateRetiredMaxTokens', () => {
+  const chat = (settings?: unknown) => ({ id: 'c', settings });
+
+  it('raises an untouched 2048 ceiling and stamps every other stored bag', () => {
+    const raised = migrateRetiredMaxTokens([
+      chat({ maxTokens: 2048, temperature: 0.7 }),
+      chat({ maxTokens: 16384 }),
+      chat(),
+      chat([]),
+    ]);
+    expect(raised.changed).toBe(true);
+    expect(raised.conversations[0].settings).toMatchObject({
+      maxTokens: DEFAULT_APP_SETTINGS.maxTokens,
+      temperature: 0.7,
+      maxTokensDefaultGeneration: MAX_TOKENS_DEFAULT_GENERATION,
+    });
+    expect(raised.conversations[1].settings).toMatchObject({
+      maxTokens: 16384,
+      maxTokensDefaultGeneration: MAX_TOKENS_DEFAULT_GENERATION,
+    });
+    expect(raised.conversations[2].settings).toBeUndefined();
+    expect(raised.conversations[3].settings).toEqual([]);
+  });
+
+  it('leaves a later choice of 2048 alone', () => {
+    const once = migrateRetiredMaxTokens([chat({ maxTokens: 2048 })]);
+    const chosen = migrateRetiredMaxTokens([
+      chat({ ...(once.conversations[0].settings as object), maxTokens: 2048 }),
+    ]);
+    expect(chosen.changed).toBe(false);
+    expect((chosen.conversations[0].settings as { maxTokens: number }).maxTokens).toBe(2048);
+  });
+
+  it('does not migrate a chat twice', () => {
+    const once = migrateRetiredMaxTokens([chat({ maxTokens: 16384, custom: true })]);
+    const twice = migrateRetiredMaxTokens(once.conversations);
+    expect(twice.changed).toBe(false);
+    expect(twice.conversations[0]).toBe(once.conversations[0]);
+    expect(once.conversations[0].settings).toMatchObject({ maxTokens: 16384, custom: true });
   });
 });

@@ -2,8 +2,9 @@
   import Icon from "./Icon.svelte";
   import type { MessageContent } from "./conversation-store";
   import {
-    extractThinkingTrace,
     messageClipboardText,
+    presentAssistantText,
+    stripChatTemplateSpill,
     messagePlainText,
     messageTimestamp,
     nonTextMessageParts,
@@ -40,6 +41,11 @@
    */
   export let assumeReasoning: boolean = false;
   /**
+   * True when the model template opens `<think>` before generation. A reply that never
+   * closes that tag is still reasoning, including when Max tokens ends the stream.
+   */
+  export let prefilledThink: boolean = false;
+  /**
    * Identifies which logical message this instance is rendering (e.g. `${conversationId}:
    * ${messageId}`). `MessageRenderer` instances are created in an unkeyed `{#each}` (Chat) or
    * reused across runs for the same Arena slot, so Svelte can reuse one component instance for
@@ -53,6 +59,7 @@
 
   let renderedHtml = "";
   let thinkingBlocks: string[] = [];
+  let stoppedBeforeAnswer = false;
   let showThinking = false;
   let userToggledThinking = false;
   let markedParser: ((src: string, options?: any) => string | Promise<string>) | null =
@@ -75,11 +82,12 @@
       userToggledThinking = false;
       showThinking = false;
       thinkingBlocks = [];
+      stoppedBeforeAnswer = false;
       renderedHtml = "";
     }
   }
 
-  $: void queueRender(role, content, isStreaming, assumeReasoning, messageKey);
+  $: void queueRender(role, content, isStreaming, assumeReasoning, prefilledThink, messageKey);
 
   function escapeHtml(text: string): string {
     const map: Record<string, string> = {
@@ -98,33 +106,33 @@
     safeContent: string,
     streaming: boolean,
     reasoning: boolean,
+    prefilled: boolean,
   ): Promise<void> {
     if (currentRole !== "assistant") {
       if (currentVersion === renderVersion) {
         renderedHtml = `<p>${escapeHtml(safeContent)}</p>`;
         thinkingBlocks = [];
+        stoppedBeforeAnswer = false;
         showThinking = false;
         userToggledThinking = false;
       }
       return;
     }
 
-    const extracted = extractThinkingTrace(safeContent, reasoning);
-    let { visibleContent } = extracted;
-    let { thinkingContent } = extracted;
-    // No tag detected yet: if this model is known to reason and the stream is still going,
-    // hold the raw text as tentative "thinking" rather than showing it as the final answer.
-    // A settled message (isStreaming false) always falls through here untouched, so a model
-    // that never actually emits a closing tag still shows its answer normally once done.
-    if (streaming && reasoning && thinkingContent.length === 0 && visibleContent) {
-      thinkingContent = [visibleContent];
-      visibleContent = "";
-    }
-    thinkingBlocks = thinkingContent;
+    const presented = presentAssistantText({
+      text: safeContent,
+      streaming,
+      assumeReasoning: reasoning,
+      prefilledThink: prefilled,
+    });
+    const { visibleContent } = presented;
+    thinkingBlocks = presented.thinkingContent;
+    stoppedBeforeAnswer = presented.stoppedBeforeAnswer;
     if (!userToggledThinking) {
-      // Auto-expand while there is reasoning but no answer yet; auto-collapse once the
-      // answer starts arriving. The user's own toggle always wins after that.
-      showThinking = thinkingBlocks.length > 0 && !visibleContent;
+      // Auto-expand while reasoning is still arriving and no answer has started.
+      // A reply that ends inside the prefilled think block stays collapsed; the cutoff
+      // note is the answer area. The user's own toggle always wins after that.
+      showThinking = thinkingBlocks.length > 0 && !visibleContent && !presented.stoppedBeforeAnswer;
     }
     if (!visibleContent) {
       if (currentVersion === renderVersion) {
@@ -156,8 +164,11 @@
   }
 
   function copyToClipboard() {
+    const copied = role === "assistant"
+      ? stripChatTemplateSpill(messageClipboardText(content))
+      : messageClipboardText(content);
     navigator.clipboard.writeText(
-      messageClipboardWithWebAudit(messageClipboardText(content), webAuditView),
+      messageClipboardWithWebAudit(copied, webAuditView),
     );
   }
 
@@ -174,6 +185,7 @@
     currentContent: MessageContent,
     streaming: boolean,
     reasoning: boolean,
+    prefilled: boolean,
     _key: string | number,
   ): void {
     const currentVersion = ++renderVersion;
@@ -191,6 +203,7 @@
         messagePlainText(currentContent),
         streaming,
         reasoning,
+        prefilled,
       );
     }, scheduleDelayMs);
   }
@@ -220,6 +233,9 @@
           </div>
         {/if}
       </div>
+    {/if}
+    {#if stoppedBeforeAnswer}
+      <p class="thinking-cutoff">This reply stopped before the answer. Raise Max tokens if the model was still reasoning.</p>
     {/if}
     <div class="rendered-markdown">
       {@html renderedHtml}
@@ -480,6 +496,12 @@
 
   .thinking-block {
     margin-bottom: 0.6rem;
+  }
+
+  .thinking-cutoff {
+    margin: 0 0 0.6rem;
+    color: var(--muted);
+    font-size: 0.85rem;
   }
 
   .thinking-toggle {

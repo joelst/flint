@@ -8,11 +8,13 @@ import {
   executeWebImage,
   executeWebToolCalls,
   messagesContainImages,
+  modelCannotUseWebTools,
   readWebToolCalls,
   searchQueryPolicyError,
   userSearchContext,
   webContentSystemInstruction,
   webToolSystemInstruction,
+  webToolTemplateCrash,
   type WebToolRequest,
   type WebToolResult,
 } from './web-tools';
@@ -50,6 +52,129 @@ describe('web tool calls', () => {
       type: 'function' as const,
       function: { name: 'web_search', arguments: '{"query":"x"}' },
     })))).toThrow(/at most 2/i);
+  });
+
+  it('runs two fetches when a repeated name splits into exactly two argument objects', async () => {
+    const execute = vi.fn(async (request: WebToolRequest): Promise<WebToolResult> => ({
+      operation: 'fetch',
+      url: request.operation === 'fetch' ? request.url : '',
+      title: 'Page',
+      text: 'Body',
+      truncated: false,
+      charCount: 4,
+    }));
+    const calls = [{
+      id: 'glued',
+      type: 'function' as const,
+      function: {
+        name: 'web_fetchweb_fetch',
+        arguments: '{"url":"https://example.com/a"}{"url":"https://example.com/b"}',
+      },
+    }];
+    const parsed = readWebToolCalls(calls);
+    expect(parsed).toHaveLength(2);
+    expect(parsed.map((item) => (
+      'request' in item && item.request.operation === 'fetch' ? item.request.url : ''
+    ))).toEqual([
+      'https://example.com/a',
+      'https://example.com/b',
+    ]);
+    const braced = readWebToolCalls([{
+      id: 'braced',
+      type: 'function' as const,
+      function: {
+        name: 'web_fetchweb_fetch',
+        arguments: '{"url":"https://example.com/a}b"}{"url":"https://example.com/c"}',
+      },
+    }]);
+    expect(braced.map((item) => (
+      'request' in item && item.request.operation === 'fetch' ? item.request.url : ''
+    ))).toEqual([
+      'https://example.com/a%7Db',
+      'https://example.com/c',
+    ]);
+    const result = await executeWebToolCalls(
+      calls,
+      execute,
+      new Set(['https://example.com/a', 'https://example.com/b']),
+    );
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(result.errors).toEqual([]);
+    expect(result.toolCalls.map((call) => call.function.name)).toEqual(['web_fetch', 'web_fetch']);
+    expect(result.toolCalls.map((call) => call.id)).toEqual(['glued:0', 'glued:1']);
+    expect(result.toolMessages.map((message) => message.tool_call_id)).toEqual(['glued:0', 'glued:1']);
+  });
+
+  it('reports one web_fetch issue for a repeated name that does not fit in two calls, and still runs the search', async () => {
+    const execute = vi.fn(async (request: WebToolRequest): Promise<WebToolResult> => ({
+      operation: 'search',
+      query: request.operation === 'search' ? request.query : '',
+      results: [{ title: 'StatMuse', url: 'https://www.statmuse.com/nfl/ask/bears', snippet: 'Record' }],
+    }));
+    const calls = [
+      {
+        id: 'search-1',
+        type: 'function' as const,
+        function: { name: 'web_search', arguments: '{"query":"Chicago Bears NFC Championship record"}' },
+      },
+      {
+        id: 'fetch-glued',
+        type: 'function' as const,
+        function: {
+          name: 'web_fetchweb_fetchweb_fetchweb_fetchweb_fetch',
+          arguments: '{',
+        },
+      },
+    ];
+    expect(() => readWebToolCalls(calls)).not.toThrow();
+    const parsed = readWebToolCalls(calls);
+    expect(parsed[0]).toMatchObject({ request: { operation: 'search', query: 'Chicago Bears NFC Championship record' } });
+    expect(parsed[1]).toMatchObject({
+      call: { function: { name: 'web_fetch' } },
+    });
+    expect('error' in parsed[1] ? parsed[1].error : '').toMatch(/included 5 web_fetch calls/i);
+    expect('error' in parsed[1] ? parsed[1].error : '').toMatch(/at most 2/);
+    const fiveObjects = Array.from({ length: 5 }, (_, index) => (
+      `{"url":"https://example.com/${index}"}`
+    )).join('');
+    expect(() => readWebToolCalls([
+      {
+        id: 'search-2',
+        type: 'function' as const,
+        function: { name: 'web_search', arguments: '{"query":"bears"}' },
+      },
+      {
+        id: 'fetch-five',
+        type: 'function' as const,
+        function: { name: 'web_fetch'.repeat(5), arguments: fiveObjects },
+      },
+    ])).not.toThrow();
+    const result = await executeWebToolCalls(
+      calls,
+      execute,
+      new Set(),
+      undefined,
+      undefined,
+      async () => true,
+    );
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(result.queries).toEqual(['Chicago Bears NFC Championship record']);
+    expect(result.errors).toEqual([
+      'web_fetch: This reply included 5 web_fetch calls in one response. A reply may request at most 2.',
+    ]);
+    expect(result.toolCalls.map((call) => call.id)).toEqual(['search-1', 'fetch-glued']);
+    expect(result.toolCalls[1].function.name).toBe('web_fetch');
+  });
+
+  it('leaves web tools off for Gemma 4 and recognizes the upstream template crash', () => {
+    expect(modelCannotUseWebTools('gemma-4-e2b-it-cuda-gpu:3')).toBe(true);
+    expect(modelCannotUseWebTools('Gemma4-E2B')).toBe(true);
+    expect(modelCannotUseWebTools('qwen3.5-9b')).toBe(false);
+    expect(modelCannotUseWebTools('smollm3-3b')).toBe(false);
+    expect(modelCannotUseWebTools('gemma-2-2b-it')).toBe(false);
+    expect(webToolTemplateCrash(new Error("Trying to access property 'name' on null"))).toBe(true);
+    expect(webToolTemplateCrash(new Error('format_function_declaration failed'))).toBe(true);
+    expect(webToolTemplateCrash(new Error('The model stopped'))).toBe(false);
   });
 
   it('allows fetches only for canonical HTTPS URLs already in conversation content', async () => {
