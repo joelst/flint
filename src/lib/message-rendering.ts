@@ -312,15 +312,27 @@ export function replyUsesPrefilledThink(input: { stamped: boolean }): boolean {
  */
 const ROLE_LINE = /^(user|system|assistant|tool)$/i;
 
+/** Opening or closing fence run. A closer is the run alone, with no info string. */
+function fenceRun(line: string): { char: string; length: number; closer: boolean } | null {
+  const match = line.trim().match(/^(`{3,}|~{3,})(.*)$/);
+  if (!match) return null;
+  return { char: match[1][0], length: match[1].length, closer: match[2].length === 0 };
+}
+
 function fenceMask(lines: string[]): boolean[] {
   const mask = new Array<boolean>(lines.length).fill(false);
-  let open = false;
+  let open: { char: string; length: number } | null = null;
   for (let index = 0; index < lines.length; index += 1) {
-    if (lines[index].trim().startsWith('```')) {
-      open = !open;
-    } else {
-      mask[index] = open;
+    const run = fenceRun(lines[index]);
+    if (!open) {
+      if (run) open = { char: run.char, length: run.length };
+      continue;
     }
+    if (run?.closer && run.char === open.char && run.length >= open.length) {
+      open = null;
+      continue;
+    }
+    mask[index] = true;
   }
   return mask;
 }
@@ -352,11 +364,13 @@ function textHasWebToolJsonLine(text: string): boolean {
  * Qwen-family templates mark turns with `<|im_start|>role` and `<|im_end|>`. The decoder
  * drops those markers and leaves the role word on its own line. Drop those lines when they
  * sit after a closing think tag, trail the reply, or come in a run. A single role word
- * between sentences stays, and so does one inside a code fence. While a stream is still
- * open, the last line is kept so a word the model has not finished can still grow.
- * A whole line of web_search or web_fetch JSON is dropped first, outside fences, so a
- * role line after those lines still counts as immediately after the think close.
- * `<|im_start|>`, `<|im_end|>`, and `<|endoftext|>` are removed only outside a code fence.
+ * between sentences stays, and so does one inside a code fence. A fence opens on three
+ * or more backticks or tildes and closes only on a matching run at least that long.
+ * While a stream is still open, the last line is kept so a word the model has not
+ * finished can still grow. A whole line of web_search or web_fetch JSON is dropped
+ * first, outside fences, so a role line after those lines still counts as immediately
+ * after the think close. `<|im_start|>`, `<|im_end|>`, and `<|endoftext|>` are removed
+ * only outside a code fence.
  */
 export function stripChatTemplateSpill(
   text: string,

@@ -368,6 +368,53 @@ describe("stripChatTemplateSpill", () => {
     expect(stripChatTemplateSpill("hello<|endoftext|>\n<|im_start|>user")).toBe("hello");
   });
 
+  it("keeps a role line and template markers inside a tilde fence", () => {
+    const fenced = [
+      "~~~",
+      "user",
+      "token <|im_start|> <|im_end|> <|endoftext|>",
+      "~~~",
+    ].join("\n");
+    expect(stripChatTemplateSpill(fenced)).toBe(fenced);
+    expect(stripChatTemplateSpill("~~~\n<|im_end|>\nuser")).toBe("~~~\n<|im_end|>\nuser");
+  });
+
+  it("keeps a role line and template markers inside a four-backtick fence that contains a triple-backtick line", () => {
+    const fenced = [
+      "````",
+      "```",
+      "user",
+      "token <|im_start|> <|im_end|> <|endoftext|>",
+      "```",
+      "````",
+    ].join("\n");
+    expect(stripChatTemplateSpill(fenced)).toBe(fenced);
+  });
+
+  it("does not let a backtick fence close a tilde fence", () => {
+    const fenced = [
+      "~~~",
+      "```",
+      "inside",
+      "```",
+      "user",
+      "token <|im_start|> <|im_end|> <|endoftext|>",
+      "~~~",
+    ].join("\n");
+    expect(stripChatTemplateSpill(fenced)).toBe(fenced);
+  });
+
+  it("keeps markers when an info string does not close the fence and a longer run does", () => {
+    const fenced = [
+      "~~~lang",
+      "```js",
+      "user",
+      "token <|im_start|> <|im_end|> <|endoftext|>",
+      "~~~~",
+    ].join("\n");
+    expect(stripChatTemplateSpill(fenced)).toBe(fenced);
+  });
+
   it("keeps an unfinished trailing role line while the stream is open", () => {
     expect(stripChatTemplateSpill("Answer\nuser", { keepTrailingOpenLine: true })).toBe("Answer\nuser");
     expect(stripChatTemplateSpill("Answer\nuser\n", { keepTrailingOpenLine: true })).toBe("Answer");

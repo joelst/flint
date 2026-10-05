@@ -13,6 +13,7 @@ import {
   stripWebCloser,
   toolContentsWithCloser,
   webCloserInstruction,
+  withVisionImage,
 } from './web-envelope';
 
 describe('web envelope', () => {
@@ -130,5 +131,79 @@ describe('web envelope', () => {
       { role: 'tool', content: second },
     ], closer)).toBe(`${first}\n\n${second}`);
     expect(toolContentsWithCloser([{ role: 'tool', content: first }], '')).toBe('');
+  });
+
+  it('keeps the page JPEG as the only image and the fence on the latest user text', () => {
+    const historyImage = { type: 'image_url', image_url: { url: 'data:image/png;base64,HISTORY' } };
+    const currentImage = { type: 'image_url', image_url: { url: 'data:image/png;base64,CURRENT' } };
+    const jpeg = 'data:image/jpeg;base64,PAGEJPEG';
+    const fence = 'flint-ref-abcdef012345\npage title\nflint-ref-abcdef012345';
+    const messages = [
+      { role: 'user', content: [historyImage] },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'older question' },
+          { type: 'file_text', file: { text: 'notes' } },
+          historyImage,
+        ],
+      },
+      { role: 'assistant', content: 'older answer' },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'current question' },
+          currentImage,
+        ],
+      },
+    ];
+    const result = withVisionImage(messages, fence, jpeg);
+    const images = result.flatMap((message) => (
+      Array.isArray(message.content)
+        ? message.content.filter((part) => (
+          part && typeof part === 'object' && (part as { type?: unknown }).type === 'image_url'
+        ))
+        : []
+    ));
+    expect(images).toEqual([{ type: 'image_url', image_url: { url: jpeg } }]);
+    const latest = result[result.length - 1];
+    const latestText = Array.isArray(latest.content)
+      ? (latest.content.find((part) => (
+        part && typeof part === 'object' && (part as { type?: unknown }).type === 'text'
+      )) as { text?: unknown } | undefined)?.text
+      : latest.content;
+    expect(latestText).toBe(`current question\n\n${fence}`);
+    expect(result.some((message) => message.content && Array.isArray(message.content) && message.content.length === 0)).toBe(false);
+    expect(result[0].content).toEqual([
+      { type: 'text', text: 'older question' },
+      { type: 'file_text', file: { text: 'notes' } },
+    ]);
+    expect(messages[1].content).toEqual([
+      { type: 'text', text: 'older question' },
+      { type: 'file_text', file: { text: 'notes' } },
+      historyImage,
+    ]);
+  });
+
+  it('turns the latest string turn into text plus the page image', () => {
+    const jpeg = 'data:image/jpeg;base64,ONLY';
+    const result = withVisionImage([
+      { role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,OLD' } }] },
+      { role: 'assistant', content: 'answer' },
+      { role: 'user', content: 'typed question' },
+    ], 'fence body', jpeg);
+    expect(result).toEqual([
+      { role: 'assistant', content: 'answer' },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'typed question\n\nfence body' },
+          { type: 'image_url', image_url: { url: jpeg } },
+        ],
+      },
+    ]);
+    expect(withVisionImage([{ role: 'assistant', content: 'hi' }], 'fence', jpeg)).toEqual([
+      { role: 'assistant', content: 'hi' },
+    ]);
   });
 });

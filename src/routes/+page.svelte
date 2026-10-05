@@ -271,6 +271,7 @@
     messageContentWithFence,
     toolContentsWithCloser,
     webCloserInstruction,
+    withVisionImage,
   } from "$lib/web-envelope";
   import { mergeBlocklists, parseBlocklistText, hostBlocked, BUILT_IN_WEB_BLOCKLIST } from "$lib/web-blocklist";
   import { packContextMessages, plannedWebFit, repackToolRequest } from "$lib/context-packer";
@@ -6670,42 +6671,6 @@ updateStateFromSdk();
     return throughLatest.filter((message) => message?.role !== "tool");
   }
 
-  function withVisionImage(messages: any[], extraFence: string, dataUrl: string) {
-    const copy = messages.map((message) => ({
-      ...message,
-      content: Array.isArray(message.content)
-        ? message.content.map((part: any) => ({ ...part }))
-        : message.content,
-    }));
-    let index = -1;
-    for (let i = copy.length - 1; i >= 0; i -= 1) {
-      if (copy[i]?.role === "user") {
-        index = i;
-        break;
-      }
-    }
-    if (index < 0) return copy;
-    const imagePart = { type: "image_url", image_url: { url: dataUrl } };
-    const current = copy[index].content;
-    if (typeof current === "string") {
-      copy[index].content = [
-        { type: "text", text: extraFence ? `${current}\n\n${extraFence}` : current },
-        imagePart,
-      ];
-      return copy;
-    }
-    if (Array.isArray(current)) {
-      const parts = current.map((part: any) => ({ ...part }));
-      if (extraFence) {
-        const textPart = parts.find((part: any) => part?.type === "text");
-        if (textPart) textPart.text = `${textPart.text}\n\n${extraFence}`;
-        else parts.unshift({ type: "text", text: extraFence });
-      }
-      parts.push(imagePart);
-      copy[index].content = parts;
-    }
-    return copy;
-  }
   const webHostBlocklist = $derived(
     mergeBlocklists(BUILT_IN_WEB_BLOCKLIST, parseBlocklistText(webHostBlocklistText).hosts, []),
   );
