@@ -911,13 +911,21 @@ describe('web tool calls', () => {
 
   it('names the search or the host while a tool call is running', async () => {
     const seen: string[] = [];
+    const note = (event: { kind: string; query?: string; host?: string }) => {
+      seen.push(event.kind === 'search' ? `search:${event.query}` : `fetch:${event.host}`);
+    };
     const execute = vi.fn(async (request: WebToolRequest): Promise<WebToolResult> => {
       if (request.operation === 'search') {
+        seen.push('ran-search');
         return { operation: 'search', query: request.query, results: [] };
+      }
+      seen.push(`ran-fetch:${request.url}`);
+      if (request.url === 'https://start.example/a') {
+        return { operation: 'redirect', url: 'https://land.example/b' };
       }
       return {
         operation: 'fetch',
-        url: 'https://example.com/',
+        url: request.url,
         title: 'Page',
         text: 'Body',
         truncated: false,
@@ -929,19 +937,22 @@ describe('web tool calls', () => {
       type: 'function',
       function: { name: 'web_search', arguments: '{"query":"public weather"}' },
     }], execute, undefined, undefined, undefined, async () => true, {
-      onActivity: (event) => {
-        seen.push(event.kind === 'search' ? event.query : event.host);
-      },
+      onActivity: note,
     });
     await executeWebToolCalls([{
       id: 'call-f',
       type: 'function',
-      function: { name: 'web_fetch', arguments: '{"url":"https://example.com/"}' },
-    }], execute, new Set(['https://example.com/']), undefined, async () => true, undefined, {
-      onActivity: (event) => {
-        seen.push(event.kind === 'search' ? event.query : event.host);
-      },
+      function: { name: 'web_fetch', arguments: '{"url":"https://start.example/a"}' },
+    }], execute, new Set(['https://start.example/a']), undefined, async () => true, undefined, {
+      onActivity: note,
     });
-    expect(seen).toEqual(['public weather', 'example.com']);
+    expect(seen).toEqual([
+      'search:public weather',
+      'ran-search',
+      'fetch:start.example',
+      'ran-fetch:https://start.example/a',
+      'fetch:land.example',
+      'ran-fetch:https://land.example/b',
+    ]);
   });
 });

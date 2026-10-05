@@ -72,6 +72,55 @@ export function buildWebAudit(
   };
 }
 
+const WEB_ENVELOPE_MARK = 'Reference data retrieved by Flint.';
+const SHORTENED_HEADER = 'Shortened to fit context.';
+const SHORTENED_BODY = '[shortened to fit context]';
+
+function envelopeBlocks(text: string): string[] {
+  return text.split(/(?=Reference data retrieved by Flint\.)/)
+    .filter((block) => block.includes(WEB_ENVELOPE_MARK));
+}
+
+function envelopeHeader(block: string): string {
+  const newline = block.indexOf('\n');
+  return newline < 0 ? block : block.slice(0, newline);
+}
+
+/** The envelope about this source, not a later page that merely quotes its URL. */
+function blockOwnsSource(block: string, url: string): boolean {
+  const header = envelopeHeader(block);
+  if (header.includes(`URL: ${url}.`) || header.endsWith(`URL: ${url}`)) return true;
+  if (header.includes('URL:')) return false;
+  return block.includes(url);
+}
+
+function envelopeWasShortened(block: string): boolean {
+  return block.includes(SHORTENED_HEADER) || block.includes(SHORTENED_BODY);
+}
+
+/**
+ * Set `budgetShortened` only when this source's own envelope in the fitted text
+ * contains a shortened marker and that source's URL. Another page in the same
+ * text stays unmarked.
+ */
+export function sourcesWithOwnBudgetShortened<T extends WebAuditSource>(
+  sources: readonly T[],
+  fittedText: string,
+): T[] {
+  const blocks = envelopeBlocks(fittedText);
+  return sources.map((source) => {
+    const url = typeof source?.url === 'string' ? source.url : '';
+    const own = url ? blocks.find((block) => blockOwnsSource(block, url)) : undefined;
+    if (!own || !envelopeWasShortened(own)) {
+      if (!source?.budgetShortened) return source;
+      const next = { ...source };
+      delete next.budgetShortened;
+      return next;
+    }
+    return source.budgetShortened === true ? source : { ...source, budgetShortened: true };
+  });
+}
+
 /**
  * Validate a stored audit. Returns `undefined` for anything this schema would not have written,
  * so a hand-edited archive cannot smuggle a non-https link into the app-controlled section.

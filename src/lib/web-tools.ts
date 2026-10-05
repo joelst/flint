@@ -643,6 +643,10 @@ export async function executeWebToolCalls(
         )) {
           throw new Error('User declined access to this site');
         }
+        // Name the host after approval and before the request, including each redirect hop.
+        if (pending.operation === 'fetch') {
+          options?.onActivity?.({ kind: 'fetch', host: hostnameFromUrl(pending.url) || pending.url });
+        }
         result = await execute(pending);
         if (result.operation !== 'redirect') break;
         // No consent callback means this hop cannot be approved. Do not request the next host.
@@ -668,7 +672,6 @@ export async function executeWebToolCalls(
           if (imageUrls.length < 1 && typeof imageUrl === 'string') imageUrls.push(imageUrl);
         }
       }
-      options?.onActivity?.({ kind: 'fetch', host: hostnameFromUrl(result.url) || result.url });
       toolCalls.push(call);
       toolMessages.push({
         role: 'tool',

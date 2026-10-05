@@ -362,6 +362,12 @@ describe("stripChatTemplateSpill", () => {
     expect(stripChatTemplateSpill("hello<|im_end|>\n<|im_start|>user")).toBe("hello");
   });
 
+  it("keeps template markers inside a code fence", () => {
+    const fenced = ["```", "token <|im_start|> <|im_end|> <|endoftext|>", "```"].join("\n");
+    expect(stripChatTemplateSpill(fenced)).toBe(fenced);
+    expect(stripChatTemplateSpill("hello<|endoftext|>\n<|im_start|>user")).toBe("hello");
+  });
+
   it("keeps an unfinished trailing role line while the stream is open", () => {
     expect(stripChatTemplateSpill("Answer\nuser", { keepTrailingOpenLine: true })).toBe("Answer\nuser");
     expect(stripChatTemplateSpill("Answer\nuser\n", { keepTrailingOpenLine: true })).toBe("Answer");

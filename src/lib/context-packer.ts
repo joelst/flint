@@ -45,6 +45,44 @@ function scaled(messages: readonly PackableMessage[], system: string): number {
 }
 
 /**
+ * A user message plus the non-user messages that follow it.
+ * A non-user message whose question is not in this list is its own turn,
+ * so a pinned or summary question can still keep its answer alone.
+ */
+function userLedTurns<T extends PackableMessage>(messages: readonly T[]): T[][] {
+  const turns: T[][] = [];
+  let current: T[] = [];
+  for (const message of messages) {
+    if (message.role === 'user') {
+      if (current.length > 0) turns.push(current);
+      current = [message];
+      continue;
+    }
+    if (current.length > 0 && current[0]?.role === 'user') {
+      current.push(message);
+      continue;
+    }
+    turns.push([message]);
+  }
+  if (current.length > 0) turns.push(current);
+  return turns;
+}
+
+/** Keep a turn only when every message in it fits. A partial turn would orphan its answer. */
+function keepWholeTurns<T extends PackableMessage>(
+  messages: readonly T[],
+  within: (candidate: T[]) => boolean,
+  prefix: readonly T[],
+  suffix: readonly T[],
+): T[] {
+  const kept: T[] = [];
+  for (const turn of [...userLedTurns(messages)].reverse()) {
+    if (within([...prefix, ...turn, ...kept, ...suffix])) kept.unshift(...turn);
+  }
+  return kept;
+}
+
+/**
  * Tokens held back for tool results that have not arrived.
  * Until a smaller `maxChars` is chosen, `fencedChars` is `MAX_FENCED_RESULT_CHARS`.
  * Each remaining round may still make two calls.
@@ -216,12 +254,12 @@ export function packContextMessages<T extends PackableMessage>(input: {
   for (const message of [...pinned].reverse()) {
     if (within([...keptSummaries, ...keptPinned, message, ...chosen])) keptPinned.unshift(message);
   }
-  const keptHistory: T[] = [];
-  for (const message of [...history].reverse()) {
-    if (within([...keptSummaries, ...keptPinned, ...keptHistory, message, ...chosen])) {
-      keptHistory.unshift(message);
-    }
-  }
+  const keptHistory = keepWholeTurns(
+    history,
+    within,
+    [...keptSummaries, ...keptPinned],
+    chosen,
+  );
   return {
     messages: [...keptSummaries, ...keptPinned, ...keptHistory, ...chosen],
     shortened,
@@ -273,10 +311,7 @@ export function repackToolRequest<T extends PackableMessage>(input: {
   if (!within([...keptHead, ...keptTail])) {
     return { messages: [], shortened, omittedHistory: middle.length, contextFull: true };
   }
-  const keptMiddle: T[] = [];
-  for (const message of [...middle].reverse()) {
-    if (within([...keptHead, ...keptMiddle, message, ...keptTail])) keptMiddle.unshift(message);
-  }
+  const keptMiddle = keepWholeTurns(middle, within, keptHead, keptTail);
   return {
     messages: [...keptHead, ...keptMiddle, ...keptTail],
     shortened,

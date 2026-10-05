@@ -81,7 +81,7 @@ The sidebar is grouped by workflow:
   memory warnings use system RAM and GPU memory, which move when a model loads.
 - **Web search** in the chat header is off by default and applies only to the current conversation.
   When it is on, and the selected model reports tool calling, the model may request a short public search.
-  The checkbox stays off for a model that does not report tool calling. Gemma 4 answers without web search until the upstream template fix.
+  The checkbox stays checked and disabled for a model that does not report tool calling, and that send does not offer web search. Gemma 4 answers without web search until the upstream template fix.
   Flint asks you to allow that query
   just once, for this session, or always. Later searches skip that question when you chose session
   or always, unless the model wrote the query after it had already read web text in that same send,

@@ -320,6 +320,8 @@ describe('renderer/sidecar boundary', () => {
     expect(page).toContain('requestCarriesTextAttachment(stamped)');
     expect(page).not.toContain('webFenceForVision');
     expect(page).toContain('toolContentsWithCloser(requestMessages, sendCloser)');
+    expect(page).not.toContain('const visionBase');
+    expect(page).toContain('withVisionImage(visionHistoryThroughLatestUser(requestMessages), toolContentsWithCloser(requestMessages, sendCloser), jpeg)');
   });
 
   it('retires every staged URL fetch attempt when a send commits', () => {

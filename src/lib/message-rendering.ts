@@ -356,18 +356,20 @@ function textHasWebToolJsonLine(text: string): boolean {
  * open, the last line is kept so a word the model has not finished can still grow.
  * A whole line of web_search or web_fetch JSON is dropped first, outside fences, so a
  * role line after those lines still counts as immediately after the think close.
+ * `<|im_start|>`, `<|im_end|>`, and `<|endoftext|>` are removed only outside a code fence.
  */
 export function stripChatTemplateSpill(
   text: string,
   options?: { keepTrailingOpenLine?: boolean },
 ): string {
-  const lines = text
-    .replace(/<\|im_start\|>/gi, '')
-    .replace(/<\|im_end\|>/gi, '')
-    .replace(/<\|endoftext\|>/gi, '')
-    .split('\n');
+  const rawLines = text.split('\n');
+  const fenced = fenceMask(rawLines);
+  const lines = rawLines.map((line, index) => (
+    fenced[index]
+      ? line
+      : line.replace(/<\|(?:im_start|im_end|endoftext)\|>/gi, '')
+  ));
   const blank = (line: string) => line.trim() === '';
-  const fenced = fenceMask(lines);
   const isRole = (index: number) => !fenced[index] && ROLE_LINE.test(lines[index].trim());
   const openTail = options?.keepTrailingOpenLine === true
     && text.length > 0

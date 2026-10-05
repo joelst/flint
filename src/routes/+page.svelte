@@ -227,6 +227,7 @@
     chipTextIsReadable,
     fenceWebSourceIndex,
     prependTextToLatestUser,
+    sourcesWithOwnBudgetShortened,
     urlChipRetrievalAudit,
     webSourceIndex,
   } from "$lib/web-audit";
@@ -6656,6 +6657,18 @@ updateStateFromSdk();
     return parts.length ? `${parts.join(", ")}.` : "";
   }
 
+  function visionHistoryThroughLatestUser(messages: any[]): any[] {
+    let latest = -1;
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i]?.role === "user") {
+        latest = i;
+        break;
+      }
+    }
+    const throughLatest = latest < 0 ? messages : messages.slice(0, latest + 1);
+    return throughLatest.filter((message) => message?.role !== "tool");
+  }
+
   function withVisionImage(messages: any[], extraFence: string, dataUrl: string) {
     const copy = messages.map((message) => ({
       ...message,
@@ -7011,7 +7024,6 @@ updateStateFromSdk();
     const doneFetches = pendingUrlFetches.filter((f) => f.status === 'done' && chipTextIsReadable(f.text));
     const sendCloser = createWebCloser();
     const retrievedOn = localRetrievalDate();
-    let webBudgetShortened = false;
     const userAttachedImage = attachedImages.length > 0;
     const scrubCorpus = [
       systemPrompt,
@@ -7191,15 +7203,29 @@ updateStateFromSdk();
     let webImageUrl = userAttachedImage
       ? ""
       : (doneFetches.find((fetch) => fetch.imageUrl)?.imageUrl || "");
-    if (openingFit?.shortened) webBudgetShortened = true;
     const packNote = contextFitSentence(openingFit);
     if (packNote) statusMessage = packNote;
     if (webToolsSkippedNote) statusMessage = webToolsSkippedNote;
     // The audit is a separate, app-controlled field: model Markdown cannot hide or restyle it.
+    function fittedWebText(messages: readonly { content?: unknown }[]): string {
+      const chunks: string[] = [];
+      for (const message of messages) {
+        const content = message?.content;
+        if (typeof content === "string") {
+          chunks.push(content);
+          continue;
+        }
+        if (!Array.isArray(content)) continue;
+        for (const part of content) {
+          if (!part || typeof part !== "object" || (part as { type?: unknown }).type !== "text") continue;
+          const textPart = (part as { text?: unknown }).text;
+          if (typeof textPart === "string") chunks.push(textPart);
+        }
+      }
+      return chunks.join("\n");
+    }
     const webAuditPatch = () => {
-      const sources = webBudgetShortened
-        ? webSources.map((source) => ({ ...source, budgetShortened: true }))
-        : webSources;
+      const sources = sourcesWithOwnBudgetShortened(webSources, fittedWebText(requestMessages));
       const webAudit = buildWebAudit(sources, webErrors, webQueries);
       return webAudit ? { webAudit } : {};
     };
@@ -7250,10 +7276,6 @@ updateStateFromSdk();
         let retriedWithoutTools = false;
         let roundMaxChars = 20_000;
         let data: any;
-        const visionBase = requestMessages.map((message: any) => ({
-          ...message,
-          content: Array.isArray(message.content) ? message.content.map((part: any) => ({ ...part })) : message.content,
-        }));
         while (true) {
           const roundsRemaining = offerWebTools ? Math.max(0, maxWebToolRounds - webToolRounds) : 0;
           const latestKeep = [...requestMessages].reverse().findIndex((message: { role?: string }) => message?.role === "user");
@@ -7280,7 +7302,6 @@ updateStateFromSdk();
             throw new Error("This send does not fit this model's context. Shorten the latest message or choose a model that reports a larger context.");
           }
           requestMessages = fitted.messages;
-          if (fitted.shortened) webBudgetShortened = true;
           const fittedNote = contextFitSentence(fitted);
           if (fittedNote) statusMessage = fittedNote;
           if (webToolsSkippedNote) statusMessage = webToolsSkippedNote;
@@ -7449,7 +7470,7 @@ updateStateFromSdk();
                 let visionContent = "";
                 const vision = await chatCompletionStream(
                   requestModelAlias,
-                  withVisionImage(visionBase, toolContentsWithCloser(requestMessages, sendCloser), jpeg),
+                  withVisionImage(visionHistoryThroughLatestUser(requestMessages), toolContentsWithCloser(requestMessages, sendCloser), jpeg),
                   (delta: string) => {
                     if (requestController.signal.aborted) return;
                     visionContent += delta;

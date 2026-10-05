@@ -114,6 +114,44 @@ describe('context packer', () => {
     })).toBe(1_000);
   });
 
+  it('drops a short answer when its huge question does not fit', () => {
+    const huge = { role: 'user', content: `question ${'question '.repeat(8_000)}` };
+    const answer = { role: 'assistant', content: 'short answer' };
+    const latest = { role: 'user', content: 'latest question' };
+    const system = 'Be helpful.';
+    const budget = Math.ceil(
+      (estimateTokens(system) + estimateTokensForMessages([answer, latest])) * 1.15,
+    );
+    const packed = packContextMessages({
+      messages: [huge, answer, latest],
+      systemPrompt: system,
+      budgetTokens: budget,
+    });
+    const contents = packed.messages.map((message) => String(message.content));
+    expect(contents).toContain('latest question');
+    const answerAt = contents.indexOf('short answer');
+    const questionAt = contents.findIndex((content) => content.startsWith('question question'));
+    expect(answerAt === -1 || (questionAt !== -1 && questionAt < answerAt)).toBe(true);
+  });
+
+  it('drops a short middle answer when its huge question does not fit', () => {
+    const huge = { role: 'user', content: `question ${'question '.repeat(8_000)}` };
+    const answer = { role: 'assistant', content: 'short answer' };
+    const head = { role: 'user', content: 'folded system' };
+    const latest = { role: 'user', content: 'latest question' };
+    const budget = Math.ceil(estimateTokensForMessages([head, answer, latest]) * 1.15);
+    const packed = repackToolRequest({
+      messages: [head, huge, answer, latest],
+      budgetTokens: budget,
+    });
+    const contents = packed.messages.map((message) => String(message.content));
+    expect(contents).toContain('folded system');
+    expect(contents).toContain('latest question');
+    const answerAt = contents.indexOf('short answer');
+    const questionAt = contents.findIndex((content) => content.startsWith('question question'));
+    expect(answerAt === -1 || (questionAt !== -1 && questionAt < answerAt)).toBe(true);
+  });
+
   it('keeps a summary, a pinned turn, and a short older turn, and drops one that does not fit', () => {
     const summary = { role: 'assistant', content: 'summary text', isSummary: true };
     const pinned = { role: 'user', content: 'pinned note', pinned: true };
