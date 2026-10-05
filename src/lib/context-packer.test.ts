@@ -7,6 +7,7 @@ import {
   packContextMessages,
   pendingWebReserve,
   plannedWebFit,
+  rejectedWebCallReserve,
   promptBudget,
   repackToolRequest,
 } from './context-packer';
@@ -97,11 +98,19 @@ describe('context packer', () => {
     });
     expect(crowded.toolsViable).toBe(false);
     expect(crowded.maxToolCalls).toBe(0);
-    const exact = plannedWebFit({
+    const fenceOnly = plannedWebFit({
       contextTokens,
       maxTokens,
       roundsRemaining: 2,
       occupiedTokens: available - minimumTokens,
+    });
+    expect(fenceOnly.maxToolCalls).toBe(0);
+    expect(fenceOnly.toolsViable).toBe(false);
+    const exact = plannedWebFit({
+      contextTokens,
+      maxTokens,
+      roundsRemaining: 2,
+      occupiedTokens: available - minimumTokens - rejectedWebCallReserve(),
     });
     expect(exact.toolsViable).toBe(true);
     expect(exact.maxToolCalls).toBe(1);

@@ -110,6 +110,23 @@ function webToolCallReserve(): number {
 }
 
 /**
+ * The short pair a one-call round keeps for a call it does not run: id, name,
+ * and `{}` on the assistant side, and the tool message id, name, and error.
+ * The assistant message overhead is already in `webToolCallReserve`.
+ */
+export function rejectedWebCallReserve(): number {
+  const assistant = ['c'.repeat(64), 'web_fetch', '{}'].join('\n');
+  const tool = [
+    'c'.repeat(64),
+    'web_fetch',
+    JSON.stringify({ error: 'Only one web result fits this context.' }),
+  ].join('\n');
+  return Math.ceil(estimateTokens(assistant) * PACKER_SAFETY_FACTOR)
+    + Math.ceil(estimateTokens(tool) * PACKER_SAFETY_FACTOR)
+    + Math.ceil(1.5);
+}
+
+/**
  * Tokens held back for tool results that have not arrived.
  * Until a smaller `maxChars` is chosen, `fencedChars` is `MAX_FENCED_RESULT_CHARS`.
  * Each remaining round may still make two calls, and each call keeps its tool-call
@@ -220,7 +237,7 @@ export function plannedWebFit(input: {
   } else if (reserveRoom >= 2 * minimumFenceTokens) {
     maxToolCalls = 2;
     toolsViable = true;
-  } else if (reserveRoom >= minimumFenceTokens) {
+  } else if (reserveRoom >= minimumFenceTokens + rejectedWebCallReserve()) {
     maxToolCalls = 1;
     toolsViable = true;
   } else {

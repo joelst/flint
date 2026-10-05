@@ -594,7 +594,10 @@ export async function executeWebToolCalls(
     if (accepted >= callLimit) {
       const message = 'Only one web result fits this context.';
       errors.push(`${parsedCall.call.function.name}: ${message}`);
-      toolCalls.push(parsedCall.call);
+      toolCalls.push({
+        ...parsedCall.call,
+        function: { ...parsedCall.call.function, arguments: '{}' },
+      });
       toolMessages.push({
         role: 'tool',
         tool_call_id: parsedCall.call.id,

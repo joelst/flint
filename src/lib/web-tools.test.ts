@@ -687,6 +687,8 @@ describe('web tool calls', () => {
     expect(execute).toHaveBeenCalledTimes(1);
     expect(result.toolMessages[1]?.content).toContain('Only one web result fits this context.');
     expect(result.queries).not.toContain('query 2');
+    expect(result.toolCalls[1]?.function.arguments).toBe('{}');
+    expect(result.toolCalls[1]?.function.arguments).not.toContain('query 2');
     await expect(executeWebToolCalls(
       [1, 2, 3].map((index) => ({
         id: `many-${index}`,
