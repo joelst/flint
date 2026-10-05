@@ -34,6 +34,37 @@ export function estimateTokens(text: string): number {
   return Math.ceil(Math.max(charBased, wordBased));
 }
 
+/**
+ * Upper bound of `estimateTokens` for every string of this length.
+ * The word branch uses the most words that fit: one character, one space.
+ */
+export function estimateTokensCeiling(chars: number): number {
+  if (!Number.isFinite(chars) || chars <= 0) return 0;
+  const n = Math.floor(chars);
+  if (n === 0) return 0;
+  const words = Math.floor((n + 1) / 2);
+  return Math.ceil(Math.max(n / 3.9, words * 1.33));
+}
+
+/** Largest length whose token ceiling is within the budget. */
+export function maxCharsWithinTokenCeiling(tokens: number): number {
+  if (!Number.isFinite(tokens) || tokens <= 0) return 0;
+  if (estimateTokensCeiling(1) > tokens) return 0;
+  let hi = 1;
+  while (estimateTokensCeiling(hi) <= tokens) {
+    const next = hi * 2;
+    if (next <= hi || next > 1_000_000_000) break;
+    hi = next;
+  }
+  let lo = 0;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi + 1) / 2);
+    if (estimateTokensCeiling(mid) <= tokens) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
 /** Text carried by a content part, or null when the part carries none this can read. */
 function partText(part: unknown): string | null {
   if (typeof part !== "object" || part === null) return null;

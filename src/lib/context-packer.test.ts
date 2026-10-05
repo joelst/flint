@@ -10,7 +10,7 @@ import {
   promptBudget,
   repackToolRequest,
 } from './context-packer';
-import { estimateTokens, estimateTokensForMessages } from './token-estimate';
+import { estimateTokens, estimateTokensCeiling, estimateTokensForMessages } from './token-estimate';
 import { buildWebEnvelope, FENCE_FRAMING_CHARS, MAX_FENCED_RESULT_CHARS } from './web-envelope';
 
 describe('context packer', () => {
@@ -70,7 +70,7 @@ describe('context packer', () => {
     const maxTokens = 2048;
     const available = contextTokens - generationReserve(contextTokens, maxTokens);
     const minimumTokens = Math.ceil(
-      estimateTokens('x'.repeat(280 + FENCE_FRAMING_CHARS)) * PACKER_SAFETY_FACTOR,
+      estimateTokensCeiling(280 + FENCE_FRAMING_CHARS) * PACKER_SAFETY_FACTOR,
     );
     const crowded = plannedWebFit({
       contextTokens,
@@ -202,6 +202,29 @@ describe('context packer', () => {
     expect(imageFit.promptTokens).toBe(
       8000 - generationReserve(8000, 100) - Math.ceil(IMAGE_TOKEN_OVERHEAD * PACKER_SAFETY_FACTOR),
     );
+  });
+
+  it('reserves a fenced result for one-character words', () => {
+    const chars = 280 + FENCE_FRAMING_CHARS;
+    const dense = 'a '.repeat(Math.ceil(chars / 2)).slice(0, chars);
+    expect(dense.length).toBe(chars);
+    const reserved = pendingWebReserve({ roundsRemaining: 1, fencedChars: chars });
+    const perSlot = Math.ceil(estimateTokens(dense) * PACKER_SAFETY_FACTOR);
+    expect(reserved).toBeGreaterThanOrEqual(perSlot * 2);
+  });
+
+  it('picks a fetch size whose short words fit the leftover', () => {
+    const contextTokens = 32_768;
+    const maxTokens = 256;
+    const occupiedTokens = 1_000;
+    const roundsRemaining = 1;
+    const chars = chooseFetchMaxChars({ contextTokens, maxTokens, roundsRemaining, occupiedTokens });
+    const fenced = chars + FENCE_FRAMING_CHARS;
+    const dense = 'a '.repeat(Math.ceil(fenced / 2)).slice(0, fenced);
+    const slots = 2;
+    const cost = slots * Math.ceil(estimateTokens(dense) * PACKER_SAFETY_FACTOR);
+    const available = contextTokens - generationReserve(contextTokens, maxTokens) - occupiedTokens;
+    expect(cost).toBeLessThanOrEqual(available);
   });
 
   it('drops a short answer when its huge question does not fit', () => {

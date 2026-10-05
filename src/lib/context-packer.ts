@@ -3,7 +3,13 @@
  * The meter keeps the unscaled estimator. This multiplies by 1.15 so a short count drops
  * history instead of overrunning the model.
  */
-import { estimateTokens, estimateTokensForMessages, IMAGE_TOKEN_OVERHEAD } from './token-estimate';
+import {
+  estimateTokens,
+  estimateTokensCeiling,
+  estimateTokensForMessages,
+  IMAGE_TOKEN_OVERHEAD,
+  maxCharsWithinTokenCeiling,
+} from './token-estimate';
 import {
   FENCE_FRAMING_CHARS,
   FETCH_BODY_CHARS,
@@ -95,7 +101,7 @@ export function pendingWebReserve(input: {
 }): number {
   const slots = Math.max(0, Math.floor(input.roundsRemaining)) * 2;
   const perResult = Math.ceil(
-    estimateTokens('x'.repeat(Math.max(0, Math.floor(input.fencedChars)))) * PACKER_SAFETY_FACTOR,
+    estimateTokensCeiling(input.fencedChars) * PACKER_SAFETY_FACTOR,
   );
   const image = input.reserveImage ? Math.ceil(IMAGE_TOKEN_OVERHEAD * PACKER_SAFETY_FACTOR) : 0;
   return slots * perResult + image;
@@ -118,9 +124,11 @@ export function chooseFetchMaxChars(input: {
     context - generationReserve(context, input.maxTokens) - image - Math.max(0, input.occupiedTokens),
   );
   const slots = Math.max(1, Math.max(0, Math.floor(input.roundsRemaining)) * 2);
-  // `occupiedTokens` is already scaled. Divide the leftover once so the character
-  // count is one whose scaled estimate fits.
-  const chars = Math.floor(available / PACKER_SAFETY_FACTOR / slots * 3.9) - FENCE_FRAMING_CHARS;
+  // `occupiedTokens` is already scaled. The fence is the longest one whose
+  // scaled token ceiling fits in one slot.
+  const perSlot = Math.floor(available / slots);
+  const fenced = maxCharsWithinTokenCeiling(Math.floor(perSlot / PACKER_SAFETY_FACTOR));
+  const chars = fenced - FENCE_FRAMING_CHARS;
   if (!Number.isFinite(chars)) return 1_000;
   return Math.min(FETCH_BODY_CHARS, Math.max(1_000, chars));
 }
@@ -172,7 +180,7 @@ export function plannedWebFit(input: {
   // One 280-character fence, scaled once. Image cost is already out of `available`.
   // A round that will not call tools needs no further result, so that fit stays viable.
   const minimumFenceTokens = Math.ceil(
-    estimateTokens('x'.repeat(280 + FENCE_FRAMING_CHARS)) * PACKER_SAFETY_FACTOR,
+    estimateTokensCeiling(280 + FENCE_FRAMING_CHARS) * PACKER_SAFETY_FACTOR,
   );
   const toolsViable = input.roundsRemaining <= 0 || reserveRoom >= minimumFenceTokens;
   const rawSchema = input.schemaTokens ?? 0;

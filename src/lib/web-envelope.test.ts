@@ -24,6 +24,7 @@ import {
   webCloserInstruction,
   withVisionImage,
 } from './web-envelope';
+import { userSearchContext } from './web-tools';
 
 describe('web envelope', () => {
   it('pins fence framing to a worst-case envelope', () => {
@@ -40,11 +41,20 @@ describe('web envelope', () => {
     expect(envelope.length).toBeGreaterThan(2276);
     expect(FENCE_FRAMING_CHARS).toBe(envelope.length + SHORTENED_FENCE_MARKER.length);
     expect(FENCED_FETCH_CHARS).toBe(FETCH_BODY_CHARS + FENCE_FRAMING_CHARS);
-    expect(FENCED_SEARCH_CHARS).toBe(
-      SEARCH_RESULT_COUNT * (SEARCH_TITLE_CHARS + SEARCH_URL_CHARS + SEARCH_SNIPPET_CHARS)
-        + FENCE_FRAMING_CHARS,
-    );
     expect(MAX_FENCED_RESULT_CHARS).toBe(Math.max(FENCED_FETCH_CHARS, FENCED_SEARCH_CHARS));
+  });
+
+  it('counts the query line and headings in the search reserve', () => {
+    const worst = userSearchContext({
+      operation: 'search',
+      query: 'q'.repeat(200),
+      results: Array.from({ length: SEARCH_RESULT_COUNT }, () => ({
+        title: 't'.repeat(SEARCH_TITLE_CHARS),
+        url: 'u'.repeat(SEARCH_URL_CHARS),
+        snippet: 's'.repeat(SEARCH_SNIPPET_CHARS),
+      })),
+    });
+    expect(FENCED_SEARCH_CHARS).toBe(worst.context.length + FENCE_FRAMING_CHARS);
   });
 
   it('keeps a shortened worst-case page inside the framing reserve', () => {
