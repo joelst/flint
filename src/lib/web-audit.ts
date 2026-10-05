@@ -216,6 +216,7 @@ export const WEB_SOURCE_INDEX_NOTE =
 
 /**
  * Title and URL lines for a later send. No page body and no tool errors.
+ * Keeps the newest 24 in encounter order.
  * This list does not count as web text for a later search confirmation.
  */
 export function webSourceIndex(messages: readonly { role?: unknown; webAudit?: unknown }[]): string {
@@ -230,7 +231,7 @@ export function webSourceIndex(messages: readonly { role?: unknown; webAudit?: u
       lines.push(`- ${title} ${url}${sourceFlagSuffix(source)}`);
     }
   }
-  return lines.slice(0, 24).join('\n');
+  return lines.slice(-24).join('\n');
 }
 
 /** Wrap title lines in this send's closer. Empty when there is no closer or no index. */

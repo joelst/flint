@@ -52,17 +52,26 @@ describe('renderer capability ACL', () => {
   it('allows shell open for target=_blank links and keeps the plugin default url regex', () => {
     expect(ids).toContain('shell:default');
     const conf = JSON.parse(readFileSync(join(process.cwd(), 'src-tauri', 'tauri.conf.json'), 'utf8'));
-    expect(conf.plugins?.shell?.open).toBe('((mailto:\\w+)|(tel:\\+?\\w+)|(https?://\\w+)).+');
+    expect(conf.plugins?.shell?.open).toBe('(([Mm][Aa][Ii][Ll][Tt][Oo]:\\w+)|([Tt][Ee][Ll]:\\+?\\w+)|([Hh][Tt][Tt][Pp][Ss]?://(\\w+|\\[[0-9A-Fa-f:.]+\\]))).+');
   });
 
   it('opens a tel link with one leading plus and still rejects javascript', () => {
     const conf = JSON.parse(readFileSync(join(process.cwd(), 'src-tauri', 'tauri.conf.json'), 'utf8'));
     const regex = shellOpenRegex(conf.plugins?.shell?.open);
+    expect(regex.test('https://example.com/')).toBe(true);
     expect(regex.test('tel:+15551234567')).toBe(true);
+    expect(regex.test('HTTPS://example.com/')).toBe(true);
+    expect(regex.test('https://[2606:4700:4700::1111]/')).toBe(true);
+    expect(regex.test('Mailto:user@example.com')).toBe(true);
+    expect(regex.test('TEL:+15551234567')).toBe(true);
     expect(regex.test('tel:5551234567')).toBe(true);
+    expect(regex.test('https://1.1.1.1/')).toBe(true);
     expect(regex.test('javascript:alert(1)')).toBe(false);
+    expect(regex.test('JAVASCRIPT:alert(1)')).toBe(false);
     expect(regex.test('ftp://example.com/file')).toBe(false);
     expect(regex.test('https://example.com/\njavascript:alert(1)')).toBe(false);
+    expect(regex.test('file:///C:/Windows')).toBe(false);
+    expect(regex.test('data:text/html,hi')).toBe(false);
   });
 
   it('does not grant the renderer a $RESOURCE read scope', () => {

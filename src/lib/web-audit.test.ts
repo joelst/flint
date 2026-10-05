@@ -177,6 +177,18 @@ describe('web audit', () => {
       },
     ]);
     expect(index).toBe('- Page A https://example.com/ (truncated, shortened to fit context)');
+    const many = Array.from({ length: 25 }, (_, i) => ({
+      title: `page-${String(i + 1).padStart(2, '0')}`,
+      url: `https://pages.example/${i + 1}`,
+    }));
+    const newest = webSourceIndex([{
+      role: 'assistant',
+      webAudit: { sources: many, errors: [] },
+    }]);
+    expect(newest).toContain('page-25');
+    expect(newest).not.toContain('page-01');
+    expect(newest).toContain('page-02');
+    expect(newest.indexOf('page-02')).toBeLessThan(newest.indexOf('page-25'));
     expect(index).not.toContain('The body is not in this request.');
     expect(index).not.toContain('secret failure');
     expect(index).not.toContain('secret query');
