@@ -136,7 +136,8 @@ function envelopeUrlField(header: string): string | undefined {
 function blockOwnsSource(block: string, url: string): boolean {
   const field = envelopeUrlField(envelopeHeader(block));
   if (field !== undefined) return field === url;
-  return block.includes(url);
+  // A search envelope has no URL field. A result address is a whole line.
+  return block.split('\n').some((line) => line.trim() === url);
 }
 
 function envelopeWasShortened(block: string): boolean {

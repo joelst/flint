@@ -479,4 +479,22 @@ describe('web audit', () => {
     const flagged = sourcesWithOwnBudgetShortened(sources, search);
     expect(flagged[0]?.budgetShortened).toBe(true);
   });
+
+  it('does not mark a shorter address that is only a prefix of a shortened search result', () => {
+    const closer = 'flint-ref-abcdef012345';
+    const search = buildWebEnvelope({
+      closer,
+      title: 'Search results',
+      retrievedOn: '2026-10-04',
+      body: 'https://host/x.y',
+      shortened: true,
+    });
+    const sources: WebAuditSource[] = [
+      { title: 'Prefix', url: 'https://host/x' },
+      { title: 'Result', url: 'https://host/x.y' },
+    ];
+    const flagged = sourcesWithOwnBudgetShortened(sources, search);
+    expect(flagged.find((source) => source.url === 'https://host/x')?.budgetShortened).toBeUndefined();
+    expect(flagged.find((source) => source.url === 'https://host/x.y')?.budgetShortened).toBe(true);
+  });
 });
