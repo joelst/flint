@@ -15,6 +15,6 @@ describe('web blocklist', () => {
     const parsed = parseBlocklistText('example.com\nhttps://example.com/a\n*.example.com\nexample.com:443\n');
     expect(parsed.hosts).toEqual(['example.com']);
     expect(parsed.rejected).toEqual(['https://example.com/a', '*.example.com', 'example.com:443']);
-    expect(mergeBlocklists(['localhost'], parsed.hosts, []).includes('example.com')).toBe(true);
+    expect(mergeBlocklists(['localhost'], parsed.hosts, [])).toEqual(['localhost', 'example.com']);
   });
 });
