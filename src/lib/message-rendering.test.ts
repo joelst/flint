@@ -4,6 +4,7 @@ import {
   extractThinkingTrace,
   modelPrefillsThink,
   assistantClipboardText,
+  assistantStoredText,
   presentAssistantText,
   replyUsesPrefilledThink,
   stripChatTemplateSpill,
@@ -487,6 +488,17 @@ describe("presentAssistantText", () => {
     expect(assistantClipboardText(text, { prefilledThink: false, streaming: false })).toBe(text);
     expect(assistantClipboardText('Answer\nuser', { prefilledThink: true, streaming: true })).toBe('Answer\nuser');
     expect(assistantClipboardText('Answer\nuser\n', { prefilledThink: true, streaming: false })).toBe('Answer');
+  });
+
+  it('saves a role word the screen keeps and drops one the screen drops', () => {
+    const shown = 'The assigned role is\nuser';
+    expect(assistantStoredText(shown, false)).toBe(shown);
+    expect(assistantStoredText('Answer\nuser\n', true)).toBe('Answer');
+    const spilled = 'Reasoning\n</think>\nuser\nThe record is 3-2.';
+    const stored = assistantStoredText(spilled, false);
+    expect(stored).not.toMatch(/^user$/m);
+    expect(stored).toContain('Reasoning');
+    expect(stored).toContain('The record is 3-2.');
   });
 
   it('copies an assistant reply without a spilled role line', () => {

@@ -193,6 +193,15 @@ export function assistantClipboardText(
   return stripChatTemplateSpill(copied, { keepTrailingOpenLine: options.streaming });
 }
 
+/**
+ * Settled reply text. Spill cleanup runs only when the screen would clean it.
+ * The reasoning above the answer stays. A trailing role word stays when there is no spill.
+ */
+export function assistantStoredText(text: string, prefilledThink: boolean): string {
+  if (!assistantTextHasTemplateSpill(text, prefilledThink)) return text;
+  return stripChatTemplateSpill(text);
+}
+
 export function messageTimestamp(
   timestamp: unknown,
   now = Date.now(),

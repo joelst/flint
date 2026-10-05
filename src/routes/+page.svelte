@@ -203,9 +203,9 @@
   import {
     conversationImagePreviewPartIndexes,
     millisecondsUntilNextLocalDay,
+    assistantStoredText,
     modelPrefillsThink,
     replyUsesPrefilledThink,
-    stripChatTemplateSpill,
   } from "$lib/message-rendering";
   import { estimateTokens, estimateTokensForMessages } from "$lib/token-estimate";
   import { formatErrorDetail, formatUncaughtError } from "$lib/error-detail";
@@ -7364,6 +7364,7 @@ updateStateFromSdk();
                 content: replyWithNote(
                   assistantContent,
                   "[Stopped after web retrieval. The partial response may already have been saved.]",
+                  modelPrefillsThink(requestModelAlias),
                 ),
                 ...webAuditPatch(),
               });
@@ -7372,6 +7373,7 @@ updateStateFromSdk();
                 content: replyWithNote(
                   assistantContent || assistantContentSoFar(assistantId),
                   "[Stopped after web retrieval. The partial response may already have been saved.]",
+                  modelPrefillsThink(requestModelAlias),
                 ),
                 ...webAuditPatch(),
               });
@@ -7445,7 +7447,9 @@ updateStateFromSdk();
             ...requestMessages,
             {
               role: "assistant",
-              content: typeof roundText === "string" ? stripChatTemplateSpill(roundText) : (roundText ?? null),
+              content: typeof roundText === "string"
+                ? assistantStoredText(roundText, modelPrefillsThink(requestModelAlias))
+                : (roundText ?? null),
               tool_calls: executed.toolCalls,
             },
             ...executed.toolMessages,
@@ -7502,9 +7506,10 @@ updateStateFromSdk();
           assistantContent = replyWithNote(
             assistantContent,
             "[Stopped after web retrieval. The partial response may already have been saved.]",
+            modelPrefillsThink(requestModelAlias),
           );
         }
-        assistantContent = stripChatTemplateSpill(assistantContent);
+        assistantContent = assistantStoredText(assistantContent, modelPrefillsThink(requestModelAlias));
         updateAssistantMessage({ content: assistantContent, ...webAuditPatch() });
         setTimeout(() => {
           if (messagesContainer)
@@ -7534,7 +7539,7 @@ updateStateFromSdk();
             updateAssistantMessage({ content: assistantContent });
           }
         }
-        assistantContent = stripChatTemplateSpill(assistantContent);
+        assistantContent = assistantStoredText(assistantContent, modelPrefillsThink(requestModelAlias));
         updateAssistantMessage({ content: assistantContent, ...webAuditPatch() });
       }
       if (webToolsSkippedNote) statusMessage = webToolsSkippedNote;
@@ -7545,6 +7550,7 @@ updateStateFromSdk();
           webToolTemplateCrash(err)
             ? "This model cannot use web search yet. The upstream template fails when tools are sent, so this reply stopped."
             : `[Error: ${err?.message || err}]`,
+          modelPrefillsThink(requestModelAlias),
         );
         updateAssistantMessage({
           isError: true,
@@ -7557,6 +7563,7 @@ updateStateFromSdk();
           content: replyWithNote(
             assistantContent,
             "[Stopped during web retrieval. An already-started network request may have completed.]",
+            modelPrefillsThink(requestModelAlias),
           ),
           ...webAuditPatch(),
         });
@@ -7576,11 +7583,11 @@ updateStateFromSdk();
   }
 
   /**
-   * Model text with chat-template role lines removed, then Flint's own note.
-   * The note is appended after the strip so a trailing role word cannot hide it.
+   * Model text cleaned with the same spill evidence as the screen, then Flint's own note.
+   * The note is appended after that cleanup so a trailing role word cannot hide it.
    */
-  function replyWithNote(modelText: string, note: string): string {
-    const body = stripChatTemplateSpill(modelText);
+  function replyWithNote(modelText: string, note: string, prefilledThink: boolean): string {
+    const body = assistantStoredText(modelText, prefilledThink);
     return body ? `${body}\n\n${note}` : note;
   }
 
@@ -7725,7 +7732,7 @@ updateStateFromSdk();
         role: m.role,
         // Role words left behind by a chat template must not be replayed as the model's reply.
         content: m.role === "assistant" && typeof m.content === "string"
-          ? stripChatTemplateSpill(m.content)
+          ? assistantStoredText(m.content, m.prefilledThink === true)
           : m.content,
       })),
       {
@@ -7779,7 +7786,7 @@ Output only the summary text, no preamble.`;
       oldMessages.map((m: any) => ({
         role: m.role,
         content: m.role === "assistant" && typeof m.content === "string"
-          ? stripChatTemplateSpill(m.content)
+          ? assistantStoredText(m.content, m.prefilledThink === true)
           : m.content,
       })),
       { systemInstruction: summaryPrompt, textOnly: true },
@@ -7819,7 +7826,7 @@ Output only the summary text, no preamble.`;
       return;
     }
     isSummarizing = false;
-    summary = stripChatTemplateSpill(summary);
+    summary = assistantStoredText(summary, modelPrefillsThink(selectedModelAlias));
 
     // The thread was replaced while the summary was being generated — it belongs nowhere now.
     if (chatThreadEpoch !== epoch) return;

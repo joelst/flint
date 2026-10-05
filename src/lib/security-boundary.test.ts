@@ -366,6 +366,12 @@ describe('renderer/sidecar boundary', () => {
     expect(page).toMatch(/function patchUrlFetch\(attempt: number[^)]*\) \{\s*const i = pendingUrlFetches\.findIndex\(f => f\.attempt === attempt\);\s*if \(i < 0\) return;/);
   });
 
+  it('stores a settled reply with the same spill evidence the screen uses', () => {
+    const page = readFileSync(join(process.cwd(), 'src', 'routes', '+page.svelte'), 'utf8');
+    expect(page).toContain('assistantStoredText(');
+    expect(page).not.toContain('stripChatTemplateSpill(');
+  });
+
   it('renders the web audit outside the model Markdown sink', () => {
     const renderer = readFileSync(join(process.cwd(), 'src', 'lib', 'MessageRenderer.svelte'), 'utf8');
     expect(renderer.match(/\{@html /g)?.length).toBe(1);
