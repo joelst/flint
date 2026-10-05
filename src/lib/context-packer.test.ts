@@ -2,13 +2,16 @@ import { describe, expect, it } from 'vitest';
 import {
   chooseFetchMaxChars,
   generationReserve,
+  IMAGE_TOKEN_OVERHEAD,
+  PACKER_SAFETY_FACTOR,
   packContextMessages,
+  pendingWebReserve,
   plannedWebFit,
   promptBudget,
   repackToolRequest,
 } from './context-packer';
 import { estimateTokens, estimateTokensForMessages } from './token-estimate';
-import { buildWebEnvelope } from './web-envelope';
+import { buildWebEnvelope, MAX_FENCED_RESULT_CHARS } from './web-envelope';
 
 describe('context packer', () => {
   it('reserves a quarter of a 4096-token window when max tokens is 2048', () => {
@@ -112,6 +115,45 @@ describe('context packer', () => {
       roundsRemaining: Number.NaN,
       occupiedTokens: 0,
     })).toBe(1_000);
+  });
+
+  it('does not admit a full fence when only its unscaled estimate fits', () => {
+    const slots = 2;
+    const fullChars = MAX_FENCED_RESULT_CHARS;
+    const unscaled = slots * estimateTokens('x'.repeat(fullChars));
+    const scaled = slots * Math.ceil(estimateTokens('x'.repeat(fullChars)) * PACKER_SAFETY_FACTOR);
+    expect(scaled).toBeGreaterThan(unscaled);
+
+    const contextTokens = 32_768;
+    const maxTokens = 256;
+    const generation = generationReserve(contextTokens, maxTokens);
+    const available = contextTokens - generation;
+    const occupiedTokens = available - unscaled;
+    const fit = plannedWebFit({
+      contextTokens,
+      maxTokens,
+      roundsRemaining: 1,
+      occupiedTokens,
+    });
+    const room = available - occupiedTokens;
+    expect(fit.fencedChars).toBeLessThanOrEqual(
+      Math.floor(room / PACKER_SAFETY_FACTOR / slots * 3.9),
+    );
+    expect(pendingWebReserve({
+      roundsRemaining: 0,
+      fencedChars: 0,
+      reserveImage: true,
+    })).toBe(Math.ceil(IMAGE_TOKEN_OVERHEAD * PACKER_SAFETY_FACTOR));
+    const imageFit = plannedWebFit({
+      contextTokens: 8000,
+      maxTokens: 100,
+      roundsRemaining: 0,
+      occupiedTokens: 0,
+      reserveImage: true,
+    });
+    expect(imageFit.promptTokens).toBe(
+      8000 - generationReserve(8000, 100) - Math.ceil(IMAGE_TOKEN_OVERHEAD * PACKER_SAFETY_FACTOR),
+    );
   });
 
   it('drops a short answer when its huge question does not fit', () => {

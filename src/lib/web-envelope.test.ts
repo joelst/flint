@@ -1,9 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CLOSER_HEX_CHARS,
+  CLOSER_PREFIX,
   FENCE_FRAMING_CHARS,
   FENCED_FETCH_CHARS,
   FENCED_SEARCH_CHARS,
+  FETCH_BODY_CHARS,
   MAX_FENCED_RESULT_CHARS,
+  SEARCH_RESULT_COUNT,
+  SEARCH_SNIPPET_CHARS,
+  SEARCH_TITLE_CHARS,
+  SEARCH_URL_CHARS,
   buildWebEnvelope,
   createWebCloser,
   localRetrievalDate,
@@ -17,11 +24,25 @@ import {
 } from './web-envelope';
 
 describe('web envelope', () => {
-  it('pins the fenced size from the fetch body, not the smaller search block', () => {
-    expect(FENCE_FRAMING_CHARS).toBe(2276);
-    expect(FENCED_FETCH_CHARS).toBe(22276);
-    expect(FENCED_SEARCH_CHARS).toBe(19016);
-    expect(MAX_FENCED_RESULT_CHARS).toBe(22276);
+  it('pins fence framing to a worst-case envelope', () => {
+    const closer = `${CLOSER_PREFIX}${'0'.repeat(CLOSER_HEX_CHARS)}`;
+    const envelope = buildWebEnvelope({
+      closer,
+      title: 'T'.repeat(120),
+      url: 'u'.repeat(SEARCH_URL_CHARS),
+      retrievedOn: '2026-10-05',
+      body: '',
+      truncated: true,
+      shortened: true,
+    });
+    expect(envelope.length).toBeGreaterThan(2276);
+    expect(FENCE_FRAMING_CHARS).toBe(envelope.length);
+    expect(FENCED_FETCH_CHARS).toBe(FETCH_BODY_CHARS + FENCE_FRAMING_CHARS);
+    expect(FENCED_SEARCH_CHARS).toBe(
+      SEARCH_RESULT_COUNT * (SEARCH_TITLE_CHARS + SEARCH_URL_CHARS + SEARCH_SNIPPET_CHARS)
+        + FENCE_FRAMING_CHARS,
+    );
+    expect(MAX_FENCED_RESULT_CHARS).toBe(Math.max(FENCED_FETCH_CHARS, FENCED_SEARCH_CHARS));
   });
 
   it('wraps a page with a Flint line, a local date, and a case-insensitive closer', () => {

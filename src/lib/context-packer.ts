@@ -85,7 +85,8 @@ function keepWholeTurns<T extends PackableMessage>(
 /**
  * Tokens held back for tool results that have not arrived.
  * Until a smaller `maxChars` is chosen, `fencedChars` is `MAX_FENCED_RESULT_CHARS`.
- * Each remaining round may still make two calls.
+ * Each remaining round may still make two calls. The 1.15 factor is applied once
+ * here, because a returned page is measured with that same factor.
  */
 export function pendingWebReserve(input: {
   roundsRemaining: number;
@@ -93,8 +94,11 @@ export function pendingWebReserve(input: {
   reserveImage?: boolean;
 }): number {
   const slots = Math.max(0, Math.floor(input.roundsRemaining)) * 2;
-  const perResult = estimateTokens('x'.repeat(Math.max(0, Math.floor(input.fencedChars))));
-  return slots * perResult + (input.reserveImage ? IMAGE_TOKEN_OVERHEAD : 0);
+  const perResult = Math.ceil(
+    estimateTokens('x'.repeat(Math.max(0, Math.floor(input.fencedChars)))) * PACKER_SAFETY_FACTOR,
+  );
+  const image = input.reserveImage ? Math.ceil(IMAGE_TOKEN_OVERHEAD * PACKER_SAFETY_FACTOR) : 0;
+  return slots * perResult + image;
 }
 
 /** Characters to ask the helper for. The helper floor is 1,000 and this never asks past one fetch body. */
@@ -108,13 +112,15 @@ export function chooseFetchMaxChars(input: {
   const context = input.contextTokens && input.contextTokens > 0
     ? input.contextTokens
     : UNKNOWN_CONTEXT_TOKENS;
-  const image = input.reserveImage ? IMAGE_TOKEN_OVERHEAD : 0;
+  const image = input.reserveImage ? Math.ceil(IMAGE_TOKEN_OVERHEAD * PACKER_SAFETY_FACTOR) : 0;
   const available = Math.max(
     0,
     context - generationReserve(context, input.maxTokens) - image - Math.max(0, input.occupiedTokens),
   );
   const slots = Math.max(1, Math.max(0, Math.floor(input.roundsRemaining)) * 2);
-  const chars = Math.floor(available / slots * 3.9) - FENCE_FRAMING_CHARS;
+  // `occupiedTokens` is already scaled. Divide the leftover once so the character
+  // count is one whose scaled estimate fits.
+  const chars = Math.floor(available / PACKER_SAFETY_FACTOR / slots * 3.9) - FENCE_FRAMING_CHARS;
   if (!Number.isFinite(chars)) return 1_000;
   return Math.min(FETCH_BODY_CHARS, Math.max(1_000, chars));
 }
@@ -136,7 +142,7 @@ export function plannedWebFit(input: {
     ? input.contextTokens
     : UNKNOWN_CONTEXT_TOKENS;
   const generation = generationReserve(context, input.maxTokens);
-  const image = input.reserveImage ? IMAGE_TOKEN_OVERHEAD : 0;
+  const image = input.reserveImage ? Math.ceil(IMAGE_TOKEN_OVERHEAD * PACKER_SAFETY_FACTOR) : 0;
   const available = Math.max(0, context - generation - image);
   const reserveRoom = Math.max(0, available - Math.max(0, input.occupiedTokens));
   const fullReserve = pendingWebReserve({

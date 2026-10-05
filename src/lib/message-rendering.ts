@@ -439,7 +439,21 @@ const APP_STATUS_PREFIXES = [
   "Consulting the public web",
   "Reading ",
 ];
-const APP_STOP_MARKER = "[Stopped after web retrieval";
+const APP_OUTCOME_NOTES = [
+  "[Stopped after web retrieval",
+  "[Stopped during web retrieval",
+  "[Error:",
+  "This model cannot use web search yet.",
+];
+
+function earliestAppOutcomeNote(text: string): number {
+  let at = -1;
+  for (const note of APP_OUTCOME_NOTES) {
+    const index = text.indexOf(note);
+    if (index >= 0 && (at < 0 || index < at)) at = index;
+  }
+  return at;
+}
 
 function appStatusPlaceholder(text: string): boolean {
   const trimmed = text.trim();
@@ -460,13 +474,14 @@ export function presentAssistantText(input: {
     : input.text;
   // Status lines are written only while this send is active. After it ends, the same
   // prefix is model text: "Reading the question…" must still get the cutoff note.
+  const trimmed = text.trim();
   if (
     (input.streaming && appStatusPlaceholder(text))
-    || text.trim().startsWith(APP_STOP_MARKER)
+    || APP_OUTCOME_NOTES.some((note) => trimmed.startsWith(note))
   ) {
-    return { visibleContent: text.trim(), thinkingContent: [], stoppedBeforeAnswer: false };
+    return { visibleContent: trimmed, thinkingContent: [], stoppedBeforeAnswer: false };
   }
-  const stopAt = text.indexOf(APP_STOP_MARKER);
+  const stopAt = earliestAppOutcomeNote(text);
   if (input.prefilledThink && stopAt >= 0 && !/<\/think>|<\/thinking>/i.test(text)) {
     const reasoning = text.slice(0, stopAt).trim();
     return {

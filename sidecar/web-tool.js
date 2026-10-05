@@ -366,7 +366,7 @@ function firstPageImage(html, pageUrl) {
   const tags = String(html).matchAll(/<img\b[^>]*>/gi);
   for (const tag of tags) {
     const source = tag[0].match(/\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i);
-    const raw = source?.[1] || source?.[2] || source?.[3] || '';
+    const raw = decodeEntities(source?.[1] || source?.[2] || source?.[3] || '');
     if (!raw || /^data:/i.test(raw) || /\.svg(?:$|[?#])/i.test(raw)) continue;
     try {
       const normalized = normalizePublicUrl(new URL(raw, page).toString());

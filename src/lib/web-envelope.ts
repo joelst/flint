@@ -14,17 +14,6 @@ export const SEARCH_TITLE_CHARS = 300;
 export const SEARCH_URL_CHARS = 2_048;
 export const SEARCH_SNIPPET_CHARS = 1_000;
 
-/** Title, canonical URL, date line, and two closers. Fixed so the reserve cannot drift. */
-export const FENCE_FRAMING_CHARS = 120 + SEARCH_URL_CHARS + 64 + (CLOSER_PREFIX.length + CLOSER_HEX_CHARS) * 2;
-
-export const FENCED_FETCH_CHARS = FETCH_BODY_CHARS + FENCE_FRAMING_CHARS;
-export const FENCED_SEARCH_CHARS = SEARCH_RESULT_COUNT
-  * (SEARCH_TITLE_CHARS + SEARCH_URL_CHARS + SEARCH_SNIPPET_CHARS)
-  + FENCE_FRAMING_CHARS;
-
-/** Larger of one fenced fetch and one fenced search. The packer reserves this per pending call. */
-export const MAX_FENCED_RESULT_CHARS = Math.max(FENCED_FETCH_CHARS, FENCED_SEARCH_CHARS);
-
 const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]+/g;
 
 export function sanitizeWebLabel(value: unknown, max = 120): string {
@@ -159,6 +148,25 @@ export function buildWebEnvelope(input: {
   const body = stripWebCloser(input.body, closer);
   return [header, closer, body, closer].join('\n');
 }
+
+/** Worst-case envelope around an empty body, so the reserve cannot drift from the header. */
+export const FENCE_FRAMING_CHARS = buildWebEnvelope({
+  closer: `${CLOSER_PREFIX}${'0'.repeat(CLOSER_HEX_CHARS)}`,
+  title: 'T'.repeat(120),
+  url: 'u'.repeat(SEARCH_URL_CHARS),
+  retrievedOn: '2026-10-05',
+  body: '',
+  truncated: true,
+  shortened: true,
+}).length;
+
+export const FENCED_FETCH_CHARS = FETCH_BODY_CHARS + FENCE_FRAMING_CHARS;
+export const FENCED_SEARCH_CHARS = SEARCH_RESULT_COUNT
+  * (SEARCH_TITLE_CHARS + SEARCH_URL_CHARS + SEARCH_SNIPPET_CHARS)
+  + FENCE_FRAMING_CHARS;
+
+/** Larger of one fenced fetch and one fenced search. The packer reserves this per pending call. */
+export const MAX_FENCED_RESULT_CHARS = Math.max(FENCED_FETCH_CHARS, FENCED_SEARCH_CHARS);
 
 /**
  * Request-only copy of one message's content. The saved turn stays untouched.

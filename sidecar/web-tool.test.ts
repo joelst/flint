@@ -951,6 +951,15 @@ describe('remaining helper edges', () => {
     expect(extracted.imageAlt).toBe('A cat');
   });
 
+  it('decodes an image src before resolving the same-host URL', () => {
+    const extracted = extractPageText(
+      '<img alt="Photo" src="/photo?a=1&amp;size=large">',
+      'https://example.com/page',
+    );
+    expect(extracted.imageUrls).toEqual(['https://example.com/photo?a=1&size=large']);
+    expect(extracted.imageUrls[0]).not.toContain('amp;size');
+  });
+
   it('returns image bytes for a sniffed JPEG and a redirect for a different host', async () => {
     const resolve = vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]);
     const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0x00]);

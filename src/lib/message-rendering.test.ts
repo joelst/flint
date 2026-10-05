@@ -526,6 +526,50 @@ describe("presentAssistantText", () => {
     expect(result.stoppedBeforeAnswer).toBe(false);
   });
 
+  it("shows an error or stop-during note after prefilled reasoning instead of a cutoff", () => {
+    const error = presentAssistantText({
+      text: "still reasoning\n\n[Error: network down]",
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(error.visibleContent).toBe("[Error: network down]");
+    expect(error.thinkingContent).toEqual(["still reasoning"]);
+    expect(error.stoppedBeforeAnswer).toBe(false);
+
+    const during = "[Stopped during web retrieval. An already-started network request may have completed.]";
+    const stopped = presentAssistantText({
+      text: `still reasoning\n\n${during}`,
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(stopped.visibleContent).toBe(during);
+    expect(stopped.thinkingContent).toEqual(["still reasoning"]);
+    expect(stopped.stoppedBeforeAnswer).toBe(false);
+
+    const only = presentAssistantText({
+      text: "[Error: network down]",
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(only.visibleContent).toBe("[Error: network down]");
+    expect(only.thinkingContent).toEqual([]);
+    expect(only.stoppedBeforeAnswer).toBe(false);
+
+    const template = "This model cannot use web search yet. The upstream template fails when tools are sent, so this reply stopped.";
+    const model = presentAssistantText({
+      text: `still reasoning\n\n${template}`,
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(model.visibleContent).toBe(template);
+    expect(model.thinkingContent).toEqual(["still reasoning"]);
+    expect(model.stoppedBeforeAnswer).toBe(false);
+  });
+
   it("still shows a finished stop note instead of hiding it as reasoning", () => {
     const note = "[Stopped after web retrieval. An already-started network request may have completed.]";
     const result = presentAssistantText({
