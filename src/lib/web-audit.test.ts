@@ -15,6 +15,7 @@ import {
   fenceWebSourceIndex,
   prependTextToLatestUser,
   webSourceIndex,
+  type WebAuditSource,
 } from './web-audit';
 import { buildWebEnvelope, shortenWebEnvelope, shortenWebEnvelopes } from './web-envelope';
 
@@ -351,10 +352,11 @@ describe('web audit', () => {
       retrievedOn: '2026-10-04',
       body: 'plain page',
     });
-    const flagged = sourcesWithOwnBudgetShortened([
+    const sources: WebAuditSource[] = [
       { title: 'Cut', url: 'https://cut.example/b' },
       { title: 'Kept', url: 'https://kept.example/a' },
-    ], `${kept}\n\n${cut}`);
+    ];
+    const flagged = sourcesWithOwnBudgetShortened(sources, `${kept}\n\n${cut}`);
     expect(flagged.find((source) => source.url === 'https://cut.example/b')?.budgetShortened).toBeUndefined();
     expect(flagged.find((source) => source.url === 'https://kept.example/a')?.budgetShortened).toBeUndefined();
   });
