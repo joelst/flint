@@ -658,6 +658,41 @@ describe('web tool calls', () => {
     expect(missing.queries).toEqual([]);
   });
 
+  it('names a search only after the user allows it', async () => {
+    const searchCall = [{
+      id: 'call-s',
+      type: 'function' as const,
+      function: { name: 'web_search', arguments: '{"query":"public weather"}' },
+    }];
+    const declinedEvents: string[] = [];
+    const declinedExecute = vi.fn(async () => {
+      declinedEvents.push('execute');
+      return { operation: 'search' as const, query: 'public weather', results: [] };
+    });
+    const declined = await executeWebToolCalls(searchCall, declinedExecute, undefined, undefined, undefined, async () => {
+      declinedEvents.push('asked');
+      return false;
+    }, {
+      onActivity: () => declinedEvents.push('activity'),
+    });
+    expect(declinedEvents).toEqual(['asked']);
+    expect(declinedExecute).not.toHaveBeenCalled();
+    expect(declined.queries).toEqual([]);
+
+    const allowedEvents: string[] = [];
+    const allowedExecute = vi.fn(async () => {
+      allowedEvents.push('execute');
+      return { operation: 'search' as const, query: 'public weather', results: [] };
+    });
+    await executeWebToolCalls(searchCall, allowedExecute, undefined, undefined, undefined, async () => {
+      allowedEvents.push('asked');
+      return true;
+    }, {
+      onActivity: () => allowedEvents.push('activity'),
+    });
+    expect(allowedEvents).toEqual(['asked', 'activity', 'execute']);
+  });
+
   it('records an empty search as a tool issue and returns no result URLs', async () => {
     const execute = vi.fn(async (request: WebToolRequest): Promise<WebToolResult> => {
       if (request.operation === 'search') {

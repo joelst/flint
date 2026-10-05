@@ -598,10 +598,11 @@ export async function executeWebToolCalls(
       if (request.operation === 'search') {
         const policy = searchQueryPolicyError(request.query, options?.scrubCorpus ?? '');
         if (policy) throw new Error(policy);
-        options?.onActivity?.({ kind: 'search', query: sanitizeWebLabel(request.query, 80) });
         const allowed = authorizeSearch ? await authorizeSearch(request.query) : false;
         if (signal?.aborted) break;
         if (!allowed) throw new Error('User declined the search');
+        // Name the query only after consent. The page autosaves this status, so a decline must not record it.
+        options?.onActivity?.({ kind: 'search', query: sanitizeWebLabel(request.query, 80) });
         // Searched-for is the audit of a query that left the device, not a rejection or a decline.
         queries.push(sanitizeWebLabel(request.query, 200));
         const result = await execute(request);
