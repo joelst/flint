@@ -704,6 +704,44 @@ describe('web tool calls', () => {
     )).rejects.toThrow(/at most 2/i);
   });
 
+  it('caps a long tool-call id and stores the canonical fetch URL', async () => {
+    const rawUrl = (`https://example.com/${'a '.repeat(1100)}`).slice(0, 2048);
+    const canonical = new URL(rawUrl).toString();
+    const longId = 'i'.repeat(80);
+    const execute = vi.fn(async (request: WebToolRequest): Promise<WebToolResult> => ({
+      operation: 'fetch',
+      url: request.operation === 'fetch' ? request.url : '',
+      title: 'Page',
+      text: 'Body',
+      truncated: false,
+      charCount: 4,
+    }));
+    const result = await executeWebToolCalls([{
+      id: longId,
+      type: 'function',
+      function: { name: 'web_fetch', arguments: JSON.stringify({ url: rawUrl }) },
+    }], execute, undefined, undefined, async () => true);
+    expect(result.toolCalls[0]?.id).toHaveLength(64);
+    expect(result.toolMessages[0]?.tool_call_id).toBe(result.toolCalls[0]?.id);
+    const retained = JSON.parse(result.toolCalls[0]?.function.arguments ?? '{}') as { url?: string };
+    expect(retained).toEqual({ url: retained.url });
+    expect(retained.url ?? '').not.toContain(' ');
+    expect(JSON.stringify(retained).length).toBeLessThanOrEqual(JSON.stringify({ url: 'u'.repeat(2048) }).length);
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({
+      operation: 'fetch',
+      url: canonical,
+    }));
+    expect(execute.mock.calls[0]?.[0]?.url).not.toBe(rawUrl);
+
+    const short = await executeWebToolCalls([{
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'web_fetch', arguments: JSON.stringify({ url: 'https://example.com/a' }) },
+    }], execute, undefined, undefined, async () => true);
+    expect(short.toolCalls[0]?.id).toBe('call-1');
+    expect(short.toolMessages[0]?.tool_call_id).toBe('call-1');
+  });
+
   it('names a search only after the user allows it', async () => {
     const searchCall = [{
       id: 'call-s',
@@ -1027,6 +1065,11 @@ describe('web tool calls', () => {
       blocklist: ['example.com'],
     });
     expect(found.resultUrls).toEqual(['https://other.example/a']);
+    expect(found.sources).toEqual([{ title: 'Open', url: 'https://other.example/a' }]);
+    expect(found.toolMessages[0]?.content).toContain('https://other.example/a');
+    expect(found.toolMessages[0]?.content).toContain('Open');
+    expect(found.toolMessages[0]?.content).not.toContain('sub.example.com');
+    expect(found.toolMessages[0]?.content).not.toContain('Blocked');
   });
 
   it('does not ask to fetch an image from a blocked host', async () => {

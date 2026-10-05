@@ -9,6 +9,7 @@ import { hostBlocked } from './web-blocklist';
 import {
   CLOSER_PREFIX,
   MAX_FENCED_RESULT_CHARS,
+  SEARCH_URL_CHARS,
   buildWebEnvelope,
   createWebCloser,
   sanitizeWebLabel,
@@ -546,6 +547,52 @@ function readOneWebToolCall(raw: unknown, fallbackId: string, seen: Set<string>)
   return fail(`Web tool "${call.function.name || 'unknown'}" is not allowed`);
 }
 
+const TOOL_CALL_ID_CHARS = 64;
+
+/** Keep a short id. A later id that collapses to the same 64-character prefix gets a suffix. */
+function retainedToolCallId(id: string, used: Set<string>): string {
+  if (id.length <= TOOL_CALL_ID_CHARS) {
+    used.add(id);
+    return id;
+  }
+  const prefix = id.slice(0, TOOL_CALL_ID_CHARS);
+  if (!used.has(prefix)) {
+    used.add(prefix);
+    return prefix;
+  }
+  let n = 2;
+  while (n < 1000) {
+    const mark = `~${n}`;
+    const next = `${prefix.slice(0, TOOL_CALL_ID_CHARS - mark.length)}${mark}`;
+    if (!used.has(next)) {
+      used.add(next);
+      return next;
+    }
+    n += 1;
+  }
+  const fallback = `${prefix.slice(0, TOOL_CALL_ID_CHARS - 1)}x`;
+  used.add(fallback);
+  return fallback;
+}
+
+function retainedToolCall(call: ChatToolCall, args: string, used: Set<string>): ChatToolCall {
+  return {
+    id: retainedToolCallId(call.id, used),
+    type: call.type,
+    function: { name: call.function.name, arguments: args },
+  };
+}
+
+function retainedFetchArguments(url: string): string {
+  return JSON.stringify({ url: url.slice(0, SEARCH_URL_CHARS) });
+}
+
+function retainedRequestArguments(request: WebToolRequest, fetchUrl?: string): string {
+  if (request.operation === 'search') return JSON.stringify({ query: request.query });
+  if (request.operation === 'fetch') return retainedFetchArguments(fetchUrl ?? request.url);
+  return '{}';
+}
+
 export async function executeWebToolCalls(
   calls: unknown,
   execute: (request: WebToolRequest) => Promise<WebToolResult>,
@@ -589,18 +636,17 @@ export async function executeWebToolCalls(
   const retrievedOn = options?.retrievedOn ?? new Date().toISOString().slice(0, 10);
   const fetchChars = Math.min(50_000, Math.max(1_000, options?.maxChars ?? 20_000));
   const callLimit = options?.maxCalls === 1 ? 1 : 2;
+  const usedIds = new Set<string>();
   let accepted = 0;
   for (const parsedCall of parsed) {
     if (accepted >= callLimit) {
       const message = 'Only one web result fits this context.';
+      const retained = retainedToolCall(parsedCall.call, '{}', usedIds);
       errors.push(`${parsedCall.call.function.name}: ${message}`);
-      toolCalls.push({
-        ...parsedCall.call,
-        function: { ...parsedCall.call.function, arguments: '{}' },
-      });
+      toolCalls.push(retained);
       toolMessages.push({
         role: 'tool',
-        tool_call_id: parsedCall.call.id,
+        tool_call_id: retained.id,
         name: parsedCall.call.function.name,
         content: JSON.stringify({ error: message }),
       });
@@ -609,17 +655,19 @@ export async function executeWebToolCalls(
     accepted += 1;
     if ('error' in parsedCall) {
       const message = collapsed(parsedCall.error).slice(0, 500);
+      const retained = retainedToolCall(parsedCall.call, '{}', usedIds);
       errors.push(`${parsedCall.call.function.name}: ${message}`);
-      toolCalls.push(parsedCall.call);
+      toolCalls.push(retained);
       toolMessages.push({
         role: 'tool',
-        tool_call_id: parsedCall.call.id,
+        tool_call_id: retained.id,
         name: parsedCall.call.function.name,
         content: JSON.stringify({ error: message }),
       });
       continue;
     }
     const { call, request } = parsedCall;
+    let fetchUrl = request.operation === 'fetch' ? request.url : undefined;
     if (signal?.aborted) break;
     try {
       if (signal?.aborted) break;
@@ -638,23 +686,39 @@ export async function executeWebToolCalls(
           throw new Error('Public search returned an unexpected result');
         }
         const packed = userSearchContext(result);
-        sources.push(...packed.sources);
-        errors.push(...packed.errors);
+        const blocklist = options?.blocklist ?? [];
+        const kept = result.results.filter((item) => {
+          const host = hostnameFromUrl(item.url);
+          return !(host && hostBlocked(host, blocklist));
+        });
+        let body = packed.context;
+        if (result.results.length > 0 && kept.length === 0) {
+          body = 'No listed result is from a host this device allows.';
+        } else if (kept.length === result.results.length) {
+          sources.push(...packed.sources);
+          errors.push(...packed.errors);
+        } else {
+          const listed = userSearchContext({ ...result, results: kept });
+          sources.push(...listed.sources);
+          errors.push(...listed.errors);
+          body = listed.context;
+        }
         for (const url of searchResultUrls(result.results)) {
           const host = hostnameFromUrl(url);
           if (host && hostBlocked(host, options?.blocklist ?? [])) continue;
           resultUrls.push(url);
         }
-        toolCalls.push(call);
+        const retained = retainedToolCall(call, JSON.stringify({ query: request.query }), usedIds);
+        toolCalls.push(retained);
         toolMessages.push({
           role: 'tool',
-          tool_call_id: call.id,
+          tool_call_id: retained.id,
           name: call.function.name,
           content: buildWebEnvelope({
             closer,
             title: 'Search results',
             retrievedOn,
-            body: packed.context,
+            body,
           }),
         });
         continue;
@@ -663,6 +727,7 @@ export async function executeWebToolCalls(
       let pending = request.operation === 'fetch'
         ? { ...request, maxChars: fetchChars }
         : request;
+      if (pending.operation === 'fetch') fetchUrl = pending.url;
       let result: WebToolResult | null = null;
       let aborted = false;
       let duplicated = false;
@@ -677,10 +742,11 @@ export async function executeWebToolCalls(
             throw new Error('This host is blocked on this device');
           }
           if (seenBodies.has(pending.url)) {
-            toolCalls.push(call);
+            const retained = retainedToolCall(call, retainedFetchArguments(pending.url), usedIds);
+            toolCalls.push(retained);
             toolMessages.push({
               role: 'tool',
-              tool_call_id: call.id,
+              tool_call_id: retained.id,
               name: call.function.name,
               content: 'This URL is already included in the current request. Use that block and answer from it.',
             });
@@ -716,6 +782,7 @@ export async function executeWebToolCalls(
         const nextUrl = canonicalFetchUrl(result.url);
         if (!nextUrl) throw new Error('Public web fetch returned an unexpected result');
         pending = { operation: 'fetch', url: nextUrl, maxChars: fetchChars };
+        fetchUrl = pending.url;
       }
       if (aborted) break;
       if (duplicated) continue;
@@ -733,10 +800,15 @@ export async function executeWebToolCalls(
           if (imageUrls.length < 1 && typeof imageUrl === 'string') imageUrls.push(imageUrl);
         }
       }
-      toolCalls.push(call);
+      const retained = retainedToolCall(
+        call,
+        pending.operation === 'fetch' ? retainedFetchArguments(pending.url) : '{}',
+        usedIds,
+      );
+      toolCalls.push(retained);
       toolMessages.push({
         role: 'tool',
-        tool_call_id: call.id,
+        tool_call_id: retained.id,
         name: call.function.name,
         content: buildWebEnvelope({
           closer,
@@ -753,11 +825,12 @@ export async function executeWebToolCalls(
       const message = String(error instanceof Error ? error.message : error)
         .replace(/[\u0000-\u001f\u007f-\u009f\s]+/g, ' ')
         .slice(0, 500);
+      const retained = retainedToolCall(call, retainedRequestArguments(request, fetchUrl), usedIds);
       errors.push(`${call.function.name}: ${message}`);
-      toolCalls.push(call);
+      toolCalls.push(retained);
       toolMessages.push({
         role: 'tool',
-        tool_call_id: call.id,
+        tool_call_id: retained.id,
         name: call.function.name,
         content: JSON.stringify({ error: message }),
       });
