@@ -462,6 +462,23 @@ describe('search result decoding', () => {
     }]);
   });
 
+  it('skips an overlong result before it consumes the only slot', () => {
+    const longUrl = `https://example.com/${'a'.repeat(3000)}`;
+    expect(new URL(longUrl).toString()).toHaveLength(3020);
+    const html = `
+      <div class="result">
+        <a class="result__a" href="${longUrl}">Long</a>
+      </div>
+      <div class="result">
+        <a class="result__a" href="https://example.com/kept">Kept</a>
+      </div>`;
+    expect(decodeSearchResults(html, 1)).toEqual([{
+      title: 'Kept',
+      url: 'https://example.com/kept',
+      snippet: '',
+    }]);
+  });
+
   it('drops hidden script and comment text from search titles and snippets', () => {
     const html = `
       <div class="result">

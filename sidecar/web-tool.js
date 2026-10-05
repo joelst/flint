@@ -19,6 +19,8 @@ const MAX_IMAGE_BYTES = 1_572_864;
 const MAX_IMAGE_OUTPUT_BYTES = 2_200_000;
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const MAX_TEXT_CHARS = 50_000;
+/** Matches SEARCH_URL_CHARS. A longer address is omitted, not sliced. */
+const SEARCH_URL_CHARS = 2048;
 const MAX_REDIRECTS = 3;
 const REQUEST_TIMEOUT_MS = 8_000;
 const OVERALL_TIMEOUT_MS = 10_000;
@@ -420,6 +422,7 @@ export function decodeSearchResults(html, maxResults) {
     if (!link) continue;
     try {
       const url = unwrapDuckDuckGoUrl(link[1]);
+      if (url.length > SEARCH_URL_CHARS) continue;
       const snippetMatch = block.match(/<(?:a|div)[^>]+class=["'][^"']*\bresult__snippet\b[^"']*["'][^>]*>([\s\S]*?)<\/(?:a|div)>/i);
       results.push({
         title: readableText(link[2]).slice(0, 300),

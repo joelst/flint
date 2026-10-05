@@ -1076,6 +1076,46 @@ describe('web tool calls', () => {
     expect(found.toolMessages[0]?.content).not.toContain('Blocked');
   });
 
+  it('drops a search result whose address is longer than 2048 characters', async () => {
+    const longUrl = `https://example.com/${'a'.repeat(3000)}`;
+    expect(longUrl).toHaveLength(3020);
+    const shortUrl = 'https://other.example/a';
+    const execute = vi.fn(async (): Promise<WebToolResult> => ({
+      operation: 'search',
+      query: 'public weather',
+      results: [
+        { title: 'Long', url: longUrl, snippet: 'too long' },
+        { title: 'Open', url: shortUrl, snippet: 'yes' },
+      ],
+    }));
+    const found = await executeWebToolCalls([{
+      id: 'call-s',
+      type: 'function',
+      function: { name: 'web_search', arguments: '{"query":"public weather"}' },
+    }], execute, undefined, undefined, undefined, async () => true);
+    expect(found.sources).toEqual([{ title: 'Open', url: shortUrl }]);
+    expect(found.resultUrls).toEqual([shortUrl]);
+    expect(found.toolMessages[0]?.content).toContain(shortUrl);
+    expect(found.toolMessages[0]?.content).not.toContain(longUrl);
+
+    const onlyLong = vi.fn(async (): Promise<WebToolResult> => ({
+      operation: 'search',
+      query: 'public weather',
+      results: [{ title: 'Long', url: longUrl, snippet: 'too long' }],
+    }));
+    const dropped = await executeWebToolCalls([{
+      id: 'call-long',
+      type: 'function',
+      function: { name: 'web_search', arguments: '{"query":"public weather"}' },
+    }], onlyLong, undefined, undefined, undefined, async () => true);
+    expect(dropped.sources).toEqual([]);
+    expect(dropped.resultUrls).toEqual([]);
+    expect(dropped.errors).toEqual([]);
+    expect(dropped.toolMessages[0]?.content).toContain('No listed result fits this request.');
+    expect(dropped.toolMessages[0]?.content).not.toContain(longUrl);
+    expect(dropped.toolMessages[0]?.content).not.toContain('No listed result is from a host this device allows.');
+  });
+
   it('does not ask to fetch an image from a blocked host', async () => {
     const execute = vi.fn();
     const authorize = vi.fn(async () => true);

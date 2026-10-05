@@ -687,16 +687,19 @@ export async function executeWebToolCalls(
         }
         const packed = userSearchContext(result);
         const blocklist = options?.blocklist ?? [];
-        const kept = result.results.filter((item) => {
+        const bounded = result.results.filter((item) => item.url.length <= SEARCH_URL_CHARS);
+        const kept = bounded.filter((item) => {
           const host = hostnameFromUrl(item.url);
           return !(host && hostBlocked(host, blocklist));
         });
         let body = packed.context;
-        if (result.results.length > 0 && kept.length === 0) {
-          body = 'No listed result is from a host this device allows.';
-        } else if (kept.length === result.results.length) {
+        if (kept.length === result.results.length) {
           sources.push(...packed.sources);
           errors.push(...packed.errors);
+        } else if (bounded.length > 0 && kept.length === 0) {
+          body = 'No listed result is from a host this device allows.';
+        } else if (kept.length === 0) {
+          body = 'No listed result fits this request.';
         } else {
           const listed = userSearchContext({ ...result, results: kept });
           sources.push(...listed.sources);
@@ -704,6 +707,7 @@ export async function executeWebToolCalls(
           body = listed.context;
         }
         for (const url of searchResultUrls(result.results)) {
+          if (url.length > SEARCH_URL_CHARS) continue;
           const host = hostnameFromUrl(url);
           if (host && hostBlocked(host, options?.blocklist ?? [])) continue;
           resultUrls.push(url);
