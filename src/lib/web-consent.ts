@@ -141,7 +141,7 @@ export function domainGranted(
 }
 
 export type ConsentQueuePrompt =
-  | { kind: 'search' }
+  | { kind: 'search'; afterWebText?: boolean }
   | { kind: 'domain'; host: string; conversationId: string };
 
 /** Leading queue entries a session, forever, or conversation all-URL grant already covers. */
@@ -160,7 +160,8 @@ function consentPromptCovered(
   session: SessionWebConsent,
   prompt: ConsentQueuePrompt,
 ): boolean {
-  if (prompt.kind === 'search') return searchGranted(stored, session);
+  // A standing grant does not cover a query written after web text entered the request.
+  if (prompt.kind === 'search') return !prompt.afterWebText && searchGranted(stored, session);
   return domainGranted(stored, session, prompt.host, prompt.conversationId);
 }
 

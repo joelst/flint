@@ -17,6 +17,7 @@
 </script>
 
 <script lang="ts">
+  import Icon from "./Icon.svelte";
   import { truncateConversationTitle } from "./conversation-sidebar";
 
   export let conversations: Conversation[] = [];
@@ -26,6 +27,8 @@
   export let onDeleteConversation: (id: string) => void = () => {};
   export let onExport: () => void = () => {};
   export let exportBusy = false;
+  export let collapsed = false;
+  export let onToggleCollapsed: () => void = () => {};
 
   function formatTime(timestamp: number): string {
     const now = Date.now();
@@ -42,17 +45,54 @@
   }
 </script>
 
-<div class="conversation-sidebar">
+<div class="conversation-sidebar" class:collapsed>
+  {#if collapsed}
+    <div class="sidebar-rail">
+      <button
+        type="button"
+        class="rail-btn"
+        aria-label="Show conversations"
+        title="Show conversations"
+        onclick={onToggleCollapsed}
+      >
+        ›
+      </button>
+      <button
+        type="button"
+        class="rail-btn new-chat-btn"
+        aria-label="New conversation"
+        title="New conversation"
+        onclick={onNewChat}
+      >
+        +
+      </button>
+    </div>
+  {:else}
   <div class="sidebar-header">
     <h3>Conversations</h3>
     <div class="sidebar-header-actions">
       <button
+        type="button"
         class="export-btn"
-        title="Save a copy of every conversation to a file, including any that Flint could not read"
+        aria-label="Hide conversations"
+        title="Hide"
+        onclick={onToggleCollapsed}
+      >
+        <Icon name="panel-left" size={15} />
+      </button>
+      <button
+        type="button"
+        class="export-btn"
+        aria-label={exportBusy ? "Saving…" : "Export conversations"}
+        title={exportBusy ? "Saving…" : "Export"}
         disabled={exportBusy}
         onclick={onExport}
       >
-        {exportBusy ? "Saving…" : "Export"}
+        {#if exportBusy}
+          <Icon name="loader" size={15} class="spin" />
+        {:else}
+          <Icon name="download" size={15} />
+        {/if}
       </button>
       <button class="new-chat-btn" title="New conversation" onclick={onNewChat}>
         ➕ New
@@ -121,6 +161,7 @@
       {/each}
     {/if}
   </div>
+  {/if}
 </div>
 
 <style>
@@ -131,6 +172,39 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    flex-shrink: 0;
+  }
+
+  .conversation-sidebar.collapsed {
+    width: 44px;
+  }
+
+  .sidebar-rail {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 4px;
+  }
+
+  .rail-btn {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel-bg);
+    color: var(--fg);
+    cursor: pointer;
+    font-size: 1.1rem;
+    line-height: 1;
+  }
+
+  .sidebar-rail .new-chat-btn {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    font-size: 1.1rem;
   }
 
   .sidebar-header {
@@ -139,6 +213,8 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
   }
 
   .sidebar-header h3 {
@@ -169,14 +245,26 @@
   }
 
   .export-btn {
-    padding: 4px 8px;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     background: transparent;
     color: var(--fg);
     border: 1px solid var(--border);
     border-radius: 3px;
-    font-size: 0.75rem;
     cursor: pointer;
-    white-space: nowrap;
+  }
+
+  .export-btn :global(svg.spin) {
+    animation: export-spin 1s linear infinite;
+  }
+
+  @keyframes export-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
   }
 
   .export-btn:hover:not(:disabled) {

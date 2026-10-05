@@ -41,11 +41,11 @@ The installer contains Flint, bundled Node, and Foundry native libraries. It doe
 
 ## Playground public web retrieval
 
-Public web search is disabled by default and enabled per conversation in Playground Generation
-settings. With that toggle on, **Search** beside Send runs the typed message as the query.
-Flint asks for confirmation of that exact query before dispatch when no session or forever
-search approval is already remembered. The model does not choose the
-query or decide whether to search. Separately, a pasted or typed URL can be added as a
+Public web search is disabled by default and enabled per conversation from the **Web search**
+checkbox in the chat header. With that toggle on, the model may request `web_search` with a
+query of at most 200 characters. Flint asks for confirmation of that query before dispatch when
+no session or forever search approval is already remembered. Declining records the refusal and
+the answer continues. Separately, a pasted or typed URL can be added as a
 context chip and then fetched by clicking **Fetch** on that chip. That explicit, user-initiated
 fetch happens immediately, independent of the toggle and of sending, and uses the same isolated
 helper and network rules. Search, fetch, and chip fetch all run in a short-lived helper process
@@ -59,11 +59,11 @@ model's Markdown. A public search that returns no organic results is still recor
 issue. So is a finished URL-chip fetch that failed or returned no readable text. A dismissed
 chip, or one still loading when the message is sent, is not.
 Search terms and requested public URLs are disclosed to the public search service and destination
-site. Search dispatch is the composer **Search** button. The query is the typed message, collapsed
-to one line and limited to 500 characters. The first search asks for approval once, for this
-session, or forever. Session approval lasts until the page reloads. Forever approval is stored in
+site. The model writes the query, collapsed to one line and limited to 200 characters. Flint
+runs at most two tool rounds and then requires a tool-free answer. The first search asks for
+approval once, for this session, or forever. Session approval lasts until the page reloads. Forever approval is stored in
 local storage. If that write fails, Flint reports it and leaves the previous saved choice in place.
-Declining leaves the draft unsent. A fetch of a search-result host asks for that
+A fetch of a search-result host asks for that
 domain once, for this session, forever, or for all public URLs in that conversation until the page reloads.
 A redirect to a different host asks for that host before it is contacted.
 URLs the user typed or attached do not ask again. A model `web_fetch` may use an HTTPS URL typed
@@ -72,10 +72,21 @@ search-result URL from the conversation that ran the search. **Ask again for sea
 clears the saved and session approvals when the saved choice can be removed. If that write fails,
 Flint reports it and leaves both in place.
 Flint admits at most two helper processes at once and refuses excess retrievals explicitly. The
-Foundry chat transport does not support tools and image parts together. A Search send that
-includes image context is refused. An ordinary Send leaves the fetch tool off and continues.
+Foundry chat transport does not support tools and image parts together. A send that
+includes image context leaves web search and fetch off and continues.
 The helper inherits only minimal Windows runtime environment variables, but it is not an OS
 security boundary against other processes running as the same signed-in user.
+Search queries are sent to DuckDuckGo over HTTPS. Every helper request uses `Accept-Encoding: identity`
+and the user agent `Flint-Web-Tool/1.0 (+https://github.com/joelst/flint)`.
+**Remember for new chats** is a device default. One use of that control turns Web search on for future
+new chats on this device. It does not rewrite existing conversations. Consent still gates each search,
+including a search written after the model has already read web text, and each new host.
+A device blocklist of hostnames is checked before a fetch and before a search-result URL is remembered.
+Allow once, for the session, forever, and Allow all URLs do not admit a blocked host. A model fetch URL
+must match the allowlist for that round exactly. The query scrub is best-effort and does not replace
+the consent dialog. Fencing page text does not make the model immune to a page that asks it to repeat
+private text. While the consent dialog is open the chat shell is inert, so Stop cannot be clicked.
+Escape declines and leaves the previous grant unchanged.
 
 ## Startup and model-management network access
 

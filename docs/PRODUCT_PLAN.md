@@ -39,14 +39,20 @@ unfinished; newly completed work must flow into it through normal changesets.
   `file:`, `data:`, UNC paths, non-approved ports, DNS rebinding, and redirects to
   a denied destination. Bound redirects, decompressed bytes, response time,
   concurrency, calls per turn, and returned text.
-- Treat every result as untrusted reference content. Strip active content, never
-  let retrieved text authorize another tool call, show citations and an audit
-  trail, and require conversation-level opt-in. Search additionally requires an
-  exact current-message directive and confirmation of the exact outbound query;
-  fetch authority comes only from URLs typed or attached in the current send.
-- Permit at most one model tool round with no more than two calls. Force the
-  follow-up completion tool-free so retrieved content cannot start another
-  network action.
+- Treat every result as untrusted reference content. Strip active content.
+  Retrieved text cannot authorize a fetch or a later search; the user's consent
+  does. Show citations and an audit trail, and require conversation-level opt-in.
+  The model may request a short public search. Flint confirms that query. A
+  search written after the model has already read web text in the same request
+  is confirmed again even when a standing grant exists. Fetch authority is an
+  exact match against URLs typed or attached in the current send, or against
+  search-result URLs the user has allowed.
+- Permit at most two model tool rounds with no more than two calls in a round.
+  A malformed call is that call's error. A missing id, a duplicate id, or more
+  than two calls fails the send. Force the follow-up completion tool-free so
+  retrieved content cannot start another network action. While the consent
+  dialog is open the chat shell is inert, so Stop cannot be clicked; Escape
+  declines.
 - Keep fetched bodies request-scoped and memory-only by default. They do not
   enter conversation archives, localStorage, benchmark storage, diagnostics,
   access logs, model indexes, or unrelated processes. Return bounded text only

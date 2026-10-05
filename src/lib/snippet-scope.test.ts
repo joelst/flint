@@ -151,9 +151,10 @@ describe("+page.svelte snippet scopes", () => {
   // `+page.svelte` is `@ts-nocheck` and has no component tests, so an
   // out-of-scope snippet reference there would otherwise only surface as a
   // blank view, in a build where the user is unlikely to open the inspector.
+  // Parsing this file can exceed the default 5s on a busy runner.
   it("references every snippet from a scope that can see it", () => {
     const source = readFileSync(join(process.cwd(), "src", "routes", "+page.svelte"), "utf8");
     const refs = findUnresolvedSnippetReferences(parseFragment(source));
     expect(refs.map((ref) => `${ref.name} (line ${lineAtOffset(source, ref.start)})`)).toEqual([]);
-  });
+  }, 20000);
 });

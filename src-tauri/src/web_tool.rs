@@ -16,6 +16,8 @@ use tauri_plugin_shell::ShellExt as _;
 
 const MAX_INPUT_BYTES: usize = 16 * 1024;
 const MAX_OUTPUT_BYTES: usize = 256 * 1024;
+/// Base64 of a 1.5 MiB image is 2 MiB. The JSON frame around it needs a little more.
+const MAX_IMAGE_OUTPUT_BYTES: usize = 2_200_000;
 const MAX_ERROR_BYTES: usize = 16 * 1024;
 const HELPER_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_CONCURRENT_HELPERS: usize = 2;
@@ -110,6 +112,15 @@ fn minimal_environment(command: &mut Command) {
     }
 }
 
+fn output_byte_limit(input: &[u8]) -> usize {
+    match serde_json::from_slice::<Value>(input) {
+        Ok(value) if value.get("operation").and_then(Value::as_str) == Some("image") => {
+            MAX_IMAGE_OUTPUT_BYTES
+        }
+        _ => MAX_OUTPUT_BYTES,
+    }
+}
+
 fn run_helper(command: Command, input: Vec<u8>) -> Result<Value, String> {
     run_helper_with_timeout(command, input, HELPER_TIMEOUT)
 }
@@ -149,11 +160,14 @@ fn run_helper_with_timeout(
         return Err("Web tool stderr was unavailable".to_string());
     };
 
+    // The byte cap depends on the operation in the request. Read it before `input`
+    // moves into the writer thread.
+    let output_limit = output_byte_limit(&input);
     let stdin_writer = thread::spawn(move || {
         stdin.write_all(&input).and_then(|_| stdin.flush())
         // Dropping stdin here closes the pipe so the helper sees end of input.
     });
-    let stdout_reader = thread::spawn(move || read_capped(stdout, MAX_OUTPUT_BYTES));
+    let stdout_reader = thread::spawn(move || read_capped(stdout, output_limit));
     let stderr_reader = thread::spawn(move || read_capped(stderr, MAX_ERROR_BYTES));
 
     let status = loop {
@@ -301,5 +315,54 @@ mod tests {
         )
         .unwrap();
         assert_eq!(value, serde_json::json!(65536));
+    }
+
+    fn write_bytes_on_stdin_end(count: usize) -> String {
+        format!(
+            "process.stdin.resume(); process.stdin.on('end', () => {{ process.stdout.write('x'.repeat({count})); }});"
+        )
+    }
+
+    #[test]
+    fn text_stdout_one_byte_over_the_host_cap_fails_in_the_host() {
+        let error = run_helper_with_timeout(
+            node(&write_bytes_on_stdin_end(MAX_OUTPUT_BYTES + 1)),
+            b"{}".to_vec(),
+            Duration::from_secs(10),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("Web tool output exceeded its byte limit"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn image_stdout_past_the_text_cap_is_accepted_until_its_own_cap() {
+        let accepted = run_helper_with_timeout(
+            node(&write_bytes_on_stdin_end(MAX_OUTPUT_BYTES + 1)),
+            br#"{"operation":"image"}"#.to_vec(),
+            Duration::from_secs(10),
+        )
+        .unwrap_err();
+        assert!(
+            accepted.contains("Web tool returned invalid JSON"),
+            "{accepted}"
+        );
+        assert!(
+            !accepted.contains("exceeded its byte limit"),
+            "{accepted}"
+        );
+
+        let rejected = run_helper_with_timeout(
+            node(&write_bytes_on_stdin_end(MAX_IMAGE_OUTPUT_BYTES + 1)),
+            br#"{"operation":"image"}"#.to_vec(),
+            Duration::from_secs(15),
+        )
+        .unwrap_err();
+        assert!(
+            rejected.contains("Web tool output exceeded its byte limit"),
+            "{rejected}"
+        );
     }
 }

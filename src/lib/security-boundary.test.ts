@@ -20,6 +20,16 @@ function permissionById(permissions: unknown[], id: string) {
   return permissions.find((permission) => permissionId(permission) === id);
 }
 
+/**
+ * tauri-plugin-shell 2.3.5: `true` compiles the default with no trailing `$`.
+ * A string is wrapped as `^...$`.
+ */
+function shellOpenRegex(open: unknown): RegExp {
+  if (open === true) return /^((mailto:\w+)|(tel:\w+)|(https?:\/\/\w+)).+/;
+  if (typeof open !== 'string') throw new Error(`unexpected shell open matcher: ${String(open)}`);
+  return new RegExp(`^${open}$`);
+}
+
 describe('renderer capability ACL', () => {
   const capability = JSON.parse(
     readFileSync(join(process.cwd(), 'src-tauri', 'capabilities', 'default.json'), 'utf8'),
@@ -37,6 +47,31 @@ describe('renderer capability ACL', () => {
     expect(ids).not.toContain('shell:allow-kill');
     expect(ids).not.toContain('shell:allow-stdin-write');
     expect(ids.some((id) => typeof id === 'string' && id.startsWith('opener:'))).toBe(false);
+  });
+
+  it('allows shell open for target=_blank links and keeps the plugin default url regex', () => {
+    expect(ids).toContain('shell:default');
+    const conf = JSON.parse(readFileSync(join(process.cwd(), 'src-tauri', 'tauri.conf.json'), 'utf8'));
+    expect(conf.plugins?.shell?.open).toBe('(([Mm][Aa][Ii][Ll][Tt][Oo]:\\w+)|([Tt][Ee][Ll]:\\+?\\w+)|([Hh][Tt][Tt][Pp][Ss]?://(\\w+|\\[[0-9A-Fa-f:.]+\\]))).+');
+  });
+
+  it('opens a tel link with one leading plus and still rejects javascript', () => {
+    const conf = JSON.parse(readFileSync(join(process.cwd(), 'src-tauri', 'tauri.conf.json'), 'utf8'));
+    const regex = shellOpenRegex(conf.plugins?.shell?.open);
+    expect(regex.test('https://example.com/')).toBe(true);
+    expect(regex.test('tel:+15551234567')).toBe(true);
+    expect(regex.test('HTTPS://example.com/')).toBe(true);
+    expect(regex.test('https://[2606:4700:4700::1111]/')).toBe(true);
+    expect(regex.test('Mailto:user@example.com')).toBe(true);
+    expect(regex.test('TEL:+15551234567')).toBe(true);
+    expect(regex.test('tel:5551234567')).toBe(true);
+    expect(regex.test('https://1.1.1.1/')).toBe(true);
+    expect(regex.test('javascript:alert(1)')).toBe(false);
+    expect(regex.test('JAVASCRIPT:alert(1)')).toBe(false);
+    expect(regex.test('ftp://example.com/file')).toBe(false);
+    expect(regex.test('https://example.com/\njavascript:alert(1)')).toBe(false);
+    expect(regex.test('file:///C:/Windows')).toBe(false);
+    expect(regex.test('data:text/html,hi')).toBe(false);
   });
 
   it('does not grant the renderer a $RESOURCE read scope', () => {
@@ -125,6 +160,8 @@ describe('renderer/sidecar boundary', () => {
     const rust = readFileSync(join(process.cwd(), 'src-tauri', 'src', 'web_tool.rs'), 'utf8');
     expect(rust).toContain('command.env_clear()');
     expect(rust).toContain('const MAX_OUTPUT_BYTES: usize = 256 * 1024');
+    expect(rust).toContain('const MAX_IMAGE_OUTPUT_BYTES: usize = 2_200_000');
+    expect(rust).toContain('fn output_byte_limit');
     expect(rust).toContain('const HELPER_TIMEOUT: Duration = Duration::from_secs(15)');
     expect(rust).toContain('.join("web-tool.js")');
   });
@@ -141,26 +178,57 @@ describe('renderer/sidecar boundary', () => {
     const round = page.slice(page.indexOf('webRoundStarted = true;'), page.indexOf('const executed = await executeWebToolCalls('));
     expect(round).toContain('releaseSettledRequestId();');
     expect(page).toMatch(/function releaseSettledRequestId\(\) \{[\s\S]*?stream\.requestId = null;[\s\S]*?activeStreamRequestId = null;/);
+    const imageAt = page.indexOf('const image = await executeWebImage(');
+    const textAnswerAt = page.indexOf('assistantContent = data?.choices?.[0]?.message?.content || assistantContent;');
+    expect(page.lastIndexOf('releaseSettledRequestId();', imageAt)).toBeGreaterThan(textAnswerAt);
   });
 
-  it('runs public search from the Search button before the model answers', () => {
+  it('lets an allowed model request search after the message is sent', () => {
     const page = readFileSync(join(process.cwd(), 'src', 'routes', '+page.svelte'), 'utf8');
     const tools = readFileSync(join(process.cwd(), 'src', 'lib', 'web-tools.ts'), 'utf8');
-    expect(page).toContain('aria-label="Search the web"');
-    expect(page).toContain('composerSearchQuery(text)');
-    expect(page).toContain('userSearchContext(result)');
-    expect(tools).toContain('The model cannot start a web search');
+    expect(page).not.toContain('aria-label="Search the web"');
+    expect(page).not.toContain('search-web-btn');
+    expect(page).not.toContain('sendMessage(event, "search")');
+    expect(page).toContain('id="web-tools-enabled"');
+    expect(page).toContain('class="composer-settings-btn"');
+    expect(page).toContain('conversationListCollapsed = $state(true)');
+    expect(page).toContain('collapsed={conversationListCollapsed}');
+    const sidebar = readFileSync(join(process.cwd(), 'src', 'lib', 'ConversationSidebar.svelte'), 'utf8');
+    expect(sidebar).toContain('aria-label="Show conversations"');
+    expect(sidebar).toContain('aria-label="Hide conversations"');
+    expect(sidebar).toContain('title="Hide"');
+    expect(sidebar).toContain('name="panel-left"');
+    expect(sidebar).toContain('title={exportBusy ? "Saving…" : "Export"}');
+    expect(sidebar).toContain('name="download"');
+    expect(page).toContain('let offerWebTools = allowWebTools');
+    expect(tools).toContain("name: 'web_search'");
+    expect(tools).toContain('userSearchContext(result)');
+    expect(tools).toContain('searchResultUrls(result.results)');
+    expect(tools).not.toContain('The model cannot start a web search');
     expect(page).not.toContain('Search the web for:');
-    const approvalAt = page.indexOf('await askSearchApproval(parsed.query)');
+    expect(page).not.toContain('Understood. I will treat those search results');
     const commitAt = page.indexOf('chatMessages = stamped;');
-    expect(approvalAt).toBeGreaterThan(0);
-    expect(approvalAt).toBeLessThan(commitAt);
+    const approvalAt = page.indexOf('const choice = await askSearchApproval(query, webTextInRequest)');
+    expect(commitAt).toBeGreaterThan(0);
+    expect(approvalAt).toBeGreaterThan(commitAt);
     expect(page).toContain('Allow this public web search?');
     expect(page).toContain('Just this search');
+    expect(page).toContain('This query was written after the model read web content.');
+    expect(page).toContain('Flint-Web-Tool/1.0');
+    expect(page).toContain('Images on the page may be fetched.');
+    expect(page).toContain('This host is blocked on this device.');
+    expect(page).toContain('supportsToolCalling === false');
+    expect(page).toContain('This model does not report tool calling.');
+    expect(page).toContain('webToolsForNewChats');
+    expect(page).toContain('This does not clear the blocklist or the new-chat default.');
+    expect(page).toContain('if (event.key === "Escape")');
+    expect(tools).toContain("name: 'web_fetch'");
+    expect(tools).not.toContain("name: 'web_image'");
     expect(page).toContain('Allow all URLs');
     expect(page).toContain('askDomainApproval(host, url, originId ?? "", hop === "redirect")');
     expect(page).toContain('hop: "request" | "redirect"');
-    expect(page).toContain('let offerFetchTool = allowWebTools');
+    expect(page).toContain('webToolRounds < maxWebToolRounds');
+    expect(page).toContain('authorizeSearch');
     expect(page).toContain('webConsentQueue = [...webConsentQueue, { kind: "search"');
     expect(page).toContain('webConsentQueue = [...webConsentQueue, { kind: "domain"');
     // The opener is saved before the shell becomes inert. Inert moves focus
@@ -185,7 +253,7 @@ describe('renderer/sidecar boundary', () => {
     expect(page).not.toContain('webConsentPrompt = {');
     expect(page).toContain('resultUrlsForConversation(sessionWebConsent, threadLoadedFor ?? "")');
     expect(page).toContain('rememberResultUrls(sessionWebConsent, originId ?? "", resultUrls)');
-    expect(page).toContain('searchResultUrls(result.results)');
+    expect(page).not.toContain('searchResultUrls(result.results)');
     expect(page).not.toContain('packed.sources.map((source) => source.url).join');
     expect(page).toContain('dialogTabTrap(');
     expect(page).toContain('consentKeyGate(');
@@ -196,7 +264,7 @@ describe('renderer/sidecar boundary', () => {
     expect(page).toContain('void tick().then(');
     expect(page).toContain('restoreDialogFocus(back, [');
     expect(page).toContain('form button.stop');
-    expect(page).toContain('in this conversation until the page reloads');
+    expect(page).toContain('until the page reloads.');
     expect(page).toContain('allUrlsGrantTarget(');
     expect(page).toContain('Allow all URLs in {webConsentGrantTarget.label}');
     expect(page).toContain('This request is from that conversation, not the one open now.');
@@ -209,6 +277,8 @@ describe('renderer/sidecar boundary', () => {
     expect(page).toContain('splitCoveredConsentPrompts(storedWebConsent, sessionWebConsent, webConsentQueue.slice(1))');
     expect(page).not.toContain('localStorage.getItem(WEB_CONSENT_STORAGE_KEY)');
     expect(page).not.toContain('localStorage.setItem(WEB_CONSENT_STORAGE_KEY');
+    expect(page).toContain('searchScrubCorpus(requestMessages)');
+    expect(page).not.toContain('attachedTextFiles.map((file) => file.file?.text || "")');
   });
 
   it('marks manual web context untrusted and keeps image sends off the fetch tool', () => {
@@ -216,32 +286,38 @@ describe('renderer/sidecar boundary', () => {
     const helper = readFileSync(join(process.cwd(), 'sidecar', 'web-tool.js'), 'utf8');
     const tools = readFileSync(join(process.cwd(), 'src', 'lib', 'web-tools.ts'), 'utf8');
     const sdk = readFileSync(join(process.cwd(), 'src', 'lib', 'sdk.ts'), 'utf8');
-    expect(page).toContain('urlContextMessages.length > 0,');
-    expect(page).toContain('if (mode === "search" && messagesContainImages(requestMessages))');
-    expect(page).toContain('Web search cannot be combined with an image. Remove the image, or press Send.');
-    expect(page).toContain('offerFetchTool = false');
+    expect(page).toContain('const chipFence = doneFetches.map');
+    expect(page).toContain('const questionText = chipFence ?');
+    expect(page).toContain('let userContent: any = text;');
+    expect(page).toContain('messageContentWithFence(message.content, questionText)');
+    expect(page).toContain('catalogModelForEndpointId(state.models, requestModelAlias || "")?.supportsToolCalling === false');
+    expect(page).toContain('stoppedBeforeVision');
+    expect(page).not.toContain('urlContextMessages');
+    expect(page).not.toContain('Understood. I have read');
+    expect(page).toContain('if (offerWebTools && messagesContainImages(requestMessages))');
+    expect(page).not.toContain('Web search cannot be combined with an image. Remove the image, or press Send.');
+    expect(page).toContain('offerWebTools = false');
     expect(page).not.toContain('disable web tools for this send');
     expect(page).toContain('This page redirects to a different site.');
     expect(helper).toContain('followCrossOriginRedirects');
     expect(helper).toContain('redirectTo');
     expect(tools).toContain("result.operation !== 'redirect'");
-    expect(sdk).toContain('followCrossOriginRedirects: true');
+    expect(sdk).not.toContain('followCrossOriginRedirects: true');
   });
 
   it('preserves retrieval audits when the follow-up completion fails', () => {
     const page = readFileSync(join(process.cwd(), 'src', 'routes', '+page.svelte'), 'utf8');
+    const tools = readFileSync(join(process.cwd(), 'src', 'lib', 'web-tools.ts'), 'utf8');
     expect(page).toContain('const chipAudit = urlChipRetrievalAudit(pendingUrlFetches);');
     expect(page.indexOf('const chipAudit = urlChipRetrievalAudit(pendingUrlFetches);'))
       .toBeLessThan(page.indexOf('clearUrlFetches();', page.indexOf('chatMessages = stamped;')));
     expect(page).toContain('let webSources = [...chipAudit.sources];');
     expect(page).toContain('let webErrors = [...chipAudit.errors];');
-    const searchTry = page.indexOf('updateAssistantMessage({ content: "Searching the public web..." });');
-    const searchCatch = page.indexOf('} catch (error) {', searchTry);
-    const searchBlock = page.slice(searchCatch, page.indexOf('let data = await chatCompletionStream', searchCatch));
-    const recordedAt = searchBlock.indexOf('webErrors = [...webErrors, `web_search: ${message}`]');
-    const abortedAt = searchBlock.indexOf('if (requestController.signal.aborted)');
-    expect(recordedAt).toBeGreaterThanOrEqual(0);
+    const recordedAt = page.indexOf('webErrors = [...webErrors, ...executed.errors];');
+    const abortedAt = page.indexOf('if (requestController.signal.aborted)', recordedAt);
+    expect(recordedAt).toBeGreaterThan(0);
     expect(abortedAt).toBeGreaterThan(recordedAt);
+    expect(tools).toContain('errors.push(`${call.function.name}: ${message}`)');
     expect(page).toContain('webErrors = [...webErrors, ...executed.errors];');
     expect(page).not.toContain('webErrors = executed.errors;');
     const audit = readFileSync(join(process.cwd(), 'src', 'lib', 'web-audit.ts'), 'utf8');
@@ -250,20 +326,34 @@ describe('renderer/sidecar boundary', () => {
     expect(audit).toContain('The page contained no readable text');
     expect(page).toContain('finalUrl: result.url');
     expect(page).toContain('truncated: result.truncated');
-    expect(page).toContain('the page content above is a truncated prefix');
-    expect(page).toContain('const anyTruncated = doneFetches.some');
+    const envelope = readFileSync(join(process.cwd(), 'src', 'lib', 'web-envelope.ts'), 'utf8');
+    expect(envelope).toContain('the page content above is a truncated prefix');
+    expect(page).not.toContain('const anyTruncated = doneFetches.some');
     expect(page).toContain('doneFetches.map((fetch) => fetch.url)');
     expect(page).toContain('webSources = [...webSources, ...executed.sources]');
     // The audit is stored beside the model's Markdown, never concatenated into it: an unclosed
     // comment, fence, or block in untrusted output would otherwise hide or restyle it.
     expect(page).not.toMatch(/appendWeb(Source|Error)Audit/);
-    expect(page).toContain('const webAudit = buildWebAudit(webSources, webErrors);');
-    expect(page.match(/\.\.\.webAuditPatch\(\)/g)?.length).toBe(9);
-    expect(page).toMatch(/isError: true,\s*content: failureMessage,\s*\.\.\.webAuditPatch\(\)/);
+    expect(page).toContain('const webAudit = buildWebAudit(sources, webErrors, webQueries);');
+    expect(page.match(/\.\.\.webAuditPatch\(\)/g)?.length).toBe(7);
+    expect(page).toContain('maxCalls: plan.maxToolCalls');
+    expect(page).toMatch(/isError: true,\s*prefilledThink: false,\s*content: failureMessage,\s*\.\.\.webAuditPatch\(\)/);
     expect(page).toContain('updateAssistantMessage({ content: assistantContent, ...webAuditPatch() });');
     expect(page).toContain('webAudit={msg.webAudit}');
     expect(page).toContain('if (webSources.length > 0 || webErrors.length > 0)');
     expect(page).toContain('{ webToolsEnabled: includeWebToolInstruction }');
+    expect(page).not.toContain('if (sourceIndex) effectiveSystem');
+    expect(page).toContain('WEB_SOURCE_INDEX_NOTE');
+    expect(page).toContain('fenceWebSourceIndex(');
+    const fenceAt = page.indexOf('prependTextToLatestUser(');
+    const packAt = page.indexOf('packContextMessages({', fenceAt);
+    expect(fenceAt).toBeGreaterThan(0);
+    expect(packAt).toBeGreaterThan(fenceAt);
+    expect(page).toContain('requestCarriesTextAttachment(stamped)');
+    expect(page).not.toContain('webFenceForVision');
+    expect(page).toContain('toolContentsWithCloser(requestMessages, sendCloser)');
+    expect(page).not.toContain('const visionBase');
+    expect(page).toContain('withVisionImage(visionHistoryThroughLatestUser(requestMessages), toolContentsWithCloser(requestMessages, sendCloser), jpeg)');
   });
 
   it('retires every staged URL fetch attempt when a send commits', () => {
@@ -276,6 +366,12 @@ describe('renderer/sidecar boundary', () => {
     expect(page).toMatch(/function patchUrlFetch\(attempt: number[^)]*\) \{\s*const i = pendingUrlFetches\.findIndex\(f => f\.attempt === attempt\);\s*if \(i < 0\) return;/);
   });
 
+  it('stores a settled reply with the same spill evidence the screen uses', () => {
+    const page = readFileSync(join(process.cwd(), 'src', 'routes', '+page.svelte'), 'utf8');
+    expect(page).toContain('assistantStoredText(');
+    expect(page).not.toContain('stripChatTemplateSpill(');
+  });
+
   it('renders the web audit outside the model Markdown sink', () => {
     const renderer = readFileSync(join(process.cwd(), 'src', 'lib', 'MessageRenderer.svelte'), 'utf8');
     expect(renderer.match(/\{@html /g)?.length).toBe(1);
@@ -284,6 +380,9 @@ describe('renderer/sidecar boundary', () => {
     expect(markdownEnd).toBeGreaterThan(0);
     expect(audit).toBeGreaterThan(markdownEnd);
     expect(renderer).toContain('normalizeWebAudit(webAudit)');
-    expect(renderer).toContain('messageClipboardWithWebAudit(messageClipboardText(content), webAuditView)');
+    expect(renderer).toContain('assistantClipboardText(content, { prefilledThink, streaming: isStreaming })');
+    expect(readFileSync(join(process.cwd(), 'src', 'lib', 'message-rendering.ts'), 'utf8'))
+      .toMatch(/export function assistantClipboardText[\s\S]*?stripChatTemplateSpill\(/);
+    expect(renderer).toContain('messageClipboardWithWebAudit(copied, webAuditView)');
   });
 });

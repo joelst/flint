@@ -5,9 +5,28 @@ import {
   prepareTextAttachmentBatch,
   prepareTextAttachment,
   promptTextForFile,
+  requestCarriesTextAttachment,
 } from "./text-attachments";
 
 describe("text attachments", () => {
+  it("sees a file_text part on an earlier turn and ignores images", () => {
+    expect(requestCarriesTextAttachment([
+      { role: "user", content: [{ type: "text", text: "hi" }] },
+      { role: "user", content: [{ type: "image_url", image_url: { url: "data:image/png;base64,AA" } }] },
+    ])).toBe(false);
+    expect(requestCarriesTextAttachment([
+      { role: "user", content: [{ type: "file_text", file: { name: "a.txt", text: "secret" } }] },
+      { role: "assistant", content: "noted" },
+      { role: "user", content: "later" },
+    ])).toBe(true);
+    expect(requestCarriesTextAttachment("nope")).toBe(false);
+    expect(requestCarriesTextAttachment([
+      null,
+      { role: "assistant", content: "text" },
+      { role: "user", content: [null, { type: "text", text: "hi" }] },
+    ])).toBe(false);
+  });
+
   it("accepts bounded text and code files without accepting arbitrary binary formats", () => {
     expect(isSupportedTextAttachment({ name: "notes.md", type: "text/markdown" } as File)).toBe(true);
     expect(isSupportedTextAttachment({ name: "main.ts", type: "" } as File)).toBe(true);

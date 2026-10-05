@@ -6,15 +6,15 @@
  * so every shape that is not what this expects contributes what it can and nothing else
  * rather than throwing and blanking the Playground over a number.
  *
- * It expects *prompt* messages — what `normalizeForAlternatingChat` produces, where every
- * part is already `text` or `image_url`. Composer-only parts such as `file_text` have been
- * flattened into their framed prompt text by then, so there is deliberately no branch for
- * them: a raw file body is not what gets sent, and counting it here would estimate text
- * the model never receives.
+ * Normalized prompts are `text` or `image_url`. A stored `file_text` part is counted as the
+ * framed prompt `formatTextAttachmentPrompt` will send, not the raw file body. A part whose
+ * name or text is not a string adds nothing and does not throw.
  */
 
+import { formatTextAttachmentPrompt } from "./text-attachment-policy";
+
 /** Rough per-image context cost. Images are opaque here, so one flat overhead is used. */
-const IMAGE_TOKEN_OVERHEAD = 500;
+export const IMAGE_TOKEN_OVERHEAD = 500;
 
 /** Per-message overhead for role markers and chat-template formatting. */
 const PER_MESSAGE_OVERHEAD = 1.5;
@@ -34,6 +34,37 @@ export function estimateTokens(text: string): number {
   return Math.ceil(Math.max(charBased, wordBased));
 }
 
+/**
+ * Upper bound of `estimateTokens` for every string of this length.
+ * The word branch uses the most words that fit: one character, one space.
+ */
+export function estimateTokensCeiling(chars: number): number {
+  if (!Number.isFinite(chars) || chars <= 0) return 0;
+  const n = Math.floor(chars);
+  if (n === 0) return 0;
+  const words = Math.floor((n + 1) / 2);
+  return Math.ceil(Math.max(n / 3.9, words * 1.33));
+}
+
+/** Largest length whose token ceiling is within the budget. */
+export function maxCharsWithinTokenCeiling(tokens: number): number {
+  if (!Number.isFinite(tokens) || tokens <= 0) return 0;
+  if (estimateTokensCeiling(1) > tokens) return 0;
+  let hi = 1;
+  while (estimateTokensCeiling(hi) <= tokens) {
+    const next = hi * 2;
+    if (next <= hi || next > 1_000_000_000) break;
+    hi = next;
+  }
+  let lo = 0;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi + 1) / 2);
+    if (estimateTokensCeiling(mid) <= tokens) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
 /** Text carried by a content part, or null when the part carries none this can read. */
 function partText(part: unknown): string | null {
   if (typeof part !== "object" || part === null) return null;
@@ -42,10 +73,50 @@ function partText(part: unknown): string | null {
   return typeof text === "string" ? text : null;
 }
 
+/** Framed prompt tokens for a stored file part, or 0 when it is not one. */
+function framedFileTokens(part: unknown): number {
+  if (typeof part !== "object" || part === null) return 0;
+  if ((part as { type?: unknown }).type !== "file_text") return 0;
+  const file = (part as { file?: unknown }).file;
+  if (!file || typeof file !== "object") return 0;
+  const name = (file as { name?: unknown }).name;
+  const text = (file as { text?: unknown }).text;
+  if (typeof name !== "string" || typeof text !== "string") return 0;
+  return estimateTokens(formatTextAttachmentPrompt({ name, text }));
+}
+
 function isImagePart(part: unknown): boolean {
   return typeof part === "object"
     && part !== null
     && (part as { type?: unknown }).type === "image_url";
+}
+
+/**
+ * Ids, function names, and argument strings travel with the completion even when `content`
+ * is empty. A display `name` is counted only on a tool result that names its `tool_call_id`.
+ */
+function toolLinkageText(message: object): string {
+  const lines: string[] = [];
+  const calls = (message as { tool_calls?: unknown }).tool_calls;
+  if (Array.isArray(calls)) {
+    for (const call of calls) {
+      if (!call || typeof call !== "object") continue;
+      const id = (call as { id?: unknown }).id;
+      const fn = (call as { function?: unknown }).function;
+      const name = fn && typeof fn === "object" ? (fn as { name?: unknown }).name : undefined;
+      const args = fn && typeof fn === "object" ? (fn as { arguments?: unknown }).arguments : undefined;
+      if (typeof id === "string" && id.length > 0) lines.push(id);
+      if (typeof name === "string" && name.length > 0) lines.push(name);
+      if (typeof args === "string" && args.length > 0) lines.push(args);
+    }
+  }
+  const toolCallId = (message as { tool_call_id?: unknown }).tool_call_id;
+  if (typeof toolCallId === "string" && toolCallId.length > 0) {
+    lines.push(toolCallId);
+    const name = (message as { name?: unknown }).name;
+    if (typeof name === "string" && name.length > 0) lines.push(name);
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -58,9 +129,10 @@ export function estimateTokensForMessages(msgs: readonly unknown[]): number {
   if (!Array.isArray(msgs)) return 0;
   let total = 0;
   for (const message of msgs) {
-    const content = typeof message === "object" && message !== null
-      ? (message as { content?: unknown }).content
-      : undefined;
+    const record = typeof message === "object" && message !== null
+      ? message as { content?: unknown }
+      : null;
+    const content = record?.content;
     if (Array.isArray(content)) {
       for (const part of content) {
         const text = partText(part);
@@ -68,22 +140,25 @@ export function estimateTokensForMessages(msgs: readonly unknown[]): number {
           total += estimateTokens(text);
         } else if (isImagePart(part)) {
           total += IMAGE_TOKEN_OVERHEAD;
+        } else {
+          total += framedFileTokens(part);
         }
       }
-      continue;
-    }
-    if (typeof content === "string") {
+    } else if (typeof content === "string") {
       total += estimateTokens(content);
-      continue;
+    } else if (content !== undefined && content !== null) {
+      // A non-string, non-array payload still costs context. Serializing is the only estimate
+      // available, and a value that cannot be serialized (a cycle, a BigInt) contributes none
+      // rather than throwing out of the caller's derived.
+      try {
+        total += estimateTokens(JSON.stringify(content) ?? "");
+      } catch {
+        // Unserializable payload: counted as its message overhead only.
+      }
     }
-    // A non-string, non-array payload still costs context. Serializing is the only estimate
-    // available, and a value that cannot be serialized (a cycle, a BigInt) contributes none
-    // rather than throwing out of the caller's derived.
-    if (content === undefined || content === null) continue;
-    try {
-      total += estimateTokens(JSON.stringify(content) ?? "");
-    } catch {
-      // Unserializable payload: counted as its message overhead only.
+    if (record) {
+      const linkage = toolLinkageText(record);
+      if (linkage) total += estimateTokens(linkage);
     }
   }
   return total + Math.ceil(msgs.length * PER_MESSAGE_OVERHEAD);

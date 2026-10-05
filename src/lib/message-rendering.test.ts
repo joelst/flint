@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   conversationImagePreviewPartIndexes,
   extractThinkingTrace,
+  modelPrefillsThink,
+  assistantClipboardText,
+  assistantStoredText,
+  presentAssistantText,
+  replyUsesPrefilledThink,
+  stripChatTemplateSpill,
   messageClipboardText,
   messageTimestamp,
   millisecondsUntilNextLocalDay,
@@ -282,6 +288,430 @@ describe("extractThinkingTrace", () => {
     const result = extractThinkingTrace(input, false);
     expect(result.visibleContent).toBe(input);
     expect(result.thinkingContent).toEqual([]);
+  });
+});
+
+describe("modelPrefillsThink", () => {
+  it("matches Qwen3-family and QwQ aliases only", () => {
+    expect(modelPrefillsThink("qwen3.5-9b")).toBe(true);
+    expect(modelPrefillsThink("qwen3-4b")).toBe(true);
+    expect(modelPrefillsThink("qwen3-vl-8b")).toBe(true);
+    expect(modelPrefillsThink("qwq-32b")).toBe(true);
+    expect(modelPrefillsThink("qwen3")).toBe(true);
+    expect(modelPrefillsThink("qwq")).toBe(true);
+    expect(modelPrefillsThink("Qwen3.5-9B")).toBe(true);
+    expect(modelPrefillsThink("qwen2.5-7b")).toBe(false);
+    expect(modelPrefillsThink("phi-4-mini-reasoning")).toBe(false);
+    expect(modelPrefillsThink("")).toBe(false);
+    expect(modelPrefillsThink("not-qwen3")).toBe(false);
+    expect(modelPrefillsThink("my-qwq")).toBe(false);
+    expect(modelPrefillsThink("qwen30")).toBe(false);
+    expect(modelPrefillsThink("qwq32")).toBe(false);
+    expect(modelPrefillsThink(null)).toBe(false);
+    expect(modelPrefillsThink(undefined)).toBe(false);
+  });
+});
+
+describe("replyUsesPrefilledThink", () => {
+  it("leaves an unstamped reply unchanged instead of using the model selected now", () => {
+    expect(replyUsesPrefilledThink({ stamped: false })).toBe(false);
+  });
+
+  it("trusts the stamp stored when the reply was produced", () => {
+    expect(replyUsesPrefilledThink({ stamped: true })).toBe(true);
+  });
+
+  it("shows a stamped error instead of an unclosed thinking trace", () => {
+    expect(replyUsesPrefilledThink({ stamped: true, isError: true })).toBe(false);
+    expect(replyUsesPrefilledThink({ stamped: true, isError: false })).toBe(true);
+  });
+});
+
+describe("stripChatTemplateSpill", () => {
+  it("drops role lines between a think close and the answer, and a trailing run", () => {
+    const text = [
+      "The user is asking about the Chicago Cubs.",
+      "</think>",
+      "",
+      "user",
+      "",
+      "user",
+      "",
+      "Based on my search, the 2021 record was 74 and 88.",
+      "Ask the user before treating that as official.",
+      "",
+      "user",
+      "",
+      "system",
+      "",
+      "assistant",
+    ].join("\n");
+    const stripped = stripChatTemplateSpill(text);
+    expect(stripped).toContain("The user is asking about the Chicago Cubs.");
+    expect(stripped).toContain("Based on my search, the 2021 record was 74 and 88.");
+    expect(stripped).toContain("Ask the user before treating that as official.");
+    expect(stripped).not.toMatch(/^user$/m);
+    expect(stripped).not.toMatch(/^system$/m);
+    expect(stripped).not.toMatch(/^assistant$/m);
+  });
+
+  it("keeps one role word between sentences and inside a code fence", () => {
+    const text = [
+      "The label below is data.",
+      "",
+      "user",
+      "",
+      "It stays.",
+      "",
+      "```",
+      "user",
+      "```",
+    ].join("\n");
+    expect(stripChatTemplateSpill(text)).toBe(text);
+  });
+
+  it("keeps a reply that is only the word user", () => {
+    expect(stripChatTemplateSpill("user")).toBe("user");
+  });
+
+  it("removes the template markers the decoder usually drops", () => {
+    expect(stripChatTemplateSpill("hello<|im_end|>\n<|im_start|>user")).toBe("hello");
+  });
+
+  it("keeps template markers inside a code fence", () => {
+    const fenced = ["```", "token <|im_start|> <|im_end|> <|endoftext|>", "```"].join("\n");
+    expect(stripChatTemplateSpill(fenced)).toBe(fenced);
+    expect(stripChatTemplateSpill("hello<|endoftext|>\n<|im_start|>user")).toBe("hello");
+  });
+
+  it("keeps a role line and template markers inside a tilde fence", () => {
+    const fenced = [
+      "~~~",
+      "user",
+      "token <|im_start|> <|im_end|> <|endoftext|>",
+      "~~~",
+    ].join("\n");
+    expect(stripChatTemplateSpill(fenced)).toBe(fenced);
+    expect(stripChatTemplateSpill("~~~\n<|im_end|>\nuser")).toBe("~~~\n<|im_end|>\nuser");
+  });
+
+  it("keeps a role line and template markers inside a four-backtick fence that contains a triple-backtick line", () => {
+    const fenced = [
+      "````",
+      "```",
+      "user",
+      "token <|im_start|> <|im_end|> <|endoftext|>",
+      "```",
+      "````",
+    ].join("\n");
+    expect(stripChatTemplateSpill(fenced)).toBe(fenced);
+  });
+
+  it("does not let a backtick fence close a tilde fence", () => {
+    const fenced = [
+      "~~~",
+      "```",
+      "inside",
+      "```",
+      "user",
+      "token <|im_start|> <|im_end|> <|endoftext|>",
+      "~~~",
+    ].join("\n");
+    expect(stripChatTemplateSpill(fenced)).toBe(fenced);
+  });
+
+  it("keeps markers when an info string does not close the fence and a longer run does", () => {
+    const fenced = [
+      "~~~lang",
+      "```js",
+      "user",
+      "token <|im_start|> <|im_end|> <|endoftext|>",
+      "~~~~",
+    ].join("\n");
+    expect(stripChatTemplateSpill(fenced)).toBe(fenced);
+  });
+
+  it("keeps an unfinished trailing role line while the stream is open", () => {
+    expect(stripChatTemplateSpill("Answer\nuser", { keepTrailingOpenLine: true })).toBe("Answer\nuser");
+    expect(stripChatTemplateSpill("Answer\nuser\n", { keepTrailingOpenLine: true })).toBe("Answer");
+  });
+
+  it("drops web tool JSON lines so a following role line after the think close goes too", () => {
+    const text = [
+      '{"name": "web_search", "arguments": {"query": "Chicago Bears NFC Championship appearances record"}}',
+      "</think>",
+      "",
+      '{"name": "web_fetch", "arguments": {"url": "https://www.espn.com/nfl/team/_/name/chic/bears#championships"}}',
+      '{"name": "web_fetch", "arguments": {"url": "https://www.espn.com/nfl/team/_/name/chic/bears#record-championships"}}',
+      "user",
+      "The search results indicate that the Chicago Bears have appeared in the NFC Championship 5 times.",
+    ].join("\n");
+    const stripped = stripChatTemplateSpill(text);
+    expect(stripped).toContain("The search results indicate that the Chicago Bears have appeared in the NFC Championship 5 times.");
+    expect(stripped).not.toContain("web_search");
+    expect(stripped).not.toContain("web_fetch");
+    expect(stripped).not.toMatch(/^user$/m);
+    const stringArgs = '{"name":"web_search","arguments":"{\\"query\\":\\"weather\\"}"}';
+    expect(stripChatTemplateSpill(stringArgs)).not.toContain("web_search");
+    expect(stripChatTemplateSpill('{"name":"web_search","arguments":"[1]"}')).toContain("web_search");
+    expect(stripChatTemplateSpill('{"name":"web_search","arguments":"1"}')).toContain("web_search");
+    expect(stripChatTemplateSpill('{"name":"web_search","arguments":"{"}')).toContain("web_search");
+  });
+
+  it("keeps a fenced web tool JSON example", () => {
+    const text = [
+      "Example:",
+      "```",
+      '{"name": "web_fetch", "arguments": {"url": "https://example.com/"}}',
+      "```",
+    ].join("\n");
+    expect(stripChatTemplateSpill(text)).toBe(text);
+  });
+
+  it("keeps blank lines inside a fenced sample and still collapses them outside", () => {
+    const fenced = ["```", "line", "", "", "line", "```"].join("\n");
+    expect(stripChatTemplateSpill(fenced)).toBe(fenced);
+    expect(stripChatTemplateSpill("a\n\n\n\nb")).toBe("a\n\nb");
+  });
+});
+
+describe("presentAssistantText", () => {
+  it('copies a trailing user line that the reply still shows', () => {
+    const text = 'The label for this turn is\nuser';
+    const shown = presentAssistantText({
+      text,
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: false,
+    });
+    expect(shown.visibleContent).toBe(text);
+    expect(assistantClipboardText(text, { prefilledThink: false, streaming: false })).toBe(text);
+    expect(assistantClipboardText('Answer\nuser', { prefilledThink: true, streaming: true })).toBe('Answer\nuser');
+    expect(assistantClipboardText('Answer\nuser\n', { prefilledThink: true, streaming: false })).toBe('Answer');
+  });
+
+  it('saves a role word the screen keeps and drops one the screen drops', () => {
+    const shown = 'The assigned role is\nuser';
+    expect(assistantStoredText(shown, false)).toBe(shown);
+    expect(assistantStoredText('Answer\nuser\n', true)).toBe('Answer');
+    const spilled = 'Reasoning\n</think>\nuser\nThe record is 3-2.';
+    const stored = assistantStoredText(spilled, false);
+    expect(stored).not.toMatch(/^user$/m);
+    expect(stored).toContain('Reasoning');
+    expect(stored).toContain('The record is 3-2.');
+  });
+
+  it('copies an assistant reply without a spilled role line', () => {
+    const text = 'Reasoning\n</think>\nuser\nThe record is 3-2.';
+    const copied = assistantClipboardText(text, { prefilledThink: false, streaming: false });
+    expect(copied).toContain('Reasoning');
+    expect(copied).toContain('The record is 3-2.');
+    expect(copied).not.toMatch(/^user$/m);
+  });
+
+  it('hides a standalone end-of-text marker on screen and on the clipboard', () => {
+    const text = 'The answer is rain.<|endoftext|>';
+    const input = { streaming: false, assumeReasoning: false, prefilledThink: false };
+    expect(presentAssistantText({ text, ...input }).visibleContent).toBe('The answer is rain.');
+    expect(assistantClipboardText(text, { prefilledThink: false, streaming: false })).toBe('The answer is rain.');
+    expect(presentAssistantText({ text: '<|ENDOFTEXT|>', ...input }).visibleContent).toBe('');
+    const fenced = ['```', '<|endoftext|>', '```'].join('\n');
+    expect(presentAssistantText({ text: fenced, ...input }).visibleContent).toBe(fenced);
+  });
+
+  it("keeps a prefilled think block out of the answer when the token budget ends it", () => {
+    const result = presentAssistantText({
+      text: "The user wants a comparison. June 2026 has not happened.",
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(result.visibleContent).toBe("");
+    expect(result.thinkingContent).toEqual(["The user wants a comparison. June 2026 has not happened."]);
+    expect(result.stoppedBeforeAnswer).toBe(true);
+  });
+
+  it("holds prefilled reasoning while the reply is still streaming", () => {
+    const result = presentAssistantText({
+      text: "Still reasoning",
+      streaming: true,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(result.visibleContent).toBe("");
+    expect(result.thinkingContent).toEqual(["Still reasoning"]);
+    expect(result.stoppedBeforeAnswer).toBe(false);
+  });
+
+  it("hides spilled role lines between the think close and the answer", () => {
+    const result = presentAssistantText({
+      text: "The user is asking about the Cubs.\n</think>\n\nuser\n\nuser\n\nBased on my search, 2021 was 74 and 88.",
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(result.thinkingContent).toEqual(["The user is asking about the Cubs."]);
+    expect(result.visibleContent).toBe("Based on my search, 2021 was 74 and 88.");
+    expect(result.stoppedBeforeAnswer).toBe(false);
+  });
+
+  it("shows the answer once a prefilled model closes the think tag", () => {
+    const result = presentAssistantText({
+      text: "worked through it\n</think>\n\nThe forecast is rain.",
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(result.visibleContent).toBe("The forecast is rain.");
+    expect(result.thinkingContent).toEqual(["worked through it"]);
+    expect(result.stoppedBeforeAnswer).toBe(false);
+  });
+
+  it("keeps playground status lines in the answer area", () => {
+    const result = presentAssistantText({
+      text: "Searching the public web: chicago weather",
+      streaming: true,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(result.visibleContent).toBe("Searching the public web: chicago weather");
+    expect(result.thinkingContent).toEqual([]);
+    expect(result.stoppedBeforeAnswer).toBe(false);
+  });
+
+  it("keeps a live Reading status in the answer area while the send is active", () => {
+    const result = presentAssistantText({
+      text: "Reading example.com",
+      streaming: true,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(result.visibleContent).toBe("Reading example.com");
+    expect(result.thinkingContent).toEqual([]);
+    expect(result.stoppedBeforeAnswer).toBe(false);
+  });
+
+  it('keeps a quoted error inside prefilled reasoning', () => {
+    const note = '[Stopped after web retrieval. The partial response may already have been saved.]';
+    const result = presentAssistantText({
+      text: `The log contains [Error: timeout] and the request never finished.\n\n${note}`,
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(result.thinkingContent).toEqual(['The log contains [Error: timeout] and the request never finished.']);
+    expect(result.visibleContent).toBe(note);
+    expect(result.stoppedBeforeAnswer).toBe(false);
+  });
+
+  it("shows an error or stop-during note after prefilled reasoning instead of a cutoff", () => {
+    const error = presentAssistantText({
+      text: "still reasoning\n\n[Error: network down]",
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(error.visibleContent).toBe("[Error: network down]");
+    expect(error.thinkingContent).toEqual(["still reasoning"]);
+    expect(error.stoppedBeforeAnswer).toBe(false);
+
+    const during = "[Stopped during web retrieval. An already-started network request may have completed.]";
+    const stopped = presentAssistantText({
+      text: `still reasoning\n\n${during}`,
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(stopped.visibleContent).toBe(during);
+    expect(stopped.thinkingContent).toEqual(["still reasoning"]);
+    expect(stopped.stoppedBeforeAnswer).toBe(false);
+
+    const only = presentAssistantText({
+      text: "[Error: network down]",
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(only.visibleContent).toBe("[Error: network down]");
+    expect(only.thinkingContent).toEqual([]);
+    expect(only.stoppedBeforeAnswer).toBe(false);
+
+    const template = "This model cannot use web search yet. The upstream template fails when tools are sent, so this reply stopped.";
+    const model = presentAssistantText({
+      text: `still reasoning\n\n${template}`,
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(model.visibleContent).toBe(template);
+    expect(model.thinkingContent).toEqual(["still reasoning"]);
+    expect(model.stoppedBeforeAnswer).toBe(false);
+  });
+
+  it("still shows a finished stop note instead of hiding it as reasoning", () => {
+    const note = "[Stopped after web retrieval. An already-started network request may have completed.]";
+    const result = presentAssistantText({
+      text: note,
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(result.visibleContent).toBe(note);
+    expect(result.thinkingContent).toEqual([]);
+    expect(result.stoppedBeforeAnswer).toBe(false);
+  });
+
+  it("does not treat a finished prefilled reply that starts with Reading as a status", () => {
+    const result = presentAssistantText({
+      text: "Reading the question and comparing the dates.",
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(result.visibleContent).toBe("");
+    expect(result.thinkingContent).toEqual(["Reading the question and comparing the dates."]);
+    expect(result.stoppedBeforeAnswer).toBe(true);
+  });
+
+  it("hides web tool JSON a model wrote as text, including when there is no think tag", () => {
+    const withThink = [
+      '{"name": "web_search", "arguments": {"query": "Chicago Bears NFC Championship appearances record"}}',
+      "</think>",
+      "",
+      '{"name": "web_fetch", "arguments": {"url": "https://www.espn.com/nfl/team/_/name/chic/bears#championships"}}',
+      "user",
+      "The search results indicate that the Chicago Bears have appeared in the NFC Championship 5 times.",
+    ].join("\n");
+    const shown = presentAssistantText({
+      text: withThink,
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: false,
+    });
+    expect(shown.visibleContent).toBe("The search results indicate that the Chicago Bears have appeared in the NFC Championship 5 times.");
+    expect(shown.thinkingContent.join("\n")).not.toContain("web_search");
+    expect(shown.visibleContent).not.toContain("web_fetch");
+    expect(shown.visibleContent).not.toMatch(/^user$/m);
+    const bare = presentAssistantText({
+      text: '{"name":"web_search","arguments":{"query":"bears"}}\nThe record is 3-2.',
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: false,
+    });
+    expect(bare.visibleContent).toBe("The record is 3-2.");
+    expect(bare.visibleContent).not.toContain("web_search");
+  });
+
+  it("shows an untagged answer from a reasoning model once streaming ends", () => {
+    const result = presentAssistantText({
+      text: "The square is red.",
+      streaming: false,
+      assumeReasoning: true,
+      prefilledThink: false,
+    });
+    expect(result.visibleContent).toBe("The square is red.");
+    expect(result.thinkingContent).toEqual([]);
+    expect(result.stoppedBeforeAnswer).toBe(false);
   });
 });
 

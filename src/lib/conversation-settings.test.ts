@@ -1,10 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import {
   DEFAULT_APP_SETTINGS,
+  MAX_TOKENS_DEFAULT_GENERATION,
+  RETIRED_DEFAULT_MAX_TOKENS,
   appSettingDefaultsToPersisted,
+  migrateRetiredMaxTokens,
   readAppSettingDefaults,
   resolveConversationSettings,
   seedSettingsFor,
+  startupWebToolsPatch,
   type AppSettingDefaults,
 } from './conversation-settings';
 
@@ -89,6 +93,32 @@ describe('readAppSettingDefaults', () => {
     expect(readAppSettingDefaults(null)).toEqual(DEFAULT_APP_SETTINGS);
   });
 
+  it('treats a stored copy of the retired ceiling as the current default', () => {
+    expect(RETIRED_DEFAULT_MAX_TOKENS).toBe(2048);
+    expect(readAppSettingDefaults({ maxTokens: 2048 }).maxTokens).toBe(DEFAULT_APP_SETTINGS.maxTokens);
+    expect(readAppSettingDefaults({ maxTokens: 2048 }, baseline).maxTokens).toBe(baseline.maxTokens);
+    expect(readAppSettingDefaults({ maxTokens: 4096 }, baseline).maxTokens).toBe(4096);
+    expect(readAppSettingDefaults({
+      maxTokens: 2048,
+      maxTokensDefaultGeneration: MAX_TOKENS_DEFAULT_GENERATION,
+    }, baseline).maxTokens).toBe(2048);
+  });
+
+  it('keeps a newer generation and its explicit 2048', () => {
+    const blob = { maxTokens: 2048, maxTokensDefaultGeneration: 3 };
+    expect(readAppSettingDefaults(blob, baseline).maxTokens).toBe(2048);
+    expect(appSettingDefaultsToPersisted(
+      { ...baseline, maxTokens: 2048 },
+      3,
+    ).maxTokensDefaultGeneration).toBe(3);
+    const migrated = migrateRetiredMaxTokens([{ id: 'c', settings: { ...blob } }]);
+    expect(migrated.changed).toBe(false);
+    expect(migrated.conversations[0].settings).toMatchObject({
+      maxTokens: 2048,
+      maxTokensDefaultGeneration: 3,
+    });
+  });
+
   it('round-trips through the persisted projection', () => {
     // The alias is excluded from the projection on purpose: the component keeps writing
     // `selectedModelAlias` itself as the last model used. Reading it back as the baseline is
@@ -96,6 +126,7 @@ describe('readAppSettingDefaults', () => {
     const persisted = appSettingDefaultsToPersisted(baseline);
     expect('selectedModelAlias' in persisted).toBe(false);
     expect('webToolsEnabled' in persisted).toBe(false);
+    expect(persisted.maxTokensDefaultGeneration).toBe(MAX_TOKENS_DEFAULT_GENERATION);
     expect(readAppSettingDefaults({ ...persisted, selectedModelAlias: baseline.modelAlias })).toEqual(
       baseline,
     );
@@ -230,12 +261,16 @@ describe('seedSettingsFor', () => {
       presencePenalty: -0.2,
       randomSeed: 7,
       webToolsEnabled: false,
+      maxTokensDefaultGeneration: MAX_TOKENS_DEFAULT_GENERATION,
     });
   });
 
   it('requires fresh opt-in instead of carrying web permission into a new chat', () => {
     expect(seedSettingsFor({ ...baseline, webToolsEnabled: true }).webToolsEnabled).toBe(false);
     expect(seedSettingsFor(baseline, { webToolsEnabled: true }).webToolsEnabled).toBe(true);
+    expect(seedSettingsFor(baseline, {}, { webToolsForNewChats: true }).webToolsEnabled).toBe(true);
+    expect(seedSettingsFor(baseline, { webToolsEnabled: false }, { webToolsForNewChats: true }).webToolsEnabled)
+      .toBe(false);
   });
 
   it('stamps an explicit null randomSeed rather than leaving it absent', () => {
@@ -260,5 +295,56 @@ describe('seedSettingsFor', () => {
   it('can override even when the inherited alias is empty', () => {
     const seed = seedSettingsFor({ ...baseline, modelAlias: '' }, { modelAlias: 'qwen3-4b' });
     expect(seed.modelAlias).toBe('qwen3-4b');
+  });
+});
+
+describe('startupWebToolsPatch', () => {
+  it('turns web search on only for an empty bag when Remember is set', () => {
+    expect(startupWebToolsPatch({}, true)).toEqual({ webToolsEnabled: true });
+    expect(startupWebToolsPatch({}, false)).toBeNull();
+    expect(startupWebToolsPatch({ webToolsEnabled: false }, true)).toBeNull();
+    expect(startupWebToolsPatch({ webToolsEnabled: true }, true)).toBeNull();
+  });
+});
+
+describe('migrateRetiredMaxTokens', () => {
+  const chat = (settings?: unknown) => ({ id: 'c', settings });
+
+  it('raises an untouched 2048 ceiling and stamps every other stored bag', () => {
+    const raised = migrateRetiredMaxTokens([
+      chat({ maxTokens: 2048, temperature: 0.7 }),
+      chat({ maxTokens: 16384 }),
+      chat(),
+      chat([]),
+    ]);
+    expect(raised.changed).toBe(true);
+    expect(raised.conversations[0].settings).toMatchObject({
+      maxTokens: DEFAULT_APP_SETTINGS.maxTokens,
+      temperature: 0.7,
+      maxTokensDefaultGeneration: MAX_TOKENS_DEFAULT_GENERATION,
+    });
+    expect(raised.conversations[1].settings).toMatchObject({
+      maxTokens: 16384,
+      maxTokensDefaultGeneration: MAX_TOKENS_DEFAULT_GENERATION,
+    });
+    expect(raised.conversations[2].settings).toBeUndefined();
+    expect(raised.conversations[3].settings).toEqual([]);
+  });
+
+  it('leaves a later choice of 2048 alone', () => {
+    const once = migrateRetiredMaxTokens([chat({ maxTokens: 2048 })]);
+    const chosen = migrateRetiredMaxTokens([
+      chat({ ...(once.conversations[0].settings as object), maxTokens: 2048 }),
+    ]);
+    expect(chosen.changed).toBe(false);
+    expect((chosen.conversations[0].settings as { maxTokens: number }).maxTokens).toBe(2048);
+  });
+
+  it('does not migrate a chat twice', () => {
+    const once = migrateRetiredMaxTokens([chat({ maxTokens: 16384, custom: true })]);
+    const twice = migrateRetiredMaxTokens(once.conversations);
+    expect(twice.changed).toBe(false);
+    expect(twice.conversations[0]).toBe(once.conversations[0]);
+    expect(once.conversations[0].settings).toMatchObject({ maxTokens: 16384, custom: true });
   });
 });

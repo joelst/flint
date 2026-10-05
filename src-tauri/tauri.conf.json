@@ -71,6 +71,9 @@
     }
   },
   "plugins": {
+    "shell": {
+      "open": "(([Mm][Aa][Ii][Ll][Tt][Oo]:\\w+)|([Tt][Ee][Ll]:\\+?\\w+)|([Hh][Tt][Tt][Pp][Ss]?://(\\w+|\\[[0-9A-Fa-f:.]+\\]))).+"
+    },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc1NTI3QUZEMjQwRUQ2QzMKUldURDFnNGsvWHBTZFg1OHNjWXFDaVpCNk80Nlp3Sk5lVis1eEdSOGFQSXJJMStQR1lpSmNGcXUK",
       "endpoints": [
