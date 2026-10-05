@@ -13,6 +13,7 @@ import {
 import {
   FENCE_FRAMING_CHARS,
   FETCH_BODY_CHARS,
+  IMAGE_LABEL_CHARS,
   MAX_FENCED_RESULT_CHARS,
   SEARCH_URL_CHARS,
   shortenWebEnvelopes,
@@ -90,16 +91,22 @@ function keepWholeTurns<T extends PackableMessage>(
 }
 
 /**
- * One assistant `tool_calls` entry: a 64-character id, `web_fetch`, and a URL
- * argument at the search length cap. Scaled once, plus the per-message overhead.
+ * One assistant `tool_calls` entry and the tool message that answers it.
+ * The call carries a 64-character id, `web_fetch`, and a URL argument at the
+ * search length cap. The result carries the same id and name, not a second URL.
+ * Each is scaled once, plus one message overhead.
  */
 function webToolCallReserve(): number {
-  const linkage = [
+  const scaled = (text: string) => (
+    Math.ceil(estimateTokens(text) * PACKER_SAFETY_FACTOR) + Math.ceil(1.5)
+  );
+  const call = [
     'c'.repeat(64),
     'web_fetch',
     JSON.stringify({ url: 'u'.repeat(SEARCH_URL_CHARS) }),
   ].join('\n');
-  return Math.ceil(estimateTokens(linkage) * PACKER_SAFETY_FACTOR) + Math.ceil(1.5);
+  const result = ['c'.repeat(64), 'web_fetch'].join('\n');
+  return scaled(call) + scaled(result);
 }
 
 /**
@@ -186,7 +193,7 @@ export function plannedWebFit(input: {
   let fencedChars = MAX_FENCED_RESULT_CHARS;
   if (input.roundsRemaining > 0 && fullReserve > reserveRoom) {
     maxChars = chooseFetchMaxChars(input);
-    fencedChars = maxChars + FENCE_FRAMING_CHARS;
+    fencedChars = maxChars + FENCE_FRAMING_CHARS + IMAGE_LABEL_CHARS;
   }
   // Image overhead was already removed from `available`. Counting it here would reserve it twice.
   let reserveTokens = pendingWebReserve({
@@ -202,7 +209,7 @@ export function plannedWebFit(input: {
   // One 280-character fence, scaled once. Image cost is already out of `available`.
   // A round that will not call tools needs no further result, so that fit stays viable.
   const minimumFenceTokens = Math.ceil(
-    estimateTokensCeiling(280 + FENCE_FRAMING_CHARS) * PACKER_SAFETY_FACTOR,
+    estimateTokensCeiling(280 + FENCE_FRAMING_CHARS + IMAGE_LABEL_CHARS) * PACKER_SAFETY_FACTOR,
   ) + webToolCallReserve();
   // A round may return two calls. Offer tools when one fence fits, and say how many.
   let maxToolCalls = 0;

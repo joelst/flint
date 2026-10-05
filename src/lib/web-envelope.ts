@@ -174,7 +174,10 @@ export const FENCE_FRAMING_CHARS = buildWebEnvelope({
   shortened: true,
 }).length + SHORTENED_FENCE_MARKER.length;
 
-export const FENCED_FETCH_CHARS = FETCH_BODY_CHARS + FENCE_FRAMING_CHARS;
+/** `executeWebToolCalls` appends this after a fetch body when the page has an image. */
+export const IMAGE_LABEL_CHARS = `\n\nImage: ${'a'.repeat(120)}`.length;
+
+export const FENCED_FETCH_CHARS = FETCH_BODY_CHARS + FENCE_FRAMING_CHARS + IMAGE_LABEL_CHARS;
 
 /**
  * Same join as `userSearchContext`: heading, a 200-character query, and five max results.

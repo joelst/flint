@@ -426,4 +426,57 @@ describe('web audit', () => {
     const flagged = sourcesWithOwnBudgetShortened(sources, `${search}\n\n${page}`);
     expect(flagged[0]?.budgetShortened).toBe(true);
   });
+
+  it('does not mark a shorter address that is only a prefix of the shortened page', () => {
+    const closer = 'flint-ref-abcdef012345';
+    const page = buildWebEnvelope({
+      closer,
+      title: 'Cut',
+      url: 'https://host/x.y',
+      retrievedOn: '2026-10-04',
+      body: 'plain page',
+      shortened: true,
+    });
+    const sources: WebAuditSource[] = [
+      { title: 'Prefix', url: 'https://host/x' },
+      { title: 'Page', url: 'https://host/x.y' },
+    ];
+    const flagged = sourcesWithOwnBudgetShortened(sources, page);
+    expect(flagged.find((source) => source.url === 'https://host/x')?.budgetShortened).toBeUndefined();
+    expect(flagged.find((source) => source.url === 'https://host/x.y')?.budgetShortened).toBe(true);
+  });
+
+  it('does not mark an address that appears only inside the page title', () => {
+    const closer = 'flint-ref-abcdef012345';
+    const page = buildWebEnvelope({
+      closer,
+      title: 'URL: https://host/x.',
+      url: 'https://other.example/a',
+      retrievedOn: '2026-10-04',
+      body: 'plain page',
+      shortened: true,
+    });
+    const sources: WebAuditSource[] = [
+      { title: 'Spoof', url: 'https://host/x' },
+      { title: 'Real', url: 'https://other.example/a' },
+    ];
+    const flagged = sourcesWithOwnBudgetShortened(sources, page);
+    expect(flagged.find((source) => source.url === 'https://host/x')?.budgetShortened).toBeUndefined();
+    expect(flagged.find((source) => source.url === 'https://other.example/a')?.budgetShortened).toBe(true);
+  });
+
+  it('marks a search result when the shortened search envelope has no URL field', () => {
+    const closer = 'flint-ref-abcdef012345';
+    const url = 'https://cut.example/b';
+    const search = buildWebEnvelope({
+      closer,
+      title: 'Search results',
+      retrievedOn: '2026-10-04',
+      body: url,
+      shortened: true,
+    });
+    const sources: WebAuditSource[] = [{ title: 'Cut', url }];
+    const flagged = sourcesWithOwnBudgetShortened(sources, search);
+    expect(flagged[0]?.budgetShortened).toBe(true);
+  });
 });

@@ -111,11 +111,31 @@ function envelopeHeader(block: string): string {
   return newline < 0 ? block : block.slice(0, newline);
 }
 
+/**
+ * The URL field is the text after the last ` URL: ` when that text ends at
+ * `. retrieved YYYY-MM-DD.` or `. retrieved unknown.`. A title can contain `URL:`.
+ */
+function envelopeUrlField(header: string): string | undefined {
+  const marker = ' URL: ';
+  let from = 0;
+  let last = -1;
+  while (from <= header.length) {
+    const at = header.indexOf(marker, from);
+    if (at < 0) break;
+    last = at;
+    from = at + marker.length;
+  }
+  if (last < 0) return undefined;
+  const matched = /^(.*?)\. retrieved (?:\d{4}-\d{2}-\d{2}|unknown)\./.exec(
+    header.slice(last + marker.length),
+  );
+  return matched ? matched[1] : undefined;
+}
+
 /** The envelope about this source, not a later page that merely quotes its URL. */
 function blockOwnsSource(block: string, url: string): boolean {
-  const header = envelopeHeader(block);
-  if (header.includes(`URL: ${url}.`) || header.endsWith(`URL: ${url}`)) return true;
-  if (header.includes('URL:')) return false;
+  const field = envelopeUrlField(envelopeHeader(block));
+  if (field !== undefined) return field === url;
   return block.includes(url);
 }
 

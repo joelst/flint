@@ -11,7 +11,13 @@ import {
   repackToolRequest,
 } from './context-packer';
 import { estimateTokens, estimateTokensCeiling, estimateTokensForMessages } from './token-estimate';
-import { buildWebEnvelope, FENCE_FRAMING_CHARS, MAX_FENCED_RESULT_CHARS, SEARCH_URL_CHARS } from './web-envelope';
+import {
+  buildWebEnvelope,
+  FENCE_FRAMING_CHARS,
+  IMAGE_LABEL_CHARS,
+  MAX_FENCED_RESULT_CHARS,
+  SEARCH_URL_CHARS,
+} from './web-envelope';
 
 describe('context packer', () => {
   it('reserves a quarter of a 4096-token window when max tokens is 2048', () => {
@@ -71,14 +77,18 @@ describe('context packer', () => {
     const contextTokens = 4096;
     const maxTokens = 2048;
     const available = contextTokens - generationReserve(contextTokens, maxTokens);
-    const linkage = Math.ceil(estimateTokens([
+    const callLinkage = Math.ceil(estimateTokens([
       'c'.repeat(64),
       'web_fetch',
       JSON.stringify({ url: 'u'.repeat(SEARCH_URL_CHARS) }),
     ].join('\n')) * PACKER_SAFETY_FACTOR) + Math.ceil(1.5);
+    const resultLinkage = Math.ceil(estimateTokens([
+      'c'.repeat(64),
+      'web_fetch',
+    ].join('\n')) * PACKER_SAFETY_FACTOR) + Math.ceil(1.5);
     const minimumTokens = Math.ceil(
-      estimateTokensCeiling(280 + FENCE_FRAMING_CHARS) * PACKER_SAFETY_FACTOR,
-    ) + linkage;
+      estimateTokensCeiling(280 + FENCE_FRAMING_CHARS + IMAGE_LABEL_CHARS) * PACKER_SAFETY_FACTOR,
+    ) + callLinkage + resultLinkage;
     const crowded = plannedWebFit({
       contextTokens,
       maxTokens,
