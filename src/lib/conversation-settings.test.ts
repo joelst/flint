@@ -8,6 +8,7 @@ import {
   readAppSettingDefaults,
   resolveConversationSettings,
   seedSettingsFor,
+  startupWebToolsPatch,
   type AppSettingDefaults,
 } from './conversation-settings';
 
@@ -97,6 +98,10 @@ describe('readAppSettingDefaults', () => {
     expect(readAppSettingDefaults({ maxTokens: 2048 }).maxTokens).toBe(DEFAULT_APP_SETTINGS.maxTokens);
     expect(readAppSettingDefaults({ maxTokens: 2048 }, baseline).maxTokens).toBe(baseline.maxTokens);
     expect(readAppSettingDefaults({ maxTokens: 4096 }, baseline).maxTokens).toBe(4096);
+    expect(readAppSettingDefaults({
+      maxTokens: 2048,
+      maxTokensDefaultGeneration: MAX_TOKENS_DEFAULT_GENERATION,
+    }, baseline).maxTokens).toBe(2048);
   });
 
   it('round-trips through the persisted projection', () => {
@@ -106,6 +111,7 @@ describe('readAppSettingDefaults', () => {
     const persisted = appSettingDefaultsToPersisted(baseline);
     expect('selectedModelAlias' in persisted).toBe(false);
     expect('webToolsEnabled' in persisted).toBe(false);
+    expect(persisted.maxTokensDefaultGeneration).toBe(MAX_TOKENS_DEFAULT_GENERATION);
     expect(readAppSettingDefaults({ ...persisted, selectedModelAlias: baseline.modelAlias })).toEqual(
       baseline,
     );
@@ -274,6 +280,15 @@ describe('seedSettingsFor', () => {
   it('can override even when the inherited alias is empty', () => {
     const seed = seedSettingsFor({ ...baseline, modelAlias: '' }, { modelAlias: 'qwen3-4b' });
     expect(seed.modelAlias).toBe('qwen3-4b');
+  });
+});
+
+describe('startupWebToolsPatch', () => {
+  it('turns web search on only for an empty bag when Remember is set', () => {
+    expect(startupWebToolsPatch({}, true)).toEqual({ webToolsEnabled: true });
+    expect(startupWebToolsPatch({}, false)).toBeNull();
+    expect(startupWebToolsPatch({ webToolsEnabled: false }, true)).toBeNull();
+    expect(startupWebToolsPatch({ webToolsEnabled: true }, true)).toBeNull();
   });
 });
 

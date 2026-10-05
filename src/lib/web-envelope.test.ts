@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_OMITTED_IMAGE_PLACEHOLDER } from './chat-request';
 import {
   CLOSER_HEX_CHARS,
   CLOSER_PREFIX,
@@ -214,7 +215,8 @@ describe('web envelope', () => {
       : latest.content;
     expect(latestText).toBe(`current question\n\n${fence}`);
     expect(result.some((message) => message.content && Array.isArray(message.content) && message.content.length === 0)).toBe(false);
-    expect(result[0].content).toEqual([
+    expect(result[0].content).toEqual([{ type: 'text', text: DEFAULT_OMITTED_IMAGE_PLACEHOLDER }]);
+    expect(result[1].content).toEqual([
       { type: 'text', text: 'older question' },
       { type: 'file_text', file: { text: 'notes' } },
     ]);
@@ -233,6 +235,10 @@ describe('web envelope', () => {
       { role: 'user', content: 'typed question' },
     ], 'fence body', jpeg);
     expect(result).toEqual([
+      {
+        role: 'user',
+        content: [{ type: 'text', text: DEFAULT_OMITTED_IMAGE_PLACEHOLDER }],
+      },
       { role: 'assistant', content: 'answer' },
       {
         role: 'user',

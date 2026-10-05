@@ -5,6 +5,8 @@
  * that will be wrapped, after extraction, so a page cannot end the block early.
  */
 
+import { DEFAULT_OMITTED_IMAGE_PLACEHOLDER } from './chat-request';
+
 export const CLOSER_PREFIX = 'flint-ref-';
 export const CLOSER_HEX_CHARS = 12;
 
@@ -63,8 +65,8 @@ function isImageUrlPart(part: unknown): boolean {
 /**
  * Copy the vision history, drop every existing image, and append the page JPEG
  * to the latest user message. Foundry accepts one image. A non-latest message
- * left with no parts is omitted. String content becomes a text part plus the image.
- * An existing text part gains the fence.
+ * left with no parts keeps a text placeholder instead of its image bytes.
+ * String content becomes a text part plus the image. An existing text part gains the fence.
  */
 export function withVisionImage<T extends { role?: unknown; content?: unknown }>(
   messages: readonly T[],
@@ -88,7 +90,13 @@ export function withVisionImage<T extends { role?: unknown; content?: unknown }>
         .map((part) => (part && typeof part === 'object' ? { ...(part as object) } : part))
       : null;
     if (index !== latest) {
-      if (withoutImages && withoutImages.length === 0) return;
+      if (withoutImages && withoutImages.length === 0) {
+        result.push({
+          ...message,
+          content: [{ type: 'text', text: DEFAULT_OMITTED_IMAGE_PLACEHOLDER }],
+        });
+        return;
+      }
       result.push(withoutImages ? { ...message, content: withoutImages } : { ...message });
       return;
     }

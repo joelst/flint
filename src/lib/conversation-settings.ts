@@ -134,10 +134,12 @@ export function readAppSettingDefaults(
 
   const maxTokens = source[PERSISTED_KEYS.maxTokens];
   if (typeof maxTokens === 'number' && Number.isInteger(maxTokens) && maxTokens > 0) {
-    // A stored copy of the retired untouched ceiling picks up the current default.
-    // Any other positive integer is a choice. This baseline has no generation mark,
-    // so it cannot stay on the retired number.
-    defaults.maxTokens = maxTokens === RETIRED_DEFAULT_MAX_TOKENS ? fallback.maxTokens : maxTokens;
+    // An unmarked copy of the retired ceiling picks up the current default.
+    // A blob that already records this generation keeps an explicit 2048.
+    const marked = source.maxTokensDefaultGeneration === MAX_TOKENS_DEFAULT_GENERATION;
+    defaults.maxTokens = maxTokens === RETIRED_DEFAULT_MAX_TOKENS && !marked
+      ? fallback.maxTokens
+      : maxTokens;
   }
 
   const topP = source[PERSISTED_KEYS.topP];
@@ -191,6 +193,7 @@ export function appSettingDefaultsToPersisted(
     [PERSISTED_KEYS.showFullHistory]: defaults.showFullHistory,
     [PERSISTED_KEYS.temperature]: defaults.temperature,
     [PERSISTED_KEYS.maxTokens]: defaults.maxTokens,
+    maxTokensDefaultGeneration: MAX_TOKENS_DEFAULT_GENERATION,
     [PERSISTED_KEYS.topP]: defaults.topP,
     [PERSISTED_KEYS.topK]: defaults.topK,
     [PERSISTED_KEYS.frequencyPenalty]: defaults.frequencyPenalty,
@@ -307,4 +310,20 @@ export function seedSettingsFor(
   // the picker that auto-selection had just filled. Leave the key absent and let it inherit.
   if (effective.modelAlias) seed.modelAlias = effective.modelAlias;
   return { ...seed, ...overrides };
+}
+
+/**
+ * Remember for new chats, applied only to a startup conversation that has no stored choice.
+ * An explicit boolean stays. A false Remember flag leaves the bag alone.
+ */
+export function startupWebToolsPatch(
+  settings: unknown,
+  webToolsForNewChats: boolean,
+): { webToolsEnabled: true } | null {
+  if (webToolsForNewChats !== true) return null;
+  if (settings && typeof settings === 'object' && !Array.isArray(settings)) {
+    const stored = (settings as { webToolsEnabled?: unknown }).webToolsEnabled;
+    if (typeof stored === 'boolean') return null;
+  }
+  return { webToolsEnabled: true };
 }

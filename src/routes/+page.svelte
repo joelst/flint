@@ -195,6 +195,7 @@
     readAppSettingDefaults,
     resolveConversationSettings,
     seedSettingsFor,
+    startupWebToolsPatch,
     type AppSettingDefaults,
   } from "$lib/conversation-settings";
   import { decideChipFetchHop, detectFetchableUrls, isFetchableUrl } from "$lib/url-chips";
@@ -2371,6 +2372,8 @@
    * previous session's blob happened to seed.
    */
   let pendingConversationSettingsSet = false;
+  /** The empty-archive chat this launch created, before Remember for new chats was loaded. */
+  let startupCreatedConversationId: string | null = null;
 
   /**
    * The model the loaded conversation stores, if any.
@@ -2865,6 +2868,7 @@
       pendingConversationSettingsSet = true;
     } else if (opened.writable) {
       createNewConversation();
+      startupCreatedConversationId = threadLoadedFor;
     }
     // A migrated archive is only in memory until it is committed; the legacy keys are left in
     // place either way, so a failure here costs nothing but a repeated migration next launch.
@@ -6134,6 +6138,14 @@ updateStateFromSdk();
         applyConversationSettings(pendingConversationSettings);
         pendingConversationSettings = undefined;
         pendingConversationSettingsSet = false;
+      }
+      if (
+        startupCreatedConversationId
+        && threadLoadedFor === startupCreatedConversationId
+      ) {
+        const created = findConversation(conversationArchive, startupCreatedConversationId);
+        const patch = startupWebToolsPatch(created?.settings, webToolsForNewChats);
+        if (patch) commitChatSettings(patch);
       }
       loadCompareHistory();
       loadCustomPersonasState();
