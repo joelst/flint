@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { hostBlocked, mergeBlocklists, parseBlocklistText } from './web-blocklist';
+import { canonicalBlockHost, hostBlocked, mergeBlocklists, parseBlocklistText } from './web-blocklist';
 
 describe('web blocklist', () => {
   it('blocks a listed host and its subdomains, not a name that merely ends the same way', () => {
@@ -16,5 +16,17 @@ describe('web blocklist', () => {
     expect(parsed.hosts).toEqual(['example.com']);
     expect(parsed.rejected).toEqual(['https://example.com/a', '*.example.com', 'example.com:443']);
     expect(mergeBlocklists(['localhost'], parsed.hosts, [])).toEqual(['localhost', 'example.com']);
+  });
+
+  it('rejects a host whose labels are not DNS labels', () => {
+    const malformed = ['.example.com', 'example..com', '-example.com'];
+    for (const entry of malformed) {
+      expect(canonicalBlockHost(entry)).toBeNull();
+    }
+    const parsed = parseBlocklistText(
+      '.example.com\nexample..com\n-example.com\nexample.com\nsub.example.com\nnotexample.com\n',
+    );
+    expect(parsed.rejected).toEqual(malformed);
+    expect(parsed.hosts).toEqual(['example.com', 'sub.example.com', 'notexample.com']);
   });
 });

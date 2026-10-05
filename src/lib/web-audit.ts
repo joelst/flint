@@ -218,7 +218,8 @@ export function prependTextToLatestUser<T extends { role?: unknown; content?: un
       return { ...message, content: `${text}\n\n${content}` };
     }
     if (Array.isArray(content)) {
-      return { ...message, content: [{ type: 'text', text }, ...content] };
+      // fromPromptParts joins text parts with '', so the closer needs its own trailing line.
+      return { ...message, content: [{ type: 'text', text: `${text}\n\n` }, ...content] };
     }
     return { ...message };
   });

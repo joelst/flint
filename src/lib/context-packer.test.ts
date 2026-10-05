@@ -176,6 +176,7 @@ describe('context packer', () => {
     expect(parts[1]).toBe('nope');
     expect(parts[2]).toBe(image);
     expect(String((parts[3] as { text: string }).text)).toContain('[shortened to fit context]');
+    expect(String((parts[3] as { text: string }).text)).not.toContain('second');
     expect((parts[4] as { text: string }).text).toBe('second');
   });
 

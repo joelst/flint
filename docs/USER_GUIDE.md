@@ -106,6 +106,7 @@ The sidebar is grouped by workflow:
   rejects local names, private IPv4 and IPv6 addresses, `file:` URLs, key-shaped text, and a long run copied from this
   send's prompt or attached files. It does not catch short secrets. The consent dialog is the control for those.
   A host on the device blocklist is not fetched, and a grant does not override that list.
+  A line is kept only when each label is a DNS name; a leading dot, an empty label, or a label that starts or ends with a hyphen is rejected.
   Adding a detected URL as a context chip and then
   clicking that chip's **Fetch** is a separate explicit action: the page is requested immediately,
   with the toggle on or off and before you send, through the same isolated helper. Sending clears

@@ -25,11 +25,17 @@ export function mergeBlocklists(
   return [...hosts];
 }
 
+/** A DNS label: 1–63 characters, letter or digit at each end, hyphens only in the middle. */
+function isDnsLabel(label: string): boolean {
+  return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label);
+}
+
 /** A hostname entry, or null when the line is not a host. No paths, ports, or wildcards. */
 export function canonicalBlockHost(entry: unknown): string | null {
   const raw = String(entry ?? '').trim().toLowerCase().replace(/\.+$/, '');
   if (!raw || raw.includes('/') || raw.includes(':') || raw.includes('*') || raw.includes(' ')) return null;
   if (!/^[a-z0-9.-]+$/.test(raw)) return null;
+  if (!raw.split('.').every(isDnsLabel)) return null;
   return canonicalHostname(raw);
 }
 

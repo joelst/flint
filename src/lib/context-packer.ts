@@ -131,24 +131,10 @@ export function plannedWebFit(input: {
   };
 }
 
-function contentText(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  return content.map((part) => {
-    if (!part || typeof part !== 'object' || (part as { type?: unknown }).type !== 'text') return '';
-    return String((part as { text?: unknown }).text ?? '');
-  }).join('\n');
-}
-
-function replaceText(content: unknown, next: string): unknown {
-  if (typeof content === 'string') return next;
-  if (!Array.isArray(content)) return content;
-  let used = false;
-  return content.map((part) => {
-    if (used || !part || typeof part !== 'object' || (part as { type?: unknown }).type !== 'text') return part;
-    used = true;
-    return { ...(part as object), text: next };
-  });
+function shortenOneText(text: string, closer: string, bodyChars: number): { text: string; shortened: boolean } {
+  if (!text.includes(closer)) return { text, shortened: false };
+  const cut = shortenWebEnvelopes(text, closer, bodyChars);
+  return cut.shortened ? { text: cut.text, shortened: true } : { text, shortened: false };
 }
 
 function shortenFenced<T extends PackableMessage>(
@@ -157,11 +143,25 @@ function shortenFenced<T extends PackableMessage>(
   bodyChars: number,
 ): { message: T; shortened: boolean } {
   if (!closer) return { message, shortened: false };
-  const text = contentText(message.content);
-  if (!text.includes(closer)) return { message, shortened: false };
-  const cut = shortenWebEnvelopes(text, closer, bodyChars);
-  if (!cut.shortened) return { message, shortened: false };
-  return { message: { ...message, content: replaceText(message.content, cut.text) }, shortened: true };
+  const content = message.content;
+  if (typeof content === 'string') {
+    const cut = shortenOneText(content, closer, bodyChars);
+    if (!cut.shortened) return { message, shortened: false };
+    return { message: { ...message, content: cut.text }, shortened: true };
+  }
+  if (!Array.isArray(content)) return { message, shortened: false };
+  let shortened = false;
+  const next = content.map((part) => {
+    if (!part || typeof part !== 'object' || (part as { type?: unknown }).type !== 'text') return part;
+    const text = (part as { text?: unknown }).text;
+    if (typeof text !== 'string') return part;
+    const cut = shortenOneText(text, closer, bodyChars);
+    if (!cut.shortened) return part;
+    shortened = true;
+    return { ...(part as object), text: cut.text };
+  });
+  if (!shortened) return { message, shortened: false };
+  return { message: { ...message, content: next }, shortened: true };
 }
 
 export function packContextMessages<T extends PackableMessage>(input: {
