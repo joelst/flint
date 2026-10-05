@@ -404,4 +404,26 @@ describe('web audit', () => {
     const flagged = sourcesWithOwnBudgetShortened(sources, kept);
     expect(flagged[0]?.budgetShortened).toBeUndefined();
   });
+
+  it('keeps a source shortened when a later page for the same url was cut', () => {
+    const closer = 'flint-ref-abcdef012345';
+    const url = 'https://cut.example/b';
+    const search = buildWebEnvelope({
+      closer,
+      title: 'Search results',
+      retrievedOn: '2026-10-04',
+      body: url,
+    });
+    const page = buildWebEnvelope({
+      closer,
+      title: 'Cut',
+      url,
+      retrievedOn: '2026-10-04',
+      body: 'plain page',
+      shortened: true,
+    });
+    const sources: WebAuditSource[] = [{ title: 'Cut', url }];
+    const flagged = sourcesWithOwnBudgetShortened(sources, `${search}\n\n${page}`);
+    expect(flagged[0]?.budgetShortened).toBe(true);
+  });
 });

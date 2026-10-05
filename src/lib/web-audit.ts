@@ -124,8 +124,9 @@ function envelopeWasShortened(block: string): boolean {
 }
 
 /**
- * Set `budgetShortened` only when this source's own Flint envelope header says
- * it was shortened. A headerless source-index fence and a quoted marker line do not.
+ * Set `budgetShortened` when any Flint envelope that owns this source says
+ * it was shortened. Clear a stale flag when none did. A headerless source-index
+ * fence and a quoted marker line do not.
  */
 export function sourcesWithOwnBudgetShortened<T extends WebAuditSource>(
   sources: readonly T[],
@@ -134,8 +135,9 @@ export function sourcesWithOwnBudgetShortened<T extends WebAuditSource>(
   const blocks = envelopeBlocks(fittedText);
   return sources.map((source) => {
     const url = typeof source?.url === 'string' ? source.url : '';
-    const own = url ? blocks.find((block) => blockOwnsSource(block, url)) : undefined;
-    if (!own || !envelopeWasShortened(own)) {
+    const shortened = Boolean(url) && blocks.some((block) =>
+      blockOwnsSource(block, url) && envelopeWasShortened(block));
+    if (!shortened) {
       if (!source?.budgetShortened) return source;
       const next = { ...source };
       delete next.budgetShortened;
