@@ -753,6 +753,14 @@ describe('web tool calls', () => {
     expect(searchQueryPolicyError('loopback 127.0.0.1')).toBe('query rejected by local policy');
   });
 
+  it('rejects a file scheme and allows a word that ends in file', () => {
+    expect(searchQueryPolicyError('public profile: Ada Lovelace')).toBeNull();
+    expect(searchQueryPolicyError('short public weather')).toBeNull();
+    expect(searchQueryPolicyError('file:///etc/passwd')).toBe('query rejected by local policy');
+    expect(searchQueryPolicyError('File:/secret')).toBe('query rejected by local policy');
+    expect(searchQueryPolicyError('open file:/tmp/x')).toBe('query rejected by local policy');
+  });
+
   it('builds the search scrub corpus from history, the current turn, and attached file text', () => {
     const historySecret = 'history-secret-value-that-is-at-least-forty-eight-characters';
     const fileSecret = 'file-secret-value-that-is-at-least-forty-eight-characters-long';
@@ -941,6 +949,36 @@ describe('web tool calls', () => {
       async () => true,
     );
     expect(tooMany).toEqual({ error: 'Too many redirects' });
+  });
+
+  it('returns an error when image authorization or execution rejects', async () => {
+    await expect(executeWebImage(
+      'https://photos.example/a.jpg',
+      async () => {
+        throw new Error('helper down');
+      },
+      async () => true,
+    )).resolves.toEqual({ error: 'helper down' });
+
+    await expect(executeWebImage(
+      'https://photos.example/a.jpg',
+      vi.fn(),
+      async () => {
+        throw new Error('consent failed');
+      },
+    )).resolves.toEqual({ error: 'consent failed' });
+
+    const controller = new AbortController();
+    await expect(executeWebImage(
+      'https://photos.example/a.jpg',
+      async () => {
+        controller.abort();
+        throw new Error('aborted');
+      },
+      async () => true,
+      [],
+      controller.signal,
+    )).resolves.toEqual({ error: 'Stopped' });
   });
 
   it('names the search or the host while a tool call is running', async () => {

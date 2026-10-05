@@ -210,7 +210,8 @@ export function searchQueryPolicyError(query: string, corpus = ''): string | nul
   const text = collapsed(query);
   if (!text) return POLICY_REJECTION;
   if (text.toLowerCase().includes(CLOSER_PREFIX)) return POLICY_REJECTION;
-  if (/file:/i.test(text)) return POLICY_REJECTION;
+  // A letter glued on, as in "profile:", is a word, not a file: scheme.
+  if (/(?:^|[^A-Za-z0-9])file:/i.test(text)) return POLICY_REJECTION;
   if (/-----BEGIN [A-Z0-9 ]+-----/.test(text)) return POLICY_REJECTION;
   if (/(?:^|[^A-Za-z0-9])sk-[A-Za-z0-9]/.test(text)) return POLICY_REJECTION;
   if (/\blocalhost\b/i.test(text) || /\.local\b/i.test(text) || /metadata\.google\.internal/i.test(text)) {
@@ -748,26 +749,35 @@ export async function executeWebImage(
   blocklist: readonly string[] = [],
   signal?: AbortSignal,
 ): Promise<{ url: string; mediaType: string; dataBase64: string } | { error: string }> {
-  let pending = url;
-  for (let hop = 0; hop <= MAX_CROSS_ORIGIN_REDIRECTS; hop += 1) {
+  try {
+    let pending = url;
+    for (let hop = 0; hop <= MAX_CROSS_ORIGIN_REDIRECTS; hop += 1) {
+      if (signal?.aborted) return { error: 'Stopped' };
+      const host = hostnameFromUrl(pending);
+      if (!host || hostBlocked(host, blocklist)) return { error: 'This host is blocked on this device' };
+      const allowed = await authorize(pending, hop === 0 ? 'request' : 'redirect');
+      if (!allowed) return { error: 'User declined access to this site' };
+      const result = await execute({ operation: 'image', url: pending });
+      if (result.operation === 'redirect') {
+        const next = canonicalFetchUrl(result.url);
+        if (!next) return { error: 'Public web fetch returned an unexpected result' };
+        pending = next;
+        continue;
+      }
+      if (result.operation !== 'image' || !result.dataBase64) {
+        return { error: 'Public web fetch returned an unexpected result' };
+      }
+      return { url: result.url, mediaType: result.mediaType, dataBase64: result.dataBase64 };
+    }
+    return { error: 'Too many redirects' };
+  } catch (error) {
     if (signal?.aborted) return { error: 'Stopped' };
-    const host = hostnameFromUrl(pending);
-    if (!host || hostBlocked(host, blocklist)) return { error: 'This host is blocked on this device' };
-    const allowed = await authorize(pending, hop === 0 ? 'request' : 'redirect');
-    if (!allowed) return { error: 'User declined access to this site' };
-    const result = await execute({ operation: 'image', url: pending });
-    if (result.operation === 'redirect') {
-      const next = canonicalFetchUrl(result.url);
-      if (!next) return { error: 'Public web fetch returned an unexpected result' };
-      pending = next;
-      continue;
-    }
-    if (result.operation !== 'image' || !result.dataBase64) {
-      return { error: 'Public web fetch returned an unexpected result' };
-    }
-    return { url: result.url, mediaType: result.mediaType, dataBase64: result.dataBase64 };
+    const message = String(error instanceof Error ? error.message : error)
+      .replace(/[\u0000-\u001f\u007f-\u009f\s]+/g, ' ')
+      .trim()
+      .slice(0, 500);
+    return { error: message || 'Public web fetch failed' };
   }
-  return { error: 'Too many redirects' };
 }
 
 function hostnameFromUrl(url: string): string | null {

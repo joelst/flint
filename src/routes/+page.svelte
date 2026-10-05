@@ -7499,6 +7499,7 @@ updateStateFromSdk();
         );
         updateAssistantMessage({
           isError: true,
+          prefilledThink: false,
           content: failureMessage,
           ...webAuditPatch(),
         });
@@ -10249,6 +10250,7 @@ Output only the summary text, no preamble.`;
                               assumeReasoning={currentModelTags.includes("reasoning")}
                               prefilledThink={replyUsesPrefilledThink({
                                 stamped: msg.prefilledThink === true,
+                                isError: msg.isError === true,
                               })}
                               messageKey={`${threadLoadedFor}:${msg.id ?? i}`}
                             />

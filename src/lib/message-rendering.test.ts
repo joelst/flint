@@ -309,6 +309,11 @@ describe("replyUsesPrefilledThink", () => {
   it("trusts the stamp stored when the reply was produced", () => {
     expect(replyUsesPrefilledThink({ stamped: true })).toBe(true);
   });
+
+  it("shows a stamped error instead of an unclosed thinking trace", () => {
+    expect(replyUsesPrefilledThink({ stamped: true, isError: true })).toBe(false);
+    expect(replyUsesPrefilledThink({ stamped: true, isError: false })).toBe(true);
+  });
 });
 
 describe("stripChatTemplateSpill", () => {

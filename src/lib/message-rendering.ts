@@ -298,9 +298,11 @@ export function modelPrefillsThink(alias: string | null | undefined): boolean {
 /**
  * New replies store the flag. A reply saved before that flag existed has no producer
  * metadata, so it stays as written. The model selected now is not that metadata:
- * switching to Qwen3 must not hide another model's answer.
+ * switching to Qwen3 must not hide another model's answer. An error is the failure
+ * text, not an unclosed reasoning trace.
  */
-export function replyUsesPrefilledThink(input: { stamped: boolean }): boolean {
+export function replyUsesPrefilledThink(input: { stamped: boolean; isError?: boolean }): boolean {
+  if (input.isError === true) return false;
   return input.stamped === true;
 }
 
