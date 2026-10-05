@@ -149,7 +149,10 @@ export function buildWebEnvelope(input: {
   return [header, closer, body, closer].join('\n');
 }
 
-/** Worst-case envelope around an empty body, so the reserve cannot drift from the header. */
+/** Body suffix added when a fence is cut. The framing reserve counts the same string. */
+export const SHORTENED_FENCE_MARKER = '\n[shortened to fit context]';
+
+/** Worst-case envelope around an empty body, plus the cut-body marker. */
 export const FENCE_FRAMING_CHARS = buildWebEnvelope({
   closer: `${CLOSER_PREFIX}${'0'.repeat(CLOSER_HEX_CHARS)}`,
   title: 'T'.repeat(120),
@@ -158,7 +161,7 @@ export const FENCE_FRAMING_CHARS = buildWebEnvelope({
   body: '',
   truncated: true,
   shortened: true,
-}).length;
+}).length + SHORTENED_FENCE_MARKER.length;
 
 export const FENCED_FETCH_CHARS = FETCH_BODY_CHARS + FENCE_FRAMING_CHARS;
 export const FENCED_SEARCH_CHARS = SEARCH_RESULT_COUNT
@@ -272,7 +275,7 @@ function shortenLeadingWebFence(envelope: string, closer: string, maxBodyChars: 
   if (body.length <= maxBodyChars) return { text: envelope, shortened: false };
   let cut = body.lastIndexOf(' ', maxBodyChars);
   if (cut < Math.min(32, maxBodyChars)) cut = maxBodyChars;
-  const shortenedBody = `${body.slice(0, cut).trimEnd()}\n[shortened to fit context]`;
+  const shortenedBody = `${body.slice(0, cut).trimEnd()}${SHORTENED_FENCE_MARKER}`;
   const tail = envelope.slice(end + closeMarker.length);
   return {
     text: `${closer}\n${shortenedBody}${closeMarker}${tail}`,
@@ -307,7 +310,7 @@ export function shortenWebEnvelope(envelope: string, closer: string, maxBodyChar
   if (body.length <= maxBodyChars) return { text: envelope, shortened: false };
   let cut = body.lastIndexOf(' ', maxBodyChars);
   if (cut < Math.min(32, maxBodyChars)) cut = maxBodyChars;
-  const shortenedBody = `${body.slice(0, cut).trimEnd()}\n[shortened to fit context]`;
+  const shortenedBody = `${body.slice(0, cut).trimEnd()}${SHORTENED_FENCE_MARKER}`;
   const header = envelope.slice(0, start);
   const withNote = header.includes('Shortened to fit context.')
     ? header

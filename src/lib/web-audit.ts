@@ -225,13 +225,9 @@ export function webSourceIndex(messages: readonly { role?: unknown; webAudit?: u
     const audit = normalizeWebAudit(message.webAudit);
     if (!audit) continue;
     for (const source of audit.sources) {
-      const flags = [
-        source.truncated ? 'truncated' : '',
-        source.budgetShortened ? 'shortened to fit context' : '',
-      ].filter(Boolean).join(', ');
       const title = sanitizeWebLabel(source.title || source.url);
       const url = sanitizeWebLabel(source.url, 2_048);
-      lines.push(`- ${title} ${url}${flags ? ` (${flags})` : ''}`);
+      lines.push(`- ${title} ${url}${sourceFlagSuffix(source)}`);
     }
   }
   return lines.slice(0, 24).join('\n');
@@ -274,8 +270,16 @@ export function prependTextToLatestUser<T extends { role?: unknown; content?: un
   });
 }
 
+function sourceFlagSuffix(source: { truncated?: boolean; budgetShortened?: boolean }): string {
+  const flags = [
+    source.truncated ? 'truncated' : '',
+    source.budgetShortened ? 'shortened to fit context' : '',
+  ].filter(Boolean).join(', ');
+  return flags ? ` (${flags})` : '';
+}
+
 export function webAuditSourceLabel(source: WebAuditSource): string {
-  return `${singleLine(source.title || source.url) || source.url}${source.truncated ? ' (truncated)' : ''}`;
+  return `${singleLine(source.title || source.url) || source.url}${sourceFlagSuffix(source)}`;
 }
 
 export function webAuditErrorLabel(error: string): string {

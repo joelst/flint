@@ -252,8 +252,9 @@ export function resolveConversationSettings(
 }
 
 /**
- * Move chats that still have the old untouched ceiling onto the current default.
- * A later choice of that same number stays, because the generation mark is written the first time.
+ * Move an unmarked 2048 ceiling onto the current default.
+ * The archive cannot tell an explicit 2048 from the old default, so that number moves once.
+ * The generation mark is written the first time, and a later explicit 2048 stays.
  */
 export function migrateRetiredMaxTokens<T extends { settings?: unknown }>(
   conversations: T[],

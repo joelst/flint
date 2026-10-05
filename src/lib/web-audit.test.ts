@@ -86,6 +86,19 @@ describe('web audit', () => {
   it('formats labels on one line and marks truncation', () => {
     expect(webAuditSourceLabel({ title: 'A\n\tB', url: 'https://e.com/', truncated: true }))
       .toBe('A B (truncated)');
+    expect(webAuditSourceLabel({ title: 'Page', url: 'https://e.com/', budgetShortened: true }))
+      .toContain('shortened to fit context');
+    expect(webAuditSourceLabel({
+      title: 'Page',
+      url: 'https://e.com/',
+      truncated: true,
+      budgetShortened: true,
+    })).toBe('Page (truncated, shortened to fit context)');
+    expect(webAuditSourceLabel({ title: 'Page', url: 'https://e.com/' })).toBe('Page');
+    expect(messageClipboardWithWebAudit('Answer', {
+      sources: [{ title: 'Page', url: 'https://example.com/a', budgetShortened: true }],
+      errors: [],
+    })).toContain('shortened to fit context');
     expect(webAuditSourceLabel({ title: '  ', url: 'https://e.com/' })).toBe('https://e.com/');
     expect(webAuditErrorLabel('web_fetch:\nbad\u0000x')).toBe('web_fetch: bad x');
     expect(webAuditPlainText(undefined)).toBe('');
