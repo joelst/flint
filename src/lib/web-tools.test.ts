@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { buildWebAudit } from './web-audit';
+import { estimateTokens } from './token-estimate';
 import {
   WEB_TOOL_DEFINITIONS,
   collectCurrentWebFetchUrls,
@@ -14,6 +15,7 @@ import {
   searchScrubCorpus,
   userSearchContext,
   webContentSystemInstruction,
+  webToolSchemaTokens,
   webToolSystemInstruction,
   webToolTemplateCrash,
   type WebToolRequest,
@@ -36,6 +38,10 @@ describe('web tool calls', () => {
   it('exposes bounded search and fetch tools to the model', () => {
     expect(WEB_TOOL_DEFINITIONS.map((tool) => tool.function.name))
       .toEqual(['web_search', 'web_fetch']);
+    expect(webToolSchemaTokens()).toBe(
+      Math.ceil(estimateTokens(JSON.stringify(WEB_TOOL_DEFINITIONS)) * 1.15),
+    );
+    expect(webToolSchemaTokens()).toBeGreaterThan(0);
   });
 
   it('returns a per-call error for an unknown tool or malformed JSON, and rejects more than two calls', () => {

@@ -1,4 +1,5 @@
 import { isDeniedAddress, ipLiteralFamily } from '../../sidecar/web-address-policy.js';
+import { estimateTokens } from './token-estimate';
 import type {
   ChatRequestMessage,
   ChatToolCall,
@@ -90,6 +91,11 @@ export const WEB_TOOL_DEFINITIONS: ChatToolDefinition[] = [
     },
   },
 ];
+
+/** Scaled size of the schemas Foundry adds whenever the tools option is present. */
+export function webToolSchemaTokens(): number {
+  return Math.ceil(estimateTokens(JSON.stringify(WEB_TOOL_DEFINITIONS)) * 1.15);
+}
 
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {

@@ -255,6 +255,7 @@
     MAX_CROSS_ORIGIN_REDIRECTS,
     WEB_TOOL_DEFINITIONS,
     WEB_TOOLS_UPSTREAM_NOTE,
+    webToolSchemaTokens,
     canonicalFetchUrl,
     collectCurrentWebFetchUrls,
     executeWebImage,
@@ -6641,6 +6642,7 @@ updateStateFromSdk();
     omittedPinned?: number;
     omittedSummaries?: number;
     omittedHistory?: number;
+    toolsViable?: boolean;
   } | null = null;
 
   function contextFitSentence(fit: {
@@ -7096,6 +7098,17 @@ updateStateFromSdk();
         );
         openingFit = lastContextFit;
       }
+      if (offerWebTools && openingFit?.toolsViable === false) {
+        offerWebTools = false;
+        requestMessages = getMessagesForInference(
+          inferenceMessages,
+          true,
+          chipFence.length > 0,
+          false,
+          { ...sendFit, roundsRemaining: 0 },
+        );
+        openingFit = lastContextFit;
+      }
     } catch (error: any) {
       const message = error?.message || "The attached files could not be included safely.";
       if (attachedImages.length > 0 || attachedTextFiles.length > 0) {
@@ -7242,12 +7255,13 @@ updateStateFromSdk();
         let data: any;
         while (true) {
           const roundsRemaining = offerWebTools ? Math.max(0, maxWebToolRounds - webToolRounds) : 0;
+          const sendTools = offerWebTools && webToolRounds < maxWebToolRounds;
           const latestKeep = [...requestMessages].reverse().findIndex((message: { role?: string }) => message?.role === "user");
           const latestKeepAt = latestKeep < 0 ? 0 : requestMessages.length - 1 - latestKeep;
           const keptHead = requestMessages.slice(0, Math.min(1, latestKeepAt));
           const occupied = Math.ceil(
             estimateTokensForMessages([...keptHead, ...requestMessages.slice(latestKeepAt)]) * 1.15,
-          );
+          ) + (sendTools ? webToolSchemaTokens() : 0);
           const plan = plannedWebFit({
             contextTokens: currentModelContextLength,
             maxTokens,
@@ -7255,6 +7269,19 @@ updateStateFromSdk();
             occupiedTokens: occupied,
             reserveImage: Boolean(webImageUrl) && isVisionModel && !userAttachedImage,
           });
+          if (sendTools && plan.toolsViable === false) {
+            offerWebTools = false;
+            if (webToolRounds === 0) {
+              requestMessages = getMessagesForInference(
+                inferenceMessages,
+                true,
+                chipFence.length > 0,
+                false,
+                { ...sendFit, roundsRemaining: 0 },
+              );
+            }
+            continue;
+          }
           roundMaxChars = plan.maxChars;
           const fitted = repackToolRequest({
             messages: requestMessages,
@@ -7269,11 +7296,7 @@ updateStateFromSdk();
           const fittedNote = contextFitSentence(fitted);
           if (fittedNote) statusMessage = fittedNote;
           if (webToolsSkippedNote) statusMessage = webToolsSkippedNote;
-          const toolChoice = !offerWebTools
-            ? undefined
-            : webToolRounds < maxWebToolRounds
-              ? "auto"
-              : "none";
+          const toolChoice = sendTools ? "auto" : undefined;
           try {
             data = await chatCompletionStream(
               requestModelAlias,
@@ -7285,7 +7308,7 @@ updateStateFromSdk();
               },
               {
                 ...requestGeneration,
-                tools: offerWebTools ? WEB_TOOL_DEFINITIONS : undefined,
+                tools: sendTools ? WEB_TOOL_DEFINITIONS : undefined,
                 toolChoice,
               },
               publishRequestId,
@@ -7335,7 +7358,7 @@ updateStateFromSdk();
           const rawCalls = data?.choices?.[0]?.message?.tool_calls;
           const hasCalls = Array.isArray(rawCalls) && rawCalls.length > 0;
           if (!offerWebTools || !hasCalls) break;
-          if (toolChoice === "none") {
+          if (!sendTools) {
             throw new Error("The model requested another web tool round after the two-round limit.");
           }
           webToolRounds += 1;
@@ -7648,7 +7671,7 @@ updateStateFromSdk();
       const latestKept = [...combined].reverse().find((message) => message?.role === "user");
       const occupied = Math.ceil(
         (estimateTokens(effectiveSystem) + estimateTokensForMessages(latestKept ? [latestKept] : [])) * 1.15,
-      );
+      ) + (includeWebToolInstruction ? webToolSchemaTokens() : 0);
       const plan = plannedWebFit({
         contextTokens: currentModelContextLength,
         maxTokens,
@@ -7663,7 +7686,7 @@ updateStateFromSdk();
         closer: fit.closer,
         bodyChars: plan.maxChars,
       });
-      lastContextFit = packed;
+      lastContextFit = { ...packed, toolsViable: plan.toolsViable };
       if (packed.contextFull) {
         throw new Error("This send does not fit this model's context. Shorten the latest message or choose a model that reports a larger context.");
       }

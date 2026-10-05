@@ -11,7 +11,7 @@ import {
   repackToolRequest,
 } from './context-packer';
 import { estimateTokens, estimateTokensForMessages } from './token-estimate';
-import { buildWebEnvelope, MAX_FENCED_RESULT_CHARS } from './web-envelope';
+import { buildWebEnvelope, FENCE_FRAMING_CHARS, MAX_FENCED_RESULT_CHARS } from './web-envelope';
 
 describe('context packer', () => {
   it('reserves a quarter of a 4096-token window when max tokens is 2048', () => {
@@ -32,6 +32,7 @@ describe('context packer', () => {
       occupiedTokens: occupied,
     });
     expect(fit.maxChars).toBe(1_000);
+    expect(fit.toolsViable).toBe(true);
     expect(fit.promptTokens).toBeGreaterThanOrEqual(occupied);
     const packed = packContextMessages({
       messages: [
@@ -45,6 +46,36 @@ describe('context packer', () => {
     });
     expect(packed.contextFull).toBe(false);
     expect(packed.messages.at(-1)).toEqual(latest);
+  });
+
+  it('withholds tools when one minimum fence cannot sit beside the prompt', () => {
+    const contextTokens = 4096;
+    const maxTokens = 2048;
+    const available = contextTokens - generationReserve(contextTokens, maxTokens);
+    const minimumTokens = Math.ceil(
+      estimateTokens('x'.repeat(280 + FENCE_FRAMING_CHARS)) * PACKER_SAFETY_FACTOR,
+    );
+    const crowded = plannedWebFit({
+      contextTokens,
+      maxTokens,
+      roundsRemaining: 2,
+      occupiedTokens: available - minimumTokens + 1,
+    });
+    expect(crowded.toolsViable).toBe(false);
+    const exact = plannedWebFit({
+      contextTokens,
+      maxTokens,
+      roundsRemaining: 2,
+      occupiedTokens: available - minimumTokens,
+    });
+    expect(exact.toolsViable).toBe(true);
+    const toolFree = plannedWebFit({
+      contextTokens,
+      maxTokens,
+      roundsRemaining: 0,
+      occupiedTokens: available - minimumTokens + 1,
+    });
+    expect(toolFree.toolsViable).toBe(true);
   });
 
   it('refuses only when the system prompt and latest message still do not fit', () => {

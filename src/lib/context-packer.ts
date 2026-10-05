@@ -137,7 +137,7 @@ export function plannedWebFit(input: {
   roundsRemaining: number;
   occupiedTokens: number;
   reserveImage?: boolean;
-}): { maxChars: number; reserveTokens: number; promptTokens: number; fencedChars: number } {
+}): { maxChars: number; reserveTokens: number; promptTokens: number; fencedChars: number; toolsViable: boolean } {
   const context = input.contextTokens && input.contextTokens > 0
     ? input.contextTokens
     : UNKNOWN_CONTEXT_TOKENS;
@@ -167,11 +167,18 @@ export function plannedWebFit(input: {
   // that measurement leaves `promptTokens` large enough for it. A reserve of four full
   // fences does not fit in the 4096-token fallback and must not consume the send.
   if (reserveTokens > reserveRoom) reserveTokens = reserveRoom;
+  // One 280-character fence, scaled once. Image cost is already out of `available`.
+  // A round that will not call tools needs no further result, so that fit stays viable.
+  const minimumFenceTokens = Math.ceil(
+    estimateTokens('x'.repeat(280 + FENCE_FRAMING_CHARS)) * PACKER_SAFETY_FACTOR,
+  );
+  const toolsViable = input.roundsRemaining <= 0 || reserveRoom >= minimumFenceTokens;
   return {
     maxChars,
     fencedChars,
     reserveTokens,
     promptTokens: Math.max(0, available - reserveTokens),
+    toolsViable,
   };
 }
 
