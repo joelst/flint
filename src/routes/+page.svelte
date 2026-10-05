@@ -259,6 +259,7 @@
     executeWebToolCalls,
     messagesContainImages,
     modelCannotUseWebTools,
+    searchScrubCorpus,
     webContentSystemInstruction,
     webToolSystemInstruction,
     webToolTemplateCrash,
@@ -7025,10 +7026,6 @@ updateStateFromSdk();
     const sendCloser = createWebCloser();
     const retrievedOn = localRetrievalDate();
     const userAttachedImage = attachedImages.length > 0;
-    const scrubCorpus = [
-      systemPrompt,
-      ...attachedTextFiles.map((file) => file.file?.text || ""),
-    ].join("\n");
     // One user turn: the fence, then the question. There is no assistant acknowledgement.
     const chipFence = doneFetches.map((fetch) => buildWebEnvelope({
       closer: sendCloser,
@@ -7395,7 +7392,7 @@ updateStateFromSdk();
               retrievedOn,
               alreadyIncluded: new Set(doneFetches.map((fetch) => fetch.finalUrl || fetch.url)),
               blocklist: webHostBlocklist,
-              scrubCorpus,
+              scrubCorpus: searchScrubCorpus(requestMessages),
               maxChars: roundMaxChars,
               onActivity: (event) => {
                 const line = event.kind === "search"

@@ -103,8 +103,8 @@ The sidebar is grouped by workflow:
   On a later message, Flint may name those pages again. The titles are reference data inside the same kind of fence, not instructions, and the page text is not sent again.
   Page text is fenced as reference data. The fence stops a page from closing that block. It does not stop a
   weak model from copying private text into a later query. Flint's check of that query is best-effort: it
-  rejects local names, private IPv4 and IPv6 addresses, `file:` URLs, key-shaped text, and a long run copied from this
-  send's prompt or attached files. It does not catch short secrets. The consent dialog is the control for those.
+  rejects local names, private IPv4 and IPv6 addresses, `file:` URLs, key-shaped text, and a long run copied from the
+  messages in this send, including earlier turns and attached files. It does not catch short secrets. The consent dialog is the control for those.
   A host on the device blocklist is not fetched, and a grant does not override that list.
   A line is kept only when each label is a DNS name; a leading dot, an empty label, or a label that starts or ends with a hyphen is rejected.
   Adding a detected URL as a context chip and then

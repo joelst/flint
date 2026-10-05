@@ -248,6 +248,8 @@ describe('renderer/sidecar boundary', () => {
     expect(page).toContain('splitCoveredConsentPrompts(storedWebConsent, sessionWebConsent, webConsentQueue.slice(1))');
     expect(page).not.toContain('localStorage.getItem(WEB_CONSENT_STORAGE_KEY)');
     expect(page).not.toContain('localStorage.setItem(WEB_CONSENT_STORAGE_KEY');
+    expect(page).toContain('searchScrubCorpus(requestMessages)');
+    expect(page).not.toContain('attachedTextFiles.map((file) => file.file?.text || "")');
   });
 
   it('marks manual web context untrusted and keeps image sends off the fetch tool', () => {

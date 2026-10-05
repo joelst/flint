@@ -230,6 +230,37 @@ export function searchQueryPolicyError(query: string, corpus = ''): string | nul
 }
 
 /**
+ * Text the model can copy into a search query from the messages just sent.
+ * System text is already folded into that request. Image bytes are not scanned.
+ */
+export function searchScrubCorpus(messages: unknown): string {
+  if (!Array.isArray(messages)) return '';
+  const chunks: string[] = [];
+  for (const message of messages) {
+    if (!message || typeof message !== 'object' || !('content' in message)) continue;
+    const content = (message as { content?: unknown }).content;
+    if (typeof content === 'string') {
+      if (content) chunks.push(content);
+      continue;
+    }
+    if (!Array.isArray(content)) continue;
+    for (const part of content) {
+      if (!part || typeof part !== 'object') continue;
+      const record = part as { type?: unknown; text?: unknown; file?: unknown };
+      if (record.type === 'image_url') continue;
+      if (record.type === 'text') {
+        if (typeof record.text === 'string' && record.text) chunks.push(record.text);
+        continue;
+      }
+      if (record.type !== 'file_text' || !record.file || typeof record.file !== 'object') continue;
+      const text = (record.file as { text?: unknown }).text;
+      if (typeof text === 'string' && text) chunks.push(text);
+    }
+  }
+  return chunks.join('\n');
+}
+
+/**
  * Denied IPv6 literals in free text. Boundaries avoid treating `hello::world` as an address.
  * A trailing sentence period is stripped before the shared address check.
  */

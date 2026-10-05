@@ -11,6 +11,7 @@ import {
   modelCannotUseWebTools,
   readWebToolCalls,
   searchQueryPolicyError,
+  searchScrubCorpus,
   userSearchContext,
   webContentSystemInstruction,
   webToolSystemInstruction,
@@ -750,6 +751,39 @@ describe('web tool calls', () => {
     expect(searchQueryPolicyError('sentence ::1.')).toBe('query rejected by local policy');
     expect(searchQueryPolicyError('docs 2001:db8::1')).toBe('query rejected by local policy');
     expect(searchQueryPolicyError('loopback 127.0.0.1')).toBe('query rejected by local policy');
+  });
+
+  it('builds the search scrub corpus from history, the current turn, and attached file text', () => {
+    const historySecret = 'history-secret-value-that-is-at-least-forty-eight-characters';
+    const fileSecret = 'file-secret-value-that-is-at-least-forty-eight-characters-long';
+    const messages = [
+      { role: 'system', content: 'System rules for this chat.' },
+      { role: 'user', content: `older question ${historySecret}` },
+      { role: 'assistant', content: 'older answer' },
+      {
+        role: 'user',
+        content: [
+          null,
+          { type: 'text' },
+          { type: 'text', text: 'current question' },
+          { type: 'file_text', file: { name: 'notes.txt', text: fileSecret } },
+          { type: 'file_text', file: {} },
+          { type: 'image_url', image_url: { url: 'data:image/png;base64,SHOULD-NOT-BE-SCANNED' } },
+          { type: 'nope' },
+        ],
+      },
+    ];
+    const corpus = searchScrubCorpus(messages);
+    expect(corpus).toContain('System rules for this chat.');
+    expect(corpus).toContain(historySecret);
+    expect(corpus).toContain('older answer');
+    expect(corpus).toContain('current question');
+    expect(corpus).toContain(fileSecret);
+    expect(corpus).not.toContain('SHOULD-NOT-BE-SCANNED');
+    expect(searchQueryPolicyError(`please find ${historySecret} now`, corpus))
+      .toBe('query rejected by local policy');
+    expect(searchQueryPolicyError('short public weather', corpus)).toBeNull();
+    expect(searchScrubCorpus(undefined)).toBe('');
   });
 
   it('rejects a query that repeats a long run from this send', () => {
