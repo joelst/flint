@@ -911,6 +911,86 @@ describe('web tool calls', () => {
     expect(result.sources).toEqual([{ title: 'A', url: 'https://example.com/b' }]);
   });
 
+  it('does not fetch a redirect whose destination is already included', async () => {
+    const start = 'https://start.example/go';
+    const land = 'https://land.example/page';
+    const execute = vi.fn(async (request: WebToolRequest): Promise<WebToolResult> => {
+      if (request.operation === 'fetch' && request.url === start) {
+        return { operation: 'redirect', url: land };
+      }
+      return {
+        operation: 'fetch',
+        url: land,
+        title: 'Land',
+        text: 'Body',
+        truncated: false,
+        charCount: 4,
+      };
+    });
+    const authorizeFetch = vi.fn(async () => true);
+    const result = await executeWebToolCalls([{
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'web_fetch', arguments: `{"url":"${start}"}` },
+    }], execute, new Set([start]), undefined, authorizeFetch, undefined, {
+      alreadyIncluded: new Set([land]),
+    });
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute).toHaveBeenCalledWith({
+      operation: 'fetch',
+      url: start,
+      maxChars: 20_000,
+    });
+    expect(authorizeFetch).toHaveBeenCalledTimes(1);
+    expect(authorizeFetch).toHaveBeenCalledWith(start, 'request');
+    expect(authorizeFetch).not.toHaveBeenCalledWith(land, 'redirect');
+    expect(result.toolMessages[0]?.content).toBe(
+      'This URL is already included in the current request. Use that block and answer from it.',
+    );
+    expect(result.sources).toEqual([]);
+    expect(result.errors).toEqual([]);
+  });
+
+  it('does not fetch a redirect to a page fetched earlier in this round', async () => {
+    const start = 'https://start.example/go';
+    const land = 'https://land.example/page';
+    const execute = vi.fn(async (request: WebToolRequest): Promise<WebToolResult> => {
+      if (request.operation === 'fetch' && request.url === start) {
+        return { operation: 'redirect', url: land };
+      }
+      return {
+        operation: 'fetch',
+        url: land,
+        title: 'Land',
+        text: 'Body',
+        truncated: false,
+        charCount: 4,
+      };
+    });
+    const authorizeFetch = vi.fn(async () => true);
+    const result = await executeWebToolCalls([
+      {
+        id: 'call-1',
+        type: 'function',
+        function: { name: 'web_fetch', arguments: `{"url":"${land}"}` },
+      },
+      {
+        id: 'call-2',
+        type: 'function',
+        function: { name: 'web_fetch', arguments: `{"url":"${start}"}` },
+      },
+    ], execute, new Set([start, land]), undefined, authorizeFetch);
+    const landFetches = execute.mock.calls.filter((call) => (
+      call[0]?.operation === 'fetch' && call[0]?.url === land
+    ));
+    expect(landFetches).toHaveLength(1);
+    expect(result.toolMessages[1]?.content).toBe(
+      'This URL is already included in the current request. Use that block and answer from it.',
+    );
+    expect(result.sources).toEqual([{ title: 'Land', url: land }]);
+    expect(authorizeFetch).not.toHaveBeenCalledWith(land, 'redirect');
+  });
+
   it('blocks a host before domain consent and drops a blocklisted search result', async () => {
     const execute = vi.fn();
     const authorizeFetch = vi.fn(async () => true);

@@ -671,7 +671,7 @@ export async function executeWebToolCalls(
           if (host && hostBlocked(host, options?.blocklist ?? [])) {
             throw new Error('This host is blocked on this device');
           }
-          if (hop === 0 && seenBodies.has(pending.url)) {
+          if (seenBodies.has(pending.url)) {
             toolCalls.push(call);
             toolMessages.push({
               role: 'tool',
