@@ -482,14 +482,10 @@ describe("presentAssistantText", () => {
 
   it('copies an assistant reply without a spilled role line', () => {
     const text = 'Reasoning\n</think>\nuser\nThe record is 3-2.';
-    const shown = presentAssistantText({
-      text,
-      streaming: false,
-      assumeReasoning: false,
-      prefilledThink: false,
-    });
-    expect(assistantClipboardText(text, { prefilledThink: false, streaming: false })).toBe(shown.visibleContent);
-    expect(assistantClipboardText(text, { prefilledThink: false, streaming: false })).not.toMatch(/^user$/m);
+    const copied = assistantClipboardText(text, { prefilledThink: false, streaming: false });
+    expect(copied).toContain('Reasoning');
+    expect(copied).toContain('The record is 3-2.');
+    expect(copied).not.toMatch(/^user$/m);
   });
 
   it("keeps a prefilled think block out of the answer when the token budget ends it", () => {

@@ -182,24 +182,15 @@ export function assistantTextHasTemplateSpill(text: string, prefilledThink: bool
 
 /**
  * Clipboard text for an assistant reply. Spill cleanup runs only when the reply
- * is already cleaned for display. A string then copies the answer still on screen.
+ * is already cleaned for display. The reasoning above the answer stays.
  */
 export function assistantClipboardText(
   content: MessageContent,
   options: { prefilledThink: boolean; streaming: boolean },
 ): string {
   const copied = messageClipboardText(content);
-  const plain = messagePlainText(content);
-  if (!assistantTextHasTemplateSpill(plain, options.prefilledThink)) return copied;
-  const stripped = stripChatTemplateSpill(copied, { keepTrailingOpenLine: options.streaming });
-  if (copied !== plain) return stripped;
-  const shown = presentAssistantText({
-    text: plain,
-    streaming: options.streaming,
-    assumeReasoning: false,
-    prefilledThink: options.prefilledThink,
-  }).visibleContent;
-  return shown.length > 0 ? shown : stripped;
+  if (!assistantTextHasTemplateSpill(messagePlainText(content), options.prefilledThink)) return copied;
+  return stripChatTemplateSpill(copied, { keepTrailingOpenLine: options.streaming });
 }
 
 export function messageTimestamp(
