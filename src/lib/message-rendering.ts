@@ -432,7 +432,34 @@ export function stripChatTemplateSpill(
   const survivors = nonBlank.filter((index) => !drop.has(index));
   if (survivors.length === 0 && nonBlank.length === 1) drop.delete(nonBlank[0]);
 
-  return lines.filter((_, index) => !drop.has(index)).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  // Collapse only unfenced blank runs. Lines inside a fence keep their spacing.
+  const keptLines: string[] = [];
+  const keptFenced: boolean[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (drop.has(index)) continue;
+    keptLines.push(lines[index]);
+    keptFenced.push(fenced[index]);
+  }
+  const collapsed: string[] = [];
+  let blankRun = 0;
+  let singleBlank = '';
+  const flushBlankRun = () => {
+    if (blankRun === 1) collapsed.push(singleBlank);
+    else if (blankRun >= 2) collapsed.push('');
+    blankRun = 0;
+  };
+  for (let index = 0; index < keptLines.length; index += 1) {
+    const line = keptLines[index];
+    if (line.trim() === '' && !keptFenced[index]) {
+      if (blankRun === 0) singleBlank = line;
+      blankRun += 1;
+      continue;
+    }
+    flushBlankRun();
+    collapsed.push(line);
+  }
+  flushBlankRun();
+  return collapsed.join('\n').trim();
 }
 
 const APP_STATUS_PREFIXES = [

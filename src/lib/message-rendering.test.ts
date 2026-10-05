@@ -456,6 +456,12 @@ describe("stripChatTemplateSpill", () => {
     ].join("\n");
     expect(stripChatTemplateSpill(text)).toBe(text);
   });
+
+  it("keeps blank lines inside a fenced sample and still collapses them outside", () => {
+    const fenced = ["```", "line", "", "", "line", "```"].join("\n");
+    expect(stripChatTemplateSpill(fenced)).toBe(fenced);
+    expect(stripChatTemplateSpill("a\n\n\n\nb")).toBe("a\n\nb");
+  });
 });
 
 describe("presentAssistantText", () => {
