@@ -84,8 +84,9 @@ The sidebar is grouped by workflow:
   The checkbox stays off for a model that does not report tool calling. Gemma 4 answers without web search until the upstream template fix.
   Flint asks you to allow that query
   just once, for this session, or always. Later searches skip that question when you chose session
-  or always, unless the model wrote the query after it had already read web text in that same send.
-  That dialog says so, and **Allow** runs that one search. Declining lets the answer continue without the search.
+  or always, unless the model wrote the query after it had already read web text in that same send,
+  or a text or code file is attached anywhere in the conversation.
+  When the query followed web text, that dialog says so, and **Allow** runs that one search. Declining lets the answer continue without the search.
   A query you decline, or that Flint rejects on this device, is not listed as a search that ran. If an answer needs a page from
   those results, Flint asks you to allow that domain once, for this session, or always, or to allow
   all public URLs in the conversation named in that prompt until the page reloads.
@@ -99,6 +100,7 @@ The sidebar is grouped by workflow:
   Search terms and requested public URLs leave the
   device. Search queries go to DuckDuckGo over HTTPS. The request identifies Flint with the user agent
   `Flint-Web-Tool/1.0 (+https://github.com/joelst/flint)`. Flint does not send cookies, credentials, or browser state.
+  On a later message, Flint may name those pages again. The titles are reference data inside the same kind of fence, not instructions, and the page text is not sent again.
   Page text is fenced as reference data. The fence stops a page from closing that block. It does not stop a
   weak model from copying private text into a later query. Flint's check of that query is best-effort: it
   rejects local names, private IPv4 and IPv6 addresses, `file:` URLs, key-shaped text, and a long run copied from this
@@ -119,6 +121,7 @@ The sidebar is grouped by workflow:
   Web tools cannot be combined with an image you attached. That send leaves search and fetch off and continues.
   A vision model may be shown one image from a fetched page, re-encoded as JPEG, so camera metadata is gone.
   That image is not saved with the conversation. If that request fails, the text answer remains.
+  Attached text files count toward that plan as the framed prompt, not the raw file.
   When a model does not report its context length, Flint plans the send as 4,096 tokens and holds back
   the smaller of Max tokens and a quarter of that window for the reply. Lowering Max tokens, or choosing
   a model that reports a larger context, leaves more room for page text. A page that does not fit is

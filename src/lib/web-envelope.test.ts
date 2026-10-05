@@ -11,6 +11,7 @@ import {
   shortenWebEnvelope,
   shortenWebEnvelopes,
   stripWebCloser,
+  toolContentsWithCloser,
   webCloserInstruction,
 } from './web-envelope';
 
@@ -114,5 +115,20 @@ describe('web envelope', () => {
     expect(shortenWebEnvelopes(trailing, closer, 1)).toEqual({ text: trailing, shortened: false });
     expect(shortenWebEnvelope('no fence', closer, 1)).toEqual({ text: 'no fence', shortened: false });
     expect(shortenWebEnvelope(trailing, closer, 1)).toEqual({ text: trailing, shortened: false });
+  });
+
+  it('joins tool envelopes that contain the closer and skips other roles', () => {
+    const closer = 'flint-ref-abcdef012345';
+    const first = `${closer}\nshort page\n${closer}`;
+    const second = `${closer}\nsecond\n${closer}`;
+    expect(toolContentsWithCloser([
+      { role: 'user', content: `${closer}\nuser fence\n${closer}` },
+      { role: 'tool', content: first },
+      { role: 'tool', content: 'no fence here' },
+      { role: 'tool', content: [{ type: 'text', text: closer }] },
+      { role: 'assistant', content: `${closer}\nnot a tool\n${closer}` },
+      { role: 'tool', content: second },
+    ], closer)).toBe(`${first}\n\n${second}`);
+    expect(toolContentsWithCloser([{ role: 'tool', content: first }], '')).toBe('');
   });
 });

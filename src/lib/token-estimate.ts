@@ -6,12 +6,12 @@
  * so every shape that is not what this expects contributes what it can and nothing else
  * rather than throwing and blanking the Playground over a number.
  *
- * It expects *prompt* messages — what `normalizeForAlternatingChat` produces, where every
- * part is already `text` or `image_url`. Composer-only parts such as `file_text` have been
- * flattened into their framed prompt text by then, so there is deliberately no branch for
- * them: a raw file body is not what gets sent, and counting it here would estimate text
- * the model never receives.
+ * Normalized prompts are `text` or `image_url`. A stored `file_text` part is counted as the
+ * framed prompt `formatTextAttachmentPrompt` will send, not the raw file body. A part whose
+ * name or text is not a string adds nothing and does not throw.
  */
+
+import { formatTextAttachmentPrompt } from "./text-attachment-policy";
 
 /** Rough per-image context cost. Images are opaque here, so one flat overhead is used. */
 export const IMAGE_TOKEN_OVERHEAD = 500;
@@ -40,6 +40,18 @@ function partText(part: unknown): string | null {
   if ((part as { type?: unknown }).type !== "text") return null;
   const text = (part as { text?: unknown }).text;
   return typeof text === "string" ? text : null;
+}
+
+/** Framed prompt tokens for a stored file part, or 0 when it is not one. */
+function framedFileTokens(part: unknown): number {
+  if (typeof part !== "object" || part === null) return 0;
+  if ((part as { type?: unknown }).type !== "file_text") return 0;
+  const file = (part as { file?: unknown }).file;
+  if (!file || typeof file !== "object") return 0;
+  const name = (file as { name?: unknown }).name;
+  const text = (file as { text?: unknown }).text;
+  if (typeof name !== "string" || typeof text !== "string") return 0;
+  return estimateTokens(formatTextAttachmentPrompt({ name, text }));
 }
 
 function isImagePart(part: unknown): boolean {
@@ -97,6 +109,8 @@ export function estimateTokensForMessages(msgs: readonly unknown[]): number {
           total += estimateTokens(text);
         } else if (isImagePart(part)) {
           total += IMAGE_TOKEN_OVERHEAD;
+        } else {
+          total += framedFileTokens(part);
         }
       }
     } else if (typeof content === "string") {

@@ -157,6 +157,7 @@
     MAX_ATTACHED_TEXT_FILES,
     mergePreparedTextAttachments,
     prepareTextAttachmentBatch,
+    requestCarriesTextAttachment,
   } from "$lib/text-attachments";
   import {
     collectStoredArchive,
@@ -220,7 +221,15 @@
     releaseConsentKey,
     restoreDialogFocus,
   } from "$lib/dialog-focus";
-  import { buildWebAudit, chipTextIsReadable, urlChipRetrievalAudit, webSourceIndex } from "$lib/web-audit";
+  import {
+    WEB_SOURCE_INDEX_NOTE,
+    buildWebAudit,
+    chipTextIsReadable,
+    fenceWebSourceIndex,
+    prependTextToLatestUser,
+    urlChipRetrievalAudit,
+    webSourceIndex,
+  } from "$lib/web-audit";
   import {
     allUrlsGrantTarget,
     allUrlsGranted,
@@ -253,7 +262,14 @@
     webToolSystemInstruction,
     webToolTemplateCrash,
   } from "$lib/web-tools";
-  import { buildWebEnvelope, createWebCloser, localRetrievalDate, messageContentWithFence } from "$lib/web-envelope";
+  import {
+    buildWebEnvelope,
+    createWebCloser,
+    localRetrievalDate,
+    messageContentWithFence,
+    toolContentsWithCloser,
+    webCloserInstruction,
+  } from "$lib/web-envelope";
   import { mergeBlocklists, parseBlocklistText, hostBlocked, BUILT_IN_WEB_BLOCKLIST } from "$lib/web-blocklist";
   import { packContextMessages, plannedWebFit, repackToolRequest } from "$lib/context-packer";
   import {
@@ -7171,11 +7187,10 @@ updateStateFromSdk();
     let webSources = [...chipAudit.sources];
     let webErrors = [...chipAudit.errors];
     let webQueries: string[] = [];
-    let webTextInRequest = chipFence.length > 0;
+    let webTextInRequest = chipFence.length > 0 || requestCarriesTextAttachment(stamped);
     let webImageUrl = userAttachedImage
       ? ""
       : (doneFetches.find((fetch) => fetch.imageUrl)?.imageUrl || "");
-    let webFenceForVision = "";
     if (openingFit?.shortened) webBudgetShortened = true;
     const packNote = contextFitSentence(openingFit);
     if (packNote) statusMessage = packNote;
@@ -7382,9 +7397,6 @@ updateStateFromSdk();
           }
           for (const message of executed.toolMessages) {
             if (typeof message.content === "string" && message.content.includes(sendCloser)) {
-              webFenceForVision = webFenceForVision
-                ? `${webFenceForVision}\n\n${message.content}`
-                : message.content;
               webTextInRequest = true;
             }
           }
@@ -7437,7 +7449,7 @@ updateStateFromSdk();
                 let visionContent = "";
                 const vision = await chatCompletionStream(
                   requestModelAlias,
-                  withVisionImage(visionBase, webFenceForVision, jpeg),
+                  withVisionImage(visionBase, toolContentsWithCloser(requestMessages, sendCloser), jpeg),
                   (delta: string) => {
                     if (requestController.signal.aborted) return;
                     visionContent += delta;
@@ -7635,8 +7647,17 @@ updateStateFromSdk();
       : includeUntrustedWebContent
         ? webContentSystemInstruction(baseSystem, fit?.closer)
         : baseSystem;
-    const sourceIndex = webSourceIndex(effectiveHistory);
-    if (sourceIndex) effectiveSystem = `${effectiveSystem}\n\n${sourceIndex}`;
+    const sourceBullets = webSourceIndex(effectiveHistory);
+    if (sourceBullets) {
+      effectiveSystem = `${effectiveSystem}\n\n${WEB_SOURCE_INDEX_NOTE}`;
+      const closer = fit?.closer;
+      if (closer) {
+        combined = prependTextToLatestUser(combined, fenceWebSourceIndex(sourceBullets, closer));
+        if (!effectiveSystem.includes(webCloserInstruction(closer))) {
+          effectiveSystem = `${effectiveSystem}\n\n${webCloserInstruction(closer)}`;
+        }
+      }
+    }
     if (fit) {
       const latestKept = [...combined].reverse().find((message) => message?.role === "user");
       const occupied = Math.ceil(

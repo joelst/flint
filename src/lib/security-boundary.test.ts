@@ -310,6 +310,16 @@ describe('renderer/sidecar boundary', () => {
     expect(page).toContain('webAudit={msg.webAudit}');
     expect(page).toContain('if (webSources.length > 0 || webErrors.length > 0)');
     expect(page).toContain('{ webToolsEnabled: includeWebToolInstruction }');
+    expect(page).not.toContain('if (sourceIndex) effectiveSystem');
+    expect(page).toContain('WEB_SOURCE_INDEX_NOTE');
+    expect(page).toContain('fenceWebSourceIndex(');
+    const fenceAt = page.indexOf('prependTextToLatestUser(');
+    const packAt = page.indexOf('packContextMessages({', fenceAt);
+    expect(fenceAt).toBeGreaterThan(0);
+    expect(packAt).toBeGreaterThan(fenceAt);
+    expect(page).toContain('requestCarriesTextAttachment(stamped)');
+    expect(page).not.toContain('webFenceForVision');
+    expect(page).toContain('toolContentsWithCloser(requestMessages, sendCloser)');
   });
 
   it('retires every staged URL fetch attempt when a send commits', () => {
