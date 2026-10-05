@@ -219,6 +219,7 @@ export function searchQueryPolicyError(query: string, corpus = ''): string | nul
   for (const match of text.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g) ?? []) {
     if (ipLiteralFamily(match) === 4 && isDeniedAddress(match)) return POLICY_REJECTION;
   }
+  if (queryHasDeniedIpv6(text)) return POLICY_REJECTION;
   const haystack = collapsed(corpus);
   if (text.length >= 48 && haystack.length >= 48) {
     for (let index = 0; index + 48 <= text.length; index += 1) {
@@ -226,6 +227,21 @@ export function searchQueryPolicyError(query: string, corpus = ''): string | nul
     }
   }
   return null;
+}
+
+/**
+ * Denied IPv6 literals in free text. Boundaries avoid treating `hello::world` as an address.
+ * A trailing sentence period is stripped before the shared address check.
+ */
+function queryHasDeniedIpv6(text: string): boolean {
+  const pattern = /(?:^|[^A-Za-z0-9%:.[\]])(\[[0-9A-Fa-f:.]+\]|(?:[0-9A-Fa-f]{0,4}:){2,}[0-9A-Fa-f.]*)(?=$|[^A-Za-z0-9:.])/g;
+  for (const match of text.matchAll(pattern)) {
+    let token = match[1];
+    if (token.startsWith('[') && token.endsWith(']')) token = token.slice(1, -1);
+    token = token.replace(/\.+$/, '');
+    if (ipLiteralFamily(token) === 6 && isDeniedAddress(token)) return true;
+  }
+  return false;
 }
 
 /** The model writes the query. Whitespace collapses to one line, capped at 200. */
@@ -549,12 +565,13 @@ export async function executeWebToolCalls(
       if (signal?.aborted) break;
       if (request.operation === 'search') {
         const policy = searchQueryPolicyError(request.query, options?.scrubCorpus ?? '');
-        queries.push(sanitizeWebLabel(request.query, 200));
         if (policy) throw new Error(policy);
         options?.onActivity?.({ kind: 'search', query: sanitizeWebLabel(request.query, 80) });
         const allowed = authorizeSearch ? await authorizeSearch(request.query) : false;
         if (signal?.aborted) break;
         if (!allowed) throw new Error('User declined the search');
+        // Searched-for is the audit of a query that left the device, not a rejection or a decline.
+        queries.push(sanitizeWebLabel(request.query, 200));
         const result = await execute(request);
         if (result.operation !== 'search') {
           throw new Error('Public search returned an unexpected result');

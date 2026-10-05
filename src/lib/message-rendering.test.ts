@@ -302,28 +302,12 @@ describe("modelPrefillsThink", () => {
 });
 
 describe("replyUsesPrefilledThink", () => {
-  it("keeps an older unstamped answer visible while Qwen3 is selected", () => {
-    expect(replyUsesPrefilledThink({
-      stamped: false,
-      selectedAlias: "qwen3.5-9b",
-      isLatestAssistant: false,
-      text: "A normal earlier answer.",
-    })).toBe(false);
+  it("leaves an unstamped reply unchanged instead of using the model selected now", () => {
+    expect(replyUsesPrefilledThink({ stamped: false })).toBe(false);
   });
 
-  it("reclassifies the latest unclosed reply for a prefilled model", () => {
-    expect(replyUsesPrefilledThink({
-      stamped: false,
-      selectedAlias: "qwen3.5-9b",
-      isLatestAssistant: true,
-      text: "Still reasoning about the dates.",
-    })).toBe(true);
-    expect(replyUsesPrefilledThink({
-      stamped: false,
-      selectedAlias: "qwen3.5-9b",
-      isLatestAssistant: true,
-      text: "done\n</think>\n\nAnswer",
-    })).toBe(false);
+  it("trusts the stamp stored when the reply was produced", () => {
+    expect(replyUsesPrefilledThink({ stamped: true })).toBe(true);
   });
 });
 
@@ -470,6 +454,43 @@ describe("presentAssistantText", () => {
     expect(result.visibleContent).toBe("Searching the public web: chicago weather");
     expect(result.thinkingContent).toEqual([]);
     expect(result.stoppedBeforeAnswer).toBe(false);
+  });
+
+  it("keeps a live Reading status in the answer area while the send is active", () => {
+    const result = presentAssistantText({
+      text: "Reading example.com",
+      streaming: true,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(result.visibleContent).toBe("Reading example.com");
+    expect(result.thinkingContent).toEqual([]);
+    expect(result.stoppedBeforeAnswer).toBe(false);
+  });
+
+  it("still shows a finished stop note instead of hiding it as reasoning", () => {
+    const note = "[Stopped after web retrieval. An already-started network request may have completed.]";
+    const result = presentAssistantText({
+      text: note,
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(result.visibleContent).toBe(note);
+    expect(result.thinkingContent).toEqual([]);
+    expect(result.stoppedBeforeAnswer).toBe(false);
+  });
+
+  it("does not treat a finished prefilled reply that starts with Reading as a status", () => {
+    const result = presentAssistantText({
+      text: "Reading the question and comparing the dates.",
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: true,
+    });
+    expect(result.visibleContent).toBe("");
+    expect(result.thinkingContent).toEqual(["Reading the question and comparing the dates."]);
+    expect(result.stoppedBeforeAnswer).toBe(true);
   });
 
   it("hides web tool JSON a model wrote as text, including when there is no think tag", () => {

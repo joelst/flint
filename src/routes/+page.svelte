@@ -200,7 +200,6 @@
   import {
     conversationImagePreviewPartIndexes,
     millisecondsUntilNextLocalDay,
-    messagePlainText,
     modelPrefillsThink,
     replyUsesPrefilledThink,
     stripChatTemplateSpill,
@@ -1819,13 +1818,6 @@
     currentModelInfo?.contextLength ?? currentModelInfo?.maxContext ?? null
   );
   const currentModelFamily: string | null = $derived(currentModelInfo?.family ?? null);
-  const latestAssistantMessageId: string | null = $derived.by(() => {
-    for (let i = chatMessages.length - 1; i >= 0; i -= 1) {
-      const message = chatMessages[i];
-      if (message?.role === "assistant") return typeof message.id === "string" ? message.id : null;
-    }
-    return null;
-  });
 
   // Rough recommended turns based on context length (very conservative); see
   // src/lib/context-turns.ts for the extracted, unit-tested math.
@@ -10253,9 +10245,6 @@ Output only the summary text, no preamble.`;
                               assumeReasoning={currentModelTags.includes("reasoning")}
                               prefilledThink={replyUsesPrefilledThink({
                                 stamped: msg.prefilledThink === true,
-                                selectedAlias: selectedModelAlias,
-                                isLatestAssistant: msg.role === "assistant" && msg.id === latestAssistantMessageId,
-                                text: messagePlainText(msg.content),
                               })}
                               messageKey={`${threadLoadedFor}:${msg.id ?? i}`}
                             />

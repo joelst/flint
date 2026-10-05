@@ -631,6 +631,7 @@ describe('web tool calls', () => {
     expect(result.sources).toEqual([{ title: 'Forecast', url: 'https://example.com/file.' }]);
     expect(result.resultUrls).toEqual(['https://example.com/file.']);
     expect(result.errors).toEqual([]);
+    expect(result.queries).toEqual(['public weather']);
     expect(result.toolMessages[0].content).toContain('UNTRUSTED WEB RESULT');
     expect(result.toolMessages[0].content).toContain('Search query: public weather');
   });
@@ -644,6 +645,7 @@ describe('web tool calls', () => {
     }], execute, undefined, undefined, undefined, async () => false);
     expect(execute).not.toHaveBeenCalled();
     expect(declined.errors).toEqual(['web_search: User declined the search']);
+    expect(declined.queries).toEqual([]);
     expect(declined.resultUrls).toEqual([]);
     const missing = await executeWebToolCalls([{
       id: 'call-s',
@@ -652,6 +654,7 @@ describe('web tool calls', () => {
     }], execute);
     expect(execute).not.toHaveBeenCalled();
     expect(missing.errors).toEqual(['web_search: User declined the search']);
+    expect(missing.queries).toEqual([]);
   });
 
   it('records an empty search as a tool issue and returns no result URLs', async () => {
@@ -716,7 +719,7 @@ describe('web tool calls', () => {
     ])).toBe(false);
   });
 
-  it('rejects a policy query without echoing it and still records the query', async () => {
+  it('rejects a policy query without echoing it or recording a search', async () => {
     const secret = `flint-ref-${'a'.repeat(12)}`;
     expect(searchQueryPolicyError(secret)).toBe('query rejected by local policy');
     expect(searchQueryPolicyError(secret)).not.toContain(secret);
@@ -727,10 +730,26 @@ describe('web tool calls', () => {
       function: { name: 'web_search', arguments: JSON.stringify({ query: secret }) },
     }], execute, undefined, undefined, undefined, async () => true);
     expect(execute).not.toHaveBeenCalled();
-    expect(result.queries).toEqual([secret]);
+    expect(result.queries).toEqual([]);
     expect(result.errors).toEqual(['web_search: query rejected by local policy']);
     expect(result.toolMessages[0].content).not.toContain(secret);
     expect(result.toolMessages[0].content).toContain('query rejected by local policy');
+  });
+
+  it('rejects denied IPv6 literals in a search query and allows a public address', () => {
+    expect(searchQueryPolicyError('public 2606:2800:220:1:248:1893:25c8:1946')).toBeNull();
+    expect(searchQueryPolicyError('public 93.184.216.34')).toBeNull();
+    expect(searchQueryPolicyError('mapped public ::ffff:93.184.216.34')).toBeNull();
+    expect(searchQueryPolicyError('code hello::world')).toBeNull();
+    expect(searchQueryPolicyError('meet at 12:30:00 today')).toBeNull();
+    expect(searchQueryPolicyError('router at ::1')).toBe('query rejected by local policy');
+    expect(searchQueryPolicyError('ula fd00::1')).toBe('query rejected by local policy');
+    expect(searchQueryPolicyError('link fe80::1')).toBe('query rejected by local policy');
+    expect(searchQueryPolicyError('mapped ::ffff:127.0.0.1')).toBe('query rejected by local policy');
+    expect(searchQueryPolicyError('bracket https://[::1]/')).toBe('query rejected by local policy');
+    expect(searchQueryPolicyError('sentence ::1.')).toBe('query rejected by local policy');
+    expect(searchQueryPolicyError('docs 2001:db8::1')).toBe('query rejected by local policy');
+    expect(searchQueryPolicyError('loopback 127.0.0.1')).toBe('query rejected by local policy');
   });
 
   it('rejects a query that repeats a long run from this send', () => {

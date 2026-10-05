@@ -296,19 +296,12 @@ export function modelPrefillsThink(alias: string | null | undefined): boolean {
 }
 
 /**
- * New replies store the flag. A reply already saved before that flag existed is treated the
- * same way only when it is the latest assistant turn and the selected model prefills think.
- * Older turns stay as written, so switching to Qwen3 does not hide an earlier model's answer.
+ * New replies store the flag. A reply saved before that flag existed has no producer
+ * metadata, so it stays as written. The model selected now is not that metadata:
+ * switching to Qwen3 must not hide another model's answer.
  */
-export function replyUsesPrefilledThink(input: {
-  stamped: boolean;
-  selectedAlias: string | null | undefined;
-  isLatestAssistant: boolean;
-  text: string;
-}): boolean {
-  if (input.stamped) return true;
-  if (!input.isLatestAssistant || !modelPrefillsThink(input.selectedAlias)) return false;
-  return !/<\/think>|<\/thinking>/i.test(input.text);
+export function replyUsesPrefilledThink(input: { stamped: boolean }): boolean {
+  return input.stamped === true;
 }
 
 /**
@@ -430,10 +423,9 @@ const APP_STATUS_PREFIXES = [
 ];
 const APP_STOP_MARKER = "[Stopped after web retrieval";
 
-function appStatusText(text: string): boolean {
+function appStatusPlaceholder(text: string): boolean {
   const trimmed = text.trim();
-  return APP_STATUS_PREFIXES.some((prefix) => trimmed.startsWith(prefix))
-    || trimmed.startsWith(APP_STOP_MARKER);
+  return APP_STATUS_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
 }
 
 export function presentAssistantText(input: {
@@ -448,7 +440,12 @@ export function presentAssistantText(input: {
   const text = strip
     ? stripChatTemplateSpill(input.text, { keepTrailingOpenLine: input.streaming })
     : input.text;
-  if (appStatusText(text)) {
+  // Status lines are written only while this send is active. After it ends, the same
+  // prefix is model text: "Reading the question…" must still get the cutoff note.
+  if (
+    (input.streaming && appStatusPlaceholder(text))
+    || text.trim().startsWith(APP_STOP_MARKER)
+  ) {
     return { visibleContent: text.trim(), thinkingContent: [], stoppedBeforeAnswer: false };
   }
   const stopAt = text.indexOf(APP_STOP_MARKER);

@@ -74,7 +74,8 @@ The sidebar is grouped by workflow:
   download icon; its tooltip is **Export**.
   Qwen3 and QwQ start a reply inside reasoning. Playground keeps that text under **Thinking**
   until the model closes it. If **Max tokens** runs out first, the answer area says the reply
-  stopped before the answer. The ceiling starts at 8192. **Max tokens** limits the reply
+  stopped before the answer. A reply saved before Flint recorded that fact stays as written
+  when you later select Qwen3 or QwQ. The ceiling starts at 8192. **Max tokens** limits the reply
   length. It does not change the memory the loaded
   model uses. The context meter is the prompt's share of the model's context window. High
   memory warnings use system RAM and GPU memory, which move when a model loads.
@@ -84,7 +85,8 @@ The sidebar is grouped by workflow:
   Flint asks you to allow that query
   just once, for this session, or always. Later searches skip that question when you chose session
   or always, unless the model wrote the query after it had already read web text in that same send.
-  That dialog says so, and **Allow** runs that one search. Declining lets the answer continue without the search. If an answer needs a page from
+  That dialog says so, and **Allow** runs that one search. Declining lets the answer continue without the search.
+  A query you decline, or that Flint rejects on this device, is not listed as a search that ran. If an answer needs a page from
   those results, Flint asks you to allow that domain once, for this session, or always, or to allow
   all public URLs in the conversation named in that prompt until the page reloads.
   If that page redirects to a different site, Flint asks before opening the new site.
@@ -99,7 +101,7 @@ The sidebar is grouped by workflow:
   `Flint-Web-Tool/1.0 (+https://github.com/joelst/flint)`. Flint does not send cookies, credentials, or browser state.
   Page text is fenced as reference data. The fence stops a page from closing that block. It does not stop a
   weak model from copying private text into a later query. Flint's check of that query is best-effort: it
-  rejects local names, private addresses, `file:` URLs, key-shaped text, and a long run copied from this
+  rejects local names, private IPv4 and IPv6 addresses, `file:` URLs, key-shaped text, and a long run copied from this
   send's prompt or attached files. It does not catch short secrets. The consent dialog is the control for those.
   A host on the device blocklist is not fetched, and a grant does not override that list.
   Adding a detected URL as a context chip and then
