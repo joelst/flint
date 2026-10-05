@@ -373,7 +373,9 @@ describe('renderer/sidecar boundary', () => {
     expect(markdownEnd).toBeGreaterThan(0);
     expect(audit).toBeGreaterThan(markdownEnd);
     expect(renderer).toContain('normalizeWebAudit(webAudit)');
-    expect(renderer).toContain('stripChatTemplateSpill(messageClipboardText(content))');
+    expect(renderer).toContain('assistantClipboardText(content, { prefilledThink, streaming: isStreaming })');
+    expect(readFileSync(join(process.cwd(), 'src', 'lib', 'message-rendering.ts'), 'utf8'))
+      .toMatch(/export function assistantClipboardText[\s\S]*?stripChatTemplateSpill\(/);
     expect(renderer).toContain('messageClipboardWithWebAudit(copied, webAuditView)');
   });
 });

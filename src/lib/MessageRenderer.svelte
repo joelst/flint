@@ -2,9 +2,9 @@
   import Icon from "./Icon.svelte";
   import type { MessageContent } from "./conversation-store";
   import {
+    assistantClipboardText,
     messageClipboardText,
     presentAssistantText,
-    stripChatTemplateSpill,
     messagePlainText,
     messageTimestamp,
     nonTextMessageParts,
@@ -165,7 +165,7 @@
 
   function copyToClipboard() {
     const copied = role === "assistant"
-      ? stripChatTemplateSpill(messageClipboardText(content))
+      ? assistantClipboardText(content, { prefilledThink, streaming: isStreaming })
       : messageClipboardText(content);
     navigator.clipboard.writeText(
       messageClipboardWithWebAudit(copied, webAuditView),

@@ -173,6 +173,35 @@ export function messageClipboardText(content: MessageContent): string {
     .join("\n");
 }
 
+/** Same evidence `presentAssistantText` uses before it removes template spill. */
+export function assistantTextHasTemplateSpill(text: string, prefilledThink: boolean): boolean {
+  return prefilledThink
+    || /<\/think>|<\/thinking>|<\|im_start\|>|<\|im_end\|>/i.test(text)
+    || textHasWebToolJsonLine(text);
+}
+
+/**
+ * Clipboard text for an assistant reply. Spill cleanup runs only when the reply
+ * is already cleaned for display. A string then copies the answer still on screen.
+ */
+export function assistantClipboardText(
+  content: MessageContent,
+  options: { prefilledThink: boolean; streaming: boolean },
+): string {
+  const copied = messageClipboardText(content);
+  const plain = messagePlainText(content);
+  if (!assistantTextHasTemplateSpill(plain, options.prefilledThink)) return copied;
+  const stripped = stripChatTemplateSpill(copied, { keepTrailingOpenLine: options.streaming });
+  if (copied !== plain) return stripped;
+  const shown = presentAssistantText({
+    text: plain,
+    streaming: options.streaming,
+    assumeReasoning: false,
+    prefilledThink: options.prefilledThink,
+  }).visibleContent;
+  return shown.length > 0 ? shown : stripped;
+}
+
 export function messageTimestamp(
   timestamp: unknown,
   now = Date.now(),
@@ -494,9 +523,7 @@ export function presentAssistantText(input: {
   assumeReasoning: boolean;
   prefilledThink: boolean;
 }): { visibleContent: string; thinkingContent: string[]; stoppedBeforeAnswer: boolean } {
-  const strip = input.prefilledThink
-    || /<\/think>|<\/thinking>|<\|im_start\|>|<\|im_end\|>/i.test(input.text)
-    || textHasWebToolJsonLine(input.text);
+  const strip = assistantTextHasTemplateSpill(input.text, input.prefilledThink);
   const text = strip
     ? stripChatTemplateSpill(input.text, { keepTrailingOpenLine: input.streaming })
     : input.text;

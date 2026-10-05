@@ -3,6 +3,7 @@ import {
   conversationImagePreviewPartIndexes,
   extractThinkingTrace,
   modelPrefillsThink,
+  assistantClipboardText,
   presentAssistantText,
   replyUsesPrefilledThink,
   stripChatTemplateSpill,
@@ -465,6 +466,32 @@ describe("stripChatTemplateSpill", () => {
 });
 
 describe("presentAssistantText", () => {
+  it('copies a trailing user line that the reply still shows', () => {
+    const text = 'The label for this turn is\nuser';
+    const shown = presentAssistantText({
+      text,
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: false,
+    });
+    expect(shown.visibleContent).toBe(text);
+    expect(assistantClipboardText(text, { prefilledThink: false, streaming: false })).toBe(text);
+    expect(assistantClipboardText('Answer\nuser', { prefilledThink: true, streaming: true })).toBe('Answer\nuser');
+    expect(assistantClipboardText('Answer\nuser\n', { prefilledThink: true, streaming: false })).toBe('Answer');
+  });
+
+  it('copies an assistant reply without a spilled role line', () => {
+    const text = 'Reasoning\n</think>\nuser\nThe record is 3-2.';
+    const shown = presentAssistantText({
+      text,
+      streaming: false,
+      assumeReasoning: false,
+      prefilledThink: false,
+    });
+    expect(assistantClipboardText(text, { prefilledThink: false, streaming: false })).toBe(shown.visibleContent);
+    expect(assistantClipboardText(text, { prefilledThink: false, streaming: false })).not.toMatch(/^user$/m);
+  });
+
   it("keeps a prefilled think block out of the answer when the token budget ends it", () => {
     const result = presentAssistantText({
       text: "The user wants a comparison. June 2026 has not happened.",
