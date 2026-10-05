@@ -830,6 +830,10 @@ describe('web tool calls', () => {
     expect(searchQueryPolicyError('sentence ::1.')).toBe('query rejected by local policy');
     expect(searchQueryPolicyError('docs 2001:db8::1')).toBe('query rejected by local policy');
     expect(searchQueryPolicyError('loopback 127.0.0.1')).toBe('query rejected by local policy');
+    expect(searchQueryPolicyError('https://[::1]:8080/')).toBe('query rejected by local policy');
+    expect(searchQueryPolicyError('https://[::1]:8080')).toBe('query rejected by local policy');
+    expect(searchQueryPolicyError('https://[2001:db8:1:2:3:4:5:6]:8080/')).toBe('query rejected by local policy');
+    expect(searchQueryPolicyError('https://[2606:2800:220:1:248:1893:25c8:1946]:443/')).toBeNull();
   });
 
   it('rejects a file scheme and allows a word that ends in file', () => {

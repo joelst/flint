@@ -270,13 +270,15 @@ export function searchScrubCorpus(messages: unknown): string {
 /**
  * Denied IPv6 literals in free text. Boundaries avoid treating `hello::world` as an address.
  * A trailing sentence period is stripped before the shared address check.
+ * A bracketed literal may have a numeric port, and that port is not part of the address.
  */
 function queryHasDeniedIpv6(text: string): boolean {
-  const pattern = /(?:^|[^A-Za-z0-9%:.[\]])(\[[0-9A-Fa-f:.]+\]|(?:[0-9A-Fa-f]{0,4}:){2,}[0-9A-Fa-f.]*)(?=$|[^A-Za-z0-9:.])/g;
+  const pattern = /(?:^|[^A-Za-z0-9%:.[\]])(\[[0-9A-Fa-f:.]+\](?::\d+)?|(?:[0-9A-Fa-f]{0,4}:){2,}[0-9A-Fa-f.]*)(?=$|[^A-Za-z0-9:.])/g;
   for (const match of text.matchAll(pattern)) {
     let token = match[1];
-    if (token.startsWith('[') && token.endsWith(']')) token = token.slice(1, -1);
-    token = token.replace(/\.+$/, '');
+    const bracketed = /^\[([0-9A-Fa-f:.]+)\](?::\d+)?$/.exec(token);
+    if (bracketed) token = bracketed[1];
+    else token = token.replace(/\.+$/, '');
     if (ipLiteralFamily(token) === 6 && isDeniedAddress(token)) return true;
   }
   return false;
