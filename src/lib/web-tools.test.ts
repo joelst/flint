@@ -722,7 +722,8 @@ describe('web tool calls', () => {
       function: { name: 'web_fetch', arguments: JSON.stringify({ url: rawUrl }) },
     }], execute, undefined, undefined, async () => true);
     expect(result.toolCalls[0]?.id).toHaveLength(64);
-    expect(result.toolMessages[0]?.tool_call_id).toBe(result.toolCalls[0]?.id);
+    const longMessage = result.toolMessages[0];
+    expect(longMessage?.role === 'tool' ? longMessage.tool_call_id : '').toBe(result.toolCalls[0]?.id);
     const retained = JSON.parse(result.toolCalls[0]?.function.arguments ?? '{}') as { url?: string };
     expect(retained).toEqual({ url: retained.url });
     expect(retained.url ?? '').not.toContain(' ');
@@ -731,7 +732,9 @@ describe('web tool calls', () => {
       operation: 'fetch',
       url: canonical,
     }));
-    expect(execute.mock.calls[0]?.[0]?.url).not.toBe(rawUrl);
+    expect(execute.mock.calls.some((call) => (
+      call[0]?.operation === 'fetch' && call[0]?.url !== rawUrl
+    ))).toBe(true);
 
     const short = await executeWebToolCalls([{
       id: 'call-1',
@@ -739,7 +742,8 @@ describe('web tool calls', () => {
       function: { name: 'web_fetch', arguments: JSON.stringify({ url: 'https://example.com/a' }) },
     }], execute, undefined, undefined, async () => true);
     expect(short.toolCalls[0]?.id).toBe('call-1');
-    expect(short.toolMessages[0]?.tool_call_id).toBe('call-1');
+    const shortMessage = short.toolMessages[0];
+    expect(shortMessage?.role === 'tool' ? shortMessage.tool_call_id : '').toBe('call-1');
   });
 
   it('names a search only after the user allows it', async () => {
