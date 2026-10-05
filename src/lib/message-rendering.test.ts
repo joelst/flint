@@ -488,6 +488,16 @@ describe("presentAssistantText", () => {
     expect(copied).not.toMatch(/^user$/m);
   });
 
+  it('hides a standalone end-of-text marker on screen and on the clipboard', () => {
+    const text = 'The answer is rain.<|endoftext|>';
+    const input = { streaming: false, assumeReasoning: false, prefilledThink: false };
+    expect(presentAssistantText({ text, ...input }).visibleContent).toBe('The answer is rain.');
+    expect(assistantClipboardText(text, { prefilledThink: false, streaming: false })).toBe('The answer is rain.');
+    expect(presentAssistantText({ text: '<|ENDOFTEXT|>', ...input }).visibleContent).toBe('');
+    const fenced = ['```', '<|endoftext|>', '```'].join('\n');
+    expect(presentAssistantText({ text: fenced, ...input }).visibleContent).toBe(fenced);
+  });
+
   it("keeps a prefilled think block out of the answer when the token budget ends it", () => {
     const result = presentAssistantText({
       text: "The user wants a comparison. June 2026 has not happened.",

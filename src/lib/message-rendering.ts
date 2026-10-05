@@ -176,7 +176,7 @@ export function messageClipboardText(content: MessageContent): string {
 /** Same evidence `presentAssistantText` uses before it removes template spill. */
 export function assistantTextHasTemplateSpill(text: string, prefilledThink: boolean): boolean {
   return prefilledThink
-    || /<\/think>|<\/thinking>|<\|im_start\|>|<\|im_end\|>/i.test(text)
+    || /<\/think>|<\/thinking>|<\|im_start\|>|<\|im_end\|>|<\|endoftext\|>/i.test(text)
     || textHasWebToolJsonLine(text);
 }
 
