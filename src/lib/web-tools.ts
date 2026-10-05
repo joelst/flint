@@ -49,7 +49,7 @@ export type WebToolResult =
     };
 
 /** Matches the helper's redirect cap. Each cross-origin hop is a new request. */
-const MAX_CROSS_ORIGIN_REDIRECTS = 3;
+export const MAX_CROSS_ORIGIN_REDIRECTS = 3;
 
 export interface WebSource {
   title: string;

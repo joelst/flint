@@ -6,6 +6,7 @@
  */
 import { isPotentiallyPublicHostname } from '../../sidecar/web-address-policy.js';
 import { hostBlocked } from './web-blocklist';
+import { MAX_CROSS_ORIGIN_REDIRECTS } from './web-tools';
 
 /**
  * Whether a detected string is something the sidecar can actually fetch.
@@ -28,6 +29,29 @@ export function isFetchableUrl(value: string, blocklist: readonly string[] = [])
   // offers a Fetch it would always refuse. DNS-resolved names are still checked by the helper.
   if (!isPotentiallyPublicHostname(parsed.hostname)) return false;
   return !hostBlocked(parsed.hostname, blocklist);
+}
+
+/**
+ * Whether this chip hop may be requested. `hop` is 0 for the URL the user clicked
+ * and increases for each cross-origin redirect. The blocklist is the one read now.
+ */
+export function decideChipFetchHop(
+  url: string,
+  blocklist: readonly string[],
+  hop: number,
+): { ok: true } | { ok: false; error: string } {
+  if (hop > MAX_CROSS_ORIGIN_REDIRECTS) return { ok: false, error: 'Too many redirects' };
+  if (isFetchableUrl(url, blocklist)) return { ok: true };
+  let host = '';
+  try {
+    host = new URL(url.trim()).hostname;
+  } catch {
+    host = '';
+  }
+  if (host && hostBlocked(host, blocklist)) {
+    return { ok: false, error: 'This host is blocked on this device.' };
+  }
+  return { ok: false, error: `Not a fetchable URL: ${url}` };
 }
 
 const URL_PATTERN = /https:\/\/[^\s"'<>)]+/g;

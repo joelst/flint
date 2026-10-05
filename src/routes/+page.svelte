@@ -197,7 +197,7 @@
     seedSettingsFor,
     type AppSettingDefaults,
   } from "$lib/conversation-settings";
-  import { isFetchableUrl, detectFetchableUrls } from "$lib/url-chips";
+  import { decideChipFetchHop, detectFetchableUrls, isFetchableUrl } from "$lib/url-chips";
   import {
     conversationImagePreviewPartIndexes,
     millisecondsUntilNextLocalDay,
@@ -252,8 +252,10 @@
     type StoredWebConsent,
   } from "$lib/web-consent";
   import {
+    MAX_CROSS_ORIGIN_REDIRECTS,
     WEB_TOOL_DEFINITIONS,
     WEB_TOOLS_UPSTREAM_NOTE,
+    canonicalFetchUrl,
     collectCurrentWebFetchUrls,
     executeWebImage,
     executeWebToolCalls,
@@ -8037,16 +8039,43 @@ Output only the summary text, no preamble.`;
     inFlightUrlFetches += 1;
     isFetchingUrl = true;
     try {
-      const result = await fetchUrl(url, MAX_URL_CONTEXT_CHARS);
-      patchUrlFetch(attempt, {
-        status: 'done',
-        finalUrl: result.url,
-        title: result.title,
-        text: result.text,
-        truncated: result.truncated,
-        imageUrl: Array.isArray(result.imageUrls) ? result.imageUrls[0] : undefined,
-        error: undefined,
-      });
+      let pending = url;
+      for (let hop = 0; hop <= MAX_CROSS_ORIGIN_REDIRECTS; hop += 1) {
+        // Read the blocklist on this hop. A host blocked after the chip was queued is refused.
+        const decision = decideChipFetchHop(pending, webHostBlocklist, hop);
+        if (!decision.ok) {
+          patchUrlFetch(attempt, { status: 'error', error: decision.error });
+          return;
+        }
+        const result = await fetchUrl(pending, MAX_URL_CONTEXT_CHARS);
+        if (result?.operation === 'redirect') {
+          if (hop === MAX_CROSS_ORIGIN_REDIRECTS) {
+            patchUrlFetch(attempt, { status: 'error', error: 'Too many redirects' });
+            return;
+          }
+          const next = canonicalFetchUrl(result.url);
+          if (!next) {
+            patchUrlFetch(attempt, {
+              status: 'error',
+              error: 'Public web fetch returned an unexpected result',
+            });
+            return;
+          }
+          pending = next;
+          continue;
+        }
+        patchUrlFetch(attempt, {
+          status: 'done',
+          finalUrl: result.url,
+          title: result.title,
+          text: result.text,
+          truncated: result.truncated,
+          imageUrl: Array.isArray(result.imageUrls) ? result.imageUrls[0] : undefined,
+          error: undefined,
+        });
+        return;
+      }
+      patchUrlFetch(attempt, { status: 'error', error: 'Too many redirects' });
     } catch (e: any) {
       patchUrlFetch(attempt, { status: 'error', error: e?.message || String(e) });
     } finally {

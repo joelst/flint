@@ -293,7 +293,7 @@ describe('renderer/sidecar boundary', () => {
     expect(helper).toContain('followCrossOriginRedirects');
     expect(helper).toContain('redirectTo');
     expect(tools).toContain("result.operation !== 'redirect'");
-    expect(sdk).toContain('followCrossOriginRedirects: true');
+    expect(sdk).not.toContain('followCrossOriginRedirects: true');
   });
 
   it('preserves retrieval audits when the follow-up completion fails', () => {

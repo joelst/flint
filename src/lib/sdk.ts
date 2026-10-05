@@ -2681,12 +2681,19 @@ export interface FetchUrlResult {
   imageAlt?: string;
 }
 
-export async function fetchUrl(url: string, maxChars = 50000): Promise<FetchUrlResult> {
-  // The user asked to retrieve this URL. The helper may follow public redirects in
-  // this one request. Model fetches omit the flag so a new host waits for approval.
-  return invoke<FetchUrlResult>('web_tool_execute', {
-    request: { operation: 'fetch', url, maxChars, followCrossOriginRedirects: true },
+export async function fetchUrl(
+  url: string,
+  maxChars = 50000,
+): Promise<FetchUrlResult | { operation: 'redirect'; url: string }> {
+  // Same-origin redirects stay in the helper. A different host comes back as
+  // operation redirect so the chip can check the blocklist before the next request.
+  const result = await invoke<FetchUrlResult & { operation?: string }>('web_tool_execute', {
+    request: { operation: 'fetch', url, maxChars },
   });
+  if (result?.operation === 'redirect' && typeof result.url === 'string') {
+    return { operation: 'redirect', url: result.url };
+  }
+  return result;
 }
 
 export async function executeWebTool(

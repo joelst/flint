@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isFetchableUrl, detectFetchableUrls } from './url-chips';
+import { decideChipFetchHop, detectFetchableUrls, isFetchableUrl } from './url-chips';
 
 describe('isFetchableUrl', () => {
   it('accepts credential-free HTTPS URLs on the standard port', () => {
@@ -62,6 +62,30 @@ describe('isFetchableUrl', () => {
     expect(isFetchableUrl('https://notexample.com/a', blocklist)).toBe(true);
     expect(detectFetchableUrls('see https://example.com/a and https://other.example/b', [], blocklist))
       .toEqual(['https://other.example/b']);
+  });
+});
+
+describe('decideChipFetchHop', () => {
+  it('refuses a host blocked after the chip was accepted, and a blocked redirect', () => {
+    const queued = 'https://news.example/story';
+    expect(isFetchableUrl(queued, [])).toBe(true);
+    expect(decideChipFetchHop(queued, ['news.example'], 0)).toEqual({
+      ok: false,
+      error: 'This host is blocked on this device.',
+    });
+    expect(decideChipFetchHop('https://cdn.example/out', ['cdn.example'], 1)).toEqual({
+      ok: false,
+      error: 'This host is blocked on this device.',
+    });
+    expect(decideChipFetchHop('https://other.example/next', ['news.example'], 1)).toEqual({ ok: true });
+    expect(decideChipFetchHop('http://other.example/next', [], 1)).toEqual({
+      ok: false,
+      error: 'Not a fetchable URL: http://other.example/next',
+    });
+    expect(decideChipFetchHop('https://other.example/next', [], 4)).toEqual({
+      ok: false,
+      error: 'Too many redirects',
+    });
   });
 });
 

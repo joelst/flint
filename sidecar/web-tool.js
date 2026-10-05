@@ -457,9 +457,9 @@ export async function executeWebRequest(raw, dependencies = {}) {
   if (request.operation === 'image') {
     return fetchPublicImage(request.url, dependencies);
   }
-  // Model fetches omit the flag, so a different host comes back for approval.
-  // A URL-chip fetch sets it: the user asked to retrieve that URL, and each hop
-  // is still checked as public HTTPS.
+  // Model fetches and URL-chip fetches omit the flag, so a different host
+  // comes back as a redirect. The chip checks the device blocklist before each hop.
+  // Same-origin redirects still stay inside this request.
   const page = await fetchPublicText(request.url, {
     ...dependencies,
     followCrossOriginRedirects: request.followCrossOriginRedirects === true,
