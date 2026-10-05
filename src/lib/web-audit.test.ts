@@ -389,4 +389,19 @@ describe('web audit', () => {
     expect(flagged.find((source) => source.url === url)?.budgetShortened).toBe(true);
     expect(flagged.find((source) => source.url === 'https://quoted.example/c')?.budgetShortened).toBeUndefined();
   });
+
+  it('does not treat a title that contains the shortening notice as a shortened page', () => {
+    const closer = 'flint-ref-abcdef012345';
+    const url = 'https://kept.example/a';
+    const kept = buildWebEnvelope({
+      closer,
+      title: 'Report. Shortened to fit context.',
+      url,
+      retrievedOn: '2026-10-04',
+      body: 'full page',
+    });
+    const sources: WebAuditSource[] = [{ title: 'Report. Shortened to fit context.', url }];
+    const flagged = sourcesWithOwnBudgetShortened(sources, kept);
+    expect(flagged[0]?.budgetShortened).toBeUndefined();
+  });
 });

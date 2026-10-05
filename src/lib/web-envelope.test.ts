@@ -252,4 +252,20 @@ describe('web envelope', () => {
       { role: 'assistant', content: 'hi' },
     ]);
   });
+
+  it('still adds the shortening notice when the title already says it', () => {
+    const closer = 'flint-ref-abcdef012345';
+    const envelope = buildWebEnvelope({
+      closer,
+      title: 'Report. Shortened to fit context.',
+      url: 'https://kept.example/a',
+      retrievedOn: '2026-10-04',
+      body: `alpha ${'word '.repeat(80)}`,
+    });
+    const cut = shortenWebEnvelope(envelope, closer, 40);
+    expect(cut.shortened).toBe(true);
+    const header = cut.text.split('\n')[0] ?? '';
+    expect(header.endsWith('Shortened to fit context.')).toBe(true);
+    expect(header.split('Shortened to fit context.').length - 1).toBe(2);
+  });
 });

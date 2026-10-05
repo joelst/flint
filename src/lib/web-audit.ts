@@ -1,5 +1,11 @@
 import { isPotentiallyPublicHostname } from '../../sidecar/web-address-policy.js';
-import { CLOSER_HEX_CHARS, CLOSER_PREFIX, sanitizeWebLabel, stripWebCloser } from './web-envelope';
+import {
+  CLOSER_HEX_CHARS,
+  CLOSER_PREFIX,
+  SHORTENED_HEADER_NOTICE,
+  sanitizeWebLabel,
+  stripWebCloser,
+} from './web-envelope';
 
 /**
  * The app-controlled record of what a web tool round sent off the device.
@@ -72,7 +78,6 @@ export function buildWebAudit(
   };
 }
 
-const SHORTENED_HEADER = 'Shortened to fit context.';
 const ENVELOPE_HEADER = 'Reference data retrieved by Flint.';
 const CLOSER_LINE = new RegExp(`^${CLOSER_PREFIX}[0-9a-fA-F]{${CLOSER_HEX_CHARS}}$`);
 
@@ -115,7 +120,7 @@ function blockOwnsSource(block: string, url: string): boolean {
 }
 
 function envelopeWasShortened(block: string): boolean {
-  return envelopeHeader(block).includes(SHORTENED_HEADER);
+  return envelopeHeader(block).trimEnd().endsWith(SHORTENED_HEADER_NOTICE);
 }
 
 /**
