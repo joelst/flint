@@ -14,6 +14,7 @@ import {
   FENCE_FRAMING_CHARS,
   FETCH_BODY_CHARS,
   MAX_FENCED_RESULT_CHARS,
+  SEARCH_URL_CHARS,
   shortenWebEnvelopes,
 } from './web-envelope';
 
@@ -89,10 +90,24 @@ function keepWholeTurns<T extends PackableMessage>(
 }
 
 /**
+ * One assistant `tool_calls` entry: a 64-character id, `web_fetch`, and a URL
+ * argument at the search length cap. Scaled once, plus the per-message overhead.
+ */
+function webToolCallReserve(): number {
+  const linkage = [
+    'c'.repeat(64),
+    'web_fetch',
+    JSON.stringify({ url: 'u'.repeat(SEARCH_URL_CHARS) }),
+  ].join('\n');
+  return Math.ceil(estimateTokens(linkage) * PACKER_SAFETY_FACTOR) + Math.ceil(1.5);
+}
+
+/**
  * Tokens held back for tool results that have not arrived.
  * Until a smaller `maxChars` is chosen, `fencedChars` is `MAX_FENCED_RESULT_CHARS`.
- * Each remaining round may still make two calls. The 1.15 factor is applied once
- * here, because a returned page is measured with that same factor.
+ * Each remaining round may still make two calls, and each call keeps its tool-call
+ * linkage as well as the fenced page. The 1.15 factor is applied once here,
+ * because a returned page is measured with that same factor.
  */
 export function pendingWebReserve(input: {
   roundsRemaining: number;
@@ -102,7 +117,7 @@ export function pendingWebReserve(input: {
   const slots = Math.max(0, Math.floor(input.roundsRemaining)) * 2;
   const perResult = Math.ceil(
     estimateTokensCeiling(input.fencedChars) * PACKER_SAFETY_FACTOR,
-  );
+  ) + webToolCallReserve();
   const image = input.reserveImage ? Math.ceil(IMAGE_TOKEN_OVERHEAD * PACKER_SAFETY_FACTOR) : 0;
   return slots * perResult + image;
 }
@@ -188,7 +203,7 @@ export function plannedWebFit(input: {
   // A round that will not call tools needs no further result, so that fit stays viable.
   const minimumFenceTokens = Math.ceil(
     estimateTokensCeiling(280 + FENCE_FRAMING_CHARS) * PACKER_SAFETY_FACTOR,
-  );
+  ) + webToolCallReserve();
   // A round may return two calls. Offer tools when one fence fits, and say how many.
   let maxToolCalls = 0;
   let toolsViable = true;
