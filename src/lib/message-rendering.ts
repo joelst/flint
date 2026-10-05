@@ -346,7 +346,8 @@ function webToolJsonLine(line: string): boolean {
   try {
     const value = JSON.parse(trimmed) as { name?: unknown; arguments?: unknown };
     if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-    const args = value.arguments;
+    let args = value.arguments;
+    if (typeof args === 'string') args = JSON.parse(args) as unknown;
     return (value.name === 'web_search' || value.name === 'web_fetch')
       && args !== null
       && typeof args === 'object'

@@ -440,6 +440,11 @@ describe("stripChatTemplateSpill", () => {
     expect(stripped).not.toContain("web_search");
     expect(stripped).not.toContain("web_fetch");
     expect(stripped).not.toMatch(/^user$/m);
+    const stringArgs = '{"name":"web_search","arguments":"{\\"query\\":\\"weather\\"}"}';
+    expect(stripChatTemplateSpill(stringArgs)).not.toContain("web_search");
+    expect(stripChatTemplateSpill('{"name":"web_search","arguments":"[1]"}')).toContain("web_search");
+    expect(stripChatTemplateSpill('{"name":"web_search","arguments":"1"}')).toContain("web_search");
+    expect(stripChatTemplateSpill('{"name":"web_search","arguments":"{"}')).toContain("web_search");
   });
 
   it("keeps a fenced web tool JSON example", () => {

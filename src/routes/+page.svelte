@@ -192,6 +192,7 @@
     MAX_TOKENS_DEFAULT_GENERATION,
     appSettingDefaultsToPersisted,
     migrateRetiredMaxTokens,
+    persistedMaxTokensGeneration,
     readAppSettingDefaults,
     resolveConversationSettings,
     seedSettingsFor,
@@ -1700,6 +1701,8 @@
    * time is a different operation.
    */
   let appSettingDefaults = $state<AppSettingDefaults>({ ...DEFAULT_APP_SETTINGS });
+  // The mark on the loaded blob. A newer build's integer stays; an unmarked blob writes this build's.
+  let appMaxTokensGeneration = $state(MAX_TOKENS_DEFAULT_GENERATION);
 
   // Collapsible left sidebar
   let sidebarCollapsed = $state(false);
@@ -2473,10 +2476,16 @@
     if (!threadLoadedFor) return;
     // The generation mark is what lets a later choice of the retired ceiling stay put.
     // A settings-less chat's first write has to carry it, or the next launch would
-    // treat that choice as the old untouched default.
+    // treat that choice as the old untouched default. A stored integer at least as
+    // new as this build is kept; a new chat still gets this build's generation.
+    const loaded = findConversation(conversationArchive, threadLoadedFor);
+    const storedSettings = loaded?.settings;
+    const storedGeneration = storedSettings && typeof storedSettings === 'object' && !Array.isArray(storedSettings)
+      ? (storedSettings as { maxTokensDefaultGeneration?: unknown }).maxTokensDefaultGeneration
+      : undefined;
     const result = captureThread(sessionState(), {
       now: Date.now(),
-      settings: { ...patch, maxTokensDefaultGeneration: MAX_TOKENS_DEFAULT_GENERATION } as any,
+      settings: { ...patch, maxTokensDefaultGeneration: persistedMaxTokensGeneration(storedGeneration) } as any,
     });
     if (!result.changed) return;
     conversationArchive = result.archive;
@@ -3525,7 +3534,7 @@
           // the effective values here would republish one chat's model and persona as the
           // setting every conversation without an override inherits. The key names are
           // unchanged, so an older build still reads these as its globals.
-          ...appSettingDefaultsToPersisted(appSettingDefaults),
+          ...appSettingDefaultsToPersisted(appSettingDefaults, appMaxTokensGeneration),
           sidebarCollapsed,
           conversationListCollapsed,
           theme,
@@ -3626,6 +3635,7 @@
         // The baseline every conversation without an override resolves against, and the seed
         // for the live values until a conversation is loaded over them.
         appSettingDefaults = readAppSettingDefaults(data, DEFAULT_APP_SETTINGS);
+        appMaxTokensGeneration = persistedMaxTokensGeneration(data.maxTokensDefaultGeneration);
         systemPrompt = appSettingDefaults.systemPrompt;
         contextTurns = clampContextTurns(appSettingDefaults.contextTurns);
         showFullHistory = appSettingDefaults.showFullHistory;

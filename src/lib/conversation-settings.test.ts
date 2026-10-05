@@ -104,6 +104,21 @@ describe('readAppSettingDefaults', () => {
     }, baseline).maxTokens).toBe(2048);
   });
 
+  it('keeps a newer generation and its explicit 2048', () => {
+    const blob = { maxTokens: 2048, maxTokensDefaultGeneration: 3 };
+    expect(readAppSettingDefaults(blob, baseline).maxTokens).toBe(2048);
+    expect(appSettingDefaultsToPersisted(
+      { ...baseline, maxTokens: 2048 },
+      3,
+    ).maxTokensDefaultGeneration).toBe(3);
+    const migrated = migrateRetiredMaxTokens([{ id: 'c', settings: { ...blob } }]);
+    expect(migrated.changed).toBe(false);
+    expect(migrated.conversations[0].settings).toMatchObject({
+      maxTokens: 2048,
+      maxTokensDefaultGeneration: 3,
+    });
+  });
+
   it('round-trips through the persisted projection', () => {
     // The alias is excluded from the projection on purpose: the component keeps writing
     // `selectedModelAlias` itself as the last model used. Reading it back as the baseline is

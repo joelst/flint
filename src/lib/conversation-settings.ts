@@ -80,6 +80,21 @@ export const RETIRED_DEFAULT_MAX_TOKENS = 2048;
  */
 export const MAX_TOKENS_DEFAULT_GENERATION = 2;
 
+/** An integer at least as new as this build is already migrated. Older marks are not. */
+function maxTokensGenerationIsCurrent(value: unknown): boolean {
+  return typeof value === 'number'
+    && Number.isInteger(value)
+    && value >= MAX_TOKENS_DEFAULT_GENERATION;
+}
+
+/**
+ * The generation a save should write. A stored integer at least as new as this build stays.
+ * Absent, non-integer, and older marks are stamped with this build's generation.
+ */
+export function persistedMaxTokensGeneration(value?: unknown): number {
+  return maxTokensGenerationIsCurrent(value) ? (value as number) : MAX_TOKENS_DEFAULT_GENERATION;
+}
+
 /** The persisted key each default is stored under in the application settings blob. */
 const PERSISTED_KEYS: Record<Exclude<keyof AppSettingDefaults, 'webToolsEnabled'>, string> = {
   modelAlias: 'selectedModelAlias',
@@ -135,8 +150,8 @@ export function readAppSettingDefaults(
   const maxTokens = source[PERSISTED_KEYS.maxTokens];
   if (typeof maxTokens === 'number' && Number.isInteger(maxTokens) && maxTokens > 0) {
     // An unmarked copy of the retired ceiling picks up the current default.
-    // A blob that already records this generation keeps an explicit 2048.
-    const marked = source.maxTokensDefaultGeneration === MAX_TOKENS_DEFAULT_GENERATION;
+    // An integer generation at least as new as this build keeps an explicit 2048.
+    const marked = maxTokensGenerationIsCurrent(source.maxTokensDefaultGeneration);
     defaults.maxTokens = maxTokens === RETIRED_DEFAULT_MAX_TOKENS && !marked
       ? fallback.maxTokens
       : maxTokens;
@@ -183,9 +198,13 @@ export function readAppSettingDefaults(
  * writing it, so re-publishing a frozen copy from here would fight with it. Reading it back as
  * the baseline is still right — a conversation that stores no model should open with a model
  * that works, and unlike a persona the alias is not a leak of the previous chat's character.
+ *
+ * `generation` is the mark already stored on the blob. A newer integer stays.
+ * A blob with no such mark is stamped with this build's generation.
  */
 export function appSettingDefaultsToPersisted(
   defaults: AppSettingDefaults,
+  generation?: unknown,
 ): Record<string, unknown> {
   return {
     [PERSISTED_KEYS.systemPrompt]: defaults.systemPrompt,
@@ -193,7 +212,7 @@ export function appSettingDefaultsToPersisted(
     [PERSISTED_KEYS.showFullHistory]: defaults.showFullHistory,
     [PERSISTED_KEYS.temperature]: defaults.temperature,
     [PERSISTED_KEYS.maxTokens]: defaults.maxTokens,
-    maxTokensDefaultGeneration: MAX_TOKENS_DEFAULT_GENERATION,
+    maxTokensDefaultGeneration: persistedMaxTokensGeneration(generation),
     [PERSISTED_KEYS.topP]: defaults.topP,
     [PERSISTED_KEYS.topK]: defaults.topK,
     [PERSISTED_KEYS.frequencyPenalty]: defaults.frequencyPenalty,
@@ -257,7 +276,8 @@ export function resolveConversationSettings(
 /**
  * Move an unmarked 2048 ceiling onto the current default.
  * The archive cannot tell an explicit 2048 from the old default, so that number moves once.
- * The generation mark is written the first time, and a later explicit 2048 stays.
+ * An integer generation at least as new as this build is already migrated, and that number stays.
+ * Older or missing marks are stamped with this build's generation.
  */
 export function migrateRetiredMaxTokens<T extends { settings?: unknown }>(
   conversations: T[],
@@ -267,7 +287,7 @@ export function migrateRetiredMaxTokens<T extends { settings?: unknown }>(
     const settings = conversation.settings;
     if (!settings || typeof settings !== 'object' || Array.isArray(settings)) return conversation;
     const bag = settings as Record<string, unknown>;
-    if (bag.maxTokensDefaultGeneration === MAX_TOKENS_DEFAULT_GENERATION) return conversation;
+    if (maxTokensGenerationIsCurrent(bag.maxTokensDefaultGeneration)) return conversation;
     changed = true;
     const upgraded = bag.maxTokens === RETIRED_DEFAULT_MAX_TOKENS
       ? { ...bag, maxTokens: DEFAULT_APP_SETTINGS.maxTokens, maxTokensDefaultGeneration: MAX_TOKENS_DEFAULT_GENERATION }
