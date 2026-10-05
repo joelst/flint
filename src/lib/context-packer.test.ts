@@ -48,6 +48,23 @@ describe('context packer', () => {
     expect(packed.messages.at(-1)).toEqual(latest);
   });
 
+  it('shrinks the message budget by the tool schemas once', () => {
+    const without = plannedWebFit({
+      contextTokens: 100000,
+      maxTokens: 100,
+      roundsRemaining: 2,
+      occupiedTokens: 500,
+    });
+    const withSchemas = plannedWebFit({
+      contextTokens: 100000,
+      maxTokens: 100,
+      roundsRemaining: 2,
+      occupiedTokens: 580,
+      schemaTokens: 80,
+    });
+    expect(without.promptTokens - withSchemas.promptTokens).toBe(80);
+  });
+
   it('withholds tools when one minimum fence cannot sit beside the prompt', () => {
     const contextTokens = 4096;
     const maxTokens = 2048;

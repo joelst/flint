@@ -1,5 +1,5 @@
 import { isPotentiallyPublicHostname } from '../../sidecar/web-address-policy.js';
-import { sanitizeWebLabel, stripWebCloser } from './web-envelope';
+import { CLOSER_HEX_CHARS, CLOSER_PREFIX, sanitizeWebLabel, stripWebCloser } from './web-envelope';
 
 /**
  * The app-controlled record of what a web tool round sent off the device.
@@ -72,13 +72,30 @@ export function buildWebAudit(
   };
 }
 
-const WEB_ENVELOPE_MARK = 'Reference data retrieved by Flint.';
 const SHORTENED_HEADER = 'Shortened to fit context.';
 const SHORTENED_BODY = '[shortened to fit context]';
+const CLOSER_LINE = new RegExp(`^${CLOSER_PREFIX}[0-9a-fA-F]{${CLOSER_HEX_CHARS}}$`);
 
+/** Header line, opening closer, body, and the same closing closer. The body is not split. */
 function envelopeBlocks(text: string): string[] {
-  return text.split(/(?=Reference data retrieved by Flint\.)/)
-    .filter((block) => block.includes(WEB_ENVELOPE_MARK));
+  const lines = text.split('\n');
+  const blocks: string[] = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!CLOSER_LINE.test(lines[i])) continue;
+    const closer = lines[i];
+    let closeAt = -1;
+    for (let j = i + 1; j < lines.length; j += 1) {
+      if (lines[j] === closer) {
+        closeAt = j;
+        break;
+      }
+    }
+    if (closeAt < 0) continue;
+    const start = i > 0 ? i - 1 : i;
+    blocks.push(lines.slice(start, closeAt + 1).join('\n'));
+    i = closeAt;
+  }
+  return blocks;
 }
 
 function envelopeHeader(block: string): string {
@@ -95,7 +112,10 @@ function blockOwnsSource(block: string, url: string): boolean {
 }
 
 function envelopeWasShortened(block: string): boolean {
-  return block.includes(SHORTENED_HEADER) || block.includes(SHORTENED_BODY);
+  const lines = block.split('\n');
+  const header = lines[0] ?? '';
+  if (header.includes(SHORTENED_HEADER) || header.includes(SHORTENED_BODY)) return true;
+  return lines.some((line) => line === SHORTENED_BODY);
 }
 
 /**

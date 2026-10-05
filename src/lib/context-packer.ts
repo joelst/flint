@@ -137,6 +137,8 @@ export function plannedWebFit(input: {
   roundsRemaining: number;
   occupiedTokens: number;
   reserveImage?: boolean;
+  /** Already included in occupiedTokens. Subtracted once from the message budget. */
+  schemaTokens?: number;
 }): { maxChars: number; reserveTokens: number; promptTokens: number; fencedChars: number; toolsViable: boolean } {
   const context = input.contextTokens && input.contextTokens > 0
     ? input.contextTokens
@@ -173,11 +175,13 @@ export function plannedWebFit(input: {
     estimateTokens('x'.repeat(280 + FENCE_FRAMING_CHARS)) * PACKER_SAFETY_FACTOR,
   );
   const toolsViable = input.roundsRemaining <= 0 || reserveRoom >= minimumFenceTokens;
+  const rawSchema = input.schemaTokens ?? 0;
+  const schemaTokens = Number.isFinite(rawSchema) && rawSchema > 0 ? rawSchema : 0;
   return {
     maxChars,
     fencedChars,
     reserveTokens,
-    promptTokens: Math.max(0, available - reserveTokens),
+    promptTokens: Math.max(0, available - reserveTokens - schemaTokens),
     toolsViable,
   };
 }

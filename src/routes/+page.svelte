@@ -7279,6 +7279,7 @@ updateStateFromSdk();
             maxTokens,
             roundsRemaining,
             occupiedTokens: occupied,
+            schemaTokens: sendTools ? webToolSchemaTokens() : 0,
             reserveImage: Boolean(webImageUrl) && isVisionModel && !userAttachedImage,
           });
           if (sendTools && plan.toolsViable === false) {
@@ -7689,6 +7690,7 @@ updateStateFromSdk();
         maxTokens,
         roundsRemaining: fit.roundsRemaining ?? 0,
         occupiedTokens: occupied,
+        schemaTokens: includeWebToolInstruction ? webToolSchemaTokens() : 0,
         reserveImage: fit.reserveImage,
       });
       const packed = packContextMessages({
