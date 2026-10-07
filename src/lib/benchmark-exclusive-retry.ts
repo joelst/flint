@@ -29,6 +29,22 @@ export type ExclusiveReleaseRetrier = {
    * claiming exclusivity), not for normal operation, where the retrier is expected to keep
    * running until it confirms release. */
   cancel: () => void;
+  /**
+   * Holds this retrier without retiring it and without meaning the release succeeded.
+   * Clears a pending timer but keeps the delay that timer was armed with, and does not
+   * consume another backoff slot. `tick` and `retryNow` do not call `release` while paused.
+   * An attempt already in flight keeps running; if it fails before `resume`, the follow-up
+   * schedule is owed rather than started.
+   */
+  pause: () => void;
+  /**
+   * Ends a pause. No-op once `cancel()` has retired this retrier, or when it is not paused.
+   * If a release is in flight, does not schedule — that attempt must see the pause has ended
+   * and schedule itself if it failed. Otherwise re-arms an interrupted timer with the same
+   * delay (no extra backoff slot), or performs one owed `scheduleNext` when an attempt
+   * already failed while paused.
+   */
+  resume: () => void;
 };
 
 /** Escalating backoff, capped at the last entry for any further attempt. */
@@ -63,6 +79,14 @@ export function createExclusiveReleaseRetrier(
    * transition for a retrier the caller has already discarded (e.g. a superseded generation's
    * retrier updating the current banner state after a newer run replaced it). */
   let cancelled = false;
+  /** Reversible hold. Unlike `cancelled`, this does not retire the retrier or mean released. */
+  let paused = false;
+  /** Delay `scheduleNext` already chose. `pause` clears the timer but keeps this so `resume`
+   * can re-arm the same slot instead of skipping ahead in the backoff. */
+  let armedDelay: number | null = null;
+  /** Set when the attempt that started this cycle fails while paused and has already returned.
+   * `resume` performs the `scheduleNext` that completion withheld. */
+  let scheduleOwed = false;
   onStuckChange(true);
 
   const setStuck = (next: boolean) => {
@@ -91,23 +115,32 @@ export function createExclusiveReleaseRetrier(
     return { promise: p, started: true };
   };
 
-  const scheduleNext = () => {
+  const arm = (delay: number) => {
     clear();
-    const delay = delaysMs[Math.min(attempt, delaysMs.length - 1)];
-    attempt += 1;
+    armedDelay = delay;
     timer = setTimeout(() => { void tick(); }, delay);
   };
 
-  const tick = async () => {
-    if (cancelled) return;
-    timer = null;
-    const { promise, started } = attemptRelease();
-    const released = await promise;
+  const scheduleNext = () => {
+    const delay = delaysMs[Math.min(attempt, delaysMs.length - 1)];
+    attempt += 1;
+    arm(delay);
+  };
+
+  const finishAttempt = (released: boolean, started: boolean) => {
     if (cancelled) return;
     if (released) {
+      // A confirmed release while paused must clear stuck. Otherwise `resume` would schedule
+      // another release after one that already succeeded.
+      scheduleOwed = false;
       setStuck(false);
       return;
     }
+    if (paused) {
+      if (started) scheduleOwed = true;
+      return;
+    }
+    setStuck(true);
     // Only the call that actually started this attempt reschedules: a `retryNow()` that joined
     // this same in-flight promise (see attemptRelease's doc) would otherwise also see `released
     // === false` and call scheduleNext() itself once it wakes, consuming a second backoff slot
@@ -115,29 +148,51 @@ export function createExclusiveReleaseRetrier(
     if (started) scheduleNext();
   };
 
+  const tick = async () => {
+    if (cancelled || paused) return;
+    timer = null;
+    armedDelay = null;
+    const { promise, started } = attemptRelease();
+    const released = await promise;
+    finishAttempt(released, started);
+  };
+
   scheduleNext();
 
   return {
     get stuck() { return stuck; },
     async retryNow() {
-      if (cancelled) return;
+      if (cancelled || paused) return;
       clear();
+      armedDelay = null;
       const { promise, started } = attemptRelease();
       const released = await promise;
-      if (cancelled) return;
-      if (released) {
-        setStuck(false);
-      } else {
-        setStuck(true);
-        // See tick()'s matching comment: only the call that started this attempt reschedules,
-        // so a retryNow() that joined a scheduled tick's already in-flight release() must not
-        // also call scheduleNext() once that shared attempt fails.
-        if (started) scheduleNext();
-      }
+      finishAttempt(released, started);
     },
     cancel() {
       cancelled = true;
+      scheduleOwed = false;
+      armedDelay = null;
       clear();
+    },
+    pause() {
+      if (cancelled) return;
+      paused = true;
+      // Drop the timer handle only. `armedDelay` stays so resume can re-arm this same slot
+      // without incrementing `attempt` again.
+      clear();
+    },
+    resume() {
+      if (cancelled || !paused) return;
+      paused = false;
+      // The in-flight completion sees `paused === false` and schedules itself if it failed.
+      if (inFlight) return;
+      if (scheduleOwed) {
+        scheduleOwed = false;
+        if (stuck) scheduleNext();
+        return;
+      }
+      if (armedDelay !== null && stuck) arm(armedDelay);
     },
   };
 }

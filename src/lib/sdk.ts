@@ -2381,7 +2381,12 @@ export async function stopAndUnload(options: {
 
     const unloaded = new Set(result.modelsUnloaded);
     currentEndpoint = undefined;
-    currentRuntimeServiceState = result.serviceStopped ? 'stopped' : 'failed';
+    // Classify the listener, not the overall cleanup. A drain timeout with no native
+    // listener is still stopped. A native-stop error did not confirm the listener
+    // stopped, so it stays unknown and Stop remains available. Do not publish failed
+    // for a successful RPC.
+    const serviceState: RuntimeServiceState = result.serviceStopped ? 'stopped' : 'unknown';
+    currentRuntimeServiceState = serviceState;
     sdkState.update((state) => ({
       ...state,
       endpoint: undefined,
@@ -2393,7 +2398,7 @@ export async function stopAndUnload(options: {
       ),
       runtime: {
         ...state.runtime,
-        service: result.serviceStopped ? 'stopped' : 'failed',
+        service: serviceState,
         models: result.drained && result.unloadFailures.length === 0 ? 'empty' : 'unknown',
       },
     }));

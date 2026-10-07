@@ -1,26 +1,42 @@
 /**
  * Benchmark Preview suite schema, validation, attempt-count accounting, and JSONL import.
  *
- * Pure and headless: no storage, no UI, no feature flag. This module only decides what a
- * well-formed suite looks like and how many attempts running it would take — the persistence
- * layer lives in `benchmark-repository.ts`, and no UI reads either module until a later PR wires
- * up an entry point. Dormant on purpose.
+ * Pure schema and scheduling: no storage and no feature flag. This module decides what a
+ * well-formed suite looks like and how many attempts running it would take. Persistence lives
+ * in `benchmark-repository.ts`. Benchmark Preview (`BenchmarkPreview.svelte`, started from
+ * `+page.svelte`) is the UI that reads this module.
  */
 
 export const BENCHMARK_MAX_TARGETS = 3;
 export const BENCHMARK_MAX_CASES = 100;
 export const BENCHMARK_MIN_REPEAT_COUNT = 1;
-export const BENCHMARK_MAX_REPEAT_COUNT = 3;
+/** Enough measured samples to compare variance on a small suite. */
+export const BENCHMARK_MAX_REPEAT_COUNT = 20;
 export const BENCHMARK_MIN_WARMUP_COUNT = 0;
 export const BENCHMARK_MAX_WARMUP_COUNT = 1;
 /**
- * Closes the gap independent per-field limits leave open: 3 targets * 100 cases * (1 warmup +
- * 3 repeats) would otherwise allow 1200 attempts. This bounds the whole suite's total attempt
- * count, not just each dimension in isolation.
+ * Chat completion rejects a temperature outside this range, so the suite cannot store one either.
+ */
+export const BENCHMARK_MIN_TEMPERATURE = 0;
+export const BENCHMARK_MAX_TEMPERATURE = 2;
+export const BENCHMARK_TEMPERATURE_STEP = 0.01;
+/**
+ * Closes the gap independent per-field limits leave open. Three targets, 100 cases, one warmup,
+ * and the repeat ceiling would otherwise be 6003 attempts. This bounds the whole suite's total
+ * attempt count, not just each dimension in isolation.
  */
 export const BENCHMARK_MAX_ATTEMPTS = 900;
-/** Conservative preview bound, independent of the attempt cap: bounds stored output volume. */
-export const BENCHMARK_MAX_TOKENS_LIMIT = 4096;
+/**
+ * New suites start here. A short completion is not enough for verbose local models
+ * such as Qwen, which need several thousand tokens before the answer is useful.
+ */
+export const BENCHMARK_DEFAULT_MAX_TOKENS = 8192;
+/**
+ * Preview ceiling, independent of the attempt cap. It bounds how much response
+ * text one attempt can ask the runtime to store. 131072 matches a common
+ * long-context window without leaving the field unbounded.
+ */
+export const BENCHMARK_MAX_TOKENS_LIMIT = 131072;
 export const BENCHMARK_MAX_NAME_LENGTH = 200;
 export const BENCHMARK_MAX_DESCRIPTION_LENGTH = 2000;
 export const BENCHMARK_MAX_TEXT_LENGTH = 8000;
@@ -294,8 +310,8 @@ export function validateBenchmarkSuite(
 
   if (raw.temperature !== undefined
     && !(typeof raw.temperature === 'number' && Number.isFinite(raw.temperature)
-      && raw.temperature >= 0 && raw.temperature <= 2)) {
-    errors.push('temperature must be a number between 0 and 2 when present');
+      && raw.temperature >= BENCHMARK_MIN_TEMPERATURE && raw.temperature <= BENCHMARK_MAX_TEMPERATURE)) {
+    errors.push(`temperature must be a number between ${BENCHMARK_MIN_TEMPERATURE} and ${BENCHMARK_MAX_TEMPERATURE} when present`);
   }
   if (raw.maxTokens !== undefined
     && !(isFiniteInteger(raw.maxTokens) && (raw.maxTokens as number) > 0

@@ -117,6 +117,12 @@ export function caseRowsFromJsonl(text: string): { ok: true; rows: SuiteCaseRow[
   return { ok: true, rows: parsed.cases.map(caseToRow) };
 }
 
+/** Blank text is an empty editor. Any other text must be benchmark JSONL, one case per line. */
+export function casesJsonlError(text: string): string | null {
+  const parsed = caseRowsFromJsonl(text);
+  return parsed.ok ? null : parsed.error;
+}
+
 export function jsonlFromCaseRows(rows: readonly SuiteCaseRow[]): string {
   return rows.map((row) => {
     if (row.kind === 'messages') return row.jsonlLine;
@@ -349,4 +355,132 @@ export function buildSuiteFromDraft(draft: SuiteDraft, now: number = Date.now())
   if (maxTokens !== undefined) raw.maxTokens = maxTokens;
 
   return validateBenchmarkSuite(raw);
+}
+
+export interface DraftCaseInputErrors {
+  id: string | null;
+  prompt: string | null;
+  expected: string | null;
+  /** A case failure that is not one of the three fields above. Tag failures stay here so Save
+   * can see them while the row keeps showing `tagsJsonError`. */
+  other: string | null;
+}
+
+export interface DraftInputErrors {
+  name: string | null;
+  description: string | null;
+  targets: string | null;
+  temperature: string | null;
+  maxTokens: string | null;
+  rows: DraftCaseInputErrors[];
+}
+
+const DRAFT_CHECK_CASES = '{"id":"draft-check","prompt":"draft-check"}';
+
+function emptyCaseInputErrors(): DraftCaseInputErrors {
+  return { id: null, prompt: null, expected: null, other: null };
+}
+
+function appendError(current: string | null, message: string): string {
+  return current ? `${current} ${message}` : message;
+}
+
+function isTagCaseMessage(message: string): boolean {
+  return message.startsWith('tags must')
+    || message.startsWith('each tag must')
+    || /^at most \d+ tags\b/.test(message);
+}
+
+function assignCaseMessage(row: DraftCaseInputErrors, message: string) {
+  if (isTagCaseMessage(message)) {
+    row.other = appendError(row.other, message);
+  } else if (message.startsWith('id must') || message.startsWith('duplicate case id')) {
+    row.id = appendError(row.id, message);
+  } else if (message.startsWith('prompt must')) {
+    row.prompt = appendError(row.prompt, message);
+  } else if (message.startsWith('expected must')) {
+    row.expected = appendError(row.expected, message);
+  } else {
+    row.other = appendError(row.other, message);
+  }
+}
+
+function caseRowAt(rows: DraftCaseInputErrors[], index: number): DraftCaseInputErrors {
+  while (rows.length <= index) rows.push(emptyCaseInputErrors());
+  return rows[index];
+}
+
+/** Parser line numbers count every physical line. The editor only has nonblank cases. */
+function nonblankCaseIndex(text: string, physicalLine: number): number | null {
+  if (!Number.isInteger(physicalLine) || physicalLine < 1) return null;
+  const lines = text.split(/\r?\n/);
+  const lineIndex = physicalLine - 1;
+  if (lineIndex >= lines.length || !lines[lineIndex].trim()) return null;
+  let caseIndex = 0;
+  for (let i = 0; i < lineIndex; i++) {
+    if (lines[i].trim()) caseIndex += 1;
+  }
+  return caseIndex;
+}
+
+/**
+ * Field messages for values the user has typed. Blank name, zero targets, and zero cases stay
+ * quiet — Save still reports those. Every sentence comes from `buildSuiteFromDraft`.
+ */
+export function draftInputErrors(draft: SuiteDraft): DraftInputErrors {
+  const parsed = parseBenchmarkCasesJsonl(draft.casesJsonl);
+  const checked = parsed.ok ? draft : { ...draft, casesJsonl: DRAFT_CHECK_CASES };
+  const result = buildSuiteFromDraft(checked);
+  const errors = result.ok ? [] : result.errors;
+  const rows: DraftCaseInputErrors[] = [];
+
+  if (!parsed.ok && parsed.error) {
+    const line = /^line (\d+): ([\s\S]+)$/.exec(parsed.error);
+    // A line that is not a case-field failure stays on the JSONL editor. The form only
+    // produces JSON, so its line failures are id, prompt, expected, duplicate id, or tags.
+    if (line && (
+      line[2].startsWith('id must')
+      || line[2].startsWith('duplicate case id')
+      || line[2].startsWith('prompt must')
+      || line[2].startsWith('expected must')
+      || isTagCaseMessage(line[2])
+    )) {
+      const caseIndex = nonblankCaseIndex(draft.casesJsonl, Number(line[1]));
+      if (caseIndex !== null) assignCaseMessage(caseRowAt(rows, caseIndex), line[2]);
+    }
+  }
+
+  let name: string | null = null;
+  let description: string | null = null;
+  let targets: string | null = null;
+  let temperature: string | null = null;
+  let maxTokens: string | null = null;
+
+  for (const error of errors) {
+    if (error.startsWith('name must')) {
+      if (draft.name.trim().length > 0) name = appendError(name, error);
+    } else if (error.startsWith('description must')) {
+      description = appendError(description, error);
+    } else if (error.startsWith('targets must be an array')) {
+      if (draft.targets.length > 0) targets = appendError(targets, error);
+    } else if (error.startsWith('targets[')) {
+      targets = appendError(targets, error);
+    } else if (error.startsWith('temperature must')) {
+      temperature = appendError(temperature, error);
+    } else if (error.startsWith('maxTokens must')) {
+      maxTokens = appendError(maxTokens, error);
+    } else if (parsed.ok) {
+      const indexed = /^cases\[(\d+)\]: ([\s\S]+)$/.exec(error);
+      if (indexed) assignCaseMessage(caseRowAt(rows, Number(indexed[1])), indexed[2]);
+    }
+  }
+
+  return { name, description, targets, temperature, maxTokens, rows };
+}
+
+export function draftInputBlocksSave(errors: DraftInputErrors): boolean {
+  if (errors.name || errors.description || errors.targets || errors.temperature || errors.maxTokens) {
+    return true;
+  }
+  return errors.rows.some((row) => row.id || row.prompt || row.expected || row.other);
 }

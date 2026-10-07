@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { aliasChoicesForTarget, applyTargetAlias, buildSuiteFromDraft, cachedVariantIds, caseRowsFromJsonl, copiedSuiteName, draftEditsSuite, draftFromSuite, duplicateSuiteDraft, estimateDraftAttempts, jsonlFromCaseRows, jsonlImportCanFitCharacterLimit, newPromptCaseRow, optionalDraftNumber, tagsJsonError, variantChoicesForTarget, type SuiteDraft } from './benchmark-draft';
-import { BENCHMARK_MAX_ATTEMPTS, BENCHMARK_MAX_JSONL_CHARS, BENCHMARK_MAX_NAME_LENGTH } from './benchmark-suite';
+import { aliasChoicesForTarget, applyTargetAlias, buildSuiteFromDraft, cachedVariantIds, caseRowsFromJsonl, casesJsonlError, copiedSuiteName, draftEditsSuite, draftFromSuite, draftInputBlocksSave, draftInputErrors, duplicateSuiteDraft, estimateDraftAttempts, jsonlFromCaseRows, jsonlImportCanFitCharacterLimit, newPromptCaseRow, optionalDraftNumber, tagsJsonError, variantChoicesForTarget, type SuiteDraft } from './benchmark-draft';
+import { BENCHMARK_MAX_ATTEMPTS, BENCHMARK_MAX_JSONL_CHARS, BENCHMARK_MAX_NAME_LENGTH, BENCHMARK_MAX_REPEAT_COUNT, BENCHMARK_MAX_TEXT_LENGTH, BENCHMARK_MAX_TOKENS_LIMIT } from './benchmark-suite';
 import type { BenchmarkSuite } from './benchmark-suite';
 
 const baseDraft = (over: Partial<SuiteDraft> = {}): SuiteDraft => ({
@@ -152,13 +152,13 @@ describe('estimateDraftAttempts', () => {
 
   it('returns null for an in-range integer that is still out of the same warmup/repeat bounds Save enforces', () => {
     // Regression: an integer failed only isFiniteInteger before, so an out-of-range value (e.g.
-    // warmup -1, or repeat 0/4 -- valid range is 0-1 warmup, 1-3 repeat per benchmark-suite.ts)
-    // produced a misleading zero/negative "Estimated attempts" preview even though Save's real
-    // validateBenchmarkSuite would reject the identical draft outright.
+    // warmup -1, or repeat 0 / one past the repeat ceiling) produced a misleading zero/negative
+    // "Estimated attempts" preview even though Save's real validateBenchmarkSuite would reject
+    // the identical draft outright.
     expect(estimateDraftAttempts(baseDraft({ warmupCount: -1, repeatCount: 1 }))).toBeNull();
     expect(estimateDraftAttempts(baseDraft({ warmupCount: 2, repeatCount: 1 }))).toBeNull();
     expect(estimateDraftAttempts(baseDraft({ warmupCount: 0, repeatCount: 0 }))).toBeNull();
-    expect(estimateDraftAttempts(baseDraft({ warmupCount: 0, repeatCount: 4 }))).toBeNull();
+    expect(estimateDraftAttempts(baseDraft({ warmupCount: 0, repeatCount: BENCHMARK_MAX_REPEAT_COUNT + 1 }))).toBeNull();
     // The boundary values themselves remain valid.
     expect(estimateDraftAttempts(baseDraft({
       casesJsonl: '{"id":"c1","prompt":"x"}\n',
@@ -199,6 +199,139 @@ describe('optionalDraftNumber', () => {
     expect(optionalDraftNumber('0.2')).toBe(0.2);
     expect(optionalDraftNumber(0)).toBe(0);
     expect(optionalDraftNumber('nope')).toBeNaN();
+  });
+});
+
+describe('draftInputErrors', () => {
+  const blank = (over: Partial<SuiteDraft> = {}): SuiteDraft => ({
+    name: '',
+    targets: [],
+    casesJsonl: '',
+    warmupCount: 1,
+    repeatCount: 1,
+    ...over,
+  });
+
+  it('stays quiet when name, targets, and cases are still empty', () => {
+    const errors = draftInputErrors(blank());
+    expect(errors.name).toBeNull();
+    expect(errors.targets).toBeNull();
+    expect(errors.temperature).toBeNull();
+    expect(errors.maxTokens).toBeNull();
+    expect(errors.rows).toEqual([]);
+    expect(draftInputBlocksSave(errors)).toBe(false);
+  });
+
+  it('reports a too-long name with the suite validator sentence', () => {
+    const errors = draftInputErrors(blank({ name: 'n'.repeat(BENCHMARK_MAX_NAME_LENGTH + 1) }));
+    expect(errors.name).toBe('name must be a non-empty string');
+    expect(draftInputBlocksSave(errors)).toBe(true);
+  });
+
+  it('reports a duplicate target alias with the suite validator sentence', () => {
+    const errors = draftInputErrors(baseDraft({
+      targets: [
+        { alias: 'model-a', variantId: null },
+        { alias: 'model-a', variantId: 'v2' },
+      ],
+    }));
+    expect(errors.targets).toBe(
+      'targets[1]: duplicate target alias "model-a" (targets are keyed by alias, not alias+variant)',
+    );
+  });
+
+  it('reports an empty prompt on that case row', () => {
+    const errors = draftInputErrors(baseDraft({ casesJsonl: '{"id":"c1","prompt":""}' }));
+    expect(errors.rows[0]?.prompt).toBe(
+      `prompt must be a non-empty string of at most ${BENCHMARK_MAX_TEXT_LENGTH} characters`,
+    );
+    expect(errors.rows[0]?.id).toBeNull();
+  });
+
+  it('maps a prompt error after leading blank lines onto the only case row', () => {
+    const prompt = `prompt must be a non-empty string of at most ${BENCHMARK_MAX_TEXT_LENGTH} characters`;
+    const oneBlank = draftInputErrors(baseDraft({
+      casesJsonl: '\n{"id":"c1","prompt":""}',
+    }));
+    expect(oneBlank.rows).toHaveLength(1);
+    expect(oneBlank.rows[0]?.prompt).toBe(prompt);
+
+    const manyBlanks = draftInputErrors(baseDraft({
+      casesJsonl: `${'\n'.repeat(40)}{"id":"c1","prompt":""}`,
+    }));
+    expect(manyBlanks.rows).toHaveLength(1);
+    expect(manyBlanks.rows[0]?.prompt).toBe(prompt);
+  });
+
+  it('reports a duplicate case id on the later row', () => {
+    const errors = draftInputErrors(baseDraft({
+      casesJsonl: '{"id":"dup","prompt":"a"}\n{"id":"dup","prompt":"b"}',
+    }));
+    expect(errors.rows[1]?.id).toBe('duplicate case id "dup"');
+    expect(errors.rows[0]?.id).toBeNull();
+  });
+
+  it('reports a duplicate case id that contains "tag" on the id field', () => {
+    const stage = draftInputErrors(baseDraft({
+      casesJsonl: '{"id":"stage","prompt":"a"}\n{"id":"stage","prompt":"b"}',
+    }));
+    expect(stage.rows[1]?.id).toBe('duplicate case id "stage"');
+    expect(stage.rows[1]?.other).toBeNull();
+
+    const tag = draftInputErrors(baseDraft({
+      casesJsonl: '{"id":"tag","prompt":"a"}\n{"id":"tag","prompt":"b"}',
+    }));
+    expect(tag.rows[1]?.id).toBe('duplicate case id "tag"');
+    expect(tag.rows[1]?.other).toBeNull();
+  });
+
+  it('keeps a real tag failure on other and does not set id', () => {
+    const errors = draftInputErrors(baseDraft({
+      casesJsonl: '{"id":"c1","prompt":"a","tags":"nope"}',
+    }));
+    expect(errors.rows[0]?.other).toMatch(/tags must be an array/);
+    expect(errors.rows[0]?.id).toBeNull();
+  });
+
+  it('reports a temperature outside 0 to 2', () => {
+    const errors = draftInputErrors(baseDraft({ temperature: '9' }));
+    expect(errors.temperature).toBe('temperature must be a number between 0 and 2 when present');
+  });
+
+  it('reports max tokens above the preview limit', () => {
+    const errors = draftInputErrors(baseDraft({ maxTokens: String(BENCHMARK_MAX_TOKENS_LIMIT + 1) }));
+    expect(errors.maxTokens).toBe(
+      `maxTokens must be an integer between 1 and ${BENCHMARK_MAX_TOKENS_LIMIT} when present`,
+    );
+  });
+
+  it('does not treat invalid JSONL as a case-row field error', () => {
+    const errors = draftInputErrors(baseDraft({ casesJsonl: 'not json' }));
+    expect(errors.rows).toEqual([]);
+    expect(draftInputBlocksSave(errors)).toBe(false);
+  });
+
+  it('accepts a draft Save can already build', () => {
+    expect(draftInputBlocksSave(draftInputErrors(baseDraft()))).toBe(false);
+  });
+});
+
+describe('casesJsonlError', () => {
+  it('treats a blank editor as not yet a case list', () => {
+    expect(casesJsonlError('')).toBeNull();
+    expect(casesJsonlError('  \n\t')).toBeNull();
+  });
+
+  it('accepts one valid case per non-blank line', () => {
+    expect(casesJsonlError('{"id":"c1","prompt":"a"}\n\n{"prompt":"b"}')).toBeNull();
+  });
+
+  it('returns the parser error for a line that is not JSON', () => {
+    expect(casesJsonlError('{"id":"c1","prompt":"a"}\nnot json')).toBe('line 2: not valid JSON');
+  });
+
+  it('returns the parser error for a duplicate case id', () => {
+    expect(casesJsonlError('{"id":"dup","prompt":"a"}\n{"id":"dup","prompt":"b"}')).toMatch(/line 2: duplicate case id "dup"/);
   });
 });
 

@@ -374,6 +374,100 @@ export async function putBenchmarkSuiteIfNoRuns(suite: BenchmarkSuite): Promise<
   return okResult(undefined);
 }
 
+/**
+ * Deletes one suite together with its runs, headers, attempts, and attempt summaries.
+ * A stored `running` row is an interrupted run unless its id is the live runner.
+ * Only that live id refuses the delete, in the same transaction, so its journal is
+ * not removed out from under the runner. Omitting the id deletes interrupted rows.
+ * There is no undo.
+ * Attempt and summary rows are removed through a key cursor so their response bodies are
+ * not structured-cloned just to throw them away.
+ */
+export async function deleteBenchmarkSuiteWithHistory(
+  id: string,
+  activeRunId?: string | null,
+): Promise<RepositoryResult<void>> {
+  const key = suiteIdKey(id);
+  const result = await withStores<void>(
+    [SUITES_STORE, RUNS_STORE, RUN_HEADERS_STORE, ATTEMPTS_STORE, ATTEMPT_SUMMARIES_STORE],
+    'readwrite',
+    (tx, trackRequest) => {
+      const runsRequest = tx.objectStore(RUNS_STORE).index(RUNS_BY_SUITE_INDEX).getAll(key) as IDBRequest<BenchmarkRun[]>;
+      trackRequest(runsRequest);
+      return new Promise<void>((resolve, reject) => {
+        runsRequest.onsuccess = () => {
+          try {
+            const runs = runsRequest.result ?? [];
+            if (runs.some((run) => run.status === 'running' && run.id === activeRunId)) {
+              throw new Error(`suite "${key}" has a run still in progress and cannot be deleted`);
+            }
+            const runsStore = tx.objectStore(RUNS_STORE);
+            for (const run of runs) {
+              trackRequest(runsStore.delete(run.id));
+            }
+            const deletions = [
+              deleteMatchingKeys(tx.objectStore(RUN_HEADERS_STORE).index(RUN_HEADERS_BY_SUITE_INDEX), key, trackRequest),
+              ...runs.flatMap((run) => [
+                deleteMatchingKeys(tx.objectStore(ATTEMPTS_STORE).index(ATTEMPTS_BY_RUN_INDEX), run.id, trackRequest),
+                deleteMatchingKeys(tx.objectStore(ATTEMPT_SUMMARIES_STORE).index(ATTEMPT_SUMMARIES_BY_RUN_INDEX), run.id, trackRequest),
+              ]),
+              requestSucceeded(tx.objectStore(SUITES_STORE).delete(key), trackRequest),
+            ];
+            Promise.all(deletions).then(() => resolve(), reject);
+          } catch (e) {
+            reject(e);
+          }
+        };
+      });
+    },
+  );
+  if (!result.ok) return failResult(result.error!);
+  return okResult(undefined);
+}
+
+/** Resolves when `request` succeeds. A failure aborts the surrounding transaction. */
+function requestSucceeded(request: IDBRequest, trackRequest: (request: IDBRequest) => void): Promise<void> {
+  trackRequest(request);
+  return new Promise((resolve) => {
+    request.onsuccess = () => resolve();
+  });
+}
+
+/**
+ * Deletes every object-store row an index matches, by primary key, without reading the row.
+ * `continue()` stays in this success handler: waiting for the delete request first makes
+ * WebView2 throw InvalidStateError once the cursor has moved on.
+ */
+function deleteMatchingKeys(
+  index: IDBIndex,
+  query: IDBValidKey,
+  trackRequest: (request: IDBRequest) => void,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let request: IDBRequest<IDBCursor | null>;
+    try {
+      request = index.openKeyCursor(query) as IDBRequest<IDBCursor | null>;
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    trackRequest(request);
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) {
+        resolve();
+        return;
+      }
+      try {
+        trackRequest(index.objectStore.delete(cursor.primaryKey));
+        cursor.continue();
+      } catch (e) {
+        reject(e);
+      }
+    };
+  });
+}
+
 /** Guarded delete counterpart to `putBenchmarkSuiteIfNoRuns` — see its docstring. */
 export async function deleteBenchmarkSuiteIfNoRuns(id: string): Promise<RepositoryResult<void>> {
   const key = suiteIdKey(id);

@@ -96,6 +96,24 @@
     <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
   {:else if name === 'loader'}
     <path d="M21 12a9 9 0 1 1-6.22-8.56"/>
+  {:else if name === 'play'}
+    <path d="M7 4.5v15l13-7.5-13-7.5Z" fill="currentColor" stroke="none"/>
+  {:else if name === 'chevron-down'}
+    <path d="m6 9 6 6 6-6"/>
+  {:else if name === 'chevron-up'}
+    <path d="m6 15 6-6 6 6"/>
+  {:else if name === 'plus'}
+    <path d="M12 5v14"/>
+    <path d="M5 12h14"/>
+  {:else if name === 'pencil'}
+    <path d="M12 20h9"/>
+    <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+  {:else if name === 'trash'}
+    <path d="M3 6h18"/>
+    <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+    <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+    <path d="M10 11v6"/>
+    <path d="M14 11v6"/>
   {:else if name === 'download'}
     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
     <polyline points="7 10 12 15 17 10"/>

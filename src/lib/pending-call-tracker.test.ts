@@ -167,6 +167,79 @@ describe('createPendingCallTracker', () => {
     }
   });
 
+  it('joinUntilIdle() resolves true immediately when nothing is tracked', async () => {
+    const tracker = createPendingCallTracker();
+    await expect(tracker.joinUntilIdle(10)).resolves.toBe(true);
+  });
+
+  it('joinUntilIdle() waits for a call tracked after it starts and resolves true inside the original deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const tracker = createPendingCallTracker();
+      const first = deferred<void>();
+      tracker.track(first.promise);
+
+      let result: boolean | undefined;
+      const joinPromise = tracker.joinUntilIdle(1000).then((value) => {
+        result = value;
+      });
+
+      // Tracked after joinUntilIdle has snapshotted `first`. A plain joinWithTimeout would
+      // miss this call; the idle join must stay pending until it settles.
+      const later = deferred<void>();
+      tracker.track(later.promise);
+      first.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(result).toBeUndefined();
+
+      later.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      await joinPromise;
+      expect(result).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('joinUntilIdle() returns false when a call tracked during the wait is still pending at the original deadline, and leaves it tracked', async () => {
+    vi.useFakeTimers();
+    try {
+      const tracker = createPendingCallTracker();
+      const first = deferred<void>();
+      tracker.track(first.promise);
+      let result: boolean | undefined;
+      const joinPromise = tracker.joinUntilIdle(1000).then((value) => {
+        result = value;
+      });
+
+      // Part of the original budget elapses before the later call exists, so a fresh budget
+      // per snapshot would still be waiting after the original deadline.
+      await vi.advanceTimersByTimeAsync(600);
+      const later = deferred<void>();
+      tracker.track(later.promise);
+      first.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(result).toBeUndefined();
+
+      await vi.advanceTimersByTimeAsync(400);
+      await joinPromise;
+      expect(result).toBe(false);
+
+      let joined = false;
+      const stillTracked = tracker.join().then(() => {
+        joined = true;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(joined).toBe(false);
+      later.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      await stillTracked;
+      expect(joined).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('joinWithTimeout() resolves false when the tracked call has not settled by the deadline, without cancelling it', async () => {
     vi.useFakeTimers();
     try {

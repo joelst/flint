@@ -16,6 +16,10 @@
  * still be running when the caller starts (and tracks) a *replacement* attempt of its own -- if a
  * newer `track()` discarded the still-pending older call's tracking, a later joiner could return
  * before that older call actually lands, reopening exactly the race this tracker exists to close.
+ *
+ * `joinWithTimeout` only waits for the calls that were already tracked when it started. A retry
+ * can `track` another call during that wait. `joinUntilIdle` keeps waiting for those too, under
+ * the original deadline, and still does not cancel anything it gives up on.
  */
 
 export interface PendingCallTracker {
@@ -44,12 +48,19 @@ export interface PendingCallTracker {
    * waits for it.
    */
   joinWithTimeout(timeoutMs: number): Promise<boolean>;
+  /**
+   * Like `joinWithTimeout`, but a call tracked after this wait has started is waited for too.
+   * The deadline is the one from this call: a later `track` does not receive a fresh budget.
+   * Returns `true` once nothing is tracked, or `false` if the deadline passes first. Does not
+   * cancel the underlying calls.
+   */
+  joinUntilIdle(timeoutMs: number): Promise<boolean>;
 }
 
 /** Creates a tracker with no in-flight calls. */
 export function createPendingCallTracker(): PendingCallTracker {
   const pending = new Set<Promise<void>>();
-  return {
+  const tracker: PendingCallTracker = {
     track(call: Promise<unknown>): void {
       const marker: Promise<void> = call.then(
         () => undefined,
@@ -84,5 +95,16 @@ export function createPendingCallTracker(): PendingCallTracker {
       clearTimeout(timer!);
       return !timedOut;
     },
+    async joinUntilIdle(timeoutMs: number): Promise<boolean> {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        if (pending.size === 0) return true;
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) return false;
+        const settled = await tracker.joinWithTimeout(remaining);
+        if (!settled) return false;
+      }
+    },
   };
+  return tracker;
 }

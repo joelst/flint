@@ -16,6 +16,106 @@ export interface DecodedPcm {
   channelData: Float32Array[];
 }
 
+type HostScheduler = { yield?: () => Promise<void> };
+
+/**
+ * Gives the UI thread a turn during a long sample walk.
+ *
+ * `scheduler.yield` paints without the 4ms timer clamp. A host without it gets a macrotask.
+ */
+export function yieldToMainThread(): Promise<void> {
+  const host = globalThis as typeof globalThis & { scheduler?: HostScheduler };
+  const yieldNow = host.scheduler?.yield;
+  if (typeof yieldNow === 'function') return yieldNow.call(host.scheduler);
+  return new Promise((resolve) => {
+    setTimeout(resolve, 0);
+  });
+}
+
+/** One hour of 16 kHz audio is tens of millions of frames. Yield a few times a second of audio. */
+const PCM_FRAMES_PER_YIELD = 32_768;
+
+function readPcmSample(
+  view: DataView,
+  sampleOffset: number,
+  bitsPerSample: number,
+  formatCode: number,
+  isFloat: boolean,
+  isInt: boolean,
+): number {
+  if (isFloat && bitsPerSample === 32) {
+    return view.getFloat32(sampleOffset, true);
+  }
+  if (isInt && bitsPerSample === 8) {
+    // 8-bit PCM is the one unsigned case (silence sits at 128, not 0).
+    return (view.getUint8(sampleOffset) - 128) / 128;
+  }
+  if (isInt && bitsPerSample === 16) {
+    return view.getInt16(sampleOffset, true) / 32768;
+  }
+  if (isInt && bitsPerSample === 24) {
+    const b0 = view.getUint8(sampleOffset);
+    const b1 = view.getUint8(sampleOffset + 1);
+    const b2 = view.getUint8(sampleOffset + 2);
+    let raw = b0 | (b1 << 8) | (b2 << 16);
+    if (raw & 0x800000) raw -= 0x1000000;
+    return raw / 8388608;
+  }
+  if (isInt && bitsPerSample === 32) {
+    return view.getInt32(sampleOffset, true) / 2147483648;
+  }
+  throw new Error(`Unsupported WAV bit depth ${bitsPerSample} for format code ${formatCode}.`);
+}
+
+function fillPcmChannels(
+  view: DataView,
+  channelData: Float32Array[],
+  startFrame: number,
+  endFrame: number,
+  dataOffset: number,
+  frameSize: number,
+  bytesPerSample: number,
+  bitsPerSample: number,
+  formatCode: number,
+  isFloat: boolean,
+  isInt: boolean,
+): void {
+  const numChannels = channelData.length;
+  for (let frame = startFrame; frame < endFrame; frame += 1) {
+    const frameOffset = dataOffset + frame * frameSize;
+    for (let channel = 0; channel < numChannels; channel += 1) {
+      const sampleOffset = frameOffset + channel * bytesPerSample;
+      channelData[channel][frame] = readPcmSample(
+        view,
+        sampleOffset,
+        bitsPerSample,
+        formatCode,
+        isFloat,
+        isInt,
+      );
+    }
+  }
+}
+
+function allocatePcm(buffer: ArrayBuffer): DecodedPcm & {
+  view: DataView;
+  formatCode: number;
+  bitsPerSample: number;
+  bytesPerSample: number;
+  frameSize: number;
+  frameCount: number;
+  dataOffset: number;
+  isFloat: boolean;
+  isInt: boolean;
+} {
+  const header = parseWavHeader(buffer);
+  const channelData: Float32Array[] = Array.from(
+    { length: header.numChannels },
+    () => new Float32Array(header.frameCount),
+  );
+  return { ...header, sampleRate: header.sampleRate, channelData };
+}
+
 /**
  * Parse a canonical RIFF/WAVE buffer into per-channel Float32 PCM.
  *
@@ -28,39 +128,54 @@ export interface DecodedPcm {
  *   is truncated, or no `data` chunk is present.
  */
 export function decodeWavPcm(buffer: ArrayBuffer): DecodedPcm {
-  const { view, formatCode, numChannels, sampleRate, bitsPerSample, bytesPerSample, frameSize, frameCount, dataOffset, isFloat, isInt } =
-    parseWavHeader(buffer);
-  const channelData: Float32Array[] = Array.from({ length: numChannels }, () => new Float32Array(frameCount));
+  const decoded = allocatePcm(buffer);
+  fillPcmChannels(
+    decoded.view,
+    decoded.channelData,
+    0,
+    decoded.frameCount,
+    decoded.dataOffset,
+    decoded.frameSize,
+    decoded.bytesPerSample,
+    decoded.bitsPerSample,
+    decoded.formatCode,
+    decoded.isFloat,
+    decoded.isInt,
+  );
+  return { sampleRate: decoded.sampleRate, channelData: decoded.channelData };
+}
 
-  for (let frame = 0; frame < frameCount; frame += 1) {
-    const frameOffset = dataOffset + frame * frameSize;
-    for (let channel = 0; channel < numChannels; channel += 1) {
-      const sampleOffset = frameOffset + channel * bytesPerSample;
-      let value: number;
-      if (isFloat && bitsPerSample === 32) {
-        value = view.getFloat32(sampleOffset, true);
-      } else if (isInt && bitsPerSample === 8) {
-        // 8-bit PCM is the one unsigned case (silence sits at 128, not 0).
-        value = (view.getUint8(sampleOffset) - 128) / 128;
-      } else if (isInt && bitsPerSample === 16) {
-        value = view.getInt16(sampleOffset, true) / 32768;
-      } else if (isInt && bitsPerSample === 24) {
-        const b0 = view.getUint8(sampleOffset);
-        const b1 = view.getUint8(sampleOffset + 1);
-        const b2 = view.getUint8(sampleOffset + 2);
-        let raw = b0 | (b1 << 8) | (b2 << 16);
-        if (raw & 0x800000) raw -= 0x1000000;
-        value = raw / 8388608;
-      } else if (isInt && bitsPerSample === 32) {
-        value = view.getInt32(sampleOffset, true) / 2147483648;
-      } else {
-        throw new Error(`Unsupported WAV bit depth ${bitsPerSample} for format code ${formatCode}.`);
-      }
-      channelData[channel][frame] = value;
-    }
+/**
+ * Same samples as `decodeWavPcm`, but returns to the event loop between frame chunks.
+ *
+ * The synchronous decoder stays for callers that already hold the result in one turn (tests,
+ * short files). A long recording walked sample-by-sample on the UI thread never paints.
+ */
+export async function decodeWavPcmYielding(
+  buffer: ArrayBuffer,
+  options?: { framesPerYield?: number; yield?: () => Promise<void> },
+): Promise<DecodedPcm> {
+  const decoded = allocatePcm(buffer);
+  const framesPerYield = Math.max(1, options?.framesPerYield ?? PCM_FRAMES_PER_YIELD);
+  const yieldNow = options?.yield ?? yieldToMainThread;
+  for (let start = 0; start < decoded.frameCount; start += framesPerYield) {
+    const end = Math.min(decoded.frameCount, start + framesPerYield);
+    fillPcmChannels(
+      decoded.view,
+      decoded.channelData,
+      start,
+      end,
+      decoded.dataOffset,
+      decoded.frameSize,
+      decoded.bytesPerSample,
+      decoded.bitsPerSample,
+      decoded.formatCode,
+      decoded.isFloat,
+      decoded.isInt,
+    );
+    if (end < decoded.frameCount) await yieldNow();
   }
-
-  return { sampleRate, channelData };
+  return { sampleRate: decoded.sampleRate, channelData: decoded.channelData };
 }
 
 /**

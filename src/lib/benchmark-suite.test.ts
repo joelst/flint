@@ -6,7 +6,11 @@ import {
   BENCHMARK_MAX_JSONL_LINE_CHARS,
   BENCHMARK_MAX_MESSAGES_PER_CASE,
   BENCHMARK_MAX_TARGETS,
+  BENCHMARK_DEFAULT_MAX_TOKENS,
+  BENCHMARK_MAX_REPEAT_COUNT,
+  BENCHMARK_MAX_TEMPERATURE,
   BENCHMARK_MAX_TOKENS_LIMIT,
+  BENCHMARK_MIN_TEMPERATURE,
   benchmarkAttemptCount,
   isBenchmarkSuite,
   isStoredBenchmarkSuite,
@@ -174,6 +178,26 @@ describe('validateBenchmarkSuite', () => {
     expect(r.ok).toBe(true);
   });
 
+  it('accepts a repeat count at the experimentation ceiling', () => {
+    expect(BENCHMARK_MAX_REPEAT_COUNT).toBe(20);
+    expect(validateBenchmarkSuite(validSuite({ repeatCount: BENCHMARK_MAX_REPEAT_COUNT })).ok).toBe(true);
+  });
+
+  it('keeps temperature inside the chat transport range', () => {
+    expect(BENCHMARK_MIN_TEMPERATURE).toBe(0);
+    expect(BENCHMARK_MAX_TEMPERATURE).toBe(2);
+    expect(validateBenchmarkSuite(validSuite({ temperature: BENCHMARK_MAX_TEMPERATURE })).ok).toBe(true);
+    expect(validateBenchmarkSuite(validSuite({ temperature: BENCHMARK_MAX_TEMPERATURE + 0.01 })).ok).toBe(false);
+  });
+
+  it('accepts the new-suite default and the preview ceiling', () => {
+    expect(BENCHMARK_DEFAULT_MAX_TOKENS).toBe(8192);
+    expect(BENCHMARK_MAX_TOKENS_LIMIT).toBe(131072);
+    expect(validateBenchmarkSuite(validSuite({ maxTokens: BENCHMARK_DEFAULT_MAX_TOKENS })).ok).toBe(true);
+    expect(validateBenchmarkSuite(validSuite({ maxTokens: BENCHMARK_MAX_TOKENS_LIMIT })).ok).toBe(true);
+    expect(validateBenchmarkSuite(validSuite({ maxTokens: 4096 })).ok).toBe(true);
+  });
+
   it('accepts optional temperature, maxTokens, and description', () => {
     const r = validateBenchmarkSuite(validSuite({
       description: 'A test suite',
@@ -195,7 +219,7 @@ describe('validateBenchmarkSuite', () => {
       cases: Array.from({ length: BENCHMARK_MAX_CASES + 1 }, (_, i) => validCase({ id: `c${i}` })),
     }],
     ['repeatCount below 1', { repeatCount: 0 }],
-    ['repeatCount above 3', { repeatCount: 4 }],
+    [`repeatCount above ${BENCHMARK_MAX_REPEAT_COUNT}`, { repeatCount: BENCHMARK_MAX_REPEAT_COUNT + 1 }],
     ['warmupCount below 0', { warmupCount: -1 }],
     ['warmupCount above 1', { warmupCount: 2 }],
     ['non-integer repeatCount', { repeatCount: 1.5 }],

@@ -213,6 +213,142 @@ describe('createExclusiveReleaseRetrier', () => {
     expect(release).toHaveBeenCalledTimes(1);
   });
 
+  it('pause suppresses a scheduled tick, and resume re-arms that same delay instead of skipping a backoff slot', async () => {
+    vi.useFakeTimers();
+    const release = vi.fn(async () => { throw new Error('still blocked'); });
+    const retrier = createExclusiveReleaseRetrier(release, vi.fn(), [10, 20, 30]);
+
+    retrier.pause();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(release).not.toHaveBeenCalled();
+
+    retrier.resume();
+    await vi.advanceTimersByTimeAsync(9);
+    expect(release).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(release).toHaveBeenCalledTimes(1);
+
+    // The resumed tick used the original 10ms slot, so the failure's follow-up is the 20ms
+    // slot — not 30ms, which is what a second increment during resume would select.
+    await vi.advanceTimersByTimeAsync(19);
+    expect(release).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(release).toHaveBeenCalledTimes(2);
+  });
+
+  it('pause during an in-flight release does not start a second call, and resume after that failure schedules exactly one follow-up', async () => {
+    vi.useFakeTimers();
+    let rejectRelease: ((e: Error) => void) | null = null;
+    const release = vi.fn(() => new Promise<void>((_resolve, reject) => {
+      rejectRelease = reject;
+    }));
+    const retrier = createExclusiveReleaseRetrier(release, vi.fn(), [10, 20, 30]);
+
+    await vi.advanceTimersByTimeAsync(10);
+    expect(release).toHaveBeenCalledTimes(1);
+    retrier.pause();
+    expect(release).toHaveBeenCalledTimes(1);
+
+    rejectRelease!(new Error('still blocked'));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(100_000);
+    expect(release).toHaveBeenCalledTimes(1);
+
+    retrier.resume();
+    await vi.advanceTimersByTimeAsync(19);
+    expect(release).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(release).toHaveBeenCalledTimes(2);
+  });
+
+  it('resume while a paused in-flight release is still running does not schedule a second follow-up', async () => {
+    vi.useFakeTimers();
+    let rejectRelease: ((e: Error) => void) | null = null;
+    const release = vi.fn(() => new Promise<void>((_resolve, reject) => {
+      rejectRelease = reject;
+    }));
+    const retrier = createExclusiveReleaseRetrier(release, vi.fn(), [10, 20, 30]);
+
+    await vi.advanceTimersByTimeAsync(10);
+    retrier.pause();
+    retrier.resume();
+    expect(release).toHaveBeenCalledTimes(1);
+
+    rejectRelease!(new Error('still blocked'));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(19);
+    expect(release).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(release).toHaveBeenCalledTimes(2);
+  });
+
+  it('retryNow during pause does not call release, and resume still uses the interrupted delay', async () => {
+    vi.useFakeTimers();
+    const release = vi.fn(async () => {});
+    const retrier = createExclusiveReleaseRetrier(release, vi.fn(), [10, 20, 30]);
+
+    retrier.pause();
+    await retrier.retryNow();
+    expect(release).not.toHaveBeenCalled();
+
+    retrier.resume();
+    await vi.advanceTimersByTimeAsync(9);
+    expect(release).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancel while paused stays cancelled across resume, including an in-flight attempt that then settles', async () => {
+    vi.useFakeTimers();
+    let resolveRelease: (() => void) | null = null;
+    const release = vi.fn(() => new Promise<void>((resolve) => { resolveRelease = resolve; }));
+    const onStuckChange = vi.fn();
+    const retrier = createExclusiveReleaseRetrier(release, onStuckChange, [10, 20, 30]);
+
+    retrier.pause();
+    retrier.cancel();
+    onStuckChange.mockClear();
+    retrier.resume();
+    await retrier.retryNow();
+    await vi.advanceTimersByTimeAsync(100_000);
+    expect(release).not.toHaveBeenCalled();
+    expect(onStuckChange).not.toHaveBeenCalled();
+
+    const inFlight = createExclusiveReleaseRetrier(release, onStuckChange, [10, 20, 30]);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(release).toHaveBeenCalledTimes(1);
+    onStuckChange.mockClear();
+    inFlight.pause();
+    inFlight.cancel();
+    resolveRelease!();
+    await vi.advanceTimersByTimeAsync(0);
+    inFlight.resume();
+    await inFlight.retryNow();
+    await vi.advanceTimersByTimeAsync(100_000);
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(onStuckChange).not.toHaveBeenCalled();
+  });
+
+  it('a release that succeeds while paused clears stuck so resume does not schedule another', async () => {
+    vi.useFakeTimers();
+    let resolveRelease: (() => void) | null = null;
+    const release = vi.fn(() => new Promise<void>((resolve) => { resolveRelease = resolve; }));
+    const onStuckChange = vi.fn();
+    const retrier = createExclusiveReleaseRetrier(release, onStuckChange, [10, 20, 30]);
+
+    await vi.advanceTimersByTimeAsync(10);
+    retrier.pause();
+    resolveRelease!();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(retrier.stuck).toBe(false);
+    expect(onStuckChange).toHaveBeenLastCalledWith(false);
+
+    retrier.resume();
+    await vi.advanceTimersByTimeAsync(100_000);
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(retrier.stuck).toBe(false);
+  });
+
   it('retryNow is a no-op after cancel, even for a caller still holding a stale retrier reference', async () => {
     vi.useFakeTimers();
     const release = vi.fn(async () => {});
