@@ -37,7 +37,7 @@ The sidebar is grouped by workflow:
 
 3. **Playground**  
    - Open **Playground**, send a message. A **Chat / Voice** toggle inside switches modes.  
-   - Optional: personas, text/code files, image attach (vision models), URL → context chips.
+   - Optional: personas, text or code files, one image on a vision model, URL chips, and the header **Web search** checkbox. The first search asks before it runs.
 
 4. **Optional — service for other apps**  
    - **Diagnostics → Start service**.  
@@ -112,7 +112,7 @@ The sidebar is grouped by workflow:
   clicking that chip's **Fetch** is a separate explicit action: the page is requested immediately,
   with the toggle on or off and before you send, through the same isolated helper. Sending clears
   every URL chip; a page still loading when you send is not used for that message or any later one.
-  **Ask again for search and sites** in Generation settings clears those approvals. It does not clear
+  **Ask again for search and sites** is in **Settings → Web**. The same button also appears in the chat header while an approval is stored. It clears those approvals. It does not clear
   the blocklist or the new-chat default.
   If that saved choice cannot be written, Flint reports the failure and leaves the previous choice in place.
   **Remember for new chats** in Settings is separate from the header checkbox. The first time it is turned

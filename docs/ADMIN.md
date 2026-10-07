@@ -68,7 +68,7 @@ domain once, for this session, forever, or for all public URLs in that conversat
 A redirect to a different host asks for that host before it is contacted.
 URLs the user typed or attached do not ask again. A model `web_fetch` may use an HTTPS URL typed
 or attached in that same send without another prompt, or, after the domain approval above, a
-search-result URL from the conversation that ran the search. **Ask again for search and sites**
+search-result URL from the conversation that ran the search. **Ask again for search and sites**, in **Settings → Web** and in the chat header while an approval is stored,
 clears the saved and session approvals when the saved choice can be removed. If that write fails,
 Flint reports it and leaves both in place.
 Flint admits at most two helper processes at once and refuses excess retrievals explicitly. The
@@ -126,7 +126,7 @@ Delete those directories only if you intend to drop local models and chat histor
 
 ## Updater
 
-The in-app updater follows GitHub `releases/latest`. **Prereleases are skipped** — 0.7.0 evaluation builds must be installed by hand. **0.9.0** is the first stable publish (skip 0.8.0) so `latest.json` resolves; that is the upgrade test from 0.7.0. **1.0.0** is a later stable after that upgrade is proven.
+The in-app updater follows GitHub `releases/latest`. **Prereleases are skipped** — 0.7.0 evaluation builds must be installed by hand. **0.9.0** was the first stable publish (skip 0.8.0) so `latest.json` resolves; that was the upgrade test from 0.7.0. The current published stable release is **0.9.2**. **0.10.0** is the next release from this tree and is not published. **1.0.0** is a later stable after 0.10.0 qualification.
 
 Checking for updates is always manual (**Settings → About → Check**); Flint does not poll for updates automatically and shows no update-available banner elsewhere in the app. When an update is available, About offers two paths: **Install** it in place (visible download progress, then **Restart to update** or **Later**), or **View release** to open the GitHub release page and download/install it yourself.
 

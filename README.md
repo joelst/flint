@@ -53,7 +53,7 @@ Use the CLI when you want a terminal-first workflow. Use Flint when you want the
 - **Operate** — Monitor (pool, resource gauges, access/audit logs), Diagnostics (service start/stop, endpoint self-test, health ring), Integrations (copy-paste setup for OpenAI-compatible tools)
 - **Manage** — Settings (bind/port with Apply & restart, autostart, defaults, shortcuts (`?`)) and Help (first-run coaching, empty-state guidance, About strip)
 
-Chat supports streaming, conversations, personas, system prompts, multi-image vision, host-aware context, and optional URL → context. Audio supports mic + file transcription (STT).
+Chat supports streaming, conversations, personas, system prompts, one attached image on a vision model, host-aware context, URL chips, and an opt-in header Web search. Audio supports mic and file transcription.
 
 No system Node install is required: release builds bundle their own Node 22 runtime for the Foundry sidecar.
 
@@ -61,7 +61,7 @@ No system Node install is required: release builds bundle their own Node 22 runt
 
 ## Status
 
-Pre-1.0: expect breaking changes. **0.9.0 is Flint's first stable channel release** (0.8.0 was skipped), following the 0.7.0 evaluation prerelease. [Installers and release notes](https://github.com/joelst/flint/releases).
+Pre-1.0: expect breaking changes. The published stable release is **[0.9.2](https://github.com/joelst/flint/releases/tag/v0.9.2)**. **0.9.0** was the first stable channel release (0.8.0 was skipped), after the 0.7.0 evaluation prerelease. **0.10.0** is the next release from this tree and is not published yet. [Installers and release notes](https://github.com/joelst/flint/releases).
 
 - Windows installers carry a **public-trust Authenticode signature** issued through Azure Trusted Signing, so they validate against the Microsoft-managed root on any machine — no certificate to install and no "unknown publisher" prompt. Bundles ship the Foundry native cores and a pinned Node 22 runtime, verified in CI.
 - macOS builds are **unsigned** (no Apple Developer account) — install with the one-liner below, not the DMG, or Gatekeeper will call the app "damaged".
@@ -75,8 +75,8 @@ Living reliability plan: **[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md)** · E
 
 ## Screenshots
 
-Each section shows Windows and macOS in dark mode (Flint's default) and light mode. Benchmark Preview is opt-in and off by default, so it is not part of this default screenshot set.
-Regenerate these with `node scripts/capture-screenshots.mjs` — see
+Each section shows dark mode (Flint's default) and light mode. The Windows and macOS images were recaptured for the 0.10.0 candidate. The Windows capture is a dev build whose Help and Settings version reads v0.10.0. Benchmark Preview is opt-in and off by default, so it is not part of this set.
+Regenerate either platform with `node scripts/capture-screenshots.mjs` — see
 [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md#screenshots).
 
 ### Chat
@@ -166,7 +166,7 @@ Regenerate these with `node scripts/capture-screenshots.mjs` — see
 
 ### Use a release build
 
-1. Install a build from [GitHub Releases](https://github.com/joelst/flint/releases) (or build from source below). Once 0.9.0 is published as a full release (not a prerelease), it appears under "Latest".
+1. Install the latest full release from [GitHub Releases](https://github.com/joelst/flint/releases). That release is 0.9.2. Drafts and prereleases, including the unpublished 0.10.0 draft, are not what the in-app updater offers.
    - **macOS**: builds are unsigned, so a browser-downloaded DMG is blocked by Gatekeeper as "damaged". Install with:
 
      ```bash
@@ -175,7 +175,7 @@ Regenerate these with `node scripts/capture-screenshots.mjs` — see
 
      (Already installed the DMG? `xattr -cr /Applications/Flint.app` fixes it.)
 2. Open Flint (release installers include a bundled Node for the sidecar).  
-3. Download a small starter model → open **Chat**.  
+3. Download a small starter model, then open **Playground**.  
 4. Optional: **Diagnostics → Start service**, then use **Integrations** to wire other tools.  
 
 If the app cannot start the sidecar, install **Node.js 22+** LTS as a fallback or reinstall Flint.

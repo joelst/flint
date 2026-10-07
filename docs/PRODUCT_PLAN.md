@@ -29,7 +29,9 @@ unfinished; newly completed work must flow into it through normal changesets.
 
 ### Tool and retrieval boundary
 
-- Flint may add a narrow, read-only public web-search/retrieval tool; this does
+The helper below is in the tree. 0.10.0 still requires the published build to match these rules.
+
+- The public web-search/retrieval tool stays narrow and read-only. It does
   not turn Playground into an autonomous agent runtime.
 - Run retrieval outside the Foundry sidecar in a separately supervised helper.
   Give it only the explicit query or URL, a minimal environment, bounded JSON

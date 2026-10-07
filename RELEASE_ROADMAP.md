@@ -59,7 +59,7 @@ work:
 - packaged Windows Benchmark Preview dogfood covers pin, Stop, Resume,
   served-variant reporting, and a gateway `503`; the preview stays opt-in and
   off by default until that evidence exists;
-- a bounded, read-only public web-search/retrieval helper may be added outside
+- the bounded, read-only public web-search/retrieval helper stays outside
   the Foundry sidecar, with no ambient credentials or filesystem operations
   exposed to retrieved content and with request-scoped untrusted content;
 - unit/contract/sidecar E2E, bundle verification, packaged runtime smoke, and
