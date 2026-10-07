@@ -1088,6 +1088,8 @@
   let customBindDraft = $state('');
   /** Custom-field confirm already in flight. Apply awaits it; the button stays enabled so the queued click is not swallowed. */
   let customBindCommitTask: Promise<boolean> | null = null;
+  /** Preset, custom commit, and Discard each take a turn so an older expose confirm cannot overwrite them. */
+  let bindSelectionGeneration = 0;
 
   // Settings: WSL clients (Windows host only). Status is fetched on demand —
   // checking spawns wsl.exe, so it never runs unprompted at startup.
@@ -3789,6 +3791,7 @@
   /** Accept a custom listen address only after a non-loopback value is confirmed. */
   async function commitCustomBindAddress(raw: string): Promise<boolean> {
     if (customBindCommitTask) return customBindCommitTask;
+    const bindSelection = ++bindSelectionGeneration;
     let resolveCommit!: (accepted: boolean) => void;
     const task = new Promise<boolean>((resolve) => {
       resolveCommit = resolve;
@@ -3810,7 +3813,8 @@
       }
       if (!isLoopbackBind(next)) {
         const acceptedExpose = await confirmExposeNetwork(next === '0.0.0.0' ? '0.0.0.0 (all interfaces)' : next);
-        // Loopback or Discard can land while this dialog is open. Do not write over that click.
+        // Loopback, another preset, or Discard can land while this dialog is open.
+        if (bindSelection !== bindSelectionGeneration) return false;
         if (!customBindOpen || customBindDraft.trim() !== next) return false;
         if (!acceptedExpose) {
           customBindDraft = isCustomBindAddress(accepted) ? accepted : '';
@@ -3833,12 +3837,14 @@
 
   /** Select a bind-address option; confirm when leaving loopback. */
   async function selectBindAddress(next: string) {
+    const bindSelection = ++bindSelectionGeneration;
     const prev = (networkBindAddress || '127.0.0.1').trim();
     const nextTrim = (next || '').trim();
     const nextExposes = nextTrim === '0.0.0.0' || (nextTrim !== '' && !isLoopbackBind(nextTrim));
     if (nextExposes && isLoopbackBind(prev)) {
       const confirmLabel = nextTrim === '0.0.0.0' ? '0.0.0.0 (all interfaces)' : nextTrim;
       if (!(await confirmExposeNetwork(confirmLabel))) return;
+      if (bindSelection !== bindSelectionGeneration) return;
     }
     customBindOpen = false;
     networkBindAddress = nextTrim;
@@ -3846,6 +3852,7 @@
   }
 
   function discardNetworkSettings() {
+    bindSelectionGeneration += 1;
     networkPort = appliedNetworkPort;
     networkBindAddress = appliedNetworkBindAddress;
     customBindOpen = isCustomBindAddress(networkBindAddress);
@@ -3909,6 +3916,7 @@
       statusMessage = blockedAfterConfirm;
       return;
     }
+    if ((networkBindAddress || '127.0.0.1').trim() !== bind || Number(networkPort) !== port) return;
     networkApplyBusy = true;
     const release = beginPoolMutation();
     try {

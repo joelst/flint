@@ -39,6 +39,50 @@ describe('review fixes wired into the page', () => {
     expect(afterConfirm).toContain('customBindDraft.trim() !== next');
   });
 
+  it('drops an All-interfaces confirm when a newer bind selection started', () => {
+    const select = slice('async function selectBindAddress', 'function discardNetworkSettings');
+    const confirmAt = select.indexOf('await confirmExposeNetwork');
+    const assignAt = select.indexOf('networkBindAddress = nextTrim');
+    expect(confirmAt).toBeGreaterThan(-1);
+    expect(assignAt).toBeGreaterThan(confirmAt);
+    const captureAt = select.indexOf('const bindSelection = ++bindSelectionGeneration');
+    expect(captureAt).toBeGreaterThan(-1);
+    expect(captureAt).toBeLessThan(confirmAt);
+    const afterConfirm = select.slice(confirmAt, assignAt);
+    expect(afterConfirm).toContain('if (bindSelection !== bindSelectionGeneration) return');
+  });
+
+  it('bumps the bind-selection generation for Discard and a new custom commit', () => {
+    const discard = slice('function discardNetworkSettings', 'function markNetworkSettingsApplied');
+    expect(discard).toContain('bindSelectionGeneration += 1');
+  });
+
+  it('bumps the bind-selection generation only when a custom commit starts', () => {
+    const commit = slice('async function commitCustomBindAddress', 'async function selectBindAddress');
+    const early = commit.indexOf('if (customBindCommitTask) return customBindCommitTask');
+    const bump = commit.indexOf('++bindSelectionGeneration');
+    const taskAt = commit.indexOf('customBindCommitTask = task');
+    expect(early).toBeGreaterThan(-1);
+    expect(bump).toBeGreaterThan(early);
+    expect(taskAt).toBeGreaterThan(bump);
+  });
+
+  it('does not apply a bind or port that changed while confirmation was open', () => {
+    const apply = slice('async function applyNetworkSettings(', 'function startSvc');
+    const bookAt = apply.lastIndexOf('const release = beginPoolMutation()');
+    expect(bookAt).toBeGreaterThan(-1);
+    const beforeBook = apply.slice(0, bookAt);
+    const lastAwait = beforeBook.lastIndexOf('await ');
+    expect(lastAwait).toBeGreaterThan(-1);
+    const gate = beforeBook.slice(lastAwait);
+    const addressAt = gate.indexOf("(networkBindAddress || '127.0.0.1').trim() !== bind");
+    const portAt = gate.indexOf('Number(networkPort) !== port');
+    expect(addressAt).toBeGreaterThan(-1);
+    expect(portAt).toBeGreaterThan(-1);
+    const checkAt = Math.min(addressAt, portAt);
+    expect(gate.slice(checkAt)).not.toContain('await');
+  });
+
   it('waits for an in-flight custom bind commit before Apply reads the address', () => {
     const bind = slice('async function commitCustomBindAddress', 'async function selectBindAddress');
     const reuseAt = bind.indexOf('if (customBindCommitTask) return customBindCommitTask');
