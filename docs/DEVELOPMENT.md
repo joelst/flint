@@ -210,17 +210,27 @@ on every development OS. SVG generation is intentionally excluded.
 
 ## Screenshots
 
-README and docs screenshots go stale after UI changes (nav labels, theme, branding). To
-refresh them:
+README and docs screenshots go stale after UI changes (nav labels, theme, branding).
+The Windows PNGs in `images/` were recaptured for the 0.10.0 candidate. The
+`flint-macos-*` PNGs are still the previous capture.
 
-1. Launch the dev build. On Windows, enable WebView2's remote debugging port so its
-   content can be driven over the Chrome DevTools Protocol (CDP):
+To refresh them:
+
+1. Launch the dev build with the version the screenshots should show. Help and
+   Settings render `VITE_FLINT_BUILD_VERSION` when it is set, and otherwise
+   `package.json`. Set it to the next release (currently `0.10.0`) in the same
+   terminal that starts the dev build, before Vite starts. That does not change
+   `package.json`, `src-tauri/tauri.conf.json`, or `src-tauri/Cargo.toml`.
+   On Windows, also enable WebView2's remote debugging port so its content can be
+   driven over the Chrome DevTools Protocol (CDP):
    ```powershell
+   $env:VITE_FLINT_BUILD_VERSION = "0.10.0"
    $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9222"
    .\build-local.ps1 -Command "npm run tauri dev"
    ```
-   On macOS, run `npm run tauri dev` normally. The terminal that invokes the capture
-   script needs Accessibility and Screen Recording permission.
+   On macOS, run `VITE_FLINT_BUILD_VERSION=0.10.0 npm run tauri dev`. The terminal
+   that invokes the capture script needs Accessibility and Screen Recording
+   permission.
 2. Once the window is visible and connected, in another terminal run:
    ```powershell
    node scripts/capture-screenshots.mjs

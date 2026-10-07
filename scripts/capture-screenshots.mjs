@@ -4,15 +4,18 @@
 //
 // Windows (implemented, verified):
 //   Tauri's WebView2 is Chromium-based and speaks CDP natively once launched
-//   with a remote debugging port.
-//     1. $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9222"
+//   with a remote debugging port. Set VITE_FLINT_BUILD_VERSION so Help and
+//   Settings show the next release instead of package.json.
+//     1. $env:VITE_FLINT_BUILD_VERSION = "0.10.0"
+//        $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9222"
 //        .\build-local.ps1 -Command "npm run tauri dev"
 //     2. node scripts/capture-screenshots.mjs
 //
 // macOS (implemented, verified):
-//   Tauri uses WKWebView rather than CDP. Launch `npm run tauri dev`, then run
-//   this script. It uses macOS Accessibility controls plus CoreGraphics and
-//   captures each native app window with `screencapture`.
+//   Tauri uses WKWebView rather than CDP. Launch
+//   `VITE_FLINT_BUILD_VERSION=0.10.0 npm run tauri dev`, then run this script.
+//   It uses macOS Accessibility controls plus CoreGraphics and captures each
+//   native app window with `screencapture`.
 //
 // This intentionally uses only Node built-ins (global fetch + WebSocket, both
 // stable since Node 22) plus macOS system tools, so it needs no new dependency

@@ -10,8 +10,7 @@ document workflows, evaluation tools, integrations, or new views.
 
 ## Architecture boundaries
 
-The Rust runtime supervisor (introduced in the 0.7.0 foundation, current through
-0.9.0) owns the sidecar process and bridges stdio JSON lines to the frontend SDK
+The Rust runtime supervisor (introduced in the 0.7.0 foundation) owns the sidecar process and bridges stdio JSON lines to the frontend SDK
 transport.
 
 ```text
@@ -197,4 +196,4 @@ complete build and publication procedures.
 Describe the user problem, the Flint seam used, the new command or data shape,
 failure and cancellation semantics, tests, and any new resource or permission.
 Keep the change behind existing runtime ownership and document whether it is
-part of the current stable (0.9.0) surface or remains a later backlog feature.
+part of the published stable surface or remains a later backlog feature. The published stable release is 0.9.2. The next release from this tree is 0.10.0.

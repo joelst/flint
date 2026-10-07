@@ -100,7 +100,7 @@ speech-to-text, audit logging, bind-address/network control.
 
 ### Inference
 
-- **Playground** — Chat (streaming, personas, system prompts, conversation history, vision image attach when supported) and Voice (microphone + file transcription, STT models) in one view with a Chat/Voice toggle
+- **Playground** — Chat (streaming, personas, system prompts, conversation history, one vision image when supported, opt-in public Web search) and Voice (microphone + file transcription, STT models) in one view with a Chat/Voice toggle
 - **Model Arena** — Quick Compare: live-streamed side-by-side model responses (bake-off) with served variant/execution provider/status
 - **Benchmark Preview** — opt-in, off by default: measured, repeatable multi-model benchmark runs with a hardened Stop/Resume lifecycle
 
@@ -112,7 +112,7 @@ speech-to-text, audit logging, bind-address/network control.
 - **Help** — Foundry Local education + tool-calling boundary
 - Persistent local-first privacy messaging
 
-Navigation is grouped as **Build** (Playground, Model Arena, Benchmark Preview),
+Navigation is grouped as **Build** (Playground, Model Arena, and Benchmark Preview when that Settings preview is on),
 **Discover** (Models), **Operate** (Monitor, Diagnostics, Integrations), and
 **Manage** (Settings, Help).
 

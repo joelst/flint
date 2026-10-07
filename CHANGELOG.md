@@ -1,5 +1,9 @@
 # Flint Changelog
 
+## 0.9.2
+
+Maintenance release built from the 0.9.0 line through #150. It adds the About release link, release icon packaging fix, optional startup catalog check, and benchmark/download admission fix, plus selected #153 visual improvements for control contrast, chat-tool layout, and readable compact actions. This is the current published GitHub release. It does not include the later mainline Foundry Local SDK 2.0.1 pin recorded under 0.9.1. The next release from this tree is 0.10.0.
+
 ## 0.9.1
 
 ### Patch Changes
