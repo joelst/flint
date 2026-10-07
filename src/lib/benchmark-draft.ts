@@ -410,6 +410,19 @@ function caseRowAt(rows: DraftCaseInputErrors[], index: number): DraftCaseInputE
   return rows[index];
 }
 
+/** Parser line numbers count every physical line. The editor only has nonblank cases. */
+function nonblankCaseIndex(text: string, physicalLine: number): number | null {
+  if (!Number.isInteger(physicalLine) || physicalLine < 1) return null;
+  const lines = text.split(/\r?\n/);
+  const lineIndex = physicalLine - 1;
+  if (lineIndex >= lines.length || !lines[lineIndex].trim()) return null;
+  let caseIndex = 0;
+  for (let i = 0; i < lineIndex; i++) {
+    if (lines[i].trim()) caseIndex += 1;
+  }
+  return caseIndex;
+}
+
 /**
  * Field messages for values the user has typed. Blank name, zero targets, and zero cases stay
  * quiet — Save still reports those. Every sentence comes from `buildSuiteFromDraft`.
@@ -432,7 +445,8 @@ export function draftInputErrors(draft: SuiteDraft): DraftInputErrors {
       || line[2].startsWith('expected must')
       || isTagCaseMessage(line[2])
     )) {
-      assignCaseMessage(caseRowAt(rows, Number(line[1]) - 1), line[2]);
+      const caseIndex = nonblankCaseIndex(draft.casesJsonl, Number(line[1]));
+      if (caseIndex !== null) assignCaseMessage(caseRowAt(rows, caseIndex), line[2]);
     }
   }
 

@@ -3810,6 +3810,8 @@
       }
       if (!isLoopbackBind(next)) {
         const acceptedExpose = await confirmExposeNetwork(next === '0.0.0.0' ? '0.0.0.0 (all interfaces)' : next);
+        // Loopback or Discard can land while this dialog is open. Do not write over that click.
+        if (!customBindOpen || customBindDraft.trim() !== next) return false;
         if (!acceptedExpose) {
           customBindDraft = isCustomBindAddress(accepted) ? accepted : '';
           return false;

@@ -1097,6 +1097,7 @@
                   <strong>{row.id}</strong>
                   <span class="muted"> — {row.messageCount === 1 ? "1 message" : `${row.messageCount} messages`}. Edit this case in JSONL.</span>
                 </p>
+                {#if rowError?.id}<p class="field-error">{rowError.id}</p>{/if}
                 {#if rowError?.other}<p class="field-error">{rowError.other}</p>{/if}
               {:else}
                 {@const tagsError = tagsJsonError(row.tagsJson)}

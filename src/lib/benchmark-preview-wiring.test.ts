@@ -233,6 +233,16 @@ describe('benchmark editor wiring', () => {
     expect(source).toContain('disabled={editorBusy || !!jsonlFieldError || draftHasInputError || attemptEstimateOverCap}');
   });
 
+  it('shows a duplicate id on a read-only messages case', () => {
+    const start = source.indexOf('row.kind === "messages"');
+    const end = source.indexOf('{:else}', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const messages = source.slice(start, end);
+    expect(messages).toContain('rowError?.id');
+    expect(messages).toContain('rowError?.other');
+  });
+
   it('keeps the JSONL editor below its help text', () => {
     const helpAt = source.indexOf('class="muted small benchmark-jsonl-help"');
     const editorAt = source.indexOf('class="benchmark-jsonl"');

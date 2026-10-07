@@ -248,6 +248,21 @@ describe('draftInputErrors', () => {
     expect(errors.rows[0]?.id).toBeNull();
   });
 
+  it('maps a prompt error after leading blank lines onto the only case row', () => {
+    const prompt = `prompt must be a non-empty string of at most ${BENCHMARK_MAX_TEXT_LENGTH} characters`;
+    const oneBlank = draftInputErrors(baseDraft({
+      casesJsonl: '\n{"id":"c1","prompt":""}',
+    }));
+    expect(oneBlank.rows).toHaveLength(1);
+    expect(oneBlank.rows[0]?.prompt).toBe(prompt);
+
+    const manyBlanks = draftInputErrors(baseDraft({
+      casesJsonl: `${'\n'.repeat(40)}{"id":"c1","prompt":""}`,
+    }));
+    expect(manyBlanks.rows).toHaveLength(1);
+    expect(manyBlanks.rows[0]?.prompt).toBe(prompt);
+  });
+
   it('reports a duplicate case id on the later row', () => {
     const errors = draftInputErrors(baseDraft({
       casesJsonl: '{"id":"dup","prompt":"a"}\n{"id":"dup","prompt":"b"}',

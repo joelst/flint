@@ -26,6 +26,19 @@ describe('review fixes wired into the page', () => {
     expect(page).not.toContain('bind:value={networkBindAddress}');
   });
 
+  it('ignores a custom bind confirm that is no longer the open draft', () => {
+    const bind = slice('async function commitCustomBindAddress', 'async function selectBindAddress');
+    const confirmAt = bind.indexOf('await confirmExposeNetwork');
+    const assignAt = bind.indexOf('networkBindAddress = next');
+    const declinedAt = bind.indexOf('if (!acceptedExpose)');
+    expect(confirmAt).toBeGreaterThan(-1);
+    expect(declinedAt).toBeGreaterThan(confirmAt);
+    expect(assignAt).toBeGreaterThan(declinedAt);
+    const afterConfirm = bind.slice(confirmAt, assignAt);
+    expect(afterConfirm).toContain('customBindOpen');
+    expect(afterConfirm).toContain('customBindDraft.trim() !== next');
+  });
+
   it('waits for an in-flight custom bind commit before Apply reads the address', () => {
     const bind = slice('async function commitCustomBindAddress', 'async function selectBindAddress');
     const reuseAt = bind.indexOf('if (customBindCommitTask) return customBindCommitTask');
