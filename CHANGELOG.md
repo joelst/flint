@@ -1,5 +1,96 @@
 # Flint Changelog
 
+## 0.10.0
+
+### Minor Changes
+
+- 6807106: Benchmark Preview suites can set a higher max-token ceiling, up to 20 repeats, and a temperature from 0 to 2. Deleting a suite asks first and removes its saved runs, except a run that is still executing. Formatted results show an unfinished Qwen3 or QwQ thought as thinking. Voice no longer shows a separate Ensure service button.
+- f2b187d: Show benchmark suite definitions and case editing, and record full-call response time on finished runs.
+- 770ba47: A local endpoint request for a cached build can load that build when another build of the same model is idle. Diagnostics → Test local endpoint runs the chat, embedding, and speech checks against every model id and parent alias the endpoint lists.
+- b2be59c: Playground now exposes generation parameters — temperature, max tokens, top-p, top-k, frequency penalty, presence penalty, and a fixed sampling seed — in a collapsible panel next to the Context control, persisted per conversation the same way the model and system prompt are.
+- 0720559: Add opt-in, per-conversation public web search and retrieval with bounded isolation and visible sources.
+- 0cbd257: **Recheck Providers** on the Models page repairs execution providers that are not registered: it replaces a broken CUDA or WebGPU download, registers the others again, and names any provider that is still not registered. The button is visible in light and dark mode.
+- 8715aeb: Add derived transcript timing exports with pause-aware chunking and accurate segment progress, plus model family sorting and search.
+  Download SRT captions and their timing note together.
+
+### Patch Changes
+
+- d7b92b9: Keep a single stored content part renderable, sendable, and saved instead of dropping the message, and tighten SDK-import diagnostics.
+- aede9a3: Route Whisper and Nemotron through supported single-inference AudioSession paths, validate WAV chunk boundaries, defer uncertain speech-family routing until load, reject known unsupported Parakeet models early, and preserve transcription errors when cleanup also fails.
+- 999212b: Fix Playground persona theme colors and align generation settings with the composer width.
+- 9cc7044: Populate the model catalog after registering every discovered accelerator so compatible GPU variants are available.
+  Keep loaded-model tracking accurate across restarts and eviction, and safely refuse catalog changes blocked by expired telemetry.
+- d3f363b: Clarify the "catalog not yet checked" notice so it doesn't imply a check is already running.
+- 8a22115: A blocked search result is not listed as a source. A follow-up keeps a short tool-call id and the address Flint used.
+- 8a22115: An app baseline that already records the token-default generation keeps an explicit 2048. An older image-only turn stays as a text placeholder. The chat created at startup honors Remember for new chats.
+- 8a22115: A page fetch checks the device blocklist again before the request and before each redirect, and stops instead of following a blocked host.
+- 8a22115: Copy still includes the reasoning above the answer.
+- 8a22115: Copy keeps a role word that the reply still shows.
+- 8a22115: An end-of-text marker is left out of the reply and the copy.
+- 8a22115: A search for a word such as "profile:" is no longer treated as a file URL. A page-image fetch that fails keeps the text answer, and a model error stays visible instead of an unfinished thinking trace.
+- 8a22115: A later reply does not call a page shortened because another page quoted the envelope wording, and a tool-using send leaves room for the tool definitions.
+- 8a22115: A later page title stays on its own line inside the reference fence. Fitting a send shortens each fenced text part without repeating the text beside it. A blocklist line is kept only when every label is a DNS label.
+- 8a22115: A shortened page is marked only for its own address. A tight follow-up leaves room for the tool result and an image label.
+- 8a22115: A page image address is fetched with encoded characters decoded, the context plan reserves the scaled size of a pending web result and its envelope header, and an error or stop note stays visible when a model prefills its thinking trace.
+- 8a22115: A page shortened to fit context stays inside the reserved fence, and Sources consulted names that shortening the same way the later source list does.
+- 8a22115: Downgrading Flint does not reset a token ceiling recorded by a newer build, and the source list does not offer a fetch it cannot run.
+- 8a22115: A search for a bracketed local IPv6 address is still refused when a port follows it.
+- 8a22115: A link with an uppercase scheme or an IPv6 address opens, and a later reply remembers the most recent pages rather than the oldest ones.
+- 8a22115: A saved reply keeps a role word that it still shows.
+- 8a22115: A one-result round does not keep a second tool call's arguments.
+- 8a22115: A tight context allows one web result in a round. A quoted error inside reasoning stays in Thinking.
+- 8a22115: A page already in this request is not fetched again when another address redirects to it.
+- 8a22115: A page stays marked shortened when an earlier copy of that address was not.
+- 8a22115: A pending web result is reserved for short words as well as long ones. A search also reserves its query line and headings.
+- 8a22115: Unstamped replies stay as written when the selected model changes, so switching to Qwen3 does not hide an older answer. A finished reply that starts with ordinary wording such as "Reading" is not treated as a web-status line. Search queries that name a denied IPv6 address are rejected on the device, and a query is listed under Searched for only after it is approved and about to be sent.
+- 8a22115: Blank lines inside a code sample stay.
+- 8a22115: A declined web search is not shown as a search that ran.
+- 8a22115: A web search query is checked against the text sent to the model in that round, including earlier messages and attached files, not only the system prompt and files attached on this turn.
+- 8a22115: A shortened search is marked only for a result whose whole line is that address.
+- 8a22115: A search result whose address is longer than 2,048 characters is left out.
+- 8a22115: A page is marked shortened only when Flint added that notice at the end of the header.
+- 8a22115: Phone links that start with tel:+ open in the system handler, and a source list at the start of a message is shortened like any other fenced page.
+- 8a22115: A custom model name that only mentions Qwen3 still shows its reply.
+- 8a22115: Web search stays off for a send that has no room for a page result, instead of failing after the search.
+- 8a22115: A tight context leaves room for the tool call as well as the page.
+- 8a22115: A question stays with its answer, and reading shows while a page loads. Web search stays checked and does not run when the model cannot use tools.
+- 8a22115: Earlier page titles are sent as fenced reference data, not as instructions. A text file in the conversation asks before a search even when searches were already allowed. Context fitting counts those files, and a page image is described from the shortened page text.
+- 8a22115: A fetched page image is the only image sent in the vision follow-up, and role lines and template markers inside a tilde fence or a longer backtick fence stay in the reply.
+- 8a22115: Show web search in the chat header, collapse the conversation list until it is opened, and let an allowed model request a short public search. The gear beside Send opens generation settings.
+- 999212b: Align Playground image attachment with composer actions and line up user and assistant messages.
+- e3d2f94: Prevent neutral Playground penalty settings from corrupting replies from models such as Gemma 4 E2B.
+- a63b103: Search the public web from the composer Search button, with approval once, for the session, or always. Opening a site from the results asks for that domain, or for all public URLs in that conversation until the page reloads, and a redirect to another site asks before that site is opened.
+- 26c1e1c: Replace the fixed-option Context turns dropdown with a continuous slider (4-40), fixing a bug where a model's recommended turn count often fell outside the preset list and left the control showing blank.
+- d7b92b9: Add a Settings option that opens the webview developer tools, and keep the inspector available in release builds.
+- 54190a5: Requests through the local endpoint that name a model alias, or a model that is not loaded yet, work again on Foundry Local 2.0.1: the gateway recognizes its not-loaded and not-found replies, loads the cached model, and replays under the loaded variant id. An explicit `:<version>` that is not cached is no longer served by another version.
+- 54190a5: Canonicalize whitespace-padded model IDs before replaying local endpoint requests, including IDs that already match the loaded variant after trimming.
+- 3edda9a: Gateway (OpenAI-compatible endpoint) rows in the Access Log now report token counts, time-to-first-token, and decode throughput for chat completions, instead of always showing "—". Captured from the response the proxy already parses for normalization, with no extra buffering of streamed responses.
+- a237030: The gateway now refuses non-multipart and structurally incomplete `/v1/audio/transcriptions` requests before they can reach Foundry.
+- 8a22115: Gemma 4 answers without web search until the upstream template fix. A reply no longer shows web-tool JSON the model wrote as text, and a repeated web_fetch name is reported once.
+- 8f1fa26: Reject malformed IPC envelopes and tool definitions instead of terminating the sidecar, and keep model output out of JSON parse error messages.
+- d2aae11: Add a local build command that applies a temporary app version without changing tracked version files.
+- 6f77c24: Accept the macOS ONNX Runtime alias after Tauri copies release resources. The staged `libonnxruntime.dylib` is a regular file, not the symlink the SDK installer created, and the bundle check was failing the release on that copy.
+- 999212b: Add message timestamps, simplify the copy action, and give user messages a subtle offset.
+- 99d9c9f: Builds no longer reuse a cached Foundry native runtime from a different SDK version; the CI cache is keyed to the exact lockfile.
+- f785d9d: Fix Playground attachments with native image understanding, compact persistence, text/code files, and a cleaner composer.
+- 56aa5d7: Recognize newer Nemotron ASR model names (e.g. `nemotron-3.5-asr-streaming-0.6b`) as speech models instead of chat, matching an `-asr-` marker in addition to the original `-speech-` naming.
+- 8f1fa26: Preserve complete tool-call loops across chat transports without exposing reply payloads in renderer logs.
+- 8a22115: Playground Max tokens now starts at 8192, and chats still on the old untouched 2048 ceiling move up with it. Bare chat-template role lines no longer appear in the reply.
+- d7b92b9: Show a recoverable error instead of a blank Playground when a message fails to render, and stop warning about the expected packaged SDK layout on every launch.
+- d7b92b9: Fix the Playground failing to open because two composer snippets were declared outside the scope that renders them.
+- 6807106: Destructive actions and exposing the local service ask for confirmation before they run, and an unconfirmed service stop stays available. Benchmark start waits for the previous run to release the machine, long audio no longer freezes the window, and warning text, buttons, and model labels stay readable.
+- 999212b: Improve message copy controls and reduce spacing between Playground messages.
+- 4c13173: Show authoritative completed benchmark results instead of stale live status or poll errors.
+- 0cbd257: Windows installs now replace the Foundry SDK and its ONNX Runtime instead of keeping the previous version's DLLs, and put the previous SDK back if the install fails or is cancelled. Builds no longer package an ONNX Runtime DLL that is not the pinned version.
+- 0e35b43: The desktop runtime, updater, and markdown renderer pick up current security and maintenance fixes.
+- 70d76af: Update the bundled archive dependency with its latest security and reliability fixes.
+- 999212b: Automatically optimize attached images over 200 KiB, enforce the native one-image request limit, surface send failures beside the composer, and simplify the chat composer.
+- 0e35b43: Build and coverage tooling uses the patched source-map parser.
+- 8f1fa26: Migrate chat and embeddings onto SDK v2 sessions while preserving the wire contract, validating structured response formats, and bounding streamed tool-call snapshots efficiently.
+- 2cf6b79: Transcription no longer fails with "Unable to decode audio data" for WAV files some WebView2/Chromium builds reject: Flint parses standard PCM WAV itself instead of relying solely on the browser decoder. Other formats (MP3, etc.) that still fail to decode now report which container was detected and suggest converting to WAV.
+- 8a22115: Fetched page text stays out of the saved chat and no longer approves later fetches. Stopping while a page image is read keeps the text answer. A single retrieved page can be shortened to fit context, and a model that does not report tool calling is not offered web search.
+- 8a22115: Fence public web results as reference data, fit them to the model context, and confirm a search again after the model has read a page. A device blocklist and a new-chat default sit beside per-chat Web search. A vision model may see one re-encoded image from a fetched page.
+
 ## 0.9.2
 
 Maintenance release built from the 0.9.0 line through #150. It adds the About release link, release icon packaging fix, optional startup catalog check, and benchmark/download admission fix, plus selected #153 visual improvements for control contrast, chat-tool layout, and readable compact actions. This is the current published GitHub release. It does not include the later mainline Foundry Local SDK 2.0.1 pin recorded under 0.9.1. The next release from this tree is 0.10.0.
