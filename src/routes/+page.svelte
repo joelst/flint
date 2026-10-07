@@ -3780,6 +3780,7 @@
   }
 
   function openCustomBind() {
+    bindSelectionGeneration += 1;
     customBindOpen = true;
     if (isCustomBindAddress(networkBindAddress)) {
       customBindDraft = networkBindAddress.trim();

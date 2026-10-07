@@ -52,6 +52,13 @@ describe('review fixes wired into the page', () => {
     expect(afterConfirm).toContain('if (bindSelection !== bindSelectionGeneration) return');
   });
 
+  it('retires a pending All-interfaces confirm when Custom is opened', () => {
+    const open = slice('function openCustomBind()', 'async function commitCustomBindAddress');
+    const bump = open.indexOf('bindSelectionGeneration += 1');
+    expect(bump).toBeGreaterThan(-1);
+    expect(open.slice(bump)).not.toContain('return');
+  });
+
   it('bumps the bind-selection generation for Discard and a new custom commit', () => {
     const discard = slice('function discardNetworkSettings', 'function markNetworkSettingsApplied');
     expect(discard).toContain('bindSelectionGeneration += 1');

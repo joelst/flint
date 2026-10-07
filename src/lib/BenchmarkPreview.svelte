@@ -584,22 +584,24 @@
     if (draftEditsSuite(editingDraft, suite.id)) return;
     // The dialog plugin replaces window.confirm with invoke("plugin:dialog|confirm").
     // That command is not granted. confirmDialog uses plugin:dialog|message, which is.
-    let confirmed = false;
-    try {
-      confirmed = await confirmDialog(suiteDeleteMessage(suite.name, runCountsBySuite[suite.id] ?? 0), {
-        title: "Delete suite",
-        kind: "warning",
-      });
-    } catch (error) {
-      loadError = error instanceof Error && error.message ? error.message : "Could not ask to confirm deletion";
-      return;
-    }
-    if (!confirmed) return;
-    if (destroyed || editorBusy || lifecycleBusy || runInFlight) return;
-    if (draftEditsSuite(editingDraft, suite.id)) return;
+    // Pending is set before the dialog so Start/Resume cannot finish a new run during the wait.
+    // suiteBusy stays false until the delete itself: it feeds editorBusy, which aborts below.
     suiteDeletePending = true;
-    suiteBusy = true;
     try {
+      let confirmed = false;
+      try {
+        confirmed = await confirmDialog(suiteDeleteMessage(suite.name, runCountsBySuite[suite.id] ?? 0), {
+          title: "Delete suite",
+          kind: "warning",
+        });
+      } catch (error) {
+        loadError = error instanceof Error && error.message ? error.message : "Could not ask to confirm deletion";
+        return;
+      }
+      if (!confirmed) return;
+      if (destroyed || editorBusy || lifecycleBusy || runInFlight) return;
+      if (draftEditsSuite(editingDraft, suite.id)) return;
+      suiteBusy = true;
       const res = await deleteBenchmarkSuiteWithHistory(suite.id, activeRunId);
       if (destroyed) return;
       if (!res.ok) {
@@ -623,8 +625,8 @@
         loadError = error instanceof Error && error.message ? error.message : "Could not delete suite";
       }
     } finally {
-      suiteDeletePending = false;
       suiteBusy = false;
+      suiteDeletePending = false;
     }
   }
 

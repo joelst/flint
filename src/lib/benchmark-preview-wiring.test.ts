@@ -72,6 +72,9 @@ describe('benchmark editor wiring', () => {
     expect(source).toContain('confirm as confirmDialog');
     expect(source).toContain('from "@tauri-apps/plugin-dialog"');
     expect(removeSuite).toContain('await confirmDialog(');
+    expect(removeSuite.indexOf('suiteDeletePending = true')).toBeGreaterThan(-1);
+    expect(removeSuite.indexOf('suiteDeletePending = true')).toBeLessThan(removeSuite.indexOf('await confirmDialog('));
+    expect(removeSuite).toContain('suiteDeletePending = false');
     expect(removeSuite).toContain('deleteBenchmarkSuiteWithHistory(suite.id, activeRunId)');
     expect(removeSuite).not.toContain('globalThis.confirm(');
     expect(source).toContain('if (runBusy || suiteDeletePending) return');
