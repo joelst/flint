@@ -1534,16 +1534,34 @@
    *
    * `setBenchmarkExclusive` has no IPC deadline, so a plain `join()` can sit forever. The
    * in-flight flag is already set, which is what stops a second Start from acquiring during
-   * the wait. On timeout this returns an error and leaves the tracked release and its retrier
-   * alone. Claiming a generation here would cancel that retrier, and `finishBenchmarkExecution`
-   * would send another release for a lease this attempt never took.
+   * the wait. On timeout this returns an error and resumes the same retrier instead of
+   * claiming a generation: claiming here would cancel that retrier, and
+   * `finishBenchmarkExecution` would send another release for a lease this attempt never took.
+   *
+   * Pause and `joinUntilIdle` exist because a scheduled retry, or the stuck-banner Retry now
+   * button, can track a new `setBenchmarkExclusive(false)` during the wait. A snapshot
+   * `joinWithTimeout` can then return while that newer release is still in flight.
+   * `claimNextBenchmarkExclusiveGeneration` cancels future timers but not an IPC already
+   * sent, so that `false` can reach the sidecar after this run's acquire and clear gateway
+   * exclusivity. The retrier stays paused when the drain settles — the caller claims next,
+   * and that `cancel()` retires it. Resuming on the settled path would reopen the race
+   * before the claim. A timeout or a thrown join resumes the same instance so retries are
+   * not left paused forever.
    */
   async function waitForPriorExclusiveRelease(): Promise<string | null> {
-    const settled = await pendingExclusiveRelease.joinWithTimeout(BENCHMARK_EXCLUSIVE_RELEASE_TIMEOUT_MS);
-    if (settled) return null;
-    const error = 'The previous benchmark has not confirmed it released exclusive gateway admission. Wait for that release before starting another run.';
-    appendAppLog(`Benchmark: ${error}`, 'warn');
-    return error;
+    const retrier = benchmarkExclusiveRetrier;
+    retrier?.pause();
+    let settled = false;
+    try {
+      settled = await pendingExclusiveRelease.joinUntilIdle(BENCHMARK_EXCLUSIVE_RELEASE_TIMEOUT_MS);
+      if (settled) return null;
+      retrier?.resume();
+      const error = 'The previous benchmark has not confirmed it released exclusive gateway admission. Wait for that release before starting another run.';
+      appendAppLog(`Benchmark: ${error}`, 'warn');
+      return error;
+    } finally {
+      if (!settled) retrier?.resume();
+    }
   }
 
   /**

@@ -41,6 +41,19 @@ describe('review fixes wired into the page', () => {
       expect(body).not.toContain('pendingExclusiveRelease.join()');
     }
     expect(page).toContain('pendingExclusiveRelease.joinWithTimeout(BENCHMARK_EXCLUSIVE_RELEASE_TIMEOUT_MS)');
+    const wait = slice('async function waitForPriorExclusiveRelease', 'async function startBenchmarkPreviewRun');
+    const pauseAt = wait.indexOf('retrier?.pause()');
+    const joinAt = wait.indexOf('pendingExclusiveRelease.joinUntilIdle(BENCHMARK_EXCLUSIVE_RELEASE_TIMEOUT_MS)');
+    const settledAt = wait.indexOf('if (settled) return null');
+    const resumeAt = wait.indexOf('retrier?.resume()');
+    const timeoutReturn = wait.indexOf('return error');
+    expect(pauseAt).toBeGreaterThan(-1);
+    expect(joinAt).toBeGreaterThan(pauseAt);
+    expect(settledAt).toBeGreaterThan(joinAt);
+    expect(wait.slice(joinAt, settledAt)).not.toContain('resume()');
+    expect(resumeAt).toBeGreaterThan(settledAt);
+    expect(timeoutReturn).toBeGreaterThan(resumeAt);
+    expect(wait.slice(timeoutReturn)).toContain('if (!settled) retrier?.resume()');
   });
 
   it('classifies chat and accelerator targets with the shared predicates', () => {
