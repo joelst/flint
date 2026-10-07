@@ -256,6 +256,28 @@ describe('draftInputErrors', () => {
     expect(errors.rows[0]?.id).toBeNull();
   });
 
+  it('reports a duplicate case id that contains "tag" on the id field', () => {
+    const stage = draftInputErrors(baseDraft({
+      casesJsonl: '{"id":"stage","prompt":"a"}\n{"id":"stage","prompt":"b"}',
+    }));
+    expect(stage.rows[1]?.id).toBe('duplicate case id "stage"');
+    expect(stage.rows[1]?.other).toBeNull();
+
+    const tag = draftInputErrors(baseDraft({
+      casesJsonl: '{"id":"tag","prompt":"a"}\n{"id":"tag","prompt":"b"}',
+    }));
+    expect(tag.rows[1]?.id).toBe('duplicate case id "tag"');
+    expect(tag.rows[1]?.other).toBeNull();
+  });
+
+  it('keeps a real tag failure on other and does not set id', () => {
+    const errors = draftInputErrors(baseDraft({
+      casesJsonl: '{"id":"c1","prompt":"a","tags":"nope"}',
+    }));
+    expect(errors.rows[0]?.other).toMatch(/tags must be an array/);
+    expect(errors.rows[0]?.id).toBeNull();
+  });
+
   it('reports a temperature outside 0 to 2', () => {
     const errors = draftInputErrors(baseDraft({ temperature: '9' }));
     expect(errors.temperature).toBe('temperature must be a number between 0 and 2 when present');

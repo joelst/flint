@@ -386,7 +386,9 @@ function appendError(current: string | null, message: string): string {
 }
 
 function isTagCaseMessage(message: string): boolean {
-  return message.includes('tag');
+  return message.startsWith('tags must')
+    || message.startsWith('each tag must')
+    || /^at most \d+ tags\b/.test(message);
 }
 
 function assignCaseMessage(row: DraftCaseInputErrors, message: string) {
