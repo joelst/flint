@@ -73,6 +73,21 @@ describe('review fixes wired into the page', () => {
     expect(startLocal).not.toContain('customBindDraft');
   });
 
+  it('rechecks pool exclusivity after confirmation before booking the mutation', () => {
+    const bodies = [
+      slice('async function deleteVariant(', 'function accelBadgeInfo'),
+      slice('async function deleteCachedModel(', 'let storedWebConsent'),
+      slice('async function applyNetworkSettings(', 'function startSvc'),
+    ];
+    for (const body of bodies) {
+      const bookAt = body.lastIndexOf('const release = beginPoolMutation()');
+      expect(bookAt).toBeGreaterThan(-1);
+      const checkAt = body.lastIndexOf('blockedByExclusivePoolRun()', bookAt);
+      expect(checkAt).toBeGreaterThan(-1);
+      expect(body.slice(checkAt, bookAt)).not.toContain('await');
+    }
+  });
+
   it('bounds a stuck benchmark exclusive-release join before claiming a new run', () => {
     const start = slice('async function startBenchmarkPreviewRun', 'async function resumeBenchmarkPreviewRun');
     const resume = slice('async function resumeBenchmarkPreviewRun', 'function stopBenchmarkPreviewRun');

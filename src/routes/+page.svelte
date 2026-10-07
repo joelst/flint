@@ -3902,6 +3902,11 @@
       if (restartOk !== "yes") return;
     }
 
+    const blockedAfterConfirm = blockedByExclusivePoolRun();
+    if (blockedAfterConfirm) {
+      statusMessage = blockedAfterConfirm;
+      return;
+    }
     networkApplyBusy = true;
     const release = beginPoolMutation();
     try {
@@ -6668,6 +6673,11 @@ updateStateFromSdk();
         if (confirmed === "no") statusMessage = `Delete cancelled for ${label}`;
         return;
       }
+      const blockedAfterConfirm = blockedByExclusivePoolRun();
+      if (blockedAfterConfirm) {
+        statusMessage = blockedAfterConfirm;
+        return;
+      }
       const release = beginPoolMutation();
       try {
         statusMessage = `Deleting ${model.alias} (${label})...`;
@@ -6748,6 +6758,11 @@ updateStateFromSdk();
       );
       if (confirmed !== "yes") {
         if (confirmed === "no") statusMessage = `Delete cancelled for ${model.alias}`;
+        return;
+      }
+      const blockedAfterConfirm = blockedByExclusivePoolRun();
+      if (blockedAfterConfirm) {
+        statusMessage = blockedAfterConfirm;
         return;
       }
       const release = beginPoolMutation();
