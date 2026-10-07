@@ -53,7 +53,7 @@ export function publishedAccelerationLabels(
   return (['GPU', 'CPU', 'NPU'] as const).filter((label) => found.has(label));
 }
 
-function publishedAccelerationKind(
+export function publishedAccelerationKind(
   variant: CatalogVariantAccel,
 ): 'GPU' | 'CPU' | 'NPU' | null {
   const device = String(variant.deviceType || '').toLowerCase();

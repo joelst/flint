@@ -416,6 +416,10 @@ describe('native service startup', () => {
     const sttEnd = source.indexOf("} else if (cmd === 'getVisionModels') {");
     const sttFlow = source.slice(sttAt, sttEnd);
     expect(sttFlow).toContain('looksLikeSpeech');
+    const visionAt = source.indexOf("} else if (cmd === 'getVisionModels') {");
+    const visionEnd = source.indexOf("} else if (cmd === 'download') {");
+    const visionFlow = source.slice(visionAt, visionEnd);
+    expect(visionFlow).toContain('/vision|vl|multimodal|image/');
     const download = source.indexOf("} else if (cmd === 'download') {");
     const downloadSerialized = source.indexOf(
       "serializeModelOperation(payload.alias, ['cache']",

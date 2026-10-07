@@ -1,11 +1,12 @@
 /**
  * Benchmark run/attempt schema, attempt scheduling, and recovery/resume classification.
  *
- * Pure and headless, like `benchmark-suite.ts`. A `BenchmarkRun` is an immutable snapshot of a
- * `BenchmarkSuite` plus run-level bookkeeping; a `BenchmarkAttempt` is one execution of one
- * logical (target, phase, case, repeat) coordinate. Nothing here calls the SDK, touches
- * IndexedDB, or reads a feature flag — that is `benchmark-repository.ts` and (in a later PR)
- * `benchmark-runner.ts` plus UI wiring.
+ * Pure schema and scheduling, like `benchmark-suite.ts`. A `BenchmarkRun` is an immutable
+ * snapshot of a `BenchmarkSuite` plus run-level bookkeeping; a `BenchmarkAttempt` is one
+ * execution of one logical (target, phase, case, repeat) coordinate. Nothing here calls the
+ * SDK, touches IndexedDB, or reads a feature flag. Persistence is `benchmark-repository.ts`.
+ * The run loop is `benchmark-runner.ts`, and the screen that starts it is
+ * `BenchmarkPreview.svelte` with `+page.svelte`.
  *
  * Attempt identity is deliberately two-layered:
  *  - `logicalAttemptId` names a *position* in the suite (e.g. "target 0, case 3, repeat 1").

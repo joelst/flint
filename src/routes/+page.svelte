@@ -76,7 +76,7 @@
     type LogEntry,
     type CacheInventory,
   } from "$lib/sdk";
-  import { evaluateStartupPreload, publishedAccelerationLabels } from "$lib/accelerator-readiness";
+  import { evaluateStartupPreload, publishedAccelerationKind, publishedAccelerationLabels } from "$lib/accelerator-readiness";
   import { failureLogLine, summarizeFailure } from "$lib/status-message";
   import {
     evaluate as evaluateWatch,
@@ -118,6 +118,7 @@
 
   import { enable as autostartEnable, disable as autostartDisable, isEnabled as autostartIsEnabled } from '$lib/autostart';
   import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { confirm as confirmDialog } from "@tauri-apps/plugin-dialog";
   import { check as checkForUpdate, type Update } from "@tauri-apps/plugin-updater";
   import {
     sortModels,
@@ -296,9 +297,9 @@
     type FlintVerified,
     type SelfTestReport,
   } from "$lib/endpoint-self-test";
-  import { buildEndpointModelClassifier } from "$lib/endpoint-model-classification";
+  import { buildEndpointModelClassifier, endpointModelKind } from "$lib/endpoint-model-classification";
   import { endpointLoadTarget } from "$lib/endpoint-load-target";
-  import { decodeWavPcm, getWavDurationSeconds } from "$lib/audio-pcm-decode";
+  import { decodeWavPcmYielding, getWavDurationSeconds, yieldToMainThread } from "$lib/audio-pcm-decode";
   import { planSegmentationAsync } from "$lib/audio-segmentation";
   import {
     assembleLongAudioTranscript,
@@ -709,18 +710,10 @@
   // Model capability helpers (based on catalog task/capabilities/family/alias)
   function modelSupportsChat(m: any): boolean {
     if (!m) return false;
-    const alias = String(m.alias || '').toLowerCase();
-    let task = '';
-    let caps = '';
-    const info = m.info || m;
-    if (info) {
-      task = String(info.task || '').toLowerCase();
-      caps = String(info.capabilities || '').toLowerCase();
-    }
-    if (task.includes('automatic-speech-recognition') || task.includes('stt') || caps.includes('automatic-speech-recognition')) return false;
-    if (looksLikeSpeech(alias)) return false;
-    if (task.includes('embedding') || alias.includes('embed')) return false;
-    return true;
+    // Unknown stays available for chat. Speech and embed are the only exclusions, and they
+    // include variant ids and capability markers that an alias-only check misses.
+    const kind = endpointModelKind(m);
+    return kind !== "speech" && kind !== "embed";
   }
 
   function detectHostPlatform(): "windows" | "macos" | "linux" | "unknown" {
@@ -1090,6 +1083,10 @@
   let appliedNetworkPort = $state(5272);
   let appliedNetworkBindAddress = $state('127.0.0.1');
   let networkApplyBusy = $state(false);
+  /** Custom radio is open. The text field edits this draft; Start keeps `networkBindAddress` until a value is accepted. */
+  let customBindOpen = $state(false);
+  let customBindDraft = $state('');
+  let customBindCommitBusy = false;
 
   // Settings: WSL clients (Windows host only). Status is fetched on demand —
   // checking spawns wsl.exe, so it never runs unprompted at startup.
@@ -1533,6 +1530,23 @@
   }
 
   /**
+   * Waits out a prior exclusive-gateway release before a new run may acquire one.
+   *
+   * `setBenchmarkExclusive` has no IPC deadline, so a plain `join()` can sit forever. The
+   * in-flight flag is already set, which is what stops a second Start from acquiring during
+   * the wait. On timeout this returns an error and leaves the tracked release and its retrier
+   * alone. Claiming a generation here would cancel that retrier, and `finishBenchmarkExecution`
+   * would send another release for a lease this attempt never took.
+   */
+  async function waitForPriorExclusiveRelease(): Promise<string | null> {
+    const settled = await pendingExclusiveRelease.joinWithTimeout(BENCHMARK_EXCLUSIVE_RELEASE_TIMEOUT_MS);
+    if (settled) return null;
+    const error = 'The previous benchmark has not confirmed it released exclusive gateway admission. Wait for that release before starting another run.';
+    appendAppLog(`Benchmark: ${error}`, 'warn');
+    return error;
+  }
+
+  /**
    * Prepares the run row (so the id is known and Stop is live) then executes in a detached
    * promise. `startBenchmarkRun` does not resolve until the schedule halts; blocking the
    * caller on that would leave the progress UI with no Stop button until the run was over.
@@ -1549,12 +1563,15 @@
     }
     benchmarkRunInFlight = true;
     benchmarkRunError = null;
+    const releasePending = await waitForPriorExclusiveRelease();
+    if (releasePending) {
+      benchmarkRunInFlight = false;
+      return { ok: false, error: releasePending };
+    }
+    // Only after the prior release has settled. Claiming earlier cancels the retrier for a
+    // release that has not confirmed.
     const myExclusiveGeneration = claimNextBenchmarkExclusiveGeneration();
     try {
-      // Must not overlap a still-in-flight release from a prior run (e.g. a background retrier
-      // mid-respawn-recovery) -- see `pendingExclusiveRelease`'s docstring for why the ordering
-      // otherwise cannot be guaranteed.
-      await pendingExclusiveRelease.join();
       try {
         await sdkSetBenchmarkExclusive(true);
       } catch (e: any) {
@@ -1591,11 +1608,14 @@
     }
     benchmarkRunInFlight = true;
     benchmarkRunError = null;
-    // See startBenchmarkPreviewRun: claims the generation and retires any stale prior banner.
+    const releasePending = await waitForPriorExclusiveRelease();
+    if (releasePending) {
+      benchmarkRunInFlight = false;
+      return { ok: false, error: releasePending };
+    }
+    // See startBenchmarkPreviewRun: claim the generation only after the prior release settles.
     const myExclusiveGeneration = claimNextBenchmarkExclusiveGeneration();
     try {
-      // See startBenchmarkPreviewRun: must not overlap a still-in-flight release.
-      await pendingExclusiveRelease.join();
       try {
         await sdkSetBenchmarkExclusive(true);
       } catch (e: any) {
@@ -3678,6 +3698,8 @@
         if (typeof data.networkBindAddress === 'string' && data.networkBindAddress) {
           networkBindAddress = data.networkBindAddress;
           appliedNetworkBindAddress = data.networkBindAddress;
+          customBindOpen = isCustomBindAddress(data.networkBindAddress);
+          customBindDraft = customBindOpen ? data.networkBindAddress.trim() : '';
         }
         if (typeof data.webToolsForNewChats === 'boolean') webToolsForNewChats = data.webToolsForNewChats;
         if (typeof data.webHostBlocklistText === 'string') webHostBlocklistText = data.webHostBlocklistText;
@@ -3702,32 +3724,98 @@
     return a === '127.0.0.1' || a === 'localhost' || a === '::1';
   }
 
-  function confirmExposeNetwork(addr: string): boolean {
+  type ConfirmChoice = "yes" | "no" | "unavailable";
+
+  /** plugin:dialog|message. A thrown dialog is a cancel: window.confirm is not a granted command. */
+  async function askConfirm(message: string, title: string): Promise<ConfirmChoice> {
+    try {
+      return (await confirmDialog(message, { title, kind: "warning" })) === true ? "yes" : "no";
+    } catch (error) {
+      statusMessage = error instanceof Error && error.message
+        ? error.message
+        : "Confirmation could not be shown, so this was cancelled.";
+      return "unavailable";
+    }
+  }
+
+  async function confirmExposeNetwork(addr: string): Promise<boolean> {
     const label = (addr || '').trim() || 'a non-loopback address';
-    return globalThis.confirm(
+    const choice = await askConfirm(
       `Bind the local inference service to ${label}?\n\n` +
         `Other devices on the network may be able to reach your models and chat traffic. ` +
         `Only continue on a trusted network with an appropriate firewall.\n\n` +
         `OK to continue, Cancel to keep the current bind address.`,
+      "Expose local service",
     );
+    return choice === "yes";
+  }
+
+  function isCustomBindAddress(addr: string): boolean {
+    const trimmed = (addr || '').trim();
+    return trimmed !== '' && trimmed !== '127.0.0.1' && trimmed !== '0.0.0.0';
+  }
+
+  function openCustomBind() {
+    customBindOpen = true;
+    if (isCustomBindAddress(networkBindAddress)) {
+      customBindDraft = networkBindAddress.trim();
+    } else if (!customBindDraft || customBindDraft === '127.0.0.1' || customBindDraft === '0.0.0.0') {
+      customBindDraft = '';
+    }
+  }
+
+  /** Accept a custom listen address only after a non-loopback value is confirmed. */
+  async function commitCustomBindAddress(raw: string) {
+    if (customBindCommitBusy) return;
+    const next = (raw || '').trim();
+    const accepted = (networkBindAddress || '127.0.0.1').trim();
+    if (next === accepted) {
+      customBindDraft = isCustomBindAddress(next) ? next : '';
+      customBindOpen = isCustomBindAddress(next);
+      return;
+    }
+    if (!next) {
+      customBindDraft = isCustomBindAddress(accepted) ? accepted : '';
+      return;
+    }
+    if (!isLoopbackBind(next)) {
+      customBindCommitBusy = true;
+      let acceptedExpose = false;
+      try {
+        acceptedExpose = await confirmExposeNetwork(next === '0.0.0.0' ? '0.0.0.0 (all interfaces)' : next);
+      } finally {
+        customBindCommitBusy = false;
+      }
+      if (!acceptedExpose) {
+        customBindDraft = isCustomBindAddress(accepted) ? accepted : '';
+        return;
+      }
+    }
+    networkBindAddress = next;
+    customBindOpen = isCustomBindAddress(next);
+    customBindDraft = customBindOpen ? next : '';
+    persistChat();
   }
 
   /** Select a bind-address option; confirm when leaving loopback. */
-function selectBindAddress(next: string) {
-  const prev = (networkBindAddress || '127.0.0.1').trim();
-  const nextTrim = (next || '').trim();
-  const nextExposes = nextTrim === '0.0.0.0' || (nextTrim !== '' && !isLoopbackBind(nextTrim));
-  if (nextExposes && isLoopbackBind(prev)) {
-    const confirmLabel = nextTrim === '0.0.0.0' ? '0.0.0.0 (all interfaces)' : nextTrim;
-    if (!confirmExposeNetwork(confirmLabel)) return;
+  async function selectBindAddress(next: string) {
+    const prev = (networkBindAddress || '127.0.0.1').trim();
+    const nextTrim = (next || '').trim();
+    const nextExposes = nextTrim === '0.0.0.0' || (nextTrim !== '' && !isLoopbackBind(nextTrim));
+    if (nextExposes && isLoopbackBind(prev)) {
+      const confirmLabel = nextTrim === '0.0.0.0' ? '0.0.0.0 (all interfaces)' : nextTrim;
+      if (!(await confirmExposeNetwork(confirmLabel))) return;
+    }
+    customBindOpen = false;
+    networkBindAddress = nextTrim;
+    persistChat();
   }
-  networkBindAddress = nextTrim;
-  persistChat();
-}
 
   function discardNetworkSettings() {
     networkPort = appliedNetworkPort;
     networkBindAddress = appliedNetworkBindAddress;
+    customBindOpen = isCustomBindAddress(networkBindAddress);
+    customBindDraft = customBindOpen ? networkBindAddress.trim() : '';
     persistChat();
   }
 
@@ -3761,16 +3849,17 @@ function selectBindAddress(next: string) {
     }
 
     if (!isLoopbackBind(bind) && isLoopbackBind(appliedNetworkBindAddress)) {
-      if (!confirmExposeNetwork(bind)) return;
+      if (!(await confirmExposeNetwork(bind))) return;
     }
 
     if (state.serviceRunning) {
-      const restartOk = globalThis.confirm(
+      const restartOk = await askConfirm(
         `Apply network settings and restart the local service?\n\n` +
           `New listen address: ${bind}:${port}\n` +
           `Active connections to the OpenAI-compatible endpoint will drop briefly.`,
+        "Restart local service",
       );
-      if (!restartOk) return;
+      if (restartOk !== "yes") return;
     }
 
     networkApplyBusy = true;
@@ -3975,14 +4064,15 @@ updateStateFromSdk();
 
   async function enableWslMirrored() {
     const configPath = wslStatus?.configPath || '%UserProfile%\\.wslconfig';
-    const ok = globalThis.confirm(
+    const ok = await askConfirm(
       `Enable WSL mirrored networking?\n\n` +
         `This writes networkingMode=mirrored into ${configPath} ` +
         `(a backup of the original is kept next to it). ` +
         `Other settings in the file are left untouched.\n\n` +
         `The change takes effect after WSL restarts.`,
+      "Enable WSL mirrored networking",
     );
-    if (!ok) return;
+    if (ok !== "yes") return;
     wslBusy = true;
     wslMessage = '';
     try {
@@ -4002,13 +4092,14 @@ updateStateFromSdk();
   }
 
   async function restartWsl() {
-    const ok = globalThis.confirm(
+    const ok = await askConfirm(
       `Restart WSL now?\n\n` +
         `This runs "wsl --shutdown", which terminates every running WSL distro ` +
         `and anything inside them (shells, servers, editors). WSL starts again ` +
         `automatically the next time you open it.`,
+      "Restart WSL",
     );
-    if (!ok) return;
+    if (ok !== "yes") return;
     wslBusy = true;
     wslMessage = '';
     try {
@@ -4192,24 +4283,14 @@ updateStateFromSdk();
       if (!variantId) variantId = String(model.info?.id || model.info?.info?.id || "").toLowerCase();
     }
 
-    const blob = `${device} ${ep} ${variantId}`;
-    if (blob.includes("npu") || blob.includes("qnn") || blob.includes("hexagon")) return "npu";
-    if (
-      blob.includes("gpu") ||
-      blob.includes("cuda") ||
-      blob.includes("tensorrt") ||
-      blob.includes("trtrtx") ||
-      blob.includes("directml") ||
-      blob.includes("dml") ||
-      blob.includes("webgpu") ||
-      blob.includes("openvino") ||
-      blob.includes("rocm") ||
-      blob.includes("metal") ||
-      blob.includes("coreml")
-    ) {
-      return "gpu";
-    }
-    if (blob.includes("cpu") || blob.includes("generic")) return "cpu";
+    const kind = publishedAccelerationKind({
+      id: variantId,
+      deviceType: device,
+      executionProvider: ep,
+    });
+    if (kind === "GPU") return "gpu";
+    if (kind === "NPU") return "npu";
+    if (kind === "CPU") return "cpu";
     return "unknown";
   }
 
@@ -4711,10 +4792,10 @@ updateStateFromSdk();
    * If one-at-a-time (or a variant switch) would unload models already in the pool,
    * ask the user first. Returns false if the user cancels the whole comparison.
    */
-  function confirmUnloadPreloadedIfNeeded(
+  async function confirmUnloadPreloadedIfNeeded(
     slots: CompareSlot[],
     oneAtATime: boolean,
-  ): { proceed: boolean; allowUnloadPreloaded: boolean } {
+  ): Promise<{ proceed: boolean; allowUnloadPreloaded: boolean }> {
     const preloadedAliases = new Set(
       loadedPoolEntries.map((e: any) => e.alias).filter(Boolean) as string[],
     );
@@ -4764,9 +4845,11 @@ updateStateFromSdk();
     lines.push("OK = allow unloading those models during the run");
     lines.push("Cancel = abort the run (nothing unloaded)");
 
-    const ok = globalThis.confirm(lines.join("\n"));
-    if (!ok) {
-      statusMessage = "Arena run cancelled — existing loaded models left as-is.";
+    const ok = await askConfirm(lines.join("\n"), "Unload loaded models");
+    if (ok !== "yes") {
+      if (ok === "no") {
+        statusMessage = "Arena run cancelled — existing loaded models left as-is.";
+      }
       return { proceed: false, allowUnloadPreloaded: false };
     }
     return { proceed: true, allowUnloadPreloaded: true };
@@ -4819,7 +4902,7 @@ updateStateFromSdk();
 
       // Re-read mode after verify (may auto-switch to one-at-a-time)
       const oneAtATime = compareOneAtATime;
-      const consent = confirmUnloadPreloadedIfNeeded(compareSlots, oneAtATime);
+      const consent = await confirmUnloadPreloadedIfNeeded(compareSlots, oneAtATime);
       if (!consent.proceed) {
         return;
       }
@@ -5702,6 +5785,12 @@ updateStateFromSdk();
     }
   }
 
+  /** An uncertain outcome already says it may have taken effect. Prefixing "Failed" contradicts that. */
+  function serviceFailureMessage(prefix: string, error: any): string {
+    if (isUncertainOutcome(error)) return error?.message || String(error);
+    return `${prefix} ${error?.message || error}`;
+  }
+
   async function startLocalService() {
     const blocked = blockedByExclusivePoolRun();
     if (blocked) {
@@ -5724,8 +5813,8 @@ updateStateFromSdk();
       appendAppLog(`Service started at ${ep}`);
     } catch (e: any) {
       serviceStartUncertain = isServiceStartUncertain();
-      statusMessage = `Failed to start service: ${e?.message || e}`;
-      appendAppLog(`Service start failed: ${e?.message || e}`, 'error');
+      statusMessage = serviceFailureMessage("Failed to start service:", e);
+      appendAppLog(statusMessage, isUncertainOutcome(e) ? 'warn' : 'error');
     } finally {
       release();
     }
@@ -5749,8 +5838,8 @@ updateStateFromSdk();
       statusMessage = "Service stopped";
       appendAppLog('Service stopped');
     } catch (e: any) {
-      statusMessage = `Failed to stop service: ${e?.message || e}`;
-      appendAppLog(`Service stop failed: ${e?.message || e}`, 'error');
+      statusMessage = serviceFailureMessage("Failed to stop service:", e);
+      appendAppLog(statusMessage, isUncertainOutcome(e) ? 'warn' : 'error');
     } finally {
       release();
     }
@@ -5776,8 +5865,8 @@ updateStateFromSdk();
           : `Endpoint withdrawn; native service cleanup ${result.cleanup}`;
       appendAppLog(statusMessage, result.cleanup === "confirmed" ? "info" : "warn");
     } catch (e: any) {
-      statusMessage = `Failed to stop and unload: ${e?.message || e}`;
-      appendAppLog(statusMessage, "error");
+      statusMessage = serviceFailureMessage("Failed to stop and unload:", e);
+      appendAppLog(statusMessage, isUncertainOutcome(e) ? "warn" : "error");
     } finally {
       release();
     }
@@ -6531,11 +6620,12 @@ updateStateFromSdk();
     }
     try {
       const label = shortVariantLabel(variantId);
-      const confirmed = globalThis.confirm(
+      const confirmed = await askConfirm(
         `Delete variant "${label}" of "${model.alias}" from disk?\n\n${variantId}\n\nThis cannot be undone.`,
+        "Delete variant",
       );
-      if (!confirmed) {
-        statusMessage = `Delete cancelled for ${label}`;
+      if (confirmed !== "yes") {
+        if (confirmed === "no") statusMessage = `Delete cancelled for ${label}`;
         return;
       }
       const release = beginPoolMutation();
@@ -6610,13 +6700,14 @@ updateStateFromSdk();
     }
     try {
       const variantCount = ((model as any).variants || []).filter((v: any) => v.cached).length;
-      const confirmed = globalThis.confirm(
+      const confirmed = await askConfirm(
         variantCount > 1
           ? `Delete ALL ${variantCount} cached variants of "${model.alias}" from disk? This cannot be undone.`
           : `Delete cached model "${model.alias}" from disk? This cannot be undone.`,
+        "Delete model",
       );
-      if (!confirmed) {
-        statusMessage = `Delete cancelled for ${model.alias}`;
+      if (confirmed !== "yes") {
+        if (confirmed === "no") statusMessage = `Delete cancelled for ${model.alias}`;
         return;
       }
       const release = beginPoolMutation();
@@ -8428,7 +8519,7 @@ Output only the summary text, no preamble.`;
 
       if (format === 'wav') {
         try {
-          const pcm = decodeWavPcm(arrayBuffer);
+          const pcm = await decodeWavPcmYielding(arrayBuffer);
           decoded = audioCtx.createBuffer(pcm.channelData.length, pcm.channelData[0].length, pcm.sampleRate);
           pcm.channelData.forEach((channel, i) => decoded.copyToChannel(channel, i));
         } catch (parseError) {
@@ -8469,11 +8560,11 @@ Output only the summary text, no preamble.`;
 
   async function convertAudioBlobToWav(blob: Blob): Promise<Blob> {
     const rendered = await getMono16kBuffer(blob);
-    const wavBuffer = audioBufferToWav(rendered);
+    const wavBuffer = await audioBufferToWav(rendered);
     return new Blob([wavBuffer], { type: "audio/wav" });
   }
 
-  function audioBufferToWav(buffer: AudioBuffer): ArrayBuffer {
+  async function audioBufferToWav(buffer: AudioBuffer): Promise<ArrayBuffer> {
     const numChannels = buffer.numberOfChannels;
     const sampleRate = buffer.sampleRate;
     const bitDepth = 16;
@@ -8498,10 +8589,16 @@ Output only the summary text, no preamble.`;
     writeString(view, 36, "data");
     view.setUint32(40, dataLength, true);
 
+    const channels: Float32Array[] = [];
+    for (let ch = 0; ch < numChannels; ch++) {
+      channels.push(buffer.getChannelData(ch));
+    }
     let offset = 44;
+    const framesPerYield = 32768;
     for (let i = 0; i < buffer.length; i++) {
+      if (i > 0 && i % framesPerYield === 0) await yieldToMainThread();
       for (let ch = 0; ch < numChannels; ch++) {
-        const sample = Math.max(-1, Math.min(1, buffer.getChannelData(ch)[i]));
+        const sample = Math.max(-1, Math.min(1, channels[ch][i]));
         view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
         offset += 2;
       }
@@ -8567,7 +8664,7 @@ Output only the summary text, no preamble.`;
       chunkBuf.copyToChannel(data, 0);
       try { tmpCtx.close?.(); } catch {}
 
-      const wavBlob = new Blob([audioBufferToWav(chunkBuf)], { type: 'audio/wav' });
+      const wavBlob = new Blob([await audioBufferToWav(chunkBuf)], { type: 'audio/wav' });
 
       if (benchmarkRunInFlight) {
         return { status: 'interrupted' as const };
@@ -8871,6 +8968,9 @@ Output only the summary text, no preamble.`;
           <span class="inline-spinner" aria-hidden="true"></span>
           Starting…
         </button>
+      {:else if state.ready && state.runtime?.service === 'unknown'}
+        <span class="service-badge unknown" title="Flint cannot tell whether the local service is running.">● Service unknown</span>
+        <button class="tiny" onclick={startLocalService} disabled={serviceTransitionBusy || benchmarkRunInFlight}>Start Service</button>
       {:else if state.ready}
         <button class="tiny" onclick={startLocalService} disabled={serviceTransitionBusy || benchmarkRunInFlight}>Start Service</button>
       {/if}
@@ -10217,19 +10317,28 @@ Output only the summary text, no preamble.`;
                     >
                       Condense old
                     </button>
-                    <button
-                      type="button"
-                      class="compact-btn summarize-btn"
+                    <span
+                      class="disabled-tip"
                       title={benchmarkRunInFlight
                         ? "Disabled while a benchmark run is active."
                         : isSummarizing
                           ? "A summarization is already in progress."
                           : "Use the model to summarize older turns into a compact memory note. Allows continuing long chats efficiently."}
-                      disabled={isStreaming || benchmarkRunInFlight || isSummarizing}
-                      onclick={() => compactConversationWithSummary(Math.max(4, Math.floor(contextTurns / 2)))}
                     >
-                      Summarize &amp; Compact
-                    </button>
+                      <button
+                        type="button"
+                        class="compact-btn summarize-btn"
+                        title={benchmarkRunInFlight
+                          ? "Disabled while a benchmark run is active."
+                          : isSummarizing
+                            ? "A summarization is already in progress."
+                            : "Use the model to summarize older turns into a compact memory note. Allows continuing long chats efficiently."}
+                        disabled={isStreaming || benchmarkRunInFlight || isSummarizing}
+                        onclick={() => compactConversationWithSummary(Math.max(4, Math.floor(contextTurns / 2)))}
+                      >
+                        Summarize &amp; Compact
+                      </button>
+                    </span>
                   {/if}
                   <button
                     onclick={() => (currentView = "models")}
@@ -11213,11 +11322,17 @@ Output only the summary text, no preamble.`;
             <div class="status-row">
               <span>Status:</span>
               <span
-                class={state.serviceRunning ? "status running" : (
-                  "status stopped"
-                )}
+                class={state.serviceRunning
+                  ? "status running"
+                  : state.runtime?.service === "unknown"
+                    ? "status unknown"
+                    : "status stopped"}
               >
-                {state.serviceRunning ? "RUNNING" : "STOPPED"}
+                {state.serviceRunning
+                  ? "RUNNING"
+                  : state.runtime?.service === "unknown"
+                    ? "UNKNOWN"
+                    : "STOPPED"}
               </span>
             </div>
             {#if endpointSelfTestReport}
@@ -11271,7 +11386,7 @@ Output only the summary text, no preamble.`;
               </button>
               <button
                 onclick={stopLocalService}
-                disabled={!state.serviceRunning || benchmarkRunInFlight}
+                disabled={(!(state.serviceRunning || state.runtime?.service === 'unknown')) || benchmarkRunInFlight}
               >
                 Stop Service
               </button>
@@ -11287,13 +11402,15 @@ Output only the summary text, no preamble.`;
               <button onclick={copyDiagnosticsToClipboard}>
                 Copy All Diagnostics
               </button>
-              <button
-                onclick={runGatewaySelfTest}
-                disabled={endpointSelfTestBusy || benchmarkRunInFlight || state.models.length === 0}
-                title={state.models.length === 0 ? "Refresh the catalog before testing the endpoint." : undefined}
-              >
-                {endpointSelfTestBusy ? "Testing endpoint…" : "Test local endpoint"}
-              </button>
+              <span class="disabled-tip" title={state.models.length === 0 ? "Refresh the catalog before testing the endpoint." : undefined}>
+                <button
+                  onclick={runGatewaySelfTest}
+                  disabled={endpointSelfTestBusy || benchmarkRunInFlight || state.models.length === 0}
+                  title={state.models.length === 0 ? "Refresh the catalog before testing the endpoint." : undefined}
+                >
+                  {endpointSelfTestBusy ? "Testing endpoint…" : "Test local endpoint"}
+                </button>
+              </span>
               <button onclick={scanCacheInventory} disabled={!state.ready || cacheInventoryLoading}>
                 {cacheInventoryLoading ? "Scanning Cache..." : "Scan Cache"}
               </button>
@@ -11616,10 +11733,7 @@ Output only the summary text, no preamble.`;
                 <tbody>
                   {#each state.pool as entry (entry.alias)}
                     {@const shortVariant = entry.variantId?.split(':')[0]?.split('-').slice(-3).join('-') ?? '—'}
-                    {@const poolBadge = accelBadgeInfo(
-                      entry.variantId?.toLowerCase().includes('gpu') ? 'GPU' : entry.variantId?.toLowerCase().includes('npu') ? 'NPU' : 'CPU',
-                      entry.variantId?.toLowerCase().includes('cuda') ? 'CUDA' : entry.variantId?.toLowerCase().includes('qnn') ? 'QNN' : entry.variantId?.toLowerCase().includes('dml') ? 'DML' : 'generic'
-                    )}
+                    {@const poolKind = publishedAccelerationKind({ id: entry.variantId })}
                     {@const tokens = state.poolStats?.tokenTotals?.find((t: any) => t.alias === entry.alias)}
                     <tr>
                       <td class="pool-alias-cell">{entry.alias}</td>
@@ -11630,7 +11744,7 @@ Output only the summary text, no preamble.`;
                         </span>
                       </td>
                       <td>
-                        <span class="accel-badge {poolBadge.cls}">{poolBadge.label}</span>
+                        <span class="accel-badge">{poolKind ?? 'Generic'}</span>
                       </td>
                       <td class="pool-tokens-cell">{tokens?.tokensIn ?? '—'}</td>
                       <td class="pool-tokens-cell">{tokens?.tokensOut ?? '—'}</td>
@@ -12365,6 +12479,10 @@ Output only the summary text, no preamble.`;
                 }}
               ></textarea>
               <div class="compare-composer-actions">
+                <span
+                  class="disabled-tip"
+                  title={benchmarkRunInFlight ? "A benchmark run is active — stop it before running the Arena" : compareSlots.length < 2 ? "Add at least 2 models" : "Send prompt to all selected models"}
+                >
                 <button
                   type="submit"
                   class="compare-send"
@@ -12380,6 +12498,7 @@ Output only the summary text, no preamble.`;
                     <span>Send</span>
                   {/if}
                 </button>
+                </span>
                 {#if isComparing}
                   <button
                     type="button"
@@ -12653,30 +12772,27 @@ Output only the summary text, no preamble.`;
               </div>
               <div class="radio-group" role="radiogroup" aria-label="Bind address">
                 <label class="radio-option">
-                  <input type="radio" name="bind-addr" checked={networkBindAddress === '127.0.0.1'}
+                  <input type="radio" name="bind-addr" checked={!customBindOpen && networkBindAddress === '127.0.0.1'}
                     onchange={() => selectBindAddress('127.0.0.1')} />
                   <span class="radio-option-text">127.0.0.1 — loopback only <span class="badge-recommend">Recommended</span></span>
                 </label>
                 <label class="radio-option">
-                  <input type="radio" name="bind-addr" checked={networkBindAddress === '0.0.0.0'}
+                  <input type="radio" name="bind-addr" checked={!customBindOpen && networkBindAddress === '0.0.0.0'}
                     onchange={() => selectBindAddress('0.0.0.0')} />
                   <span class="radio-option-text">0.0.0.0 — all interfaces</span>
                 </label>
                 <label class="radio-option">
-                  <input type="radio" name="bind-addr" checked={networkBindAddress !== '127.0.0.1' && networkBindAddress !== '0.0.0.0'}
-                    onchange={() => {
-                      if (networkBindAddress === '127.0.0.1' || networkBindAddress === '0.0.0.0') {
-                        selectBindAddress('');
-                      }
-                    }} />
+                  <input type="radio" name="bind-addr" checked={customBindOpen}
+                    onchange={openCustomBind} />
                   <span class="radio-option-text">Custom</span>
                 </label>
-                {#if networkBindAddress !== '127.0.0.1' && networkBindAddress !== '0.0.0.0'}
+                {#if customBindOpen}
                   <input
                     type="text"
                     class="custom-bind-input"
-                    bind:value={networkBindAddress}
-                    onchange={persistChat}
+                    value={customBindDraft}
+                    oninput={(e) => { customBindDraft = e.currentTarget.value; }}
+                    onchange={(e) => commitCustomBindAddress(e.currentTarget.value)}
                     placeholder="e.g. 192.168.1.100"
                     aria-label="Custom bind address"
                   />
@@ -13147,6 +13263,9 @@ Output only the summary text, no preamble.`;
     --muted: #888;
     --success: #4ade80;
     --warning: #facc15;
+    --surface: var(--panel-bg);
+    --text: var(--fg);
+    --text-muted: var(--muted);
     --danger: #f87171;
     --input-bg: #222226;
     /* #001639 sits on #1a1a1e and the button disappears. This blue stays
@@ -13169,7 +13288,10 @@ Output only the summary text, no preamble.`;
     --accent-fg: #fff;
     --muted: #6c757d;
     --success: #198754;
-    --warning: #ffc107;
+    --warning: #b45309;
+    --surface: var(--panel-bg);
+    --text: var(--fg);
+    --text-muted: var(--muted);
     --danger: #dc3545;
     --input-bg: #ffffff;
     --button-bg: #001639;
@@ -13326,6 +13448,10 @@ Output only the summary text, no preamble.`;
   .service-badge.running {
     background: color-mix(in srgb, var(--success) 30%, var(--panel-bg));
     color: var(--success);
+  }
+  .service-badge.unknown {
+    background: color-mix(in srgb, var(--warning) 30%, var(--panel-bg));
+    color: var(--warning);
   }
 
   button.tiny {
@@ -14157,8 +14283,17 @@ Output only the summary text, no preamble.`;
   }
 
   button.secondary {
-    background: var(--subtle-bg);
+    background: var(--panel-bg);
     color: var(--fg);
+    border: 1px solid color-mix(in srgb, var(--fg) 35%, var(--border));
+  }
+
+  .disabled-tip {
+    display: inline-flex;
+  }
+  /* Disabled controls do not show a title in WebView2, so the wrapper owns it. */
+  .disabled-tip button:disabled {
+    pointer-events: none;
   }
 
   .storage-error {
@@ -15802,6 +15937,10 @@ Output only the summary text, no preamble.`;
   }
   .status.stopped {
     color: var(--danger);
+  }
+  .status.unknown {
+    color: var(--warning);
+    font-weight: bold;
   }
 
   .endpoint-display {

@@ -1,0 +1,80 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { describe, expect, it } from 'vitest';
+
+const page = readFileSync(join(process.cwd(), 'src', 'routes', '+page.svelte'), 'utf8');
+
+function slice(startMarker: string, endMarker: string): string {
+  const start = page.indexOf(startMarker);
+  const end = page.indexOf(endMarker, start + startMarker.length);
+  expect(start, startMarker).toBeGreaterThan(-1);
+  expect(end, endMarker).toBeGreaterThan(start);
+  return page.slice(start, end);
+}
+
+describe('review fixes wired into the page', () => {
+  it('asks with the granted dialog command and never window.confirm', () => {
+    expect(page).toContain('confirm as confirmDialog');
+    expect(page).toContain('from "@tauri-apps/plugin-dialog"');
+    expect(page).not.toContain('globalThis.confirm(');
+    expect(page).toContain('return "unavailable"');
+    const bind = slice('async function commitCustomBindAddress', 'async function selectBindAddress');
+    const confirmAt = bind.indexOf('await confirmExposeNetwork');
+    expect(confirmAt).toBeGreaterThan(-1);
+    expect(bind.slice(0, confirmAt)).not.toContain('networkBindAddress = next');
+    expect(bind.indexOf('networkBindAddress = next')).toBeGreaterThan(bind.indexOf('if (!acceptedExpose)'));
+    expect(page).not.toContain('bind:value={networkBindAddress}');
+  });
+
+  it('bounds a stuck benchmark exclusive-release join before claiming a new run', () => {
+    const start = slice('async function startBenchmarkPreviewRun', 'async function resumeBenchmarkPreviewRun');
+    const resume = slice('async function resumeBenchmarkPreviewRun', 'function stopBenchmarkPreviewRun');
+    for (const body of [start, resume]) {
+      const waitAt = body.indexOf('await waitForPriorExclusiveRelease()');
+      const clearAt = body.indexOf('benchmarkRunInFlight = false');
+      const claimAt = body.indexOf('claimNextBenchmarkExclusiveGeneration()');
+      const finishAt = body.indexOf('finishBenchmarkExecution');
+      expect(waitAt).toBeGreaterThan(-1);
+      expect(clearAt).toBeGreaterThan(waitAt);
+      expect(claimAt).toBeGreaterThan(clearAt);
+      expect(finishAt).toBeGreaterThan(claimAt);
+      expect(body).not.toContain('pendingExclusiveRelease.join()');
+    }
+    expect(page).toContain('pendingExclusiveRelease.joinWithTimeout(BENCHMARK_EXCLUSIVE_RELEASE_TIMEOUT_MS)');
+  });
+
+  it('classifies chat and accelerator targets with the shared predicates', () => {
+    const chat = slice('function modelSupportsChat', 'function detectHostPlatform');
+    expect(chat).toContain('endpointModelKind(m)');
+    expect(chat).toContain('kind !== "speech" && kind !== "embed"');
+    const slot = slice('function resolveSlotTarget', 'function slotTargetLabel');
+    expect(slot).toContain('publishedAccelerationKind(');
+    expect(slot).not.toContain('openvino');
+    expect(page).toContain('publishedAccelerationKind({ id: entry.variantId })');
+    expect(page).toContain("{poolKind ?? 'Generic'}");
+  });
+
+  it('shows an uncertain service as unknown and keeps Stop available', () => {
+    expect(page).toContain('state.runtime?.service === \'unknown\'');
+    expect(page).toContain('? "UNKNOWN"');
+    expect(page).toContain('Service unknown');
+    const stop = slice('async function stopLocalService', 'async function stopAndUnloadModels');
+    expect(stop).toContain('serviceFailureMessage(');
+    expect(stop).not.toContain('statusMessage = `Failed to stop service:');
+    expect(page).toContain("state.runtime?.service === 'unknown'");
+  });
+
+  it('keeps long WAV work off a single UI turn and gives secondary buttons an edge', () => {
+    expect(page).toContain('await decodeWavPcmYielding(arrayBuffer)');
+    expect(page).toContain('await audioBufferToWav(');
+    expect(page).toContain('await yieldToMainThread()');
+    expect(page).toContain('--warning: #b45309');
+    expect(page).toContain('--surface: var(--panel-bg)');
+    expect(page).toContain('--text-muted: var(--muted)');
+    expect(page).toContain('class="disabled-tip"');
+    expect(page).toContain('.disabled-tip button:disabled');
+    const secondary = slice('button.secondary {', '.storage-error');
+    expect(secondary).toContain('background: var(--panel-bg)');
+    expect(secondary).toContain('border: 1px solid color-mix(in srgb, var(--fg) 35%, var(--border))');
+  });
+});

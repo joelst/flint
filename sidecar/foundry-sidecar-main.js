@@ -3092,7 +3092,10 @@ rl.on('line', async (line) => {
               const t = (m.info?.task || '').toLowerCase();
               const caps = (m.info?.capabilities || '').toLowerCase();
               const alias = (m.alias || '').toLowerCase();
-              return t.includes('vision') || caps.includes('vision') || caps.includes('image') || alias.includes('vision') || alias.includes('multimodal');
+              // Same tokens as getModelTags() in src/lib/personas.ts. `vl` is how Qwen-VL
+              // and similar catalog rows spell a vision model.
+              const combined = `${alias} ${t} ${caps}`;
+              return /vision|vl|multimodal|image/.test(combined);
             })
             .map(m => ({ alias: m.alias, cached: m.isCached }));
         },

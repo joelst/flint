@@ -50,7 +50,8 @@
   }
 
   button.secondary {
-    background: var(--subtle-bg);
+    background: var(--panel-bg);
     color: var(--fg);
+    border: 1px solid color-mix(in srgb, var(--fg) 35%, var(--border));
   }
 </style>

@@ -1,10 +1,10 @@
 /**
  * Benchmark Preview suite schema, validation, attempt-count accounting, and JSONL import.
  *
- * Pure and headless: no storage, no UI, no feature flag. This module only decides what a
- * well-formed suite looks like and how many attempts running it would take — the persistence
- * layer lives in `benchmark-repository.ts`, and no UI reads either module until a later PR wires
- * up an entry point. Dormant on purpose.
+ * Pure schema and scheduling: no storage and no feature flag. This module decides what a
+ * well-formed suite looks like and how many attempts running it would take. Persistence lives
+ * in `benchmark-repository.ts`. Benchmark Preview (`BenchmarkPreview.svelte`, started from
+ * `+page.svelte`) is the UI that reads this module.
  */
 
 export const BENCHMARK_MAX_TARGETS = 3;

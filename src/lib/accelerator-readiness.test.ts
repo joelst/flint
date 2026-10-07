@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   evaluateStartupPreload,
   hasRegisteredAccelerator,
+  publishedAccelerationKind,
   publishedAccelerationLabels,
 } from './accelerator-readiness';
 
@@ -68,6 +69,18 @@ describe('publishedAccelerationLabels', () => {
     expect(publishedAccelerationLabels([
       { id: 'example-openvino:1', executionProvider: 'OpenVINO' },
     ])).toEqual([]);
+  });
+
+  it('does not treat a generic OpenVINO id or a glued webgpu token as a GPU', () => {
+    expect(publishedAccelerationKind({
+      id: 'example-openvino:1',
+      executionProvider: 'OpenVINO',
+    })).toBeNull();
+    expect(publishedAccelerationKind({ id: 'example-webgpu:1' })).toBeNull();
+    expect(publishedAccelerationKind({
+      id: 'example-openvino-gpu:1',
+      executionProvider: 'OpenVINO',
+    })).toBe('GPU');
   });
 });
 

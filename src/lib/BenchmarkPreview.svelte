@@ -1897,8 +1897,9 @@
     cursor: not-allowed;
   }
   button.secondary {
-    background: var(--subtle-bg, rgba(127,127,127,0.2));
+    background: var(--panel-bg, #222);
     color: var(--fg, inherit);
+    border: 1px solid color-mix(in srgb, var(--fg, #e8e8e8) 35%, var(--border, #2a2a30));
   }
   button.small {
     font-size: 0.75rem;

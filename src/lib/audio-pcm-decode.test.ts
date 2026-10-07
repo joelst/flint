@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { decodeWavPcm, getWavDurationSeconds } from './audio-pcm-decode.js';
+import { decodeWavPcm, decodeWavPcmYielding, getWavDurationSeconds, yieldToMainThread } from './audio-pcm-decode.js';
 
 function writeAscii(view: DataView, offset: number, text: string) {
   for (let i = 0; i < text.length; i += 1) view.setUint8(offset + i, text.charCodeAt(i));
@@ -270,5 +270,73 @@ describe('getWavDurationSeconds', () => {
   it('throws for a non-RIFF buffer, same as decodeWavPcm', () => {
     const buffer = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]).buffer;
     expect(() => getWavDurationSeconds(buffer)).toThrow(/RIFF\/WAVE/);
+  });
+});
+
+describe('decodeWavPcmYielding', () => {
+  it('matches decodeWavPcm and yields between frame chunks', async () => {
+    const samples = new Int16Array(20_000);
+    for (let i = 0; i < samples.length; i += 1) samples[i] = (i % 200) - 100;
+    const wav = buildWav({ bitsPerSample: 16, numChannels: 1, data: samples.buffer });
+    let yields = 0;
+    const decoded = await decodeWavPcmYielding(wav, {
+      framesPerYield: 8192,
+      yield: async () => {
+        yields += 1;
+      },
+    });
+    const sync = decodeWavPcm(wav);
+    expect(Array.from(decoded.channelData[0])).toEqual(Array.from(sync.channelData[0]));
+    expect(yields).toBe(2);
+  });
+
+  it('yields on the default path without changing samples', async () => {
+    const samples = new Int16Array([0, 16384, -16384]);
+    const wav = buildWav({ bitsPerSample: 16, data: samples.buffer });
+    const decoded = await decodeWavPcmYielding(wav, { framesPerYield: 1 });
+    expect(decoded.channelData[0][1]).toBeCloseTo(decodeWavPcm(wav).channelData[0][1], 5);
+  });
+
+  it('decodes a short file on the default yield interval', async () => {
+    const samples = new Int16Array([0, 1, -1]);
+    const wav = buildWav({ bitsPerSample: 16, data: samples.buffer });
+    const decoded = await decodeWavPcmYielding(wav);
+    expect(Array.from(decoded.channelData[0])).toEqual(Array.from(decodeWavPcm(wav).channelData[0]));
+  });
+
+  it('rejects a buffer that is not RIFF/WAVE', async () => {
+    const buffer = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]).buffer;
+    await expect(decodeWavPcmYielding(buffer)).rejects.toThrow(/RIFF\/WAVE/);
+  });
+});
+
+describe('yieldToMainThread', () => {
+  it('uses scheduler.yield when the host provides it', async () => {
+    const host = globalThis as typeof globalThis & { scheduler?: { yield?: () => Promise<void> } };
+    const original = host.scheduler;
+    let called = 0;
+    host.scheduler = {
+      yield() {
+        called += 1;
+        return Promise.resolve();
+      },
+    };
+    try {
+      await yieldToMainThread();
+      expect(called).toBe(1);
+    } finally {
+      host.scheduler = original;
+    }
+  });
+
+  it('uses a timer when the host has no scheduler.yield', async () => {
+    const host = globalThis as typeof globalThis & { scheduler?: { yield?: () => Promise<void> } };
+    const original = host.scheduler;
+    host.scheduler = {};
+    try {
+      await yieldToMainThread();
+    } finally {
+      host.scheduler = original;
+    }
   });
 });
