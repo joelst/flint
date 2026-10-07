@@ -1,16 +1,26 @@
 import dns from 'node:dns/promises';
 import https from 'node:https';
 import net from 'node:net';
-import { StringDecoder } from 'node:string_decoder';
 import { pathToFileURL } from 'node:url';
-import { canonicalHostname, isDeniedAddress, isLocalHostname } from './web-address-policy.js';
+import {
+  canonicalHostname,
+  ipLiteralFamily,
+  isDeniedAddress,
+  isLocalHostname,
+} from './web-address-policy.js';
+import { detectImageFormat } from './image-dimensions.js';
 
-export { isDeniedAddress };
+export { isDeniedAddress, MAX_OUTPUT_BYTES, MAX_IMAGE_BYTES, MAX_IMAGE_OUTPUT_BYTES };
 
 const MAX_INPUT_BYTES = 16 * 1024;
 const MAX_OUTPUT_BYTES = 256 * 1024;
+/** 1.5 MiB of image bytes. Base64 of that is 2 MiB; the JSON frame needs a little more. */
+const MAX_IMAGE_BYTES = 1_572_864;
+const MAX_IMAGE_OUTPUT_BYTES = 2_200_000;
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const MAX_TEXT_CHARS = 50_000;
+/** Matches SEARCH_URL_CHARS. A longer address is omitted, not sliced. */
+const SEARCH_URL_CHARS = 2048;
 const MAX_REDIRECTS = 3;
 const REQUEST_TIMEOUT_MS = 8_000;
 const OVERALL_TIMEOUT_MS = 10_000;
@@ -50,6 +60,35 @@ function stripMarkup(value) {
     .trim();
 }
 
+/**
+ * Hidden page regions must not become model text. Browsers do not show HTML comments or the
+ * body of an active element; a comment that contains `>` and an unclosed comment or tag are
+ * both still hidden, and `stripMarkup` would otherwise keep that text.
+ */
+function stripHiddenContent(html) {
+  const withoutComments = String(html)
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<!--[\s\S]*$/g, ' ');
+  const open = /<(script|style|noscript|svg|iframe|form)\b[^>]*>/gi;
+  let result = '';
+  let cursor = 0;
+  for (const match of withoutComments.matchAll(open)) {
+    const start = match.index ?? 0;
+    if (start < cursor) continue;
+    result += withoutComments.slice(cursor, start);
+    const tag = match[1].toLowerCase();
+    const rest = withoutComments.slice(start + match[0].length);
+    const close = new RegExp(`</${tag}\\s*>`, 'i').exec(rest);
+    if (!close) return result;
+    cursor = start + match[0].length + close.index + close[0].length;
+  }
+  return result + withoutComments.slice(cursor);
+}
+
+function readableText(html) {
+  return stripMarkup(stripHiddenContent(html));
+}
+
 function normalizePublicUrl(raw) {
   const parsed = new URL(String(raw).trim());
   if (parsed.protocol !== 'https:') throw new Error('Only HTTPS URLs are allowed');
@@ -61,8 +100,23 @@ function normalizePublicUrl(raw) {
   if (isLocalHostname(hostname)) {
     throw new Error('Local hostnames are not allowed');
   }
+  // Search results never resolve DNS. isDeniedAddress is true for every non-IP, so only
+  // literals are checked here. WHATWG IPv6 hostnames include brackets.
+  const literal = hostname.startsWith('[') && hostname.endsWith(']')
+    ? hostname.slice(1, -1)
+    : hostname;
+  const family = ipLiteralFamily(literal);
+  if ((family === 4 || family === 6) && isDeniedAddress(literal)) {
+    throw new Error('IP literals that are private or special are not allowed');
+  }
   parsed.hash = '';
   return parsed;
+}
+
+/** Same site after case and trailing-dot folding. IPv6 hostnames keep brackets in WHATWG. */
+function comparableHost(url) {
+  const host = canonicalHostname(url.hostname);
+  return host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
 }
 
 export function normalizeRequest(raw) {
@@ -79,14 +133,28 @@ export function normalizeRequest(raw) {
     return { operation: 'search', query, maxResults: Math.min(5, Math.max(1, requested)) };
   }
   if (raw.operation === 'fetch') {
-    if (Object.keys(raw).some((key) => !['operation', 'url', 'maxChars'].includes(key))) {
+    if (Object.keys(raw).some((key) => !['operation', 'url', 'maxChars', 'followCrossOriginRedirects'].includes(key))) {
       throw new Error('Fetch request contains an unsupported field');
     }
     const url = normalizePublicUrl(raw.url).toString();
     const requested = Number.isInteger(raw.maxChars) ? raw.maxChars : 20_000;
-    return { operation: 'fetch', url, maxChars: Math.min(MAX_TEXT_CHARS, Math.max(1_000, requested)) };
+    return {
+      operation: 'fetch',
+      url,
+      maxChars: Math.min(MAX_TEXT_CHARS, Math.max(1_000, requested)),
+      followCrossOriginRedirects: raw.followCrossOriginRedirects === true,
+    };
   }
-  throw new Error('Operation must be search or fetch');
+  if (raw.operation === 'image') {
+    if (raw.followCrossOriginRedirects) {
+      throw new Error('Image requests cannot follow a cross-origin redirect');
+    }
+    if (Object.keys(raw).some((key) => !['operation', 'url'].includes(key))) {
+      throw new Error('Image request contains an unsupported field');
+    }
+    return { operation: 'image', url: normalizePublicUrl(raw.url).toString() };
+  }
+  throw new Error('Operation must be search, fetch, or image');
 }
 
 async function resolvePublic(hostname, resolve = dns.lookup) {
@@ -118,10 +186,39 @@ function withDeadline(promise, deadlineAt, message) {
   ]);
 }
 
-function decodeResponseBody(body, truncated) {
-  if (!truncated) return body.toString('utf8');
-  const decoder = new StringDecoder('utf8');
-  return decoder.write(body);
+/** Last `charset` parameter, or null when the header does not declare one. `''` means it was empty. */
+function declaredCharset(header) {
+  const pattern = /(?:^|;)\s*charset\s*=\s*(?:"([^"]*)"|'([^']*)'|([^;\s]*))/gi;
+  let found = false;
+  let value = '';
+  for (const match of String(header).matchAll(pattern)) {
+    found = true;
+    value = (match[1] ?? match[2] ?? match[3] ?? '').trim();
+  }
+  return found ? value : null;
+}
+
+function decodeResponseBody(body, truncated, charset) {
+  const label = charset == null ? 'utf-8' : charset;
+  let decoder;
+  try {
+    decoder = new TextDecoder(label, { fatal: true });
+  } catch (error) {
+    if (error instanceof RangeError) {
+      throw new Error(`Unsupported response charset: ${label}`);
+    }
+    throw error;
+  }
+  try {
+    // A bounded prefix may end mid-character. Streaming keeps that tail buffered instead of
+    // inserting a replacement character; a finished body must be valid for its charset.
+    return decoder.decode(body, { stream: truncated === true });
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new Error(`Response body is not valid ${decoder.encoding}`);
+    }
+    throw error;
+  }
 }
 
 export function requestPinned(url, resolved, options = {}) {
@@ -138,7 +235,7 @@ export function requestPinned(url, resolved, options = {}) {
       // RFC 6066 forbids IP literals in SNI; without it Node verifies the pinned IP against the certificate's IP SANs.
       servername: net.isIP(literalHost) ? undefined : url.hostname,
       headers: {
-        Accept: 'text/html,text/plain,application/json;q=0.9',
+        Accept: options.accept ?? 'text/html,text/plain,application/json;q=0.9',
         'Accept-Encoding': 'identity',
         'User-Agent': 'Flint-Web-Tool/1.0 (+https://github.com/joelst/flint)',
         Host: url.host,
@@ -195,6 +292,9 @@ export async function fetchPublicText(rawUrl, dependencies = {}) {
   const resolve = dependencies.resolve ?? dns.lookup;
   const request = dependencies.request ?? requestPinned;
   const deadlineAt = Date.now() + (dependencies.overallTimeoutMs ?? OVERALL_TIMEOUT_MS);
+  // Consent approved the host already requested. Stop before a different host so
+  // the app can ask again. Search leaves this on and still follows public redirects.
+  const followCrossOriginRedirects = dependencies.followCrossOriginRedirects !== false;
   let current = normalizePublicUrl(rawUrl);
   let method = dependencies.method ?? 'GET';
   let body = dependencies.body ?? null;
@@ -218,6 +318,9 @@ export async function fetchPublicText(rawUrl, dependencies = {}) {
       if (!location) throw new Error('Redirect response has no destination');
       if (redirects === MAX_REDIRECTS) throw new Error('Too many redirects');
       const next = normalizePublicUrl(new URL(location, current).toString());
+      if (!followCrossOriginRedirects && comparableHost(next) !== comparableHost(current)) {
+        return { redirectTo: next.toString() };
+      }
       const dropsBody = [301, 302, 303].includes(response.statusCode);
       if (!dropsBody && body && method !== 'GET' && next.origin !== current.origin) {
         throw new Error('Cross-origin redirects cannot receive a request body');
@@ -232,8 +335,8 @@ export async function fetchPublicText(rawUrl, dependencies = {}) {
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw new Error(`Remote server returned HTTP ${response.statusCode}`);
     }
-    const contentType = String(response.headers['content-type'] ?? '')
-      .split(';', 1)[0].trim().toLowerCase();
+    const rawContentType = String(response.headers['content-type'] ?? '');
+    const contentType = rawContentType.split(';', 1)[0].trim().toLowerCase();
     if (!ALLOWED_CONTENT_TYPES.includes(contentType)) {
       throw new Error(`Unsupported response content type: ${contentType || 'missing'}`);
     }
@@ -242,24 +345,55 @@ export async function fetchPublicText(rawUrl, dependencies = {}) {
     if (contentEncoding && contentEncoding !== 'identity') {
       throw new Error(`Unsupported response content encoding: ${contentEncoding}`);
     }
+    const charset = declaredCharset(rawContentType);
+    if (charset === '') throw new Error('Unsupported response charset');
     return {
       url: current.toString(),
       statusCode: response.statusCode,
       contentType,
-      body: decodeResponseBody(response.body, response.truncated === true),
+      body: decodeResponseBody(response.body, response.truncated === true, charset),
       truncated: response.truncated === true,
     };
   }
   throw new Error('Too many redirects');
 }
 
-function extractPageText(html) {
-  const withoutActive = html
-    .replace(/<(script|style|noscript|svg|iframe|form)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ');
-  const titleMatch = withoutActive.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i);
+function firstPageImage(html, pageUrl) {
+  let page;
+  try {
+    page = normalizePublicUrl(pageUrl);
+  } catch {
+    return null;
+  }
+  const tags = String(html).matchAll(/<img\b[^>]*>/gi);
+  for (const tag of tags) {
+    const source = tag[0].match(/\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i);
+    const raw = decodeEntities(source?.[1] || source?.[2] || source?.[3] || '');
+    if (!raw || /^data:/i.test(raw) || /\.svg(?:$|[?#])/i.test(raw)) continue;
+    try {
+      const normalized = normalizePublicUrl(new URL(raw, page).toString());
+      if (comparableHost(normalized) !== comparableHost(page)) continue;
+      const alt = tag[0].match(/\balt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+      return {
+        url: normalized.toString(),
+        alt: readableText(alt?.[1] || alt?.[2] || alt?.[3] || ''),
+      };
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+export function extractPageText(html, pageUrl = '') {
+  const visible = stripHiddenContent(html);
+  const titleMatch = visible.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i);
+  const image = pageUrl ? firstPageImage(visible, pageUrl) : null;
   return {
-    title: titleMatch ? stripMarkup(titleMatch[1]) : '',
-    text: stripMarkup(withoutActive),
+    title: titleMatch ? readableText(titleMatch[1]) : '',
+    text: readableText(visible),
+    imageUrls: image ? [image.url] : [],
+    imageAlt: image?.alt || '',
   };
 }
 
@@ -288,11 +422,12 @@ export function decodeSearchResults(html, maxResults) {
     if (!link) continue;
     try {
       const url = unwrapDuckDuckGoUrl(link[1]);
+      if (url.length > SEARCH_URL_CHARS) continue;
       const snippetMatch = block.match(/<(?:a|div)[^>]+class=["'][^"']*\bresult__snippet\b[^"']*["'][^>]*>([\s\S]*?)<\/(?:a|div)>/i);
       results.push({
-        title: stripMarkup(link[2]).slice(0, 300),
+        title: readableText(link[2]).slice(0, 300),
         url,
-        snippet: snippetMatch ? stripMarkup(snippetMatch[1]).slice(0, 1_000) : '',
+        snippet: snippetMatch ? readableText(snippetMatch[1]).slice(0, 1_000) : '',
       });
     } catch {
       continue;
@@ -311,8 +446,9 @@ export async function executeWebRequest(raw, dependencies = {}) {
       method: 'POST',
       body,
     });
-    if (page.statusCode !== 200
-      || /anomaly-modal|challenge-form|bots use duckduckgo too/i.test(page.body)) {
+    // The challenge page is identified by its markup. The sentence "bots use DuckDuckGo too"
+    // also appears in ordinary result snippets and must not fail a completed search.
+    if (page.statusCode !== 200 || /anomaly-modal|challenge-form/i.test(page.body)) {
       throw new Error('Public search service returned a bot challenge');
     }
     return {
@@ -321,10 +457,22 @@ export async function executeWebRequest(raw, dependencies = {}) {
       results: decodeSearchResults(page.body, request.maxResults),
     };
   }
-  const page = await fetchPublicText(request.url, dependencies);
+  if (request.operation === 'image') {
+    return fetchPublicImage(request.url, dependencies);
+  }
+  // Model fetches and URL-chip fetches omit the flag, so a different host
+  // comes back as a redirect. The chip checks the device blocklist before each hop.
+  // Same-origin redirects still stay inside this request.
+  const page = await fetchPublicText(request.url, {
+    ...dependencies,
+    followCrossOriginRedirects: request.followCrossOriginRedirects === true,
+  });
+  if (page.redirectTo) {
+    return { operation: 'redirect', url: page.redirectTo };
+  }
   const extracted = page.contentType === 'text/html'
-    ? extractPageText(page.body)
-    : { title: '', text: page.body.replace(/\s+/g, ' ').trim() };
+    ? extractPageText(page.body, page.url)
+    : { title: '', text: page.body.replace(/\s+/g, ' ').trim(), imageUrls: [], imageAlt: '' };
   const truncated = page.truncated || extracted.text.length > request.maxChars;
   return {
     operation: 'fetch',
@@ -333,7 +481,59 @@ export async function executeWebRequest(raw, dependencies = {}) {
     text: extracted.text.slice(0, request.maxChars),
     truncated,
     charCount: Math.min(extracted.text.length, request.maxChars),
+    imageUrls: extracted.imageUrls ?? [],
+    imageAlt: extracted.imageAlt ?? '',
   };
+}
+
+async function fetchPublicImage(rawUrl, dependencies = {}) {
+  const resolve = dependencies.resolve ?? dns.lookup;
+  const request = dependencies.request ?? requestPinned;
+  const deadlineAt = Date.now() + (dependencies.overallTimeoutMs ?? OVERALL_TIMEOUT_MS);
+  let current = normalizePublicUrl(rawUrl);
+  for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
+    const resolved = await withDeadline(
+      resolvePublic(current.hostname, resolve),
+      deadlineAt,
+      'Web request timed out while resolving the host',
+    );
+    const response = await withDeadline(request(current, resolved, {
+      maxBytes: MAX_BODY_BYTES,
+      timeoutMs: Math.min(REQUEST_TIMEOUT_MS, Math.max(1, deadlineAt - Date.now())),
+      method: 'GET',
+      accept: 'image/jpeg,image/png,image/webp,image/gif,image/bmp;q=0.9',
+    }), deadlineAt, 'Web request timed out');
+    if ([301, 302, 303, 307, 308].includes(response.statusCode)) {
+      const location = response.headers.location;
+      if (!location) throw new Error('Redirect response has no destination');
+      if (redirects === MAX_REDIRECTS) throw new Error('Too many redirects');
+      const next = normalizePublicUrl(new URL(location, current).toString());
+      if (comparableHost(next) !== comparableHost(current)) {
+        return { operation: 'redirect', url: next.toString() };
+      }
+      current = next;
+      continue;
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw new Error(`Remote server returned HTTP ${response.statusCode}`);
+    }
+    const encoding = String(response.headers['content-encoding'] ?? 'identity').trim().toLowerCase();
+    if (encoding && encoding !== 'identity') {
+      throw new Error(`Unsupported response content encoding: ${encoding}`);
+    }
+    const body = response.body;
+    if (!Buffer.isBuffer(body)) throw new Error('Image response was not bytes');
+    if (body.length > MAX_IMAGE_BYTES) throw new Error('Image exceeds the byte limit');
+    const format = detectImageFormat(new Uint8Array(body));
+    if (!format || format === 'svg') throw new Error('Unsupported image');
+    return {
+      operation: 'image',
+      url: current.toString(),
+      mediaType: `image/${format}`,
+      dataBase64: body.toString('base64'),
+    };
+  }
+  throw new Error('Too many redirects');
 }
 
 async function readInput(input) {
@@ -357,7 +557,8 @@ export async function runHelper(
     const raw = JSON.parse(await readInput(input));
     const result = await executeWebRequest(raw, dependencies);
     const output = JSON.stringify({ ok: true, result });
-    if (Buffer.byteLength(output) > MAX_OUTPUT_BYTES) throw new Error('Output exceeds the byte limit');
+    const outputLimit = raw?.operation === 'image' ? MAX_IMAGE_OUTPUT_BYTES : MAX_OUTPUT_BYTES;
+    if (Buffer.byteLength(output) > outputLimit) throw new Error('Output exceeds the byte limit');
     write(`${output}\n`);
     return 0;
   } catch (error) {

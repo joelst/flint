@@ -2677,12 +2677,23 @@ export interface FetchUrlResult {
   text: string;
   truncated: boolean;
   charCount: number;
+  imageUrls?: string[];
+  imageAlt?: string;
 }
 
-export async function fetchUrl(url: string, maxChars = 50000): Promise<FetchUrlResult> {
-  return invoke<FetchUrlResult>('web_tool_execute', {
+export async function fetchUrl(
+  url: string,
+  maxChars = 50000,
+): Promise<FetchUrlResult | { operation: 'redirect'; url: string }> {
+  // Same-origin redirects stay in the helper. A different host comes back as
+  // operation redirect so the chip can check the blocklist before the next request.
+  const result = await invoke<FetchUrlResult & { operation?: string }>('web_tool_execute', {
     request: { operation: 'fetch', url, maxChars },
   });
+  if (result?.operation === 'redirect' && typeof result.url === 'string') {
+    return { operation: 'redirect', url: result.url };
+  }
+  return result;
 }
 
 export async function executeWebTool(

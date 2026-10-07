@@ -68,27 +68,65 @@ The sidebar is grouped by workflow:
   as attachment chips, and labels their contents as untrusted reference text when sending them
   to the model. PDF and Office documents are not decoded. The attach button's picker shows all
   files; anything Flint cannot attach is reported in a notice above the composer rather than skipped silently.
-- Persona is beside the message controls. Context and sampling options are in the collapsible
-  **Generation settings** drawer below the composer.
-- **Public web search & retrieval** in Generation settings is off by default and applies only to
-  the current conversation. When enabled, the model may make one bounded round of public
-  `web_search` or `web_fetch` calls. Fetch is limited to HTTPS URLs typed or attached as a URL chip
-  in the current message, retrieved text is treated as untrusted reference material, and consulted
-  sources (and any tool issues) appear in a separate **Sources consulted** section under the
-  answer that the model's text cannot hide or alter. Copying the message includes that section.
+- Persona is beside the message controls. The gear beside Send opens and closes the
+  **Generation settings** drawer. The conversation list starts collapsed. **Show conversations**
+  opens it. The sidebar icon, tooltip **Hide**, closes it again. **Export** beside it is the
+  download icon; its tooltip is **Export**.
+  Qwen3 and QwQ start a reply inside reasoning. Playground keeps that text under **Thinking**
+  until the model closes it. If **Max tokens** runs out first, the answer area says the reply
+  stopped before the answer. A reply saved before Flint recorded that fact stays as written
+  when you later select Qwen3 or QwQ. The ceiling starts at 8192. **Max tokens** limits the reply
+  length. It does not change the memory the loaded
+  model uses. The context meter is the prompt's share of the model's context window. High
+  memory warnings use system RAM and GPU memory, which move when a model loads.
+- **Web search** in the chat header is off by default and applies only to the current conversation.
+  When it is on, and the selected model reports tool calling, the model may request a short public search.
+  The checkbox stays checked and disabled for a model that does not report tool calling, and that send does not offer web search. Gemma 4 answers without web search until the upstream template fix.
+  Flint asks you to allow that query
+  just once, for this session, or always. Later searches skip that question when you chose session
+  or always, unless the model wrote the query after it had already read web text in that same send,
+  or a text or code file is attached anywhere in the conversation.
+  When the query followed web text, that dialog says so, and **Allow** runs that one search. Declining lets the answer continue without the search.
+  A query you decline, or that Flint rejects on this device, is not listed as a search that ran. If an answer needs a page from
+  those results, Flint asks you to allow that domain once, for this session, or always, or to allow
+  all public URLs in the conversation named in that prompt until the page reloads.
+  If that page redirects to a different site, Flint asks before opening the new site.
+  A URL you typed or attached as a chip is still fetched only as public HTTPS. Retrieved text is untrusted reference
+  material, and consulted sources (and any tool issues) appear in a separate **Sources consulted**
+  section under the answer that the model's text cannot hide or alter. A search that returns
+  nothing is listed as a web tool issue instead of leaving no record. A URL chip that finishes in
+  an error, or with no readable text, is listed the same way. A chip you dismissed, or one still
+  loading when you send, is not recorded. Copying the message includes that section.
   Search terms and requested public URLs leave the
-  device; Flint does not send cookies, credentials, or browser state.
-  The toggle governs only what the model may do. Adding a detected URL as a context chip and then
+  device. Search queries go to DuckDuckGo over HTTPS. The request identifies Flint with the user agent
+  `Flint-Web-Tool/1.0 (+https://github.com/joelst/flint)`. Flint does not send cookies, credentials, or browser state.
+  On a later message, Flint may name those pages again. The titles are reference data inside the same kind of fence, not instructions, and the page text is not sent again.
+  Page text is fenced as reference data. The fence stops a page from closing that block. It does not stop a
+  weak model from copying private text into a later query. Flint's check of that query is best-effort: it
+  rejects local names, private IPv4 and IPv6 addresses, a `file:` scheme, key-shaped text, and a long run copied from the
+  messages in this send, including earlier turns and attached files. It does not catch short secrets. The consent dialog is the control for those.
+  A host on the device blocklist is not fetched, and a grant does not override that list.
+  A line is kept only when each label is a DNS name; a leading dot, an empty label, or a label that starts or ends with a hyphen is rejected.
+  Adding a detected URL as a context chip and then
   clicking that chip's **Fetch** is a separate explicit action: the page is requested immediately,
-  with the toggle on or off and before you send, through the same isolated helper.
-  To authorize a search, put the exact unquoted query on its own line as
-  **`Search the web for: your query`**, outside block quotes, code blocks, and HTML comments.
-  Flint shows the exact outbound search query for
-  confirmation immediately before sending it.
-  Web tools cannot be combined with image context in one model request; remove the image or turn
-  web tools off for that send.
-  Stop suppresses any continuation after an in-flight retrieval returns; it does not prove that an
-  already-started network request was cancelled.
+  with the toggle on or off and before you send, through the same isolated helper. Sending clears
+  every URL chip; a page still loading when you send is not used for that message or any later one.
+  **Ask again for search and sites** in Generation settings clears those approvals. It does not clear
+  the blocklist or the new-chat default.
+  If that saved choice cannot be written, Flint reports the failure and leaves the previous choice in place.
+  **Remember for new chats** in Settings is separate from the header checkbox. The first time it is turned
+  on, Flint says that new chats on this device will start with Web search on. It does not change chats
+  that already exist. While a consent dialog is open the chat is inert, so Stop cannot be clicked.
+  Escape declines. Stop during a retrieval suppresses any continuation after an in-flight request returns;
+  it does not prove that an already-started network request was cancelled.
+  Web tools cannot be combined with an image you attached. That send leaves search and fetch off and continues.
+  A vision model may be shown one image from a fetched page, re-encoded as JPEG, so camera metadata is gone.
+  That image is not saved with the conversation. If that request fails, the text answer remains.
+  Attached text files count toward that plan as the framed prompt, not the raw file.
+  When a model does not report its context length, Flint plans the send as 4,096 tokens and holds back
+  the smaller of Max tokens and a quarter of that window for the reply. Lowering Max tokens, or choosing
+  a model that reports a larger context, leaves more room for page text. A page that does not fit is
+  shortened, and the status line says so.
 - **Export conversations**: Export any chat thread as structured JSON, formatted Markdown, or plain text for documentation or archive.
 
 ### Bring Your Own Model (BYOM) and External Linking
@@ -215,7 +253,7 @@ Then launch Flint normally from Finder or Spotlight.
 
 ## Tool calling
 
-Models may return `tool_calls` on the OpenAI-compatible API. **Flint’s chat UI does not execute general tools.** The one exception is the supervised **Public web search & retrieval** round described under [Chat and conversations](#chat-and-conversations): it runs only when you enable it for a conversation, executes only Flint’s own `web_search` and `web_fetch`, and never runs tools a model invents. For anything else, point an agent client (Continue, Cline, your code) at the local endpoint; that client owns permissions and confirmation.
+Models may return `tool_calls` on the OpenAI-compatible API. **Flint’s chat UI does not execute general tools.** With **Web search** on, the model may request Flint’s `web_search` (a query of at most 200 characters) and `web_fetch` for a URL already allowed for that send. Flint runs at most two of those rounds, then requires an answer with no further tool request. A malformed call is reported for that call. A missing id, a duplicate id, or more than two calls fails the send. It never runs a tool a model invents. For anything else, point an agent client (Continue, Cline, your code) at the local endpoint; that client owns permissions and confirmation. See [Chat and conversations](#chat-and-conversations).
 
 ---
 

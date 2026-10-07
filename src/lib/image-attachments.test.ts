@@ -221,6 +221,27 @@ describe("image attachment storage limits", () => {
     expect(decode).not.toHaveBeenCalled();
   });
 
+  it("re-encodes a small PNG as JPEG when forceJpeg is set", async () => {
+    installFileReader();
+    const close = vi.fn();
+    const decode = vi.fn(async () => ({ width: 1, height: 1, close }));
+    Object.defineProperty(globalThis, "createImageBitmap", { configurable: true, value: decode });
+    const compacted = "data:image/jpeg;base64,AQID";
+    const canvas = {
+      width: 0,
+      height: 0,
+      getContext: () => ({ fillStyle: "", fillRect: vi.fn(), drawImage: vi.fn() }),
+      toBlob: (callback: (blob: Blob) => void) =>
+        callback(Object.assign(new Blob(), { __dataUrl: compacted })),
+    };
+    vi.spyOn(document, "createElement").mockImplementation(((tag: string) =>
+      tag === "canvas" ? canvas : originalCreateElement(tag)) as typeof document.createElement);
+
+    await expect(compactImageAttachment(fileWithDataUrl(TINY_PNG_DATA_URL), { forceJpeg: true }))
+      .resolves.toBe(compacted);
+    expect(decode).toHaveBeenCalledOnce();
+  });
+
   it("resizes a small-but-high-resolution image instead of returning it", async () => {
     installFileReader();
     const close = vi.fn();

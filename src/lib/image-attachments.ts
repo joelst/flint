@@ -267,7 +267,10 @@ function canvasBlob(canvas: HTMLCanvasElement, quality: number): Promise<Blob> {
   });
 }
 
-export async function compactImageAttachment(file: File): Promise<string> {
+export async function compactImageAttachment(
+  file: File,
+  options?: { forceJpeg?: boolean },
+): Promise<string> {
   const label = file.name || "The selected image";
   if (file.size > MAX_SOURCE_IMAGE_BYTES) {
     throw new Error(`${label} is larger than 20 MB.`);
@@ -292,7 +295,8 @@ export async function compactImageAttachment(file: File): Promise<string> {
   const mimeType = `image/${header.format}`;
   const labelled = `data:${mimeType};base64,${original.slice(comma + 1)}`;
   if (
-    labelled.length <= MAX_ATTACHMENT_DATA_URL_CHARS
+    !options?.forceJpeg
+    && labelled.length <= MAX_ATTACHMENT_DATA_URL_CHARS
     && payload.length <= MAX_OPTIMIZED_IMAGE_BYTES
     && Math.max(header.width, header.height) <= MAX_IMAGE_DIMENSION
   ) {

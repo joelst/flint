@@ -48,7 +48,7 @@ export const FLINT_FACT_SHEET = `[About Flint & Foundry Local — use when the u
 export const FLINT_WEB_FACT_SHEET = FLINT_FACT_SHEET
   .replace(
     "- Chat window is display-only: it does not parse or execute tool calls, run shell/file ops, or make network requests for the model (guarded web-fetch is user-initiated URL context only).",
-    "- Chat can process one supervised round of `web_search` or `web_fetch` when the user enables public web access. Flint validates current-send consent, executes the bounded read-only request outside the model runtime, and returns untrusted text for a tool-free answer.",
+    "- When this conversation allows it, you may call supervised `web_search` and `web_fetch`. Flint runs them outside the model runtime, asks before a new search or a new site, and returns untrusted text. You get at most two tool rounds, then a tool-free answer.",
   )
   .replace(
     "- What you (the model in Flint chat) cannot do: change UI, load/unload models, execute tools, access files, or browse the network on the user's behalf.",

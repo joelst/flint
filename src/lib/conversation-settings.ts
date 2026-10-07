@@ -60,8 +60,9 @@ export const DEFAULT_APP_SETTINGS: AppSettingDefaults = Object.freeze({
   showFullHistory: false,
   // Foundry Local's model catalog reports no default sampling parameters today, so these are
   // Flint's own sensible starting point rather than anything sourced from the catalog.
+  // 8192 leaves room for a thinking model to finish reasoning and still write the answer.
   temperature: 0.7,
-  maxTokens: 2048,
+  maxTokens: 8192,
   topP: 1,
   topK: 50,
   frequencyPenalty: 0,
@@ -69,6 +70,30 @@ export const DEFAULT_APP_SETTINGS: AppSettingDefaults = Object.freeze({
   randomSeed: null,
   webToolsEnabled: false,
 });
+
+/** The untouched Max tokens ceiling this build replaced. A stored copy of it is not a choice. */
+export const RETIRED_DEFAULT_MAX_TOKENS = 2048;
+
+/**
+ * Written onto a conversation the first time its ceiling is checked.
+ * A later choice of the retired number stays, because the mark is already set.
+ */
+export const MAX_TOKENS_DEFAULT_GENERATION = 2;
+
+/** An integer at least as new as this build is already migrated. Older marks are not. */
+function maxTokensGenerationIsCurrent(value: unknown): boolean {
+  return typeof value === 'number'
+    && Number.isInteger(value)
+    && value >= MAX_TOKENS_DEFAULT_GENERATION;
+}
+
+/**
+ * The generation a save should write. A stored integer at least as new as this build stays.
+ * Absent, non-integer, and older marks are stamped with this build's generation.
+ */
+export function persistedMaxTokensGeneration(value?: unknown): number {
+  return maxTokensGenerationIsCurrent(value) ? (value as number) : MAX_TOKENS_DEFAULT_GENERATION;
+}
 
 /** The persisted key each default is stored under in the application settings blob. */
 const PERSISTED_KEYS: Record<Exclude<keyof AppSettingDefaults, 'webToolsEnabled'>, string> = {
@@ -124,7 +149,12 @@ export function readAppSettingDefaults(
 
   const maxTokens = source[PERSISTED_KEYS.maxTokens];
   if (typeof maxTokens === 'number' && Number.isInteger(maxTokens) && maxTokens > 0) {
-    defaults.maxTokens = maxTokens;
+    // An unmarked copy of the retired ceiling picks up the current default.
+    // An integer generation at least as new as this build keeps an explicit 2048.
+    const marked = maxTokensGenerationIsCurrent(source.maxTokensDefaultGeneration);
+    defaults.maxTokens = maxTokens === RETIRED_DEFAULT_MAX_TOKENS && !marked
+      ? fallback.maxTokens
+      : maxTokens;
   }
 
   const topP = source[PERSISTED_KEYS.topP];
@@ -168,9 +198,13 @@ export function readAppSettingDefaults(
  * writing it, so re-publishing a frozen copy from here would fight with it. Reading it back as
  * the baseline is still right — a conversation that stores no model should open with a model
  * that works, and unlike a persona the alias is not a leak of the previous chat's character.
+ *
+ * `generation` is the mark already stored on the blob. A newer integer stays.
+ * A blob with no such mark is stamped with this build's generation.
  */
 export function appSettingDefaultsToPersisted(
   defaults: AppSettingDefaults,
+  generation?: unknown,
 ): Record<string, unknown> {
   return {
     [PERSISTED_KEYS.systemPrompt]: defaults.systemPrompt,
@@ -178,6 +212,7 @@ export function appSettingDefaultsToPersisted(
     [PERSISTED_KEYS.showFullHistory]: defaults.showFullHistory,
     [PERSISTED_KEYS.temperature]: defaults.temperature,
     [PERSISTED_KEYS.maxTokens]: defaults.maxTokens,
+    maxTokensDefaultGeneration: persistedMaxTokensGeneration(generation),
     [PERSISTED_KEYS.topP]: defaults.topP,
     [PERSISTED_KEYS.topK]: defaults.topK,
     [PERSISTED_KEYS.frequencyPenalty]: defaults.frequencyPenalty,
@@ -239,6 +274,30 @@ export function resolveConversationSettings(
 }
 
 /**
+ * Move an unmarked 2048 ceiling onto the current default.
+ * The archive cannot tell an explicit 2048 from the old default, so that number moves once.
+ * An integer generation at least as new as this build is already migrated, and that number stays.
+ * Older or missing marks are stamped with this build's generation.
+ */
+export function migrateRetiredMaxTokens<T extends { settings?: unknown }>(
+  conversations: T[],
+): { conversations: T[]; changed: boolean } {
+  let changed = false;
+  const next = conversations.map((conversation) => {
+    const settings = conversation.settings;
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) return conversation;
+    const bag = settings as Record<string, unknown>;
+    if (maxTokensGenerationIsCurrent(bag.maxTokensDefaultGeneration)) return conversation;
+    changed = true;
+    const upgraded = bag.maxTokens === RETIRED_DEFAULT_MAX_TOKENS
+      ? { ...bag, maxTokens: DEFAULT_APP_SETTINGS.maxTokens, maxTokensDefaultGeneration: MAX_TOKENS_DEFAULT_GENERATION }
+      : { ...bag, maxTokensDefaultGeneration: MAX_TOKENS_DEFAULT_GENERATION };
+    return { ...conversation, settings: upgraded };
+  });
+  return { conversations: changed ? next : conversations, changed };
+}
+
+/**
  * The settings patch a newly created conversation should be seeded with.
  *
  * New conversations are stamped with explicit values rather than left to inherit, so that the
@@ -249,6 +308,7 @@ export function resolveConversationSettings(
 export function seedSettingsFor(
   effective: AppSettingDefaults,
   overrides: ConversationSettings = {},
+  options: { webToolsForNewChats?: boolean } = {},
 ): ConversationSettings {
   const seed: ConversationSettings = {
     systemPrompt: effective.systemPrompt,
@@ -256,12 +316,13 @@ export function seedSettingsFor(
     showFullHistory: effective.showFullHistory,
     temperature: effective.temperature,
     maxTokens: effective.maxTokens,
+    maxTokensDefaultGeneration: MAX_TOKENS_DEFAULT_GENERATION,
     topP: effective.topP,
     topK: effective.topK,
     frequencyPenalty: effective.frequencyPenalty,
     presencePenalty: effective.presencePenalty,
     randomSeed: effective.randomSeed,
-    webToolsEnabled: false,
+    webToolsEnabled: options.webToolsForNewChats === true,
   };
   // An empty alias is not a choice, it is the absence of one — on a fresh install no model has
   // been picked yet, and the component's auto-selector fills it in at runtime. Seeding `''`
@@ -269,4 +330,20 @@ export function seedSettingsFor(
   // the picker that auto-selection had just filled. Leave the key absent and let it inherit.
   if (effective.modelAlias) seed.modelAlias = effective.modelAlias;
   return { ...seed, ...overrides };
+}
+
+/**
+ * Remember for new chats, applied only to a startup conversation that has no stored choice.
+ * An explicit boolean stays. A false Remember flag leaves the bag alone.
+ */
+export function startupWebToolsPatch(
+  settings: unknown,
+  webToolsForNewChats: boolean,
+): { webToolsEnabled: true } | null {
+  if (webToolsForNewChats !== true) return null;
+  if (settings && typeof settings === 'object' && !Array.isArray(settings)) {
+    const stored = (settings as { webToolsEnabled?: unknown }).webToolsEnabled;
+    if (typeof stored === 'boolean') return null;
+  }
+  return { webToolsEnabled: true };
 }

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { formatTextAttachmentPrompt } from "./text-attachment-policy";
 import { estimateTokens, estimateTokensForMessages } from "./token-estimate";
 
 describe("estimateTokens", () => {
@@ -49,14 +50,22 @@ describe("estimateTokensForMessages", () => {
     expect(withImage).toBe(500 + 2);
   });
 
-  // `chat-request.ts` flattens a `file_text` part into framed prompt text before the meter
-  // ever sees it, so a raw file body is not what gets sent. Counting it here would estimate
-  // text the model never receives.
-  it("ignores a raw file part, which prompt messages never carry", () => {
+  it("counts a stored file_text part as its framed prompt, not the raw body", () => {
+    const file = { name: "add.js", text: "a".repeat(400) };
     const counted = estimateTokensForMessages([
-      { role: "user", content: [{ type: "file_text", file: { name: "add.js", text: "a".repeat(400) } }] },
+      { role: "user", content: [{ type: "file_text", file }] },
     ]);
-    expect(counted).toBe(2);
+    expect(counted).toBe(estimateTokens(formatTextAttachmentPrompt(file)) + 2);
+    expect(counted).not.toBe(estimateTokens(file.text) + 2);
+    expect(estimateTokensForMessages([
+      { role: "user", content: [{ type: "file_text", file: { name: 1, text: file.text } }] },
+    ])).toBe(2);
+    expect(estimateTokensForMessages([
+      { role: "user", content: [{ type: "file_text" }] },
+    ])).toBe(2);
+    expect(estimateTokensForMessages([
+      { role: "user", content: [{ type: "file_text", file: "nope" }] },
+    ])).toBe(2);
   });
 
   it("ignores a text part whose text is not a string", () => {
@@ -111,5 +120,42 @@ describe("estimateTokensForMessages", () => {
 
   it("rounds the per-message overhead up across an odd message count", () => {
     expect(estimateTokensForMessages([{}, {}, {}])).toBe(5);
+  });
+
+  it("counts tool-call ids, names, and arguments in addition to content", () => {
+    const content = "answer";
+    const argumentsText = `https://example.com/${"p".repeat(400)}`;
+    const plain = estimateTokensForMessages([{ role: "assistant", content }]);
+    const withCall = estimateTokensForMessages([{
+      role: "assistant",
+      content,
+      tool_calls: [{
+        id: "call-1",
+        type: "function",
+        function: { name: "web_fetch", arguments: argumentsText },
+      }],
+    }]);
+    expect(withCall).toBe(
+      plain + estimateTokens(["call-1", "web_fetch", argumentsText].join("\n")),
+    );
+    const linked = estimateTokensForMessages([{
+      role: "tool",
+      content,
+      tool_call_id: "call-1",
+      name: "web_fetch",
+    }]);
+    expect(linked).toBe(plain + estimateTokens("call-1\nweb_fetch"));
+    const namedOnly = estimateTokensForMessages([{
+      role: "assistant",
+      content,
+      name: "web_fetch",
+    }]);
+    expect(namedOnly).toBe(plain);
+    const unnamedTool = estimateTokensForMessages([{
+      role: "tool",
+      content,
+      name: "web_fetch",
+    }]);
+    expect(unnamedTool).toBe(plain);
   });
 });

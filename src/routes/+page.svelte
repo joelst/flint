@@ -1,6 +1,6 @@
 <script lang="ts">
   // @ts-nocheck  // runes ($state etc.) are handled by Svelte compiler, not raw TS
-  import { onMount, untrack } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import { isPoolEntryResident } from "$lib/pool-residency";
   import { providerRecheckStatus } from "$lib/provider-recheck-status";
   import MessageRenderer from "$lib/MessageRenderer.svelte";
@@ -157,6 +157,7 @@
     MAX_ATTACHED_TEXT_FILES,
     mergePreparedTextAttachments,
     prepareTextAttachmentBatch,
+    requestCarriesTextAttachment,
   } from "$lib/text-attachments";
   import {
     collectStoredArchive,
@@ -188,34 +189,97 @@
   } from "$lib/conversation-store";
   import {
     DEFAULT_APP_SETTINGS,
+    MAX_TOKENS_DEFAULT_GENERATION,
     appSettingDefaultsToPersisted,
+    migrateRetiredMaxTokens,
+    persistedMaxTokensGeneration,
     readAppSettingDefaults,
     resolveConversationSettings,
     seedSettingsFor,
+    startupWebToolsPatch,
     type AppSettingDefaults,
   } from "$lib/conversation-settings";
-  import { isFetchableUrl, detectFetchableUrls } from "$lib/url-chips";
+  import { decideChipFetchHop, detectFetchableUrls, isFetchableUrl } from "$lib/url-chips";
   import {
     conversationImagePreviewPartIndexes,
     millisecondsUntilNextLocalDay,
+    assistantStoredText,
+    modelPrefillsThink,
+    replyUsesPrefilledThink,
   } from "$lib/message-rendering";
-  import { estimateTokensForMessages } from "$lib/token-estimate";
+  import { estimateTokens, estimateTokensForMessages } from "$lib/token-estimate";
   import { formatErrorDetail, formatUncaughtError } from "$lib/error-detail";
   import {
     normalizeForAlternatingChat,
     isEmptyAssistantPlaceholder,
     selectPinnedAndRecentMessages,
   } from "$lib/chat-request";
-  import { buildWebAudit } from "$lib/web-audit";
   import {
+    consentKeyGate,
+    consentPointerAllows,
+    dialogFocusable,
+    dialogTabTrap,
+    latchConsentPointer,
+    releaseConsentKey,
+    restoreDialogFocus,
+  } from "$lib/dialog-focus";
+  import {
+    WEB_SOURCE_INDEX_NOTE,
+    buildWebAudit,
+    chipTextIsReadable,
+    fenceWebSourceIndex,
+    prependTextToLatestUser,
+    sourcesWithOwnBudgetShortened,
+    urlChipRetrievalAudit,
+    webSourceIndex,
+  } from "$lib/web-audit";
+  import {
+    allUrlsGrantTarget,
+    allUrlsGranted,
+    domainGranted,
+    emptySessionWebConsent,
+    emptyStoredWebConsent,
+    grantDomain,
+    grantSearch,
+    hostnameOf,
+    loadStoredWebConsent,
+    rememberResultUrls,
+    resultUrlsForConversation,
+    saveStoredWebConsent,
+    searchGranted,
+    splitCoveredConsentPrompts,
+    type DomainChoice,
+    type SearchChoice,
+    type SessionWebConsent,
+    type StoredWebConsent,
+  } from "$lib/web-consent";
+  import {
+    MAX_CROSS_ORIGIN_REDIRECTS,
     WEB_TOOL_DEFINITIONS,
+    WEB_TOOLS_UPSTREAM_NOTE,
+    webToolSchemaTokens,
+    canonicalFetchUrl,
     collectCurrentWebFetchUrls,
+    executeWebImage,
     executeWebToolCalls,
     messagesContainImages,
-    readWebToolCalls,
+    modelCannotUseWebTools,
+    searchScrubCorpus,
     webContentSystemInstruction,
     webToolSystemInstruction,
+    webToolTemplateCrash,
   } from "$lib/web-tools";
+  import {
+    buildWebEnvelope,
+    createWebCloser,
+    localRetrievalDate,
+    messageContentWithFence,
+    toolContentsWithCloser,
+    webCloserInstruction,
+    withVisionImage,
+  } from "$lib/web-envelope";
+  import { mergeBlocklists, parseBlocklistText, hostBlocked, BUILT_IN_WEB_BLOCKLIST } from "$lib/web-blocklist";
+  import { packContextMessages, plannedWebFit, repackToolRequest } from "$lib/context-packer";
   import {
     beginScopedPreparation,
     preparationScopeIsCurrent,
@@ -1615,7 +1679,7 @@
   // Generation parameters (Playground: learning how sampling settings affect model output).
   // Foundry Local's catalog reports no per-model defaults today, so these are Flint's own.
   let temperature = $state(0.7);
-  let maxTokens = $state(2048);
+  let maxTokens = $state(DEFAULT_APP_SETTINGS.maxTokens);
   let topP = $state(1);
   let topK = $state(50);
   let frequencyPenalty = $state(0);
@@ -1637,9 +1701,13 @@
    * time is a different operation.
    */
   let appSettingDefaults = $state<AppSettingDefaults>({ ...DEFAULT_APP_SETTINGS });
+  // The mark on the loaded blob. A newer build's integer stays; an unmarked blob writes this build's.
+  let appMaxTokensGeneration = $state(MAX_TOKENS_DEFAULT_GENERATION);
 
   // Collapsible left sidebar
   let sidebarCollapsed = $state(false);
+  // Absent from older settings, so existing installs start collapsed.
+  let conversationListCollapsed = $state(true);
 
   // Theme: light or dark
   let theme = $state<'light' | 'dark'>('dark');
@@ -1677,13 +1745,13 @@
     title?: string;
     text?: string;
     truncated?: boolean;
+    imageUrl?: string;
     error?: string;
   }[] = $state([]);
   let isFetchingUrl = $state(false);
 
-  // Detects URLs typed/pasted into the chat input that haven't been fetched yet
-  let detectedUrls = $derived.by(() =>
-    detectFetchableUrls(chatInput, pendingUrlFetches.map(f => f.url))
+  let webToolsCallingUnsupported = $derived(
+    catalogModelForEndpointId(state.models, selectedModelAlias || "")?.supportsToolCalling === false,
   );
 
   // Proper vision capability detection based on model metadata (not just alias name).
@@ -2261,7 +2329,7 @@
       // stamping those onto the very first conversation would fabricate overrides for settings
       // the user has not chosen and `restoreChat` has not yet read.
       settings: (hydrated
-        ? seedSettingsFor(currentChatSettings(), seedOverrides)
+        ? seedSettingsFor(currentChatSettings(), seedOverrides, { webToolsForNewChats })
         : seedOverrides) as any,
     });
     conversationArchive = result.archive;
@@ -2307,6 +2375,8 @@
    * previous session's blob happened to seed.
    */
   let pendingConversationSettingsSet = false;
+  /** The empty-archive chat this launch created, before Remember for new chats was loaded. */
+  let startupCreatedConversationId: string | null = null;
 
   /**
    * The model the loaded conversation stores, if any.
@@ -2404,7 +2474,19 @@
     if ('randomSeed' in patch) randomSeed = patch.randomSeed;
     if ('webToolsEnabled' in patch) webToolsEnabled = patch.webToolsEnabled;
     if (!threadLoadedFor) return;
-    const result = captureThread(sessionState(), { now: Date.now(), settings: patch as any });
+    // The generation mark is what lets a later choice of the retired ceiling stay put.
+    // A settings-less chat's first write has to carry it, or the next launch would
+    // treat that choice as the old untouched default. A stored integer at least as
+    // new as this build is kept; a new chat still gets this build's generation.
+    const loaded = findConversation(conversationArchive, threadLoadedFor);
+    const storedSettings = loaded?.settings;
+    const storedGeneration = storedSettings && typeof storedSettings === 'object' && !Array.isArray(storedSettings)
+      ? (storedSettings as { maxTokensDefaultGeneration?: unknown }).maxTokensDefaultGeneration
+      : undefined;
+    const result = captureThread(sessionState(), {
+      now: Date.now(),
+      settings: { ...patch, maxTokensDefaultGeneration: persistedMaxTokensGeneration(storedGeneration) } as any,
+    });
     if (!result.changed) return;
     conversationArchive = result.archive;
     conversationsDirty = true;
@@ -2765,7 +2847,10 @@
       appVersion: appVersion,
       now: Date.now(),
     });
-    conversationArchive = opened.archive;
+    const migratedTokens = migrateRetiredMaxTokens(opened.archive.conversations);
+    conversationArchive = migratedTokens.changed
+      ? { ...opened.archive, conversations: migratedTokens.conversations }
+      : opened.archive;
     conversationsWritable = opened.writable;
     // Asked of storage, not inferred from this open: a copy parked by an earlier launch is just
     // as much at risk, and by then nothing about the open looks unusual.
@@ -2781,7 +2866,7 @@
     storageInventoryUnknown = recovery === 'unknown';
     if (opened.notice) hydrationNotice = opened.notice;
 
-    const active = findConversation(opened.archive, opened.archive.activeId);
+    const active = findConversation(conversationArchive, conversationArchive.activeId);
     if (active) {
       // adoptThread snapshots, so the archive's own message objects are not handed to the UI.
       adoptThread(active.id, active.messages as any);
@@ -2792,10 +2877,11 @@
       pendingConversationSettingsSet = true;
     } else if (opened.writable) {
       createNewConversation();
+      startupCreatedConversationId = threadLoadedFor;
     }
     // A migrated archive is only in memory until it is committed; the legacy keys are left in
     // place either way, so a failure here costs nothing but a repeated migration next launch.
-    if (opened.migrated && opened.writable) {
+    if ((opened.migrated || migratedTokens.changed) && opened.writable) {
       conversationsDirty = true;
       saveConversations();
     }
@@ -3448,8 +3534,9 @@
           // the effective values here would republish one chat's model and persona as the
           // setting every conversation without an override inherits. The key names are
           // unchanged, so an older build still reads these as its globals.
-          ...appSettingDefaultsToPersisted(appSettingDefaults),
+          ...appSettingDefaultsToPersisted(appSettingDefaults, appMaxTokensGeneration),
           sidebarCollapsed,
+          conversationListCollapsed,
           theme,
           modelRuntimeMeta,
           startupModels,
@@ -3462,6 +3549,9 @@
           keepServiceInBackground,
           benchmarkPreviewEnabled,
           devToolsEnabled,
+          webToolsForNewChats,
+          webHostBlocklistText,
+          webToolsDefaultHintShown,
         }),
       );
       // Persist immediately so a failure is not sticky. Assigning the same value is a no-op in
@@ -3545,6 +3635,7 @@
         // The baseline every conversation without an override resolves against, and the seed
         // for the live values until a conversation is loaded over them.
         appSettingDefaults = readAppSettingDefaults(data, DEFAULT_APP_SETTINGS);
+        appMaxTokensGeneration = persistedMaxTokensGeneration(data.maxTokensDefaultGeneration);
         systemPrompt = appSettingDefaults.systemPrompt;
         contextTurns = clampContextTurns(appSettingDefaults.contextTurns);
         showFullHistory = appSettingDefaults.showFullHistory;
@@ -3558,6 +3649,9 @@
         webToolsEnabled = appSettingDefaults.webToolsEnabled;
         if (typeof data.sidebarCollapsed === 'boolean') {
           sidebarCollapsed = data.sidebarCollapsed;
+        }
+        if (typeof data.conversationListCollapsed === 'boolean') {
+          conversationListCollapsed = data.conversationListCollapsed;
         }
         if (data.theme === 'light' || data.theme === 'dark') {
           theme = data.theme;
@@ -3585,6 +3679,9 @@
           networkBindAddress = data.networkBindAddress;
           appliedNetworkBindAddress = data.networkBindAddress;
         }
+        if (typeof data.webToolsForNewChats === 'boolean') webToolsForNewChats = data.webToolsForNewChats;
+        if (typeof data.webHostBlocklistText === 'string') webHostBlocklistText = data.webHostBlocklistText;
+        if (data.webToolsDefaultHintShown === true) webToolsDefaultHintShown = true;
       }
       return true;
     } catch (e: any) {
@@ -6052,6 +6149,14 @@ updateStateFromSdk();
         pendingConversationSettings = undefined;
         pendingConversationSettingsSet = false;
       }
+      if (
+        startupCreatedConversationId
+        && threadLoadedFor === startupCreatedConversationId
+      ) {
+        const created = findConversation(conversationArchive, startupCreatedConversationId);
+        const patch = startupWebToolsPatch(created?.settings, webToolsForNewChats);
+        if (patch) commitChatSettings(patch);
+      }
       loadCompareHistory();
       loadCustomPersonasState();
     } finally {
@@ -6544,8 +6649,301 @@ updateStateFromSdk();
     }
   }
 
+  let storedWebConsent = $state(loadStoredWebConsent(
+    typeof localStorage === "undefined" ? null : localStorage,
+  ));
+  let sessionWebConsent = $state(emptySessionWebConsent());
+  // One resolver slot drops an in-flight prompt when another conversation reaches
+  // consent at the same time, and that send waits forever.
+  let webToolsForNewChats = $state(false);
+  let webHostBlocklistText = $state("");
+  let webToolsDefaultHintShown = $state(false);
+  let webBlocklistRejected = $state<string[]>([]);
+  let lastContextFit: {
+    shortened?: boolean;
+    omittedPinned?: number;
+    omittedSummaries?: number;
+    omittedHistory?: number;
+    toolsViable?: boolean;
+  } | null = null;
+
+  function contextFitSentence(fit: {
+    shortened?: boolean;
+    omittedPinned?: number;
+    omittedSummaries?: number;
+    omittedHistory?: number;
+  } | null): string {
+    if (!fit) return "";
+    const parts: string[] = [];
+    if (fit.shortened) parts.push("Page text shortened to fit this model's context");
+    const pinned = fit.omittedPinned || 0;
+    const summaries = fit.omittedSummaries || 0;
+    const history = fit.omittedHistory || 0;
+    if (pinned || summaries || history) {
+      parts.push(`left ${pinned} pinned, ${summaries} summarized, and ${history} earlier messages out of this request`);
+    }
+    return parts.length ? `${parts.join(", ")}.` : "";
+  }
+
+  function visionHistoryThroughLatestUser(messages: any[]): any[] {
+    let latest = -1;
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i]?.role === "user") {
+        latest = i;
+        break;
+      }
+    }
+    const throughLatest = latest < 0 ? messages : messages.slice(0, latest + 1);
+    return throughLatest.filter((message) => message?.role !== "tool");
+  }
+
+  const webHostBlocklist = $derived(
+    mergeBlocklists(BUILT_IN_WEB_BLOCKLIST, parseBlocklistText(webHostBlocklistText).hosts, []),
+  );
+  // Detects URLs typed or pasted into the chat input that have not been fetched yet.
+  let detectedUrls = $derived.by(() =>
+    detectFetchableUrls(chatInput, pendingUrlFetches.map((fetch) => fetch.url), webHostBlocklist),
+  );
+  let webConsentQueue = $state<Array<
+    | { kind: "search"; query: string; afterWebText?: boolean; resolve: (choice: SearchChoice | null) => void }
+    | {
+      kind: "domain";
+      host: string;
+      url: string;
+      conversationId: string;
+      redirect: boolean;
+      resolve: (choice: DomainChoice | null) => void;
+    }
+  >>([]);
+  const webConsentPrompt = $derived(webConsentQueue[0] ?? null);
+  // Allow all URLs follows the conversation that asked, which may be behind the one on screen.
+  const webConsentGrantTarget = $derived.by(() => {
+    const prompt = webConsentPrompt;
+    if (!prompt || prompt.kind !== "domain") return null;
+    const requested = findConversation(conversationArchive, prompt.conversationId);
+    const visible = findConversation(conversationArchive, threadLoadedFor);
+    return allUrlsGrantTarget(
+      prompt.conversationId,
+      requested?.title,
+      threadLoadedFor,
+      visible?.title,
+    );
+  });
+  let webConsentDialog = $state<HTMLDivElement | null>(null);
+  let webConsentReturnFocus: HTMLElement | null = null;
+  // The gesture that answered one prompt must not answer the next one in the queue.
+  let consentHeldKeys = new Set<string>();
+  let consentPointerLatchUntil = 0;
+
+  function acceptConsentChoice(event: MouseEvent, choice: SearchChoice | DomainChoice | null) {
+    // Keyboard activation reports detail 0. A pointer click reports a positive
+    // detail, including the second click of a double-click after the button
+    // underneath it has been replaced by the next prompt.
+    const pointer = event.detail !== 0;
+    if (pointer && !consentPointerAllows(consentPointerLatchUntil, performance.now())) return;
+    finishWebConsent(choice);
+    if (pointer && webConsentQueue.length > 0) {
+      consentPointerLatchUntil = latchConsentPointer(performance.now());
+    }
+  }
+
+  function persistWebConsent(next: StoredWebConsent): boolean {
+    const saved = saveStoredWebConsent(typeof localStorage === "undefined" ? null : localStorage, next);
+    if (!saved) {
+      statusMessage = "Could not save web approvals on this device. The previous choice is unchanged.";
+      appendAppLog(statusMessage, "warn");
+      return false;
+    }
+    storedWebConsent = next;
+    return true;
+  }
+
+  function applyWebConsent(next: { stored: StoredWebConsent; session: SessionWebConsent }) {
+    if (next.stored !== storedWebConsent && !persistWebConsent(next.stored)) return;
+    sessionWebConsent = next.session;
+  }
+
+  function forgetWebApprovals() {
+    if (!persistWebConsent(emptyStoredWebConsent())) return;
+    sessionWebConsent = emptySessionWebConsent();
+  }
+
+  function setWebToolsForNewChats(enabled: boolean) {
+    webToolsForNewChats = enabled;
+    if (enabled && !webToolsDefaultHintShown) {
+      webToolsDefaultHintShown = true;
+      statusMessage = "New chats on this device will start with Web search on.";
+    }
+    persistChat();
+  }
+
+  function commitWebBlocklist() {
+    webBlocklistRejected = parseBlocklistText(webHostBlocklistText).rejected;
+    persistChat();
+  }
+
+  function rememberConsentReturnFocus() {
+    // The shell becomes inert when this prompt renders, and the browser moves
+    // focus off the opener before the dialog effect can read it.
+    if (webConsentReturnFocus instanceof HTMLElement && webConsentReturnFocus.isConnected) return;
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement)) return;
+    if (webConsentDialog?.contains(active)) return;
+    webConsentReturnFocus = active;
+  }
+
+  function askSearchApproval(query: string, afterWebText = false): Promise<SearchChoice | null> {
+    // A standing grant covers a search only before web text enters this request.
+    // The later-turn source index is Flint metadata and does not count.
+    if (!afterWebText && searchGranted(storedWebConsent, sessionWebConsent)) return Promise.resolve("session");
+    return new Promise((resolve) => {
+      rememberConsentReturnFocus();
+      webConsentQueue = [...webConsentQueue, { kind: "search", query, afterWebText, resolve }];
+    });
+  }
+
+  function askDomainApproval(
+    host: string,
+    url: string,
+    conversationId: string,
+    redirect = false,
+  ): Promise<DomainChoice | null> {
+    return new Promise((resolve) => {
+      rememberConsentReturnFocus();
+      webConsentQueue = [...webConsentQueue, { kind: "domain", host, url, conversationId, redirect, resolve }];
+    });
+  }
+
+  function finishWebConsent(choice: SearchChoice | DomainChoice | null) {
+    const prompt = webConsentQueue[0];
+    if (!prompt) return;
+    let stored = storedWebConsent;
+    let session = sessionWebConsent;
+    let resolved: SearchChoice | DomainChoice | null = null;
+    if (prompt.kind === "search") {
+      const searchChoice = choice === "once" || choice === "session" || choice === "forever" ? choice : null;
+      if (searchChoice) {
+        const next = grantSearch(stored, session, searchChoice);
+        stored = next.stored;
+        session = next.session;
+      }
+      resolved = searchChoice;
+    } else {
+      const domainChoice = choice === "once" || choice === "session" || choice === "forever" || choice === "all-urls"
+        ? choice
+        : null;
+      if (domainChoice) {
+        const next = grantDomain(stored, session, prompt.host, domainChoice, prompt.conversationId);
+        stored = next.stored;
+        session = next.session;
+      }
+      resolved = domainChoice;
+    }
+    applyWebConsent({ stored, session });
+    // A one-time choice does not satisfy the next prompt. A session, forever, or
+    // all-URL grant does, so those waiting requests must not show another dialog.
+    // Use the grant that was kept. A failed save must not cover the next prompt.
+    const split = splitCoveredConsentPrompts(storedWebConsent, sessionWebConsent, webConsentQueue.slice(1));
+    webConsentQueue = split.remaining;
+    prompt.resolve(resolved);
+    for (const covered of split.covered) covered.resolve("once");
+  }
+
+  $effect(() => {
+    const dialog = webConsentDialog;
+    const prompt = webConsentQueue[0];
+    if (!dialog || !prompt) return;
+    if (!(webConsentReturnFocus instanceof HTMLElement) || !webConsentReturnFocus.isConnected) {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && !dialog.contains(active)) {
+        webConsentReturnFocus = active;
+      }
+    }
+    const grantButton = dialogFocusable(dialog)[0];
+    // A held Enter would activate whichever grant button receives focus.
+    (consentHeldKeys.size > 0 ? dialog : (grantButton ?? dialog)).focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!webConsentDialog) return;
+      if (event.key === "Enter" || event.key === " " || event.key === "Escape") {
+        const gate = consentKeyGate(consentHeldKeys, event.key, event.repeat);
+        consentHeldKeys = gate.held;
+        if (!gate.allow) {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        finishWebConsent(null);
+        return;
+      }
+      if (event.key === "Tab") {
+        const trap = dialogTabTrap(
+          document.activeElement,
+          webConsentDialog,
+          dialogFocusable(webConsentDialog),
+          event.shiftKey,
+        );
+        if (trap.action === "default") return;
+        event.preventDefault();
+        trap.element.focus();
+        return;
+      }
+      // Inert does not stop document shortcuts. Plain activation keys still reach
+      // the focused consent button. Modified keys, including Ctrl+Space dictation,
+      // must not act on the page underneath.
+      if ((event.key === "Enter" || event.key === " ") && !event.metaKey && !event.ctrlKey && !event.altKey) return;
+      event.stopPropagation();
+    };
+    const focusGrantAfterGesture = () => {
+      const current = webConsentDialog;
+      if (!current) return;
+      // Space activates on keyup, so wait until that click has chosen.
+      queueMicrotask(() => {
+        if (consentHeldKeys.size > 0 || webConsentDialog !== current) return;
+        dialogFocusable(current)[0]?.focus();
+      });
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      const before = consentHeldKeys.size;
+      consentHeldKeys = releaseConsentKey(consentHeldKeys, event.key);
+      if (before > 0 && consentHeldKeys.size === 0) focusGrantAfterGesture();
+    };
+    const onWindowBlur = () => {
+      if (consentHeldKeys.size === 0) return;
+      // A lost keyup would leave the next Enter suppressed.
+      consentHeldKeys = new Set();
+      focusGrantAfterGesture();
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    document.addEventListener("keyup", onKeyUp, true);
+    window.addEventListener("blur", onWindowBlur);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown, true);
+      document.removeEventListener("keyup", onKeyUp, true);
+      window.removeEventListener("blur", onWindowBlur);
+      if (webConsentQueue.length === 0) {
+        consentHeldKeys = new Set();
+        consentPointerLatchUntil = 0;
+        const back = webConsentReturnFocus;
+        webConsentReturnFocus = null;
+        // Send is replaced by Stop once the reply starts. Focusing a disabled
+        // control drops focus on the document, so wait until Stop is in the DOM.
+        void tick().then(() => {
+          const target = restoreDialogFocus(back, [
+            ...document.querySelectorAll<HTMLElement>("form button.stop"),
+          ]);
+          target?.focus();
+        });
+      }
+    };
+  });
+
   async function sendMessage(e: Event) {
     e.preventDefault();
+    if (webConsentPrompt) return;
     if (benchmarkRunInFlight) {
       statusMessage = "Chat is disabled while a benchmark run is active — it would contend for inference and invalidate the measurements.";
       return;
@@ -6611,28 +7009,24 @@ updateStateFromSdk();
 
     // Fetched page bodies are request-only. They must never enter `nextMessages`, because that
     // array becomes the persisted conversation archive below.
-    const doneFetches = pendingUrlFetches.filter(f => f.status === 'done' && f.text);
-    const urlContextMessages: any[] = [];
-    if (doneFetches.length > 0) {
-      const contextBlock = doneFetches.map(f => {
-        const titleLine = f.title ? `Title: ${f.title}\n` : '';
-        const sourceUrl = f.finalUrl || f.url;
-        const truncationNotice = f.truncated
-          ? '\nFlint notice: the page content above is a truncated prefix.'
-          : '';
-        return `--- Page context from ${sourceUrl} ---\n${titleLine}${f.text}\n--- end context ---${truncationNotice}`;
-      }).join('\n\n');
-      const anyTruncated = doneFetches.some((fetch) => fetch.truncated);
-      urlContextMessages.push(createTimestampedMessage({
-        role: "user",
-        content: `The following web page content has been fetched for context:\n\n${contextBlock}\n\nPlease use this context to answer my question.`
-      }, userCreatedAt), createTimestampedMessage({
-        role: "assistant",
-        content: anyTruncated
-          ? "Understood. I have read the provided page prefixes and will account for their truncation."
-          : "Understood. I have read the page content and will use it to answer your question.",
-      }, userCreatedAt));
-    }
+    // Snapshot every finished chip before send clears the composer. A failure or a page with no
+    // readable text must stay on the answer; a dismissed chip or one still loading is not a
+    // retrieval outcome for this send.
+    const chipAudit = urlChipRetrievalAudit(pendingUrlFetches);
+    const doneFetches = pendingUrlFetches.filter((f) => f.status === 'done' && chipTextIsReadable(f.text));
+    const sendCloser = createWebCloser();
+    const retrievedOn = localRetrievalDate();
+    const userAttachedImage = attachedImages.length > 0;
+    // One user turn: the fence, then the question. There is no assistant acknowledgement.
+    const chipFence = doneFetches.map((fetch) => buildWebEnvelope({
+      closer: sendCloser,
+      title: fetch.title || fetch.finalUrl || fetch.url,
+      url: fetch.finalUrl || fetch.url,
+      retrievedOn,
+      body: fetch.text || "",
+      truncated: fetch.truncated === true,
+    })).join("\n\n");
+    const questionText = chipFence ? `${chipFence}\n\n${text}` : text;
 
     let userContent: any = text;
     if ((attachedImages.length > 0 && isVisionModel) || attachedTextFiles.length > 0) {
@@ -6669,20 +7063,74 @@ updateStateFromSdk();
       }
     }
     let requestMessages: any[];
-    const allowedFetchUrls = collectCurrentWebFetchUrls(
+    const typedFetchUrls = collectCurrentWebFetchUrls(
       stamped.at(-1),
       doneFetches.map((fetch) => fetch.url),
     );
+    // The model decides whether to search. Flint still runs the search, checks
+    // permission, and returns the snippets as an untrusted tool result.
+    let fetchAllow = new Set<string>([
+      ...typedFetchUrls,
+      ...resultUrlsForConversation(sessionWebConsent, threadLoadedFor ?? ""),
+    ]);
+    let offerWebTools = allowWebTools;
+    let webToolsSkippedNote = "";
+    if (offerWebTools && modelCannotUseWebTools(requestModelAlias)) {
+      offerWebTools = false;
+      webToolsSkippedNote = WEB_TOOLS_UPSTREAM_NOTE;
+    } else if (
+      offerWebTools
+      && catalogModelForEndpointId(state.models, requestModelAlias || "")?.supportsToolCalling === false
+    ) {
+      offerWebTools = false;
+    }
+    // The saved turn stays on `stamped`. The fence is copied onto the last message for this send only.
+    const inferenceMessages = chipFence
+      ? stamped.map((message: any, index: number) => (
+          index === stamped.length - 1
+            ? { ...message, content: messageContentWithFence(message.content, questionText) }
+            : message
+        ))
+      : stamped;
+    const sendFit = {
+      closer: sendCloser,
+      roundsRemaining: offerWebTools ? 2 : 0,
+      reserveImage: false,
+    };
+    let openingFit: typeof lastContextFit = null;
     try {
-      const inferenceMessages = urlContextMessages.length > 0
-        ? [...stamped.slice(0, -1), ...urlContextMessages, stamped.at(-1)]
-        : stamped;
       requestMessages = getMessagesForInference(
         inferenceMessages,
         true,
-        urlContextMessages.length > 0,
-        allowWebTools,
+        chipFence.length > 0,
+        offerWebTools,
+        sendFit,
       );
+      openingFit = lastContextFit;
+      // Foundry rejects tool definitions together with image parts. Leave both
+      // tools off and answer from the image.
+      if (offerWebTools && messagesContainImages(requestMessages)) {
+        offerWebTools = false;
+        requestMessages = getMessagesForInference(
+          inferenceMessages,
+          true,
+          chipFence.length > 0,
+          false,
+          { ...sendFit, roundsRemaining: 0 },
+        );
+        openingFit = lastContextFit;
+      }
+      if (offerWebTools && openingFit?.toolsViable === false) {
+        offerWebTools = false;
+        requestMessages = getMessagesForInference(
+          inferenceMessages,
+          true,
+          chipFence.length > 0,
+          false,
+          { ...sendFit, roundsRemaining: 0 },
+        );
+        openingFit = lastContextFit;
+      }
     } catch (error: any) {
       const message = error?.message || "The attached files could not be included safely.";
       if (attachedImages.length > 0 || attachedTextFiles.length > 0) {
@@ -6692,13 +7140,10 @@ updateStateFromSdk();
       }
       return;
     }
-    if (allowWebTools && messagesContainImages(requestMessages)) {
-      statusMessage =
-        "Web tools cannot be combined with image context in the same request. Remove the image or disable web tools for this send.";
-      return;
-    }
     chatMessages = stamped;
-    if (doneFetches.length > 0) clearUrlFetches();
+    // Retire every staged fetch attempt, including in-flight ones: a reply arriving after this
+    // send would otherwise mark its chip done and become context and authority for the next one.
+    clearUrlFetches();
     chatInput = "";
     clearComposerAttachments(); // clear after queuing for send
     const originId = threadLoadedFor;
@@ -6750,15 +7195,37 @@ updateStateFromSdk();
 
     let assistantContent = "";
     let webRoundStarted = false;
-    let webSources = doneFetches.map((fetch) => ({
-      title: fetch.title || fetch.finalUrl || fetch.url,
-      url: fetch.finalUrl || fetch.url,
-      truncated: fetch.truncated,
-    }));
-    let webErrors = [];
+    let webSources = [...chipAudit.sources];
+    let webErrors = [...chipAudit.errors];
+    let webQueries: string[] = [];
+    let webTextInRequest = chipFence.length > 0 || requestCarriesTextAttachment(stamped);
+    let webImageUrl = userAttachedImage
+      ? ""
+      : (doneFetches.find((fetch) => fetch.imageUrl)?.imageUrl || "");
+    const packNote = contextFitSentence(openingFit);
+    if (packNote) statusMessage = packNote;
+    if (webToolsSkippedNote) statusMessage = webToolsSkippedNote;
     // The audit is a separate, app-controlled field: model Markdown cannot hide or restyle it.
+    function fittedWebText(messages: readonly { content?: unknown }[]): string {
+      const chunks: string[] = [];
+      for (const message of messages) {
+        const content = message?.content;
+        if (typeof content === "string") {
+          chunks.push(content);
+          continue;
+        }
+        if (!Array.isArray(content)) continue;
+        for (const part of content) {
+          if (!part || typeof part !== "object" || (part as { type?: unknown }).type !== "text") continue;
+          const textPart = (part as { text?: unknown }).text;
+          if (typeof textPart === "string") chunks.push(textPart);
+        }
+      }
+      return chunks.join("\n");
+    }
     const webAuditPatch = () => {
-      const webAudit = buildWebAudit(webSources, webErrors);
+      const sources = sourcesWithOwnBudgetShortened(webSources, fittedWebText(requestMessages));
+      const webAudit = buildWebAudit(sources, webErrors, webQueries);
       return webAudit ? { webAudit } : {};
     };
     try {
@@ -6766,61 +7233,208 @@ updateStateFromSdk();
         role: "assistant",
         content: "",
         id: assistantId,
+        ...(modelPrefillsThink(requestModelAlias) ? { prefilledThink: true } : {}),
       })];
 
       // Sidecar IPC runs native ChatSession inference independently of the optional HTTP service.
       // Keep the direct client only as the development fallback when no service endpoint exists.
       if (chatTransport === "sidecar") {
-        let data = await chatCompletionStream(
-          requestModelAlias,
-          requestMessages,
-          (delta: string) => {
-            if (requestController.signal.aborted) return;
-            assistantContent += delta;
-            updateAssistantMessage({ content: assistantContent });
-          },
-          {
-            ...requestGeneration,
-            tools: allowWebTools ? WEB_TOOL_DEFINITIONS : undefined,
-            toolChoice: allowWebTools ? "auto" : undefined,
-          },
-          (requestId: number) => {
-            const stream = streamsByConversation.get(originId);
-            if (stream && stream.controller === requestController) stream.requestId = requestId;
-            if (threadLoadedFor === originId) activeStreamRequestId = requestId;
-          },
+        const authorizeFetch = async (url: string, hop: "request" | "redirect" = "request") => {
+          if (requestController.signal.aborted) return false;
+          if (typedFetchUrls.has(url)) return true;
+          const host = hostnameOf(url);
+          if (!host) return false;
+          if (domainGranted(storedWebConsent, sessionWebConsent, host, originId ?? "")) return true;
+          const choice = await askDomainApproval(host, url, originId ?? "", hop === "redirect");
+          return choice !== null && !requestController.signal.aborted;
+        };
+        const authorizeSearch = async (query: string) => {
+          if (requestController.signal.aborted) return false;
+          const choice = await askSearchApproval(query, webTextInRequest);
+          return choice !== null && !requestController.signal.aborted;
+        };
+        const typedHosts = new Set(
+          [...typedFetchUrls].map((url) => hostnameOf(url)).filter((host): host is string => Boolean(host)),
         );
-        if (requestController.signal.aborted) {
-          if (webSources.length > 0 || webErrors.length > 0) {
-            updateAssistantMessage({
-              content: `${assistantContent || assistantContentSoFar(assistantId)}\n\n`
-                + "[Stopped after web retrieval. The partial response may already have been saved.]",
-              ...webAuditPatch(),
-            });
+        const authorizeImage = async (url: string, hop: "request" | "redirect" = "request") => {
+          const host = hostnameOf(url);
+          if (hop === "request" && host && typedHosts.has(host)) return true;
+          return authorizeFetch(url, hop);
+        };
+        const publishRequestId = (requestId: number) => {
+          const stream = streamsByConversation.get(originId);
+          if (stream && stream.controller === requestController) stream.requestId = requestId;
+          if (threadLoadedFor === originId) activeStreamRequestId = requestId;
+        };
+        // Two tool rounds, then a tool-free answer. A fetch is checked against the
+        // allowlist from before that round, so a URL found by a search in the same
+        // response waits for the next round. Allow all URLs omits the list. The
+        // helper still requires public HTTPS.
+        const maxWebToolRounds = 2;
+        let webToolRounds = 0;
+        let retriedWithoutTools = false;
+        let roundMaxChars = 20_000;
+        let data: any;
+        while (true) {
+          const roundsRemaining = offerWebTools ? Math.max(0, maxWebToolRounds - webToolRounds) : 0;
+          const sendTools = offerWebTools && webToolRounds < maxWebToolRounds;
+          const latestKeep = [...requestMessages].reverse().findIndex((message: { role?: string }) => message?.role === "user");
+          const latestKeepAt = latestKeep < 0 ? 0 : requestMessages.length - 1 - latestKeep;
+          const keptHead = requestMessages.slice(0, Math.min(1, latestKeepAt));
+          const occupied = Math.ceil(
+            estimateTokensForMessages([...keptHead, ...requestMessages.slice(latestKeepAt)]) * 1.15,
+          ) + (sendTools ? webToolSchemaTokens() : 0);
+          const plan = plannedWebFit({
+            contextTokens: currentModelContextLength,
+            maxTokens,
+            roundsRemaining,
+            occupiedTokens: occupied,
+            schemaTokens: sendTools ? webToolSchemaTokens() : 0,
+            reserveImage: Boolean(webImageUrl) && isVisionModel && !userAttachedImage,
+          });
+          if (sendTools && plan.toolsViable === false) {
+            offerWebTools = false;
+            if (webToolRounds === 0) {
+              requestMessages = getMessagesForInference(
+                inferenceMessages,
+                true,
+                chipFence.length > 0,
+                false,
+                { ...sendFit, roundsRemaining: 0 },
+              );
+            }
+            continue;
           }
-          return;
-        }
-        const toolCalls = allowWebTools
-          ? readWebToolCalls(data?.choices?.[0]?.message?.tool_calls, allowedFetchUrls, text)
-          : [];
-        if (toolCalls.length > 0) {
+          roundMaxChars = plan.maxChars;
+          const fitted = repackToolRequest({
+            messages: requestMessages,
+            budgetTokens: plan.promptTokens,
+            closer: sendCloser,
+            bodyChars: plan.maxChars,
+          });
+          if (fitted.contextFull) {
+            throw new Error("This send does not fit this model's context. Shorten the latest message or choose a model that reports a larger context.");
+          }
+          requestMessages = fitted.messages;
+          const fittedNote = contextFitSentence(fitted);
+          if (fittedNote) statusMessage = fittedNote;
+          if (webToolsSkippedNote) statusMessage = webToolsSkippedNote;
+          const toolChoice = sendTools ? "auto" : undefined;
+          try {
+            data = await chatCompletionStream(
+              requestModelAlias,
+              requestMessages,
+              (delta: string) => {
+                if (requestController.signal.aborted) return;
+                assistantContent += delta;
+                updateAssistantMessage({ content: assistantContent });
+              },
+              {
+                ...requestGeneration,
+                tools: sendTools ? WEB_TOOL_DEFINITIONS : undefined,
+                toolChoice,
+              },
+              publishRequestId,
+            );
+          } catch (error) {
+            const retryWithoutTools = offerWebTools
+              && webToolRounds === 0
+              && !retriedWithoutTools
+              && !requestController.signal.aborted
+              && webToolTemplateCrash(error);
+            if (!retryWithoutTools) throw error;
+            retriedWithoutTools = true;
+            offerWebTools = false;
+            webToolsSkippedNote = WEB_TOOLS_UPSTREAM_NOTE;
+            assistantContent = "";
+            updateAssistantMessage({ content: "" });
+            requestMessages = getMessagesForInference(
+              inferenceMessages,
+              true,
+              chipFence.length > 0,
+              false,
+              { ...sendFit, roundsRemaining: 0 },
+            );
+            statusMessage = webToolsSkippedNote;
+            continue;
+          }
+          if (requestController.signal.aborted) {
+            if (webRoundStarted) {
+              updateAssistantMessage({
+                content: replyWithNote(
+                  assistantContent,
+                  "[Stopped after web retrieval. The partial response may already have been saved.]",
+                  modelPrefillsThink(requestModelAlias),
+                ),
+                ...webAuditPatch(),
+              });
+            } else if (webSources.length > 0 || webErrors.length > 0) {
+              updateAssistantMessage({
+                content: replyWithNote(
+                  assistantContent || assistantContentSoFar(assistantId),
+                  "[Stopped after web retrieval. The partial response may already have been saved.]",
+                  modelPrefillsThink(requestModelAlias),
+                ),
+                ...webAuditPatch(),
+              });
+            }
+            return;
+          }
+          const rawCalls = data?.choices?.[0]?.message?.tool_calls;
+          const hasCalls = Array.isArray(rawCalls) && rawCalls.length > 0;
+          if (!offerWebTools || !hasCalls) break;
+          if (!sendTools) {
+            throw new Error("The model requested another web tool round after the two-round limit.");
+          }
+          webToolRounds += 1;
           webRoundStarted = true;
           releaseSettledRequestId();
           assistantContent = "";
-          updateAssistantMessage({ content: "Consulting the public web..." });
+          const searching = rawCalls.some((call: any) => call?.function?.name === "web_search");
+          updateAssistantMessage({
+            content: searching ? "Searching the public web..." : "Consulting the public web...",
+          });
+          const fetchAllowlist = allUrlsGranted(sessionWebConsent, originId ?? "") ? undefined : fetchAllow;
           const executed = await executeWebToolCalls(
-            toolCalls.map(({ call }) => call),
+            rawCalls,
             executeWebTool,
-            allowedFetchUrls,
+            fetchAllowlist,
             requestController.signal,
-            text,
-            (query) => globalThis.confirm(
-              `Allow this public web search?\n\n${query}\n\n`
-              + "The exact query will be sent to DuckDuckGo. Retrieved content is untrusted.",
-            ),
+            authorizeFetch,
+            authorizeSearch,
+            {
+              closer: sendCloser,
+              retrievedOn,
+              alreadyIncluded: new Set(doneFetches.map((fetch) => fetch.finalUrl || fetch.url)),
+              blocklist: webHostBlocklist,
+              scrubCorpus: searchScrubCorpus(requestMessages),
+              maxChars: roundMaxChars,
+              maxCalls: plan.maxToolCalls,
+              onActivity: (event) => {
+                const line = event.kind === "search"
+                  ? `Searching the public web: ${event.query}`
+                  : `Reading ${event.host}`;
+                updateAssistantMessage({ content: line });
+              },
+            },
           );
+          if (executed.resultUrls.length > 0) {
+            const resultUrls = new Set(executed.resultUrls);
+            sessionWebConsent = rememberResultUrls(sessionWebConsent, originId ?? "", resultUrls);
+            fetchAllow = new Set([...fetchAllow, ...resultUrls]);
+          }
           webSources = [...webSources, ...executed.sources];
-          webErrors = executed.errors;
+          webErrors = [...webErrors, ...executed.errors];
+          webQueries = [...webQueries, ...executed.queries];
+          if (!webImageUrl && !userAttachedImage && executed.imageUrls[0]) {
+            webImageUrl = executed.imageUrls[0];
+          }
+          for (const message of executed.toolMessages) {
+            if (typeof message.content === "string" && message.content.includes(sendCloser)) {
+              webTextInRequest = true;
+            }
+          }
+          if (executed.sources.length > 0) webTextInRequest = true;
           if (requestController.signal.aborted) {
             updateAssistantMessage({
               content: "[Stopped after web retrieval. An already-started network request may have completed.]",
@@ -6828,52 +7442,74 @@ updateStateFromSdk();
             });
             return;
           }
-          const assistantToolMessage = {
-            role: "assistant",
-            content: data?.choices?.[0]?.message?.content ?? null,
-            tool_calls: toolCalls.map(({ call }) => call),
-          };
+          const roundText = data?.choices?.[0]?.message?.content;
           requestMessages = [
             ...requestMessages,
-            assistantToolMessage,
+            {
+              role: "assistant",
+              content: typeof roundText === "string"
+                ? assistantStoredText(roundText, modelPrefillsThink(requestModelAlias))
+                : (roundText ?? null),
+              tool_calls: executed.toolCalls,
+            },
             ...executed.toolMessages,
           ];
-          data = await chatCompletionStream(
-            requestModelAlias,
-            requestMessages,
-            (delta: string) => {
-              if (requestController.signal.aborted) return;
-              assistantContent += delta;
-              updateAssistantMessage({ content: assistantContent });
-            },
-            {
-              ...requestGeneration,
-              tools: WEB_TOOL_DEFINITIONS,
-              toolChoice: "none",
-            },
-            (requestId: number) => {
-              const stream = streamsByConversation.get(originId);
-              if (stream && stream.controller === requestController) stream.requestId = requestId;
-              if (threadLoadedFor === originId) activeStreamRequestId = requestId;
-            },
-          );
-          if (requestController.signal.aborted) {
-            updateAssistantMessage({
-              content: `${assistantContent}\n\n[Stopped after web retrieval. The partial response may already have been saved.]`.trim(),
-              ...webAuditPatch(),
-            });
-            return;
-          }
-          if (Array.isArray(data?.choices?.[0]?.message?.tool_calls)
-            && data.choices[0].message.tool_calls.length > 0) {
-            throw new Error("The model requested another web tool round after the one-round limit.");
-          }
         }
         const endpointAcceleration = String(data?.acceleration?.active || "").trim();
         if (endpointAcceleration && requestModelAlias) {
           setModelRuntimeMeta(requestModelAlias, { lastUsedAcceleration: endpointAcceleration });
         }
         assistantContent = data?.choices?.[0]?.message?.content || assistantContent;
+        releaseSettledRequestId();
+        let stoppedBeforeVision = false;
+        if (webImageUrl && !userAttachedImage && isVisionModel && !requestController.signal.aborted) {
+          const imageHost = hostnameOf(webImageUrl) || webImageUrl;
+          updateAssistantMessage({ content: `Reading an image from ${imageHost}` });
+          const image = await executeWebImage(
+            webImageUrl,
+            executeWebTool,
+            authorizeImage,
+            webHostBlocklist,
+            requestController.signal,
+          );
+          if (requestController.signal.aborted) {
+            stoppedBeforeVision = true;
+          } else if (!("error" in image) && image.dataBase64) {
+            try {
+              const bytes = Uint8Array.from(atob(image.dataBase64), (char) => char.charCodeAt(0));
+              const file = new File([bytes], "page-image", { type: image.mediaType || "application/octet-stream" });
+              const jpeg = await compactImageAttachment(file, { forceJpeg: true });
+              if (requestController.signal.aborted) {
+                stoppedBeforeVision = true;
+              } else {
+                let visionContent = "";
+                const vision = await chatCompletionStream(
+                  requestModelAlias,
+                  withVisionImage(visionHistoryThroughLatestUser(requestMessages), toolContentsWithCloser(requestMessages, sendCloser), jpeg),
+                  (delta: string) => {
+                    if (requestController.signal.aborted) return;
+                    visionContent += delta;
+                    updateAssistantMessage({ content: visionContent });
+                  },
+                  { ...requestGeneration },
+                  publishRequestId,
+                );
+                assistantContent = vision?.choices?.[0]?.message?.content || visionContent || assistantContent;
+              }
+            } catch {
+              if (requestController.signal.aborted) stoppedBeforeVision = true;
+              // A vision failure keeps the text answer. The fence still names the page.
+            }
+          }
+        }
+        if (stoppedBeforeVision) {
+          assistantContent = replyWithNote(
+            assistantContent,
+            "[Stopped after web retrieval. The partial response may already have been saved.]",
+            modelPrefillsThink(requestModelAlias),
+          );
+        }
+        assistantContent = assistantStoredText(assistantContent, modelPrefillsThink(requestModelAlias));
         updateAssistantMessage({ content: assistantContent, ...webAuditPatch() });
         setTimeout(() => {
           if (messagesContainer)
@@ -6903,20 +7539,32 @@ updateStateFromSdk();
             updateAssistantMessage({ content: assistantContent });
           }
         }
+        assistantContent = assistantStoredText(assistantContent, modelPrefillsThink(requestModelAlias));
         updateAssistantMessage({ content: assistantContent, ...webAuditPatch() });
       }
+      if (webToolsSkippedNote) statusMessage = webToolsSkippedNote;
     } catch (err: any) {
       if (!requestController.signal.aborted) {
-        const failureMessage =
-          `${assistantContent || assistantContentSoFar(assistantId)}\n\n[Error: ${err?.message || err}]`;
+        const failureMessage = replyWithNote(
+          assistantContent || assistantContentSoFar(assistantId),
+          webToolTemplateCrash(err)
+            ? "This model cannot use web search yet. The upstream template fails when tools are sent, so this reply stopped."
+            : `[Error: ${err?.message || err}]`,
+          modelPrefillsThink(requestModelAlias),
+        );
         updateAssistantMessage({
           isError: true,
+          prefilledThink: false,
           content: failureMessage,
           ...webAuditPatch(),
         });
       } else if (webRoundStarted || webSources.length > 0 || webErrors.length > 0) {
         updateAssistantMessage({
-          content: `${assistantContent}\n\n[Stopped during web retrieval. An already-started network request may have completed.]`.trim(),
+          content: replyWithNote(
+            assistantContent,
+            "[Stopped during web retrieval. An already-started network request may have completed.]",
+            modelPrefillsThink(requestModelAlias),
+          ),
           ...webAuditPatch(),
         });
       }
@@ -6932,6 +7580,15 @@ updateStateFromSdk();
       flushBackgroundArchiveSave();
       syncVisibleStreaming();
     }
+  }
+
+  /**
+   * Model text cleaned with the same spill evidence as the screen, then Flint's own note.
+   * The note is appended after that cleanup so a trailing role word cannot hide it.
+   */
+  function replyWithNote(modelText: string, note: string, prefilledThink: boolean): string {
+    const body = assistantStoredText(modelText, prefilledThink);
+    return body ? `${body}\n\n${note}` : note;
   }
 
   /** Current text of an in-flight assistant message, for appending an error to. */
@@ -6990,6 +7647,7 @@ updateStateFromSdk();
     rejectInvalidTextAttachments = false,
     includeUntrustedWebContent = false,
     includeWebToolInstruction = false,
+    fit?: { closer?: string; roundsRemaining?: number; reserveImage?: boolean },
   ): any[] {
     // Remove any trailing empty assistant placeholder (from streaming setup)
     let history = [...sourceMessages];
@@ -7009,7 +7667,7 @@ updateStateFromSdk();
 
     // === Step 5: Respect pinned messages ===
     const maxRecent = Math.max(2, contextTurns * 2);
-    const combined = selectPinnedAndRecentMessages(effectiveHistory, maxRecent);
+    let combined = selectPinnedAndRecentMessages(effectiveHistory, maxRecent);
 
     // Latest user turn drives optional Flint fact-sheet expansion (token-efficient).
     let latestUserText = "";
@@ -7024,16 +7682,58 @@ updateStateFromSdk();
       latestUserText,
       { webToolsEnabled: includeWebToolInstruction },
     );
-    const effectiveSystem = includeWebToolInstruction
-      ? webToolSystemInstruction(baseSystem)
+    let effectiveSystem = includeWebToolInstruction
+      ? webToolSystemInstruction(baseSystem, fit?.closer)
       : includeUntrustedWebContent
-        ? webContentSystemInstruction(baseSystem)
+        ? webContentSystemInstruction(baseSystem, fit?.closer)
         : baseSystem;
+    const sourceBullets = webSourceIndex(effectiveHistory);
+    if (sourceBullets) {
+      effectiveSystem = `${effectiveSystem}\n\n${WEB_SOURCE_INDEX_NOTE}`;
+      const closer = fit?.closer;
+      if (closer) {
+        combined = prependTextToLatestUser(combined, fenceWebSourceIndex(sourceBullets, closer));
+        if (!effectiveSystem.includes(webCloserInstruction(closer))) {
+          effectiveSystem = `${effectiveSystem}\n\n${webCloserInstruction(closer)}`;
+        }
+      }
+    }
+    if (fit) {
+      const latestKept = [...combined].reverse().find((message) => message?.role === "user");
+      const occupied = Math.ceil(
+        (estimateTokens(effectiveSystem) + estimateTokensForMessages(latestKept ? [latestKept] : [])) * 1.15,
+      ) + (includeWebToolInstruction ? webToolSchemaTokens() : 0);
+      const plan = plannedWebFit({
+        contextTokens: currentModelContextLength,
+        maxTokens,
+        roundsRemaining: fit.roundsRemaining ?? 0,
+        occupiedTokens: occupied,
+        schemaTokens: includeWebToolInstruction ? webToolSchemaTokens() : 0,
+        reserveImage: fit.reserveImage,
+      });
+      const packed = packContextMessages({
+        messages: combined,
+        systemPrompt: effectiveSystem,
+        budgetTokens: plan.promptTokens,
+        closer: fit.closer,
+        bodyChars: plan.maxChars,
+      });
+      lastContextFit = { ...packed, toolsViable: plan.toolsViable };
+      if (packed.contextFull) {
+        throw new Error("This send does not fit this model's context. Shorten the latest message or choose a model that reports a larger context.");
+      }
+      combined = packed.messages;
+    } else {
+      lastContextFit = null;
+    }
 
     return normalizeForAlternatingChat(
       combined.map((m: any) => ({
         role: m.role,
-        content: m.content, // can be string or vision array [{type,text}, {type:'image_url',...}]
+        // Role words left behind by a chat template must not be replayed as the model's reply.
+        content: m.role === "assistant" && typeof m.content === "string"
+          ? assistantStoredText(m.content, m.prefilledThink === true)
+          : m.content,
       })),
       {
         systemInstruction: effectiveSystem,
@@ -7083,7 +7783,12 @@ Output only the summary text, no preamble.`;
     // costing a base64 payload — and the SDK fallback below rejects non-string content outright,
     // so a thread containing images would otherwise fail and silently degrade to condense.
     const summaryMessages = normalizeForAlternatingChat(
-      oldMessages.map((m: any) => ({ role: m.role, content: m.content })),
+      oldMessages.map((m: any) => ({
+        role: m.role,
+        content: m.role === "assistant" && typeof m.content === "string"
+          ? assistantStoredText(m.content, m.prefilledThink === true)
+          : m.content,
+      })),
       { systemInstruction: summaryPrompt, textOnly: true },
     );
 
@@ -7121,6 +7826,7 @@ Output only the summary text, no preamble.`;
       return;
     }
     isSummarizing = false;
+    summary = assistantStoredText(summary, modelPrefillsThink(selectedModelAlias));
 
     // The thread was replaced while the summary was being generated — it belongs nowhere now.
     if (chatThreadEpoch !== epoch) return;
@@ -7338,8 +8044,11 @@ Output only the summary text, no preamble.`;
   let urlFetchAttemptSeq = 0;
 
   async function queueUrlFetch(url: string) {
-    if (!isFetchableUrl(url)) {
-      statusMessage = `Not a fetchable URL: ${url}`;
+    if (!isFetchableUrl(url, webHostBlocklist)) {
+      const host = hostnameOf(url);
+      statusMessage = host && hostBlocked(host, webHostBlocklist)
+        ? "This host is blocked on this device."
+        : `Not a fetchable URL: ${url}`;
       return;
     }
     if (pendingUrlFetches.some(f => f.url === url)) return;
@@ -7372,7 +8081,7 @@ Output only the summary text, no preamble.`;
    */
   function patchUrlFetch(attempt: number, patch: Record<string, any>) {
     const i = pendingUrlFetches.findIndex(f => f.attempt === attempt);
-    if (i < 0) return; // the user removed this chip — drop the result
+    if (i < 0) return; // removed, or retired by send — drop the late result
     pendingUrlFetches[i] = { ...pendingUrlFetches[i], ...patch };
     pendingUrlFetches = [...pendingUrlFetches];
   }
@@ -7385,15 +8094,43 @@ Output only the summary text, no preamble.`;
     inFlightUrlFetches += 1;
     isFetchingUrl = true;
     try {
-      const result = await fetchUrl(url, MAX_URL_CONTEXT_CHARS);
-      patchUrlFetch(attempt, {
-        status: 'done',
-        finalUrl: result.url,
-        title: result.title,
-        text: result.text,
-        truncated: result.truncated,
-        error: undefined,
-      });
+      let pending = url;
+      for (let hop = 0; hop <= MAX_CROSS_ORIGIN_REDIRECTS; hop += 1) {
+        // Read the blocklist on this hop. A host blocked after the chip was queued is refused.
+        const decision = decideChipFetchHop(pending, webHostBlocklist, hop);
+        if (!decision.ok) {
+          patchUrlFetch(attempt, { status: 'error', error: decision.error });
+          return;
+        }
+        const result = await fetchUrl(pending, MAX_URL_CONTEXT_CHARS);
+        if (result?.operation === 'redirect') {
+          if (hop === MAX_CROSS_ORIGIN_REDIRECTS) {
+            patchUrlFetch(attempt, { status: 'error', error: 'Too many redirects' });
+            return;
+          }
+          const next = canonicalFetchUrl(result.url);
+          if (!next) {
+            patchUrlFetch(attempt, {
+              status: 'error',
+              error: 'Public web fetch returned an unexpected result',
+            });
+            return;
+          }
+          pending = next;
+          continue;
+        }
+        patchUrlFetch(attempt, {
+          status: 'done',
+          finalUrl: result.url,
+          title: result.title,
+          text: result.text,
+          truncated: result.truncated,
+          imageUrl: Array.isArray(result.imageUrls) ? result.imageUrls[0] : undefined,
+          error: undefined,
+        });
+        return;
+      }
+      patchUrlFetch(attempt, { status: 'error', error: 'Too many redirects' });
     } catch (e: any) {
       patchUrlFetch(attempt, { status: 'error', error: e?.message || String(e) });
     } finally {
@@ -8073,7 +8810,7 @@ Output only the summary text, no preamble.`;
   }
 </script>
 
-<main class="app">
+<main class="app" inert={webConsentPrompt ? true : undefined}>
   <header class="header">
     <div class="brand" data-tooltip="Foundry Local Interface">
       <img class="brand-logo" src="/favicon.png" alt="Flint logo" />
@@ -9372,6 +10109,11 @@ Output only the summary text, no preamble.`;
             <ConversationSidebar
               {conversations}
               {currentConversationId}
+              collapsed={conversationListCollapsed}
+              onToggleCollapsed={() => {
+                conversationListCollapsed = !conversationListCollapsed;
+                persistChat();
+              }}
               onNewChat={createNewConversation}
               onSelectConversation={selectConversation}
               onDeleteConversation={deleteConversation}
@@ -9430,6 +10172,26 @@ Output only the summary text, no preamble.`;
                   </label>
                 </div>
                 <div class="chat-header-actions">
+                  <label
+                    class="chat-web-search"
+                    title={webToolsCallingUnsupported
+                      ? "This model does not report tool calling."
+                      : modelCannotUseWebTools(selectedModelAlias)
+                        ? "Gemma 4 cannot use web search until an upstream fix. This chat answers without it."
+                        : "Let the model search the public web and read allowed pages for this conversation. The first search still asks you to allow it."}
+                  >
+                    <input
+                      id="web-tools-enabled"
+                      type="checkbox"
+                      checked={webToolsEnabled}
+                      onchange={(event) =>
+                        commitChatSettings({
+                          webToolsEnabled: (event.currentTarget as HTMLInputElement).checked,
+                        })}
+                      disabled={isStreaming || webToolsCallingUnsupported}
+                    />
+                    Web search
+                  </label>
                   <button
                     type="button"
                     class="compact-btn full-thread-btn"
@@ -9570,6 +10332,10 @@ Output only the summary text, no preamble.`;
                               role={msg.role}
                               isStreaming={isStreaming && msg.id === activeStreamAssistantId}
                               assumeReasoning={currentModelTags.includes("reasoning")}
+                              prefilledThink={replyUsesPrefilledThink({
+                                stamped: msg.prefilledThink === true,
+                                isError: msg.isError === true,
+                              })}
                               messageKey={`${threadLoadedFor}:${msg.id ?? i}`}
                             />
                             {#snippet failed(error, reset)}
@@ -9740,25 +10506,12 @@ Output only the summary text, no preamble.`;
               </div>
 
               <div class="web-tools-control">
-                <label for="web-tools-enabled">
-                  <input
-                    id="web-tools-enabled"
-                    type="checkbox"
-                    checked={webToolsEnabled}
-                    onchange={(event) =>
-                      commitChatSettings({
-                        webToolsEnabled: (event.currentTarget as HTMLInputElement).checked,
-                      })}
-                    disabled={isStreaming}
-                  />
-                  Allow public web search and retrieval for this conversation
-                </label>
-                <span>
-                  Search terms and requested public URLs leave this device. Access is read-only,
-                  unauthenticated HTTPS; results are untrusted, bounded, and not stored as page
-                  bodies. Authorize search with <code>Search the web for: your query</code>.
-                  Flint shows the consulted sources with the answer.
-                </span>
+                {#if storedWebConsent.searchForever || storedWebConsent.domainsForever.length > 0 || sessionWebConsent.search || sessionWebConsent.allUrlsByConversation.size > 0 || sessionWebConsent.domains.size > 0}
+                  <button type="button" class="small secondary" onclick={forgetWebApprovals}>
+                    Ask again for search and sites
+                  </button>
+                  <span>This does not clear the blocklist or the new-chat default.</span>
+                {/if}
               </div>
 
               <!-- Generation parameters: how sampling settings affect model output -->
@@ -9782,7 +10535,7 @@ Output only the summary text, no preamble.`;
                     />
                     <span class="genparams-value">{temperature.toFixed(2)}</span>
 
-                    <label for="genparams-maxtokens" title="Maximum tokens generated per reply">Max tokens</label>
+                    <label for="genparams-maxtokens" title="Maximum tokens generated per reply. This does not change how much memory the loaded model uses.">Max tokens</label>
                     <input
                       type="number"
                       id="genparams-maxtokens"
@@ -9803,6 +10556,9 @@ Output only the summary text, no preamble.`;
                       }}
                       disabled={isStreaming}
                     />
+                    {#if modelPrefillsThink(selectedModelAlias)}
+                      <span class="genparams-note">This model reasons before it answers. The ceiling starts at 8192. Raising Max tokens does not load more of the model into memory.</span>
+                    {/if}
 
                     <label for="genparams-topp" title="Nucleus sampling threshold (0-1]">Top-p</label>
                     <input
@@ -10105,6 +10861,18 @@ Output only the summary text, no preamble.`;
                   onpaste={handlePaste}
                 />
                 <button
+                  type="button"
+                  class="composer-settings-btn"
+                  onclick={() => (showGenParamsPanel = !showGenParamsPanel)}
+                  title={showGenParamsPanel ? "Hide generation settings" : "Generation settings"}
+                  aria-label={showGenParamsPanel ? "Hide generation settings" : "Generation settings"}
+                  aria-expanded={showGenParamsPanel}
+                  aria-controls="composer-settings-drawer"
+                  disabled={isStreaming}
+                >
+                  <Icon name="settings" size={16} />
+                </button>
+                <button
                   type="submit"
                   aria-label="Send message"
                   disabled={benchmarkRunInFlight || chatBlockedByLoadedSTT || !selectedModelSupportsChat || (!chatInput.trim() && attachedImages.length === 0 && attachedTextFiles.length === 0) || imageProcessingCount > 0 || textAttachmentProcessingCount > 0 || attachmentClassifications.count > 0 || !canDispatchChat || isStreaming}
@@ -10117,18 +10885,6 @@ Output only the summary text, no preamble.`;
                   >
                 {/if}
               </form>
-              <button
-                type="button"
-                class="composer-settings-toggle"
-                onclick={() => (showGenParamsPanel = !showGenParamsPanel)}
-                title="Context and generation settings"
-                aria-expanded={showGenParamsPanel}
-                aria-controls="composer-settings-drawer"
-                disabled={isStreaming}
-              >
-                <Icon name="settings" size={13} />
-                {showGenParamsPanel ? "Hide generation settings" : "Generation settings"}
-              </button>
               {#if showGenParamsPanel}
                 <div id="composer-settings-drawer" class="composer-settings-drawer">
                   {@render generationSettings()}
@@ -11174,8 +11930,9 @@ Output only the summary text, no preamble.`;
             <h3>Tool calling</h3>
             <p>
               Many models can emit <code>tool_calls</code> on the OpenAI-compatible API. A <em>client</em> (Continue, Cline, your code)
-              must execute tools and return results. Flint keeps the model and service running — the chat UI does
-              <strong>not</strong> auto-run shell, files, or network calls from model output.
+              must execute tools and return results. Flint’s chat can run only the supervised public
+              <code>web_search</code> and <code>web_fetch</code> tools when Web search is on for that
+              conversation. It does <strong>not</strong> auto-run shell, files, or any other network call.
             </p>
           </section>
 
@@ -11699,6 +12456,7 @@ Output only the summary text, no preamble.`;
                           content={r.content || ""}
                           isStreaming={compareStreamingSlotKey === slot.key}
                           assumeReasoning={getModelTags(slot.alias, state.models.find((m) => m.alias === slot.alias)?.info).includes("reasoning")}
+                          prefilledThink={modelPrefillsThink(slot.alias)}
                           messageKey={`${compareRunGeneration}:${slot.key}`}
                         />
                       </div>
@@ -11779,6 +12537,45 @@ Output only the summary text, no preamble.`;
                 <span class="toggle-track"></span>
               </label>
             </div>
+          </div>
+
+          <div class="settings-section">
+            <h3>Web</h3>
+            <div class="setting-row">
+              <div class="setting-info">
+                <span class="setting-name" id="web-tools-new-chats-label">Remember for new chats</span>
+                <span class="setting-desc">
+                  New chats on this device start with Web search on. The header checkbox changes
+                  only the open conversation. Existing chats keep the setting stored on them.
+                </span>
+              </div>
+              <label class="toggle-switch">
+                <input
+                  type="checkbox"
+                  checked={webToolsForNewChats}
+                  onchange={(event) => setWebToolsForNewChats((event.currentTarget as HTMLInputElement).checked)}
+                  aria-labelledby="web-tools-new-chats-label"
+                />
+                <span class="toggle-track"></span>
+              </label>
+            </div>
+            <label class="setting-name" for="web-host-blocklist">Hosts Flint will not contact</label>
+            <textarea
+              id="web-host-blocklist"
+              rows="4"
+              value={webHostBlocklistText}
+              oninput={(event) => { webHostBlocklistText = (event.currentTarget as HTMLTextAreaElement).value; }}
+              onblur={commitWebBlocklist}
+              spellcheck="false"
+            ></textarea>
+            <span class="setting-desc">One hostname per line. example.com also blocks sub.example.com. Paths, ports, and wildcards are not rules.</span>
+            {#if webBlocklistRejected.length > 0}
+              <p>Rejected lines: {webBlocklistRejected.join(", ")}</p>
+            {/if}
+            <button type="button" class="small secondary" onclick={forgetWebApprovals}>
+              Ask again for search and sites
+            </button>
+            <span class="setting-desc">This does not clear the blocklist or the new-chat default.</span>
           </div>
 
           <div class="settings-section">
@@ -12262,6 +13059,83 @@ Output only the summary text, no preamble.`;
     </div>
   {/if}
 </main>
+
+<!--
+  A background conversation can reach this prompt while another dialog is open.
+  It stays outside the app shell, above the persona menu and the shortcuts
+  overlay. The shell is inert, so those dialogs keep their edits and are not a
+  second modal.
+-->
+{#if webConsentPrompt}
+  <div class="web-consent-overlay" role="presentation">
+    <div
+      bind:this={webConsentDialog}
+      class="persona-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="web-consent-title"
+      tabindex="-1"
+    >
+      <div class="modal-header">
+        <h3 id="web-consent-title">
+          {webConsentPrompt.kind === "search"
+            ? "Search the public web?"
+            : `Open ${webConsentPrompt.host}?`}
+        </h3>
+      </div>
+      <div class="modal-body">
+        {#if webConsentPrompt.kind === "search"}
+          <p>Allow this public web search?</p>
+          {#if webConsentPrompt.afterWebText}
+            <p>This query was written after the model read web content.</p>
+          {/if}
+          <p><strong>{webConsentPrompt.query}</strong></p>
+          <p>
+            The exact query is sent to DuckDuckGo over HTTPS. The request identifies Flint
+            with the user agent Flint-Web-Tool/1.0. Results are untrusted reference text.
+            A page can still persuade a weak model to put private text into a later query.
+          </p>
+        {:else}
+          <p>
+            {#if webConsentPrompt.redirect}
+              This page redirects to a different site. Opening it contacts
+            {:else}
+              This address came from the search results. Opening it contacts
+            {/if}
+            <strong>{webConsentPrompt.host}</strong>. The page text is untrusted.
+            Images on the page may be fetched.
+          </p>
+          <p class="web-consent-url">{webConsentPrompt.url}</p>
+          {#if webConsentGrantTarget}
+            <p>
+              Allow all URLs applies to every public site in
+              <strong>{webConsentGrantTarget.label}</strong>
+              until the page reloads.
+            </p>
+            {#if webConsentGrantTarget.background}
+              <p>This request is from that conversation, not the one open now.</p>
+            {/if}
+          {/if}
+        {/if}
+      </div>
+      <div class="web-consent-actions">
+        {#if webConsentPrompt.kind === "search"}
+          <button type="button" onclick={(event) => acceptConsentChoice(event, "once")}>{webConsentPrompt.afterWebText ? "Allow" : "Just this search"}</button>
+          <button type="button" onclick={(event) => acceptConsentChoice(event, "session")}>This session</button>
+          <button type="button" onclick={(event) => acceptConsentChoice(event, "forever")}>Always</button>
+        {:else}
+          <button type="button" onclick={(event) => acceptConsentChoice(event, "once")}>This site once</button>
+          <button type="button" onclick={(event) => acceptConsentChoice(event, "session")}>This site this session</button>
+          <button type="button" onclick={(event) => acceptConsentChoice(event, "forever")}>Always allow this site</button>
+          {#if webConsentGrantTarget}
+            <button type="button" onclick={(event) => acceptConsentChoice(event, "all-urls")}>Allow all URLs in {webConsentGrantTarget.label}</button>
+          {/if}
+        {/if}
+        <button type="button" class="secondary" onclick={(event) => acceptConsentChoice(event, null)}>Don't allow</button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   /* Inline SVG icons sit on the text baseline */
@@ -13717,6 +14591,20 @@ Output only the summary text, no preamble.`;
     flex-wrap: wrap;
   }
 
+  .chat-web-search {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.8rem;
+    color: var(--fg);
+    white-space: nowrap;
+    cursor: pointer;
+  }
+
+  .chat-web-search input {
+    margin: 0;
+  }
+
   .chat-header h2 {
     margin: 0;
     font-size: 1.1rem;
@@ -14473,6 +15361,54 @@ Output only the summary text, no preamble.`;
     cursor: not-allowed;
   }
 
+  .chat-input button[type="submit"] {
+    width: 36px;
+    height: 36px;
+    min-width: 36px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .chat-input .composer-settings-btn {
+    width: 36px;
+    height: 36px;
+    min-width: 36px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
+    color: var(--fg);
+  }
+
+  .chat-input .composer-settings-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 20%, var(--panel-bg));
+  }
+
+  .chat-input .composer-settings-btn[aria-expanded="true"] {
+    border-color: var(--accent);
+    color: var(--fg);
+  }
+
+  .web-consent-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 0 16px 16px;
+  }
+
+  .web-consent-actions button {
+    min-height: 36px;
+  }
+
+  .web-consent-url {
+    overflow-wrap: anywhere;
+    color: var(--muted);
+  }
+
   .chat-input .stop {
     background: var(--danger) !important;
   }
@@ -14538,22 +15474,6 @@ Output only the summary text, no preamble.`;
     font-size: 0.75rem;
   }
 
-  .composer-settings-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    margin: 0 12px 8px;
-    padding: 5px 8px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--input-bg);
-    color: var(--muted);
-    cursor: pointer;
-    font-size: 0.75rem;
-    width: calc(100% - 24px);
-    box-sizing: border-box;
-  }
-
   .composer-settings-drawer {
     display: grid;
     gap: 12px;
@@ -14586,6 +15506,7 @@ Output only the summary text, no preamble.`;
     }
 
     .chat-input > button[type="submit"],
+    .chat-input > .composer-settings-btn,
     .chat-input > .stop {
       order: 1;
     }
@@ -15298,6 +16219,12 @@ Output only the summary text, no preamble.`;
     font-size: 0.8125rem;
     white-space: nowrap;
   }
+  .genparams-note {
+    flex-basis: 100%;
+    color: var(--muted);
+    font-size: 0.75rem;
+    line-height: 1.4;
+  }
 
   .recommend-btn {
     padding: 0 8px;
@@ -15465,6 +16392,17 @@ Output only the summary text, no preamble.`;
   }
 
   /* Persona manager modal */
+  .web-consent-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.65);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    /* Above .persona-menu (9999) and .shortcuts-overlay (1000). Sharing
+       .persona-modal-overlay left this prompt at 200, under the later manager. */
+    z-index: 10000;
+  }
   .persona-modal-overlay {
     position: fixed;
     inset: 0;

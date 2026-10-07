@@ -137,3 +137,16 @@ export function mergePreparedTextAttachments(
 export function promptTextForFile(part: TextFilePart): string {
   return formatTextAttachmentPrompt(part.file);
 }
+
+/** True when any turn still carries a `file_text` part. Images do not count. */
+export function requestCarriesTextAttachment(messages: unknown): boolean {
+  if (!Array.isArray(messages)) return false;
+  return messages.some((message) => {
+    if (!message || typeof message !== 'object') return false;
+    const content = (message as { content?: unknown }).content;
+    if (!Array.isArray(content)) return false;
+    return content.some((part) => (
+      !!part && typeof part === 'object' && (part as { type?: unknown }).type === 'file_text'
+    ));
+  });
+}

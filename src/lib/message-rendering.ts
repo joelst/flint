@@ -173,6 +173,35 @@ export function messageClipboardText(content: MessageContent): string {
     .join("\n");
 }
 
+/** Same evidence `presentAssistantText` uses before it removes template spill. */
+export function assistantTextHasTemplateSpill(text: string, prefilledThink: boolean): boolean {
+  return prefilledThink
+    || /<\/think>|<\/thinking>|<\|im_start\|>|<\|im_end\|>|<\|endoftext\|>/i.test(text)
+    || textHasWebToolJsonLine(text);
+}
+
+/**
+ * Clipboard text for an assistant reply. Spill cleanup runs only when the reply
+ * is already cleaned for display. The reasoning above the answer stays.
+ */
+export function assistantClipboardText(
+  content: MessageContent,
+  options: { prefilledThink: boolean; streaming: boolean },
+): string {
+  const copied = messageClipboardText(content);
+  if (!assistantTextHasTemplateSpill(messagePlainText(content), options.prefilledThink)) return copied;
+  return stripChatTemplateSpill(copied, { keepTrailingOpenLine: options.streaming });
+}
+
+/**
+ * Settled reply text. Spill cleanup runs only when the screen would clean it.
+ * The reasoning above the answer stays. A trailing role word stays when there is no spill.
+ */
+export function assistantStoredText(text: string, prefilledThink: boolean): string {
+  if (!assistantTextHasTemplateSpill(text, prefilledThink)) return text;
+  return stripChatTemplateSpill(text);
+}
+
 export function messageTimestamp(
   timestamp: unknown,
   now = Date.now(),
@@ -283,6 +312,268 @@ export function extractThinkingTrace(text: string, recognizePlainText = false): 
   return {
     visibleContent: visible.trim(),
     thinkingContent: sections
+  };
+}
+
+/**
+ * Qwen3-family and QwQ templates open `<think>` in the prompt, before the model writes.
+ * The generated text stays reasoning until the model emits the closing tag. Qwen2 does not.
+ * The alias must start with that family token. A later mention does not.
+ */
+export function modelPrefillsThink(alias: string | null | undefined): boolean {
+  const name = (alias ?? "").trim().toLowerCase();
+  return /^(?:qwen3|qwq)(?:$|[^a-z0-9])/.test(name);
+}
+
+/**
+ * New replies store the flag. A reply saved before that flag existed has no producer
+ * metadata, so it stays as written. The model selected now is not that metadata:
+ * switching to Qwen3 must not hide another model's answer. An error is the failure
+ * text, not an unclosed reasoning trace.
+ */
+export function replyUsesPrefilledThink(input: { stamped: boolean; isError?: boolean }): boolean {
+  if (input.isError === true) return false;
+  return input.stamped === true;
+}
+
+/**
+ * Split a reply into reasoning and answer.
+ * A prefilled-think model that never closes the tag has no answer yet, including after the
+ * stream ends because the token budget ran out. Other reasoning models still show untagged
+ * text as the answer once the stream settles.
+ */
+const ROLE_LINE = /^(user|system|assistant|tool)$/i;
+
+/** Opening or closing fence run. A closer is the run alone, with no info string. */
+function fenceRun(line: string): { char: string; length: number; closer: boolean } | null {
+  const match = line.trim().match(/^(`{3,}|~{3,})(.*)$/);
+  if (!match) return null;
+  return { char: match[1][0], length: match[1].length, closer: match[2].length === 0 };
+}
+
+function fenceMask(lines: string[]): boolean[] {
+  const mask = new Array<boolean>(lines.length).fill(false);
+  let open: { char: string; length: number } | null = null;
+  for (let index = 0; index < lines.length; index += 1) {
+    const run = fenceRun(lines[index]);
+    if (!open) {
+      if (run) open = { char: run.char, length: run.length };
+      continue;
+    }
+    if (run?.closer && run.char === open.char && run.length >= open.length) {
+      open = null;
+      continue;
+    }
+    mask[index] = true;
+  }
+  return mask;
+}
+
+/** A whole line the model wrote as a web tool call, not a call Flint executed. */
+function webToolJsonLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return false;
+  try {
+    const value = JSON.parse(trimmed) as { name?: unknown; arguments?: unknown };
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    let args = value.arguments;
+    if (typeof args === 'string') args = JSON.parse(args) as unknown;
+    return (value.name === 'web_search' || value.name === 'web_fetch')
+      && args !== null
+      && typeof args === 'object'
+      && !Array.isArray(args);
+  } catch {
+    return false;
+  }
+}
+
+function textHasWebToolJsonLine(text: string): boolean {
+  const lines = text.split('\n');
+  const fenced = fenceMask(lines);
+  return lines.some((line, index) => !fenced[index] && webToolJsonLine(line));
+}
+
+/**
+ * Qwen-family templates mark turns with `<|im_start|>role` and `<|im_end|>`. The decoder
+ * drops those markers and leaves the role word on its own line. Drop those lines when they
+ * sit after a closing think tag, trail the reply, or come in a run. A single role word
+ * between sentences stays, and so does one inside a code fence. A fence opens on three
+ * or more backticks or tildes and closes only on a matching run at least that long.
+ * While a stream is still open, the last line is kept so a word the model has not
+ * finished can still grow. A whole line of web_search or web_fetch JSON is dropped
+ * first, outside fences, so a role line after those lines still counts as immediately
+ * after the think close. `<|im_start|>`, `<|im_end|>`, and `<|endoftext|>` are removed
+ * only outside a code fence.
+ */
+export function stripChatTemplateSpill(
+  text: string,
+  options?: { keepTrailingOpenLine?: boolean },
+): string {
+  const rawLines = text.split('\n');
+  const fenced = fenceMask(rawLines);
+  const lines = rawLines.map((line, index) => (
+    fenced[index]
+      ? line
+      : line.replace(/<\|(?:im_start|im_end|endoftext)\|>/gi, '')
+  ));
+  const blank = (line: string) => line.trim() === '';
+  const isRole = (index: number) => !fenced[index] && ROLE_LINE.test(lines[index].trim());
+  const openTail = options?.keepTrailingOpenLine === true
+    && text.length > 0
+    && !text.endsWith('\n');
+  const canDrop = (index: number) => !(openTail && index === lines.length - 1);
+  const drop = new Set<number>();
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!fenced[index] && webToolJsonLine(lines[index]) && canDrop(index)) drop.add(index);
+  }
+  const nonBlank: number[] = [];
+  lines.forEach((line, index) => {
+    if (!blank(line) && !drop.has(index)) nonBlank.push(index);
+  });
+
+  let runStart = 0;
+  for (let cursor = 0; cursor <= nonBlank.length; cursor += 1) {
+    const index = cursor < nonBlank.length ? nonBlank[cursor] : -1;
+    const roleHere = index >= 0 && isRole(index);
+    if (!roleHere) {
+      const span = nonBlank.slice(runStart, cursor);
+      if (span.length >= 2 && span.every((line) => isRole(line))) {
+        for (const line of span) if (canDrop(line)) drop.add(line);
+      }
+      runStart = cursor + 1;
+    }
+  }
+
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!/<\/think>|<\/thinking>/i.test(lines[index])) continue;
+    for (let follow = index + 1; follow < lines.length; follow += 1) {
+      if (blank(lines[follow]) || drop.has(follow)) continue;
+      if (isRole(follow) && canDrop(follow)) drop.add(follow);
+      else break;
+    }
+  }
+
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (blank(lines[index]) || drop.has(index)) continue;
+    if (isRole(index) && canDrop(index)) drop.add(index);
+    else break;
+  }
+
+  const survivors = nonBlank.filter((index) => !drop.has(index));
+  if (survivors.length === 0 && nonBlank.length === 1) drop.delete(nonBlank[0]);
+
+  // Collapse only unfenced blank runs. Lines inside a fence keep their spacing.
+  const keptLines: string[] = [];
+  const keptFenced: boolean[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (drop.has(index)) continue;
+    keptLines.push(lines[index]);
+    keptFenced.push(fenced[index]);
+  }
+  const collapsed: string[] = [];
+  let blankRun = 0;
+  let singleBlank = '';
+  const flushBlankRun = () => {
+    if (blankRun === 1) collapsed.push(singleBlank);
+    else if (blankRun >= 2) collapsed.push('');
+    blankRun = 0;
+  };
+  for (let index = 0; index < keptLines.length; index += 1) {
+    const line = keptLines[index];
+    if (line.trim() === '' && !keptFenced[index]) {
+      if (blankRun === 0) singleBlank = line;
+      blankRun += 1;
+      continue;
+    }
+    flushBlankRun();
+    collapsed.push(line);
+  }
+  flushBlankRun();
+  return collapsed.join('\n').trim();
+}
+
+const APP_STATUS_PREFIXES = [
+  "Searching the public web",
+  "Consulting the public web",
+  "Reading ",
+];
+const APP_OUTCOME_NOTES = [
+  "[Stopped after web retrieval",
+  "[Stopped during web retrieval",
+  "[Error:",
+  "This model cannot use web search yet.",
+];
+
+/** A Flint note starts the text or follows a blank line. The last such note wins. */
+function earliestAppOutcomeNote(text: string): number {
+  let at = -1;
+  for (const note of APP_OUTCOME_NOTES) {
+    let from = 0;
+    while (from < text.length) {
+      const index = text.indexOf(note, from);
+      if (index < 0) break;
+      const boundary = index === 0 || text.slice(index - 2, index) === '\n\n';
+      if (boundary) at = Math.max(at, index);
+      from = index + note.length;
+    }
+  }
+  return at;
+}
+
+function appStatusPlaceholder(text: string): boolean {
+  const trimmed = text.trim();
+  return APP_STATUS_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
+}
+
+export function presentAssistantText(input: {
+  text: string;
+  streaming: boolean;
+  assumeReasoning: boolean;
+  prefilledThink: boolean;
+}): { visibleContent: string; thinkingContent: string[]; stoppedBeforeAnswer: boolean } {
+  const strip = assistantTextHasTemplateSpill(input.text, input.prefilledThink);
+  const text = strip
+    ? stripChatTemplateSpill(input.text, { keepTrailingOpenLine: input.streaming })
+    : input.text;
+  // Status lines are written only while this send is active. After it ends, the same
+  // prefix is model text: "Reading the question…" must still get the cutoff note.
+  const trimmed = text.trim();
+  if (
+    (input.streaming && appStatusPlaceholder(text))
+    || APP_OUTCOME_NOTES.some((note) => trimmed.startsWith(note))
+  ) {
+    return { visibleContent: trimmed, thinkingContent: [], stoppedBeforeAnswer: false };
+  }
+  const stopAt = earliestAppOutcomeNote(text);
+  if (input.prefilledThink && stopAt >= 0 && !/<\/think>|<\/thinking>/i.test(text)) {
+    const reasoning = text.slice(0, stopAt).trim();
+    return {
+      visibleContent: text.slice(stopAt).trim(),
+      thinkingContent: reasoning ? [reasoning] : [],
+      stoppedBeforeAnswer: false,
+    };
+  }
+  const extracted = extractThinkingTrace(text, input.assumeReasoning);
+  let visibleContent = extracted.visibleContent;
+  let thinkingContent = extracted.thinkingContent;
+  const untagged = thinkingContent.length === 0 && visibleContent.length > 0;
+  const hold = untagged && (
+    (input.streaming && (input.assumeReasoning || input.prefilledThink))
+    || (!input.streaming && input.prefilledThink)
+  );
+  if (hold) {
+    thinkingContent = [visibleContent];
+    visibleContent = "";
+  }
+  const closed = /<\/think>|<\/thinking>/i.test(text);
+  return {
+    visibleContent,
+    thinkingContent,
+    stoppedBeforeAnswer: !input.streaming
+      && input.prefilledThink
+      && !closed
+      && thinkingContent.length > 0
+      && visibleContent.length === 0,
   };
 }
 
