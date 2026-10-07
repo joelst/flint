@@ -211,8 +211,7 @@ on every development OS. SVG generation is intentionally excluded.
 ## Screenshots
 
 README and docs screenshots go stale after UI changes (nav labels, theme, branding).
-The Windows PNGs in `images/` were recaptured for the 0.10.0 candidate. The
-`flint-macos-*` PNGs are still the previous capture.
+The Windows and macOS PNGs in `images/` were recaptured for the 0.10.0 candidate.
 
 To refresh them:
 

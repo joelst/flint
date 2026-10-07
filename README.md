@@ -75,7 +75,7 @@ Living reliability plan: **[docs/PRODUCT_PLAN.md](./docs/PRODUCT_PLAN.md)** · E
 
 ## Screenshots
 
-Each section shows dark mode (Flint's default) and light mode. The Windows images were recaptured locally for the 0.10.0 candidate, from a dev build whose Help and Settings version reads v0.10.0. The macOS images are the previous capture; refresh them on a Mac with the same script before 0.10.0 is published. Benchmark Preview is opt-in and off by default, so it is not part of this set.
+Each section shows dark mode (Flint's default) and light mode. The Windows and macOS images were recaptured for the 0.10.0 candidate. The Windows capture is a dev build whose Help and Settings version reads v0.10.0. Benchmark Preview is opt-in and off by default, so it is not part of this set.
 Regenerate either platform with `node scripts/capture-screenshots.mjs` — see
 [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md#screenshots).
 

@@ -16,9 +16,9 @@ Finish the **0.10.0** qualification gates in
 [PRODUCT_PLAN.md](./PRODUCT_PLAN.md): packaged Benchmark Preview dogfood,
 confirmation that the shipped public web-retrieval helper still matches its
 boundary, infrastructure/release validation, and the generated release review.
-Windows README screenshots for that candidate are refreshed; macOS screenshots
-are not. Then continue the remaining 1.0 process gates:
-signed clean-machine Windows dogfood, stable updater evidence, and pinned
+Windows and macOS README screenshots for that candidate are refreshed. Then
+continue the remaining 1.0 process gates: signed clean-machine Windows dogfood,
+stable updater evidence, and pinned
 integration versions. Defer wholesale Foundry runtime replacement.
 
 **Linux work is deferred:** preserve existing checks and mappings. Continue
