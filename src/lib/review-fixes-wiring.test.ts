@@ -38,14 +38,39 @@ describe('review fixes wired into the page', () => {
     expect(bind).toContain('return true');
 
     const apply = slice('async function applyNetworkSettings', 'function startSvc');
-    const waitAt = apply.indexOf('await customBindCommitTask');
+    const waitAt = apply.indexOf('await commitCustomBindAddress');
     const bindAt = apply.indexOf('const bind');
+    const assignAt = apply.indexOf('networkBindAddress = bind');
+    const restartAt = apply.indexOf('Restarting service');
     expect(waitAt).toBeGreaterThan(-1);
     expect(bindAt).toBeGreaterThan(waitAt);
     const between = apply.slice(waitAt, bindAt);
     expect(between).toContain('if (!committed) return');
-    expect(between).not.toContain('networkBindAddress');
-    expect(apply.slice(0, waitAt)).not.toContain('networkBindAddress');
+    expect(assignAt).toBeGreaterThan(bindAt);
+    expect(restartAt).toBeGreaterThan(assignAt);
+    expect(apply.slice(0, bindAt)).toContain('customBindCommitTask');
+  });
+
+  it('enables Apply for a typed custom address that is not confirmed yet', () => {
+    const dirty = slice('const networkSettingsDirty', 'function isLoopbackBind');
+    expect(dirty).toContain('customBindDraft');
+    expect(dirty).toContain("customBindDraft.trim() !== ''");
+    expect(dirty).toContain('appliedNetworkBindAddress');
+
+    const apply = slice('async function applyNetworkSettings', 'function startSvc');
+    const waitAt = apply.indexOf('await commitCustomBindAddress');
+    const bindAt = apply.indexOf('const bind');
+    expect(waitAt).toBeGreaterThan(-1);
+    expect(bindAt).toBeGreaterThan(waitAt);
+    expect(apply.slice(0, waitAt)).toContain('customBindDraft');
+    expect(apply.slice(waitAt, bindAt)).toContain('if (!committed) return');
+    expect(apply.indexOf('networkBindAddress = bind')).toBeGreaterThan(bindAt);
+
+    const start = slice('function startSvc(', 'const serviceTransitionBusy');
+    expect(start).toContain('networkBindAddress || undefined');
+    expect(start).not.toContain('customBindDraft');
+    const startLocal = slice('async function startLocalService', 'async function stopLocalService');
+    expect(startLocal).not.toContain('customBindDraft');
   });
 
   it('bounds a stuck benchmark exclusive-release join before claiming a new run', () => {

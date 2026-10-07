@@ -3735,7 +3735,10 @@
 
   const networkSettingsDirty = $derived(
     Number(networkPort) !== Number(appliedNetworkPort) ||
-      (networkBindAddress || '127.0.0.1').trim() !== (appliedNetworkBindAddress || '127.0.0.1').trim(),
+      (networkBindAddress || '127.0.0.1').trim() !== (appliedNetworkBindAddress || '127.0.0.1').trim() ||
+      (customBindOpen &&
+        customBindDraft.trim() !== '' &&
+        customBindDraft.trim() !== (appliedNetworkBindAddress || '127.0.0.1').trim()),
   );
 
   function isLoopbackBind(addr: string): boolean {
@@ -3864,9 +3867,12 @@
       statusMessage = 'Port must be between 1024 and 65535';
       return;
     }
-    // Blur already started the custom-field confirm. Read the address only after it settles.
-    if (customBindCommitTask) {
-      const committed = await customBindCommitTask;
+    // A typed custom address is not accepted until this confirm. Blur's in-flight
+    // confirm is the same task. Cancel leaves the previous address alone.
+    const draft = customBindDraft.trim();
+    const acceptedBind = (networkBindAddress || '127.0.0.1').trim();
+    if (customBindCommitTask || (customBindOpen && draft !== '' && draft !== acceptedBind)) {
+      const committed = await commitCustomBindAddress(draft);
       if (!committed) return;
     }
     const bind = (networkBindAddress || '127.0.0.1').trim();
