@@ -1744,6 +1744,37 @@ describe('service start uncertainty', () => {
     expect(snapshot.runtime.service).toBe('failed');
   });
 
+  it('keeps an unconfirmed stop-and-unload unknown instead of stopped or failed', async () => {
+    const sdk = await loadSdk();
+    const warmup = sdk.getEps();
+    const warmupId = await waitForWrite('getEps');
+    harness.emitStdout({ id: warmupId, result: [] });
+    await warmup;
+
+    const stopping = sdk.stopAndUnload();
+    const stopId = await waitForWrite('stopAndUnload');
+    harness.emitStdout({
+      id: stopId,
+      result: {
+        endpointWithdrawn: true,
+        serviceStopped: false,
+        drained: false,
+        activeOperations: [],
+        modelsUnloaded: [],
+        unloadFailures: [],
+        nativeServiceStopped: false,
+        cleanup: 'timed-out',
+      },
+    });
+    await stopping;
+
+    const snapshot = getLastSdkSnapshot(sdk);
+    expect(snapshot.endpoint).toBeUndefined();
+    expect(snapshot.serviceRunning).toBe(false);
+    expect(snapshot.runtime.service).toBe('unknown');
+    expect(snapshot.runtime.models).toBe('unknown');
+  });
+
   it('confirms runtime quit only after the child closes', async () => {
     const sdk = await loadSdk();
     const warmup = sdk.getEps();

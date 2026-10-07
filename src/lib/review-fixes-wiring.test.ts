@@ -26,6 +26,28 @@ describe('review fixes wired into the page', () => {
     expect(page).not.toContain('bind:value={networkBindAddress}');
   });
 
+  it('waits for an in-flight custom bind commit before Apply reads the address', () => {
+    const bind = slice('async function commitCustomBindAddress', 'async function selectBindAddress');
+    const reuseAt = bind.indexOf('if (customBindCommitTask) return customBindCommitTask');
+    const taskAt = bind.indexOf('customBindCommitTask = task');
+    const confirmAt = bind.indexOf('await confirmExposeNetwork');
+    expect(reuseAt).toBeGreaterThan(-1);
+    expect(taskAt).toBeGreaterThan(reuseAt);
+    expect(confirmAt).toBeGreaterThan(taskAt);
+    expect(bind).toContain('return false');
+    expect(bind).toContain('return true');
+
+    const apply = slice('async function applyNetworkSettings', 'function startSvc');
+    const waitAt = apply.indexOf('await customBindCommitTask');
+    const bindAt = apply.indexOf('const bind');
+    expect(waitAt).toBeGreaterThan(-1);
+    expect(bindAt).toBeGreaterThan(waitAt);
+    const between = apply.slice(waitAt, bindAt);
+    expect(between).toContain('if (!committed) return');
+    expect(between).not.toContain('networkBindAddress');
+    expect(apply.slice(0, waitAt)).not.toContain('networkBindAddress');
+  });
+
   it('bounds a stuck benchmark exclusive-release join before claiming a new run', () => {
     const start = slice('async function startBenchmarkPreviewRun', 'async function resumeBenchmarkPreviewRun');
     const resume = slice('async function resumeBenchmarkPreviewRun', 'function stopBenchmarkPreviewRun');

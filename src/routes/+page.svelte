@@ -1086,7 +1086,8 @@
   /** Custom radio is open. The text field edits this draft; Start keeps `networkBindAddress` until a value is accepted. */
   let customBindOpen = $state(false);
   let customBindDraft = $state('');
-  let customBindCommitBusy = false;
+  /** Custom-field confirm already in flight. Apply awaits it; the button stays enabled so the queued click is not swallowed. */
+  let customBindCommitTask: Promise<boolean> | null = null;
 
   // Settings: WSL clients (Windows host only). Status is fetched on demand —
   // checking spawns wsl.exe, so it never runs unprompted at startup.
@@ -3783,36 +3784,46 @@
   }
 
   /** Accept a custom listen address only after a non-loopback value is confirmed. */
-  async function commitCustomBindAddress(raw: string) {
-    if (customBindCommitBusy) return;
-    const next = (raw || '').trim();
-    const accepted = (networkBindAddress || '127.0.0.1').trim();
-    if (next === accepted) {
-      customBindDraft = isCustomBindAddress(next) ? next : '';
-      customBindOpen = isCustomBindAddress(next);
-      return;
-    }
-    if (!next) {
-      customBindDraft = isCustomBindAddress(accepted) ? accepted : '';
-      return;
-    }
-    if (!isLoopbackBind(next)) {
-      customBindCommitBusy = true;
-      let acceptedExpose = false;
-      try {
-        acceptedExpose = await confirmExposeNetwork(next === '0.0.0.0' ? '0.0.0.0 (all interfaces)' : next);
-      } finally {
-        customBindCommitBusy = false;
+  async function commitCustomBindAddress(raw: string): Promise<boolean> {
+    if (customBindCommitTask) return customBindCommitTask;
+    let resolveCommit!: (accepted: boolean) => void;
+    const task = new Promise<boolean>((resolve) => {
+      resolveCommit = resolve;
+    });
+    customBindCommitTask = task;
+    let acceptedCommit = false;
+    try {
+      const next = (raw || '').trim();
+      const accepted = (networkBindAddress || '127.0.0.1').trim();
+      if (next === accepted) {
+        customBindDraft = isCustomBindAddress(next) ? next : '';
+        customBindOpen = isCustomBindAddress(next);
+        acceptedCommit = true;
+        return true;
       }
-      if (!acceptedExpose) {
+      if (!next) {
         customBindDraft = isCustomBindAddress(accepted) ? accepted : '';
-        return;
+        return false;
       }
+      if (!isLoopbackBind(next)) {
+        const acceptedExpose = await confirmExposeNetwork(next === '0.0.0.0' ? '0.0.0.0 (all interfaces)' : next);
+        if (!acceptedExpose) {
+          customBindDraft = isCustomBindAddress(accepted) ? accepted : '';
+          return false;
+        }
+      }
+      networkBindAddress = next;
+      customBindOpen = isCustomBindAddress(next);
+      customBindDraft = customBindOpen ? next : '';
+      persistChat();
+      acceptedCommit = true;
+      return true;
+    } finally {
+      resolveCommit(acceptedCommit);
+      setTimeout(() => {
+        if (customBindCommitTask === task) customBindCommitTask = null;
+      }, 0);
     }
-    networkBindAddress = next;
-    customBindOpen = isCustomBindAddress(next);
-    customBindDraft = customBindOpen ? next : '';
-    persistChat();
   }
 
   /** Select a bind-address option; confirm when leaving loopback. */
@@ -3852,6 +3863,11 @@
     if (!Number.isFinite(port) || port < 1024 || port > 65535) {
       statusMessage = 'Port must be between 1024 and 65535';
       return;
+    }
+    // Blur already started the custom-field confirm. Read the address only after it settles.
+    if (customBindCommitTask) {
+      const committed = await customBindCommitTask;
+      if (!committed) return;
     }
     const bind = (networkBindAddress || '127.0.0.1').trim();
     if (!bind) {

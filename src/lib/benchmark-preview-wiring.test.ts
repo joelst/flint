@@ -75,6 +75,7 @@ describe('benchmark editor wiring', () => {
     expect(removeSuite).toContain('deleteBenchmarkSuiteWithHistory(suite.id, activeRunId)');
     expect(removeSuite).not.toContain('globalThis.confirm(');
     expect(source).toContain('if (runBusy || suiteDeletePending) return');
+    expect(source).toContain('$: runBusy = lifecycleBusy || runInFlight || suiteDeletePending');
     expect(source).toContain('function casesJsonlListError');
     expect(source).not.toContain('isStaleCasesJsonlMessage');
     expect(source).not.toContain('Suites with runs cannot be deleted.');
@@ -241,6 +242,17 @@ describe('benchmark editor wiring', () => {
     expect(help).toContain('One case per line');
     expect(help.indexOf('</p>')).toBeGreaterThan(-1);
     expect(help.indexOf('</p>')).toBeLessThan(help.indexOf('<textarea'));
+  });
+
+  it('blocks resume while suite deletion is pending', () => {
+    expect(source).toContain('$: runBusy = lifecycleBusy || runInFlight || suiteDeletePending');
+    const start = source.indexOf('async function handleResume(');
+    const end = source.indexOf('await onResume(', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const resume = source.slice(start, end);
+    expect(resume).toContain('if (runBusy) return');
+    expect(resume).not.toContain('onResume');
   });
 
   it('preserves same-run historical result ownership when the row is reopened', () => {

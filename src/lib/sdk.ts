@@ -2381,7 +2381,14 @@ export async function stopAndUnload(options: {
 
     const unloaded = new Set(result.modelsUnloaded);
     currentEndpoint = undefined;
-    currentRuntimeServiceState = result.serviceStopped ? 'stopped' : 'failed';
+    // Drain timeout does not attempt the native stop. Publishing that as "failed"
+    // shows STOPPED and disables Stop; the termination is still unconfirmed.
+    const serviceState: RuntimeServiceState = result.cleanup === 'timed-out'
+      ? 'unknown'
+      : result.serviceStopped
+        ? 'stopped'
+        : 'failed';
+    currentRuntimeServiceState = serviceState;
     sdkState.update((state) => ({
       ...state,
       endpoint: undefined,
@@ -2393,7 +2400,7 @@ export async function stopAndUnload(options: {
       ),
       runtime: {
         ...state.runtime,
-        service: result.serviceStopped ? 'stopped' : 'failed',
+        service: serviceState,
         models: result.drained && result.unloadFailures.length === 0 ? 'empty' : 'unknown',
       },
     }));

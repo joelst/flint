@@ -152,8 +152,8 @@
   let destroyed = false;
   /** Editor write in flight — Save/Cancel/New/Edit serialize on this, not on an unrelated run. */
   $: editorBusy = editingBusy || suiteBusy || casesImporting;
-  /** Start/resume handshake or live run. Does not freeze Save/Cancel of an unrelated draft. */
-  $: runBusy = lifecycleBusy || runInFlight;
+  /** Start/resume handshake, live run, or suite-history deletion. Not the Save/Cancel gate. */
+  $: runBusy = lifecycleBusy || runInFlight || suiteDeletePending;
   function suiteHasStoredRuns(suiteId: string): boolean {
     return (runCountsBySuite[suiteId] ?? 0) > 0;
   }
