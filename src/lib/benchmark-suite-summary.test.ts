@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { generationSettingLabel, suiteDefinitionView, targetVariantLabel } from './benchmark-suite-summary';
+import { caseSummaryLine, generationSettingLabel, suiteDefinitionView, targetVariantLabel } from './benchmark-suite-summary';
 import type { BenchmarkSuite } from './benchmark-suite';
 
 const suite = (over: Partial<BenchmarkSuite> = {}): BenchmarkSuite => ({
@@ -46,6 +46,14 @@ describe('suite definition labels', () => {
       ],
       tags: [],
     });
+  });
+
+  it('collapses a case to one line for the disclosure summary', () => {
+    expect(caseSummaryLine({ prompt: 'What is 2+2?\nShow the work.' })).toBe('What is 2+2? Show the work.');
+    expect(caseSummaryLine({
+      messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'hello' }],
+    })).toBe('user: hi assistant: hello');
+    expect(caseSummaryLine({})).toBe('');
   });
 
   it('labels omitted temperature and max tokens as the runtime default', () => {

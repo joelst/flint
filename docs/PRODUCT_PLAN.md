@@ -104,7 +104,7 @@ Foundry has no abort API. 1.0 closes honesty and fencing, not a fake Stop.
 
 - Chat streaming: Stop settles the caller; native loop keeps consuming until stream end or child exit; UI already says the background may finish.
 - Compare: no Stop control. The running state says the run cannot be cancelled — wait for slots.
-- Audio: transcription cannot be stopped once started; the Transcribe button says so while in flight.
+- Audio: transcription cannot be stopped once started; Voice says so beside Transcribe while it is in flight.
 - Gateway disconnect already destroys upstream. The embeddings **path** is present
   (Wave 9). Full RAG stays after 1.0.
 

@@ -4,6 +4,7 @@ import {
   createBenchmarkRun,
   deleteBenchmarkSuite,
   deleteBenchmarkSuiteIfNoRuns,
+  deleteBenchmarkSuiteWithHistory,
   countBenchmarkRunsBySuite,
   countBenchmarkRunsForSuite,
   getBenchmarkRun,
@@ -749,6 +750,60 @@ describe('benchmark-repository: runs and attempts (v2)', () => {
     expect(result.ok).toBe(true);
     expect((result as any).value.__proto__).toBe(1);
     expect(Object.prototype.hasOwnProperty.call((result as any).value, '__proto__')).toBe(true);
+  });
+
+  it('deleteBenchmarkSuiteWithHistory removes a finished run, its attempts, and the suite', async () => {
+    await createBenchmarkRun(testRun({ status: 'completed' }));
+    await recordAttemptDispatched(testAttempt());
+    await recordAttemptTerminal('exec-1', { status: 'succeeded', responseText: 'hi', settledAt: 42 });
+    const other = { ...testSuite, id: 'suite-2', name: 'Other' };
+    await putBenchmarkSuite(other);
+    await createBenchmarkRun(testRun({ id: 'run-2', suiteId: 'suite-2', suite: other, status: 'completed' }));
+
+    const result = await deleteBenchmarkSuiteWithHistory(testSuite.id);
+    expect(result).toEqual({ ok: true, value: undefined });
+    expect((await getBenchmarkSuite(testSuite.id)).value).toBeNull();
+    expect((await getBenchmarkRun('run-1')).value).toBeNull();
+    expect((await listBenchmarkRunHeadersForSuite(testSuite.id)).value).toEqual([]);
+    expect((await listAttemptsForRun('run-1')).value).toEqual([]);
+    expect((await listAttemptSummariesForRun('run-1')).value).toEqual([]);
+    expect((await getBenchmarkSuite('suite-2')).value?.name).toBe('Other');
+    expect((await getBenchmarkRun('run-2')).value?.id).toBe('run-2');
+  });
+
+  it('deleteBenchmarkSuiteWithHistory refuses while a run is still in progress', async () => {
+    await createBenchmarkRun(testRun());
+    const result = await deleteBenchmarkSuiteWithHistory(testSuite.id, 'run-1');
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/still in progress/);
+    expect((await getBenchmarkSuite(testSuite.id)).value).not.toBeNull();
+    expect((await getBenchmarkRun('run-1')).value?.status).toBe('running');
+  });
+
+  it('deleteBenchmarkSuiteWithHistory removes an interrupted running row when that run is not live', async () => {
+    await createBenchmarkRun(testRun());
+    await recordAttemptDispatched(testAttempt());
+    const omitted = await deleteBenchmarkSuiteWithHistory(testSuite.id);
+    expect(omitted).toEqual({ ok: true, value: undefined });
+    expect((await getBenchmarkSuite(testSuite.id)).value).toBeNull();
+    expect((await getBenchmarkRun('run-1')).value).toBeNull();
+    expect((await listBenchmarkRunHeadersForSuite(testSuite.id)).value).toEqual([]);
+    expect((await listAttemptsForRun('run-1')).value).toEqual([]);
+    expect((await listAttemptSummariesForRun('run-1')).value).toEqual([]);
+
+    await putBenchmarkSuite(testSuite);
+    await createBenchmarkRun(testRun());
+    await recordAttemptDispatched(testAttempt());
+    const otherLive = await deleteBenchmarkSuiteWithHistory(testSuite.id, null);
+    expect(otherLive).toEqual({ ok: true, value: undefined });
+    expect((await getBenchmarkRun('run-1')).value).toBeNull();
+
+    await putBenchmarkSuite(testSuite);
+    await createBenchmarkRun(testRun());
+    const differentId = await deleteBenchmarkSuiteWithHistory(testSuite.id, 'run-other');
+    expect(differentId).toEqual({ ok: true, value: undefined });
+    expect((await getBenchmarkSuite(testSuite.id)).value).toBeNull();
+    expect((await getBenchmarkRun('run-1')).value).toBeNull();
   });
 
   it('getBenchmarkRunWithAttempts returns null for a run id that does not exist', async () => {

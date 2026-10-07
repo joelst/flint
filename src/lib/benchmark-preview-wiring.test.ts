@@ -17,12 +17,29 @@ describe('benchmark editor wiring', () => {
     expect(setter).toContain('[field]: raw');
     expect(setter).not.toContain('optionalDraftNumber');
 
-    const temperatureStart = source.indexOf('Temperature');
+    const temperatureStart = source.indexOf('id="benchmark-temperature"');
     const maxTokensStart = source.indexOf('Max tokens', temperatureStart);
     expect(temperatureStart).toBeGreaterThan(-1);
     expect(maxTokensStart).toBeGreaterThan(temperatureStart);
-    expect(source.slice(temperatureStart, maxTokensStart)).toContain('type="text"');
-    expect(source.slice(temperatureStart, maxTokensStart)).toContain('inputmode="decimal"');
+    const temperatureControl = source.slice(temperatureStart, maxTokensStart);
+    expect(temperatureControl).toContain('type="range"');
+    expect(temperatureControl).toContain('min={BENCHMARK_MIN_TEMPERATURE}');
+    expect(temperatureControl).toContain('max={BENCHMARK_MAX_TEMPERATURE}');
+    expect(temperatureControl).toContain('step={BENCHMARK_TEMPERATURE_STEP}');
+    expect(temperatureControl).toContain('>Use runtime default</button>');
+    expect(source).toContain('max={BENCHMARK_MAX_REPEAT_COUNT}');
+    expect(source).toContain('min={BENCHMARK_MIN_REPEAT_COUNT}');
+    expect(source).toContain('maxTokens: BENCHMARK_DEFAULT_MAX_TOKENS');
+    expect(source).toContain('A new suite starts at {BENCHMARK_DEFAULT_MAX_TOKENS} max tokens.');
+  });
+
+  it('paints suite and run titles with the theme foreground', () => {
+    const start = source.indexOf('.benchmark-suite-select, .benchmark-run-select');
+    const end = source.indexOf('}', start);
+    expect(start).toBeGreaterThan(-1);
+    const rule = source.slice(start, end);
+    expect(rule).toContain('background: none');
+    expect(rule).toContain('color: var(--fg, inherit)');
   });
 
   it('uses runtime-selected consistently for alias-only benchmark targets', () => {
@@ -39,8 +56,30 @@ describe('benchmark editor wiring', () => {
       );
     }
     expect(source).toMatch(
-      /disabled=\{editorBusy \|\| lifecycleBusy \|\| !!editingDraft\}[\s\S]*?>New suite<\/button>/,
+      /label="New suite"[\s\S]*?disabled=\{editorBusy \|\| lifecycleBusy \|\| !!editingDraft\}/,
     );
+    expect(source).toContain('name="plus"');
+    expect(source).toContain('name="pencil"');
+    expect(source).toContain('name="trash"');
+    expect(source).toContain('label="Edit"');
+    expect(source).toContain('label="Duplicate"');
+    expect(source).toContain('label="Delete"');
+    expect(source).toContain('This cannot be undone.');
+    expect(source).toContain('deleteBenchmarkSuiteWithHistory');
+    const removeStart = source.indexOf('async function removeSuite(');
+    const removeEnd = source.indexOf('\n  function stopPolling(', removeStart);
+    const removeSuite = source.slice(removeStart, removeEnd);
+    expect(source).toContain('confirm as confirmDialog');
+    expect(source).toContain('from "@tauri-apps/plugin-dialog"');
+    expect(removeSuite).toContain('await confirmDialog(');
+    expect(removeSuite).toContain('deleteBenchmarkSuiteWithHistory(suite.id, activeRunId)');
+    expect(removeSuite).not.toContain('globalThis.confirm(');
+    expect(source).toContain('if (runBusy || suiteDeletePending) return');
+    expect(source).toContain('function casesJsonlListError');
+    expect(source).not.toContain('isStaleCasesJsonlMessage');
+    expect(source).not.toContain('Suites with runs cannot be deleted.');
+    expect(source).not.toMatch(/>New suite<\/button>/);
+    expect(source).not.toMatch(/>Edit<\/button>/);
     expect(source).toMatch(
       /disabled=\{editorBusy \|\| lifecycleBusy \|\| !!editingDraft\}[\s\S]*?onclick=\{\(\) => startDuplicateSuite\(suite\)\}/,
     );
@@ -48,7 +87,16 @@ describe('benchmark editor wiring', () => {
       /disabled=\{editorBusy \|\| lifecycleBusy \|\| !!editingDraft \|\| suiteHasStoredRuns\(suite\.id\)\}/,
     );
     expect(source).toContain('Save or cancel this draft before creating, editing, or duplicating another suite.');
-    expect(source.match(/Save or cancel the open draft first\./g)).toHaveLength(3);
+    expect(source.match(/Save or cancel the open draft first\./g)).toHaveLength(4);
+    expect(source).toContain(
+      'Locked after a run, on purpose. Duplicate this suite to modify it or to run it again with changes.',
+    );
+    const tip = source.indexOf('class="benchmark-action-tip"');
+    const editButton = source.indexOf('label="Edit"');
+    expect(tip).toBeGreaterThan(-1);
+    expect(tip).toBeLessThan(editButton);
+    expect(source).toContain('.benchmark-action-tip :global(button:disabled)');
+    expect(source).toContain('pointer-events: none');
   });
 
   it('edits tags as a JSON array so commas remain part of a tag', () => {
@@ -66,6 +114,53 @@ describe('benchmark editor wiring', () => {
     expect(source).not.toMatch(
       /Expected \(stored, not scored\)[\s\S]*?<input type="text" bind:value=\{row\.expected\}/,
     );
+  });
+
+  it('collapses the suites pane with the playground panel control', () => {
+    const collapse = readFileSync(join(process.cwd(), 'src', 'lib', 'PanelCollapseButton.svelte'), 'utf8');
+    expect(collapse).toContain('M9.5 5.5V18.5');
+    expect(source).toContain('<PanelCollapseButton');
+    expect(source).toContain('collapseLabel="Collapse suites"');
+    expect(source).toContain('expandLabel="Expand suites"');
+    expect(source).toContain('class:suites-collapsed={suitesCollapsed}');
+    const chats = readFileSync(join(process.cwd(), 'src', 'lib', 'ConversationSidebar.svelte'), 'utf8');
+    expect(chats).toContain('<PanelCollapseButton');
+    expect(chats).toContain('name="plus"');
+    expect(chats).toContain('label="New conversation"');
+    expect(chats).toContain('name="trash"');
+    expect(chats).toContain('label="Delete conversation"');
+    expect(chats).toContain('name="download"');
+    expect(chats).toContain('label="Export conversations"');
+    expect(chats).toContain('title={exportTip}');
+    expect(chats).not.toContain('>Export</button>');
+  });
+
+  it('collapses the suite definition and separates targets from cases', () => {
+    expect(source).toContain('<details class="benchmark-definition" open>');
+    expect(source).toContain('<h4>Targets</h4>');
+    expect(source).toContain('<h4>Cases</h4>');
+    expect(source).toContain('<dt>Warmups</dt>');
+    expect(source).toContain('<dt>Repeats</dt>');
+    expect(source).toContain('<dt>Temperature</dt>');
+    expect(source).toContain('<dt>Max tokens</dt>');
+    expect(source).toContain('class="benchmark-definition-table"');
+    expect(source).toContain('class="benchmark-case-row"');
+    expect(source).not.toContain('Warmups {definition.warmupCount} · Repeats');
+  });
+
+  it('keeps start and stop on one header control and formats stored responses', () => {
+    expect(source).toContain('name={lifecycleBusy ? "loader" : "play"}');
+    expect(source).toContain('name="stop"');
+    expect(source).toContain('aria-label="Stop run"');
+    expect(source).toContain('aria-label="Start run"');
+    expect(source).toContain('name={expandedResultId === row.attemptId ? "chevron-up" : "chevron-down"}');
+    expect(source).toContain('title="Copy response"');
+    expect(source).toContain('<MessageRenderer content={presentBenchmarkResponse(');
+    expect(source).not.toContain('<MessageRenderer content={row.responseText}');
+    expect(source).toContain('<pre class="benchmark-response">{row.responseText}</pre>');
+    expect(source).toContain('copyBenchmarkResponse(row.responseText ?? "")');
+    expect(source).toContain('class="badge badge-live"');
+    expect(source).toContain('class="benchmark-run-toolbar"');
   });
 
   it('describes unavailable medians without assuming timing was never started', () => {
@@ -127,6 +222,25 @@ describe('benchmark editor wiring', () => {
     const clear = source.slice(clearStart, clearEnd);
     expect(clear).toContain('resultLoadRunId = null;');
     expect(clear).toContain('resultLoadPromise = null;');
+  });
+
+  it('validates JSONL text in the editor', () => {
+    expect(source).toContain('casesJsonlError(');
+    expect(source).toContain('id="benchmark-jsonl-error"');
+    expect(source).toContain('aria-invalid={jsonlFieldError ? "true" : "false"}');
+    expect(source).toContain('draftInputErrors(');
+    expect(source).toContain('disabled={editorBusy || !!jsonlFieldError || draftHasInputError || attemptEstimateOverCap}');
+  });
+
+  it('keeps the JSONL editor below its help text', () => {
+    const helpAt = source.indexOf('class="muted small benchmark-jsonl-help"');
+    const editorAt = source.indexOf('class="benchmark-jsonl"');
+    expect(helpAt).toBeGreaterThan(-1);
+    expect(editorAt).toBeGreaterThan(helpAt);
+    const help = source.slice(helpAt, editorAt);
+    expect(help).toContain('One case per line');
+    expect(help.indexOf('</p>')).toBeGreaterThan(-1);
+    expect(help.indexOf('</p>')).toBeLessThan(help.indexOf('<textarea'));
   });
 
   it('preserves same-run historical result ownership when the row is reopened', () => {

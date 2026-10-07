@@ -86,6 +86,7 @@ export default defineConfig(() => ({
         'src/lib/benchmark-progress.ts',
         'src/lib/benchmark-draft.ts',
         'src/lib/benchmark-export.ts',
+        'src/lib/benchmark-response-format.ts',
         'src/lib/benchmark-results.ts',
         'src/lib/benchmark-suite-summary.ts',
         'src/lib/benchmark-lifecycle.ts',

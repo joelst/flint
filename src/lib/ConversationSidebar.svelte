@@ -17,8 +17,9 @@
 </script>
 
 <script lang="ts">
-  import Icon from "./Icon.svelte";
   import { truncateConversationTitle } from "./conversation-sidebar";
+  import IconActionButton from "./IconActionButton.svelte";
+  import PanelCollapseButton from "./PanelCollapseButton.svelte";
 
   export let conversations: Conversation[] = [];
   export let currentConversationId: string | null = null;
@@ -29,6 +30,10 @@
   export let exportBusy = false;
   export let collapsed = false;
   export let onToggleCollapsed: () => void = () => {};
+
+  $: exportTip = exportBusy
+    ? "Saving…"
+    : "Save a copy of every conversation to a file, including any that Flint could not read";
 
   function formatTime(timestamp: number): string {
     const now = Date.now();
@@ -45,61 +50,32 @@
   }
 </script>
 
-<div class="conversation-sidebar" class:collapsed>
-  {#if collapsed}
-    <div class="sidebar-rail">
-      <button
-        type="button"
-        class="rail-btn"
-        aria-label="Show conversations"
-        title="Show conversations"
-        onclick={onToggleCollapsed}
-      >
-        ›
-      </button>
-      <button
-        type="button"
-        class="rail-btn new-chat-btn"
-        aria-label="New conversation"
-        title="New conversation"
-        onclick={onNewChat}
-      >
-        +
-      </button>
-    </div>
-  {:else}
-  <div class="sidebar-header">
-    <h3>Conversations</h3>
+<div class="conversation-sidebar" class:collapsed={collapsed}>
+  <div class="sidebar-header" class:collapsed={collapsed}>
+    <PanelCollapseButton
+      collapsed={collapsed}
+      collapseLabel="Collapse conversations"
+      expandLabel="Expand conversations"
+      onclick={onToggleCollapsed}
+    />
+    {#if !collapsed}
+      <h3>Conversations</h3>
+    {/if}
     <div class="sidebar-header-actions">
-      <button
-        type="button"
-        class="export-btn"
-        aria-label="Hide conversations"
-        title="Hide"
-        onclick={onToggleCollapsed}
-      >
-        <Icon name="panel-left" size={15} />
-      </button>
-      <button
-        type="button"
-        class="export-btn"
-        aria-label={exportBusy ? "Saving…" : "Export conversations"}
-        title={exportBusy ? "Saving…" : "Export"}
-        disabled={exportBusy}
-        onclick={onExport}
-      >
-        {#if exportBusy}
-          <Icon name="loader" size={15} class="spin" />
-        {:else}
-          <Icon name="download" size={15} />
-        {/if}
-      </button>
-      <button class="new-chat-btn" title="New conversation" onclick={onNewChat}>
-        ➕ New
-      </button>
+      <span class="action-tip" title={exportTip}>
+        <IconActionButton
+          name="download"
+          label="Export conversations"
+          title={exportTip}
+          disabled={exportBusy}
+          onclick={onExport}
+        />
+      </span>
+      <IconActionButton name="plus" label="New conversation" filled onclick={onNewChat} />
     </div>
   </div>
 
+  {#if !collapsed}
   <div class="conversations-list">
     {#if conversations.length === 0}
       <div class="empty-state">No conversations yet</div>
@@ -119,6 +95,7 @@
           tabindex="0"
           title="Select conversation"
         >
+          <div class="conv-body">
           <div class="conv-title" title={conv.title}>
             {truncateConversationTitle(conv.title)}
           </div>
@@ -146,17 +123,16 @@
               Recovered
             </div>
           {/if}
-          <button
-            type="button"
-            class="delete-btn"
-            title="Delete conversation"
+          </div>
+          <IconActionButton
+            name="trash"
+            label="Delete conversation"
+            danger
             onclick={(e) => {
               e.stopPropagation();
               onDeleteConversation(conv.id);
             }}
-          >
-            ✕
-          </button>
+          />
         </div>
       {/each}
     {/if}
@@ -172,70 +148,29 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    flex-shrink: 0;
+    flex: none;
   }
-
   .conversation-sidebar.collapsed {
-    width: 44px;
-  }
-
-  .sidebar-rail {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 4px;
-  }
-
-  .rail-btn {
-    width: 32px;
-    height: 32px;
-    padding: 0;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--panel-bg);
-    color: var(--fg);
-    cursor: pointer;
-    font-size: 1.1rem;
-    line-height: 1;
-  }
-
-  .sidebar-rail .new-chat-btn {
-    width: 32px;
-    height: 32px;
-    padding: 0;
-    font-size: 1.1rem;
+    width: 3.25rem;
   }
 
   .sidebar-header {
-    padding: 12px;
+    padding: 8px;
     border-bottom: 1px solid var(--border);
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .sidebar-header.collapsed {
+    flex-direction: column;
   }
 
   .sidebar-header h3 {
     margin: 0;
+    flex: 1;
+    min-width: 0;
     font-size: 0.95rem;
     color: var(--fg);
-  }
-
-  .new-chat-btn {
-    padding: 4px 8px;
-    background: var(--button-bg);
-    color: white;
-    border: none;
-    border-radius: 3px;
-    font-size: 0.75rem;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-
-  .new-chat-btn:hover {
-    background: color-mix(in srgb, var(--accent) 80%, #000);
   }
 
   .sidebar-header-actions {
@@ -243,37 +178,16 @@
     align-items: center;
     gap: 6px;
   }
+  .sidebar-header.collapsed .sidebar-header-actions {
+    flex-direction: column;
+  }
 
-  .export-btn {
-    width: 28px;
-    height: 28px;
-    padding: 0;
+  .action-tip {
     display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    background: transparent;
-    color: var(--fg);
-    border: 1px solid var(--border);
-    border-radius: 3px;
-    cursor: pointer;
   }
-
-  .export-btn :global(svg.spin) {
-    animation: export-spin 1s linear infinite;
-  }
-
-  @keyframes export-spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
-  }
-
-  .export-btn:hover:not(:disabled) {
-    background: var(--panel-hover, rgba(127, 127, 127, 0.12));
-  }
-
-  .export-btn:disabled {
-    opacity: 0.6;
-    cursor: default;
+  /* Disabled controls do not show a title in WebView2, so the wrapper owns it. */
+  .action-tip :global(button:disabled) {
+    pointer-events: none;
   }
 
   .conversations-list {
@@ -294,14 +208,20 @@
     width: 100%;
     box-sizing: border-box;
     text-align: left;
-    padding: 12px 44px 12px 12px;
+    padding: 8px 8px 8px 12px;
     border-bottom: 1px solid var(--border);
     cursor: pointer;
     transition: background 0.15s;
-    position: relative;
     background: none;
     border: none;
     color: inherit;
+    min-width: 0;
+    display: flex;
+    align-items: flex-start;
+    gap: 4px;
+  }
+  .conv-body {
+    flex: 1;
     min-width: 0;
   }
 
@@ -345,32 +265,4 @@
     color: var(--muted);
   }
 
-  .delete-btn {
-    position: absolute;
-    top: 8px;
-    right: 8px;
-    background: none;
-    border: none;
-    color: var(--muted);
-    cursor: pointer;
-    font-size: 1rem;
-    padding: 0;
-    width: 24px;
-    height: 24px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    opacity: 0;
-    transition:
-      opacity 0.2s,
-      color 0.2s;
-  }
-
-  .conversation-item:hover .delete-btn {
-    opacity: 1;
-  }
-
-  .delete-btn:hover {
-    color: var(--danger);
-  }
 </style>

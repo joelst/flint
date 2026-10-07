@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
+  import { confirm as confirmDialog } from "@tauri-apps/plugin-dialog";
   import type { ModelInfo } from "./sdk";
   import {
     listBenchmarkSuites,
     putBenchmarkSuiteIfNoRuns,
-    deleteBenchmarkSuiteIfNoRuns,
+    deleteBenchmarkSuiteWithHistory,
     listBenchmarkRunHeadersForSuite,
     countBenchmarkRunsBySuite,
     getBenchmarkRun,
@@ -12,16 +13,26 @@
     listAttemptSummariesForRun,
   } from "./benchmark-repository";
   import {
+    BENCHMARK_DEFAULT_MAX_TOKENS,
+    BENCHMARK_MAX_REPEAT_COUNT,
     BENCHMARK_MAX_TARGETS,
     BENCHMARK_MAX_ATTEMPTS,
     BENCHMARK_MAX_CASES,
+    BENCHMARK_MAX_TEMPERATURE,
+    BENCHMARK_MAX_WARMUP_COUNT,
+    BENCHMARK_MIN_REPEAT_COUNT,
+    BENCHMARK_MIN_TEMPERATURE,
+    BENCHMARK_MIN_WARMUP_COUNT,
+    BENCHMARK_TEMPERATURE_STEP,
     BENCHMARK_MAX_JSONL_CHARS,
     isBenchmarkSuite,
+    parseBenchmarkCasesJsonl,
     type BenchmarkSuite,
     type BenchmarkTarget,
   } from "./benchmark-suite";
-  import { aliasChoicesForTarget, applyTargetAlias, cachedVariantIds, caseRowsFromJsonl, draftEditsSuite, draftFromSuite, duplicateSuiteDraft, jsonlFromCaseRows, jsonlImportCanFitCharacterLimit, newPromptCaseRow, buildSuiteFromDraft, estimateDraftAttempts, tagsJsonError, variantChoicesForTarget, type SuiteCaseRow, type SuiteDraft } from "./benchmark-draft";
-  import { suiteDefinitionView } from "./benchmark-suite-summary";
+  import { aliasChoicesForTarget, applyTargetAlias, cachedVariantIds, caseRowsFromJsonl, casesJsonlError, draftEditsSuite, draftFromSuite, draftInputBlocksSave, draftInputErrors, duplicateSuiteDraft, jsonlFromCaseRows, jsonlImportCanFitCharacterLimit, newPromptCaseRow, buildSuiteFromDraft, estimateDraftAttempts, tagsJsonError, variantChoicesForTarget, type SuiteCaseRow, type SuiteDraft } from "./benchmark-draft";
+  import { caseSummaryLine, suiteDefinitionView } from "./benchmark-suite-summary";
+  import { presentBenchmarkResponse } from "./benchmark-response-format";
   import { formatResponseMs, type TargetResultView } from "./benchmark-results";
   import { buildProgressMatrix, isRunInterrupted, isRunResumable, nextRunPollAction, nextRunPollActionAfterReread, type AttemptSummary } from "./benchmark-progress";
   import {
@@ -34,6 +45,10 @@
     type BenchmarkPreviewSnapshot,
   } from "./benchmark-preview-snapshot";
   import { buildBenchmarkExport } from "./benchmark-export";
+  import Icon from "./Icon.svelte";
+  import IconActionButton from "./IconActionButton.svelte";
+  import PanelCollapseButton from "./PanelCollapseButton.svelte";
+  import MessageRenderer from "./MessageRenderer.svelte";
   import type { BenchmarkRun, BenchmarkRunHeader } from "./benchmark-run";
 
   export let availableModels: ModelInfo[] = [];
@@ -63,6 +78,7 @@
   export let onResume: (runId: string) => Promise<{ ok: true; runId: string } | { ok: false; error: string }>;
 
   let suites: BenchmarkSuite[] = [];
+  let suitesCollapsed = false;
   let loadError = "";
   let selectedSuiteId: string | null = null;
   let runsForSelectedSuite: BenchmarkRunHeader[] = [];
@@ -79,6 +95,7 @@
   let editingBusy = false;
   /** Held across create/edit/save/delete so Delete cannot race a Save that recreates the suite. */
   let suiteBusy = false;
+  let suiteDeletePending = false;
   let resultView: TargetResultView[] | null = null;
   let resultViewRunId: string | null = null;
   let resultError = "";
@@ -86,6 +103,8 @@
   let resultLoadRunId: string | null = null;
   let resultLoadPromise: Promise<void> | null = null;
   let expandedResultId: string | null = null;
+  /** Per-attempt raw view. Reassigned so Svelte notices the change. */
+  let rawResultIds: Record<string, true> = {};
 
   let selectedRunId: string | null = null;
   let selectedRun: BenchmarkRun | null = null;
@@ -138,6 +157,11 @@
   function suiteHasStoredRuns(suiteId: string): boolean {
     return (runCountsBySuite[suiteId] ?? 0) > 0;
   }
+
+  /** Shown on the Edit control and in the definition. A disabled button does not
+   * receive the hover in WebView2, so the title has to live on a wrapper. */
+  const LOCKED_SUITE_EDIT_REASON =
+    "Locked after a run, on purpose. Duplicate this suite to modify it or to run it again with changes.";
 
   async function refreshSuites() {
     const generation = ++suitesGeneration;
@@ -285,6 +309,7 @@
       name: "",
       targets: [],
       casesJsonl: "",
+      maxTokens: BENCHMARK_DEFAULT_MAX_TOKENS,
       warmupCount: 1,
       repeatCount: 1,
     };
@@ -378,6 +403,15 @@
     editingDraft = { ...editingDraft, [field]: raw };
   }
 
+  function temperatureIsBlank(value: number | string | null | undefined): boolean {
+    return value === undefined || value === null || (typeof value === "string" && value.trim() === "");
+  }
+
+  function clearTemperature() {
+    if (!editingDraft || editorBusy) return;
+    editingDraft = { ...editingDraft, temperature: "" };
+  }
+
   async function importCasesFile(event: Event) {
     const input = event.currentTarget;
     if (!(input instanceof HTMLInputElement) || !editingDraft || editingBusy || suiteBusy || casesImporting) return;
@@ -440,7 +474,7 @@
     // recorded against its frozen snapshot, and silently changing the live suite underneath
     // that history would be misleading even though runs themselves are immutable.
     if ((runCountsBySuite[suite.id] ?? 0) > 0) {
-      loadError = "This suite has runs and can no longer be edited. Duplicate it to make changes.";
+      loadError = LOCKED_SUITE_EDIT_REASON;
       return;
     }
     openDraft(draftFromSuite(suite));
@@ -480,7 +514,36 @@
     editingDraft.targets = targets;
   }
 
+  let jsonlFieldError: string | null = null;
+  let jsonlListError: string | null = null;
+
+  /** Parser message Save would copy into the list. Blank JSONL is one of those messages. */
+  function casesJsonlListError(text: string): string | null {
+    const parsed = parseBenchmarkCasesJsonl(text);
+    return parsed.ok ? null : (parsed.error ?? "cases are invalid");
+  }
+
+  // Drop only the previous parser message once this JSONL's message changes.
+  // A save error that still matches the current text, and an import error that is
+  // not that parser message, stay in the list. Leaving JSONL mode does not count
+  // as the text changing.
+  $: {
+    const text = editingDraft?.casesJsonl ?? "";
+    jsonlFieldError = casesAdvanced && editingDraft ? casesJsonlError(text) : null;
+    const nextList = editingDraft ? casesJsonlListError(text) : null;
+    if (jsonlListError && jsonlListError !== nextList) {
+      const stale = jsonlListError;
+      const nextErrors = editingErrors.filter((message) => message !== stale);
+      if (nextErrors.length !== editingErrors.length) editingErrors = nextErrors;
+    }
+    jsonlListError = nextList;
+  }
+
+  $: inputErrors = editingDraft ? draftInputErrors(editingDraft) : null;
+  $: draftHasInputError = inputErrors ? draftInputBlocksSave(inputErrors) : false;
+
   $: draftAttemptEstimate = editingDraft ? estimateDraftAttempts(editingDraft) : null;
+  $: attemptEstimateOverCap = draftAttemptEstimate !== null && draftAttemptEstimate > BENCHMARK_MAX_ATTEMPTS;
 
   async function saveSuite() {
     if (!editingDraft || editorBusy) return;
@@ -507,15 +570,37 @@
     }
   }
 
+  function suiteDeleteMessage(name: string, runs: number): string {
+    const label = (name ?? "").trim() || "this suite";
+    if (runs > 0) {
+      const noun = runs === 1 ? "run" : "runs";
+      return `Delete "${label}" and its ${runs} saved ${noun}? The runs and their responses are removed with the suite. This cannot be undone.`;
+    }
+    return `Delete "${label}"? This cannot be undone.`;
+  }
+
   async function removeSuite(suite: BenchmarkSuite) {
-    if (editorBusy || lifecycleBusy || runInFlight) return;
+    if (suiteDeletePending || editorBusy || lifecycleBusy || runInFlight) return;
     if (draftEditsSuite(editingDraft, suite.id)) return;
-    suiteBusy = true;
-    // `runCountsBySuite` is only a UI hint (last refresh) — the actual guard against deleting a
-    // suite that has gained a run since then lives inside `deleteBenchmarkSuiteIfNoRuns`, which
-    // rechecks atomically in the same transaction as the delete.
+    // The dialog plugin replaces window.confirm with invoke("plugin:dialog|confirm").
+    // That command is not granted. confirmDialog uses plugin:dialog|message, which is.
+    let confirmed = false;
     try {
-      const res = await deleteBenchmarkSuiteIfNoRuns(suite.id);
+      confirmed = await confirmDialog(suiteDeleteMessage(suite.name, runCountsBySuite[suite.id] ?? 0), {
+        title: "Delete suite",
+        kind: "warning",
+      });
+    } catch (error) {
+      loadError = error instanceof Error && error.message ? error.message : "Could not ask to confirm deletion";
+      return;
+    }
+    if (!confirmed) return;
+    if (destroyed || editorBusy || lifecycleBusy || runInFlight) return;
+    if (draftEditsSuite(editingDraft, suite.id)) return;
+    suiteDeletePending = true;
+    suiteBusy = true;
+    try {
+      const res = await deleteBenchmarkSuiteWithHistory(suite.id, activeRunId);
       if (destroyed) return;
       if (!res.ok) {
         loadError = res.error || "Could not delete suite";
@@ -525,10 +610,20 @@
       if (draftEditsSuite(editingDraft, suite.id)) discardDraft();
       if (selectedSuiteId === suite.id) {
         selectedSuiteId = null;
+        selectedRunId = null;
+        selectedRun = null;
+        selectedRunAttempts = [];
         runsForSelectedSuite = [];
+        clearRunResults();
+        stopPolling();
       }
       await refreshSuites();
+    } catch (error) {
+      if (!destroyed) {
+        loadError = error instanceof Error && error.message ? error.message : "Could not delete suite";
+      }
     } finally {
+      suiteDeletePending = false;
       suiteBusy = false;
     }
   }
@@ -682,6 +777,10 @@
       })
     : [];
   $: selectedRunIsActive = !!selectedRun && selectedRun.id === activeRunId;
+  /** The selected suite owns the live run, even if an older row in its list is open. */
+  $: suiteOwnsActiveRun = !!activeRunId && (
+    selectedRunIsActive || runsForSelectedSuite.some((run) => run.id === activeRunId)
+  );
 
   /** `openRun` only starts `pollHandle` for whichever run is *selected* at the time. Selecting a
    * different (e.g. historical) run while a run stays active elsewhere stops that poll, so if
@@ -698,7 +797,7 @@
   }
 
   async function handleStart(suite: BenchmarkSuite) {
-    if (runBusy) return;
+    if (runBusy || suiteDeletePending) return;
     if (draftEditsSuite(editingDraft, suite.id)) {
       lifecycleError = "Save or cancel your edits before starting a run.";
       return;
@@ -727,6 +826,37 @@
 
   function handleStop() {
     onStop();
+  }
+
+  function startRunTitle(suite: BenchmarkSuite): string {
+    if (lifecycleBusy) return "Starting the run";
+    if (otherInferenceActive) {
+      return "Finish or stop chat, dictation, transcription, summarization, or endpoint self-test before starting a benchmark.";
+    }
+    if (activeRunId) return "A benchmark run is already going. Stop it before starting another.";
+    if (draftEditsSuite(editingDraft, suite.id)) return "Save or cancel your edits before starting a run.";
+    if (!isBenchmarkSuite(suite)) {
+      return "This suite lists the same model alias twice, so a new run would not measure both.";
+    }
+    return "Start run";
+  }
+
+  function toggleRawResult(attemptId: string) {
+    if (rawResultIds[attemptId]) {
+      const next = { ...rawResultIds };
+      delete next[attemptId];
+      rawResultIds = next;
+      return;
+    }
+    rawResultIds = { ...rawResultIds, [attemptId]: true };
+  }
+
+  async function copyBenchmarkResponse(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      lifecycleError = "Could not copy the response.";
+    }
   }
 
   async function handleResume(runId: string) {
@@ -808,13 +938,6 @@
         Early preview.
       </p>
     </div>
-    <button
-      type="button"
-      class="secondary small"
-      onclick={startCreateSuite}
-      disabled={editorBusy || lifecycleBusy || !!editingDraft}
-      title={editingDraft ? "Save or cancel the open draft first." : undefined}
-    >New suite</button>
   </div>
 
   {#if loadError}
@@ -825,10 +948,10 @@
     <div class="warning-banner">{runError}</div>
   {/if}
 
-  {#if activeRunId && !selectedRunIsActive}
-    <!-- Suite/run selection stays enabled while a run executes, so the run-detail Stop button
-         below is hidden whenever the user has selected anything other than the live run. This
-         standing control is the only way to stop it in that case. -->
+  {#if activeRunId && !suiteOwnsActiveRun}
+    <!-- The banner is the stop control when the live run belongs to a suite that is not
+         selected. While the selected suite owns the live run, Stop is the header button
+         even if an older row is open. -->
     <div class="benchmark-active-run-banner">
       <span>A benchmark run is active in the background.</span>
       <button type="button" class="secondary small" onclick={handleStop}>Stop</button>
@@ -855,15 +978,27 @@
       <fieldset class="benchmark-editor-fieldset" disabled={editorBusy}>
       <label>
         Name
-        <input type="text" bind:value={editingDraft.name} />
+        <input type="text" bind:value={editingDraft.name} aria-invalid={inputErrors?.name ? "true" : "false"} />
+        {#if inputErrors?.name}<span class="field-error">{inputErrors.name}</span>{/if}
       </label>
       <label>
         Description
-        <textarea bind:value={editingDraft.description} rows="2"></textarea>
+        <textarea bind:value={editingDraft.description} rows="2" aria-invalid={inputErrors?.description ? "true" : "false"}></textarea>
+        {#if inputErrors?.description}<span class="field-error">{inputErrors.description}</span>{/if}
       </label>
 
       <div class="benchmark-targets">
-        <strong>Targets ({editingDraft.targets.length}/{BENCHMARK_MAX_TARGETS})</strong>
+        <div class="benchmark-editor-head">
+          <strong>Targets ({editingDraft.targets.length}/{BENCHMARK_MAX_TARGETS})</strong>
+          <button
+            type="button"
+            class="editor-add"
+            onclick={addTarget}
+            disabled={availableModels.length === 0 || editingDraft.targets.length >= BENCHMARK_MAX_TARGETS}
+          >
+            + Add target
+          </button>
+        </div>
         {#each editingDraft.targets as target, i}
           <div class="benchmark-target-row">
             <select
@@ -895,11 +1030,6 @@
             </button>
           </div>
         {/each}
-        {#if editingDraft.targets.length < BENCHMARK_MAX_TARGETS}
-          <button type="button" class="tiny" onclick={addTarget} disabled={availableModels.length === 0}>
-            + Add target
-          </button>
-        {/if}
         {#if editingDraft.targets.some((t) =>
           aliasChoicesForTarget(availableModels.map((m) => m.alias), t.alias).some((c) => !c.available)
           || variantChoicesForTarget(variantsForAlias(t.alias), t.variantId).some((c) => !c.available)
@@ -909,12 +1039,22 @@
             to load that build. Pick a downloaded model to measure something already on disk.
           </p>
         {/if}
+        {#if inputErrors?.targets}<p class="field-error">{inputErrors.targets}</p>{/if}
       </div>
 
       <div class="benchmark-cases">
-        <div class="benchmark-cases-toolbar">
+        <div class="benchmark-editor-head">
           <strong>Cases ({casesAdvanced ? "JSONL" : editingCaseRows.length}/{BENCHMARK_MAX_CASES})</strong>
-          <button type="button" class="tiny" onclick={() => casesFileInput?.click()}>Import JSONL</button>
+          <div class="benchmark-editor-head-actions">
+            <button type="button" class="editor-add" onclick={() => casesFileInput?.click()}>Import JSONL</button>
+            <button
+              type="button"
+              class="editor-add"
+              disabled={casesAdvanced || editingCaseRows.length >= BENCHMARK_MAX_CASES}
+              title={casesAdvanced ? "Switch off JSONL editing to add a case in the form." : undefined}
+              onclick={addCaseRow}
+            >+ Add case</button>
+          </div>
           <input
             bind:this={casesFileInput}
             class="benchmark-file-input"
@@ -932,31 +1072,58 @@
           Edit cases as JSONL
         </label>
         {#if casesAdvanced}
-          <label>
+          <p id="benchmark-jsonl-help" class="muted small benchmark-jsonl-help">
             One case per line, for example {`{"id":"c1","prompt":"..."}`}. A messages array is kept when you return to the form, but that case stays read-only there.
-            <textarea bind:value={editingDraft.casesJsonl} rows="6"></textarea>
-          </label>
+          </p>
+          <textarea
+            class="benchmark-jsonl"
+            class:invalid={!!jsonlFieldError}
+            bind:value={editingDraft.casesJsonl}
+            rows="8"
+            spellcheck="false"
+            aria-label="Cases as JSONL"
+            aria-invalid={jsonlFieldError ? "true" : "false"}
+            aria-describedby={jsonlFieldError ? "benchmark-jsonl-help benchmark-jsonl-error" : "benchmark-jsonl-help"}
+          ></textarea>
+          {#if jsonlFieldError}
+            <span id="benchmark-jsonl-error" class="field-error">{jsonlFieldError}</span>
+          {/if}
         {:else}
           {#each editingCaseRows as row, i (i)}
+            {@const rowError = inputErrors?.rows[i]}
             <div class="benchmark-case-edit">
               {#if row.kind === "messages"}
                 <p class="small">
                   <strong>{row.id}</strong>
                   <span class="muted"> — {row.messageCount === 1 ? "1 message" : `${row.messageCount} messages`}. Edit this case in JSONL.</span>
                 </p>
+                {#if rowError?.other}<p class="field-error">{rowError.other}</p>{/if}
               {:else}
                 {@const tagsError = tagsJsonError(row.tagsJson)}
                 <label>
                   Id
-                  <input type="text" bind:value={row.id} oninput={(e) => setPromptField(row, "id", e.currentTarget.value)} />
+                  <input
+                    type="text"
+                    bind:value={row.id}
+                    aria-invalid={rowError?.id ? "true" : "false"}
+                    oninput={(e) => setPromptField(row, "id", e.currentTarget.value)}
+                  />
+                  {#if rowError?.id}<span class="field-error">{rowError.id}</span>{/if}
                 </label>
                 <label>
                   Prompt
-                  <textarea rows="2" bind:value={row.prompt} oninput={(e) => setPromptField(row, "prompt", e.currentTarget.value)}></textarea>
+                  <textarea
+                    rows="2"
+                    bind:value={row.prompt}
+                    aria-invalid={rowError?.prompt ? "true" : "false"}
+                    oninput={(e) => setPromptField(row, "prompt", e.currentTarget.value)}
+                  ></textarea>
+                  {#if rowError?.prompt}<span class="field-error">{rowError.prompt}</span>{/if}
                 </label>
                 <label>
                   Expected (stored, not scored)
-                  <textarea rows="2" bind:value={row.expected} oninput={(e) => setPromptField(row, "expected", e.currentTarget.value)}></textarea>
+                  <textarea rows="2" bind:value={row.expected} aria-invalid={rowError?.expected ? "true" : "false"} oninput={(e) => setPromptField(row, "expected", e.currentTarget.value)}></textarea>
+                  {#if rowError?.expected}<span class="field-error">{rowError.expected}</span>{/if}
                 </label>
                 <label>
                   Tags (JSON array)
@@ -978,49 +1145,70 @@
               </div>
             </div>
           {/each}
-          <button type="button" class="tiny" disabled={editingCaseRows.length >= BENCHMARK_MAX_CASES} onclick={addCaseRow}>+ Add case</button>
         {/if}
       </div>
 
       <div class="benchmark-form-row">
         <label>
-          Warmups
-          <input type="number" min="0" max="1" bind:value={editingDraft.warmupCount} />
+          Warmups ({BENCHMARK_MIN_WARMUP_COUNT}–{BENCHMARK_MAX_WARMUP_COUNT})
+          <input type="number" min={BENCHMARK_MIN_WARMUP_COUNT} max={BENCHMARK_MAX_WARMUP_COUNT} bind:value={editingDraft.warmupCount} />
         </label>
         <label>
-          Repeats
-          <input type="number" min="1" max="3" bind:value={editingDraft.repeatCount} />
+          Repeats ({BENCHMARK_MIN_REPEAT_COUNT}–{BENCHMARK_MAX_REPEAT_COUNT})
+          <input type="number" min={BENCHMARK_MIN_REPEAT_COUNT} max={BENCHMARK_MAX_REPEAT_COUNT} bind:value={editingDraft.repeatCount} />
         </label>
-        <label>
-          Temperature
-          <input
-            type="text"
-            inputmode="decimal"
-            value={editingDraft.temperature ?? ""}
-            oninput={(e) => setDraftNumber("temperature", e.currentTarget.value)}
-          />
-        </label>
+        <div class="benchmark-temperature">
+          <div class="benchmark-temperature-head">
+            <label for="benchmark-temperature">Temperature</label>
+            <span class="benchmark-range-value">
+              {temperatureIsBlank(editingDraft.temperature) ? "runtime default" : editingDraft.temperature}
+            </span>
+          </div>
+          <div class="benchmark-range">
+            <span class="benchmark-range-end">{BENCHMARK_MIN_TEMPERATURE}</span>
+            <input
+              id="benchmark-temperature"
+              type="range"
+              min={BENCHMARK_MIN_TEMPERATURE}
+              max={BENCHMARK_MAX_TEMPERATURE}
+              step={BENCHMARK_TEMPERATURE_STEP}
+              value={temperatureIsBlank(editingDraft.temperature) ? BENCHMARK_MIN_TEMPERATURE : editingDraft.temperature}
+              aria-valuemin={BENCHMARK_MIN_TEMPERATURE}
+              aria-valuemax={BENCHMARK_MAX_TEMPERATURE}
+              aria-valuetext={temperatureIsBlank(editingDraft.temperature) ? "runtime default" : String(editingDraft.temperature)}
+              aria-invalid={inputErrors?.temperature ? "true" : "false"}
+              oninput={(e) => setDraftNumber("temperature", e.currentTarget.value)}
+            />
+            <span class="benchmark-range-end">{BENCHMARK_MAX_TEMPERATURE}</span>
+          </div>
+          {#if !temperatureIsBlank(editingDraft.temperature)}
+            <button type="button" class="tiny" onclick={clearTemperature}>Use runtime default</button>
+          {/if}
+          {#if inputErrors?.temperature}<span class="field-error">{inputErrors.temperature}</span>{/if}
+        </div>
         <label>
           Max tokens
           <input
             type="text"
             inputmode="numeric"
             value={editingDraft.maxTokens ?? ""}
+            aria-invalid={inputErrors?.maxTokens ? "true" : "false"}
             oninput={(e) => setDraftNumber("maxTokens", e.currentTarget.value)}
           />
+          {#if inputErrors?.maxTokens}<span class="field-error">{inputErrors.maxTokens}</span>{/if}
         </label>
       </div>
-      <p class="muted small">Blank temperature or max tokens uses the runtime default. Expected answers are stored and not scored.</p>
+      <p class="muted small">A new suite starts at {BENCHMARK_DEFAULT_MAX_TOKENS} max tokens. Blank temperature or max tokens uses the runtime default. Expected answers are stored and not scored.</p>
 
       {#if draftAttemptEstimate !== null}
-        <p class="muted small">
+        <p class="small" class:muted={!attemptEstimateOverCap} class:field-error={attemptEstimateOverCap}>
           Estimated attempts: {draftAttemptEstimate} / {BENCHMARK_MAX_ATTEMPTS}
         </p>
       {/if}
       </fieldset>
 
       <div class="benchmark-editor-actions">
-        <button type="button" class="primary" disabled={editorBusy} onclick={saveSuite}>
+        <button type="button" class="primary" disabled={editorBusy || !!jsonlFieldError || draftHasInputError || attemptEstimateOverCap} onclick={saveSuite}>
           {editingBusy ? "Saving…" : "Save suite"}
         </button>
         <button type="button" class="secondary" disabled={editorBusy} onclick={cancelEditSuite}>Cancel</button>
@@ -1028,9 +1216,32 @@
     </div>
   {/if}
 
-  <div class="benchmark-body">
-    <div class="benchmark-suite-list">
-      <h3>Suites</h3>
+  <div class="benchmark-body" class:suites-collapsed={suitesCollapsed}>
+    <div class="benchmark-suite-list" class:collapsed={suitesCollapsed}>
+      <div class="benchmark-suite-head">
+        <PanelCollapseButton
+          collapsed={suitesCollapsed}
+          collapseLabel="Collapse suites"
+          expandLabel="Expand suites"
+          onclick={() => (suitesCollapsed = !suitesCollapsed)}
+        />
+        {#if !suitesCollapsed}
+          <h3>Suites</h3>
+        {/if}
+        <span
+          class="benchmark-action-tip"
+          title={editingDraft ? "Save or cancel the open draft first." : "New suite"}
+        >
+          <IconActionButton
+            name="plus"
+            label="New suite"
+            filled
+            disabled={editorBusy || lifecycleBusy || !!editingDraft}
+            onclick={startCreateSuite}
+          />
+        </span>
+      </div>
+      {#if !suitesCollapsed}
       {#if suites.length === 0}
         <p class="muted small">No suites yet. Create one to get started.</p>
       {/if}
@@ -1040,33 +1251,53 @@
             <strong>{suite.name}</strong>
             <span class="muted small">{suite.targets.length} target(s) · {suite.cases.length} case(s) · {runCountsBySuite[suite.id] ?? 0} run(s)</span>
           </button>
-          <button
-            type="button"
-            class="tiny"
-            disabled={editorBusy || lifecycleBusy || !!editingDraft || suiteHasStoredRuns(suite.id)}
-            title={editingDraft
-              ? "Save or cancel the open draft first."
-              : suiteHasStoredRuns(suite.id)
-                ? "This suite has runs. Duplicate it to make changes."
-                : undefined}
-            onclick={() => startEditSuite(suite)}
-          >Edit</button>
-          <button
-            type="button"
-            class="tiny"
-            disabled={editorBusy || lifecycleBusy || !!editingDraft}
-            title={editingDraft ? "Save or cancel the open draft first." : undefined}
-            onclick={() => startDuplicateSuite(suite)}
-          >Duplicate</button>
-          <button
-            type="button"
-            class="tiny danger-btn"
-            disabled={editorBusy || lifecycleBusy || runInFlight || suiteHasStoredRuns(suite.id) || draftEditsSuite(editingDraft, suite.id)}
-            title={suiteHasStoredRuns(suite.id) ? "Suites with runs cannot be deleted." : undefined}
-            onclick={() => removeSuite(suite)}
-          >Delete</button>
+          <div class="benchmark-suite-actions">
+            <span
+              class="benchmark-action-tip"
+              title={editingDraft
+                ? "Save or cancel the open draft first."
+                : suiteHasStoredRuns(suite.id)
+                  ? LOCKED_SUITE_EDIT_REASON
+                  : "Edit"}
+            >
+              <IconActionButton
+                name="pencil"
+                label="Edit"
+                disabled={editorBusy || lifecycleBusy || !!editingDraft || suiteHasStoredRuns(suite.id)}
+                onclick={() => startEditSuite(suite)}
+              />
+            </span>
+            <span
+              class="benchmark-action-tip"
+              title={editingDraft ? "Save or cancel the open draft first." : "Duplicate"}
+            >
+              <IconActionButton
+                name="copy"
+                label="Duplicate"
+                disabled={editorBusy || lifecycleBusy || !!editingDraft}
+                onclick={() => startDuplicateSuite(suite)}
+              />
+            </span>
+            <span
+              class="benchmark-action-tip"
+              title={draftEditsSuite(editingDraft, suite.id)
+                ? "Save or cancel the open draft first."
+                : runInFlight
+                  ? "Stop the benchmark run before deleting a suite."
+                  : "Delete"}
+            >
+              <IconActionButton
+                name="trash"
+                label="Delete"
+                danger
+                disabled={editorBusy || lifecycleBusy || runInFlight || draftEditsSuite(editingDraft, suite.id)}
+                onclick={() => removeSuite(suite)}
+              />
+            </span>
+          </div>
         </div>
       {/each}
+      {/if}
     </div>
 
     {#if selectedSuiteId}
@@ -1075,17 +1306,41 @@
         {@const definition = suiteDefinitionView(suite)}
         <div class="benchmark-run-panel">
           <div class="benchmark-run-header">
-            <h3>{suite.name}</h3>
-            <button
-              type="button"
-              class="primary small"
-              disabled={runBusy || otherInferenceActive || !!activeRunId || !isBenchmarkSuite(suite) || draftEditsSuite(editingDraft, suite.id)}
-              title={otherInferenceActive ? "Finish or stop chat, dictation, transcription, summarization, or endpoint self-test before starting a benchmark." : undefined}
-              onclick={() => handleStart(suite)}
-            >
-              {lifecycleBusy ? "Starting…" : "Start run"}
-            </button>
+            <div class="benchmark-run-title">
+              <h3>{suite.name}</h3>
+              {#if suiteOwnsActiveRun}
+                <span class="badge badge-live"><span class="live-dot" aria-hidden="true"></span>Running</span>
+              {/if}
+            </div>
+            {#if suiteOwnsActiveRun}
+              <button
+                type="button"
+                class="benchmark-icon-btn stop"
+                title="Stop. Prevents further dispatches; a model already asked to respond may still finish."
+                aria-label="Stop run"
+                onclick={handleStop}
+              >
+                <Icon name="stop" size={16} />
+              </button>
+            {:else}
+              <button
+                type="button"
+                class="benchmark-icon-btn"
+                disabled={runBusy || otherInferenceActive || !!activeRunId || !isBenchmarkSuite(suite) || draftEditsSuite(editingDraft, suite.id)}
+                title={startRunTitle(suite)}
+                aria-label="Start run"
+                onclick={() => handleStart(suite)}
+              >
+                <Icon name={lifecycleBusy ? "loader" : "play"} size={16} class={lifecycleBusy ? "spin" : ""} />
+              </button>
+            {/if}
           </div>
+          {#if suiteOwnsActiveRun}
+            <p class="muted small benchmark-live-note">
+              Stop prevents further dispatches; a model already asked to respond may still
+              finish. Flint only records a result if it durably receives and saves one.
+            </p>
+          {/if}
           {#if draftEditsSuite(editingDraft, suite.id)}
             <p class="muted small">Save or cancel your edits before starting a run.</p>
           {/if}
@@ -1100,50 +1355,98 @@
           {/if}
           {#if lifecycleError}<div class="warning-banner">{lifecycleError}</div>{/if}
 
-          <div class="benchmark-definition">
-            <h4>Definition</h4>
-            {#if suiteHasStoredRuns(suite.id)}
-              <p class="muted small">This suite is locked because it has runs. Duplicate it to change the definition.</p>
-            {/if}
-            {#if definition.description}
-              <p class="small">{definition.description}</p>
-            {/if}
-            <p class="muted small">
-              Warmups {definition.warmupCount} · Repeats {definition.repeatCount} ·
-              Temperature {definition.temperatureLabel} · Max tokens {definition.maxTokensLabel}
-            </p>
-            <ul class="benchmark-definition-list">
-              {#each definition.targets as target, i (i)}
-                <li>{target.alias} · {target.variantLabel}</li>
-              {/each}
-            </ul>
-            {#if definition.cases.length === 0}
-              <p class="muted small">No cases yet.</p>
-            {:else}
-              <ul class="benchmark-case-list">
-                {#each definition.cases as entry (entry.id)}
-                  <li class="benchmark-case-row">
-                    <strong>{entry.id}</strong>
-                    {#if entry.tags.length}
-                      <span class="muted small">{entry.tags.join(", ")}</span>
-                    {/if}
-                    {#if entry.messages}
-                      {#each entry.messages as message, messageIndex (messageIndex)}
-                        <p class="small benchmark-case-body"><span class="muted">{message.role}:</span> {message.content}</p>
-                      {/each}
-                    {:else}
-                      <p class="small benchmark-case-body">{entry.prompt}</p>
-                    {/if}
-                    {#if entry.expected}
-                      <p class="muted small">Expected (stored, not scored): {entry.expected}</p>
-                    {/if}
-                  </li>
-                {/each}
-              </ul>
-            {/if}
-          </div>
+          {#key suite.id}
+            <details class="benchmark-definition" open>
+              <summary class="benchmark-section-head">
+                <h4>Definition</h4>
+                <Icon name="chevron-down" size={14} class="benchmark-disclosure-chevron" />
+              </summary>
+              {#if suiteHasStoredRuns(suite.id)}
+                <p class="muted small">{LOCKED_SUITE_EDIT_REASON}</p>
+              {/if}
+              {#if definition.description}
+                <p class="small benchmark-definition-description">{definition.description}</p>
+              {/if}
+              <dl class="benchmark-stat-row">
+                <div class="benchmark-stat">
+                  <dt>Warmups</dt>
+                  <dd>{definition.warmupCount}</dd>
+                </div>
+                <div class="benchmark-stat">
+                  <dt>Repeats</dt>
+                  <dd>{definition.repeatCount}</dd>
+                </div>
+                <div class="benchmark-stat">
+                  <dt>Temperature</dt>
+                  <dd>{definition.temperatureLabel}</dd>
+                </div>
+                <div class="benchmark-stat">
+                  <dt>Max tokens</dt>
+                  <dd>{definition.maxTokensLabel}</dd>
+                </div>
+              </dl>
+              <div class="benchmark-section-head">
+                <h4>Targets</h4>
+              </div>
+              {#if definition.targets.length === 0}
+                <p class="muted small">No targets.</p>
+              {:else}
+                <table class="benchmark-definition-table">
+                  <thead>
+                    <tr>
+                      <th>Model</th>
+                      <th>Variant</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {#each definition.targets as target, i (i)}
+                      <tr>
+                        <td>{target.alias}</td>
+                        <td>{target.variantLabel}</td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              {/if}
+              <div class="benchmark-section-head">
+                <h4>Cases</h4>
+              </div>
+              {#if definition.cases.length === 0}
+                <p class="muted small">No cases yet.</p>
+              {:else}
+                <div class="benchmark-case-list">
+                  {#each definition.cases as entry (entry.id)}
+                    <details class="benchmark-case-row">
+                      <summary class="benchmark-case-summary">
+                        <Icon name="chevron-down" size={14} class="benchmark-disclosure-chevron" />
+                        <strong>{entry.id}</strong>
+                        {#if entry.tags.length}
+                          <span class="benchmark-case-tags">{entry.tags.join(", ")}</span>
+                        {/if}
+                        <span class="benchmark-case-preview">{caseSummaryLine(entry)}</span>
+                      </summary>
+                      <div class="benchmark-case-detail">
+                        {#if entry.messages}
+                          {#each entry.messages as message, messageIndex (messageIndex)}
+                            <p class="small benchmark-case-body"><span class="muted">{message.role}:</span> {message.content}</p>
+                          {/each}
+                        {:else}
+                          <p class="small benchmark-case-body">{entry.prompt}</p>
+                        {/if}
+                        {#if entry.expected}
+                          <p class="muted small">Expected (stored, not scored): {entry.expected}</p>
+                        {/if}
+                      </div>
+                    </details>
+                  {/each}
+                </div>
+              {/if}
+            </details>
+          {/key}
 
-          <h4>Runs</h4>
+          <div class="benchmark-section-head">
+            <h4>Runs</h4>
+          </div>
           {#if runsForSelectedSuite.length === 0}
             <p class="muted small">No runs yet.</p>
           {/if}
@@ -1152,8 +1455,11 @@
               <li class:active={selectedRunId === run.id}>
                 <button type="button" class="benchmark-run-select" disabled={lifecycleBusy} onclick={() => openRun(run.id)}>
                   <span>{new Date(run.createdAt).toLocaleString()}</span>
-                  <span class="badge">{isRunInterrupted(run, activeRunId) ? "interrupted" : run.status}</span>
-                  {#if run.id === activeRunId}<span class="badge">active</span>{/if}
+                  {#if run.id === activeRunId}
+                    <span class="badge badge-live"><span class="live-dot" aria-hidden="true"></span>Running</span>
+                  {:else}
+                    <span class="badge">{isRunInterrupted(run, activeRunId) ? "interrupted" : run.status}</span>
+                  {/if}
                 </button>
               </li>
             {/each}
@@ -1168,25 +1474,19 @@
             {@const currentRun = selectedRun}
             <div class="benchmark-run-detail">
               {#if pollError}<div class="warning-banner">{pollError}</div>{/if}
-              <div class="benchmark-run-actions">
-                {#if selectedRunIsActive}
-                  <button type="button" class="secondary small" onclick={handleStop}>Stop</button>
-                  <p class="muted small">
-                    Stop prevents further dispatches; a model already asked to respond may still
-                    finish. Flint only records a result if it durably receives and saves one.
-                  </p>
-                {:else if isRunResumable(currentRun, activeRunId)}
+              <div class="benchmark-run-toolbar">
+                {#if !selectedRunIsActive && isRunResumable(currentRun, activeRunId)}
                   <button
                     type="button"
                     class="primary small"
                     disabled={runBusy || otherInferenceActive || !!activeRunId}
-                    title={otherInferenceActive ? "Finish or stop chat, dictation, transcription, summarization, or endpoint self-test before resuming a benchmark." : undefined}
+                    title={otherInferenceActive ? "Finish or stop chat, dictation, transcription, summarization, or endpoint self-test before resuming a benchmark." : "Resume"}
                     onclick={() => handleResume(currentRun.id)}
                   >
                     {lifecycleBusy ? "Resuming…" : "Resume"}
                   </button>
                 {/if}
-                <button type="button" class="tiny" onclick={() => exportRun(currentRun.id)}>Export JSON</button>
+                <button type="button" class="secondary small" title="Export this run as JSON" onclick={() => exportRun(currentRun.id)}>Export JSON</button>
               </div>
 
               {#each progressMatrix as target}
@@ -1215,11 +1515,22 @@
                 {#if resultError}<div class="warning-banner">{resultError}</div>{/if}
                 {#if resultView && resultViewRunId === currentRun.id}
                   <div class="benchmark-results">
-                    <h4>Results</h4>
-                    <p class="muted small">Response time is the full call, not time to first token. Warmups are not included in the median.</p>
+                    <div class="benchmark-section-head">
+                      <h4>Results</h4>
+                    </div>
+                    <p class="muted small">Response time is the full call, not time to first token. Warmups do not get a vote in the median.</p>
                     {#each resultView as target (target.targetIndex)}
-                      <div class="benchmark-target-progress">
-                        <strong>{target.alias}</strong>
+                      <div class="benchmark-score-card">
+                        <div class="benchmark-score-head">
+                          <strong>{target.alias}</strong>
+                          <span class="benchmark-score-median">
+                            {#if target.medianResponseMs !== null}
+                              {formatResponseMs(target.medianResponseMs)}
+                            {:else}
+                              —
+                            {/if}
+                          </span>
+                        </div>
                         <p class="muted small">
                           {target.succeededMeasured} measured succeeded
                           {#if target.medianResponseMs !== null}
@@ -1246,7 +1557,7 @@
                                 <tr>
                                   <td>{row.caseId ?? "—"}</td>
                                   <td>{row.repeatIndex == null ? "—" : row.repeatIndex + 1}</td>
-                                  <td>{row.status}</td>
+                                  <td><span class="status-chip {row.status}">{row.status}</span></td>
                                   <td>{formatResponseMs(row.responseTimeMs)}</td>
                                   <td>{row.promptTokens == null && row.completionTokens == null ? "—" : `${row.promptTokens ?? "—"} / ${row.completionTokens ?? "—"}`}</td>
                                   <td>{row.servedVariantId ?? "—"}</td>
@@ -1254,9 +1565,14 @@
                                     {#if row.responseText !== null && row.attemptId}
                                       <button
                                         type="button"
-                                        class="tiny"
+                                        class="benchmark-icon-btn ghost"
+                                        title={expandedResultId === row.attemptId ? "Hide response" : "Show response"}
+                                        aria-label={expandedResultId === row.attemptId ? "Hide response" : "Show response"}
+                                        aria-expanded={expandedResultId === row.attemptId}
                                         onclick={() => expandedResultId = expandedResultId === row.attemptId ? null : row.attemptId}
-                                      >{expandedResultId === row.attemptId ? "Hide response" : "Show response"}</button>
+                                      >
+                                        <Icon name={expandedResultId === row.attemptId ? "chevron-up" : "chevron-down"} size={14} />
+                                      </button>
                                     {/if}
                                   </td>
                                 </tr>
@@ -1267,7 +1583,33 @@
                                 {/if}
                                 {#if row.attemptId && expandedResultId === row.attemptId && row.responseText !== null}
                                   <tr>
-                                    <td colspan="7"><pre class="benchmark-response">{row.responseText}</pre></td>
+                                    <td colspan="7">
+                                      <div class="benchmark-response-card">
+                                        <div class="benchmark-response-toolbar">
+                                          <button
+                                            type="button"
+                                            class="tiny"
+                                            title={rawResultIds[row.attemptId] ? "Show the formatted answer" : "Show the raw response"}
+                                            aria-pressed={rawResultIds[row.attemptId] ? "true" : "false"}
+                                            onclick={() => toggleRawResult(row.attemptId!)}
+                                          >{rawResultIds[row.attemptId] ? "Formatted" : "Raw"}</button>
+                                          <button
+                                            type="button"
+                                            class="benchmark-icon-btn ghost"
+                                            title="Copy response"
+                                            aria-label="Copy response"
+                                            onclick={() => copyBenchmarkResponse(row.responseText ?? "")}
+                                          >
+                                            <Icon name="copy" size={14} />
+                                          </button>
+                                        </div>
+                                        {#if rawResultIds[row.attemptId]}
+                                          <pre class="benchmark-response">{row.responseText}</pre>
+                                        {:else}
+                                          <MessageRenderer content={presentBenchmarkResponse(row.responseText, [target.alias, row.servedVariantId, currentRun.suite.targets[target.targetIndex]?.variantId])} role="assistant" messageKey={row.attemptId} />
+                                        {/if}
+                                      </div>
+                                    </td>
                                   </tr>
                                 {/if}
                               {/each}
@@ -1311,24 +1653,75 @@
   }
   .benchmark-body {
     display: grid;
-    grid-template-columns: 260px 1fr;
+    grid-template-columns: minmax(16rem, 22rem) minmax(0, 1fr);
     gap: 1rem;
     align-items: start;
+  }
+  .benchmark-body.suites-collapsed {
+    grid-template-columns: 3.25rem minmax(0, 1fr);
+  }
+  .benchmark-body:not(:has(.benchmark-run-panel)):not(.suites-collapsed) {
+    grid-template-columns: minmax(0, 1fr);
   }
   .benchmark-suite-list, .benchmark-run-panel, .benchmark-editor {
     border: 1px solid var(--border, #ccc);
     border-radius: 8px;
     padding: 0.75rem;
+    min-width: 0;
+  }
+  .benchmark-suite-list.collapsed {
+    padding: 0.4rem 0.2rem;
+  }
+  .benchmark-suite-head {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    margin-bottom: 0.55rem;
+  }
+  .benchmark-suite-list.collapsed .benchmark-suite-head {
+    flex-direction: column;
+    margin-bottom: 0;
+  }
+  .benchmark-suite-head h3 {
+    margin: 0;
+    flex: 1;
+    min-width: 0;
+    font-size: 1rem;
+    color: var(--fg, inherit);
+  }
+  .benchmark-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+  .benchmark-editor h3,
+  .benchmark-editor p,
+  .benchmark-editor ul {
+    margin: 0;
   }
   .benchmark-suite-row {
     display: flex;
     align-items: center;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     gap: 0.25rem;
     margin-bottom: 0.25rem;
   }
+  .benchmark-suite-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+    flex: none;
+  }
+  .benchmark-action-tip {
+    display: inline-flex;
+  }
+  /* The action button lives in a child component. Disabled controls do not show a title in WebView2. */
+  .benchmark-action-tip :global(button:disabled) {
+    pointer-events: none;
+  }
   .benchmark-suite-select, .benchmark-run-select {
     flex: 1;
+    min-width: 0;
     display: flex;
     flex-direction: column;
     align-items: flex-start;
@@ -1337,6 +1730,10 @@
     border: none;
     cursor: pointer;
     padding: 0.25rem;
+    /* The shared button rule paints white text for filled actions. These controls
+       sit on the panel, so they have to use the theme foreground or light mode
+       washes the suite name and run time out. */
+    color: var(--fg, inherit);
   }
   .benchmark-suite-row.active, .benchmark-run-list li.active {
     background: var(--surface-active, rgba(127,127,127,0.15));
@@ -1348,9 +1745,52 @@
     align-items: center;
     margin-bottom: 0.25rem;
   }
+  .benchmark-target-row select {
+    flex: 1 1 0;
+    min-width: 0;
+    width: auto;
+  }
+  .benchmark-target-row button {
+    flex: none;
+  }
   .benchmark-form-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+    gap: 0.75rem;
+  }
+  .benchmark-temperature {
+    grid-column: 1 / -1;
     display: flex;
-    gap: 1rem;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.35rem;
+    min-width: 0;
+  }
+  .benchmark-temperature-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+    width: 100%;
+  }
+  .benchmark-temperature-head label {
+    font-size: 0.85rem;
+  }
+  .benchmark-range {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+  }
+  .benchmark-range-end,
+  .benchmark-range-value {
+    flex: none;
+    font-variant-numeric: tabular-nums;
+  }
+  .benchmark-range input[type="range"] {
+    flex: 1 1 auto;
+    min-width: 8rem;
+    accent-color: var(--accent, #3b82f6);
   }
   .benchmark-editor-actions {
     display: flex;
@@ -1358,10 +1798,64 @@
     margin-top: 0.5rem;
   }
   .benchmark-editor-fieldset {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
     border: none;
     margin: 0;
     padding: 0;
     min-width: 0;
+  }
+  .benchmark-editor-fieldset label {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.3rem;
+    min-width: 0;
+    font-size: 0.85rem;
+  }
+  .benchmark-editor-fieldset label > input:not([type="checkbox"]),
+  .benchmark-editor-fieldset label > textarea {
+    width: 100%;
+    box-sizing: border-box;
+    font: inherit;
+    font-weight: 400;
+  }
+  .benchmark-targets,
+  .benchmark-cases {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.4rem;
+    min-width: 0;
+  }
+  .benchmark-editor-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+  .benchmark-editor-head strong {
+    min-width: 0;
+  }
+  .benchmark-editor-head-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex: none;
+  }
+  button.editor-add {
+    font-size: 0.85rem;
+    line-height: 1.2;
+    padding: 6px 12px;
+    min-height: 2.25rem;
+    background: var(--panel-bg, transparent);
+    border: 1px solid var(--border, #ccc);
+    color: var(--fg, inherit);
+  }
+  button.editor-add:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent, #3b82f6) 12%, var(--panel-bg, #fff));
   }
   .benchmark-errors {
     color: var(--danger, #c0392b);
@@ -1445,6 +1939,205 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 0.75rem;
+  }
+  .benchmark-run-title {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    min-width: 0;
+  }
+  .benchmark-run-title h3 {
+    margin: 0;
+  }
+  .benchmark-live-note {
+    margin: 0.35rem 0 0;
+  }
+  .benchmark-section-head {
+    display: flex;
+    align-items: baseline;
+    margin: 1.15rem 0 0.45rem;
+    padding-bottom: 0.3rem;
+    border-bottom: 1px solid var(--border, #ccc);
+  }
+  .benchmark-definition > summary.benchmark-section-head {
+    margin-top: 0.85rem;
+    width: 100%;
+    cursor: pointer;
+    list-style: none;
+    color: var(--fg, inherit);
+  }
+  .benchmark-definition > summary::-webkit-details-marker,
+  .benchmark-case-summary::-webkit-details-marker {
+    display: none;
+  }
+  .benchmark-definition > summary::marker,
+  .benchmark-case-summary::marker {
+    content: none;
+  }
+  .benchmark-definition > summary :global(.benchmark-disclosure-chevron) {
+    margin-left: auto;
+    flex: none;
+    transition: transform 0.15s ease;
+  }
+  .benchmark-definition[open] > summary :global(.benchmark-disclosure-chevron),
+  .benchmark-case-row[open] > summary :global(.benchmark-disclosure-chevron) {
+    transform: rotate(180deg);
+  }
+  .benchmark-definition-description {
+    margin: 0.45rem 0 0;
+  }
+  .benchmark-stat-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin: 0.75rem 0 0.1rem;
+  }
+  .benchmark-stat {
+    flex: 1 1 7.5rem;
+    margin: 0;
+    padding: 0.45rem 0.7rem 0.5rem;
+    border: 1px solid var(--border, #ccc);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--accent, #3b82f6) 12%, var(--panel-bg, #fff));
+  }
+  .benchmark-stat dt {
+    margin: 0;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--muted, #6c757d);
+  }
+  .benchmark-stat dd {
+    margin: 0.12rem 0 0;
+    font-size: 1.15rem;
+    font-weight: 700;
+    line-height: 1.2;
+    font-variant-numeric: tabular-nums;
+    color: var(--fg, inherit);
+  }
+  .benchmark-section-head h4 {
+    margin: 0;
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--fg, inherit);
+  }
+  .benchmark-run-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.85rem;
+  }
+  .benchmark-icon-btn {
+    width: 2rem;
+    height: 2rem;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    border-radius: 999px;
+    background: var(--button-bg, #1d4ed8);
+    color: #fff;
+  }
+  .benchmark-icon-btn.stop {
+    background: var(--danger-btn-bg, #9f1239);
+    color: var(--danger-btn-fg, #fff);
+  }
+  .benchmark-icon-btn.ghost {
+    width: 1.75rem;
+    height: 1.75rem;
+    background: var(--panel-bg, transparent);
+    color: var(--fg, inherit);
+    border: 1px solid var(--border, #ccc);
+  }
+  .benchmark-icon-btn :global(.spin) {
+    animation: benchmark-spin 0.8s linear infinite;
+  }
+  .badge-live {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-weight: 700;
+    color: var(--accent, #3b82f6);
+    background: color-mix(in srgb, var(--accent, #3b82f6) 14%, transparent);
+  }
+  .live-dot {
+    width: 0.45rem;
+    height: 0.45rem;
+    border-radius: 50%;
+    background: var(--accent, #3b82f6);
+    animation: benchmark-pulse 1.2s ease-in-out infinite;
+  }
+  .benchmark-score-card {
+    margin-top: 0.85rem;
+    padding: 0.75rem 0.8rem 0.4rem;
+    border: 1px solid var(--border, #ccc);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--panel-bg, #fff) 88%, var(--accent, #3b82f6));
+  }
+  .benchmark-score-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+  .benchmark-score-median {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    font-size: 1.05rem;
+  }
+  .status-chip {
+    display: inline-block;
+    padding: 0.05rem 0.4rem;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    background: var(--subtle-bg, rgba(127, 127, 127, 0.15));
+  }
+  .status-chip.succeeded { color: var(--success, #198754); }
+  .status-chip.failed { color: var(--danger, #dc3545); }
+  .status-chip.running { color: var(--accent, #3b82f6); font-weight: 700; }
+  .benchmark-response-card {
+    margin: 0.35rem 0 0.5rem;
+    padding: 0.55rem 0.65rem;
+    border-radius: 8px;
+    background: var(--panel-bg, transparent);
+    border: 1px solid var(--border, #ccc);
+  }
+  .benchmark-response-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.35rem;
+    margin-bottom: 0.35rem;
+  }
+  .benchmark-response-toolbar .tiny {
+    min-width: 6.5rem;
+    justify-content: center;
+  }
+  .benchmark-response-card :global(.copy-btn) {
+    display: none;
+  }
+  @keyframes benchmark-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.35; transform: scale(0.72); }
+  }
+  @keyframes benchmark-spin {
+    to { transform: rotate(360deg); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .live-dot,
+    .benchmark-icon-btn :global(.spin) {
+      animation: none;
+    }
+    .benchmark-definition > summary :global(.benchmark-disclosure-chevron),
+    .benchmark-case-summary :global(.benchmark-disclosure-chevron) {
+      transition: none;
+    }
   }
   .benchmark-run-actions {
     display: flex;
@@ -1483,13 +2176,34 @@
     padding: 4px 6px;
   }
   .benchmark-file-input { display: none; }
-  .benchmark-check {
-    display: flex;
+  .benchmark-editor-fieldset label.benchmark-check {
+    flex-direction: row;
     align-items: center;
+    justify-content: flex-start;
+    width: fit-content;
     gap: 0.4rem;
-    margin: 0.35rem 0;
+    margin: 0;
+    font-weight: 400;
   }
-  .benchmark-cases-toolbar,
+  .benchmark-check input {
+    width: auto;
+    flex: none;
+  }
+  .benchmark-jsonl-help {
+    margin: 0;
+  }
+  .benchmark-jsonl {
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 9rem;
+    font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    font-size: 0.85rem;
+    line-height: 1.45;
+    resize: vertical;
+  }
+  .benchmark-jsonl.invalid {
+    border-color: var(--danger, #c0392b);
+  }
   .benchmark-case-edit-actions {
     display: flex;
     align-items: center;
@@ -1503,15 +2217,47 @@
     flex-direction: column;
     gap: 0.35rem;
   }
-  .benchmark-definition-list,
   .benchmark-case-list {
-    list-style: none;
-    margin: 0.25rem 0 0;
-    padding: 0;
+    margin: 0.15rem 0 0;
   }
   .benchmark-case-row {
     border-top: 1px solid var(--border, #ccc);
-    padding: 0.35rem 0;
+  }
+  .benchmark-case-row:last-child {
+    border-bottom: 1px solid var(--border, #ccc);
+  }
+  .benchmark-case-summary {
+    display: flex;
+    align-items: baseline;
+    gap: 0.55rem;
+    padding: 0.45rem 0.15rem;
+    cursor: pointer;
+    color: var(--fg, inherit);
+  }
+  .benchmark-case-summary :global(.benchmark-disclosure-chevron) {
+    flex: none;
+    align-self: center;
+    transition: transform 0.15s ease;
+  }
+  .benchmark-case-tags {
+    font-size: 0.75rem;
+    color: var(--muted, #6c757d);
+    white-space: nowrap;
+  }
+  .benchmark-case-preview {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--fg, inherit);
+    font-size: 0.85rem;
+  }
+  .benchmark-case-row[open] .benchmark-case-preview {
+    display: none;
+  }
+  .benchmark-case-detail {
+    padding: 0 0.15rem 0.55rem 1.45rem;
   }
   .benchmark-case-body,
   .benchmark-response {
@@ -1519,19 +2265,43 @@
     margin: 0.2rem 0 0;
   }
   .benchmark-results { overflow-x: auto; }
-  .benchmark-results-table {
+  .benchmark-results-table,
+  .benchmark-definition-table {
     width: 100%;
-    border-collapse: collapse;
+    border-collapse: separate;
+    border-spacing: 0;
     font-size: 0.8rem;
-    margin-top: 0.35rem;
+    margin-top: 0.45rem;
+    border: 1px solid var(--border, #ccc);
+    border-radius: 8px;
+    overflow: hidden;
   }
   .benchmark-results-table th,
-  .benchmark-results-table td {
+  .benchmark-results-table td,
+  .benchmark-definition-table th,
+  .benchmark-definition-table td {
     text-align: left;
-    padding: 0.25rem 0.4rem;
+    padding: 0.4rem 0.5rem;
     border-bottom: 1px solid var(--border, #ccc);
     vertical-align: top;
     color: var(--fg, inherit);
+  }
+  .benchmark-results-table th,
+  .benchmark-definition-table th {
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted, #6c757d);
+    background: color-mix(in srgb, var(--accent, #3b82f6) 10%, var(--panel-bg, #fff));
+  }
+  .benchmark-results-table td:nth-child(4),
+  .benchmark-results-table th:nth-child(4) {
+    font-variant-numeric: tabular-nums;
+  }
+  .benchmark-results-table tr:last-child td,
+  .benchmark-definition-table tr:last-child td {
+    border-bottom: none;
   }
   .benchmark-result-error { color: var(--danger, #c0392b); }
 </style>

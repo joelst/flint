@@ -40,6 +40,16 @@ export interface SuiteDefinitionView {
   }>;
 }
 
+/** One line for a collapsed case. The expanded row still shows the full prompt or messages. */
+export function caseSummaryLine(
+  entry: Pick<SuiteDefinitionView['cases'][number], 'prompt' | 'messages'>,
+): string {
+  const raw = typeof entry.prompt === 'string'
+    ? entry.prompt
+    : (entry.messages ?? []).map((message) => `${message.role}: ${message.content}`).join(' ');
+  return raw.replace(/\s+/g, ' ').trim();
+}
+
 export function suiteDefinitionView(suite: BenchmarkSuite): SuiteDefinitionView {
   const view: SuiteDefinitionView = {
     warmupCount: suite.warmupCount,

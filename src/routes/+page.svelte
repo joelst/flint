@@ -2074,8 +2074,8 @@
 
   // Prioritize the actually loaded STT model (so loading from top bar / Models
   // list / main UI immediately makes the Audio page inherit it).
-  // Fall back to the last explicitly chosen STT (for when a chat model is
-  // currently active, user can still "Ensure service" to bring their audio model back).
+  // Fall back to the last explicitly chosen STT when a chat model is loaded.
+  // Transcribe loads that model without restarting a service that is already up.
   const effectiveSTTModelAlias = $derived(
     loadedAudioModel?.alias || selectedSTTModelAlias || ""
   );
@@ -11015,103 +11015,86 @@ Output only the summary text, no preamble.`;
             <button type="button" class:active={currentView === "chat"} aria-pressed={currentView === "chat"} onclick={() => (currentView = "chat")}>Chat</button>
             <button type="button" class:active={currentView === "audio"} aria-pressed={currentView === "audio"} onclick={() => (currentView = "audio")}>Voice</button>
           </div>
-          <h2>Audio Transcription</h2>
+          <header class="audio-header">
+            <h2>Audio Transcription</h2>
+            <p class="audio-note">
+              Selecting a model loads it into the shared local service. Chat and Voice share that service.
+              Longer or name-heavy audio is more reliable on a larger model.
+            </p>
+          </header>
 
-          <p class="notice">
-            Audio uses STT models (Whisper etc.) via the sidecar + local service.
-            Selecting one here will (re)start the service with that model.
-            Chat and audio share one endpoint, so only one model is active at a time.
-            New STT families appear automatically from catalog metadata (task/capabilities).
-            <br><small>For best results on long/complex audio (e.g. Text readings with names), use the largest STT model your hardware supports. Tiny models often hallucinate or repeat words.</small>
-          </p>
+          <section class="audio-panel" aria-label="Transcription setup">
+            <div class="audio-model-row">
+              <span class="audio-kicker">Model</span>
+              <span class="current-stt">{effectiveSTTModelAlias || "None selected"}</span>
+            </div>
 
-          <!-- STT model selector (independent of chat selectedModelAlias) -->
-          <div class="stt-picker">
-            <strong>Current STT model:</strong>
-            <span class="current-stt">{effectiveSTTModelAlias || "(none)"}</span>
-            {#if effectiveSTTModelAlias}
-              <button
-                class="tiny"
-                disabled={serviceTransitionBusy}
-                onclick={async () => {
-                  try {
-                    await ensureServiceRunning(
-                      effectiveSTTModelAlias,
-                      selectedAccelerationPreference === "auto" ? undefined : selectedAccelerationPreference,
-                    );
-                    statusMessage = `Service ensured with ${effectiveSTTModelAlias}`;
-                  } catch (e: any) {
-                    statusMessage = `Could not ensure service: ${e?.message || e}`;
-                  }
-                }}
-              >
-                Ensure service
-              </button>
+            {#if sttModels.length > 0}
+              <div class="stt-models" role="group" aria-label="Available STT models">
+                {#each sttModels as m (m.alias)}
+                  <button
+                    type="button"
+                    onclick={() => useSTTModelForAudio(m)}
+                    class="stt-btn"
+                    class:active={m.alias === effectiveSTTModelAlias}
+                    aria-pressed={m.alias === effectiveSTTModelAlias}
+                    title={m.isCached ? m.alias : `${m.alias} (download)`}
+                  >
+                    {m.alias}
+                    {#if !m.isCached}<span class="stt-get">Download</span>{/if}
+                  </button>
+                {/each}
+              </div>
+            {:else}
+              <p class="audio-empty">No STT models yet. Initialize the sidecar, then refresh the catalog.</p>
             {/if}
 
-          </div>
-
-          {#if sttModels.length > 0}
-            <div class="stt-models">
-              <strong>Available STT models:</strong>
-              {#each sttModels as m}
-                <button
-                  onclick={() => useSTTModelForAudio(m)}
-                  class="stt-btn"
-                  title={m.alias}
-                >
-                  {m.alias}
-                  {#if !m.isCached}(get){/if}
-                </button>
-              {/each}
+            <div class="audio-controls">
+              <label class="audio-language">
+                Language
+                <select bind:value={transcriptionLanguage} disabled={isTranscribing}>
+                  <option value="auto">Auto</option>
+                  <option value="en">English</option>
+                  <option value="es">Spanish</option>
+                  <option value="fr">French</option>
+                  <option value="de">German</option>
+                  <option value="ja">Japanese</option>
+                  <option value="zh">Chinese</option>
+                </select>
+              </label>
+              <button type="button" class:secondary={!isRecording} class:danger-btn={isRecording} onclick={toggleRecording} disabled={isTranscribing}>
+                {#if isRecording}<Icon name="stop" size={14} /> Stop Recording{:else}<Icon name="mic" size={14} /> Start Recording{/if}
+              </button>
+              <button type="button" class="secondary" onclick={uploadAudioFile} disabled={isTranscribing}>
+                <Icon name="folder" size={14} /> Upload Audio File
+              </button>
+              <button
+                type="button"
+                onclick={doTranscribe}
+                disabled={!audioBlob || isTranscribing || !effectiveSTTModelAlias || benchmarkRunInFlight}
+              >
+                {isTranscribing ? "Transcribing…" : "Transcribe"}
+              </button>
             </div>
-          {:else}
-            <p class="small">No STT models found yet. Make sure the sidecar is initialized and refresh the catalog.</p>
-          {/if}
 
-          <div class="audio-controls">
-            <label class="audio-language">
-              Language
-              <select bind:value={transcriptionLanguage} disabled={isTranscribing}>
-                <option value="auto">Auto</option>
-                <option value="en">English</option>
-                <option value="es">Spanish</option>
-                <option value="fr">French</option>
-                <option value="de">German</option>
-                <option value="ja">Japanese</option>
-                <option value="zh">Chinese</option>
-              </select>
-            </label>
-            <button onclick={toggleRecording} disabled={isTranscribing}>
-              {#if isRecording}<Icon name="stop" size={14} /> Stop Recording{:else}<Icon name="mic" size={14} /> Start Recording{/if}
-            </button>
-            <button onclick={uploadAudioFile} disabled={isTranscribing}>
-              <Icon name="folder" size={14} /> Upload Audio File
-            </button>
-            <button
-              onclick={doTranscribe}
-              disabled={!audioBlob || isTranscribing || !effectiveSTTModelAlias || benchmarkRunInFlight}
-            >
-              {isTranscribing
-                ? (transcriptionProgress
-                    ? formatTranscriptionProgress(transcriptionProgress)
-                    : "Transcribing… cannot be stopped once started")
-                : "Transcribe"}
-            </button>
-          </div>
-
-          {#if audioBlob}
-            <div class="audio-info">
-              Audio ready ({(audioBlob.size / 1024).toFixed(1)} KB)
-              {#await getAudioDuration(audioBlob) then secs}
-                — approx {secs.toFixed(1)} seconds
-              {/await}
-            </div>
-          {/if}
+            {#if audioBlob}
+              <p class="audio-info">
+                Audio ready ({(audioBlob.size / 1024).toFixed(1)} KB)
+                {#await getAudioDuration(audioBlob) then secs}
+                  — approx {secs.toFixed(1)} seconds
+                {/await}
+              </p>
+            {/if}
+            {#if isTranscribing}
+              <p class="audio-status">
+                {#if transcriptionProgress}{formatTranscriptionProgress(transcriptionProgress)} {/if}This cannot be stopped once started.
+              </p>
+            {/if}
+          </section>
 
           {#if transcription}
             <div class="transcription-result">
-              <h3>Transcription:</h3>
+              <h3>Transcription</h3>
               {#if transcriptionSegments.length > 0}
                 <TranscriptViewToggle
                   bind:showTimestampedTranscript
@@ -11177,18 +11160,20 @@ Output only the summary text, no preamble.`;
                 </div>
               {/if}
               <div class="transcription-actions">
-                <button onclick={copyTranscriptionToClipboard}>Copy</button>
-                <button onclick={downloadTranscription}>Download .txt</button>
+                <button type="button" onclick={copyTranscriptionToClipboard}>Copy</button>
+                <button type="button" class="secondary" onclick={downloadTranscription}>Download .txt</button>
                 {#if hasTimestampExportData()}
-                  <button onclick={copyTimestampedTranscript}>Copy with estimated times</button>
-                  <button onclick={() => downloadCaptions("srt")}>
+                  <button type="button" class="secondary" onclick={copyTimestampedTranscript}>Copy with estimated times</button>
+                  <button type="button" class="secondary" onclick={() => downloadCaptions("srt")}>
                     {transcriptionSegments.length > 0
                       ? "Download .srt bundle (.zip)"
                       : "Download timing note"}
                   </button>
-                  <button onclick={() => downloadCaptions("vtt")}>Download .vtt</button>
+                  <button type="button" class="secondary" onclick={() => downloadCaptions("vtt")}>Download .vtt</button>
                 {/if}
                 <button
+                  type="button"
+                  class="secondary"
                   onclick={() => {
                     transcription = "";
                     transcriptionSegments = [];
@@ -15622,33 +15607,114 @@ Output only the summary text, no preamble.`;
     background: var(--danger) !important;
   }
 
-  .audio-view .audio-controls {
+  .audio-view {
     display: flex;
+    flex-direction: column;
     gap: 12px;
-    margin-bottom: 16px;
+  }
+
+  .audio-view .playground-subnav {
+    margin-bottom: 0;
+  }
+
+  .audio-header h2 {
+    margin: 0;
+    font-size: 1.1rem;
+  }
+
+  .audio-note {
+    margin: 4px 0 0;
+    max-width: 46rem;
+    color: var(--muted);
+    font-size: 0.82rem;
+    line-height: 1.45;
+  }
+
+  .audio-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 14px 16px;
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+
+  .audio-model-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     flex-wrap: wrap;
   }
 
-  .audio-language {
+  .audio-kicker {
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .audio-view .audio-controls {
     display: flex;
-    flex-direction: column;
-    gap: 4px;
-    font-size: 0.78rem;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: 0;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
+
+  .audio-view .audio-controls button {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    box-sizing: border-box;
+    min-height: 2.25rem;
+  }
+
+  .audio-view button.secondary {
+    display: inline-flex;
+    align-items: center;
+    box-sizing: border-box;
+    min-height: 2.25rem;
+    border: 1px solid color-mix(in srgb, var(--fg) 28%, var(--border));
+    background: color-mix(in srgb, var(--fg) 8%, var(--panel-bg));
+    color: var(--fg);
+  }
+
+  .audio-view button.secondary:hover:not(:disabled) {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, var(--panel-bg));
+  }
+
+  .audio-language {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-right: auto;
+    font-size: 0.8rem;
     color: var(--muted);
   }
 
   .audio-language select {
+    box-sizing: border-box;
+    height: 2.25rem;
     background: var(--input-bg);
     border: 1px solid var(--border);
     color: var(--fg);
     border-radius: 6px;
     padding: 6px 8px;
-    min-width: 120px;
+    min-width: 8.5rem;
   }
 
-  .audio-info {
-    margin: 8px 0;
+  .audio-info,
+  .audio-status,
+  .audio-empty {
+    margin: 0;
     color: var(--muted);
+    font-size: 0.8rem;
+    line-height: 1.4;
   }
 
   .transcription-actions {
@@ -15658,9 +15724,13 @@ Output only the summary text, no preamble.`;
     margin-top: 10px;
   }
 
-  .stt-models {
-    margin: 12px 0;
+  .audio-view .stt-models {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 0;
   }
+
   .stt-btn {
     font-size: 0.8rem;
     padding: 4px 8px;
@@ -15669,16 +15739,41 @@ Output only the summary text, no preamble.`;
     color: var(--fg);
   }
 
-  .stt-picker {
-    margin: 8px 0 12px;
-    font-size: 0.85rem;
+  .audio-view .stt-btn {
+    margin: 0;
+    padding: 6px 12px;
+    min-height: 2rem;
+    border: 1px solid color-mix(in srgb, var(--fg) 28%, var(--border));
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--fg) 8%, var(--panel-bg));
+    color: var(--fg);
   }
+
+  .audio-view .stt-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, var(--panel-bg));
+  }
+
+  .audio-view .stt-btn.active {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 16%, var(--panel-bg));
+    color: var(--fg);
+    font-weight: 600;
+  }
+
+  .stt-get {
+    margin-left: 6px;
+    font-size: 0.68rem;
+    font-weight: 500;
+    color: var(--muted);
+  }
+
   .current-stt {
     font-family: ui-monospace, monospace;
+    font-size: 0.85rem;
     background: var(--subtle-bg);
-    padding: 1px 6px;
-    border-radius: 3px;
-    margin: 0 6px;
+    padding: 3px 8px;
+    border-radius: 4px;
   }
 
   .vision-attach {
@@ -16013,9 +16108,15 @@ Output only the summary text, no preamble.`;
 
   .transcription-result {
     background: var(--panel-bg);
-    padding: 12px;
-    border-radius: 6px;
-    margin-top: 16px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-top: 0;
+  }
+
+  .transcription-result h3 {
+    margin: 0 0 8px;
+    font-size: 0.95rem;
   }
 
   .transcription-result pre {

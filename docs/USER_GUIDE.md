@@ -69,9 +69,10 @@ The sidebar is grouped by workflow:
   to the model. PDF and Office documents are not decoded. The attach button's picker shows all
   files; anything Flint cannot attach is reported in a notice above the composer rather than skipped silently.
 - Persona is beside the message controls. The gear beside Send opens and closes the
-  **Generation settings** drawer. The conversation list starts collapsed. **Show conversations**
-  opens it. The sidebar icon, tooltip **Hide**, closes it again. **Export** beside it is the
-  download icon; its tooltip is **Export**.
+  **Generation settings** drawer. The conversation list starts collapsed. The panel button
+  opens it (tooltip **Expand conversations**) and closes it (tooltip **Collapse conversations**).
+  **Export conversations** is the download icon and stays available while the list is collapsed.
+  **New conversation** is the plus icon.
   Qwen3 and QwQ start a reply inside reasoning. Playground keeps that text under **Thinking**
   until the model closes it. If **Max tokens** runs out first, the answer area says the reply
   stopped before the answer. A reply saved before Flint recorded that fact stays as written
@@ -149,7 +150,7 @@ The sidebar is grouped by workflow:
 
 - **Playground → Voice**: pick an STT model, use mic or file.  
 - Chat and audio share the local service — only one “active” path at a time for some flows; load the right model for the task.
-- Transcription cannot be stopped once started; the Transcribe control says so while in flight.
+- Transcription cannot be stopped once started; Voice says so beside Transcribe while it is in flight.
 - Long recordings use approximately 28-second windows with overlap at fixed cuts. Flint may snap
   individual boundaries to detected pauses and rebalances fixed cuts to avoid an unsuitable short
   final window, but every displayed timestamp is a Flint-derived estimate, never timing reported
@@ -177,7 +178,7 @@ On Windows, **Settings → About** checks the stable release channel. Checking i
 
 - **Quick Compare**: pick 2–3 models or variants, send one prompt, and watch results stream live into side-by-side cards. Each result shows the served variant, execution provider, and run status. **Stop** prevents further slots from starting and stops showing new output for the active slot, but generation has no native abort API — the sidecar keeps draining it in the background and it may run to completion; text already streamed is kept.
 - Useful before downloading large weights.
-- **Benchmark Preview** (opt-in, off by default — enable under Settings): a separate, repeatable multi-model benchmark. A suite holds up to 3 models and its cases (a prompt each, or a JSONL file that can also carry multi-message cases). Optional temperature, max tokens, one warmup, and 1–3 repeats are part of the definition, which stays visible after the first run, including each message's role and text. Edit and delete are only available before any run; duplicate the suite to change what a later run measures. An optional expected answer is stored and not scored. A run is persisted and resumable. **Stop** prevents further cases from starting; a model already generating may finish, and Flint only records a result it durably saved. When the run is no longer active, each measured case shows response time (the full call, not time to first token), token counts, the served variant, and the response text. Warmups are listed separately and are not part of the timing summary.
+- **Benchmark Preview** (opt-in, off by default — enable under Settings): a separate, repeatable multi-model benchmark. A suite holds up to 3 models and its cases (a prompt each, or a JSONL file that can also carry multi-message cases). Optional temperature from 0 to 2, max tokens, one warmup, and 1–20 repeats are part of the definition, which stays available after the first run and can be collapsed. Targets and each case are listed under their own headings; a case expands to its prompt or messages, including each message's role and text. Edit is only available before any run; duplicate the suite to change what a later run measures. Delete asks for confirmation, removes the suite and any saved runs, and cannot be undone. An optional expected answer is stored and not scored. A run is persisted and resumable. **Stop** prevents further cases from starting; a model already generating may finish, and Flint only records a result it durably saved. When the run is no longer active, each measured case shows response time (the full call, not time to first token), token counts, the served variant, and the response. The formatted view shows an unfinished Qwen3 or QwQ reply that never closed its think tag as the thought; Raw and copy keep the stored text. Warmups are listed separately and are not part of the timing summary.
 
 ### Monitor
 
