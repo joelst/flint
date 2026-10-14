@@ -11,6 +11,20 @@ const NATIVE_LOAD_ERROR = new Error(
 );
 
 describe("summarizeFailure", () => {
+  it("puts CUDA recovery advice ahead of generic operation-outcome text and native frames", () => {
+    const detail = "genai_model_instance.cc:204 failed to load model smollm3-3b-cuda-gpu:1: " +
+      "Failed to create allocator for CUDA: No requested allocator available";
+    const error = new Error(
+      `This did not complete. Any part of it that had already been done was not undone. ${detail}\n    at loadModel`,
+    );
+    const summary = summarizeFailure("Load failed", error);
+    expect(summary).toMatch(/^Load failed: CUDA could not initialize a GPU allocator/);
+    expect(summary).toContain("CUDA_VISIBLE_DEVICES=0");
+    expect(summary).not.toContain("genai_model_instance");
+    expect(summary).not.toContain("Any part");
+    expect(failureLogLine("Load failed", error)).toContain(detail);
+  });
+
   it("keeps the whole sentence rather than truncating to the visible width", () => {
     const detail = "a".repeat(400);
     const line = summarizeFailure("Load failed", new Error(detail));

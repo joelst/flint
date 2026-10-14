@@ -55,6 +55,30 @@ The sidebar is grouped by workflow:
 - Update badges: newer catalog versions for the **same** acceleration track (CPU/GPU/NPU), not cross-grade noise.
 - Listing/refreshing the catalog contacts Microsoft's Foundry Local model catalog over the network (separate from inference, which stays local). Flint checks it on startup by default; disable **Settings → Startup → "Check model catalog on startup"** to skip recommendations and configured model preloads for that launch. **Refresh catalog** later populates the Models view but does not replay startup-only work. Accelerator setup is separate: Flint runs it automatically at startup, and Foundry Local may download execution-provider components when needed. **Recheck Providers** on the Models page asks Foundry Local to register each execution provider that is not registered. CUDA and WebGPU are downloaded into Flint's own cache, so for those two it removes the cached copy first and Foundry Local downloads a new one. The other providers (QNN, OpenVINO, DirectML, NvTensorRTRTX) come from Windows ML or the runtime and have no Flint cache; Recheck only registers them again, which can still fetch their package. When every provider is already registered, it does nothing. A CUDA or WebGPU cache whose files are still loaded, so Windows will not delete them, is left in place and not downloaded again. The status line names any provider that is still not registered afterward. Model actions such as download or import may also require network access or refresh the catalog afterward.
 
+### CUDA allocator load failures
+
+If loading a CUDA variant reports **CUDA could not initialize a GPU allocator**
+(`Failed to create allocator for CUDA: No requested allocator available`), Flint
+shows recovery guidance and keeps the original runtime detail in the app log.
+This signature does not identify whether the cause is GPU visibility, the NVIDIA
+driver, or the runtime. It is not proof of insufficient VRAM or a damaged model.
+
+Use **Models → Recheck Providers** and check your NVIDIA driver. On a machine with
+multiple NVIDIA GPUs, a temporary workaround is to fully quit Flint, then launch
+the installed Windows app from PowerShell with only one CUDA device exposed:
+
+```powershell
+$env:CUDA_VISIBLE_DEVICES = '0'
+Start-Process -FilePath "$($env:LOCALAPPDATA)\Flint\Flint.exe"
+```
+
+This applies to that launch and its child runtime, not global settings. Device 0
+is the CUDA ordinal; do not assume it matches Windows' display ordering. An
+already running runtime will not adopt the change. Alternatively, explicitly
+select a downloaded CPU variant. Flint does not automatically retry, switch
+devices, or change model variants after this error. Per-model GPU placement is
+not currently exposed.
+
 ### Chat and conversations
 
 - Conversations live in the sidebar; new chat via UI or shortcut (see **?**).  

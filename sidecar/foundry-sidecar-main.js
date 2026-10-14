@@ -20,6 +20,7 @@ import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { annotateVariantUpdates } from './model-updates.js';
+import { loadModelWithDiagnostic } from './model-load-diagnostic.js';
 import { normalizeTextPartsForLegacyClient, selectChatTransport } from './chat-transport.js';
 import {
   createSessionChatClient,
@@ -2220,7 +2221,7 @@ async function ensureModelLocked(alias, variantId, onCatalogProgress, requireCac
         if (requireCached && !isCachedModel(existing.catModel)) {
           throw new Error(`${variantId || alias} is not in the local cache; refusing to load it.`);
         }
-        await existing.catModel.load();
+        await loadModelWithDiagnostic(existing.catModel);
         log('info', `Model ${alias} reloaded after runtime eviction`);
       }
       touchModel(alias);
@@ -2294,7 +2295,7 @@ async function ensureModelLocked(alias, variantId, onCatalogProgress, requireCac
         log('warn', `Low memory: loading ${alias} (${fileSizeMb} MB) but only ${Math.round(os.freemem() / 1024 / 1024)} MB free`);
       }
       catModel.selectVariant(variant);
-      await catModel.load();
+      await loadModelWithDiagnostic(catModel);
       pool.set(alias, { catModel, variantId });
       log('info', `Model ${alias} loaded (variantId: ${variantId})`);
     } else {
@@ -2302,7 +2303,7 @@ async function ensureModelLocked(alias, variantId, onCatalogProgress, requireCac
       if (fileSizeMb && os.freemem() < fileSizeMb * 1024 * 1024 * 1.15) {
         log('warn', `Low memory: loading ${alias} (${fileSizeMb} MB) but only ${Math.round(os.freemem() / 1024 / 1024)} MB free`);
       }
-      await catModel.load();
+      await loadModelWithDiagnostic(catModel);
       const resolvedVariantId = catModel.id;
       pool.set(alias, { catModel, variantId: resolvedVariantId });
       log('info', `Model ${alias} loaded (variantId: ${resolvedVariantId})`);
