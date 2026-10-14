@@ -127,6 +127,7 @@ export default defineConfig(() => ({
         'src/lib/provider-recheck-status.ts',
         'src/lib/status-message.ts',
         'sidecar/model-load-diagnostic.js',
+        'src/lib/runtime-gpu.ts',
         'src/lib/snippet-scope.ts',
         'src/lib/error-detail.ts',
         'src/lib/token-estimate.ts',

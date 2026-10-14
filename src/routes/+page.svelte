@@ -200,6 +200,7 @@
     startupWebToolsPatch,
     type AppSettingDefaults,
   } from "$lib/conversation-settings";
+  import { readRuntimeGpu, writeRuntimeGpu, runtimeGpuChoices } from "$lib/runtime-gpu";
   import { decideChipFetchHop, detectFetchableUrls, isFetchableUrl } from "$lib/url-chips";
   import {
     conversationImagePreviewPartIndexes,
@@ -1010,6 +1011,17 @@
   let recommendedStarters = $state([] as ModelInfo[]);
   let isLoadingRecommendations = $state(false);
   let selectedAccelerationPreference = $state<string>("auto");
+  // Read at launch: the runtime child was spawned with this value, so a later change only
+  // takes effect on the next start.
+  const runtimeGpuAtLaunch = readRuntimeGpu(localStorage);
+  let runtimeGpu = $state<string>(runtimeGpuAtLaunch);
+  let runtimeGpuSaveFailed = $state(false);
+  const runtimeGpuOptions = $derived(runtimeGpuChoices(state.poolStats?.accelerators));
+
+  function setRuntimeGpu(value: string) {
+    runtimeGpu = value;
+    runtimeGpuSaveFailed = !writeRuntimeGpu(localStorage, value);
+  }
   let cacheInventory = $state<CacheInventory | null>(null);
   let cacheInventoryLoading = $state(false);
   let hostPlatform = $state<"windows" | "macos" | "linux" | "unknown">("unknown");
@@ -9535,6 +9547,34 @@ Output only the summary text, no preamble.`;
                     </span>
                   {/each}
                 </div>
+              {/if}
+              {#if runtimeGpuOptions.length > 1 || runtimeGpu}
+                <div class="accel-panel-row">
+                  <label for="runtime-gpu">Runtime GPU</label>
+                  <select
+                    id="runtime-gpu"
+                    value={runtimeGpu}
+                    onchange={(e) => setRuntimeGpu((e.currentTarget as HTMLSelectElement).value)}
+                  >
+                    <option value="">All GPUs (default)</option>
+                    {#each runtimeGpuOptions as gpu (gpu.deviceId)}
+                      <option value={gpu.deviceId}>{gpu.label}</option>
+                    {/each}
+                    {#if runtimeGpu && !runtimeGpuOptions.some((g) => g.deviceId === runtimeGpu)}
+                      <option value={runtimeGpu}>{runtimeGpu} (saved)</option>
+                    {/if}
+                  </select>
+                </div>
+                <p class="muted">
+                  Limits which GPU the runtime can use. If CUDA fails with “No requested allocator available” while
+                  more than one GPU is installed, pick one here.
+                  {#if runtimeGpu !== runtimeGpuAtLaunch}
+                    Restart Flint for this to take effect.
+                  {/if}
+                  {#if runtimeGpuSaveFailed}
+                    The choice could not be saved.
+                  {/if}
+                </p>
               {/if}
             </div>
 

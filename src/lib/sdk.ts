@@ -31,6 +31,7 @@ import {
   shellProgramForNodeMode,
   type NodeRuntimeMode,
 } from './sidecar-paths';
+import { readRuntimeGpu } from './runtime-gpu';
 import {
   createProgressStallWatchdog,
   type ProgressStallWatchdog,
@@ -356,6 +357,8 @@ export interface AcceleratorMemory {
   kind: 'gpu' | 'npu';
   name: string;
   vendor?: string | null;
+  /** Stable NVIDIA GPU UUID (`GPU-…`) when nvidia-smi reports one. */
+  deviceId?: string | null;
   totalMb: number | null;
   usedMb: number | null;
   freeMb: number | null;
@@ -888,7 +891,8 @@ async function spawnSidecar() {
     console.log(`[sdk] Calling native runtime_start...`);
     ensureStartAuthorized();
     startingNative = true;
-    started = await invoke<{ generation: number }>('runtime_start', { nodeMode });
+    const gpuDevices = readRuntimeGpu(typeof localStorage === 'undefined' ? null : localStorage) || null;
+    started = await invoke<{ generation: number }>('runtime_start', { nodeMode, gpuDevices });
   } catch (error) {
     startingNative = false;
     cleanupListeners();
@@ -1708,6 +1712,7 @@ function mapPoolStats(result: any): PoolStats {
           kind: a?.kind === 'npu' ? 'npu' as const : 'gpu' as const,
           name: String(a?.name || ''),
           vendor: a?.vendor ?? null,
+          deviceId: typeof a?.deviceId === 'string' ? a.deviceId : null,
           totalMb: a?.totalMb == null ? null : Number(a.totalMb),
           usedMb: a?.usedMb == null ? null : Number(a.usedMb),
           freeMb: a?.freeMb == null ? null : Number(a.freeMb),

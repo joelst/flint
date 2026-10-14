@@ -1385,6 +1385,7 @@ function normalizeAccelDevice(d) {
     kind,
     name,
     vendor: d.vendor ? String(d.vendor) : null,
+    deviceId: typeof d.deviceId === 'string' && /^GPU-[0-9A-Fa-f-]{8,64}$/.test(d.deviceId) ? d.deviceId : null,
     totalMb,
     usedMb,
     freeMb,
@@ -1396,7 +1397,7 @@ async function queryNvidiaSmi() {
   try {
     const { stdout } = await execFileAsync(
       'nvidia-smi',
-      ['--query-gpu=name,memory.total,memory.used,memory.free', '--format=csv,noheader,nounits'],
+      ['--query-gpu=name,memory.total,memory.used,memory.free,uuid', '--format=csv,noheader,nounits'],
       { timeout: 5000, windowsHide: true, maxBuffer: 1024 * 1024 },
     );
     return stdout
@@ -1406,11 +1407,12 @@ async function queryNvidiaSmi() {
       .map((line) => {
         const parts = line.split(',').map((s) => s.trim());
         if (parts.length < 4) return null;
-        const [name, total, used, free] = parts;
+        const [name, total, used, free, uuid] = parts;
         return normalizeAccelDevice({
           kind: 'gpu',
           name,
           vendor: 'nvidia',
+          deviceId: uuid,
           totalMb: total,
           usedMb: used,
           freeMb: free,
@@ -1590,7 +1592,7 @@ function vendorFromName(name) {
 /** Prefer nvidia-smi rows for NVIDIA devices; keep DXGI/other for non-NVIDIA + NPUs. */
 function mergeAcceleratorDevices(nvidia, others) {
   const byKey = new Map();
-  const keyOf = (d) => `${d.kind}:${d.name.toLowerCase()}`;
+  const keyOf = (d) => `${d.kind}:${d.deviceId || d.name.toLowerCase()}`;
 
   for (const d of others || []) {
     byKey.set(keyOf(d), d);
