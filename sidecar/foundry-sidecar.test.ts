@@ -3808,7 +3808,7 @@ describe('chatCompletion ChatSession path', () => {
       "const awaitSignal = async () => { while (!fs.existsSync(process.env.FLINT_TEST_CANCEL_SIGNAL)) await new Promise((resolve) => setTimeout(resolve, 5)); };",
       'class FakeModel {',
       "  constructor() { this.id = 'fake-variant'; this.loaded = false; }",
-      '  async load() { this.loaded = true; }',
+      "  async load() { const failure = streamSteps()[0]?.loadError; if (failure) { note('model-load-failed'); throw new Error(failure); } this.loaded = true; }",
       '  isLoaded() { return this.loaded; }',
       `  async getExecutionProvider() { note('provider-probe'); if (${JSON.stringify(sdkMode)} === 'session-stream-provider-cancel' && fs.readFileSync(process.env.FLINT_TEST_EVENT_LOG, 'utf8').includes('stream-finished')) { note('provider-probe-waiting'); await awaitSignal(); } return 'CPUExecutionProvider'; }`,
       hasLegacy ? '  createChatClient() {' : '  // no createChatClient() in this mode',
@@ -3955,6 +3955,24 @@ describe('chatCompletion ChatSession path', () => {
   afterEach(async () => {
     await killAndWait(proc);
     rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  it.each(['load', 'chatCompletion'])('reports CUDA allocator guidance over IPC for %s without retrying', async (cmd) => {
+    await startSidecar('session');
+    const detail = 'Failed to create allocator for CUDA: No requested allocator available';
+    setStreamSteps([{ loadError: detail }]);
+    const failed = reply(3);
+    send(cmd === 'load'
+      ? { id: 3, cmd, alias: 'another-model' }
+      : { id: 3, cmd, model: 'another-model', messages: [{ role: 'user', content: 'hi' }] });
+    const result = await failed;
+    expect(result.ok).not.toBe(true);
+    expect(result.error).toContain('CUDA could not initialize a GPU allocator');
+    expect(result.error).toContain('Recheck Providers');
+    expect(result.error).toContain('CUDA_VISIBLE_DEVICES=0');
+    expect(result.error).toContain(`Runtime detail: ${detail}`);
+    expect(events().filter((event) => event === 'model-load-failed')).toHaveLength(1);
+    expect(events()).not.toContain('session-chat');
   });
 
   it('prefers the ChatSession-backed client over createChatClient() when the SDK exports it (buffered)', async () => {

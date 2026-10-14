@@ -11,6 +11,8 @@
  * against a pathologically large message reaching a DOM attribute.
  */
 
+import { cudaAllocatorDiagnostic } from '../../sidecar/model-load-diagnostic.js';
+
 /** Hard ceiling for a status line, far above any real sentence. */
 const MAX_STATUS_LENGTH = 2000;
 
@@ -39,6 +41,8 @@ export function failureLogLine(prefix: string, error: unknown): string {
 export function summarizeFailure(prefix: string, error: unknown): string {
   const raw = errorText(error);
   if (!raw.trim()) return prefix;
+  const cudaDiagnostic = cudaAllocatorDiagnostic(raw);
+  if (cudaDiagnostic) return `${prefix}: ${cudaDiagnostic}`;
   const json = raw.match(/JSON Error:\s*(.+?)\s+at line/i);
   const body = json
     ? json[1]
