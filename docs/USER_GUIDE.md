@@ -69,9 +69,10 @@ choice is saved by the GPU's UUID (so it survives device reordering) and is
 applied as `CUDA_VISIBLE_DEVICES` to the runtime child process only, not to your
 global environment. The picker appears when more than one NVIDIA GPU reports a
 UUID through `nvidia-smi`, and stays visible while a choice is saved. It limits
-CUDA only: DirectML and WebGPU can still use other GPUs. Arena VRAM checks follow
-the choice in force at launch. Foundry Local initializes once per process and has
-no per-model device option, so the choice applies to the whole runtime.
+CUDA only: DirectML and WebGPU can still use other GPUs. Arena VRAM checks apply
+the choice the running runtime was started with, to CUDA models only. Foundry Local
+initializes once per process and has no per-model device option, so the choice
+applies to every CUDA model in the runtime.
 
 Without the picker, you can launch the installed Windows app from PowerShell
 with only one CUDA device exposed:

@@ -82,6 +82,16 @@ export function runtimeGpuPanelVisible(state: {
 }
 
 /**
+ * Whether a variant runs on the CUDA execution provider, from its provider name or variant id
+ * (`…-cuda-gpu:4`). Unknown means unknown: callers should not apply a CUDA restriction to it.
+ */
+export function isCudaVariant(executionProvider: string | null | undefined, variantId: string | null | undefined): boolean {
+  const ep = String(executionProvider ?? '').toLowerCase();
+  if (ep) return ep.includes('cuda');
+  return /(^|[-_])cuda([-_]|$)/i.test(String(variantId ?? ''));
+}
+
+/**
  * GPUs a CUDA load can use under the selector the running child was spawned with. Non-NVIDIA
  * adapters are kept. An index selector cannot be mapped to nvidia-smi rows reliably, so it
  * leaves the list unfiltered rather than guessing.

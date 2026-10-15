@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   RUNTIME_GPU_KEY,
   cudaVisibleAccelerators,
+  isCudaVariant,
   normalizeRuntimeGpu,
   readRuntimeGpu,
   runtimeGpuChoices,
@@ -103,6 +104,16 @@ describe('runtimeGpuPanelVisible', () => {
     { saveFailed: true },
   ])('shows for %j', (patch) => {
     expect(runtimeGpuPanelVisible({ ...base, ...patch })).toBe(true);
+  });
+});
+
+describe('isCudaVariant', () => {
+  it('uses the provider when known, else the variant id', () => {
+    expect(isCudaVariant('CUDAExecutionProvider', 'x')).toBe(true);
+    expect(isCudaVariant('DmlExecutionProvider', 'm-cuda-gpu:1')).toBe(false);
+    expect(isCudaVariant('', 'qwen3-0.6b-cuda-gpu:4')).toBe(true);
+    expect(isCudaVariant('', 'qwen3-0.6b-generic-gpu:4')).toBe(false);
+    expect(isCudaVariant(undefined, undefined)).toBe(false);
   });
 });
 

@@ -417,6 +417,8 @@ export interface FlintSDKState {
   audioLaneModel?: string;
   pool: PoolEntry[];
   poolStats: PoolStats | null;
+  /** CUDA GPU selector the live runtime child was spawned with; null until a child has started. */
+  runtimeGpuApplied: string | null;
 }
 
 export interface CacheInventoryEntry {
@@ -472,6 +474,7 @@ const initialState: FlintSDKState = {
   audioLaneModel: undefined,
   pool: [],
   poolStats: null,
+  runtimeGpuApplied: null,
 };
 
 export const sdkState: Writable<FlintSDKState> = writable(initialState);
@@ -826,6 +829,7 @@ async function spawnSidecar() {
   };
 
   let started: { generation: number };
+  let appliedGpuSelector = '';
   try {
     unlisteners.push(
       await listen<{ generation: number; message: any }>('flint://runtime-stdout', ({ payload }) => {
@@ -891,8 +895,8 @@ async function spawnSidecar() {
     console.log(`[sdk] Calling native runtime_start...`);
     ensureStartAuthorized();
     startingNative = true;
-    const gpuDevices = readRuntimeGpu(typeof localStorage === 'undefined' ? null : localStorage) || null;
-    started = await invoke<{ generation: number }>('runtime_start', { nodeMode, gpuDevices });
+    appliedGpuSelector = readRuntimeGpu(typeof localStorage === 'undefined' ? null : localStorage);
+    started = await invoke<{ generation: number }>('runtime_start', { nodeMode, gpuDevices: appliedGpuSelector || null });
   } catch (error) {
     startingNative = false;
     cleanupListeners();
@@ -911,6 +915,8 @@ async function spawnSidecar() {
   }
   myGeneration = started.generation;
   sidecarGeneration = started.generation;
+  // Every respawn (including crash recovery) rereads storage, so publish what this child got.
+  updateState({ runtimeGpuApplied: appliedGpuSelector });
   if (closeData) {
     throw new Error(formatStartupFailure(stdoutEventFired, stderrLines, closeData, commandError));
   }
