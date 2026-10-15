@@ -9564,7 +9564,7 @@ Output only the summary text, no preamble.`;
                   {/each}
                 </div>
               {/if}
-              {#if runtimeGpuOptions.length > 1 || runtimeGpu}
+              {#if runtimeGpuOptions.length > 1 || runtimeGpu || runtimeGpuAtLaunch || runtimeGpuSaveFailed}
                 <div class="accel-panel-row">
                   <label for="runtime-gpu">Runtime GPU</label>
                   <select
