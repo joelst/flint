@@ -64,12 +64,14 @@ This signature does not identify whether the cause is GPU visibility, the NVIDIA
 driver, or the runtime. It is not proof of insufficient VRAM or a damaged model.
 
 Use **Models → Recheck Providers** and check your NVIDIA driver. On a machine with
-multiple NVIDIA GPUs, pick one in **Models → Runtime GPU** and restart Flint. The
+multiple NVIDIA GPUs, pick one in **Models → CUDA GPU** and restart Flint. The
 choice is saved by the GPU's UUID (so it survives device reordering) and is
 applied as `CUDA_VISIBLE_DEVICES` to the runtime child process only, not to your
 global environment. The picker appears when more than one NVIDIA GPU reports a
-UUID through `nvidia-smi`. The whole runtime is restricted to that GPU, because
-Foundry Local initializes once per process and has no per-model device option.
+UUID through `nvidia-smi`, and stays visible while a choice is saved. It limits
+CUDA only: DirectML and WebGPU can still use other GPUs. Arena VRAM checks follow
+the choice in force at launch. Foundry Local initializes once per process and has
+no per-model device option, so the choice applies to the whole runtime.
 
 Without the picker, you can launch the installed Windows app from PowerShell
 with only one CUDA device exposed:

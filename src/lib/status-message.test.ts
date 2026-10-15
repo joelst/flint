@@ -26,7 +26,7 @@ describe("summarizeFailure", () => {
 
     const notice = failureNotice("Load failed", error);
     expect(notice?.title).toBe("Load failed: CUDA allocator unavailable");
-    expect(notice?.advice).toContain("Runtime GPU");
+    expect(notice?.advice).toContain("CUDA GPU");
     expect(notice?.advice).toContain("Recheck Providers");
     expect(notice?.advice).not.toContain("genai_model_instance");
   });

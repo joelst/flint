@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   RUNTIME_GPU_KEY,
+  cudaVisibleAccelerators,
   normalizeRuntimeGpu,
   readRuntimeGpu,
   runtimeGpuChoices,
+  runtimeGpuPanelVisible,
   writeRuntimeGpu,
 } from './runtime-gpu';
 
@@ -74,5 +76,53 @@ describe('runtimeGpuChoices', () => {
       ]),
     ).toEqual([{ deviceId: UUID, label: 'RTX 5090' }]);
     expect(runtimeGpuChoices(undefined)).toEqual([]);
+  });
+
+  it('adds the uuid to labels when names repeat', () => {
+    const other = 'GPU-aaaaaaaa-1111-2222-3333-444455556666';
+    expect(
+      runtimeGpuChoices([
+        { kind: 'gpu', name: 'RTX 4090', deviceId: UUID },
+        { kind: 'gpu', name: 'RTX 4090', deviceId: other },
+        { kind: 'gpu', name: 'RTX 3060', deviceId: 'GPU-bbbbbbbb' },
+      ]).map((c) => c.label),
+    ).toEqual([`RTX 4090 (${UUID})`, `RTX 4090 (${other})`, 'RTX 3060']);
+  });
+});
+
+describe('runtimeGpuPanelVisible', () => {
+  const base = { choiceCount: 0, current: '', appliedAtLaunch: '', saveFailed: false };
+  it('hides when there is nothing to choose or say', () => {
+    expect(runtimeGpuPanelVisible(base)).toBe(false);
+    expect(runtimeGpuPanelVisible({ ...base, choiceCount: 1 })).toBe(false);
+  });
+  it.each([
+    { choiceCount: 2 },
+    { current: UUID },
+    { appliedAtLaunch: UUID },
+    { saveFailed: true },
+  ])('shows for %j', (patch) => {
+    expect(runtimeGpuPanelVisible({ ...base, ...patch })).toBe(true);
+  });
+});
+
+describe('cudaVisibleAccelerators', () => {
+  const other = 'GPU-aaaaaaaa-1111-2222-3333-444455556666';
+  const list = [
+    { kind: 'gpu', name: 'A', vendor: 'nvidia', deviceId: UUID },
+    { kind: 'gpu', name: 'B', vendor: 'nvidia', deviceId: other },
+    { kind: 'gpu', name: 'Intel', vendor: 'intel' },
+    { kind: 'npu', name: 'NPU' },
+  ];
+  it('keeps everything with no selector or an index selector', () => {
+    expect(cudaVisibleAccelerators(list, '')).toHaveLength(4);
+    expect(cudaVisibleAccelerators(list, '0')).toHaveLength(4);
+    expect(cudaVisibleAccelerators(undefined, UUID)).toEqual([]);
+  });
+  it('drops other NVIDIA GPUs but keeps non-NVIDIA devices', () => {
+    expect(cudaVisibleAccelerators(list, UUID).map((a) => a.name)).toEqual(['A', 'Intel', 'NPU']);
+  });
+  it('drops an NVIDIA row without identity', () => {
+    expect(cudaVisibleAccelerators([{ kind: 'gpu', name: 'X', vendor: 'nvidia' }], UUID)).toEqual([]);
   });
 });

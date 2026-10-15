@@ -200,7 +200,7 @@
     startupWebToolsPatch,
     type AppSettingDefaults,
   } from "$lib/conversation-settings";
-  import { readRuntimeGpu, writeRuntimeGpu, runtimeGpuChoices } from "$lib/runtime-gpu";
+  import { readRuntimeGpu, writeRuntimeGpu, runtimeGpuChoices, runtimeGpuPanelVisible, cudaVisibleAccelerators } from "$lib/runtime-gpu";
   import { decideChipFetchHop, detectFetchableUrls, isFetchableUrl } from "$lib/url-chips";
   import {
     conversationImagePreviewPartIndexes,
@@ -4436,7 +4436,10 @@ updateStateFromSdk();
     maxFreeMb: number;
     names: string[];
   } {
-    const gpus = (state.poolStats?.accelerators || []).filter((a) => a.kind === "gpu");
+    // Admission follows the selector the running child launched with, not the pending picker value.
+    const gpus = cudaVisibleAccelerators(state.poolStats?.accelerators, runtimeGpuAtLaunch).filter(
+      (a) => a.kind === "gpu",
+    );
     let totalMb = 0;
     let freeMb = 0;
     let usedMb = 0;
@@ -9564,9 +9567,9 @@ Output only the summary text, no preamble.`;
                   {/each}
                 </div>
               {/if}
-              {#if runtimeGpuOptions.length > 1 || runtimeGpu || runtimeGpuAtLaunch || runtimeGpuSaveFailed}
+              {#if runtimeGpuPanelVisible({ choiceCount: runtimeGpuOptions.length, current: runtimeGpu, appliedAtLaunch: runtimeGpuAtLaunch, saveFailed: runtimeGpuSaveFailed })}
                 <div class="accel-panel-row">
-                  <label for="runtime-gpu">Runtime GPU</label>
+                  <label for="runtime-gpu">CUDA GPU</label>
                   <select
                     id="runtime-gpu"
                     value={runtimeGpu}
@@ -9582,8 +9585,8 @@ Output only the summary text, no preamble.`;
                   </select>
                 </div>
                 <p class="muted">
-                  Limits which GPU the runtime can use. If CUDA fails with “No requested allocator available” while
-                  more than one GPU is installed, pick one here.
+                  Limits which NVIDIA GPU CUDA can use; DirectML and WebGPU are not affected. If CUDA fails with
+                  “No requested allocator available” while more than one GPU is installed, pick one here.
                   {#if runtimeGpu !== runtimeGpuAtLaunch}
                     Restart Flint for this to take effect.
                   {/if}

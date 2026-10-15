@@ -11,7 +11,7 @@ export function cudaAllocatorDiagnostic(detail) {
   return 'CUDA could not initialize a GPU allocator. This can involve GPU visibility, the driver, ' +
     'or the runtime; the error does not establish which. In Models, use Recheck Providers and ' +
     'check your NVIDIA driver. If multiple NVIDIA GPUs are present, choose one under Models → ' +
-    'Runtime GPU and restart Flint (or launch with CUDA_VISIBLE_DEVICES=0). Alternatively, explicitly ' +
+    'CUDA GPU and restart Flint (or launch with CUDA_VISIBLE_DEVICES=0). Alternatively, explicitly ' +
     'select a downloaded CPU variant. Flint has not retried or switched devices automatically.';
 }
 
